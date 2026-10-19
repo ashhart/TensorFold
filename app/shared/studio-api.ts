@@ -24,7 +24,7 @@ import type { LocalTtsDiscovery, VoiceSynthesisResult, VoiceTranscriptionInput, 
 import type { KokoroStatus, KokoroSynthesisInput } from '../electron/agent/types'
 import type { OrchestrationEvent } from '../electron/agent/types'
 import type { RoomManualMemoryCommand, RoomMergeResult } from '../electron/agent/types'
-import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from '../electron/agent/types'
+import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineEnvOverrides, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from '../electron/agent/types'
 import type { MobileBridgePairing, MobileBridgeStatus } from '../electron/agent/types/mobile-bridge'
 
 import type { EngineModelLibrarySnapshot, EngineLibraryScanOptions } from '../electron/agent/types'
@@ -504,6 +504,9 @@ export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryAp
   engineSetCortheon(enabled: boolean): Promise<EngineStatus>
   engineLearning(): Promise<EngineLearningSnapshot>
   engineSetLearning(enabled: boolean, model?: string): Promise<EngineLearningSnapshot>
+  // Advanced: environment variables passed through to every engine process at its next launch.
+  engineEnvOverrides(): Promise<EngineEnvOverrides>
+  engineSetEnvOverrides(overrides: EngineEnvOverrides): Promise<EngineEnvOverrides>
   engineTeach(text: string): Promise<EngineLearningSnapshot>
   engineCancelTeach(): Promise<EngineLearningSnapshot>
   engineDelete(repo: string): Promise<EngineInstalledModel[]>

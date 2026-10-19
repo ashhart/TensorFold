@@ -8,6 +8,7 @@ import { FAMILY_TITLES, SUGGESTED_MODELS, drafterFor } from './catalog'
 import { parseCapabilities, parseInfoOutput, parseModelsOutput, parseVersion, runEngineCli, type ModelInfo } from './cli'
 import { ModelHub } from './model-hub'
 import { engineLaunchEnv, pinnedEngineEnv } from './engine-env'
+import { normalizeEngineEnvOverrides, type EngineEnvOverrides } from '../../../shared/engine-advanced-env'
 export { engineChildEnv } from './engine-env'
 import { assertRepoId, hasCachedSnapshot, hubCacheDir, repoCacheDir, repoCachedBytes, type EngineBinary } from './paths'
 import { setEnginePerformanceRecorder, setEngineServeHook } from './provider'
@@ -59,6 +60,8 @@ function processAlive(pid: number): boolean {
 export class EngineService {
   readonly supervisor: EngineSupervisor
   private readonly launch: { env: NodeJS.ProcessEnv; endpoint: string }
+  // Advanced user variables applied over the launch environment; null until preferences load.
+  private envOverridesApplied: EngineEnvOverrides | null = null
   private readonly totalMemoryBytes: number
   private version: string | null = null
   private versionChecked = false
@@ -94,8 +97,10 @@ export class EngineService {
   private purgingLearning = false
 
   // A supplied childEnv stays live for the fake engine's knobs; the authorized Hub origin stays pinned either way.
+  // Saved advanced variables layer on top; the running server keeps its launch-time values.
   private get env(): NodeJS.ProcessEnv {
-    return this.options.childEnv ? pinnedEngineEnv(this.options.childEnv, this.launch.endpoint) : this.launch.env
+    const base = this.options.childEnv ? pinnedEngineEnv(this.options.childEnv, this.launch.endpoint) : this.launch.env
+    return this.envOverridesApplied ? { ...base, ...this.envOverridesApplied } : base
   }
 
   constructor(private readonly options: EngineServiceOptions) {
@@ -108,6 +113,7 @@ export class EngineService {
     })
     this.revisions = new ModelRevisions(options.appHome, () => this.hub)
     this.preferences = new EnginePreferenceStore(options.appHome)
+    this.envOverridesApplied = this.preferences.get().envOverrides
     this.library = new ModelLibrary({ appHome: options.appHome, env: this.env, capabilities: () => this.capabilitiesDoc(), memoryLimitBytes: () => this.supervisor.memoryLimitBytes })
     this.learningCopies = new LearningCopies(options.appHome)
     this.supervisor = new EngineSupervisor({
@@ -238,6 +244,20 @@ export class EngineService {
   setCortheon(enabled: boolean): Promise<EngineStatus> {
     try { assertCortheonReleaseAllowed(enabled) } catch (error) { return Promise.reject(error) }
     return this.changeFeature(() => this.setCortheonNow(enabled))
+  }
+
+  // Advanced engine environment: validated, persisted in engine preferences, and handed to
+  // every engine process at its next launch; a running server keeps its launch-time values.
+  envOverrides(): EngineEnvOverrides {
+    return this.preferences.get().envOverrides
+  }
+
+  async setEnvOverrides(next: EngineEnvOverrides): Promise<EngineEnvOverrides> {
+    const normalized = normalizeEngineEnvOverrides(next)
+    await this.preferences.set({ envOverrides: normalized })
+    this.envOverridesApplied = normalized
+    this.emitStatus()
+    return normalized
   }
 
   private changeFeature<T>(run: () => Promise<T>): Promise<T> {

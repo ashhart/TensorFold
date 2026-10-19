@@ -153,6 +153,13 @@ async function main() {
     const missing = supervisor(h, { binary: () => null })
     await assert.rejects(() => missing.sup.serve('mlx-community/Qwen3.5-2B-MLX-4bit'), /not bundled/)
     await assert.rejects(() => missing.sup.serve('../escape'), /owner\/name/)
+
+    // Engine-side load-limit variables (Settings → Engine advanced) raise the app-side floor check.
+    const baseLimit = Math.floor(0.7 * 64 * GIB)
+    assert.equal(supervisor(h).sup.memoryLimitBytes, baseLimit)
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '60' }).sup.memoryLimitBytes, 60 * GIB)
+    assert.equal(supervisor(h, {}, { FLASHNEXT_LOAD_LIMIT_GB: '40' }).sup.memoryLimitBytes, baseLimit, 'a limit below the default does not lower it')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: 'about sixty' }).sup.memoryLimitBytes, baseLimit, 'a value the engine would reject changes nothing here')
   } finally {
     for (const pid of await servePids(h)) if (Number.isSafeInteger(pid) && pid > 1 && processAlive(pid)) { try { process.kill(-pid, 'SIGKILL') } catch {} }
     await h.cleanup()

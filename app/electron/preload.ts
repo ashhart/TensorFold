@@ -21,7 +21,7 @@ import type { KokoroStatus, KokoroSynthesisInput } from './agent/types'
 import type { OrchestrationEvent } from './agent/types'
 import type { ArtifactPreview } from './agent/types'
 import type { RoomManualMemoryCommand, RoomMergeResult } from './agent/types'
-import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './agent/types'
+import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineEnvOverrides, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './agent/types'
 import type { MobileBridgePairing, MobileBridgeStatus } from './agent/types/mobile-bridge'
 
 import type { EngineModelLibrarySnapshot, EngineLibraryScanOptions } from './agent/types'
@@ -618,6 +618,8 @@ const api = {
   engineSetCortheon: (enabled: boolean): Promise<EngineStatus> => ipcRenderer.invoke('engine:setCortheon', enabled),
   engineLearning: (): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:learning'),
   engineSetLearning: (enabled: boolean, model?: string): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:setLearning', { enabled, model }),
+  engineEnvOverrides: (): Promise<EngineEnvOverrides> => ipcRenderer.invoke('engine:envOverrides'),
+  engineSetEnvOverrides: (overrides: EngineEnvOverrides): Promise<EngineEnvOverrides> => ipcRenderer.invoke('engine:setEnvOverrides', overrides),
   engineTeach: (text: string): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:teach', text),
   engineCancelTeach: (): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:cancelTeach'),
   engineDelete: (repo: string): Promise<EngineInstalledModel[]> => ipcRenderer.invoke('engine:delete', repo),

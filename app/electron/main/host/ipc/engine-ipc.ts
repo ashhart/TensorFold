@@ -1,4 +1,5 @@
 import { assertCortheonReleaseAllowed } from '../../../../shared/release-feature-policy'
+import { normalizeEngineEnvOverrides } from '../../../../shared/engine-advanced-env'
 import { BrowserWindow, dialog } from 'electron'
 import type { EngineService } from '../../../agent/engine/service'
 import { comparisonId, comparisonInput } from '../../../agent/engine/model-comparison'
@@ -153,6 +154,21 @@ export function registerEngineIpc(engine: () => EngineService | null, options: {
       const snapshot = await svc().setLearning(input.enabled as boolean, model)
       await auditEvent('engine.learning', { enabled: input.enabled, model: snapshot.model })
       return snapshot
+    })
+  })
+
+  handle('engine:envOverrides', async () => {
+    requireSecurityRole('operator', 'read the advanced engine variables')
+    return svc().envOverrides()
+  })
+
+  handle('engine:setEnvOverrides', async (_e, value: unknown) => {
+    requireSecurityRole('operator', 'change the advanced engine variables')
+    const overrides = normalizeEngineEnvOverrides(value)
+    return operation(async () => {
+      // Only the names are audited; values may hold paths or engine data.
+      await auditEvent('engine.envOverrides', { keys: Object.keys(overrides).sort() })
+      return svc().setEnvOverrides(overrides)
     })
   })
 

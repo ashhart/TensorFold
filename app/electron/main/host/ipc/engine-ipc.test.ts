@@ -26,7 +26,7 @@ for (const bad of [{ path: '/tmp/model' }, { includeHuggingFace: 'yes' }, [], '/
 // Every channel goes through handle() with a role check; delete needs the owner role.
 const source = readFileSync(path.join(__dirname, 'engine-ipc.ts'), 'utf8')
 const channels = [...source.matchAll(/handle\('(engine:[A-Za-z]+)'/g)].map((m) => m[1])
-assert.deepEqual(channels, ['engine:snapshot', 'engine:connection', 'engine:refresh', 'engine:search', 'engine:preflight', 'engine:pull', 'engine:cancelPull', 'engine:load', 'engine:compareModels', 'engine:comparisonStatus', 'engine:cancelComparison', 'engine:tryModel', 'engine:cancelTryModel', 'engine:setCortheon', 'engine:learning', 'engine:setLearning', 'engine:teach', 'engine:cancelTeach', 'engine:unload', 'engine:delete', 'engine:library', 'engine:scanLibrary', 'engine:addLibraryFolder', 'engine:removeLibraryFolder', 'engine:cancelLibraryScan'])
+assert.deepEqual(channels, ['engine:snapshot', 'engine:connection', 'engine:refresh', 'engine:search', 'engine:preflight', 'engine:pull', 'engine:cancelPull', 'engine:load', 'engine:compareModels', 'engine:comparisonStatus', 'engine:cancelComparison', 'engine:tryModel', 'engine:cancelTryModel', 'engine:setCortheon', 'engine:learning', 'engine:setLearning', 'engine:envOverrides', 'engine:setEnvOverrides', 'engine:teach', 'engine:cancelTeach', 'engine:unload', 'engine:delete', 'engine:library', 'engine:scanLibrary', 'engine:addLibraryFolder', 'engine:removeLibraryFolder', 'engine:cancelLibraryScan'])
 assert.match(source, /handle\('engine:setCortheon'[\s\S]*?typeof enabled !== 'boolean'/, 'Cortheon takes only a boolean')
 assert.equal((source.match(/requireSecurityRole\(/g) ?? []).length, channels.length, 'each channel checks the caller role')
 assert.match(source, /handle\('engine:delete'[\s\S]*?requireSecurityRole\('owner'/)
@@ -39,6 +39,9 @@ const teachHandler = source.slice(source.indexOf("handle('engine:teach'"), sourc
 assert.match(teachHandler, /Buffer.byteLength\(text, 'utf8'\) > 8192/, 'lessons have a main-process byte limit')
 assert.doesNotMatch(teachHandler, /auditEvent\([^\n]*text/, 'private teaching text never enters security audit logs')
 assert.match(source, /handle\('engine:setLearning'[\s\S]*?typeof input\?\.enabled !== 'boolean'/, 'the renderer cannot supply flags, credentials or paths')
+const envHandler = source.slice(source.indexOf("handle('engine:setEnvOverrides'"), source.indexOf("handle('engine:teach'"))
+assert.match(envHandler, /normalizeEngineEnvOverrides\(value\)/, 'advanced variables are re-validated in the main process')
+assert.match(envHandler, /Object\.keys\(overrides\)\.sort\(\)/, 'only variable names enter the audit, never the values')
 const folderHandler = source.slice(source.indexOf("handle('engine:addLibraryFolder'"), source.indexOf("handle('engine:removeLibraryFolder'"))
 assert.match(folderHandler, /dialog\.showOpenDialog/, 'only the native picker admits filesystem paths')
 assert.match(folderHandler, /svc\(\)\.addLibraryFolder\(result\.filePaths\[0\]\)/)

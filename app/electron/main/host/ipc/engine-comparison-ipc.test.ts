@@ -5,6 +5,7 @@ import ts from 'typescript'
 import { comparisonId, comparisonInput } from '../../../agent/engine/model-comparison'
 import { isRepoId, isRevision } from '../../../agent/engine/paths'
 import { assertCortheonReleaseAllowed } from '../../../../shared/release-feature-policy'
+import { normalizeEngineEnvOverrides } from '../../../../shared/engine-advanced-env'
 import { createMockEngineApi } from '../../../../src/lib/mock/engine'
 
 const handlers = new Map<string, (...args: any[]) => Promise<any>>()
@@ -21,6 +22,7 @@ const service = {
 }
 const imports: Record<string, unknown> = {
   '../../../../shared/release-feature-policy': { assertCortheonReleaseAllowed },
+  '../../../../shared/engine-advanced-env': { normalizeEngineEnvOverrides },
   electron: { BrowserWindow: {}, dialog: {} },
   '../../../agent/engine/paths': { isRepoId, isRevision },
   '../../../agent/engine/model-comparison': { comparisonId, comparisonInput },
