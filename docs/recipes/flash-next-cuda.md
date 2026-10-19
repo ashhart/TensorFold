@@ -135,13 +135,13 @@ token 15 on the 3,001-token one. Over 4,096 tokens of this repository's document
 
 `nvidia/Qwen3.8-Flash-Next-FP4-Local` (revision `b9ce18a6`) on a GB10 (128 GB, driver 580.178, CUDA 13.3), greedy,
 `--prompt-cache-gib 0`, the tools above, three runs of the defaults at a 32,768-token window alternated with other
-settings in one session:
+settings in one session. These are @balancedscorpion's measurements on `beec1aad6`, the #952 branch build before
+1.1.0, and have not been remeasured on 1.1.2:
 
 | | defaults |
 | --- | --- |
 | One stream, drafted, code / chat | 64.1-64.6 / 40.7-41.1 |
 | drafted, 1 / 4 / 8 streams, greedy code | 64.1-64.4 / 44.9-45.2 / 66.2-66.8 |
-| drafted, 1 / 4 / 8 streams, greedy chat | 40.6-41.1 / 35.0-35.2 / 52.4-52.8 |
 | Cold first token at 2,048 / 8,192 / 32,768 / 65,536 / 131,072 tokens (s) | 1.83 / 7.11 / 29.2 / 60.1 / 131.7 |
 
 Every concurrent reply equalled its solo run and every drafted one its `"draft": false` run. A reply cancelled
