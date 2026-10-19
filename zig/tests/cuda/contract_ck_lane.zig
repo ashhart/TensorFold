@@ -102,7 +102,8 @@ pub const Lane = struct {
         for (xs, self.x) |*h, v| h.* = c.toBf16(@floatCast(e4m3(v)));
         const src = try self.rig.scratch(xs.len * 2);
         try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = src, .len = xs.len * 2 }).upload(0, std.mem.sliceAsBytes(xs));
-        const zeros = try a.alloc(u8, cuda.modelopt.padded(n) * k);
+        // zeros for x8 (rows * k) and the padded weight (padded(n) * k): either can be the larger
+        const zeros = try a.alloc(u8, @max(cuda.modelopt.padded(n), shape.rows) * k);
         defer a.free(zeros);
         @memset(zeros, 0);
         self.xd = try self.rig.input(zeros[0..self.x.len]);
