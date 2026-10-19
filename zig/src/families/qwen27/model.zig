@@ -131,6 +131,11 @@ pub const Model = struct {
         std.log.info("qwen27: Neural Engine prompt share requested_columns={d} loaded_columns={d} program_weight_bytes={d} loaded={any} exact_output_qualified={any}", .{ columns, loaded_columns, ane_mlp.Share.bytes(c, loaded_columns), m.ane != null, ane_policy.exact_output_qualified });
     }
 
+    /// The loaded share's price still absent from the process footprint; no loaded share reserves nothing.
+    pub fn shareCacheBytes(m: *const Model) !u64 {
+        return if (m.ane) |share| share.cacheBytes(m.config) else 0;
+    }
+
     pub fn deinit(m: *Model) void {
         if (m.ane) |share| share.deinit();
         m.frame.deinit();

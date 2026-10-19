@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- The optional 27B Neural Engine share uses a measured 32 MiB private-overhead price and reserves its full size in the prompt-cache budget, including cold builds (#643).
+
 - Shared draft rounds offer one deeper row every eighth round when the row cap permits, retaining normal pricing and trimming (#1059). Thanks to @plotarmordev.
 
 - Nemotron tensor parallelism shares Flash Next's NCCL 2.30.0 minimum, refusing older loaded libraries before rank setup (#1060).

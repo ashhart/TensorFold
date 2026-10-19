@@ -32,6 +32,7 @@ pub const Share = struct {
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+    footprint_growth: ?u64 = null,
 
     /// The fp16 weights a share of `columns` holds: every layer's gate, up and down over those columns.
     pub fn bytes(c: Config, columns: u32) u64 {
@@ -53,9 +54,21 @@ pub const Share = struct {
         return std.math.add(u64, known, overhead orelse return error.MissingAneOverhead);
     }
 
+    /// Reserve the full priced share less only the footprint growth observed across its successful construction.
+    pub fn cacheBytes(s: *const Share, c: Config) !u64 {
+        const total = try totalBytes(c, s.columns, s.slices, @import("ane_policy.zig").build_runtime_overhead);
+        return total -| (s.footprint_growth orelse 0);
+    }
+
     /// Every layer's program from the affine rows (w = q * scale + bias, rounded once to fp16), columns [0, c).
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, checkpoint: *const cp.Checkpoint, c: Config, columns: u32, slices: u32) !*Share {
         if (columns == 0 or columns % 64 != 0 or columns > c.intermediate or slices == 0 or slices > max_slices) return error.BadAneShare;
+        const memory_policy = @import("sys").memory_policy;
+        const before = memory_policy.footprint();
+        var loaded: ?*Share = null;
+        defer if (loaded) |share| {
+            share.footprint_growth = memory_policy.growth(before, memory_policy.footprint());
+        };
         const s = try a.create(Share);
         errdefer a.destroy(s);
         const programs = try a.alloc(ane.Program, c.layers);
@@ -104,6 +117,7 @@ pub const Share = struct {
         for (threads) |t| t.join();
         if (b.failed.load(.acquire)) return error.AneShareBuild;
         s.thread = try std.Thread.spawn(.{}, work, .{s});
+        loaded = s;
         return s;
     }
 

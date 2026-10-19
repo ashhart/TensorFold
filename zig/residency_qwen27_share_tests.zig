@@ -167,3 +167,61 @@ test "residency owner Qwen27 share: program-only room refuses and exact payload 
     c.layers = std.math.maxInt(u32);
     try t.expectError(error.Overflow, share_owner.Share.admissionBytes(c, std.math.maxInt(u32), 16));
 }
+
+test "residency owner Qwen27 share: measured price admits exactly and refuses one byte short" {
+    var c: Config = undefined;
+    c.hidden = 5120;
+    c.layers = 64;
+    const overhead = @import("src/families/qwen27/ane_policy.zig").build_runtime_overhead;
+    const ram: u64 = 32 << 30;
+    const ceiling = ram / 100 * 70 - mtl.ResidencySet.margin;
+    for ([_]u32{ 256, 512, 768 }) |columns| {
+        for ([_]u32{ 1, 4, 16 }) |slices| {
+            const known = try share_owner.Share.admissionBytes(c, columns, slices);
+            const priced = try share_owner.Share.totalBytes(c, columns, slices, overhead);
+            try t.expectEqual(known + (32 << 20), priced);
+            try t.expect(priced <= share_fit.room(ram, ceiling - priced, 0, .{}));
+            try t.expect(priced > share_fit.room(ram, ceiling - priced + 1, 0, .{}));
+        }
+    }
+}
+
+test "residency owner Qwen27 share: cold and warm loads leave the same priced cache budget" {
+    const memory_policy = @import("sys").memory_policy;
+    const fit = @import("src/native/cache_fit.zig");
+    const NativeModel = @import("src/families/qwen27/model.zig").Model;
+    var model: NativeModel = undefined;
+    model.config = undefined;
+    model.config.hidden = 5120;
+    model.config.layers = 64;
+    var share: share_owner.Share = undefined;
+    share.columns = 256;
+    share.slices = 4;
+    model.ane = &share;
+    const total = try share_owner.Share.totalBytes(model.config, share.columns, share.slices, @import("src/families/qwen27/ane_policy.zig").build_runtime_overhead);
+    const before: u64 = 19 << 30;
+    const buffers: u64 = 4 * (5 << 20);
+    const private: u64 = 5 << 20;
+    const program = share_owner.Share.bytes(model.config, share.columns);
+    var budgets: [2]u64 = undefined;
+    for ([_]u64{ buffers + private, program + buffers + private }, &budgets) |growth, *budget| {
+        const after = before + growth;
+        share.footprint_growth = memory_policy.growth(before, after);
+        const charge = try model.shareCacheBytes();
+        try t.expectEqual(total, growth + charge);
+        const ready = after + charge;
+        budget.* = (try fit.fit(32 << 30, ready, null, false)).budget;
+        try t.expectEqual((try fit.fit(32 << 30, before + total, null, false)).budget, budget.*);
+    }
+    try t.expectEqual(budgets[0], budgets[1]);
+    share.footprint_growth = total + 1;
+    try t.expectEqual(@as(u64, 0), try model.shareCacheBytes());
+    share.footprint_growth = null;
+    try t.expectEqual(total, try model.shareCacheBytes());
+    try t.expect(memory_policy.growth(null, before) == null);
+    try t.expect(memory_policy.growth(before, 0) == null);
+    try t.expectEqual(@as(?u64, 0), memory_policy.growth(before, before - 1));
+    // Disabled columns and a declined constructor both leave the model without a loaded share.
+    model.ane = null;
+    try t.expectEqual(@as(u64, 0), try model.shareCacheBytes());
+}

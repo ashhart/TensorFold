@@ -149,7 +149,7 @@ fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
         why.* = "TF_QWEN27_FIT_RAM_BYTES and TF_QWEN27_FIT_FOOTPRINT_BYTES must be positive byte counts";
         return err;
     };
-    return share_fit.room(cache_fit.ram(), cache_fit.footprint(), laterFootprint(h), guards);
+    return share_fit.room(cache_fit.ram(), cache_fit.footprint(), try laterFootprint(h), guards);
 }
 
 /// Room left beside the weights and an 8 GiB margin.
@@ -342,10 +342,14 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     errdefer q.residency.drop(h);
     // Decide before cache sizing and the worker starts, with ready state wired and future buffers reserved.
-    if (model.share_pending) q.residency.finishShare(h, try shareRoom(h, why)) catch |err| {
-        why.* = "the optional Neural Engine share could not join the residency owner within its load limit";
-        return err;
-    };
+    if (model.share_pending) {
+        const before = cache_fit.footprint();
+        q.residency.finishShare(h, try shareRoom(h, why)) catch |err| {
+            why.* = "the optional Neural Engine share could not join the residency owner within its load limit";
+            return err;
+        };
+        if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
+    }
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
     if (o.learn) |l| try disk.attach(h, io, a, l);
@@ -356,16 +360,17 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     return h;
 }
 
-/// Buffers absent from the footprint at ready: later slots and the image tower's first-use scratch and rows.
-fn laterFootprint(h: *const Host) u64 {
+/// Reserve later buffers and the loaded share's priced bytes that its construction left outside the footprint.
+fn laterFootprint(h: *const Host) !u64 {
     const tower: u64 = if (h.back.vision) |v| v.firstUse() else 0;
-    return laterBytes(h) +| tower;
+    const share = try h.model.shareCacheBytes();
+    return std.math.add(u64, try std.math.add(u64, laterBytes(h), tower), share);
 }
 
 /// Prompt reuse in up to 16 GiB of what 70% of RAM leaves once every slot has its memory; CacheOverCap: `why` says why.
 fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
-    const later = laterBytes(h);
-    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, laterFootprint(h), a, why, "");
+    const later = try laterFootprint(h);
+    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
     h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .rows = &disk.image } }, .{ .warm = .on, .chunk = @intCast(h.back.chunk) }, plan.budget_bytes);

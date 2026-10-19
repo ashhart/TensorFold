@@ -50,16 +50,8 @@ pub fn ceiling(total: u64, most: u64, text: ?[]const u8) error{BadLoadLimit}!Cei
 /// This machine's RAM (null where the OS does not say).
 pub const ram = mtl.ResidencySet.totalRam;
 
-extern "c" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *anyopaque) c_int;
-extern "c" fn getpid() c_int;
-
-/// This process's physical footprint as macOS counts it, Metal buffers included (rusage_info_v4; null elsewhere).
-pub fn footprint() ?u64 {
-    if (builtin.os.tag != .macos) return null;
-    var info: [43]u64 = undefined;
-    if (proc_pid_rusage(getpid(), 4, &info) != 0) return null;
-    return info[9];
-}
+/// The shared process-footprint reader used by load accounting and prompt-cache sizing.
+pub const footprint = @import("sys").memory_policy.footprint;
 
 /// The Mac hosts' session peak: the footprint's high-water mark since the last `reset_peak`.
 var host_peak: std.atomic.Value(u64) = .init(0);
@@ -108,7 +100,7 @@ fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64,
         return .{ .source = if (gib != null) .explicit else .metal_working_set, .budget_bytes = b, .explicit_budget = gib != null };
     }
     const ready = loaded + later;
-    const streams = if (later > 0) try std.fmt.allocPrint(a, " and {d:.1} GiB its streams take on first use", .{gibs(later)}) else "";
+    const streams = if (later > 0) try std.fmt.allocPrint(a, " and {d:.1} GiB reserved outside that reading", .{gibs(later)}) else "";
     const cap = limit orelse total / 100 * SHARE_PERCENT;
     const f = fitUnder(cap, ready, gib, over) catch |e| {
         const left = (fitUnder(cap, ready, null, false) catch unreachable).room; // without a given budget it never refuses
