@@ -9,6 +9,7 @@ const st = @import("state.zig");
 const prompt_mod = @import("prompt.zig");
 const ep_mod = @import("ep.zig");
 pub const fit = @import("load_fit.zig");
+pub const fit_candidates = @import("fit_candidates.zig");
 
 /// The checkpoint's identity for a peer: its config and weight index, hashed.
 pub fn modelHash(gpa: std.mem.Allocator, dir: []const u8, config: []const u8) !u64 {
@@ -175,4 +176,5 @@ test "the load limit: 70% of RAM, or GLM_LOAD_LIMIT_GB up to the GPU's working s
 
 test {
     _ = fit;
+    _ = fit_candidates;
 }
