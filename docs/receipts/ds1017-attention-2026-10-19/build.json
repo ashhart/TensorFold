@@ -1,0 +1,12 @@
+{
+  "commit": "61ab890f46e1f4eb173eb72cd89c0e1766845331",
+  "upstream": "d1018b318fb51981c4a18f12e40269a4d3ee9713",
+  "zig": "0.17.0",
+  "cpu": "apple_m3",
+  "binary_sha256": {
+    "tf-dsv41-run": "7afd7931bb3f35cc9b58ee90ff8c77682791c35d11351b883277569edb05a304",
+    "tf-dsv41-gpu": "3761ad37dd1a219cb361472af65baae0c019f8695c803719ad2931ca152e8153",
+    "tf-dsv41-reference": "e3632891a409dbba1d85407e9072827f53a73674d82e169521fe47812813d04c",
+    "tf-exl3-gpu": "39c19f7b7e2ebc78296853e9ec06634a31d82a95ac4329ea796910481deb5efc"
+  }
+}

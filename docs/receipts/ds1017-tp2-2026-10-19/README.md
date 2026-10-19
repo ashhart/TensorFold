@@ -6,6 +6,9 @@ against 4.06 for one. It replicates the weights and attention on each Mac, so it
 also does not reduce the memory needed per Mac. These are development receipts,
 not release qualification.
 
+A later [shared-family and whole-slot comparison](../ds1017-tp2-slots-2026-10-20/README.md)
+records runtime `cdfa5203`. This folder retains the earlier `b27e39af` results.
+
 ## Scope and provenance
 
 The measured runtime is `b27e39af70a101e4a964035e79335d1f0aa446de`, based on

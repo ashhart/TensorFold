@@ -1,0 +1,329 @@
+{
+  "candidate": "cdfa5203d19805b1e544b7b39647b5bc9170e913",
+  "upstream": "d1018b318fb51981c4a18f12e40269a4d3ee9713",
+  "zig": "0.17.0",
+  "cpu": "apple_m3",
+  "linux": {
+    "zig": "0.17.0",
+    "platform": "Linux-6.8.0-117-generic-aarch64-with-glibc2.39",
+    "results": [
+      {
+        "command": [
+          "zig",
+          "build",
+          "test"
+        ],
+        "exit_code": 0,
+        "seconds": 3.1937536880000152,
+        "log": "0-zig_build_test.log"
+      },
+      {
+        "command": [
+          "zig",
+          "build",
+          "test-kernel-contract"
+        ],
+        "exit_code": 0,
+        "seconds": 10.83161148499994,
+        "log": "1-zig_build_test-kernel-contract.log"
+      },
+      {
+        "command": [
+          "zig",
+          "build",
+          "test-golden"
+        ],
+        "exit_code": 0,
+        "seconds": 74.71593902999984,
+        "log": "2-zig_build_test-golden.log"
+      },
+      {
+        "command": [
+          "zig",
+          "build",
+          "fuzz-cortheon"
+        ],
+        "exit_code": 0,
+        "seconds": 0.12619894899989959,
+        "log": "3-zig_build_fuzz-cortheon.log"
+      },
+      {
+        "command": [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tools/zig",
+          "-p",
+          "flashnext_batch_serve_test.py"
+        ],
+        "exit_code": 0,
+        "seconds": 0.12447411799985275,
+        "log": "4-python3_-m_unittest_discover_-s_tools_zig_-p_flashnext_batch_serve_test.py.log"
+      },
+      {
+        "command": [
+          "python3",
+          "lean_new.py"
+        ],
+        "exit_code": 0,
+        "log": "lean-new.log"
+      }
+    ]
+  },
+  "app": {
+    "cdfa5203": {
+      "head": "cdfa5203d19805b1e544b7b39647b5bc9170e913",
+      "node": "v22.23.2",
+      "npm": "10.9.8",
+      "state": "failed",
+      "results": [
+        {
+          "command": [
+            "npm",
+            "install",
+            "--global",
+            "--ignore-scripts",
+            "npm@10.9.8"
+          ],
+          "exit_code": 0,
+          "seconds": 3.1424792910111137
+        },
+        {
+          "command": [
+            "npm",
+            "ci",
+            "--ignore-scripts"
+          ],
+          "exit_code": 0,
+          "seconds": 81.39682687498862
+        },
+        {
+          "command": [
+            "npm",
+            "--prefix",
+            "mobile",
+            "ci",
+            "--ignore-scripts"
+          ],
+          "exit_code": 0,
+          "seconds": 32.903031249996275
+        },
+        {
+          "command": [
+            "npm",
+            "test"
+          ],
+          "exit_code": 1,
+          "seconds": 930.9491869999911
+        },
+        {
+          "command": [
+            "npm",
+            "run",
+            "typecheck"
+          ],
+          "exit_code": 0,
+          "seconds": 44.65896029199939
+        },
+        {
+          "command": [
+            "npm",
+            "run",
+            "verify:mobile"
+          ],
+          "exit_code": 0,
+          "seconds": 10.245477958000265
+        },
+        {
+          "command": [
+            "git",
+            "diff",
+            "--check",
+            "HEAD^",
+            "HEAD"
+          ],
+          "exit_code": 0,
+          "seconds": 0.0676065000006929
+        }
+      ]
+    },
+    "d1018b31": {
+      "head": "d1018b318fb51981c4a18f12e40269a4d3ee9713",
+      "node": "v22.23.2",
+      "npm": "10.9.8",
+      "state": "failed",
+      "results": [
+        {
+          "command": [
+            "npm",
+            "install",
+            "--global",
+            "--ignore-scripts",
+            "npm@10.9.8"
+          ],
+          "exit_code": 0,
+          "seconds": 2.724249584018253
+        },
+        {
+          "command": [
+            "npm",
+            "ci",
+            "--ignore-scripts"
+          ],
+          "exit_code": 0,
+          "seconds": 7.655476124986308
+        },
+        {
+          "command": [
+            "npm",
+            "--prefix",
+            "mobile",
+            "ci",
+            "--ignore-scripts"
+          ],
+          "exit_code": 0,
+          "seconds": 11.355899582995335
+        },
+        {
+          "command": [
+            "npm",
+            "test"
+          ],
+          "exit_code": 1,
+          "seconds": 700.9388846250076
+        },
+        {
+          "command": [
+            "npm",
+            "run",
+            "typecheck"
+          ],
+          "exit_code": 0,
+          "seconds": 46.43345195800066
+        },
+        {
+          "command": [
+            "npm",
+            "run",
+            "verify:mobile"
+          ],
+          "exit_code": 0,
+          "seconds": 7.250187666999409
+        },
+        {
+          "command": [
+            "git",
+            "diff",
+            "--check",
+            "HEAD^",
+            "HEAD"
+          ],
+          "exit_code": 0,
+          "seconds": 0.047125833021709695
+        }
+      ]
+    }
+  },
+  "app_failures_reproduced_on_unchanged_base": true,
+  "app_tree_sha1": "f2909da2ed69931a5acb654e371391c5d96f8b95",
+  "template": {
+    "head": "cdfa5203d19805b1e544b7b39647b5bc9170e913",
+    "template_sha256": "d959d804d5101b79a49b6ff1bf3c54cd5affa9a5a78c503d925f3090040b31c3",
+    "binary_sha256": "121bef9f94653b586b1a2c58fe5d01e92b7150bb30c9e7e3ef5350cc3f335e6c",
+    "compiler": "0.17.0",
+    "cpu": "apple_m3",
+    "fixtures": {
+      "test_input_1.json": "6a5a86694e47169c8f0c9243a7e24cc5db05447be0d3d3a9891034e913c518de",
+      "test_input_2.json": "fd985cda88e8640b8e2404d8e659f7006cad204eb41f73c9e6662b1f218c01aa",
+      "test_input_3.json": "4207613f15c79b95ad92074bdb8b2b81c5ce9cfdf15b7a67f58ded6bb3ec4fa5",
+      "test_input_4.json": "4c3890a7bc042ec6396d98d024a39a73cdcffbe1d0253e852da0c35e65296f3e",
+      "test_input_5.json": "88289b0aac8d650aa55c4ffeb392818fff3a0ac83c2293ddfd90546804d5e5c4",
+      "test_output_1.txt": "91f79aa955717b414a82aabfb38bcd83ab5a998bd47db89d2a26338e8d3de550",
+      "test_output_2.txt": "9fa162587b73ab9b315be5c88d433f9e0e681b4b36926952f289099ed9bc1dab",
+      "test_output_3.txt": "cf2b801d0738c88abb691bf4a096000c0e0737faab8a54a4ba5243c5513a3711",
+      "test_output_4.txt": "94433b68370dcc69fa61efc5011b5d0e28685e4716fee1ee77fbbfc0c9935b54",
+      "test_output_5.txt": "4d673091746553d1cb2e40a3fc01dc09a7c53c40627096a3e49c97a269a81f64"
+    },
+    "result": "case 1: equal (2476 bytes)\ncase 2: equal (294 bytes)\ncase 3: equal (2481 bytes)\ncase 4: equal (574 bytes)\ncase 5: equal (408 bytes)\n5/5 cases equal\n"
+  },
+  "native_build": {
+    "candidate": "cdfa5203d19805b1e544b7b39647b5bc9170e913",
+    "upstream": "d1018b318fb51981c4a18f12e40269a4d3ee9713",
+    "zig": "0.17.0",
+    "cpu": "apple_m3",
+    "built_unix": 1792449321.578912,
+    "files": {
+      "tf-kernel-contract.d1018b31": "1cfa845cec595bcd4cb0516d68a1e2203adf94ded1fbbda38741f1f4f5c35122",
+      "tensorfold-native.cdfa5203": "daeaca7bb4979413089cf18180bdc3724160634467d25dc7bb6ec9ce0af98183"
+    },
+    "native_full_model_tested": false,
+    "native_build_steps": 54,
+    "unchanged_baseline_contract_build_steps": 43
+  },
+  "fmt": {
+    "command": [
+      "zig",
+      "fmt",
+      "--check",
+      "build.zig",
+      "zig"
+    ],
+    "exit_code": 0
+  },
+  "local_windows_execution": "not run on Darwin; inspect current-head remote CI after push",
+  "qualification": "development proof only; global kernel limits and whole-model release gates remain open",
+  "kernel_contract": {
+    "0": {
+      "operator_tests": {
+        "dsv41-gpu": 100,
+        "dsv41-reference": 28,
+        "exl3-gpu": 29
+      },
+      "candidate_summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 12 limit problems; gates 290 ms, limits 74 ms",
+      "unchanged_base_summary": "SUMMARY 0 kernels: 0 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 12 limit problems; gates 0 ms, limits 3599 ms",
+      "numerical_controls_summary": "SUMMARY 0 kernels: 0 pass gates 1-4, 0 fail, 0 known findings; 5 controls: 5 red as planted, 0 missed; 0 limit problems; gates 12 ms, limits 0 ms",
+      "global_missing_limits_reproduced_on_base": [
+        "flashnext rotary absolute fz_idx_pool_abs on M1: no compiled thread limit recorded",
+        "flashnext rotary absolute fz_idx_pool_abs on M2: no compiled thread limit recorded",
+        "flashnext rotary mtp custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t on M1: no compiled thread limit recorded",
+        "flashnext rotary mtp custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t on M2: no compiled thread limit recorded",
+        "flashnext rotary pooled custom_kernel_q4_idx_pool_6d826f5ebecec197_bfloat16_t_int32_tc_float_floatc_floatc_bfloat16_t on M1: no compiled thread limit recorded",
+        "flashnext rotary pooled custom_kernel_q4_idx_pool_6d826f5ebecec197_bfloat16_t_int32_tc_float_floatc_floatc_bfloat16_t on M2: no compiled thread limit recorded",
+        "flashnext rotary target custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t on M1: no compiled thread limit recorded",
+        "flashnext rotary target custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t on M2: no compiled thread limit recorded",
+        "flashnext vision fn_attn_prep_mrope on M1: no compiled thread limit recorded",
+        "flashnext vision fn_attn_prep_mrope on M2: no compiled thread limit recorded",
+        "flashnext vision fz_mask_rows on M1: no compiled thread limit recorded",
+        "flashnext vision fz_mask_rows on M2: no compiled thread limit recorded"
+      ],
+      "own_attention_launches_pass": true
+    },
+    "1": {
+      "operator_tests": {
+        "dsv41-gpu": 100,
+        "dsv41-reference": 28,
+        "exl3-gpu": 29
+      },
+      "candidate_summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 12 limit problems; gates 299 ms, limits 75 ms",
+      "unchanged_base_summary": "SUMMARY 0 kernels: 0 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 12 limit problems; gates 0 ms, limits 3559 ms",
+      "numerical_controls_summary": "SUMMARY 0 kernels: 0 pass gates 1-4, 0 fail, 0 known findings; 5 controls: 5 red as planted, 0 missed; 0 limit problems; gates 12 ms, limits 0 ms",
+      "global_missing_limits_reproduced_on_base": [
+        "flashnext rotary absolute fz_idx_pool_abs on M1: no compiled thread limit recorded",
+        "flashnext rotary absolute fz_idx_pool_abs on M2: no compiled thread limit recorded",
+        "flashnext rotary mtp custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t on M1: no compiled thread limit recorded",
+        "flashnext rotary mtp custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t on M2: no compiled thread limit recorded",
+        "flashnext rotary pooled custom_kernel_q4_idx_pool_6d826f5ebecec197_bfloat16_t_int32_tc_float_floatc_floatc_bfloat16_t on M1: no compiled thread limit recorded",
+        "flashnext rotary pooled custom_kernel_q4_idx_pool_6d826f5ebecec197_bfloat16_t_int32_tc_float_floatc_floatc_bfloat16_t on M2: no compiled thread limit recorded",
+        "flashnext rotary target custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t on M1: no compiled thread limit recorded",
+        "flashnext rotary target custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t on M2: no compiled thread limit recorded",
+        "flashnext vision fn_attn_prep_mrope on M1: no compiled thread limit recorded",
+        "flashnext vision fn_attn_prep_mrope on M2: no compiled thread limit recorded",
+        "flashnext vision fz_mask_rows on M1: no compiled thread limit recorded",
+        "flashnext vision fz_mask_rows on M2: no compiled thread limit recorded"
+      ],
+      "own_attention_launches_pass": true
+    }
+  }
+}

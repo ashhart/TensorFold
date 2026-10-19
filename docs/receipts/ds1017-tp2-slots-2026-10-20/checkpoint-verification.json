@@ -1,0 +1,40 @@
+{
+  "checkpoint_receipt": "../ds1017-tp2-2026-10-19/model.json",
+  "pack_manifest": "../ds1017-tp2-2026-10-19/pack-sha256.json",
+  "files_per_mac": 69,
+  "bytes_per_mac": 413892636159,
+  "ranks": {
+    "0": {
+      "sha256_receipt": "c53403f55e6469dcfbad5de5cfbed7ac332a02c9dc5be1aff9a3484e78402fe0",
+      "finished_unix": 1792449781.83684,
+      "identity_before": {
+        "state": "unchanged_since_sha256",
+        "files": 69,
+        "receipt_sha256": "c53403f55e6469dcfbad5de5cfbed7ac332a02c9dc5be1aff9a3484e78402fe0",
+        "checked_unix": 1792449894.7394712
+      },
+      "identity_after": {
+        "state": "unchanged_since_sha256",
+        "files": 69,
+        "receipt_sha256": "c53403f55e6469dcfbad5de5cfbed7ac332a02c9dc5be1aff9a3484e78402fe0",
+        "checked_unix": 1792453636.439658
+      }
+    },
+    "1": {
+      "sha256_receipt": "ea4a54eac743704a1c7fbf727c8928b0828f9f27ec709f35b9f11f754a4940c5",
+      "finished_unix": 1792449445.537735,
+      "identity_before": {
+        "state": "unchanged_since_sha256",
+        "files": 69,
+        "receipt_sha256": "ea4a54eac743704a1c7fbf727c8928b0828f9f27ec709f35b9f11f754a4940c5",
+        "checked_unix": 1792449894.657202
+      },
+      "identity_after": {
+        "state": "unchanged_since_sha256",
+        "files": 69,
+        "receipt_sha256": "ea4a54eac743704a1c7fbf727c8928b0828f9f27ec709f35b9f11f754a4940c5",
+        "checked_unix": 1792453636.25322
+      }
+    }
+  }
+}

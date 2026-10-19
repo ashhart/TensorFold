@@ -1,0 +1,17 @@
+{
+  "runtime_commit": "cdfa5203d19805b1e544b7b39647b5bc9170e913",
+  "upstream": "d1018b318fb51981c4a18f12e40269a4d3ee9713",
+  "compiler": "0.17.0",
+  "cpu": "apple_m3",
+  "runtime_zig_tree": "100af63aa241b97d94e34ff625af00c9e3a5bef7",
+  "binary_sha256": {
+    "tf-dsv41-reference.cdfa5203": "3406c119a2abd4a88c850625db962b2f52a8adbfbd648e55b066253b204cc7ba",
+    "tf-dsv41-gpu.cdfa5203": "6f248d1dd53d2984dfbe5ed047c1a8c8f657d69c9a6c06272ce790cc4c81feb8",
+    "tf-exl3-gpu.cdfa5203": "f5353fe7445bab6d907da95afc07c1f6ea5b706e9bcbc72b8d4a1434eebfdc4c",
+    "tf-kernel-contract.cdfa5203": "d468e2b25583a6a24da05f8155889ab5800963d64c3872e8de66ce72ccbda7e1",
+    "tf-dsv41-run.cdfa5203": "35852fd94c5860e9615f6b0181513121b02bd48d81d37cab4cede24a11b459bc",
+    "tf-kernel-contract.d1018b31": "1cfa845cec595bcd4cb0516d68a1e2203adf94ded1fbbda38741f1f4f5c35122",
+    "tensorfold-native.cdfa5203": "daeaca7bb4979413089cf18180bdc3724160634467d25dc7bb6ec9ce0af98183"
+  },
+  "native_http_tested_at_this_commit": false
+}

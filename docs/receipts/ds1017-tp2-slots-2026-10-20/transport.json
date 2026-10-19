@@ -1,0 +1,17 @@
+{
+  "transport": "ordinary TCP over TB5 IP interfaces",
+  "rdma_device_used": false,
+  "observations": {
+    "0": {
+      "at_utc": "2026-10-19T23:08:54.299185+00:00",
+      "socket_addresses": "p68699\nctf-dsv41-run.cdfa5203\nf10\nn169.254.75.241:19816->169.254.92.133:63025\nTST=ESTABLISHED\nTQR=0\nTQS=0\nf11\nn169.254.75.241:19817->169.254.92.133:63026\nTST=ESTABLISHED\nTQR=0\nTQS=0\n",
+      "nettop_csv": "time,,interface,state,bytes_in,bytes_out,rx_dupe,rx_ooo,re-tx,rtt_avg,rcvsize,tx_win,tc_class,tc_mgt,cc_algo,P,C,R,W,arch,\n01:08:54.298028,tf-dsv41-run.cd.68699,,,17433504,17433504,0,0,0,,,,,,,,,,,,\n01:08:54.297703,tcp4 169.254.75.241:19816<->169.254.92.133:63025,bridge0,Established,17433400,17433400,0,0,0,1.22 ms,4194240,3567232,BE,-,cubic,-,-,-,-,so,\n01:08:54.297729,tcp4 169.254.75.241:19817<->169.254.92.133:63026,bridge0,Established,104,104,0,0,0,1.00 ms,131712,131712,BE,-,cubic,-,-,-,-,so,\n"
+    },
+    "1": {
+      "at_utc": "2026-10-19T23:08:54.322437+00:00",
+      "socket_addresses": "p47316\nctf-dsv41-run.cdfa5203\nf9\nn169.254.92.133:63025->169.254.75.241:19816\nTST=ESTABLISHED\nTQR=0\nTQS=0\nf10\nn169.254.92.133:63026->169.254.75.241:19817\nTST=ESTABLISHED\nTQR=0\nTQS=0\n",
+      "nettop_csv": "time,,interface,state,bytes_in,bytes_out,rx_dupe,rx_ooo,re-tx,rtt_avg,rcvsize,tx_win,tc_class,tc_mgt,cc_algo,P,C,R,W,arch,\n01:08:54.318483,tf-dsv41-run.cd.47316,,,17433504,17433504,0,0,0,,,,,,,,,,,,\n01:08:54.318020,tcp4 169.254.92.133:63025<->169.254.75.241:19816,en3,Established,17433400,17433400,0,0,0,1.22 ms,3567176,4194240,BE,-,cubic,-,-,-,-,so,\n01:08:54.318045,tcp4 169.254.92.133:63026<->169.254.75.241:19817,en3,Established,104,104,0,0,0,1.00 ms,131712,131712,BE,-,cubic,-,-,-,-,so,\n"
+    }
+  },
+  "scope": "actual established data and acknowledgement sockets; snapshot counters, not a standalone throughput benchmark"
+}

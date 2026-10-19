@@ -1,0 +1,44 @@
+{
+  "verified_at_utc": "2026-10-19T23:49:10.139856+00:00",
+  "controller_exit": 0,
+  "ranks": {
+    "0": {
+      "window_exit": 0,
+      "original_qwen_reply": "4",
+      "health": "ok",
+      "warming": false,
+      "own_test_processes": [],
+      "locks": {
+        ".tp-window-lock": false,
+        ".r3-window-lock": false,
+        ".s1-copy-lock": false
+      },
+      "test_ports_clear": true
+    },
+    "1": {
+      "window_exit": 0,
+      "original_qwen_reply": "4",
+      "health": "ok",
+      "warming": false,
+      "own_test_processes": [],
+      "locks": {
+        ".tp-window-lock": false,
+        ".r3-window-lock": false,
+        ".s1-copy-lock": false
+      },
+      "test_ports_clear": true
+    }
+  },
+  "original_reranker_after_both": {
+    "origin": "synthetic reranker availability control",
+    "health": {
+      "status": "ok"
+    },
+    "model": "qwen3-reranker-0.6b",
+    "scores": {
+      "0": 0.9979732632637024,
+      "1": 1.4130221643426921e-05
+    },
+    "correct_document_ranked_first": true
+  }
+}

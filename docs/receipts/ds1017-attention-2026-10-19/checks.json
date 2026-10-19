@@ -1,0 +1,503 @@
+{
+  "origin": "actual 61ab890f full-model stdout records",
+  "phases": {
+    "serial-generate-0": {
+      "execution_records": [
+        {
+          "mode": "prefill_progress",
+          "completed_tokens": 32,
+          "prompt_tokens": 32,
+          "elapsed_seconds": 1.31796583335381,
+          "footprint_bytes": 211363926264,
+          "disk_read_bytes": 20365312,
+          "pageins": 0
+        },
+        {
+          "mode": "generate",
+          "prompt_tokens": 32,
+          "completion_tokens": 128,
+          "prefill_seconds": 1.3180440000724047,
+          "decode_seconds": 31.343201458337717,
+          "decode_gpu_seconds": 30.642673874972388
+        }
+      ],
+      "residency": {
+        "mode": "generate",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": false,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 159,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 79,
+        "ready_footprint_bytes": 210974347488,
+        "final_footprint_bytes": 211357552912,
+        "load_seconds": 51.81353220832534,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 99733504,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 126844928,
+        "engram_rows_requested": 7632,
+        "engram_rows_unique": 7632,
+        "engram_cache_hits": 0,
+        "engram_reads": 7632,
+        "engram_wait_seconds": 0.424616,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "serial-generate-1": {
+      "execution_records": [
+        {
+          "mode": "prefill_progress",
+          "completed_tokens": 32,
+          "prompt_tokens": 32,
+          "elapsed_seconds": 1.3149498333223164,
+          "footprint_bytes": 211363795192,
+          "disk_read_bytes": 20037632,
+          "pageins": 0
+        },
+        {
+          "mode": "generate",
+          "prompt_tokens": 32,
+          "completion_tokens": 128,
+          "prefill_seconds": 1.3150156666524708,
+          "decode_seconds": 31.352408249978907,
+          "decode_gpu_seconds": 30.638499875785783
+        }
+      ],
+      "residency": {
+        "mode": "generate",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": false,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 159,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 79,
+        "ready_footprint_bytes": 210974249160,
+        "final_footprint_bytes": 211357421840,
+        "load_seconds": 53.2119858332444,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 99467264,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 126844928,
+        "engram_rows_requested": 7632,
+        "engram_rows_unique": 7632,
+        "engram_cache_hits": 0,
+        "engram_reads": 7632,
+        "engram_wait_seconds": 0.431939,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "serial-generate-2": {
+      "execution_records": [
+        {
+          "mode": "prefill_progress",
+          "completed_tokens": 32,
+          "prompt_tokens": 32,
+          "elapsed_seconds": 1.319603250012733,
+          "footprint_bytes": 211363811648,
+          "disk_read_bytes": 20037632,
+          "pageins": 0
+        },
+        {
+          "mode": "generate",
+          "prompt_tokens": 32,
+          "completion_tokens": 128,
+          "prefill_seconds": 1.3196700416738167,
+          "decode_seconds": 31.3299550000811,
+          "decode_gpu_seconds": 30.63455495785456
+        }
+      ],
+      "residency": {
+        "mode": "generate",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": false,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 159,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 79,
+        "ready_footprint_bytes": 210974200056,
+        "final_footprint_bytes": 211357421912,
+        "load_seconds": 53.10753149993252,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 99467264,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 126844928,
+        "engram_rows_requested": 7632,
+        "engram_rows_unique": 7632,
+        "engram_cache_hits": 0,
+        "engram_reads": 7632,
+        "engram_wait_seconds": 0.421751,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "parallel-generate-0": {
+      "execution_records": [
+        {
+          "mode": "prefill_progress",
+          "completed_tokens": 32,
+          "prompt_tokens": 32,
+          "elapsed_seconds": 1.3303610000293702,
+          "footprint_bytes": 211330355472,
+          "disk_read_bytes": 20037632,
+          "pageins": 0
+        },
+        {
+          "mode": "generate",
+          "prompt_tokens": 32,
+          "completion_tokens": 128,
+          "prefill_seconds": 1.3304207084001973,
+          "decode_seconds": 26.13416887493804,
+          "decode_gpu_seconds": 25.44145883375313
+        }
+      ],
+      "residency": {
+        "mode": "generate",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": true,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 159,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 67,
+        "ready_footprint_bytes": 210974314720,
+        "final_footprint_bytes": 211323982120,
+        "load_seconds": 53.10356449999381,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 99467264,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 126844928,
+        "engram_rows_requested": 7632,
+        "engram_rows_unique": 7632,
+        "engram_cache_hits": 0,
+        "engram_reads": 7632,
+        "engram_wait_seconds": 0.421481,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "parallel-generate-1": {
+      "execution_records": [
+        {
+          "mode": "prefill_progress",
+          "completed_tokens": 32,
+          "prompt_tokens": 32,
+          "elapsed_seconds": 1.328212249907665,
+          "footprint_bytes": 211330486544,
+          "disk_read_bytes": 20037632,
+          "pageins": 0
+        },
+        {
+          "mode": "generate",
+          "prompt_tokens": 32,
+          "completion_tokens": 128,
+          "prefill_seconds": 1.32828491658438,
+          "decode_seconds": 26.168299750075676,
+          "decode_gpu_seconds": 25.43944699934218
+        }
+      ],
+      "residency": {
+        "mode": "generate",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": true,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 159,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 67,
+        "ready_footprint_bytes": 210974363824,
+        "final_footprint_bytes": 211324113192,
+        "load_seconds": 53.199200874892995,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 99467264,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 126844928,
+        "engram_rows_requested": 7632,
+        "engram_rows_unique": 7632,
+        "engram_cache_hits": 0,
+        "engram_reads": 7632,
+        "engram_wait_seconds": 0.452272,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "parallel-generate-2": {
+      "execution_records": [
+        {
+          "mode": "prefill_progress",
+          "completed_tokens": 32,
+          "prompt_tokens": 32,
+          "elapsed_seconds": 1.3295293749542907,
+          "footprint_bytes": 211330175176,
+          "disk_read_bytes": 20037632,
+          "pageins": 0
+        },
+        {
+          "mode": "generate",
+          "prompt_tokens": 32,
+          "completion_tokens": 128,
+          "prefill_seconds": 1.3295881665544584,
+          "decode_seconds": 26.116685458342545,
+          "decode_gpu_seconds": 25.41125166718848
+        }
+      ],
+      "residency": {
+        "mode": "generate",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": true,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 159,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 67,
+        "ready_footprint_bytes": 210974150808,
+        "final_footprint_bytes": 211323785440,
+        "load_seconds": 53.048179791658185,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 99467264,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 126844928,
+        "engram_rows_requested": 7632,
+        "engram_rows_unique": 7632,
+        "engram_cache_hits": 0,
+        "engram_reads": 7632,
+        "engram_wait_seconds": 0.429017,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "serial-teacher": {
+      "execution_records": [
+        {
+          "mode": "teacher",
+          "tokens": 268,
+          "elapsed_seconds": 7.401024125050753,
+          "gpu_seconds": 7.259088583406992
+        }
+      ],
+      "residency": {
+        "mode": "teacher",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": false,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 268,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 18,
+        "ready_footprint_bytes": 210974298408,
+        "final_footprint_bytes": 211401691624,
+        "load_seconds": 50.918394874897785,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 152551424,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 197459968,
+        "engram_rows_requested": 12864,
+        "engram_rows_unique": 11872,
+        "engram_cache_hits": 0,
+        "engram_reads": 11870,
+        "engram_wait_seconds": 0.098097,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "parallel-teacher": {
+      "execution_records": [
+        {
+          "mode": "teacher",
+          "tokens": 268,
+          "elapsed_seconds": 7.568995250039734,
+          "gpu_seconds": 7.427380041684955
+        }
+      ],
+      "residency": {
+        "mode": "teacher",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": true,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 268,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 18,
+        "ready_footprint_bytes": 210974314768,
+        "final_footprint_bytes": 211368186344,
+        "load_seconds": 53.3257579166675,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 152551424,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 197459968,
+        "engram_rows_requested": 12864,
+        "engram_rows_unique": 11872,
+        "engram_cache_hits": 0,
+        "engram_reads": 11870,
+        "engram_wait_seconds": 0.098072,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "parallel-decode-teacher": {
+      "execution_records": [
+        {
+          "mode": "teacher",
+          "tokens": 268,
+          "elapsed_seconds": 56.87473999999929,
+          "gpu_seconds": 55.36408349976409
+        }
+      ],
+      "residency": {
+        "mode": "teacher",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": true,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 1048576,
+        "consumed_tokens": 268,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 204238438400,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 139,
+        "ready_footprint_bytes": 210974265568,
+        "final_footprint_bytes": 211360223552,
+        "load_seconds": 50.935376124922186,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 167542784,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 214106112,
+        "engram_rows_requested": 12864,
+        "engram_rows_unique": 12864,
+        "engram_cache_hits": 0,
+        "engram_reads": 12864,
+        "engram_wait_seconds": 0.88551,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    },
+    "parallel-lanes": {
+      "execution_records": [
+        {
+          "mode": "lanes",
+          "slots": 2,
+          "chunk": 16,
+          "max_logit_error_slot0": 0,
+          "max_logit_error_slot1": 0,
+          "bit_disagreements": 0,
+          "position_slot0": 134,
+          "position_slot1": 134,
+          "gpu_seconds": 16.052
+        }
+      ],
+      "residency": {
+        "mode": "lanes",
+        "tensor_parallel_ranks": 1,
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_partition": "none",
+        "attention_parallel": true,
+        "tensor_parallel_exchanges": 0,
+        "evidence_origin": "current_invocation_not_historical_qualification",
+        "context_capacity": 8192,
+        "consumed_tokens": 134,
+        "weight_bytes": 202366929272,
+        "resident_allocation_bytes": 202792583168,
+        "weight_residency_sets": 19,
+        "residency_refresh_ticks": 79,
+        "ready_footprint_bytes": 209528164144,
+        "final_footprint_bytes": 210025893848,
+        "load_seconds": 52.159936833311804,
+        "measurement_scope": "model_execution",
+        "execution_disk_read_bytes": 323092480,
+        "execution_pageins": 0,
+        "engram": "streamed",
+        "engram_read_bytes": 414777344,
+        "engram_rows_requested": 25728,
+        "engram_rows_unique": 24928,
+        "engram_cache_hits": 0,
+        "engram_reads": 24928,
+        "engram_wait_seconds": 0.284517,
+        "resident_gate_passed": true,
+        "execution_error": null
+      }
+    }
+  },
+  "teacher_logit_sha256": "910189ca833f31f7f905667f2df2f5b767391deac975dd34e7782ab694ad8eb2",
+  "generated_tokens_match_frozen_ids": true,
+  "restoration": {
+    "window_exit": 0,
+    "original_qwen_response_verified": true,
+    "original_reranker_response_verified": true
+  },
+  "operator_tests": {
+    "deepseek_gpu": 100,
+    "reference": 28,
+    "exl3_gpu": 29,
+    "attention_predecessor_bit_equal_shapes": 51,
+    "isolated_timing_samples_per_case": 32
+  },
+  "retained_raw_logit_sha256": {
+    "serial-teacher": "910189ca833f31f7f905667f2df2f5b767391deac975dd34e7782ab694ad8eb2",
+    "parallel-teacher": "910189ca833f31f7f905667f2df2f5b767391deac975dd34e7782ab694ad8eb2",
+    "parallel-decode-teacher": "910189ca833f31f7f905667f2df2f5b767391deac975dd34e7782ab694ad8eb2"
+  },
+  "retained_raw_token_sha256": {
+    "serial-0": "0f125059d45e9b79c773a6849c3115647c95a55ade930a753faf2490a8a1a9ac",
+    "serial-1": "0f125059d45e9b79c773a6849c3115647c95a55ade930a753faf2490a8a1a9ac",
+    "serial-2": "0f125059d45e9b79c773a6849c3115647c95a55ade930a753faf2490a8a1a9ac",
+    "parallel-0": "0f125059d45e9b79c773a6849c3115647c95a55ade930a753faf2490a8a1a9ac",
+    "parallel-1": "0f125059d45e9b79c773a6849c3115647c95a55ade930a753faf2490a8a1a9ac",
+    "parallel-2": "0f125059d45e9b79c773a6849c3115647c95a55ade930a753faf2490a8a1a9ac"
+  }
+}

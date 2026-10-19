@@ -1,0 +1,67 @@
+{
+  "serial": {
+    "runs": [
+      {
+        "mode": "generate",
+        "prompt_tokens": 32,
+        "completion_tokens": 128,
+        "prefill_seconds": 1.3180440000724047,
+        "decode_seconds": 31.343201458337717,
+        "decode_gpu_seconds": 30.642673874972388,
+        "decode_forwards_per_second": 4.051915378485253
+      },
+      {
+        "mode": "generate",
+        "prompt_tokens": 32,
+        "completion_tokens": 128,
+        "prefill_seconds": 1.3150156666524708,
+        "decode_seconds": 31.352408249978907,
+        "decode_gpu_seconds": 30.638499875785783,
+        "decode_forwards_per_second": 4.050725513249383
+      },
+      {
+        "mode": "generate",
+        "prompt_tokens": 32,
+        "completion_tokens": 128,
+        "prefill_seconds": 1.3196700416738167,
+        "decode_seconds": 31.3299550000811,
+        "decode_gpu_seconds": 30.63455495785456,
+        "decode_forwards_per_second": 4.053628548131373
+      }
+    ],
+    "median_forwards_per_second": 4.051915378485253
+  },
+  "parallel": {
+    "runs": [
+      {
+        "mode": "generate",
+        "prompt_tokens": 32,
+        "completion_tokens": 128,
+        "prefill_seconds": 1.3304207084001973,
+        "decode_seconds": 26.13416887493804,
+        "decode_gpu_seconds": 25.44145883375313,
+        "decode_forwards_per_second": 4.8595385071453165
+      },
+      {
+        "mode": "generate",
+        "prompt_tokens": 32,
+        "completion_tokens": 128,
+        "prefill_seconds": 1.32828491658438,
+        "decode_seconds": 26.168299750075676,
+        "decode_gpu_seconds": 25.43944699934218,
+        "decode_forwards_per_second": 4.853200292450515
+      },
+      {
+        "mode": "generate",
+        "prompt_tokens": 32,
+        "completion_tokens": 128,
+        "prefill_seconds": 1.3295881665544584,
+        "decode_seconds": 26.116685458342545,
+        "decode_gpu_seconds": 25.41125166718848,
+        "decode_forwards_per_second": 4.862791651052793
+      }
+    ],
+    "median_forwards_per_second": 4.8595385071453165
+  },
+  "speedup": 1.1993188537323258
+}
