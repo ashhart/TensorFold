@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const blocks = @import("sha256_blocks.zig");
+const linuxAuxval = if (builtin.link_libc) std.c.getauxval else std.os.linux.getauxval;
 pub const Mode = enum { auto, software, hardware };
 pub const Backend = enum { software, arm_sha2, x86_sha };
 
@@ -25,7 +26,7 @@ pub fn available() Backend {
     if (builtin.zig_backend == .stage2_c) return .software;
     if (builtin.cpu.arch == .aarch64) {
         if (builtin.os.tag == .linux) {
-            if (std.os.linux.getauxval(std.elf.AT.HWCAP) & std.os.linux.HWCAP.SHA2 != 0) return .arm_sha2;
+            if (linuxAuxval(std.elf.AT.HWCAP) & std.os.linux.HWCAP.SHA2 != 0) return .arm_sha2;
         } else if (builtin.os.tag == .macos) {
             var yes: c_int = 0;
             var len: usize = @sizeOf(c_int);
@@ -107,3 +108,15 @@ pub const Hash = struct {
         return out;
     }
 };
+
+test "runtime SHA256: Linux auxv uses the entry point matching the executable startup" {
+    comptime {
+        if (builtin.os.tag == .linux and builtin.cpu.arch == .aarch64) {
+            if (builtin.link_libc) {
+                std.debug.assert(linuxAuxval == std.c.getauxval);
+            } else {
+                std.debug.assert(linuxAuxval == std.os.linux.getauxval);
+            }
+        }
+    }
+}

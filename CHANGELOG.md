@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Linux checkpoint hashing reads runtime SHA2 capabilities through libc when libc owns process startup.
+
 - Streaming research waits for the HTTP response head before sending chat, Messages or Responses keepalives.
 
 - Plain Qwen3.8-27B Metal prompt caching can copy up to four interior DeltaNet marks without separate prompt calls, within the memory bound (#548, #851). Thanks to @jschmied.
