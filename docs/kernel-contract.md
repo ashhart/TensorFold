@@ -111,8 +111,10 @@ Mamba scan of a verify window (its host twin's bytes), qmm_group's cluster tile,
 bit-equal to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4 tiles with fp32 out (K slices met in a
 cluster, fused, or by `reduce_kernel<true>`), the checkpoint math's FP8 128-row prompt tiles (both slice meetings,
 bit-equal to the 64-row tiles) and NVFP4 experts: the decode-sized forms and the prompt tiles (up to down's NVFP4
-rows, fp32 down and the down summing two width shares, each bit-equal to the kernels it replaces; sm_120 up), and the
-reduce-scatter's `tf_rank_sum`.
+rows, fp32 down and the down summing two width shares, each bit-equal to the kernels it replaces; sm_120 up), the
+reduce-scatter's `tf_rank_sum`, and `window_attention`'s rows at head dim 256 (`window_rows.cu`: decode chunks and their
+merge, prompt tiles with P as bf16 or in two halves, a row's last key), each output within float64's range over the
+spread its fp32 steps and tensor-core sums allow (`core/attention_range.zig`; six controls, each one planted fault).
 
 ## CUDA records per nvcc release
 
