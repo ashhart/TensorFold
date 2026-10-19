@@ -154,6 +154,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 /// `open` once the ranks' lines are up: NCCL, the engine and the link, then a follower's loop or rank 0's lanes.
 fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings, roce_bytes: usize) !Loaded {
+    cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
@@ -203,7 +204,8 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
     // every rank loaded and agreed (cuda_ranks) before the first step; the digest names what they agreed on
     if (p.world > 1) try cuda.tp_watch.ready(io, own.e.checkpoint_digest);
-    if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, then leaves the process
+    cuda.memory_receipt.emit(@intCast(p.rank), .load_end, false);
+    if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, frees what it owns, then leaves the process
         follow.follow(own.e, &own.link) catch |err| {
             std.log.err("rank {d}: following rank 0 stopped ({s})", .{ p.rank, @errorName(err) });
             cuda.tp_watch.fail(@errorName(err)); // rank 0 and the others stop with it
@@ -211,6 +213,9 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         };
         cuda.tp_watch.ended();
         std.log.info("rank {d}: rank 0 ended; leaving", .{p.rank});
+        cuda.memory_receipt.emit(@intCast(p.rank), .cleanup_begin, false);
+        release(own);
+        cuda.memory_receipt.emit(@intCast(p.rank), .cleanup_end, false);
         std.process.exit(0);
     }
     // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_SHARED=0 runs windows alone.
@@ -304,9 +309,17 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 
 fn close(ptr: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(ptr));
+    const rank: u32 = @intCast(own.group.rank);
+    cuda.memory_receipt.emit(rank, .cleanup_begin, false);
     cuda.tp_watch.ended(); // the other ranks leave on the end step, so their lines close on purpose from here
     own.lanes.x.end() catch {};
     own.lanes.deinit();
+    release(own);
+    cuda.memory_receipt.emit(rank, .cleanup_end, false);
+}
+
+/// What a rank owns, freed by rank 0's close and by a follower before it leaves.
+fn release(own: *Owned) void {
     own.link.deinit();
     if (own.e.images) |v| v.deinit();
     own.e.deinit();
