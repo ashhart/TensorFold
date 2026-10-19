@@ -18,7 +18,8 @@ if (!process.argv[2]) {
       const child = spawnSync(process.execPath, [import.meta.filename, mode, tmp], {
         cwd: studio,
         encoding: 'utf8',
-        timeout: 5000
+        // Each child transpiles this module; a loaded CI host needs more than the old 5 s.
+        timeout: 30000
       });
       assert.equal(child.error, undefined, mode + ' consumer timed out');
       assert.equal(child.status, 0, mode + ': ' + child.stderr);
