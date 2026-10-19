@@ -10,30 +10,51 @@ pub const Groups = struct {
         gpa: std.mem.Allocator,
         sets: [max_sets]mtl.ResidencySet,
         count: usize,
-        ticker: *@import("../../core/keepalive.zig").Keepalive,
+        io: std.Io,
+        stopped: std.atomic.Value(bool) = .init(false),
+        ticks: std.atomic.Value(u64) = .init(0),
+        thread: std.Thread = undefined,
 
         pub fn start(gpa: std.mem.Allocator, io: std.Io, groups: *const Groups) !?*Refresh {
             const mode = std.c.getenv("TF_DSV41_RESIDENCY_REFRESH") orelse return null;
             if (!std.mem.eql(u8, std.mem.span(mode), "1")) return null;
             if (groups.count == 0) return error.ResidencyRefreshRequiresSplitSets;
+            return create(gpa, io, groups);
+        }
+
+        fn create(gpa: std.mem.Allocator, io: std.Io, groups: *const Groups) !*Refresh {
             const r = try gpa.create(Refresh);
             errdefer gpa.destroy(r);
-            r.* = .{ .gpa = gpa, .sets = undefined, .count = groups.count, .ticker = undefined };
+            r.* = .{ .gpa = gpa, .sets = undefined, .count = groups.count, .io = io };
             @memcpy(r.sets[0..r.count], groups.sets[0..groups.count]);
-            r.ticker = try @import("../../core/keepalive.zig").Keepalive.start(gpa, io, .{ .ctx = r, .tick = tick }, std.math.maxInt(i64));
+            r.thread = try std.Thread.spawn(.{}, loop, .{r});
             return r;
         }
 
-        fn tick(ptr: *anyopaque) void {
-            const r: *Refresh = @ptrCast(@alignCast(ptr));
+        fn loop(r: *Refresh) void {
+            while (!r.stopped.load(.acquire)) {
+                std.Io.sleep(r.io, .fromMilliseconds(400), .awake) catch {};
+                if (r.stopped.load(.acquire)) break;
+                r.tick();
+                _ = r.ticks.fetchAdd(1, .release);
+            }
+        }
+
+        fn tick(r: *Refresh) void {
+            if (r.count == 0) return;
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
             // Only immutable weight sets; execution descriptors may be added concurrently to the other set.
             for (r.sets[0..r.count]) |set| set.requestResidency();
         }
 
+        fn join(r: *Refresh) void {
+            r.stopped.store(true, .release);
+            r.thread.join();
+        }
+
         pub fn stop(r: *Refresh) void {
-            r.ticker.stop();
+            r.join();
             r.gpa.destroy(r);
         }
     };
@@ -121,4 +142,18 @@ test "TP residency keeps every byte while bounding sets and reserving an executi
     total = 0;
     for (p.sizes[0..p.count]) |n| total += n;
     try std.testing.expectEqual(@as(usize, 5205), total);
+}
+
+test "TP residency refresh joins its worker before releasing borrowed sets" {
+    const r = try Groups.Refresh.create(std.testing.allocator, std.testing.io, &.{});
+    defer std.testing.allocator.destroy(r);
+    for (0..2000) |_| {
+        if (r.ticks.load(.acquire) != 0) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    r.join();
+    const ticks = r.ticks.load(.acquire);
+    try std.testing.expect(ticks > 0);
+    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+    try std.testing.expectEqual(ticks, r.ticks.load(.acquire));
 }

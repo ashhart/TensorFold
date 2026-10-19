@@ -262,6 +262,8 @@ pub fn main(init: std.process.Init) !void {
         .consumed_tokens = model.cache.position,
         .weight_bytes = model.checkpoint.residentBytes(),
         .resident_allocation_bytes = model.residency.allocatedSize() + model.weight_residency.bytes(),
+        .weight_residency_sets = model.weight_residency.count,
+        .residency_refresh_ticks = if (model.residency_refresh) |refresh| refresh.ticks.load(.acquire) else 0,
         .ready_footprint_bytes = before.footprint,
         .final_footprint_bytes = after.footprint,
         .load_seconds = ready - begin,
