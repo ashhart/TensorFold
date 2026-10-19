@@ -1,5 +1,4 @@
 //! The tensor-unit eh_proj stays no worse than the row kernel on an fp64 reference, per column and in aggregate.
-
 //! Decode (1 row) and prompt (2048 and 8192 rows) are separate shapes on identical input rows.
 const std = @import("std");
 const mtl = @import("metal");

@@ -277,7 +277,6 @@ pub fn bf16(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: 
 }
 
 /// x [rows, k] through bf16 W [n, k]: prefill-side eh_proj on tensor units (8x8 simdgroup MMA in fp32).
-
 /// Caller must ensure rows and n are multiples of 8 and 64 respectively (eh_proj: rows = chunk rows, n = D=4096).
 pub fn bf16Nax(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: Io) void {
     e.setPipeline(p.bf16_nax);
