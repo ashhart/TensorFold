@@ -93,6 +93,8 @@ pub const Server = struct {
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
+    /// With image input: whether the chat template writes an image placeholder for an image part (templateImages).
+    template_images: bool = true,
     markers: reply_text.Markers = reply_text.think_markers,
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
@@ -152,6 +154,10 @@ pub const Server = struct {
             std.mem.indexOf(u8, source, "thinking_mode") != null;
         srv.late_system = try lateSystem(a, text);
         srv.needs_user_after_tool = needsUserAfterTool(source);
+        if (srv.info.vision != null) {
+            srv.template_images = templateImages(srv);
+            if (!srv.template_images) log.line("warning: --vision: the chat template writes no image placeholder for an image part, so image requests will fail; serve with --chat-template naming a template that has an image path", .{});
+        }
         if (text.tokenId("</think>")) |end| {
             const lead = try text.encode(a, "\n", false);
             const trail = try text.encode(a, "\n\n", false);
@@ -405,6 +411,21 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     var problem: []const u8 = "";
     const rendered = text.render(a, probe, .{ .add_generation_prompt = false }, &problem) catch return "user";
     return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
+}
+
+/// With image input: one user turn holding an image part, rendered as a request's would be, writes at least one
+/// image placeholder. A template without an image path (one that swaps media parts for text) fails every image
+/// request; finding that at startup turns a request-time 500 into a configuration warning.
+fn templateImages(srv: *Server) bool {
+    const v = srv.info.vision orelse return true;
+    var arena: std.heap.ArenaAllocator = .init(srv.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: errors.Cx = .{ .a = a };
+    const probe = (json.parse(a, "[{\"role\": \"user\", \"content\": [{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,AA==\"}}, {\"type\": \"text\", \"text\": \"x\"}]}]") catch return true).ok;
+    const ids = @import("prompt.zig").renderIds(srv, &cx, probe, &.{}, false, null, true) catch return true; // a render failure is the request's to report
+    for (ids) |t| if (t == v.image_token) return true;
+    return false;
 }
 
 /// Templates requiring a user query gain a user turn after trailing tool results replace their last user turn.

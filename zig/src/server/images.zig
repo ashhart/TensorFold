@@ -240,6 +240,8 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         marks += @intFromBool(t == v.image_token);
         video_marks += @intFromBool(video_token != null and t == video_token.?);
     }
+    // none at all: the template has no image path (it swaps media parts for text), a configuration problem
+    if (marks == 0 and n_images > 0) return cx.fail(.server, "the chat template wrote no image placeholder for {d} image part{s}; a template that turns media parts into text has no image path: serve with --chat-template naming one that writes the image token", .{ n_images, if (n_images == 1) "" else "s" });
     if (marks != n_images) return cx.fail(.server, "the chat template wrote {d} image placeholders for {d} image parts", .{ marks, n_images });
     if (video_marks != n_videos) return cx.fail(.server, "the chat template wrote {d} video placeholders for {d} video parts", .{ video_marks, n_videos });
     if (ps.len == 0) return null;
