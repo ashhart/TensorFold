@@ -805,6 +805,11 @@ const appWindowRuntime = createAppWindowRuntime({
   shouldGuardWindowClose: () => !draftQuitSettled,
   beforeWindowClose: (win) => requestRendererDraftFlush(win.webContents),
   onWindowCloseFailure: () => dialog.showErrorBox('Your draft needs attention', 'TensorFold could not confirm that unfinished messages were saved; keep the window open and retry saving the draft.'),
+  // A blank window is otherwise silent: report the renderer failure to the terminal and a dialog.
+  onRendererFailure: (detail) => {
+    console.error(`[tensorfold] ${detail}`)
+    dialog.showErrorBox('TensorFold could not start its interface', `${detail}\n\nThe interface did not load. Reinstalling the app or starting it with a fresh profile may help.`)
+  },
 })
 // Lazy-accessor bundle: replaces the installSessionHardening + createWindow forwarder shims.
 const appWindowApi = {

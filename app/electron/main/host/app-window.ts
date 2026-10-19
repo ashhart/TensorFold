@@ -17,6 +17,8 @@ interface AppWindowRuntimeDeps {
   beforeWindowClose?(win: BrowserWindowType): Promise<void>
   shouldGuardWindowClose?(): boolean
   onWindowCloseFailure?(error: unknown): void
+  /** Report a renderer that never loaded or died, so a blank window is not mistaken for a hang. */
+  onRendererFailure?(detail: string): void
 }
 
 interface MediaPermissionDetails {
@@ -139,6 +141,14 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
       }
     })
 
+    // A failed load or a dead renderer otherwise leaves the static boot splash on screen forever.
+    appWebContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return
+      deps.onRendererFailure?.(`The interface failed to load (${errorCode} ${errorDescription}) for ${validatedURL}.`)
+    })
+    appWebContents.on('render-process-gone', (_event, details) => {
+      deps.onRendererFailure?.(`The interface process stopped (${details.reason}${details.exitCode != null ? `, exit ${details.exitCode}` : ''}).`)
+    })
     appWindow.webContents.setWindowOpenHandler(({ url }) => {
       openExternalSafely(url, { allowHttpLocalhost: true }).catch(() => {})
       return { action: 'deny' }

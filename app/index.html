@@ -43,6 +43,22 @@
         60% { opacity: 1; transform: scale(1.04); }
         100% { opacity: 1; transform: scale(1); }
       }
+      #boot-failure {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 61;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #0c0c0d;
+        color: #e8e8ea;
+        font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
+      }
+      #boot-failure[data-visible='true'] { display: flex; }
+      #boot-failure .panel { max-width: 620px; width: 100%; border: 1px solid #2a2b31; border-radius: 12px; padding: 20px; background: #141519; }
+      #boot-failure h1 { margin: 0 0 8px; font-size: 16px; }
+      #boot-failure pre { margin: 12px 0 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.5 ui-monospace, monospace; color: #b6b7bd; max-height: 40vh; overflow: auto; }
     </style>
   </head>
   <body>
@@ -51,6 +67,13 @@
       <svg class="boot-mark" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
         <path d="M12 16h40M12 32h40M12 48h24" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
       </svg>
+    </div>
+    <div id="boot-failure" role="alert" aria-live="assertive">
+      <div class="panel">
+        <h1>TensorFold could not finish starting</h1>
+        <div>The window opened, but the interface never became ready. This panel reports the first failure so it can be diagnosed; restarting may help.</div>
+        <pre id="boot-failure-detail"></pre>
+      </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

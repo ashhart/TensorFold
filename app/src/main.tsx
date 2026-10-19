@@ -1,4 +1,8 @@
 import './lib/trusted-types'
+import { installBootGuard } from './lib/boot-guard'
+
+// First: make a failed or stalled boot visible instead of leaving the static splash forever.
+installBootGuard(window, document)
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { preparePairedSession } from './lib/remote-pairing'
