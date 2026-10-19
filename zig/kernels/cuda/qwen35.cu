@@ -70,6 +70,15 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
     const int E = D / 256;
     float hv[MAXE];
     float ss = 0.0f;
+    // the weights are loaded with the row, not after its reduction
+    uint2 wq[MAXE / 4];
+    if ((E & 3) == 0) {
+#pragma unroll
+        for (int i = 0; i < MAXE; i += 4) {
+            if (i >= E) break;
+            wq[i / 4] = *reinterpret_cast<const uint2*>(W + t * E + i);
+        }
+    }
     if ((E & 3) == 0) {
         // the same entries and order a thread at a time, four at a load
 #pragma unroll
@@ -117,8 +126,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
         for (int i = 0; i < MAXE; i += 4) {
             if (i >= E) break;
             const int d = t * E + i;
-            const uint2 ww = *reinterpret_cast<const uint2*>(W + d);
-            const __nv_bfloat16* wb = reinterpret_cast<const __nv_bfloat16*>(&ww);
+            const __nv_bfloat16* wb = reinterpret_cast<const __nv_bfloat16*>(&wq[i / 4]);
             uint2 xw;
             __nv_bfloat16* xb = reinterpret_cast<__nv_bfloat16*>(&xw);
 #pragma unroll
@@ -171,6 +179,8 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
 #pragma unroll
     for (int tap = 0; tap < TAPS; tap++) src[tap] = back(rowpar, w, TAPS - 1 - tap);
     constexpr int PER = DK / 32;
+    // a recorded window's row logs the tail after it (taps 1..TAPS-1) here, so conv_commit only moves the stream's
+    __nv_bfloat16* tail = recorded(P) ? log_row(geo, sg, layer, w - sg.row0).conv : nullptr;
     float vals[PER];
 #pragma unroll
     for (int j = 0; j < PER; j++) {
@@ -179,8 +189,9 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
 #pragma unroll
         for (int tap = 0; tap < TAPS; tap++) {
             const int at = src[tap];
-            const float xv = at < 0 ? bf(CS[(size_t)(-1 - at) * C + c]) : bf(QKV[(size_t)at * C + c]);
-            acc += bf(CW[c * TAPS + tap]) * xv;
+            const __nv_bfloat16 xb = at < 0 ? CS[(size_t)(-1 - at) * C + c] : QKV[(size_t)at * C + c];
+            if (tail != nullptr && tap > 0) tail[(size_t)(tap - 1) * C + c] = xb;
+            acc += bf(CW[c * TAPS + tap]) * bf(xb);
         }
         const float conv = rbf(acc);
         const float sig = rbf(1.0f / (1.0f + expf(-conv)));
@@ -209,7 +220,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
     }
 }
 
-// A segment's conv tail: a recorded window logs each row's for keep and leaves the stream's; others update it in place.
+// A segment's conv tail: a recorded window leaves the stream's (gdn_pre logged its rows'); others update it in place.
 extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __restrict__ QKV, const Seg* __restrict__ segs,
                                                 const int* __restrict__ rowpar, int layer, const int* __restrict__ P) {
     const int C = geo.conv();
@@ -218,13 +229,7 @@ extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __re
     const Seg sg = segs[blockIdx.y];
     __nv_bfloat16* CS = reinterpret_cast<__nv_bfloat16*>(sg.conv) + (size_t)layer * geo.conv_rows();
     if (recorded(P)) {
-        for (int j = 0; j < sg.rows; j++) {
-            __nv_bfloat16* out = log_row(geo, sg, layer, j).conv;
-            for (int r = 0; r < TAPS - 1; r++) {
-                const int at = back(rowpar, sg.row0 + j, TAPS - 2 - r);
-                out[(size_t)r * C + c] = at < 0 ? CS[(size_t)(-1 - at) * C + c] : QKV[(size_t)at * C + c];
-            }
-        }
+        // gdn_pre logged each row's tail
         if (sg.rows != 1) return;
         __nv_bfloat16* before = reinterpret_cast<__nv_bfloat16*>(sg.before + geo.nl * geo.rec() * sizeof(float)) + (size_t)layer * geo.conv_rows();
         for (int r = 0; r < TAPS - 1; ++r) before[(size_t)r * C + c] = CS[(size_t)r * C + c];

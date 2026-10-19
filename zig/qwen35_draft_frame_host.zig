@@ -92,7 +92,7 @@ const Record = struct {
         if (id == 13) last_norm_input = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
         if (id == 1) max_rows = @max(max_rows, x);
         if (id == 5) {
-            std.debug.assert(z == 9 and threads == 32);
+            std.debug.assert(z == 9 and threads == 128);
             if (fail) return cuda.abi.error_not_ready;
         }
         return cuda.abi.success;

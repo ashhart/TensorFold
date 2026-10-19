@@ -24,6 +24,6 @@ pub const records = [_]CudaRecord{
     .{ .launch = .{ .name = "qwen35_draft tf_q35d_dyn_conv_batch", .symbol = "tf_q35d_dyn_conv_batch", .image = "qwen35_draft", .threads = 256 }, .usage = none },
     .{ .launch = .{ .name = "qwen35_draft tf_q35d_norm_rope_batch", .symbol = "tf_q35d_norm_rope_batch", .image = "qwen35_draft", .threads = 32 }, .usage = none },
     .{ .launch = .{ .name = "qwen35_draft tf_q35d_mask_rows", .symbol = "tf_q35d_mask_rows", .image = "qwen35_draft", .threads = 256 }, .usage = none },
-    .{ .launch = .{ .name = "qwen35_draft tf_q35d_attn_partial", .symbol = "tf_q35d_attn_partial", .image = "qwen35_draft", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_attn_partial", .symbol = "tf_q35d_attn_partial", .image = "qwen35_draft", .threads = 128 }, .usage = none },
     .{ .launch = .{ .name = "qwen35_draft tf_q35d_attn_merge", .symbol = "tf_q35d_attn_merge", .image = "qwen35_draft", .threads = 32 }, .usage = none },
 };

@@ -24,8 +24,29 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
 #pragma unroll
         for (int i = 0; i < PT; ++i) kept[slot][i] = 0.f;
     const bool record = recorded(P);
+    // row inputs as stored, the next row's loaded while this one computes
+    struct In { uint2 k, q; __nv_bfloat16 v, beta; float g; };
+    auto load = [&](unsigned row, In& x) {
+        const size_t key = ((size_t)row * NK + hk) * DK + PT * dk;
+        x.k = *reinterpret_cast<const uint2*>(k + key);
+        x.q = *reinterpret_cast<const uint2*>(q + key);
+        x.v = v[((size_t)row * NV + hv) * DK + dv];
+        x.g = g[row * NV + hv];
+        x.beta = beta[row * NV + hv];
+    };
+    In next;
+    SlotStep step_next;
+    if (sg.rows > 0) {
+        step_next = steps[sg.row0];
+        load(step_next.row, next);
+    }
     for (int item = 0; item < sg.rows; ++item) {
-        const SlotStep step = steps[sg.row0 + item];
+        const SlotStep step = step_next;
+        const In in = next;
+        if (item + 1 < sg.rows) {
+            step_next = steps[sg.row0 + item + 1];
+            load(step_next.row, next);
+        }
         const int row = step.row, r = row - sg.row0;
 #pragma unroll
         for (int i = 0; i < PT; ++i) state[i] = root[i];
@@ -33,15 +54,17 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
         for (int slot = 0; slot < SLOTS; ++slot) if (slot == step.read_slot)
 #pragma unroll
             for (int i = 0; i < PT; ++i) state[i] = kept[slot][i];
+        const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&in.k);
+        const __nv_bfloat16* qb = reinterpret_cast<const __nv_bfloat16*>(&in.q);
         float kc[PT], qc[PT];
 #pragma unroll
         for (int i = 0; i < PT; i++) {
-            kc[i] = bf(k[((size_t)row * NK + hk) * DK + PT * dk + i]);
-            qc[i] = bf(q[((size_t)row * NK + hk) * DK + PT * dk + i]);
+            kc[i] = bf(kb[i]);
+            qc[i] = bf(qb[i]);
         }
-        const float vc = bf(v[((size_t)row * NV + hv) * DK + dv]);
-        const float gc = g[row * NV + hv];
-        const float bc = bf(beta[row * NV + hv]);
+        const float vc = bf(in.v);
+        const float gc = in.g;
+        const float bc = bf(in.beta);
         float kv_mem = 0.0f;
 #pragma unroll
         for (int i = 0; i < PT; i++) {
@@ -64,9 +87,7 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
                 l.delta[hv * DK + dv] = delta;
                 if (dv == 0) l.g[hv] = gc;
             }
-            if (dv == 0 && hv % (NV / NK) == 0)
-#pragma unroll
-                for (int i = 0; i < PT; i++) l.k[hk * DK + PT * dk + i] = k[((size_t)row * NK + hk) * DK + PT * dk + i];
+            if (dv == 0 && hv % (NV / NK) == 0) *reinterpret_cast<uint2*>(l.k + hk * DK + PT * dk) = in.k;
         }
 #pragma unroll
         for (int slot = 0; slot < SLOTS; ++slot) if (slot == step.write_slot)
