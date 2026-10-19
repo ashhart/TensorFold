@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Shared draft rounds offer one deeper row every eighth round when the row cap permits, retaining normal pricing and trimming (#1059). Thanks to @plotarmordev.
+
 - Nemotron tensor parallelism shares Flash Next's NCCL 2.30.0 minimum, refusing older loaded libraries before rank setup (#1060).
 
 - Linux checkpoint hashing reads runtime SHA2 capabilities through libc when libc owns process startup.
