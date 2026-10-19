@@ -62,6 +62,7 @@ test {
     _ = @import("lone_backoff_test.zig");
     _ = @import("fill_test.zig");
     _ = @import("fill_trim_test.zig");
+    _ = @import("fair_turns_test.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");

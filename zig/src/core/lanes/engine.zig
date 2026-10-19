@@ -172,7 +172,8 @@ pub const Engine = struct {
         for (order) |i| {
             const s = live[i];
             const need: u64 = if (s.drafts) @min(@min(e.cfg.base_width, e.cfg.batch_rows), 1 + s.force.items.len) else 1;
-            if (chosen.items.len == e.cfg.batch_streams or (chosen.items.len > 0 and rows + need > e.cfg.batch_rows)) break;
+            if (chosen.items.len == e.cfg.batch_streams) break;
+            if (chosen.items.len > 0 and rows + need > e.cfg.batch_rows) continue;
             try chosen.append(a, i);
             rows += need;
         }
