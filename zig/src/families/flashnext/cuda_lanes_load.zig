@@ -15,6 +15,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.context > prompt.max_tokens) return error.ContextOverWindow;
     if (o.segments != 1) return error.UnsupportedOption;
     if ((o.tp != 1 and o.tp != 2) or o.rank >= o.tp) return error.BadRank;
+    // refused before the stream, the glue or a captured set loads
+    const chunk = try prompt.chunkRows();
     const mode = try config.mode(gpa, io, dir);
     if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
@@ -31,7 +33,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (captured) |kernels| own.set = try F.comparison(gpa, io, driver, ctx, kernels, o.drafts);
     errdefer if (own.set) |*x| x.deinit();
     if (o.tp == 2) {
-        var id = try ranks.identity(gpa, io, dir, o.context, try prompt.chunkRows());
+        var id = try ranks.identity(gpa, io, dir, o.context, chunk);
         id.mtp = @intFromBool(o.drafts);
         if (o.vision) |v| {
             try @import("qwen_vision").media.checkLimits(v);

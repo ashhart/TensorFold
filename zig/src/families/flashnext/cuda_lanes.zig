@@ -541,6 +541,21 @@ pub fn Namespace(comptime Tri: type) type {
             _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
         }
 
+        test "a bad TF_FLASHNEXT_CHUNK is refused at load before the loader takes a stream, a module or a buffer" {
+            const env = if (@import("builtin").os.tag == .windows) @import("sys").c else struct {
+                extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: i32) i32;
+                extern "c" fn unsetenv(name: [*:0]const u8) i32;
+            };
+            defer _ = env.unsetenv("TF_FLASHNEXT_CHUNK");
+            // every driver entry point undefined: the refusal must come before the first call
+            var driver: cuda.Driver = undefined;
+            const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+            for ([_][*:0]const u8{ "0", "16385", "4k" }) |bad| {
+                _ = env.setenv("TF_FLASHNEXT_CHUNK", bad, 1);
+                try std.testing.expectError(error.BadChunk, open(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));
+            }
+        }
+
         // -- the prompt cache's copies ------------------------------------------------------------------------
 
         fn snapBytes(ptr: *anyopaque, at: u32) u64 {

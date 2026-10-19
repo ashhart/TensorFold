@@ -152,6 +152,8 @@ pub const Engine = struct {
     pub fn initRank(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8, world: usize, rank: usize) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
+        // refused before anything loads: a bad TF_FLASHNEXT_CHUNK leaves no module or buffer behind
+        const chunk = try chunkRows();
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -222,7 +224,7 @@ pub const Engine = struct {
         e.batch_k = try batch.Kernels.load(driver);
         e.batch_s = null;
         e.scores = null;
-        e.chunk = try chunkRows();
+        e.chunk = chunk;
         return e;
     }
 
