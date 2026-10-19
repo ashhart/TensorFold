@@ -94,6 +94,33 @@ pub fn setBack(b: anytype, hook: ?mtl.ResidencySet.Follow) void {
     if (hook) |f| fields.apply(b, f, true);
 }
 
+const share_owner = @import("ane_mlp.zig");
+pub const ShareBuffers = [1 + 2 * share_owner.max_slices]mtl.Buffer;
+
+/// One inventory for an immediate share and the deferred share's handoff to an existing owner.
+pub fn shareBuffers(share: anytype, storage: *ShareBuffers) ![]const mtl.Buffer {
+    const n = share.slices;
+    if (n == 0 or n > share_owner.max_slices or share.inputs.len != n or share.outputs.len != n)
+        return error.BadAneShare;
+    storage[0] = share.partial;
+    for (share.inputs, share.outputs, 0..) |input, output, i| {
+        storage[1 + 2 * i] = input.buffer;
+        storage[2 + 2 * i] = output.buffer;
+    }
+    return storage[0 .. 1 + 2 * n];
+}
+
+/// A deferred optional share needs the stable residency owner; refusal unwinds before the model frees buffers.
+pub fn finishShare(h: anytype, room: u64) !void {
+    if (!h.model.share_pending) return;
+    try h.model.loadShare(if (h.resident != null) room else 0);
+    if (h.model.ane) |share| {
+        var buffers: ShareBuffers = undefined;
+        const resident = if (h.resident) |*r| r else return error.AneShareResidencyRefused;
+        if (!resident.tryAddNow(try shareBuffers(share, &buffers))) return error.AneShareResidencyRefused;
+    }
+}
+
 pub fn hold(h: anytype, io: std.Io) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
@@ -101,9 +128,8 @@ pub fn hold(h: anytype, io: std.Io) !void {
     try list.appendSlice(h.gpa, h.model.weights.owned.items);
     try fields.append(h.gpa, &list, &h.model.frame);
     if (h.model.ane) |share| {
-        try list.append(h.gpa, share.partial);
-        for (share.inputs) |surface| try list.append(h.gpa, surface.buffer);
-        for (share.outputs) |surface| try list.append(h.gpa, surface.buffer);
+        var buffers: ShareBuffers = undefined;
+        try list.appendSlice(h.gpa, try shareBuffers(share, &buffers));
     }
     var projections = h.model.kernels.lanes.valueIterator();
     while (projections.next()) |projection| try fields.append(h.gpa, &list, projection);

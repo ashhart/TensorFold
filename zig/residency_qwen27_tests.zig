@@ -209,6 +209,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
                 share.partial = try owned.take();
                 inputs[0] = .{ .buffer = try owned.take() };
                 outputs[0] = .{ .buffer = try owned.take() };
+                share.slices = 1;
                 share.inputs = &inputs;
                 share.outputs = &outputs;
                 model.ane = &share;

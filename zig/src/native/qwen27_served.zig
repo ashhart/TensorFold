@@ -9,6 +9,7 @@ const q = tf.qwen27;
 const lanes = tf.lanes;
 const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
+const share_fit = @import("qwen27_share_fit.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
@@ -142,9 +143,13 @@ const Snaps = struct {
     }
 };
 
-/// Whether the Neural Engine's share of `bytes` keeps this server inside the 70% load limit beside what it loaded.
-fn shareFits(bytes: u64) bool {
-    return cache_fit.fitsLoadLimit((cache_fit.footprint() orelse 0) +| bytes, cache_fit.ram() orelse 0);
+/// The optional share's room after residency; unknown readings refuse it, and guards only reduce the room.
+fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
+    const guards = share_fit.Guards.read() catch |err| {
+        why.* = "TF_QWEN27_FIT_RAM_BYTES and TF_QWEN27_FIT_FOOTPRINT_BYTES must be positive byte counts";
+        return err;
+    };
+    return share_fit.room(cache_fit.ram(), cache_fit.footprint(), laterFootprint(h), guards);
 }
 
 /// Room left beside the weights and an 8 GiB margin.
@@ -272,7 +277,7 @@ fn laterBytes(h: *const Host) u64 {
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const model = try q.model.Model.load(gpa, io, dir, 128, shareFits);
+    const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken
@@ -336,6 +341,11 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
     holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     errdefer q.residency.drop(h);
+    // Decide before cache sizing and the worker starts, with ready state wired and future buffers reserved.
+    if (model.share_pending) q.residency.finishShare(h, try shareRoom(h, why)) catch |err| {
+        why.* = "the optional Neural Engine share could not join the residency owner within its load limit";
+        return err;
+    };
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
     if (o.learn) |l| try disk.attach(h, io, a, l);
@@ -346,12 +356,16 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     return h;
 }
 
+/// Buffers absent from the footprint at ready: later slots and the image tower's first-use scratch and rows.
+fn laterFootprint(h: *const Host) u64 {
+    const tower: u64 = if (h.back.vision) |v| v.firstUse() else 0;
+    return laterBytes(h) +| tower;
+}
+
 /// Prompt reuse in up to 16 GiB of what 70% of RAM leaves once every slot has its memory; CacheOverCap: `why` says why.
 fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
     const later = laterBytes(h);
-    // the tower's scratch and rows join the footprint at the first image: the budget counts them now, as room() does
-    const tower: u64 = if (h.back.vision) |v| v.firstUse() else 0;
-    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later + tower, a, why, "");
+    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, laterFootprint(h), a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
     h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .rows = &disk.image } }, .{ .warm = .on, .chunk = @intCast(h.back.chunk) }, plan.budget_bytes);
@@ -381,4 +395,8 @@ pub fn close(ptr: *anyopaque) void {
     if (h.vision) |v| v.deinit();
     if (h.owns_model) h.model.deinit();
     h.gpa.destroy(h);
+}
+
+test {
+    _ = @import("qwen27_share_fit.zig");
 }

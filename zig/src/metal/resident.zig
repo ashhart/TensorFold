@@ -52,9 +52,16 @@ pub fn Owner(comptime Metal: type) type {
 
         /// `add`, committed now: buffers the next round reads (a stream's slot), so no round mixes them with the set's.
         pub fn addNow(r: *Self, buffers: []const mtl.Buffer) void {
+            _ = r.tryAddNow(buffers);
+        }
+
+        /// A bounded join committed before returning; false leaves every new buffer outside the owner.
+        pub fn tryAddNow(r: *Self, buffers: []const mtl.Buffer) bool {
             r.mutex.lockUncancelable(r.io);
             defer r.mutex.unlock(r.io);
-            if (r.held.join(buffers)) r.held.flush();
+            if (!r.held.join(buffers)) return false;
+            r.held.flush();
+            return true;
         }
 
         /// A buffer about to be freed leaves the set now: the set holds its own reference until a commit drops it.

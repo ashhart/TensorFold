@@ -3,6 +3,8 @@ const std = @import("std");
 pub const default_columns: u32 = 0;
 /// Loading the optional fp16 share does not establish exact output identity with the GPU path.
 pub const exact_output_qualified = false;
+/// No measured build/runtime overhead bound has been qualified for this share yet.
+pub const build_runtime_overhead: ?u64 = null;
 
 pub fn columns(value: ?[]const u8) !u32 {
     return if (value) |text| std.fmt.parseInt(u32, text, 10) else default_columns;

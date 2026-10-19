@@ -26,11 +26,29 @@ pub const Model = struct {
     frame: Frame,
     /// The Neural Engine's share of prompt-chunk MLPs, when it loaded.
     ane: ?*ane_mlp.Share = null,
+    /// A deferred share still needs the checkpoint mappings, until loadShare decides and closes them.
+    share_pending: bool = false,
     /// widths.Widths.tag: 0 for a uniform 4-bit g64 checkpoint.
     widths_tag: u64 = 0,
 
-    /// `share_fits(bytes)`: whether the Neural Engine's share fits beside what is loaded (null: wherever it can load).
+    /// Immediate share loading for tools; `share_fits` null keeps their existing unrestricted behavior.
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, share_fits: ?*const fn (u64) bool) !*Model {
+        return loadWith(a, io, dir, rows, share_fits, false);
+    }
+
+    /// Serving decides the share after the drafter, residency and slots are accounted for.
+    pub fn loadDeferred(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32) !*Model {
+        return loadWith(a, io, dir, rows, null, true);
+    }
+
+    fn loadWith(
+        a: std.mem.Allocator,
+        io: std.Io,
+        dir: []const u8,
+        rows: u32,
+        share_fits: ?*const fn (u64) bool,
+        later: bool,
+    ) !*Model {
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
@@ -71,18 +89,46 @@ pub const Model = struct {
         m.frame = try Frame.init(m.device, c, @max(rows, promptRows()));
         errdefer m.frame.deinit();
         m.ane = null;
+        m.share_pending = true;
+        if (!later) try m.finishShare(null, share_fits);
+        return m;
+    }
+
+    /// A deferred share takes at most `room` bytes; zero refuses it, and decided models stay as they are.
+    pub fn loadShare(m: *Model, room: u64) !void {
+        try m.finishShare(room, null);
+    }
+
+    fn finishShare(m: *Model, room: ?u64, share_fits: ?*const fn (u64) bool) !void {
+        if (!m.share_pending) return;
+        m.share_pending = false;
+        defer m.checkpoint.closeFiles();
+        const c = m.config;
         const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
         const share = ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and mtl.ane.available() and m.weights.uniformMlp();
-        const fits = if (share_fits) |f| !share or f(ane_mlp.Share.bytes(c, columns)) else true;
-        if (!fits) std.log.info("qwen27: the Neural Engine's prompt share ({d} MiB of fp16 weights) would take this Mac past its load limit; prompts run on the GPU alone", .{ane_mlp.Share.bytes(c, columns) >> 20});
-        if (share and fits) m.ane = ane_mlp.Share.init(a, m.device, m.queue, &m.checkpoint, c, columns, (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width) catch |err| blk: {
+        const bytes = ane_mlp.Share.bytes(c, columns);
+        const slices = (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width;
+        const required: ?u64 = if (share) ane_mlp.Share.totalBytes(c, columns, slices, ane_policy.build_runtime_overhead) catch |err| switch (err) {
+            error.MissingAneOverhead => null,
+            else => return err,
+        } else 0;
+        const fits = !share or if (required) |total| (if (room) |free| total <= free else if (share_fits) |f| f(total) else true) else false;
+        if (required == null) {
+            std.log.info("qwen27: the Neural Engine share has no qualified build/runtime overhead bound; prompts run on the GPU alone", .{});
+        } else if (!fits) {
+            if (room) |free| {
+                std.log.info("qwen27: the Neural Engine's prompt share ({d} MiB of fp16 weights) would take this Mac " ++
+                    "past its load limit ({d} MiB left after its drafter, streams and images); prompts run on the GPU alone", .{ bytes >> 20, free >> 20 });
+            } else {
+                std.log.info("qwen27: the Neural Engine's prompt share ({d} MiB of fp16 weights) would take this Mac past its load limit; prompts run on the GPU alone", .{bytes >> 20});
+            }
+        }
+        if (share and fits) m.ane = ane_mlp.Share.init(m.allocator, m.device, m.queue, &m.checkpoint, c, columns, slices) catch |err| blk: {
             std.log.warn("qwen27: the Neural Engine's prompt share did not load ({s}); prompts run on the GPU alone", .{@errorName(err)});
             break :blk null;
         };
         const loaded_columns = if (m.ane) |loaded| loaded.columns else 0;
         std.log.info("qwen27: Neural Engine prompt share requested_columns={d} loaded_columns={d} program_weight_bytes={d} loaded={any} exact_output_qualified={any}", .{ columns, loaded_columns, ane_mlp.Share.bytes(c, loaded_columns), m.ane != null, ane_policy.exact_output_qualified });
-        m.checkpoint.closeFiles();
-        return m;
     }
 
     pub fn deinit(m: *Model) void {

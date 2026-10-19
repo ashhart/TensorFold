@@ -8,6 +8,7 @@ const Config = @import("config.zig").Config;
 
 /// Program rows: 128 rows of a prompt pass a call, zero past its last (rows never depend on each other).
 pub const width = 128;
+pub const max_slices = 16;
 
 pub const Share = struct {
     allocator: std.mem.Allocator,
@@ -37,9 +38,24 @@ pub const Share = struct {
         return 3 * @as(u64, columns) * c.hidden * 2 * c.layers;
     }
 
+    /// Known persistent payload: program weights, fp32 partials and both fp16 surfaces for every slice.
+    pub fn admissionBytes(c: Config, columns: u32, slices: u32) !u64 {
+        if (columns == 0 or slices == 0 or slices > max_slices) return error.BadAneShare;
+        const mul = std.math.mul;
+        const weights = try mul(u64, try mul(u64, try mul(u64, 6, columns), c.hidden), c.layers);
+        const buffers = try mul(u64, try mul(u64, try mul(u64, slices, width), c.hidden), 8);
+        return std.math.add(u64, weights, buffers);
+    }
+
+    /// An absent private build/runtime peak price refuses admission rather than silently pricing it at zero.
+    pub fn totalBytes(c: Config, columns: u32, slices: u32, overhead: ?u64) !u64 {
+        const known = try admissionBytes(c, columns, slices);
+        return std.math.add(u64, known, overhead orelse return error.MissingAneOverhead);
+    }
+
     /// Every layer's program from the affine rows (w = q * scale + bias, rounded once to fp16), columns [0, c).
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, checkpoint: *const cp.Checkpoint, c: Config, columns: u32, slices: u32) !*Share {
-        if (columns == 0 or columns % 64 != 0 or columns > c.intermediate or slices == 0 or slices > 16) return error.BadAneShare;
+        if (columns == 0 or columns % 64 != 0 or columns > c.intermediate or slices == 0 or slices > max_slices) return error.BadAneShare;
         const s = try a.create(Share);
         errdefer a.destroy(s);
         const programs = try a.alloc(ane.Program, c.layers);
