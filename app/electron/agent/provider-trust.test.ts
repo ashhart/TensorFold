@@ -1,6 +1,6 @@
 // Run: npx tsx electron/agent/provider-trust.test.ts
 import assert from 'node:assert/strict'
-import { classifyProvider, isExternalProvider, isLoopbackUrl, pickPlanRunner } from '../../shared/provider-trust'
+import { classifyProvider, isExternalProvider, isLoopbackUrl, isPrivateNetworkUrl, pickPlanRunner } from '../../shared/provider-trust'
 
 const local = (baseUrl: string, extra: Record<string, string> = {}) => ({ id: 'ollama', name: 'Ollama', kind: 'local', source: 'ollama', transport: 'chat-completions', baseUrl, ...extra })
 
@@ -30,6 +30,27 @@ assert.equal(classifyProvider(local('')), 'external')
 assert.equal(classifyProvider(null), 'external')
 for (const transport of ['codex-cli', 'claude-cli', 'cursor-cli', 'gemini-cli', 'pi-cli', 'opencode', 'kilo']) {
   assert.equal(isExternalProvider(local('http://127.0.0.1:4096', { transport })), true, transport)
+}
+
+// A network engine the user marked as their own is local only while the address stays private.
+const trustedNetwork = (baseUrl: string) => ({ id: 'tf-remote', kind: 'local', source: 'custom', transport: 'chat-completions', baseUrl, trustedNetwork: true })
+assert.equal(classifyProvider(trustedNetwork('http://192.168.1.20:8080/v1')), 'trusted-local')
+assert.equal(classifyProvider(trustedNetwork('http://10.1.2.3:8080/v1')), 'trusted-local')
+assert.equal(classifyProvider(trustedNetwork('http://172.20.0.5:8080/v1')), 'trusted-local')
+assert.equal(classifyProvider(trustedNetwork('http://mac-mini.local:8080/v1')), 'trusted-local')
+assert.equal(classifyProvider(trustedNetwork('http://127.0.0.1:8080/v1')), 'trusted-local')
+assert.equal(classifyProvider(trustedNetwork('https://tensorfold.example.com/v1')), 'external', 'a public address is never trusted')
+assert.equal(classifyProvider({ ...trustedNetwork('http://192.168.1.20:8080/v1'), transport: 'claude-cli' }), 'external', 'CLI transports stay external')
+assert.equal(classifyProvider(trustedNetwork('http://93.184.216.34:8080/v1')), 'external', 'a public IP is never trusted')
+assert.equal(classifyProvider(local('http://192.168.1.20:8000/v1')), 'external', 'an unmarked LAN provider stays external')
+assert.equal(classifyProvider(local('http://172.32.0.1:8080/v1')), 'external', '172.32 is outside the private range')
+assert.equal(trustedNetwork('http://10.1.2.3/v1').trustedNetwork, true)
+
+for (const url of ['http://127.0.0.1:1/v1', 'http://10.0.0.2/v1', 'http://192.168.0.10/v1', 'http://172.16.4.4/v1', 'http://box.local/v1', 'http://[fd00::1]/v1']) {
+  assert.equal(isPrivateNetworkUrl(url), true, url)
+}
+for (const url of ['https://api.openai.com/v1', 'http://8.8.8.8/v1', 'http://172.15.0.1/v1', 'http://172.32.0.1/v1', 'not a url', '']) {
+  assert.equal(isPrivateNetworkUrl(url), false, url)
 }
 
 // Plan runner: the built-in engine first, then any trusted local provider, else none.
