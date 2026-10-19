@@ -413,9 +413,7 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
 }
 
-/// With image input: one user turn holding an image part, rendered as a request's would be, writes at least one
-/// image placeholder. A template without an image path (one that swaps media parts for text) fails every image
-/// request; finding that at startup turns a request-time 500 into a configuration warning.
+/// With image input: whether a user turn holding an image part renders an image placeholder (else a startup warning).
 fn templateImages(srv: *Server) bool {
     const v = srv.info.vision orelse return true;
     var arena: std.heap.ArenaAllocator = .init(srv.gpa);
