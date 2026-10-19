@@ -309,8 +309,6 @@ pub const Cuda = struct {
             e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
         }
         defer e.prompt_rows = null;
-        if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
-        defer if (e.vision) |v| v.end();
         var tap: TapSink = .{ .self = self, .taps = &gop.value_ptr.taps };
         tap.taps.prompt.clearRetainingCapacity();
         tap.taps.from = from;
