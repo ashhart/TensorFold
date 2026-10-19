@@ -37,7 +37,7 @@ const imports: Record<string, any> = {
   '../../lib/provider-accounts': providerAccounts, '../../lib/provider-usage': { modelUsageLabel: () => null }, '../../lib/provider-model-metadata': { providerIconName: () => 'cpu' },
   './UsagePill': { UsagePill: () => null }, './RateLimitBar': { RateLimitBar: () => null }, '../models/EngineStatus': { EngineDot: () => null },
   '../../lib/store': { useStore: (selector: any) => selector({ setView() {} }) }, '../../lib/learning': { useLearning: () => ({ snapshot: null }), learningBusy: () => false },
-  '../../lib/engine': { useEngine: () => ({ snapshot: engine }) }, '../../lib/turn-stats-line': turnStats, '../../lib/model-picker': modelPicker,
+  '../../lib/engine': { useEngine: () => ({ snapshot: engine }) }, '../../lib/ipc': { api: { platform: 'darwin' } }, '../../lib/turn-stats-line': turnStats, '../../lib/model-picker': modelPicker,
   '../../lib/favorite-models': { ...favorites, useFavoriteModels(owner: string | null) { preferenceOwner = owner; const current = preference.get(); return { favorites: current, ready: true, error: preferenceError,
     isFavorite: (route: favorites.FavoriteModel) => current.some((item) => favorites.favoriteModelKey(item) === favorites.favoriteModelKey(route)),
     toggle: (route: favorites.FavoriteModel) => preference.toggle(route) } } },
