@@ -39,6 +39,8 @@ pub const Affine4Kernels = struct {
     split_fn: Function,
     seg_fn: Function, // the split form over up to four projections of one input
     prefill_fn: Function,
+    prefill22_fn: Function, // the prompt tile on 2x2 warps and two stages (`half_prompt` picks it)
+    half_prompt: bool = false, // prompts on prefill22_fn: its four warps a block and two stages are quicker on an RTX 5090
     words_fn: Function, // affine4_pack.cu: MLX words into the tiles
     scales_fn: Function, // affine4_pack.cu: (n, kg) scales or biases into (kg, npad)
     gemv_blocks: usize, // resident lane_gemv CTAs: per SM times SMs
@@ -54,6 +56,8 @@ pub const Affine4Kernels = struct {
         a.verify64_fn = try group_mod.function(symbols.verify64);
         a.verify128_fn = try group_mod.function(symbols.verify128);
         a.prefill_fn = try prefill_mod.function(symbols.prefill);
+        a.prefill22_fn = try prefill_mod.function(symbols.prefill22);
+        a.half_prompt = false;
         a.gemv_fn = try gemv_mod.function(symbols.gemv);
         a.split_fn = try gemv_mod.function(symbols.gemv_split);
         a.seg_fn = try gemv_mod.function(symbols.gemv_seg);
@@ -67,6 +71,7 @@ pub const Affine4Kernels = struct {
         try a.split_fn.allowDynamicShared(split_smem);
         try a.seg_fn.allowDynamicShared(split_smem);
         try a.prefill_fn.allowDynamicShared(prefill_smem);
+        try a.prefill22_fn.allowDynamicShared(linear.prefill22_smem);
         a.gemv_blocks = @max(1, try a.gemv_fn.occupancy(128, group_smem)) * sms;
         a.pdl = gb10;
         a.wide_verify = false;
@@ -248,6 +253,9 @@ pub const Affine4Kernels = struct {
         for ([_]u64{ x, q.w, q.s, q.b, out }) |v| g.add(v);
         for ([_]usize{ rows, q.n, q.k, q.npad, q.k, group }) |v| g.add(int(v));
         const grid = rows_t * ((q.n + 127) / 128);
-        try launch_.launch(a.prefill_fn, .{ .grid = .{ .x = u(grid), .y = 1, .z = 1 }, .block = .{ .x = 256 }, .shared = prefill_smem }, s, &g);
+        const f = if (a.half_prompt) a.prefill22_fn else a.prefill_fn;
+        const threads: u32 = if (a.half_prompt) 128 else 256;
+        const smem: u32 = if (a.half_prompt) linear.prefill22_smem else prefill_smem;
+        try launch_.launch(f, .{ .grid = .{ .x = u(grid), .y = 1, .z = 1 }, .block = .{ .x = threads }, .shared = smem }, s, &g);
     }
 };
