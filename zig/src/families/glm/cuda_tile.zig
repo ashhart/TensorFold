@@ -15,11 +15,11 @@ fn add(l: *std.ArrayList(Lin), gpa: std.mem.Allocator, field: *u64, n: usize, k:
     if (field.* != 0) try l.append(gpa, .{ .field = field, .n = n, .k = k });
 }
 
-/// A projection as stored: its bf16 rows like any linear's; block FP8 stays the lane's tiles, never read as bf16 here.
+/// A projection as stored: its bf16 rows like any linear's; FP8 kinds stay the lane's tiles, never read as bf16 here.
 fn addProj(l: *std.ArrayList(Lin), gpa: std.mem.Allocator, p: *projection.Proj, n: usize, k: usize) !void {
     switch (p.*) {
         .bf16 => |*w| try add(l, gpa, w, n, k),
-        .fp8g => {},
+        .fp8g, .mxfp8 => {},
     }
 }
 
@@ -29,17 +29,20 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
         .kda => |*x| {
             const n = x.heads * kd;
             if (x.tiledInput()) {
-                try add(list, gpa, &x.proj, x.width(), x.dims);
+                switch (x.proj) { // a split stack's MXFP8 [q | k | v] is the lane's; its bf16 [f_a | g_a | b] tiles
+                    .bf16 => |*p| try add(list, gpa, p, x.width(), x.dims),
+                    .split => |*sp| try add(list, gpa, &sp.rest, x.width() - 3 * n, x.dims),
+                }
                 try add(list, gpa, &x.fb, n, kd);
                 try add(list, gpa, &x.gb, n, kd);
             }
-            try add(list, gpa, &x.o, x.dims, n);
+            try addProj(list, gpa, &x.o, x.dims, n);
         },
         .mla => |*x| {
             try addProj(list, gpa, &x.proj, x.q_lora + x.lw, x.dims);
             try addProj(list, gpa, &x.q_b, x.heads * x.qk, x.q_lora);
-            try add(list, gpa, &x.index.kw, x.index.d + x.index.heads, x.dims);
-            try add(list, gpa, &x.index.qb, x.index.heads * x.index.d, x.q_lora);
+            try addProj(list, gpa, &x.index.kw, x.index.d + x.index.heads, x.dims);
+            try addProj(list, gpa, &x.index.qb, x.index.heads * x.index.d, x.q_lora);
             try addProj(list, gpa, &x.o, x.dims, x.heads * x.dv);
         },
     }
@@ -49,7 +52,7 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
                 try add(list, gpa, &b.gu, 2 * x.width, x.dims);
                 try add(list, gpa, &b.down, x.dims, x.width);
             },
-            .nvfp4 => {},
+            .nvfp4, .mxfp8 => {},
         },
         .moe => |*x| {
             try addProj(list, gpa, &x.shared_gu, 2 * x.shared, x.routed.dims);
@@ -65,7 +68,7 @@ fn linears(w: *Weights, list: *std.ArrayList(Lin)) !void {
         try layerLinears(w.gpa, &m.layer, list);
         try add(list, w.gpa, &m.eh, w.config.hidden, 2 * w.config.hidden);
     }
-    try add(list, w.gpa, &w.head, w.share.vocab.len(), w.config.hidden);
+    try addProj(list, w.gpa, &w.head, w.share.vocab.len(), w.config.hidden);
 }
 
 /// A packed linear moved into a buffer its own size, its bf16 one freed; the bytes freed (0: it shares a buffer).
@@ -114,7 +117,7 @@ pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernel
         const n = e.n;
         const k = e.k;
         const ptr = e.field.*;
-        const bits = if (i + 1 == list.items.len) head_bits else dense_bits;
+        const bits = if (i + 1 == list.items.len and w.head == .bf16) head_bits else dense_bits; // an MXFP8 head stays
         if (bits == 16) {
             try mm_mod.tile(mk, s, ptr, tmp.ptr, n, k);
             try d.check(d.api.cuMemcpyDtoDAsync_v2(ptr, tmp.ptr, n * k * 2, s.handle), "cuMemcpyDtoDAsync");
@@ -162,17 +165,20 @@ test "GLM TP3: the tiler keeps unsupported KDA input and view weights in row-maj
     const a = std.testing.allocator;
     for ([_]usize{ 1, 2, 3, 4, 5, 8 }) |world| for (0..world) |rank| {
         const share = try Share.of(&c, rank, world);
-        var l: Layer = undefined;
-        l.mixer = .{ .kda = .{ .proj = 1, .fb = 2, .gb = 3, .o = 4, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = share.kda.len(), .dims = c.hidden } };
-        l.ffn = .{ .dense = .{ .w = .{ .nvfp4 = undefined }, .width = share.dense.len(), .dims = c.hidden, .limit = 0 } };
-        var list: std.ArrayList(Lin) = .empty;
-        defer list.deinit(a);
-        try layerLinears(a, &l, &list);
-        const aligned = share.kda.len() % 8 == 0;
-        try std.testing.expectEqual(@as(usize, if (aligned) 4 else 1), list.items.len);
-        try std.testing.expectEqual(&l.mixer.kda.o, list.items[list.items.len - 1].field);
-        if (aligned) {
-            for (list.items, [_]u64{ 1, 2, 3, 4 }) |linear, ptr| try std.testing.expectEqual(ptr, linear.field.*);
+        for ([_]bool{ false, true }) |split| { // a split stack's bf16 rest tiles or stays row-major with the stack
+            const in: @import("cuda_kda_block.zig").In = if (split) .{ .split = .{ .qkv = undefined, .rest = 1 } } else .{ .bf16 = 1 };
+            var l: Layer = undefined;
+            l.mixer = .{ .kda = .{ .proj = in, .fb = 2, .gb = 3, .o = .{ .bf16 = 4 }, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = share.kda.len(), .dims = c.hidden } };
+            l.ffn = .{ .dense = .{ .w = .{ .nvfp4 = undefined }, .width = share.dense.len(), .dims = c.hidden, .limit = 0 } };
+            var list: std.ArrayList(Lin) = .empty;
+            defer list.deinit(a);
+            try layerLinears(a, &l, &list);
+            const aligned = share.kda.len() % 8 == 0;
+            try std.testing.expectEqual(@as(usize, if (aligned) 4 else 1), list.items.len);
+            try std.testing.expectEqual(&l.mixer.kda.o.bf16, list.items[list.items.len - 1].field);
+            if (aligned) {
+                for (list.items, [_]u64{ 1, 2, 3, 4 }) |linear, ptr| try std.testing.expectEqual(ptr, linear.field.*);
+            }
         }
     };
 }

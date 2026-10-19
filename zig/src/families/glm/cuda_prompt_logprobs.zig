@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const b16 = @import("cuda_b16.zig");
+const projection = @import("cuda_proj.zig");
 const fw = @import("cuda_forward.zig");
 const config = @import("config.zig");
 const shard = @import("cuda_shard.zig");
@@ -76,7 +77,7 @@ pub fn run(e: *Engine, want: Want, next: []const u32) !void {
     while (r < next.len) : (r += rows) {
         const n = @min(rows, next.len - r);
         // as the head's last-row pass (Forward.finish); its column count takes no K slices (the test below)
-        try b16.matmul(projectionSet(e), e.stream, e.bp.fnormed + r * D * 2, D, e.w.head, columns, e.bp.kda.mm_part, n, e.share.vocab.len(), D, false);
+        try projection.matmul(projectionSet(e), e.stream, e.w.head, e.bp.fnormed + r * D * 2, D, columns, e.bp.kda.mm_part, n, e.share.vocab.len(), D, false);
         try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = columns }}, n, full);
         const reader = want.reader orelse continue;
         @memcpy(picks[0..n], next[r..][0..n]);
@@ -112,7 +113,7 @@ test "the head's columns at TP=2 and TP=3 take no K slices: a pass of any rows n
     };
 }
 
-/// The projection policy used by the prompt-row head passes.
+/// The projection policy used by the prompt-row head passes; an MXFP8 head (FP4-Local's) runs on the lane.
 pub fn projectionSet(e: anytype) @import("cuda_glue.zig").Set {
-    return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs, .prompt = true };
+    return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs, .prompt = true, .linear = .{ .lane = &e.m.lane } };
 }

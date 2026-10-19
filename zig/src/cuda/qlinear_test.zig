@@ -39,10 +39,12 @@ test "a lane weight whose mode is not its format's is refused before any launch"
     try std.testing.expectError(error.FormatMismatch, l.prompt(s, .{ .mxfp8 = fp4 }, .{ .x = 0 }, 0, 1));
     try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, .{ .nvfp4 = fp4 }, .{ .x = 0 }, 0, 1));
     const f8: qmmf.Weight = .{ .mode = .fp8g, .codes = 0, .scales = 0, .n = 64, .k = 64, .npad = 128 };
-    try std.testing.expectError(error.EpilogueNotBuilt, l.decodeF32(s, .{ .mxfp8 = f8 }, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.EpilogueNotBuilt, l.decodeF32(s, .{ .bf16 = f8 }, .{ .x = 0 }, 0, 1));
     try std.testing.expectError(error.EpilogueNotBuilt, l.promptF32(s, .{ .bf16 = f8 }, .{ .x = 0 }, 0, 1));
     try std.testing.expectError(error.FormatMismatch, l.decodeF32(s, .{ .fp8g = fp4 }, .{ .x = 0 }, 0, 1));
     try std.testing.expectError(error.FormatMismatch, l.promptF32(s, .{ .fp8g = fp4 }, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.FormatMismatch, l.decodeF32(s, .{ .mxfp8 = fp4 }, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.FormatMismatch, l.promptF32(s, .{ .mxfp8 = fp4 }, .{ .x = 0 }, 0, 1));
 }
 
 test "EXL3 FP32 entries check loading and stride before launching" {

@@ -6,13 +6,20 @@ const glue = @import("cuda_glue.zig");
 const kda = @import("cuda_kda.zig");
 const b16 = @import("cuda_b16.zig");
 const prof = @import("cuda_prof.zig");
+const projection = @import("cuda_proj.zig");
 
-/// One KDA layer, `heads` heads: proj bf16 [3 heads 128 + 256 + heads][dims], f_b, g_b, o, the chain's taps and norm.
+/// The input projection [q | k | v | f_a | g_a | b] [3 heads 128 + 256 + heads][dims]: one bf16 stack, or two parts.
+pub const In = union(enum) {
+    bf16: u64,
+    split: struct { qkv: cuda.qmmf.Weight, rest: u64 }, // MXFP8 [q | k | v] for the lane (FP4-Local's), bf16 the rest
+};
+
+/// One KDA layer, `heads` heads: its input projection, f_b, g_b, o (bf16 or MXFP8), the chain's taps and norm.
 pub const Layer = struct {
-    proj: u64,
+    proj: In,
     fb: u64,
     gb: u64,
-    o: u64,
+    o: projection.Proj,
     conv_w: u64,
     a_log: u64,
     dt_bias: u64,
@@ -32,8 +39,8 @@ pub const Layer = struct {
     }
 };
 
-/// The block's scratch for `rows` rows: projection, decay and gate rows, chain saves and scratch, B16 split-K partials.
-pub const Scratch = struct { p: u64, ka: u64, kg: u64, saves: kda.Saves, wide: kda.Wide, mm_part: u64 };
+/// The block's scratch for `rows` rows: projection, decay and gate rows, chain saves, B16 partials, a split's tmp.
+pub const Scratch = struct { p: u64, ka: u64, kg: u64, saves: kda.Saves, wide: kda.Wide, mm_part: u64, tmp: u64 = 0 };
 
 /// forward.kda_block: out [rows][dims] fp32 partial; `wide`: three-kernel chain; `prompt`: commits the conv window.
 pub fn block(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool, out: u64) !void {
@@ -44,7 +51,7 @@ pub fn block(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Laye
 /// forward.out_proj's fill for the KDA block: o_proj of rows lo..hi (s.saves.out) into out [hi - lo][dims] fp32.
 pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi: usize, out: u64) !void {
     const n = l.heads * kda.dk;
-    try b16.matmul(set, stream, s.saves.out + lo * n * 2, n, l.o, out, s.mm_part, hi - lo, l.dims, n, true);
+    try projection.matmul(set, stream, l.o, s.saves.out + lo * n * 2, n, out, s.mm_part, hi - lo, l.dims, n, true);
 }
 
 /// The block up to its out_proj: the projections, the chain, and a prompt chunk's conv window commit.
@@ -69,9 +76,33 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
     const n = l.heads * kda.dk;
     const w = l.width();
     const fa = 3 * n;
-    try b16.matmul(selected, stream, x, x_stride, l.proj, s.p, s.mm_part, rows, w, l.dims, false);
+    switch (l.proj) {
+        .bf16 => |p| try b16.matmul(selected, stream, x, x_stride, p, s.p, s.mm_part, rows, w, l.dims, false),
+        .split => |sp| { // each part on its own kernel into its columns of s.p: one row straight there, more through tmp
+            // cc-defer: two row copies a window; an output row stride on the lane and glm_mm when 03 times them
+            const one = rows == 1;
+            try projection.matmul(set, stream, .{ .mxfp8 = sp.qkv }, x, x_stride, if (one) s.p else s.tmp, s.mm_part, rows, fa, l.dims, false);
+            if (!one) try columns(set, stream, s.tmp, fa, s.p, w, rows);
+            // the bf16 rest (2 * dk + heads wide) tiles with the stack, or stays row-major with it when uneven
+            try b16.matmul(selected, stream, x, x_stride, sp.rest, if (one) s.p + fa * 2 else s.tmp, s.mm_part, rows, w - fa, l.dims, false);
+            if (!one) try columns(set, stream, s.tmp, w - fa, s.p + fa * 2, w, rows);
+        },
+    }
     try b16.matmul(selected, stream, s.p + fa * 2, w, l.fb, s.ka, s.mm_part, rows, n, kda.dk, false);
     try b16.matmul(selected, stream, s.p + (fa + kda.dk) * 2, w, l.gb, s.kg, s.mm_part, rows, n, kda.dk, false);
+}
+
+/// `rows` rows of `cols` bf16 packed at `src` into `dst`, rows `stride` apart (tf_glm_copy_rows).
+fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64, stride: usize, rows: usize) !void {
+    const f = set.copy_rows orelse return error.FormatNotLoaded;
+    var a: cuda.Args = .{};
+    a.add(src);
+    a.add(@as(c_longlong, @intCast(cols * 2)));
+    a.add(dst);
+    a.add(@as(c_longlong, @intCast(stride * 2)));
+    a.add(@as(c_int, @intCast(rows)));
+    a.add(@as(c_int, @intCast(cols * 2)));
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
 }
 
 /// The chain over `rows` projected rows (s.p, s.ka, s.kg) on one sequence's conv window and recurrent state.

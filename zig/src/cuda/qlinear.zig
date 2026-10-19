@@ -155,7 +155,7 @@ pub const Linear = struct {
         }
     }
 
-    /// Decode rows to FP32 without the output BF16 cast (NVFP4, block FP8 and EXL3), including TP partial rows.
+    /// Decode rows to FP32 without the output BF16 cast (NVFP4, block FP8, MXFP8 and EXL3), including TP partial rows.
     pub fn decodeF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         const q = switch (w) {
             .exl3 => |q| {
@@ -164,13 +164,14 @@ pub const Linear = struct {
                 return e.decode(s, q, in.x, .bf16, rows, out, .f32);
             },
             .fp8g => |q| return l.onLaneAs(s, q, .fp8g, in, out, .f32, rows),
+            .mxfp8 => |q| return l.onLaneAs(s, q, .mxfp8, in, out, .f32, rows),
             .nvfp4 => |q| q,
             else => return error.EpilogueNotBuilt,
         };
         return l.onLaneAs(s, q, .fp4, in, out, .f32, rows);
     }
 
-    /// Prompt rows to FP32 without the output BF16 cast (NVFP4, EXL3, and block FP8 on the lane as prompt() runs it).
+    /// Prompt rows to FP32 without the output BF16 cast (NVFP4, EXL3; block FP8 and MXFP8 on the lane, as prompt()).
     pub fn promptF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         const q = switch (w) {
             .exl3 => |q| {
@@ -179,6 +180,7 @@ pub const Linear = struct {
                 return e.prompt(s, q, in.x, .bf16, rows, out, .f32);
             },
             .fp8g => |q| return l.onLaneAs(s, q, .fp8g, in, out, .f32, rows),
+            .mxfp8 => |q| return l.onLaneAs(s, q, .mxfp8, in, out, .f32, rows),
             .nvfp4 => |q| q,
             else => return error.EpilogueNotBuilt,
         };

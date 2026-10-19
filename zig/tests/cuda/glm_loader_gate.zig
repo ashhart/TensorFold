@@ -57,6 +57,8 @@ fn plan(p: *Plan, c: *const Config, s: glm.shard.Share, name: []const u8) !Want 
         try p.whole(P ++ "norm.weight", .{}, .bf16);
     } else if (eql(name, "head")) {
         try p.rows("lm_head.weight", .{}, s.vocab.lo, s.vocab.hi, .bf16);
+    } else if (eql(name, "head.codes") or eql(name, "head.scales")) {
+        return laneMade(p, &.{.{ .module = "lm_head", .rows = .{ s.vocab.lo, s.vocab.hi } }}, name);
     } else if (std.mem.startsWith(u8, name, "draft_head.")) {
         return .{ .skip = "the GPU quantizer's 4-bit tiles of the head's rows" };
     } else if (std.mem.startsWith(u8, name, "mtp.")) {
@@ -94,8 +96,11 @@ fn layer(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u
             return .cut;
         };
     }
-    const fp8g = std.mem.endsWith(u8, what, ".codes") or std.mem.endsWith(u8, what, ".scales");
-    if (fp8g and (std.mem.startsWith(u8, what, "dsa.") or std.mem.startsWith(u8, what, "moe.shared."))) return fp8Made(p, c, s, i, what);
+    const lane = std.mem.endsWith(u8, what, ".codes") or std.mem.endsWith(u8, what, ".scales");
+    // the lane's projections first: a dense MXFP8 MLP's mlp.gu. and mlp.down. before the NVFP4 one's .scales
+    for ([_][]const u8{ "dsa.", "moe.shared.", "kda.", "mlp.gu.", "mlp.down." }) |x| {
+        if (lane and std.mem.startsWith(u8, what, x)) return laneUpload(p, c, s, i, what);
+    }
     if (std.mem.startsWith(u8, what, "kda.")) return kda(p, c, s, i, what[4..]);
     if (std.mem.startsWith(u8, what, "dsa.")) return dsa(p, c, s, i, what[4..]);
     if (std.mem.startsWith(u8, what, "moe.")) return moe(p, c, s, i, what[4..]);
@@ -110,8 +115,8 @@ fn kda(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8)
     const at = P ++ "layers.{d}.self_attn.";
     const h = s.kda;
     const dk: usize = c.kda_dim;
-    if (eql(what, "proj")) {
-        inline for (.{ "q", "k", "v" }) |x| try p.rows(at ++ x ++ "_proj.weight", .{i}, h.lo * dk, h.hi * dk, .bf16);
+    if (eql(what, "proj") or eql(what, "rest")) { // rest: a split stack's bf16 [f_a | g_a | b], its q k v on the lane
+        if (eql(what, "proj")) inline for (.{ "q", "k", "v" }) |x| try p.rows(at ++ x ++ "_proj.weight", .{i}, h.lo * dk, h.hi * dk, .bf16);
         inline for (.{ "f_a", "g_a" }) |x| try p.whole(at ++ x ++ "_proj.weight", .{i}, .bf16);
         try p.rows(at ++ "b_proj.weight", .{i}, h.lo, h.hi, .bf16);
     } else if (eql(what, "fb") or eql(what, "gb")) {
@@ -148,10 +153,16 @@ fn dsa(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8)
     } else if (eql(what, "absorb.wk") or eql(what, "absorb.wv")) {
         const per = try p.outer(at ++ "kv_b_proj.weight", .{i}) / c.mla_heads; // a head's keys, then its values
         const keys = per - dv;
+        const kv = try std.fmt.allocPrint(p.a, at ++ "kv_b_proj", .{i});
+        const mx = (try p.ck.get(try std.fmt.allocPrint(p.a, "{s}.weight", .{kv}))).dtype == .f8_e4m3; // MTP's MXFP8
+        var wide: std.ArrayList(u8) = .empty;
+        errdefer wide.deinit(p.gpa);
         for (h.lo..h.hi) |head| {
             const lo = if (eql(what, "absorb.wk")) head * per else head * per + keys;
-            try p.rows(at ++ "kv_b_proj.weight", .{i}, lo, lo + (if (eql(what, "absorb.wk")) keys else dv), .bf16);
+            const hi = lo + (if (eql(what, "absorb.wk")) keys else dv);
+            if (mx) try widen(p, kv, lo, hi, &wide) else try p.rows(at ++ "kv_b_proj.weight", .{i}, lo, hi, .bf16);
         }
+        if (mx) return .{ .made = try wide.toOwnedSlice(p.gpa) };
     } else if (eql(what, "o")) {
         try p.cols(at ++ "o_proj.weight", .{i}, h.lo * dv, h.hi * dv);
     } else if (eql(what, "index.kw")) {
@@ -166,6 +177,16 @@ fn dsa(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8)
         return error.UnknownUpload;
     }
     return .cut;
+}
+
+/// MXFP8 `module`'s rows [lo, hi) widened to bf16 bytes onto `out`, as the loader widens an MTP layer's kv_b.
+fn widen(p: *Plan, module: []const u8, lo: usize, hi: usize, out: *std.ArrayList(u8)) !void {
+    const MX = glm.weights.formats.mxfp8;
+    const t = try MX.Mxfp8.read(p.ck, module);
+    const rows = try p.gpa.alloc(u16, (hi - lo) * t.k);
+    defer p.gpa.free(rows);
+    try MX.bf16Rows(t, lo, hi, rows);
+    try out.appendSlice(p.gpa, std.mem.sliceAsBytes(rows));
 }
 
 /// MoE: router and bias whole, the experts' tiles and global scales, shared gate and up by rows, down by columns.
@@ -283,46 +304,80 @@ fn expertsMade(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, up: bool)
     return .{ .made = try p.gpa.dupe(u8, std.mem.sliceAsBytes(out)) };
 }
 
-/// A block-FP8 projection's lane codes or scale tiles: the rank's cut of each stored part, packed as cuda_fp8pb packs.
-fn fp8Made(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
-    const FP = glm.weights.formats.fp8pb;
+/// A stored part of a lane upload: its module and the rank's rows or inputs of it (all of either when null).
+const Part = struct { module: []const u8, rows: ?[2]usize = null, cols: ?[2]usize = null };
+
+/// Module `rel` of layer `i`, by its checkpoint name.
+fn modOf(p: *Plan, i: u32, comptime rel: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(p.a, P ++ "layers.{d}." ++ rel, .{i});
+}
+
+/// Layer `i`'s lane upload `what` (.codes or .scales): its stored parts as the loader stacks and cuts them.
+fn laneUpload(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
     const base = what[0..std.mem.lastIndexOfScalar(u8, what, '.').?];
-    const Part = struct { rel: []const u8, rows: ?[2]usize = null, cols: ?[2]usize = null };
+    const at = P ++ "layers.{d}.";
     const h = s.mla;
     const sh = s.shared;
-    const at = P ++ "layers.{d}.";
-    var parts: [2]Part = undefined;
-    const n_parts: usize = if (eql(base, "dsa.proj") or eql(base, "moe.shared.gu")) 2 else 1;
-    if (eql(base, "dsa.proj")) {
-        parts = .{ .{ .rel = "self_attn.q_a_proj" }, .{ .rel = "self_attn.kv_a_proj_with_mqa" } };
-    } else if (eql(base, "dsa.q_b")) {
+    const kh: [2]usize = .{ s.kda.lo * c.kda_dim, s.kda.hi * c.kda_dim };
+    const dn: [2]usize = .{ s.dense.lo, s.dense.hi };
+    if (eql(base, "dsa.proj")) return laneMade(p, &.{ .{ .module = try modOf(p, i, "self_attn.q_a_proj") }, .{ .module = try modOf(p, i, "self_attn.kv_a_proj_with_mqa") } }, what);
+    if (eql(base, "dsa.q_b")) {
         const per = try p.outer(at ++ "self_attn.q_b_proj.weight", .{i}) / c.mla_heads;
-        parts[0] = .{ .rel = "self_attn.q_b_proj", .rows = .{ h.lo * per, h.hi * per } };
-    } else if (eql(base, "dsa.o")) {
-        parts[0] = .{ .rel = "self_attn.o_proj", .cols = .{ h.lo * c.v_dim, h.hi * c.v_dim } };
-    } else if (eql(base, "moe.shared.gu")) {
-        parts = .{ .{ .rel = "mlp.shared_experts.gate_proj", .rows = .{ sh.lo, sh.hi } }, .{ .rel = "mlp.shared_experts.up_proj", .rows = .{ sh.lo, sh.hi } } };
-    } else if (eql(base, "moe.shared.down")) {
-        parts[0] = .{ .rel = "mlp.shared_experts.down_proj", .cols = .{ sh.lo, sh.hi } };
-    } else return error.UnknownUpload;
-    var stored: [2]FP.Fp8pb = undefined;
+        return laneMade(p, &.{.{ .module = try modOf(p, i, "self_attn.q_b_proj"), .rows = .{ h.lo * per, h.hi * per } }}, what);
+    }
+    if (eql(base, "dsa.o")) return laneMade(p, &.{.{ .module = try modOf(p, i, "self_attn.o_proj"), .cols = .{ h.lo * c.v_dim, h.hi * c.v_dim } }}, what);
+    if (eql(base, "dsa.index.kw")) return laneMade(p, &.{ .{ .module = try modOf(p, i, "self_attn.indexer.wk") }, .{ .module = try modOf(p, i, "self_attn.indexer.weights_proj") } }, what);
+    if (eql(base, "dsa.index.qb")) return laneMade(p, &.{.{ .module = try modOf(p, i, "self_attn.indexer.wq_b") }}, what);
+    if (eql(base, "moe.shared.gu")) return laneMade(p, &.{ .{ .module = try modOf(p, i, "mlp.shared_experts.gate_proj"), .rows = .{ sh.lo, sh.hi } }, .{ .module = try modOf(p, i, "mlp.shared_experts.up_proj"), .rows = .{ sh.lo, sh.hi } } }, what);
+    if (eql(base, "moe.shared.down")) return laneMade(p, &.{.{ .module = try modOf(p, i, "mlp.shared_experts.down_proj"), .cols = .{ sh.lo, sh.hi } }}, what);
+    if (eql(base, "kda.qkv")) return laneMade(p, &.{ .{ .module = try modOf(p, i, "self_attn.q_proj"), .rows = kh }, .{ .module = try modOf(p, i, "self_attn.k_proj"), .rows = kh }, .{ .module = try modOf(p, i, "self_attn.v_proj"), .rows = kh } }, what);
+    if (eql(base, "kda.o")) return laneMade(p, &.{.{ .module = try modOf(p, i, "self_attn.o_proj"), .cols = kh }}, what);
+    if (eql(base, "mlp.gu")) return laneMade(p, &.{ .{ .module = try modOf(p, i, "mlp.gate_proj"), .rows = dn }, .{ .module = try modOf(p, i, "mlp.up_proj"), .rows = dn } }, what);
+    if (eql(base, "mlp.down")) return laneMade(p, &.{.{ .module = try modOf(p, i, "mlp.down_proj"), .cols = dn }}, what);
+    return error.UnknownUpload;
+}
+
+/// A lane upload packed from the rank's cut of each part: block FP8 or MXFP8, as its first scale is stored (f32 or u8).
+fn laneMade(p: *Plan, parts: []const Part, what: []const u8) !Want {
+    const want_codes = std.mem.endsWith(u8, what, ".codes");
+    if ((try p.ck.get(try std.fmt.allocPrint(p.a, "{s}.weight_scale", .{parts[0].module}))).dtype == .u8) {
+        const MX = glm.weights.formats.mxfp8;
+        var stored: [3]MX.Mxfp8 = undefined;
+        var shares: [3]MX.Share = undefined;
+        for (parts, 0..) |q, j| {
+            stored[j] = try MX.Mxfp8.read(p.ck, q.module);
+            const r = q.rows orelse [2]usize{ 0, stored[j].n };
+            const k = q.cols orelse [2]usize{ 0, stored[j].k };
+            shares[j] = .{ .p = &stored[j], .lo = r[0], .hi = r[1], .klo = k[0], .khi = k[1] };
+        }
+        const z = try MX.sizes(shares[0..parts.len]);
+        const codes = try p.gpa.alloc(u8, z.codes);
+        errdefer p.gpa.free(codes);
+        const tiles = try p.gpa.alloc(u8, z.scales);
+        errdefer p.gpa.free(tiles);
+        try MX.pack(p.gpa, shares[0..parts.len], codes, tiles);
+        p.gpa.free(if (want_codes) tiles else codes);
+        return .{ .made = if (want_codes) codes else tiles };
+    }
+    const FP = glm.weights.formats.fp8pb;
+    var stored: [3]FP.Fp8pb = undefined;
     var made: usize = 0;
     defer for (stored[0..made]) |t| t.deinit(p.gpa);
-    var shares: [2]FP.Share = undefined;
-    for (parts[0..n_parts], 0..) |q, j| {
-        stored[j] = try FP.Fp8pb.read(p.gpa, p.ck, try std.fmt.allocPrint(p.a, at ++ "{s}", .{ i, q.rel }));
+    var shares: [3]FP.Share = undefined;
+    for (parts, 0..) |q, j| {
+        stored[j] = try FP.Fp8pb.read(p.gpa, p.ck, q.module);
         made += 1;
         const r = q.rows orelse [2]usize{ 0, stored[j].n };
         const k = q.cols orelse [2]usize{ 0, stored[j].k };
         shares[j] = .{ .p = &stored[j], .lo = r[0], .hi = r[1], .klo = k[0], .khi = k[1] };
     }
-    const z = try FP.sizes(shares[0..n_parts]);
+    const z = try FP.sizes(shares[0..parts.len]);
     const codes = try p.gpa.alloc(u8, z.codes);
     errdefer p.gpa.free(codes);
     const tiles = try p.gpa.alloc(f32, z.scales);
     defer p.gpa.free(tiles);
-    try FP.pack(p.gpa, shares[0..n_parts], codes, tiles);
-    if (std.mem.endsWith(u8, what, ".codes")) return .{ .made = codes };
+    try FP.pack(p.gpa, shares[0..parts.len], codes, tiles);
+    if (want_codes) return .{ .made = codes };
     p.gpa.free(codes);
     return .{ .made = try p.gpa.dupe(u8, std.mem.sliceAsBytes(tiles)) };
 }
@@ -423,7 +478,22 @@ fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *cons
     return bad;
 }
 
-/// TF_GATE_TAMPER=NAME flips a bit of upload NAME after each download, so a run shows the gate refusing it by name.
+/// Numbers from an environment value like "0-3,41,44", each under `max`; `all` when the variable is unset.
+fn picks(a: std.mem.Allocator, name: [:0]const u8, all: []const u32, max: usize) ![]const u32 {
+    const text = glm.ranks.environment(name) orelse return all;
+    var out: std.ArrayList(u32) = .empty;
+    var it = std.mem.tokenizeScalar(u8, text, ',');
+    while (it.next()) |part| {
+        const dash = std.mem.indexOfScalar(u8, part, '-');
+        const lo = try std.fmt.parseInt(u32, if (dash) |i| part[0..i] else part, 10);
+        const hi = if (dash) |i| try std.fmt.parseInt(u32, part[i + 1 ..], 10) else lo;
+        if (hi < lo or hi >= max) return error.BadGateList;
+        for (lo..hi + 1) |v| try out.append(a, @intCast(v));
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// TF_GATE_TAMPER=NAME flips a bit of upload NAME; TF_GATE_WORLDS, _RANKS and _LAYERS narrow a real checkpoint's run.
 pub fn run(gpu: check.Gpu, dir: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
@@ -436,12 +506,18 @@ pub fn run(gpu: check.Gpu, dir: []const u8) !void {
     defer stream.deinit();
     var ck = try core.Checkpoint.openModel(gpu.gpa, gpu.io, dir);
     defer ck.close();
-    const layers = try a.alloc(u32, c.layers);
-    for (layers, 0..) |*l, i| l.* = @intCast(i);
+    const every = try a.alloc(u32, c.layers);
+    for (every, 0..) |*l, i| l.* = @intCast(i);
+    const layers = try picks(a, "TF_GATE_LAYERS", every, c.layers);
+    const worlds = try picks(a, "TF_GATE_WORLDS", &.{ 1, 2, 3 }, 4);
+    const ranks = try picks(a, "TF_GATE_RANKS", &.{ 0, 1, 2 }, 3);
     var tamper: Tamper = .{ .name = glm.ranks.environment("TF_GATE_TAMPER") };
     var bad: usize = 0;
-    for (1..4) |world| {
-        for (0..world) |rank| bad += try rankGate(gpu, a, &ck, &c, &m, stream, dir, layers, rank, world, &tamper);
+    for (worlds) |world| {
+        if (world == 0) return error.BadGateList;
+        for (ranks) |rank| if (rank < world) {
+            bad += try rankGate(gpu, a, &ck, &c, &m, stream, dir, layers, rank, world, &tamper);
+        };
     }
     if (tamper.name) |t| try check.expect(tamper.done > 0, "glm-loader-gate: TF_GATE_TAMPER={s} names no upload it compares", .{t});
     try check.expect(bad == 0, "glm-loader-gate: {d} uploads differ from the checkpoint or are not known", .{bad});
