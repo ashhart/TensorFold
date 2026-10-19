@@ -318,6 +318,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer for (&denses) |*x| x.deinit();
     for (&denses) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
+    try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
     try @import("gdn_back_tests.zig").run(gpu);

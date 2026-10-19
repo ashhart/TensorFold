@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
+const dump = @import("byte_dump.zig");
 
 const counts = [_]usize{ 1, 3, 17, 40, 300 };
 const most = counts[counts.len - 1];
@@ -44,6 +45,7 @@ fn case(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.den
     try s.synchronize();
     const wide = try a.alloc(u8, most * n * 4);
     try outs[counts.len - 1].download(0, wide);
+    try dump.output(a, "dense-rows", "product", "rows", &.{ most, n }, .f32, .{ .k = k }, wide);
     const want = try a.alloc(f64, n);
     const tol = try a.alloc(f64, n);
     var q_most: f64 = 0;
@@ -59,6 +61,7 @@ fn case(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.den
     for (counts[0 .. counts.len - 1], outs[0 .. counts.len - 1]) |m, o| {
         const got = try a.alloc(u8, m * n * 4);
         try o.download(0, got);
+        try dump.output(a, "dense-rows", "product", "rows", &.{ m, n }, .f32, .{ .k = k }, got);
         try check.sameBytes("dense rows: a row count's bits equal the widest call's", got, wide[0 .. m * n * 4]);
     }
 }

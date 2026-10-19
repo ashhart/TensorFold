@@ -96,6 +96,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     cli.addImport("checkpoint_cli", checkpointCli(b, target, optimize, strip, native.engines, mods.core));
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
+    const dump_options = b.addOptions();
+    dump_options.addOption(bool, "enabled", b.option(bool, "cuda-test-dump", "Compile test-only CUDA byte records") orelse false);
+    runner.addOptions("cuda_dump_options", dump_options);
     runner.addImport("cuda", cuda);
     runner.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     runner.addImport("core", mods.core);

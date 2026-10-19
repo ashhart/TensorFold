@@ -5,6 +5,7 @@ const q27_back_tests = @import("q27_back_tests.zig");
 const q27_gemm_tests = @import("q27_gemm_tests.zig");
 const cuda = @import("cuda");
 const check = @import("check.zig");
+const dump = @import("byte_dump.zig");
 const runtime_tests = @import("runtime_tests.zig");
 const bench = @import("bench.zig");
 const oracle_tests = @import("oracle_tests.zig");
@@ -221,11 +222,14 @@ pub fn main(init: std.process.Init) !u8 {
     const cmd = args[1];
     const rest = args[2..];
 
+    try dump.begin(init.gpa, cmd);
     run(gpu, cmd, rest) catch |e| {
         if (std.mem.eql(u8, cmd, "cached-plans-tp2")) cuda.tp_watch.fatal(@errorName(e));
         std.debug.print("FAIL {s}: {t}\n", .{ cmd, e });
+        try dump.end(init.gpa, cmd, false);
         return 1;
     };
+    try dump.end(init.gpa, cmd, true);
     return 0;
 }
 
