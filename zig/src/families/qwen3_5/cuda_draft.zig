@@ -15,7 +15,7 @@ const dr = lanes.drafter;
 const Stream = lanes.Stream;
 
 /// Rows an absorb runs at once (the target's prompt chunks are at most this).
-const max_rows = engine.max_rows;
+const max_rows = engine.most_verify; // taps absorbed at most this many rows a call (a prompt chunk's in pieces)
 /// The logprob row's words (sample.cu's LP_WORDS) and its best-token capacity.
 const lp_words = 3 + 2 * 20;
 /// A hold's rows: the reference's 16-row blocks (dflash2.block), past the 8 the checkpoint was trained with.

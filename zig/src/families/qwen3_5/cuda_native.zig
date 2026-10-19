@@ -207,12 +207,15 @@ fn coldCut(len: usize, chunks: []const u32, pos: usize) bool {
 }
 
 test "a pass resumes only where a cold pass cuts: every max_rows rows from 0 or from the request's chunk starts" {
-    try std.testing.expect(coldCut(1000, &.{}, E.max_rows * 3));
-    try std.testing.expect(!coldCut(1000, &.{}, E.max_rows * 3 + 1));
-    try std.testing.expect(coldCut(1000, &.{200}, 200));
-    try std.testing.expect(coldCut(1000, &.{200}, 200 + E.max_rows));
-    try std.testing.expect(!coldCut(1000, &.{200}, 2 * E.max_rows)); // cut at 200 instead, then 328
-    try std.testing.expectEqual(@as(usize, 200), nextCut(1000, &.{200}, E.max_rows));
+    const m = E.max_rows;
+    const len = 10 * m;
+    const start = m + m / 2; // a request chunk start between the first two cuts
+    try std.testing.expect(coldCut(len, &.{}, m * 3));
+    try std.testing.expect(!coldCut(len, &.{}, m * 3 + 1));
+    try std.testing.expect(coldCut(len, &.{start}, start));
+    try std.testing.expect(coldCut(len, &.{start}, start + m));
+    try std.testing.expect(!coldCut(len, &.{start}, 2 * m)); // cut at the start instead, then max_rows on
+    try std.testing.expectEqual(@as(usize, start), nextCut(len, &.{start}, m));
 }
 
 fn release(p: *anyopaque) void {
