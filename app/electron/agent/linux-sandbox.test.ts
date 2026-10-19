@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { canUseLinuxSandbox, linuxSandboxArgv, linuxSandboxBinary } from './linux-sandbox'
+import { canUseLinuxSandbox, linuxSandboxArgv, linuxSandboxBinary, planLinuxMounts } from './linux-sandbox'
 import { runSandboxedCommand } from './sandbox'
 
 let passed = 0
@@ -37,6 +37,21 @@ try {
   const network = linuxSandboxArgv(cwd, { allowCwdWrite: false, allowNetwork: true })
   assert.ok(network.includes('--share-net'), 'network-fetch shares the network namespace')
   ok('draft profile contains requested mount and network arguments (not confinement proof)')
+
+  // A workspace inside the temporary root must end read-only, after the writable parent mount.
+  const tmpCwd = path.join(realpathSync(tmpdir()), 'vontra-tmp-workspace')
+  mkdirSync(tmpCwd, { recursive: true })
+  const tmpMounts = planLinuxMounts(tmpCwd, { allowCwdWrite: false, allowNetwork: false })
+  assert.deepEqual(tmpMounts.filter((mount) => mount.path === tmpCwd).map((mount) => mount.mode), ['ro'], 'read-only workspace stays read-only')
+  const tmpIndex = tmpMounts.findIndex((mount) => mount.path === realpathSync(tmpdir()))
+  const cwdIndex = tmpMounts.findIndex((mount) => mount.path === tmpCwd)
+  assert.ok(tmpIndex >= 0 && cwdIndex > tmpIndex, 'the read-only workspace mount follows its writable temporary parent')
+  assert.equal(tmpMounts[cwdIndex].mode, 'ro')
+  const writeMounts = planLinuxMounts(tmpCwd, { allowCwdWrite: true, allowNetwork: false })
+  assert.equal(writeMounts.find((mount) => mount.path === tmpCwd)?.mode, 'rw')
+  const ordered = planLinuxMounts(cwd, { allowCwdWrite: true, allowNetwork: false })
+  for (let i = 1; i < ordered.length; i++) assert.ok(ordered[i - 1].path.length <= ordered[i].path.length, 'mounts are parent-first')
+  ok('mount plan keeps a read-only workspace decisive under a writable temporary parent')
 
   // usrmerge-style symlinked roots get a compatibility symlink, not a broken path.
   const real = path.join(root, 'real-usr-bin')
