@@ -1,4 +1,4 @@
-//! Flash Next's prompt tiles' CUDA records: nvcc 13.0's in registry.cuda, then 13.2's and 13.3's where they differ.
+//! Flash Next's new tiles' CUDA records, decode's indexer and one-buffer attention among them: nvcc 13.0, 13.2, 13.3.
 const registry = @import("registry.zig");
 const CudaRecord = registry.CudaRecord;
 

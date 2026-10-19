@@ -441,7 +441,7 @@ extern "C" __global__ void __launch_bounds__(128) fn_attn_fused(const __nv_bfloa
     attn_chunks<1, true, true>(Q, KC, VC, POS0, OUT, nullptr, nullptr, IDS, NKR, SPR, H, HK, G, CH, 1, SCALE, IDW, QSA);
 }
 
-// attn_chunks with one buffer, keys then values (prompt chunks: three blocks a multiprocessor), the same sums.
+// attn_chunks with one buffer, keys then values (17 to 256 rows: prompt chunks and wide decode rounds), the same sums.
 extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_one(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
                                                                      const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
                                                                      float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
