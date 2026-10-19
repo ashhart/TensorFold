@@ -162,13 +162,19 @@ export class EngineSupervisor {
 
   get activeRequestCount(): number { return this.activeRequests }
 
-  get memoryLimitBytes(): number {
+  get memoryLimitBytes(): number { return this.memoryPolicyFor(null).bytes }
+
+  // The app-side admission limit for one checkpoint family, with the human-readable basis for it.
+  // A user load-limit variable raises only its own family's limit and never lowers the 70% default;
+  // the engine may still cap the requested ceiling by its own RAM/GPU working-set math.
+  memoryPolicyFor(modelType: string | null | undefined): { bytes: number; basis: string } {
     const base = Math.floor(this.memoryBudgetBytes * (this.deps.memoryFraction ?? 0.7))
-    // A user-set engine load-limit variable (Settings → Engine advanced) is the engine's own
-    // ceiling for its family; the floor check must not veto what the engine was told to allow.
-    const override = engineLoadLimitOverride(this.deps.env())
-    return override ? Math.max(base, override.bytes) : base
+    const override = engineLoadLimitOverride(this.deps.env(), modelType ?? null, this.deps.totalMemoryBytes)
+    if (override && override.bytes > base) return { bytes: override.bytes, basis: `${override.key}=${override.gb} GB from Settings → Engine advanced${override.capped ? ', capped at this Mac\'s memory ceiling' : ''}; the engine applies its own final ceiling` }
+    return { bytes: base, basis: this.memoryBudgetBytes < this.deps.totalMemoryBytes ? `70% of the lowered ${formatGiB(this.memoryBudgetBytes)} qualification budget` : `70% of this Mac's ${formatGiB(this.deps.totalMemoryBytes)}` }
   }
+
+  memoryLimitFor(modelType: string | null | undefined): number { return this.memoryPolicyFor(modelType).bytes }
 
   get memoryBudgetBytes(): number {
     return loweredEngineMemoryBudget(this.deps.totalMemoryBytes, this.deps.memoryBudgetBytes)
@@ -459,13 +465,9 @@ export class EngineSupervisor {
       if (drafterBytes == null) this.fail(`${model} needs its drafter ${drafter}. Download the model again to fetch it.`)
       floor += drafterBytes
     }
-    if (floor > this.memoryLimitBytes) {
-      const raisedBase = Math.floor(this.memoryBudgetBytes * (this.deps.memoryFraction ?? 0.7))
-      const override = engineLoadLimitOverride(this.deps.env())
-      const basis = override && override.bytes > raisedBase
-        ? `${override.key}=${String(override.gb)} GB, already above the 70% default`
-        : this.memoryBudgetBytes < this.deps.totalMemoryBytes ? `70% of the lowered ${formatGiB(this.memoryBudgetBytes)} qualification budget` : `70% of this Mac's ${formatGiB(this.deps.totalMemoryBytes)}`
-      this.fail(`${model} needs at least ${formatGiB(floor)} of memory, more than the ${formatGiB(this.memoryLimitBytes)} limit (${basis}).`)
+    const floorPolicy = this.memoryPolicyFor(info.modelType)
+    if (floor > floorPolicy.bytes) {
+      this.fail(`${model} needs at least ${formatGiB(floor)} of memory, more than the ${formatGiB(floorPolicy.bytes)} limit (${floorPolicy.basis}).`)
     }
     if (generation !== this.generation) this.fail('Engine start was cancelled.')
 

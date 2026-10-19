@@ -363,63 +363,63 @@ export const languagePacks: Readonly<Record<string, Readonly<Record<string, stri
 })
 export const languagePackCoverage: Readonly<Record<string, { present: number; total: number; complete: boolean }>> = Object.freeze({
   "es": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "hi": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "id": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "ja": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "ko": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "la": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "pl": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "ru": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "th": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "vi": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "zh-Hans": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   },
   "zh-Hant": {
-    "present": 4935,
-    "total": 4935,
+    "present": 4942,
+    "total": 4942,
     "complete": true
   }
 })

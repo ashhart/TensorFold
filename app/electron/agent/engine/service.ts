@@ -106,15 +106,16 @@ export class EngineService {
   constructor(private readonly options: EngineServiceOptions) {
     this.launch = engineLaunchEnv(options)
     this.totalMemoryBytes = options.totalMemoryBytes ?? os.totalmem()
-    this.models = new ModelHub({
-      endpoint: this.launch.endpoint, fetch: options.fetch, env: this.env, totalMemoryBytes: this.totalMemoryBytes,
-      capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), cacheDir: () => this.hub,
-      memory: () => ({ limit: this.supervisor.memoryLimitBytes, budget: this.supervisor.memoryBudgetBytes }),
-    })
-    this.revisions = new ModelRevisions(options.appHome, () => this.hub)
+    // Preferences load first so a saved HF_HUB_OFFLINE or cache location governs every dependent.
     this.preferences = new EnginePreferenceStore(options.appHome)
     this.envOverridesApplied = this.preferences.get().envOverrides
-    this.library = new ModelLibrary({ appHome: options.appHome, env: this.env, capabilities: () => this.capabilitiesDoc(), memoryLimitBytes: () => this.supervisor.memoryLimitBytes })
+    this.models = new ModelHub({
+      endpoint: this.launch.endpoint, fetch: options.fetch, env: () => this.env, totalMemoryBytes: this.totalMemoryBytes,
+      capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), cacheDir: () => this.hub,
+      memory: () => ({ limit: this.supervisor.memoryLimitBytes, budget: this.supervisor.memoryBudgetBytes, limitFor: (modelType) => this.supervisor.memoryPolicyFor(modelType) }),
+    })
+    this.revisions = new ModelRevisions(options.appHome, () => this.hub)
+    this.library = new ModelLibrary({ appHome: options.appHome, env: () => this.env, capabilities: () => this.capabilitiesDoc(), memoryLimitBytes: () => this.supervisor.memoryLimitBytes })
     this.learningCopies = new LearningCopies(options.appHome)
     this.supervisor = new EngineSupervisor({
       binary: () => this.binary(),
@@ -254,9 +255,18 @@ export class EngineService {
 
   async setEnvOverrides(next: EngineEnvOverrides): Promise<EngineEnvOverrides> {
     const normalized = normalizeEngineEnvOverrides(next)
+    const prior = this.preferences.get().envOverrides
+    // A cache-location move must never race an operation bound to the current root.
+    const cacheMoved = normalized.HF_HOME !== prior.HF_HOME || normalized.HF_HUB_CACHE !== prior.HF_HUB_CACHE
+    if (cacheMoved && (this.pulls.size || this.pullQueue.busy || this.deletingModel)) throw new Error('Finish model downloads and cache cleanup before changing the model cache location.')
     await this.preferences.set({ envOverrides: normalized })
     this.envOverridesApplied = normalized
+    // Verdicts cached at the old limit are stale the moment the limit moves; re-answer them all.
+    this.models.clearPreflights()
+    await this.library.refreshEligibility((modelType) => this.supervisor.memoryLimitFor(modelType))
+    this.installedCache = null
     this.emitStatus()
+    await this.installed(true)
     return normalized
   }
 
@@ -309,7 +319,8 @@ export class EngineService {
         if (enabled) {
           const current = this.supervisor.status()
           if (current.model && current.model !== repo && ['ready', 'starting'].includes(current.state)) throw new Error('Load the Nemotron model before enabling Living Weights; the current model will not be replaced.')
-          if ((await this.info(repo!)).memoryFloorBytes > this.supervisor.memoryLimitBytes) throw new Error('This Mac does not have enough model memory for Living Weights on Nemotron. Choose a smaller model for ordinary chat.')
+          const learningInfo = await this.info(repo!)
+          if (learningInfo.memoryFloorBytes > this.supervisor.memoryLimitFor(learningInfo.modelType)) throw new Error('This Mac does not have enough model memory for Living Weights on Nemotron. Choose a smaller model for ordinary chat.')
           if (!await this.learningCopies.existing(repo!)) {
             let source = await this.revisions.selected(repo!)
             if (!source) {
@@ -610,7 +621,7 @@ export class EngineService {
         entry.contextTokens = info.contextTokens
         entry.weightsBytes = info.weightsBytes
         entry.memoryFloorBytes = info.memoryFloorBytes + (drafterBytes ?? 0)
-        entry.fitsMemory = entry.memoryFloorBytes <= this.supervisor.memoryLimitBytes
+        entry.fitsMemory = entry.memoryFloorBytes <= this.supervisor.memoryLimitFor(info.modelType)
       } catch {
         if (selected[model.repo]) continue // Never present a different legacy ref as the selected model.
         /* Legacy listed but unreadable: keep the row without sizes. */
@@ -624,7 +635,7 @@ export class EngineService {
         const drafterBytes = drafter ? await this.cachedModelBytes(drafter) : null
         const memoryFloorBytes = checked.memoryFloorBytes == null ? null : checked.memoryFloorBytes + (drafterBytes ?? 0)
         if (checked.repo) this.localRepos.set(local.id, checked.repo)
-        out.push({ repo: local.id, source: 'library', title: local.title, localPath: checked.path, family: FAMILY_TITLES[checked.modelType!] ?? checked.modelType!, modelType: checked.modelType!, format: checked.format, contextTokens: null, weightsBytes: checked.weightsBytes, memoryFloorBytes, fitsMemory: memoryFloorBytes == null ? null : memoryFloorBytes <= this.supervisor.memoryLimitBytes, drafter, drafterInstalled: drafter ? drafterBytes != null : null })
+        out.push({ repo: local.id, source: 'library', title: local.title, localPath: checked.path, family: FAMILY_TITLES[checked.modelType!] ?? checked.modelType!, modelType: checked.modelType!, format: checked.format, contextTokens: null, weightsBytes: checked.weightsBytes, memoryFloorBytes, fitsMemory: memoryFloorBytes == null ? null : memoryFloorBytes <= this.supervisor.memoryLimitFor(checked.modelType), drafter, drafterInstalled: drafter ? drafterBytes != null : null })
       } catch { /* Moved or changed checkpoints are unavailable until scanned again. */ }
     }
     this.installedCache = out
@@ -659,6 +670,7 @@ export class EngineService {
     const steps = [{ repo, revision: pre.resolvedRevision }, ...(pre.drafter ? [{ repo: pre.drafter.repo, revision: pre.drafter.resolvedRevision! }] : [])]
     for (const step of steps) this.assertPullIdle(step.repo)
     this.finished.delete(repo)
+    const startedHub = this.hub
     const handle = this.pullQueue.enqueue({
       binary: this.requireBinary(),
       env: this.env,
@@ -667,7 +679,7 @@ export class EngineService {
       totalBytes: pre.totalBytes,
       pollMs: this.options.pollMs ? Math.max(50, this.options.pollMs) : 1000,
       onUpdate: (progress) => this.onPullUpdate(progress),
-    }, async (final) => { await this.revisions.commit(steps); return final })
+    }, async (final) => { await this.revisions.commit(steps, startedHub); return final })
     this.pulls.set(repo, { handle, last: handle.progress() })
     this.options.emit({ kind: 'pull', pull: handle.progress() })
     void handle.done.then(async (final) => {
@@ -796,7 +808,7 @@ export class EngineService {
       if (bytes == null) { model.loadable = false; model.reason = `This checkpoint needs its drafter ${drafter}. Download the full model in Models or scan the companion checkpoint too.` }
       else if (model.memoryFloorBytes != null) {
         model.memoryFloorBytes += bytes
-        model.fitsMemory = model.memoryFloorBytes <= this.supervisor.memoryLimitBytes
+        model.fitsMemory = model.memoryFloorBytes <= this.supervisor.memoryLimitFor(model.modelType)
         if (!model.fitsMemory) { model.loadable = false; model.reason = 'This model and its drafter need more model memory than the current hardware allows.' }
       }
     }

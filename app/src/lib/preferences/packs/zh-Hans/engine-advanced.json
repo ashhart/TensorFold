@@ -11,5 +11,12 @@
  "Common variables": "常用变量",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "保存的值将在每个引擎进程下次启动时生效；已加载的模型会保持其启动时的值，直到重新加载。",
  "Saved values take effect the next time a model loads.": "保存的值将在下次加载模型时生效。",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "高于默认 70% 的加载上限会减少这台 Mac 上其他用途可用的内存。仅当引擎报告模型差一点放不下时才提高此值。"
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "高于默认 70% 的加载上限会减少这台 Mac 上其他用途可用的内存。仅当引擎报告模型差一点放不下时才提高此值。",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "加载 GLM-5.3 的 GB 上限，取代 70% 内存默认限制，同时提高应用侧的内存检查。",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "加载 Flash Next 模型的 GB 上限，取代 70% 内存默认限制，同时提高应用侧的内存检查。",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "设为 1 让引擎保持离线；下载模型时需要重新联网。",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face 下载缓存的位置。TensorFold 自身的模型文件夹在“设置 → 模型文件夹”中管理。",
+ "Engine knob: append per-request records to a file for diagnostics.": "引擎选项：将每个请求的记录追加到文件，用于诊断。",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "设为 1 可隐藏引擎终端中的实时文本显示；所服务的模型不变。",
+ "Engine knob: mix a salt into request seeds.": "引擎选项：在请求种子中混入盐值。"
 }

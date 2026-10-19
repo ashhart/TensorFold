@@ -39,12 +39,12 @@ export class ModelRevisions {
     return sha ? this.snapshot(repo, sha) : null
   }
 
-  async snapshot(repo: string, sha: string): Promise<string> {
+  async snapshot(repo: string, sha: string, boundHub?: string): Promise<string> {
     assertRepoId(repo)
     if (!SHA.test(sha)) throw new Error(INVALID)
     const missing = () => new Error(`The selected checkpoint for ${repo} is missing or unreadable. Download it again in Models.`)
     try {
-      const hub = await fs.realpath(this.hub())
+      const hub = await fs.realpath(boundHub ?? this.hub())
       const directory = path.join(repoCacheDir(hub, repo), 'snapshots', sha)
       // Canonical directory authority: no repo/snapshots/checkpoint symlink may redirect the CLI.
       if (await fs.realpath(directory) !== directory || !(await fs.lstat(directory)).isDirectory()) throw missing()
@@ -70,10 +70,11 @@ export class ModelRevisions {
     return bytes
   }
 
-  commit(selections: { repo: string; revision: string }[]): Promise<void> {
+  // boundHub pins verification to the cache root an operation started on, so a later cache-location change cannot verify against another root.
+  commit(selections: { repo: string; revision: string }[], boundHub?: string): Promise<void> {
     return this.mutate(async (revisions) => {
       for (const selection of selections) {
-        await this.snapshot(selection.repo, selection.revision)
+        await this.snapshot(selection.repo, selection.revision, boundHub)
         revisions[selection.repo] = selection.revision
       }
     })

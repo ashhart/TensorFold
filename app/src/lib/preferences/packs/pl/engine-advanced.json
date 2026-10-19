@@ -11,5 +11,12 @@
  "Common variables": "Popularne zmienne",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Zapisane wartości trafiają do każdego procesu silnika przy jego następnym uruchomieniu; wczytany model zachowuje wartości, z którymi się uruchomił, do czasu ponownego wczytania.",
  "Saved values take effect the next time a model loads.": "Zapisane wartości zostaną zastosowane przy następnym wczytaniu modelu.",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Limit ładowania powyżej domyślnych 70% pozostawia mniej pamięci na wszystko inne na tym Macu. Podnoś go tylko, gdy silnik zgłosił, że model minimalnie się nie mieści."
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Limit ładowania powyżej domyślnych 70% pozostawia mniej pamięci na wszystko inne na tym Macu. Podnoś go tylko, gdy silnik zgłosił, że model minimalnie się nie mieści.",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Limit GB do ładowania GLM-5.3, zastępujący limit 70% RAM. Podnosi też kontrolę pamięci po stronie aplikacji.",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Limit GB do ładowania modeli Flash Next, zastępujący limit 70% RAM. Podnosi też kontrolę pamięci po stronie aplikacji.",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "Ustaw 1, aby odłączyć silnik od sieci; pobieranie modeli będzie wymagać ponownego połączenia.",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Miejsce, w którym Hugging Face zapisuje pobrane pliki. Własne foldery modeli TensorFold ustawia w Ustawieniach → Foldery modeli.",
+ "Engine knob: append per-request records to a file for diagnostics.": "Opcja silnika: dopisuje zapisy każdego żądania do pliku w celach diagnostycznych.",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Ustaw 1, aby ukryć podgląd tekstu na żywo w terminalu silnika; serwowany model pozostaje bez zmian.",
+ "Engine knob: mix a salt into request seeds.": "Opcja silnika: dodaje sól do seedów żądań."
 }

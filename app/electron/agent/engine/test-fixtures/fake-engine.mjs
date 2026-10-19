@@ -10,6 +10,9 @@ import path from 'node:path'
 const env = process.env
 const argv = process.argv.slice(2)
 const TITLES = { qwen3_5: 'Qwen3.5-2B or Qwen3.8-27B', nemotron_h: 'Nemotron 3.5 Lightning' }
+// FAKE_ENGINE_FAMILIES='glm5_next:GLM-5.3-Flash,other' registers extra families in info/models/capabilities.
+const EXTRA_FAMILIES = (env.FAKE_ENGINE_FAMILIES ?? '').split(',').map((entry) => entry.split(':')).filter(([type]) => type && !TITLES[type])
+for (const [type, title] of EXTRA_FAMILIES) TITLES[type] = title || type
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function hub() {
@@ -134,7 +137,7 @@ async function serveCommand(args) {
   if (graphFile && existsSync(graphFile)) graph = { ...graph, ...JSON.parse(readFileSync(graphFile, 'utf8')) }
   const saveGraph = () => { if (graphFile) writeFileSync(graphFile, JSON.stringify(graph), { mode: 0o600 }) }
   let learning = false
-  record({ kind: 'serve', args, pid: process.pid, hasKey: keys.length > 0, noUpdateCheck: env.TENSORFOLD_NO_UPDATE_CHECK ?? null, advancedEnv: Object.fromEntries(['GLM_LOAD_LIMIT_GB', 'FLASHNEXT_LOAD_LIMIT_GB'].filter((k) => k in env).map((k) => [k, env[k]])), secretEnv: Object.keys(env).filter((k) => /API_KEY|TOKEN|SECRET/.test(k) && k !== 'TENSORFOLD_API_KEY') })
+  record({ kind: 'serve', args, pid: process.pid, hasKey: keys.length > 0, noUpdateCheck: env.TENSORFOLD_NO_UPDATE_CHECK ?? null, hubCache: env.HF_HUB_CACHE ?? null, advancedEnv: Object.fromEntries(['GLM_LOAD_LIMIT_GB', 'FLASHNEXT_LOAD_LIMIT_GB'].filter((k) => k in env).map((k) => [k, env[k]])), secretEnv: Object.keys(env).filter((k) => /API_KEY|TOKEN|SECRET/.test(k) && k !== 'TENSORFOLD_API_KEY') })
   console.error(`[tensorfold] loading ${model}`)
   await sleep(Number(env.FAKE_SERVE_LOAD_MS ?? 50))
   if (env.FAKE_SERVE_FAIL || env.FAKE_SERVE_FAIL_MODEL === name) { console.error(`tensorfold: ${env.FAKE_SERVE_FAIL}`); process.exit(1) }
@@ -225,7 +228,7 @@ async function serveCommand(args) {
 
 const [command, ...rest] = argv
 if (command === '--version') console.log(`tensorfold-native ${env.FAKE_ENGINE_VERSION ?? '1.0.7'}`)
-else if (command === 'capabilities' && rest[0] === '--json') console.log(JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.7', chip: 'Apple M5 Max', backends: ['mlx'], families: { qwen3_5: ['mlx-q4g64'], nemotron_h: ['mlx-q4g64'] }, serve: { flags: { ...(env.FAKE_ENGINE_CORTHEON ? { '--cortheon': {} } : {}), ...(env.FAKE_ENGINE_LEARNING ? { '--slide': {}, '--slide-graph': {} } : {}), '--host': {}, '--port': {}, '--drafter': {} } }, env: ['TENSORFOLD_API_KEY', 'HF_HOME', 'HF_HUB_CACHE'] }))
+else if (command === 'capabilities' && rest[0] === '--json') console.log(JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.7', chip: 'Apple M5 Max', backends: ['mlx'], families: { qwen3_5: ['mlx-q4g64'], nemotron_h: ['mlx-q4g64'], ...Object.fromEntries(EXTRA_FAMILIES.map(([type]) => [type, ['mlx-q4g64']])) }, serve: { flags: { ...(env.FAKE_ENGINE_CORTHEON ? { '--cortheon': {} } : {}), ...(env.FAKE_ENGINE_LEARNING ? { '--slide': {}, '--slide-graph': {} } : {}), '--host': {}, '--port': {}, '--drafter': {} } }, env: ['TENSORFOLD_API_KEY', 'HF_HOME', 'HF_HUB_CACHE'] }))
 else if (command === 'models') process.exitCode = modelsCommand()
 else if (command === 'info') process.exitCode = infoCommand(rest[0])
 else if (command === 'pull') process.exitCode = await pullCommand(rest[0])

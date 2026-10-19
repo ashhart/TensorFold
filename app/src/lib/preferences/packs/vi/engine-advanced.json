@@ -11,5 +11,12 @@
  "Common variables": "Các biến thường dùng",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Giá trị đã lưu sẽ áp dụng khi mỗi tiến trình engine khởi động lần tới; mô hình đã nạp vẫn giữ các giá trị lúc khởi động cho đến khi nạp lại.",
  "Saved values take effect the next time a model loads.": "Giá trị đã lưu sẽ có hiệu lực lần tới khi nạp mô hình.",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Giới hạn tải cao hơn mặc định 70% để lại ít bộ nhớ hơn cho mọi thứ khác trên Mac này. Chỉ nâng lên khi engine báo mô hình vừa khít không đủ."
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Giới hạn tải cao hơn mặc định 70% để lại ít bộ nhớ hơn cho mọi thứ khác trên Mac này. Chỉ nâng lên khi engine báo mô hình vừa khít không đủ.",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Giới hạn tính bằng GB khi tải GLM-5.3, thay cho giới hạn 70% RAM. Cũng nâng mức kiểm tra bộ nhớ của ứng dụng.",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Giới hạn tính bằng GB khi tải các mô hình Flash Next, thay cho giới hạn 70% RAM. Cũng nâng mức kiểm tra bộ nhớ của ứng dụng.",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "Đặt 1 để giữ engine ngoại tuyến; tải mô hình sẽ cần kết nối lại.",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Nơi Hugging Face lưu bộ nhớ đệm tải xuống. Thư mục mô hình của TensorFold đặt trong Cài đặt → Thư mục mô hình.",
+ "Engine knob: append per-request records to a file for diagnostics.": "Tùy chọn engine: ghi thêm nhật ký từng yêu cầu vào tệp để chẩn đoán.",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Đặt 1 để ẩn hiển thị văn bản trực tiếp của engine trong terminal; mô hình phục vụ không thay đổi.",
+ "Engine knob: mix a salt into request seeds.": "Tùy chọn engine: trộn muối vào seed của yêu cầu."
 }

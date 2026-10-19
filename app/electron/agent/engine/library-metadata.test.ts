@@ -7,7 +7,7 @@ import { ModelLibrary } from './library'
 const MIB = 1024 ** 2
 const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'tensorfold-library-metadata-')))
 const caps = { version: '1.1.0', chip: null, backends: ['metal'], families: { qwen3_5: ['mlx-q4g64'], gemma4: ['mlx-q4g64'] }, flags: [], env: [] }
-const library = (name: string, metadataBytes?: number) => new ModelLibrary({ appHome: path.join(root, 'profiles', name), env: { HOME: path.join(root, 'home') }, capabilities: async () => caps, memoryLimitBytes: () => 16 * 1024 ** 3, ...(metadataBytes === undefined ? {} : { limits: { metadataBytes } }) })
+const library = (name: string, metadataBytes?: number) => new ModelLibrary({ appHome: path.join(root, 'profiles', name), env: () => ({ HOME: path.join(root, 'home') }), capabilities: async () => caps, memoryLimitBytes: () => 16 * 1024 ** 3, ...(metadataBytes === undefined ? {} : { limits: { metadataBytes } }) })
 async function checkpoint(directory: string, marker: string, headerPadding = 0) {
   await fs.mkdir(directory, { recursive: true })
   await fs.writeFile(path.join(directory, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 }, marker }))

@@ -38,7 +38,7 @@ export async function makeHarness(extraEnv: NodeJS.ProcessEnv = {}): Promise<Har
 }
 
 // A cached checkpoint as pull leaves it: blobs, a snapshot of links, refs/main.
-export async function seedModel(hub: string, repo: string, opts: { modelType?: string; bytes?: number; dflash?: boolean } = {}): Promise<void> {
+export async function seedModel(hub: string, repo: string, opts: { modelType?: string; bytes?: number; dflash?: boolean; checkpoint?: boolean } = {}): Promise<void> {
   const [owner, name] = repo.split('/')
   const dir = path.join(hub, `models--${owner}--${name}`)
   const sha = 'a'.repeat(40)
@@ -46,10 +46,23 @@ export async function seedModel(hub: string, repo: string, opts: { modelType?: s
   await fs.mkdir(path.join(dir, 'blobs'), { recursive: true })
   await fs.mkdir(snapshot, { recursive: true })
   await fs.mkdir(path.join(dir, 'refs'), { recursive: true })
-  await fs.writeFile(path.join(dir, 'blobs', 'weights'), Buffer.alloc(opts.bytes ?? 8192, 1))
-  await fs.symlink(path.join(dir, 'blobs', 'weights'), path.join(snapshot, 'model.safetensors'))
-  const config = opts.dflash ? { model_type: 'qwen3', dflash_config: {} } : { model_type: opts.modelType ?? 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768 }
-  await fs.writeFile(path.join(snapshot, 'config.json'), JSON.stringify(config))
+  if (opts.checkpoint) {
+    // A scan-valid MLX checkpoint: real safetensors header, sparse body, tokenizer, HF symlinks.
+    const header = Buffer.from(JSON.stringify({ weight: { dtype: 'F32', shape: [2], data_offsets: [0, 8] } }))
+    const prefix = Buffer.alloc(8); prefix.writeBigUInt64LE(BigInt(header.length))
+    const fd = await fs.open(path.join(dir, 'blobs', 'weights'), 'w')
+    try { await fd.write(Buffer.concat([prefix, header])); await fd.truncate(opts.bytes ?? 8192) } finally { await fd.close() }
+    const config = { model_type: opts.modelType ?? 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768 }
+    await fs.writeFile(path.join(dir, 'blobs', 'config.json'), JSON.stringify(config))
+    await fs.writeFile(path.join(dir, 'blobs', 'tokenizer.json'), JSON.stringify({ model: { type: 'BPE', vocab: {} } }))
+    for (const file of ['config.json', 'tokenizer.json']) await fs.symlink(path.join(dir, 'blobs', file), path.join(snapshot, file))
+    await fs.symlink(path.join(dir, 'blobs', 'weights'), path.join(snapshot, 'model.safetensors'))
+  } else {
+    await fs.writeFile(path.join(dir, 'blobs', 'weights'), Buffer.alloc(opts.bytes ?? 8192, 1))
+    await fs.symlink(path.join(dir, 'blobs', 'weights'), path.join(snapshot, 'model.safetensors'))
+    const config = opts.dflash ? { model_type: 'qwen3', dflash_config: {} } : { model_type: opts.modelType ?? 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768 }
+    await fs.writeFile(path.join(snapshot, 'config.json'), JSON.stringify(config))
+  }
   await fs.writeFile(path.join(dir, 'refs', 'main'), sha)
 }
 

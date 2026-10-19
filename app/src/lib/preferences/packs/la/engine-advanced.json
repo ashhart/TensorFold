@@ -11,5 +11,12 @@
  "Common variables": "Versus communes",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Valores servati singuli processus machinae inchoatione sequente utentur; exemplar oneratum valores inchoationis suae retinet donec iterum oneretur.",
  "Saved values take effect the next time a model loads.": "Valores servati in oneratione exemplaris sequentis valebunt.",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Limite onerantis supra consuetas septuaginta centesimas provisum minus memoriae ceteris operibus huius Mac relinquitur. Limitem tantum augeto si machina nuntiat exemplar vix non sufficere."
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Limite onerantis supra consuetas septuaginta centesimas provisum minus memoriae ceteris operibus huius Mac relinquitur. Limitem tantum augeto si machina nuntiat exemplar vix non sufficere.",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Modus GB onerando GLM-5.3, qui modum 70% memoriae mutare sustituit. Examinationem quoque memoriai apud app attollit.",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Modus GB onerandis modellos Flash Next, qui modum 70% memoriae mutare sustituit. Examinationem quoque memoriai apud app attollit.",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "Pone 1 ut instrumentum extra retineat; descriptiones modelloorum connexionem renovatam exposcunt.",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Ubi Hugging Face descriptiones reposcit. TensorFold calices modelloorum suorum in Optionibus → Calices modelloorum servat.",
+ "Engine knob: append per-request records to a file for diagnostics.": "Clavis instrumenti: singula monumenta rogatorum in pugio pro diagnosci adiungere.",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Pone 1 ut vivam textus monstrationem in terminali instrumenti celas; modellos qui ministratur nihil mutatur.",
+ "Engine knob: mix a salt into request seeds.": "Clavis instrumenti: sal in semina rogationum miscere."
 }

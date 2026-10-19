@@ -11,5 +11,12 @@
  "Common variables": "よく使う変数",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "保存した値は各エンジンプロセスの次回起動時に適用されます。読み込み済みのモデルは、再読み込みするまで起動時の値を保持します。",
  "Saved values take effect the next time a model loads.": "保存した値は次回のモデル読み込み時に有効になります。",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "既定の 70% を超えるロード上限は、この Mac の他の用途に使えるメモリを減らします。エンジンがモデルはわずかに収まらないと報告した場合にのみ引き上げてください。"
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "既定の 70% を超えるロード上限は、この Mac の他の用途に使えるメモリを減らします。エンジンがモデルはわずかに収まらないと報告した場合にのみ引き上げてください。",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "GLM-5.3 の読み込み上限（GB）。RAM の 70% 上限に代わり、アプリ側のメモリ判定も引き上げます。",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Flash Next モデルの読み込み上限（GB）。RAM の 70% 上限に代わり、アプリ側のメモリ判定も引き上げます。",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "1 にするとエンジンがネットワークを使わなくなります。モデルのダウンロードには接続の復帰が必要です。",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face がダウンロードを保存する場所です。TensorFold 自身のモデルフォルダは「設定 → モデルフォルダ」で管理します。",
+ "Engine knob: append per-request records to a file for diagnostics.": "エンジン設定：リクエストごとの記録を診断用にファイルへ追記します。",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "1 にするとエンジンのターミナルでのライブ表示を隠します。提供されるモデルは変わりません。",
+ "Engine knob: mix a salt into request seeds.": "エンジン設定：リクエストのシードにソルトを混ぜます。"
 }
