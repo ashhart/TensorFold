@@ -77,7 +77,7 @@ pub const Config = struct {
         const text = try field(root, "text_config");
         if (text != .object) return error.UnexpectedToken;
         const quant = try field(root, "quantization_config");
-        inline for (@typeInfo(Text).@"struct".fields) |f| _ = try field(text, f.name);
+        inline for (@typeInfo(Text).@"struct".field_names) |name| _ = try field(text, name);
         const c = try arena.create(shared.Config);
         c.* = try shared.Config.parse(arena, bytes);
         try c.validateRelease();
