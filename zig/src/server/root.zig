@@ -145,3 +145,8 @@ test {
     _ = @import("slide_subject_guard_test.zig");
     _ = @import("server_recovery_test.zig");
 }
+
+test {
+    _ = @import("cortheon/gate_test.zig");
+    _ = @import("cortheon/gate_http_test.zig");
+}
