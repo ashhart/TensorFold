@@ -36,6 +36,7 @@ const Chain = mtp.Chain;
 const Pick = mtp.Pick;
 const Sampling = mtp.Sampling;
 const drawRow = mtp.drawRow;
+const maskRow = mtp.maskRow;
 const promote = mtp.promote;
 
 fn cint(v: usize) c_int {
@@ -245,11 +246,11 @@ pub fn Ops(comptime Tri: type) type {
             d.open = keeps;
         }
 
-        /// The window's rows drawn at their keyed positions (seq position fed0 + 1 + r), as serial decoding draws.
-        pub fn draws(o: Self, d: *Draft, sm: ?Sampling, out: []u32) !void {
+        /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.
+        pub fn draws(o: Self, d: *Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
             const n = d.rows;
             const greedy = if (sm) |s| s.temperature <= 0 else true;
-            if (greedy) {
+            if (greedy and masks.len == 0) {
                 try o.h.best(o.stream(), d.logits.ptr, vocab, vocab, n, d.best.ptr);
                 try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
                 for (out[0..n], 0..) |*t, r| t.* = @intCast(@as(i32, @bitCast(d.best_host[4 * r + 2])));
@@ -257,7 +258,12 @@ pub fn Ops(comptime Tri: type) type {
             }
             const rows = d.host[0 .. n * vocab];
             try download(o.stream(), std.mem.sliceAsBytes(rows), d.logits.ptr);
-            for (out[0..n], 0..) |*t, r| t.* = try drawRow(o.e.gpa, rows[r * vocab ..][0..vocab], null, d.fed0 + 1 + r, sm);
+            const words = masks.len / n;
+            for (out[0..n], 0..) |*t, r| {
+                const row = rows[r * vocab ..][0..vocab];
+                if (words > 0) maskRow(row, masks[r * words ..][0..words]);
+                t.* = try drawRow(o.e.gpa, row, null, d.fed0 + 1 + r, sm);
+            }
         }
 
         /// Keep the window's first `keep` rows (Python forward.commit) from its saved rows; a repeat is a no-op.

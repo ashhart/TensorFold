@@ -91,6 +91,13 @@ pub fn argmaxRow(row: []const u16) usize {
     return at;
 }
 
+/// Structured output: every token whose bit is clear in `bits` (token i in word i / 32) scores bf16 -inf.
+pub fn maskRow(row: []u16, bits: []const u32) void {
+    for (row, 0..) |*v, i| {
+        if (i / 32 >= bits.len or (bits[i / 32] >> @intCast(i % 32)) & 1 == 0) v.* = 0xFF80;
+    }
+}
+
 /// The keyed draw over one bf16 score row, column j being token ids[j] (or j), as lanes.sampling.choose draws.
 pub fn drawRow(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, position: u64, sm: ?Sampling) !u32 {
     const id = struct {
@@ -268,6 +275,27 @@ test "a keyed draw over the top-k columns is the draw over every column" {
         try std.testing.expectEqual(try all(gpa, &row, position, s), try drawRow(gpa, &row, null, position, s));
     }
     try std.testing.expectEqual(@as(u32, @intCast(argmaxRow(&row))), try drawRow(gpa, &row, null, 0, null));
+}
+
+test "a masked row draws only allowed tokens, greedy the best of them" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(5);
+    for (0..64) |position| {
+        var row: [300]u16 = undefined;
+        for (&row) |*v| v.* = @as(u16, 0x3f00) + prng.random().int(u8);
+        var bits: [10]u32 = @splat(0); // tokens 0..319: three allowed, the vocabulary's best usually not among them
+        const allowed = [_]u32{ 7, @intCast(64 + position), 299 };
+        for (allowed) |t| bits[t / 32] |= @as(u32, 1) << @intCast(t % 32);
+        var best: u32 = allowed[0];
+        for (allowed) |t| if (promote(row[t]) > promote(row[best]) or (promote(row[t]) == promote(row[best]) and t < best)) {
+            best = t;
+        };
+        maskRow(&row, &bits);
+        try std.testing.expectEqual(best, try drawRow(gpa, &row, null, position, null));
+        const s: Sampling = .{ .seed = 11, .temperature = 1.0, .top_k = 20, .top_p = 0.95 };
+        const t = try drawRow(gpa, &row, null, position, s);
+        try std.testing.expect(std.mem.indexOfScalar(u32, &allowed, t) != null);
+    }
 }
 
 test "draft chains fit one verify window while the default stays six" {
