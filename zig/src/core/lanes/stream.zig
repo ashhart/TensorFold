@@ -348,9 +348,10 @@ pub const Stream = struct {
 
     /// Begin the thinking budget's close: its first token now, the rest forced after it.
     pub fn startClose(s: *Stream, gpa: Allocator) !u32 {
+        try s.force.ensureTotalCapacity(gpa, s.think_close.len - 1);
         s.think_open = false;
         s.force.clearRetainingCapacity();
-        try s.force.appendSlice(gpa, s.think_close[1..]);
+        s.force.appendSliceAssumeCapacity(s.think_close[1..]);
         return s.think_close[0];
     }
 
@@ -386,16 +387,13 @@ pub const Stream = struct {
     /// Append tokens, and with `logprobs` their rows, until the stream finishes; how many landed.
     pub fn commit(s: *Stream, gpa: Allocator, tokens: []const u32, rows: []const Row) !usize {
         if (rows.len != if (s.logprobs != null) tokens.len else 0) return error.LogprobRowsMismatch;
+        if (s.finished or tokens.len == 0) return 0;
+        try s.context.ensureUnusedCapacity(gpa, tokens.len);
+        if (rows.len > 0) try s.rows.ensureUnusedCapacity(gpa, rows.len);
+        if (s.loop_guard and s.think_open) try s.force.ensureTotalCapacity(gpa, s.think_close.len);
         var landed: usize = 0;
         for (tokens, 0..) |t, i| {
             if (s.finished) break;
-            try s.context.append(gpa, t);
-            if (rows.len > 0) try s.rows.append(gpa, rows[i]);
-            landed += 1;
-            if (@as(i64, t) == s.think_end) {
-                s.think_open = false;
-                if (s.answer_from == null) s.answer_from = s.emitted().len;
-            }
             if (s.grammar) |g| {
                 if (!try g.follow(t)) {
                     s.finished = true;
@@ -403,6 +401,15 @@ pub const Stream = struct {
                     s.problem = "the reply's grammar rejected a chosen token";
                     break;
                 }
+            }
+            s.context.appendAssumeCapacity(t);
+            if (rows.len > 0) s.rows.appendAssumeCapacity(rows[i]);
+            landed += 1;
+            if (@as(i64, t) == s.think_end) {
+                s.think_open = false;
+                if (s.answer_from == null) s.answer_from = s.emitted().len;
+            }
+            if (s.grammar) |g| {
                 if (g.finished() and !s.isEos(t)) { // the grammar's stop token ends the reply (eos ignored or not)
                     s.finished = true;
                     s.reason = .stop;
@@ -424,7 +431,7 @@ pub const Stream = struct {
                 } else {
                     s.think_open = false;
                     s.force.clearRetainingCapacity();
-                    try s.force.appendSlice(gpa, s.think_close);
+                    s.force.appendSliceAssumeCapacity(s.think_close);
                 }
                 break;
             } else if (s.budgetLeft() <= 0) {
@@ -445,6 +452,10 @@ pub const Stream = struct {
         return s.force.orderedRemove(0);
     }
 };
+
+test {
+    _ = @import("commit_storage_test.zig");
+}
 
 test "commit stops at eos and length" {
     const gpa = std.testing.allocator;
