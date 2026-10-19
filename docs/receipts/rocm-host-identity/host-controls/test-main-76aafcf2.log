@@ -1,0 +1,894 @@
+# tree: main 76aafcf274e60a5e31a59ce145b2f71f7b366e9d
+# cmd: zig build test -Dcpu=apple_m1 --summary all -j8 (zig 0.17.0, ZIG_GLOBAL_CACHE_DIR and ZIG_LOCAL_CACHE_DIR private)
+# started 2026-10-18T23:12:40Z
+test
++- run test w
+[default] (warn): a round could not be recorded: OutOfDeviceMemory
+failed command: ./.zc/o/c006ea4bcf6c8cffd67e5b0b6d533499/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+failed command: ./.zc/o/61f4f42007c910ae0dba3d28a8174637/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): language_model.lm_head: stored affine but declared unquantized
+[default] (warn): language_model.model.embed_tokens: stored affine but declared unquantized
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+failed command: ./.zc/o/8871d809081e7b7104c8626a39069d70/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): XPU: a command list did not drain at close; its memory and context stay until the process ends
+failed command: ./.zc/o/d81124c80476e199df0db72a5c7ab081/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): glm: restoring 1500 tokens failed (PoolMoveNotDrained); pool relocation aborted
+failed command: ./.zc/o/9c900e13443c4ea3333643efc5df6815/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): lane host: stopping at a round boundary: 1 running and 2 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (the planner refused): every admitted stream fails
+[default] (warn): lane host: a round failed (PlannerFull): every admitted stream fails
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (drain deadline)
+failed command: ./.zc/o/a8b7681f29e9e489e82bddc04264a5b8/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zc/o/79a801776f3037613fa73ba17b60f7ac/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): slide pocket: a delete failed (UploadFailed), and its put-back did not reach the device (PutBackNotOnDevice)
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): slide pocket: a delete failed (UploadFailed), and its put-back did not reach the device (PutBackNotOnDevice)
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): checkpoint tensor text.weight stays in its file: read it through a Stage
+[default] (warn): language_model.mtp.fc_embedding: not read at its declared width: UnsupportedQuantization
+[default] (warn): language_model.model.embed_tokens: not stored at its declared width: InvalidAffineShape
+[default] (warn): lane L0.att.o: LaneRowsNotFours
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): pack ~/tmp/rv1001-1-main/.zig-cache/tmp/y644BJjaM5ocvL-U/pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): pack pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+SSM pipeline capacity: forward=1024, backward=1024
+SSM seeded=false heads=2 groups=1 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0, 0 }
+SSM seeded=false heads=2 groups=1 rows=7: max abs dx/dB/dC/ddt { 0.000000011360835217022469, 0.000000002917455535836333, 0.000000004647133651849988, 0.00000008929183081818337 }
+SSM seeded=false heads=2 groups=1 rows=8: max abs dx/dB/dC/ddt { 0.00000000863441644745333, 0.0000000030472456129596037, 0.000000004647133651849988, 0.00000010044378595530645 }
+SSM seeded=false heads=2 groups=1 rows=9: max abs dx/dB/dC/ddt { 0.000000006604320090808358, 0.0000000027633473599630864, 0.0000000051661870337227356, 0.00000006044416009376441 }
+SSM seeded=false heads=2 groups=1 rows=15: max abs dx/dB/dC/ddt { 0.000000010416435020088599, 0.0000000050579541700790376, 0.000000008099387559939997, 0.00000010302938735495815 }
+SSM seeded=false heads=2 groups=1 rows=16: max abs dx/dB/dC/ddt { 0.000000010399334079633227, 0.000000004927133326337874, 0.000000008099387559939997, 0.00000010076810685877291 }
+SSM seeded=false heads=2 groups=1 rows=17: max abs dx/dB/dC/ddt { 0.00000001543697608283323, 0.000000004476264019170895, 0.000000008099387559939997, 0.000000170725301229524 }
+SSM seeded=false heads=2 groups=1 rows=25: max abs dx/dB/dC/ddt { 0.00000001223729547902841, 0.000000005462381803822414, 0.000000014270247941650105, 0.00000013346487892640368 }
+SSM seeded=false heads=4 groups=2 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0, 0 }
+SSM seeded=false heads=4 groups=2 rows=7: max abs dx/dB/dC/ddt { 0.000000015510263740026176, 0.000000006877330351040545, 0.000000003777481768357793, 0.00000016323549628660672 }
+SSM seeded=false heads=4 groups=2 rows=8: max abs dx/dB/dC/ddt { 0.0000000129148233773968, 0.000000005653858301674086, 0.000000005027532001822266, 0.00000017245745953520242 }
+SSM seeded=false heads=4 groups=2 rows=9: max abs dx/dB/dC/ddt { 0.00000002633087964332148, 0.000000006475598009203498, 0.000000005457366610700509, 0.00000029433054438143813 }
+SSM seeded=false heads=4 groups=2 rows=15: max abs dx/dB/dC/ddt { 0.00000002973828677754753, 0.000000009558005810428316, 0.000000008944659693477242, 0.0000003865198301422623 }
+SSM seeded=false heads=4 groups=2 rows=16: max abs dx/dB/dC/ddt { 0.000000025754882060358142, 0.000000008921690271973537, 0.000000008944659693477242, 0.0000003074925702950537 }
+SSM seeded=false heads=4 groups=2 rows=17: max abs dx/dB/dC/ddt { 0.00000002553487910179897, 0.000000008921690271973537, 0.00000001164840428280467, 0.00000030358411029496324 }
+SSM seeded=false heads=4 groups=2 rows=25: max abs dx/dB/dC/ddt { 0.00000003875727619395697, 0.000000014591112693085329, 0.000000022576584234046404, 0.0000004419375038144935 }
+SSM seeded=false heads=64 groups=8 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0, 0 }
+SSM seeded=false heads=64 groups=8 rows=9: max abs dx/dB/dC/ddt { 0.00000002087263310801557, 0.00000001779203438051491, 0.000000010395453171885283, 0.0000002193045710030539 }
+SSM seeded=false heads=64 groups=8 rows=17: max abs dx/dB/dC/ddt { 0.00000009930843825056712, 0.00000002114473045267129, 0.00000001602812140649723, 0.0000007270377315737875 }
+SSM pipeline capacity: forward=1024, backward=1024
+SSM seeded=true heads=2 groups=1 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0.000000015089179933314156, 0.00000003066629741810267 }
+SSM seeded=true heads=2 groups=1 rows=7: max abs dx/dB/dC/ddt { 0.000000011360835217022469, 0.000000002917455535836333, 0.000000015656003028718946, 0.00000011578910319443025 }
+SSM seeded=true heads=2 groups=1 rows=8: max abs dx/dB/dC/ddt { 0.00000000863441644745333, 0.0000000030472456129596037, 0.000000015656003028718946, 0.000000137397136557027 }
+SSM seeded=true heads=2 groups=1 rows=9: max abs dx/dB/dC/ddt { 0.000000006604320090808358, 0.0000000027633473599630864, 0.000000015656003028718946, 0.000000058752570086806344 }
+SSM seeded=true heads=2 groups=1 rows=15: max abs dx/dB/dC/ddt { 0.000000010416435020088599, 0.0000000050579541700790376, 0.00000003896021144589312, 0.00000011965777954592305 }
+SSM seeded=true heads=2 groups=1 rows=16: max abs dx/dB/dC/ddt { 0.000000010399334079633227, 0.000000004927133326337874, 0.00000004227448897886621, 0.0000001134548608394681 }
+SSM seeded=true heads=2 groups=1 rows=17: max abs dx/dB/dC/ddt { 0.00000001543697608283323, 0.000000004476264019170895, 0.00000004227448897886621, 0.00000018029616666304094 }
+SSM seeded=true heads=2 groups=1 rows=25: max abs dx/dB/dC/ddt { 0.00000001223729547902841, 0.000000005462381803822414, 0.0000000506942888084394, 0.0000001136397048684401 }
+SSM seeded=true heads=4 groups=2 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0.0000000073519402093991104, 0.000000027996068407976082 }
+SSM seeded=true heads=4 groups=2 rows=7: max abs dx/dB/dC/ddt { 0.000000015510263740026176, 0.000000006877330351040545, 0.00000001807481535276434, 0.00000021659550952790596 }
+SSM seeded=true heads=4 groups=2 rows=8: max abs dx/dB/dC/ddt { 0.0000000129148233773968, 0.000000005653858301674086, 0.000000018969054375872485, 0.00000017414204611654327 }
+SSM seeded=true heads=4 groups=2 rows=9: max abs dx/dB/dC/ddt { 0.00000002633087964332148, 0.000000006475598009203498, 0.000000018969054375872485, 0.00000017655989847931153 }
+SSM seeded=true heads=4 groups=2 rows=15: max abs dx/dB/dC/ddt { 0.00000002973828677754753, 0.000000009558005810428316, 0.000000023961633413560612, 0.0000003531072296780735 }
+SSM seeded=true heads=4 groups=2 rows=16: max abs dx/dB/dC/ddt { 0.000000025754882060358142, 0.000000008921690271973537, 0.000000023961633413560612, 0.00000024600469961111315 }
+SSM seeded=true heads=4 groups=2 rows=17: max abs dx/dB/dC/ddt { 0.00000002553487910179897, 0.000000008921690271973537, 0.000000023961633413560612, 0.0000003112589632703333 }
+SSM seeded=true heads=4 groups=2 rows=25: max abs dx/dB/dC/ddt { 0.00000003875727619395697, 0.000000014591112693085329, 0.00000002654540304236619, 0.0000004793090875310213 }
+SSM seeded=true heads=64 groups=8 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0.000000013799211689979884, 0.00000008033819287600608 }
+SSM seeded=true heads=64 groups=8 rows=9: max abs dx/dB/dC/ddt { 0.00000002087263310801557, 0.00000001779203438051491, 0.000000027007305641868484, 0.0000002670173361307704 }
+SSM seeded=true heads=64 groups=8 rows=17: max abs dx/dB/dC/ddt { 0.00000009930843825056712, 0.00000002114473045267129, 0.00000003555922037379311, 0.0000006937729284395289 }
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): qwen image: num_layers is not 32; this family runs the released geometry only
+[default] (warn): /opt/homebrew/opt/jpeg-turbo/lib/libturbojpeg.0.dylib is not libjpeg-turbo 3.1.4.1; JPEG images are refused until it is
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+[default] (warn): gemma4: layers.0.self_attn.q_proj is 4-bit in groups of 32; the kernels read bits 2-6 and 8 in groups of 64
+[default] (warn): gemma4: layers.0.self_attn.q_proj is 4-bit in groups of 128; the kernels read bits 2-6 and 8 in groups of 64
+[default] (warn): gemma4: layers.3.mlp.up_proj's width is not MLX affine bits 2-6 or 8
+[default] (warn): gemma4: layers.3.mlp.up_proj's width is not MLX affine bits 2-6 or 8
+[default] (warn): gemma4: layers.3.mlp.up_proj is not a width table (false or {} marks a module unquantized); every linear is affine
+[default] (warn): gemma4: layers.3.mlp.up_proj is not a width table (false or {} marks a module unquantized); every linear is affine
+[default] (warn): model.layers.3.mlp.up_proj: another spelling of module layers.3.mlp.up_proj declares a different width
+[default] (warn): expert parallel: this Mac runs .{ .magic = 1196182853, .version = 2, .layers = 45, .run = 45, .mtp = 1, .experts = 288, .own_lo = 0, .own_hi = 144, .cap = 8256, .pad = 0, .model = 4660, .rest = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, the peer .{ .magic = 1196182853, .version = 2, .layers = 45, .run = 8, .mtp = 1, .experts = 288, .own_lo = 144, .own_hi = 288, .cap = 8256, .pad = 0, .model = 4660, .rest = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
+[default] (warn): expert parallel: this Mac runs .{ .magic = 1196182853, .version = 2, .layers = 45, .run = 8, .mtp = 1, .experts = 288, .own_lo = 144, .own_hi = 288, .cap = 8256, .pad = 0, .model = 4660, .rest = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, the peer .{ .magic = 1196182853, .version = 2, .layers = 45, .run = 45, .mtp = 1, .experts = 288, .own_lo = 0, .own_hi = 144, .cap = 8256, .pad = 0, .model = 4660, .rest = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
+sparse attention (64 heads): 99.97% of outputs equal the row kernel's, at most 0.96 bf16 steps apart
+sparse attention (32 heads): 99.96% of outputs equal the row kernel's, at most 0.94 bf16 steps apart
+absorb on the tensor units: 99.99% of outputs equal the row kernel's, at most 0.98 bf16 steps apart
+KDA heads=64 rows=1: worst 0.4999 bf16 steps, state 0.000000002
+KDA heads=64 rows=2: worst 0.4999 bf16 steps, state 0.000000002
+KDA heads=64 rows=8: worst 0.4999 bf16 steps, state 0.000000003
+KDA heads=64 rows=16: worst 0.4999 bf16 steps, state 0.000000005
+KDA heads=32 rows=1: worst 0.4999 bf16 steps, state 0.000000002
+KDA heads=32 rows=2: worst 0.4999 bf16 steps, state 0.000000002
+KDA heads=32 rows=8: worst 0.4999 bf16 steps, state 0.000000003
+KDA heads=32 rows=16: worst 0.4999 bf16 steps, state 0.000000005
+[default] (warn): language_model.model.layers.1.mlp.down_proj: another spelling of module layers.1.mlp.down_proj declares a different width
+glm plan: 4 of 45 layers and the MTP layer, 1.51 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x39
+glm plan: 4 of 45 layers and the MTP layer, 1.51 GB in buffers, every tensor's name, dtype and shape checked; 2-bit/64 x2, 4-bit/64 x35, 5-bit/32 x1, 8-bit/64 x1
+glm plan: 4 of 45 layers and the MTP layer, 1.57 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x37, 5-bit/64 x4, 6-bit/64 x2, 8-bit/64 x4
+glm plan: 4 of 45 layers and the MTP layer, 1.86 GB in buffers, every tensor's name, dtype and shape checked; 2-bit/64 x3, 4-bit/64 x34, 5-bit/64 x1, 6-bit/64 x1, 8-bit/64 x1
+glm plan: 4 of 45 layers and the MTP layer, 1.56 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x40
+glm plan: 4 of 45 layers and the MTP layer, 1.51 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x39
+glm plan: 4 of 45 layers and the MTP layer, 1.56 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x40
+glm plan: 4 of 45 layers and the MTP layer, 1.56 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x40
+failed command: ./.zc/o/38a8f1065ad9ff655f4b42cf2113d36d/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): pack ~/tmp/rv1001-1-main/.zig-cache/tmp/WGohgoDAEaZ54stn/pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): pack pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): language_model.mtp.fc_embedding: not read at its declared width: UnsupportedQuantization
+[default] (warn): language_model.model.embed_tokens: not stored at its declared width: InvalidAffineShape
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): lane L0.att.o: LaneRowsNotFours
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+failed command: ./.zc/o/f8d3bf693f0e05179118ea8c6eb40f5c/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): language_model.model.layers.0: gate and up of one expert differ in width; one kernel reads both
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+[default] (warn): language_model.mtp.fc_embedding: not read at its declared width: UnsupportedQuantization
+[default] (warn): language_model.model.embed_tokens: not stored at its declared width: InvalidAffineShape
+[default] (warn): pack ~/tmp/rv1001-1-main/.zig-cache/tmp/Lte7I8mqNdGe7FKe/pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): pack pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): lane L0.att.o: LaneRowsNotFours
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+failed command: ./.zc/o/9586ede43cd16349d8dbadf219aa4ae4/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- run test w
+[default] (warn): language_model.mtp.fc_embedding: not read at its declared width: UnsupportedQuantization
+[default] (warn): language_model.model.embed_tokens: not stored at its declared width: InvalidAffineShape
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): lane L0.att.o: LaneRowsNotFours
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): pack ~/tmp/rv1001-1-main/.zig-cache/tmp/lyhvxnFj9cqHZy1y/pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): pack pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+failed command: ./.zc/o/1a82ff962611db8c42af6656d23d40d4/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+failed command: ./.zc/o/3a29e04aef202e78700d1846260ac59b/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+failed command: ./.zc/o/30d710ca425c97de2cded66302b3cc2f/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zc/o/9b8a4b56c3a74aabdb18c5ebefc89338/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 0 cannot exchange with rank 2; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 1 cannot exchange with rank 3; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 2 cannot exchange with rank 0; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 3 cannot exchange with rank 1; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+failed command: ./.zc/o/fe1691631351b887dfcf0a23f0ecffec/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+fake target: proposed=68 verified=68 accepted=68
+failed command: ./.zc/o/b14d9e46b0d7ee10a3cb8cf281256070/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zc/o/a529abb901551c852fa65e556ac33565/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+failed command: ./.zc/o/64fbdce0f7ef835b083e716eeb96c64e/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): /opt/homebrew/opt/jpeg-turbo/lib/libturbojpeg.0.dylib is not libjpeg-turbo 3.1.4.1; JPEG images are refused until it is
+libjpeg-turbo 3.1.4.1 not found: LFM2's JPEG cases skipped
+libjpeg-turbo 3.1.4.1 not found: LFM2's JPEG cases skipped
+failed command: ./.zc/o/65e976b591c0054618177133701a6e9c/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+failed command: ./.zc/o/bad8028c5ed1fa3d2a707d317182e06f/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (err): rank 0: another rank's process ended (its line closed); this rank stops instead of waiting on it
+[default] (err): rank 0: rank 1 stopped (peer OOM); this rank stops too
+failed command: ./.zc/o/ee93d32aa7709c998e223d0eefc647cb/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): lane host: stopping at a round boundary: 2 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (the planner refused): every admitted stream fails
+[default] (warn): lane host: a round failed (PlannerFull): every admitted stream fails
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (drain deadline)
+failed command: ./.zc/o/3715e5673fd04f7ffc906ecb69c0e4d0/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): qwen3_5: a failed restore's stream did not drain: its kept state's host copy stays
+[default] (warn): qwen3_5: a kept state's host copy goes to the copy-source quarantine: a restore's copies did not drain
+[default] (warn): qwen3_5: a failed restore's stream did not drain: its kept state's host copy stays
+failed command: ./.zc/o/f3b10f670ad7268b96c2e9a7e7df0b46/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): /opt/homebrew/opt/jpeg-turbo/lib/libturbojpeg.0.dylib is not libjpeg-turbo 3.1.4.1; JPEG images are refused until it is
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+failed command: ./.zc/o/8b9c81f8568eba22650d9870cadcbbdc/test --cache-dir=./.zc --seed=0xee6486a4 --listen=-
+
+Build Summary: 292/292 steps succeeded; 4305/4321 tests passed (16 skipped)
+test success
++- run test 37 pass (37 total) 48ms MaxRSS:8M
+|  +- compile test debug native-native success 5s MaxRSS:315M
++- run test 7 pass (7 total) 320ms MaxRSS:64M
+|  +- compile test debug native success 2s MaxRSS:310M
++- run test 9 pass (9 total) 96ms MaxRSS:4M
+|  +- compile test debug native success 4s MaxRSS:285M
+|     +- options success
+|        +- compile exe digest-writer debug native success 4s MaxRSS:264M
++- run test 6 pass (6 total) 5ms MaxRSS:3M
+|  +- compile test debug native success 1s MaxRSS:270M
++- test-flashnext-batch-host success
+|  +- run test 6 pass (6 total) 4s MaxRSS:30M
+|     +- compile test debug native success 7s MaxRSS:383M
+|        +- WriteFile flashnext-test-empty.zig success
++- run test 2 pass (2 total) 38ms MaxRSS:3M
+|  +- compile test debug native-native success 2s MaxRSS:267M
++- run test 4 pass (4 total) 5ms MaxRSS:3M
+|  +- compile test debug native-native success 1s MaxRSS:266M
++- run test 4 pass (4 total) 9ms MaxRSS:3M
+|  +- compile test debug native-native success 3s MaxRSS:290M
++- run test 3 pass (3 total) 4ms MaxRSS:3M
+|  +- compile test debug native-native success 1s MaxRSS:267M
++- run test 23 pass (23 total) 7ms MaxRSS:3M
+|  +- compile test debug native-native success 2s MaxRSS:285M
++- run test 5 pass (5 total) 8ms MaxRSS:7M
+|  +- compile test debug native-native success 4s MaxRSS:332M
++- run test 19 pass (19 total) 6ms MaxRSS:6M
+|  +- compile test fast native-native success 12s MaxRSS:493M
+|     +- WriteFile drama3.metallib cached
+|        +- run xcrun (drama3.metallib) cached
+|           +- run xcrun (d3_dense.air) cached
+|           +- run xcrun (d3_gdn.air) cached
+|           +- run xcrun (d3_attn.air) cached
+|           +- run xcrun (d3_moe.air) cached
+|           +- run xcrun (d3_sample.air) cached
+|           +- run xcrun (d3_codec.air) cached
++- run test 131 pass (131 total) 970ms MaxRSS:22M
+|  +- compile test fast native-native success 28s MaxRSS:877M
+|     +- WriteFile draft_ids.txt success
+|     +- WriteFile nemotron_packed.metallib success
+|        +- run xcrun (nemotron_packed.metallib) success 82ms
+|           +- run xcrun (coop_down_1_0.air) success 241ms
+|           +- run xcrun (coop_down_2_0.air) success 239ms
+|           +- run xcrun (coop_down_2_1.air) success 246ms
+|           +- run xcrun (coop_draft_1_0.air) success 252ms
+|           +- run xcrun (coop_draft_2_0.air) success 239ms
+|           +- run xcrun (coop_draft_2_1.air) success 258ms
+|           +- run xcrun (coop_eh_1_0.air) success 248ms
+|           +- run xcrun (coop_eh_1_0_sk.air) success 237ms
+|           +- run xcrun (coop_eh_2_0.air) success 238ms
+|           +- run xcrun (coop_eh_2_0_sk.air) success 243ms
+|           +- run xcrun (coop_eh_2_1.air) success 238ms
+|           +- run xcrun (coop_eh_2_1_sk.air) success 1s
+|           +- run xcrun (coop_head_1_0.air) success 234ms
+|           +- run xcrun (coop_head_2_0.air) success 244ms
+|           +- run xcrun (coop_head_2_1.air) success 240ms
+|           +- run xcrun (coop_in_1_0.air) success 1s
+|           +- run xcrun (coop_in_1_0_sk.air) success 243ms
+|           +- run xcrun (coop_in_2_0.air) success 238ms
+|           +- run xcrun (coop_in_2_0_sk.air) success 243ms
+|           +- run xcrun (coop_in_2_1.air) success 250ms
+|           +- run xcrun (coop_in_2_1_sk.air) success 258ms
+|           +- run xcrun (coop_out_1_0.air) success 250ms
+|           +- run xcrun (coop_out_1_0_sk.air) success 238ms
+|           +- run xcrun (coop_out_2_0.air) success 238ms
+|           +- run xcrun (coop_out_2_0_sk.air) success 240ms
+|           +- run xcrun (coop_out_2_1.air) success 251ms
+|           +- run xcrun (coop_out_2_1_sk.air) success 260ms
+|           +- run xcrun (coop_qkv_1_0.air) success 248ms
+|           +- run xcrun (coop_qkv_2_0.air) success 246ms
+|           +- run xcrun (coop_qkv_2_1.air) success 262ms
+|           +- run xcrun (coop_up_1_0.air) success 238ms
+|           +- run xcrun (coop_up_2_0.air) success 1s
+|           +- run xcrun (coop_up_2_1.air) success 253ms
+|           +- run xcrun (up_relu2_1_0.air) success 236ms
+|           +- run xcrun (up_relu2_2_0.air) success 250ms
+|           +- run xcrun (up_relu2_2_1.air) success 262ms
++- run test 77 pass (77 total) 77ms MaxRSS:9M
+|  +- compile test fast native-native success 23s MaxRSS:740M
++- run test 38 pass (38 total) 64ms MaxRSS:5M
+|  +- compile test fast native-native success 13s MaxRSS:466M
++- run test 86 pass (86 total) 170ms MaxRSS:10M
+|  +- compile test fast native-native success 24s MaxRSS:754M
++- run test 9 pass (9 total) 6ms MaxRSS:6M
+|  +- compile test fast native-native success 9s MaxRSS:409M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 2 pass (2 total) 5ms MaxRSS:6M
+|  +- compile test fast native-native success 8s MaxRSS:398M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- test-exl3 success
+|  +- compile obj exl3_metal_loader debug native-native success 454ms MaxRSS:101M
+|  |  +- WriteFile exl3_projection.metal success
+|  +- run test 11 pass (11 total) 18ms MaxRSS:7M
+|  |  +- compile test fast native-native success 20s MaxRSS:424M
+|  |     +- WriteFile exl3_projection.metal (reused)
+|  +- run test 2 pass (2 total) 7ms MaxRSS:6M
+|     +- compile test fast native-native success 18s MaxRSS:402M
+|        +- WriteFile exl3_projection.metal (reused)
++- run test 4 pass (4 total) 6ms MaxRSS:6M
+|  +- compile test fast native-native success 8s MaxRSS:402M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 19 pass (19 total) 1s MaxRSS:24M
+|  +- compile test safe native-native success 30s MaxRSS:1G
+|     +- WriteFile exlr8_alias.zig success
+|     +- WriteFile drama3_core.zig success
+|     +- WriteFile draft_ids.txt (reused)
+|     +- WriteFile xsum.metal success
+|     +- WriteFile drama3.metallib success
+|     |  +- run xcrun (drama3.metallib) success 413ms
+|     |     +- run xcrun (d3_dense.air) success 84ms
+|     |     +- run xcrun (d3_gdn.air) success 63ms
+|     |     +- run xcrun (d3_attn.air) success 64ms
+|     |     +- run xcrun (d3_moe.air) success 96ms
+|     |     +- run xcrun (d3_sample.air) success 104ms
+|     |     +- run xcrun (d3_codec.air) success 1s
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 9 pass (9 total) 5ms MaxRSS:6M
+|  +- compile test safe native-native success 9s MaxRSS:415M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 3 pass (3 total) 9ms MaxRSS:7M
+|  +- compile test fast native-native success 8s MaxRSS:412M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 2 pass (2 total) 5ms MaxRSS:6M
+|  +- compile test fast native-native success 8s MaxRSS:400M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 1 pass (1 total) 6ms MaxRSS:6M
+|  +- compile test safe native-native success 9s MaxRSS:408M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 5 pass (5 total) 4ms MaxRSS:2M
+|  +- compile test safe native-native success 9s MaxRSS:373M
++- run test 10 pass (10 total) 6ms MaxRSS:6M
+|  +- compile test safe native-native success 10s MaxRSS:439M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 3 pass (3 total) 3ms MaxRSS:2M
+|  +- compile test safe native-native success 9s MaxRSS:367M
++- run test 4 pass (4 total) 3ms MaxRSS:2M
+|  +- compile test safe native-native success 8s MaxRSS:369M
++- run test 1 pass (1 total) 7ms MaxRSS:6M
+|  +- compile test safe native-native success 9s MaxRSS:410M
++- run test 112 pass (112 total) 206ms MaxRSS:17M
+|  +- compile test safe native-native success 18s MaxRSS:658M
+|     +- WriteFile xsum.metal (reused)
+|     +- WriteFile xsum.metal (reused)
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 7 pass (7 total) 4ms MaxRSS:2M
+|  +- compile test safe native-native success 15s MaxRSS:401M
++- run test 1 pass (1 total) 5ms MaxRSS:6M
+|  +- compile test safe native-native success 9s MaxRSS:413M
++- run sh success 220ms
+|  +- compile exe tensorfold-native safe native-native success 2m MaxRSS:4G
+|     +- options success
+|     +- WriteFile drama3_core.zig (reused)
+|     +- WriteFile exlr8_alias.zig cached
+|     +- WriteFile draft_ids.txt (reused)
+|     +- WriteFile xsum.metal (reused)
+|     +- WriteFile drama3.metallib (+1 more reused dependencies)
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 428 pass (428 total) 51s MaxRSS:96M
+|  +- compile test debug native-native success 17s MaxRSS:1G
++- run test 5 pass (5 total) 7ms MaxRSS:3M
+|  +- compile test debug native-native success 4s MaxRSS:354M
++- run test 25 pass (25 total) 30s MaxRSS:236M
+|  +- compile test debug native-native success 2s MaxRSS:336M
++- run test 15 pass (15 total) 201ms MaxRSS:33M
+|  +- compile test debug native-native success 3s MaxRSS:389M
++- run test 204 pass (204 total) 1s MaxRSS:12M
+|  +- compile test fast native-native success 30s MaxRSS:988M
++- run test 8 pass (8 total) 76ms MaxRSS:14M
+|  +- compile test fast native-native success 9s MaxRSS:431M
++- run test 1 pass (1 total) 5ms MaxRSS:6M
+|  +- compile test fast native-native success 9s MaxRSS:396M
+|     +- WriteFile tensorfold.metallib success
+|        +- run xcrun (tensorfold.metallib) success 445ms
+|           +- run xcrun (runtime_tests.air) success 1s
+|           +- run xcrun (nemotron_expert_up.air) success 1s
+|           +- run xcrun (nemotron_expert_down.air) success 1s
++- run test 648 pass, 3 skip (651 total) 20s MaxRSS:161M
+|  +- compile test fast native-native success 1m MaxRSS:2G
+|     +- WriteFile draft_ids.txt (reused)
+|     +- WriteFile xsum.metal (reused)
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 163 pass (163 total) 420ms MaxRSS:29M
+|  +- compile test fast native-native success 56s MaxRSS:789M
++- run test 30 pass, 1 skip (31 total) 42ms MaxRSS:2M
+|  +- compile test fast native-native success 12s MaxRSS:488M
++- run test 1 pass (1 total) 3ms MaxRSS:2M
+|  +- compile test fast native-native success 7s MaxRSS:348M
++- run test 6 pass (6 total) 6ms MaxRSS:6M
+|  +- compile test fast native-native success 8s MaxRSS:400M
++- run test 4 pass (4 total) 3ms MaxRSS:2M
+|  +- compile test fast native-native success 8s MaxRSS:367M
++- test-cuda-host success
+|  +- run test 1 pass (1 total) 5ms MaxRSS:3M
+|  |  +- compile test debug native success 3s MaxRSS:270M
+|  +- run test 30 pass (30 total) 69ms MaxRSS:4M
+|  |  +- compile test debug native success 5s MaxRSS:369M
+|  |     +- WriteFile h3-compile-only.fatbin success
+|  |     +- options cached
+|  +- run test 3 pass (3 total) 1s MaxRSS:70M
+|  |  +- compile test debug native success 4s MaxRSS:288M
+|  +- run test 10 pass (10 total) 2s MaxRSS:15M
+|  |  +- compile test debug native success 6s MaxRSS:418M
+|  |     +- WriteFile draft_ids.txt (reused)
+|  |     +- options (reused)
+|  +- compile obj exl3_host_compile debug native success 384ms MaxRSS:113M
+|  |  +- options (reused)
+|  +- run test 6 pass (6 total) 13ms MaxRSS:3M
+|  |  +- compile test debug native success 4s MaxRSS:306M
+|  |     +- options (reused)
+|  +- run test 6 pass (6 total) 75ms MaxRSS:5M
+|  |  +- compile test debug native success 4s MaxRSS:290M
+|  |     +- options (reused)
+|  +- run test 8 pass (8 total) 16ms MaxRSS:3M
+|  |  +- compile test debug native success 3s MaxRSS:281M
+|  +- run test 3 pass (3 total) 71ms MaxRSS:5M
+|  |  +- compile test debug native success 4s MaxRSS:280M
+|  +- run test 8 pass (8 total) 21ms MaxRSS:3M
+|  |  +- compile test debug native success 2s MaxRSS:285M
+|  +- run test 4 pass (4 total) 7ms MaxRSS:3M
+|  |  +- compile test debug native success 3s MaxRSS:286M
+|  |     +- options (reused)
+|  +- run test 1 pass (1 total) 50ms MaxRSS:4M
+|  |  +- compile test debug native success 4s MaxRSS:285M
+|  |     +- options (reused)
+|  +- run test 4 pass (4 total) 5ms MaxRSS:2M
+|  |  +- compile test fast native success 17s MaxRSS:373M
+|  |     +- options (reused)
+|  +- run test 1 pass (1 total) 32ms MaxRSS:3M
+|  |  +- compile test fast native success 18s MaxRSS:382M
+|  |     +- options (reused)
+|  +- compile obj bolt_host_compile debug aarch64-linux-gnu success 879ms MaxRSS:140M
+|  |  +- options cached
+|  |  +- WriteFile draft_ids.txt (reused)
+|  +- run test 26 pass (26 total) 743ms MaxRSS:6M
+|  |  +- compile test debug native success 5s MaxRSS:378M
+|  |     +- options (reused)
+|  +- compile obj drama_cuda_native_host debug native success 639ms MaxRSS:124M
+|  |  +- options (reused)
+|  +- run test 5 pass (5 total) 6ms MaxRSS:3M
+|  |  +- compile test debug native success 3s MaxRSS:272M
+|  +- run test 428 pass (428 total) 1m MaxRSS:96M
+|  |  +- compile test debug native success 31s MaxRSS:1G
+|  +- run test 5 pass (5 total) 16ms MaxRSS:3M
+|  |  +- compile test debug native success 3s MaxRSS:285M
+|  +- run test 130 pass (130 total) 63ms MaxRSS:4M
+|  |  +- compile test debug native success 6s MaxRSS:371M
+|  |     +- options (reused)
+|  +- run test 280 pass, 2 skip (282 total) 9s MaxRSS:132M
+|  |  +- compile test debug native success 8s MaxRSS:588M
+|  +- run test 163 pass (163 total) 13s MaxRSS:65M
+|  |  +- compile test debug native success 8s MaxRSS:476M
+|  +- run test 74 pass, 1 skip (75 total) 303ms MaxRSS:10M
+|  |  +- compile test debug native success 8s MaxRSS:495M
+|  |     +- WriteFile draft_ids.txt (reused)
+|  |     +- options (reused)
+|  +- run test 33 pass (33 total) 13s MaxRSS:24M
+|  |  +- compile test debug native success 5s MaxRSS:341M
+|  |     +- options (reused)
+|  +- run test 12 pass (12 total) 24ms MaxRSS:3M
+|  |  +- compile test debug native success 4s MaxRSS:327M
+|  |     +- options (reused)
+|  +- run test 83 pass (83 total) 326ms MaxRSS:74M
+|  |  +- compile test debug native success 8s MaxRSS:448M
+|  |     +- options (reused)
+|  +- run test 13 pass (13 total) 10s MaxRSS:15M
+|  |  +- compile test debug native success 5s MaxRSS:392M
+|  |     +- options (reused)
+|  +- run test 29 pass (29 total) 8s MaxRSS:1G
+|  |  +- compile test debug native success 4s MaxRSS:343M
+|  |     +- options (reused)
+|  +- run test 5 pass (5 total) 7ms MaxRSS:3M
+|  |  +- compile test debug native success 4s MaxRSS:284M
+|  +- run test 20 pass (20 total) 181ms MaxRSS:5M
+|  |  +- compile test debug native success 5s MaxRSS:342M
+|  +- run test 204 pass (204 total) 7s MaxRSS:42M
+|  |  +- compile test debug native success 11s MaxRSS:530M
+|  +- run test 52 pass, 1 skip (53 total) 87ms MaxRSS:24M
+|  |  +- compile test debug native success 12s MaxRSS:642M
+|  |     +- options (reused)
+|  |     +- WriteFile draft_ids.txt (reused)
+|  +- run test 3 pass (3 total) 6ms MaxRSS:3M
+|  |  +- compile test debug native success 3s MaxRSS:270M
+|  +- run test 52 pass (52 total) 41ms MaxRSS:61M
+|  |  +- compile test debug native success 5s MaxRSS:394M
+|  |     +- options (reused)
+|  +- run test 5 pass (5 total) 5ms MaxRSS:3M
+|  |  +- compile test debug native success 4s MaxRSS:272M
+|  +- run test 25 pass (25 total) 1m MaxRSS:236M
+|  |  +- compile test debug native success 5s MaxRSS:332M
+|  +- run test 1 pass (1 total) 5ms MaxRSS:3M
+|     +- compile test debug native success 3s MaxRSS:294M
+|        +- options (reused)
+|        +- options (reused)
+|        +- WriteFile draft_ids.txt (reused)
+|        +- WriteFile exlr8_alias.zig cached
++- run test 4 pass (4 total) 16ms MaxRSS:3M
+|  +- compile test debug native success 1s MaxRSS:268M
+|     +- options success
++- run test 13 pass, 1 skip (14 total) 61ms MaxRSS:4M
+|  +- compile test debug native success 2s MaxRSS:318M
+|     +- options (reused)
++- run test 3 pass (3 total) 7ms MaxRSS:3M
+|  +- compile test debug native success 2s MaxRSS:281M
+|     +- options (reused)
++- run test 1 pass (1 total) 4ms MaxRSS:3M
+|  +- compile test debug native success 1s MaxRSS:268M
++- test-kv-pool success
+|  +- run test 9 pass (9 total) 13ms MaxRSS:3M
+|  |  +- compile test debug native success 2s MaxRSS:272M
+|  +- run test 6 pass (6 total) 2s MaxRSS:34M
+|     +- compile test debug native success 3s MaxRSS:389M
++- run test 51 pass (51 total) 41ms MaxRSS:3M
+|  +- compile test debug native success 2s MaxRSS:324M
+|     +- options success
+|     |  +- compile lib hip-mock-success debug native success 135ms MaxRSS:56M
+|     |  +- compile lib hip-mock-failed debug native success 7s MaxRSS:330M
+|     |  +- compile lib hip-mock-missing debug native success 127ms MaxRSS:55M
+|     +- WriteFile kernels.zig cached
++- run test 23 pass, 1 skip (24 total) 104ms MaxRSS:5M
+|  +- compile test debug native success 3s MaxRSS:354M
++- run test 49 pass (49 total) 36ms MaxRSS:9M
+|  +- compile test debug native success 2s MaxRSS:347M
+|     +- WriteFile kernels.zig success
++- run test 30 pass, 1 skip (31 total) 121ms MaxRSS:5M
+|  +- compile test debug native success 5s MaxRSS:480M
+|     +- WriteFile kernels.zig (reused)
++- run test 18 pass (18 total) 215ms MaxRSS:7M
+|  +- compile test debug native success 5s MaxRSS:509M
+|     +- WriteFile kernels.zig (reused)
++- run test 4 pass (4 total) 23ms MaxRSS:3M
+|  +- compile test debug native success 1s MaxRSS:284M
+|     +- WriteFile kernels.zig (reused)
++- run test 3 pass (3 total) 5ms MaxRSS:3M
+|  +- compile test debug native success 2s MaxRSS:288M
+|     +- WriteFile kernels.zig (reused)
++- compile exe tf-qwen35-test debug native success 1s MaxRSS:169M
+|  +- WriteFile kernels.zig (reused)
++- compile exe tensorfold-native safe native success 2s MaxRSS:257M
+|  +- options (reused)
+|  +- WriteFile exlr8_alias.zig cached
+|  +- WriteFile kernels.zig (reused)
++- run test 26 pass, 5 skip (31 total) 16ms MaxRSS:6M
+|  +- compile test safe native-native success 16s MaxRSS:537M
++- run test 112 pass (112 total) 3s MaxRSS:41M
+|  +- compile test debug native success 3s MaxRSS:389M
++- run test 20 pass (20 total) 124ms MaxRSS:11M
+|  +- compile test debug native success 2s MaxRSS:321M
++- run exe learned-warning-test success 15ms
+   +- compile exe learned-warning-test debug native success 2s MaxRSS:291M
+
+# exit=0 after 455s

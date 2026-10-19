@@ -1,0 +1,88 @@
+# negative control: agent positions (re-run 2026-10-19T07:52:39Z)
+# undone: the agent-position fix. zig/src/server/benchmark_host.zig is put back to its state before the fix
+# (0bdb1a52: unreportable agents dropped before the visible-device indices apply); the only addition is the
+# rocmVisible() helper the new test calls. Everything else is 82237515afa0572705c2803b6b633e9e5cef1b02.
+# cmd: zig build test-server-cpu -Dcpu=apple_m1 --summary all -j8 (zig 0.17.0, private caches: --cache-dir and ZIG_GLOBAL_CACHE_DIR)
+# free disk before: 13 GB
+# --- the undo, as git diff against HEAD ---
+diff --git a/zig/src/server/benchmark_host.zig b/zig/src/server/benchmark_host.zig
+index 9d2e8529..88d66016 100644
+--- a/zig/src/server/benchmark_host.zig
++++ b/zig/src/server/benchmark_host.zig
+@@ -23,7 +23,7 @@ pub fn detect(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, bac
+     const cpu = cpuinfo(a, readProc(a, io, "/proc/cpuinfo") orelse "");
+     const memory = meminfo(readProc(a, io, "/proc/meminfo") orelse "") orelse (std.process.totalSystemMemory() catch null);
+     const out = if (gpuQuery(backend)) |argv| run(a, io, argv) orelse "" else "";
+-    if (std.mem.eql(u8, backend, "rocm")) return rocm(a, cpu, memory, out, rocmVisible(env));
++    if (std.mem.eql(u8, backend, "rocm")) return rocm(a, cpu, memory, out, env.get("HIP_VISIBLE_DEVICES") orelse env.get("ROCR_VISIBLE_DEVICES"));
+     return linux(a, cpu, memory, out, env.get("CUDA_VISIBLE_DEVICES"));
+ }
+
+@@ -41,12 +41,8 @@ pub fn rocmVisible(env: *const std.process.Environ.Map) ?[]const u8 {
+
+ /// ROCm facts from rocminfo's GPU agents by HIP_VISIBLE_DEVICES; an APU ("... Graphics") is ``unified``.
+ pub fn rocm(a: Allocator, cpu: ?[]const u8, memory: ?u64, text: []const u8, visible: ?[]const u8) Probe {
+-    const none: Probe = .{ .hardware = summarize(cpu, memory, &.{}, false) };
+-    // indices count every GPU agent, so selecting an agent with no reportable name lists no GPU, never the next one
+-    const slots = select(?Gpu, a, amdAgents(a, text), visible) orelse return none;
+-    var kept: std.ArrayList(Gpu) = .empty;
+-    for (slots) |slot| if (slot) |g| kept.append(a, g) catch return none;
+-    const gpus = kept.items;
++    const all = amdGpus(a, text);
++    const gpus = select(Gpu, a, all, visible) orelse return .{ .hardware = summarize(cpu, memory, &.{}, false) };
+     var h = summarize(cpu, memory, gpus, false);
+     if (gpus.len > 0) h.memory_type = for (gpus) |g| {
+         if (!std.mem.endsWith(u8, g.name, " Graphics")) break "dedicated";
+@@ -54,9 +50,9 @@ pub fn rocm(a: Allocator, cpu: ?[]const u8, memory: ?u64, text: []const u8, visi
+     return .{ .hardware = h };
+ }
+
+-/// Every rocminfo GPU agent in order (vendor-prefixed name, first GLOBAL pool, compute units); null if a name fails.
+-pub fn amdAgents(a: Allocator, text: []const u8) []const ?Gpu {
+-    var out: std.ArrayList(?Gpu) = .empty;
++/// GPU agents from ``rocminfo``: the vendor-prefixed marketing name, the first GLOBAL pool size and the compute units.
++pub fn amdGpus(a: Allocator, text: []const u8) []const Gpu {
++    var out: std.ArrayList(Gpu) = .empty;
+     var agents = std.mem.splitSequence(u8, text, "*******");
+     while (agents.next()) |block| {
+         var marketing: []const u8 = "";
+@@ -81,8 +77,8 @@ pub fn amdAgents(a: Allocator, text: []const u8) []const ?Gpu {
+             std.fmt.allocPrint(a, "{s} {s}", .{ vendor, marketing }) catch return &.{}
+         else
+             marketing;
+-        const name = modelName(a, full);
+-        out.append(a, if (name) |n| .{ .name = n, .memory_bytes = g.memory_bytes, .cores = g.cores } else null) catch return &.{};
++        g.name = modelName(a, full) orelse continue;
++        out.append(a, g) catch return &.{};
+     }
+     return out.items;
+ }
+# --- build output ---
+test-server-cpu
++- run test 433 pass, 1 fail (434 total)
+error: 'benchmark_facts_test.test.rocm visible-device indices count every GPU agent: selecting an unreportable agent lists no GPU, never the next' failed:
+       HIP_VISIBLE_DEVICES=1: listed GPUs [], want [AMD Radeon PRO V620]
+       HIP_VISIBLE_DEVICES=0: listed GPUs [AMD Radeon PRO V620], want []
+       ROCR_VISIBLE_DEVICES=1: listed GPUs [], want [AMD Radeon PRO V620]
+       ROCR_VISIBLE_DEVICES=0: listed GPUs [AMD Radeon PRO V620], want []
+       expected 0, found 4
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:93:17: 0x101501c97 in expectEqualInner__func_4100 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x1015512c7 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1/zig/src/server/benchmark_facts_test.zig:435:5: 0x10155138f in test.rocm visible-device indices count every GPU agent: selecting an unreportable agent lists no GPU, never the next (test)
+           try std.testing.expectEqual(@as(usize, 0), wrong);
+           ^
+failed command: ./.zc/o/c4899e586703dcbaa807a56bccdeda78/test --cache-dir=./.zc --seed=0xf2371a6 --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 433/434 tests passed (1 failed)
+test-server-cpu transitive failure
++- run test 433 pass, 1 fail (434 total)
+|  +- compile test debug native success 12s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 50ms MaxRSS:31M
+
+# exit=1 after 63s
+# restored: git status of tracked files: 0 modified

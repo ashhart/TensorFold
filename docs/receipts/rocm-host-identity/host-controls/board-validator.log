@@ -1,0 +1,15 @@
+# the board's validator on each receipt, re-run 2026-10-19T07:56:16Z on the Mac with node v26.9.0
+# protocol.mjs: https://tensorfold.dev/benchmarks/protocol.js as fetched 18 Oct 2026, sha256 0252160a717f4f50e12f9b019beff760ee10e415503ee504d72fc6289fc9cc4b
+# check.mjs: gpu-run/check.mjs, sha256 23b78e745c0519e1c012e62e17302f81f3ffb4a8441bb2cb0c3a780e80829466; each receipt as rocm, then a copy with runtime.backend cuda
+# cmd: node check.mjs gpu-run/27b-auto.json gpu-run/35b.json gpu-run/35b-serial.json gpu-run/35b-attached.json gpu-attached-rerun/35b-attached.json
+gpu-run/27b-auto.json rocm REFUSED: Unsupported benchmark runtime.
+gpu-run/27b-auto.json cuda ACCEPTED
+gpu-run/35b.json rocm REFUSED: Unsupported benchmark runtime.
+gpu-run/35b.json cuda ACCEPTED
+gpu-run/35b-serial.json rocm REFUSED: Unsupported benchmark runtime.
+gpu-run/35b-serial.json cuda ACCEPTED
+gpu-run/35b-attached.json rocm REFUSED: Unsupported benchmark runtime.
+gpu-run/35b-attached.json cuda ACCEPTED
+gpu-attached-rerun/35b-attached.json rocm REFUSED: Unsupported benchmark runtime.
+gpu-attached-rerun/35b-attached.json cuda ACCEPTED
+# exit=0

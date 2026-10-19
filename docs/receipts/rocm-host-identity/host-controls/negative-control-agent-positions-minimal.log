@@ -1,0 +1,49 @@
+# negative control: agent-positions
+# undone: the new fix: drop an unreportable rocminfo GPU agent before the visible-device indices apply
+# tree: 82237515afa0572705c2803b6b633e9e5cef1b02 with only this change
+# cmd: zig build test-server-cpu --summary all -j8 (zig 0.17.0)
+# started 2026-10-18T23:28:24Z
+# --- the undo, as git diff ---
+diff --git a/zig/src/server/benchmark_host.zig b/zig/src/server/benchmark_host.zig
+index 9d2e8529..dd4cc753 100644
+--- a/zig/src/server/benchmark_host.zig
++++ b/zig/src/server/benchmark_host.zig
+@@ -81,8 +81,8 @@ pub fn amdAgents(a: Allocator, text: []const u8) []const ?Gpu {
+             std.fmt.allocPrint(a, "{s} {s}", .{ vendor, marketing }) catch return &.{}
+         else
+             marketing;
+-        const name = modelName(a, full);
+-        out.append(a, if (name) |n| .{ .name = n, .memory_bytes = g.memory_bytes, .cores = g.cores } else null) catch return &.{};
++        const n = modelName(a, full) orelse continue;
++        out.append(a, .{ .name = n, .memory_bytes = g.memory_bytes, .cores = g.cores }) catch return &.{};
+     }
+     return out.items;
+ }
+# --- build output ---
+test-server-cpu
++- run test 433 pass, 1 fail (434 total)
+error: 'benchmark_facts_test.test.rocm visible-device indices count every GPU agent: selecting an unreportable agent lists no GPU, never the next' failed:
+       HIP_VISIBLE_DEVICES=1: listed GPUs [], want [AMD Radeon PRO V620]
+       HIP_VISIBLE_DEVICES=0: listed GPUs [AMD Radeon PRO V620], want []
+       ROCR_VISIBLE_DEVICES=1: listed GPUs [], want [AMD Radeon PRO V620]
+       ROCR_VISIBLE_DEVICES=0: listed GPUs [AMD Radeon PRO V620], want []
+       expected 0, found 4
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:93:17: 0x1006edc97 in expectEqualInner__func_4100 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x10073d2c7 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1/zig/src/server/benchmark_facts_test.zig:435:5: 0x10073d38f in test.rocm visible-device indices count every GPU agent: selecting an unreportable agent lists no GPU, never the next (test)
+           try std.testing.expectEqual(@as(usize, 0), wrong);
+           ^
+failed command: ./.zc/o/b1636d7ae7e004fb025de77034673e5d/test --cache-dir=./.zc --seed=0xedd01c48 --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 433/434 tests passed (1 failed)
+test-server-cpu transitive failure
++- run test 433 pass, 1 fail (434 total)
+|  +- compile test debug native success 29s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 29s MaxRSS:32M
+
+# exit=1 after 111s
