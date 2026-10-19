@@ -40,17 +40,23 @@ pub const Client = struct {
 
     /// GET `url` into `a` through redirects on public addresses; `limits.timeout_ms` bounds the whole read.
     pub fn get(c: *Client, a: Allocator, url: []const u8, headers: []const std.http.Header, limits: Limits) Error!Response {
+        return c.getVia(a, url, headers, limits, c);
+    }
+
+    fn getVia(c: *Client, a: Allocator, url: []const u8, headers: []const std.http.Header, limits: Limits, via: anytype) Error!Response {
         const io = c.http.io;
         const deadline = Io.Clock.awake.now(io).toMilliseconds() + limits.timeout_ms;
         var current = url;
+        var kept_headers = headers;
         var hops: u8 = 0;
         while (true) : (hops += 1) {
             var hop_limits = limits;
             hop_limits.timeout_ms = deadline - Io.Clock.awake.now(io).toMilliseconds();
             if (hop_limits.timeout_ms <= 0) return error.Timeout;
-            const step = try c.timed(a, current, headers, hop_limits);
+            const step = try via.timed(a, current, kept_headers, hop_limits);
             const next = step.redirect orelse return step.response;
             if (hops >= limits.redirects) return error.Redirects;
+            if (!sameOrigin(current, next)) kept_headers = &.{};
             current = next;
         }
     }
@@ -192,6 +198,19 @@ pub const Client = struct {
     }
 };
 
+fn sameOrigin(first: []const u8, next: []const u8) bool {
+    const from = std.Uri.parse(first) catch return false;
+    const to = std.Uri.parse(next) catch return false;
+    if (!std.ascii.eqlIgnoreCase(from.scheme, to.scheme)) return false;
+    const default_port: u16 = if (std.ascii.eqlIgnoreCase(from.scheme, "https")) 443 else 80;
+    if ((from.port orelse default_port) != (to.port orelse default_port)) return false;
+    var from_buf: [HostName.max_len]u8 = undefined;
+    var to_buf: [HostName.max_len]u8 = undefined;
+    const from_host = (from.host orelse return false).toRaw(&from_buf) catch return false;
+    const to_host = (to.host orelse return false).toRaw(&to_buf) catch return false;
+    return std.ascii.eqlIgnoreCase(from_host, to_host);
+}
+
 /// `location` resolved against `base` (absolute, scheme-relative, root-relative or path-relative).
 pub fn resolveUrl(a: Allocator, base: []const u8, location: []const u8) Allocator.Error![]const u8 {
     const loc = std.mem.trim(u8, location, " \t");
@@ -254,4 +273,45 @@ test "local and private names are refused before any connection" {
         try std.testing.expect(got == error.NotPublic or got == error.BadUrl);
     }
     try std.testing.expectError(error.Ipv6Only, c.hop(a, "https://[2606:4700::1111]/", &.{}, .{}));
+}
+
+test "security: cloud platform virtual addresses are not public web targets" {
+    try std.testing.expect(!publicIp4(.{ 168, 63, 129, 16 }));
+    try std.testing.expect(publicIp4(.{ 168, 63, 129, 15 }));
+    try std.testing.expect(publicIp4(.{ 168, 63, 129, 17 }));
+}
+
+test "security: request credentials stay within their original web origin" {
+    const Fake = struct {
+        next: []const []const u8,
+        calls: usize = 0,
+        authenticated: usize = 0,
+
+        fn timed(f: *@This(), _: Allocator, url: []const u8, headers: []const std.http.Header, _: Limits) Error!Client.Step {
+            for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, "X-Subscription-Token")) {
+                f.authenticated += 1;
+            };
+            const index = f.calls;
+            f.calls += 1;
+            if (index < f.next.len) return .{ .redirect = f.next[index] };
+            return .{ .response = .{ .url = url, .status = 200, .content_type = "text/plain", .body = "ok", .truncated = false } };
+        }
+    };
+    const cases = [_]struct { next: []const u8, count: usize }{
+        .{ .next = "https://other.example/path", .count = 1 },
+        .{ .next = "http://api.example/path", .count = 1 },
+        .{ .next = "https://api.example:8443/path", .count = 1 },
+        .{ .next = "https://API.EXAMPLE:443/path", .count = 2 },
+    };
+    const headers = [_]std.http.Header{.{ .name = "X-Subscription-Token", .value = "fixture-secret" }};
+    var c = Client.init(std.testing.allocator, std.testing.io, "fixture");
+    defer c.deinit();
+    for (cases) |case| {
+        var fake: Fake = .{ .next = &.{case.next} };
+        _ = try c.getVia(std.testing.allocator, "https://api.example/search", &headers, .{}, &fake);
+        try std.testing.expectEqual(case.count, fake.authenticated);
+    }
+    var returning: Fake = .{ .next = &.{ "https://other.example/path", "https://api.example/back" } };
+    _ = try c.getVia(std.testing.allocator, "https://api.example/search", &headers, .{}, &returning);
+    try std.testing.expectEqual(@as(usize, 1), returning.authenticated);
 }
