@@ -67,6 +67,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = lora_merge;
     _ = deepseek_v41.tp_moe;
+    _ = @import("families/deepseek_v41/weight_residency.zig");
     _ = deepseek_v41.tp_transport;
     _ = @import("families/deepseek_v41/tp_control.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.

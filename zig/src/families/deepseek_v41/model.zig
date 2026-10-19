@@ -5,6 +5,7 @@ const checkpoint = @import("../../core/checkpoint_metal.zig");
 const exl3 = @import("../../core/exl3_projection.zig");
 const config = @import("config.zig");
 const load = @import("load.zig");
+const WeightResidency = @import("weight_residency.zig").Groups;
 const weights = @import("weights.zig");
 const work = @import("workspace.zig");
 pub const attention = @import("attention.zig");
@@ -88,6 +89,7 @@ pub const Model = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     residency: mtl.ResidencySet,
+    weight_residency: WeightResidency,
     checkpoint: checkpoint.Checkpoint,
     weights: weights.Model,
     cfg: config.Config,
@@ -206,8 +208,9 @@ pub const Model = struct {
         pipelines.attention.registerResidency(residency);
         residency.commit();
         residency.requestResidency();
+        const weight_residency = try WeightResidency.init(device, queue, &cp, residency);
         queue.addResidencySet(residency);
-        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .engram_sources = sources, .admitted_bytes = limited, .concurrent = std.c.getenv("TF_DSV41_SERIAL") == null, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
+        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .weight_residency = weight_residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .engram_sources = sources, .admitted_bytes = limited, .concurrent = std.c.getenv("TF_DSV41_SERIAL") == null, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
     }
 
     pub fn deinit(m: *Model) void {
@@ -215,6 +218,7 @@ pub const Model = struct {
             for (pair) |*src| src.deinit();
             m.gpa.destroy(pair);
         }
+        m.weight_residency.deinit(m.queue);
         m.queue.removeResidencySet(m.residency);
         m.residency.deinit();
         m.attention_workspace.deinit();

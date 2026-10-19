@@ -261,7 +261,7 @@ pub fn main(init: std.process.Init) !void {
         .context_capacity = model.cache.plan.capacity,
         .consumed_tokens = model.cache.position,
         .weight_bytes = model.checkpoint.residentBytes(),
-        .resident_allocation_bytes = model.residency.allocatedSize(),
+        .resident_allocation_bytes = model.residency.allocatedSize() + model.weight_residency.bytes(),
         .ready_footprint_bytes = before.footprint,
         .final_footprint_bytes = after.footprint,
         .load_seconds = ready - begin,
