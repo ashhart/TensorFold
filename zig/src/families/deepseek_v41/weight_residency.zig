@@ -18,7 +18,8 @@ pub const Groups = struct {
             if (groups.count == 0) return error.ResidencyRefreshRequiresSplitSets;
             const r = try gpa.create(Refresh);
             errdefer gpa.destroy(r);
-            r.* = .{ .gpa = gpa, .sets = groups.sets, .count = groups.count, .ticker = undefined };
+            r.* = .{ .gpa = gpa, .sets = undefined, .count = groups.count, .ticker = undefined };
+            @memcpy(r.sets[0..r.count], groups.sets[0..groups.count]);
             r.ticker = try @import("../../core/keepalive.zig").Keepalive.start(gpa, io, .{ .ctx = r, .tick = tick }, std.math.maxInt(i64));
             return r;
         }
