@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { CHAT_TOOL_SCHEMAS, executeTool, READ_ONLY_TOOLS, toolLabel, TOOL_SCHEMAS } from './tools.ts'
+import { canUseMacSandbox } from './sandbox.ts'
 import { workspaceBackend } from './tool-workspace.ts'
 import { emailDraftEvent } from './email-connector.ts'
 import { BROWSER_AUTOMATION_ACTIONS } from './browser-automation.ts'
@@ -28,6 +29,10 @@ async function makeWorkspace(): Promise<string> {
 
 async function main() {
 console.log('tool tests:')
+
+// Non-macOS CI has no sandbox-exec. Use the existing explicit development escape hatch so
+// run_command cases exercise the real exec path; the fail-closed default is covered separately.
+if (!canUseMacSandbox()) process.env.VONTRA_ALLOW_UNSANDBOXED_COMMANDS = '1'
 
 {
   assert.throws(
@@ -579,7 +584,7 @@ console.log('tool tests:')
 {
   const cwd = await makeWorkspace()
   const result = await executeTool('run_command', { command: 'printf ok' }, { cwd })
-  assert.match(result.meta ?? '', /sandbox=build-test/)
+  assert.match(result.meta ?? '', /sandbox=(build-test|unsandboxed)/)
   assert.match(result.meta ?? '', /(macos-sandbox-exec|unsandboxed)/)
   assert.match(result.meta ?? '', /artifacts=sbox-/)
   assert.doesNotMatch(result.output, /Sandbox artifacts/)

@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { SANDBOX_PROFILES, buildSandboxArtifactBundle, canUseMacSandbox, captureSandboxArtifactBaseline, summarizeSandboxArtifactBundle, macSandboxProfile, runSandboxedCommand, sandboxCommandEnv, sandboxProfileForCommand, taskSandboxNetworkOverride } from './sandbox'
+import { commandShell } from './cli-path'
 
 async function main() {
   // Keep the fixture outside both the repo (mutation snapshots must not see the
@@ -70,7 +71,7 @@ async function main() {
     process.env.VONTRA_TOKEN = 'vontra-secret-leak'
     const env = sandboxCommandEnv(cwd)
     assert.equal(env.HOME, cwd)
-    assert.equal(env.SHELL, '/bin/zsh')
+    assert.equal(env.SHELL, commandShell())
     assert.equal(env.OPENAI_API_KEY, undefined)
     assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined)
     assert.equal(env.VONTRA_TOKEN, undefined)

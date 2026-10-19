@@ -43,6 +43,22 @@ export function loginShellPath(): string {
   }
 }
 
+let cachedCommandShell: string | undefined
+
+/** The shell that runs agent commands: zsh where present (macOS behavior), then bash/sh for Linux. */
+export function commandShell(): string {
+  if (cachedCommandShell) return cachedCommandShell
+  for (const candidate of ['/bin/zsh', '/bin/bash', '/bin/sh', process.env.SHELL]) {
+    if (candidate && existsSync(candidate)) return (cachedCommandShell = candidate)
+  }
+  return (cachedCommandShell = '/bin/sh')
+}
+
+/** zsh keeps the login shell for macOS PATH parity; bash/sh run plain, as a login bash re-clobbers PATH. */
+export function commandShellArgs(): string[] {
+  return commandShell().endsWith('zsh') ? ['-lc'] : ['-c']
+}
+
 /**
  * Augment process.env.PATH (in place) so GUI-launched processes can find CLIs the stripped PATH
  * omits. Existing entries win; the login-shell PATH and known dirs are appended. Safe to call once

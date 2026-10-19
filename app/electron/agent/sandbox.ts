@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { approvalPolicyScope, isReadOnlyShellCommand } from './approval-policy'
+import { commandShell, commandShellArgs } from './cli-path'
 import { commandApprovalReason } from './command-policy'
 import { hostGitEnv } from './host-git-env'
 import { redactCommandStreams } from './command-output-redaction'
@@ -350,7 +351,7 @@ export async function runSandboxedCommand(command: string, options: SandboxedCom
   try {
     const baseline = captureSandboxArtifactBaseline(cwd, Date.now(), SANDBOX_PROFILES[profile].allowCwdWrite)
     if (canUseMacSandbox()) {
-      const result = await runShell(['/usr/bin/sandbox-exec', '-p', macSandboxProfile(cwd, profile, [], allowNetwork), '/bin/zsh', '-lc', command], {
+      const result = await runShell(['/usr/bin/sandbox-exec', '-p', macSandboxProfile(cwd, profile, [], allowNetwork), commandShell(), ...commandShellArgs(), command], {
         cwd,
         timeoutMs: options.timeoutMs,
         maxBuffer: options.maxBuffer,
@@ -371,7 +372,7 @@ export async function runSandboxedCommand(command: string, options: SandboxedCom
         implementation: 'unsandboxed',
       }, baseline)
     }
-    const result = await runShell(['/bin/zsh', '-lc', command], {
+    const result = await runShell([commandShell(), ...commandShellArgs(), command], {
       cwd,
       timeoutMs: options.timeoutMs,
       maxBuffer: options.maxBuffer,
@@ -818,7 +819,7 @@ function patchLines(text: string): string[] {
 export function sandboxCommandEnv(cwd: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin',
-    SHELL: '/bin/zsh',
+    SHELL: commandShell(),
     HOME: cwd,
     TMPDIR: process.env.TMPDIR || os.tmpdir(),
     LANG: process.env.LANG || 'C.UTF-8',
