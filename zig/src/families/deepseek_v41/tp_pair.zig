@@ -40,6 +40,7 @@ pub const Pair = struct {
         _ = try p.wire.hello(.{ .magic = 0x44535450, .version = 1, .layers = 40, .run = model.workspace.plan.rows, .mtp = @intCast(model.lanes), .experts = 2, .own_lo = p.wire.rank, .own_hi = p.wire.rank + 1, .cap = model.caches[0].plan.capacity, .model = std.mem.readInt(u64, fingerprint[0..8], .little), .rest = fingerprint[8..24].* });
         for (p.moe.descriptors) |layer| for (layer) |buffer| model.residency.add(buffer);
         model.residency.commit();
+        model.residency.requestResidency();
         model.tp = &p.moe;
         return p;
     }

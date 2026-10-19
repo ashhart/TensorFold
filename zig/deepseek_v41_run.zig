@@ -230,6 +230,7 @@ pub fn main(init: std.process.Init) !void {
         tp_context = try ds.tp_moe.Context.init(a, model.device, &model.weights, @intCast(transport.channel.myRank()), model.workspace.plan.rows, transport.exchange());
         for (tp_context.?.descriptors) |layer| for (layer) |buffer| model.residency.add(buffer);
         model.residency.commit();
+        model.residency.requestResidency();
         model.tp = &tp_context.?;
     }
     const ready = mtl.clock.seconds();
