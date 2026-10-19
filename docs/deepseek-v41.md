@@ -28,7 +28,9 @@ tokenizer and inference config. The native engine builds the map itself — deco
 id, fall back to the raw token when the decoder emits U+FFFD, normalize through the
 release's chain (NFKD, strip marks, lowercase, the whitespace replaces), dedupe — with
 the multipliers drawn from NumPy's PCG64 exactly as the source does. The result is
-byte-identical to the map shipped beside the 2.9bpw pack. When `engram-token-map.bin`
+byte-identical to the map shipped beside the original qualified 2.9bpw pack.
+Full normalization parity for other tokenizers, including Hangul, remains
+[unqualified](engram-token-map.md#normalization-qualification). When `engram-token-map.bin`
 is missing beside the checkpoint and the original's tokenizer sits beside the tables,
 the engine builds it at open; no Python step. To build it by hand:
 
@@ -74,9 +76,11 @@ tensorfold-native serve <pack> \
 ```
 
 - Set `--context` explicitly: `--context 0` means the config's 1,048,576 positions.
-- The pack must fit the load limit without the tables: on a 256 GB Mac that is a
-  backbone of roughly 2.0 to 2.25 bpw. Such a pack is a local recipe; its whole-model
-  error is larger than the qualified 2.8 and 2.9bpw packs' and must be measured.
+- The bound backbone tensors must fit the load limit without the tables. The
+  measured LibertAI 1017 2.9bpw checkpoint stages about 202.37 GB and runs with
+  `GLM_LOAD_LIMIT_GB=220` on 256 GB. Fit depends on the pack and which tensors the
+  backbone binds, not only its advertised bpw. See the
+  [pinned checkpoint and receipts](receipts/ds1017-tp2-2026-10-19/README.md).
 - Every row read costs a random read: put the tables on the internal SSD.
 - Releases without `chat_template.jinja` (DeepSeek-V4.1-Flash-1017 ships only
   `encoding/`): use V4.1's template after checking it against the release's goldens,
@@ -115,17 +119,18 @@ regenerate them.
 
 ## Experimental two-Mac MoE
 
-The development branch adds `--speed-up SETTINGS` for two Metal ranks. Hardware
-qualification of this path is pending. The host tests exercise command ordering,
-rollback, peer disagreement and timeouts; they do not establish model correctness or
-speed on a pair of Macs.
+The development branch adds `--speed-up SETTINGS` for two Metal ranks. On two
+M3 Ultra Macs with 256 GB each, the measured logits and tokens match the single-rank
+engine. TCP over TB5 is slower in this implementation: 2.78 decode forwards/s
+against 4.06 on one Mac. The [development receipts](receipts/ds1017-tp2-2026-10-19/README.md)
+include model and HTTP state checks, failure/restart controls and open release gates.
+These measurements do not qualify MCDMA, RDMA, drafts or vision.
 
 Each rank holds the full backbone and reads its Engram tables from its own SSD.
 The ranks split the output columns of the MoE gate, up and down projections and
 exchange their output halves. Each dot product still covers its complete input
 width. Attention and routing run on both ranks. This partition does not halve the
-memory required on either Mac. The GPU and model comparisons must establish whether
-its bytes match the single-rank path and whether the communication pays off.
+memory required on either Mac. The recorded comparisons cover only the pinned checkpoint and inputs.
 
 For MCDMA, use the existing [speed-up link settings](n-link-speed-up.md), with rank 0
 on one Mac and rank 1 on the other, one peer per rank, and the same library build.
@@ -154,6 +159,7 @@ MoE row and 256 rows. Those times are transport measurements, not inference spee
 On both Macs, pass the respective settings file alongside the streamed-Engram options:
 
 ```sh
+TF_DSV41_SPLIT_RESIDENCY=1 TF_DSV41_RESIDENCY_REFRESH=1 \
 GLM_LOAD_LIMIT_GB=220 tensorfold-native serve <pack> \
   --engram-stream --engram-table-dir <original-1017> \
   --chat-template <qualified-template> --speed-up <rank-settings.json> \
