@@ -221,15 +221,7 @@ template <int BITS, bool GLU>
   }
 }
 
-// OUT[m, c] = sum_k X[m, k] * W[c, k] on tensor units: bf16 X / W loaded cooperatively into threadgroup float buffers.
-
-// 8x8 simdgroup MMA tiles accumulate in fp32; per-thread fp32->bf16 writeback via the same writeback buffer.
-
-// Each threadgroup covers an (BM x BN) tile; SG_M x SG_N simdgroups of 32 lanes tile it as 8x8 sub-blocks.
-
-// A is X[BM, BK=8] row-major; B is the W^T staging (W [N, K] row-major) read non-transposed: B[l][j] = W[n0+j][k0+l].
-
-// Grid (n/BN, rows/BM, 1) threadgroups of (SG_M*SG_N*32) threads. Receipt: eh_proj prefill replaces glm_rows_bf16.
+// OUT[m, c] = sum_k X[m,k]*W[c,k] on tensor units: fp32 8x8 mma, RNE writeback; B from the W^T staging non-transposed.
 template <int BM, int BN>
 [[kernel]] void glm_rows_bf16_nax(const device bfloat* X [[buffer(0)]], const device bfloat* W [[buffer(1)]],
                                   constant GlmRowDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
@@ -264,11 +256,7 @@ template <int BM, int BN>
         const int global_c = k0 + c;
         xs_pad[r * A_PAD + c] = (global_r < d.rows && global_c < d.k) ? float(X[x_base + long(r) * d.ldx + k0 + c]) : 0.0f;
       }
-      // Cooperatively load W[BN rows of K=8] from device bf16 into ws_pad as W^T [BK=8, BN] (padded col-major).
-
-      // Column base is THREADGROUP-scoped (tg.x * BN): all 8 N-simdgroups cooperate on the one full-width tile.
-
-      // Shipped: per-simdgroup n0, so 8 copies of different W slices raced into the same slots (review VIII defect 1).
+      // Load W[BN rows of K=8] into ws_pad as W^T [BK=8, BN]; the column base is threadgroup-scoped (tg.x * BN).
       const int n_base = int(tg.x) * BN;
       for (int e = int(ti); e < 8 * BN; e += TG_THREADS) {
         const int kk = e / BN; // K position (rows of B)
@@ -281,9 +269,7 @@ template <int BM, int BN>
       simdgroup_matrix<float, 8, 8> a_mat;
       simdgroup_matrix<float, 8, 8> b_mat;
       simdgroup_load(a_mat, xs_pad, ulong(A_PAD));
-      // This simdgroup's 8-column slice of the tile (review VIII defect 2 fixed): the W slice is staged [kk][nn] = W^T.
-
-      // NON-transposed: b[l][j] = W[n0+j][k0+l]; the shipped transpose=true summed over n with k fixed - uncorrelated.
+      // This tile's W slice is staged [kk][nn] = W^T: the load is non-transposed, b[l][j] = W[n0+j][k0+l].
       simdgroup_load(b_mat, ws_pad + sg_n * 8, ulong(B_PAD), ulong2(0, 0), false);
       simdgroup_multiply_accumulate(acc, a_mat, b_mat, acc);
       threadgroup_barrier(mem_flags::mem_threadgroup);

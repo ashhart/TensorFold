@@ -9,7 +9,7 @@ const k: usize = 8192;
 const max_rows: usize = 8192;
 const col_step: usize = 16;
 const few: f64 = 2; // attn_check's pair bar, and the ~2-step fp64 sanity bound
-// Floor under the 2-step bar: an fp32 reduction of this k can move a small column by more than one step.
+// An fp32 reduction of this k can move a small column by more than one bf16 step: acc_floor.
 const acc_floor: f64 = 0.1;
 
 fn bf16(v: f32) u16 {
@@ -25,7 +25,7 @@ fn limit(scale: f64) f64 {
     return @max(few * scale / 128.0, acc_floor);
 }
 
-// At the cast floor the pair may differ by a few bf16 steps; otherwise nax must not exceed the row kernel.
+// At the cast floor the pair may differ a few bf16 steps; otherwise nax must not exceed the row kernel.
 fn pointOk(es: f64, en: f64, pair_abs: f64, scale: f64) bool {
     const step = scale / 128.0;
     if (es > limit(scale) or en > limit(scale)) return false;
@@ -137,6 +137,7 @@ fn ehCheck() !void {
         const nax_out = bufs[3].slice(u16, rows * n);
         var worst_steps: f64 = 0;
         var worst_pair: f64 = 0;
+        var pair_div: usize = 0;
         var pair_ok = true;
         var pair_i: usize = 0;
         for (row_out, nax_out, 0..) |sv, nv, i| {
@@ -146,6 +147,7 @@ fn ehCheck() !void {
             const scale = @max(@abs(scal), @abs(got));
             const step = scale / 128.0;
             worst_pair = @max(worst_pair, diff);
+            if (sv != nv) pair_div += 1;
             if (few * step >= acc_floor and step != 0) worst_steps = @max(worst_steps, diff / step);
             if (pair_ok and diff > limit(scale)) {
                 pair_ok = false;
@@ -200,6 +202,13 @@ fn ehCheck() !void {
                 n / col_step,
             },
         );
+
+        // Byte hashes of the projection at each shape; diverging elements sit within the cast-floor bar (see pair-abs).
+        var sh1: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{});
+        sh1.update(std.mem.sliceAsBytes(row_out));
+        var sh2: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{});
+        sh2.update(std.mem.sliceAsBytes(nax_out));
+        std.debug.print("eh byte-hash rows={d}: scalar sha256={s} nax={s} diverging-elements={d}\n", .{ rows, std.fmt.bytesToHex(sh1.finalResult(), .lower), std.fmt.bytesToHex(sh2.finalResult(), .lower), pair_div });
         if (!pair_ok) std.debug.print(
             "eh nax pair fail rows={d} r={d} c={d} scal={d:.4} nax={d:.4} fp64-abs\n",
             .{ rows, pair_i / n, pair_i % n, f32of(row_out[pair_i]), f32of(nax_out[pair_i]) },

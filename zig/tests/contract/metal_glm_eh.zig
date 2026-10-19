@@ -31,9 +31,7 @@ pub fn spec() c.Spec {
         .accum = .f32,
         .depth = depth,
         .out = .bf16,
-        // Rows: the launcher's ceil-div grid takes any positive count (the last chunk's tail).
-
-        // n moves in 64-column tiles; k is an interior loop with no tiling of its own.
+        // Rows: the launcher's ceil-div grid takes any positive count; n moves in 64-column tiles; k untiled.
         .tiles = .{ .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 64, .step = 64, .min = 64 }, .{} },
         .served = &served,
     };
@@ -63,9 +61,7 @@ pub const Nax = struct {
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !Nax {
-        // The engine's own compilation unit for this pipeline: wide.zig's gather_source.
-
-        // (core_row_projection, glue_math, glm_rows and glm_gather concatenated.)
+        // The engine's compilation unit: wide.zig's gather_source (projection, glue math, rows, gather).
         return .{
             .a = a,
             .rig = .{ .a = a, .device = device, .queue = queue },
@@ -93,9 +89,7 @@ pub const Nax = struct {
         const d = try Dense.init(self.a, shape, 1);
         self.d = d;
         d.fillX(fill, seed, 2);
-        // W as bf16 bits: values in [-1, 1), or gate 4's mirrored integers, half a row the negative of the other half.
-
-        // (The stress sums cancel and the partials stay under 2^24.)
+        // W as bf16 bits in [-1, 1) or gate 4's mirrored integers; mirrored stress halves cancel (partials under 2^24).
         const bits = try self.a.alloc(u16, shape.n * shape.k);
         defer self.a.free(bits);
         var prng = std.Random.DefaultPrng.init(seed ^ 0x6d);
