@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
+const qr = @import("qk_round_check.zig");
 
 const counts = [_]usize{ 1, 3, 17, 300 };
 const most = counts[counts.len - 1];
@@ -207,6 +208,139 @@ fn run1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.qk_
     }
 }
 
+const Rope = enum { none, sliding, proportional, table };
+
+/// A Gemma-shaped call: dim 256 or 512, the rotation, MLX's rows or one rounding, v's unit norm, v from k's columns.
+const Wide = struct { h: usize, hk: usize, dim: usize, rope: Rope, round: bool, v_norm: bool, v_from_k: bool = false };
+
+const Dev = struct {
+    gpu: check.Gpu,
+    s: cuda.Stream,
+    bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
+
+    fn deinit(d: *Dev) void {
+        for (d.bufs.items) |*b| b.free();
+        d.bufs.deinit(d.gpu.gpa);
+    }
+
+    fn up(d: *Dev, bytes: []const u8) !u64 {
+        const b = try cuda.DeviceBuffer.fromHost(d.gpu.d, bytes);
+        try d.bufs.append(d.gpu.gpa, b);
+        return b.ptr;
+    }
+
+    fn poisoned(d: *Dev, n: usize) !u64 {
+        const b = try cuda.DeviceBuffer.alloc(d.gpu.d, @max(n, 2));
+        try d.bufs.append(d.gpu.gpa, b);
+        try b.fill8(0xff, d.s.handle);
+        return b.ptr;
+    }
+
+    fn back(d: *Dev, a: std.mem.Allocator, ptr: u64, n: usize) ![]u16 {
+        try d.s.synchronize();
+        const raw = try a.alloc(u16, n);
+        const b: cuda.DeviceBuffer = .{ .d = d.gpu.d, .ptr = ptr, .len = n * 2 };
+        try b.download(0, std.mem.sliceAsBytes(raw));
+        return raw;
+    }
+};
+
+/// One Wide call at every row count: outputs in float64's ranges, caches as the outputs, bits equal at every count.
+fn wide(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.qk_rows.QkRows, rng: std.Random, c: Wide, stats: *qr.Stats) !void {
+    var d: Dev = .{ .gpu = gpu, .s = s };
+    defer d.deinit();
+    const ld = (c.h + (if (c.v_from_k) c.hk else 2 * c.hk)) * c.dim;
+    const xs = try a.alloc(u16, most * ld);
+    for (xs, 0..) |*h, i| h.* = bf16(rng.floatNorm(f32) * (if (i % 37 == 0) @as(f32, 8) else 1));
+    const wb = try a.alloc(u16, 2 * c.dim); // Gemma 4 12B's: q 0.95 to 1.05, k 0.06 to 0.13
+    for (wb, 0..) |*v, i| v.* = bf16(if (i < c.dim) 0.9 + 0.2 * rng.float(f32) else 0.05 + 0.1 * rng.float(f32));
+    const rot: usize = if (c.rope == .none) 0 else c.dim;
+    const half = @max(rot / 2, 1);
+    const inv = try a.alloc(f32, half); // families/gemma4/config.zig's inverseFrequencies
+    for (inv, 0..) |*v, j| v.* = if (c.rope == .proportional and j >= 64) 0 else @floatCast(1 / std.math.pow(f64, if (c.rope == .proportional) 1e6 else 1e4, @as(f64, @floatFromInt(2 * j)) / @as(f64, @floatFromInt(c.dim))));
+    const tc = try a.alloc(f32, positions * @max(rot, 1));
+    const ts = try a.alloc(f32, positions * @max(rot, 1));
+    if (c.rope == .table) for (0..positions) |p| for (0..rot) |i| {
+        const ang = @as(f64, @floatFromInt(p)) * inv[i % half];
+        tc[p * rot + i] = @floatCast(@cos(ang));
+        ts[p * rot + i] = @floatCast(@sin(ang));
+    };
+    const len = 600;
+    const pos = try a.alloc(i32, most);
+    const slot = try a.alloc(i32, most);
+    for (pos, slot, 0..) |*p, *sl, i| { // distinct (slot, pos % len) a row
+        p.* = @intCast((i / 2) % len + len * (i % 5));
+        sl.* = @intCast(i % 2);
+    }
+    const cs = try a.alloc(f64, most * @max(rot, 1));
+    const sn = try a.alloc(f64, most * @max(rot, 1));
+    for (0..most) |r| for (0..rot) |i| {
+        const p: usize = @intCast(pos[r]);
+        const ang: f64 = @as(f32, @floatFromInt(p)) * inv[i % half];
+        cs[r * rot + i] = if (c.rope == .table) tc[p * rot + i] else @cos(ang);
+        sn[r * rot + i] = if (c.rope == .table) ts[p * rot + i] else @sin(ang);
+    };
+    const dx = try d.up(std.mem.sliceAsBytes(xs));
+    const nw = try d.up(std.mem.sliceAsBytes(wb));
+    var shape: cuda.qk_rows.Shape = .{ .norms = nw, .norms_bf16 = true, .rot = rot, .round = c.round, .v_norm = c.v_norm };
+    switch (c.rope) {
+        .none => {},
+        .table => {
+            shape.cos = try d.up(std.mem.sliceAsBytes(tc));
+            shape.sin = try d.up(std.mem.sliceAsBytes(ts));
+        },
+        .sliding, .proportional => shape.inv = try d.up(std.mem.sliceAsBytes(inv)),
+    }
+    const dp = try d.up(std.mem.sliceAsBytes(pos));
+    const dsl = try d.up(std.mem.sliceAsBytes(slot));
+    const kp = dx + c.h * c.dim * 2;
+    const src: cuda.qk_rows.Src = .{ .q = dx, .q_ld = @intCast(ld), .q_hs = @intCast(c.dim), .k = kp, .k_ld = @intCast(ld), .k_hs = @intCast(c.dim), .v = if (c.hk == 0) 0 else if (c.v_from_k) kp else kp + c.hk * c.dim * 2, .v_ld = @intCast(ld), .v_hs = @intCast(c.dim) };
+    const cache = 2 * len * c.hk * c.dim;
+    var outs: [counts.len]cuda.qk_rows.Out = undefined;
+    for (counts, &outs) |m, *o| {
+        o.* = .{ .q = try d.poisoned(m * c.h * c.dim * 2), .k = try d.poisoned(m * c.hk * c.dim * 2), .v = try d.poisoned(m * c.hk * c.dim * 2), .kc = if (c.hk > 0) try d.poisoned(cache * 2) else null, .vc = if (c.hk > 0) try d.poisoned(cache * 2) else null, .len = len };
+        try g.rowsFrom(s, src, .{ .h = c.h, .hk = c.hk, .dim = c.dim }, shape, dp, dsl, o.*, m);
+    }
+    const o = outs[counts.len - 1];
+    const nq = most * c.h * c.dim;
+    const nk = most * c.hk * c.dim;
+    const out = try a.alloc(u16, nq + 2 * nk);
+    @memcpy(out[0..nq], try d.back(a, o.q, nq));
+    @memcpy(out[nq..][0..nk], try d.back(a, o.k, nk));
+    @memcpy(out[nq + nk ..], try d.back(a, o.v, nk));
+    const wv = try a.alloc(f64, 2 * c.dim);
+    for (wv, wb) |*v, h| v.* = bf(h);
+    const k: qr.Case = .{ .rows = most, .h = c.h, .hk = c.hk, .dim = c.dim, .rot = rot, .x = xs, .ld = ld, .v_from_k = c.v_from_k, .wq = wv[0..c.dim], .wk = wv[c.dim..], .cos = if (rot > 0) cs else null, .sin = if (rot > 0) sn else null, .computed = c.rope == .sliding or c.rope == .proportional, .points = if (c.round) .{ .row = true, .out = true } else .{}, .v_norm = c.v_norm };
+    var msg: [200]u8 = undefined;
+    var name: [96]u8 = undefined;
+    const label = try std.fmt.bufPrint(&name, "qk rows {d}/{d}x{d} {t}{s}{s}{s}", .{ c.h, c.hk, c.dim, c.rope, if (c.round) ", MLX's rows" else "", if (c.v_norm) ", unit v norm" else "", if (c.v_from_k) ", v from k" else "" });
+    if (try qr.verify(a, k, out, stats, &msg)) |why| try check.expect(false, "{s}: {s}", .{ label, why });
+    if (c.hk > 0) { // the caches hold what the outputs hold, at (slot * len + pos % len)
+        const kc = try d.back(a, o.kc.?, cache);
+        const vc = try d.back(a, o.vc.?, cache);
+        for (0..most) |r| {
+            const at = @as(usize, @intCast(slot[r])) * len + @as(usize, @intCast(pos[r])) % len;
+            for (0..c.hk) |j| {
+                try check.sameBytes(label, std.mem.sliceAsBytes(kc[(at * c.hk + j) * c.dim ..][0..c.dim]), std.mem.sliceAsBytes(out[nq + (r * c.hk + j) * c.dim ..][0..c.dim]));
+                try check.sameBytes(label, std.mem.sliceAsBytes(vc[(at * c.hk + j) * c.dim ..][0..c.dim]), std.mem.sliceAsBytes(out[nq + nk + (r * c.hk + j) * c.dim ..][0..c.dim]));
+            }
+        }
+    }
+    for (counts[0 .. counts.len - 1], outs[0 .. counts.len - 1]) |m, oo| {
+        try check.sameBytes(label, std.mem.sliceAsBytes(try d.back(a, oo.q, m * c.h * c.dim)), std.mem.sliceAsBytes(out[0 .. m * c.h * c.dim]));
+        try check.sameBytes(label, std.mem.sliceAsBytes(try d.back(a, oo.k, m * c.hk * c.dim)), std.mem.sliceAsBytes(out[nq..][0 .. m * c.hk * c.dim]));
+        try check.sameBytes(label, std.mem.sliceAsBytes(try d.back(a, oo.v, m * c.hk * c.dim)), std.mem.sliceAsBytes(out[nq + nk ..][0 .. m * c.hk * c.dim]));
+    }
+    if (c.dim <= 256 and !c.round and c.v_norm) { // q and k as tf_qk_rows writes them: v's norm alone moves the call
+        const o2: cuda.qk_rows.Out = .{ .q = try d.poisoned(nq * 2), .k = try d.poisoned(nk * 2), .v = try d.poisoned(nk * 2), .len = len };
+        var plain = shape;
+        plain.v_norm = false;
+        try g.rowsFrom(s, src, .{ .h = c.h, .hk = c.hk, .dim = c.dim }, plain, dp, dsl, o2, most);
+        try check.sameBytes("qk rows once: q as tf_qk_rows'", std.mem.sliceAsBytes(try d.back(a, o2.q, nq)), std.mem.sliceAsBytes(out[0..nq]));
+        try check.sameBytes("qk rows once: k as tf_qk_rows'", std.mem.sliceAsBytes(try d.back(a, o2.k, nk)), std.mem.sliceAsBytes(out[nq..][0..nk]));
+    }
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
@@ -223,4 +357,16 @@ pub fn run(gpu: check.Gpu) !void {
     try run1(gpu, a, s, &g, prng.random(), .{ .h = 16, .hk = 2, .dim = 128, .rot = 128, .norm = false }, &worst); // a warp a head, no norm
     try run1(gpu, a, s, &g, prng.random(), .{ .h = 24, .hk = 4, .dim = 256, .rot = 64, .norm = true }, &worst); // Qwen3.8-27B
     check.pass("qk rows: q and k within float64 tolerance (worst {d:.3}), v and the caches exact, bits at any row count", .{worst});
+    var stats: qr.Stats = .{};
+    for ([_]usize{ 16, 32 }) |h| { // Gemma 4 12B and 31B: sliding 2:1 x 256, global (k's columns as v) 16:1 and 8:1 x 512
+        try wide(gpu, a, s, &g, prng.random(), .{ .h = h, .hk = h / 2, .dim = 256, .rope = .sliding, .round = true, .v_norm = true }, &stats);
+        try wide(gpu, a, s, &g, prng.random(), .{ .h = h, .hk = if (h == 16) 1 else 4, .dim = 512, .rope = .proportional, .round = true, .v_norm = true, .v_from_k = true }, &stats);
+    }
+    for ([_]usize{ 256, 512 }) |dim| try wide(gpu, a, s, &g, prng.random(), .{ .h = 16, .hk = 0, .dim = dim, .rope = if (dim == 256) .sliding else .proportional, .round = true, .v_norm = false }, &stats); // the 12B's assistant: q only
+    try wide(gpu, a, s, &g, prng.random(), .{ .h = 32, .hk = 4, .dim = 512, .rope = .table, .round = false, .v_norm = false }, &stats); // one rounding at 512
+    try wide(gpu, a, s, &g, prng.random(), .{ .h = 32, .hk = 4, .dim = 512, .rope = .none, .round = true, .v_norm = true }, &stats);
+    try wide(gpu, a, s, &g, prng.random(), .{ .h = 24, .hk = 4, .dim = 256, .rope = .table, .round = false, .v_norm = true }, &stats); // the 27B's shape, v normed
+    try wide(gpu, a, s, &g, prng.random(), .{ .h = 48, .hk = 4, .dim = 128, .rope = .sliding, .round = false, .v_norm = true }, &stats);
+    try std.testing.expectError(error.HeadShape, g.rows(s, 0, .{ .h = 1, .hk = 1, .dim = 544 }, .{}, 0, null, .{ .q = 0, .k = 0, .v = 0 }, 1));
+    check.pass("qk rows dims to 512, MLX's rows, unit v norm: {d} outputs bit-equal to float64's at the rounding points, {d} within the fp32 inverse's or cosf's range, {d} non-finite as float64; caches as the outputs; every row count's bits equal", .{ stats.decided, stats.ranged, stats.nonfinite });
 }

@@ -120,6 +120,8 @@ round it; twelve controls, each dropping one rounding point; their 64-value sums
 CUDA also checks the MLX affine token rows (4 bits, and 2 to 6 or 8 bits times a bf16 scale, each
 output bit-equal to float64 at its rounding points; two controls, one dropping the rounding point, one folding the scale
 into the group's scale and bias).
+CUDA also checks qk_rows' attention inputs at head dims to 512 with a unit v norm and MLX's bf16
+rows (three controls, each dropping one option).
 
 ## CUDA records per nvcc release
 

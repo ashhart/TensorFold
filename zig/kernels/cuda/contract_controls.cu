@@ -63,6 +63,19 @@ extern "C" __global__ void tf_ctl_half_dot(const __nv_bfloat16* X, int K, float*
     if (lane == 0) Y[row] = __half2float(s);
 }
 
+// Gate 3: qk_rows.cu's tf_qk_rows_round keeping only the options in `keep`; the exact check must go red.
+#include "qk_round.cuh"
+
+extern "C" __global__ void __launch_bounds__(tf_qk_round::WIDE) tf_ctl_qk_round(const tf_qk::QkSrc in, const tf_qk::QkW nw,
+                                                                                const float* cosv, const float* sinv,
+                                                                                const float* inv, int rot, const int* pos,
+                                                                                const int* slot, const tf_qk::QkDst dst,
+                                                                                __nv_bfloat16* kc, __nv_bfloat16* vc,
+                                                                                long long len, int h, int hk, float eps, int keep) {
+    tf_qk_round::rows(in, nw, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps, keep);
+}
+
+
 // Gate 3: embed_rows.cu's scaled MLX rows keeping the rounding points in `keep`; the exact check must go red.
 #include "embed_affine.cuh"
 
