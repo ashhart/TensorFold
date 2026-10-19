@@ -29,6 +29,7 @@ const round_k = @import("contract_tree_round.zig");
 const act_k = @import("contract_act.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
+const qkr_k = @import("contract_qk_round.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -268,6 +269,10 @@ pub fn run(gpu: check.Gpu) !void {
     for (&qks, qk_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .arena = .init(a) };
     defer for (&qks) |*x| x.deinit();
     for (&qks) |*x| try kernels.append(a, x.kernel());
+    var qkrs: [qkr_k.forms.len]qkr_k.Qk = undefined;
+    for (&qkrs, qkr_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .ctl = if (f.keep != null) try mods[5].function("tf_ctl_qk_round") else null, .arena = .init(a) };
+    defer for (&qkrs) |*x| x.deinit();
+    for (&qkrs) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
