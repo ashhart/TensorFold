@@ -516,14 +516,14 @@ __device__ void sample_full(const __nv_bfloat16* L, unsigned V, const Rule& rl, 
 }
 
 // The Metal engine's choice: tf_sample_full for top_k off or past 1,024, tf_gpu_sample for the rest.
-template <bool MAP, bool PITCHED = false>
+template <bool MAP>
 __device__ void draw(const __nv_bfloat16* L, unsigned V, const Rule* rule, const int* meta, int offset, unsigned* TOK,
-                     const long long* IDS, float* PROB, unsigned pitch = 0) {
+                     const long long* IDS, float* PROB) {
     __shared__ Shared s;
     const unsigned row = blockIdx.x;
     const Rule rl = *rule;
     const unsigned position = static_cast<unsigned>(meta[0] + static_cast<int>(row) + 1 + offset);
-    const __nv_bfloat16* L_row = L + static_cast<size_t>(row) * (PITCHED ? pitch : V);
+    const __nv_bfloat16* L_row = L + static_cast<size_t>(row) * V;
     if (rl.top_k == 0u || rl.top_k > C) {
         sample_full<MAP>(L_row, V, rl, position, IDS, TOK + row, PROB ? PROB + row : nullptr, s);
     } else {

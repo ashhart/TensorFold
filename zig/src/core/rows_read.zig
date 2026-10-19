@@ -125,11 +125,6 @@ fn ready(s: *const pc.Store, bytes: u64) bool {
     return spare <= room and bytes <= room - spare;
 }
 
-/// Whether reading disk state `i` costs less than prefilling the tokens it reaches past `from` (measured rates).
-pub fn worth(r: *const Rows, i: usize, from: u32) bool {
-    return if (select.savedSeconds(r, i, from)) |seconds| seconds > 0 else true;
-}
-
 /// How much of a prompt the server resumes, and from where, with the estimated wait for the rest.
 pub const Resume = struct {
     tokens: u32 = 0, // the prompt's tokens
