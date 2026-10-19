@@ -29,7 +29,8 @@ pub const Pipes = struct {
     moe: [nw]mtl.Pipeline, // routed experts by pick at each width and the 8-bit shared expert, one launch
     moe_glu: [nw]mtl.Pipeline, // the same through gate and up, SwiGLU'd
     gather: [2]mtl.Pipeline, // four gathered rows sharing the sorted row arithmetic
-    bf16: mtl.Pipeline, // an unquantized matrix (the MTP head's eh_proj)
+    bf16: mtl.Pipeline, // an unquantized matrix (the MTP head's eh_proj, scalar path; decode-side path keeps this)
+    bf16_nax: mtl.Pipeline, // bf16 GEMM on tensor units: prefill-side eh_proj replacement for `bf16`
     kda_pre: mtl.Pipeline, // kda_rows reading f_b's and g_b's products made apart (any width but 4/64)
     kda_fg: [nw]mtl.Pipeline, // kda_rows making f_b's and g_b's dots of one width (g64) as glm_rows does: .pre's bits
     embed: [2]mtl.Pipeline, // the embedding at 6 and 8 bits, groups of 64
@@ -54,6 +55,7 @@ pub const Pipes = struct {
             &p.kda_fg,
         }) |set| for (set) |x| x.deinit();
         p.bf16.deinit();
+        p.bf16_nax.deinit();
         p.kda_pre.deinit();
         p.zeros.deinit();
         inline for (.{ p.mm8, p.mm2, p.mm5, p.mm6 }) |set| for (set) |x| x.deinit();
@@ -104,7 +106,7 @@ pub const gather_source = sources.core_row_projection ++ glue_math ++ sources.gl
 
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 8 + 6 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
+    list: [nw * 8 + 7 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
     n: usize = 0,
     released: usize = 0,
 
@@ -156,6 +158,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
         }
         p.bf16 = try made.add(device, l, "glm_rows_bf16");
         for (gather.names, &p.gather) |name, *pipe| pipe.* = try made.add(device, l, name);
+        p.bf16_nax = try made.add(device, l, "glm_rows_bf16_nax");
     }
     const pre_a = try std.mem.replaceOwned(u8, gpa, kda, pre_f[0], pre_f[1]); // its own instance, under its own name
     defer gpa.free(pre_a);
@@ -264,13 +267,27 @@ pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io:
     });
 }
 
-/// x [rows, k] through bf16 W [n, k].
+/// x [rows, k] through bf16 W [n, k]: scalar path, kept for tests / non-prefill callers (decode-side eh uses mtp.zig).
 pub fn bf16(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: Io) void {
     e.setPipeline(p.bf16);
     bind(e, 0, .{ io.in, w });
     e.setValue(RowDims{ .k = @intCast(k), .n = @intCast(n), .group = 0, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, 4);
     bind(e, 5, .{io.out});
-    e.dispatchGroups(mtl.Size.of((n + 7) / 8, 1, 1), mtl.Size.of(64, 1, 1));
+    e.dispatchGroups(mtl.Size.of(@intCast(@divTrunc(n + 7, 8)), 1, 1), mtl.Size.of(64, 1, 1));
+}
+
+/// x [rows, k] through bf16 W [n, k]: prefill-side eh_proj on tensor units (8x8 simdgroup MMA in fp32).
+/// Caller must ensure rows and n are multiples of 8 and 64 respectively (eh_proj: rows = chunk rows, n = D=4096).
+pub fn bf16Nax(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: Io) void {
+    e.setPipeline(p.bf16_nax);
+    bind(e, 0, .{ io.in, w });
+    e.setValue(RowDims{ .k = @intCast(k), .n = @intCast(n), .group = 0, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, 4);
+    bind(e, 5, .{io.out});
+    // kernel template: <8, 64> -> BM=8, BN=64. Grid: (n / 64, rows / 8).
+    e.dispatchGroups(
+        mtl.Size.of(@intCast(@divTrunc(n + 63, 64)), @intCast(@divTrunc(io.rows + 7, 8)), 1),
+        mtl.Size.of(8 * 32, 1, 1), // 8 simdgroups * 32 lanes
+    );
 }
 
 /// The routed experts `w` (stacked [experts, n, k]) by pick: with `up`, gate and up SwiGLU'd.
@@ -483,7 +500,7 @@ test "a failed compile releases every pipeline built before it; a load counts ea
     defer device.deinit();
     var made: Made = .{};
     try std.testing.expectError(error.KernelCompile, build(gpa, device, "", &made)); // after the row kernels
-    try std.testing.expectEqual(@as(usize, nw * 7 + 3), made.released);
+    try std.testing.expectEqual(@as(usize, nw * 7 + 4), made.released);
     try std.testing.expectEqual(@as(usize, 0), made.n);
     var all: Made = .{};
     var p = try build(gpa, device, comptime kernels.generatedSource("kda_rows"), &all);

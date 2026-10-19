@@ -454,6 +454,7 @@ pub const metal = [_]M{
     .{ .name = "glm hc_expand_10 custom_kernel_tf_glm5_fused_hc_expand_cc77af98f2__4096_1_0_0_0_bfloat16_t_bfloat16_t_float_float_floatc_bfloat16_t_float_float", .threads = 1024, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "glm gather glm_gather_glu", .threads = 64, .tg_memory = 0, .m1 = 512, .m2 = 512 },
     .{ .name = "glm gather glm_gather_down", .threads = 64, .tg_memory = 0, .m1 = 576, .m2 = 576 },
+    .{ .name = "glm gather glm_rows_bf16_nax", .threads = 256, .tg_memory = 5120, .offline = false },
     .{ .name = "h3 rows in h3_rows_in", .threads = 1024, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "h3 modulated norm h3_norm", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "h3 gated add h3_gate_add", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },

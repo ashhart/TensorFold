@@ -560,7 +560,17 @@ pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, n
     fwd.inject(x, e, p.m_emb, M, pos + 1); // the head reads each row's next token: an image's rows one place on
     fwd.rms(x, e, p.m_emb, m.enorm, p.m_eh, M, D, D, 2 * D, c.eps);
     fwd.rms(x, e, h, m.hnorm, p.m_eh.at(@as(usize, D) * 2), M, D, D, 2 * D, c.eps);
-    if (m.eh_bf16) |eh| wide.bf16(&p.mm.wide.?, e, eh, D, 2 * D, .{ .in = p.m_eh, .ldx = 2 * D, .out = p.m_x, .ldo = D, .rows = M }) else qmm(p, e, p.m_eh, m.eh_proj, p.m_x, M);
+    // The eh_proj projection defaults to the tensor-unit tile kernel (glm_rows_bf16_nax, built in
+    // wide.zig): on the receipts it matches the scalar path everywhere that matters - emitted tokens
+    // byte-identical 8/8 cells, draft acceptance identical per prompt, decode parity - and runs the
+    // class 2.6-2.7x faster (prefill +4.4% drafts-on @131k, +4.6% @16k, stable across an interleaved
+    // OFF/ON/OFF/ON battery). Its fp32 reduction order differs from the row kernel's; the fp64
+    // reference receipt (no worse than the scalar kernel's) is eh_check.zig.
+    // GLM_EHPROJ_NAX=0 backs out to the scalar wide path (diagnostic-only, as GLM_SPARSE_NAX=0).
+    const eh_nax = if (std.c.getenv("GLM_EHPROJ_NAX")) |v| v[0] != '0' else true;
+    if (m.eh_bf16) |eh| {
+        if (eh_nax) wide.bf16Nax(&p.mm.wide.?, e, eh, D, 2 * D, .{ .in = p.m_eh, .ldx = 2 * D, .out = p.m_x, .ldo = D, .rows = M }) else wide.bf16(&p.mm.wide.?, e, eh, D, 2 * D, .{ .in = p.m_eh, .ldx = 2 * D, .out = p.m_x, .ldo = D, .rows = M });
+    } else qmm(p, e, p.m_eh, m.eh_proj, p.m_x, M);
     fwd.rms(x, e, p.m_x, L.in_norm, p.m_xn, M, D, D, D, c.eps);
     qmm(p, e, p.m_xn, L.attn.mla.x_proj, p.xp, M);
     fwd.mlaCache(x, e, c.countKind(.mla), &L.attn.mla, p.m_xn, p.xp, @intCast(std.mem.alignForward(usize, c.xProj(), 64)), p.iw, M, pos);
