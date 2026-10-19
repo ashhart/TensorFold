@@ -185,12 +185,14 @@ export default function App() {
     }
   }, [ready])
 
+  // Every hook must run before the bootstrap early return below, or React reports a hook-count
+  // change when the workspace becomes ready (error #310).
+  const { snapshot: engineSnapshot } = useEngine()
+  const engineStatus = engineSnapshot?.status ?? null
   const bootstrap = applicationBootstrapState(ready, settings)
   if (bootstrap !== 'ready') return <BootstrapRecovery unavailable={bootstrap === 'settings-unavailable'} onRetry={() => init({ retry: true })} />
 
   const contentView = view.name === 'settings' ? lastContentView.current : view
-  const { snapshot: engineSnapshot } = useEngine()
-  const engineStatus = engineSnapshot?.status ?? null
   const closeSettings = () => setView(lastContentView.current)
   const settingsInitialSection: SettingsSection | undefined = view.name === 'settings' && typeof view.section === 'string' && ALL_SETTINGS_SECTIONS.some((section) => section.id === view.section)
     ? view.section as SettingsSection
