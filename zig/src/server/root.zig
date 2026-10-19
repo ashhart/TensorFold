@@ -74,8 +74,11 @@ test {
     _ = @import("systemone.zig");
     _ = @import("systemone_test.zig");
     _ = @import("slide_context_test.zig");
-    _ = @import("slide_stream_test.zig");
-    _ = @import("slide_save_stream_test.zig");
+    // both run over Unix socket pairs
+    if (comptime @import("builtin").os.tag != .windows) {
+        _ = @import("slide_stream_test.zig");
+        _ = @import("slide_save_stream_test.zig");
+    }
     _ = @import("slide_writer_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_cli.zig");

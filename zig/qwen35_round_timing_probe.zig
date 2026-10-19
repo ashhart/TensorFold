@@ -78,5 +78,6 @@ pub fn main(init: std.process.Init) !void {
     }
     var bytes: [256]u8 = undefined;
     const text = try std.fmt.bufPrint(&bytes, "{{\"rounds\":{d},\"offered\":{d},\"kept\":{d},\"sha\":\"{s}\"}}\n", .{ target.rounds, target.offered, kept, &std.fmt.bytesToHex(hash.finalResult(), .lower) });
+    if (@import("builtin").os.tag == .windows) return std.Io.File.stdout().writeStreamingAll(init.io, text);
     if (std.c.write(1, text.ptr, text.len) != text.len) return error.Output;
 }

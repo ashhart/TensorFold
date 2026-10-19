@@ -10,7 +10,7 @@ const Fault = struct {
     threadlocal var creations: usize = 0;
     threadlocal var private: bool = true;
     fn create(ctx: ?*anyopaque, dir: std.Io.Dir, name: []const u8, options: std.Io.Dir.CreateFileAtomicOptions) std.Io.Dir.CreateFileAtomicError!std.Io.File.Atomic {
-        private = private and options.replace and options.permissions.toMode() == 0o600;
+        private = private and options.replace and (@import("builtin").os.tag == .windows or options.permissions.toMode() == 0o600);
         creations += 1;
         return io.vtable.dirCreateFileAtomic(ctx, dir, name, options);
     }
