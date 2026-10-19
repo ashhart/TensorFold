@@ -14,6 +14,7 @@ pub const draft_depth = @import("draft_depth.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const recurrent_workspace = @import("recurrent_workspace.zig");
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
+pub const proposal_vocab = @import("proposal_vocab.zig");
 pub const ids_json = @import("ids_json.zig");
 pub const affine4_host = @import("affine4_host.zig");
 pub const affine4_fold = @import("affine4_fold.zig");
@@ -85,6 +86,7 @@ test {
     _ = draft_depth;
     _ = @import("copy_index.zig");
     _ = ids_json;
+    _ = proposal_vocab;
     _ = nvfp4;
     _ = nvfp4_csf32;
     _ = modelopt;
