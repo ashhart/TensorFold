@@ -325,6 +325,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
             .{ ranks.max_world, ranks.max_world },
         ),
         error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4 checkpoints (the log names what config.json has)",
+        error.UnreadableFormat => "a projection is stored in a format GLM-5.3-Flash on CUDA does not read (the log names its module, recipe and tensors)",
         else => null,
     };
 }
@@ -334,6 +335,10 @@ test "a place inside its world of at most 16 ranks serves; a larger world is ref
     try std.testing.expectError(error.TooManyRanks, checked(.{ .rank = 0, .world = 17 }));
     try std.testing.expectError(error.NoRank, checked(.{ .rank = 2, .world = 2 }));
     try std.testing.expect(explain(null, error.TooManyRanks) != null);
+}
+
+test "a checkpoint refused for its format, at the entry or by the loader, is explained" {
+    for ([_]anyerror{ error.NotModelOpt, error.UnsupportedQuant, error.UnreadableFormat }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
 test "capacity keeps a verify window past the context and a multiple of 64" {

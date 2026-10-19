@@ -14,6 +14,7 @@ const quant = @import("cuda_quant.zig");
 const q4 = @import("cuda_q4.zig");
 const exl3 = @import("cuda_exl3.zig");
 const mm_mod = @import("cuda_mm.zig");
+const formats = @import("cuda_formats.zig");
 
 const Tensor = core.checkpoint.Tensor;
 const prefix = "model.language_model.";
@@ -81,10 +82,47 @@ const Loader = struct {
     ck: *core.Checkpoint,
     host: std.ArrayList(u8) = .empty,
     name_buf: [192]u8 = undefined,
+    recipes: ?*const core.modelopt.Recipes = null, // MIXED_PRECISION's table; null: the tensors decide (NVFP4)
 
     pub fn get(L: *Loader, comptime fmt: []const u8, args: anytype) !Tensor {
         const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ fmt, args);
         return L.ck.get(name);
+    }
+
+    /// The projection `fmt` (a module under the prefix) is stored as `want`, or it is refused by name (formats.of).
+    fn format(L: *Loader, comptime fmt: []const u8, args: anytype, want: formats.Format) !void {
+        var buf: [192]u8 = undefined;
+        return L.formatIn(L.ck, try std.fmt.bufPrint(&buf, prefix ++ fmt, args), want);
+    }
+
+    fn formatIn(L: *Loader, ck: *core.Checkpoint, module: []const u8, want: formats.Format) !void {
+        var buf: [224]u8 = undefined;
+        const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
+        const scale_name = try std.fmt.bufPrint(&buf, "{s}.weight_scale", .{module});
+        const s: ?Tensor = if (ck.has(scale_name)) try ck.get(scale_name) else null;
+        const stored: formats.Stored = .{
+            .weight = .{ .dtype = w.dtype, .shape = w.shape[0..w.rank] },
+            .scale = if (s) |*t| .{ .dtype = t.dtype, .shape = t.shape[0..t.rank] } else null,
+            .csf = ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module})),
+        };
+        const declared: formats.Declared = if (L.recipes) |r| .{ .mixed = r.of(module) } else .nvfp4;
+        const got: ?formats.Format = formats.of(declared, stored) catch null;
+        if (got != null and got.? == want) return;
+        var why: [320]u8 = undefined;
+        std.log.err("{s}; this loader reads it as {t}", .{ formats.describe(&why, module, declared, stored), want });
+        return error.UnreadableFormat;
+    }
+
+    /// A routed expert's NVFP4 linear: scales as stored, or csf_32x2_v1's decoded into `scales`; else refused by name.
+    fn expert(L: *Loader, module: []const u8, scales: []u8) !core.nvfp4.Linear {
+        var buf: [224]u8 = undefined;
+        const csf = L.ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module}));
+        try L.formatIn(L.ck, module, if (csf) .nvfp4_csf else .nvfp4);
+        if (!csf) return core.nvfp4.Linear.read(L.ck, module);
+        return formats.csfLinear(L.ck, module, scales) catch |e| {
+            std.log.err("{s}: its csf_32x2_v1 scales do not read as docs/csf-scale-blocks.md has them ({t})", .{ module, e });
+            return e;
+        };
     }
 
     /// The host bytes gathered so far uploaded as one tensor named `fmt`.
@@ -149,6 +187,7 @@ const Loader = struct {
         const h = L.w.share.kda;
         const dk = c.kda_dim;
         const all = c.kda_heads * dk;
+        inline for (.{ "q", "k", "v", "o" }) |x| try L.format("layers.{d}.self_attn." ++ x ++ "_proj", .{i}, .bf16);
         inline for (.{ "q", "k", "v" }) |x| try L.rows(try L.get("layers.{d}.self_attn." ++ x ++ "_proj.weight", .{i}), h.lo * dk, h.hi * dk, all, .bf16);
         inline for (.{ "f_a", "g_a" }) |x| try L.whole(try L.get("layers.{d}.self_attn." ++ x ++ "_proj.weight", .{i}), .bf16);
         try L.rows(try L.get("layers.{d}.self_attn.b_proj.weight", .{i}), h.lo, h.hi, c.kda_heads, .bf16);
@@ -175,6 +214,7 @@ const Loader = struct {
         const c = &L.w.config;
         const h = L.w.share.mla;
         const qk = c.nope;
+        inline for (.{ "q_a_proj", "kv_a_proj_with_mqa", "q_b_proj", "kv_b_proj", "o_proj" }) |x| try L.format("layers.{d}.self_attn." ++ x, .{i}, .bf16);
         inline for (.{ "q_a_proj", "kv_a_proj_with_mqa" }) |x| try L.whole(try L.get("layers.{d}.self_attn." ++ x ++ ".weight", .{i}), .bf16);
         const proj = try L.put("layers.{d}.dsa.proj", .{i});
         try L.whole(try L.get("layers.{d}.self_attn.q_a_layernorm.weight", .{i}), .bf16);
@@ -261,6 +301,8 @@ const Loader = struct {
         const c = &L.w.config;
         const s = L.w.share.dense;
         const d = c.hidden;
+        const want: formats.Format = if (c.exl3) .bf16 else .nvfp4;
+        inline for (.{ "gate_proj", "up_proj", "down_proj" }) |x| try L.format("layers.{d}.mlp." ++ x, .{i}, want);
         const w: mlp.Weights = if (c.exl3) bf16: { // an EXL3 checkpoint keeps its dense layers bf16
             inline for (.{ "gate_proj", "up_proj" }) |x| try L.rows(try L.get("layers.{d}.mlp." ++ x ++ ".weight", .{i}), s.lo, s.hi, c.dense_inter, .bf16);
             const gu = try L.put("layers.{d}.mlp.gu", .{i});
@@ -362,6 +404,7 @@ const Loader = struct {
             if (!x3.?.shx) L.w.exl3_shx = false;
         } else routed = try L.nvfp4Experts(i);
         const sh = L.w.share.shared;
+        inline for (.{ "gate_proj", "up_proj", "down_proj" }) |x| try L.format("layers.{d}.mlp.shared_experts." ++ x, .{i}, .bf16);
         inline for (.{ "gate_proj", "up_proj" }) |x| try L.rows(try L.get("layers.{d}.mlp.shared_experts." ++ x ++ ".weight", .{i}), sh.lo, sh.hi, c.shared_inter, .bf16);
         const gu = try L.put("layers.{d}.moe.shared.gu", .{i});
         try L.cols(try L.get("layers.{d}.mlp.shared_experts.down_proj.weight", .{i}), sh.lo, sh.hi, .bf16);
@@ -402,11 +445,14 @@ const Loader = struct {
         defer L.gpa.free(codes);
         const scales = try L.gpa.alloc(u8, d * ni / 16);
         defer L.gpa.free(scales);
+        const per = c.moe_inter * d / 16; // a whole gate, up or down's e4m3 scales
+        const decoded = try L.gpa.alloc(u8, 3 * per); // csf_32x2_v1's, decoded before the rank's cut
+        defer L.gpa.free(decoded);
         if (i == c.layers) try L.quantizedExperts(i, up, down, up_scale, down_scale) else for (0..count) |e| {
             var ls: [3]core.nvfp4.Linear = undefined;
             inline for (.{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, m| {
                 const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj, .{ i, e });
-                ls[m] = try core.nvfp4.Linear.read(L.ck, name);
+                ls[m] = try L.expert(name, decoded[m * per ..][0..per]);
             }
             // gate and up: the rank's rows; down: every row, the rank's columns
             const gate = .{ ls[0].codes[cut.lo * d / 2 ..][0 .. ni * d / 2], ls[0].scales[cut.lo * d / 16 ..][0 .. ni * d / 16] };
@@ -503,6 +549,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     defer head_ck.close();
     var L: Loader = .{ .gpa = gpa, .d = d, .stream = stream, .pack_dense = tools.pack_dense, .tools = tools, .w = &w, .ck = &ck };
     defer L.host.deinit(gpa);
+    var recipes = try readRecipes(gpa, io, dir);
+    defer if (recipes) |*r| r.deinit();
+    if (recipes) |*r| L.recipes = if (r.modules.count() > 0) r else null;
     w.layers = try gpa.alloc(Layer, layers.len);
     for (layers, w.layers) |i, *l| {
         if (i >= c.layers) return error.BadLayer;
@@ -513,10 +562,21 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     w.embed = try L.put("embed", .{});
     try L.whole(try L.get("norm.weight", .{}), .bf16);
     w.norm = try L.put("norm", .{});
+    try L.formatIn(&head_ck, "lm_head", .bf16);
     try L.rows(try head_ck.get("lm_head.weight"), share.vocab.lo, share.vocab.hi, c.vocab, .bf16);
     w.head = try L.put("head", .{});
     if (with_mtp and c.mtp > 0) w.mtp = try L.mtp();
     return w;
+}
+
+/// config.json's MIXED_PRECISION recipes, or null when it declares none this reader takes (the entry refuses those).
+fn readRecipes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?core.modelopt.Recipes {
+    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
+    defer gpa.free(path);
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24)) catch return null;
+    defer gpa.free(text);
+    var why: core.modelopt.Why = .{};
+    return core.modelopt.admitRecipes(gpa, text, &why) catch null;
 }
 
 test "bf16 rounding of fp32 is to nearest even" {
@@ -524,4 +584,8 @@ test "bf16 rounding of fp32 is to nearest even" {
     try std.testing.expectEqual(@as(u16, 0x3f80), toBf16(@bitCast(@as(u32, 0x3f808000)))); // a tie to even (down)
     try std.testing.expectEqual(@as(u16, 0x3f82), toBf16(@bitCast(@as(u32, 0x3f818000)))); // a tie to even (up)
     try std.testing.expectEqual(@as(u16, 0x3f81), toBf16(@bitCast(@as(u32, 0x3f808001))));
+}
+
+test {
+    _ = @import("cuda_formats.zig");
 }

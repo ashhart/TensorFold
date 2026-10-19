@@ -11,7 +11,7 @@ const layers = 2;
 const experts = 16;
 const vocab = 8192;
 const hidden = 4096;
-/// The ModelOpt block nvidia/GLM-5.3-Flash-NVFP4 writes, which the CUDA family admits (modelopt.admit).
+/// The ModelOpt block nvidia/GLM-5.3-Flash-NVFP4 writes, which the CUDA family admits (modelopt.admitRecipes).
 const modelopt_block = ",\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"NVFP4\", " ++
     "\"config_groups\": {\"group_0\": {\"weights\": {\"num_bits\": 4, \"type\": \"float\", \"group_size\": 16}}}}";
 const P = "model.language_model.";
