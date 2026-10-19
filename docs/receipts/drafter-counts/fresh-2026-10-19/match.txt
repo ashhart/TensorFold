@@ -1,0 +1,37 @@
+out/27b-auto: drafter_passed=False attempts=20 reported=20 rounds=5030 drafted=262 accepted=70 (sum of samples, and the run's line)
+  no server log: a managed run unlinks its server's log as it starts
+out/35b: drafter_passed=False attempts=20 reported=20 rounds=2642 drafted=4251 accepted=2466 (sum of samples, and the run's line)
+  no server log: a managed run unlinks its server's log as it starts
+out/35b-serial: drafter_passed=False attempts=20 reported=20 rounds=5100 drafted=0 accepted=0 (sum of samples, and the run's line)
+  no server log: a managed run unlinks its server's log as it starts
+out/35b-attached: drafter_passed=None attempts=20 reported=20 rounds=2483 drafted=4537 accepted=2626 (sum of samples, and the run's line)
+  warm-up code T=1.0: out/35b-serve.log:8 rounds=106 accepted=150/248 (not a sample)
+  code T=1.0 r0: rounds=102 drafted=264 accepted=154 sha=5d7effdcf06f = out/35b-serve.log:10 (/v1/completions at line 9, finish=length, rounds=102 accepted=154/264 sha=5d7effdcf06f)
+  code T=1.0 r1: rounds=89 drafted=249 accepted=166 sha=bd3964ef7930 = out/35b-serve.log:12 (/v1/completions at line 11, finish=length, rounds=89 accepted=166/249 sha=bd3964ef7930)
+  code T=1.0 r2: rounds=89 drafted=228 accepted=166 sha=bc55cc799f87 = out/35b-serve.log:14 (/v1/completions at line 13, finish=length, rounds=89 accepted=166/228 sha=bc55cc799f87)
+  code T=1.0 r3: rounds=118 drafted=220 accepted=138 sha=306e0fe05bc2 = out/35b-serve.log:16 (/v1/completions at line 15, finish=length, rounds=118 accepted=138/220 sha=306e0fe05bc2)
+  code T=1.0 r4: rounds=111 drafted=250 accepted=144 sha=5a89476cf1f5 = out/35b-serve.log:18 (/v1/completions at line 17, finish=length, rounds=111 accepted=144/250 sha=5a89476cf1f5)
+  warm-up chat T=1.0: out/35b-serve.log:20 rounds=151 accepted=104/162 (not a sample)
+  chat T=1.0 r0: rounds=143 drafted=183 accepted=112 sha=460edda16244 = out/35b-serve.log:22 (/v1/chat/completions at line 21, finish=length, rounds=143 accepted=112/183 sha=460edda16244)
+  chat T=1.0 r1: rounds=112 drafted=252 accepted=144 sha=0eba9c9d3070 = out/35b-serve.log:24 (/v1/chat/completions at line 23, finish=length, rounds=112 accepted=144/252 sha=0eba9c9d3070)
+  chat T=1.0 r2: rounds=169 drafted=150 accepted=86 sha=15d18697d5f1 = out/35b-serve.log:26 (/v1/chat/completions at line 25, finish=length, rounds=169 accepted=86/150 sha=15d18697d5f1)
+  chat T=1.0 r3: rounds=209 drafted=84 accepted=46 sha=d813ade7fc53 = out/35b-serve.log:28 (/v1/chat/completions at line 27, finish=length, rounds=209 accepted=46/84 sha=d813ade7fc53)
+  chat T=1.0 r4: rounds=142 drafted=214 accepted=114 sha=7675315607f0 = out/35b-serve.log:30 (/v1/chat/completions at line 29, finish=length, rounds=142 accepted=114/214 sha=7675315607f0)
+  warm-up code T=0.0: out/35b-serve.log:32 rounds=82 accepted=173/290 (not a sample)
+  code T=0.0 r0: rounds=82 drafted=290 accepted=173 sha=9f2923ac14d0 = out/35b-serve.log:34 (/v1/completions at line 33, finish=length, rounds=82 accepted=173/290 sha=9f2923ac14d0)
+  code T=0.0 r1: rounds=82 drafted=290 accepted=173 sha=9f2923ac14d0 = out/35b-serve.log:36 (/v1/completions at line 35, finish=length, rounds=82 accepted=173/290 sha=9f2923ac14d0)
+  code T=0.0 r2: rounds=82 drafted=290 accepted=173 sha=9f2923ac14d0 = out/35b-serve.log:38 (/v1/completions at line 37, finish=length, rounds=82 accepted=173/290 sha=9f2923ac14d0)
+  code T=0.0 r3: rounds=83 drafted=283 accepted=172 sha=9f2923ac14d0 = out/35b-serve.log:40 (/v1/completions at line 39, finish=length, rounds=83 accepted=172/283 sha=9f2923ac14d0)
+  code T=0.0 r4: rounds=82 drafted=290 accepted=173 sha=9f2923ac14d0 = out/35b-serve.log:42 (/v1/completions at line 41, finish=length, rounds=82 accepted=173/290 sha=9f2923ac14d0)
+  warm-up chat T=0.0: out/35b-serve.log:44 rounds=135 accepted=121/249 (not a sample)
+  chat T=0.0 r0: rounds=135 drafted=249 accepted=121 sha=a8c28b8297b4 = out/35b-serve.log:46 (/v1/chat/completions at line 45, finish=length, rounds=135 accepted=121/249 sha=a8c28b8297b4)
+  chat T=0.0 r1: rounds=134 drafted=248 accepted=122 sha=a8c28b8297b4 = out/35b-serve.log:48 (/v1/chat/completions at line 47, finish=length, rounds=134 accepted=122/248 sha=a8c28b8297b4)
+  chat T=0.0 r2: rounds=191 drafted=133 accepted=65 sha=a8c28b8297b4 = out/35b-serve.log:50 (/v1/chat/completions at line 49, finish=length, rounds=191 accepted=65/133 sha=a8c28b8297b4)
+  chat T=0.0 r3: rounds=140 drafted=217 accepted=116 sha=a8c28b8297b4 = out/35b-serve.log:52 (/v1/chat/completions at line 51, finish=length, rounds=140 accepted=116/217 sha=a8c28b8297b4)
+  chat T=0.0 r4: rounds=188 drafted=153 accepted=68 sha=a8c28b8297b4 = out/35b-serve.log:54 (/v1/chat/completions at line 53, finish=length, rounds=188 accepted=68/153 sha=a8c28b8297b4)
+  server log, warm-ups left out: rounds=2483 drafted=4537 accepted=2626
+out/35b-hipvis0: drafter_passed=False attempts=20 reported=20 rounds=2507 drafted=4500 accepted=2601 (sum of samples, and the run's line)
+  no server log: a managed run unlinks its server's log as it starts
+control, one drafted count +1: refused: out/35b-attached: the run's printed line [('2626', '4537', '2483', '20', '20')] is not its totals; out/35b-attached: sample chat T=1.0 r2 does not match out/35b-serve.log:26; out/35b-attached: the server log's samples sum to {'rounds': 2483, 'drafted': 4537, 'accepted': 2626}, the file to {'rounds': 2483, 'drafted': 4538, 'accepted': 2626}
+control, log one request out of step: refused: out/35b-attached: sample code T=1.0 r0 does not match out/35b-serve.log:12; out/35b-attached: sample code T=1.0 r1 does not match out/35b-serve.log:14; out/35b-attached: sample code T=1.0 r2 does not match out/35b-serve.log:16; out/35b-attached: sample code T=1.0 r3 does not match out/35b-serve.log:18; out/35b-attached: sample code T=1.0 r4 does not match out/35b-serve.log:20; out/35b-attached: sample chat T=1.0 r0 does not match out/35b-serve.log:24; out/35b-attached: sample chat T=1.0 r1 does not match out/35b-serve.log:26; out/35b-attached: sample chat T=1.0 r2 does not match out/35b-serve.log:28; out/35b-attached: sample chat T=1.0 r3 does not match out/35b-serve.log:30; out/35b-attached: sample chat T=1.0 r4 does not match out/35b-serve.log:32; out/35b-attached: sample code T=0.0 r2 does not match out/35b-serve.log:40; out/35b-attached: sample code T=0.0 r3 does not match out/35b-serve.log:42; out/35b-attached: sample code T=0.0 r4 does not match out/35b-serve.log:44; out/35b-attached: sample chat T=0.0 r0 does not match out/35b-serve.log:48; out/35b-attached: sample chat T=0.0 r1 does not match out/35b-serve.log:50; out/35b-attached: sample chat T=0.0 r2 does not match out/35b-serve.log:52; out/35b-attached: sample chat T=0.0 r3 does not match out/35b-serve.log:54; out/35b-attached: sample chat T=0.0 r4 does not match out/35b-serve.log:8; out/35b-attached: the server log's samples sum to {'rounds': 2495, 'drafted': 4500, 'accepted': 2614}, the file to {'rounds': 2483, 'drafted': 4537, 'accepted': 2626}
+every count matches
