@@ -99,7 +99,8 @@ pub fn run(gpu: check.Gpu) !void {
     var n = try cuda.norms.Norms.load(gpu.d);
     defer n.unload();
     var stats: tail_.Stats = .{};
-    for ([_]usize{ 3840, 5376, 1024 }) |width| for (forms) |f| try case(&r, &n, width, f, &stats); // 12B, 31B, the 12B's assistant
+    // 12B, 31B, the 12B's assistant
+    for ([_]usize{ 3840, 5376, 1024 }) |width| for (forms) |f| try case(&r, &n, width, f, &stats);
     for ([_]usize{ 64, 1984, 2048, 2112, 8192 }) |width| for ([_]Form{ input_norm, dense_tail }) |f| try case(&r, &n, width, f, &stats);
     try unchanged(&r, &n, 3840);
     const sc = try r.out(16);

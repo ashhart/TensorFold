@@ -66,15 +66,25 @@ fn rowRef(a: std.mem.Allocator, k: Case, row: usize, spread_: f64, h_lo: []f64, 
     ref.tail(t.t, t.x, t.w, ref.Exact{}, h_lo, h_hi, y_lo, y_hi);
 }
 
-/// got within [lo, hi] (finite), or of the float64 point's class where the range is not finite.
-fn inRange(got: u16, lo: f64, hi: f64, want: f64, stats: *Stats) bool {
+/// got in [lo, hi]: by its bits where the ends are one value, else between ordered ends (-0 below +0); NaN for NaN.
+fn inRange(got: u16, lo: f64, hi: f64, stats: *Stats) bool {
     const g: f64 = bfr.value(got);
     if (std.math.isFinite(lo) and std.math.isFinite(hi)) {
-        if (lo == hi) stats.decided += 1 else stats.ranged += 1;
-        return std.math.isFinite(g) and lo <= g and g <= hi;
-    }
-    stats.nonfinite += 1;
-    return c.classOf(g) == c.classOf(want);
+        if (sameBits(lo, hi)) stats.decided += 1 else stats.ranged += 1;
+    } else stats.nonfinite += 1;
+    if (std.math.isNan(lo) or std.math.isNan(hi)) return std.math.isNan(g);
+    if (sameBits(lo, hi)) return bfr.value(bfr.bits(@floatCast(lo))) == lo and got == bfr.bits(@floatCast(lo));
+    const a, const b = if (atMost(lo, hi)) .{ lo, hi } else .{ hi, lo };
+    return atMost(a, g) and atMost(g, b);
+}
+
+fn sameBits(a: f64, b: f64) bool {
+    return @as(u64, @bitCast(a)) == @as(u64, @bitCast(b));
+}
+
+/// a <= b with -0 below +0 (false for NaN).
+fn atMost(a: f64, b: f64) bool {
+    return a < b or (a == b and (std.math.signbit(a) or !std.math.signbit(b)));
 }
 
 /// norms_tail.cuh's group_sum8 over stored outputs: each thread's 8 in order from 0, then 8 lanes' xor tree 4, 2, 1.
@@ -96,21 +106,20 @@ pub fn groupSum(y: []const u16) f32 {
 /// Every h (when written), y and xs of `k`: the outputs in their float64 ranges, the sums bit-equal to the fp32 tree.
 pub fn verify(a: std.mem.Allocator, k: Case, h: []const u16, y: []const u16, xs: ?[]const f32, stats: *Stats, msg: []u8) !?[]const u8 {
     const n = k.width;
-    const b = try a.alloc(f64, 6 * n);
+    const b = try a.alloc(f64, 4 * n);
     defer a.free(b);
-    const h_lo, const h_hi, const y_lo, const y_hi, const hp, const yp = .{ b[0..n], b[n .. 2 * n], b[2 * n .. 3 * n], b[3 * n .. 4 * n], b[4 * n .. 5 * n], b[5 * n ..] };
+    const h_lo, const h_hi, const y_lo, const y_hi = .{ b[0..n], b[n .. 2 * n], b[2 * n .. 3 * n], b[3 * n ..] };
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     for (0..k.rows) |row| {
         _ = arena.reset(.retain_capacity);
         const ra = arena.allocator();
         try rowRef(ra, k, row, spread(), h_lo, h_hi, y_lo, y_hi);
-        try point(ra, k, row, hp, yp);
         const at = row * n;
         for (0..n) |i| {
-            if (k.writesH() and !inRange(h[at + i], h_lo[i], h_hi[i], hp[i], stats))
+            if (k.writesH() and !inRange(h[at + i], h_lo[i], h_hi[i], stats))
                 return try std.fmt.bufPrint(msg, "row {d} h[{d}] = {e} outside float64's [{e}, {e}]", .{ row, i, bfr.value(h[at + i]), h_lo[i], h_hi[i] });
-            if (!inRange(y[at + i], y_lo[i], y_hi[i], yp[i], stats))
+            if (!inRange(y[at + i], y_lo[i], y_hi[i], stats))
                 return try std.fmt.bufPrint(msg, "row {d} y[{d}] = {e} outside float64's [{e}, {e}]", .{ row, i, bfr.value(y[at + i]), y_lo[i], y_hi[i] });
         }
         if (xs) |sums| for (0..n / 64) |g| {
@@ -131,4 +140,53 @@ test "the fp32 group tree: lanes then the xor tree, not one chain" {
     for (y) |h| chain += bfr.value(h);
     try std.testing.expectEqual(@as(f32, 0x1p24), chain); // one chain loses all 63 ones beside 2^24
     try std.testing.expectEqual(@as(f32, 0x1p24 + 56), groupSum(&y)); // lanes 1 to 7 keep theirs
+}
+
+test "a range with one infinite end: a zero below its finite end is refused, the point and the end pass" {
+    var x: [64]u16 = undefined;
+    var w: [64]u16 = undefined;
+    for (&x, &w) |*v, *u| {
+        v.* = bfr.bits(1);
+        u.* = bfr.bits(1);
+    }
+    x[62] = bfr.bits(0.625);
+    x[63] = bfr.bits(1.0546875);
+    w[0] = 0x7f7f; // the largest finite bf16: bf16(x0 inv) of 1 or 1 + 2^-7 within the spread, so y0 in [w0, +Inf]
+    const k: Case = .{ .rows = 1, .width = 64, .round = true, .x = &x, .w = &w };
+    const a = std.testing.allocator;
+    var lo: [64]f64 = undefined;
+    var hi: [64]f64 = undefined;
+    var scratch: [2][64]f64 = undefined;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    try rowRef(arena.allocator(), k, 0, spread(), &scratch[0], &scratch[1], &lo, &hi);
+    try std.testing.expectEqual(@as(f64, bfr.value(0x7f7f)), lo[0]);
+    try std.testing.expect(std.math.isPositiveInf(hi[0]));
+    var yp: [64]f64 = undefined;
+    try point(arena.allocator(), k, 0, &scratch[0], &yp);
+    try std.testing.expect(std.math.isFinite(yp[0]));
+    var y: [64]u16 = undefined;
+    for (&y, yp) |*o, v| o.* = bfr.bits(@floatCast(v));
+    var msg: [200]u8 = undefined;
+    var stats: Stats = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), try verify(a, k, &y, &y, null, &stats, &msg));
+    y[0] = 0x7f80; // +Inf, the range's upper end
+    try std.testing.expectEqual(@as(?[]const u8, null), try verify(a, k, &y, &y, null, &stats, &msg));
+    y[0] = 0; // the planted zero
+    try std.testing.expect(try verify(a, k, &y, &y, null, &stats, &msg) != null);
+}
+
+test "range ends: the negative infinite side, signed zeros by their bits, NaN only for NaN" {
+    var s: Stats = .{};
+    const inf = std.math.inf(f64);
+    const big = bfr.value(0x7f7f);
+    try std.testing.expect(!inRange(0, -inf, -big, &s)); // a zero above the finite upper end
+    try std.testing.expect(inRange(0xff7f, -inf, -big, &s) and inRange(0xff80, -inf, -big, &s));
+    try std.testing.expect(!inRange(0x8000, 0, 0, &s)); // -0 where float64 decides +0
+    try std.testing.expect(!inRange(0, -0.0, -0.0, &s));
+    try std.testing.expect(!inRange(0x8000, 0, 1, &s) and inRange(0, 0, 1, &s)); // -0 below a +0 end
+    try std.testing.expect(inRange(0x8000, -0.0, 0, &s) and inRange(0, 0, -0.0, &s));
+    try std.testing.expect(inRange(0x7f80, inf, inf, &s) and !inRange(0x7f7f, inf, inf, &s));
+    try std.testing.expect(inRange(0x3f80, -inf, inf, &s) and !inRange(0x7fc0, -inf, inf, &s));
+    try std.testing.expect(!inRange(0x3f80, std.math.nan(f64), std.math.nan(f64), &s) and inRange(0x7fc0, std.math.nan(f64), std.math.nan(f64), &s));
 }
