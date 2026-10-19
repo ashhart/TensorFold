@@ -519,6 +519,7 @@ const Run = struct {
         const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin };
         var live = gone;
         live.out = r.out;
+        live.opened = &sink_state.opened;
         live.every_ns = @intFromFloat(r.srv.config.sse_keepalive_s * std.time.ns_per_s);
         var reply = (if (r.turn) |t| cortheon.loop.stream(t, r.srv, &cx, &r.plan.input, prepared, sink, live) else chat.generate(r.srv, &cx, prepared, sink, live)) catch |e| {
             if (!sink_state.opened) {
