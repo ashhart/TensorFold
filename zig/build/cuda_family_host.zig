@@ -6,6 +6,13 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const proposal = b.createModule(.{ .root_source_file = b.path("zig/proposal_router_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
     b.step("test-proposal-router-host", "Optional common proposal routing, legacy parity and lifecycle").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = proposal, .filters = &.{"proposal router:"} })).step);
 
+    const proposal_rows = b.createModule(.{ .root_source_file = b.path("zig/proposal_rows_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = mods.core }} });
+    b.step("test-proposal-rows-host", "Exact stored proposal rows, padding, mapping and refusal").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = proposal_rows, .filters = &.{"proposal rows:"} })).step);
+    b.step("test-proposal-head-cuda-host", "Common proposal projection and keyed draw recording without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"proposal rows:"} })).step);
+    const proposal_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    const proposal_affine = b.createModule(.{ .root_source_file = b.path("zig/src/core/affine_mm.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "metal", .module = proposal_metal }} });
+    const proposal_encoder = b.createModule(.{ .root_source_file = b.path("zig/proposal_metal_host.zig"), .target = host, .optimize = .debug, .imports = &.{ .{ .name = "metal", .module = proposal_metal }, .{ .name = "core", .module = mods.core }, .{ .name = "affine_mm", .module = proposal_affine } } });
+    b.step("compile-proposal-metal-host", "Compile the existing shared affine encoder without executing Metal").dependOn(&b.addObject(.{ .name = "proposal-affine-host", .root_module = proposal_encoder }).step);
     const timing_probe = b.addExecutable(.{ .name = "qwen-round-timing-probe", .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_round_timing_probe.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "lanes", .module = mods.lanes } } }) });
     const timing_options = b.addOptions();
     timing_options.addOptionPath("probe", timing_probe.getEmittedBin());

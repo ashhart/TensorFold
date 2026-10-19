@@ -16,6 +16,7 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 
 /// MLX affine 4-bit tiled for qmm: packed words, (kg, npad) scales and biases, n outputs from k inputs.
+pub const proposal = @import("proposal_head.zig");
 pub const Affine4 = struct {
     w: u64,
     s: u64,

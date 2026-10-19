@@ -40,6 +40,7 @@ pub const Capabilities = struct { subset: bool, full: bool, ranks: u32 = 1 };
 pub const Service = struct {
     gpa: std.mem.Allocator,
     mode: Mode = .legacy,
+    scorer: ?*const @import("proposal_score.zig").Scorer = null,
     compact: Plan = .{ .kind = .paused, .vocab = 0 },
     complete: Plan = .{ .kind = .paused, .vocab = 0 },
     paused: Plan = .{ .kind = .paused, .vocab = 0 },
@@ -53,6 +54,26 @@ pub const Service = struct {
     pub fn full(gpa: std.mem.Allocator, vocab: u32, available: bool) !Service {
         if (!available or vocab == 0) return error.ProposalFullUnsupported;
         return .{ .gpa = gpa, .mode = .full, .complete = .{ .kind = .full, .vocab = vocab }, .paused = .{ .kind = .paused, .vocab = vocab } };
+    }
+    pub fn withScorer(s: Service, scorer: *const @import("proposal_score.zig").Scorer) !Service {
+        if (s.mode == .legacy or scorer.descriptor.vocab != s.complete.vocab) return error.ProposalServiceUnsupported;
+        if (s.compact.map) |m| {
+            const generation = scorer.generation orelse return error.ProposalIdentityMismatch;
+            if (!std.mem.eql(u8, &generation, &m.fingerprint)) return error.ProposalIdentityMismatch;
+        }
+        const logical: usize = if (s.compact.map) |m| m.ids.len else s.complete.vocab;
+        switch (scorer.selection) {
+            .topk, .coupled_topk => |k| if (k > logical) return error.ProposalScoreShape,
+            else => {},
+        }
+        var bound = s;
+        bound.scorer = scorer;
+        return bound;
+    }
+    pub fn score(s: *const Service, plan: *const Plan, input: @import("proposal_score.zig").Normalized) !@import("proposal_score.zig").View {
+        if (plan != &s.compact and plan != &s.complete and plan != &s.paused) return error.ProposalIdentityMismatch;
+        const scorer = s.scorer orelse return error.ProposalServiceUnsupported;
+        return scorer.score(plan, input);
     }
     fn choose(s: *const Service, r: be.DraftRequest) *const Plan {
         if (r.stream.finished or r.stream.paused) return &s.paused;

@@ -83,6 +83,20 @@ pub const Draws = struct {
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &a);
     }
 
+    /// Per-view logical columns and pitch; draw_ids keeps noise, ties and outputs keyed by global token ID.
+    pub fn proposal(d: *const Draws, s: Stream, logits: u64, view: anytype, ids: ?u64, rule_ptr: u64, meta: u64, offset: usize, out: u64, rows: usize, prob: ?u64) !void {
+        if (@hasField(@TypeOf(view), "dtype")) if (view.dtype != .bf16) return error.ProposalBasisUnsupported;
+        if (view.logical == 0 or view.logical > view.vocab or view.stride < view.logical or (view.ids != null) != (ids != null)) return error.ProposalScoreShape;
+        if (view.ids) |map| if (map.len != view.logical) return error.ProposalScoreShape;
+        if (view.ids == null and view.logical != view.vocab) return error.ProposalScoreShape;
+        if (view.stride == view.logical) return d.draw(s, logits, view.logical, rule_ptr, meta, offset, out, rows, ids, prob);
+        const pitch = try std.math.mul(usize, view.stride, 2);
+        for (0..rows) |r| {
+            const input = try std.math.add(u64, logits, try std.math.mul(usize, r, pitch));
+            try d.draw(s, input, view.logical, rule_ptr, meta, try std.math.add(usize, offset, r), try std.math.add(u64, out, try std.math.mul(usize, r, 4)), 1, ids, if (prob) |p| try std.math.add(u64, p, try std.math.mul(usize, r, 4)) else null);
+        }
+    }
+
     /// Each bf16 logits row's logprob words at `out`: its pick in `picks`, its `k` best tokens, its rank if `rank`.
     pub fn logprobRows(d: *const Draws, s: Stream, logits: u64, vocab: usize, picks: u64, k: u8, rank: bool, out: u64, rows: usize) !void {
         var a: launch_.Args = .{};

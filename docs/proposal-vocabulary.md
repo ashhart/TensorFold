@@ -70,8 +70,8 @@ The manifest and each receipt are bounded to 16 MiB, receipts total 64 MiB/100,0
 
 Run `zig build test-proposal-vocab-tool-host` for the offline and legacy-CLI fixtures. These tests use a synthetic
 stand-in tokenizer for the unchanged text-mode contract; they do not qualify a real tokenizer or model.
-Shared scoring, forced/grammar/OOV fallback, streams, allocations on devices, collective placement and all family
-adapters remain steps 3-8. Head-fraction measurements and native exactness/performance gates still apply.
+Optional shared routing and backend row views are available as preparation APIs. Collective placement and all family
+adapters remain later steps. Head-fraction measurements and native exactness/performance gates still apply.
 
 ## Optional shared routing
 
@@ -92,3 +92,33 @@ Backend producers must implement planned drafting and held invalidation explicit
 before work. Plan references and artifact maps remain alive through the model's queued work. There is no hot swap.
 With no service, or legacy mode, the original callback receives the original requests without routing or allocation.
 Run `zig build test-proposal-router-host test-shared-lane-regressions-host` for recording, lifecycle and parity fixtures.
+
+## Shared scoring and stored rows
+
+A service binds one scorer before publication. Its descriptor records the actual head geometry, stored format,
+group/scale recipe, tied ownership, backend device and queue. The scorer accepts normalized BF16 rows with original
+stream, position and numerical-role metadata. Its result carries logical width, physical pitch, immutable global-ID
+mapping and the existing argmax, keyed, top-k or coupled selection recipe. Short buffers and mismatched generations,
+queues or dimensions refuse. Mixed views partition by generation, binding, shape, role, queue and rank, then scatter
+by original row index. No target random draws or family-specific vocabulary policy belong in this interface.
+
+`core.proposal_rows.Source` copies original row bytes into separately owned, zero-padded planes after identity,
+shape, placement and memory-price checks. BF16 preserves signed zeros and NaN payloads. Affine rows require explicit
+BF16 scale/bias storage; codes, scales and biases are copied without rounding. Other scale dtypes and opaque bases
+refuse this subset capability. Logical IDs are never synthesized for padding. The full head remains available.
+
+`cuda.qlinear.proposal` uses the existing BF16 packer or affine-4 packer and projection owners. Decode/prompt role
+stays explicit. A shape that would change the original split-K basis refuses the compact view. The shared affine
+Metal encoder likewise retains its existing bits, group and output role; its real encoder is compile-checked only.
+There is no new precision option. Row selection uses the common tree-round argmax and BF16 top-k rules; keyed CUDA
+draws reuse sample's global-ID kernel, with each padded row's logical bound and actual pitch.
+
+Prepared CPU planes, packed words, mapping buffers and device allocations have explicit prices. Admission must
+include the old admitted head, source planes and the prepared/upload peak before publication. `uploadBytes` bounds
+the prepared generation, new device buffers, temporary int64 IDs and synchronous copy custody. Failed upload keeps
+the prepared generation intact. Captured pointers retain the generation; deinit refuses live captures or an
+undrained queue. Model owners drain before releasing artifacts, views or graph bindings. There is no live reload.
+
+Run `zig build test-proposal-rows-host test-proposal-head-cuda-host compile-proposal-metal-host` for exact byte,
+padding, mapping, recording-driver and compile-only encoder checks. These are host receipts, not GPU arithmetic,
+model equality or speed measurements. No native family exposes a proposal-vocabulary serving option yet.

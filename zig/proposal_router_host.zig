@@ -210,6 +210,42 @@ test "proposal router: askDrafts pauses without stale holds and clears failures 
 const FakeDrafter = @import("lanes").drafted;
 const External = @import("lanes").fake;
 
+const ScoreRecord = struct {
+    calls: u32 = 0,
+    bad: bool = false,
+    fn run(ptr: *anyopaque, plan: *const h.Plan, input: lanes.proposal_score.Normalized) anyerror!lanes.proposal_score.Buffer {
+        const x: *ScoreRecord = @ptrCast(@alignCast(ptr));
+        x.calls += 1;
+        try t.expect(plan.kind == .subset and input.positions[0] == 17 and input.role == .decode);
+        return .{ .address = 0x9000, .rows = input.rows.rows, .stride = if (x.bad) 2 else 128 };
+    }
+};
+test "proposal router: normalized rows use one bound shared scoring service and preserve selection metadata" {
+    var a = try artifact();
+    defer a.deinit();
+    var record: ScoreRecord = .{};
+    const scorer = try lanes.proposal_score.Scorer.calibrated(&a, a.identity(), .{ .vocab = 11, .hidden = 8, .format = "bf16", .group = 0, .scale_recipe = "none", .space = .host, .device = 0, .queue = 123 }, .{ .coupled_topk = 2 }, &record, ScoreRecord.run);
+    const raw = try h.Service.calibrated(gpa, &a, a.identity(), .{ .subset = true, .full = true });
+    const service = try raw.withScorer(&scorer);
+    var s = try stream();
+    defer s.deinit(gpa);
+    const input: lanes.proposal_score.Normalized = .{ .rows = .{ .buffer = 0x1000, .rows = 1, .row_bytes = 16, .space = .host, .dtype = .bf16 }, .streams = &.{&s}, .positions = &.{17}, .queue = 123, .role = .decode };
+    const view = try service.score(&service.compact, input);
+    try t.expectEqual(@as(u32, 3), view.logical);
+    try t.expectEqual(@as(u32, 128), view.stride);
+    try t.expectEqual(@as(u32, 7), try view.global(2));
+    try t.expectError(error.ProposalPaddingPick, view.global(3));
+    try t.expectEqual(@as(u32, 2), view.selection.coupled_topk);
+    try t.expectError(error.ProposalPaused, service.score(&service.paused, input));
+    var wrong = input;
+    wrong.queue = 124;
+    try t.expectError(error.ProposalScoreShape, service.score(&service.compact, wrong));
+    try t.expectError(error.ProposalIdentityMismatch, service.score(&raw.compact, input));
+    try t.expectEqual(@as(u32, 1), record.calls);
+    record.bad = true;
+    try t.expectError(error.ProposalScoreShape, service.score(&service.compact, input));
+}
+
 test "proposal router: an omitted target EOS is committed by the existing verifier correction" {
     var a = try artifact();
     defer a.deinit();
