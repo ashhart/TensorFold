@@ -32,6 +32,8 @@ pub const mtp = @import("cuda_mtp.zig");
 pub const pocket = @import("cuda_pocket.zig");
 /// Living Weights' trainer over the batched pass
 pub const train = @import("cuda_train.zig");
+/// Decisions' label scores (the lanes backend's `score`)
+pub const score = @import("cuda_score.zig");
 pub const native = @import("cuda_lanes.zig").Namespace(Tri);
 /// Our own glue kernels, which every launch takes when no captured set is loaded
 pub const Glue = glue_.Glue;

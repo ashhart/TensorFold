@@ -194,6 +194,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .release = releaseFn,
                     .tree = treeFn,
                     .probabilities = probabilitiesFn,
+                    .score = scoreFn,
                     .first_masked = firstMaskedFn,
                 } };
             }
@@ -401,6 +402,13 @@ pub fn Namespace(comptime Tri: type) type {
             return self.take(try self.tokenAt(&l.seq, s, position, mask));
         }
 
+        /// Decisions' label scores on one rank; a second rank would miss the pass's collectives.
+        fn scoreFn(ptr: *anyopaque, ids: []const u32, wanted: []const u32, logits: []f64, mass: bool) anyerror!f64 {
+            const self = of(ptr);
+            if (self.ranks != null) return error.UnsupportedRankOperation;
+            return @import("cuda_score.zig").labels(Tri, self.engine, self.tri(), self.context, ids, wanted, logits, mass);
+        }
+
         fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
             _ = ptr;
             _ = s;
@@ -535,6 +543,7 @@ pub fn Namespace(comptime Tri: type) type {
             _ = @import("cuda_images_test.zig").Cases(Cuda, Cuda.open, dropLane);
             _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snapRestore, dropLane);
             _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
+            _ = @import("cuda_score.zig");
         }
 
         test "a bad TF_FLASHNEXT_CHUNK is refused at load before the loader takes a stream, a module or a buffer" {
