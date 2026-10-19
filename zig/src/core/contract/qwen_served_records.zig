@@ -20,7 +20,7 @@ pub const cuda_132 = [_]registry.Override{
 test "the six served MoE and MTP launches are in the live registry and fit every SM by their records" {
     for (records) |record| {
         var found: usize = 0;
-        for (registry.all_cuda) |active| if (std.mem.eql(u8, active.launch.symbol, record.launch.symbol)) {
+        for (registry.all_cuda) |active| if (std.mem.eql(u8, active.launch.symbol, record.launch.symbol) and std.mem.eql(u8, active.launch.image, record.launch.image)) {
             try std.testing.expectEqualDeep(record, active);
             found += 1;
         };
