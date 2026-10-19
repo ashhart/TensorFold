@@ -79,7 +79,11 @@ pub const Service = struct {
         const scorer = s.scorer orelse return error.ProposalServiceUnsupported;
         return scorer.score(plan, input);
     }
-    pub fn choose(s: *const Service, r: be.DraftRequest) *const Plan {
+    pub const testing = if (@import("builtin").is_test) struct {
+        pub const choose = Service.choose;
+    } else struct {};
+
+    fn choose(s: *const Service, r: be.DraftRequest) *const Plan {
         if (s.mode == .legacy) return &s.compact;
         if (r.stream.finished or r.stream.paused or r.stream.isCancelled()) return &s.paused;
         if (s.mode == .full) return &s.complete;

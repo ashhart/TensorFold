@@ -11,6 +11,7 @@ const gpa = t.allocator;
 const pv = core.proposal_vocab;
 
 test "Flash Next proposal: original IDs match the common legacy artifact and cannot claim calibration" {
+    try t.expect(!@hasDecl(lanes.proposal_head.Service, "choose"));
     const before = try old.rawIds(gpa, table);
     defer gpa.free(before);
     const after = try family.mtp.draftIds(gpa);
@@ -20,7 +21,7 @@ test "Flash Next proposal: original IDs match the common legacy artifact and can
     var artifact = try pv.legacy.artifact(gpa, after, .{ .vocab = 248320, .hidden = 2560, .format = "bf16", .group = 0, .scale_recipe = "existing draft head" });
     defer artifact.deinit();
     var service = try lanes.proposal_head.Service.legacy(gpa, &artifact);
-    const plan = service.choose(undefined);
+    const plan = lanes.proposal_head.Service.testing.choose(&service, undefined);
     try t.expect(service.mode == .legacy and plan.kind == .subset);
     try t.expectEqualSlices(u32, before, plan.map.?.ids);
     for (before, 0..) |id, col| try t.expectEqual(id, plan.map.?.global(col).?);

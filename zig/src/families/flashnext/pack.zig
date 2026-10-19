@@ -11,6 +11,10 @@ const pio = @import("pack_io.zig");
 const quant_mlx = @import("../../core/quant/mlx.zig");
 const quant_widen = @import("../../core/quant/widen.zig");
 const widen = @import("pack_widen.zig");
+const Module = @This();
+pub const testing = if (@import("builtin").is_test) struct {
+    pub const putDraftHead = Module.putDraftHead;
+} else struct {};
 
 pub const Report = struct {
     decode_tensors: usize = 0,
@@ -286,7 +290,7 @@ pub fn draftIdList(gpa: std.mem.Allocator, io: Io, path: []const u8, vocab: usiz
 }
 
 /// The MTP draft head: lm_head's rows gathered by the id list, then the lane pipeline (draft_head.cut_head).
-pub fn putDraftHead(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, name: []const u8, lm_head: Q, ids: []const u32) !void {
+fn putDraftHead(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, name: []const u8, lm_head: Q, ids: []const u32) !void {
     const rows = ids.len;
     const kw = lm_head.kw;
     const kg = lm_head.s.dim(1);

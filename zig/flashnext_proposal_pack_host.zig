@@ -9,6 +9,7 @@ const table = @import("src/families/flashnext/proposal_table.zig").text;
 const t = std.testing;
 const gpa = t.allocator;
 test "Flash Next proposal: original padded support pack bytes and cache fingerprints stay equal" {
+    try t.expect(!@hasDecl(pack, "putDraftHead"));
     const before = try old.paddedIds(gpa, table, 248320);
     defer gpa.free(before);
     const after = try pv.legacy.ids(gpa, table, .{ .vocab = 248320, .tile = 64 });
@@ -34,7 +35,7 @@ test "Flash Next proposal: original padded support pack bytes and cache fingerpr
         var next = pack.Out.init(gpa);
         defer next.deinit();
         try old.putDraftHead(pack, &prior, gpa, a, "mtp.draft", head, before);
-        try pack.putDraftHead(&next, gpa, a, "mtp.draft", head, after);
+        try pack.testing.putDraftHead(&next, gpa, a, "mtp.draft", head, after);
         try t.expectEqual(prior.blobs.items.len, next.blobs.items.len);
         for (prior.names.items, next.names.items, prior.dtypes.items, next.dtypes.items, prior.shapes.items, next.shapes.items, prior.blobs.items, next.blobs.items) |pn, nn, pd, nd, ps, ns, pb, nb| {
             try t.expectEqualStrings(pn, nn);
