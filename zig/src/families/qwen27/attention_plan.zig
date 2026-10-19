@@ -28,6 +28,23 @@ pub const Geometry = struct {
     shared_prefix: bool = true,
     /// Chains of rows take the prefix kernel to their last key; a test turns this off to compare with the tail kernel.
     fuse_chain: bool = true,
+    /// Read the target's attention geometry; the current kernel qualification still applies.
+    pub fn fromConfig(c: @import("config.zig").Config, shared_prefix: bool) !Geometry {
+        const g = Geometry{
+            .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape,
+            .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape,
+            .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape,
+            .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape,
+            .shared_prefix = shared_prefix,
+        };
+        try g.check();
+        return g;
+    }
+
+    pub fn sameShape(g: Geometry, other: Geometry) bool {
+        return g.heads == other.heads and g.kv_heads == other.kv_heads and g.dim == other.dim and g.rotary == other.rotary;
+    }
+
     pub fn check(g: Geometry) !void {
         if (g.heads != 24 or g.kv_heads != 4 or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
     }
@@ -406,4 +423,27 @@ test "a window that starts below 8192 keeps its partials within the scratch's ch
             try std.testing.expect(p.tail_chunks <= 3);
         }
     };
+}
+
+test "target attention reads every config dimension without widening kernel qualification" {
+    // fromConfig reads only these four fields; no other config field is consumed here.
+    var c: @import("config.zig").Config = undefined;
+    c.heads = 24;
+    c.kv_heads = 4;
+    c.head_dim = 256;
+    c.rope_dims = 64;
+    const g = try Geometry.fromConfig(c, false);
+    try std.testing.expect(g.sameShape(.{}));
+    try std.testing.expect(!g.shared_prefix);
+    c.heads = 16; // the supplied 9B has GQA4; the unchanged shaders still require GQA6
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.heads = 24;
+    c.kv_heads = 2;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.kv_heads = 4;
+    c.head_dim = 128;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.head_dim = 256;
+    c.rope_dims = 32;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
 }
