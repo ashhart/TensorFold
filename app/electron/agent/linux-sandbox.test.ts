@@ -36,7 +36,7 @@ try {
   assert.ok(!readOnly.some((arg, i) => arg === '--ro-bind' && readOnly[i + 2] === path.join(cwd, '.git')), 'no git pinning without cwd writes')
   const network = linuxSandboxArgv(cwd, { allowCwdWrite: false, allowNetwork: true })
   assert.ok(network.includes('--share-net'), 'network-fetch shares the network namespace')
-  ok('profile argv mirrors the macOS read/write/network contract')
+  ok('draft profile contains requested mount and network arguments (not confinement proof)')
 
   // usrmerge-style symlinked roots get a compatibility symlink, not a broken path.
   const real = path.join(root, 'real-usr-bin')
@@ -48,7 +48,7 @@ try {
   assert.ok(bind(withLink, '--ro-bind', real), 'the resolved root is bound')
   ok('symlinked read roots resolve and keep their original path visible')
 
-  // Real confinement where bwrap actually works (skipped inside nested-sandbox CI containers).
+  // Draft integration cases; the backend remains disabled pending adversarial qualification.
   if (canUseLinuxSandbox()) {
     const hello = await runSandboxedCommand('printf hello', { cwd })
     assert.equal(hello.stdout, 'hello')
@@ -62,7 +62,7 @@ try {
     assert.notEqual(net.code, 0, 'build-test has no network')
     ok('bwrap confinement: fs, git-control and network rules enforced')
   } else {
-    console.log('  (bwrap unavailable or unusable here; argv contract covered, confinement proof skipped)')
+    console.log('  (draft Linux backend disabled pending qualification; confinement NOT verified)')
   }
 } finally {
   rmSync(root, { recursive: true, force: true })
