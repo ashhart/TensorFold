@@ -24,7 +24,6 @@ pub fn blank(a: std.mem.Allocator, r: *const Runner, ring: ?Ring, at: u32) !*Sta
 }
 
 const Part = struct { buffer: mtl.Buffer, offset: usize, len: usize };
-const ROW = 256 * 2; // a key or value row of one head (bf16)
 pub const Ring = @import("tap_ring.zig").Ring;
 
 fn parts(r: *const Runner, slot: u32, ring: ?Ring, at: u32, list: *std.ArrayList(Part), a: std.mem.Allocator, marked: bool) !void {
@@ -40,11 +39,12 @@ fn parts(r: *const Runner, slot: u32, ring: ?Ring, at: u32, list: *std.ArrayList
         };
         try list.append(a, .{ .buffer = span.buffer, .offset = span.offset, .len = span.bytes });
     };
+    const row_bytes = r.model.config.head_dim * @sizeOf(u16);
     for (0..r.caches.len / r.slots) |layer| {
         const cache = r.caches[layer * r.slots + slot];
         for ([_]@import("projection.zig").Ref{ cache.keys, cache.values }, [_]u32{ cache.key_stride, cache.value_stride }) |ref, stride| {
-            const head_stride = @as(usize, if (stride == 0) cache.capacity * 256 else stride) * 2;
-            for (0..r.model.config.kv_heads) |head| try list.append(a, .{ .buffer = ref.buffer, .offset = ref.offset + head * head_stride, .len = @as(usize, at) * ROW });
+            const head_stride = @as(usize, if (stride == 0) cache.capacity * r.model.config.head_dim else stride) * 2;
+            for (0..r.model.config.kv_heads) |head| try list.append(a, .{ .buffer = ref.buffer, .offset = ref.offset + head * head_stride, .len = @as(usize, at) * row_bytes });
         }
     }
     if (ring) |g| try list.append(a, .{ .buffer = g.buf, .offset = 0, .len = g.bytes(at) });
@@ -58,7 +58,8 @@ pub fn bytes(r: *const Runner, draft: ?*Draft, at: u32) usize {
 pub fn slotBytes(r: *const Runner, ring: ?Ring, at: u32) usize {
     const pool = &r.gdn;
     const gdn = pool.budget.layers * (pool.budget.shape.state * 4 + pool.budget.shape.conv * 2);
-    const kv = (r.caches.len / r.slots) * 2 * r.model.config.kv_heads * @as(usize, at) * ROW;
+    const row_bytes = r.model.config.head_dim * @sizeOf(u16);
+    const kv = (r.caches.len / r.slots) * 2 * r.model.config.kv_heads * @as(usize, at) * row_bytes;
     return gdn + kv + if (ring) |g| g.bytes(at) else 0;
 }
 
