@@ -211,6 +211,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .release = releaseFn,
                     .tree = treeFn,
                     .probabilities = probabilitiesFn,
+                    .first_masked = firstMaskedFn,
                 } };
             }
 
@@ -246,12 +247,13 @@ pub fn Namespace(comptime Tri: type) type {
                 };
             }
 
-            /// The token after the sequence's last row (seq.logits) at `position`: the draws serial decoding makes.
-            fn tokenAt(self: *Cuda, seq: *prompt.Seq, s: *lanes.Stream, position: u64) !u32 {
-                if (s.sampling == null) return prompt.argmax(seq.logits);
+            /// The token after seq.logits' row at `position`, within `mask` if any: the draw serial decoding makes.
+            fn tokenAt(self: *Cuda, seq: *prompt.Seq, s: *lanes.Stream, position: u64, mask: []const u32) !u32 {
+                if (s.sampling == null and mask.len == 0) return prompt.argmax(seq.logits);
                 const row = try self.gpa.alloc(u16, prompt.vocabulary);
                 defer self.gpa.free(row);
                 for (row, 0..) |*v, i| v.* = std.mem.readInt(u16, seq.logits[2 * i ..][0..2], .little);
+                if (mask.len > 0) mtp.maskRow(row, mask);
                 return mtp.drawRow(self.gpa, row, null, position, s.sampling);
             }
 
@@ -403,7 +405,15 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             const l = try self.lane(s);
             if (l.filled != null or position != l.seq.fed) return error.PositionMismatch;
-            return self.take(try self.tokenAt(&l.seq, s, position));
+            return self.take(try self.tokenAt(&l.seq, s, position, &.{}));
+        }
+
+        /// The first token drawn among `mask`'s allowed tokens (structured output), from the prompt's last row.
+        fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
+            const self = of(ptr);
+            const l = try self.lane(s);
+            if (l.filled != null or position != l.seq.fed) return error.PositionMismatch;
+            return self.take(try self.tokenAt(&l.seq, s, position, mask));
         }
 
         fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -441,7 +451,7 @@ pub fn Namespace(comptime Tri: type) type {
                     row_ids[0] = w.pending;
                     @memcpy(row_ids[1..rows], w.tokens);
                     try self.ops().verify(&l.seq, d, row_ids[0..rows]);
-                    try self.ops().draws(d, w.stream.sampling, o.sampled[0..rows]);
+                    try self.ops().draws(d, w.stream.sampling, w.masks, o.sampled[0..rows]);
                 } else {
                     if (rows != 1) return error.CannotRewind;
                     if (w.positions[0] != l.seq.fed + 1) return error.PositionMismatch;
@@ -457,7 +467,7 @@ pub fn Namespace(comptime Tri: type) type {
                 const n = @min(round_streams, plain - at);
                 if (self.ranks) |r| try r.round(Tri, self.tri(), seqs[at..][0..n], ids[at..][0..n], self.logits.ptr) else try self.engine.round(Tri, self.tri(), seqs[at..][0..n], ids[at..][0..n], self.logits.ptr);
             }
-            for (seqs[0..plain], at_window[0..plain]) |q, wi| out[wi].sampled[0] = try self.tokenAt(q, windows[wi].stream, windows[wi].positions[0]);
+            for (seqs[0..plain], at_window[0..plain]) |q, wi| out[wi].sampled[0] = try self.tokenAt(q, windows[wi].stream, windows[wi].positions[0], windows[wi].masks);
         }
 
         /// Each window keeps its first rows (a chain's prefix): the DeltaNet states replayed over them alone.
