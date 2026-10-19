@@ -66,8 +66,10 @@ pub const DraftRequest = struct {
 };
 
 pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
+pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
 
 pub const Backend = struct {
+    round_observer: ?RoundObserver = null,
     first_before_draft: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -158,6 +160,9 @@ pub const Backend = struct {
     }
     pub fn keep(b: Backend, windows: []const Window, paths: []const []const u32) !void {
         return b.vtable.keep(b.ptr, windows, paths);
+    }
+    pub fn observed(b: Backend, paths: []const []const u32) void {
+        if (b.round_observer) |observer| observer.done(observer.ptr, paths);
     }
     pub fn draft(b: Backend, requests: []const DraftRequest) !void {
         return b.vtable.draft(b.ptr, requests);

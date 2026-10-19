@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- On the 27B CUDA path, TF_TIMING reports offered and kept rows, capture bucket and forward time for each verification frame.
+
 - Checkpoint hashing uses a bounded file pool and runtime SHA acceleration, preserving digest identities and atomic cache publication.
 
 - Qwen3.8-27B on CUDA sizes recurrent verification scratch by its live windows, retaining fp32 state and exact rollback.

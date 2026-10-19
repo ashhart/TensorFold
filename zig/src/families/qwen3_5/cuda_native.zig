@@ -14,6 +14,7 @@ const vision_prompt = @import("cuda_vision_prompt.zig");
 const reuse = @import("cuda_reuse.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
 const be = lanes.backend;
+pub const round_timing = @import("cuda_round_timing.zig");
 pub const vision = @import("cuda_vision.zig");
 pub const slide = @import("cuda_slide.zig");
 pub const linked = slide.linked;
@@ -70,8 +71,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
     const v: ?*vision.Vision = if (o.vision) |lim| try vision.Vision.open(gpa, io, ctx.d, e.stream, dir, e.g.hidden, lim) else null;
     errdefer if (v) |x| x.deinit();
+    const timing_on = round_timing.Trace.enabled();
+    const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
+    errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .learns = if (o.slide) e else null,
@@ -224,6 +228,8 @@ fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
 }
 
 const Lanes = struct {
+    timing_on: bool = false,
+    trace: ?*round_timing.Trace = null,
     gpa: std.mem.Allocator,
     io: std.Io,
     e: *E.Engine,
@@ -254,6 +260,7 @@ const Lanes = struct {
         self.pool.deinit(self.gpa);
         if (self.vision) |v| v.deinit();
         self.e.deinit();
+        if (self.trace) |x| self.gpa.destroy(x);
         self.gpa.destroy(self);
     }
 
@@ -293,7 +300,7 @@ const Lanes = struct {
     }
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Lanes {
@@ -387,8 +394,9 @@ const Lanes = struct {
     /// Each window (a pending token and drafts) checked, then as many as fit a forward; a tree's rows keyed by depth.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
-        const t0 = std.Io.Clock.awake.now(self.io);
-        defer @import("cuda_draft.zig").timing("verify", self.io, t0);
+        const t0 = if (self.timing_on) std.Io.Clock.awake.now(self.io) else std.Io.Timestamp.zero;
+        defer if (self.timing_on) @import("cuda_draft.zig").timing("verify", self.io, t0);
+        if (self.trace) |x| x.reset();
         if (windows.len != out.len) return error.InvalidQwenWindows;
         for (windows, out) |w, o| {
             const rows = w.rows();
@@ -423,7 +431,13 @@ const Lanes = struct {
                 total += w.rows();
             }
             // structured output draws on the host, over each row's logits with its mask applied
+            const started = if (self.trace != null) std.Io.Clock.awake.now(self.io) else std.Io.Timestamp.zero;
             try self.e.forward(parts[0..n], ids[0..total], if (masked) .logits else .{ .draws = picks[0..total] });
+            if (self.trace) |x| {
+                const ns = started.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds();
+                const bucket = if (self.e.learning != null or self.e.pockets.any()) 0 else E.Engine.Shape.init(total, n, true, self.e.n_taps > 0, 1).total;
+                x.frame(at, n, total, bucket, @as(f64, @floatFromInt(ns)) / 1e6);
+            }
             var row: usize = 0;
             for (windows[at..][0..n], out[at..][0..n]) |w, o| {
                 for (o.sampled, w.positions, 0..) |*t, p, r| {

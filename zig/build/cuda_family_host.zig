@@ -3,6 +3,14 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const timing_probe = b.addExecutable(.{ .name = "qwen-round-timing-probe", .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_round_timing_probe.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "lanes", .module = mods.lanes } } }) });
+    const timing_options = b.addOptions();
+    timing_options.addOptionPath("probe", timing_probe.getEmittedBin());
+    const timing_host = b.createModule(.{ .root_source_file = b.path("zig/qwen35_round_timing_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "lanes", .module = mods.lanes } } });
+    timing_host.addOptions("round_timing_options", timing_options);
+    const timing_run = b.addRunArtifact(b.addTest(.{ .root_module = timing_host }));
+    b.step("test-qwen35-round-timing-host", "Enabled-only CUDA round receipts through real host acceptance, without devices").dependOn(&timing_run.step);
+    step.dependOn(&timing_run.step);
     const prompt_moe = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"prompt MoE precision:"} }));
     b.step("test-qwen35-prompt-moe-host", "Prompt expert arithmetic stays separate from verify capacity without devices").dependOn(&prompt_moe.step);
     step.dependOn(&prompt_moe.step);
