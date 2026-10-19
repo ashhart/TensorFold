@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { commandShell } from './cli-path'
 
 // Linux command sandbox on bubblewrap, mirroring the macOS sandbox-exec profiles in
 // sandbox.ts: deny-by-default filesystem with per-profile read/write roots and an
@@ -16,7 +17,17 @@ export function linuxSandboxBinary(): string | null {
 
 let linuxSandboxAvailable: boolean | undefined
 
-/** Probe bwrap with a representative minimal namespace; cached like the macOS probe. */
+/** Probe the real production argv with a read-only fixture, so loader and mount rules are exercised. */
+export function probeLinuxSandbox(cwd: string, run = spawnSync): boolean {
+  const binary = linuxSandboxBinary()
+  if (!binary) return false
+  const probe = run(binary, [...linuxSandboxArgv(cwd, { allowCwdWrite: false, allowNetwork: false, production: false }), commandShell(), '-c', 'exit 0'], {
+    stdio: 'ignore',
+    timeout: 4_000,
+  })
+  return probe.status === 0
+}
+
 export function canUseLinuxSandbox(): boolean {
   // Keep the draft backend fail-closed until mount ordering and git-control confinement are qualified.
   const qualified = false
@@ -24,11 +35,7 @@ export function canUseLinuxSandbox(): boolean {
   const binary = linuxSandboxBinary()
   if (!binary) return false
   if (linuxSandboxAvailable !== undefined) return linuxSandboxAvailable
-  const probe = spawnSync(binary, ['--ro-bind', '/usr', '/usr', '--dev', '/dev', '--unshare-net', '--die-with-parent', '--', '/usr/bin/true'], {
-    stdio: 'ignore',
-    timeout: 2_000,
-  })
-  linuxSandboxAvailable = probe.status === 0
+  linuxSandboxAvailable = probeLinuxSandbox(process.cwd())
   return linuxSandboxAvailable
 }
 
@@ -94,11 +101,13 @@ export interface LinuxSandboxProfileOptions {
   allowCwdWrite: boolean
   allowNetwork: boolean
   extraReadRoots?: Array<string | null | undefined>
+  /** False for the capability probe, which must not inspect or depend on the caller's workspace. */
+  production?: boolean
 }
 
-/** bwrap argv (without the binary) implementing the same contract as macSandboxProfile. */
-export function linuxSandboxArgv(cwd: string, options: LinuxSandboxProfileOptions): string[] {
-  const readRoots = resolveRoots([
+/** Every requested read root, kept with its unresolved name so usrmerge links stay visible. */
+export function linuxReadRoots(cwd: string, options: LinuxSandboxProfileOptions): ResolvedRoot[] {
+  return resolveRoots([
     cwd,
     '/bin',
     '/sbin',
@@ -116,22 +125,38 @@ export function linuxSandboxArgv(cwd: string, options: LinuxSandboxProfileOption
     process.env.TMPDIR,
     ...(options.extraReadRoots ?? []),
   ])
+}
+
+/** One final decision per resolved path; later mounts win, so children must follow their parents. */
+export function planLinuxMounts(cwd: string, options: LinuxSandboxProfileOptions): Array<{ mode: 'ro' | 'rw'; path: string }> {
+  const readRoots = linuxReadRoots(cwd, options)
   const writeRoots = resolveRoots([
     ...(options.allowCwdWrite ? [cwd] : []),
     os.tmpdir(),
     process.env.TMPDIR,
   ])
   const writable = new Set(writeRoots.map((root) => root.resolved))
+  const byPath = new Map<string, 'ro' | 'rw'>()
+  for (const root of readRoots) byPath.set(root.resolved, writable.has(root.resolved) ? 'rw' : 'ro')
+  for (const root of writeRoots) byPath.set(root.resolved, 'rw')
+  // A read-only workspace always wins, even when it sits inside a writable temporary parent.
+  const canonicalCwd = (() => { try { return realpathSync(cwd) } catch { return path.resolve(cwd) } })()
+  if (!options.allowCwdWrite) byPath.set(canonicalCwd, 'ro')
+  return [...byPath.entries()]
+    .map(([mountPath, mode]) => ({ mode, path: mountPath }))
+    .sort((a, b) => a.path.length - b.path.length || a.path.localeCompare(b.path))
+}
+
+/** bwrap argv (without the binary) implementing the same contract as macSandboxProfile. */
+export function linuxSandboxArgv(cwd: string, options: LinuxSandboxProfileOptions): string[] {
+  const mounts = planLinuxMounts(cwd, options)
   const args: string[] = ['--unshare-all', '--die-with-parent']
   if (options.allowNetwork) args.push('--share-net')
   args.push('--proc', '/proc', '--dev', '/dev')
-  for (const root of readRoots) {
-    if (writable.has(root.resolved)) continue
-    args.push('--ro-bind', root.resolved, root.resolved)
-  }
-  for (const root of writeRoots) args.push('--bind', root.resolved, root.resolved)
+  // Parent-first order is what makes a read-only child decisive.
+  for (const mount of mounts) args.push(mount.mode === 'rw' ? '--bind' : '--ro-bind', mount.path, mount.path)
   if (options.allowCwdWrite) args.push(...gitControlReadOnlyBinds(realpathSync(cwd)))
-  args.push(...compatSymlinks(readRoots))
+  args.push(...compatSymlinks(linuxReadRoots(cwd, options)))
   args.push('--chdir', cwd, '--')
   return args
 }
