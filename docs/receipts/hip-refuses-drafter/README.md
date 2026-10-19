@@ -40,7 +40,7 @@ nothing is printed before or after it.
 (`run.log` line 44: `ls: cannot access '~/tf-1001-runs/out/27b-dflash2.json'`). In the code the refusal is the
 first check once the checkpoint's family is known, before the drafter cache lookup and before any serve child
 (`zig/src/server/benchmark.zig` line 338, `if (rocm and given) return fail(ctx, rocm_drafter);`; the banner is
-line 382).
+lines 381-382).
 
 **R2b stops before any weights load.** The refusal is the first line of `checkGroup` (`zig/src/native/hip.zig`
 line 54). `ready()` runs `checkGroup` first (line 84), before it reads the model's window, queries the GPU (line 92)
@@ -73,18 +73,20 @@ The run still drafted. Its 20 attempts drafted 262 tokens and kept 70 of them, o
 (`27b-auto.drafts.json` `totals`, and `27b-auto.log` line 37). These drafts did not come from an MTP head,
 because this checkpoint has none. At this revision `model.safetensors.index.json` (git blob `05a3a3a1`, the digest
 pinned in `docs/receipts/gfx1151-qwen-833bbfcb/checkpoints.json`) lists 2,180 tensors and none of them is an
-`mtp` tensor, and the revision has no `mtp*.safetensors` file. The HIP engine looks for a head only in those
-tensors (`Checkpoint.mtp` in `zig/src/families/qwen3_5/weights/checkpoint.zig`), and the 1.0.12 model check on
-this checkpoint reports `the model has no draft head` (`docs/receipts/gfx1151-qwen-833bbfcb/27b-model-check.log`
-line 29). The policy line's `mtp drafts 3 under 0.3` is the policy, printed whether or not a head loads. An
-earlier reading in the PR description took these drafts for MTP drafts; they are not.
+`mtp` tensor, and the revision has no `mtp*.safetensors` file. The HIP engine looks for a head in
+`mtp*.safetensors` or among the shards' own tensors, and the shards hold the same 2,180 (`Checkpoint.mtp` in
+`zig/src/families/qwen3_5/weights/checkpoint.zig`), and the 1.0.12 model check on this checkpoint reports `the
+model has no draft head` (`docs/receipts/gfx1151-qwen-833bbfcb/27b-model-check.log` line 29). The policy line's
+`mtp drafts 3 under 0.3` is the policy, printed whether or not a head loads. An earlier reading in the PR
+description took these drafts for MTP drafts; they are not.
 
 What drafted is the lane core's copy proposer (`SuffixLookup`): it proposes tokens copied from the stream's own
 context, on every request that drafts. The counts fit it: 6 of the 20 attempts drafted nothing in about 255
 rounds, and the others drafted 15, 34 or 48 tokens each. An MTP head proposes on most rounds: the MTP checkpoint
 in `docs/receipts/gfx1151-qwen-833bbfcb/35b-server-8092.log` shows `rounds=33 accepted=30/68`, for example.
 On a checkpoint with MTP weights the HIP engine drafts with the head as well as with copies. `serve --mtp-drafts 0`
-turns off the head alone; `serve --no-drafts`, or `tensorfold benchmark --serial`, turns both off and decodes plain.
+stops the head's drafts alone (the head still loads); `serve --no-drafts`, or `tensorfold benchmark --serial`,
+turns both off and decodes plain.
 
 ## Host controls (`host-controls/`)
 
@@ -120,6 +122,7 @@ banner and sent the fake server nothing; line 238 checks that `autoDrafter` name
 | `build.log` | the HIP build's output: empty, the build printed nothing |
 | `host-controls/control-*.patch` | the change each control applied to the commit's tree |
 | `host-controls/control-*.log`, `host-controls/restored.log` | the host test runs for the controls and the restored tree |
+| `host-controls/.gitattributes` | exempts the control patches and logs from git's whitespace check: verbatim tool output, and patch context lines must keep their trailing space |
 | `SHA256SUMS` | SHA-256 of every file here except itself |
 
 In `run.log`, lines 1 to 26 are git setting up the merge on the box; line 24 is the `rev-parse` error behind

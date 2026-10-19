@@ -1,0 +1,2 @@
+*.patch whitespace=-trailing-space,-blank-at-eof
+*.log whitespace=-trailing-space,-blank-at-eof
