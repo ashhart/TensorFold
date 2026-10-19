@@ -68,52 +68,78 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
     const size_t row = blockIdx.x;
     const int t = threadIdx.x;
     const int E = D / 256;
-    float hv[MAXE];
-    float ss = 0.0f;
-    // the weights are loaded with the row, not after its reduction
-    uint2 wq[MAXE / 4];
     if ((E & 3) == 0) {
+        // h + r and w * (h * inv) move 8 entries a lane through xrow; the squares keep a thread's E entries in order
+        uint4 wv[4];
 #pragma unroll
-        for (int i = 0; i < MAXE; i += 4) {
-            if (i >= E) break;
-            wq[i / 4] = *reinterpret_cast<const uint2*>(W + t * E + i);
+        for (int j = 0; j < 4; j++) {
+            const int d = (t + 256 * j) * 8;
+            if (d < D) wv[j] = *reinterpret_cast<const uint4*>(W + d);
         }
-    }
-    if ((E & 3) == 0) {
-        // the same entries and order a thread at a time, four at a load
 #pragma unroll
-        for (int i = 0; i < MAXE; i += 4) {
-            if (i >= E) break;
-            const size_t at = row * D + t * E + i;
-            uint2 hw = *reinterpret_cast<const uint2*>(H + at);
-            __nv_bfloat16* hb = reinterpret_cast<__nv_bfloat16*>(&hw);
+        for (int j = 0; j < 4; j++) {
+            const int d = (t + 256 * j) * 8;
+            if (d >= D) break;
+            const size_t at = row * D + d;
+            uint4 hw = *reinterpret_cast<const uint4*>(H + at);
             if (R != nullptr) {
-                const uint2 rw = *reinterpret_cast<const uint2*>(R + at);
+                const uint4 rw = *reinterpret_cast<const uint4*>(R + at);
+                __nv_bfloat16* hb = reinterpret_cast<__nv_bfloat16*>(&hw);
                 const __nv_bfloat16* rb = reinterpret_cast<const __nv_bfloat16*>(&rw);
 #pragma unroll
-                for (int j = 0; j < 4; j++) hb[j] = __float2bfloat16_rn(bf(hb[j]) + bf(rb[j]));
-                *reinterpret_cast<uint2*>(H + at) = hw;
+                for (int k = 0; k < 8; k++) hb[k] = __float2bfloat16_rn(bf(hb[k]) + bf(rb[k]));
+                *reinterpret_cast<uint4*>(H + at) = hw;
             }
-#pragma unroll
-            for (int j = 0; j < 4; j++) {
-                hv[i + j] = bf(hb[j]);
-                ss = fmaf(hv[i + j], hv[i + j], ss);
-            }
+            *reinterpret_cast<uint4*>(xrow + d) = hw;
         }
-    } else {
+        __syncthreads();
+        float sq = 0.0f;
 #pragma unroll
         for (int i = 0; i < MAXE; i++) {
             if (i >= E) break;
-            const size_t at = row * D + t * E + i;
-            float h = bf(H[at]);
-            if (R != nullptr) {
-                const __nv_bfloat16 hb = __float2bfloat16_rn(h + bf(R[at]));
-                H[at] = hb;
-                h = bf(hb);
-            }
-            hv[i] = h;
-            ss = fmaf(h, h, ss);
+            const float h = bf(xrow[t * E + i]);
+            sq = fmaf(h, h, sq);
         }
+        sq = warp_sum(sq);
+        if ((t & 31) == 0) red[t >> 5] = sq;
+        __syncthreads();
+        float sum = 0.0f;
+        for (int i = 0; i < 8; i++) sum += red[i];
+        const float scale = rsqrtf(sum / (float)D + eps);
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            const int d = (t + 256 * j) * 8;
+            if (d >= D) break;
+            const uint4 hw = *reinterpret_cast<const uint4*>(xrow + d);
+            const __nv_bfloat16* hb = reinterpret_cast<const __nv_bfloat16*>(&hw);
+            const __nv_bfloat16* wb = reinterpret_cast<const __nv_bfloat16*>(&wv[j]);
+            uint4 xw;
+            __nv_bfloat16* xb = reinterpret_cast<__nv_bfloat16*>(&xw);
+#pragma unroll
+            for (int k = 0; k < 8; k++) xb[k] = __float2bfloat16_rn(bf(wb[k]) * (bf(hb[k]) * scale));
+            *reinterpret_cast<uint4*>(X + row * D + d) = xw;
+            *reinterpret_cast<uint4*>(xrow + d) = xw;
+        }
+        if (XS == nullptr) return;
+        __syncthreads();
+        for (int g = t; g < D / 64; g += blockDim.x) XS[row * (D / 64) + g] = group_sum(xrow + g * 64);
+        return;
+    }
+    // E not a multiple of 4: a thread's entries one at a time
+    float hv[MAXE];
+    float ss = 0.0f;
+#pragma unroll
+    for (int i = 0; i < MAXE; i++) {
+        if (i >= E) break;
+        const size_t at = row * D + t * E + i;
+        float h = bf(H[at]);
+        if (R != nullptr) {
+            const __nv_bfloat16 hb = __float2bfloat16_rn(h + bf(R[at]));
+            H[at] = hb;
+            h = bf(hb);
+        }
+        hv[i] = h;
+        ss = fmaf(h, h, ss);
     }
     ss = warp_sum(ss);
     if ((t & 31) == 0) red[t >> 5] = ss;
@@ -121,28 +147,13 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
     float total = 0.0f;
     for (int i = 0; i < 8; i++) total += red[i];
     const float inv = rsqrtf(total / (float)D + eps);
-    if ((E & 3) == 0) {
 #pragma unroll
-        for (int i = 0; i < MAXE; i += 4) {
-            if (i >= E) break;
-            const int d = t * E + i;
-            const __nv_bfloat16* wb = reinterpret_cast<const __nv_bfloat16*>(&wq[i / 4]);
-            uint2 xw;
-            __nv_bfloat16* xb = reinterpret_cast<__nv_bfloat16*>(&xw);
-#pragma unroll
-            for (int j = 0; j < 4; j++) xb[j] = __float2bfloat16_rn(bf(wb[j]) * (hv[i + j] * inv));
-            *reinterpret_cast<uint2*>(X + row * D + d) = xw;
-            *reinterpret_cast<uint2*>(xrow + d) = xw;
-        }
-    } else {
-#pragma unroll
-        for (int i = 0; i < MAXE; i++) {
-            if (i >= E) break;
-            const int d = t * E + i;
-            const __nv_bfloat16 x = __float2bfloat16_rn(bf(W[d]) * (hv[i] * inv));
-            X[row * D + d] = x;
-            xrow[d] = x;
-        }
+    for (int i = 0; i < MAXE; i++) {
+        if (i >= E) break;
+        const int d = t * E + i;
+        const __nv_bfloat16 x = __float2bfloat16_rn(bf(W[d]) * (hv[i] * inv));
+        X[row * D + d] = x;
+        xrow[d] = x;
     }
     if (XS == nullptr) return;
     __syncthreads();
