@@ -40,7 +40,7 @@ export function MinimalWorkspace({ target, onTarget }: { target: MinimalTarget; 
     await loadEngineModel(selected.repo)
   }
   return <div data-testid="minimal-workspace" className="flex h-full w-full min-w-0 flex-col bg-canvas text-ink">
-    <header className="drag flex min-h-12 shrink-0 flex-wrap items-center justify-end gap-2 px-4 pb-2 pl-[96px] pt-2">
+    <header className={clsx('drag flex min-h-12 shrink-0 flex-wrap items-center justify-end gap-2 pr-4 pb-2 pt-2', api.platform === 'linux' ? 'pl-4' : 'pl-[96px]')}>
       <Button size="sm" variant="ghost" className="no-drag" disabled={busy} icon="settings" onClick={() => useStore.getState().setView({ name: 'settings', section: 'app' })}>{tx("Settings")}</Button>
       <Button size="sm" className="no-drag" disabled={busy} onClick={() => void action(() => changeDesktopMode('full'))}>{tx("Open Full")}</Button>
     </header>

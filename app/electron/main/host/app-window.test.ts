@@ -24,7 +24,7 @@ class FakeBrowserWindow {
   loadedFile: string | null = null
   loadedUrl: string | null = null
 
-  constructor(_options: unknown) { FakeBrowserWindow.latest = this; FakeBrowserWindow.all.push(this) }
+  constructor(readonly options: import('electron').BrowserWindowConstructorOptions) { FakeBrowserWindow.latest = this; FakeBrowserWindow.all.push(this) }
   once(name: string, handler: () => void) { this.onceHandlers.set(name, handler) }
   show() {}
   loadFile(file: string) {
@@ -133,4 +133,33 @@ try {
 assert.equal(trustedRendererMediaAllowed('media', { requestingUrl: 'http://127.0.0.1:5173/', isMainFrame: true, mediaTypes: ['audio'] }, 'http://127.0.0.1:5173/'), true)
 assert.equal(trustedRendererMediaAllowed('media', { requestingUrl: 'http://127.0.0.1:5173/other', isMainFrame: true, mediaTypes: ['audio'] }, 'http://127.0.0.1:5173/'), false)
 
-console.log('app window navigation + media permission trust tests passed')
+// Exercise the actual BrowserWindow options across desktop platforms without Electron.
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+try {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    Object.defineProperty(process, 'platform', { ...platformDescriptor, value: platform })
+    const runtime = createAppWindowRuntime({
+      BrowserWindow: FakeBrowserWindow as any,
+      baseDir: '/fixture/dist-electron',
+      openExternalSafely: async () => {},
+      session: {} as any,
+    })
+    runtime.createWindow()
+    const win = FakeBrowserWindow.latest!
+    assert.equal(win.options.titleBarStyle, platform === 'linux' ? 'default' : 'hiddenInset')
+    assert.notEqual(win.options.frame, false, 'native frame must not be disabled')
+    assert.equal(win.options.titleBarOverlay, undefined, 'no custom window-control overlay')
+    assert.deepEqual(win.options.trafficLightPosition, platform === 'linux' ? undefined : { x: 18, y: 22 })
+    assert.equal(win.options.backgroundColor, platform === 'darwin' ? '#00000000' : '#111216')
+    assert.equal(win.options.vibrancy, platform === 'darwin' ? 'under-window' : undefined)
+    assert.deepEqual(win.options.webPreferences, {
+      preload: '/fixture/dist-electron/preload.js', contextIsolation: true, nodeIntegration: false, sandbox: true,
+    }, 'native chrome does not change renderer isolation')
+    win.onceHandlers.get('closed')?.()
+  }
+} finally {
+  Object.defineProperty(process, 'platform', platformDescriptor)
+  store.win = null
+}
+
+console.log('app window navigation + media permission trust + native chrome tests passed')

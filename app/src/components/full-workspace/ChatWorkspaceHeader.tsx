@@ -4,6 +4,8 @@ import { useUiText } from '../../lib/preferences/hooks'
 import { requestConversationSearch } from '../search/search-events'
 import { useMemo, useRef, useState } from 'react'
 import { useStore } from '../../lib/store'
+import { api } from '../../lib/ipc'
+import clsx from 'clsx'
 import { fullWorkspaceActivity } from '../../lib/full-workspace-activity'
 import { Icon } from '../../lib/icons'
 import type { Thread } from '../../lib/types'
@@ -36,7 +38,7 @@ export function ChatWorkspaceHeader({ title, thread }: { title: string; thread: 
     finally { lock.current = false; setCreating(false) }
   }
   return <header aria-label={tx("Full chat navigation")} className="drag relative z-10 shrink-0 border-b border-line/60 bg-canvas">
-    <div className="flex min-h-11 items-center gap-2 pl-[96px] pr-3">
+    <div className={clsx('flex min-h-11 items-center gap-2 pr-3', api.platform === 'linux' ? 'pl-3' : 'pl-[96px]')}>
       <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{title || "TensorFold"}</span>
       <FullLayoutSwitch />
     </div>
