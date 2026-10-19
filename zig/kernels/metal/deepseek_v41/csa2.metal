@@ -102,6 +102,7 @@ kernel void dsv41_sparse_attention(device const ushort *q [[buffer(0)]], device 
 }
 
 // Each SIMD group scores different keys; every lane retains the predecessor's maxima and value-sum order.
+[[max_total_threads_per_threadgroup(256)]]
 kernel void dsv41_sparse_attention_parallel(device const ushort *q [[buffer(0)]], device const uchar *ring [[buffer(1)]],
     device const uchar *chunk [[buffer(2)]], device const uchar *main [[buffer(3)]],
     device const int *indices [[buffer(4)]], device const float *sink [[buffer(5)]],

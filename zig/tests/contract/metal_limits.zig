@@ -11,7 +11,7 @@ const limits = contract.limits;
 const registry = contract.registry;
 
 /// A registered pipeline as built here: its declaration, function, this GPU's source and the pre-M5 source.
-pub const Launch = struct { decl: limits.MetalLaunch, function: []const u8, here: []const u8, pre_m5: []const u8 };
+pub const Launch = struct { decl: limits.MetalLaunch, function: []const u8, here: []const u8, pre_m5: []const u8, precise: bool = false };
 
 /// The pre-M5 text of a source that includes nax.h (frags.source's branch for GPUs without tensor units).
 fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
@@ -35,6 +35,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const w: tf.flashnext_vision_contract.Which = if (std.mem.eql(u8, fun, "fz_mask_rows")) .mask else if (std.mem.eql(u8, fun, "fn_attn_prep_mrope")) .mrope else if (std.mem.indexOf(u8, d.name, " target ") != null) .target else if (std.mem.indexOf(u8, d.name, " mtp ") != null) .mtp else if (std.mem.indexOf(u8, d.name, " absolute ") != null) .absolute else .pooled;
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
+    }
+    if (std.mem.startsWith(u8, d.name, "deepseek sparse ")) {
+        const body = sources.deepseek_v41_kv ++ sources.deepseek_v41_csa2;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body, .precise = true };
     }
     if (std.mem.startsWith(u8, d.name, "drama3 ")) {
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
@@ -88,9 +92,18 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
 }
 
+fn pipeline(device: mtl.Device, l: Launch) !mtl.Pipeline {
+    if (!l.precise) return rig_.pipeline(device, l.here, l.function);
+    var options = mtl.CompileOptions.mlx();
+    options.math_functions = .precise;
+    const lib = try mtl.Library.fromSource(device, l.here, options);
+    defer lib.deinit();
+    return mtl.Pipeline.init(device, lib, l.function, false);
+}
+
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
-    const p = rig_.pipeline(device, l.here, l.function) catch |err| {
+    const p = pipeline(device, l) catch |err| {
         std.debug.print("{s} {s}: no pipeline on this GPU ({t})\n", .{ if (control) "RED " else "FAIL", l.decl.name, err });
         return 1;
     };

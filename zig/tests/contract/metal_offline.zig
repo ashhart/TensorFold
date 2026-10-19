@@ -28,16 +28,17 @@ fn exec(x: Ctx, argv: []const []const u8) !void {
 }
 
 /// The source compiled as MLX compiles it at run time, linked into a metallib named by its hash.
-fn library(x: Ctx, source: []const u8) ![]const u8 {
+fn library(x: Ctx, source: []const u8, precise: bool) ![]const u8 {
     var h = std.hash.Wyhash.init(0);
     h.update(source);
+    h.update(if (precise) "precise" else "fast");
     const stem = try std.fmt.allocPrint(x.a, "{s}/src_{x}", .{ x.dir, h.final() });
     const lib = try std.fmt.allocPrint(x.a, "{s}.metallib", .{stem});
     if (std.Io.Dir.cwd().access(x.io, lib, .{})) |_| return lib else |_| {}
     const src = try std.fmt.allocPrint(x.a, "{s}.metal", .{stem});
     const air = try std.fmt.allocPrint(x.a, "{s}.air", .{stem});
     try std.Io.Dir.cwd().writeFile(x.io, .{ .sub_path = src, .data = source });
-    try exec(x, &.{ "xcrun", "-sdk", "macosx", "metal", std_flag(), "-fmetal-math-mode=safe", "-fmetal-math-fp32-functions=fast", "-c", src, "-o", air });
+    try exec(x, &.{ "xcrun", "-sdk", "macosx", "metal", std_flag(), "-fmetal-math-mode=safe", if (precise) "-fmetal-math-fp32-functions=precise" else "-fmetal-math-fp32-functions=fast", "-c", src, "-o", air });
     try exec(x, &.{ "xcrun", "-sdk", "macosx", "metallib", air, "-o", lib });
     return lib;
 }
@@ -112,7 +113,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
         const control = std.mem.startsWith(u8, d.name, "control");
         const safe = d.adapts or d.reserved >= d.threads or (!d.offline and d.threads <= 256);
         const got = blk: {
-            const lib = library(x, l.pre_m5) catch |err| break :blk err;
+            const lib = library(x, l.pre_m5, l.precise) catch |err| break :blk err;
             const m1 = familyLimit(x, lib, l.function, &m1_archs) catch |err| break :blk err;
             const m2 = familyLimit(x, lib, l.function, &m2_archs) catch |err| break :blk err;
             break :blk [2]u32{ m1, m2 };
