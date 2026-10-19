@@ -115,6 +115,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.first_masked.?(x.inner.ptr, s, position, mask);
             }
         }.f else null,
+        .score = if (v.score != null) struct {
+            fn f(p: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 {
+                const x = H.bind(p);
+                return x.inner.vtable.score.?(x.inner.ptr, prompt, labels, logits, mass);
+            }
+        }.f else null,
         .held = if (v.held != null) struct {
             fn f(p: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
                 const x = H.bind(p);
@@ -259,6 +265,12 @@ test "each forwarded entry calls the family's entry of the same name, once" {
                 return 0;
             }
         }.f,
+        .score = struct {
+            fn f(p: *anyopaque, _: []const u32, _: []const u32, _: []f64, _: bool) anyerror!f64 {
+                Rec.hit(p, "score");
+                return 0;
+            }
+        }.f,
         .held = struct {
             fn f(p: *anyopaque, _: *S, _: []u32) anyerror!void {
                 Rec.hit(p, "held");
@@ -318,6 +330,9 @@ test "each forwarded entry calls the family's entry of the same name, once" {
     try rec.once("first_row");
     _ = try w.first_masked.?(p, &s, 0, &.{});
     try rec.once("first_masked");
+    var label_logits: [0]f64 = .{};
+    _ = try w.score.?(p, &.{}, &.{}, &label_logits, true);
+    try rec.once("score");
     try w.held.?(p, &s, &out);
     try rec.once("held");
     w.release(p, &s);

@@ -24,6 +24,7 @@ const Stats = api.Stats;
 pub const Rounds = rounds.Rounds;
 pub const Proposers = rounds.Proposers;
 const rounds = @import("lane_rounds.zig");
+const scoring = @import("lane_host_score.zig");
 const lane_stream = @import("lane_stream.zig");
 const lane_halt = @import("lane_halt.zig");
 
@@ -69,6 +70,7 @@ pub const LaneHost = struct {
     memory_lanes: ?usize = null, // lanes the backend had memory for at its last LaneMemory, until a job ends
     warm_quiet: u64 = 0, // ns a warm pass waits for other work before its first chunk (0: none), set by its family
     disk: rows_host.Disk = .{}, // the Mac app's questions about kept states, and the disk writer's quiet
+    scores: scoring.Queue = .{}, // decisions' label scores waiting for the engine thread (lane_host_score.zig)
     /// Runs first on the engine thread: a backend whose API state is per thread (a CUDA context) binds it there.
     on_thread: ?ThreadInit = null,
     /// opt-in: a family round planner (prompt pieces, decode rows in one pass); null: whole or `prefill_step` prompts
@@ -95,6 +97,7 @@ pub const LaneHost = struct {
     pub fn stop(h: *LaneHost) void {
         rows_host.drainThread(h);
         rows_host.close(h);
+        scoring.close(h);
         const closed: api.LearnEvent = .{ .done = .{ .message = "the engine closed" } };
         for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
         h.lessons.deinit(h.gpa);
@@ -112,19 +115,28 @@ pub const LaneHost = struct {
     pub const halt = lane_halt.halt;
 
     pub fn engine(h: *LaneHost) Engine {
-        return .{ .ctx = h, .vtable = &.{
-            .info = infoFn,
-            .submit = submitFn,
-            .cancel = cancelFn,
-            .status = status.read,
-            .memory = memoryFn,
-            .keepalive = keepaliveFn,
-            .learn = learn.submit,
-            .recall = recalls.attach,
-            .imprint = rows_host.ask,
-            .drain = rows_host.drain,
-        } };
+        // decisions' label scores only when the backend gives them, so the route refuses as before otherwise
+        return .{ .ctx = h, .vtable = if (h.core.backend.vtable.score != null) &scored_vtable else &plain_vtable };
     }
+
+    const plain_vtable: Engine.VTable = .{
+        .info = infoFn,
+        .submit = submitFn,
+        .cancel = cancelFn,
+        .status = status.read,
+        .memory = memoryFn,
+        .keepalive = keepaliveFn,
+        .learn = learn.submit,
+        .recall = recalls.attach,
+        .imprint = rows_host.ask,
+        .drain = rows_host.drain,
+    };
+
+    const scored_vtable: Engine.VTable = blk: {
+        var v = plain_vtable;
+        v.score = scoring.score;
+        break :blk v;
+    };
 
     /// The family's queue as a keepalive target, when it set one.
     fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
@@ -513,6 +525,7 @@ pub const LaneHost = struct {
         while (true) {
             ends.takeCancels(h);
             rows_host.answer(h);
+            scoring.answer(h);
             learn.refuse(h);
             while (h.admitOne()) {}
             h.fillOne();
