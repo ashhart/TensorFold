@@ -333,7 +333,7 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
     defer gpa.free(index_text);
     var parsed_index = try std.json.parseFromSlice(std.json.Value, gpa, index_text, .{});
     defer parsed_index.deinit();
-    const weight_map = parsed_index.value.object.get("weight_map").?.object;
+    const weight_map = try st.index.weightMap(parsed_index.value);
     const spelling = index_mod.ngramSpelling(weight_map);
     const mtp_root = index_mod.mtpRoot(weight_map); // oMLX keeps the head outside language_model.
     var ck_mtp = if (std.mem.eql(u8, mtp_root, "mtp")) try ckpt.Checkpoint.openModelPrefix(gpa, io, model_dir, "mtp.") else null;

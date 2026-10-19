@@ -2,6 +2,7 @@
 const fz = @import("replay.zig");
 const std = @import("std");
 const platform = @import("sys");
+const safetensors = @import("../../core/safetensors.zig");
 const mtl = @import("metal");
 const split = fz.split;
 const dense = fz.dense;
@@ -182,17 +183,16 @@ pub const Run = struct {
         };
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
-        const n = std.mem.readInt(u64, &head, .little);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
+        if (end < 8) return error.BadSafetensors;
+        const size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+        const n = try safetensors.headerSize(std.mem.readInt(u64, &head, .little), size);
         const text = try r.arena.alloc(u8, n);
         try readAll(fd, text, 8);
-        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, r.arena, text, .{});
-        var it = parsed.object.iterator();
-        while (it.next()) |kv| {
-            if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
-            const offs = kv.value_ptr.object.get("data_offsets").?.array.items;
-            const lo: usize = @intCast(offs[0].integer);
-            const hi: usize = @intCast(offs[1].integer);
-            try r.index.put(r.arena, kv.key_ptr.*, .{ .fd = fd, .at = 8 + n + lo, .len = hi - lo });
+        const entries = try safetensors.parseHeader(r.arena, text, size - 8 - n);
+        try r.index.ensureUnusedCapacity(r.arena, @intCast(entries.count()));
+        for (entries.keys(), entries.values()) |name, tensor| {
+            r.index.putAssumeCapacity(name, .{ .fd = fd, .at = 8 + n + tensor.begin, .len = tensor.end - tensor.begin });
         }
     }
 

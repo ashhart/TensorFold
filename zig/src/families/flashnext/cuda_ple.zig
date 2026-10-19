@@ -365,7 +365,7 @@ pub const Ngram = struct {
         defer gpa.free(text);
         const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
         defer parsed.deinit();
-        const wm = parsed.value.object.get("weight_map").?.object;
+        const wm = try core.safetensors.index.weightMap(parsed.value);
         const first = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
         const modelopt = wm.contains(first);
         g.format = if (modelopt) .nvfp4 else .mlx;

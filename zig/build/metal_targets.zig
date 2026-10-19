@@ -193,7 +193,12 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "metal", .module = metal }},
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = b.createModule(.{
+            .root_source_file = b.path("zig/src/families/kimi_k3/core_safetensors.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "core", .module = mods.engine }},
+        }) } },
     });
     const kimi_bytes = embedded(b, kimi_lib, "kimi.metallib");
     const kimi_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{

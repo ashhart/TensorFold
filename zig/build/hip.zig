@@ -129,7 +129,7 @@ fn checksExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/npy.zig"), .target = target, .optimize = optimize }) } },
+        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/npy_from_core.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = e.hip.import_table.get("core").? }} }) } },
     }) });
 }
 

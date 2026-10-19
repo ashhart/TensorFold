@@ -100,17 +100,9 @@ fn writeAll(fd: platform.c.fd_t, bytes: []const u8) !void {
     }
 }
 
-/// `bytes` to `path` through `path`.tmp, synced, then renamed over it.
+/// `bytes` to `path` through an exclusively created sibling file, synced, then renamed over it.
 pub fn writeWhole(a: Allocator, path: []const u8, bytes: []const u8) !void {
-    const tmp = try std.fmt.allocPrintSentinel(a, "{s}.tmp", .{path}, 0);
-    const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, file_mode);
-    if (fd < 0) return error.WriteFailed;
-    {
-        defer _ = platform.c.close(fd);
-        try writeAll(fd, bytes);
-        if (platform.c.fsync(fd) != 0) return error.WriteFailed;
-    }
-    try rename(tmp, try a.dupeSentinel(u8, path, 0));
+    try platform.atomic_file.replace(a, path, &.{bytes});
 }
 
 pub fn rename(from: [:0]const u8, to: [:0]const u8) !void {

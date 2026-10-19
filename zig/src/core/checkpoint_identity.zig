@@ -5,6 +5,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const Io = std.Io;
 const digest_cache = @import("digest_cache.zig");
 const runtime_sha = @import("runtime_sha256.zig");
+const index_format = @import("checkpoint_index.zig");
 
 /// Before any weight loads: config.json (a split's rank left out), the index, each shard's name, size and header.
 pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
@@ -32,9 +33,8 @@ fn shards(a: std.mem.Allocator, io: Io, dir: []const u8, h: ?*Sha256) ![]const [
     if (Io.Dir.cwd().readFileAlloc(io, index, a, .limited(1 << 26))) |text| {
         if (h) |x| x.update(text);
         const root = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
-        const map = if (root == .object) root.object.get("weight_map") else null;
-        if (map == null or map.? != .object) return error.BadIndex;
-        for (map.?.object.values()) |v| if (v == .string) try names.append(a, v.string);
+        const map = try index_format.weightMap(root);
+        for (map.values()) |v| try names.append(a, v.string);
     } else |err| switch (err) {
         error.FileNotFound => try names.append(a, "model.safetensors"),
         else => return err,
@@ -50,8 +50,8 @@ fn header(a: std.mem.Allocator, io: Io, file: Io.File, size: u64) ![]u8 {
     var head: [8]u8 = undefined;
     if (try file.readPositionalAll(io, &head, 0) != 8) return error.BadHeader;
     const n = std.mem.readInt(u64, &head, .little);
-    if (n > 1 << 30 or 8 + n > size) return error.BadHeader;
-    const text = try a.alloc(u8, @intCast(n));
+    const length = @import("safetensors.zig").headerSize(n, size) catch return error.BadHeader;
+    const text = try a.alloc(u8, length);
     if (try file.readPositionalAll(io, text, 8) != text.len) return error.BadHeader;
     return text;
 }

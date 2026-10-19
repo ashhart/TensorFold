@@ -102,7 +102,9 @@ fn openStore(path: []const u8, read_only: bool) !*Store {
     var problem: []const u8 = "";
     const id: lanes.recall_store.Identity = .{ .digest = @splat(9), .vocab = lanes.fake.vocab, .name = "fake" };
     const o: lanes.recall_store.Options = .{ .dir = path, .cap_bytes = 64 << 20, .read_only = read_only };
-    return (try Store.open(gpa, std.testing.io, id, o, &problem, arena.allocator())) orelse error.TestRefused;
+    const store = (try Store.open(gpa, std.testing.io, id, o, &problem, arena.allocator())) orelse return error.TestRefused;
+    store.admission.floor = 1 << 20;
+    return store;
 }
 
 fn prompt(comptime n: usize, seed: u32) [n]u32 {

@@ -186,15 +186,16 @@ pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]
     };
     defer mapped.map.destroy(io);
     defer mapped.file.close(io);
+    if (mapped.map.memory.len > st.index.max_bytes) return error.BadIndex;
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, mapped.map.memory, .{});
     defer parsed.deinit();
-    const weight_map = parsed.value.object.get("weight_map") orelse return identityFromMapped(gpa, null, config, shards.items);
+    const weight_map = try st.index.weightMap(parsed.value);
     var names: std.ArrayList([]const u8) = .empty;
     defer {
         for (names.items) |n| gpa.free(n);
         names.deinit(gpa);
     }
-    var it = weight_map.object.iterator();
+    var it = weight_map.iterator();
     while (it.next()) |kv| {
         var dup = false;
         for (names.items) |n| if (std.mem.eql(u8, n, kv.value_ptr.string)) {

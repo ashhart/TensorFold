@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 pub const windows = builtin.os.tag == .windows;
 
 pub const c = if (windows) @import("win_c.zig") else std.c;
+pub const atomic_file = @import("atomic_file.zig");
 
 /// std.posix, or its sockets, signals and limits over Winsock and console events.
 pub const posix = if (windows) @import("win_posix.zig") else std.posix;

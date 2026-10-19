@@ -5,6 +5,7 @@ const mtl = @import("metal");
 const fz = @import("replay.zig");
 const config = @import("config.zig");
 const segments = @import("../../core/segments.zig");
+const index_format = @import("../../core/checkpoint_index.zig");
 const tp_settings = @import("tp_settings.zig");
 const pack_io = @import("pack_io.zig");
 const pack = @import("pack.zig");
@@ -141,9 +142,10 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     }
     const index_file = try r.mapFile(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
 
-    const index = try std.json.parseFromSliceLeaky(std.json.Value, arena, index_file.bytes[0..index_file.size], .{});
+    if (index_file.size > index_format.max_bytes) return error.BadIndex;
+    const index = try std.json.parseFromSliceLeaky(std.json.Value, arena, index_file.bytes[0..index_file.size], .{ .allocate = .alloc_always });
     var files: std.StringHashMapUnmanaged(void) = .empty;
-    var wit = index.object.get("weight_map").?.object.iterator();
+    var wit = (try index_format.weightMap(index)).iterator();
     while (wit.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
     var fit = files.keyIterator();
     while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));

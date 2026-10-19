@@ -2,6 +2,13 @@
 
 const std = @import("std");
 const Io = std.Io;
+pub const index = @import("checkpoint_index.zig");
+pub const max_header_bytes = 100_000_000;
+
+pub fn headerSize(header_len: u64, file_size: u64) error{BadSafetensors}!usize {
+    if (file_size < 8 or header_len > max_header_bytes or header_len > file_size - 8) return error.BadSafetensors;
+    return std.math.cast(usize, header_len) orelse error.BadSafetensors;
+}
 
 pub const DType = enum {
     bool,
@@ -61,13 +68,23 @@ pub fn parseHeader(arena: std.mem.Allocator, json: []const u8, data_len: usize) 
 
 /// Select one tensor namespace before interpreting shapes, so a text engine need not admit a vision tower's layouts.
 pub fn parseHeaderPrefix(arena: std.mem.Allocator, json: []const u8, data_len: usize, prefix: ?[]const u8) !Header {
+    return parseHeaderPrefixes(arena, json, data_len, if (prefix) |p| &.{p} else &.{});
+}
+
+/// Select multiple namespaces in one header parse; an empty list admits every name.
+pub fn parseHeaderPrefixes(arena: std.mem.Allocator, json: []const u8, data_len: usize, prefixes: []const []const u8) !Header {
+    if (json.len > max_header_bytes) return error.BadSafetensors;
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
     if (parsed != .object) return error.BadSafetensors;
     var out: Header = .empty;
     var it = parsed.object.iterator();
     while (it.next()) |kv| {
         if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
-        if (prefix) |p| if (!std.mem.startsWith(u8, kv.key_ptr.*, p)) continue;
+        if (prefixes.len > 0) {
+            for (prefixes) |p| {
+                if (std.mem.startsWith(u8, kv.key_ptr.*, p)) break;
+            } else continue;
+        }
         if (kv.value_ptr.* != .object) return error.BadSafetensors;
         const o = kv.value_ptr.object;
         const dtype = DType.parse(str(o.get("dtype")) orelse return error.BadSafetensors) orelse return error.UnsupportedDType;
@@ -85,6 +102,19 @@ pub fn parseHeaderPrefix(arena: std.mem.Allocator, json: []const u8, data_len: u
         e.end = uint(offs[1]) orelse return error.BadSafetensors;
         if (e.end < e.begin or e.end - e.begin != n or e.end > data_len) return error.BadSafetensors;
         try out.put(arena, kv.key_ptr.*, e);
+    }
+    const ranges = try arena.dupe(Entry, out.values());
+    defer arena.free(ranges);
+    std.mem.sort(Entry, ranges, {}, struct {
+        fn less(_: void, a: Entry, b: Entry) bool {
+            return a.begin < b.begin;
+        }
+    }.less);
+    var end: usize = 0;
+    for (ranges) |e| {
+        if (e.begin == e.end) continue;
+        if (e.begin < end) return error.OverlappingTensors;
+        end = e.end;
     }
     return out;
 }
@@ -145,12 +175,11 @@ pub const File = struct {
     pub fn openPrefix(gpa: std.mem.Allocator, io: Io, path: []const u8, prefix: ?[]const u8) !File {
         var file = try Io.Dir.cwd().openFile(io, path, .{});
         errdefer file.close(io);
-        const len: usize = @intCast(try file.length(io));
+        const len = std.math.cast(usize, try file.length(io)) orelse return error.BadSafetensors;
         if (len < 8) return error.BadSafetensors;
         var map = try Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
         errdefer map.destroy(io);
-        const header_len: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
-        if (header_len > len - 8) return error.BadSafetensors;
+        const header_len = try headerSize(std.mem.readInt(u64, map.memory[0..8], .little), len);
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const names = try parseHeaderPrefix(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len, prefix);
@@ -289,4 +318,8 @@ test "text namespace filtering skips rank-six vision metadata without hiding inv
     try std.testing.expectEqual(@as(usize, 1), h.count());
     try std.testing.expect(h.contains("language_model.lm_head.weight"));
     try std.testing.expectError(error.BadSafetensors, parseHeaderPrefix(arena.allocator(), json, 25, "language_model."));
+}
+
+test {
+    _ = @import("safetensors_security_test.zig");
 }
