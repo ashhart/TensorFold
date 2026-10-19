@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "इंजन उन्नत सेटिंग्स",
+ "Variables passed to the built-in engine": "अंतर्निहित इंजन को भेजे जाने वाले वेरिएबल",
+ "Engine variables": "इंजन वेरिएबल",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "अंतर्निहित TensorFold इंजन प्रक्रिया को भेजे जाने वाले एनवायरनमेंट वेरिएबल। मॉडल लोड सीमा बढ़ाने या ऐप छोड़े बिना इंजन का व्यवहार बदलने के लिए इनका उपयोग करें।",
+ "Current app-side load limit:": "वर्तमान ऐप-साइड लोड सीमा:",
+ "{value0} is managed by TensorFold or the system.": "{value0} को TensorFold या सिस्टम प्रबंधित करता है, इसे यहाँ सेट नहीं किया जा सकता।",
+ "No variables set. The engine runs with its defaults.": "कोई वेरिएबल सेट नहीं है। इंजन डिफ़ॉल्ट मानों से चलता है।",
+ "Add variable": "वेरिएबल जोड़ें",
+ "Each variable can appear only once.": "हर वेरिएबल केवल एक बार आ सकता है।",
+ "Common variables": "सामान्य वेरिएबल",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "सहेजे गए मान हर इंजन प्रक्रिया की अगली शुरुआत पर लागू होंगे; लोड किया गया मॉडल रीलोड होने तक अपने शुरुआती मान रखता है।",
+ "Saved values take effect the next time a model loads.": "सहेजे गए मान अगली बार मॉडल लोड होने पर प्रभावी होंगे।",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "डिफ़ॉल्ट 70% से ऊपर की लोड सीमा इस Mac के बाकी कार्यों के लिए कम मेमोरी छोड़ती है। इसे केवल तभी बढ़ाएँ जब इंजन ने बताया हो कि मॉडल बाल-बाल नहीं समा रहा।"
+}

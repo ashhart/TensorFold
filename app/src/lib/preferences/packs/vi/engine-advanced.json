@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "Cài đặt nâng cao của engine",
+ "Variables passed to the built-in engine": "Biến truyền tới engine tích hợp",
+ "Engine variables": "Biến của engine",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "Các biến môi trường được truyền tới tiến trình engine TensorFold tích hợp. Dùng chúng để nâng giới hạn tải mô hình hoặc điều chỉnh hành vi của engine mà không cần rời khỏi ứng dụng.",
+ "Current app-side load limit:": "Giới hạn tải hiện tại phía ứng dụng:",
+ "{value0} is managed by TensorFold or the system.": "{value0} do TensorFold hoặc hệ thống quản lý nên không thể đặt ở đây.",
+ "No variables set. The engine runs with its defaults.": "Chưa đặt biến nào. Engine chạy với giá trị mặc định.",
+ "Add variable": "Thêm biến",
+ "Each variable can appear only once.": "Mỗi biến chỉ được xuất hiện một lần.",
+ "Common variables": "Các biến thường dùng",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Giá trị đã lưu sẽ áp dụng khi mỗi tiến trình engine khởi động lần tới; mô hình đã nạp vẫn giữ các giá trị lúc khởi động cho đến khi nạp lại.",
+ "Saved values take effect the next time a model loads.": "Giá trị đã lưu sẽ có hiệu lực lần tới khi nạp mô hình.",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Giới hạn tải cao hơn mặc định 70% để lại ít bộ nhớ hơn cho mọi thứ khác trên Mac này. Chỉ nâng lên khi engine báo mô hình vừa khít không đủ."
+}

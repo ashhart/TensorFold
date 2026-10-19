@@ -170,7 +170,7 @@ export function patchSpendBudget(current: ModelSpendBudget | null | undefined, p
   return { ...spendBudgetDefaults(current), ...patch, updatedAt: Date.now() }
 }
 
-export type SettingsSection = 'phone' | 'app' | 'library' | 'readiness' | 'models' | 'agents' | 'agent' | 'orchestrator' | 'connectors' | 'persona' | 'security' | 'voice' | 'appearance' | 'skills'
+export type SettingsSection = 'phone' | 'app' | 'library' | 'engine' | 'readiness' | 'models' | 'agents' | 'agent' | 'orchestrator' | 'connectors' | 'persona' | 'security' | 'voice' | 'appearance' | 'skills'
 
 export interface SettingsSectionMeta {
   id: SettingsSection
@@ -197,6 +197,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'readiness', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Readiness") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Providers, CLIs, connectors") }, icon: 'check' },
       { id: 'models', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Models & Accounts") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Sources for chats and agents") }, icon: 'cpu' },
       { id: 'library', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Model folders") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Find existing Hugging Face and local models") }, icon: 'folder' },
+      { id: 'engine', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Engine advanced") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Variables passed to the built-in engine") }, icon: 'sliders' },
       { id: 'agents', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Bots") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Saved instructions, models and permissions") }, icon: 'spark' },
     ],
   },

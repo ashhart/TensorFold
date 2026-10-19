@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "Дополнительные параметры движка",
+ "Variables passed to the built-in engine": "Переменные для встроенного движка",
+ "Engine variables": "Переменные движка",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "Переменные среды, передаваемые процессу встроенного движка TensorFold. Используйте их, чтобы повысить лимит загрузки модели или настроить поведение движка, не выходя из приложения.",
+ "Current app-side load limit:": "Текущий лимит загрузки на стороне приложения:",
+ "{value0} is managed by TensorFold or the system.": "{value0} управляется TensorFold или системой и не может быть изменён здесь.",
+ "No variables set. The engine runs with its defaults.": "Переменные не заданы. Движок работает со значениями по умолчанию.",
+ "Add variable": "Добавить переменную",
+ "Each variable can appear only once.": "Каждая переменная может встречаться только один раз.",
+ "Common variables": "Часто используемые переменные",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Сохранённые значения применяются при следующем запуске каждого процесса движка; загруженная модель сохраняет значения, с которыми была запущена, до перезагрузки.",
+ "Saved values take effect the next time a model loads.": "Сохранённые значения вступят в силу при следующей загрузке модели.",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Лимит загрузки выше прежних 70% оставляет меньше памяти для всего остального на этом Mac. Повышайте его, только если движок сообщил, что модели не хватило совсем немного."
+}

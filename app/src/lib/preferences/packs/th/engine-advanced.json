@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "การตั้งค่าขั้นสูงของเอนจิน",
+ "Variables passed to the built-in engine": "ตัวแปรที่ส่งให้เอนจินในตัว",
+ "Engine variables": "ตัวแปรของเอนจิน",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "ตัวแปรสภาพแวดล้อมที่ส่งให้กระบวนการเอนจิน TensorFold ในตัว ใช้เพื่อเพิ่มขีดจำกัดการโหลดโมเดลหรือปรับพฤติกรรมของเอนจินโดยไม่ต้องออกจากแอป",
+ "Current app-side load limit:": "ขีดจำกัดการโหลดฝั่งแอปปัจจุบัน:",
+ "{value0} is managed by TensorFold or the system.": "{value0} อยู่ในการจัดการของ TensorFold หรือระบบ จึงตั้งค่าที่นี่ไม่ได้",
+ "No variables set. The engine runs with its defaults.": "ยังไม่ได้ตั้งค่าตัวแปร เอนจินจะทำงานด้วยค่าเริ่มต้น",
+ "Add variable": "เพิ่มตัวแปร",
+ "Each variable can appear only once.": "ตัวแปรแต่ละตัวต้องไม่ซ้ำกัน",
+ "Common variables": "ตัวแปรที่ใช้บ่อย",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "ค่าที่บันทึกจะมีผลกับแต่ละกระบวนการเอนจินในครั้งที่เริ่มทำงานถัดไป ส่วนโมเดลที่โหลดอยู่แล้วจะคงค่าที่ใช้ตอนเริ่มไว้จนกว่าจะโหลดใหม่",
+ "Saved values take effect the next time a model loads.": "ค่าที่บันทึกจะมีผลในการโหลดโมเดลครั้งถัดไป",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "ขีดจำกัดการโหลดที่สูงกว่าค่าเริ่มต้น 70% จะเหลือหน่วยความจำสำหรับงานอื่นบน Mac นี้ลดลง เพิ่มเฉพาะเมื่อเอนจินรายงานว่าโมเดลไม่พอแบบฉิวเฉียด"
+}

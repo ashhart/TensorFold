@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "引擎高级设置",
+ "Variables passed to the built-in engine": "传递给内置引擎的变量",
+ "Engine variables": "引擎变量",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "传递给内置 TensorFold 引擎进程的环境变量。可用于提高模型加载上限，或在不离开应用的情况下调整引擎行为。",
+ "Current app-side load limit:": "当前应用端加载上限：",
+ "{value0} is managed by TensorFold or the system.": "{value0} 由 TensorFold 或系统管理，无法在此设置。",
+ "No variables set. The engine runs with its defaults.": "未设置变量。引擎将使用默认配置运行。",
+ "Add variable": "添加变量",
+ "Each variable can appear only once.": "每个变量只能出现一次。",
+ "Common variables": "常用变量",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "保存的值将在每个引擎进程下次启动时生效；已加载的模型会保持其启动时的值，直到重新加载。",
+ "Saved values take effect the next time a model loads.": "保存的值将在下次加载模型时生效。",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "高于默认 70% 的加载上限会减少这台 Mac 上其他用途可用的内存。仅当引擎报告模型差一点放不下时才提高此值。"
+}

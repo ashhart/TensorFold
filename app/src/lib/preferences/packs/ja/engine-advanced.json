@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "エンジンの高度な設定",
+ "Variables passed to the built-in engine": "組み込みエンジンに渡す変数",
+ "Engine variables": "エンジン変数",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "組み込みの TensorFold エンジンプロセスに渡される環境変数です。アプリを離れずにモデルのロード上限を上げたり、エンジンの動作を調整したりするために使用します。",
+ "Current app-side load limit:": "現在のアプリ側のロード上限：",
+ "{value0} is managed by TensorFold or the system.": "{value0} は TensorFold またはシステムが管理しているため、ここでは設定できません。",
+ "No variables set. The engine runs with its defaults.": "変数は設定されていません。エンジンは既定値で実行されます。",
+ "Add variable": "変数を追加",
+ "Each variable can appear only once.": "各変数は 1 回だけ指定できます。",
+ "Common variables": "よく使う変数",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "保存した値は各エンジンプロセスの次回起動時に適用されます。読み込み済みのモデルは、再読み込みするまで起動時の値を保持します。",
+ "Saved values take effect the next time a model loads.": "保存した値は次回のモデル読み込み時に有効になります。",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "既定の 70% を超えるロード上限は、この Mac の他の用途に使えるメモリを減らします。エンジンがモデルはわずかに収まらないと報告した場合にのみ引き上げてください。"
+}

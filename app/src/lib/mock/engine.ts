@@ -1,4 +1,5 @@
 import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY } from '../../../shared/release-feature-policy'
+import { normalizeEngineEnvOverrides } from '../../../shared/engine-advanced-env'
 import type { EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, SuggestedModel } from '../types'
 import type { TensorFoldStudioApi } from '../ipc'
 import type { EngineModelLibrarySnapshot } from '../types'
@@ -32,7 +33,7 @@ const HUB: HubModelSummary[] = [
 ]
 
 export function createMockEngineApi(): Pick<TensorFoldStudioApi,
-  'engineCompareModels' | 'engineComparisonStatus' | 'engineCancelComparison' | 'engineTryModel' | 'engineCancelTryModel' | 'engineSaveModelProfiles' | 'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
+  'engineCompareModels' | 'engineComparisonStatus' | 'engineCancelComparison' | 'engineTryModel' | 'engineCancelTryModel' | 'engineSaveModelProfiles' | 'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'engineEnvOverrides' | 'engineSetEnvOverrides' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
   const listeners = new Set<(event: EngineEvent) => void>()
   const emit = (event: EngineEvent) => { for (const cb of listeners) cb(event) }
   let installed: EngineInstalledModel[] = [{
@@ -41,6 +42,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
   }]
   let library: EngineModelLibrarySnapshot = { includeHuggingFace: false, folders: [], models: [], scanning: false, scannedAt: null, warnings: [], truncated: false, cancelled: false }
   const librarySnapshot = () => structuredClone(library)
+  let envOverrides: Record<string, string> = {}
   const scanLibrary = async (options?: { includeHuggingFace?: boolean }) => {
     library = { ...library, ...options, scanning: true, cancelled: false }
     await new Promise((resolve) => setTimeout(resolve, 350))
@@ -171,6 +173,11 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
       if (enabled && status.state === 'ready' && status.model !== repo) throw new Error('Load Nemotron before enabling Living Weights.')
       learning = { ...learning, enabled, model: enabled ? repo : learning.model, state: enabled ? 'ready' : 'off', privateCopy: enabled || learning.privateCopy }
       syncLearning(); return learningSnapshot()
+    },
+    engineEnvOverrides: async () => ({ ...envOverrides }),
+    engineSetEnvOverrides: async (overrides) => {
+      envOverrides = normalizeEngineEnvOverrides(overrides)
+      return { ...envOverrides }
     },
     engineTeach: async (text) => {
       if (!learning.active || learning.state !== 'ready') throw new Error('Load the learning model before teaching.')

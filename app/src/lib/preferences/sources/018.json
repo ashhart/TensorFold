@@ -1,0 +1,15 @@
+[
+ "Engine advanced",
+ "Variables passed to the built-in engine",
+ "Engine variables",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.",
+ "Current app-side load limit:",
+ "{value0} is managed by TensorFold or the system.",
+ "No variables set. The engine runs with its defaults.",
+ "Add variable",
+ "Each variable can appear only once.",
+ "Common variables",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.",
+ "Saved values take effect the next time a model loads.",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit."
+]

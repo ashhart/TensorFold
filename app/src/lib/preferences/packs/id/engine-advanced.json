@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "Pengaturan lanjutan engine",
+ "Variables passed to the built-in engine": "Variabel yang diteruskan ke engine bawaan",
+ "Engine variables": "Variabel engine",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "Variabel lingkungan yang diteruskan ke proses engine TensorFold bawaan. Gunakan ini untuk menaikkan batas pemuatan model atau menyesuaikan perilaku engine tanpa keluar dari aplikasi.",
+ "Current app-side load limit:": "Batas pemuatan sisi aplikasi saat ini:",
+ "{value0} is managed by TensorFold or the system.": "{value0} dikelola oleh TensorFold atau sistem dan tidak dapat diatur di sini.",
+ "No variables set. The engine runs with its defaults.": "Tidak ada variabel yang diatur. Engine berjalan dengan nilai bawaannya.",
+ "Add variable": "Tambah variabel",
+ "Each variable can appear only once.": "Setiap variabel hanya boleh muncul sekali.",
+ "Common variables": "Variabel umum",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Nilai yang disimpan dipakai setiap proses engine pada peluncuran berikutnya; model yang sudah dimuat mempertahankan nilai saat ia dimulai hingga dimuat ulang.",
+ "Saved values take effect the next time a model loads.": "Nilai yang disimpan berlaku saat model berikutnya dimuat.",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Batas pemuatan di atas default 70% menyisakan lebih sedikit memori untuk hal lain di Mac ini. Naikkan hanya jika engine melaporkan model sedikit sekali tidak muat."
+}
