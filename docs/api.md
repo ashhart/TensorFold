@@ -366,8 +366,9 @@ engines, and with thinking disabled, `max_tokens` limits the whole reply as befo
 
 The native `--loop-guard` flag is off by default and watches only an open think block. It closes a repeated exact
 cycle of at most eight tokens after 256 predecessor matches, when the detected region starts at least 64 reply tokens
-in; the reply continues after the forced close, and reports `runtime.loop: {"period": N}` plus `loop=period:N` in the
-server log. The native engine refuses the flag on backends that do not enforce it, and prints that refusal as
+in. It also closes a longer passage repeated verbatim: once a period of nine tokens or more has repeated in full and
+for at least 1,024 tokens, the period found from where the reasoning's last 32-token run occurred before. The reply
+continues after the forced close, and reports `runtime.loop: {"period": N}` plus `loop=period:N` in the server log. The native engine refuses the flag on backends that do not enforce it, and prints that refusal as
 a startup error.
 
 ## Context and errors

@@ -47,6 +47,8 @@ pub const Trim = trim.Trim;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
+    _ = @import("long_loop.zig");
+    _ = @import("long_loop_test.zig");
     _ = @import("handover_test.zig");
     _ = @import("open_first_test.zig");
     _ = @import("recorder_test.zig");
