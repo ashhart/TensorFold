@@ -140,7 +140,7 @@ heads that day. In `rocm-systems`, `projects/clr`'s visible-device block in `roc
   the CPU, GPU and AIE lists. So `rocminfo` prints only the visible GPUs, renumbered, and the probe must not apply
   the variable again.
 - HIP reads `HIP_VISIBLE_DEVICES`, else `CUDA_VISIBLE_DEVICES` (`rocclr/device/rocm/rocdevice.cpp` 390-393), over
-  every GPU agent in `hsa_iterate_agents` order (`iterateAgentCallback`, 326-346), the order `rocminfo` prints. An
+  every GPU agent in `hsa_iterate_agents` order (`iterateAgentCallback`, 327-349), the order `rocminfo` prints. An
   entry with `GPU-` in it is matched as a substring of each agent's UUID, first match wins (408-421); an index must
   read back unchanged through `std::to_string(atoi(entry))` and be below the GPU count (422-426); the first invalid
   entry ends the list (428-431), and a repeated index is skipped (433-436).
