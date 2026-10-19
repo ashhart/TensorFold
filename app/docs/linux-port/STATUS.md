@@ -44,6 +44,17 @@ clean-machine install.
   a dialog.
 - Wayland cannot present Vulkan surfaces; the app now merges `Vulkan` into `--disable-features` when
   a Wayland session is detected, leaving X11 and macOS untouched.
+- The **TensorFold** network preset is marked `trustedNetwork`: it counts as a local engine (bots,
+  phone guard, local-only features) while its address stays loopback, RFC1918, IPv6 unique-local or
+  `.local`. A public address, a CLI transport, or a hand-added LAN provider stays external.
+- Thread and bot chrome no longer says "this Mac" on Linux; a trusted network engine is labelled
+  "Network" rather than "On this Mac".
+
+## Known product limits (upstream design, not platform bugs)
+
+- Bot chats are `kind: 'chat'`, and chat mode has no `read_file`/`run_command` tools, so a bot cannot
+  read the workspace on any platform. Attachments are the supported way to give a bot file content;
+  workspace work belongs to a task or project chat.
 
 ## Linux command sandbox
 
