@@ -34,7 +34,7 @@ async function cached(cache: string, repo: string, sha: string) {
   for (const name of ['config.json', 'model.safetensors', 'tokenizer.json']) await fs.symlink(path.join(blobs, name), path.join(snapshot, name))
   return snapshot
 }
-const library = (extra: Partial<ConstructorParameters<typeof ModelLibrary>[0]> = {}) => new ModelLibrary({ appHome, env, capabilities: async () => caps, memoryLimitBytes: () => 16 * 1024 ** 3, ...extra })
+const library = (extra: Partial<ConstructorParameters<typeof ModelLibrary>[0]> = {}) => new ModelLibrary({ appHome, env: () => env, capabilities: async () => caps, memoryLimitBytes: () => 16 * 1024 ** 3, ...extra })
 const hash = async (file: string) => createHash('sha256').update(await fs.readFile(file)).digest('hex')
 
 try {
@@ -154,6 +154,19 @@ try {
   const lowMemory = library({ memoryLimitBytes: () => 1024 })
   const large = await lowMemory.scan()
   assert.equal(large.models.every((model) => !model.loadable), true)
+
+  // An eligibility refresh re-answers the persisted memory verdict without a rescan, both directions.
+  const memoryEntries = (snap: any) => snap.models.filter((model: any) => model.memoryFloorBytes != null)
+  const raised = await lowMemory.refreshEligibility(() => 16 * 1024 ** 3)
+  assert.ok(memoryEntries(raised).length >= 3, 'the seeded checkpoints carry memory verdicts')
+  assert.equal(memoryEntries(raised).every((model: any) => model.loadable), true, 'a raised limit makes every saved entry selectable without a rescan')
+  assert.equal(memoryEntries(raised).every((model: any) => model.reason === null), true, 'the memory reason clears with the verdict')
+  const lowered = await lowMemory.refreshEligibility(() => 1024)
+  assert.equal(memoryEntries(lowered).every((model: any) => !model.loadable && model.reason === 'This checkpoint needs more model memory than the current hardware allows.'), true, 'removing the raise reverses the verdict again')
+  const escaped = lowered.models.find((model: any) => model.memoryFloorBytes == null)
+  assert.ok(escaped && !escaped.loadable, 'an entry without a memory verdict keeps its own reason through the refresh')
+  const rescan = await lowMemory.scan()
+  assert.deepEqual(rescan.models.map((model: any) => [model.id, model.loadable, model.reason]), lowered.models.map((model: any) => [model.id, model.loadable, model.reason]), 'a later rescan agrees with the refreshed state')
 
   const validRegistry = await fs.readFile(lib.file, 'utf8')
   await fs.writeFile(lib.file, '{')

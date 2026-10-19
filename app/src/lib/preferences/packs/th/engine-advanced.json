@@ -11,5 +11,12 @@
  "Common variables": "ตัวแปรที่ใช้บ่อย",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "ค่าที่บันทึกจะมีผลกับแต่ละกระบวนการเอนจินในครั้งที่เริ่มทำงานถัดไป ส่วนโมเดลที่โหลดอยู่แล้วจะคงค่าที่ใช้ตอนเริ่มไว้จนกว่าจะโหลดใหม่",
  "Saved values take effect the next time a model loads.": "ค่าที่บันทึกจะมีผลในการโหลดโมเดลครั้งถัดไป",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "ขีดจำกัดการโหลดที่สูงกว่าค่าเริ่มต้น 70% จะเหลือหน่วยความจำสำหรับงานอื่นบน Mac นี้ลดลง เพิ่มเฉพาะเมื่อเอนจินรายงานว่าโมเดลไม่พอแบบฉิวเฉียด"
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "ขีดจำกัดการโหลดที่สูงกว่าค่าเริ่มต้น 70% จะเหลือหน่วยความจำสำหรับงานอื่นบน Mac นี้ลดลง เพิ่มเฉพาะเมื่อเอนจินรายงานว่าโมเดลไม่พอแบบฉิวเฉียด",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "ขีดจำกัดหน่วย GB ในการโหลด GLM-5.3 แทนขีดจำกัด 70% ของ RAM และเพิ่มการตรวจหน่วยความจำฝั่งแอปด้วย",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "ขีดจำกัดหน่วย GB ในการโหลดรุ่น Flash Next แทนขีดจำกัด 70% ของ RAM และเพิ่มการตรวจหน่วยความจำฝั่งแอปด้วย",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "ตั้งเป็น 1 เพื่อให้เอนจินไม่ใช้เครือข่าย การดาวน์โหลดรุ่นจะต้องเปิดการเชื่อมต่อกลับ",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "ตำแหน่งที่ Hugging Face เก็บไฟล์ดาวน์โหลด โฟลเดอร์รุ่นของ TensorFold เองตั้งค่าได้ใน การตั้งค่า → โฟลเดอร์รุ่น",
+ "Engine knob: append per-request records to a file for diagnostics.": "ตัวเลือกเอนจิน: บันทึกข้อมูลรายคำขอลงไฟล์เพื่อการวินิจฉัย",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "ตั้งเป็น 1 เพื่อซ่อนการแสดงข้อความสดในเทอร์มินัลของเอนจิน ตัวแบบที่ให้บริการไม่เปลี่ยนแปลง",
+ "Engine knob: mix a salt into request seeds.": "ตัวเลือกเอนจิน: ผสมเกลือเข้าไปในซีดของคำขอ"
 }

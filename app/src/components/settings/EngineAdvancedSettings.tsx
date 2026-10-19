@@ -113,7 +113,7 @@ export function EngineAdvancedSettings() {
               <div key={preset.key} className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="font-mono text-[12px] font-medium text-ink">{preset.key}</div>
-                  <div className="mt-0.5 text-[12px] leading-snug text-ink-3">{preset.desc}</div>
+                  <div className="mt-0.5 text-[12px] leading-snug text-ink-3">{tx(preset.desc)}</div>
                 </div>
                 <Button variant="ghost" size="xs" icon="plus" disabled={added.has(preset.key)} onClick={() => addRow(preset.key)} aria-label={tx('Add {value0}', { value0: preset.key })} />
               </div>

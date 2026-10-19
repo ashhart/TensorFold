@@ -32,6 +32,7 @@ export function normalizeEngineEnvOverrides(value: unknown): EngineEnvOverrides 
     if (isDeniedEngineEnvKey(key)) denied(key)
     if (typeof raw !== 'string' || !raw.length) throw new Error(`${key} needs a value.`)
     if (raw.length > MAX_VALUE_LENGTH || raw.includes('\0')) throw new Error(`${key} needs a value of at most ${MAX_VALUE_LENGTH} characters.`)
+    if (/[\r\n]/.test(raw)) throw new Error(`${key} needs a single-line value.`)
     next[key] = raw
   }
   return next
@@ -43,36 +44,51 @@ export function readEngineEnvOverrides(value: unknown): EngineEnvOverrides {
   if (value == null || typeof value !== 'object' || Array.isArray(value)) return {}
   const next: EngineEnvOverrides = {}
   for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (!KEY_PATTERN.test(key) || isDeniedEngineEnvKey(key) || typeof raw !== 'string' || !raw.length || raw.length > MAX_VALUE_LENGTH || raw.includes('\0')) continue
+    if (Object.keys(next).length >= MAX_OVERRIDES) break
+    if (!KEY_PATTERN.test(key) || isDeniedEngineEnvKey(key) || typeof raw !== 'string' || !raw.length || raw.length > MAX_VALUE_LENGTH || raw.includes('\0') || /[\r\n]/.test(raw)) continue
     next[key] = raw
   }
   return next
 }
 
-// The engine reads one load-limit variable per big-model family: GB above 0 replaces its
-// default 70%-of-RAM load limit. The app-side memory floor check must not veto a model
-// the user has deliberately allowed, so it honours the same variables.
+// The engine reads one load-limit variable per big-model family. The native code
+// (zig/src/families/glm/load_plan.zig, zig/src/native/cache_fit.zig) applies each variable only
+// to its own family's checkpoints, chosen by the config.json model_type, never the repository name.
+// The app-side admission floor must not veto a model the user has deliberately allowed for its family.
 export const ENGINE_LOAD_LIMIT_KEYS = ['GLM_LOAD_LIMIT_GB', 'FLASHNEXT_LOAD_LIMIT_GB'] as const
+
+// glm5_next is GLM-5.3-Flash on this Mac and glm_moe_dsa its expert-parallel sibling; qwen4_exp
+// is Qwen3.8 Flash Next (zig/src/cli/hub.zig family list). Checkpoints choose their loader by these
+// config.json model_type values, so the app maps variables the same way.
+const LOAD_LIMIT_FAMILIES: Record<(typeof ENGINE_LOAD_LIMIT_KEYS)[number], string[]> = {
+  GLM_LOAD_LIMIT_GB: ['glm5_next', 'glm_moe_dsa'],
+  FLASHNEXT_LOAD_LIMIT_GB: ['qwen4_exp'],
+}
 
 export interface EngineLoadLimitOverride {
   key: string
   gb: number
   bytes: number
+  // True when the request reaches or exceeds the byte cap (the native engine caps further at its GPU working set).
+  capped: boolean
 }
 
-const GIB = 1024 ** 3
-
-export function engineLoadLimitOverride(env: Record<string, string | undefined>): EngineLoadLimitOverride | null {
-  let best: EngineLoadLimitOverride | null = null
-  for (const key of ENGINE_LOAD_LIMIT_KEYS) {
-    const raw = env[key]
-    if (typeof raw !== 'string') continue
-    const gb = Number(raw)
-    if (!Number.isFinite(gb) || gb <= 0) continue
-    const bytes = Math.floor(gb * GIB)
-    if (!best || bytes > best.bytes) best = { key, gb, bytes }
-  }
-  return best
+// Mirrors the native parse (std.fmt.parseFloat over a space/tab trim): decimal or exponent GB,
+// above zero, finite; hex or words are refused. Native measures GB as decimal 1e9 and caps the
+// request at min(RAM, GPU working set); capBytes carries the app-visible RAM bound, so a value
+// like 1e308 cannot overflow the byte result.
+export function engineLoadLimitOverride(env: Record<string, string | undefined>, modelType: string | null, capBytes: number): EngineLoadLimitOverride | null {
+  const key = modelType ? ENGINE_LOAD_LIMIT_KEYS.find((candidate) => LOAD_LIMIT_FAMILIES[candidate].includes(modelType)) : undefined
+  if (!key) return null
+  const raw = env[key]
+  if (typeof raw !== 'string') return null
+  const text = raw.trim()
+  if (!text.length || !/^(\+?\d+(\.\d*)?|\+?\.\d+)([eE][+-]?\d+)?$/.test(text)) return null
+  const gb = Number(text.replace(/^\+/, ''))
+  if (!Number.isFinite(gb) || gb <= 0 || !(capBytes > 0)) return null
+  const requested = gb * 1e9
+  const capped = !Number.isFinite(requested) || requested >= capBytes
+  return { key, gb, bytes: Math.min(Math.floor(requested), capBytes), capped }
 }
 
 // Known knobs offered as quick-add chips. The first two are the reported pain point;
@@ -83,6 +99,6 @@ export const ENGINE_ENV_PRESETS: Array<{ key: string; placeholder: string; desc:
   { key: 'HF_HUB_OFFLINE', placeholder: '1', desc: 'Set 1 to keep the engine off the network; model downloads need the connection back on.' },
   { key: 'HF_HOME', placeholder: '/Volumes/Models/hf', desc: 'Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.' },
   { key: 'TENSORFOLD_REQUEST_LOG', placeholder: '/tmp/engine-requests.log', desc: 'Engine knob: append per-request records to a file for diagnostics.' },
-  { key: 'TENSORFOLD_NO_LIVE', placeholder: '1', desc: 'Engine knob: disable live features of the served model.' },
+  { key: 'TENSORFOLD_NO_LIVE', placeholder: '1', desc: 'Set 1 to hide the engine live text display in its terminal; the served model is unchanged.' },
   { key: 'TENSORFOLD_SEED_SALT', placeholder: 'salt', desc: 'Engine knob: mix a salt into request seeds.' },
 ]

@@ -154,12 +154,24 @@ async function main() {
     await assert.rejects(() => missing.sup.serve('mlx-community/Qwen3.5-2B-MLX-4bit'), /not bundled/)
     await assert.rejects(() => missing.sup.serve('../escape'), /owner\/name/)
 
-    // Engine-side load-limit variables (Settings → Engine advanced) raise the app-side floor check.
+    // Native load-limit semantics (families/glm/load_plan.zig, native/cache_fit.zig): decimal GB,
+    // each variable applied only to its own model family, requested values capped at this RAM.
     const baseLimit = Math.floor(0.7 * 64 * GIB)
     assert.equal(supervisor(h).sup.memoryLimitBytes, baseLimit)
-    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '60' }).sup.memoryLimitBytes, 60 * GIB)
-    assert.equal(supervisor(h, {}, { FLASHNEXT_LOAD_LIMIT_GB: '40' }).sup.memoryLimitBytes, baseLimit, 'a limit below the default does not lower it')
-    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: 'about sixty' }).sup.memoryLimitBytes, baseLimit, 'a value the engine would reject changes nothing here')
+    assert.equal(supervisor(h).sup.memoryLimitFor('glm5_next'), baseLimit)
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '60' }).sup.memoryLimitFor('glm5_next'), 60e9, 'the GLM variable raises the GLM family to the requested decimal GB')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '60' }).sup.memoryLimitFor('glm_moe_dsa'), 60e9, 'both GLM checkpoints share the GLM variable')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '60' }).sup.memoryLimitFor('qwen4_exp'), baseLimit, 'the GLM variable never touches the Flash Next family')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '60' }).sup.memoryLimitFor(null), baseLimit, 'a checkpoint with no family keeps the default policy')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '60' }).sup.memoryLimitBytes, baseLimit, 'the reported app default policy stays the 70% admission limit')
+    assert.equal(supervisor(h, {}, { FLASHNEXT_LOAD_LIMIT_GB: '55' }).sup.memoryLimitFor('qwen4_exp'), 55e9, 'the Flash Next variable raises only its own family')
+    assert.equal(supervisor(h, {}, { FLASHNEXT_LOAD_LIMIT_GB: '55', GLM_LOAD_LIMIT_GB: '60' }).sup.memoryLimitFor('glm5_next'), 60e9, 'with both set, each family reads only its own variable')
+    assert.equal(supervisor(h, {}, { FLASHNEXT_LOAD_LIMIT_GB: '40' }).sup.memoryLimitFor('qwen4_exp'), baseLimit, 'a limit below the default does not lower it')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: ' 60 ' }).sup.memoryLimitFor('glm5_next'), 60e9, 'surrounding spaces match the native trim')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '0x64' }).sup.memoryLimitFor('glm5_next'), baseLimit, 'hex is refused exactly like the native parseFloat')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: 'about sixty' }).sup.memoryLimitFor('glm5_next'), baseLimit, 'a value the engine would reject changes nothing here')
+    assert.equal(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '1e308' }).sup.memoryLimitFor('glm5_next'), 64 * GIB, 'an overflowing request is capped at the machine RAM, never Infinity')
+    assert.match(supervisor(h, {}, { GLM_LOAD_LIMIT_GB: '1e308' }).sup.memoryPolicyFor('glm5_next').basis, /capped at this Mac's memory ceiling/)
   } finally {
     for (const pid of await servePids(h)) if (Number.isSafeInteger(pid) && pid > 1 && processAlive(pid)) { try { process.kill(-pid, 'SIGKILL') } catch {} }
     await h.cleanup()

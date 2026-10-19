@@ -11,5 +11,12 @@
  "Common variables": "सामान्य वेरिएबल",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "सहेजे गए मान हर इंजन प्रक्रिया की अगली शुरुआत पर लागू होंगे; लोड किया गया मॉडल रीलोड होने तक अपने शुरुआती मान रखता है।",
  "Saved values take effect the next time a model loads.": "सहेजे गए मान अगली बार मॉडल लोड होने पर प्रभावी होंगे।",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "डिफ़ॉल्ट 70% से ऊपर की लोड सीमा इस Mac के बाकी कार्यों के लिए कम मेमोरी छोड़ती है। इसे केवल तभी बढ़ाएँ जब इंजन ने बताया हो कि मॉडल बाल-बाल नहीं समा रहा।"
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "डिफ़ॉल्ट 70% से ऊपर की लोड सीमा इस Mac के बाकी कार्यों के लिए कम मेमोरी छोड़ती है। इसे केवल तभी बढ़ाएँ जब इंजन ने बताया हो कि मॉडल बाल-बाल नहीं समा रहा।",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "GLM-5.3 लोड करने के लिए GB सीमा, जो 70% RAM सीमा को बदलती है। यह ऐप-साइड मेमोरी जाँच भी बढ़ाती है।",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Flash Next मॉडल लोड करने के लिए GB सीमा, जो 70% RAM सीमा को बदलती है। यह ऐप-साइड मेमोरी जाँच भी बढ़ाती है।",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "इंजन को नेटवर्क से बाहर रखने के लिए 1 सेट करें; मॉडल डाउनलोड के लिए फिर से कनेक्शन चाहिए होगा।",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face डाउनलोड कहाँ सहेजता है। TensorFold अपने मॉडल फ़ोल्डर सेटिंग्स → मॉडल फ़ोल्डर में रखता है।",
+ "Engine knob: append per-request records to a file for diagnostics.": "इंजन विकल्प: निदान के लिए अनुरोध-वार रिकॉर्ड फ़ाइल में जोड़ें।",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "इंजन के टर्मिनल में लाइव टेक्स्ट प्रदर्शन छिपाने के लिए 1 सेट करें; सेवाया गया मॉडल वैसा ही रहता है।",
+ "Engine knob: mix a salt into request seeds.": "इंजन विकल्प: अनुरोध सीड्स में नमक मिलाएँ।"
 }

@@ -11,5 +11,12 @@
  "Common variables": "Variabel umum",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Nilai yang disimpan dipakai setiap proses engine pada peluncuran berikutnya; model yang sudah dimuat mempertahankan nilai saat ia dimulai hingga dimuat ulang.",
  "Saved values take effect the next time a model loads.": "Nilai yang disimpan berlaku saat model berikutnya dimuat.",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Batas pemuatan di atas default 70% menyisakan lebih sedikit memori untuk hal lain di Mac ini. Naikkan hanya jika engine melaporkan model sedikit sekali tidak muat."
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Batas pemuatan di atas default 70% menyisakan lebih sedikit memori untuk hal lain di Mac ini. Naikkan hanya jika engine melaporkan model sedikit sekali tidak muat.",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Batas GB untuk memuat GLM-5.3, menggantikan batas 70% RAM. Juga menaikkan pemeriksaan memori aplikasi.",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Batas GB untuk memuat model Flash Next, menggantikan batas 70% RAM. Juga menaikkan pemeriksaan memori aplikasi.",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "Setel 1 agar mesin tetap luring; unduhan model memerlukan koneksi aktif kembali.",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Lokasi cache unduhan Hugging Face. TensorFold menyimpan folder modelnya sendiri di Setelan → Folder model.",
+ "Engine knob: append per-request records to a file for diagnostics.": "Pengaturan mesin: tambahkan catatan per permintaan ke berkas untuk diagnostik.",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Setel 1 untuk menyembunyikan tampilan teks langsung mesin di terminalnya; model yang dilayani tidak berubah.",
+ "Engine knob: mix a salt into request seeds.": "Pengaturan mesin: campurkan salt ke seed permintaan."
 }

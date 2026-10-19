@@ -170,6 +170,8 @@ export interface PreflightContext extends HubDeps {
   totalMemoryBytes: number
   memoryBudgetBytes?: number
   memoryLimitBytes: number
+  // App admission policy per checkpoint family: a user load-limit override applies to its own family only.
+  memoryLimitFor?: (modelType: string | null) => { bytes: number; basis: string }
   installed: Set<string>
   drafterFor: (repo: string) => string | null
   cachedBytes: (repo: string) => Promise<number>
@@ -207,7 +209,11 @@ export async function preflightRepo(repo: string, revision: string | null, ctx: 
   }) : null
   const totalBytes = tree.bytes + (drafterTree?.bytes ?? 0)
   const memoryFloorBytes = tree.bytes ? totalBytes + RUNTIME_MARGIN_BYTES : null
-  const fitsMemory = memoryFloorBytes == null ? null : memoryFloorBytes <= ctx.memoryLimitBytes
+  const memoryPolicy = ctx.memoryLimitFor?.(modelType) ?? {
+    bytes: ctx.memoryLimitBytes,
+    basis: `70% of ${formatGiB(ctx.memoryBudgetBytes ?? ctx.totalMemoryBytes)}${(ctx.memoryBudgetBytes ?? ctx.totalMemoryBytes) < ctx.totalMemoryBytes ? ' qualification budget' : ''}`,
+  }
+  const fitsMemory = memoryFloorBytes == null ? null : memoryFloorBytes <= memoryPolicy.bytes
   const cachedBytes = Math.min(totalBytes, (await ctx.cachedBytes(repo)) + (drafterRepo ? await ctx.cachedBytes(drafterRepo) : 0))
   const neededDiskBytes = Math.max(0, totalBytes - cachedBytes)
   const freeDiskBytes = await ctx.freeDiskBytes()
@@ -221,7 +227,7 @@ export async function preflightRepo(repo: string, revision: string | null, ctx: 
   if (formatOk === false) reasons.push(`The engine reads ${formats!.map(describeFormat).join(' or ')} for this family; this checkpoint is ${describeFormat(format)}.`)
   if (supported && !gated && formatOk == null) reasons.push('Its config.json format could not be verified; retry the model checks before downloading.')
   if (gated) reasons.push('The repo is gated, and the engine downloads without a Hugging Face token.')
-  if (fitsMemory === false) reasons.push(`It needs about ${formatGiB(memoryFloorBytes!)} of memory; the limit on this Mac is ${formatGiB(ctx.memoryLimitBytes)} (70% of ${formatGiB(ctx.memoryBudgetBytes ?? ctx.totalMemoryBytes)}${(ctx.memoryBudgetBytes ?? ctx.totalMemoryBytes) < ctx.totalMemoryBytes ? ' qualification budget' : ''}).`)
+  if (fitsMemory === false) reasons.push(`It needs about ${formatGiB(memoryFloorBytes!)} of memory; the limit on this Mac is ${formatGiB(memoryPolicy.bytes)} (${memoryPolicy.basis}).`)
   if (fitsDisk === false) reasons.push(`It needs ${formatGiB(neededDiskBytes)} more disk space; ${formatGiB(freeDiskBytes!)} is free.`)
   if (drafterRepo && (!drafterTree?.bytes || !drafterRevision)) reasons.push(`Its drafter ${drafterRepo} could not be resolved and sized at an immutable commit.`)
 
@@ -251,7 +257,7 @@ export async function preflightRepo(repo: string, revision: string | null, ctx: 
     fileCount: tree.files,
     drafter: drafterRepo ? { repo: drafterRepo, totalBytes: drafterTree?.bytes ?? null, resolvedRevision: drafterRevision } : null,
     memoryFloorBytes,
-    memoryLimitBytes: ctx.memoryLimitBytes,
+    memoryLimitBytes: memoryPolicy.bytes,
     fitsMemory,
     freeDiskBytes,
     neededDiskBytes,

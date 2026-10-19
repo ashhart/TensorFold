@@ -11,5 +11,12 @@
  "Common variables": "자주 쓰는 변수",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "저장된 값은 각 엔진 프로세스가 다음에 시작될 때 적용됩니다. 이미 로드된 모델은 다시 로드할 때까지 시작 당시 값을 유지합니다.",
  "Saved values take effect the next time a model loads.": "저장된 값은 다음에 모델을 로드할 때 적용됩니다.",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "기본값인 70%를 초과하는 로드 상한은 이 Mac의 다른 작업에 사용할 수 있는 메모리를 줄입니다. 엔진이 모델이 간신히 맞지 않는다고 보고한 경우에만 높이세요."
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "기본값인 70%를 초과하는 로드 상한은 이 Mac의 다른 작업에 사용할 수 있는 메모리를 줄입니다. 엔진이 모델이 간신히 맞지 않는다고 보고한 경우에만 높이세요.",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "GLM-5.3 로딩용 GB 상한. RAM의 70% 기본 제한을 대체하며 앱 측 메모리 검사도 올립니다.",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Flash Next 모델 로딩용 GB 상한. RAM의 70% 기본 제한을 대체하며 앱 측 메모리 검사도 올립니다.",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "1로 설정하면 엔진이 네트워크를 사용하지 않습니다. 모델 다운로드에는 다시 연결이 필요합니다.",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face가 다운로드를 캐시하는 위치입니다. TensorFold의 모델 폴더는 설정 → 모델 폴더에서 관리합니다.",
+ "Engine knob: append per-request records to a file for diagnostics.": "엔진 옵션: 진단용으로 요청별 기록을 파일에 추가합니다.",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "1로 설정하면 엔진 터미널의 라이브 텍스트 표시를 숨깁니다. 제공되는 모델은 그대로입니다.",
+ "Engine knob: mix a salt into request seeds.": "엔진 옵션: 요청 시드에 솔트를 혼합합니다."
 }

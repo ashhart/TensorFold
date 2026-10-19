@@ -27,6 +27,86 @@ function hubFetch(repo: string, bytes: number, modelType = 'qwen3_5') {
   }) as typeof fetch
 }
 
+// Review regression: eligibility answers, offline policy, and the cache root all follow a saved
+// override immediately — no restart, no manual rescan, and nothing bound to a stale state.
+async function liveEligibilityAndCacheScenarios() {
+  const GLM = 'BigLabs/GLM-Test-4bit'
+  const FRESH = 'FreshLabs/Fresh-4bit'
+  const h = await makeHarness({ FAKE_ENGINE_FAMILIES: 'glm5_next:GLM-Test,other', FAKE_PULL_FILES: '2', FAKE_PULL_SIZE: String(64 * 1024), FAKE_PULL_DELAY_MS: '80' })
+  let fetches = 0
+  const glmFetch = hubFetch(GLM, 26 * GIB, 'glm5_next')
+  const freshFetch = hubFetch(FRESH, 64 * 1024)
+  const spy = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => { fetches++; return (String(input).includes(FRESH) ? freshFetch : glmFetch)(input, init) }) as typeof fetch
+  const appHome = path.join(h.root, 'live')   // its own preferences file: saved overrides here must not leak into other scenarios
+  const service = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome, childEnv: h.env, fetch: spy, totalMemoryBytes: 32 * GIB, pollMs: 20, emit: () => {} })
+  service.install()
+  await seedModel(h.hub, GLM, { modelType: 'glm5_next', bytes: 26 * GIB, checkpoint: true })
+  const scanned = await service.scanLibrary({ includeHuggingFace: true })
+  assert.equal(scanned.models.find((m) => m.repo === GLM)?.loadable, false, 'the seeded checkpoint starts over the 70% default')
+
+  // A preflight caches its verdict, and the download path replays that cache.
+  const beforeFetches = fetches
+  const before = await service.preflight(GLM)
+  assert.ok(fetches > beforeFetches, 'the first preflight talks to the Hub')
+  assert.equal(before.fitsMemory, false)
+  assert.match(before.reasons.join('; '), /of memory/)
+  const cachedBeforeFetches = fetches
+  await assert.rejects(() => service.pull(GLM), /of memory/, 'the download replays the cached not-fitting verdict')
+  assert.equal(fetches, cachedBeforeFetches, 'the refused download truly came from the cache')
+
+  // Raising the family limit makes the same model fit everywhere, with no restart or rescan.
+  await service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '50', FLASHNEXT_LOAD_LIMIT_GB: '20' })
+  const after = await service.preflight(GLM)
+  assert.equal(after.fitsMemory, true, 'the previously oversized download is eligible after the raise')
+  assert.equal(after.memoryLimitBytes, 32 * GIB, 'the GLM family policy reads decimal GB, capped at this machine\'s RAM ceiling')
+  assert.ok(fetches > cachedBeforeFetches, 'the stale cached preflight was dropped, not replayed')
+  const refreshed = (await service.librarySnapshot()).models.find((m) => m.repo === GLM)
+  assert.equal(refreshed?.loadable, true, 'the saved library entry became selectable without a manual rescan')
+  assert.equal((await service.installed()).find((m) => m.repo === GLM)?.fitsMemory, true, 'the installed list republishes the new verdict to the renderer')
+  // The Flash Next variable must not have leaked into the GLM family, and removing the raise reverses it.
+  await service.setEnvOverrides({ FLASHNEXT_LOAD_LIMIT_GB: '20' })
+  assert.equal((await service.preflight(GLM)).fitsMemory, false, 'removing the raise makes the model ineligible again')
+  assert.equal((await service.librarySnapshot()).models.find((m) => m.repo === GLM)?.loadable, false, 'the library entry reverts without a rescan')
+
+  // Offline: the saved-then-live override governs every Hub path, and caches cannot bypass it.
+  const preOfflineFetches = fetches
+  await service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '50', FLASHNEXT_LOAD_LIMIT_GB: '20', HF_HUB_OFFLINE: '1' })
+  await assert.rejects(async () => { await service.search('glm') }, /HF_HUB_OFFLINE|offline/)
+  await assert.rejects(async () => { await service.preflight(GLM) }, /HF_HUB_OFFLINE|offline/, 'a cached preflight cannot bypass the offline policy')
+  await assert.rejects(async () => { await service.pull(GLM) }, /offline/i, 'the download path refuses offline before touching its cache')
+  assert.equal(fetches, preOfflineFetches, 'offline searches, preflights and pulls issue no network requests')
+  const offlineRestart = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome, childEnv: h.env, fetch: spy, totalMemoryBytes: 32 * GIB, emit: () => {} })
+  await assert.rejects(async () => { await offlineRestart.preflight(GLM) }, /HF_HUB_OFFLINE|offline/, 'a saved offline preference governs app-side Hub requests after restart')
+  await assert.rejects(async () => { await offlineRestart.search('glm') }, /offline/)
+  const backOnlineFetches = fetches
+  await service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '50' })
+  assert.equal((await service.preflight(GLM)).fitsMemory, true, 'clearing the saved offline flag returns Hub traffic to online')
+  assert.ok(fetches > backOnlineFetches, 'going online actually fetches again')
+
+  // Cache location: a move is refused while a download runs, and afterwards all paths follow the new root.
+  const secondRoot = path.join(h.root, 'second-hub')
+  await seedModel(secondRoot, 'FreshLabs/Fresh-4bit', { checkpoint: true })
+  const pulling = await service.pull(GLM)
+  assert.equal(pulling.state, 'queued')
+  await assert.rejects(() => service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '50', FLASHNEXT_LOAD_LIMIT_GB: '20', HF_HUB_CACHE: path.join(h.root, 'third-hub') }), /cache location/i, 'the root cannot move under an in-flight download')
+  assert.ok((await service.librarySnapshot()).models.every((m) => m.repo !== 'FreshLabs/Fresh-4bit'), 'discovery still answers from the current root while the pull holds it')
+  await waitFor(async () => (await service.pullList()).every((job) => job.state === 'done' || job.state === 'failed' || job.state === 'cancelled'), 15_000, 'the pull to finish on its original root')
+  assert.ok((await service.installed()).some((m) => m.repo === GLM), 'the completion callback verified against the root the download started on')
+  await service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '50', FLASHNEXT_LOAD_LIMIT_GB: '20', HF_HUB_CACHE: secondRoot })
+  assert.ok((await service.scanLibrary()).models.some((m) => m.repo === 'FreshLabs/Fresh-4bit'), 'discovery follows the saved root')
+  assert.ok((await service.preflight('FreshLabs/Fresh-4bit')).verdict !== 'unsupported', 'preflight measures against the saved root')
+  await service.pull('FreshLabs/Fresh-4bit')
+  await waitFor(async () => (await service.pullList()).every((job) => job.state === 'done' || job.state === 'failed' || job.state === 'cancelled') && (await service.installed()).some((m) => m.repo === 'FreshLabs/Fresh-4bit'), 15_000, 'the download to register in the saved root')
+  await service.load('FreshLabs/Fresh-4bit')
+  const served = (await h.records()).filter((row) => row.kind === 'serve').at(-1)
+  assert.equal(await fs.realpath(served.hubCache).catch(() => served.hubCache), await fs.realpath(secondRoot), 'launches use the same root discovery and downloads used')
+  await service.unload()
+  assert.ok(await fs.stat(path.join(h.hub, `models--${GLM.replace('/', '--')}`)), 'saving a new root never moves or deletes the old cache')
+  await service.setEnvOverrides({})
+  assert.deepEqual(service.envOverrides(), {}, 'clearing every override leaves a clean saved map')
+  await h.cleanup()
+}
+
 async function main() {
   // Engine processes get OS values and the HF cache settings, never provider credentials.
   const childEnv = engineChildEnv({ HOME: '/u', PATH: '/bin', HF_HOME: '/hf', OPENAI_API_KEY: 'sk-x', ANTHROPIC_API_KEY: 'x', TENSORFOLD_API_KEY: 'stale', NODE_OPTIONS: '--inspect', HF_TOKEN: 'hf_x' })
@@ -81,8 +161,8 @@ async function main() {
 
     // HF_HUB_OFFLINE: no capabilities call, no network.
     const offline = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: { command: '/nonexistent', args: [] }, appHome: h.root, childEnv: { ...h.env, HF_HUB_OFFLINE: '1' }, fetch: (async () => { throw new Error('no network in offline mode') }) as typeof fetch, emit: () => {} })
-    await assert.rejects(() => offline.preflight('mlx-community/Qwen3.5-2B-MLX-4bit'), /HF_HUB_OFFLINE/)
-    await assert.rejects(() => offline.search('qwen'), /HF_HUB_OFFLINE/)
+    await assert.rejects(async () => { await offline.preflight('mlx-community/Qwen3.5-2B-MLX-4bit') }, /HF_HUB_OFFLINE/)
+    await assert.rejects(async () => { await offline.search('qwen') }, /HF_HUB_OFFLINE/)
 
     // Unsupported repos are refused before any pull starts.
     const refusing = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: hubFetch('google/gemma-9', 1024, 'gemma4'), totalMemoryBytes: 32 * GIB, emit: () => {} })
@@ -157,14 +237,17 @@ async function main() {
     assert.deepEqual(saved, { FLASHNEXT_LOAD_LIMIT_GB: '20', GLM_LOAD_LIMIT_GB: '30' })
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(h.root, 'engine', 'preferences.json'), 'utf8')).envOverrides, saved, 'overrides persist with the other engine preferences')
     assert.deepEqual(service.envOverrides(), saved, 'the saved map reads back without another save')
-    assert.equal((await service.snapshot()).status.memoryLimitBytes, 30 * GIB, 'GLM_LOAD_LIMIT_GB raises the app-side admission floor above the 70% default')
+    assert.equal((await service.snapshot()).status.memoryLimitBytes, Math.floor(32 * GIB * 0.7), 'the reported default policy stays the 70% admission limit')
+    assert.equal(service.supervisor.memoryLimitFor('glm5_next'), 30e9, 'GLM_LOAD_LIMIT_GB raises only the GLM family, in decimal GB')
+    assert.equal(service.supervisor.memoryLimitFor('qwen3_5'), Math.floor(32 * GIB * 0.7), 'other families keep the default')
     await service.load('Other/Kept')
     const served = (await h.records()).filter((row) => row.kind === 'serve').at(-1)
     assert.deepEqual(served.advancedEnv, { FLASHNEXT_LOAD_LIMIT_GB: '20', GLM_LOAD_LIMIT_GB: '30' }, 'every launch-time override reaches the engine process environment')
     await service.unload()
     const restarted = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: hubFetch('mlx-community/Qwen3.5-2B-MLX-4bit', 2 * 64 * 1024), totalMemoryBytes: 32 * GIB, pollMs: 20, emit: () => {} })
     assert.deepEqual(restarted.envOverrides(), saved, 'a fresh service loads the saved overrides')
-    assert.equal((await restarted.snapshot()).status.memoryLimitBytes, 30 * GIB, 'the raised floor survives the restart')
+    assert.equal((await restarted.snapshot()).status.memoryLimitBytes, Math.floor(32 * GIB * 0.7), 'the saved policy survives the restart')
+    assert.equal(restarted.supervisor.memoryLimitFor('glm5_next'), 30e9, 'the raised family floor survives the restart')
     await assert.rejects(() => service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '' }), /needs a value/, 'an empty value cannot be saved')
 
     const after = await service.remove('mlx-community/Qwen3.5-2B-MLX-4bit')
@@ -236,6 +319,7 @@ async function main() {
   new EngineService({ binaryPath: fakeNative, appHome: path.join(h.root, 'reap2'), childEnv: h.env, emit: () => {} }).install()
   await waitFor(() => !processAlive(orphan.pid!), 5000, 'orphaned engine to be reaped')
   await h.cleanup()
+  await liveEligibilityAndCacheScenarios()
   console.log('engine service tests passed')
 }
 

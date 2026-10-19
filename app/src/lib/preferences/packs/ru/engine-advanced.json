@@ -11,5 +11,12 @@
  "Common variables": "Часто используемые переменные",
  "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Сохранённые значения применяются при следующем запуске каждого процесса движка; загруженная модель сохраняет значения, с которыми была запущена, до перезагрузки.",
  "Saved values take effect the next time a model loads.": "Сохранённые значения вступят в силу при следующей загрузке модели.",
- "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Лимит загрузки выше прежних 70% оставляет меньше памяти для всего остального на этом Mac. Повышайте его, только если движок сообщил, что модели не хватило совсем немного."
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Лимит загрузки выше прежних 70% оставляет меньше памяти для всего остального на этом Mac. Повышайте его, только если движок сообщил, что модели не хватило совсем немного.",
+ "GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Лимит в ГБ для загрузки GLM-5.3 вместо ограничения в 70% ОЗУ. Также повышает проверку памяти в приложении.",
+ "GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.": "Лимит в ГБ для загрузки моделей Flash Next вместо ограничения в 70% ОЗУ. Также повышает проверку памяти в приложении.",
+ "Set 1 to keep the engine off the network; model downloads need the connection back on.": "Установите 1, чтобы движок работал без сети; для загрузки моделей понадобится снова включить подключение.",
+ "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Где Hugging Face хранит загрузки. Собственные папки моделей TensorFold задаёт в «Настройки → Папки моделей».",
+ "Engine knob: append per-request records to a file for diagnostics.": "Параметр движка: дописывать записи по каждому запросу в файл для диагностики.",
+ "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Установите 1, чтобы скрыть живой вывод текста в терминале движка; обслуживаемая модель не меняется.",
+ "Engine knob: mix a salt into request seeds.": "Параметр движка: примешивать соль к сидам запросов."
 }
