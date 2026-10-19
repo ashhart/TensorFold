@@ -363,7 +363,7 @@ test "rocm GPUs: discrete cards are dedicated, visible-device indices select, an
     try std.testing.expectEqualStrings("AMD Radeon PRO V620", both.hardware.gpus[1].name);
     const second = host.rocm(a, "AMD EPYC 9004", 128 << 30, rocminfo_two_dgpus, "1");
     try std.testing.expect(second.hardware.gpus.len == 1 and second.hardware.gpus[0].cores.? == 72);
-    for ([_][]const u8{ "-1", "", "x" }) |sel| try std.testing.expect(host.rocm(a, null, null, rocminfo_two_dgpus, sel).hardware.gpus.len == 0);
+    for ([_][]const u8{ "-1", " ", "x" }) |sel| try std.testing.expect(host.rocm(a, null, null, rocminfo_two_dgpus, sel).hardware.gpus.len == 0);
     const none = host.rocm(a, "AMD EPYC 9004", 128 << 30, "", null);
     try std.testing.expect(none.hardware.gpus.len == 0 and std.mem.eql(u8, none.hardware.source, "partial") and std.mem.eql(u8, none.hardware.memory_type, "unknown"));
 }
@@ -396,13 +396,14 @@ test "rocm visible-device indices count every GPU agent: selecting an unreportab
     defer arena.deinit();
     const a = arena.allocator();
     const v620: []const []const u8 = &.{"AMD Radeon PRO V620"};
-    const cases = [_]struct { key: []const u8, visible: []const u8, want: []const []const u8 }{
-        .{ .key = "", .visible = "", .want = v620 },
-        .{ .key = "HIP_VISIBLE_DEVICES", .visible = "1", .want = v620 },
-        .{ .key = "HIP_VISIBLE_DEVICES", .visible = "0", .want = &.{} },
-        .{ .key = "HIP_VISIBLE_DEVICES", .visible = "0,1", .want = v620 },
-        .{ .key = "ROCR_VISIBLE_DEVICES", .visible = "1", .want = v620 },
-        .{ .key = "ROCR_VISIBLE_DEVICES", .visible = "0", .want = &.{} },
+    // with no list or 0,1 HIP sees both agents and the probe names one, so the list is short and the source partial
+    const cases = [_]struct { key: []const u8, visible: []const u8, want: []const []const u8, source: []const u8 }{
+        .{ .key = "", .visible = "", .want = v620, .source = "partial" },
+        .{ .key = "HIP_VISIBLE_DEVICES", .visible = "1", .want = v620, .source = "detected" },
+        .{ .key = "HIP_VISIBLE_DEVICES", .visible = "0", .want = &.{}, .source = "partial" },
+        .{ .key = "HIP_VISIBLE_DEVICES", .visible = "0,1", .want = v620, .source = "partial" },
+        .{ .key = "CUDA_VISIBLE_DEVICES", .visible = "1", .want = v620, .source = "detected" },
+        .{ .key = "CUDA_VISIBLE_DEVICES", .visible = "0", .want = &.{}, .source = "partial" },
     };
     const runtime: receipt.Runtime = .{ .tensorfold_version = "0.0.0-test", .backend = "rocm", .python_version = "none", .platform = "linux" };
     const settings: receipt.Settings = .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true };
@@ -414,10 +415,10 @@ test "rocm visible-device indices count every GPU agent: selecting an unreportab
         const hw = host.rocm(a, "AMD EPYC 9004", 128 << 30, rocminfo_unnamed_first, host.rocmVisible(&env)).hardware;
         const names = try a.alloc([]const u8, hw.gpus.len);
         for (hw.gpus, names) |g, *n| n.* = g.name;
-        const got = try std.mem.join(a, ", ", names);
-        const want = try std.mem.join(a, ", ", c.want);
+        const got = try std.fmt.allocPrint(a, "[{s}] {s}", .{ try std.mem.join(a, ", ", names), hw.source });
+        const want = try std.fmt.allocPrint(a, "[{s}] {s}", .{ try std.mem.join(a, ", ", c.want), c.source });
         if (!std.mem.eql(u8, got, want)) {
-            std.debug.print("{s}={s}: listed GPUs [{s}], want [{s}]\n", .{ c.key, c.visible, got, want });
+            std.debug.print("{s}={s}: listed GPUs {s}, want {s}\n", .{ c.key, c.visible, got, want });
             wrong += 1;
             continue;
         }
@@ -433,10 +434,11 @@ test "rocm visible-device indices count every GPU agent: selecting an unreportab
         }
     }
     try std.testing.expectEqual(@as(usize, 0), wrong);
-    // the probe reads HIP_VISIBLE_DEVICES first, else ROCR_VISIBLE_DEVICES
+    // HIP reads HIP_VISIBLE_DEVICES, else CUDA_VISIBLE_DEVICES; ROCr applies ROCR_VISIBLE_DEVICES inside rocminfo
     var env: std.process.Environ.Map = .init(a);
-    try std.testing.expect(host.rocmVisible(&env) == null);
     try env.put("ROCR_VISIBLE_DEVICES", "0");
+    try std.testing.expect(host.rocmVisible(&env) == null);
+    try env.put("CUDA_VISIBLE_DEVICES", "0");
     try env.put("HIP_VISIBLE_DEVICES", "1");
     try std.testing.expectEqualStrings("1", host.rocmVisible(&env).?);
 }
