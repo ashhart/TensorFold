@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Nemotron tensor parallelism shares Flash Next's NCCL 2.30.0 minimum, refusing older loaded libraries before rank setup (#1060).
+
 - Linux checkpoint hashing reads runtime SHA2 capabilities through libc when libc owns process startup.
 
 - Streaming research waits for the HTTP response head before sending chat, Messages or Responses keepalives.
