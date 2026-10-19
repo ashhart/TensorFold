@@ -586,7 +586,7 @@ if (!canUseMacSandbox()) process.env.VONTRA_ALLOW_UNSANDBOXED_COMMANDS = '1'
   const cwd = await makeWorkspace()
   const result = await executeTool('run_command', { command: 'printf ok' }, { cwd })
   assert.match(result.meta ?? '', /sandbox=(build-test|unsandboxed)/)
-  assert.match(result.meta ?? '', /(macos-sandbox-exec|unsandboxed)/)
+  assert.match(result.meta ?? '', /(macos-sandbox-exec|linux-bwrap|unsandboxed)/)
   assert.match(result.meta ?? '', /artifacts=sbox-/)
   assert.doesNotMatch(result.output, /Sandbox artifacts/)
   assert.equal(result.output, 'ok')
