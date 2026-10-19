@@ -27,10 +27,17 @@ const Part = struct { buffer: mtl.Buffer, offset: usize, len: usize };
 const ROW = 256 * 2; // a key or value row of one head (bf16)
 pub const Ring = @import("tap_ring.zig").Ring;
 
-fn parts(r: *const Runner, slot: u32, ring: ?Ring, at: u32, list: *std.ArrayList(Part), a: std.mem.Allocator) !void {
+fn parts(r: *const Runner, slot: u32, ring: ?Ring, at: u32, list: *std.ArrayList(Part), a: std.mem.Allocator, marked: bool) !void {
     if (slot >= r.ready) return error.SlotNotReady;
     for (0..r.gdn.budget.layers) |layer| for ([_]bool{ true, false }) |recurrent| {
-        const span = try r.gdn.committedSpan(layer, slot, recurrent);
+        const span: @import("gdn.zig").Span = if (marked and r.offsets[slot] != at) blk: {
+            const bank = r.gdn.marks orelse return error.NotAtMark;
+            const mark = bank.index(slot, at, r.offsets[slot]) orelse return error.NotAtMark;
+            break :blk try bank.span(layer, mark, recurrent);
+        } else blk: {
+            const live = try r.gdn.committedSpan(layer, slot, recurrent);
+            break :blk .{ .buffer = live.buffer, .offset = live.offset, .bytes = live.bytes };
+        };
         try list.append(a, .{ .buffer = span.buffer, .offset = span.offset, .len = span.bytes });
     };
     for (0..r.caches.len / r.slots) |layer| {
@@ -59,7 +66,7 @@ pub fn slotBytes(r: *const Runner, ring: ?Ring, at: u32) usize {
 fn copy(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, st: *const State, to_state: bool) !void {
     var list: std.ArrayList(Part) = .empty;
     defer list.deinit(a);
-    try parts(r, slot, ring, st.at, &list, a);
+    try parts(r, slot, ring, st.at, &list, a, to_state);
     var total: usize = 0;
     for (list.items) |p| {
         if (p.offset % 4 != 0 or p.len % 4 != 0) return error.SnapshotAlignment; // blits copy 4-byte words
@@ -88,7 +95,9 @@ pub fn save(a: std.mem.Allocator, r: *const Runner, draft: ?*Draft, at: u32) !*S
 
 /// Slot `slot`'s state after `at` tokens, its taps ring standing there too when it has one.
 pub fn saveSlot(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, at: u32) !*State {
-    if (at == 0 or r.failed or r.active != null or slot >= r.slots or r.offsets[slot] != at or (ring != null and ring.?.end.* != at)) return error.NotAtMark;
+    if (at == 0 or r.failed or r.active != null or slot >= r.ready) return error.NotAtMark;
+    const marked = if (r.gdn.marks) |m| m.index(slot, at, r.offsets[slot]) != null else false;
+    if ((r.offsets[slot] != at and !marked) or (ring != null and (marked or ring.?.end.* != at))) return error.NotAtMark;
     const n = slotBytes(r, ring, at);
     const buf = try r.model.device.buffer(n, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
     errdefer buf.deinit();
@@ -127,8 +136,8 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
     defer src.deinit(a);
     var dst: std.ArrayList(Part) = .empty;
     defer dst.deinit(a);
-    try parts(r, from, from_ring, at, &src, a);
-    try parts(r, to, to_ring, at, &dst, a);
+    try parts(r, from, from_ring, at, &src, a, false);
+    try parts(r, to, to_ring, at, &dst, a, false);
     if (src.items.len != dst.items.len) return error.SnapshotLayout;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();

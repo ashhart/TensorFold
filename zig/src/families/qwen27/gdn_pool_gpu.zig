@@ -10,6 +10,8 @@ const Tensor = @import("gpu_weights.zig").Tensor;
 const profile = @import("core").gpu_profile;
 const Kernels = @import("gdn_library.zig").Kernels;
 
+pub const PromptMarks = @import("gdn_marks_gpu.zig").Bank;
+
 const Field = enum { state, history, next_history, qkv, query, key, value, decay, mixing, snapshots, tails, recurrent };
 
 pub const Metadata = struct {
@@ -56,6 +58,7 @@ pub const Pool = struct {
     buffers: [std.enums.values(Field).len]metal.Buffer,
     kernels: Kernels,
     before: ?metal.Buffer = null,
+    marks: ?*PromptMarks = null, // borrowed through one synchronous plain prompt and its cache callbacks
     before_slots: usize = 0,
     profiler: ?*profile.Trace = null,
     tree_mode: gdn.TreeMode = .auto,
@@ -181,7 +184,10 @@ pub const Pool = struct {
         var scan = profile.begin(pool.profiler, input_encoder, .gdn_scan);
         errdefer scan.cancel();
         const wide = prompt and pool.budget.shape.c.dk == 128 and pool.budget.shape.c.dv % 4 == 0;
-        prepared.scanChain(scan.encoder, if (wide) pool.kernels.chain_wide else pool.kernels.chain, wide);
+        if (pool.marks) |m| {
+            if (!wide) return error.BadPromptMarks;
+            try m.scan(layer, prepared, scan.encoder, pool.kernels.chain_wide_marks);
+        } else prepared.scanChain(scan.encoder, if (wide) pool.kernels.chain_wide else pool.kernels.chain, wide);
         try scan.end();
         var gate = profile.begin(pool.profiler, input_encoder, .gdn_gate);
         errdefer gate.cancel();
@@ -191,6 +197,7 @@ pub const Pool = struct {
         var publication = profile.begin(pool.profiler, input_encoder, .state_publish);
         errdefer publication.cancel();
         const e = publication.encoder;
+        if (pool.marks) |m| try m.convolution(layer, prepared, e, pool.kernels.mark_conv);
         prepared.commitConv(e);
         e.setPipeline(pool.kernels.publish_conv);
         gdn.bind(e, .{prepared.b.next_history}, 0);

@@ -124,6 +124,11 @@ const Snaps = struct {
         const h = host(ptr);
         const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const slot = h.back.slotOf(s) orelse return error.UnknownStream;
+        // Scratch already occupies its bytes; do not let cache growth spend that same free room again.
+        if (h.runner.gdn.marks != null) {
+            const need = q.snapshot.slotBytes(&h.runner, h.back.ringOf(slot), at);
+            if (need > room(h.model) -| h.runner.gdn.missingBeforeBytes()) return error.LaneMemory;
+        }
         const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at);
         return @ptrCast(st);
     }

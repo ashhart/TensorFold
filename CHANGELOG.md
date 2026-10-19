@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Plain Qwen3.8-27B Metal prompt caching can copy up to four interior DeltaNet marks without separate prompt calls, within the memory bound (#548, #851). Thanks to @jschmied.
+
 - Streaming research replies keep late context-length refusals on the stream while retaining pre-token keepalives (#912). Thanks to @cwschroeder and @akol1.
 
 - Shared CUDA sliding-window attention uses bounded split launches, with sigmoid-routing and dense-row contract fixtures (#798). Thanks to @jschmied.

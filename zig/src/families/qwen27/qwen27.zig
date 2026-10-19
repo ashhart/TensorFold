@@ -28,6 +28,7 @@ pub const projection = @import("projection.zig");
 pub const prompt_glue = @import("prompt_glue.zig");
 pub const prompt_gpu = @import("prompt_gpu.zig");
 pub const prompt_state = @import("prompt_state.zig");
+pub const prompt_marks = @import("prompt_marks.zig");
 pub const prompt_state_gpu = @import("prompt_state_gpu.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
@@ -57,6 +58,7 @@ test {
     _ = attention;
     _ = prompt_glue;
     _ = prompt_state;
+    _ = prompt_marks;
     _ = config;
     _ = affine;
     _ = widths;

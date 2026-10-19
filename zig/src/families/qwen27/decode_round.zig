@@ -209,6 +209,10 @@ pub const Runner = struct {
         defer r.accepted_chain = false;
         var recurrent = try round.recurrent(try r.params(round.ids.len), paths);
         defer recurrent.deinit();
+        if (r.gdn.marks) |m| {
+            if (!accepted or !r.model.kernels.prompt or r.capture_taps) return error.BadPromptMarks;
+            try m.check(recurrent);
+        }
         var attention_plan = try r.attentionPlan(round);
         defer attention_plan.deinit();
         try r.gdn.prepare(r.model.device, recurrent, accepted);
