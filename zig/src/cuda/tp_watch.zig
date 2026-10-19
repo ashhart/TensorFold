@@ -211,36 +211,107 @@ test "a record is 64 bytes, and a name past 56 bytes is cut" {
     try std.testing.expectEqual(@as(usize, 56), std.mem.sliceTo(&r.text, 0).len);
 }
 
-test "a sleep takes a wake record that came before it, and waits for one that comes after" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
-    var pair: [2]c_int = undefined;
-    if (ProcessTest.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketFailed;
-    defer _ = posix.system.close(pair[0]);
-    watch_io = std.testing.io;
-    line_count = 1;
-    defer line_count = 0;
-    const first = wakes.load(.acquire);
-    slept = first;
-    const watcher = try std.Thread.spawn(.{}, watch, .{ pair[0], 0 });
-    const rec: Record = .{ .kind = wake_kind, .rank = 0 };
-    const record = std.mem.asBytes(&rec);
-    try std.testing.expectEqual(@as(isize, record.len), posix.system.write(pair[1], record.ptr, record.len));
-    while (wakes.load(.acquire) == first) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
-    sleep(std.testing.io); // the wake was counted before the sleep
-    const Late = struct {
-        fn send(fd: c_int, bytes: []const u8) void {
-            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
-            _ = posix.system.write(fd, bytes.ptr, bytes.len);
+const SleepTest = struct {
+    var joined = false;
+    const Guard = struct {
+        done: std.atomic.Value(bool) = .init(false),
+        expired: std.atomic.Value(bool) = .init(false),
+        target: u32,
+        limit: usize,
+
+        fn run(g: *Guard) void {
+            for (0..g.limit) |_| {
+                if (g.done.load(.acquire)) return;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+            g.expired.store(true, .release);
+            wakes.store(g.target, .release);
+            std.testing.io.futexWake(u32, &wakes.raw, 1);
         }
     };
-    const late = try std.Thread.spawn(.{}, Late.send, .{ pair[1], record[0..] });
-    sleep(std.testing.io); // returns once the late record lands
-    late.join();
-    try std.testing.expectEqual(first + 2, wakes.load(.acquire));
-    ending.store(true, .release); // the line closing next is expected: the watcher returns
-    _ = posix.system.close(pair[1]);
-    watcher.join();
-    ending.store(false, .release);
+
+    fn late(fd: c_int, bytes: []const u8) void {
+        std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
+        _ = posix.system.write(fd, bytes.ptr, bytes.len);
+    }
+
+    fn firstWake(first: u32) !void {
+        for (0..2000) |_| {
+            if (wakes.load(.acquire) != first) return;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+        return error.WakeTimeout;
+    }
+
+    fn check(mode: u8) !void {
+        var pair: [2]c_int = undefined;
+        if (ProcessTest.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketFailed;
+        defer _ = posix.system.close(pair[0]);
+        var peer_open = true;
+        defer if (peer_open) {
+            _ = posix.system.close(pair[1]);
+        };
+        const was_ending = ending.load(.acquire);
+        const was_count = line_count;
+        const was_slept = slept;
+        const first = wakes.load(.acquire);
+        defer {
+            ending.store(was_ending, .release);
+            line_count = was_count;
+            slept = was_slept;
+            wakes.store(first, .release);
+        }
+        watch_io = std.testing.io;
+        line_count = 1;
+        slept = first;
+        ending.store(false, .release);
+        joined = false;
+        const watcher = try std.Thread.spawn(.{}, watch, .{ pair[0], 0 });
+        defer {
+            ending.store(true, .release);
+            _ = posix.system.close(pair[1]);
+            peer_open = false;
+            watcher.join();
+            joined = true;
+        }
+        if (mode == 1) return error.InjectedParentFailure;
+        var guard: Guard = .{ .target = first + 2, .limit = if (mode == 2) 100 else 2000 };
+        const timer = try std.Thread.spawn(.{}, Guard.run, .{&guard});
+        defer {
+            guard.done.store(true, .release);
+            timer.join();
+        }
+        const rec: Record = .{ .kind = wake_kind, .rank = 0 };
+        const record = std.mem.asBytes(&rec);
+        try std.testing.expectEqual(@as(isize, record.len), posix.system.write(pair[1], record.ptr, record.len));
+        try firstWake(first);
+        if (guard.expired.load(.acquire)) return error.WakeTimeout;
+        sleep(std.testing.io);
+        if (guard.expired.load(.acquire)) return error.WakeTimeout;
+        const sender: ?std.Thread = if (mode == 2) null else try std.Thread.spawn(.{}, late, .{ pair[1], record[0..] });
+        defer if (sender) |t| t.join();
+        sleep(std.testing.io);
+        if (guard.expired.load(.acquire)) return error.WakeTimeout;
+        try std.testing.expectEqual(first + 2, wakes.load(.acquire));
+    }
+};
+
+test "a sleep takes a wake record that came before it, and waits for one that comes after" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try SleepTest.check(0);
+    try std.testing.expect(SleepTest.joined);
+}
+
+test "a lost wake and an early failure both stop and join the test watcher" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const before = wakes.load(.acquire);
+    const count = line_count;
+    try std.testing.expectError(error.InjectedParentFailure, SleepTest.check(1));
+    try std.testing.expect(SleepTest.joined);
+    try std.testing.expectError(error.WakeTimeout, SleepTest.check(2));
+    try std.testing.expect(SleepTest.joined);
+    try std.testing.expectEqual(before, wakes.load(.acquire));
+    try std.testing.expectEqual(count, line_count);
 }
 
 const ProcessTest = struct {
