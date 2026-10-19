@@ -7,6 +7,7 @@ import clsx from 'clsx'
 import { botProviderSupported, captureBotConfig } from '../../shared/bot-policy'
 import { isExternalProvider } from '../../shared/provider-trust'
 import { api } from '../lib/ipc'
+import { botVmSupported, localExecutionSource } from '../lib/bot-labels'
 import { Icon } from '../lib/icons'
 import { modelDisplayName, providerModelGroups } from '../lib/provider-accounts'
 import { useStore } from '../lib/store'
@@ -38,6 +39,8 @@ function botProblem(bot: AgentPreset, providers: Provider[]): string | null {
 
 export function Bots() {
   const tx = useAuthoredText()
+  const isMac = api.platform === 'darwin'
+  const localTarget = tx(localExecutionSource(api.platform))
   const settings = useStore((state) => state.settings)
   const presets = settings?.agentPresets ?? EMPTY_BOTS
   const providers = settings?.providers ?? EMPTY_PROVIDERS
@@ -88,7 +91,7 @@ export function Bots() {
   return <div className="scroll-thin h-full overflow-y-auto px-4 py-6 sm:px-7">
     <div className="mx-auto max-w-[1080px]">
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
-        <div><h1 className="text-[22px] font-semibold tracking-[-0.02em] text-ink">{tx("Your bots")}</h1><p className="mt-1 max-w-[620px] text-[13px] leading-relaxed text-ink-2">{tx("Save a model, a responsibility and clear permissions, then start a chat. Bots work while TensorFold is running on this Mac.")}</p></div>
+        <div><h1 className="text-[22px] font-semibold tracking-[-0.02em] text-ink">{tx("Your bots")}</h1><p className="mt-1 max-w-[620px] text-[13px] leading-relaxed text-ink-2">{isMac && tx("Save a model, a responsibility and clear permissions, then start a chat. Bots work while TensorFold is running on this Mac.")}</p></div>
         <Button variant="primary" icon="plus" disabled={!!draft || !!busyId} onClick={() => startDraft()}>{tx("New bot")}</Button>
       </div>
       <BotRecipes disabled={!!draft || !!busyId} />
@@ -108,10 +111,10 @@ export function Bots() {
           </select><span className="block text-[12px] text-ink-2">{draft.executionTarget === 'vm' ? tx("A bot VM needs a model on this Mac with Cortheon off. Guest files stay out of external model services.") : tx("API models keep permissions under TensorFold control. External models follow the app’s planning policy.")}</span></label>
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Permissions")}</span><select value={draft.approvalScope ?? 'readonly'} onChange={(event) => setDraft({ ...draft, approvalScope: event.target.value as AgentPreset['approvalScope'] })} className="h-10 w-full rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink"><option value="readonly">{tx("Read only")}</option><option value="review">{tx("Review actions with workspace rules")}</option></select></label>
-            <label className="space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Execution")}</span><select value={draft.executionTarget ?? 'workspace'} onChange={(event) => setDraft({ ...draft, executionTarget: event.target.value as AgentPreset['executionTarget'] })} className="h-10 w-full rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink"><option value="workspace">{tx("This Mac")}</option><option value="vm">{tx("Separate Linux VM")}</option></select></label>
+            <label className="space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Execution")}</span><select value={draft.executionTarget ?? 'workspace'} onChange={(event) => setDraft({ ...draft, executionTarget: event.target.value as AgentPreset['executionTarget'] })} className="h-10 w-full rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink"><option value="workspace">{localTarget}</option>{botVmSupported(api.platform) && <option value="vm">{tx("Separate Linux VM")}</option>}</select></label>
           </div>
           <BotToolScopeEditor bot={draft} onChange={setDraft} />
-          <p className="rounded-lg bg-card-2 p-3 text-[12px] leading-relaxed text-ink-2">{draft.executionTarget === 'vm' ? tx("A separate VM keeps bot files and commands away from your Mac. Set it up explicitly before the first run; TensorFold refuses to fall back to your Mac.") : tx("This Mac uses your configured chat tools and connected sources. Read only prevents actions; workspace rules may include approvals you saved earlier.")} {tx("Changes apply to new chats; existing chats keep their captured instructions, model and permissions.")}</p>
+          <p className="rounded-lg bg-card-2 p-3 text-[12px] leading-relaxed text-ink-2">{draft.executionTarget === 'vm' ? tx("A separate VM keeps bot files and commands away from your Mac. Set it up explicitly before the first run; TensorFold refuses to fall back to your Mac.") : isMac ? tx("This Mac uses your configured chat tools and connected sources. Read only prevents actions; workspace rules may include approvals you saved earlier.") : null} {tx("Changes apply to new chats; existing chats keep their captured instructions, model and permissions.")}</p>
           {draftProblem && <p className="text-[13px] text-ink-2">{draftProblem} {tx("Save paused to keep these instructions while you set up a model in Settings.")}</p>}
           <div className="flex justify-end gap-2"><Button disabled={!!busyId} onClick={() => { setDraft(null); setError(null) }}>{tx("Discard")}</Button><Button type="button" variant="primary" onClick={() => void saveBot(draftProblem ? { ...draft, paused: true } : draft)} disabled={!!busyId || !draft.name.trim() || api.platform === 'web-remote'}>{busyId ? tx("Saving…") : draftProblem ? tx("Save paused") : tx("Save bot")}</Button></div>
         </form>
@@ -128,7 +131,7 @@ export function Bots() {
         const state = bot.archivedAt ? tx("Archived") : bot.paused ? tx("Paused") : awaiting ? tx("Needs you") : running ? tx("Working") : problem ? tx("Setup needed") : bot.executionTarget === 'vm' ? tx("Model ready") : tx("Ready")
         return <article key={bot.id} className="min-w-0 rounded-xl border border-line bg-card p-4 shadow-card">
           <div className="flex items-start gap-3"><span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-ink-5 text-accent"><Icon name="spark" size={19} /></span><div className="min-w-0 flex-1"><h2 className="break-words text-[15px] font-semibold">{bot.name}</h2><p className="mt-0.5 break-words text-[13px] text-ink-2">{bot.role || tx("A bot with your saved instructions")}</p></div><span className={clsx('shrink-0 rounded-full px-2 py-1 text-[12px]', awaiting ? 'bg-accent/10 text-accent' : 'bg-card-2 text-ink-2')}>{state}</span></div>
-          <div className="mt-4 space-y-1 text-[12px] text-ink-2"><p className="truncate" title={bot.model}>{modelDisplayName(provider, bot.model)} · {isExternalProvider(provider) ? tx("Planning only") : tx("Local model")}</p><p>{bot.executionTarget === 'vm' ? tx("Separate Linux VM") : tx("This Mac")} · {bot.approvalScope === 'review' ? tx("Workspace approval rules") : tx("Read only")}</p></div>
+          <div className="mt-4 space-y-1 text-[12px] text-ink-2"><p className="truncate" title={bot.model}>{modelDisplayName(provider, bot.model)} · {isExternalProvider(provider) ? tx("Planning only") : tx("Local model")}</p><p>{bot.executionTarget === 'vm' ? tx("Separate Linux VM") : localTarget} · {bot.approvalScope === 'review' ? tx("Workspace approval rules") : tx("Read only")}</p></div>
           {(bot.toolScope !== undefined || bot.toolScopeProblem !== undefined) && <p className="mt-1 text-[12px] text-ink-2">{bot.toolScopeProblem !== undefined || toolSelection.error ? tx("Tool selection needs repair") : toolSelection.names.length ? tx("{value0} selected tool names", { value0: toolSelection.names.length }) : tx("Chat without tools")} {tx("· plugins and delegation off")}</p>}
           {problem && <p className="mt-3 break-words text-[12px] text-danger">{problem}</p>}
           {bot.executionTarget === 'vm' && <BotVmControls botId={bot.id} archived={!!bot.archivedAt} paused={!!bot.paused} />}
