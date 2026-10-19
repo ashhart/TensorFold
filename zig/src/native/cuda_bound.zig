@@ -6,6 +6,12 @@ const be = lanes.backend;
 /// `v` (the family's entries, held as `inner` by `H`) behind `H.bind`: every entry the family gives, and only those.
 pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
     return .{
+        .embedding = if (v.embedding != null) struct {
+            fn f(p: *anyopaque, s: *lanes.Stream, out: []f32) anyerror!void {
+                const x = H.bind(p);
+                return x.inner.vtable.embedding.?(x.inner.ptr, s, out);
+            }
+        }.f else null,
         .prefill = struct {
             fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
                 const x = H.bind(p);

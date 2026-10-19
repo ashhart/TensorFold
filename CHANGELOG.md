@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Shared serving and prompt scheduling have an embedding request contract with float/base64 output and declared MRL dimensions (#1035). Native EmbeddingGemma-2 loading and device qualification remain pending. Thanks to @jschmied for the RFC.
+
 - On the 27B CUDA path, TF_TIMING reports offered and kept rows, capture bucket and forward time for each verification frame.
 
 - Checkpoint hashing uses a bounded file pool and runtime SHA acceleration, preserving digest identities and atomic cache publication.

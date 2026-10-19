@@ -1,5 +1,6 @@
 //! Method and path dispatch, as ``do_GET``, ``do_POST`` and ``do_DELETE`` route them.
 const speech = @import("speech.zig");
+const embeddings = @import("embeddings.zig");
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -80,6 +81,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, std.mem.endsWith(u8, route, "/detokenize"));
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
+    const is_embedding = std.mem.eql(u8, route, "/v1/embeddings");
     const is_anthropic = anthropic.route(conn.path);
     const is_responses = if (responses.route(route)) |rid| rid.len == 0 else false;
     const is_decisions = std.mem.endsWith(u8, route, "/decisions");
@@ -87,7 +89,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
-    if (!is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    if (!is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
@@ -99,7 +101,13 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         discardBody(conn, a);
         return draining(conn, is_anthropic);
     }
+    if (srv.info.embeddings != null and (is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions"))) {
+        discardBody(conn, a);
+        conn.sendJson(400, "{\"error\":{\"message\":\"this model produces embeddings; use POST /v1/embeddings\",\"type\":\"invalid_request_error\"}}");
+        return;
+    }
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
+    if (is_embedding) return embeddings.post(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
     if (is_decisions) return decisions.post(srv, conn, a);

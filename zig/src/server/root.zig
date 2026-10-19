@@ -16,6 +16,8 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("embedding_protocol_test.zig");
+    _ = @import("embedding_service_test.zig");
     _ = @import("http_limits_test.zig");
     _ = @import("done_times_test.zig");
     _ = @import("drain_test.zig");

@@ -8,6 +8,9 @@ pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
+pub const EmbeddingInfo = lanes.embedding.Info;
+pub const EmbeddingBatch = lanes.embedding.Batch;
+pub const embedding_vector = @import("embedding_vector.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -52,6 +55,7 @@ pub const grammar = lanes.grammar;
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
 pub const Request = struct {
     prompt: []const u32,
+    embedding: ?lanes.embedding.Batch = null,
     max_tokens: u32,
     sampling: ?Sampling = null,
     /// Tokens that end the reply as ``stop`` (the token is delivered); empty when the request ignores EOS.
@@ -168,6 +172,7 @@ pub const Sink = struct {
 pub const Info = struct {
     name: []const u8 = "lanes",
     text_generation: bool = true,
+    embeddings: ?lanes.embedding.Info = null,
     speech: ?SpeechInfo = null,
     lanes: u32 = 1,
     /// Prompt plus reply tokens one request may use (0: no limit).
@@ -329,7 +334,7 @@ pub const MemorySource = struct {
 pub const HealthSource = @import("engine_status.zig").HealthSource;
 pub const Status = @import("engine_status.zig").Status;
 
-pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a learner's put-back has not reached the device
+pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest }; // Stale: put-back has not reached the device
 
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
@@ -382,6 +387,14 @@ pub const Engine = struct {
     }
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
+        const info_ = e.info();
+        if (request.embedding) |batch| {
+            const cap = info_.embeddings orelse return error.InvalidRequest;
+            if (info_.text_generation or request.max_tokens != 0 or request.drafts or request.sampling != null or
+                request.images.len != 0 or request.structure != null or request.logprobs != null or
+                request.prompt_logprobs != null or request.decode_spans.len != 0) return error.InvalidRequest;
+            batch.validate(cap, request.prompt, info_.context_window) catch return error.InvalidRequest;
+        } else if (info_.embeddings != null) return error.InvalidRequest;
         return e.vtable.submit(e.ctx, id, request, sink);
     }
     pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
@@ -496,6 +509,7 @@ pub const originals = @import("originals.zig");
 pub const save_guard = @import("save_guard");
 
 test {
+    _ = @import("lane_embedding_test.zig");
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
     _ = @import("lane_root_copy_test.zig");

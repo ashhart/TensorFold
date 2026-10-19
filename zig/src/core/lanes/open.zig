@@ -74,6 +74,15 @@ pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
 }
 
 fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !void {
+    if (s.embedding != null) {
+        if (s.isCancelled()) {
+            e.backend.release(s);
+            return error.Cancelled;
+        }
+        s.cache_len = s.prompt_len;
+        s.pending = null;
+        return;
+    }
     if (e.backend.first_before_draft and e.cfg.family_mtp and s.drafts) return @import("open_first.zig").opened(e, s, reach, hook);
     if (s.isCancelled()) { // cancelled in its last chunk: no first token
         e.backend.release(s);

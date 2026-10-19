@@ -75,6 +75,8 @@ pub const Backend = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        /// After prompt work, synchronously write full-width vectors into the caller's host output before release.
+        embedding: ?*const fn (*anyopaque, *Stream, []f32) anyerror!void = null,
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.

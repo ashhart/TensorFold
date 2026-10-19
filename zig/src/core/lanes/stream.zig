@@ -111,6 +111,7 @@ pub const Image = struct {
 pub const Spec = struct {
     id: []const u8,
     prompt: []const u32,
+    embedding: ?@import("embedding.zig").Batch = null,
     max_new: u32,
     eos: []const u32 = &.{},
     sampling: ?Sampling = null,
@@ -140,6 +141,7 @@ pub const Spec = struct {
 };
 
 pub const Stream = struct {
+    embedding: ?@import("embedding.zig").Batch = null,
     id: []const u8,
     prompt_len: usize,
     max_new: u32,
@@ -218,6 +220,7 @@ pub const Stream = struct {
         var s: Stream = .{
             .id = spec.id,
             .prompt_len = spec.prompt.len,
+            .embedding = spec.embedding,
             .max_new = spec.max_new,
             .eos = spec.eos,
             .sampling = spec.sampling,

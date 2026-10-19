@@ -21,6 +21,7 @@ pub const trim = @import("trim.zig");
 pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");
 pub const backend = @import("backend.zig");
+pub const embedding = @import("embedding.zig");
 pub const events = @import("events.zig");
 pub const windows = @import("windows.zig");
 pub const trail = @import("trail.zig");
