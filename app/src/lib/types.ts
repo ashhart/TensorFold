@@ -462,5 +462,6 @@ export type {
 export type { PhonePlatform, PhoneTransport, PhoneDevice, PhoneBounds, PhoneNode, PhoneObservation, PhoneSession, PhoneSnapshot, PhoneConnectInput, PhoneDeveloperConnectInput, PhonePairInput, PhoneAction, PhoneActionInput, PhoneToolInput } from '../../electron/agent/types'
 export type { EngineModelLibrarySnapshot, EngineLibraryFolder, EngineLibraryModel, EngineLibraryScanOptions } from '../../electron/agent/types'
 export type { EngineState, EngineHardware, EngineConnection, EnginePerformance, EngineStatus, EngineInstalledModel, EngineCapabilities, EngineSnapshot, EngineEvent, EngineLearningSnapshot, EngineLearningFact, EngineLearningGraph, HubGated, HubModelSummary, ModelPreflight, PreflightVerdict, PullProgress, PullState, SuggestedModel } from '../../electron/agent/types'
+export type { EngineEnvOverrides } from '../../electron/agent/types'
 
 export type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelComparisonRow, EngineModelGenerationSettings, EngineModelProfile, EngineModelProfileSet, SaveEngineModelProfilesInput, EngineModelPreviewResult } from '../../electron/agent/types'

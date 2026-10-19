@@ -25,6 +25,7 @@ import { useBotConnectors } from './settings/useBotConnectors'
 import { useRemoteSecurity } from './settings/useRemoteSecurity'
 import { AppSettings } from './settings/AppSettings'
 import { ModelFoldersSettings } from './settings/ModelFoldersSettings'
+import { EngineAdvancedSettings } from './settings/EngineAdvancedSettings'
 import { PhoneSettings } from './settings/PhoneSettings'
 
 function consumeRequestedSettingsSection(): SettingsSection | null {
@@ -240,6 +241,7 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
 
             {activeSection === 'app' && <AppSettings blocked={draftState.dirty} />}
             {activeSection === 'library' && <ModelFoldersSettings />}
+            {activeSection === 'engine' && <EngineAdvancedSettings />}
             {activeSection === 'phone' && <PhoneSettings />}
 
             {activeSection === 'agents' && (

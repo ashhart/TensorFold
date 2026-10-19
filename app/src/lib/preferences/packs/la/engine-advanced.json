@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "Machina provecta",
+ "Variables passed to the built-in engine": "Versus machinae insitae tradendi",
+ "Engine variables": "Versus machinales",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "Ambitus variabiles processo machinae TensorFold insitae traditae. His limitem onerantis exemplaris augere vel moribus machinae immutare potes, dum in applicatione manes.",
+ "Current app-side load limit:": "Limite onerantis currente ex parte applicationis:",
+ "{value0} is managed by TensorFold or the system.": "{value0} a TensorFold aut a systemate regitur et hic constitui non potest.",
+ "No variables set. The engine runs with its defaults.": "Nulli versus dispositi. Machina valoribus consuetis currit.",
+ "Add variable": "Adde versum",
+ "Each variable can appear only once.": "Quisque versus semel tantum adhiberi potest.",
+ "Common variables": "Versus communes",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Valores servati singuli processus machinae inchoatione sequente utentur; exemplar oneratum valores inchoationis suae retinet donec iterum oneretur.",
+ "Saved values take effect the next time a model loads.": "Valores servati in oneratione exemplaris sequentis valebunt.",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Limite onerantis supra consuetas septuaginta centesimas provisum minus memoriae ceteris operibus huius Mac relinquitur. Limitem tantum augeto si machina nuntiat exemplar vix non sufficere."
+}

@@ -1,0 +1,15 @@
+{
+ "Engine advanced": "Zaawansowane ustawienia silnika",
+ "Variables passed to the built-in engine": "Zmienne przekazywane do wbudowanego silnika",
+ "Engine variables": "Zmienne silnika",
+ "Environment variables passed to the built-in TensorFold engine process. Use these to raise a model load limit or adjust engine behaviour without leaving the app.": "Zmienne środowiskowe przekazywane do procesu wbudowanego silnika TensorFold. Użyj ich, aby podnieść limit ładowania modelu lub zmienić zachowanie silnika bez opuszczania aplikacji.",
+ "Current app-side load limit:": "Bieżący limit ładowania po stronie aplikacji:",
+ "{value0} is managed by TensorFold or the system.": "{value0} jest zarządzana przez TensorFold lub system i nie można jej tu ustawić.",
+ "No variables set. The engine runs with its defaults.": "Nie ustawiono zmiennych. Silnik działa z wartościami domyślnymi.",
+ "Add variable": "Dodaj zmienną",
+ "Each variable can appear only once.": "Każda zmienna może wystąpić tylko raz.",
+ "Common variables": "Popularne zmienne",
+ "Saved values reach each engine process at its next launch; the loaded model keeps the values it started with until it reloads.": "Zapisane wartości trafiają do każdego procesu silnika przy jego następnym uruchomieniu; wczytany model zachowuje wartości, z którymi się uruchomił, do czasu ponownego wczytania.",
+ "Saved values take effect the next time a model loads.": "Zapisane wartości zostaną zastosowane przy następnym wczytaniu modelu.",
+ "A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.": "Limit ładowania powyżej domyślnych 70% pozostawia mniej pamięci na wszystko inne na tym Macu. Podnoś go tylko, gdy silnik zgłosił, że model minimalnie się nie mieści."
+}
