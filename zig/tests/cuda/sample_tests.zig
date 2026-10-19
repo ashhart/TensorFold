@@ -157,6 +157,7 @@ pub fn draws(gpu: Gpu) !void {
     try check.expect(differ == 0, "sample: {d} of {d} draws differ", .{ differ, total });
     try check.expect(worst < 1e-3, "sample: a pick's share is {e} off its f64 value", .{worst});
     check.pass("sample: {d} draws equal the Metal rule's host references", .{total});
+    try @import("sample_proposal_tests.zig").run(gpu);
 }
 
 /// topkRows' two stages against tf_logprob_rows: the same k ids and logits, word for word, on every row kind and width.

@@ -585,7 +585,7 @@ pub const landed_cuda = cuda ++ gradient_pending ++ qwen_learning_pending ++ pag
 test {
     _ = learning;
 }
-pub const all_cuda = landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_pending.zig").records;
+pub const all_cuda = landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_pending.zig").records ++ @import("proposal_sampling_pending.zig").records;
 pub const dsv41_pending = @import("registry_union.zig").extra(landed_cuda, @import("dsv41_pending_1.zig").records ++ @import("dsv41_pending_2.zig").records);
 test {
     _ = @import("glm_kv_pending.zig");

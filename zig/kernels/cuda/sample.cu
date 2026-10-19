@@ -516,14 +516,14 @@ __device__ void sample_full(const __nv_bfloat16* L, unsigned V, const Rule& rl, 
 }
 
 // The Metal engine's choice: tf_sample_full for top_k off or past 1,024, tf_gpu_sample for the rest.
-template <bool MAP>
+template <bool MAP, bool PITCHED = false>
 __device__ void draw(const __nv_bfloat16* L, unsigned V, const Rule* rule, const int* meta, int offset, unsigned* TOK,
-                     const long long* IDS, float* PROB) {
+                     const long long* IDS, float* PROB, unsigned pitch = 0) {
     __shared__ Shared s;
     const unsigned row = blockIdx.x;
     const Rule rl = *rule;
     const unsigned position = static_cast<unsigned>(meta[0] + static_cast<int>(row) + 1 + offset);
-    const __nv_bfloat16* L_row = L + static_cast<size_t>(row) * V;
+    const __nv_bfloat16* L_row = L + static_cast<size_t>(row) * (PITCHED ? pitch : V);
     if (rl.top_k == 0u || rl.top_k > C) {
         sample_full<MAP>(L_row, V, rl, position, IDS, TOK + row, PROB ? PROB + row : nullptr, s);
     } else {
@@ -544,6 +544,13 @@ extern "C" __global__ void __launch_bounds__(1024) tf_draw_ids(const __nv_bfloat
                                                                const int* meta, int offset, unsigned* TOK, const long long* IDS,
                                                                float* PROB) {
     tf_sample::draw<true>(L, V, rule, meta, offset, TOK, IDS, PROB);
+}
+
+// Logical-width sampling over pitched rows; the IDs select the same existing keyed arithmetic.
+extern "C" __global__ void __launch_bounds__(1024) tf_draw_pitched(const __nv_bfloat16* L, unsigned V, unsigned pitch,
+    const tf_sample::Rule* rule, const int* meta, int offset, unsigned* TOK, const long long* IDS, float* PROB) {
+    if (IDS) tf_sample::draw<true, true>(L, V, rule, meta, offset, TOK, IDS, PROB, pitch);
+    else tf_sample::draw<false, true>(L, V, rule, meta, offset, TOK, nullptr, PROB, pitch);
 }
 
 // Rows of bf16 logits [rows, V]: row r's LP_WORDS words at OUT + r * LP_WORDS for PICK[r], k (at most 20) best, rank.

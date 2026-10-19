@@ -18,6 +18,7 @@ pub const Descriptor = struct {
     rank: u32 = 0,
     ranks: u32 = 1,
 };
+/// Producers score the whole batch in order; stream cancellation belongs to the router and host.
 pub const Normalized = struct {
     rows: be.Features,
     streams: []const *Stream,
@@ -65,9 +66,7 @@ pub const Scorer = struct {
             input.rows.row_bytes != try std.math.mul(u32, d.hidden, 2) or input.rows.space != d.space or input.rows.device != d.device or
             input.queue != d.queue or input.streams.len != input.rows.rows or input.positions.len != input.rows.rows or input.rows.buffer == 0) return error.ProposalScoreShape;
         const logical: u32 = if (plan.map) |m| @intCast(m.ids.len) else plan.vocab;
-        for (input.streams) |stream| if (stream.isCancelled()) return error.Cancelled;
         const result = try s.run(s.ptr, plan, input);
-        for (input.streams) |stream| if (stream.isCancelled()) return error.Cancelled;
         if (result.dtype != d.output or result.address == 0 or result.rows != input.rows.rows or result.stride < logical) return error.ProposalScoreShape;
         return .{ .buffer = result, .dtype = result.dtype, .vocab = d.vocab, .logical = logical, .stride = result.stride, .ids = if (plan.map) |m| m.ids else null, .map = plan.map, .selection = s.selection };
     }

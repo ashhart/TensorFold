@@ -76,8 +76,8 @@ test "proposal router: no service and explicit legacy preserve calls depths IDs 
     var old: Spy = .{};
     var legacy: Spy = .{};
     const service: h.Service = .{ .gpa = gpa };
-    try old.backend(null).draft(&.{request(&s)});
-    try legacy.backend(&service).draft(&.{request(&s)});
+    try old.backend(null).draftIn(gpa, &.{request(&s)});
+    try legacy.backend(&service).draftIn(gpa, &.{request(&s)});
     try t.expectEqualDeep(old, legacy);
     try t.expectEqual(@as(u32, 1), legacy.legacy_calls);
     try t.expectEqual(@as(u32, 0), legacy.routed_calls);
@@ -85,8 +85,8 @@ test "proposal router: no service and explicit legacy preserve calls depths IDs 
     try t.expectEqual(@as(?u32, null), s.proposal_depth);
     old.fail = true;
     legacy.fail = true;
-    try t.expectError(error.LegacyFailure, old.backend(null).draft(&.{request(&s)}));
-    try t.expectError(error.LegacyFailure, legacy.backend(&service).draft(&.{request(&s)}));
+    try t.expectError(error.LegacyFailure, old.backend(null).draftIn(gpa, &.{request(&s)}));
+    try t.expectError(error.LegacyFailure, legacy.backend(&service).draftIn(gpa, &.{request(&s)}));
     try t.expectEqualDeep(old, legacy);
 }
 
@@ -107,7 +107,7 @@ test "proposal router: artifact identity unsupported formats full diagnostics an
     var vt = b.vtable.*;
     vt.proposal_draft = null;
     b.vtable = &vt;
-    try t.expectError(error.ProposalServiceUnsupported, b.draft(&.{request(&s)}));
+    try t.expectError(error.ProposalServiceUnsupported, b.draftIn(gpa, &.{request(&s)}));
     try t.expectEqual(@as(u32, 0), x.clears + x.legacy_calls + x.routed_calls);
 }
 
@@ -122,39 +122,39 @@ test "proposal router: mixed spans forced OOV grammar EOS unknown history and re
     var x: Spy = .{};
     const b = x.backend(&service);
     try two.context.append(gpa, 9);
-    try b.draft(&.{ request(&one), request(&two) });
+    try b.draftIn(gpa, &.{ request(&one), request(&two) });
     try t.expectEqualSlices(h.Kind, &.{ .subset, .full }, x.plans[0..2]);
     for (0..15) |_| try two.context.append(gpa, 3);
-    try b.draft(&.{request(&two)});
+    try b.draftIn(gpa, &.{request(&two)});
     try t.expectEqual(h.Kind.full, x.plans[0]);
     try two.context.append(gpa, 7);
-    try b.draft(&.{request(&two)});
+    try b.draftIn(gpa, &.{request(&two)});
     try t.expectEqual(h.Kind.subset, x.plans[0]);
     try one.force.append(gpa, 9);
-    try b.draft(&.{request(&one)});
+    try b.draftIn(gpa, &.{request(&one)});
     try t.expectEqual(h.Kind.full, x.plans[0]);
     one.force.clearRetainingCapacity();
     one.eos = &.{9};
-    try b.draft(&.{request(&one)});
+    try b.draftIn(gpa, &.{request(&one)});
     try t.expectEqual(h.Kind.full, x.plans[0]);
     one.eos = &.{};
     var constraint: lanes.grammar.Constraint = undefined;
     one.grammar = &constraint;
-    try b.draft(&.{request(&one)});
+    try b.draftIn(gpa, &.{request(&one)});
     try t.expectEqual(h.Kind.full, x.plans[0]);
     one.grammar = null;
     var r = request(&one);
     r.first = .{ .value = 9 };
-    try b.draft(&.{r});
+    try b.draftIn(gpa, &.{r});
     try t.expectEqual(h.Kind.full, x.plans[0]);
     r.first = .{ .handle = 123 };
-    try b.draft(&.{r});
+    try b.draftIn(gpa, &.{r});
     try t.expectEqual(h.Kind.full, x.plans[0]);
     one.context.shrinkRetainingCapacity(8);
-    try b.draft(&.{request(&one)});
+    try b.draftIn(gpa, &.{request(&one)});
     try t.expectEqual(h.Kind.full, x.plans[0]);
     const diagnostic = try h.Service.full(gpa, 11, true);
-    try x.backend(&diagnostic).draft(&.{request(&one)});
+    try x.backend(&diagnostic).draftIn(gpa, &.{request(&one)});
     try t.expectEqual(h.Kind.full, x.plans[0]);
 }
 
@@ -174,18 +174,18 @@ test "proposal router: askDrafts pauses without stale holds and clears failures 
     var clock: lanes.fake.FixedClock = .{};
     var e = lanes.Engine.init(gpa, &cfg, x.backend(&service), clock.clock());
     defer e.deinit();
-    try e.askDrafts(&.{request(&s)});
+    try lanes.Engine.testing.askDrafts(&e, &.{request(&s)});
     try t.expectEqual(@as(u32, 2), s.next.?.count);
     try s.context.append(gpa, 9);
-    try e.askDrafts(&.{request(&s)});
+    try lanes.Engine.testing.askDrafts(&e, &.{request(&s)});
     try t.expectEqual(@as(u32, 0), s.next.?.count);
     try t.expect(s.drafts);
     try t.expectEqual(@as(u32, 0), x.depths[0]);
     s.context.items[s.context.items.len - 1] = 3;
-    try e.askDrafts(&.{request(&s)});
+    try lanes.Engine.testing.askDrafts(&e, &.{request(&s)});
     try t.expectEqual(@as(u32, 2), s.next.?.count);
     x.fail = true;
-    try t.expectError(error.Injected, e.askDrafts(&.{request(&s)}));
+    try t.expectError(error.Injected, lanes.Engine.testing.askDrafts(&e, &.{request(&s)}));
     const p = try lanes.windows.plan(&e, &s, null);
     try t.expectEqual(@as(usize, 0), p.count());
     try t.expect(!x.held);
@@ -193,18 +193,21 @@ test "proposal router: askDrafts pauses without stale holds and clears failures 
     var flag = true;
     s.cancel_check = .{ .ptr = &flag, .check = cancelled };
     const before = x.routed_calls;
-    try t.expectError(error.Cancelled, e.askDrafts(&.{request(&s)}));
-    try t.expectEqual(before, x.routed_calls);
+    try lanes.Engine.testing.askDrafts(&e, &.{request(&s)});
+    try t.expectEqual(before + 1, x.routed_calls);
+    try t.expectEqual(h.Kind.paused, x.plans[0]);
+    try t.expectEqual(@as(u32, 0), s.next.?.count);
     flag = false;
     x.cancel_after = &flag;
-    try t.expectError(error.Cancelled, e.askDrafts(&.{request(&s)}));
+    try lanes.Engine.testing.askDrafts(&e, &.{request(&s)});
     try t.expect(!x.held);
     x.cancel_after = null;
     flag = false;
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     service.gpa = failing.allocator();
-    try t.expectError(error.OutOfMemory, e.askDrafts(&.{request(&s)}));
-    try t.expect(!x.held);
+    try lanes.Engine.testing.askDrafts(&e, &.{request(&s)});
+    try t.expectEqual(@as(usize, 0), failing.allocations);
+    try t.expectEqual(@as(u32, 2), s.next.?.count);
 }
 
 const FakeDrafter = @import("lanes").drafted;
@@ -273,7 +276,7 @@ test "proposal router: legacy ignores unrouted proposal state" {
     for ([_]?*const h.Service{ null, &legacy }) |service| {
         var e = lanes.Engine.init(gpa, &cfg, x.backend(service), clock.clock());
         defer e.deinit();
-        try e.askDrafts(&.{request(&s)});
+        try lanes.Engine.testing.askDrafts(&e, &.{request(&s)});
         try t.expectEqual(@as(u32, 2), s.next.?.count);
         const plan = try lanes.windows.plan(&e, &s, null);
         try t.expectEqual(@as(usize, 2), plan.count());
@@ -290,8 +293,12 @@ test "proposal router: recorder forwards the optional service without routing a 
     var recorded: lanes.recorder.Recorded = .{ .inner = x.backend(&service), .recorder = undefined };
     const b = recorded.backend();
     try t.expectEqual(@as(?*const h.Service, &service), b.proposal_head);
-    try b.draft(&.{request(&s)});
+    try b.draftIn(gpa, &.{request(&s)});
     try t.expectEqual(@as(u32, 1), x.routed_calls);
     try t.expectEqual(@as(u32, 1), x.clears);
     try t.expectEqual(@as(u32, 0), x.legacy_calls);
+}
+
+test {
+    _ = @import("proposal_batch_host.zig");
 }

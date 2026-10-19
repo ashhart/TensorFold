@@ -81,7 +81,7 @@ pub const Service = struct {
     }
     pub fn choose(s: *const Service, r: be.DraftRequest) *const Plan {
         if (s.mode == .legacy) return &s.compact;
-        if (r.stream.finished or r.stream.paused) return &s.paused;
+        if (r.stream.finished or r.stream.paused or r.stream.isCancelled()) return &s.paused;
         if (s.mode == .full) return &s.complete;
         const m = s.compact.map.?;
         if (r.stream.grammar != null) return &s.complete;
@@ -100,7 +100,7 @@ pub const Service = struct {
 };
 
 /// Only opt-in producers may consume a plan; refusing an absent callback precedes absorption or scoring.
-pub fn draft(service: *const Service, b: be.Backend, requests: []const be.DraftRequest) !void {
+pub fn draft(service: *const Service, b: be.Backend, arena: std.mem.Allocator, requests: []const be.DraftRequest) !void {
     const run = b.vtable.proposal_draft orelse return error.ProposalServiceUnsupported;
     const clear = b.vtable.clear_proposals orelse return error.ProposalServiceUnsupported;
     for (requests) |r| {
@@ -111,10 +111,9 @@ pub fn draft(service: *const Service, b: be.Backend, requests: []const be.DraftR
         r.stream.proposal_depth = 0;
         clear(b.ptr, r.stream);
     };
-    const routed = try service.gpa.dupe(be.DraftRequest, requests);
-    defer service.gpa.free(routed);
+    const routed = try arena.dupe(be.DraftRequest, requests);
+    defer arena.free(routed);
     for (routed) |*r| {
-        if (r.stream.isCancelled()) return error.Cancelled;
         r.plan = service.choose(r.*);
         if (r.plan.?.kind == .paused) {
             r.depth = 0;
@@ -123,6 +122,10 @@ pub fn draft(service: *const Service, b: be.Backend, requests: []const be.DraftR
         }
     }
     try run(b.ptr, routed);
-    for (routed) |r| if (r.stream.isCancelled()) return error.Cancelled;
-    for (routed) |r| r.stream.proposal_depth = r.depth;
+    for (routed) |r| {
+        if (r.stream.isCancelled()) {
+            clear(b.ptr, r.stream);
+            r.stream.proposal_depth = 0;
+        } else r.stream.proposal_depth = r.depth;
+    }
 }

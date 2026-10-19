@@ -56,26 +56,26 @@ test "proposal router: external zero-depth fallback absorbs omitted target rows 
     defer s.deinit(gpa);
     try b.prefill(&s);
     defer b.release(&s);
-    try b.draft(&.{.{ .stream = &s, .follow = &.{}, .first = .{ .value = 3 }, .rows = null, .start = 16, .position = 17, .depth = 2 }});
+    try b.draftIn(gpa, &.{.{ .stream = &s, .follow = &.{}, .first = .{ .value = 3 }, .rows = null, .start = 16, .position = 17, .depth = 2 }});
     _ = try s.commit(gpa, &.{3}, &.{});
     try std.testing.expectEqual(@as(u32, 1), inner.holds);
     try target.lanes.getPtr(&s).?.history.append(gpa, 3);
     _ = try s.commit(gpa, &.{9}, &.{});
-    try b.draft(&.{.{ .stream = &s, .follow = &.{9}, .rows = &.{0}, .start = 16, .position = 18, .depth = 2 }});
+    try b.draftIn(gpa, &.{.{ .stream = &s, .follow = &.{9}, .rows = &.{0}, .start = 16, .position = 18, .depth = 2 }});
     const paused_absorbs = inner.absorbs;
     try std.testing.expectEqual(@as(u32, 1), inner.holds);
     try std.testing.expectEqual(@as(usize, 0), inner.lanes.getPtr(&s).?.held.items.len);
     for (0..16) |j| {
         try target.lanes.getPtr(&s).?.history.append(gpa, if (j == 0) 9 else 3);
         _ = try s.commit(gpa, &.{3}, &.{});
-        try b.draft(&.{.{ .stream = &s, .follow = &.{3}, .rows = &.{0}, .start = 17 + j, .position = 19 + j, .depth = 2 }});
+        try b.draftIn(gpa, &.{.{ .stream = &s, .follow = &.{3}, .rows = &.{0}, .start = 17 + j, .position = 19 + j, .depth = 2 }});
         try std.testing.expectEqual(@as(u32, if (j == 15) 2 else 1), inner.holds);
     }
     try std.testing.expectEqual(paused_absorbs + 16, inner.absorbs);
     try std.testing.expect(s.drafts);
     try std.testing.expectEqualSlices(u32, target.lanes.getPtr(&s).?.history.items, inner.lanes.getPtr(&s).?.history.items);
     inner.fail = .absorb;
-    try std.testing.expectError(error.Injected, b.draft(&.{.{ .stream = &s, .follow = &.{3}, .rows = &.{0}, .start = 32, .position = 34, .depth = 2 }}));
+    try std.testing.expectError(error.Injected, b.draftIn(gpa, &.{.{ .stream = &s, .follow = &.{3}, .rows = &.{0}, .start = 32, .position = 34, .depth = 2 }}));
     try std.testing.expectEqual(@as(usize, 0), inner.lanes.getPtr(&s).?.held.items.len);
 }
 

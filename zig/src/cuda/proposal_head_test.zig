@@ -27,20 +27,28 @@ fn source() q.Weight {
     return .{ .bf16 = .{ .mode = .bf16, .codes = 0x2000, .scales = 0, .n = 11, .k = 64, .npad = 128 } };
 }
 const Trace = struct {
-    const Call = struct { id: usize, grid: [3]u32, shared: u32, args: [13]u64 = @splat(0) };
+    const Call = struct { id: usize, grid: [3]u32, block: [3]u32, stream: usize, shared: u32, args: [13]u64 = @splat(0) };
     var calls: [80]Call = undefined;
     var n: usize = 0;
     fn read(comptime T: type, a: ?*anyopaque) T {
         return @as(*const T, @ptrCast(@alignCast(a.?))).*;
     }
-    fn launch(f: abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, _: c_uint, _: c_uint, _: c_uint, sm: c_uint, _: abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+    fn launch(f: abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, stream: abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
         const id = @intFromPtr(f);
         const a = args.?;
-        var call = Call{ .id = id, .grid = .{ gx, gy, gz }, .shared = sm };
+        var call = Call{ .id = id, .grid = .{ gx, gy, gz }, .block = .{ bx, by, bz }, .stream = @intFromPtr(stream), .shared = sm };
         if (id < 20) {
             inline for (.{ 0, 1, 2, 4, 5 }) |i| call.args[i] = read(u64, a[i]);
             call.args[3] = read(u32, a[3]);
             inline for (6..13) |i| call.args[i] = read(u32, a[i]);
+        } else if (id == 82) {
+            call.args[0] = read(u64, a[0]);
+            call.args[1] = read(u32, a[1]);
+            call.args[2] = read(u32, a[2]);
+            call.args[3] = read(u64, a[3]);
+            call.args[4] = read(u64, a[4]);
+            call.args[5] = read(u32, a[5]);
+            inline for (6..9) |i| call.args[i] = read(u64, a[i]);
         } else {
             call.args[0] = read(u64, a[0]);
             call.args[1] = read(u32, a[1]);
@@ -113,18 +121,18 @@ test "proposal rows: qlinear packs exact selected BF16 bits and full view launch
 test "proposal rows: padded keyed draws use logical widths global IDs and each view's actual stride" {
     var d: Driver = undefined;
     d.api.cuLaunchKernel = Trace.launch;
-    const draws: sample.Draws = .{ .draw_fn = Trace.function(&d, 80), .draw_ids_fn = Trace.function(&d, 81), .logprob_rows_fn = undefined, .topk_slices_fn = undefined, .topk_merge_fn = undefined };
+    const draws: sample.Draws = .{ .draw_fn = Trace.function(&d, 80), .draw_ids_fn = Trace.function(&d, 81), .pitched_fn = Trace.function(&d, 82), .logprob_rows_fn = undefined, .topk_slices_fn = undefined, .topk_merge_fn = undefined };
     const s: Stream = .{ .d = &d, .handle = null };
     const view = .{ .vocab = @as(u32, 11), .logical = @as(u32, 3), .stride = @as(u32, 128), .ids = @as(?[]const u32, &.{ 0, 3, 7 }) };
-    Trace.n = 0;
-    try draws.proposal(s, 0x1000, view, 0x5000, 0x2000, 0x3000, 4, 0x6000, 3, 0x7000);
-    try t.expectEqual(@as(usize, 3), Trace.n);
-    for (Trace.calls[0..3], 0..) |c, i| {
-        try t.expectEqual(@as(usize, 81), c.id);
-        try t.expectEqual(@as(u64, 0x1000 + i * 256), c.args[0]);
-        try t.expectEqual(@as(u64, 3), c.args[1]);
-        try t.expectEqual(@as(u64, 4 + i), c.args[4]);
-        try t.expectEqual(@as(u64, 0x5000), c.args[6]);
+    for ([_]usize{ 1, 17, 64 }) |rows| {
+        Trace.n = 0;
+        try draws.proposal(s, 0x1000, view, 0x5000, 0x2000, 0x3000, 4, 0x6000, rows, 0x7000);
+        try t.expectEqual(@as(usize, 1), Trace.n);
+        const c = Trace.calls[0];
+        try t.expectEqual(@as(usize, 82), c.id);
+        try t.expectEqual([3]u32{ @intCast(rows), 1, 1 }, c.grid);
+        try t.expectEqual([3]u32{ 1024, 1, 1 }, c.block);
+        try t.expectEqualSlices(u64, &.{ 0x1000, 3, 128, 0x2000, 0x3000, 4, 0x6000, 0x5000, 0x7000 }, c.args[0..9]);
     }
     const full = .{ .vocab = @as(u32, 11), .logical = @as(u32, 11), .stride = @as(u32, 11), .ids = @as(?[]const u32, null) };
     Trace.n = 0;
@@ -134,6 +142,16 @@ test "proposal rows: padded keyed draws use logical widths global IDs and each v
     try draws.proposal(s, 0x1000, full, null, 0x2000, 0x3000, 4, 0x6000, 3, 0x7000);
     try t.expectEqual(@as(usize, 1), Trace.n);
     try t.expectEqualDeep(baseline, Trace.calls[0]);
+    const compact = .{ .vocab = view.vocab, .logical = view.logical, .stride = @as(u32, 3), .ids = view.ids };
+    for ([_]usize{ 1, 17, 64 }) |rows| {
+        Trace.n = 0;
+        try draws.draw(s, 0x1000, 3, 0x2000, 0x3000, 4, 0x6000, rows, 0x5000, 0x7000);
+        const keyed = Trace.calls[0];
+        Trace.n = 0;
+        try draws.proposal(s, 0x1000, compact, 0x5000, 0x2000, 0x3000, 4, 0x6000, rows, 0x7000);
+        try t.expectEqual(@as(usize, 1), Trace.n);
+        try t.expectEqualDeep(keyed, Trace.calls[0]);
+    }
     try t.expectError(error.ProposalScoreShape, draws.proposal(s, 0x1000, view, null, 0x2000, 0x3000, 4, 0x6000, 3, null));
 }
 const CopyFake = @import("copy_source_extra_fake.zig").Fake;
@@ -187,18 +205,25 @@ test "proposal rows: upload failure preserves prepared generation and live captu
     const words: [3 * 64]u16 align(16) = @splat(0x3f80);
     for ([_]usize{ 1, 2, 3 }) |failure| {
         var d = Memory.init();
-        var p = try h.bf16(gpa, Fixture{ .codes = std.mem.sliceAsBytes(&words) }, source());
-        defer p.deinit();
+        var p: ?h.Packed = try h.bf16(gpa, Fixture{ .codes = std.mem.sliceAsBytes(&words) }, source());
+        defer if (p) |*owned| owned.deinit();
         if (failure < 3) Memory.fail_alloc = failure else Memory.fail_copy = 1;
-        try t.expectError(error.NotReady, p.upload(&d, 1 << 20));
+        try t.expectError(error.NotReady, h.Packed.upload(&p, &d, 1 << 20));
         try t.expect(Memory.slots[0] == null and Memory.slots[1] == null);
-        try t.expectEqualSlices(u32, &.{ 0, 3, 7 }, p.ids);
+        try t.expectEqualSlices(u32, &.{ 0, 3, 7 }, p.?.ids);
     }
     var d = Memory.init();
-    var p = try h.bf16(gpa, Fixture{ .codes = std.mem.sliceAsBytes(&words) }, source());
-    const price = try p.uploadBytes();
-    try t.expectError(error.ProposalRowBudget, p.upload(&d, price - 1));
-    var device = try p.upload(&d, price);
+    var p: ?h.Packed = try h.bf16(gpa, Fixture{ .codes = std.mem.sliceAsBytes(&words) }, source());
+    defer if (p) |*owned| owned.deinit();
+    const price = try p.?.uploadBytes();
+    try t.expectError(error.ProposalRowBudget, h.Packed.upload(&p, &d, price - 1));
+    var device = try h.Packed.upload(&p, &d, price);
+    errdefer {
+        p = null;
+        device.deinit() catch {};
+    }
+    try t.expect(p == null);
+    try t.expectError(error.ProposalAlreadyUploaded, h.Packed.upload(&p, &d, price));
     try t.expectEqualSlices(i64, &.{ 0, 3, 7 }, @as([*]const i64, @ptrFromInt(device.ids.ptr))[0..3]);
     try device.retainCapture();
     try t.expectError(error.ProposalCaptureLive, device.deinit());

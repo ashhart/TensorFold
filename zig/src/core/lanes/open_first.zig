@@ -51,7 +51,7 @@ pub fn opened(e: *Engine, s: *Stream, reach: open.Reach, hook: ?be.Committed) !v
         return error.Cancelled;
     }
     const requests = try @import("root_copy.zig").prepare(e, &.{.{ .stream = s, .follow = &.{}, .first = .{ .value = value }, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = depth }});
-    e.backend.draft(requests) catch |err| {
+    e.backend.draftIn(e.arena.allocator(), requests) catch |err| {
         if (err == error.Cancelled) e.release(s);
         return err;
     };

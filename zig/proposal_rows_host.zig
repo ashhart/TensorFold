@@ -134,8 +134,12 @@ test "proposal rows: mixed plans roles and queues partition and scatter by origi
     keys[2].generation = @splat(2);
     keys[4].recipe = .qlinear_prompt;
     keys[5].queue = 9;
-    var p = try r.partition(gpa, &keys);
-    defer p.deinit();
+    var order: [6]usize = undefined;
+    var groups: [6]r.Group = undefined;
+    const p = try r.partition(&keys, &order, &groups);
+    try t.expect(p.order.ptr == &order and p.groups.ptr == &groups);
+    try t.expectError(error.ProposalRowBudget, r.partition(&keys, order[0..5], &groups));
+    try t.expectError(error.ProposalRowBudget, r.partition(&keys, &order, groups[0..5]));
     try t.expectEqualSlices(usize, &.{ 0, 3, 1, 2, 4, 5 }, p.order);
     try t.expectEqual(@as(usize, 5), p.groups.len);
     var out: [6]u32 = undefined;

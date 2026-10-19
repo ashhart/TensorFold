@@ -61,14 +61,8 @@ pub const Key = struct {
 };
 pub const Group = struct { first: usize, count: usize };
 pub const Partition = struct {
-    gpa: std.mem.Allocator,
-    order: []usize,
-    groups: []Group,
-    pub fn deinit(p: *Partition) void {
-        p.gpa.free(p.order);
-        p.gpa.free(p.groups);
-        p.* = undefined;
-    }
+    order: []const usize,
+    groups: []const Group,
     pub fn scatter(p: Partition, comptime T: type, packed_rows: []const T, original: []T) !void {
         if (packed_rows.len != p.order.len or original.len != p.order.len) return error.ProposalRowShape;
         const a = @intFromPtr(packed_rows.ptr);
@@ -78,11 +72,10 @@ pub const Partition = struct {
         for (packed_rows, p.order) |value, i| original[i] = value;
     }
 };
-pub fn partition(gpa: std.mem.Allocator, keys: []const Key) !Partition {
-    const order = try gpa.alloc(usize, keys.len);
-    errdefer gpa.free(order);
-    var groups: std.ArrayList(Group) = .empty;
-    defer groups.deinit(gpa);
+/// The caller retains the order and group buffers for the whole scatter; no heap allocation occurs.
+pub fn partition(keys: []const Key, order: []usize, groups: []Group) !Partition {
+    if (order.len < keys.len or groups.len < keys.len) return error.ProposalRowBudget;
+    var count: usize = 0;
     var used: usize = 0;
     for (keys, 0..) |key, i| {
         var seen = false;
@@ -96,7 +89,8 @@ pub fn partition(gpa: std.mem.Allocator, keys: []const Key) !Partition {
             order[used] = j;
             used += 1;
         };
-        try groups.append(gpa, .{ .first = first, .count = used - first });
+        groups[count] = .{ .first = first, .count = used - first };
+        count += 1;
     }
-    return .{ .gpa = gpa, .order = order, .groups = try groups.toOwnedSlice(gpa) };
+    return .{ .order = order[0..used], .groups = groups[0..count] };
 }

@@ -55,8 +55,9 @@ pub const Packed = struct {
         const custody = @min(@max(words, staged_ids), 64 << 20);
         return std.math.add(usize, try p.deviceBytes(), try std.math.add(usize, try std.math.add(usize, words, host_ids), try std.math.add(usize, staged_ids, custody)));
     }
-    /// Successful synchronous upload transfers ownership; failure leaves this prepared generation intact.
-    pub fn upload(p: *Packed, d: *const Driver, budget: usize) !DeviceHead {
+    /// Success takes the nullable source; failure leaves its prepared generation intact.
+    pub fn upload(source: *?Packed, d: *const Driver, budget: usize) !DeviceHead {
+        const p = if (source.*) |*p| p else return error.ProposalAlreadyUploaded;
         if (try p.uploadBytes() > budget) return error.ProposalRowBudget;
         var codes = try memory.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(p.words));
         errdefer codes.free();
@@ -67,7 +68,7 @@ pub const Packed = struct {
         const mapped = try memory.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(ids));
         const result = DeviceHead{ .gpa = p.gpa, .codes = codes, .ids = mapped, .head = p.view(codes.ptr) };
         p.gpa.free(p.words);
-        p.* = undefined;
+        source.* = null;
         return result;
     }
 };

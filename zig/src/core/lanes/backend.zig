@@ -177,8 +177,13 @@ pub const Backend = struct {
         return if (b.proposal_head) |service| service.mode != .legacy else false;
     }
     pub fn draft(b: Backend, requests: []const DraftRequest) !void {
-        if (b.proposals()) return @import("proposal_head.zig").draft(b.proposal_head.?, b, requests);
+        if (b.proposals()) return error.ProposalWorkspaceRequired;
         return b.vtable.draft(b.ptr, requests);
+    }
+    /// Opt-in routing borrows round storage; the legacy callback receives the original requests unchanged.
+    pub fn draftIn(b: Backend, arena: std.mem.Allocator, requests: []const DraftRequest) !void {
+        if (!b.proposals()) return b.draft(requests);
+        return @import("proposal_head.zig").draft(b.proposal_head.?, b, arena, requests);
     }
     pub fn features(b: Backend, s: *Stream, taps: []const u32, start: u64, count: u32) !Features {
         const f = b.vtable.features orelse return error.NoFeatures;
