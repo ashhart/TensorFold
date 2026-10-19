@@ -1,0 +1,40 @@
+{
+  "scope": "Comparisons with the same-pack single-rank engine, not a new whole-model FP64 qualification",
+  "teacher_tokens": 268,
+  "chunks": [
+    1,
+    2,
+    3,
+    7,
+    31,
+    127,
+    128,
+    129,
+    255,
+    256
+  ],
+  "bit_disagreements": 0,
+  "logits_f32_sha256": "910189ca833f31f7f905667f2df2f5b767391deac975dd34e7782ab694ad8eb2",
+  "generated_tokens": 128,
+  "generated_tokens_match_previous_single_rank": true,
+  "lanes": {
+    "slots": 2,
+    "context": 8192,
+    "chunk": 16,
+    "positions": [
+      134,
+      134
+    ],
+    "bit_disagreements": 0
+  },
+  "tests_per_mac": {
+    "exl3_gpu": 29,
+    "deepseek_gpu": 99,
+    "reference": 28
+  },
+  "template": {
+    "goldens_equal": 5,
+    "goldens_total": 5,
+    "sha256": "d959d804d5101b79a49b6ff1bf3c54cd5affa9a5a78c503d925f3090040b31c3"
+  }
+}

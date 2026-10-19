@@ -23,5 +23,6 @@ pub fn steps(b: *std.Build) void {
     const token_tests = b.addRunArtifact(b.addTest(.{ .root_module = builder }));
     b.step("test-dsv41-token-map", "PCG64 and Unicode normalization without Metal").dependOn(&token_tests.step);
     const tool = b.addExecutable(.{ .name = "tf-dsv41-token-map", .root_module = builder });
+    b.step("tf-dsv41-token-map", "Build the shared Engram token-map tool").dependOn(&b.addInstallArtifact(tool, .{}).step);
     b.step("compile-dsv41-token-map", "Compile actual token-map CLI without running or Metal").dependOn(&tool.step);
 }

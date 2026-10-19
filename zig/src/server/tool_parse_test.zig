@@ -517,3 +517,30 @@ test "GLM pairs from the cached key and value ends are the pairs each key's own 
     }
     try std.testing.expect(compared > 1000);
 }
+
+test "DeepSeek V4.1's DSML calls (a space after the bar) parse like V4's, string and JSON parameters" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}},{\"type\":\"function\",\"function\":{\"name\":\"search\"}}]")).ok.array;
+    // 1017 encoding/tests/test_output_1.txt: assistant text after the think block, plus a second invoke.
+    const text = "Checking.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n" ++
+        "<｜DSML｜ parameter name=\"location\" string=\"true\">Beijing</｜DSML｜ parameter>\n" ++
+        "<｜DSML｜ parameter name=\"unit\" string=\"true\">celsius</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n" ++
+        "<｜DSML｜ invoke name=\"search\">\n<｜DSML｜ parameter name=\"num_results\" string=\"false\">3</｜DSML｜ parameter>\n" ++
+        "</｜DSML｜ invoke>\n</｜DSML｜ calls>";
+    const parsed = try parse(a, text, tools, null);
+    try std.testing.expectEqual(@as(usize, 2), parsed.calls.?.len);
+    const first = parsed.calls.?[0].get("function").?;
+    try std.testing.expectEqualStrings("get_weather", first.strField("name").?);
+    try std.testing.expectEqualStrings("{\"location\":\"Beijing\",\"unit\":\"celsius\"}", first.strField("arguments").?);
+    try std.testing.expectEqualStrings("{\"num_results\":3}", parsed.calls.?[1].get("function").?.strField("arguments").?);
+    try std.testing.expectEqualStrings("Checking.", parsed.content);
+    // Unfinished: stays text, never a call.
+    const open = try parse(a, text[0 .. text.len - 30], tools, null);
+    try std.testing.expect(open.calls == null);
+    // Streaming hides the V4.1 block and a partial opener, as it does V4's.
+    const reply_text = @import("reply_text.zig");
+    try std.testing.expectEqualStrings("Checking.\n\n", try reply_text.hideToolCalls(a, text, true));
+    try std.testing.expectEqualStrings("Checking.", try reply_text.hideToolCalls(a, "Checking.<｜DSML｜ ca", false));
+}

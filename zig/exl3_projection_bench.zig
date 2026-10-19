@@ -322,6 +322,7 @@ pub fn main(init: std.process.Init) !void {
     // Keep the arithmetic reference independent of the optional prefill kernel.
     if (p[0].prefill) |pf| pf.deinit();
     p[0].prefill = null;
+    p[0].pairs_up_to_groups = 0;
     try checkCodebooks(device, queue);
     for ([_]ex.format.Codebook{ .inst3, .mcg, .mul1 }) |book| {
         for ([_]u16{ 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16 }) |width| {

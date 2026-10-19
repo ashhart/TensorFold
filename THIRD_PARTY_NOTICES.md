@@ -213,6 +213,13 @@ TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card st
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
 without derivatives; only the Python engine reads that drafter. Each checkpoint keeps its own license.
 
+The native `zig/src/families/deepseek_v41/` implementation and `zig/tests/deepseek_v41_reference/`
+follow [DeepSeek-V4.1-Flash's official inference](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/tree/2cba9e42aa026125f3ed06c6d98c1db82f7ca027/inference),
+MIT License, Copyright (c) 2023 DeepSeek: the reference's equations, the Engram normalization,
+PCG64 multipliers and prime bucket layout, and the pinned chat template come from that revision.
+The EXL3 checkpoint reads through the ExLlamaV3 format covered above; no captured CUDA/Triton
+kernel assets, full model shards or binary traces are bundled.
+
 ## Structured output: libtfgrammar
 
 `lib/libtfgrammar` in the release archives is `zig/src/grammar/tf_grammar.cc` compiled with the C++ sources of

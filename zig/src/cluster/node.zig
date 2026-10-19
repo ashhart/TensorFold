@@ -7,7 +7,7 @@ pub const gib: u64 = 1 << 30;
 pub const Backend = enum(u8) { metal = 1, cuda = 2 };
 
 /// Thunderbolt 5 between Macs, MCDMA's ConnectX-5 between a Mac and a CUDA host, ConnectX-7 between CUDA hosts.
-pub const LinkKind = enum(u8) { tb5 = 1, cx5 = 2, cx7 = 3 };
+pub const LinkKind = enum(u8) { tb5 = 1, cx5 = 2, cx7 = 3, tcp = 4 };
 
 /// A GID as the verbs library reports it; on Thunderbolt GID[0] is the bus's domain UUID.
 pub const Gid = [16]u8;

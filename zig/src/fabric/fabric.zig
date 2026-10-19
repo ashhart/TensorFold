@@ -12,6 +12,7 @@ pub const producer = @import("producer.zig");
 pub const decoder = @import("decoder.zig");
 pub const rdma = @import("rdma.zig");
 pub const mcdma_abi = @import("mcdma_abi.zig");
+pub const tcp = @import("tcp.zig");
 pub const mcdma = @import("mcdma.zig");
 pub const packet = @import("packet.zig");
 pub const collective = @import("collective.zig");

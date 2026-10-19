@@ -1,0 +1,105 @@
+{
+  "linux": {
+    "commit": "b27e39af70a101e4a964035e79335d1f0aa446de",
+    "base": "d46d17a784758b8a8b66badde1f728f36bdc9541",
+    "platform": "Linux-6.8.0-117-generic-aarch64-with-glibc2.39",
+    "zig": "0.17.0",
+    "results": [
+      {
+        "command": [
+          "zig",
+          "build",
+          "test"
+        ],
+        "exit_code": 0,
+        "seconds": 1.8468520270000006,
+        "log": "0-zig_build_test.log"
+      },
+      {
+        "command": [
+          "zig",
+          "build",
+          "test-kernel-contract"
+        ],
+        "exit_code": 0,
+        "seconds": 11.017747375999999,
+        "log": "1-zig_build_test-kernel-contract.log"
+      },
+      {
+        "command": [
+          "zig",
+          "build",
+          "test-golden"
+        ],
+        "exit_code": 0,
+        "seconds": 69.696737998,
+        "log": "2-zig_build_test-golden.log"
+      },
+      {
+        "command": [
+          "zig",
+          "build",
+          "fuzz-cortheon"
+        ],
+        "exit_code": 0,
+        "seconds": 0.06515243200000498,
+        "log": "3-zig_build_fuzz-cortheon.log"
+      },
+      {
+        "command": [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tools/zig",
+          "-p",
+          "flashnext_batch_serve_test.py"
+        ],
+        "exit_code": 0,
+        "seconds": 0.1183854340000039,
+        "log": "4-python3_-m_unittest_discover_-s_tools_zig_-p_flashnext_batch_serve_test.py.log"
+      }
+    ],
+    "running": null,
+    "state": "complete"
+  },
+  "zig_fmt": "passed: zig fmt --check build.zig zig, Zig 0.17.0",
+  "lean": {
+    "base_findings": 503,
+    "head_findings": 503,
+    "new_findings": 0
+  },
+  "app": {
+    "node": "22.23.2",
+    "npm": "10.9.8",
+    "candidate_test_files_passed": 815,
+    "candidate_test_files_total": 817,
+    "candidate_failures": [
+      "electron/agent/sandbox-git-control.test.ts: git commit still works",
+      "scripts/settings-main-transaction.test.mjs: concurrent consumer timed out (5000 ms)"
+    ],
+    "unchanged_base_test_files_passed": 816,
+    "unchanged_base_test_files_total": 817,
+    "unchanged_base_failure": "electron/agent/sandbox-git-control.test.ts: git commit still works",
+    "settings_timeout_reproduced_on_base": false,
+    "typecheck": "passed",
+    "verify_mobile": "passed"
+  },
+  "not_run": [
+    "Windows workflow",
+    "new-family kernel contract registration/SUMMARY",
+    "long-context release matrix",
+    "another-engine comparison",
+    "sampled peak memory trace; footprints are snapshots"
+  ],
+  "portable_http_probe_controls": {
+    "passed": 3,
+    "scope": [
+      "complete repeated replies pass",
+      "changed repeated reply fails",
+      "SSE without DONE fails"
+    ],
+    "origin": "synthetic HTTP fixture; not model-performance evidence"
+  }
+}

@@ -7,6 +7,7 @@ const glm_checks = @import("glm_checks.zig");
 const flashnext_checks = @import("flashnext_checks.zig");
 const counters_build = @import("metal_counters.zig");
 const exl3_build = @import("exl3.zig");
+const dsv41_build = @import("deepseek_v41.zig");
 const exlr8_build = @import("exlr8.zig");
 const server_build = @import("server.zig");
 const golden_build = @import("golden.zig");
@@ -281,6 +282,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.step("test-flashnext-pack-cache", "CPU-only atomic Flash Next pack cache lifecycle").dependOn(&pack_cache_run.step);
     test_step.dependOn(&pack_cache_run.step);
     const engine_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8, c_source: ?[]const u8 = null }{
+        .{ .name = "tf-dsv41-run", .path = "zig/deepseek_v41_run.zig", .about = "DeepSeek Metal admission, numerical and streamed Engram receipts" },
+        .{ .name = "tf-dsv41-transport-probe", .path = "zig/dsv41_transport_probe.zig", .about = "DeepSeek framed transport without model allocation" },
         .{ .name = "tf-qwen35-check", .path = "zig/tests/qwen35_check.zig", .about = "Qwen3.5-2B checkpoint and native operations" },
         .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },
         .{ .name = "tf-qwen35-exact", .path = "zig/tests/qwen35_exact.zig", .about = "Qwen3.5-2B forward and committed-state exactness" },
@@ -364,6 +367,10 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
     core_checks.tileQmm(b, target, optimize, metal, sources, test_step);
     exl3_build.targets(b, target, optimize, metal, test_step);
+    test_step.dependOn(dsv41_build.weights(b, target, optimize, metal));
+    const dsv41 = dsv41_build.checks(b, target, optimize, metal, sources, engine);
+    test_step.dependOn(dsv41.device);
+    test_step.dependOn(dsv41.reference);
     exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
     exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);
 

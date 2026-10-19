@@ -139,6 +139,16 @@ pub const flashnext_gen = @import("flashnext/sources_gen.zig");
 /// Nemotron's packed kernels prebuilt as one metallib, for a macOS whose runtime compiler refuses uint4b_format.
 pub const packed_metallib = @import("nemotron_packed_metallib").bytes;
 /// The core lane projection (tensor units): every window row's sums in one weight read, and its row order.
+pub const core_expert_groups = @embedFile("core/expert_groups.metal");
+/// DeepSeek V4.1: Engram, sparse/compressed attention, hyperconnections, MoE, shared projections, cache and rotary.
+pub const deepseek_v41_engram = @embedFile("deepseek_v41/engram.metal");
+pub const deepseek_v41_ops = @embedFile("deepseek_v41/ops.metal");
+pub const deepseek_v41_mhc = @embedFile("deepseek_v41/mhc.metal");
+pub const deepseek_v41_route = @embedFile("deepseek_v41/route.metal");
+pub const deepseek_v41_kv = @embedFile("deepseek_v41/kv.metal");
+pub const deepseek_v41_rope = @embedFile("deepseek_v41/rope.metal");
+pub const deepseek_v41_index = @embedFile("deepseek_v41/index.metal");
+pub const deepseek_v41_csa2 = @embedFile("deepseek_v41/csa2.metal");
 pub const core_lane_projection = @embedFile("core/lane_projection.metal");
 pub const core_lane_order = @embedFile("core/lane_order.metal");
 /// Lane rows attending a shared context through an explicit mask (core/shared_attention.zig).

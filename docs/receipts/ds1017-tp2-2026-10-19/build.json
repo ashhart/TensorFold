@@ -1,0 +1,15 @@
+{
+  "commit": "b27e39af70a101e4a964035e79335d1f0aa446de",
+  "upstream": "d46d17a784758b8a8b66badde1f728f36bdc9541",
+  "compiler": "0.17.0",
+  "cpu": "apple_m3",
+  "build_steps": 72,
+  "host_tests": 43,
+  "binary_sha256": {
+    "tf-dsv41-run.b27e39af": "d4ec1f2c29c157fd2bc2ee1a54e55b7257302d25ff96994906076a05bd79bb88",
+    "tf-dsv41-gpu.b27e39af": "91a6e7653aa29356352e4d9388bacae70ce08255f9e5aa6bd67ba8087a7e0efa",
+    "tf-dsv41-reference.b27e39af": "0bfced5516402a1858b6bcf04b86f37e0dd8e580b0c48c2e23bef915109ddaca",
+    "tf-exl3-gpu.b27e39af": "28d5d2bc6b6c060d2e54c2c1840a7f055a3d2753e2fe4846596e0e0e7d70a5d3",
+    "tensorfold-native.b27e39af": "d36f40b0bff9d6c62728909826ceca1da3457df7db8e68569c6a19575c396798"
+  }
+}

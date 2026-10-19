@@ -47,6 +47,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .imports = imports,
     }) });
     const gpu_run = b.addRunArtifact(gpu);
+    b.step("check-exl3-gpu", "Compile EXL3 Metal qualification tests without executing GPU work")
+        .dependOn(&b.addInstallArtifact(gpu, .{ .dest_sub_path = "tf-exl3-gpu" }).step);
     gpu_run.setCwd(b.path("."));
     b.step("test-exl3-gpu", "EXL3 Metal arithmetic, row windows, routes and validation regressions")
         .dependOn(&gpu_run.step);

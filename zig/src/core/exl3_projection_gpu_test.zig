@@ -1,79 +1,18 @@
-//! Explicit GPU qualification tests; run through the native test module on a Metal SIMDgroup-matrix device.
+//! EXL3 GPU projection and routing qualification.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const ex = @import("exl3_projection.zig");
 const decoder = @import("exl3_projection_decode.zig");
-const k = 256;
-const n = 128;
-const rows = 9;
-
-const Owned = struct {
-    matrix: ex.Matrix,
-    buffers: [4]mtl.Buffer,
-
-    fn init(device: mtl.Device, halves: u16, book: ex.format.Codebook, seed: u64) !Owned {
-        const words = @as(usize, halves) * 8 * (k / 16) * (n / 16);
-        const t = try device.buffer(words * 2 + 16, mtl.ResourceOptions.shared);
-        errdefer t.deinit();
-        const su = try device.buffer(k * 2 + 16, mtl.ResourceOptions.shared);
-        errdefer su.deinit();
-        const sv = try device.buffer(n * 2 + 16, mtl.ResourceOptions.shared);
-        errdefer sv.deinit();
-        const bias = try device.buffer(n * 2 + 16, mtl.ResourceOptions.shared);
-        errdefer bias.deinit();
-        var prng = std.Random.DefaultPrng.init(seed);
-        for (t.slice(i16, words + 8)[8..]) |*x| x.* = prng.random().int(i16);
-        for (su.slice(f16, k + 8)[8..], 0..) |*x, i| x.* = if (i % 3 == 0) -0.75 else 1.125;
-        for (sv.slice(f16, n + 8)[8..], 0..) |*x, i| x.* = if (i % 5 == 0) -0.25 else 0.875;
-        for (bias.slice(f16, n + 8)[8..], 0..) |*x, i| x.* = @floatCast(@as(f32, @floatFromInt(i % 7)) / 16);
-        return .{ .matrix = .{ .trellis = .{ .buffer = t, .offset = 16 }, .suh = .{ .buffer = su, .offset = 16 }, .svh = .{ .buffer = sv, .offset = 16 }, .bias = .{ .buffer = bias, .offset = 16 }, .k = k, .n = n, .width = .{ .halves = halves }, .codebook = book }, .buffers = .{ t, su, sv, bias } };
-    }
-    fn deinit(w: Owned) void {
-        for (w.buffers) |b| b.deinit();
-    }
-};
-
-fn bf16(x: f32) u16 {
-    const bits: u32 = @bitCast(x);
-    return @truncate((bits +% (0x7fff + ((bits >> 16) & 1))) >> 16);
-}
-fn input(device: mtl.Device, count: usize) !mtl.Buffer {
-    const x = try device.buffer(count * (k + 16) * 2 + 32, mtl.ResourceOptions.shared);
-    for (x.slice(u16, count * (k + 16) + 16), 0..) |*v, i|
-        v.* = bf16(@as(f32, @floatFromInt(@as(i32, @intCast(i % 23)) - 11)) / 32);
-    return x;
-}
-fn complete(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
-    e.end();
-    cb.commit();
-    cb.wait();
-    if (cb.failure() != null) return error.Exl3GpuFailure;
-}
-
-fn reference(w: Owned, x: []const u16, out: *[n]f32) void {
-    var rotated: [k]f16 = undefined;
-    const su = w.buffers[1].slice(f16, k + 8)[8..];
-    for (0..k / 128) |b| {
-        var block: [128]f32 = undefined;
-        for (&block, 0..) |*v, i| v.* = @as(f32, @bitCast(@as(u32, x[b * 128 + i]) << 16)) * @as(f32, su[b * 128 + i]);
-        decoder.hadamard(&block);
-        for (block, 0..) |v, i| rotated[b * 128 + i] = @floatCast(v);
-    }
-    const word_count = w.matrix.width.tileWords() * (k / 16) * (n / 16);
-    const words = w.buffers[0].slice(i16, word_count + 8)[8..];
-    var unpacked: [k * n]f16 = undefined;
-    ex.format.unpack(w.matrix.width, w.matrix.codebook, words, k / 16, n / 16, &unpacked);
-    for (out, 0..) |*v, col| {
-        var sum: f64 = 0;
-        for (0..k) |j| sum += @as(f64, rotated[j]) * @as(f64, unpacked[j * n + col]);
-        v.* = @floatCast(sum);
-    }
-    decoder.hadamard(out);
-    const sv = w.buffers[2].slice(f16, n + 8)[8..];
-    const bias = w.buffers[3].slice(f16, n + 8)[8..];
-    for (out, 0..) |*v, i| v.* = v.* * @as(f32, sv[i]) + @as(f32, bias[i]);
-}
+const fixture = @import("exl3_gpu_fixture.zig");
+const k = fixture.k;
+const n = fixture.n;
+const rows = fixture.rows;
+const Owned = fixture.Owned;
+const bf16 = fixture.bf16;
+const input = fixture.input;
+const complete = fixture.complete;
+const reference = fixture.reference;
 
 test "EXL3 long cancellation retains small terms in BF16 projection output" {
     const long_k = 4096;
@@ -237,6 +176,51 @@ test "GPU router descriptors select mixed-width experts with gather and scatter 
     }
     try complete(cb, e);
     try std.testing.expectEqualSlices(u32, plain.slice(u32, 6 * n), indexed.slice(u32, 6 * n));
+}
+
+test "eight output slices as one indexed product keep each slice's strided bits" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try ex.Pipelines.load(device);
+    defer p.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const tokens = 3;
+    var slices: [8]Owned = undefined;
+    var made: usize = 0;
+    defer for (slices[0..made]) |w| w.deinit();
+    const widths = [_]u16{ 3, 4, 5, 6, 3, 8, 4, 6 };
+    for (&slices, widths, 0..) |*w, halves, i| {
+        w.* = try Owned.init(device, halves, .mul1, 40 + i);
+        made += 1;
+    }
+    const descriptors = try device.buffer(8 * @sizeOf(ex.ExpertDescriptor), mtl.ResourceOptions.shared);
+    defer descriptors.deinit();
+    for (slices, descriptors.slice(ex.ExpertDescriptor, 8)) |w, *d| d.* = try ex.descriptor(w.matrix);
+    const ids = try device.buffer(tokens * 8 * 4, mtl.ResourceOptions.shared);
+    defer ids.deinit();
+    for (ids.slice(u32, tokens * 8), 0..) |*v, i| v.* = @intCast(i % 8);
+    // x[token, slice*k + i] and y[token, slice*n + j], as wo_a reads q and writes its grouped rows.
+    const x = try device.buffer(tokens * 8 * k * 2, mtl.ResourceOptions.shared);
+    defer x.deinit();
+    for (x.slice(u16, tokens * 8 * k), 0..) |*v, i| v.* = bf16(@as(f32, @floatFromInt(@as(i32, @intCast(i % 29)) - 14)) / 16);
+    const indexed = try device.buffer(tokens * 8 * n * 2, mtl.ResourceOptions.shared);
+    defer indexed.deinit();
+    const plain = try device.buffer(tokens * 8 * n * 2, mtl.ResourceOptions.shared);
+    defer plain.deinit();
+    const scratch = try device.buffer(try ex.scratchBytes(k, n, tokens * 8), mtl.ResourceOptions.shared);
+    defer scratch.deinit();
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.serial);
+    for (slices) |w| ex.useMatrix(e, w.matrix);
+    try ex.encodeIndexed(&p, e, .{ .descriptors = .{ .buffer = descriptors }, .count = 8, .k = k, .n = n }, .{ .buffer = x }, .{ .buffer = indexed }, .{ .buffer = scratch }, .{ .count = tokens * 8, .x_stride = k, .y_stride = n, .routes = .{ .ids = .{ .buffer = ids }, .repeat = 1 } });
+    e.barrier();
+    for (slices, 0..) |w, slice| {
+        try ex.encode(&p, e, w.matrix, .{ .buffer = x, .offset = slice * k * 2 }, .{ .buffer = plain, .offset = slice * n * 2 }, .{ .buffer = scratch }, .{ .count = tokens, .x_stride = 8 * k, .y_stride = 8 * n });
+        e.barrier();
+    }
+    try complete(cb, e);
+    try std.testing.expectEqualSlices(u16, plain.slice(u16, tokens * 8 * n), indexed.slice(u16, tokens * 8 * n));
 }
 
 test "packed signs and GPU expert filtering preserve untouched output slots" {
@@ -452,121 +436,6 @@ test "Metal EXL3 mapped windows match independent 64-bit extraction at every off
 }
 
 // Larger and resumed windows must retain the original per-row arithmetic and untouched padding.
-test "shared prefill retains exact row bits and guards across tile boundaries and fallback" {
-    const device = try mtl.Device.init();
-    defer device.deinit();
-    var p = try ex.Pipelines.load(device);
-    defer p.deinit();
-    const prefill = p.prefill orelse return error.SharedPrefillUnavailable;
-    try std.testing.expect(prefill.simdWidth() == 32 and prefill.maxThreads() >= 128);
-    var legacy = p;
-    legacy.prefill = null;
-    const queue = try device.queue();
-    defer queue.deinit();
-    const w = try Owned.init(device, 5, .mul1, 0x7368617265);
-    defer w.deinit();
-    for ([_]usize{ 31, 32, 33, 63, 64, 65 }) |count| {
-        const x = try input(device, count);
-        defer x.deinit();
-        const ids = try device.buffer(count * 4, mtl.ResourceOptions.shared);
-        defer ids.deinit();
-        for (ids.slice(u32, count), 0..) |*id, i| id.* = @intCast(i % 2);
-        for ([_]ex.Output{ .bf16, .f32 }) |kind| {
-            const size: usize = if (kind == .bf16) 2 else 4;
-            const bytes = count * (n + 8) * size;
-            const actual = try device.buffer(bytes + 64, mtl.ResourceOptions.shared);
-            defer actual.deinit();
-            const original = try device.buffer(bytes + 64, mtl.ResourceOptions.shared);
-            defer original.deinit();
-            const scratch_bytes = try ex.scratchBytes(k, n, count);
-            const scratch = try device.buffer(scratch_bytes + 32, mtl.ResourceOptions.shared);
-            defer scratch.deinit();
-            for ([_]bool{ false, true }) |filtered| {
-                @memset(actual.slice(u8, bytes + 64), 0xa5);
-                @memset(original.slice(u8, bytes + 64), 0xa5);
-                @memset(scratch.slice(u8, scratch_bytes + 32), 0xcd);
-                const r: ex.Rows = .{ .count = count, .x_stride = k + 16, .y_stride = n + 8, .output = kind, .routes = if (filtered) .{ .ids = .{ .buffer = ids } } else null };
-                const cb = queue.commandBuffer();
-                const e = cb.compute(.concurrent);
-                try ex.encode(&p, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = actual, .offset = 32 }, .{ .buffer = scratch, .offset = 16 }, r);
-                e.barrier();
-                try ex.encode(&legacy, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = original, .offset = 32 }, .{ .buffer = scratch, .offset = 16 }, r);
-                try complete(cb, e);
-                try std.testing.expectEqualSlices(u8, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64));
-                if (!filtered) {
-                    @memset(original.slice(u8, bytes + 64), 0xa5);
-                    const resumed = queue.commandBuffer();
-                    const re = resumed.compute(.concurrent);
-                    var first = r;
-                    first.count = 31;
-                    try ex.encode(&p, re, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = original, .offset = 32 }, .{ .buffer = scratch, .offset = 16 }, first);
-                    if (count > 31) {
-                        re.barrier();
-                        var tail = r;
-                        tail.count = count - 31;
-                        try ex.encode(&p, re, w.matrix, .{ .buffer = x, .offset = 32 + 31 * (k + 16) * 2 }, .{ .buffer = original, .offset = 32 + 31 * (n + 8) * size }, .{ .buffer = scratch, .offset = 16 }, tail);
-                    }
-                    try complete(resumed, re);
-                    try std.testing.expectEqualSlices(u8, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64));
-                }
-                for (actual.slice(u8, bytes + 64)[0..32]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
-                for (actual.slice(u8, bytes + 64)[bytes + 32 ..]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
-                for (0..count) |row| {
-                    const pad = 32 + (row * (n + 8) + n) * size;
-                    for (actual.slice(u8, bytes + 64)[pad .. pad + 8 * size]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
-                    if (filtered and row % 2 != 0) {
-                        const at = 32 + row * (n + 8) * size;
-                        for (actual.slice(u8, bytes + 64)[at .. at + n * size]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
-                    }
-                }
-                for (scratch.slice(u8, scratch_bytes + 32)[0..16]) |v| try std.testing.expectEqual(@as(u8, 0xcd), v);
-                for (scratch.slice(u8, scratch_bytes + 32)[scratch_bytes + 16 ..]) |v| try std.testing.expectEqual(@as(u8, 0xcd), v);
-            }
-        }
-    }
-}
-
-test "shared prefill preserves gather and scatter maps across a partial tile" {
-    const device = try mtl.Device.init();
-    defer device.deinit();
-    var p = try ex.Pipelines.load(device);
-    defer p.deinit();
-    if (p.prefill == null) return error.SharedPrefillUnavailable;
-    var legacy = p;
-    legacy.prefill = null;
-    const queue = try device.queue();
-    defer queue.deinit();
-    const w = try Owned.init(device, 3, .mul1, 0x676174686572);
-    defer w.deinit();
-    const x = try input(device, 3);
-    defer x.deinit();
-    const count = 33;
-    const gather = try device.buffer(count * 4 + 16, mtl.ResourceOptions.shared);
-    defer gather.deinit();
-    const scatter = try device.buffer(count * 4 + 16, mtl.ResourceOptions.shared);
-    defer scatter.deinit();
-    for (0..count) |i| {
-        gather.slice(u32, count + 4)[4 + i] = @intCast((i * 5) % 3);
-        scatter.slice(u32, count + 4)[4 + i] = @intCast(count - 1 - i);
-    }
-    for ([_]ex.Output{ .bf16, .f32 }) |kind| {
-        const size: usize = if (kind == .bf16) 2 else 4;
-        const bytes = count * (n + 8) * size + 64;
-        const actual = try device.buffer(bytes, mtl.ResourceOptions.shared);
-        defer actual.deinit();
-        const original = try device.buffer(bytes, mtl.ResourceOptions.shared);
-        defer original.deinit();
-        @memset(actual.slice(u8, bytes), 0xa5);
-        @memset(original.slice(u8, bytes), 0xa5);
-        const scratch = try device.buffer(try ex.scratchBytes(k, n, count), mtl.ResourceOptions.shared);
-        defer scratch.deinit();
-        const r: ex.Rows = .{ .count = count, .x_stride = k + 16, .y_stride = n + 8, .output = kind, .input_ids = .{ .buffer = gather, .offset = 16 }, .output_ids = .{ .buffer = scatter, .offset = 16 }, .input_rows = 3, .output_rows = count };
-        const cb = queue.commandBuffer();
-        const e = cb.compute(.concurrent);
-        try ex.encode(&p, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = actual, .offset = 32 }, .{ .buffer = scratch }, r);
-        e.barrier();
-        try ex.encode(&legacy, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = original, .offset = 32 }, .{ .buffer = scratch }, r);
-        try complete(cb, e);
-        try std.testing.expectEqualSlices(u8, original.slice(u8, bytes), actual.slice(u8, bytes));
-    }
+test {
+    _ = @import("exl3_prefill_gpu_test.zig");
 }

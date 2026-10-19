@@ -30,6 +30,21 @@ pub const Matrix = struct {
     tile_k_stride: usize = 0,
     tile_n_stride: usize = 0,
 
+    /// Borrow whole output rotation blocks, retaining the parent's K stride and complete reduction.
+    pub fn columns(m: Matrix, start: usize, count: usize) !Matrix {
+        try m.validate();
+        if (start % 128 != 0 or count == 0 or count % 128 != 0 or
+            start > m.n or count > m.n - start) return error.InvalidExl3Partition;
+        var shard = m;
+        shard.tile_k_stride = try m.kStride();
+        shard.trellis.offset = try std.math.add(usize, m.trellis.offset, try std.math.mul(usize, start / 16, m.nStride()));
+        const scale_bytes = start * 2 / (if (m.svh_format == .packed_signs) @as(usize, 16) else 1);
+        shard.svh.offset = try std.math.add(usize, m.svh.offset, scale_bytes);
+        if (m.bias) |bias| shard.bias.?.offset = try std.math.add(usize, bias.offset, start * 2);
+        shard.n = count;
+        return shard;
+    }
+
     pub fn validate(m: Matrix) !void {
         try shape(m.k, m.n);
         if (m.width.halves < 2 or m.width.halves > 16 or
@@ -99,6 +114,18 @@ pub const ExpertDescriptor = extern struct {
     svh_signs: u32,
     has_bias: u32,
     reserved: u32 = 0,
+
+    /// Apply the same output-block cut to an already validated resident expert descriptor.
+    pub fn columns(d: ExpertDescriptor, n: usize, start: usize, count: usize) !ExpertDescriptor {
+        if (n == 0 or n % 128 != 0 or start % 128 != 0 or count == 0 or count % 128 != 0 or
+            start > n or count > n - start) return error.InvalidExl3Partition;
+        var out = d;
+        out.trellis = try std.math.add(u64, d.trellis, try std.math.mul(u64, start / 16, d.tile_n_stride));
+        const scale_bytes = try std.math.mul(u64, start / (if (d.svh_signs != 0) @as(usize, 16) else 1), 2);
+        out.svh = try std.math.add(u64, d.svh, scale_bytes);
+        if (d.has_bias != 0) out.bias = try std.math.add(u64, d.bias, try std.math.mul(u64, start, 2));
+        return out;
+    }
 };
 
 /// Populate a caller-owned shared descriptor table once; no weight copying, packing or dequantization.
@@ -139,6 +166,11 @@ pub const Pipelines = struct {
     matmul: mtl.Pipeline,
     rotate_out: mtl.Pipeline,
     prefill: ?mtl.Pipeline = null,
+    dense: mtl.Pipeline,
+    /// Two columns per SIMD group, for products too small to fill the GPU with sixteen-column groups.
+    matmul_pairs: mtl.Pipeline,
+    /// Maximum sixteen-column grid for matmul_pairs (0 disables); see docs/exl3-projection.md for tuning.
+    pairs_up_to_groups: usize = 128,
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -151,7 +183,11 @@ pub const Pipelines = struct {
         errdefer mm.deinit();
         const ro = try mtl.Pipeline.init(device, lib, "tf_exl3_rotate_out", false);
         errdefer ro.deinit();
-        for ([_]mtl.Pipeline{ ri, mm, ro }) |p|
+        const dn = try mtl.Pipeline.init(device, lib, "tf_exl3_dense", false);
+        errdefer dn.deinit();
+        const mp = try mtl.Pipeline.init(device, lib, "tf_exl3_matmul_pairs", false);
+        errdefer mp.deinit();
+        for ([_]mtl.Pipeline{ ri, mm, ro, mp }) |p|
             if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedExl3Simd;
         var prefill = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill", false) catch null;
         if (prefill) |pf| {
@@ -160,13 +196,19 @@ pub const Pipelines = struct {
                 prefill = null;
             }
         }
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill };
+        errdefer if (prefill) |pf| pf.deinit();
+        var out: Pipelines = .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill, .dense = dn, .matmul_pairs = mp };
+        if (std.c.getenv("TF_EXL3_PAIRS_UP_TO_GROUPS")) |v|
+            out.pairs_up_to_groups = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.InvalidExl3PairsGroups;
+        return out;
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
         p.matmul.deinit();
         p.rotate_out.deinit();
         if (p.prefill) |pf| pf.deinit();
+        p.dense.deinit();
+        p.matmul_pairs.deinit();
     }
 };
 
@@ -274,6 +316,10 @@ fn bind(e: mtl.ComputeEncoder, v: View, index: usize) void {
 
 /// No allocation or commit; retain all views until completion, disjoint from writes, with valid GPU IDs.
 pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y: View, scratch: View, r: Rows) !void {
+    stages(p, e, try prepare(m, x, y, scratch, r));
+}
+
+fn prepare(m: Matrix, x: View, y: View, scratch: View, r: Rows) !Staged {
     const storage_bytes = try m.checkStorage();
     var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
     if (r.grouped) return error.InvalidExl3GroupedRows;
@@ -285,11 +331,102 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y:
     a.has_bias = @intFromBool(m.bias != null);
     a.tile_k_stride = try m.kStride();
     a.tile_n_stride = m.nStride();
-    stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r);
+    return .{ .a = a, .trellis = m.trellis, .su = m.suh, .sv = m.svh, .bias = m.bias orelse m.svh, .descriptors = scratch, .x = x, .y = y, .scratch = scratch, .r = r };
+}
+
+/// One product of a concurrent group: a plain matrix or GPU-routed experts.
+pub const Job = struct {
+    weights: union(enum) { matrix: Matrix, experts: Experts },
+    x: View,
+    y: View,
+    scratch: View,
+    rows: Rows,
+};
+
+/// Dispatch each stage for all independent jobs before its barrier; reject cross-job read/write aliasing first.
+pub fn encodeJobs(p: *const Pipelines, e: mtl.ComputeEncoder, jobs: []const Job) !void {
+    if (jobs.len == 0 or jobs.len > max_jobs) return error.InvalidExl3Jobs;
+    var staged: [max_jobs]Staged = undefined;
+    for (jobs, staged[0..jobs.len]) |job, *out| out.* = switch (job.weights) {
+        .matrix => |m| try prepare(m, job.x, job.y, job.scratch, job.rows),
+        .experts => |x| try prepareIndexed(x, job.x, job.y, job.scratch, job.rows),
+    };
+    for (staged[0..jobs.len], 0..) |a, i| for (staged[0..jobs.len], 0..) |b, j| {
+        if (i == j) continue;
+        // a's writes against everything b touches.
+        for ([_]Extent{ a.output(), a.scratchExtent() }) |w| for (b.reads() ++ [_]Extent{ b.output(), b.scratchExtent() }) |o| {
+            if (o.bytes != 0) try disjoint(w.view, w.bytes, o.view, o.bytes);
+        };
+    };
+    // Stage barriers: the matmul reads every job's rotated rows, rotate_out every job's sums.
+    for (0..3) |stage| {
+        for (staged[0..jobs.len]) |job| dispatchStage(p, e, job, stage);
+        e.barrier();
+    }
+}
+const max_jobs = 6;
+
+/// A kept-dense EXL3 matrix: a bf16 weight beside the input/output rotation scales, no trellis.
+pub const DenseMatrix = struct {
+    weight: View,
+    suh: View,
+    svh: View,
+    bias: ?View = null,
+    k: usize,
+    n: usize,
+};
+
+/// Rotate as in encode, but use a dense f32 product in sequential K order, matching the fp64 reference.
+pub fn encodeDense(p: *const Pipelines, e: mtl.ComputeEncoder, m: DenseMatrix, x: View, y: View, scratch: View, r: Rows) !void {
+    try shape(m.k, m.n);
+    var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
+    if (r.grouped) return error.InvalidExl3GroupedRows;
+    a.su_signs = 0;
+    a.sv_signs = 0;
+    a.has_bias = @intFromBool(m.bias != null);
+    const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + try rotatedBytes(m.k, r.count) };
+    const sums_bytes = try std.math.mul(usize, try std.math.mul(usize, m.n, r.count), 4);
+    try readonly(m.weight, try std.math.mul(usize, try std.math.mul(usize, m.n, m.k), 2), y, 0, scratch, sums_bytes);
+    try readonly(m.suh, m.k * 2, y, 0, scratch, sums_bytes);
+    try readonly(m.svh, m.n * 2, y, 0, scratch, sums_bytes);
+    if (m.bias) |b| try readonly(b, m.n * 2, y, 0, scratch, sums_bytes);
+    e.setPipeline(p.rotate_in);
+    bind(e, x, 0);
+    bind(e, m.suh, 1);
+    bind(e, scratch, 2);
+    e.setValue(a, 3);
+    bind(e, scratch, 4);
+    bind(e, scratch, 5);
+    bind(e, scratch, 6);
+    e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
+    e.barrier();
+    e.setPipeline(p.dense);
+    bind(e, scratch, 0);
+    bind(e, m.weight, 1);
+    bind(e, sums, 2);
+    e.setValue(a, 3);
+    bind(e, scratch, 4);
+    e.dispatchThreads(.{ .width = a.n, .height = a.rows }, .{ .width = 64 });
+    e.barrier();
+    e.setPipeline(p.rotate_out);
+    bind(e, sums, 0);
+    bind(e, m.svh, 1);
+    bind(e, m.bias orelse m.svh, 2);
+    bind(e, y, 3);
+    e.setValue(a, 4);
+    bind(e, scratch, 5);
+    bind(e, scratch, 6);
+    bind(e, scratch, 7);
+    e.dispatchGroups(.{ .width = a.n / 128, .height = a.rows }, .{ .width = 32 });
+    e.barrier();
 }
 
 /// GPU routes choose caller-validated resident descriptors; grouped padding uses maxInt(u32).
 pub fn encodeIndexed(p: *const Pipelines, e: mtl.ComputeEncoder, experts: Experts, x: View, y: View, scratch: View, r: Rows) !void {
+    stages(p, e, try prepareIndexed(experts, x, y, scratch, r));
+}
+
+fn prepareIndexed(experts: Experts, x: View, y: View, scratch: View, r: Rows) !Staged {
     if (r.routes == null or experts.count == 0 or experts.count > std.math.maxInt(u32)) return error.InvalidExl3Experts;
     if (r.grouped and (r.input_ids == null or r.output_ids == null or r.count % 8 != 0))
         return error.InvalidExl3GroupedRows;
@@ -301,7 +438,7 @@ pub fn encodeIndexed(p: *const Pipelines, e: mtl.ComputeEncoder, experts: Expert
     try readonly(experts.descriptors, experts.count * @sizeOf(ExpertDescriptor), y, ybytes, scratch, try scratchBytes(experts.k, experts.n, r.count));
     a.indexed = if (r.grouped) 2 else 1;
     a.experts = @intCast(experts.count);
-    stages(p, e, a, scratch, scratch, scratch, scratch, experts.descriptors, x, y, scratch, r);
+    return .{ .a = a, .trellis = scratch, .su = scratch, .sv = scratch, .bias = scratch, .descriptors = experts.descriptors, .x = x, .y = y, .scratch = scratch, .r = r };
 }
 
 fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows) !void {
@@ -314,41 +451,96 @@ fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows
     if (m.bias) |b| try readonly(b, m.n * 2, y, ybytes, scratch, scratch_bytes);
 }
 
-fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su: View, sv: View, bias: View, descriptors: View, x: View, y: View, scratch: View, r: Rows) void {
+const Extent = struct { view: View, bytes: usize };
+
+/// A validated product: its arguments and every view its three stages bind.
+const Staged = struct {
+    a: Args,
+    trellis: View,
+    su: View,
+    sv: View,
+    bias: View,
+    descriptors: View,
+    x: View,
+    y: View,
+    scratch: View,
+    r: Rows,
+
+    fn output(s: Staged) Extent {
+        const yrows: usize = if (s.r.output_ids != null) s.r.output_rows else s.r.count;
+        return .{ .view = s.y, .bytes = ((yrows - 1) * s.r.y_stride + s.a.n) * (if (s.r.output == .f32) @as(usize, 4) else 2) };
+    }
+    fn scratchExtent(s: Staged) Extent {
+        return .{ .view = s.scratch, .bytes = scratchBytes(s.a.k, s.a.n, s.r.count) catch unreachable };
+    }
+    /// The input rows and ID maps; weights are read-only resident tensors for every job.
+    fn reads(s: Staged) [4]Extent {
+        const repeat: usize = if (s.r.routes) |v| v.repeat else 1;
+        const xrows: usize = if (s.r.input_ids != null) s.r.input_rows else s.r.count / repeat;
+        const ids = s.r.count * 4;
+        return .{
+            .{ .view = s.x, .bytes = ((xrows - 1) * s.r.x_stride + s.a.k) * 2 },
+            .{ .view = s.r.input_ids orelse s.x, .bytes = if (s.r.input_ids != null) ids else 0 },
+            .{ .view = s.r.output_ids orelse s.x, .bytes = if (s.r.output_ids != null) ids else 0 },
+            .{ .view = if (s.r.routes) |v| v.ids else s.x, .bytes = if (s.r.routes != null) ids else 0 },
+        };
+    }
+};
+
+fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, s: Staged) void {
+    for (0..3) |stage| {
+        dispatchStage(p, e, s, stage);
+        e.barrier();
+    }
+}
+
+/// Stages rotate input, multiply, then rotate sums out; the caller places barriers between stages.
+fn dispatchStage(p: *const Pipelines, e: mtl.ComputeEncoder, s: Staged, stage: usize) void {
+    const a = s.a;
+    const r = s.r;
+    const scratch = s.scratch;
+    const descriptors = s.descriptors;
     const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + ((@as(usize, a.rows) * a.k * 2 + 15) & ~@as(usize, 15)) };
     const routes = if (r.routes) |v| v.ids else scratch;
-    e.setPipeline(p.rotate_in);
-    bind(e, x, 0);
-    bind(e, su, 1);
-    bind(e, scratch, 2);
-    e.setValue(a, 3);
-    bind(e, r.input_ids orelse scratch, 4);
-    bind(e, routes, 5);
-    bind(e, descriptors, 6);
-    e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
-    e.barrier();
-    const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
-    e.setPipeline(if (shared) p.prefill.? else p.matmul);
-    bind(e, scratch, 0);
-    bind(e, trellis, 1);
-    bind(e, sums, 2);
-    e.setValue(a, 3);
-    bind(e, routes, 4);
-    bind(e, descriptors, 5);
-    const group_rows: usize = if (shared) 32 else 8;
-    e.dispatchGroups(.{ .width = a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
-    e.barrier();
-    e.setPipeline(p.rotate_out);
-    bind(e, sums, 0);
-    bind(e, sv, 1);
-    bind(e, bias, 2);
-    bind(e, y, 3);
-    e.setValue(a, 4);
-    bind(e, r.output_ids orelse scratch, 5);
-    bind(e, routes, 6);
-    bind(e, descriptors, 7);
-    e.dispatchGroups(.{ .width = a.n / 128, .height = a.rows }, .{ .width = 32 });
-    e.barrier();
+    switch (stage) {
+        0 => {
+            e.setPipeline(p.rotate_in);
+            bind(e, s.x, 0);
+            bind(e, s.su, 1);
+            bind(e, scratch, 2);
+            e.setValue(a, 3);
+            bind(e, r.input_ids orelse scratch, 4);
+            bind(e, routes, 5);
+            bind(e, descriptors, 6);
+            e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
+        },
+        1 => {
+            const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
+            const row_groups: usize = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + 7) / 8;
+            const pairs = !shared and a.n / 16 * row_groups <= p.pairs_up_to_groups;
+            e.setPipeline(if (shared) p.prefill.? else if (pairs) p.matmul_pairs else p.matmul);
+            bind(e, scratch, 0);
+            bind(e, s.trellis, 1);
+            bind(e, sums, 2);
+            e.setValue(a, 3);
+            bind(e, routes, 4);
+            bind(e, descriptors, 5);
+            const group_rows: usize = if (shared) 32 else 8;
+            e.dispatchGroups(.{ .width = if (pairs) a.n / 2 else a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
+        },
+        else => {
+            e.setPipeline(p.rotate_out);
+            bind(e, sums, 0);
+            bind(e, s.sv, 1);
+            bind(e, s.bias, 2);
+            bind(e, s.y, 3);
+            e.setValue(a, 4);
+            bind(e, r.output_ids orelse scratch, 5);
+            bind(e, routes, 6);
+            bind(e, descriptors, 7);
+            e.dispatchGroups(.{ .width = a.n / 128, .height = a.rows }, .{ .width = 32 });
+        },
+    }
 }
 
 test "EXL3 scratch is row compact and bounded independently of full matrices" {
@@ -359,39 +551,8 @@ test "EXL3 scratch is row compact and bounded independently of full matrices" {
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(Args));
 }
 
-test "stored per-matrix width and rectangular strides include public target shapes" {
-    var m = Matrix{ .trellis = undefined, .suh = undefined, .svh = undefined, .k = 5120, .n = 2304, .width = .{ .halves = 6 } };
-    try m.validate();
-    try std.testing.expectEqual(@as(usize, 4423680), try m.storageBytes());
-    m.width.halves = 5;
-    try m.validate();
-    m.codebook = .mcg;
-    try std.testing.expectError(error.UnsupportedExl3Width, m.validate());
-    m.width.halves = 16;
-    m.k = 1280;
-    m.n = 4096;
-    try m.validate();
-    m.tile_n_stride = 258;
-    try m.validate();
-    m.tile_k_stride = 256;
-    try std.testing.expectError(error.InvalidExl3Stride, m.validate());
-}
-
-test "invalid and overflowing extents fail before storage arithmetic can wrap" {
-    var m = Matrix{ .trellis = undefined, .suh = undefined, .svh = undefined, .k = 0, .n = 128, .width = .{ .halves = 6 } };
-    try std.testing.expectError(error.UnsupportedExl3Shape, m.storageBytes());
-    m.k = 128;
-    m.n = 256;
-    m.tile_n_stride = std.math.maxInt(usize) - 1;
-    try std.testing.expectError(error.Overflow, m.validate());
-    m.tile_n_stride = m.tileBytes();
-    m.tile_k_stride = std.math.maxInt(usize) - 1;
-    try std.testing.expectError(error.Overflow, m.storageBytes());
-    try std.testing.expectError(error.InvalidExl3Rows, scratchBytes(128, 128, std.math.maxInt(u32)));
-    try std.testing.expectError(error.Overflow, scratchBytes(0xffffff80, 0xffffff80, 0xffffff80));
-}
-
 test {
+    _ = @import("exl3_projection_test.zig");
     _ = decoder;
     _ = @import("exl3_rect_test.zig");
 }

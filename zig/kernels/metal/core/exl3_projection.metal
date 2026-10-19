@@ -192,6 +192,60 @@ kernel void tf_exl3_matmul_hoisted(const device half* x [[buffer(0)]],
   tf_exl3_matmul_impl<true>(x, trellis, sums, a, routes, descriptors, lane, tg, wx, xx);
 }
 
+// Two columns and eight rows per SIMD group; product/TwoSum order is preserved. See docs/deepseek-execution.md.
+kernel void tf_exl3_matmul_pairs(const device half* x [[buffer(0)]],
+                                 const device uchar* trellis [[buffer(1)]],
+                                 device float* sums [[buffer(2)]],
+                                 constant TfExl3Args& a [[buffer(3)]],
+                                 const device uint* routes [[buffer(4)]],
+                                 const device TfExl3Expert* descriptors [[buffer(5)]],
+                                 uint lane [[thread_index_in_simdgroup]],
+                                 uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint rb = a.indexed == 1 ? tg.y : tg.y * 8;
+  if (!simd_any(tf_exl3_active(routes, a, rb + (a.indexed == 1 ? 0 : lane % 8)))) return;
+  const uint id = a.indexed ? routes[rb] : 0;
+  const device uchar* data = a.indexed ? descriptors[id].trellis : trellis;
+  const ulong ks = a.indexed ? descriptors[id].tile_k_stride : a.tile_k_stride;
+  const ulong ns = a.indexed ? descriptors[id].tile_n_stride : a.tile_n_stride;
+  const uint halves = a.indexed ? descriptors[id].halves : a.halves;
+  const uint codebook = a.indexed ? descriptors[id].codebook : a.codebook;
+  const uint side = lane / 16, r = lane % 16, col = tg.x * 2 + side, c = col % 16;
+  // Tile position (r, c) is stream position p = 8 l + e of tf_exl3_matmul_impl's layout.
+  const uint e = (r & 1u) | ((r >> 3) << 1) | ((c >> 3) << 2);
+  const uint l = 4 * (c & 7u) + ((r & 7u) >> 1);
+  const uint p = 8 * l + e, ring = 128 * halves;
+  const uint end = ((p + 1) * halves - ((halves & 1u) ? ((p + 1) & 1u) : 0u)) / 2;
+  const uint start = (end + ring - 16) % ring;
+  const uint wi = start / 32, off = start % 32, next = wi + 1 == 4 * halves ? 0 : wi + 1;
+  const uint map = wi | (off << 6) | (next << 11);
+  // Lanes r < 8 of each side sum row rb + r of their column (only r == 0 for one-row routes).
+  const uint row = rb + r;
+  const bool summing = r < 8 && !(a.indexed == 1 && r != 0) && tf_exl3_active(routes, a, row);
+  const device half* xr = x + ulong(summing ? row : rb) * a.k;
+  const device uchar* column = data + ulong(col / 16) * ns;
+  float high = 0, low = 0;
+  for (uint kb = 0; kb < a.k; kb += 16) {
+    const device ushort* tile = reinterpret_cast<const device ushort*>(column + ulong(kb / 16) * ks);
+    const float w = float(tf_exl3_value(tf_exl3_mapped_state(tile, map), codebook));
+    float ws[16], xs[16];
+    for (uint k = 0; k < 16; ++k) {
+      ws[k] = simd_shuffle(w, ushort(side * 16 + k));
+      xs[k] = float(xr[kb + k]);
+    }
+    for (uint k = 0; k < 16; ++k) {
+      if (summing) {
+        // FP16 products are exact in FP32. TwoSum retains each addition's rounding error.
+        const float product = xs[k] * ws[k];
+        const float sum = high + product;
+        const float borrowed = sum - high;
+        low += (high - (sum - borrowed)) + (product - borrowed);
+        high = sum;
+      }
+    }
+  }
+  if (summing) sums[ulong(row) * a.n + col] = high + low;
+}
+
 // Qualification only: compare every arithmetic state against the independent CPU-generated FP16 table.
 kernel void tf_exl3_codebook_check(device half* arithmetic [[buffer(0)]],
                                   uint i [[thread_position_in_grid]]) {
@@ -239,6 +293,20 @@ kernel void tf_exl3_state_window_check(const device uint4* inputs [[buffer(0)]],
   const device ushort* tile = reinterpret_cast<const device ushort*>(inputs + tid);
   const uint off = inputs[tid].z;
   outputs[tid] = tf_exl3_mapped_state(tile, (off << 6) | (1u << 11));
+}
+
+// Dense BF16 product: sequential k, FP32 sums, one output per thread; the FP64 reference follows this order.
+kernel void tf_exl3_dense(const device half* rotated [[buffer(0)]],
+                          const device bfloat* weight [[buffer(1)]],
+                          device float* sums [[buffer(2)]],
+                          constant TfExl3Args& a [[buffer(3)]],
+                          const device uint* input_ids [[buffer(4)]],
+                          uint2 g [[thread_position_in_grid]]) {
+  const uint row = a.input_ids ? input_ids[g.y] : g.y;
+  float acc = 0;
+  for (uint k = 0; k < a.k; ++k)
+    acc += float(rotated[ulong(g.y) * a.k + k]) * float(weight[ulong(g.x) * a.k + k]);
+  sums[ulong(g.y) * a.n + g.x] = acc;
 }
 
 // Four SIMDgroups share decoded weights while each retains its original eight-row compensated dots.

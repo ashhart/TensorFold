@@ -1,0 +1,38 @@
+{
+  "checkpoint": {
+    "repository": "LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw",
+    "revision": "afc7aa0aab98ee735c0f54e0a122019af1ac08f1"
+  },
+  "engram": {
+    "repository": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "files": {
+      "model-00047-of-00048.safetensors": "76a05106ece259be83d1bfea0dcb54f23377864ee60fd321690f35e6698a2af5",
+      "model-00048-of-00048.safetensors": "9dc51433e195bc78b5ad846b68643cc0351d3b174e5e4309222d3b7402c83afd"
+    }
+  },
+  "hardware": {
+    "rank0": {
+      "chip": "Apple M3 Ultra",
+      "gpu_cores": 80,
+      "unified_memory_gb": 256
+    },
+    "rank1": {
+      "chip": "Apple M3 Ultra",
+      "gpu_cores": 80,
+      "unified_memory_gb": 256
+    },
+    "transport": "TCP over Thunderbolt 5 IP link; no RDMA"
+  },
+  "environment": {
+    "TF_DSV41_SPLIT_RESIDENCY": "1",
+    "TF_DSV41_RESIDENCY_REFRESH": "1",
+    "DSV41_ENGRAM_STREAM": "1"
+  },
+  "token_map": {
+    "file": "engram-token-map.bin",
+    "size": 517680,
+    "sha256": "b9a7cf9d341f5daf8fc435dbc36153bf4b28c1b8075be20de30d0556fb910511",
+    "provenance": "generated with this branch; full Rust normalizer parity remains unqualified"
+  }
+}

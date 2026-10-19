@@ -22,6 +22,19 @@ pub const row_projection = @import("core/row_projection.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
 pub const quant = @import("core/quant/quant.zig");
+pub const deepseek_v41_tp_pair = @import("families/deepseek_v41/tp_pair.zig");
+pub const deepseek_v41_config = @import("families/deepseek_v41/metal_config.zig");
+pub const deepseek_v41_load = @import("families/deepseek_v41/metal_load.zig");
+pub const deepseek_v41_weights = @import("families/deepseek_v41/weights.zig");
+pub const deepseek_v41_view = @import("families/deepseek_v41/view.zig");
+pub const deepseek_v41 = @import("families/deepseek_v41/metal_model.zig");
+pub const deepseek_v41_profiler = @import("families/deepseek_v41/profiler.zig");
+pub const deepseek_v41_backend = @import("families/deepseek_v41/backend.zig");
+pub const deepseek_v41_token_map = @import("families/deepseek_v41/token_map.zig");
+pub const gpu_counters = @import("core/gpu_counters.zig");
+pub const expert_groups = @import("core/expert_groups.zig");
+pub const deepseek_v41_engram_hash = @import("families/deepseek_v41/engram_hash.zig");
+
 pub const exl3_format = @import("core/exl3_format.zig");
 pub const exl3_projection = @import("core/exl3_projection.zig");
 pub const exlr8 = @import("core/exlr8.zig");
@@ -55,6 +68,10 @@ pub const flashnext_pack = @import("families/flashnext/pack.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = lora_merge;
+    _ = deepseek_v41.tp_moe;
+    _ = @import("families/deepseek_v41/weight_residency.zig");
+    _ = deepseek_v41.tp_transport;
+    _ = @import("families/deepseek_v41/tp_control.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
