@@ -28,6 +28,7 @@ const fact_path = "/v1/slide/fact/";
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const m = conn.method;
+    if (!std.mem.eql(u8, m, "POST") and !consumeBody(conn, a)) return;
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);
     if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);
     if (std.mem.eql(u8, m, "DELETE")) {
@@ -40,6 +41,21 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     const message = std.fmt.allocPrint(a, "Unsupported method ({s})", .{http_conn.pyRepr(a, m) catch m}) catch return;
     conn.sendError(a, 501, message, null) catch {};
+}
+
+fn consumeBody(conn: *Conn, a: Allocator) bool {
+    const body = http_body.read(conn, a, http_body.limit) catch {
+        conn.close = true;
+        conn.sendError(a, 500, "out of memory", null) catch {};
+        return false;
+    };
+    switch (body) {
+        .ok => return true,
+        .refused => |message| {
+            conn.sendError(a, 400, message, null) catch {};
+            return false;
+        },
+    }
 }
 
 /// Python's ``json.dumps(payload)`` sent as a JSON reply.

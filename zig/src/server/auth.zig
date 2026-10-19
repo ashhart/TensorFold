@@ -433,3 +433,30 @@ fn publicAsset(path: []const u8) bool {
     }
     return false;
 }
+
+test "security: every System One alias requires a key" {
+    for ([_][]const u8{ "/systemone", "/systemone/", "/systemone?x=1", "/alternative/systemone", "/v1/systemone" }) |path| {
+        try std.testing.expect(gated(path, false));
+        try std.testing.expect(gated(path, true));
+    }
+}
+
+test "security: key files cannot be written by another user" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-local\n" });
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/keys", .{tmp.sub_path}, 0);
+    defer a.free(path);
+    var problem: []const u8 = "";
+    for ([_]u32{ 0o620, 0o602, 0o622 }) |mode| {
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(posix.AT.FDCWD, path, @intCast(mode), 0));
+        if (Store.init(a, &.{}, "", path, false, &problem)) |value| {
+            var store = value;
+            store.deinit();
+            return error.UnsafeKeyFileAccepted;
+        } else |err| try std.testing.expectEqual(error.KeyFile, err);
+    }
+}

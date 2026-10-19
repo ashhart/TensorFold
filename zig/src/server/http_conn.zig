@@ -276,22 +276,25 @@ pub const Conn = struct {
                 try c.sendError(a, 431, "Line too long", "got more than 65536 bytes when reading header line");
                 return false;
             }
+            if (line.len == 0 or !std.mem.endsWith(u8, line, "\r\n")) {
+                try c.sendError(a, 400, "Incomplete or malformed request headers", null);
+                return false;
+            }
             if (lines.items.len > max_headers) {
                 try c.sendError(a, 431, "Too many headers", "got more than 100 headers");
                 return false;
             }
             try lines.append(a, line);
-            if (line.len == 0 or std.mem.eql(u8, line, "\r\n") or std.mem.eql(u8, line, "\n")) break;
+            if (std.mem.eql(u8, line, "\r\n")) break;
         }
         var headers: std.ArrayList(Header) = .empty;
         for (lines.items) |line| {
-            if (line.len == 0 or line[0] == '\r' or line[0] == '\n') break;
-            const text = std.mem.trimEnd(u8, line, "\r\n");
-            const colon = std.mem.indexOfScalar(u8, text, ':') orelse return c.badHead(a);
-            const name = text[0..colon];
-            if (!headerName(name)) return c.badHead(a);
-            const value = std.mem.trimStart(u8, text[colon + 1 ..], " \t");
-            for (value) |ch| if ((ch < 0x20 and ch != '\t') or ch == 0x7f) return c.badHead(a);
+            if (std.mem.eql(u8, line, "\r\n")) break;
+            if (line[0] == ' ' or line[0] == '\t') return c.badHead(a); // folded continuation lines are refused
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse return c.badHead(a);
+            const name = line[0..colon];
+            const value = std.mem.trim(u8, line[colon + 1 .. line.len - 2], " \t");
+            if (!headerName(name) or !headerValue(value)) return c.badHead(a);
             try headers.append(a, .{ .name = name, .value = value });
         }
         c.headers = headers.items;
@@ -391,8 +394,14 @@ const error_page =
 ;
 
 fn headerName(name: []const u8) bool {
-    if (name.len == 0) return false;
-    for (name) |ch| if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", ch) == null) return false;
+    for (name) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", ch) == null) return false;
+    }
+    return name.len > 0;
+}
+
+fn headerValue(value: []const u8) bool {
+    for (value) |ch| if ((ch < 0x20 and ch != '\t') or ch == 0x7f) return false;
     return true;
 }
 
