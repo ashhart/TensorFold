@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Prepare optional shared proposal routing for native and external draft heads, with full or absorb-only fallback.
+
 - The optional 27B Neural Engine share uses a measured 32 MiB private-overhead price and reserves its full size in the prompt-cache budget, including cold builds (#643).
 
 - Shared draft rounds offer one deeper row every eighth round when the row cap permits, retaining normal pricing and trimming (#1059). Thanks to @plotarmordev.

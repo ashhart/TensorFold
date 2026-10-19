@@ -46,8 +46,16 @@ pub const Drafted = struct {
         x.firsts.deinit(x.gpa);
     }
 
+    const legacy_vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .probabilities = probabilities, .tree = tree, .release = release };
+    const planned_vtable: be.Backend.VTable = blk: {
+        var v = legacy_vtable;
+        v.proposal_draft = draft;
+        v.clear_proposals = clearProposals;
+        break :blk v;
+    };
     pub fn backend(x: *Drafted) be.Backend {
-        return .{ .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .probabilities = probabilities, .tree = tree, .release = release } };
+        const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .vtable = if (planned) &planned_vtable else &legacy_vtable };
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.
@@ -78,6 +86,15 @@ pub const Drafted = struct {
     /// Device bytes an admitted stream takes: the target's own and the drafter's for the same stream.
     pub fn streamBytes(x: *const Drafted, target: usize) usize {
         return target + x.drafter.facts().stream_bytes;
+    }
+
+    fn clearProposals(ptr: *anyopaque, s: *Stream) void {
+        const x = self(ptr);
+        if (x.lanes.getPtr(s)) |lane| {
+            lane.filler = 0;
+            lane.tree_first = null;
+        }
+        x.drafter.vtable.clear_proposals.?(x.drafter.ptr, s);
     }
 
     fn self(ptr: *anyopaque) *Drafted {
@@ -236,7 +253,7 @@ pub const Drafted = struct {
                 lane.filler = r.depth;
                 continue;
             }
-            try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth, .lanes = r.lanes });
+            try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth, .plan = r.plan, .lanes = r.lanes });
         }
         if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
         if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);

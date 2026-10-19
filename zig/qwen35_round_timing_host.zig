@@ -74,7 +74,7 @@ test "round timing: drafter and recorder preserve the original observer context"
     var seen: usize = 0;
     var backend = target.backend();
     backend.round_observer = .{ .ptr = &seen, .done = Spy.done };
-    var drafter: lanes.drafted.Drafted = .{ .gpa = t.allocator, .target = backend, .drafter = undefined };
+    var drafter: lanes.drafted.Drafted = .{ .gpa = t.allocator, .target = backend, .drafter = .{ .ptr = undefined, .vtable = undefined } };
     defer drafter.deinit();
     var recorded: lanes.recorder.Recorded = .{ .inner = drafter.backend(), .recorder = undefined };
     const wrapped = recorded.backend();

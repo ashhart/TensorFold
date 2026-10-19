@@ -429,7 +429,7 @@ pub const Engine = struct {
         try e.askDrafts(&.{.{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = d }});
     }
 
-    fn askDrafts(e: *Engine, original: []const be.DraftRequest) !void {
+    pub fn askDrafts(e: *Engine, original: []const be.DraftRequest) !void {
         const requests = try @import("root_copy.zig").prepare(e, original);
         for (requests) |r| try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(r.stream.id)), f("depth", int(r.depth)), f("position", int(r.position)), f("follow", .{ .u32s = r.follow }), f("rows", if (r.rows) |x| .{ .u32s = x } else .null) });
         // a lone stream's lanes: the head tree or chain + grafts with the most expected tokens a round time
@@ -463,12 +463,15 @@ pub const Engine = struct {
         try e.backend.draft(asked);
         for (asked) |r| {
             r.stream.dropHeld(e.gpa);
-            r.stream.next = .{ .count = r.depth };
-            if (lone) |l| {
+            r.stream.next = .{ .count = r.heldDepth(e.backend) };
+            if (r.heldDepth(e.backend) == 0 and e.backend.proposals()) {
+                if (lone) |l| l.deinit(e.gpa);
+                lone = null;
+            } else if (lone) |l| {
                 if (r.lanes != null) r.stream.next = .{ .count = @intCast(l.parents.len), .parents = try e.gpa.dupe(i32, l.parents) };
                 r.stream.lanes = l;
                 lone = null;
-            } else if (r.depth > 0) if (e.backend.vtable.tree) |tree| {
+            } else if (r.heldDepth(e.backend) > 0) if (e.backend.vtable.tree) |tree| {
                 if (try tree(e.backend.ptr, r.stream, e.gpa)) |held| r.stream.next = held;
             };
         }

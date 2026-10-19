@@ -56,8 +56,8 @@ pub fn opened(e: *Engine, s: *Stream, reach: open.Reach, hook: ?be.Committed) !v
         return err;
     };
     s.dropHeld(e.gpa);
-    s.next = .{ .count = requests[0].depth };
-    if (requests[0].depth > 0) if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
+    s.next = .{ .count = requests[0].heldDepth(e.backend) };
+    if (requests[0].heldDepth(e.backend) > 0) if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
         s.next = held;
     };
     try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(s.id)), f("depth", int(requests[0].depth)), f("position", int(position + 1)), f("follow", .{ .u32s = &.{value} }), f("rows", .null) });

@@ -50,6 +50,9 @@ pub const Artifact = struct {
     pub fn ids(a: *const Artifact) []const u32 {
         return a.owned.value.ids;
     }
+    pub fn matches(a: *const Artifact, expected: Identity) bool {
+        return sameIdentity(a.identity(), expected);
+    }
     pub fn identity(a: *const Artifact) Identity {
         return a.owned.value.identity;
     }

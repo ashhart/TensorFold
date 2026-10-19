@@ -101,9 +101,10 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
         // the head reads the prompt's last row and the first token, and drafts the one after it
         const wanted = try firstDepth(e, s, reach);
         const requests = try @import("root_copy.zig").prepare(e, &.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = wanted }});
-        const d = requests[0].depth;
+        var d = requests[0].depth;
         asked = d;
         try e.backend.draft(requests);
+        if (e.backend.proposals()) d = requests[0].heldDepth(e.backend);
         s.dropHeld(e.gpa);
         s.next = .{ .count = d };
         if (d > 0) if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {

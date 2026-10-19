@@ -216,6 +216,7 @@ pub const Stream = struct {
     next: ?Held = null,
     inflight: ?u64 = null,
     served: ?u64 = null,
+    proposal_depth: ?u32 = null, // null: legacy; otherwise the last routed request, zero until it succeeds
     granted: ?u32 = null,
     copy_width: ?u32 = null,
 
@@ -279,6 +280,7 @@ pub const Stream = struct {
         s.served = null;
         s.granted = null;
         s.copy_width = null;
+        s.proposal_depth = null;
     }
 
     pub fn dropHeld(s: *Stream, gpa: Allocator) void {

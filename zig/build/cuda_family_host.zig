@@ -3,6 +3,9 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const proposal = b.createModule(.{ .root_source_file = b.path("zig/proposal_router_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
+    b.step("test-proposal-router-host", "Optional common proposal routing, legacy parity and lifecycle").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = proposal, .filters = &.{"proposal router:"} })).step);
+
     const timing_probe = b.addExecutable(.{ .name = "qwen-round-timing-probe", .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_round_timing_probe.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "lanes", .module = mods.lanes } } }) });
     const timing_options = b.addOptions();
     timing_options.addOptionPath("probe", timing_probe.getEmittedBin());

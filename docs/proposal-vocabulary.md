@@ -1,8 +1,8 @@
 # Proposal vocabulary artifacts
 
-The shared `core.proposal_vocab` parser is preparation code with no serving caller.
+The shared `core.proposal_vocab` parser admits immutable artifacts for optional shared proposal services.
 It changes no default, target projection, target sampling, draft list or model admission.
-Backend scoring, coverage-based routing, fallback, CLI serving options and device qualification are later work.
+The optional router is available to backend producers; CLI activation, family adapters and device qualification are later work.
 
 Version 1 is strict JSON, bounded to 16 MiB. Unknown, missing and duplicate fields refuse.
 Integer fields require JSON integer syntax, never strings, floats or exponent notation.
@@ -72,3 +72,23 @@ Run `zig build test-proposal-vocab-tool-host` for the offline and legacy-CLI fix
 stand-in tokenizer for the unchanged text-mode contract; they do not qualify a real tokenizer or model.
 Shared scoring, forced/grammar/OOV fallback, streams, allocations on devices, collective placement and all family
 adapters remain steps 3-8. Head-fraction measurements and native exactness/performance gates still apply.
+
+## Optional shared routing
+
+`lanes.proposal_head.Service` is immutable model-owned configuration, absent by default. Construct it against the
+actual artifact identity before publication. Native Backend and external Drafter expose the same optional service.
+Explicit calibrated mode refuses missing subset support, wrong identity and unqualified multi-rank placement.
+Full diagnostic mode requires an available full head. No family has an adapter or enables this service yet.
+
+A calibrated request uses the subset only with sixteen covered committed context tokens and covered pending,
+forced and stop IDs. Unknown first-token handles, short histories and structured requests take full fallback;
+without admitted full proposal resources, they carry depth zero through absorption. The stream keeps drafts enabled.
+The router clears held validity before each planned call and after allocation, producer or cancellation failure.
+External Drafted always absorbs kept rows before a positive-depth planned hold; paused requests never reuse fillers.
+Coverage is reconstructed from committed context, so an omitted token delays subset resumption until it leaves the
+last sixteen tokens. Target verification and correction remain full-width, including omitted tokens and EOS.
+
+Backend producers must implement planned drafting and held invalidation explicitly; unsupported services refuse
+before work. Plan references and artifact maps remain alive through the model's queued work. There is no hot swap.
+With no service, or legacy mode, the original callback receives the original requests without routing or allocation.
+Run `zig build test-proposal-router-host test-shared-lane-regressions-host` for recording, lifecycle and parity fixtures.

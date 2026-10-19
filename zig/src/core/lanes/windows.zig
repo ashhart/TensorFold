@@ -56,6 +56,7 @@ pub const Copy = struct { tokens: []const u32 = &.{}, recalled: bool = false };
 pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
     const a = e.arena.allocator();
     var p: Plan = .{ .stream = s, .position = s.cache_len, .kind = .none };
+    if (e.backend.proposals() and s.proposal_depth == 0) s.dropHeld(e.gpa);
     const queued = s.next;
     s.next = null;
     defer if (queued) |q| {

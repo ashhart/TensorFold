@@ -62,13 +62,18 @@ pub const DraftRequest = struct {
     depth: u32, // drafts to hold (0: absorb only)
     early: bool = false, // settle the drafts the verify began (speculate_early) instead of drafting late
     lanes: ?*const Shape = null, // a tree of drafts to hold, each lane its parent's rank-r head token (depth unused)
+    plan: ?*const @import("proposal_head.zig").Plan = null,
     ranks: bool = false, // also keep each chained level's best tokens (alternatives(), for grafts)
+    pub fn heldDepth(r: DraftRequest, b: Backend) u32 {
+        return if (b.proposals()) r.stream.proposal_depth orelse r.depth else r.depth;
+    }
 };
 
 pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
 pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
 
 pub const Backend = struct {
+    proposal_head: ?*const @import("proposal_head.zig").Service = null,
     round_observer: ?RoundObserver = null,
     first_before_draft: bool = false,
     ptr: *anyopaque,
@@ -97,6 +102,8 @@ pub const Backend = struct {
         keep: *const fn (ptr: *anyopaque, windows: []const Window, paths: []const []const u32) anyerror!void,
         /// Absorb kept rows and hold drafts for the next round (one batch for a shared round).
         draft: *const fn (ptr: *anyopaque, requests: []const DraftRequest) anyerror!void,
+        proposal_draft: ?*const fn (*anyopaque, []const DraftRequest) anyerror!void = null,
+        clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// Undo an early speculation whose round was cut (the drafts come from a late request instead).
         unspeculate: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Each held draft's chance of landing, for heads that give them; false when it has none.
@@ -166,7 +173,11 @@ pub const Backend = struct {
     pub fn observed(b: Backend, paths: []const []const u32) void {
         if (b.round_observer) |observer| observer.done(observer.ptr, paths);
     }
+    pub fn proposals(b: Backend) bool {
+        return if (b.proposal_head) |service| service.mode != .legacy else false;
+    }
     pub fn draft(b: Backend, requests: []const DraftRequest) !void {
+        if (b.proposals()) return @import("proposal_head.zig").draft(b.proposal_head.?, b, requests);
         return b.vtable.draft(b.ptr, requests);
     }
     pub fn features(b: Backend, s: *Stream, taps: []const u32, start: u64, count: u32) !Features {
