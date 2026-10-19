@@ -8,6 +8,7 @@ const affine = @import("affine.zig");
 const st = @import("state.zig");
 const prompt_mod = @import("prompt.zig");
 const ep_mod = @import("ep.zig");
+pub const fit = @import("load_fit.zig");
 
 /// The checkpoint's identity for a peer: its config and weight index, hashed.
 pub fn modelHash(gpa: std.mem.Allocator, dir: []const u8, config: []const u8) !u64 {
@@ -170,4 +171,8 @@ test "the load limit: 70% of RAM, or GLM_LOAD_LIMIT_GB up to the GPU's working s
     try std.testing.expect(most.bytes == ws and most.capped and std.mem.eql(u8, "GLM_LOAD_LIMIT_GB", most.source()));
     for ([_][]const u8{ "abc", "0", "-5", "nan", "inf", "1e400", "12GB" }) |bad| try std.testing.expectError(error.BadLoadLimit, limitFor(ram, ws, bad));
     try std.testing.expectEqual(@as(usize, 0), (try limitFor(0, ws, "100")).bytes); // RAM unknown: nothing loads
+}
+
+test {
+    _ = fit;
 }
