@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Shared CUDA sliding-window attention uses bounded split launches, with sigmoid-routing and dense-row contract fixtures (#798). Thanks to @jschmied.
+
 - Shared CUDA tree and DFlash block attention have exact-replay launch contracts and bounded resource records (#746). Thanks to @jschmied.
 
 - An opt-in GLM CUDA FP8 latent-cache implementation is prepared behind --kv-cache fp8. BF16 remains the default; native quality and device qualification are pending.

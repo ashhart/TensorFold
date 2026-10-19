@@ -33,6 +33,9 @@ const qk_k = @import("contract_qk.zig");
 const tree_k = @import("contract_tree_attn.zig");
 const block_k = @import("contract_block_attn.zig");
 
+const window_k = @import("contract_window.zig");
+const moe_k = @import("contract_moe.zig");
+
 const contract = core.contract;
 const g = contract.gates;
 const limits = contract.limits;
@@ -51,7 +54,7 @@ const h3_image = struct {
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "moe_glue", "dense_rows" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
     std.debug.print("FAIL kernel-contract: unknown image name: {s}\n", .{name});
     return error.UnknownContractImage;
@@ -292,6 +295,28 @@ pub fn run(gpu: check.Gpu) !void {
     var blocks: [2]block_k.Block = .{ .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = false }, .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = true } };
     defer for (&blocks) |*x| x.deinit();
     for (&blocks) |*x| try kernels.append(a, x.kernel());
+    var window_fns = try cuda.window_attention.WindowAttention.load(gpu.d);
+    defer window_fns.unload();
+    var windows: [window_k.cfgs.len]window_k.Window = undefined;
+    for (window_k.cfgs, &windows) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns };
+    defer for (&windows) |*x| x.deinit();
+    for (&windows) |*x| try kernels.append(a, x.kernel());
+    var moe_fns = try cuda.moe_glue.MoeGlue.load(gpu.d);
+    defer moe_fns.unload();
+    var topks: [moe_k.routes.len]moe_k.TopK = undefined;
+    for (moe_k.routes, &topks) |r, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .route = r, .g = &moe_fns };
+    defer for (&topks) |*x| x.deinit();
+    for (&topks) |*x| try kernels.append(a, x.kernel());
+    var combines: [moe_k.combos.len]moe_k.Combine = undefined;
+    for (moe_k.combos, &combines) |m, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .x = m, .g = &moe_fns };
+    defer for (&combines) |*x| x.deinit();
+    for (&combines) |*x| try kernels.append(a, x.kernel());
+    var dense_fns = try cuda.dense_rows.DenseRows.load(gpu.d);
+    defer dense_fns.unload();
+    var denses: [moe_k.dense_tiles.len]moe_k.DenseRows = undefined;
+    for (&denses, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .tile = i, .g = &dense_fns };
+    defer for (&denses) |*x| x.deinit();
+    for (&denses) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
