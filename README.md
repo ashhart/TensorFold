@@ -94,7 +94,7 @@ Send it a document instead and it finds the facts in it and learns them one by o
 files that hold them, and the lesson running now.
 
 Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
-other. On a Mac, `cp -cRL` makes the copy an APFS clone that takes no extra space. It rewrites the folder's files:
+other. On an APFS volume, `cp -cRL` makes a clone that shares the original's data until lessons change it. It rewrites the folder's files:
 before the first lesson the server keeps the originals in a hidden snapshot, and
 `tensorfold slide rollback ~/models/nemotron-living` puts them back, undoing every lesson. The
 [Living Weights guide](docs/living-weights.md) covers the key, teaching files and web pages, omp's `/learn` command,
@@ -162,7 +162,7 @@ A lone greedy request there uses GPU-side rounds and hands over when a second re
 `FZ_BATCH_MTP_SERIAL=1` restores serial MTP drafting on the shared host.
 The [earlier MTP chain receipt](docs/receipts/flashnext-mtp-chain-2026-10-10/README.md) records its own pinned commits.
 Nemotron, GLM, the 2B model and Qwen3.8-27B use shared lane rounds.
-The 27B's DFlash2 drafter drafts for one stream at a time: a request alone, or the one in the drafter's slot when several share rounds.
+On Metal, each of up to 128 streams in the 27B's shared rounds drafts its own DFlash2 tree.
 
 ## Models on disk
 
