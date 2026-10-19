@@ -24,9 +24,19 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
         .all => {
             try self.writeback(0, n);
             try self.copy(self.hooks.streams, s.h, n * wide * 2);
+            var row0: usize = 0;
+            for (self.lanes) |l| {
+                try self.copy(l.streams, s.h + row0 * wide * 2, l.rows * wide * 2);
+                row0 += l.rows;
+            }
             try self.readoutKeep(self.m.mixer, 0, n, mixer_keep);
             const out = if (self.hooks.logits_out != 0) self.hooks.logits_out else return error.UnexpectedTensor;
             try self.projectHead(out, n);
+            row0 = 0;
+            for (self.lanes) |l| {
+                try self.copy(l.logits, out + row0 * vocab * 2, l.rows * vocab * 2);
+                row0 += l.rows;
+            }
             if (logits_host) |lh| {
                 try self.complete();
                 const d = self.stream.d;
