@@ -8,6 +8,30 @@ pub fn config() q.draft.Config {
     return .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .heads = 2, .kv_heads = 1, .head_dim = 128, .block = 8, .mask = 255, .window = 2048, .group = 16, .rank = 2, .topk = 2, .eps = 1e-6, .theta = 10000000, .taps = @splat(0), .n_taps = 1 };
 }
 
+test "Draft frames: a grown tree's node budget past the block (TF_DRAFT_NODES) stages; a chain keeps one row a depth" {
+    const F = q.draft.frame;
+    var c = config();
+    c.block = 16;
+    var storage: [F.stagedLen(2)]u8 align(8) = undefined;
+    var ctx: q.draft.Ctx = .{ .ring = .{ .d = undefined, .ptr = 0x1000, .len = 1 }, .begin = 0, .end = 100 };
+    var refs = [_]*q.draft.Ctx{&ctx};
+    var items = [_]lanes.drafter.Hold{.{ .stream = @ptrFromInt(0x1000), .pending = 1, .position = 101, .depth = 15 }};
+    try F.stage(c, &items, &refs, &storage);
+    items[0].depth = 16;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(c, &items, &refs, &storage));
+    _ = setenv("TF_DRAFT_NODES", "24", 1);
+    defer _ = unsetenv("TF_DRAFT_NODES");
+    items[0].depth = 24;
+    try F.stage(c, &items, &refs, &storage);
+    items[0].depth = 25;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(c, &items, &refs, &storage));
+    items[0].depth = 24;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(config(), &items, &refs, &storage));
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
 test "Draft frames: the actual drafter advertises batched holds" {
     var d: q.draft.Draft = undefined;
     d.projection_role = .proposal;

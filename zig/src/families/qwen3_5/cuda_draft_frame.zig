@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const dr = @import("lanes").drafter;
 const draft = @import("cuda_draft.zig");
+const tree = @import("cuda_draft_tree.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
 pub const chunks = 9;
@@ -24,7 +25,9 @@ pub fn stage(c: draft.Config, items: []const dr.Hold, contexts: []const *draft.C
     if (items.len == 0 or items.len > max_streams or contexts.len != items.len or (c.block != 8 and c.block != 16) or st.len < try stagedBytes(c.rank) or @intFromPtr(st.ptr) % 8 != 0) return error.BadDraftFrame;
     for (items, contexts, 0..) |it, ctx, index| {
         if (it.position == 0 or it.position > std.math.maxInt(i64) - c.block or ctx.end != it.position - 1 or ctx.begin > ctx.end) return error.DraftContextBehind;
-        if (it.pending >= c.vocab or it.depth > c.block - 1) return error.BadDraftFrame;
+        // a chain drafts a row a depth; a grown tree's depth is its node budget (tree.nodes(), up to the window)
+        const most = if (c.block == 16 and it.lanes == null) @max(c.block - 1, tree.nodes()) else c.block - 1;
+        if (it.pending >= c.vocab or it.depth > most) return error.BadDraftFrame;
         for (contexts[0..index]) |prior| if (ctx == prior or ctx.ring.ptr == prior.ring.ptr) return error.OverlappingDraftContexts;
         if (it.lanes) |shape| {
             if (shape.parents.len > ctx.held.len or shape.parents.len != shape.depths.len or shape.parents.len != shape.ranks.len) return error.BadLanes;
