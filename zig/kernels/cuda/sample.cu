@@ -546,11 +546,14 @@ extern "C" __global__ void __launch_bounds__(1024) tf_draw_ids(const __nv_bfloat
     tf_sample::draw<true>(L, V, rule, meta, offset, TOK, IDS, PROB);
 }
 
-// Logical-width sampling over pitched rows; the IDs select the same existing keyed arithmetic.
+#include "pitched_draw.cuh"
+
+// Logical-width sampling over pitched rows; both ID mappings use the same block-owned buffer.
 extern "C" __global__ void __launch_bounds__(1024) tf_draw_pitched(const __nv_bfloat16* L, unsigned V, unsigned pitch,
     const tf_sample::Rule* rule, const int* meta, int offset, unsigned* TOK, const long long* IDS, float* PROB) {
-    if (IDS) tf_sample::draw<true, true>(L, V, rule, meta, offset, TOK, IDS, PROB, pitch);
-    else tf_sample::draw<false, true>(L, V, rule, meta, offset, TOK, nullptr, PROB, pitch);
+    __shared__ tf_sample::Shared s;
+    if (IDS) tf_sample::draw_pitched<true>(L, V, rule, meta, offset, TOK, IDS, PROB, pitch, s);
+    else tf_sample::draw_pitched<false>(L, V, rule, meta, offset, TOK, nullptr, PROB, pitch, s);
 }
 
 // Rows of bf16 logits [rows, V]: row r's LP_WORDS words at OUT + r * LP_WORDS for PICK[r], k (at most 20) best, rank.
