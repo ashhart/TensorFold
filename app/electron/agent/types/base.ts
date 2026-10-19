@@ -160,7 +160,8 @@ export interface OmlxDiscovery {
   message: string
 }
 
-export type ProviderDiscoveryKind = 'ollama' | 'lmstudio' | 'omlx'
+/** Probe target kinds. `custom` covers any OpenAI-compatible endpoint, including a remote TensorFold engine. */
+export type ProviderDiscoveryKind = 'ollama' | 'lmstudio' | 'omlx' | 'custom'
 
 export interface ProviderDiscovery {
   kind: ProviderDiscoveryKind

@@ -45,7 +45,7 @@ import { desktopDraftPort } from '../lib/desktop-drafts'
 type ProviderSetupStep = 'choice' | 'cloud' | 'local' | 'configure'
 type Mode = 'cloud' | 'local'
 
-const DISCOVERY_SOURCES: ProviderDiscoveryKind[] = ['omlx', 'ollama', 'lmstudio']
+const DISCOVERY_SOURCES: ProviderDiscoveryKind[] = ['omlx', 'ollama', 'lmstudio', 'custom']
 
 export function Onboarding({ onDone }: { onDone: () => void }) {
   const tx = useAuthoredText()
@@ -206,7 +206,8 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     setError('')
     setFoundModels(null)
     try {
-      const result = await api.discoverLocalProvider(kind)
+      // Pass the typed address so a provider on another machine is probed, not just localhost.
+      const result = await api.discoverLocalProvider(kind, localPath.trim() || undefined, apiKey.trim() || undefined)
       if (result.found && result.models.length) setFoundModels(result.models)
       else setError(result.message || t("setup.noServer"))
     } catch (e: any) {
