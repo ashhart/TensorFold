@@ -6,6 +6,37 @@ const checkpoint = @import("../../core/checkpoint_metal.zig");
 // One of Metal's 32 queue slots remains reserved for execution buffers and descriptors.
 const max_sets = 31;
 pub const Groups = struct {
+    pub const Refresh = struct {
+        gpa: std.mem.Allocator,
+        sets: [max_sets]mtl.ResidencySet,
+        count: usize,
+        ticker: *@import("../../core/keepalive.zig").Keepalive,
+
+        pub fn start(gpa: std.mem.Allocator, io: std.Io, groups: *const Groups) !?*Refresh {
+            const mode = std.c.getenv("TF_DSV41_RESIDENCY_REFRESH") orelse return null;
+            if (!std.mem.eql(u8, std.mem.span(mode), "1")) return null;
+            if (groups.count == 0) return error.ResidencyRefreshRequiresSplitSets;
+            const r = try gpa.create(Refresh);
+            errdefer gpa.destroy(r);
+            r.* = .{ .gpa = gpa, .sets = groups.sets, .count = groups.count, .ticker = undefined };
+            r.ticker = try @import("../../core/keepalive.zig").Keepalive.start(gpa, io, .{ .ctx = r, .tick = tick }, std.math.maxInt(i64));
+            return r;
+        }
+
+        fn tick(ptr: *anyopaque) void {
+            const r: *Refresh = @ptrCast(@alignCast(ptr));
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            // Only immutable weight sets; execution descriptors may be added concurrently to the other set.
+            for (r.sets[0..r.count]) |set| set.requestResidency();
+        }
+
+        pub fn stop(r: *Refresh) void {
+            r.ticker.stop();
+            r.gpa.destroy(r);
+        }
+    };
+
     sets: [max_sets]mtl.ResidencySet = undefined,
     count: usize = 0,
 

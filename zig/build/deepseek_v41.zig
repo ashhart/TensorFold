@@ -41,7 +41,7 @@ pub fn checks(
     }) });
     const tp_host = b.addTest(.{
         .root_module = engine,
-        .filters = &.{ "TP residency", "TP history", "TP output row", "TP exchanges", "TP control", "TP TCP" },
+        .filters = &.{ "the ticker commits", "ticks stop once", "the window decides", "TP residency", "TP history", "TP output row", "TP exchanges", "TP control", "TP TCP" },
     });
     const tp_step = b.step("test-deepseek-v41-tp-host", "Two-rank row layout, history and message validation");
     tp_step.dependOn(&b.addRunArtifact(tp_host).step);
