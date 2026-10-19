@@ -264,6 +264,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
     while (true) {
         ends.takeCancels(h);
         rows_host.answer(h);
+        @import("lane_host_score.zig").answer(h);
         learn.refuse(h);
         h.lock();
         if (h.closing) {
