@@ -1,9 +1,9 @@
 # Kernel contract
 
 Every GPU kernel, ours or a contributor's, registers with the kernel contract before it lands. One harness
-(`zig/src/core/contract/`) runs five gates on Metal and on CUDA, and each gate has a planted control: a kernel built to
-break that gate, which the gate must report as failing. A run where a control passes is a failed run, because then the
-gate proves nothing.
+(`zig/src/core/contract/`) runs five gates on Metal, CUDA and HIP, and each gate has a planted control: a kernel built
+to break that gate, which the gate must report as failing. A run where a control passes is a failed run, because then
+the gate proves nothing.
 
 A kernel's own unit test usually compares a few outputs within one tolerance. The gates ask more: what happens to NaN
 and infinities, whether the bytes repeat, whether every tile edge is covered, whether the sums are really fp32, and
@@ -27,7 +27,8 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
   (top-k, argmax, sampling and routing kernels state theirs).
 - For gate 5, its launch in `zig/src/core/contract/registry.zig`: threads a group and threadgroup bytes (the source's,
   and any its encoder sets) on Metal, or symbol, image, threads a block, dynamic shared bytes and cluster width on CUDA,
-  with the limits its compiles recorded.
+  with the limits its compiles recorded. HIP launches are in `zig/src/core/contract/hip_records.zig`: symbol, code
+  object, threads a workgroup and dynamic LDS bytes.
 
 ## The gates
 
@@ -50,21 +51,26 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
    bf16 loses thousands. Then the kernel must meet the exact-sum bound, which enforces "no fp16 sums where fp32 is
    used". Where the output's own rounding hides a sum's error (a bf16 softmax of at most 4,096 terms in [0, 1]), the
    spec says so and the run prints the margins it could prove. Control: a dot product summed in half.
-5. Limits. Every registered launch against each chip we serve, from its declaration and recorded compiles, so this
-   part runs with no GPU in `zig build test`. Metal: threads a group and threadgroup bytes against M1 to M5; on M1
-   and M2 a pipeline's thread limit falls as its registers rise (simd_qmm_bits' 8-bit tiles compile for 224), so
-   every launch records its M1/M2 limit, unless its launcher sizes its groups to the pipeline or its source reserves
-   the threads. A tensor-op kernel, which cannot be built for M1/M2 ahead of time, stays at 256 threads. CUDA:
-   registers a thread (rounded per warp), static plus dynamic shared bytes, launch bounds and clusters against sm_80,
-   sm_86, sm_89, sm_120 and sm_121. Tools re-derive the records: on a Mac, `tf-kernel-contract --offline DIR` compiles
-   each pipeline for M1 and M2 with Xcode's Metal toolchain (native code built for T threads equal to the plain build
-   means the plain pipeline runs T); on a CUDA build machine, `tf-cuda-test kernel-contract-limits DIR` reads registers,
-   shared bytes and launch bounds from the fatbins' ELF images for every SM, counted as the driver counts them (sm_120
-   and sm_121 images keep registers only in the `.nv.info` register records, and add the block's reserved 1 KiB to
-   `.nv.shared`). On the GPU itself both runners check the loaded pipelines and the device's own limits. Controls:
-   Metal, the row projection's pipeline launched at 1,024 threads where M1 and M2 compile it for 512, and 36 KiB of
-   threadgroup memory; CUDA, a kernel launched past its `__launch_bounds__`, and one needing more registers than a block
-   has.
+5. Limits. Every registered launch against each chip we serve, from its declaration and recorded compiles, so this part
+   runs with no GPU in `zig build test`. Metal: threads a group and threadgroup bytes against M1 to M5; on M1 and M2 a
+   pipeline's thread limit falls as its registers rise (simd_qmm_bits' 8-bit tiles compile for 224), so every launch
+   records its M1/M2 limit, unless its launcher sizes its groups to the pipeline or its source reserves the threads. A
+   tensor-op kernel, which cannot be built for M1/M2 ahead of time, stays at 256 threads. CUDA: registers a thread
+   (rounded per warp), static plus dynamic shared bytes, launch bounds and clusters against sm_80, sm_86, sm_89, sm_120
+   and sm_121. HIP: VGPRs a wave (a workgroup's waves spread over the WGP's four SIMDs, each rounded to the chip's
+   allocation step), static plus dynamic LDS bytes, the kernel's `__launch_bounds__` and its wave size against gfx1030,
+   gfx1100, gfx1151 and gfx1201, one chip a generation. Tools re-derive the records: on a Mac, `tf-kernel-contract
+   --offline DIR` compiles each pipeline for M1 and M2 with Xcode's Metal toolchain (native code built for T threads
+   equal to the plain build means the plain pipeline runs T); on a CUDA build machine, `tf-cuda-test
+   kernel-contract-limits DIR` reads registers, shared bytes and launch bounds from the fatbins' ELF images for every
+   SM, counted as the driver counts them (sm_120 and sm_121 images keep registers only in the `.nv.info` register
+   records, and add the block's reserved 1 KiB to `.nv.shared`); with hipcc, `tf-hip-kernel-contract limits DIR` reads
+   VGPRs, SGPRs, LDS, scratch, the bound and the wave size from the AMDGPU metadata note of each chip's code objects. On
+   the GPU itself the runners check the loaded kernels and the device's own limits. Controls: Metal, the row
+   projection's pipeline launched at 1,024 threads where M1 and M2 compile it for 512, and 36 KiB of threadgroup memory;
+   CUDA, a kernel launched past its `__launch_bounds__`, and one needing more registers than a block has; HIP, a kernel
+   launched past its `__launch_bounds__`, and 40 KiB of static LDS launched with 32 KiB more (hipcc fits a kernel's
+   VGPRs to its bound, so a register overflow shows as a launch past the bound).
 
 ## Running it
 
@@ -77,17 +83,25 @@ On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), an
 -Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
 `registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
+On an AMD machine, run `zig build hip-kernel-contract -Dhip-arch=ARCH -Dhipcc=...` on a GPU of that chip (the
+controls are built with the kernels). For the limits of every served chip, `zig build hip-kernel-contract-limits
+-Dhipcc=...` compiles every kernel group and the controls for gfx1030, gfx1100, gfx1151 and gfx1201 and checks each
+record against them, no GPU needed; `hip-kernel-contract-objects` installs those code objects into `zig-out/hsaco/`.
+Its `RECORD` lines are the values `hip_records.zig` holds for that hipcc.
+
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
 
 ## Adding a kernel
 
-1. Write its test type in `zig/tests/contract/` (Metal) or `zig/tests/cuda/contract_*.zig` (CUDA): `prepare` builds
+1. Write its test type in `zig/tests/contract/` (Metal), `zig/tests/cuda/contract_*.zig` (CUDA) or
+   `zig/tests/hip/contract_*.zig` (HIP): `prepare` builds
    the inputs for a shape and a gate's fill (usually through an input family), `run` launches once and waits, `count`
    and `reference` give the outputs and their float64 values, `simulate` replays the sums for gate 4.
 2. Add it to the runner's list, with its served shapes and tiles.
 3. Add its launches to `registry.zig`, and fill the records from `--offline` (Metal) or `kernel-contract-limits`
-   (CUDA: nvcc 13.0's in `cuda`, and each later release's set where that release compiles it differently).
+   (CUDA: nvcc 13.0's in `cuda`, and each later release's set where that release compiles it differently); a HIP
+   kernel's go to `hip_records.zig`, filled from `hip-kernel-contract-limits`.
 4. Post the `SUMMARY` lines from each backend you ran in the pull request, and say which chips you could not run.
 
 A replacement kernel names the kernel it replaces and gives `replaced`, which runs that kernel on the same inputs.
@@ -122,6 +136,7 @@ output bit-equal to float64 at its rounding points; two controls, one dropping t
 into the group's scale and bias).
 CUDA also checks qk_rows' attention inputs at head dims to 512 with a unit v norm and MLX's bf16
 rows (three controls, each dropping one option).
+HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 
 ## CUDA records per nvcc release
 

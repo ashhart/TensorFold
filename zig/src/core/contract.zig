@@ -9,6 +9,8 @@ pub const dense = @import("contract/dense.zig");
 pub const limits = @import("contract/limits.zig");
 pub const registry = @import("contract/registry.zig");
 pub const cubin = @import("contract/cubin.zig");
+pub const hsaco = @import("contract/hsaco.zig");
+pub const hip_records = @import("contract/hip_records.zig");
 
 test {
     _ = @import("contract/qwen_served_records.zig");
@@ -22,5 +24,7 @@ test {
     _ = limits;
     _ = registry;
     _ = cubin;
+    _ = hsaco;
+    _ = hip_records;
     _ = @import("contract/fakes.zig");
 }

@@ -3,6 +3,7 @@
 const std = @import("std");
 const caps = @import("../src/hip/caps.zig");
 const exlr8_build = @import("exlr8.zig");
+const LazyPath = std.Build.LazyPath;
 
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options, test_step: *std.Build.Step) void {
@@ -120,6 +121,15 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     ).dependOn(&b.addInstallArtifact(fx_test, .{}).step);
     const native = server(b, target, gpu, build_options);
     b.step("native-hip", "tensorfold-native with the HIP engines into zig-out/native-hip/bin (-Dhip-arch)").dependOn(&b.addInstallArtifact(native, .{ .dest_dir = .{ .override = .{ .custom = "native-hip/bin" } } }).step);
+    @import("hip_contract.zig").steps(b, .{
+        .target = target,
+        .optimize = optimize,
+        .hipcc = .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib },
+        .arch = hip_arch,
+        .gpu = gpu.hip,
+        .host = host.hip,
+        .test_step = test_step,
+    });
 }
 
 /// `tf-qwen35-test`: the model checks on a real checkpoint and GPU.
@@ -235,33 +245,51 @@ const stub = "pub const arch = \"\";\npub const images: [10][]align(8) const u8 
 
 /// One code object a group for `arch`, built with the caps table's instruction switches, as the `hip_kernels` module.
 fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, arch: []const u8) *std.Build.Module {
-    const c = caps.Caps.of(arch).?;
-    const root = std.fs.path.dirname(std.fs.path.dirname(hipcc_resolved) orelse ".") orelse ".";
-    const files = b.addWriteFiles();
+    const files = objectFiles(b, .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib }, arch);
     var decls: []const u8 = "";
     var refs: []const u8 = "";
-    for (groups, 0..) |source, i| {
-        const run = b.addSystemCommand(&.{ hipcc, "--genco" });
-        run.addArgs(&flags);
-        run.addArg(b.fmt("-DTF_WAVE={d}", .{c.wave}));
-        run.addArg(b.fmt("-DTF_DOT2_F16={d}", .{@intFromBool(c.dot2_f16)}));
-        run.addArg(b.fmt("-DTF_DOT2_BF16={d}", .{@intFromBool(c.dot2_bf16)}));
-        run.addArg(b.fmt("-DTF_SDOT4={d}", .{@intFromBool(c.sdot4)}));
-        run.addArg(b.fmt("-DTF_SDOT8={d}", .{@intFromBool(c.sdot8)}));
-        run.addArg(b.fmt("-DTF_MATRIX={d}", .{@intFromBool(c.matrix != .none)}));
-        run.addArg(b.fmt("--rocm-path={s}", .{root}));
-        run.addArg(b.fmt("--rocm-device-lib-path={s}", .{device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root})}));
-        run.addArg(b.fmt("--offload-arch={s}", .{arch}));
-        run.addPrefixedDirectoryArg("-I", b.path("zig/kernels/hip"));
-        for (headers) |h| run.addFileInput(b.path(b.fmt("zig/kernels/hip/{s}", .{h})));
-        run.addArg("-o");
-        const object = run.addOutputFileArg(b.fmt("group{d}.hsaco", .{i}));
-        run.addFileArg(b.path(b.fmt("zig/kernels/hip/{s}", .{source})));
-        _ = files.addCopyFile(object, b.fmt("group{d}.hsaco", .{i}));
+    for (0..groups.len) |i| {
         decls = b.fmt("{s}const g{d} align(8) = @embedFile(\"group{d}.hsaco\").*;\n", .{ decls, i, i });
         refs = b.fmt("{s}&g{d}, ", .{ refs, i });
     }
     return b.createModule(.{ .root_source_file = files.add("kernels.zig", b.fmt("pub const arch = \"{s}\";\n{s}pub const images = [_][]align(8) const u8{{ {s}}};\n", .{ arch, decls, refs })) });
+}
+
+/// The HIP compiler as the build found it, and the device bitcode it links.
+pub const Hipcc = struct { name: []const u8, resolved: []const u8, device_lib: ?[]const u8 };
+
+/// The groups' code objects for `arch` in one directory, group0.hsaco onward.
+pub fn objectFiles(b: *std.Build, cc: Hipcc, arch: []const u8) *std.Build.Step.WriteFile {
+    const files = b.addWriteFiles();
+    for (groups, 0..) |source, i| {
+        const name = b.fmt("group{d}.hsaco", .{i});
+        _ = files.addCopyFile(compile(b, cc, arch, b.path(b.fmt("zig/kernels/hip/{s}", .{source})), name), name);
+    }
+    return files;
+}
+
+/// One source's code object for `arch`, with the kernels' flags and the caps table's instruction switches.
+pub fn compile(b: *std.Build, cc: Hipcc, arch: []const u8, source: std.Build.LazyPath, out: []const u8) LazyPath {
+    const c = caps.Caps.of(arch).?;
+    const root = std.fs.path.dirname(std.fs.path.dirname(cc.resolved) orelse ".") orelse ".";
+    const run = b.addSystemCommand(&.{ cc.name, "--genco" });
+    run.addArgs(&flags);
+    run.addArg(b.fmt("-DTF_WAVE={d}", .{c.wave}));
+    run.addArg(b.fmt("-DTF_DOT2_F16={d}", .{@intFromBool(c.dot2_f16)}));
+    run.addArg(b.fmt("-DTF_DOT2_BF16={d}", .{@intFromBool(c.dot2_bf16)}));
+    run.addArg(b.fmt("-DTF_SDOT4={d}", .{@intFromBool(c.sdot4)}));
+    run.addArg(b.fmt("-DTF_SDOT8={d}", .{@intFromBool(c.sdot8)}));
+    run.addArg(b.fmt("-DTF_MATRIX={d}", .{@intFromBool(c.matrix != .none)}));
+    run.addArg(b.fmt("--rocm-path={s}", .{root}));
+    const lib = cc.device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root});
+    run.addArg(b.fmt("--rocm-device-lib-path={s}", .{lib}));
+    run.addArg(b.fmt("--offload-arch={s}", .{arch}));
+    run.addPrefixedDirectoryArg("-I", b.path("zig/kernels/hip"));
+    for (headers) |h| run.addFileInput(b.path(b.fmt("zig/kernels/hip/{s}", .{h})));
+    run.addArg("-o");
+    const object = run.addOutputFileArg(out);
+    run.addFileArg(source);
+    return object;
 }
 
 /// The backend-neutral core (checkpoint formats, the kernel registry), as the other backends import it.

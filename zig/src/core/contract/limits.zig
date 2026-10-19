@@ -104,6 +104,73 @@ pub fn cuda(l: CudaLaunch, u: Usage, t: Sm, out: *std.ArrayList(u8), a: std.mem.
     return n;
 }
 
+/// An RDNA chip we serve, one a generation: a workgroup's limits and a SIMD's wave32 register file (WGP mode).
+pub const Rdna = struct {
+    name: []const u8,
+    threads: u32 = 1024,
+    lds: u32 = 64 * 1024,
+    wave: u32 = 32,
+    /// VGPRs one wave32 may address.
+    vgprs_wave: u32 = 256,
+    /// VGPRs a SIMD holds for each lane, and the step a wave32 allocates them in.
+    vgprs_simd: u32,
+    granule: u32,
+    simds: u32 = 4,
+};
+
+pub const rdna = [_]Rdna{
+    .{ .name = "gfx1030", .vgprs_simd = 1024, .granule = 16 },
+    .{ .name = "gfx1100", .vgprs_simd = 1536, .granule = 24 },
+    .{ .name = "gfx1151", .vgprs_simd = 1536, .granule = 24 },
+    .{ .name = "gfx1201", .vgprs_simd = 1536, .granule = 24 },
+};
+
+/// A HIP kernel as launched: its symbol, its code object, most threads a workgroup and dynamic LDS bytes.
+pub const HipLaunch = struct {
+    name: []const u8,
+    symbol: []const u8,
+    image: []const u8,
+    threads: u32,
+    dynamic: u32 = 0,
+};
+
+/// What hipcc made of one kernel for one chip, from the code object's metadata (vgprs 0: none recorded).
+pub const HipUsage = struct {
+    vgprs: u32,
+    sgprs: u32 = 0,
+    lds: u32 = 0,
+    private: u32 = 0,
+    bound: u32 = 1024,
+    wave: u32 = 32,
+};
+
+/// VGPRs a workgroup of `threads` takes from each SIMD: its waves spread over the WGP's SIMDs, each rounded up.
+pub fn simdVgprs(vgprs: u32, threads: u32, t: Rdna) u32 {
+    const alloc = (vgprs + t.granule - 1) / t.granule * t.granule;
+    const waves = (threads + t.wave - 1) / t.wave;
+    return alloc * ((waves + t.simds - 1) / t.simds);
+}
+
+/// Every problem one HIP launch has on one chip given what hipcc made of it; returns how many.
+pub fn hip(l: HipLaunch, u: HipUsage, t: Rdna, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
+    var n: usize = 0;
+    const at = .{ l.name, t.name };
+    const wave = "{s} on {s}: built for wave{d}, the kernels assume wave{d}";
+    if (u.wave != t.wave) n += try note(out, a, wave, at ++ .{ u.wave, t.wave });
+    const most = "{s} on {s}: {d} threads a workgroup, the most is {d}";
+    if (l.threads > t.threads) n += try note(out, a, most, at ++ .{ l.threads, t.threads });
+    const past = "{s} on {s}: launched at {d} threads past its bound {d}";
+    if (l.threads > u.bound) n += try note(out, a, past, at ++ .{ l.threads, u.bound });
+    if (u.vgprs > t.vgprs_wave) n += try note(out, a, "{s} on {s}: {d} VGPRs a wave", at ++ .{u.vgprs});
+    const simd = simdVgprs(u.vgprs, l.threads, t);
+    const file = "{s} on {s}: {d} VGPRs x {d} threads need {d} a SIMD, it has {d}";
+    if (simd > t.vgprs_simd) n += try note(out, a, file, at ++ .{ u.vgprs, l.threads, simd, t.vgprs_simd });
+    const lds = u.lds + l.dynamic;
+    const shared = "{s} on {s}: {d} LDS bytes, the most a workgroup takes is {d}";
+    if (lds > t.lds) n += try note(out, a, shared, at ++ .{ lds, t.lds });
+    return n;
+}
+
 fn note(out: *std.ArrayList(u8), a: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !usize {
     try out.print(a, fmt ++ "\n", args);
     return 1;
@@ -167,4 +234,23 @@ test "CUDA: registers by warp, launch bounds, shared bytes and clusters per SM" 
     cl.min_sm = 90;
     try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, sm80, &out, a));
     try std.testing.expectEqual(@as(?Sm, null), target(75));
+}
+
+test "HIP: bounds, wave size, VGPRs a SIMD and LDS per chip" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    const l = HipLaunch{ .name = "k", .symbol = "k", .image = "ops", .threads = 1024 };
+    try std.testing.expectEqual(@as(u32, 1024), simdVgprs(128, 1024, rdna[0])); // 32 waves, 8 a SIMD
+    try std.testing.expectEqual(@as(u32, 1536), simdVgprs(183, 1024, rdna[1])); // 183 rounds up to 192
+    for (rdna) |t| try std.testing.expectEqual(@as(usize, 0), try hip(l, .{ .vgprs = 128 }, t, &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try hip(l, .{ .vgprs = 183 }, rdna[0], &out, a));
+    try std.testing.expectEqual(@as(usize, 0), try hip(l, .{ .vgprs = 183 }, rdna[3], &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try hip(l, .{ .vgprs = 64, .bound = 256 }, rdna[1], &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try hip(l, .{ .vgprs = 64, .wave = 64 }, rdna[2], &out, a));
+    var big = l;
+    big.threads = 256;
+    big.dynamic = 32 * 1024;
+    try std.testing.expectEqual(@as(usize, 1), try hip(big, .{ .vgprs = 32, .lds = 40 * 1024 }, rdna[0], &out, a));
+    try std.testing.expectEqual(@as(usize, 0), try hip(big, .{ .vgprs = 32, .lds = 32 * 1024 }, rdna[0], &out, a));
 }
