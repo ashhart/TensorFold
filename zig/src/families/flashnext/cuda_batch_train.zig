@@ -88,7 +88,7 @@ pub fn spans(comptime Tri: type, p: *batch.Pass(Tri), ids: []const u32, list: []
                 const li = wt.linearIndex(layer);
                 try zero(p, p.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim / 2);
                 try zero(p, p.seq.state[li].ptr, state_n);
-                try p.gdnBlock(lw, li, k);
+                try p.gdnBlock(lw, layer, li, k);
             } else {
                 try p.attnBlockKeep(lw, wt.attnIndex(layer), k);
             }

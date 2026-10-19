@@ -18,6 +18,8 @@ const be = lanes.backend;
 const ring = 1024;
 /// Streams a round takes at most (a round with more live streams takes them in turns).
 const round_streams = 32;
+/// Drafted windows' rows a shared verify takes at most: a drafting round's (TF_FLASHNEXT_WINDOW_ROWS; 0: each alone).
+const window_rows_default = 4 * mtp.max_rows;
 
 /// The Triton entry points the pass launches and the head's two more: a captured set replaces our glue with all.
 pub const captured_entries = [_][]const u8{ "_embed", "_hc_writeback", "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_ple_gate", "_ple_conv", "_attn_prep", "_attn_gate", "_pool", "_scores", "_chunks", "_merge", "_router", "_topk_rows" };
@@ -174,7 +176,7 @@ pub fn Namespace(comptime Tri: type) type {
                 return .{ .set = if (self.set) |*x| x else null, .own = &self.glue, .s = self.stream };
             }
 
-            fn ops(self: *Cuda) Ops {
+            pub fn ops(self: *Cuda) Ops {
                 return .{ .e = self.engine, .tri = self.tri(), .h = self.head.?, .main = if (self.ranks != null) .{
                     .ptr = self,
                     .forward = mainForward,
@@ -257,7 +259,7 @@ pub fn Namespace(comptime Tri: type) type {
                 return mtp.drawRow(self.gpa, row, null, position, s.sampling);
             }
 
-            fn lane(self: *Cuda, s: *lanes.Stream) !*Lane {
+            pub fn lane(self: *Cuda, s: *lanes.Stream) !*Lane {
                 return self.lanes.getPtr(s) orelse return error.UnknownStream;
             }
 
@@ -439,19 +441,23 @@ pub fn Namespace(comptime Tri: type) type {
             defer self.gpa.free(ids);
             const at_window = try self.gpa.alloc(usize, windows.len);
             defer self.gpa.free(at_window);
+            const row_ids = try self.gpa.alloc([mtp.max_rows]u32, windows.len);
+            defer self.gpa.free(row_ids);
+            const drafted = try self.gpa.alloc(usize, windows.len);
+            defer self.gpa.free(drafted);
             var plain: usize = 0;
+            var held: usize = 0;
             for (windows, out, 0..) |w, *o, wi| {
                 if (w.held != 0 or w.parents != null) return error.HeldDraftsNotBuilt;
                 const l = try self.lane(w.stream);
                 const rows = w.rows();
-                if (l.draft) |*d| {
+                if (l.draft != null) {
                     if (rows > mtp.max_rows) return error.WindowTooWide;
                     for (w.positions, 0..) |p, r| if (p != l.seq.fed + 1 + r) return error.PositionMismatch;
-                    var row_ids: [mtp.max_rows]u32 = undefined;
-                    row_ids[0] = w.pending;
-                    @memcpy(row_ids[1..rows], w.tokens);
-                    try self.ops().verify(&l.seq, d, row_ids[0..rows]);
-                    try self.ops().draws(d, w.stream.sampling, w.masks, o.sampled[0..rows]);
+                    row_ids[wi][0] = w.pending;
+                    @memcpy(row_ids[wi][1..rows], w.tokens);
+                    drafted[held] = wi;
+                    held += 1;
                 } else {
                     if (rows != 1) return error.CannotRewind;
                     if (w.positions[0] != l.seq.fed + 1) return error.PositionMismatch;
@@ -462,6 +468,8 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 if (w.tokens.len > 0) @memcpy(o.drafts[0..w.tokens.len], w.tokens);
             }
+            const cap = @min(@min(envUsize("TF_FLASHNEXT_WINDOW_ROWS", window_rows_default), window_rows_default), self.engine.chunk);
+            try @import("cuda_lanes_verify.zig").windows(self, windows, out, drafted[0..held], row_ids, cap);
             var at: usize = 0;
             while (at < plain) : (at += round_streams) {
                 const n = @min(round_streams, plain - at);

@@ -43,6 +43,8 @@ pub const Cache = struct {
     /// CPU histories and pinned inputs advance once per round, outside stream capture and replay.
     fn prepare(pass: anytype, ids: []const u32) !void {
         const s = pass.s;
+        // a captured round is one row a lane; windows run the plain pass
+        if (ids.len != pass.lanes.len) return error.UnexpectedTensor;
         try s.ready();
         for (s.hostIds(ids.len), ids) |*out, token| out.* = @intCast(token);
         const positions = s.hostPos(ids.len * 4);

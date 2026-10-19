@@ -70,7 +70,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const window = @min(o.context + mtp.max_rows, prompt.max_tokens);
     // and an attention block's block scores at the window (64 MiB at 262,144 tokens)
     _ = try own.engine.reserveScores(window, @min(o.context, own.engine.chunk));
-    own.logits = try cuda.DeviceBuffer.alloc(driver, round_streams * prompt.vocabulary * 2);
+    // a shared round's or a shared verify's scores: up to a drafting round's rows (facts' batch_rows)
+    own.logits = try cuda.DeviceBuffer.alloc(driver, @max(round_streams, 4 * mtp.max_rows) * prompt.vocabulary * 2);
     errdefer own.logits.free();
     own.lanes = .empty;
     own.next = 0;

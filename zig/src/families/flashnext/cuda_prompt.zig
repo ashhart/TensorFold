@@ -279,7 +279,7 @@ pub const Engine = struct {
     }
 
     /// The weights a pass of streams that read the model as shipped reads (untaught): the pockets left out.
-    fn shipped(e: *Engine) batch.Model {
+    pub fn shipped(e: *Engine) batch.Model {
         var m = e.model();
         m.pocket = null;
         return m;
@@ -326,7 +326,7 @@ pub const Engine = struct {
         return e.forward(Tri, tri, seq, ids, .{});
     }
 
-    fn complete(e: *Engine) !void {
+    pub fn complete(e: *Engine) !void {
         if (e.collective) |c| return c.finish(e.stream.*);
         try e.stream.synchronize();
     }
@@ -387,6 +387,10 @@ pub const Engine = struct {
         if (hooks.logits == .none) try e.complete();
         seq.fed += ids.len;
     }
+
+    /// A stream's window in a shared pass and the pass over several (cuda_prompt_windows.zig).
+    pub const Window = @import("cuda_prompt_windows.zig").Window;
+    pub const windows = @import("cuda_prompt_windows.zig").windows;
 
     /// One decode round: each of `seqs` takes its token of `ids` in one batched pass; scores as if alone.
     pub fn round(e: *Engine, comptime Tri: type, tri: Tri, seqs: []const *Seq, ids: []const u32, out: u64) !void {

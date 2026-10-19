@@ -42,8 +42,12 @@ pub const View = struct {
 pub fn inject(view: ?View, rows: anytype, stream: cuda.Stream, out: u64, pos: usize, n: usize) !void {
     if (rows.len == 0) {
         if (view) |m| try m.image.inject(stream, out, pos, n, wt.streams);
-    } else for (rows, 0..) |l, r| {
-        if (l.seq.media) |m| try m.image.inject(stream, out + r * wt.wide * 2, l.pos, 1, wt.streams);
+    } else {
+        var row0: usize = 0;
+        for (rows) |l| {
+            if (l.seq.media) |m| try m.image.inject(stream, out + row0 * wt.wide * 2, l.pos, l.rows, wt.streams);
+            row0 += l.rows;
+        }
     }
 }
 

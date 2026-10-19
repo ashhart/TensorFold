@@ -247,6 +247,38 @@ pub fn Ops(comptime Tri: type) type {
             d.open = keeps;
         }
 
+        /// Several streams' windows in one forward, each left as its `verify` leaves it; `out` takes all rows' scores.
+        pub fn verifyMany(o: Self, seqs: []const *prompt.Seq, ds: []const *Draft, idss: []const []const u32, out: u64) !void {
+            if (o.main != null) return error.UnsupportedRankOperation;
+            // every window refused before any stream's state moves
+            for (seqs, idss) |seq, ids| {
+                if (ids.len == 0 or ids.len > max_rows) return error.WindowTooWide;
+                if (seq.fed + ids.len > seq.cap) return error.PromptTooLong;
+            }
+            o.e.round_graph.clear();
+            const wins = try o.e.gpa.alloc(prompt.Engine.Window, seqs.len);
+            defer o.e.gpa.free(wins);
+            for (seqs, ds, idss, wins) |seq, d, ids, *w| {
+                const n = ids.len;
+                d.settle(seq);
+                d.fed0 = seq.fed;
+                d.rows = n;
+                d.history = seq.history;
+                @memcpy(d.ids[0..n], ids);
+                const keeps = n > 1;
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+                w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = d.logits.ptr };
+            }
+            try o.e.windows(Tri, o.tri, wins, out);
+            var row0: usize = 0;
+            for (ds, idss) |d, ids| {
+                const keeps = ids.len > 1;
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
+                d.open = keeps;
+                row0 += ids.len;
+            }
+        }
+
         /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.
         pub fn draws(o: Self, d: *Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
             const n = d.rows;

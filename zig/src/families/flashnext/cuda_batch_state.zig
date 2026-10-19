@@ -534,8 +534,32 @@ pub fn scoreBytes(cap: usize, rows: usize) usize {
     return @min(rows, att_rows) * scoreStride(cap) * 4;
 }
 
-/// One row of a decode round: its stream's next token, on that stream's own caches at its own position.
-pub const Lane = struct { seq: SeqState, pos: usize };
+/// One stream's rows in a shared pass from `pos` on its own caches, and its window's rollback, hidden rows and scores.
+pub const Lane = struct { seq: SeqState, pos: usize, rows: usize = 1, keep: ?*const Keep = null, streams: u64 = 0, logits: u64 = 0 };
+
+/// Lanes whose rows add up to `n`, each window within its cache and the attention block, keeping a rollback at most.
+pub fn checkLanes(lanes: []const Lane, n: usize) error{UnexpectedTensor}!void {
+    var total: usize = 0;
+    for (lanes) |l| {
+        if (l.rows == 0 or l.rows > att_rows or l.pos + l.rows > l.seq.cap) return error.UnexpectedTensor;
+        if (l.keep) |kp| if (!rollbackOnly(kp)) return error.UnexpectedTensor;
+        total += l.rows;
+    }
+    if (total != n) return error.UnexpectedTensor;
+}
+
+/// A drafted window's rollback (the DeltaNet rows, history and end states alone), not a training pass's tensors.
+pub fn rollbackOnly(k: *const Keep) bool {
+    if (!std.meta.eql(k.mixer, HcKeep{})) return false;
+    for (k.layers) |lk| {
+        var rest = lk;
+        rest.proj = 0;
+        rest.hist = 0;
+        rest.state_out = 0;
+        if (!std.meta.eql(rest, LayerKeep{})) return false;
+    }
+    return true;
+}
 
 /// The engine's resident weights the pass reads.
 pub const Model = struct {
@@ -574,11 +598,13 @@ pub const Gather = struct {
             };
             return;
         }
-        for (g.lanes, 0..) |l, r| {
-            g.ngram.rows(l.seq.history[0..], g.ids[r..][0..1], g.emb[r * dims ..][0..dims], g.xs[r * (dims / 32) ..][0 .. dims / 32]) catch |err| {
+        var row0: usize = 0;
+        for (g.lanes) |l| {
+            g.ngram.rows(l.seq.history[0..], g.ids[row0..][0..l.rows], g.emb[row0 * dims ..][0 .. l.rows * dims], g.xs[row0 * (dims / 32) ..][0 .. l.rows * (dims / 32)]) catch |err| {
                 g.failed = err;
                 return;
             };
+            row0 += l.rows;
         }
     }
 };

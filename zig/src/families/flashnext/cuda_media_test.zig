@@ -40,7 +40,7 @@ test "the splice, attention and pooled indexer launches get every pointer, scala
     try m.pooled(s, 1, 2, 3, 4, 5, 1e-6, 8);
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5, eps, 8, wt.index_dim, wt.half, wt.index_ratio, 3000, 20, delta }, Capture.values[2][0..13]);
     try std.testing.expectEqual([7]u32{ 8 / wt.index_ratio + 2, 1, 1, 128, 1, 1, 0 }, Capture.configs[2]);
-    const Row = struct { seq: struct { media: ?media.View }, pos: usize };
+    const Row = struct { seq: struct { media: ?media.View }, pos: usize, rows: usize = 1 };
     const rows = [_]Row{ .{ .seq = .{ .media = m }, .pos = 2 }, .{ .seq = .{ .media = null }, .pos = 2 }, .{ .seq = .{ .media = view(&d, 1100) }, .pos = 5 } };
     try media.inject(null, &rows, s, 9000, 0, 3);
     try std.testing.expectEqualSlices(u64, &.{ 1000, 2000, 9000, 2, 20, 2560, 4 }, Capture.values[3][0..7]);
