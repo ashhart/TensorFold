@@ -30,7 +30,7 @@ pub const Pipes = struct {
     moe_glu: [nw]mtl.Pipeline, // the same through gate and up, SwiGLU'd
     gather: [2]mtl.Pipeline, // four gathered rows sharing the sorted row arithmetic
     bf16: mtl.Pipeline, // an unquantized matrix (the MTP head's eh_proj, scalar path; decode-side path keeps this)
-    bf16_nax: mtl.Pipeline, // bf16 GEMM on tensor units: prefill-side eh_proj replacement for `bf16`
+    bf16_nax: ?mtl.Pipeline, // bf16 GEMM on tensor units: prefill-side eh_proj replacement for `bf16`
     kda_pre: mtl.Pipeline, // kda_rows reading f_b's and g_b's products made apart (any width but 4/64)
     kda_fg: [nw]mtl.Pipeline, // kda_rows making f_b's and g_b's dots of one width (g64) as glm_rows does: .pre's bits
     embed: [2]mtl.Pipeline, // the embedding at 6 and 8 bits, groups of 64
@@ -55,7 +55,7 @@ pub const Pipes = struct {
             &p.kda_fg,
         }) |set| for (set) |x| x.deinit();
         p.bf16.deinit();
-        p.bf16_nax.deinit();
+        if (p.bf16_nax) |x| x.deinit();
         p.kda_pre.deinit();
         p.zeros.deinit();
         inline for (.{ p.mm8, p.mm2, p.mm5, p.mm6 }) |set| for (set) |x| x.deinit();
@@ -158,7 +158,10 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
         }
         p.bf16 = try made.add(device, l, "glm_rows_bf16");
         for (gather.names, &p.gather) |name, *pipe| pipe.* = try made.add(device, l, name);
-        p.bf16_nax = try made.add(device, l, "glm_rows_bf16_nax");
+        p.bf16_nax = made.add(device, l, "glm_rows_bf16_nax") catch blk: {
+            std.log.warn("glm: the eh_proj tile kernel cannot build here; eh_proj serves on the scalar path", .{});
+            break :blk null;
+        };
     }
     const pre_a = try std.mem.replaceOwned(u8, gpa, kda, pre_f[0], pre_f[1]); // its own instance, under its own name
     defer gpa.free(pre_a);
@@ -279,7 +282,8 @@ pub fn bf16(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: 
 /// x [rows, k] through bf16 W [n, k]: prefill-side eh_proj on tensor units (8x8 simdgroup MMA in fp32).
 /// Caller must ensure rows and n are multiples of 8 and 64 respectively (eh_proj: rows = chunk rows, n = D=4096).
 pub fn bf16Nax(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: Io) void {
-    e.setPipeline(p.bf16_nax);
+    const pipe = p.bf16_nax orelse { return bf16(p, e, w, n, k, io); };
+    e.setPipeline(pipe);
     bind(e, 0, .{ io.in, w });
     e.setValue(RowDims{ .k = @intCast(k), .n = @intCast(n), .group = 0, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, 4);
     bind(e, 5, .{io.out});
