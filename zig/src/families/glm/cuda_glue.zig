@@ -4,8 +4,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const mm_mod = @import("cuda_mm.zig");
 
-/// What the forward's kernels launch from: our glue's functions.
-pub const Set = struct { glue: *const Kernels, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false }; // mm: linears tiled at load
+/// What the forward's kernels launch from: our glue's functions, glm_mm's when tiled, and qlinear's lane for block FP8.
+pub const Set = struct { glue: *const Kernels, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false, linear: cuda.qlinear.Linear = .{} };
 
 /// Our glm_glue.cu's functions.
 pub const Kernels = struct {

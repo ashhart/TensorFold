@@ -14,7 +14,7 @@ const quant = @import("cuda_quant.zig");
 const q4 = @import("cuda_q4.zig");
 const exl3 = @import("cuda_exl3.zig");
 const mm_mod = @import("cuda_mm.zig");
-const formats = @import("cuda_formats.zig");
+pub const formats = @import("cuda_formats.zig");
 
 const Tensor = core.checkpoint.Tensor;
 const prefix = "model.language_model.";
@@ -96,6 +96,11 @@ const Loader = struct {
     }
 
     pub fn formatIn(L: *Loader, ck: *core.Checkpoint, module: []const u8, want: formats.Format) !void {
+        _ = try L.formatOne(ck, module, &.{want});
+    }
+
+    /// `module`'s stored format (formats.of) when it is one of `wants`; any other is refused by name.
+    pub fn formatOne(L: *Loader, ck: *core.Checkpoint, module: []const u8, wants: []const formats.Format) !formats.Format {
         var buf: [224]u8 = undefined;
         const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
         const scale_name = try std.fmt.bufPrint(&buf, "{s}.weight_scale", .{module});
@@ -107,9 +112,9 @@ const Loader = struct {
         };
         const declared = L.declaredAs(module);
         const got: ?formats.Format = formats.of(declared, stored) catch null;
-        if (got != null and got.? == want) return;
+        if (got) |f| for (wants) |want| if (f == want) return f;
         var why: [320]u8 = undefined;
-        std.log.err("{s}; this loader reads it as {t}", .{ formats.describe(&why, module, declared, stored), want });
+        std.log.err("{s}; this loader reads it as {any}", .{ formats.describe(&why, module, declared, stored), wants });
         return error.UnreadableFormat;
     }
 
@@ -148,18 +153,18 @@ const Loader = struct {
     }
 
     /// Rows [lo, hi) of `t`'s outermost axis (`total` long; a vector's elements): split.py's "row" cut.
-    fn rows(L: *Loader, t: Tensor, lo: usize, hi: usize, total: usize, to: core.checkpoint.DType) !void {
+    pub fn rows(L: *Loader, t: Tensor, lo: usize, hi: usize, total: usize, to: core.checkpoint.DType) !void {
         const per = t.numel() / total;
         if (per * total != t.numel()) return error.UnexpectedTensor;
         try L.add(t, lo * per, hi * per, to);
     }
 
-    fn whole(L: *Loader, t: Tensor, to: core.checkpoint.DType) !void {
+    pub fn whole(L: *Loader, t: Tensor, to: core.checkpoint.DType) !void {
         try L.add(t, 0, t.numel(), to);
     }
 
     /// Columns [lo, hi) of every row of a matrix: split.py's "col" cut.
-    fn cols(L: *Loader, t: Tensor, lo: usize, hi: usize, to: core.checkpoint.DType) !void {
+    pub fn cols(L: *Loader, t: Tensor, lo: usize, hi: usize, to: core.checkpoint.DType) !void {
         if (t.rank != 2) return error.UnexpectedTensor;
         const k = t.dim(1);
         for (0..t.dim(0)) |r| try L.add(t, r * k + lo, r * k + hi, to);
@@ -207,15 +212,13 @@ const Loader = struct {
         const c = &L.w.config;
         const h = L.w.share.mla;
         const qk = c.nope;
-        inline for (.{ "q_a_proj", "kv_a_proj_with_mqa", "q_b_proj", "kv_b_proj", "o_proj" }) |x| try L.format("layers.{d}.self_attn." ++ x, .{i}, .bf16);
-        inline for (.{ "q_a_proj", "kv_a_proj_with_mqa" }) |x| try L.whole(try L.get("layers.{d}.self_attn." ++ x ++ ".weight", .{i}), .bf16);
-        const proj = try L.put("layers.{d}.dsa.proj", .{i});
+        try L.format("layers.{d}.self_attn.kv_b_proj", .{i}, .bf16);
+        const proj = try formats.cutProj(L, prefix, i, &.{ .{ .rel = "self_attn.q_a_proj" }, .{ .rel = "self_attn.kv_a_proj_with_mqa" } }, "layers.{d}.dsa.proj");
         try L.whole(try L.get("layers.{d}.self_attn.q_a_layernorm.weight", .{i}), .bf16);
         const q_norm = try L.put("layers.{d}.dsa.q_norm", .{i});
         try L.whole(try L.get("layers.{d}.self_attn.kv_a_layernorm.weight", .{i}), .bf16);
         const kv_norm = try L.put("layers.{d}.dsa.kv_norm", .{i});
-        try L.rows(try L.get("layers.{d}.self_attn.q_b_proj.weight", .{i}), h.lo * qk, h.hi * qk, c.mla_heads * qk, .bf16);
-        const q_b = try L.put("layers.{d}.dsa.q_b", .{i});
+        const q_b = try formats.cutProj(L, prefix, i, &.{.{ .rel = "self_attn.q_b_proj", .rows = .{ h.lo * qk, h.hi * qk } }}, "layers.{d}.dsa.q_b");
         const kv_b = try L.get("layers.{d}.self_attn.kv_b_proj.weight", .{i});
         const per = qk + c.v_dim; // a head's kv_b rows: its keys, then its values
         const total = c.mla_heads * per;
@@ -223,8 +226,7 @@ const Loader = struct {
         const wk = try L.put("layers.{d}.dsa.absorb.wk", .{i});
         for (h.lo..h.hi) |head| try L.rows(kv_b, head * per + qk, (head + 1) * per, total, .bf16);
         const wv = try L.put("layers.{d}.dsa.absorb.wv", .{i});
-        try L.cols(try L.get("layers.{d}.self_attn.o_proj.weight", .{i}), h.lo * c.v_dim, h.hi * c.v_dim, .bf16);
-        const o = try L.put("layers.{d}.dsa.o", .{i});
+        const o = try formats.cutProj(L, prefix, i, &.{.{ .rel = "self_attn.o_proj", .cols = .{ h.lo * c.v_dim, h.hi * c.v_dim } }}, "layers.{d}.dsa.o");
         inline for (.{ "wk", "weights_proj" }) |x| try L.whole(try L.get("layers.{d}.self_attn.indexer." ++ x ++ ".weight", .{i}), .bf16);
         const kw = try L.put("layers.{d}.dsa.index.kw", .{i});
         try L.whole(try L.get("layers.{d}.self_attn.indexer.wq_b.weight", .{i}), .bf16);
@@ -398,11 +400,9 @@ const Loader = struct {
             if (!x3.?.shx) L.w.exl3_shx = false;
         } else routed = try L.nvfp4Experts(i);
         const sh = L.w.share.shared;
-        inline for (.{ "gate_proj", "up_proj", "down_proj" }) |x| try L.format("layers.{d}.mlp.shared_experts." ++ x, .{i}, .bf16);
-        inline for (.{ "gate_proj", "up_proj" }) |x| try L.rows(try L.get("layers.{d}.mlp.shared_experts." ++ x ++ ".weight", .{i}), sh.lo, sh.hi, c.shared_inter, .bf16);
-        const gu = try L.put("layers.{d}.moe.shared.gu", .{i});
-        try L.cols(try L.get("layers.{d}.mlp.shared_experts.down_proj.weight", .{i}), sh.lo, sh.hi, .bf16);
-        const sd = try L.put("layers.{d}.moe.shared.down", .{i});
+        const gu_parts = [_]formats.Part{ .{ .rel = "mlp.shared_experts.gate_proj", .rows = .{ sh.lo, sh.hi } }, .{ .rel = "mlp.shared_experts.up_proj", .rows = .{ sh.lo, sh.hi } } };
+        const gu = try formats.cutProj(L, prefix, i, &gu_parts, "layers.{d}.moe.shared.gu");
+        const sd = try formats.cutProj(L, prefix, i, &.{.{ .rel = "mlp.shared_experts.down_proj", .cols = .{ sh.lo, sh.hi } }}, "layers.{d}.moe.shared.down");
         return .{
             .router = router,
             .bias = bias,
@@ -574,4 +574,6 @@ test "bf16 rounding of fp32 is to nearest even" {
 
 test {
     _ = @import("cuda_formats.zig");
+    _ = @import("cuda_proj.zig");
+    _ = @import("cuda_fp8pb.zig");
 }

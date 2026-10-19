@@ -13,9 +13,13 @@ const P = "model.language_model.";
 /// A piece of an upload: tensor `name`'s outer rows [lo, hi) (a vector's elements), or a matrix's columns [lo, hi).
 const Cut = struct { name: []const u8, cols: bool = false, lo: usize, hi: usize, to: DType = .bf16 };
 
+/// What an upload is held against: its cut as stored, a host packer's bytes from the gate's own cut, or nothing.
+const Want = union(enum) { cut, made: []u8, skip: []const u8 };
+
 /// One upload's pieces as the Python family's weights.load cuts them, read from a checkpoint apart from the loader's.
 const Plan = struct {
     a: std.mem.Allocator,
+    gpa: std.mem.Allocator, // a packed upload's expected bytes, freed once compared
     ck: *core.Checkpoint,
     cuts: std.ArrayList(Cut) = .empty,
 
@@ -45,8 +49,8 @@ fn eql(a: []const u8, b: []const u8) bool {
 /// The MTP head's uploads (`mtp.{what}`) and the tensors under layer `layers` they come from.
 const mtp_sources = [_][2][]const u8{ .{ "enorm", "enorm" }, .{ "hnorm", "hnorm" }, .{ "eh", "eh_proj" }, .{ "norm", "shared_head.norm" } };
 
-/// Upload `name`'s pieces at share `s` into `p`; false when it is packed (no host reference here yet).
-fn plan(p: *Plan, c: *const Config, s: glm.shard.Share, name: []const u8) !bool {
+/// Upload `name`'s pieces at share `s` into `p`, or the bytes a host packer makes of them, or why it is left out.
+fn plan(p: *Plan, c: *const Config, s: glm.shard.Share, name: []const u8) !Want {
     if (eql(name, "embed")) {
         try p.whole(P ++ "embed_tokens.weight", .{}, .bf16);
     } else if (eql(name, "norm")) {
@@ -54,11 +58,11 @@ fn plan(p: *Plan, c: *const Config, s: glm.shard.Share, name: []const u8) !bool 
     } else if (eql(name, "head")) {
         try p.rows("lm_head.weight", .{}, s.vocab.lo, s.vocab.hi, .bf16);
     } else if (std.mem.startsWith(u8, name, "draft_head.")) {
-        return false; // the GPU's 4-bit tiles of the head's rows
+        return .{ .skip = "the GPU quantizer's 4-bit tiles of the head's rows" };
     } else if (std.mem.startsWith(u8, name, "mtp.")) {
         for (mtp_sources) |m| if (eql(name[4..], m[0])) {
             try p.whole(P ++ "layers.{d}.{s}.weight", .{ c.layers, m[1] }, .bf16);
-            return true;
+            return .cut;
         };
         return error.UnknownUpload;
     } else if (std.mem.startsWith(u8, name, "layers.")) {
@@ -66,41 +70,43 @@ fn plan(p: *Plan, c: *const Config, s: glm.shard.Share, name: []const u8) !bool 
         const i = std.fmt.parseInt(u32, name["layers.".len..dot], 10) catch return error.UnknownUpload;
         return layer(p, c, s, i, name[dot + 1 ..]);
     } else return error.UnknownUpload;
-    return true;
+    return .cut;
 }
 
 /// Layer `i`'s upload `what`, as `plan`.
-fn layer(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !bool {
+fn layer(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
     const L = P ++ "layers.{d}.";
     if (eql(what, "in_norm")) {
         try p.whole(L ++ "input_layernorm.weight", .{i}, .bf16);
-        return true;
+        return .cut;
     }
     if (eql(what, "post_norm")) {
         try p.whole(L ++ "post_attention_layernorm.weight", .{i}, .bf16);
-        return true;
+        return .cut;
     }
     inline for (.{ "attn", "ffn" }) |site| {
         if (eql(what, site ++ "_hc.fn")) {
             try p.whole(L ++ "hc_" ++ site ++ "_fn", .{i}, .bf16);
-            return true;
+            return .cut;
         }
         inline for (.{ "base", "scale" }) |x| if (eql(what, site ++ "_hc." ++ x)) {
             try p.whole(L ++ "hc_" ++ site ++ "_" ++ x, .{i}, .f32);
-            return true;
+            return .cut;
         };
     }
+    const fp8g = std.mem.endsWith(u8, what, ".codes") or std.mem.endsWith(u8, what, ".scales");
+    if (fp8g and (std.mem.startsWith(u8, what, "dsa.") or std.mem.startsWith(u8, what, "moe.shared."))) return fp8Made(p, c, s, i, what);
     if (std.mem.startsWith(u8, what, "kda.")) return kda(p, c, s, i, what[4..]);
     if (std.mem.startsWith(u8, what, "dsa.")) return dsa(p, c, s, i, what[4..]);
     if (std.mem.startsWith(u8, what, "moe.")) return moe(p, c, s, i, what[4..]);
     if (std.mem.startsWith(u8, what, "mlp.") and (std.mem.endsWith(u8, what, ".words") or std.mem.endsWith(u8, what, ".scales"))) {
-        return false; // a dense NVFP4 linear: tf_pack_dense's words, packScales' tiles
+        return denseMade(p, c, s, i, what);
     }
     return error.UnknownUpload;
 }
 
 /// KDA: [q | k | v | f_a | g_a | b], q k v b by the rank's heads; f_b, g_b, taps, dt_bias by heads; o by columns.
-fn kda(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !bool {
+fn kda(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
     const at = P ++ "layers.{d}.self_attn.";
     const h = s.kda;
     const dk: usize = c.kda_dim;
@@ -121,11 +127,11 @@ fn kda(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8)
     } else if (eql(what, "o")) {
         try p.cols(at ++ "o_proj.weight", .{i}, h.lo * dk, h.hi * dk);
     } else return error.UnknownUpload;
-    return true;
+    return .cut;
 }
 
 /// Latent attention: [q_a | kv_a] whole; q_b, kv_b's keys and values by heads (rows from the tensors); o by columns.
-fn dsa(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !bool {
+fn dsa(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
     const at = P ++ "layers.{d}.self_attn.";
     const h = s.mla;
     const dv: usize = c.v_dim;
@@ -155,25 +161,27 @@ fn dsa(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8)
         const index = [_][2][]const u8{ .{ "index.qb", "wq_b.weight" }, .{ "index.ln_w", "k_norm.weight" }, .{ "index.ln_b", "k_norm.bias" }, .{ "index.gate", "index_kpool_compress_gate" }, .{ "index.ape", "index_kpool_compress_ape" } };
         for (index) |x| if (eql(what, x[0])) {
             try p.whole(at ++ "indexer.{s}", .{ i, x[1] }, .bf16);
-            return true;
+            return .cut;
         };
         return error.UnknownUpload;
     }
-    return true;
+    return .cut;
 }
 
-/// MoE: router and bias whole, the experts' global scales, the shared expert's gate and up by rows, down by columns.
-fn moe(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !bool {
+/// MoE: router and bias whole, the experts' tiles and global scales, shared gate and up by rows, down by columns.
+fn moe(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
     const at = P ++ "layers.{d}.mlp.";
     if (eql(what, "router")) {
         try p.whole(at ++ "gate.weight", .{i}, .bf16);
     } else if (eql(what, "bias")) {
         try p.whole(at ++ "gate.e_score_correction_bias", .{i}, .f32);
     } else if (eql(what, "experts.up") or eql(what, "experts.down")) {
-        return false; // packGateUp's and packOne's tiles
+        return expertsMade(p, c, s, i, eql(what, "experts.up"));
     } else if (eql(what, "experts.up_scale") or eql(what, "experts.down_scale")) {
         // the MTP layer's bf16 experts take the GPU quantizer's scales; W4A16_NVFP4 ones (FP4-Local's) keep their own
-        if (i == c.layers and !p.ck.has(try std.fmt.allocPrint(p.a, at ++ "experts.0.gate_proj.weight_scale_2", .{i}))) return false;
+        if (i == c.layers and !p.ck.has(try std.fmt.allocPrint(p.a, at ++ "experts.0.gate_proj.weight_scale_2", .{i}))) {
+            return .{ .skip = "the GPU quantizer's, from the MTP layer's bf16 experts" };
+        }
         for (0..c.experts) |e| {
             const projs: []const []const u8 = if (eql(what, "experts.up_scale")) &.{ "gate_proj", "up_proj" } else &.{"down_proj"};
             for (projs) |x| try p.whole(at ++ "experts.{d}.{s}.weight_scale_2", .{ i, e, x }, .f32);
@@ -183,7 +191,140 @@ fn moe(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8)
     } else if (eql(what, "shared.down")) {
         try p.cols(at ++ "shared_experts.down_proj.weight", .{i}, s.shared.lo, s.shared.hi);
     } else return error.UnknownUpload;
-    return true;
+    return .cut;
+}
+
+/// `module`'s e4m3 block scales [n, k/16]: as stored, or its csf_32x2_v1 parts decoded here.
+fn scalesOf(p: *Plan, module: []const u8, n: usize, k: usize) ![]u8 {
+    const out = try p.gpa.alloc(u8, n * k / 16);
+    errdefer p.gpa.free(out);
+    if (!p.ck.has(try std.fmt.allocPrint(p.a, "{s}.weight_scale.csf32_bases", .{module}))) {
+        const t = try p.ck.get(try std.fmt.allocPrint(p.a, "{s}.weight_scale", .{module}));
+        if (t.dtype != .f8_e4m3 or t.bytes.len != out.len) return error.UnexpectedDType;
+        @memcpy(out, t.bytes);
+        return out;
+    }
+    var parts: core.nvfp4_csf32.Parts = undefined;
+    inline for (.{ "bases", "codes", "page_bases", "offsets", "exceptions" }) |x| {
+        @field(parts, x) = (try p.ck.get(try std.fmt.allocPrint(p.a, "{s}.weight_scale.csf32_" ++ x, .{module}))).bytes;
+    }
+    try core.nvfp4_csf32.decode(parts, n, k / 16, out);
+    return out;
+}
+
+/// NVFP4 matrix `module`'s rows [lo, hi) and inputs [klo, khi): its codes and its e4m3 scales, each its own copy.
+fn cut4(p: *Plan, module: []const u8, lo: usize, hi: usize, klo: usize, khi: usize) ![2][]u8 {
+    const w = try p.ck.get(try std.fmt.allocPrint(p.a, "{s}.weight", .{module}));
+    const kk = 2 * w.dim(1);
+    if (w.dtype != .u8 or w.rank != 2 or lo > hi or hi > w.dim(0) or klo > khi or khi > kk or klo % 16 != 0 or (khi - klo) % 64 != 0) return error.CutOutside;
+    const all = try scalesOf(p, module, w.dim(0), kk);
+    defer p.gpa.free(all);
+    const n = hi - lo;
+    const k = khi - klo;
+    const codes = try p.gpa.alloc(u8, n * k / 2);
+    errdefer p.gpa.free(codes);
+    const scales = try p.gpa.alloc(u8, n * k / 16);
+    for (0..n) |r| {
+        @memcpy(codes[r * k / 2 ..][0 .. k / 2], w.bytes[(lo + r) * kk / 2 + klo / 2 ..][0 .. k / 2]);
+        @memcpy(scales[r * k / 16 ..][0 .. k / 16], all[(lo + r) * kk / 16 + klo / 16 ..][0 .. k / 16]);
+    }
+    return .{ codes, scales };
+}
+
+/// A dense NVFP4 linear's `.words` or `.scales`: cuda.nvfp4's host packers (the loader packs words on the GPU).
+fn denseMade(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
+    const proj = what["mlp.".len..std.mem.lastIndexOfScalar(u8, what, '.').?];
+    const d: usize = c.hidden;
+    const down = eql(proj, "down_proj"); // down: every row, the rank's inputs; gate and up: the rank's rows
+    const at: [4]usize = if (down) .{ 0, d, s.dense.lo, s.dense.hi } else .{ s.dense.lo, s.dense.hi, 0, d };
+    const q = try cut4(p, try std.fmt.allocPrint(p.a, P ++ "layers.{d}.mlp.{s}", .{ i, proj }), at[0], at[1], at[2], at[3]);
+    defer for (q) |b| p.gpa.free(b);
+    const n = at[1] - at[0];
+    const k = at[3] - at[2];
+    const npad = cuda.nvfp4.padded(n);
+    if (std.mem.endsWith(u8, what, ".scales")) {
+        const tiles = try p.gpa.alloc(u8, npad * k / 16);
+        cuda.nvfp4.packScales(tiles, q[1], n, k);
+        return .{ .made = tiles };
+    }
+    const words = try p.gpa.alloc(u32, npad / 64 * (k / cuda.nvfp4.group) * 512);
+    defer p.gpa.free(words);
+    cuda.nvfp4.packWords(words, q[0], n, k);
+    return .{ .made = try p.gpa.dupe(u8, std.mem.sliceAsBytes(words)) };
+}
+
+/// The routed experts' tiles: gate and up by the rank's rows (packGateUp), down by its inputs (packOne).
+fn expertsMade(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, up: bool) !Want {
+    const at = P ++ "layers.{d}.mlp.experts.{d}.";
+    if (i == c.layers and (try p.ck.get(try std.fmt.allocPrint(p.a, at ++ "gate_proj.weight", .{ i, 0 }))).dtype == .bf16) {
+        return .{ .skip = "the GPU quantizer's, from the MTP layer's bf16 experts" };
+    }
+    const X = cuda.experts.Nvfp4Experts;
+    const d: usize = c.hidden;
+    const cut = s.moe;
+    const ni = cut.len();
+    const per = if (up) X.bytes(1, ni, d, 2) / 4 else X.bytes(1, d, ni, 1) / 4;
+    const out = try p.gpa.alloc(u32, c.experts * per);
+    defer p.gpa.free(out);
+    for (0..c.experts) |e| {
+        const block = out[e * per ..][0..per];
+        if (!up) {
+            const q = try cut4(p, try std.fmt.allocPrint(p.a, at ++ "down_proj", .{ i, e }), 0, d, cut.lo, cut.hi);
+            defer for (q) |b| p.gpa.free(b);
+            X.packOne(block, q[0], q[1], d, ni);
+            continue;
+        }
+        const g = try cut4(p, try std.fmt.allocPrint(p.a, at ++ "gate_proj", .{ i, e }), cut.lo, cut.hi, 0, d);
+        defer for (g) |b| p.gpa.free(b);
+        const u = try cut4(p, try std.fmt.allocPrint(p.a, at ++ "up_proj", .{ i, e }), cut.lo, cut.hi, 0, d);
+        defer for (u) |b| p.gpa.free(b);
+        X.packGateUp(block, .{ g[0], g[1] }, .{ u[0], u[1] }, ni, d);
+    }
+    return .{ .made = try p.gpa.dupe(u8, std.mem.sliceAsBytes(out)) };
+}
+
+/// A block-FP8 projection's lane codes or scale tiles: the rank's cut of each stored part, packed as cuda_fp8pb packs.
+fn fp8Made(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
+    const FP = glm.weights.formats.fp8pb;
+    const base = what[0..std.mem.lastIndexOfScalar(u8, what, '.').?];
+    const Part = struct { rel: []const u8, rows: ?[2]usize = null, cols: ?[2]usize = null };
+    const h = s.mla;
+    const sh = s.shared;
+    const at = P ++ "layers.{d}.";
+    var parts: [2]Part = undefined;
+    const n_parts: usize = if (eql(base, "dsa.proj") or eql(base, "moe.shared.gu")) 2 else 1;
+    if (eql(base, "dsa.proj")) {
+        parts = .{ .{ .rel = "self_attn.q_a_proj" }, .{ .rel = "self_attn.kv_a_proj_with_mqa" } };
+    } else if (eql(base, "dsa.q_b")) {
+        const per = try p.outer(at ++ "self_attn.q_b_proj.weight", .{i}) / c.mla_heads;
+        parts[0] = .{ .rel = "self_attn.q_b_proj", .rows = .{ h.lo * per, h.hi * per } };
+    } else if (eql(base, "dsa.o")) {
+        parts[0] = .{ .rel = "self_attn.o_proj", .cols = .{ h.lo * c.v_dim, h.hi * c.v_dim } };
+    } else if (eql(base, "moe.shared.gu")) {
+        parts = .{ .{ .rel = "mlp.shared_experts.gate_proj", .rows = .{ sh.lo, sh.hi } }, .{ .rel = "mlp.shared_experts.up_proj", .rows = .{ sh.lo, sh.hi } } };
+    } else if (eql(base, "moe.shared.down")) {
+        parts[0] = .{ .rel = "mlp.shared_experts.down_proj", .cols = .{ sh.lo, sh.hi } };
+    } else return error.UnknownUpload;
+    var stored: [2]FP.Fp8pb = undefined;
+    var made: usize = 0;
+    defer for (stored[0..made]) |t| t.deinit(p.gpa);
+    var shares: [2]FP.Share = undefined;
+    for (parts[0..n_parts], 0..) |q, j| {
+        stored[j] = try FP.Fp8pb.read(p.gpa, p.ck, try std.fmt.allocPrint(p.a, at ++ "{s}", .{ i, q.rel }));
+        made += 1;
+        const r = q.rows orelse [2]usize{ 0, stored[j].n };
+        const k = q.cols orelse [2]usize{ 0, stored[j].k };
+        shares[j] = .{ .p = &stored[j], .lo = r[0], .hi = r[1], .klo = k[0], .khi = k[1] };
+    }
+    const z = try FP.sizes(shares[0..n_parts]);
+    const codes = try p.gpa.alloc(u8, z.codes);
+    errdefer p.gpa.free(codes);
+    const tiles = try p.gpa.alloc(f32, z.scales);
+    defer p.gpa.free(tiles);
+    try FP.pack(p.gpa, shares[0..n_parts], codes, tiles);
+    if (std.mem.endsWith(u8, what, ".codes")) return .{ .made = codes };
+    p.gpa.free(codes);
+    return .{ .made = try p.gpa.dupe(u8, std.mem.sliceAsBytes(tiles)) };
 }
 
 /// The bytes `cuts` make: each piece's elements in order, written as its dtype.
@@ -238,21 +379,25 @@ fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *cons
     var w = try glm.weights.load(gpu.gpa, gpu.io, gpu.d, stream, m.tools(), dir, c.*, s, layers, true);
     defer w.deinit();
     var bad: usize = 0;
-    var same: usize = 0;
+    var cut: usize = 0;
+    var made: usize = 0;
     var bytes: usize = 0;
-    var skipped: std.ArrayList([]const u8) = .empty;
+    var left: std.ArrayList([2][]const u8) = .empty;
     for (w.named.items) |n| {
-        var p: Plan = .{ .a = a, .ck = ck };
-        const known = plan(&p, c, s, n.name) catch |e| {
+        var p: Plan = .{ .a = a, .gpa = gpu.gpa, .ck = ck };
+        const how = plan(&p, c, s, n.name) catch |e| {
             std.debug.print("FAIL TP={d} rank {d} {s}: {t}\n", .{ world, rank, n.name, e });
             bad += 1;
             continue;
         };
-        if (!known) {
-            try skipped.append(a, n.name);
-            continue;
-        }
-        const want = try bytesOf(gpu.gpa, ck, p.cuts.items);
+        const want = switch (how) {
+            .skip => |why| {
+                try left.append(a, .{ n.name, why });
+                continue;
+            },
+            .cut => try bytesOf(gpu.gpa, ck, p.cuts.items),
+            .made => |b| b,
+        };
         defer gpu.gpa.free(want);
         const got = try gpu.gpa.alloc(u8, n.len);
         defer gpu.gpa.free(got);
@@ -267,11 +412,14 @@ fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *cons
             bad += 1;
             continue;
         };
-        same += 1;
+        if (how == .made) made += 1 else cut += 1;
         bytes += n.len;
     }
-    check.pass("glm-loader-gate TP={d} rank {d}: {d} uploads ({d} MiB) as the checkpoint cut on the host, {d} packed not compared", .{ world, rank, same, bytes >> 20, skipped.items.len });
-    if (world == 1) for (skipped.items) |name| std.debug.print("  packed, not compared: {s}\n", .{name});
+    const line = "glm-loader-gate TP={d} rank {d}: {d} uploads as the checkpoint cut, {d} as the host packers make them " ++
+        "({d} MiB), {d} left out, {d} differ or are not known";
+    const args = .{ world, rank, cut, made, bytes >> 20, left.items.len, bad };
+    if (bad == 0) check.pass(line, args) else std.debug.print("FAIL " ++ line ++ "\n", args);
+    if (world == 1) for (left.items) |x| std.debug.print("  left out: {s} ({s})\n", .{ x[0], x[1] });
     return bad;
 }
 

@@ -1,4 +1,4 @@
-//! `glm-synth OUT_DIR`: a 2-layer + MTP GLM-5.3-Flash checkpoint, dc.json; run TF_GLM_LAYERS=2.
+//! `glm-synth OUT_DIR [fp8pb]`: a 2-layer + MTP GLM-5.3-Flash checkpoint, dc.json; run TF_GLM_LAYERS=2.
 const std = @import("std");
 const core = @import("core");
 const glm = @import("glm_cuda");
@@ -14,7 +14,20 @@ const hidden = 4096;
 /// The ModelOpt block nvidia/GLM-5.3-Flash-NVFP4 writes, which the CUDA family admits (modelopt.admitRecipes).
 const modelopt_block = ",\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"NVFP4\", " ++
     "\"config_groups\": {\"group_0\": {\"weights\": {\"num_bits\": 4, \"type\": \"float\", \"group_size\": 16}}}}";
+/// fp8pb: FP4-Local's MIXED_PRECISION form, layer 1's MLA and shared expert in block FP8, the NVFP4 ones as before.
+const mixed_block = ",\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"MIXED_PRECISION\", " ++
+    "\"quantized_layers\": {" ++ nv4("layers.0.mlp") ++ "," ++ nv4("layers.1.mlp.experts") ++ "," ++ pb("layers.1.mlp.shared_experts") ++ "," ++
+    pb("layers.1.self_attn.q_a_proj") ++ "," ++ pb("layers.1.self_attn.kv_a_proj_with_mqa") ++ "," ++ pb("layers.1.self_attn.q_b_proj") ++ "," ++
+    pb("layers.1.self_attn.o_proj") ++ "}}";
 const P = "model.language_model.";
+
+fn nv4(comptime module: []const u8) []const u8 {
+    return "\"" ++ P ++ module ++ "\": {\"quant_algo\": \"NVFP4\", \"group_size\": 16}";
+}
+
+fn pb(comptime module: []const u8) []const u8 {
+    return "\"" ++ P ++ module ++ "\": {\"quant_algo\": \"FP8_PB_WO\", \"weight_block_size\": [128, 128]}";
+}
 
 const Out = struct {
     a: std.mem.Allocator,
@@ -60,6 +73,24 @@ const Out = struct {
         try o.put(try cat(o.a, base, ".weight_scale"), .f8_e4m3, &.{ n, k / 16 }, scales);
         try o.scalar(try cat(o.a, base, ".weight_scale_2"), 1.0 / (6.0 * @sqrt(@as(f32, @floatFromInt(k)))));
         try o.scalar(try cat(o.a, base, ".input_scale"), 1.0);
+    }
+
+    /// FP8_PB_WO: e4m3 codes of magnitude 2^-4 to 1.875 (no NaN), fp32 scales [Rb, 1, Cb, 1] near 1/(2 sqrt(k)).
+    fn fp8pb(o: *Out, base: []const u8, n: usize, k: usize) !void {
+        const codes = try o.a.alloc(u8, n * k);
+        for (codes) |*x| x.* = (o.rng.uintLessThan(u8, 2) << 7) | ((3 + o.rng.uintLessThan(u8, 5)) << 3) | o.rng.uintLessThan(u8, 8);
+        try o.put(try cat(o.a, base, ".weight"), .f8_e4m3, &.{ n, k }, codes);
+        const rb = (n + 127) / 128;
+        const cb = (k + 127) / 128;
+        const v = try o.a.alloc(f32, rb * cb);
+        for (v) |*x| x.* = (0.5 + o.rng.float(f32)) / (2.0 * @sqrt(@as(f32, @floatFromInt(k))));
+        try o.put(try cat(o.a, base, ".weight_scale"), .f32, &.{ rb, 1, cb, 1 }, std.mem.sliceAsBytes(v));
+    }
+
+    /// A linear as bf16, or as FP8_PB_WO with `fp8`.
+    fn either(o: *Out, base: []const u8, n: usize, k: usize, fp8: bool) !void {
+        if (fp8) return o.fp8pb(base, n, k);
+        try o.linear(try cat(o.a, base, ".weight"), n, k);
     }
 
     fn scalar(o: *Out, name: []const u8, value: f32) !void {
@@ -118,15 +149,15 @@ fn kda(o: *Out, i: usize) !void {
     try o.linear(try cat(o.a, s, "o_proj.weight"), hidden, 8192);
 }
 
-fn mla(o: *Out, i: usize) !void {
+fn mla(o: *Out, i: usize, fp8: bool) !void {
     const s = try tensor(o.a, "layers.{d}.self_attn.", .{i});
-    try o.linear(try cat(o.a, s, "q_a_proj.weight"), 1536, hidden);
-    try o.linear(try cat(o.a, s, "kv_a_proj_with_mqa.weight"), 512, hidden);
+    try o.either(try cat(o.a, s, "q_a_proj"), 1536, hidden, fp8);
+    try o.either(try cat(o.a, s, "kv_a_proj_with_mqa"), 512, hidden, fp8);
     try o.bf16Const(try cat(o.a, s, "q_a_layernorm.weight"), &.{1536}, 1.0);
     try o.bf16Const(try cat(o.a, s, "kv_a_layernorm.weight"), &.{512}, 1.0);
-    try o.linear(try cat(o.a, s, "q_b_proj.weight"), 16384, 1536);
+    try o.either(try cat(o.a, s, "q_b_proj"), 16384, 1536, fp8);
     try o.linear(try cat(o.a, s, "kv_b_proj.weight"), 32768, 512);
-    try o.linear(try cat(o.a, s, "o_proj.weight"), hidden, 16384);
+    try o.either(try cat(o.a, s, "o_proj"), hidden, 16384, fp8);
     try o.linear(try cat(o.a, s, "indexer.wk.weight"), 128, hidden);
     try o.linear(try cat(o.a, s, "indexer.weights_proj.weight"), 32, hidden);
     try o.linear(try cat(o.a, s, "indexer.wq_b.weight"), 4096, 1536);
@@ -141,13 +172,13 @@ fn dense(o: *Out, i: usize) !void {
     try o.nvfp4(try tensor(o.a, "layers.{d}.mlp.down_proj", .{i}), hidden, 12288);
 }
 
-/// The router, the shared expert, and the routed ones in NVFP4 (backbone) or bf16 (the MTP layer).
-fn moe(o: *Out, i: usize, bf: bool) !void {
+/// The router, the shared expert (bf16, or block FP8 with `fp8`), the routed ones in NVFP4 or bf16 (the MTP layer).
+fn moe(o: *Out, i: usize, bf: bool, fp8: bool) !void {
     try o.linear(try tensor(o.a, "layers.{d}.mlp.gate.weight", .{i}), experts, hidden);
     try o.f32s(try tensor(o.a, "layers.{d}.mlp.gate.e_score_correction_bias", .{i}), &.{experts}, 0.0, 0.0);
-    try o.linear(try tensor(o.a, "layers.{d}.mlp.shared_experts.gate_proj.weight", .{i}), 2048, hidden);
-    try o.linear(try tensor(o.a, "layers.{d}.mlp.shared_experts.up_proj.weight", .{i}), 2048, hidden);
-    try o.linear(try tensor(o.a, "layers.{d}.mlp.shared_experts.down_proj.weight", .{i}), hidden, 2048);
+    try o.either(try tensor(o.a, "layers.{d}.mlp.shared_experts.gate_proj", .{i}), 2048, hidden, fp8);
+    try o.either(try tensor(o.a, "layers.{d}.mlp.shared_experts.up_proj", .{i}), 2048, hidden, fp8);
+    try o.either(try tensor(o.a, "layers.{d}.mlp.shared_experts.down_proj", .{i}), hidden, 2048, fp8);
     for (0..experts) |e| {
         const s = try tensor(o.a, "layers.{d}.mlp.experts.{d}.", .{ i, e });
         if (bf) {
@@ -162,7 +193,7 @@ fn moe(o: *Out, i: usize, bf: bool) !void {
     }
 }
 
-pub fn run(gpu: check.Gpu, out_dir: []const u8) !void {
+pub fn run(gpu: check.Gpu, out_dir: []const u8, fp8: bool) !void {
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -175,20 +206,21 @@ pub fn run(gpu: check.Gpu, out_dir: []const u8) !void {
     try hc(&o, 0);
     try norms(&o, 0);
     try dense(&o, 0);
-    try mla(&o, 1);
+    try mla(&o, 1, fp8);
     try hc(&o, 1);
     try norms(&o, 1);
-    try moe(&o, 1, false);
-    try mla(&o, layers); // the MTP layer: no hyper-connections, bf16 routed experts, the draft head's norms and eh_proj
+    try moe(&o, 1, false, fp8);
+    // the MTP layer: no hyper-connections, bf16 attention and routed experts, the draft head's norms and eh_proj
+    try mla(&o, layers, false);
     try norms(&o, layers);
-    try moe(&o, layers, true);
+    try moe(&o, layers, true, false);
     for ([_][]const u8{ "enorm", "hnorm", "shared_head.norm" }) |m| try o.bf16Const(try tensor(a, "layers.{d}.{s}.weight", .{ layers, m }), &.{hidden}, 1.0);
     try o.linear(try tensor(a, "layers.{d}.eh_proj.weight", .{layers}), hidden, 2 * hidden);
 
     try std.Io.Dir.cwd().createDirPath(gpu.io, out_dir);
     const text = try glm.config.textConfig(a, layers, 1, &.{1}, experts, vocab, hidden);
     const end = std.mem.lastIndexOfScalar(u8, text, '}') orelse return error.BadConfig;
-    const cfg = try std.mem.concat(a, u8, &.{ text[0..end], modelopt_block, text[end..] }); // its linears are NVFP4
+    const cfg = try std.mem.concat(a, u8, &.{ text[0..end], if (fp8) mixed_block else modelopt_block, text[end..] });
     _ = try glm.config.parse(a, cfg);
     try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = try std.fs.path.join(a, &.{ out_dir, "config.json" }), .data = cfg });
     try core.shard_edit.create(gpu.gpa, try std.fs.path.join(a, &.{ out_dir, "model.safetensors" }), &.{.{ "format", "pt" }}, o.list.items);
@@ -207,5 +239,5 @@ pub fn run(gpu: check.Gpu, out_dir: []const u8) !void {
     try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = try std.fs.path.join(a, &.{ out_dir, "dc.json" }), .data = dc.written() });
     var bytes: usize = 0;
     for (o.list.items) |t| bytes += t.bytes.len;
-    check.pass("glm-synth: {d} tensors, {d} MiB, config {d} layers {d} experts vocabulary {d}, dc.json in {s}", .{ o.list.items.len, bytes >> 20, layers, experts, vocab, out_dir });
+    check.pass("glm-synth: {d} tensors, {d} MiB, config {d} layers {d} experts vocabulary {d}{s}, dc.json in {s}", .{ o.list.items.len, bytes >> 20, layers, experts, vocab, if (fp8) ", layer 1's MLA and shared in FP8_PB_WO" else "", out_dir });
 }

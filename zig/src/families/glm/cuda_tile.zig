@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const weights = @import("cuda_weights.zig");
 const mm_mod = @import("cuda_mm.zig");
 const qpack = @import("cuda_qpack.zig");
+const projection = @import("cuda_proj.zig");
 const Weights = weights.Weights;
 const Layer = weights.Layer;
 
@@ -12,6 +13,14 @@ const Lin = struct { field: *u64, n: usize, k: usize };
 
 fn add(l: *std.ArrayList(Lin), gpa: std.mem.Allocator, field: *u64, n: usize, k: usize) !void {
     if (field.* != 0) try l.append(gpa, .{ .field = field, .n = n, .k = k });
+}
+
+/// A projection as stored: its bf16 rows like any linear's; block FP8 stays the lane's tiles, never read as bf16 here.
+fn addProj(l: *std.ArrayList(Lin), gpa: std.mem.Allocator, p: *projection.Proj, n: usize, k: usize) !void {
+    switch (p.*) {
+        .bf16 => |*w| try add(l, gpa, w, n, k),
+        .fp8g => {},
+    }
 }
 
 fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !void {
@@ -27,11 +36,11 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
             try add(list, gpa, &x.o, x.dims, n);
         },
         .mla => |*x| {
-            try add(list, gpa, &x.proj, x.q_lora + x.lw, x.dims);
-            try add(list, gpa, &x.q_b, x.heads * x.qk, x.q_lora);
+            try addProj(list, gpa, &x.proj, x.q_lora + x.lw, x.dims);
+            try addProj(list, gpa, &x.q_b, x.heads * x.qk, x.q_lora);
             try add(list, gpa, &x.index.kw, x.index.d + x.index.heads, x.dims);
             try add(list, gpa, &x.index.qb, x.index.heads * x.index.d, x.q_lora);
-            try add(list, gpa, &x.o, x.dims, x.heads * x.dv);
+            try addProj(list, gpa, &x.o, x.dims, x.heads * x.dv);
         },
     }
     switch (l.ffn) {
@@ -43,8 +52,8 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
             .nvfp4 => {},
         },
         .moe => |*x| {
-            try add(list, gpa, &x.shared_gu, 2 * x.shared, x.routed.dims);
-            try add(list, gpa, &x.shared_down, x.routed.dims, x.shared);
+            try addProj(list, gpa, &x.shared_gu, 2 * x.shared, x.routed.dims);
+            try addProj(list, gpa, &x.shared_down, x.routed.dims, x.shared);
         },
     }
 }

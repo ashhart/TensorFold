@@ -1,7 +1,11 @@
-//! Which stored format a GLM CUDA projection is read in (its recipe, checked against its tensors); csf scales decoded.
+//! Which stored format a GLM CUDA projection is read in (its recipe against its tensors), and how: csf, block-FP8 cuts.
 
 const std = @import("std");
 const core = @import("core");
+const cuda = @import("cuda");
+const fp8 = cuda.fp8;
+const projection = @import("cuda_proj.zig");
+pub const fp8pb = @import("cuda_fp8pb.zig");
 
 const Meta = core.nvfp4.Meta;
 const Recipe = core.modelopt.Recipe;
@@ -105,8 +109,65 @@ pub fn plainLinear(ck: *core.Checkpoint, module: []const u8, declared: Declared)
     return .{ .n = d.n, .k = d.k, .codes = w.bytes, .scales = s.bytes, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
 }
 
-fn metaOf(t: *const core.checkpoint.Tensor) Meta {
+pub fn metaOf(t: *const core.checkpoint.Tensor) Meta {
     return .{ .dtype = t.dtype, .shape = t.shape[0..t.rank] };
+}
+
+/// A projection's part as a rank takes it: tensor `rel` under the layer, its rows or its inputs, or the whole of it.
+pub const Part = struct { rel: []const u8, rows: ?[2]usize = null, cols: ?[2]usize = null };
+
+/// Projection `name` of `parts` stacked: bf16 cut as split.py cuts it, or FP8_PB_WO packed; else refused by name.
+pub fn cutProj(L: anytype, comptime prefix: []const u8, i: u32, parts: []const Part, comptime name: []const u8) !projection.Proj {
+    var bufs: [2][192]u8 = undefined;
+    var mods: [2][]const u8 = undefined;
+    if (parts.len == 0 or parts.len > bufs.len) return error.BadFp8Share; // one tensor, or [q_a | kv_a] and [gate | up]
+    var got: ?Format = null;
+    for (parts, 0..) |q, j| {
+        mods[j] = try std.fmt.bufPrint(&bufs[j], prefix ++ "layers.{d}.{s}", .{ i, q.rel });
+        const f = try L.formatOne(L.ck, mods[j], &.{ .bf16, .fp8_pb });
+        if (got != null and got.? != f) {
+            std.log.err("{s}: stored as {t}, stacked with a part stored as {t}", .{ mods[j], f, got.? });
+            return error.UnreadableFormat;
+        }
+        got = f;
+    }
+    var wb: [224]u8 = undefined;
+    if (got.? == .bf16) {
+        for (parts, mods[0..parts.len]) |q, m| {
+            const t = try L.ck.get(try std.fmt.bufPrint(&wb, "{s}.weight", .{m}));
+            if (q.cols) |c| try L.cols(t, c[0], c[1], .bf16) else if (q.rows) |r| try L.rows(t, r[0], r[1], t.dim(0), .bf16) else try L.whole(t, .bf16);
+        }
+        return .{ .bf16 = try L.put(name, .{i}) };
+    }
+    var stored: [2]fp8pb.Fp8pb = undefined;
+    var made: usize = 0;
+    defer for (stored[0..made]) |t| t.deinit(L.gpa);
+    var shares: [2]fp8pb.Share = undefined;
+    for (parts, mods[0..parts.len], 0..) |q, m, j| {
+        stored[j] = try fp8pb.Fp8pb.read(L.gpa, L.ck, m);
+        made += 1;
+        const r = q.rows orelse [2]usize{ 0, stored[j].n };
+        const c = q.cols orelse [2]usize{ 0, stored[j].k };
+        shares[j] = .{ .p = &stored[j], .lo = r[0], .hi = r[1], .klo = c[0], .khi = c[1] };
+    }
+    return .{ .fp8g = try fp8g(L, shares[0..parts.len], name, .{i}) };
+}
+
+/// `shares` packed for the lane as one weight (fp8pb.pack), uploaded as `name`'s codes and scale tiles.
+fn fp8g(L: anytype, shares: []const fp8pb.Share, comptime name: []const u8, args: anytype) !cuda.qmmf.Weight {
+    const z = fp8pb.sizes(shares) catch |e| {
+        std.log.err(name ++ ": a rank's cut leaves the lane's 64-row tiles or 64-input groups", args);
+        return e;
+    };
+    const codes = try L.gpa.alloc(u8, z.codes);
+    defer L.gpa.free(codes);
+    const scales = try L.gpa.alloc(f32, z.scales);
+    defer L.gpa.free(scales);
+    try fp8pb.pack(L.gpa, shares, codes, scales); // packed apart from L.host, then moved in for each put
+    try L.host.appendSlice(L.gpa, codes);
+    const c = try L.put(name ++ ".codes", args);
+    try L.host.appendSlice(L.gpa, std.mem.sliceAsBytes(scales));
+    return fp8.weight(c, try L.put(name ++ ".scales", args), z.n, z.k);
 }
 
 /// The refusal's text: the module, what the checkpoint declares and what its weight holds.
