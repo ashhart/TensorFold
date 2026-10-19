@@ -98,9 +98,9 @@ pub const Window = struct {
         try self.pos.resize(a, n);
         try self.slot.resize(a, n);
         for (self.pos.items, self.slot.items, 0..) |*p, *sl, i| {
-            // short histories, wrapped rings, the last position; gate 4: one stream's row at the bound, every row alike
-            p.* = @intCast(if (fill == .stress or i == n - 1) shape.k -| 1 else if (i % 4 == 0) i % @min(40, shape.k) else (i * 7919) % shape.k);
-            sl.* = @intCast(if (fill == .stress) 0 else i % f.streams);
+            // prompt rows at k + i, as at() says; decode: short histories, wrapped rings, the last; gate 4 at the bound
+            p.* = @intCast(if (f.prompt) shape.k + i else if (fill == .stress or i == n - 1) shape.k -| 1 else if (i % 4 == 0) i % @min(40, shape.k) else (i * 7919) % shape.k);
+            sl.* = @intCast(if (f.prompt or fill == .stress) 0 else i % f.streams);
         }
         const crow = if (f.prompt) (if (f.ring > 0) f.ring else shape.k + n) else f.streams * f.ring;
         const kv = f.hk * f.d;
