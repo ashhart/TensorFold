@@ -49,24 +49,33 @@ export async function resolvePackagedLinuxExecutable(root = fileURLToPath(new UR
   return path.join(root, 'release', 'linux', 'linux-unpacked', executable)
 }
 
-async function healthy(port) {
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_500) })
-    const body = await response.json()
-    return response.ok && body?.ok === true
-  } catch {
-    return false
-  }
+async function probe(port) {
+  const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_500) })
+  const body = await health.json().catch(() => null)
+  if (!health.ok || body?.ok !== true || body?.listening !== true) throw new Error('health did not confirm ok=true and listening=true')
+  const ui = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1_500) })
+  const uiText = await ui.text()
+  if (ui.status !== 200 || !uiText.trim()) throw new Error(`UI returned HTTP ${ui.status}${uiText.trim() ? '' : ' with an empty body'}`)
+  // Status only: an accidentally authorized snapshot body may contain private state.
+  const snapshot = await fetch(`http://127.0.0.1:${port}/v1/snapshot`, { signal: AbortSignal.timeout(1_500) })
+  await snapshot.arrayBuffer().catch(() => {})
+  if (snapshot.status !== 401) throw new Error(`unauthenticated snapshot returned HTTP ${snapshot.status}, expected 401`)
+  return { healthStatus: health.status, uiStatus: ui.status, snapshotStatus: snapshot.status }
 }
 
 async function waitForHealthy(port, timeoutMs, child) {
   const deadline = Date.now() + timeoutMs
+  let lastFailure = 'listener did not become ready'
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Packaged Linux app exited early (code ${child.exitCode}).`)
-    if (await healthy(port)) return
+    try {
+      return await probe(port)
+    } catch (error) {
+      lastFailure = error?.message || String(error)
+    }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
-  throw new Error(`Packaged Linux app did not answer /health on loopback port ${port}.`)
+  throw new Error(`Packaged Linux app did not pass readiness checks on loopback port ${port}: ${lastFailure}.`)
 }
 
 export async function runPackagedLinuxSmoke(options = {}) {
