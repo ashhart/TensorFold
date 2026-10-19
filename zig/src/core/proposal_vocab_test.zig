@@ -144,5 +144,18 @@ test "proposal vocabulary: parser allocation failures release every owned artifa
 }
 
 test "proposal vocabulary: planted same-size wrong-tokenizer artifact refuses before use" {
-    try t.expectError(error.IdentityMismatch, p.load(t.allocator, @embedFile("testdata/proposal-vocab-bad.json"), expected, &.{0}));
+    if (p.load(t.allocator, @embedFile("testdata/proposal-vocab-bad.json"), expected, &.{0})) |loaded| {
+        var bad = loaded;
+        defer bad.deinit();
+        return error.BadArtifactAccepted;
+    } else |err| try t.expectEqual(error.IdentityMismatch, err);
+}
+
+test "proposal vocabulary: offline response artifact shares the parser ID hash and split coverage contract" {
+    var a = try p.load(t.allocator, @embedFile("testdata/proposal-vocab-responses.json"), expected, &.{0});
+    defer a.deinit();
+    try t.expectEqualSlices(u32, &.{ 0, 3, 7 }, a.ids());
+    try t.expectEqual(@as(u64, 0), a.owned.value.coverage[4].covered);
+    try t.expectEqual(@as(u64, 4), a.owned.value.coverage[4].tokens);
+    try t.expectEqual(@as(u32, 64), try a.physicalCount(64));
 }

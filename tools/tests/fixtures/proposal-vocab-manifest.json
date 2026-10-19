@@ -1,0 +1,82 @@
+{
+  "buckets": [
+    "toy"
+  ],
+  "collector": {
+    "name": "synthetic-collector",
+    "revision": "r1",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "corpus": {
+    "name": "synthetic-corpus",
+    "revision": "r1",
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "identity": {
+    "drafter": {
+      "name": "synthetic-drafter",
+      "revision": "r1",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "format": "bf16",
+    "group": 0,
+    "head": {
+      "name": "proposal-head",
+      "revision": "r1",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "hidden": 8,
+    "recipe": {
+      "name": "synthetic-recipe",
+      "revision": "r1",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "scale_recipe": "none",
+    "target": {
+      "name": "synthetic-target",
+      "revision": "r1",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "tokenizer": {
+      "name": "synthetic-tokenizer",
+      "revision": "r1",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "vocab": 11
+  },
+  "mandatory_ids": [
+    0
+  ],
+  "mandatory_source": "synthetic-recipe",
+  "records": [
+    {
+      "bucket": "toy",
+      "id": "calibration",
+      "prompt_group": "p-calibration",
+      "prompt_sha256": "69a51dff72d243ff5a1e7cb63ede660636f6612135d05a313795b48a8ece7062",
+      "source_group": "s-calibration",
+      "split": "calibration",
+      "template_group": "t-calibration"
+    },
+    {
+      "bucket": "toy",
+      "id": "selection",
+      "prompt_group": "p-selection",
+      "prompt_sha256": "d4f5f1f1dafa53a602b0c9bf43a002d984414222048451700e4e9d412da82ead",
+      "source_group": "s-selection",
+      "split": "selection",
+      "template_group": "t-selection"
+    },
+    {
+      "bucket": "toy",
+      "id": "heldout",
+      "prompt_group": "p-heldout",
+      "prompt_sha256": "0ce4626443247f2b7d82d023d25270c154436eec77aa0e09bd26b27de5f3b5ca",
+      "source_group": "s-heldout",
+      "split": "heldout",
+      "template_group": "t-heldout"
+    }
+  ],
+  "settings_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "version": 1
+}
