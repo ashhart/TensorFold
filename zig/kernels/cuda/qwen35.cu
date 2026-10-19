@@ -192,18 +192,24 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
     constexpr int PER = DK / 32;
     // a recorded window's row logs the tail after it (taps 1..TAPS-1) here, so conv_commit only moves the stream's
     __nv_bfloat16* tail = recorded(P) ? log_row(geo, sg, layer, w - sg.row0).conv : nullptr;
+    // a lane's PER channels in 8-byte loads: each tap's row, the weights (PER x TAPS in a row), the logged tail
+    static_assert(PER == 4 && TAPS == 4, "a tap's channels and a channel's taps are one uint2");
+    const int cl = c0 + lane * PER;
+    uint2 xw[TAPS], ww[TAPS];
+#pragma unroll
+    for (int tap = 0; tap < TAPS; tap++) {
+        const int at = src[tap];
+        xw[tap] = *reinterpret_cast<const uint2*>(at < 0 ? CS + (size_t)(-1 - at) * C + cl : QKV + (size_t)at * C + cl);
+        ww[tap] = *reinterpret_cast<const uint2*>(CW + (size_t)cl * TAPS + tap * PER);
+        if (tail != nullptr && tap > 0) *reinterpret_cast<uint2*>(tail + (size_t)(tap - 1) * C + cl) = xw[tap];
+    }
+    const __nv_bfloat16* cw = reinterpret_cast<const __nv_bfloat16*>(ww);
     float vals[PER];
 #pragma unroll
     for (int j = 0; j < PER; j++) {
-        const int c = c0 + lane * PER + j;
         float acc = 0.0f;
 #pragma unroll
-        for (int tap = 0; tap < TAPS; tap++) {
-            const int at = src[tap];
-            const __nv_bfloat16 xb = at < 0 ? CS[(size_t)(-1 - at) * C + c] : QKV[(size_t)at * C + c];
-            if (tail != nullptr && tap > 0) tail[(size_t)(tap - 1) * C + c] = xb;
-            acc += bf(CW[c * TAPS + tap]) * bf(xb);
-        }
+        for (int tap = 0; tap < TAPS; tap++) acc += bf(cw[j * TAPS + tap]) * bf(reinterpret_cast<const __nv_bfloat16*>(&xw[tap])[j]);
         const float conv = rbf(acc);
         const float sig = rbf(1.0f / (1.0f + expf(-conv)));
         vals[j] = rbf(conv * sig);
