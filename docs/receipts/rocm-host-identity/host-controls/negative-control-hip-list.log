@@ -1,0 +1,78 @@
+# negative control: HIP's list rules (2026-10-19T08:55:27Z)
+# undone: fb8eaf85 part 2. The list is parsed again by 82237515's select() (entries trimmed, out-of-range indices skipped, repeats kept, any other entry voids the list, no GPU- entries); hipVisible() stays in the file, unused. Everything else is fb8eaf85.
+# tree: a scratch copy of fb8eaf85081880f686bbb0b12a5852f64b81fe26 (git archive) with only this change
+# cmd: zig build test-server-cpu -Dcpu=apple_m1 --summary all -j8 (zig 0.17.0, private caches: --cache-dir and ZIG_GLOBAL_CACHE_DIR)
+# free disk before: 52 GB
+# --- the undo, as a diff against fb8eaf85 ---
+--- a/zig/src/server/benchmark_host.zig
++++ b/zig/src/server/benchmark_host.zig
+@@ -56,7 +56,7 @@
+     const none: Probe = .{ .hardware = summarize(cpu, memory, &.{}, false) };
+     var sure = true;
+     // indices count every GPU agent, so selecting an agent with no reportable name lists no GPU, never the next one
+-    const agents = hipVisible(a, amdAgents(a, text), visible, &sure) orelse return none;
++    const agents = select(Agent, a, amdAgents(a, text), visible) orelse return none;
+     var kept: std.ArrayList(Gpu) = .empty;
+     for (agents) |agent| {
+         const g = agent.gpu orelse {
+@@ -121,6 +121,22 @@
+     if (end == 0 or !std.mem.endsWith(u8, value, " KB")) return null;
+     const n = std.fmt.parseInt(u64, value[0..end], 10) catch return null;
+     return if (n > 0 and n < 1 << 43) n * 1024 else null;
++}
++
++/// Items kept by a comma-separated index list (``CUDA_VISIBLE_DEVICES`` rules); null when the list is malformed.
++fn select(comptime T: type, a: Allocator, items: []const T, visible: ?[]const u8) ?[]const T {
++    const v = visible orelse return items;
++    const sel = std.mem.trim(u8, v, " \t\n\r");
++    if (sel.len == 0 or std.mem.eql(u8, sel, "-1")) return &.{};
++    var kept: std.ArrayList(T) = .empty;
++    var it = std.mem.splitScalar(u8, v, ',');
++    while (it.next()) |raw| {
++        const index = std.mem.trim(u8, raw, " \t");
++        for (index) |ch| if (!std.ascii.isDigit(ch)) return null;
++        const n = std.fmt.parseInt(usize, index, 10) catch return null;
++        if (n < items.len) kept.append(a, items[n]) catch return null;
++    }
++    return kept.items;
+ }
+
+ /// The agents HIP keeps (clr Device::init): the first bad or out-of-range entry ends the list; a repeat is skipped.
+# --- build output ---
+test-server-cpu
++- run test 435 pass, 1 fail (436 total)
+error: 'benchmark_rocm_test.test.HIP's list: the first bad or out-of-range entry ends it, a repeat is skipped, and GPU- text matches rocminfo's Uuid' failed:
+       HIP_VISIBLE_DEVICES=0,3,2 (rocminfo lists 3 GPUs): recorded [AMD Radeon PRO W7800, AMD Instinct MI210] detected, want [AMD Radeon PRO W7800] detected
+       HIP_VISIBLE_DEVICES=0,0 (rocminfo lists 3 GPUs): recorded [AMD Radeon PRO W7800, AMD Radeon PRO W7800] detected, want [AMD Radeon PRO W7800] detected
+       HIP_VISIBLE_DEVICES=2,0,2 (rocminfo lists 3 GPUs): recorded [AMD Instinct MI210, AMD Radeon PRO W7800, AMD Instinct MI210] detected, want [AMD Instinct MI210, AMD Radeon PRO W7800] detected
+       HIP_VISIBLE_DEVICES=1,x,0 (rocminfo lists 3 GPUs): recorded [] partial, want [AMD Radeon PRO V620] detected
+       HIP_VISIBLE_DEVICES=1,,0 (rocminfo lists 3 GPUs): recorded [] partial, want [AMD Radeon PRO V620] detected
+       HIP_VISIBLE_DEVICES=0, (rocminfo lists 3 GPUs): recorded [] partial, want [AMD Radeon PRO W7800] detected
+       HIP_VISIBLE_DEVICES= 1 (rocminfo lists 3 GPUs): recorded [AMD Radeon PRO V620] detected, want [] partial
+       HIP_VISIBLE_DEVICES=01 (rocminfo lists 3 GPUs): recorded [AMD Radeon PRO V620] detected, want [] partial
+       HIP_VISIBLE_DEVICES=GPU-c3c3c3c3c3c3c3c3 (rocminfo lists 3 GPUs): recorded [] partial, want [AMD Instinct MI210] detected
+       HIP_VISIBLE_DEVICES=GPU-c3c3,0 (rocminfo lists 3 GPUs): recorded [] partial, want [AMD Instinct MI210, AMD Radeon PRO W7800] detected
+       HIP_VISIBLE_DEVICES=1,GPU-0000000000000000,0 (rocminfo lists 3 GPUs): recorded [] partial, want [AMD Radeon PRO V620] detected
+       HIP_VISIBLE_DEVICES=1,GPU-b2b2 (rocminfo lists 2 GPUs): recorded [] partial, want [AMD Radeon PRO V620] partial
+       expected 0, found 12
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:93:17: 0x10154dc97 in expectEqualInner__func_4100 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x10159da5b in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1-nc/zig/src/server/benchmark_rocm_test.zig:101:5: 0x10159db17 in test.HIP's list: the first bad or out-of-range entry ends it, a repeat is skipped, and GPU- text matches rocminfo's Uuid (test)
+           try std.testing.expectEqual(@as(usize, 0), try wrong(a, &cases));
+           ^
+failed command: ./.zc/o/0b5eabaa4cbe5a3d8394df8bfd4af328/test --cache-dir=./.zc --seed=0xdc4b282 --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 435/436 tests passed (1 failed)
+test-server-cpu transitive failure
++- run test 435 pass, 1 fail (436 total)
+|  +- compile test debug native success 10s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 41ms MaxRSS:32M
+
+
+# exit=1 after 57s
+# restored: benchmark_host.zig is byte-identical to fb8eaf85's again

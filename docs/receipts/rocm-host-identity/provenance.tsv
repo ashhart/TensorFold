@@ -36,5 +36,9 @@ host-controls/negative-control-revision.log	negative-control-revision.log	withhe
 host-controls/negative-control-cores.log	negative-control-cores.log	withheld: sanitized	4e371a8ba0d5d460624c952adf43a2e4482a06ee8eb2b21081a9c41d7fe1b81b	home path x6
 host-controls/negative-control-w-slash.log	negative-control-w-slash.log	withheld: sanitized	f758685dc353c7509cf1c5b10577ab692d36a4c81161425ee7cd4e4120666a3c	home path x4
 host-controls/negative-control-ranking-note.log	negative-control-ranking-note.log	withheld: sanitized	56cb6979e17413fa5730fe6acd62cad121fa3bc4fa10f4b3f6c6ffebb8615d24	home path x4
-host-controls/lint.log	lint.log	505052fe5cb1e8a3b2c480e7ef6ed946e3d1c8e5e29cb81eec9cd04087845de9	505052fe5cb1e8a3b2c480e7ef6ed946e3d1c8e5e29cb81eec9cd04087845de9	unchanged
+host-controls/lint.log	lint.raw.log	98071ed48e76891dfd1bc764bea839ede3e03ffb72b87eee5e9f7d3375eb35b2	98071ed48e76891dfd1bc764bea839ede3e03ffb72b87eee5e9f7d3375eb35b2	unchanged
 host-controls/board-validator.log	board-validator.log	d29c91f5a59a9f10981b9427c1f13b4da2ed5a181c5249ed50d329b475544e80	d29c91f5a59a9f10981b9427c1f13b4da2ed5a181c5249ed50d329b475544e80	unchanged
+host-controls/test-branch-fb8eaf85.log	test-branch-fb8eaf85.raw.log	withheld: sanitized	2dc2c0c3736b3659f2c6e2b2b204caf740a03815c2b13be06529408b02be0247	home path x4
+host-controls/negative-control-rocr-twice.log	nc-rocr-twice.raw.log	withheld: sanitized	ea400f4d7e41cf1f327be10094923e1bea51c433b50f8765af49fb19d9d1e95f	home path x6, trailing whitespace x2
+host-controls/negative-control-hip-list.log	nc-hip-list.raw.log	withheld: sanitized	949b8e2ab3ec65d147187125ea29e707a09167dbb4b6fe4fb3594768d6570a4d	home path x3, trailing whitespace x1
+host-controls/negative-control-partial.log	nc-partial.raw.log	withheld: sanitized	406dea5c0acfa6ca66e1f654627b0d2a2c3d9bd7b5bc08e5ee6c15d5bc3c3d79	home path x6
