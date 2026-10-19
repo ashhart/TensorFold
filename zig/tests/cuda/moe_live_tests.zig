@@ -11,8 +11,9 @@ const top_k = 8;
 const slots = top_k + 1;
 const dims = 256;
 const ni = 128;
-const most = 32;
+const most = 128;
 const unset: u8 = 0xab;
+const stale_pick = 5; // an expert a padding row's stale pick names: planned, it would add that expert's pairs
 
 /// The chain's kernels, weights and scratch for buckets of up to `most` rows.
 const Chain = struct {
@@ -47,6 +48,24 @@ const Chain = struct {
     fn get(c: *Chain, ptr: u64, out: []u8) !void {
         try c.s.synchronize();
         try c.gpu.d.check(c.gpu.d.api.cuMemcpyDtoH_v2(out.ptr, ptr, out.len), "cuMemcpyDtoH");
+    }
+
+    fn set(c: *Chain, ptr: u64, bytes: []const u8) !void {
+        try c.s.synchronize();
+        try c.gpu.d.check(c.gpu.d.api.cuMemcpyHtoD_v2(ptr, bytes.ptr, bytes.len), "cuMemcpyHtoD");
+    }
+
+    fn fill(c: *Chain, ptr: u64, byte: u8, len: usize) !void {
+        try c.s.synchronize();
+        try c.gpu.d.check(c.gpu.d.api.cuMemsetD8_v2(ptr, byte, len), "cuMemsetD8");
+    }
+
+    /// True when every byte from ptr + `from` to ptr + `end` still holds `byte`.
+    fn still(c: *Chain, a: std.mem.Allocator, ptr: u64, from: usize, end: usize, byte: u8) !bool {
+        const host = try a.alloc(u8, end - from);
+        defer a.free(host);
+        try c.get(ptr + from, host);
+        return std.mem.allEqual(u8, host, byte);
     }
 
     /// The engine's decode chain over a bucket of `rows` rows at x into out (cuda_routed.rows, wide off).
@@ -121,7 +140,7 @@ pub fn run(gpu: Gpu) !void {
     c.logits = try c.buf(most * count * 4);
     c.picks = try c.buf(pairs * 4);
     c.wts = try c.buf(pairs * 4);
-    c.plan = .{ .members = try c.buf(pairs * 4), .items = try c.buf(3 * cuda.grouped.maxItems(pairs, count, 16) * 4), .counts = try c.buf(8), .rank = 0, .hist = 0 };
+    c.plan = .{ .members = try c.buf(pairs * 4), .items = try c.buf(3 * cuda.grouped.maxItems(pairs, count, 16) * 4), .counts = try c.buf(8), .rank = try c.buf(pairs * 4), .hist = try c.buf((pairs + 1023) / 1024 * count * 4) };
     c.act = try c.buf(pairs * ni * 2);
     c.y = try c.buf(pairs * dims * 4);
     // rows of normed activations; every row is non-zero, so a padding row routed would plan its own experts
@@ -140,15 +159,25 @@ pub fn run(gpu: Gpu) !void {
     const out = try c.buf(most * dims * 2);
     const got = try a.alloc(u8, most * dims * 2);
     defer a.free(got);
+    const poisoned = try a.alloc(u16, most * dims);
+    defer a.free(poisoned);
+    const stale = try a.alloc(i32, pairs);
+    defer a.free(stale);
+    @memset(stale, stale_pick);
     var params = [8]i32{ 0, 0, 0, 0, 0, 0, 0, 0 };
     const dparams = try c.put(std.mem.sliceAsBytes(&params));
-    // each bucket captured once, then replayed at live counts in this order (the count is read at each replay)
+    // each bucket captured once, then replayed at live counts in this order (the count is read at each replay);
+    // nine pairs a row, so buckets past 113 rows take the wide plan, and 114 live rows are its first wide count
     const sweeps = [_]struct { bucket: usize, live: []const usize }{
         .{ .bucket = 1, .live = &.{1} },
         .{ .bucket = 16, .live = &.{ 1, 2, 3, 7, 15, 16, 3, 14, 2 } },
-        .{ .bucket = most, .live = &.{ 17, 18, 31, 32, 3, 30, 17 } },
+        .{ .bucket = 32, .live = &.{ 17, 18, 31, 32, 3, 30, 17 } },
+        .{ .bucket = 64, .live = &.{ 33, 1, 64, 40, 63, 9 } },
+        .{ .bucket = 128, .live = &.{ 1, 9, 33, 64, 127, 128, 113, 114, 2, 120, 64 } },
     };
     for (sweeps) |sw| {
+        // capture over clean rows, so a replay's padding is whatever the replay leaves there
+        try c.set(dx, std.mem.sliceAsBytes(x));
         try cuda.graph.beginCapture(c.s, .thread_local);
         c.run(dx, out, sw.bucket, dparams) catch |err| {
             var broken = cuda.graph.endCapture(c.s) catch return err;
@@ -160,17 +189,31 @@ pub fn run(gpu: Gpu) !void {
         var exec = try graph.instantiate();
         defer exec.deinit();
         for (sw.live) |live| {
+            // poisoned padding: rows from `live` up NaN, +huge and -huge in turn; stale picks name a real expert,
+            // stale weights and logits are NaN, and the experts' pair outputs hold a sentinel
+            @memcpy(poisoned, x);
+            for (live..most) |row| @memset(poisoned[row * dims ..][0..dims], switch (row % 3) {
+                0 => 0x7fc0,
+                1 => 0x7f7f,
+                else => 0xff7f,
+            });
+            try c.set(dx, std.mem.sliceAsBytes(poisoned));
+            try c.set(c.picks, std.mem.sliceAsBytes(stale));
+            try c.fill(c.wts, 0xff, pairs * 4);
+            try c.fill(c.logits, 0xff, most * count * 4);
+            try c.fill(c.act, unset, pairs * ni * 2);
+            try c.fill(c.y, unset, pairs * dims * 4);
+            try c.fill(out, unset, most * dims * 2);
             params[2] = @intCast(live);
-            try c.s.synchronize();
-            try c.gpu.d.check(c.gpu.d.api.cuMemcpyHtoD_v2(dparams, &params, @sizeOf(@TypeOf(params))), "cuMemcpyHtoD");
-            try c.gpu.d.check(c.gpu.d.api.cuMemsetD8_v2(out, unset, most * dims * 2), "cuMemsetD8");
+            try c.set(dparams, std.mem.sliceAsBytes(&params));
             try exec.launchOn(c.s);
             const p = try c.planned(a);
             try check.expect(p.pairs == live * slots and p.top < live * slots, "bucket {d} at {d} live rows planned {d} pairs (largest member {d}), want the live rows' {d}", .{ sw.bucket, live, p.pairs, p.top, live * slots });
+            try check.expect(try c.still(a, c.act, live * slots * ni * 2, sw.bucket * slots * ni * 2, unset) and try c.still(a, c.y, live * slots * dims * 4, sw.bucket * slots * dims * 4, unset), "bucket {d} at {d} live rows: an expert wrote a padding pair", .{ sw.bucket, live });
             try c.get(out, got);
             try check.sameBytes("live rows against one-row runs", got[0 .. live * dims * 2], want[0 .. live * dims * 2]);
             for (got[live * dims * 2 ..]) |byte| try check.expect(byte == unset, "bucket {d} at {d} live rows wrote a padding row", .{ sw.bucket, live });
         }
-        check.pass("moe live rows: bucket {d} replayed at {any} live rows plans only their pairs, equals one-row runs, skips padding", .{ sw.bucket, sw.live });
+        check.pass("moe live rows: bucket {d} replayed at {any} live rows, padding poisoned, plans only their pairs, experts never see padding, equals one-row runs, skips padding", .{ sw.bucket, sw.live });
     }
 }
