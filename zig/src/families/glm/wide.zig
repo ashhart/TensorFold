@@ -281,7 +281,9 @@ pub fn bf16(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: 
 
 /// x [rows, k] through bf16 W [n, k] on tensor units (8x8 simdgroup MMA in fp32). Rows multiple of 8, n of 64.
 pub fn bf16Nax(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: Io) void {
-    const pipe = p.bf16_nax orelse { return bf16(p, e, w, n, k, io); };
+    const pipe = p.bf16_nax orelse {
+        return bf16(p, e, w, n, k, io);
+    };
     e.setPipeline(pipe);
     bind(e, 0, .{ io.in, w });
     e.setValue(RowDims{ .k = @intCast(k), .n = @intCast(n), .group = 0, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, 4);
