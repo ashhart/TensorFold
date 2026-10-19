@@ -89,6 +89,26 @@ pub fn csfLinear(ck: *core.Checkpoint, module: []const u8, scales: []u8) !core.n
     return .{ .n = n, .k = k, .codes = w.bytes, .scales = scales, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
 }
 
+/// `module`'s NVFP4 linear, scales stored plain; only W4A16_NVFP4 may lack the input_scale (FP4-Local's MTP experts).
+pub fn plainLinear(ck: *core.Checkpoint, module: []const u8, declared: Declared) !core.nvfp4.Linear {
+    var buf: [256]u8 = undefined;
+    if (ck.has(try std.fmt.bufPrint(&buf, "{s}.input_scale", .{module}))) return core.nvfp4.Linear.read(ck, module);
+    const w4a16 = switch (declared) {
+        .nvfp4 => false,
+        .mixed => |r| if (r) |recipe| recipe == .w4a16_nvfp4 else false,
+    };
+    if (!w4a16) return error.NoInputScale;
+    const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
+    const s = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale", .{module}));
+    const g = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale_2", .{module}));
+    const d = try core.nvfp4.dims(metaOf(&w), metaOf(&s), metaOf(&g), null);
+    return .{ .n = d.n, .k = d.k, .codes = w.bytes, .scales = s.bytes, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
+}
+
+fn metaOf(t: *const core.checkpoint.Tensor) Meta {
+    return .{ .dtype = t.dtype, .shape = t.shape[0..t.rank] };
+}
+
 /// The refusal's text: the module, what the checkpoint declares and what its weight holds.
 pub fn describe(buf: []u8, module: []const u8, declared: Declared, stored: Stored) []const u8 {
     const said = switch (declared) {
@@ -102,6 +122,34 @@ pub fn describe(buf: []u8, module: []const u8, declared: Declared, stored: Store
 pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *core.modelopt.Why) !void {
     var recipes = try core.modelopt.admitRecipes(gpa, config_json, why);
     recipes.deinit();
+}
+
+/// A routed expert's NVFP4 linear: scales as stored, or csf_32x2_v1's decoded into `scales`; else refused by name.
+pub fn expert(L: anytype, module: []const u8, scales: []u8) !core.nvfp4.Linear {
+    var buf: [224]u8 = undefined;
+    const csf = L.ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module}));
+    try L.formatIn(L.ck, module, if (csf) .nvfp4_csf else .nvfp4);
+    if (!csf) return plainLinear(L.ck, module, L.declaredAs(module)) catch |e| switch (e) {
+        error.NoInputScale => {
+            std.log.err("{s}: declared NVFP4 (W4A4) but stores no input_scale", .{module});
+            return error.UnreadableFormat;
+        },
+        else => return e,
+    };
+    return csfLinear(L.ck, module, scales) catch |e| {
+        std.log.err("{s}: its csf_32x2_v1 scales do not read as docs/csf-scale-blocks.md has them ({t})", .{ module, e });
+        return e;
+    };
+}
+
+/// config.json's MIXED_PRECISION recipes, or null when it declares none this reader takes (the entry refuses those).
+pub fn readRecipes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?core.modelopt.Recipes {
+    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
+    defer gpa.free(path);
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24)) catch return null;
+    defer gpa.free(text);
+    var why: core.modelopt.Why = .{};
+    return core.modelopt.admitRecipes(gpa, text, &why) catch null;
 }
 
 const testing = std.testing;
@@ -127,8 +175,8 @@ test "nvidia/GLM-5.3-Flash-FP4-Local's projections, by their recipes and their s
     try testing.expectEqual(Format.fp8_pb, try of(.{ .mixed = .fp8_pb_wo }, kv_a));
     const mla_o = Stored{ .weight = meta(.f8_e4m3, &.{ 4096, 16384 }), .scale = meta(.f32, &.{ 32, 1, 128, 1 }) };
     try testing.expectEqual(Format.fp8_pb, try of(.{ .mixed = .fp8_pb_wo }, mla_o));
-    const expert = Stored{ .weight = meta(.u8, &.{ 2048, 2048 }), .csf = true };
-    try testing.expectEqual(Format.nvfp4_csf, try of(.{ .mixed = .nvfp4_csf }, expert));
+    const routed = Stored{ .weight = meta(.u8, &.{ 2048, 2048 }), .csf = true };
+    try testing.expectEqual(Format.nvfp4_csf, try of(.{ .mixed = .nvfp4_csf }, routed));
     const mtp_expert = Stored{ .weight = meta(.u8, &.{ 4096, 1024 }), .scale = meta(.f8_e4m3, &.{ 4096, 128 }) };
     try testing.expectEqual(Format.nvfp4, try of(.{ .mixed = .w4a16_nvfp4 }, mtp_expert));
     const kv_b = Stored{ .weight = meta(.bf16, &.{ 32768, 512 }) };
@@ -206,4 +254,41 @@ test "csf_32x2_v1 scales read as the same NVFP4 linear as the scales stored plai
     try testing.expect(enc.exceptions.len > 0);
     try testing.expectEqual(@as(usize, 0), ck.unused());
     try testing.expectError(error.BadNvfp4, csfLinear(&ck, "b", decoded[1..]));
+}
+
+test "a W4A16_NVFP4 linear reads without an input_scale, which NVFP4's W4A4 recipe requires" {
+    const gpa = testing.allocator;
+    var codes: [4 * 16]u8 = undefined; // n = 4, k = 32
+    for (&codes, 0..) |*c, j| c.* = @truncate(j * 7);
+    const scale = [_]u8{ 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
+    const half = std.mem.toBytes(@as(f32, 0.5));
+    const tensors = [_]core.shard_edit.New{
+        .{ .name = "m.weight", .dtype = .u8, .shape = &.{ 4, 16 }, .bytes = &codes },
+        .{ .name = "m.weight_scale", .dtype = .f8_e4m3, .shape = &.{ 4, 2 }, .bytes = &scale },
+        .{ .name = "m.weight_scale_2", .dtype = .f32, .shape = &.{}, .bytes = &half },
+        .{ .name = "a.weight", .dtype = .u8, .shape = &.{ 4, 16 }, .bytes = &codes },
+        .{ .name = "a.weight_scale", .dtype = .f8_e4m3, .shape = &.{ 4, 2 }, .bytes = &scale },
+        .{ .name = "a.weight_scale_2", .dtype = .f32, .shape = &.{}, .bytes = &half },
+        .{ .name = "a.input_scale", .dtype = .f32, .shape = &.{}, .bytes = &half },
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir: [64]u8 = undefined;
+    const at = try std.fmt.bufPrint(&dir, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var path: [96]u8 = undefined;
+    try core.shard_edit.create(gpa, try std.fmt.bufPrint(&path, "{s}/model.safetensors", .{at}), &.{}, &tensors);
+    var ck = try core.Checkpoint.openModel(gpa, testing.io, at);
+    defer ck.close();
+    try testing.expectError(error.NoInputScale, plainLinear(&ck, "m", .nvfp4));
+    try testing.expectError(error.NoInputScale, plainLinear(&ck, "m", .{ .mixed = .nvfp4 }));
+    const got = try plainLinear(&ck, "m", .{ .mixed = .w4a16_nvfp4 });
+    try testing.expectEqual(@as(usize, 4), got.n);
+    try testing.expectEqual(@as(usize, 32), got.k);
+    try testing.expectEqual(@as(f32, 0.5), got.global);
+    try testing.expectEqualSlices(u8, &codes, got.codes);
+    try testing.expectEqualSlices(u8, &scale, got.scales);
+    const stored = try plainLinear(&ck, "a", .{ .mixed = .w4a16_nvfp4 }); // an input_scale it does store is read too
+    try testing.expectEqualSlices(u8, got.scales, stored.scales);
+    _ = try plainLinear(&ck, "a", .nvfp4);
+    try testing.expectEqual(@as(usize, 0), ck.unused());
 }

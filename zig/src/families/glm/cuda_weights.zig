@@ -95,7 +95,7 @@ const Loader = struct {
         return L.formatIn(L.ck, try std.fmt.bufPrint(&buf, prefix ++ fmt, args), want);
     }
 
-    fn formatIn(L: *Loader, ck: *core.Checkpoint, module: []const u8, want: formats.Format) !void {
+    pub fn formatIn(L: *Loader, ck: *core.Checkpoint, module: []const u8, want: formats.Format) !void {
         var buf: [224]u8 = undefined;
         const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
         const scale_name = try std.fmt.bufPrint(&buf, "{s}.weight_scale", .{module});
@@ -105,7 +105,7 @@ const Loader = struct {
             .scale = if (s) |*t| .{ .dtype = t.dtype, .shape = t.shape[0..t.rank] } else null,
             .csf = ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module})),
         };
-        const declared: formats.Declared = if (L.recipes) |r| .{ .mixed = r.of(module) } else .nvfp4;
+        const declared = L.declaredAs(module);
         const got: ?formats.Format = formats.of(declared, stored) catch null;
         if (got != null and got.? == want) return;
         var why: [320]u8 = undefined;
@@ -113,16 +113,9 @@ const Loader = struct {
         return error.UnreadableFormat;
     }
 
-    /// A routed expert's NVFP4 linear: scales as stored, or csf_32x2_v1's decoded into `scales`; else refused by name.
-    fn expert(L: *Loader, module: []const u8, scales: []u8) !core.nvfp4.Linear {
-        var buf: [224]u8 = undefined;
-        const csf = L.ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module}));
-        try L.formatIn(L.ck, module, if (csf) .nvfp4_csf else .nvfp4);
-        if (!csf) return core.nvfp4.Linear.read(L.ck, module);
-        return formats.csfLinear(L.ck, module, scales) catch |e| {
-            std.log.err("{s}: its csf_32x2_v1 scales do not read as docs/csf-scale-blocks.md has them ({t})", .{ module, e });
-            return e;
-        };
+    /// What config.json declares `module` to be: its MIXED_PRECISION recipe, or NVFP4 for every quantized linear.
+    pub fn declaredAs(L: *const Loader, module: []const u8) formats.Declared {
+        return if (L.recipes) |r| .{ .mixed = r.of(module) } else .nvfp4;
     }
 
     /// The host bytes gathered so far uploaded as one tensor named `fmt`.
@@ -356,6 +349,7 @@ const Loader = struct {
                 const n = if (m < 2) ni else d; // gate and up: the rank's rows; down: every row, the rank's columns
                 const k = if (m < 2) d else ni;
                 for (e0..e0 + ec) |e| {
+                    try L.format("layers.{d}.mlp.experts.{d}." ++ proj, .{ i, e }, .bf16);
                     const t = try L.get("layers.{d}.mlp.experts.{d}." ++ proj ++ ".weight", .{ i, e });
                     if (m < 2) try L.rows(t, cut.lo, cut.hi, c.moe_inter, .bf16) else try L.cols(t, cut.lo, cut.hi, .bf16);
                 }
@@ -448,11 +442,13 @@ const Loader = struct {
         const per = c.moe_inter * d / 16; // a whole gate, up or down's e4m3 scales
         const decoded = try L.gpa.alloc(u8, 3 * per); // csf_32x2_v1's, decoded before the rank's cut
         defer L.gpa.free(decoded);
-        if (i == c.layers) try L.quantizedExperts(i, up, down, up_scale, down_scale) else for (0..count) |e| {
+        // the MTP layer's experts: bf16 (nvidia's), quantized here, or W4A16_NVFP4 (FP4-Local's), read as stored
+        const bf16 = i == c.layers and (try L.get("layers.{d}.mlp.experts.0.gate_proj.weight", .{i})).dtype == .bf16;
+        if (bf16) try L.quantizedExperts(i, up, down, up_scale, down_scale) else for (0..count) |e| {
             var ls: [3]core.nvfp4.Linear = undefined;
             inline for (.{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, m| {
                 const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj, .{ i, e });
-                ls[m] = try L.expert(name, decoded[m * per ..][0..per]);
+                ls[m] = try formats.expert(L, name, decoded[m * per ..][0..per]);
             }
             // gate and up: the rank's rows; down: every row, the rank's columns
             const gate = .{ ls[0].codes[cut.lo * d / 2 ..][0 .. ni * d / 2], ls[0].scales[cut.lo * d / 16 ..][0 .. ni * d / 16] };
@@ -549,7 +545,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     defer head_ck.close();
     var L: Loader = .{ .gpa = gpa, .d = d, .stream = stream, .pack_dense = tools.pack_dense, .tools = tools, .w = &w, .ck = &ck };
     defer L.host.deinit(gpa);
-    var recipes = try readRecipes(gpa, io, dir);
+    var recipes = try formats.readRecipes(gpa, io, dir);
     defer if (recipes) |*r| r.deinit();
     if (recipes) |*r| L.recipes = if (r.modules.count() > 0) r else null;
     w.layers = try gpa.alloc(Layer, layers.len);
@@ -567,16 +563,6 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     w.head = try L.put("head", .{});
     if (with_mtp and c.mtp > 0) w.mtp = try L.mtp();
     return w;
-}
-
-/// config.json's MIXED_PRECISION recipes, or null when it declares none this reader takes (the entry refuses those).
-fn readRecipes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?core.modelopt.Recipes {
-    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
-    defer gpa.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24)) catch return null;
-    defer gpa.free(text);
-    var why: core.modelopt.Why = .{};
-    return core.modelopt.admitRecipes(gpa, text, &why) catch null;
 }
 
 test "bf16 rounding of fp32 is to nearest even" {
