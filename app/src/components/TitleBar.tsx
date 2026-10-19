@@ -41,7 +41,7 @@ export function TitleBar({ simple = false }: { simple?: boolean }) {
 
   if (simple) return <ChatWorkspaceHeader title={title || (view.name === 'home' ? tx("New task") : "TensorFold")} thread={thread} />
   return (
-    <header className={clsx('drag relative z-10 flex h-11 shrink-0 items-center gap-2 pr-3', sidebarCollapsed ? 'pl-[96px]' : 'pl-3')}>
+    <header className={clsx('drag relative z-10 flex h-11 shrink-0 items-center gap-2 pr-3', sidebarCollapsed && api.platform !== 'linux' ? 'pl-[96px]' : 'pl-3')}>
       <button onClick={toggleSidebar} title={tx("Toggle sidebar (⌘B)")} className="no-drag flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink"><Icon name="sidebar" size={15} /></button>
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {thread && <Icon name={thread.kind === 'chat' ? 'message' : 'file'} size={14} className="shrink-0 text-ink-3" />}

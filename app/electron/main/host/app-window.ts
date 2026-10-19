@@ -83,8 +83,9 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
       minWidth: 720,
       minHeight: 520,
       show: false,
-      titleBarStyle: 'hiddenInset',
-      trafficLightPosition: { x: 18, y: 22 },
+      // Linux uses the window manager's native title bar and controls; no renderer IPC needed.
+      titleBarStyle: process.platform === 'linux' ? 'default' : 'hiddenInset',
+      trafficLightPosition: process.platform === 'linux' ? undefined : { x: 18, y: 22 },
       // macOS glass: native vibrancy blurs the desktop wallpaper through the window
       // (the dark tint comes from the translucent renderer surfaces on top). A clear
       // backgroundColor lets the material show; other platforms keep a solid dark.
