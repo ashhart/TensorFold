@@ -279,21 +279,25 @@ pub const Attention = struct {
     }
     /// `prompt`: a prompt chunk's rows (one stream, a chain) take the prompt kernel on chips with tensor units.
     pub fn encode(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool) !void {
+        try plan.geometry.check();
+        const g = plan.geometry;
+        const q_bytes = @as(usize, plan.rows) * g.heads * g.dim * 2;
+        const kv_bytes = @as(usize, plan.rows) * g.kv_heads * g.dim * 2;
         var timing = profile.begin(a.profiler, input_encoder, .attention);
         errdefer timing.cancel();
         const e = timing.encoder;
 
         try scratch.check(plan);
         try binding.check(plan, caches);
-        try spanAligned(q, @as(usize, plan.rows) * 6144 * 2, 16);
-        try span(k, @as(usize, plan.rows) * 1024 * 2);
-        try span(v, @as(usize, plan.rows) * 1024 * 2);
-        try span(out, @as(usize, plan.rows) * 6144 * 2);
+        try spanAligned(q, q_bytes, 16);
+        try span(k, kv_bytes);
+        try span(v, kv_bytes);
+        try span(out, q_bytes);
         if (raw_gate) |gate| {
-            try span(gate, @as(usize, plan.rows) * 12288 * 2);
-            try disjoint(out, @as(usize, plan.rows) * 6144 * 2, gate, @as(usize, plan.rows) * 12288 * 2);
+            try span(gate, 2 * q_bytes);
+            try disjoint(out, q_bytes, gate, 2 * q_bytes);
         }
-        const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = @as(usize, plan.rows) * 6144 * 2 }, .{ .ref = k, .bytes = @as(usize, plan.rows) * 1024 * 2 }, .{ .ref = v, .bytes = @as(usize, plan.rows) * 1024 * 2 }, .{ .ref = out, .bytes = @as(usize, plan.rows) * 6144 * 2 } };
+        const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = q_bytes }, .{ .ref = k, .bytes = kv_bytes }, .{ .ref = v, .bytes = kv_bytes }, .{ .ref = out, .bytes = q_bytes } };
         for (caches) |cache| for (operands) |operand| {
             try disjoint(cache.keys, cacheBytes(cache, true, plan.geometry), operand.ref, operand.bytes);
             try disjoint(cache.values, cacheBytes(cache, false, plan.geometry), operand.ref, operand.bytes);
@@ -304,24 +308,24 @@ pub const Attention = struct {
             e.useResource(cache.keys.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
             e.useResource(cache.values.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         }
-        const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16 };
+        const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16, .heads = g.heads, .kv_heads = g.kv_heads, .dim = g.dim, .group = g.group() };
         e.setPipeline(a.io[2]);
         bind(e, .{ k, v, binding.get(.caches), binding.get(.meta), scratch.get(.nodes) });
         e.setValue(args, 5);
-        e.dispatchThreads(mtl.Size.of(256, 4, plan.rows), mtl.Size.of(32, 4, 1));
+        e.dispatchThreads(mtl.Size.of(g.dim, g.kv_heads, plan.rows), mtl.Size.of(32, 4, 1));
         e.setPipeline(a.io[0]);
         bind(e, .{ q, scratch.get(.q_rows), scratch.get(.qa) });
         e.setValue(args, 3);
-        e.dispatchThreads(mtl.Size.of(256, args.packed_rows, 4), mtl.Size.of(32, 4, 1));
+        e.dispatchThreads(mtl.Size.of(g.dim, args.packed_rows, g.kv_heads), mtl.Size.of(32, 4, 1));
         if (prompt and a.prompt != null and plan.geometry.shared_prefix and plan.streams == 1) {
             e.barrier();
             try a.promptRows(e, scratch, binding, plan, out);
             if (raw_gate) |gate| {
                 e.setPipeline(a.io[9]);
                 bind(e, .{ out, gate });
-                e.setValue(glue.Element{ .width = 256, .heads = 24, .rows = plan.rows, .activation = .bf16 }, 2);
+                e.setValue(glue.Element{ .width = g.dim, .heads = g.heads, .rows = plan.rows, .activation = .bf16 }, 2);
                 e.setBuffer(out.buffer, out.offset, 3);
-                e.dispatchThreads(mtl.Size.of(256, 24, plan.rows), mtl.Size.of(32, 1, 1));
+                e.dispatchThreads(mtl.Size.of(g.dim, g.heads, plan.rows), mtl.Size.of(32, 1, 1));
                 e.barrier();
             }
         } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args);
@@ -329,6 +333,7 @@ pub const Attention = struct {
     }
     /// A prompt chunk's rows over absolute 512-key chunks (attention_prompt.metal), merged in key order.
     fn promptRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, out: Ref) !void {
+        const g = plan.geometry;
         const start: i32 = plan.meta[planning.global_words + 4];
         for (plan.positions, 0..) |position, i| if (position != start + @as(i32, @intCast(i))) return error.PromptRowsNotChain; // the kernel places row i at start + i
         const chunks: u32 = @intCast(@divFloor(start + @as(i32, @intCast(plan.rows)) + planning.chunk - 1, planning.chunk));
@@ -341,22 +346,23 @@ pub const Attention = struct {
         e.setBuffer(scratch.get(.poa).buffer, 0, 3);
         e.setBuffer(scratch.get(.pma).buffer, 0, 4);
         e.setBuffer(scratch.get(.pla).buffer, 0, 5);
-        e.dispatchGroups(mtl.Size.of(4, chunks, (plan.tiles + pairs - 1) / pairs), mtl.Size.of(32 * 2 * pairs, 1, 1));
+        e.dispatchGroups(mtl.Size.of(g.kv_heads, chunks, (plan.tiles + pairs - 1) / pairs), mtl.Size.of(32 * 2 * pairs, 1, 1));
         e.barrier();
         e.setPipeline(a.prompt.?[1]);
         bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla) });
         e.setValue(args, 3);
         e.setBuffer(out.buffer, out.offset, 4);
-        e.dispatchGroups(mtl.Size.of(4, plan.rows * 6, 1), mtl.Size.of(32, 1, 1));
+        e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.rows * g.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
     /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by path (tail), merged and gated.
     fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs) !void {
+        const g = plan.geometry;
         if (!plan.fused) {
             e.setPipeline(a.io[1]);
             bind(e, .{ q, scratch.get(.qb) });
             e.setValue(args, 2);
-            e.dispatchThreads(mtl.Size.of(256, 16, 4 * plan.rows), mtl.Size.of(32, 4, 1));
+            e.dispatchThreads(mtl.Size.of(g.dim, 16, g.kv_heads * plan.rows), mtl.Size.of(32, 4, 1));
         }
         e.barrier();
         const scale: f32 = 0.0625;
@@ -371,7 +377,7 @@ pub const Attention = struct {
             e.setBuffer(scratch.get(.pma).buffer, 0, 6);
             e.setBuffer(scratch.get(.pla).buffer, 0, 7);
             e.setBuffer(scratch.get(.nodes).buffer, 0, 8);
-            e.dispatchGroups(mtl.Size.of(4, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(64 * sg, 1, 1));
+            e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(64 * sg, 1, 1));
             e.barrier();
         }
         if (!plan.fused) {
@@ -383,18 +389,19 @@ pub const Attention = struct {
                 const r = scratch.get(field);
                 e.setBuffer(r.buffer, 0, i);
             }
-            e.dispatchGroups(mtl.Size.of(4, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
+            e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
             e.barrier();
         }
         e.setPipeline(a.io[4]);
         bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla), scratch.get(.pob), scratch.get(.pmb), scratch.get(.plb), binding.get(.meta), scratch.get(.nodes), out, raw_gate orelse out });
         e.setValue(@as(u32, @intFromBool(raw_gate != null)), 10);
-        e.dispatchGroups(mtl.Size.of(4, plan.rows * 6, 1), mtl.Size.of(32, 1, 1));
+        e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.rows * g.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
     pub fn keep(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, kept: u32, caches: []const Cache) !void {
         if (kept > scratch.limits.rows or binding.kept == null or binding.kept.? != kept) return error.AttentionKeep;
         try binding.checkCaches(caches);
+        const g = binding.limits.geometry;
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         if (kept == 0) return;
@@ -405,12 +412,12 @@ pub const Attention = struct {
         e.setPipeline(a.io[5]);
         bind(e, .{ binding.get(.caches), binding.get(.meta), binding.get(.keep_map), scratch.get(.keep_k), scratch.get(.keep_v) });
         e.setValue(kept, 5);
-        e.dispatchThreads(mtl.Size.of(256, 4, kept), mtl.Size.of(32, 4, 1));
+        e.dispatchThreads(mtl.Size.of(g.dim, g.kv_heads, kept), mtl.Size.of(32, 4, 1));
         e.barrier();
         e.setPipeline(a.io[6]);
         bind(e, .{ scratch.get(.keep_k), scratch.get(.keep_v), binding.get(.caches), binding.get(.meta), binding.get(.keep_map) });
         e.setValue(kept, 5);
-        e.dispatchThreads(mtl.Size.of(256, 4, kept), mtl.Size.of(32, 4, 1));
+        e.dispatchThreads(mtl.Size.of(g.dim, g.kv_heads, kept), mtl.Size.of(32, 4, 1));
         e.barrier();
     }
 };
