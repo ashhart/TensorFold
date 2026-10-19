@@ -256,6 +256,7 @@ pub fn main(init: std.process.Init) !void {
         .tensor_parallel_ranks = if (model.tp != null) @as(u32, 2) else 1,
         .tensor_parallel_rank = if (model.tp) |context| @as(u32, context.rank) else 0,
         .tensor_parallel_partition = if (model.tp != null) "moe_output_columns_replicated_weights" else "none",
+        .attention_parallel = model.pipelines.attention.sparse.parallel_enabled,
         .tensor_parallel_exchanges = if (tp_transport) |transport| transport.channel.step else 0,
         .evidence_origin = "current_invocation_not_historical_qualification",
         .context_capacity = model.cache.plan.capacity,

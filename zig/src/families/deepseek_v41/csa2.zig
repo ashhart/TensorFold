@@ -42,15 +42,22 @@ pub const Params = extern struct {
 };
 pub const Pipelines = struct {
     attention: mtl.Pipeline,
+    attention_parallel: mtl.Pipeline,
+    parallel_enabled: bool = false,
     pub fn load(device: mtl.Device) !Pipelines {
         var options = mtl.CompileOptions.mlx();
         options.math_functions = .precise;
         const lib = try mtl.Library.fromSource(device, sources.deepseek_v41_kv ++ sources.deepseek_v41_csa2, options);
         defer lib.deinit();
-        return .{ .attention = try mtl.Pipeline.init(device, lib, "dsv41_sparse_attention", false) };
+        const attention = try mtl.Pipeline.init(device, lib, "dsv41_sparse_attention", false);
+        errdefer attention.deinit();
+        const parallel = try mtl.Pipeline.init(device, lib, "dsv41_sparse_attention_parallel", false);
+        const mode = std.c.getenv("TF_DSV41_PARALLEL_ATTENTION");
+        return .{ .attention = attention, .attention_parallel = parallel, .parallel_enabled = if (mode) |v| std.mem.eql(u8, std.mem.span(v), "1") else false };
     }
     pub fn deinit(p: *Pipelines) void {
         p.attention.deinit();
+        p.attention_parallel.deinit();
     }
     /// BF16 Q/output [rows,heads,width], FP32 sinks, I32 indices; publish this chunk to the ring only after dispatch.
     pub fn encode(p: *const Pipelines, enc: mtl.ComputeEncoder, q: View, ring: View, chunk: View, compressed: View, positions: View, sink: View, out: View, args: Params) !void {
@@ -64,14 +71,18 @@ pub const Pipelines = struct {
             try compressed.requireRows(args.compressed_rows, args.main_stride, args.width / 2 + args.width / 16, 1);
             try positions.requireRows(args.rows, args.index_stride, args.topk, 4);
         }
-        enc.setPipeline(p.attention);
+        const groups: u32 = if (p.parallel_enabled) @min(8, args.width / 32) else 1;
+        const pipeline = if (p.parallel_enabled) p.attention_parallel else p.attention;
+        if (pipeline.maxThreads() < groups * 32) return error.InvalidSparseAttentionThreads;
+        enc.setPipeline(pipeline);
         for ([_]View{ q, ring, chunk, compressed, positions, sink, out }, 0..) |v, i|
             enc.setBuffer(v.buffer, v.offset, i);
         enc.setValue(args, 7);
-        enc.dispatchGroups(mtl.Size.of(args.heads, args.rows, 1), mtl.Size.of(32, 1, 1));
+        enc.dispatchGroups(mtl.Size.of(args.heads, args.rows, 1), mtl.Size.of(32 * groups, 1, 1));
     }
 };
 
 test {
     _ = @import("kv_test.zig");
+    _ = @import("csa2_parallel_test.zig");
 }

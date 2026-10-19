@@ -41,7 +41,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen3_5", .formats = affine_widths },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
-    .{ .model_type = "deepseek_v41", .formats = &.{"exl3"} },
+    .{ .model_type = "deepseek_v41", .formats = &.{"exl3"}, .raw_text = false },
     .{ .model_type = "gemma4", .formats = gemma4_widths },
     .{ .model_type = "gemma4_unified", .formats = gemma4_widths },
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },

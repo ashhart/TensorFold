@@ -100,3 +100,54 @@ kernel void dsv41_sparse_attention(device const ushort *q [[buffer(0)]], device 
     for (uint d = 0; d < p.width / 32; ++d)
         out[row * p.q_stride + head * p.width + lane + d * 32] = dsv41_round(acc[d] / denom);
 }
+
+// Each SIMD group scores different keys; every lane retains the predecessor's maxima and value-sum order.
+kernel void dsv41_sparse_attention_parallel(device const ushort *q [[buffer(0)]], device const uchar *ring [[buffer(1)]],
+    device const uchar *chunk [[buffer(2)]], device const uchar *main [[buffer(3)]],
+    device const int *indices [[buffer(4)]], device const float *sink [[buffer(5)]],
+    device ushort *out [[buffer(6)]], constant Dsv41Attention &p [[buffer(7)]],
+    uint2 g [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+    uint group [[simdgroup_index_in_threadgroup]]) {
+    uint head = g.x, row = g.y;
+    if (head >= p.heads || row >= p.rows) return;
+    const uint groups = min(8u, p.width / 32);
+    threadgroup float lane_scores[64 * 32];
+    float query[16], acc[2] = {0, 0};
+    for (uint j = 0; j < p.width / 32; ++j)
+        query[j] = dsv41_bf(q[row * p.q_stride + head * p.width + lane + j * 32]);
+    float mx = -1e30f, sum = 0;
+    uint query_position = p.position + row;
+    uint compressed_columns = p.ratio ? min(p.topk, min(p.compressed_rows, (query_position + 1) / p.ratio)) : 0;
+    uint count = dsv41_window_columns(p, row) + compressed_columns;
+    for (uint base = 0; base < count; base += 64) {
+        for (uint j = group; j < 64; j += groups) {
+            uint kind = 0;
+            device const uchar *key = base + j < count ? dsv41_attn_key(base + j, row, ring, chunk, main, indices, p, kind) : nullptr;
+            float dot = 0, dot_error = 0;
+            if (key) for (uint d = 0; d < p.width / 32; ++d)
+                dsv41_dot_add(dot, dot_error, query[d] * dsv41_unpack(key, lane + d * 32, p.width, kind ? p.main_block : 32, kind));
+            lane_scores[j * 32 + lane] = key ? dsv41_dot_reduce(dot, dot_error) * p.scale : -INFINITY;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float next_max = mx;
+        for (uint j = 0; j < 64; ++j) next_max = max(next_max, lane_scores[j * 32 + lane]);
+        float correction = exp(mx - next_max);
+        float tile_sum = 0;
+        for (uint d = group; d < p.width / 32; d += groups) acc[d / groups] *= correction;
+        for (uint j = 0; j < 64; ++j) {
+            float probability = exp(lane_scores[j * 32] - next_max);
+            tile_sum += probability;
+            float rounded = dsv41_bf(dsv41_round(probability));
+            uint kind = 0;
+            device const uchar *key = base + j < count ? dsv41_attn_key(base + j, row, ring, chunk, main, indices, p, kind) : nullptr;
+            if (key) for (uint d = group; d < p.width / 32; d += groups)
+                acc[d / groups] += rounded * dsv41_unpack(key, lane + d * 32, p.width, kind ? p.main_block : 32, kind);
+        }
+        sum = sum * correction + tile_sum;
+        mx = next_max;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float denom = sum + exp(sink[head] - mx);
+    for (uint d = group; d < p.width / 32; d += groups)
+        out[row * p.q_stride + head * p.width + lane + d * 32] = dsv41_round(acc[d / groups] / denom);
+}

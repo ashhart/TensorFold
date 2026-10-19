@@ -77,6 +77,11 @@ fn loadLimit(device: mtl.Device) !struct { bytes: u64, asked: bool } {
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const experimental: ?[]const u8 = if (std.c.getenv("TF_EXPERIMENTAL")) |v| std.mem.span(v) else null;
+    if (@import("../families/deepseek_v41/metal_admission.zig").refusal(experimental)) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.slide or o.learn != null or
         (o.prompt_cache_gib != null and o.prompt_cache_gib.? != 0) or o.prompt_cache_over_cap or
         o.drafter != null or o.tp != 1)

@@ -130,7 +130,7 @@ pub fn identity(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
         defer gpa.free(path);
         try hashFile(gpa, io, &hash, path);
     }
-    for ([_][:0]const u8{ "TF_DSV41_SERIAL", "TF_EXL3_PAIRS_UP_TO_GROUPS" }) |key| {
+    for ([_][:0]const u8{ "TF_DSV41_SERIAL", "TF_EXL3_PAIRS_UP_TO_GROUPS", "TF_DSV41_PARALLEL_ATTENTION" }) |key| {
         const value = if (std.c.getenv(key)) |v| std.mem.span(v) else "<unset>";
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(value, &digest, .{});
