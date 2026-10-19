@@ -255,7 +255,6 @@ template <int BM, int BN>
   const bool m_in = m0 < d.rows;
   if (m_in) {
     const long x_base = long(m0) * d.ldx;
-    const long w_base = long(n0) * d.k;
     for (int k0 = 0; k0 < d.k; k0 += 8) {
       // Cooperatively load X[BM, BK=8] from device bf16 into xs_pad (padded row-major; out-of-bounds = 0).
       for (int e = int(ti); e < BM * 8; e += TG_THREADS) {
