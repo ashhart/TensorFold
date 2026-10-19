@@ -63,7 +63,11 @@ pub fn run(gpu: Gpu, model: []const u8, case: []const u8, bf16_case: []const u8,
     var mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_vision);
     defer mod.unload();
     const ru: glm.vision.Run = .{ .stream = s, .f = try glm.vision.Funcs.load(mod) };
-    var t = try glm.vision.Tower.load(a, gpu.io, gpu.d, model);
+    var lane = try cuda.qmmf.Lane.load(gpu.d, (try gpu.ctx.capability()) / 10);
+    defer lane.unload();
+    var prompt = try cuda.nvfp4.Prompt.load(gpu.d);
+    defer prompt.unload();
+    var t = try glm.vision.Tower.load(a, gpu.io, gpu.d, model, .{ .lane = &lane, .nvfp4_prompt = &prompt });
     defer t.deinit();
     var out = try cuda.DeviceBuffer.alloc(gpu.d, @as(usize, p.tokens) * glm.vision_config.out_hidden * 2);
     defer out.free();
