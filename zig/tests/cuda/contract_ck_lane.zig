@@ -102,14 +102,15 @@ pub const Lane = struct {
         for (xs, self.x) |*h, v| h.* = c.toBf16(@floatCast(e4m3(v)));
         const src = try self.rig.scratch(xs.len * 2);
         try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = src, .len = xs.len * 2 }).upload(0, std.mem.sliceAsBytes(xs));
-        const zeros = try a.alloc(u8, cuda.modelopt.padded(n) * k);
+        const wbytes = cuda.modelopt.padded(n) * k;
+        const zeros = try a.alloc(u8, @max(self.x.len, wbytes));
         defer a.free(zeros);
         @memset(zeros, 0);
         self.xd = try self.rig.input(zeros[0..self.x.len]);
         try self.ck.quant8(self.rig.s, src, k, shape.rows, k, 1, self.xd);
         const wsrc = try self.rig.scratch(self.w.len);
         try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = wsrc, .len = self.w.len }).upload(0, self.w);
-        self.wd = try self.rig.input(zeros);
+        self.wd = try self.rig.input(zeros[0..wbytes]);
         try self.packer.fp8Lane(self.rig.s, wsrc, self.wd, n, k);
         try self.rig.s.synchronize();
         self.part = try self.rig.scratch(cuda.qmmf.splitK(n, k) * shape.rows * n * 4);
