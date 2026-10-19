@@ -40,7 +40,7 @@ export function Spinner({ size = 13 }: { size?: number }) {
 
 export type ProviderSetupMode = 'cloud' | 'local'
 export type LocalSetupLocation = 'this-mac' | 'network'
-export type LocalRuntimeKey = ProviderDiscoveryKind | 'custom'
+export type LocalRuntimeKey = ProviderDiscoveryKind | 'custom' | 'tensorfold-remote'
 
 export type ProviderSeed = Pick<Provider, 'name' | 'baseUrl' | 'kind'> & Partial<Provider>
 
@@ -108,6 +108,8 @@ export const LOCAL_RUNTIME_PRESETS: LocalRuntimePreset[] = [
   { key: 'omlx', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "oMLX") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "MLX local server. This Mac can read ~/.omlx/settings.json.") }, defaultPort: '9000', defaultApiKey: '', defaultModels: ['local-model'], source: 'omlx' },
   { key: 'lmstudio', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "LM Studio") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "LM Studio local server or LAN node.") }, defaultPort: '1234', defaultApiKey: 'lm-studio', defaultModels: ['local-model'], source: 'lmstudio' },
   { key: 'ollama', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Ollama") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Ollama OpenAI-compatible endpoint.") }, defaultPort: '11434', defaultApiKey: 'ollama', defaultModels: ['qwen2.5-coder:14b', 'llama3.1:8b'], source: 'ollama' },
+  // Reuses registered strings so the preset needs no new translations.
+  { key: 'tensorfold-remote', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "TensorFold") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Any OpenAI-compatible local or network endpoint.") }, defaultPort: '8080', defaultApiKey: '', defaultModels: [], source: 'custom' },
   { key: 'custom', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "vLLM / llama.cpp") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Any OpenAI-compatible local or network endpoint.") }, defaultPort: '8000', defaultApiKey: '', defaultModels: ['local-model'], source: 'custom' },
 ]
 

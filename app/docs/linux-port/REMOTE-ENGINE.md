@@ -27,7 +27,12 @@ A healthy answer lists the served ID, its context length and whether reasoning i
 
 ## 3. Add it as a provider
 
-Settings → Providers → add a local/OpenAI-compatible provider:
+Settings → Providers → add the **TensorFold** local preset (described as "Any OpenAI-compatible local
+or network endpoint."): enter the Mac's address, paste the key, and press **Detect** to list the served
+model (`Qwen3.8-27B-MLX-4bit` style IDs). Detection probes the address you typed, so it works against
+another machine, not just localhost.
+
+Any OpenAI-compatible preset also works — "vLLM / llama.cpp" accepts the same fields:
 
 | Field | Value |
 | --- | --- |

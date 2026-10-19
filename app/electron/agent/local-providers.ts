@@ -163,8 +163,19 @@ function isLoopbackHost(baseUrl: string): boolean {
 // describe a node on another machine — e.g. a Mac Studio at 192.168.x.x — so when
 // the user points the provider at a non-loopback host we ask that node itself.
 async function discoverRemoteOpenAiCompatible(kind: ProviderDiscoveryKind, baseUrl: string, apiKey: string): Promise<ProviderDiscovery> {
-  const name = kind === 'omlx' ? 'oMLX (network)' : kind === 'ollama' ? 'Ollama (network)' : 'LM Studio (network)'
-  const base = { kind, name, source: kind, baseUrl, apiKey, configPath: null }
+  const name = kind === 'omlx' ? 'oMLX (network)' : kind === 'ollama' ? 'Ollama (network)' : kind === 'custom' ? 'TensorFold / OpenAI-compatible (network)' : 'LM Studio (network)'
+  const base = { kind, name, source: kind === 'custom' ? 'custom' as const : kind, baseUrl, apiKey, configPath: null }
+  try {
+    const models = await fetchOpenAiCompatibleModels(baseUrl, apiKey)
+    return { ...base, found: models.length > 0, models, defaultModel: models[0] ?? null, message: models.length ? `Found ${models.length} model${models.length === 1 ? '' : 's'} at ${baseUrl}.` : `Reached ${baseUrl} but it reported no models.` }
+  } catch (e: any) {
+    return { ...base, found: false, models: [], defaultModel: null, message: `Could not reach ${baseUrl}: ${e?.message ?? e}` }
+  }
+}
+
+// Any OpenAI-compatible endpoint, local or networked: a TensorFold engine, vLLM, llama.cpp, a proxy.
+async function discoverCustomProvider(baseUrl: string, apiKey: string): Promise<ProviderDiscovery> {
+  const base = { kind: 'custom' as const, name: 'TensorFold / OpenAI-compatible', source: 'custom' as const, baseUrl, apiKey, configPath: null }
   try {
     const models = await fetchOpenAiCompatibleModels(baseUrl, apiKey)
     return { ...base, found: models.length > 0, models, defaultModel: models[0] ?? null, message: models.length ? `Found ${models.length} model${models.length === 1 ? '' : 's'} at ${baseUrl}.` : `Reached ${baseUrl} but it reported no models.` }
@@ -177,6 +188,7 @@ export async function discoverLocalProvider(kind: ProviderDiscoveryKind, baseUrl
   // A non-loopback base URL means a networked node — probe it directly instead of
   // the local runtime config (which only knows about this machine).
   const target = (baseUrl ?? '').trim()
+  if (kind === 'custom') return discoverCustomProvider(target || 'http://127.0.0.1:8080/v1', apiKey)
   if (target && !isLoopbackHost(target)) return discoverRemoteOpenAiCompatible(kind, target, apiKey)
   if (kind === 'ollama') return discoverOllama()
   if (kind === 'lmstudio') return discoverLmStudio()
