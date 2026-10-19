@@ -47,6 +47,7 @@ pub fn target(comptime Cache: type, comptime Part: type, l: anytype, streams: u3
         try l.pool.items[0].reset(l.e);
         l.warmed.mark(shape);
     };
+    if (comptime @hasField(@TypeOf(l.e.*), "rec_scratch")) E.recurrent.idle(l.e);
     l.startup.warmups += warm_ns;
     l.startup.reserve += warm.profile.elapsed(l.io, started) - warm_ns;
 }

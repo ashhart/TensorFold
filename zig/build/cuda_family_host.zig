@@ -35,6 +35,11 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const shared_run = b.addRunArtifact(b.addTest(.{ .root_module = shared, .filters = &.{"Shared verification:"} }));
     shared_run.has_side_effects = true;
     b.step("test-qwen35-shared-host", "Shared CUDA slots and rollback without device execution").dependOn(&shared_run.step);
+    const recurrent = b.createModule(.{ .root_source_file = b.path("zig/src/core/recurrent_workspace.zig"), .target = host, .optimize = .debug });
+    b.step("test-recurrent-workspace-host", "Recurrent scratch queue domains, epochs, leases and allocation failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = recurrent })).step);
+    const policy = b.createModule(.{ .root_source_file = b.path("zig/src/core/recurrent_workspace.zig"), .target = host, .optimize = .fast });
+    const book = b.addExecutable(.{ .name = "recurrent-bookkeeping", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/recurrent_bookkeeping.zig"), .target = host, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "recurrent", .module = policy }} }) });
+    b.step("compile-recurrent-bookkeeping-host", "Build the CPU-only lease bookkeeping probe; no automatic run").dependOn(&b.addInstallArtifact(book, .{}).step);
     const draft_frame = b.createModule(.{ .root_source_file = b.path("zig/qwen35_draft_frame_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
     b.step("test-qwen35-frame-invalidation-host", "A failed shared frame invalidates held tokens and grown trees").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = draft_frame, .filters = &.{"Draft frames: the real hold adapter"} })).step);
     const frame_run = b.addRunArtifact(b.addTest(.{ .root_module = draft_frame, .filters = &.{"Draft frames:"} }));

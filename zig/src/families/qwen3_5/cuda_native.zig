@@ -258,6 +258,10 @@ const Lanes = struct {
     }
 
     fn drop(self: *Lanes, cache: *E.Cache) void {
+        if (cache.owner != null) {
+            cuda.completion.drain(self.e.d, self.e.stream, "recurrent cache disposal did not drain");
+            E.recurrent.completed(self.e);
+        }
         cache.deinit(self.gpa);
         self.gpa.destroy(cache);
     }
@@ -275,6 +279,11 @@ const Lanes = struct {
     }
 
     fn give(self: *Lanes, cache: *E.Cache) void {
+        if (cache.owner != null) {
+            cache.last = null;
+            E.recurrent.release(cache);
+            if (self.caches.count() == 0) E.recurrent.idle(self.e);
+        }
         self.pool.append(self.gpa, cache) catch self.drop(cache);
     }
 

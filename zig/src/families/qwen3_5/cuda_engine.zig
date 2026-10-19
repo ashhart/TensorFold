@@ -10,6 +10,7 @@ const routed = @import("cuda_routed.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const pocket = @import("cuda_pocket.zig");
 const profile = @import("cuda_startup_profile.zig");
+pub const recurrent = @import("cuda_recurrent.zig");
 
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
@@ -68,6 +69,7 @@ pub const Keep = union(enum) { last, draws: []const Draw, logits, hidden };
 pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
 
 pub const Engine = struct {
+    rec_scratch: recurrent.Pool,
     startup: profile.Times = .{},
     gpa: std.mem.Allocator,
     dir: []const u8,
@@ -186,6 +188,7 @@ pub const Engine = struct {
         e.window_rows = most_window;
         e.arena_at = 0;
         e.graphs = .empty;
+        e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
         e.n_taps = 0;
         e.features = 0;
         e.stream = try cuda.Stream.init(d, true);
@@ -235,6 +238,7 @@ pub const Engine = struct {
         try e.stream.synchronize();
         const warm_start = profile.now(io);
         e.startup = .{ .load = warm_start - started };
+        errdefer recurrent.shutdown(e);
         e.startup.add(try profile.withCache(gpa, io, e, Cache));
         return e;
     }
@@ -250,9 +254,11 @@ pub const Engine = struct {
         try e.forward(&.{.{ .cache = warm_cache, .rows = 3, .parents = &.{ -1, 0, 0 } }}, ids[0..3], .{ .draws = &.{ greedy, greedy, greedy } });
         try warm_cache.keep(e, &.{ 0, 2 });
         try e.stream.synchronize();
+        recurrent.completed(e);
     }
 
     pub fn deinit(e: *Engine) void {
+        recurrent.shutdown(e);
         e.pockets.deinit();
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
@@ -435,7 +441,10 @@ pub const Engine = struct {
         @memcpy(std.mem.bytesAsSlice(u32, st[ids_at..][0 .. total * 4]), ids);
         const segs = std.mem.bytesAsSlice(Seg, st[segs_at..][0 .. parts.len * @sizeOf(Seg)]);
         const slot_peak = try Round.build(st, parts, record);
-        for (parts) |p| try p.cache.settle(e);
+        for (parts) |p| {
+            try p.cache.settle(e);
+            try recurrent.prepare(e, p.cache, p.rows, record);
+        }
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
             segs[i] = p.cache.seg(e, p.cache.len, row0, p.rows);
@@ -470,6 +479,10 @@ pub const Engine = struct {
         }
         try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
         var shape = Shape.init(total, parts.len, record, e.n_taps > 0, @intCast(Round.variant(slot_peak)));
+        if (record) for (parts) |p| {
+            try recurrent.mark(p.cache, false);
+            if (p.rows == 1) try recurrent.mark(p.cache, true);
+        };
         shape.hidden = keep == .hidden;
         if (e.learning != null or e.pockets.any()) {
             var exact = shape;
@@ -527,6 +540,7 @@ pub const Engine = struct {
                 if (keep == .last) @memcpy(parts[0].cache.logits, e.rowLogits(0));
             },
         }
+        recurrent.completed(e);
     }
 
     pub const Shape = @import("cuda_shapes.zig").Shape;
