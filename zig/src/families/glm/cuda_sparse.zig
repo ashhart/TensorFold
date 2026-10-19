@@ -50,6 +50,11 @@ pub const Scratch = struct { scores: u64, ls: u64, li: u64, pools: u64, at: u64 
 
 /// sparse.select_tokens: each row's tokens (i32 [rows][width], ascending, -1 padded), count 0 under the dense limit.
 pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64) !void {
+    return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, pos, host_pos, rows, heads, d, np_max_cap, s, tokens, counts, null);
+}
+
+pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64, profile: ?*@import("cuda_prof.zig").Prof) !void {
+    const prof = @import("cuda_prof.zig");
     const np_max = poolBucket(host_pos, rows, np_max_cap);
     const b = @min(rows, select_rows);
     const loop: usize = if (rows >= score_loop_from) score_loop else 1;
@@ -70,11 +75,17 @@ pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u6
         var sa: cuda.Args = .{};
         inline for (.{ qi + a * heads * d * 2, wts + a * w_stride * 2, @as(i64, @intCast(w_stride)), pk, s.scores, at, @as(i64, @intCast(np_max)), @as(i64, @intCast(nb)), @as(f32, @floatCast(std.math.pow(f64, @floatFromInt(d), -0.5))), headScale(heads), @as(i64, @intCast(heads)), @as(c_int, @intCast(loop)) }) |v| sa.add(v);
         if (d != 128 or heads > 32) return error.IndexShape;
+        var stamp = prof.span(profile, stream, .index_score);
         try cuda.launch.launch(set.glue.scores, .{ .grid = .{ .x = @intCast(n), .y = @intCast(cdiv(nb, loop)) }, .block = .{ .x = 128 } }, stream, &sa);
+        stamp.end();
+        stamp = prof.span(profile, stream, .index_select);
         var sel: cuda.Args = .{};
         inline for (.{ s.scores, s.pools + a * topk_pools * 8, @as(i64, @intCast(np_max)), at, @as(c_int, topk_pools) }) |v| sel.add(v);
         try cuda.launch.launch(set.glue.select_rows, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 128 } }, stream, &sel);
+        stamp.end();
     }
+    const stamp = prof.span(profile, stream, .index_select);
+    defer stamp.end();
     const assemble = try ops.function("tf_glm_dsa_tokens");
     var args: cuda.Args = .{};
     args.add(s.pools);

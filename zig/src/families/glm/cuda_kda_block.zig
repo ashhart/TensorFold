@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const glue = @import("cuda_glue.zig");
 const kda = @import("cuda_kda.zig");
 const b16 = @import("cuda_b16.zig");
+const prof = @import("cuda_prof.zig");
 
 /// One KDA layer, `heads` heads: proj bf16 [3 heads 128 + 256 + heads][dims], f_b, g_b, o, the chain's taps and norm.
 pub const Layer = struct {
@@ -43,7 +44,15 @@ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize,
 
 /// The block up to its out_proj: the projections, the chain, and a prompt chunk's conv window commit.
 pub fn body(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool) !void {
+    return bodyProfile(set, ks, stream, l, s, x, x_stride, rows, conv_state, state_in, wide, prompt, null);
+}
+
+pub fn bodyProfile(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool, profile: ?*prof.Prof) !void {
+    var stamp = prof.span(profile, stream, .projections);
     try project(set, stream, l, s, x, x_stride, rows);
+    stamp.end();
+    stamp = prof.span(profile, stream, .kda);
+    defer stamp.end();
     try chainRows(ks, stream, l, s, rows, conv_state, state_in, wide);
     if (prompt) try glue.convShift(set, stream, conv_state, s.p, rows, rows * l.width(), l.width(), 1, 3 * l.heads * kda.dk);
 }

@@ -34,6 +34,7 @@ pub const lanes = @import("cuda_lanes.zig");
 pub const native = @import("cuda_native.zig");
 
 test {
+    _ = @import("cuda_prof.zig");
     _ = @import("cuda_load_owner.zig");
     _ = @import("cuda_images_interleave_test.zig");
     _ = experts;

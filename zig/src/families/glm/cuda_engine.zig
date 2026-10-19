@@ -58,6 +58,7 @@ pub const Engine = struct {
     packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
+    profiling_prompt: ?*prof_mod.Prof = null,
     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
     checkpoint_digest: [32]u8,
     settings: ranks.Settings,
@@ -322,13 +323,27 @@ pub const Engine = struct {
         if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
         f.prof = e.prompt_profs[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3];
         const labels = [_][]const u8{ "prompt chunk to 64 rows", "prompt chunk to 256 rows", "prompt chunk to 1024 rows", "prompt chunk to 2048 rows" };
-        if (f.prof) |p| try p.begin(e.stream, labels[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3]);
+        if (f.prof) |p| try p.beginPrompt(e.stream, labels[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3], .{ .rank = e.share.rank, .slot = e.slot, .start = start, .rows = rows }, e.c.run, e.pieces.count);
+        if (f.prof) |p| e.profiling_prompt = p;
+        defer if (f.prof != null) {
+            e.profiling_prompt = null;
+        };
         defer if (f.prof) |p| p.end();
+        errdefer if (f.prof) |p| {
+            p.prompt.?.invalid = true;
+        };
+        var stamp = prof_mod.span(f.prof, e.stream, .gate);
         try e.gate(cancel);
+        stamp.end();
         if (f.prof) |p| p.mark(e.stream, .gate);
         try f.run(as_i32[0..rows]);
+        stamp = prof_mod.span(f.prof, e.stream, .prompt_score);
         if (e.prompt_logprobs) |p| if (part.len > 1) try prompt_lp.run(e, p, part[1..]);
+        stamp.end();
+        stamp = prof_mod.span(f.prof, e.stream, .drafter);
         if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
+        stamp.end();
+        stamp = prof_mod.span(f.prof, e.stream, .draw);
         const last = start + rows == len;
         var first: ?u32 = null;
         if (last) {
@@ -336,20 +351,26 @@ pub const Engine = struct {
             try e.draw(e.bp.logits, 1, len, 0, &t);
             first = t[0];
         }
+        stamp.end();
         if (f.prof) |p| p.mark(e.stream, .draw);
         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
+        stamp = prof_mod.span(f.prof, e.stream, .mtp);
         if (e.mtp) {
             const nxt = as_i32[1..];
             if (nxt.len > 0) { // decode._absorb_rows
                 const mp = f.prof;
+                defer f.prof = mp;
                 f.prof = null; // the head's pass as one section
                 try f.mtp(nxt, &.{e.bp.fnormed});
                 f.prof = mp;
                 try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
             }
         }
+        stamp.end();
         if (f.prof) |p| p.mark(e.stream, .mtp);
+        stamp = prof_mod.span(f.prof, e.stream, .commit);
         try f.commit(rows);
+        stamp.end();
         if (f.prof) |p| p.mark(e.stream, .commit);
         return first;
     }
@@ -423,7 +444,9 @@ pub const Engine = struct {
     pub fn shared(e: *Engine, v: f64) !f64 {
         var x = v;
         try e.shared_buf.uploadAsync(0, std.mem.asBytes(&x), e.stream.handle);
+        const stamp = prof_mod.span(e.profiling_prompt, e.stream, .control_reduce);
         try e.lib.check(e.lib.api.ncclAllReduce(e.shared_buf.ptr, e.shared_buf.ptr, 1, .f64, .max, e.comm, e.stream.handle), "ncclAllReduce");
+        stamp.end();
         try e.stream.synchronize();
         try e.shared_buf.download(0, std.mem.asBytes(&x));
         return x;
@@ -476,10 +499,7 @@ pub const Engine = struct {
         if (f.prof) |p| p.end();
     }
 
-    fn verifyLabel(rows: usize) []const u8 {
-        const l = [_][]const u8{ "verify 1 row", "verify 2 rows", "verify 3 rows", "verify 4 rows", "verify 5 rows", "verify 6 rows", "verify 7 rows", "verify 8 rows" };
-        return l[@min(rows, l.len) - 1];
-    }
+    const verifyLabel = @import("cuda_engine_prof.zig").verifyLabel;
 
     /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
     pub fn verifyShared(e: *Engine, parts: []const Part) !void {
@@ -565,28 +585,7 @@ pub const Engine = struct {
     pub const drawWhole = @import("cuda_structured.zig").drawWhole;
     pub const redrawFirst = @import("cuda_structured.zig").redrawFirst;
     /// decode.sample_rows' greedy pick: per-rank top-1 (tf_glm_top1), all-gathered, largest value then lowest id.
-    fn greedy(e: *Engine, logits: u64) !u32 {
-        const world = e.share.world;
-        var a: cuda.Args = .{};
-        a.add(logits);
-        a.add(@as(i64, @intCast(e.share.vocab.len())));
-        a.add(@as(u32, @intCast(e.share.vocab.lo)));
-        a.add(e.pairs.ptr + e.share.rank * pair_bytes);
-        try cuda.launch.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
-        const mine = e.pairs.ptr + e.share.rank * pair_bytes;
-        if (e.group) |g| try g.allGather(e.stream, mine, e.pairs.ptr, pair_bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, e.pairs.ptr, pair_bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");
-        try e.stream.synchronize();
-        try e.checkGathers();
-        var all: [ranks.max_world][4]u32 = undefined; // Engine.init refuses a larger world
-        try e.d.check(e.d.api.cuMemcpyDtoH_v2(&all, e.pairs.ptr, world * pair_bytes), "cuMemcpyDtoH");
-        var pick = all[0];
-        for (all[1..world]) |p| {
-            const v: f32 = @bitCast(p[0]);
-            const b: f32 = @bitCast(pick[0]);
-            if (v > b or (v == b and p[1] < pick[1])) pick = p;
-        }
-        return pick[1];
-    }
+    const greedy = @import("cuda_engine_pick.zig").greedy;
 
     /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
     pub fn checkGathers(e: *const Engine) !void {

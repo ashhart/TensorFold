@@ -1,6 +1,7 @@
 //! TF_GLM_PROF=1: where a forward's GPU time goes (events between its sections) against the call's wall time.
 const std = @import("std");
 const cuda = @import("cuda");
+pub const prompt_trace = @import("cuda_prompt_trace.zig");
 
 pub const Section = enum { gate, embed, kda, mla, gather_a, dense, router, routed, shared, gather_b, head, draw, mtp, commit };
 const names = [_][]const u8{ "gate", "embed", "kda", "mla", "gather_a", "dense", "router", "routed", "shared", "gather_b", "head", "draw", "mtp", "commit" };
@@ -19,6 +20,7 @@ pub const Prof = struct {
     wall_ms: f64 = 0,
     calls: u64 = 0,
     label: []const u8 = "",
+    prompt: ?*prompt_trace.Trace = null,
     every: u64 = 64, // calls a report sums
 
     pub fn init(d: *const cuda.Driver, io: std.Io) !*Prof {
@@ -39,6 +41,7 @@ pub const Prof = struct {
     }
 
     pub fn deinit(p: *Prof) void {
+        if (p.prompt) |t| t.deinit();
         for (&p.events) |*e| e.deinit();
         std.heap.page_allocator.destroy(p);
     }
@@ -47,6 +50,13 @@ pub const Prof = struct {
     pub fn wanted() bool {
         const v = std.c.getenv("TF_GLM_PROF") orelse return false;
         return std.mem.eql(u8, std.mem.span(v), "1");
+    }
+
+    pub fn beginPrompt(p: *Prof, s: cuda.Stream, label: []const u8, meta: prompt_trace.Meta, layers: usize, pieces: usize) !void {
+        if (p.prompt == null) p.prompt = try prompt_trace.Trace.init(std.heap.page_allocator, p.io, p.d, 64 + layers * (64 + 16 * pieces));
+        if (!p.prompt.?.usable or p.prompt.?.active) return error.InvalidPromptProfile;
+        try p.begin(s, label);
+        p.prompt.?.begin(meta);
     }
 
     /// A call begins on `s` (its wall clock and its first event).
@@ -69,10 +79,12 @@ pub const Prof = struct {
     /// The call ended (its results read: the stream is idle): sections summed, a report every 64 calls.
     pub fn end(p: *Prof) void {
         if (!p.open) return;
+        defer if (p.prompt) |t| t.finish();
         p.open = false;
         const wall: f64 = @as(f64, @floatFromInt(std.Io.Clock.awake.now(p.io).toNanoseconds() - p.t0)) / 1e6;
         if (p.n == 0) return;
         p.events[p.n].synchronize() catch return;
+        if (p.prompt) |t| t.finish();
         for (0..p.n) |i| p.sections[@backingInt(p.ends[i])] += cuda.Event.elapsedMs(p.events[i], p.events[i + 1]) catch 0;
         p.gpu_ms += cuda.Event.elapsedMs(p.events[0], p.events[p.n]) catch 0;
         p.wall_ms += wall;
@@ -139,4 +151,21 @@ test "a profiler destroys all 513 of its events" {
     try std.testing.expectEqual(@as(usize, 513), Counted.live);
     p.deinit();
     try std.testing.expectEqual(@as(usize, 0), Counted.live);
+}
+
+pub inline fn span(p: ?*Prof, s: cuda.Stream, stage: prompt_trace.Stage) prompt_trace.Scope {
+    if (p) |v| if (v.prompt) |t| return t.span(s, stage);
+    return .{};
+}
+
+pub inline fn context(p: ?*Prof, layer: ?usize, piece: ?usize, site: prompt_trace.Site) void {
+    if (p) |v| if (v.prompt) |t| {
+        t.layer = layer;
+        t.piece = piece;
+        t.site = site;
+    };
+}
+
+test {
+    _ = @import("cuda_prompt_trace_test.zig");
 }
