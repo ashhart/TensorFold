@@ -5,6 +5,7 @@ const steps = @import("steps.zig");
 const models = @import("model.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
+pub const eos = @import("eos.zig");
 /// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
 pub const identity = @import("identity.zig").identity;
 
@@ -591,4 +592,5 @@ test {
 
 test {
     _ = @import("identity.zig");
+    _ = eos;
 }

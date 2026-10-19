@@ -35,7 +35,14 @@ pub const HfText = struct {
         // each request renders its chat up to three times, and a chat's earlier messages come back every turn
         t.tok.memo = try tokenizer.Memo.create(gpa, 64 << 20);
         const config = readJson(io, a, dir, "tokenizer_config.json");
-        const model_config = readJson(io, a, dir, "config.json");
+        const model_config = readEosJson(io, a, dir, "config.json", 64 << 20) catch |e| {
+            problem.* = try std.fmt.allocPrint(pa, "cannot read config.json EOS ({s})", .{@errorName(e)});
+            return error.Load;
+        };
+        const generation = readEosJson(io, a, dir, "generation_config.json", 1 << 20) catch |e| {
+            problem.* = try std.fmt.allocPrint(pa, "cannot read generation_config.json EOS ({s})", .{@errorName(e)});
+            return error.Load;
+        };
         if (template_override) |path| {
             t.source = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch |e| {
                 problem.* = try std.fmt.allocPrint(pa, "cannot read chat template override ({s})", .{@errorName(e)});
@@ -43,7 +50,11 @@ pub const HfText = struct {
             };
         } else try t.readTemplates(io, a, dir, config);
         t.specials = try specialsOf(a, config);
-        t.eos = try t.eosIds(a, model_config, config);
+        t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {
+            if (e == error.OutOfMemory) return e;
+            problem.* = try std.fmt.allocPrint(pa, "invalid checkpoint EOS ({s})", .{@errorName(e)});
+            return error.Load;
+        };
         try t.readPostProcessor(io, a, dir);
         if (t.source.len > 0) {
             var diag: template.Diag = .{};
@@ -69,6 +80,18 @@ pub const HfText = struct {
         const path = std.fs.path.join(a, &.{ dir, name }) catch return .null;
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)) catch return .null;
         return std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch .null;
+    }
+
+    /// Optional EOS documents are absent only on FileNotFound; malformed present data refuses the text load.
+    fn readEosJson(io: std.Io, a: Allocator, dir: []const u8, name: []const u8, limit: usize) !std.json.Value {
+        const path = try std.fs.path.join(a, &.{ dir, name });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(limit)) catch |e| switch (e) {
+            error.FileNotFound => return .null,
+            else => return e,
+        };
+        const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{ .allocate = .alloc_always });
+        if (doc != .object) return error.BadEos;
+        return doc;
     }
 
     /// chat_template.jinja, else chat_template.json, else tokenizer_config.json's (named: "default", and "tool_use").
@@ -124,30 +147,23 @@ pub const HfText = struct {
         return .{ .object = out };
     }
 
-    /// Model end ids plus the tokenizer's chat end, when both are declared.
-    fn eosIds(t: *HfText, a: Allocator, model_config: std.json.Value, config: std.json.Value) ![]const u32 {
+    /// Shared model/generation EOS, plus the tokenizer's chat end when declared.
+    fn eosIds(t: *HfText, a: Allocator, model: std.json.Value, generation: std.json.Value, config: std.json.Value, vocab: usize) ![]const u32 {
+        const bound = try tokenizer.eos.vocabulary(model, vocab);
+        const ids = try tokenizer.eos.resolve(a, model, generation, bound);
+        defer a.free(ids);
         var out: std.ArrayList(u32) = .empty;
-        if (model_config == .object) {
-            const holders = [_]?std.json.Value{ model_config.object.get("eos_token_id"), if (model_config.object.get("text_config")) |tc| (if (tc == .object) tc.object.get("eos_token_id") else null) else null };
-            for (holders) |h| {
-                const v = h orelse continue;
-                switch (v) {
-                    .integer => |i| try out.append(a, @intCast(i)),
-                    .array => |list| for (list.items) |x| if (x == .integer) try out.append(a, @intCast(x.integer)),
-                    else => {},
-                }
-                if (out.items.len > 0) break;
-            }
-        }
+        errdefer out.deinit(a);
+        try out.appendSlice(a, ids);
         if (config == .object) if (config.object.get("eos_token")) |e| {
             const piece = switch (e) {
-                .string => |s| s,
+                .string => |value| value,
                 .object => |o| if (o.get("content")) |c| (if (c == .string) c.string else "") else "",
                 else => "",
             };
-            if (t.tok.specialTokenId(piece)) |id| if (std.mem.indexOfScalar(u32, out.items, id) == null) try out.append(a, id);
+            if (t.tok.specialTokenId(piece)) |id| try tokenizer.eos.appendId(a, &out, id, bound);
         };
-        return out.items;
+        return out.toOwnedSlice(a);
     }
 
     /// The tokens ``add_special_tokens`` adds: TemplateProcessing's single template, or Bert and Roberta's cls and sep.
@@ -300,12 +316,12 @@ test "model EOS does not hide a different tokenizer chat end" {
     try t.tok.vocab.put("<|im_end|>", 248046);
     const model = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"text_config\":{\"eos_token_id\":248044}}", .{});
     const config = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"eos_token\":\"<|im_end|>\"}", .{});
-    try std.testing.expectEqualSlices(u32, &.{ 248044, 248046 }, try t.eosIds(a, model, config));
+    try std.testing.expectEqualSlices(u32, &.{ 248044, 248046 }, try t.eosIds(a, model, .null, config, 248047));
     const same = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"eos_token_id\":[248046]}", .{});
-    try std.testing.expectEqualSlices(u32, &.{248046}, try t.eosIds(a, same, config));
+    try std.testing.expectEqualSlices(u32, &.{248046}, try t.eosIds(a, same, .null, config, 248047));
     const added = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"eos_token\":{\"content\":\"<|im_end|>\"}}", .{});
-    try std.testing.expectEqualSlices(u32, &.{ 248044, 248046 }, try t.eosIds(a, model, added));
-    try std.testing.expectEqualSlices(u32, &.{248046}, try t.eosIds(a, .null, config));
+    try std.testing.expectEqualSlices(u32, &.{ 248044, 248046 }, try t.eosIds(a, model, .null, added, 248047));
+    try std.testing.expectEqualSlices(u32, &.{248046}, try t.eosIds(a, .null, .null, config, 248047));
 }
 
 /// Our JSON value as std.json's, ints exact (past i64 as number strings) and keys in order.
@@ -373,4 +389,8 @@ test "explicit template overrides checkpoint templates including tool prompts an
     const empty = try HfText.load(gpa, io, dir, path, a, &problem);
     defer empty.deinit();
     try std.testing.expectError(error.Template, empty.text().render(a, messages, .{}, &problem));
+}
+
+test {
+    _ = @import("hf_eos_test.zig");
 }
