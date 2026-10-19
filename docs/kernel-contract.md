@@ -40,7 +40,9 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
 3. Shapes. Every served shape, then each tiled dimension at its least size, a tile minus a step, a tile, a tile plus a
    step and the largest served size. Each output must be within `|want| * outputs' half ulp + gamma(depth) * magnitude`
    of float64, or for a replacement kernel bit-equal to the kernel it replaces. Control: a row sum whose partial tail
-   loses its last input; it passes at whole tiles and fails at the edges.
+   loses its last input; it passes at whole tiles and fails at the edges. A kernel with bf16 rounding points between
+   its steps (MLX's op-by-op rows) checks each output against float64's value at those points, as a range over the
+   spread its fp32 steps allow, and its controls each drop one rounding point, which that check must catch.
 4. fp32 sums. The inputs are integers whose partial sums reach about 2^20 in any order and stay below 2^24, so fp32
    sums are exact whatever the kernel's order; the second half of each row mirrors the first, so the result is small.
    Before the kernel runs, the harness replays the sums on the CPU in fp16 and bf16 (one chain, contiguous halves, and
@@ -111,8 +113,10 @@ Mamba scan of a verify window (its host twin's bytes), qmm_group's cluster tile,
 bit-equal to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4 tiles with fp32 out (K slices met in a
 cluster, fused, or by `reduce_kernel<true>`), the checkpoint math's FP8 128-row prompt tiles (both slice meetings,
 bit-equal to the 64-row tiles) and NVFP4 experts: the decode-sized forms and the prompt tiles (up to down's NVFP4
-rows, fp32 down and the down summing two width shares, each bit-equal to the kernels it replaces; sm_120 up), and the
-reduce-scatter's `tf_rank_sum`.
+rows, fp32 down and the down summing two width shares, each bit-equal to the kernels it replaces; sm_120 up), the
+reduce-scatter's `tf_rank_sum`, and the MLX affine token rows (4 bits, and 2 to 6 or 8 bits times a bf16 scale, each
+output bit-equal to float64 at its rounding points; two controls, one dropping the rounding point, one folding the scale
+into the group's scale and bias).
 
 ## CUDA records per nvcc release
 
