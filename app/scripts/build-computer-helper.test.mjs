@@ -26,6 +26,9 @@ function toolchain({ swiftcMissing = false, compileFails = false, selfTest = '{"
   return { calls, run, compiles: () => calls.filter((call) => call.command === 'xcrun' && call.args[0] === 'swiftc').length }
 }
 
+// The mocked toolchain plays macOS regardless of the host running the test.
+const build = (options) => buildComputerHelper({ platform: 'darwin', ...options })
+
 async function main() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'tf-computer-build-'))
   try {
@@ -49,7 +52,7 @@ async function main() {
     // First build compiles from the source folder by relative names, stamps, and self-tests.
     const first = toolchain()
     const logs = []
-    const built = await buildComputerHelper({ root, run: first.run, log: (line) => logs.push(line) })
+    const built = await build({ root, run: first.run, log: (line) => logs.push(line) })
     assert.equal(built.compiled, true)
     assert.equal(built.checks, 7)
     assert.match(logs.join('\n'), /self-test passed 7 checks/)
@@ -65,7 +68,7 @@ async function main() {
 
     // Unchanged sources: no swiftc and no xcrun lookup, but the self-test still runs.
     const second = toolchain()
-    const again = await buildComputerHelper({ root, run: second.run, log: () => {} })
+    const again = await build({ root, run: second.run, log: () => {} })
     assert.equal(again.compiled, false)
     assert.equal(second.compiles(), 0)
     assert.equal(second.calls.filter((call) => call.command === 'xcrun').length, 0)
@@ -74,35 +77,35 @@ async function main() {
     // An edited source, a new source, a replaced binary and --force each rebuild.
     await writeFile(path.join(paths.sourceDir, 'Keys.swift'), 'let a = 2\n')
     const edited = toolchain()
-    assert.equal((await buildComputerHelper({ root, run: edited.run, log: () => {} })).compiled, true)
+    assert.equal((await build({ root, run: edited.run, log: () => {} })).compiled, true)
     await writeFile(path.join(paths.sourceDir, 'Extra.swift'), 'let b = 1\n')
     const added = toolchain()
-    assert.equal((await buildComputerHelper({ root, run: added.run, log: () => {} })).compiled, true)
+    assert.equal((await build({ root, run: added.run, log: () => {} })).compiled, true)
     assert.ok(added.calls.find((call) => call.args[0] === 'swiftc').args.includes('Extra.swift'))
     await writeFile(paths.binary, 'tampered', { mode: 0o755 })
     const tampered = toolchain()
-    assert.equal((await buildComputerHelper({ root, run: tampered.run, log: () => {} })).compiled, true)
+    assert.equal((await build({ root, run: tampered.run, log: () => {} })).compiled, true)
     const forced = toolchain()
-    assert.equal((await buildComputerHelper({ root, run: forced.run, force: true, log: () => {} })).compiled, true)
+    assert.equal((await build({ root, run: forced.run, force: true, log: () => {} })).compiled, true)
     const settled = toolchain()
-    assert.equal((await buildComputerHelper({ root, run: settled.run, log: () => {} })).compiled, false)
+    assert.equal((await build({ root, run: settled.run, log: () => {} })).compiled, false)
 
     // Failures: a missing toolchain, a compile error, a local path in the binary, a failing self-test, another OS.
     await writeFile(path.join(paths.sourceDir, 'Extra.swift'), 'let b = 2\n')
-    await assert.rejects(() => buildComputerHelper({ root, run: toolchain({ swiftcMissing: true }).run, log: () => {} }), /xcrun could not find swiftc.*xcode-select --install/s)
-    await assert.rejects(() => buildComputerHelper({ root, run: toolchain({ compileFails: true }).run, log: () => {} }), /swiftc failed[\s\S]*expected expression/)
+    await assert.rejects(() => build({ root, run: toolchain({ swiftcMissing: true }).run, log: () => {} }), /xcrun could not find swiftc.*xcode-select --install/s)
+    await assert.rejects(() => build({ root, run: toolchain({ compileFails: true }).run, log: () => {} }), /swiftc failed[\s\S]*expected expression/)
     await assert.rejects(stat(paths.binary), /ENOENT/, 'a failed compile leaves no binary behind')
     await assert.rejects(stat(paths.stamp), /ENOENT/)
-    await assert.rejects(() => buildComputerHelper({ root, run: toolchain({ binaryText: 'bin /Users/someone/Studio/main.swift' }).run, log: () => {} }), /local build path \/Users\/someone\//)
+    await assert.rejects(() => build({ root, run: toolchain({ binaryText: 'bin /Users/someone/Studio/main.swift' }).run, log: () => {} }), /local build path \/Users\/someone\//)
     await assert.rejects(stat(paths.binary), /ENOENT/)
-    await assert.rejects(() => buildComputerHelper({ root, run: toolchain({ selfTest: '{"ok":false,"checks":7,"failures":["key f12 code"]}\n' }).run, log: () => {} }), /--self-test failed[\s\S]*key f12 code/)
+    await assert.rejects(() => build({ root, run: toolchain({ selfTest: '{"ok":false,"checks":7,"failures":["key f12 code"]}\n' }).run, log: () => {} }), /--self-test failed[\s\S]*key f12 code/)
     await assert.rejects(stat(paths.binary), /ENOENT/, 'a failing self-test removes the binary')
     await assert.rejects(stat(paths.stamp), /ENOENT/)
     await assert.rejects(() => buildComputerHelper({ root, run: toolchain().run, platform: 'linux', log: () => {} }), /only on macOS/)
 
     await rm(paths.sourceDir, { recursive: true, force: true })
     await mkdir(paths.sourceDir)
-    await assert.rejects(() => buildComputerHelper({ root, run: toolchain().run, log: () => {} }), /No Swift sources/)
+    await assert.rejects(() => build({ root, run: toolchain().run, log: () => {} }), /No Swift sources/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
