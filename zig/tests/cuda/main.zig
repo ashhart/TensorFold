@@ -48,6 +48,7 @@ const exlr8_dense_tests = @import("exlr8_dense_tests.zig");
 const norms_tests = @import("norms_tests.zig");
 const norm_rows_tests = @import("norm_rows_tests.zig");
 const norm_tail_tests = @import("norm_tail_tests.zig");
+const embed_tests = @import("embed_tests.zig");
 const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
 const contract_tests = @import("contract_tests.zig");
@@ -129,6 +130,7 @@ const usage =
     \\  norms                     RMS norm and the residual step against float64 references (synthetic)
     \\  norm-rows                 bf16-residual and gated norms, token rows against float64 (synthetic)
     \\  norm-tail                 bf16 residual tails (branch norm, scalar, MLX rounding) against float64 (synthetic)
+    \\  embed-rows                MLX affine token rows (2 to 8 bits, bf16 scale) against float64 (synthetic)
     \\  tree-round                tree_round.cu's picks, batched verified trees and commits against core/tree_round
     \\  act-rows                  SwiGLU, output gates, group sums, DFlash2's dynamic conv against float64 (synthetic)
     \\  gdn-prep                  Gated DeltaNet conv, norms, g and beta against float64 (synthetic)
@@ -316,6 +318,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-tail")) return norm_tail_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "embed-rows")) return embed_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "tree-round")) return tree_round_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "act-rows")) return act_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "gdn-prep")) return gdn_prep_tests.run(gpu);

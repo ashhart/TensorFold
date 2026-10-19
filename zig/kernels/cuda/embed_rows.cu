@@ -1,4 +1,4 @@
-// Token rows for every CUDA family (float64 reference: core/act_ref.zig's affine4): 4-bit affine or bf16 tables.
+// Token rows for every CUDA family (float64 references: core/embed_ref.zig): MLX affine or bf16 tables.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -55,4 +55,17 @@ extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16_copies(const
     const uint4 value = *reinterpret_cast<const uint4*>(w + static_cast<int64_t>(ids[r]) * d + 8 * c);
     for (int k = 0; k < copies; ++k)
         *reinterpret_cast<uint4*>(out + (r * copies + k) * d + 8 * c) = value;
+}
+
+// MLX's affine rows at 2 to 6 or 8 bits with a bf16 scale (embed_affine.cuh).
+#include "embed_affine.cuh"
+
+// out[r] = bf16(bf16(q * s + b) * scale) of token ids[r]: q `bits` wide, s and b a group's; scale 1: MLX's dequantize.
+extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_affine(const int* __restrict__ ids,
+                                                                      const uint32_t* __restrict__ w,
+                                                                      const __nv_bfloat16* __restrict__ s,
+                                                                      const __nv_bfloat16* __restrict__ b,
+                                                                      __nv_bfloat16* __restrict__ out, int d, int bits,
+                                                                      int group, float scale) {
+    tf_embed_affine::rows(ids, w, s, b, out, d, bits, group, scale, tf_embed_affine::ROUND);
 }

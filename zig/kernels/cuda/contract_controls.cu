@@ -63,6 +63,17 @@ extern "C" __global__ void tf_ctl_half_dot(const __nv_bfloat16* X, int K, float*
     if (lane == 0) Y[row] = __half2float(s);
 }
 
+// Gate 3: embed_rows.cu's scaled MLX rows keeping the rounding points in `keep`; the exact check must go red.
+#include "embed_affine.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_embed_affine(const int* ids, const uint32_t* w,
+                                                                       const __nv_bfloat16* s, const __nv_bfloat16* b,
+                                                                       __nv_bfloat16* out, int d, int bits, int group,
+                                                                       float scale, int keep) {
+    tf_embed_affine::rows(ids, w, s, b, out, d, bits, group, scale, keep);
+}
+
+
 // Gate 3: act_rows.cu's MLX activations keeping only the rounding points in `keep`; the exact check must go red.
 #include "act_round.cuh"
 

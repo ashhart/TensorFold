@@ -31,6 +31,7 @@ const round_k = @import("contract_tree_round.zig");
 const act_k = @import("contract_act.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
+const embed_k = @import("contract_embed.zig");
 
 const tree_k = @import("contract_tree_attn.zig");
 const block_k = @import("contract_block_attn.zig");
@@ -328,6 +329,12 @@ pub fn run(gpu: check.Gpu) !void {
     for (&denses, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .tile = i, .g = &dense_fns };
     defer for (&denses) |*x| x.deinit();
     for (&denses) |*x| try kernels.append(a, x.kernel());
+    var embed_rows = try cuda.embed_rows.EmbedRows.load(gpu.d);
+    defer embed_rows.unload();
+    var embeds: [embed_k.entries.len]embed_k.Embed = undefined;
+    for (embed_k.entries, &embeds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .e = &embed_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_embed_affine") else null };
+    defer for (&embeds) |*x| x.deinit();
+    for (&embeds) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);
