@@ -151,6 +151,22 @@ async function main() {
     assert.equal(await service.connection(), null, 'unloading discards the working client connection')
     assert.equal((await service.snapshot()).performance, null, 'unloading clears the latest request')
     await waitFor(async () => !(await fs.stat(path.join(h.root, 'engine', 'serve.json')).catch(() => null)), 5000, 'pid record to clear')
+
+    // Advanced overrides reach the engine process, persist across restarts, and raise the admission floor.
+    const saved = await service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '30', FLASHNEXT_LOAD_LIMIT_GB: '20' })
+    assert.deepEqual(saved, { FLASHNEXT_LOAD_LIMIT_GB: '20', GLM_LOAD_LIMIT_GB: '30' })
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(h.root, 'engine', 'preferences.json'), 'utf8')).envOverrides, saved, 'overrides persist with the other engine preferences')
+    assert.deepEqual(service.envOverrides(), saved, 'the saved map reads back without another save')
+    assert.equal((await service.snapshot()).status.memoryLimitBytes, 30 * GIB, 'GLM_LOAD_LIMIT_GB raises the app-side admission floor above the 70% default')
+    await service.load('Other/Kept')
+    const served = (await h.records()).filter((row) => row.kind === 'serve').at(-1)
+    assert.deepEqual(served.advancedEnv, { FLASHNEXT_LOAD_LIMIT_GB: '20', GLM_LOAD_LIMIT_GB: '30' }, 'every launch-time override reaches the engine process environment')
+    await service.unload()
+    const restarted = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: hubFetch('mlx-community/Qwen3.5-2B-MLX-4bit', 2 * 64 * 1024), totalMemoryBytes: 32 * GIB, pollMs: 20, emit: () => {} })
+    assert.deepEqual(restarted.envOverrides(), saved, 'a fresh service loads the saved overrides')
+    assert.equal((await restarted.snapshot()).status.memoryLimitBytes, 30 * GIB, 'the raised floor survives the restart')
+    await assert.rejects(() => service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '' }), /needs a value/, 'an empty value cannot be saved')
+
     const after = await service.remove('mlx-community/Qwen3.5-2B-MLX-4bit')
     assert.deepEqual(after.map((m) => m.repo), ['Other/Kept'])
     await assert.rejects(() => fs.stat(path.join(h.hub, 'models--mlx-community--Qwen3.5-2B-MLX-4bit')), { code: 'ENOENT' })

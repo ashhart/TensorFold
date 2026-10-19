@@ -134,7 +134,7 @@ async function serveCommand(args) {
   if (graphFile && existsSync(graphFile)) graph = { ...graph, ...JSON.parse(readFileSync(graphFile, 'utf8')) }
   const saveGraph = () => { if (graphFile) writeFileSync(graphFile, JSON.stringify(graph), { mode: 0o600 }) }
   let learning = false
-  record({ kind: 'serve', args, pid: process.pid, hasKey: keys.length > 0, noUpdateCheck: env.TENSORFOLD_NO_UPDATE_CHECK ?? null, secretEnv: Object.keys(env).filter((k) => /API_KEY|TOKEN|SECRET/.test(k) && k !== 'TENSORFOLD_API_KEY') })
+  record({ kind: 'serve', args, pid: process.pid, hasKey: keys.length > 0, noUpdateCheck: env.TENSORFOLD_NO_UPDATE_CHECK ?? null, advancedEnv: Object.fromEntries(['GLM_LOAD_LIMIT_GB', 'FLASHNEXT_LOAD_LIMIT_GB'].filter((k) => k in env).map((k) => [k, env[k]])), secretEnv: Object.keys(env).filter((k) => /API_KEY|TOKEN|SECRET/.test(k) && k !== 'TENSORFOLD_API_KEY') })
   console.error(`[tensorfold] loading ${model}`)
   await sleep(Number(env.FAKE_SERVE_LOAD_MS ?? 50))
   if (env.FAKE_SERVE_FAIL || env.FAKE_SERVE_FAIL_MODEL === name) { console.error(`tensorfold: ${env.FAKE_SERVE_FAIL}`); process.exit(1) }
