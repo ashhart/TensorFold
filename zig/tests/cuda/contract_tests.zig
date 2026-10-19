@@ -31,6 +31,7 @@ const round_k = @import("contract_tree_round.zig");
 const act_k = @import("contract_act.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
+const wrows_k = @import("contract_window_rows.zig");
 const embed_k = @import("contract_embed.zig");
 
 const tree_k = @import("contract_tree_attn.zig");
@@ -62,6 +63,7 @@ const h3_image = struct {
 /// The named embedded image; only contract_controls may select the planted controls.
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
+    if (std.mem.eql(u8, name, "window_rows")) return kk.window_rows;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
     inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
@@ -419,6 +421,10 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(glue_k.Kind), &glues) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = &glue_fns, .glue = &fglue };
     defer for (&glues) |*m| m.deinit();
     for (&glues) |*m| try kernels.append(a, m.kernel());
+    var wrows: [wrows_k.cfgs.len]wrows_k.Rows = undefined;
+    for (&wrows, wrows_k.cfgs) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns, .ctl = mods[5], .arena = .init(a) };
+    defer for (&wrows) |*x| x.deinit();
+    for (&wrows) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

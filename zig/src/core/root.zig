@@ -46,6 +46,7 @@ pub const drafter_release = @import("drafter_release.zig");
 pub const drafter_layout = @import("drafter_layout.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const attention_ref = @import("attention_ref.zig");
+pub const attention_range = @import("attention_range.zig");
 pub const gdn_prep_ref = @import("gdn_prep_ref.zig");
 pub const qk_ref = @import("qk_ref.zig");
 pub const moe_ref = @import("moe_ref.zig");
@@ -75,6 +76,7 @@ test {
     _ = contract;
     _ = tree_round;
     _ = attention_ref;
+    _ = attention_range;
     _ = gdn_prep_ref;
     _ = qk_ref;
     _ = moe_ref;

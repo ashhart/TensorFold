@@ -135,3 +135,43 @@ TF_CTL_TAIL(tf_ctl_tail_drop_branch_out, tf_rms_tail::BRANCH_OUT)
 TF_CTL_TAIL(tf_ctl_tail_drop_sum, tf_rms_tail::SUM)
 TF_CTL_TAIL(tf_ctl_tail_drop_row, tf_rms_tail::ROW)
 #undef TF_CTL_TAIL
+
+// Gate 3: window_rows.cu's kernels at head dim 256, each with one planted fault (window_rows.cuh's Fault).
+#include "window_rows.cuh"
+
+extern "C" __global__ void __launch_bounds__(tf_wrows::NT) tf_ctl_wrows_part_edge(const __nv_bfloat16* q, const __nv_bfloat16* kc,
+                                                                                 const __nv_bfloat16* vc, const int* pos, const int* slot,
+                                                                                 float* po, float* pm, float* pl, int h, int hk, int win,
+                                                                                 long long ring, float scale) {
+    tf_wrows::part<256, tf_wrows::EDGE>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale);
+}
+
+extern "C" __global__ void __launch_bounds__(tf_wrows::NT) tf_ctl_wrows_merge_rescale(const float* po, const float* pm, const float* pl,
+                                                                                     __nv_bfloat16* out, int h, int hk, int chunks,
+                                                                                     const __nv_bfloat16* q, const __nv_bfloat16* kc,
+                                                                                     const __nv_bfloat16* vc, const int* pos, const int* slot,
+                                                                                     int win, long long ring, float scale) {
+    tf_wrows::merge<256, tf_wrows::RESCALE>(po, pm, pl, out, h, hk, chunks, q, kc, vc, pos, slot, win, ring, scale);
+}
+
+extern "C" __global__ void __launch_bounds__(tf_wrows::NT) tf_ctl_wrows_merge_trunc(const float* po, const float* pm, const float* pl,
+                                                                                   __nv_bfloat16* out, int h, int hk, int chunks,
+                                                                                   const __nv_bfloat16* q, const __nv_bfloat16* kc,
+                                                                                   const __nv_bfloat16* vc, const int* pos, const int* slot,
+                                                                                   int win, long long ring, float scale) {
+    tf_wrows::merge<256, tf_wrows::TRUNC>(po, pm, pl, out, h, hk, chunks, q, kc, vc, pos, slot, win, ring, scale);
+}
+
+extern "C" __global__ void __launch_bounds__(tf_wrows::NT, 1) tf_ctl_wrows_prompt_edge(const __nv_bfloat16* q, const __nv_bfloat16* kc,
+                                                                                      const __nv_bfloat16* vc, __nv_bfloat16* out,
+                                                                                      const int* hi, int p0, int W, int H, int HK, int G,
+                                                                                      float scale, int win, int ring) {
+    tf_wrows::prompt::kernel<256, true, tf_wrows::EDGE>(q, kc, vc, out, hi, p0, W, H, HK, G, scale, win, ring);
+}
+
+extern "C" __global__ void __launch_bounds__(tf_wrows::NT, 1) tf_ctl_wrows_prompt_last(const __nv_bfloat16* q, const __nv_bfloat16* kc,
+                                                                                      const __nv_bfloat16* vc, __nv_bfloat16* out,
+                                                                                      const int* hi, int p0, int W, int H, int HK, int G,
+                                                                                      float scale, int win, int ring) {
+    tf_wrows::prompt::kernel<256, true, tf_wrows::LAST>(q, kc, vc, out, hi, p0, W, H, HK, G, scale, win, ring);
+}
