@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Io = std.Io;
 const digest_cache = @import("digest_cache.zig");
+const runtime_sha = @import("runtime_sha256.zig");
 
 /// Before any weight loads: config.json (a split's rank left out), the index, each shard's name, size and header.
 pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
@@ -124,11 +125,17 @@ pub const Content = struct {
     failed: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
     stop: std.atomic.Value(bool) = .init(false),
     bytes: std.atomic.Value(u64) = .init(0),
-    threads: [workers]?std.Thread = @splat(null),
+    threads: [max_workers]?std.Thread = @splat(null),
+    hash_backend: runtime_sha.Backend,
     t0: Io.Timestamp,
 
-    const workers = 8;
+    pub const max_workers = 8;
     const block = 8 << 20;
+    pub const Options = struct { serving_threads: usize = 2, storage_workers: usize = max_workers, hash_mode: runtime_sha.Mode = .auto };
+
+    pub fn workerCount(cpus: usize, serving: usize, files: usize, storage: usize) usize {
+        return @min(files, max_workers, @max(1, cpus -| serving), @max(1, storage));
+    }
 
     pub fn start(gpa: std.mem.Allocator, io: Io, dir: []const u8, split: bool) !*Content {
         const root = try digest_cache.environmentRoot(gpa);
@@ -137,9 +144,14 @@ pub const Content = struct {
     }
 
     pub fn startWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, split: bool, root: ?[]const u8) !*Content {
+        return startWithOptions(gpa, io, dir, split, root, .{});
+    }
+
+    pub fn startWithOptions(gpa: std.mem.Allocator, io: Io, dir: []const u8, split: bool, root: ?[]const u8, options: Options) !*Content {
+        const backend = try runtime_sha.select(options.hash_mode);
         const c = try gpa.create(Content);
         errdefer gpa.destroy(c);
-        c.* = .{ .gpa = gpa, .io = io, .arena = .init(gpa), .dir = undefined, .split = split, .names = undefined, .files = undefined, .plain = undefined, .keys = undefined, .errors = undefined, .t0 = Io.Clock.awake.now(io) };
+        c.* = .{ .gpa = gpa, .io = io, .arena = .init(gpa), .dir = undefined, .split = split, .names = undefined, .files = undefined, .plain = undefined, .keys = undefined, .errors = undefined, .hash_backend = backend, .t0 = Io.Clock.awake.now(io) };
         errdefer c.arena.deinit();
         const a = c.arena.allocator();
         c.dir = try a.dupe(u8, dir);
@@ -150,8 +162,13 @@ pub const Content = struct {
         c.keys = try a.alloc(digest_cache.Key, c.names.len);
         c.errors = try a.alloc(?anyerror, c.names.len);
         @memset(c.errors, null);
-        for (&c.threads) |*t| t.* = std.Thread.spawn(.{}, work, .{c}) catch null;
-        if (c.threads[0] == null) c.work(); // no thread could start: hash here
+        const workers = workerCount(std.Thread.getCpuCount() catch 1, options.serving_threads, c.names.len, options.storage_workers);
+        var started: usize = 0;
+        for (c.threads[0..workers]) |*thread| {
+            thread.* = std.Thread.spawn(.{}, work, .{c}) catch null;
+            if (thread.* != null) started += 1;
+        }
+        if (workers > 0 and started == 0) c.work();
         return c;
     }
 
@@ -212,8 +229,8 @@ pub const Content = struct {
         }
         std.mem.sort(Range, ranges.items, {}, byLo);
         for (ranges.items, 0..) |range, i| if (i > 0 and range.lo < ranges.items[i - 1].hi) return error.BadHeader;
-        var all = Sha256.init(.{});
-        var part = Sha256.init(.{});
+        var all = runtime_sha.Hash.init(c.hash_backend);
+        var part = runtime_sha.Hash.init(c.hash_backend);
         var at: u64 = 0;
         var r: usize = 0;
         while (at < size) {

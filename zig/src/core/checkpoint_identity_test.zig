@@ -6,6 +6,10 @@ const production = @import("checkpoint_identity.zig");
 const identity = production.identity;
 const Content = production.Content;
 
+test {
+    _ = @import("checkpoint_parallel_test.zig");
+}
+
 /// A test checkpoint: config.json, a dense and a 1 MiB expert tensor, a manifest of `manifest_sha` (else the shard's).
 pub fn write(io: Io, dir: Io.Dir, sub: []const u8, config: []const u8, dense: u8, flip: ?usize, manifest_sha: ?[32]u8) !void {
     const gpa = std.testing.allocator;
