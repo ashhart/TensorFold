@@ -303,8 +303,43 @@ pub fn nodeChances(e: *Engine, s: *Stream, n: usize) ![]const f64 {
     return alloc.chainProbabilities(a, try e.rule.rates(who(s)), n);
 }
 
-/// Structured output: the rows an accepted path can use, each row's bits, and the grammar's drafts after a lone chain.
+/// Grammar chains share the unallocated rows; the first share rotates without changing backend window order.
+pub fn constrainShared(e: *Engine, plans: []Plan) !void {
+    if (plans.len == 0) return;
+    var total: usize = 0;
+    var left: usize = 0;
+    for (plans) |p| {
+        total += 1 + p.count();
+        left += @intFromBool(grammarGrows(p));
+    }
+    const start = e.shared_rounds % plans.len;
+    for (0..plans.len) |i| {
+        const p = &plans[(start + i) % plans.len];
+        const rows = 1 + p.count();
+        var room = rows;
+        if (grammarGrows(p.*)) {
+            const spare = e.cfg.batch_rows -| total;
+            const share = spare / left + @intFromBool(spare % left != 0);
+            const budget: usize = @intCast(@max(1, p.stream.draftRoom()));
+            room = @min(rows + share, e.cfg.family_width, budget);
+            left -= 1;
+        }
+        try constrainTo(e, p, room);
+        total = total - rows + 1 + p.count();
+    }
+}
+
+fn grammarGrows(p: Plan) bool {
+    return p.stream.grammar != null and p.stream.drafts and p.kind != .forced and
+        (p.parents == null or accept.isChain(p.parents.?));
+}
+
+/// Structured output: the accepted paths' rows and masks, and grammar drafts within the available row budget.
 pub fn constrain(e: *Engine, p: *Plan) !void {
+    return constrainTo(e, p, if (e.alone) e.cfg.family_width else 1 + p.count());
+}
+
+fn constrainTo(e: *Engine, p: *Plan, limit: usize) !void {
     const g = p.stream.grammar orelse return;
     const a = e.arena.allocator();
     if (p.held > 0) {
@@ -318,8 +353,8 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
     const rows = try a.alloc(u32, 1 + p.tokens.len);
     rows[0] = p.stream.pending.?;
     @memcpy(rows[1..], p.tokens);
-    const grows = p.stream.drafts and p.kind != .forced and e.alone;
-    const room = if (grows) @max(rows.len, e.cfg.family_width) else rows.len;
+    const grows = p.stream.drafts and p.kind != .forced;
+    const room = if (grows) @max(rows.len, limit) else rows.len;
     const w = try g.window(a, rows, try accept.rowParents(a, rows.len, p.parents), p.kind == .forced, room);
     p.masks = w.masks;
     if (w.rows.len == rows.len and w.extra.len == 0) return;
