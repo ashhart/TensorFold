@@ -194,6 +194,14 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
         }
         if (j != 0 || row0 + r >= a.m) continue;
 #pragma unroll
+        for (int c = 0; c < CB; ++c) {
+            const int col = col0 + c % CH;
+            if (col < cols && !__builtin_isfinite(v[c])) {
+                const int wc = col + (PAIR && c >= CH ? pair_cols : 0);
+                v[c] = Dec::template repair_stream<T>(a, xr[r], wc, v[c]);
+            }
+        }
+#pragma unroll
         for (int c = 0; c < CH; ++c) {
             const int col = col0 + c;
             if (col >= cols) continue;

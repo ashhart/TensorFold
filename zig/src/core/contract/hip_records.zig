@@ -10,7 +10,7 @@ pub const Record = struct { launch: limits.HipLaunch, usage: [limits.rdna.len]U 
 const rms_ns = "_ZN2tf4rocm10rms_kernelI";
 
 /// HIP kernels as launched; tf-hip-kernel-contract limits DIR re-derives the usage records from the code objects.
-pub const records = [_]Record{
+const own_records = [_]Record{
     .{
         .launch = .{ .name = "RMS norm tf_rms_rows", .symbol = "tf_rms_rows", .image = "ops", .threads = 256 },
         .usage = .{
@@ -49,6 +49,8 @@ pub const records = [_]Record{
         },
     },
 };
+
+pub const records = own_records ++ @import("hip_records_stream.zig").records;
 
 /// Gate 5's planted HIP controls: a launch past its __launch_bounds__, and 72 KiB of LDS where a workgroup has 64.
 pub const controls = [_]Record{

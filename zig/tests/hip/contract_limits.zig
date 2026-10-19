@@ -75,10 +75,10 @@ pub fn live(a: std.mem.Allocator, r: *const hip.Runtime, ctx: hip.Context, arch:
         const bytes = try image(rec.launch.image);
         const listed = try hsaco.kernels(a, bytes);
         defer a.free(listed);
-        const meta = (hsaco.find(listed, rec.launch.symbol) orelse return error.SymbolNotInImage).usage;
+        const meta = (hsaco.find(listed, rec.launch.symbolOn(at)) orelse return error.SymbolNotInImage).usage;
         var mod = try hip.Module.load(r, bytes);
         defer mod.unload();
-        const sym = try a.dupeSentinel(u8, rec.launch.symbol, 0);
+        const sym = try a.dupeSentinel(u8, rec.launch.symbolOn(at), 0);
         defer a.free(sym);
         const f = try mod.function(sym);
         const regs: u32 = @intCast(try f.attribute(.num_regs));
@@ -119,7 +119,7 @@ pub fn objects(a: std.mem.Allocator, io: std.Io, dir: []const u8) !usize {
             defer a.free(bytes);
             const listed = try hsaco.kernels(a, bytes);
             defer a.free(listed);
-            const k = hsaco.find(listed, rec.launch.symbol) orelse return error.SymbolNotInImage;
+            const k = hsaco.find(listed, rec.launch.symbolOn(i)) orelse return error.SymbolNotInImage;
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(a);
             const problems = try limits.hip(rec.launch, k.usage, t, &out, a);

@@ -132,6 +132,13 @@ pub const HipLaunch = struct {
     image: []const u8,
     threads: u32,
     dynamic: u32 = 0,
+    /// The symbol on each chip (rdna's order) where it differs, as a stream tile's dot2 type does.
+    symbols: ?[rdna.len][]const u8 = null,
+
+    /// The symbol the launch resolves on chip `i` of `rdna`.
+    pub fn symbolOn(l: HipLaunch, i: usize) []const u8 {
+        return if (l.symbols) |s| s[i] else l.symbol;
+    }
 };
 
 /// What hipcc made of one kernel for one chip, from the code object's metadata (vgprs 0: none recorded).

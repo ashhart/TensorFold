@@ -5,6 +5,7 @@ const core = @import("core");
 const controls = @import("hip_controls");
 const gate5 = @import("contract_limits.zig");
 const rows_k = @import("contract_rows.zig");
+const stream_k = @import("contract_stream.zig");
 
 const g = core.contract.gates;
 
@@ -66,6 +67,10 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
         nrows += 1;
     }
     for (row_list[0..nrows]) |*x| try kernels.append(a, x.kernel());
+    var streams: [stream_k.cases.len]stream_k.Stream = undefined;
+    for (&streams, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    defer for (&streams) |*x| x.deinit();
+    for (&streams) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

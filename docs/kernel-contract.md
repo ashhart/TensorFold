@@ -113,6 +113,10 @@ A gate failure on a kernel already shipped is reported, not hidden. Until its fi
 it pass, the run fails until the entry is removed. Today: affine_mm's 4-bit form gives NaN for an infinite input where
 MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s.
 
+HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
+operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
+registered at all six supported bit widths and groups of 32, 64 and 128, with no known finding.
+
 ## Coverage
 
 Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm
