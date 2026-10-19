@@ -19,7 +19,7 @@ command-sandbox conformance test, typechecks and checks patch whitespace.
 | Check | Evidence |
 | --- | --- |
 | Dev build + typecheck | `npm run build` and `tsc --noEmit` pass |
-| Full test suite | `npm test` → 826/826 passed |
+| Full test suite | `npm test` → 832/832 passed |
 | Window chrome | native Linux frame; window, close/draft and spacing tests pass |
 | Linux packaging | `npm run pack:linux:dev` → `release/linux/linux-unpacked` |
 | Artifact contents | no `resources/engine`, no `resources/computer-use`; notices only |
@@ -29,8 +29,21 @@ command-sandbox conformance test, typechecks and checks patch whitespace.
 | VM installer fixture | passes with `umask 022` (environment cause) |
 | Outlook fixture | passes with a workspace-extracted sqlite3 CLI |
 
-Not verified: graphical launch on X11/Wayland, a real Mac-server streaming/tool round trip, and a
+Not verified by this branch's author: a real Mac-server streaming/tool round trip (the user
+confirmed a remote TensorFold engine and provider detection working on Fedora 42), and a
 clean-machine install.
+
+## Fixed from user testing on Fedora 42 (Wayland)
+
+- A startup crash (`React #310`) left the window on the boot splash in every Linux build. `App`
+  declared `useEngine()` below its loading-state return, so the hook count changed when settings
+  arrived. The hook moved above the return and `App.hooks-order.test.ts` now fails if any hook is
+  declared after that return.
+- A frozen boot is no longer silent: renderer errors, unhandled rejections and a ten-second stall
+  appear in a visible panel, and `did-fail-load` / `render-process-gone` report to the terminal and
+  a dialog.
+- Wayland cannot present Vulkan surfaces; the app now merges `Vulkan` into `--disable-features` when
+  a Wayland session is detected, leaving X11 and macOS untouched.
 
 ## Linux command sandbox
 
