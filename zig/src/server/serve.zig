@@ -149,6 +149,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
         .served_name = s.served,
         .model_dir = s.model_dir,
+        .voices_dir = args.voices,
+        .default_voice = args.default_voice,
         .model_ids = ids.items,
         .default_max_tokens = args.max_tokens,
         .enable_thinking = args.thinking,

@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Drama speech serving accepts opt-in attested voice catalogs with `--voices`, `--default-voice` and `GET /v1/voices`, using the family's reference prompt builder.
+
 ## 1.1.1
 
 - The app checks models through HTTPS Hub fake-IP proxies in both address families and honours one validated `HF_ENDPOINT` for checks and downloads. Network-policy refusals name the DNS address and proxy remedy (#1037). Thanks to @samwang0041-star.

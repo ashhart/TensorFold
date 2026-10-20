@@ -7,6 +7,20 @@ const parse = cli.parse;
 const request = cli.request;
 const capabilities = cli.capabilities;
 
+test "voices: CLI defaults and explicit catalog" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const defaults = try parse(a, &.{"m"}, &u);
+    try std.testing.expect(defaults.voices == null);
+    try std.testing.expectEqualStrings("default", defaults.default_voice);
+    const named = try parse(a, &.{ "m", "--voices", "catalog", "--default-voice=tone" }, &u);
+    try std.testing.expectEqualStrings("catalog", named.voices.?);
+    try std.testing.expectEqualStrings("tone", named.default_voice);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--default-voice=../tone" }, &u));
+}
+
 test "parse and capabilities share the table" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
