@@ -83,6 +83,7 @@ pub const Sizes = struct {
 };
 
 pub fn products(s: Sizes) Error!void {
+    if (s.kv_heads == 0 or s.key_heads == 0) return error.InvalidConfig;
     if (s.heads % s.kv_heads != 0 or s.value_heads % s.key_heads != 0) return error.InvalidConfig;
     const limit: usize = std.math.maxInt(u32);
     const q = try mul(try mul(s.heads, s.head_dim), 2);
@@ -186,6 +187,11 @@ test "sizes: products past 32 bits and uneven head groups are refused" {
     var uneven = ok;
     uneven.kv_heads = 5;
     try std.testing.expectError(error.InvalidConfig, products(uneven));
+    for ([_]*usize{ &uneven.kv_heads, &uneven.key_heads }) |field| {
+        uneven = ok;
+        field.* = 0;
+        try std.testing.expectError(error.InvalidConfig, products(uneven));
+    }
     var huge = ok;
     huge.hidden = std.math.maxInt(usize) / 2;
     try std.testing.expectError(error.InvalidConfig, products(huge));

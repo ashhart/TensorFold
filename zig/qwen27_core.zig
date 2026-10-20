@@ -35,4 +35,6 @@ pub const tree_commit_gpu = @import("tree_commit_gpu");
 pub const tree_slots = @import("src/core/tree_slots.zig");
 /// The 35B-A3B's routed experts: router logits and the expert tiles.
 pub const moe_route = @import("src/core/moe_route.zig");
+/// The Qwen3.5 family's config reader, which the CUDA and HIP engines read too.
+pub const qwen35_config = @import("src/families/qwen3_5/config.zig");
 pub const tile_qmm = @import("src/core/tile_qmm.zig");
