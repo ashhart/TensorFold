@@ -78,9 +78,9 @@ pub const Modules = struct {
         return m;
     }
 
-    /// What weights.load runs: the dense packing, and for the MTP head the quantizers and the 4-bit tiling.
+    /// What weights.load runs: the dense packing, the FP8 lane, and the MTP head's quantizers and 4-bit tiling.
     pub fn tools(m: *const Modules) weights.Tools {
-        return .{ .pack_dense = m.pack_dense, .quant = &m.quant, .q4 = &m.q4 };
+        return .{ .pack_dense = m.pack_dense, .lane = &m.lane, .quant = &m.quant, .q4 = &m.q4 };
     }
 
     pub fn ops(m: *const Modules) cuda.Module {

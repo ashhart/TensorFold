@@ -191,6 +191,7 @@ fn fp8g(L: anytype, shares: []const fp8pb.Share, comptime name: []const u8, args
         std.log.err(name ++ ": a rank's cut leaves the lane's 64-row tiles or 64-input groups", args);
         return e;
     };
+    try laneRuns(L, fp8.weight(0, 0, z.n, z.k), name, args);
     const codes = try L.gpa.alloc(u8, z.codes);
     defer L.gpa.free(codes);
     const scales = try L.gpa.alloc(f32, z.scales);
@@ -208,6 +209,7 @@ fn mxLane(L: anytype, shares: []const mxfp8.Share, comptime name: []const u8, ar
         std.log.err(name ++ ": a rank's cut leaves a scale byte's 32 inputs or the lane's 64-row tiles", args);
         return e;
     };
+    try laneRuns(L, cuda.mxfp8.weight(0, 0, z.n, z.k), name, args);
     const codes = try L.gpa.alloc(u8, z.codes);
     defer L.gpa.free(codes);
     const scales = try L.gpa.alloc(u8, z.scales);
@@ -217,6 +219,14 @@ fn mxLane(L: anytype, shares: []const mxfp8.Share, comptime name: []const u8, ar
     const c = try L.put(name ++ ".codes", args);
     try L.host.appendSlice(L.gpa, scales);
     return cuda.mxfp8.weight(c, try L.put(name ++ ".scales", args), z.n, z.k);
+}
+
+/// A lane weight of `w`'s shape that the forward's matmul cannot run on this GPU, refused by name before its upload.
+fn laneRuns(L: anytype, w: cuda.qmmf.Weight, comptime name: []const u8, args: anytype) !void {
+    projection.fits(L.tools.lane, w) catch |e| {
+        std.log.err(name ++ ": the lane would sum its K slices in memory on this GPU (clusters need sm_90)", args);
+        return e;
+    };
 }
 
 /// The refusal's text: the module, what the checkpoint declares and what its weight holds.

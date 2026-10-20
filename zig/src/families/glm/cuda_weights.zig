@@ -32,8 +32,8 @@ pub const Layer = struct { index: u32, attn_hc: Hc, ffn_hc: Hc, in_norm: glue.No
 /// The MTP head (weights.MTPW): norms, eh_proj, a DSA + MoE layer (NVFP4 experts), shared_head.norm, 4-bit draft head.
 pub const Mtp = struct { enorm: u64, hnorm: u64, eh: u64, norm: u64, layer: Layer, draft: q4.Q4 };
 
-/// The kernels a load runs: affine4_pack's tf_pack_dense, and for the MTP head the quantizers and the 4-bit tiling.
-pub const Tools = struct { pack_dense: cuda.Function, quant: ?*const quant.Kernels = null, q4: ?*const q4.Kernels = null };
+/// The kernels a load runs: affine4_pack's tf_pack_dense, the FP8 lane, and the MTP head's quantizers and 4-bit tiling.
+pub const Tools = struct { pack_dense: cuda.Function, lane: *const cuda.qmmf.Lane, quant: ?*const quant.Kernels = null, q4: ?*const q4.Kernels = null };
 
 /// A loaded tensor by the Python family's attribute path, for digests against its weights.
 pub const Named = struct { name: []u8, ptr: u64, len: usize };
