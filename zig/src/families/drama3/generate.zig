@@ -44,12 +44,13 @@ const usage =
     \\       drama3-generate --model DIR --text "..." [--ref-text "..." --ref-codes FILE] [--rows FILE]
     \\                       [--temperature 1.0] [--top-k 30] [--top-p 0.9] [--seed 1] [--greedy]
     \\                       [--max-frames 1500] [--graphs 1] [--sync-every 8] [--out FILE] [--rows-out FILE]
-    \\                       [--max-ctx 4096] [--max-rows 1024] [--threads 16] [--repeat N] [--pdl 1] [--split 1]
+    \\                       [--max-ctx 4096] [--max-rows 128] [--threads 16] [--repeat N] [--pdl 1] [--split 1]
     \\       drama3-generate --model DIR --check DUMPDIR [--check-frames 40]
     \\       drama3-generate --codec-check REF --codec CODEC --frames FRAMES [--ref-audio WAV]
     \\
     \\WAV out: 16-bit PCM mono 44.1 kHz; --pcm-out streams raw s16le ("-" is stdout). Reference WAVs: any PCM or float32.
     \\--replay 1 checks eager/graphs, scratch poisoning, codec chunks and interleaved independent state.
+    \\--check honors --max-rows for prompt probes; compare the same oracle vectors at 1 and N rows.
     \\--speed-probe 1 compares the staged CUDA GEMV candidate; it never promotes a serving kernel.
     \\--rows: prompt rows int32 [n, 11]; --ref-codes and --encode: int32 [frames, 10]; --out: frames int32 [n, 11].
     \\The last stderr line is "RESULT drama3 OK ..." with the frame count, timings and frames a second.

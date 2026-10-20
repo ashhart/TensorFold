@@ -32,6 +32,7 @@ pub const Options = struct {
     lanes: u32 = 2,
     silence: api.speech_guard.Config = .{},
     max_frames: ?u32 = null,
+    prefill_rows: u32 = if (is_cuda) 128 else 1,
 };
 
 const Host = struct {
@@ -181,8 +182,9 @@ const Host = struct {
                 if (is_cuda) try s.t.c.reset(s.t.cs) else try s.t.c.reset();
                 j.state.started = true;
             }
-            try s.e.promptChunk(r.frames.len, j.state.prompt, 1, null);
-            j.state.prompt += 1;
+            const count = s.e.o.promptRows(r.frames.len - j.state.prompt);
+            try s.e.promptChunk(r.frames.len, j.state.prompt, count, null);
+            j.state.prompt += count;
             if (j.state.prompt == r.frames.len) {
                 try s.e.finishPrompt(r.frames);
                 h.lock();
@@ -281,6 +283,7 @@ const Host = struct {
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, o: Options) !api.Opened {
     if (o.context < 1025 or o.context > 8192) return error.BadDramaContext;
     const budget = try @import("drama_budget.zig").budget(o.context, o.max_frames);
+    try (d3.Options{ .max_rows = o.prefill_rows, .attn_chunk = o.prefill_rows }).validatePrefill();
     if (!is_cuda) try d3.load_limit.admit(gpa, io, dir, o.context); // refused before a weight is read: the floor's one-Mac limit
     try o.silence.validate();
     const h = try gpa.create(Host);
@@ -306,8 +309,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
     while (made < o.lanes) : (made += 1) {
         const e = if (made == 0) try d3.Engine.create(gpa, io, dir, .{
             .max_ctx = o.context,
-            .max_rows = 1,
-            .attn_chunk = 1,
+            .max_rows = o.prefill_rows,
+            .attn_chunk = o.prefill_rows,
             .max_frames = o.max_frames orelse 1024,
             .warmup = false,
             .device = o.device,

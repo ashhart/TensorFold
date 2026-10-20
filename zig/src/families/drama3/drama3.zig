@@ -22,6 +22,7 @@ pub const Sampling = engine.Sampling;
 pub const Options = engine.Options;
 
 test {
+    _ = common;
     _ = completion;
     _ = speech_decode;
     _ = @import("replay_test.zig");

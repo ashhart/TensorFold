@@ -26,6 +26,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `drama3-voice` writes an attested voice catalog file from reference WAVs and transcripts, with codes from `drama3-generate --encode`, and refuses a file without `--source-kind` and `--source-note` (#1153). Thanks to @plotarmordev.
 
+- Drama 3 on CUDA prefills bounded row chunks in each shared round. `TF_DRAMA_PREFILL_ROWS` selects 1 through 1024 rows (default 128); the generation tool uses `--max-rows`. Batched projections and attention can change rounding relative to single-row prefill; oracle checks now compare the selected prompt chunks at their reference-row offsets.
+
 ## 1.1.3
 
 - Flash Next image chats that add another image resume from their cached prompt instead of processing it again: image streams sit in the standard frame, and positioned pooling reads the image's three position axes. Malformed image spans are refused before anything is allocated (#1200). Thanks to @sethforprivacy.

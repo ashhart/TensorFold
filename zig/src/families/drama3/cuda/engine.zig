@@ -102,6 +102,7 @@ pub const Engine = struct {
     prompt_rows: usize = 0,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, o: Options) !*Engine {
+        try o.validatePrefill();
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.* = undefined;
@@ -351,10 +352,10 @@ pub const Engine = struct {
     /// Run the prompt rows (int32 [n][11]) through the backbone and the tower, leaving the frame step ready.
     pub fn prefill(e: *Engine, rows: []const [W]i32, probe: ?Probe) !void {
         try e.startPrompt(rows);
-        const R = if (probe != null) e.o.max_rows else 1;
+        const R = e.o.max_rows;
         if (probe != null and rows.len > R) return error.ProbeNeedsOneChunk;
         var at: usize = 0;
-        while (at < rows.len) : (at += R) try e.promptChunk(rows.len, at, @min(R, rows.len - at), probe);
+        while (at < rows.len) : (at += R) try e.promptChunk(rows.len, at, e.o.promptRows(rows.len - at), probe);
         try e.finishPrompt(rows);
     }
 
