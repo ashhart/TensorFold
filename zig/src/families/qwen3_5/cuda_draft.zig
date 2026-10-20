@@ -56,6 +56,7 @@ pub const Draft = struct {
     fns: Fns,
     scratch: DeviceBuffer,
     selection_base: usize = 0,
+    drawn: struct { sampling: ?lanes.Sampling = null, position: u64 = 0 } = .{},
     segments: u64 = 0,
     pm: u64 = 0,
     pl: u64 = 0,
@@ -342,7 +343,7 @@ pub const Draft = struct {
 
     fn candidates(d: *const Draft, rows: usize) tree.Candidates {
         const base = d.selection_base;
-        return .{ .words = d.staged.bytes[words_at + base * lp_words * 4 ..][0 .. rows * lp_words * 4], .projected = d.staged.bytes[hp_at + base * d.c.rank * 2 ..][0 .. rows * d.c.rank * 2], .topk = d.c.topk, .rank = d.c.rank, .predecessor = d.w.predecessor, .successor = d.w.successor };
+        return .{ .words = d.staged.bytes[words_at + base * lp_words * 4 ..][0 .. rows * lp_words * 4], .projected = d.staged.bytes[hp_at + base * d.c.rank * 2 ..][0 .. rows * d.c.rank * 2], .topk = d.c.topk, .rank = d.c.rank, .predecessor = d.w.predecessor, .successor = d.w.successor, .sampling = d.drawn.sampling, .position = d.drawn.position };
     }
 
     pub fn select(d: *Draft, ctx: *Ctx, pending: u32, rows: usize) void {
@@ -358,6 +359,9 @@ pub const Draft = struct {
     pub fn selectHold(d: *Draft, ctx: *Ctx, it: dr.Hold) !void {
         const rows = d.c.block - 1;
         ctx.grown = 0;
+        // a sampled hold's candidates ranked as its target draw ranks them (its seed, each draft's position)
+        d.drawn = .{ .sampling = it.sampling, .position = it.position };
+        defer d.drawn = .{};
         if (it.lanes) |shape| return d.selectLanes(ctx, it.pending, rows, shape);
         const limit = if (d.c.block == 16) tree.nodes() else 0;
         if (limit > 0) {

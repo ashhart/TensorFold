@@ -31,8 +31,8 @@ pub const Absorb = struct {
     offered: u32 = 0, // the drafter's grown tree's first nodes the verified window carried (0: none of its own)
 };
 
-/// `depth` drafts after `pending` at `position`; `lanes`: a tree's rank-r choices; `tokens`: the stream's, if given.
-pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, plan: ?*const @import("proposal_head.zig").Plan = null, lanes: ?*const Shape = null, tokens: []const u32 = &.{} };
+/// `depth` drafts after `pending` at `position`; `lanes`: a tree's ranks; `tokens`, `sampling`: the stream's, if given.
+pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, plan: ?*const @import("proposal_head.zig").Plan = null, lanes: ?*const Shape = null, tokens: []const u32 = &.{}, sampling: ?@import("sampling.zig").Sampling = null };
 
 pub const Drafter = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
