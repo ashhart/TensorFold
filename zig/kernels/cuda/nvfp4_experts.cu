@@ -166,8 +166,19 @@ __device__ __forceinline__ uint32_t mul2(uint32_t a, uint32_t b) {
   return r;
 }
 
-// Prompt rows, 64 inputs a stage, one fp32 sum over K; NT (row tiles a warp) is constant so no branch splits mma.
-template <int M, int EPI, int RT, int WM, int WN, int NT>
+// mma from zero (C = 0): the same sums as the decode form's zeroed p[4], no register moves.
+__device__ __forceinline__ void mma_z(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
+                                      uint32_t b1) {
+  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+      "{%10, %10, %10, %10};\n"
+      : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(0.f));
+}
+
+// Prompt rows, 64 inputs a stage; NT (row tiles a warp) is constant so no branch splits mma. FACT false: one fp32
+// sum over K of the scaled codes. FACT true: the decode form's factored sums, bit for bit at every row: each
+// 16-input block's mma of the raw codes from zero, then fma(p, its e4m3 scale, acc), blocks in ascending K.
+template <int M, int EPI, int RT, int WM, int WN, int NT, bool FACT = false>
 __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                              const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
                                              int NB, const int* __restrict__ members, void* __restrict__ out, int N,
@@ -233,13 +244,18 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
       const uint4* ws = xs + P::XU + (wn * P::SG + gi) * P::WB;
       uint4 wv[M];
       uint2 sc[M][2];
+      uint4 sd[M];  // FACT: the decode form's scale word of quad t (columns 2t, 2t + 1 of each n8 tile)
 #pragma unroll
       for (int m = 0; m < M; ++m) {
         wv[m] = ws[m * BLOCK4 + lane];
+        if constexpr (FACT) {
+          sd[m] = ws[m * BLOCK4 + 32 + t];
+        } else {
         // column j * 8 + gq's scales of 16-block h: bytes 2j + (gq & 1) of an 8-byte run
 #pragma unroll
         for (int h = 0; h < 2; ++h)
           sc[m][h] = reinterpret_cast<const uint2*>(ws + m * BLOCK4 + 32)[(gq >> 1) * 2 + h];
+        }
       }
 #pragma unroll
       for (int h = 0; h < 2; ++h) {
@@ -256,10 +272,27 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
 #pragma unroll
           for (int j = 0; j < NTW; ++j) {
             const uint32_t word = comp(wv[m], j);
+            if constexpr (FACT) {
+              const uint32_t b0 = fp4pair(word, 8 * h), b1 = fp4pair(word, 8 * h + 4);
+              const uint32_t sw = comp(sd[m], 2 * h + (j >> 1));
+              const int sh = (j & 1) * 16;
+              const float s0 = e4m3f((sw >> sh) & 0xFFu), s1 = e4m3f((sw >> (sh + 8)) & 0xFFu);
+#pragma unroll
+              for (int r = 0; r < NT; ++r) {
+                float p[4];
+                mma_z(p, xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
+                float(&a)[4] = acc[m][r][j];
+                a[0] = fmaf(p[0], s0, a[0]);
+                a[1] = fmaf(p[1], s1, a[1]);
+                a[2] = fmaf(p[2], s0, a[2]);
+                a[3] = fmaf(p[3], s1, a[3]);
+              }
+            } else {
             const uint32_t sv = e4m3x2(__byte_perm(j < 2 ? sc[m][h].x : sc[m][h].y, 0u, pick[j & 1]));
             const uint32_t b0 = mul2(fp4pair(word, 8 * h), sv), b1 = mul2(fp4pair(word, 8 * h + 4), sv);
 #pragma unroll
             for (int r = 0; r < NT; ++r) mma(acc[m][r][j], xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
+            }
           }
       }
     }
@@ -286,7 +319,7 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
   }
 }
 
-template <int M, int EPI, int RT, int WM, int WN>
+template <int M, int EPI, int RT, int WM, int WN, bool FACT = false>
 __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                             const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
                                             int NB, const int* __restrict__ items, const int* __restrict__ counts,
@@ -299,7 +332,7 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
   if (e == skip) return;  // an expert the family computes itself, left alone as the decode form does
   const int nt = max(0, min(RT, (cnt - 16 * RT * ((threadIdx.x >> 5) / WN) + 15) >> 4));
 #define TF_TILES(NT) \
-  prompt_tiles<M, EPI, RT, WM, WN, NT>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, first, cnt)
+  prompt_tiles<M, EPI, RT, WM, WN, NT, FACT>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, first, cnt)
   switch (nt) {
     case 4: TF_TILES(4); break;
     case 3: TF_TILES(3); break;
@@ -335,3 +368,16 @@ template __global__ void nvfp4_expert_kernel<1, 1, 1>(const __nv_bfloat16* __res
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_relu2, 1, 1, 8)
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_swiglu, 2, 2, 4)
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_down, 1, 3, 8)
+
+// The decode form's factored sums on the prompt tiles (bit-equal to nvfp4_expert_kernel<2, 2, *> and <1, 0, *> at
+// every row): SwiGLU gate-up to bf16, down to fp32 slot rows.
+#define TF_NVFP4_FACT(NAME, M, EPI, WN)                                                                                \
+  extern "C" __global__ void __launch_bounds__(WN * 32) NAME(                                                        \
+      const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,                     \
+      const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items, const int* __restrict__ counts, \
+      const int* __restrict__ members, void* __restrict__ out, int N, float limit, int skip) {                       \
+    tf_nvfp4_experts::prompt_body<M, EPI, 4, 1, WN, true>(X, x_stride, slots, W, scale, KG, NB, items, counts,       \
+                                                          members, out, N, limit, skip);                             \
+  }
+TF_NVFP4_FACT(tf_nvfp4_fact_swiglu, 2, 2, 4)
+TF_NVFP4_FACT(tf_nvfp4_fact_down_f32, 1, 0, 8)
