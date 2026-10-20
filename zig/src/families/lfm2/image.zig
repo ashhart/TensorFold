@@ -164,6 +164,19 @@ pub const Marks = struct {
         return null;
     }
 
+    /// Automatic pictures are disabled with a warning when their markers are unsafe.
+    pub fn forPictures(t: *const Tokenizer, warning: *[]const u8) ?Marks {
+        const marks = resolve(t) orelse {
+            warning.* = "LFM2 image input disabled: the tokenizer is missing required picture markers; text serving continues";
+            return null;
+        };
+        if (marks.firstNonAdded(t) != null) {
+            warning.* = "LFM2 image input disabled: a picture marker is not an added token; text serving continues";
+            return null;
+        }
+        return marks;
+    }
+
     /// The marks from the tokenizer's special tokens, or null when one is missing.
     pub fn resolve(t: *const Tokenizer) ?Marks {
         var m: Marks = undefined;
@@ -314,4 +327,47 @@ test "vision markers: every LFM2 picture and tile marker must be added" {
         added[i].id -= 1000;
     }
     std.debug.print("VISION_LFM2 markers={d}; every omitted entry refused\n", .{added.len});
+}
+
+test "automatic LFM2 pictures warn and turn off for missing or non-added markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var names: [104][]const u8 = undefined;
+    @memcpy(names[0..4], &[_][]const u8{ "<image>", "<|image_start|>", "<|image_end|>", "<|img_thumbnail|>" });
+    for (names[4..], 0..) |*name, i| name.* = try std.fmt.allocPrint(a, "<|img_row_{d}_col_{d}|>", .{ i / max_grid + 1, i % max_grid + 1 });
+    for (0..3) |mode| {
+        var vocab: std.json.ObjectMap = .empty;
+        try vocab.put(a, "?", .{ .integer = 0 });
+        var added = std.json.Array.init(a);
+        for (names, 0..) |name, i| {
+            if (mode != 1 or i != 3) try vocab.put(a, name, .{ .integer = @intCast(i + 1) });
+            if (mode != 0 and i == 3) continue;
+            var token: std.json.ObjectMap = .empty;
+            try token.put(a, "content", .{ .string = name });
+            try token.put(a, "special", .{ .bool = true });
+            try token.put(a, "normalized", .{ .bool = false });
+            try added.append(.{ .object = token });
+        }
+        var model: std.json.ObjectMap = .empty;
+        try model.put(a, "type", .{ .string = "WordLevel" });
+        try model.put(a, "unk_token", .{ .string = "?" });
+        try model.put(a, "vocab", .{ .object = vocab });
+        var table: std.json.ObjectMap = .empty;
+        try table.put(a, "model", .{ .object = model });
+        try table.put(a, "added_tokens", .{ .array = added });
+        var tok = try core.tokenizer.parse(a, try std.json.Stringify.valueAlloc(a, std.json.Value{ .object = table }, .{}));
+        defer tok.deinit();
+        var warning: []const u8 = "";
+        const marks = Marks.forPictures(&tok, &warning);
+        try std.testing.expectEqual(mode == 0, marks != null);
+        if (mode == 0) {
+            try std.testing.expectEqualStrings("", warning);
+        } else {
+            try std.testing.expect(std.mem.indexOf(u8, warning, "image input disabled") != null);
+            try std.testing.expect(std.mem.indexOf(u8, warning, "text serving continues") != null);
+            try std.testing.expect(std.mem.indexOf(u8, warning, if (mode == 1) "missing" else "not an added token") != null);
+        }
+    }
+    std.debug.print("VISION_LFM2_AUTO valid stays enabled; missing and non-added disable pictures with warning\n", .{});
 }

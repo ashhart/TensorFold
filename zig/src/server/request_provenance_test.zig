@@ -5,6 +5,23 @@ const HfText = @import("hf_text.zig").HfText;
 const f = @import("control_tokens_fixture.zig");
 const mt = @import("model_text.zig");
 
+test "request provenance: ordinary added-id overlap reports a clear refusal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = try f.Fixture.init(a, 0);
+    defer fixture.deinit();
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tokenizer.json", .data =
+        \\{"added_tokens":[{"content":"<V>","special":true,"normalized":false}],"model":{"type":"WordLevel","unk_token":"?","vocab":{"?":0,"<V>":1}}}
+    });
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, std.testing.io, fixture.path, null, a, &problem);
+    defer hf.deinit();
+    try std.testing.expectError(error.Template, hf.text().encodeMasked(a, "<V>", &.{.{ 0, 3 }}, &problem));
+    try std.testing.expect(std.mem.indexOf(u8, problem, "request text tokenizes to an added-token id") != null);
+    try std.testing.expectEqualSlices(u32, &.{1}, try hf.text().encode(a, "<V>", false));
+}
+
 const field_source =
     \\{% for m in messages %}{{ m.role }}{{ m.content }}{{ m.reasoning_content|default('') }}
     \\{% for c in m.tool_calls|default([]) %}{{ c.function.name }}{{ c.function.arguments }}{% endfor %}{% endfor %}

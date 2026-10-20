@@ -86,3 +86,53 @@ test "lossy UTF8 keeps its request mask while adjacent literal matches survive" 
     const ids = try tokenizer.encodeMasked(a, "\xff<S>", &.{.{ 0, 1 }});
     try t.expectEqualSlices(u32, try tokenizer.encode(a, "\u{fffd}<S>"), ids);
 }
+
+test "masked gaps refuse added ids emitted by WordLevel and BPE vocabulary overlap" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{
+        \\{"added_tokens":[{"content":"<V>","special":true,"normalized":false}],"model":{"type":"WordLevel","unk_token":"?","vocab":{"?":0,"<V>":1}}}
+        ,
+        \\{"added_tokens":[{"content":"<V>","special":true,"normalized":false}],"model":{"type":"BPE","ignore_merges":true,"vocab":{"?":0,"<":1,"V":2,">":3,"<V>":4},"merges":[]}}
+        ,
+        \\{"added_tokens":[{"content":"<V>","special":true,"normalized":true}],"model":{"type":"WordLevel","unk_token":"?","vocab":{"?":0,"<V>":1}}}
+        ,
+    }) |source| {
+        var tokenizer = try tok.parse(a, source);
+        defer tokenizer.deinit();
+        const id = tokenizer.specialTokenId("<V>").?;
+        try t.expectEqualSlices(u32, &.{id}, try tokenizer.encodePlain(a, "<V>"));
+        try t.expectEqualSlices(u32, &.{id}, try tokenizer.encodeMasked(a, "<V>", &.{}));
+        for (0..3) |i| try t.expectError(error.UnsafeAddedTokenMask, tokenizer.encodeMasked(a, "<V>", &.{.{ i, i + 1 }}));
+        try t.expectEqualSlices(u32, &.{0}, try tokenizer.encodeMasked(a, "?", &.{.{ 0, 1 }}));
+    }
+}
+
+test "masked gap overlap checks memo hits even when no added spelling occurs" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try a.alloc(u8, 8192);
+    @memset(text, 'a');
+    const source = try std.fmt.allocPrint(a,
+        \\{{"added_tokens":[{{"content":"<V>","special":true,"normalized":false}}],"model":{{"type":"WordLevel","unk_token":"?","vocab":{{"?":0,"<V>":1,"{s}":1}}}}}}
+    , .{text});
+    var tokenizer = try tok.parse(a, source);
+    defer tokenizer.deinit();
+    tokenizer.memo = try tok.Memo.create(a, 1 << 20);
+    try t.expectEqualSlices(u32, &.{1}, try tokenizer.encode(a, text));
+    const hits = tokenizer.memo.?.hits;
+    try t.expectError(error.UnsafeAddedTokenMask, tokenizer.encodeMasked(a, text, &.{.{ 0, text.len }}));
+    try t.expect(tokenizer.memo.?.hits > hits);
+    try t.expectEqualSlices(u32, &.{1}, try tokenizer.encode(a, text));
+}
+
+test "a template-only normalized match in a mixed gap keeps its added id" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tokenizer = try fixture(a, true, false);
+    defer tokenizer.deinit();
+    try t.expectEqualSlices(u32, try tokenizer.encode(a, "<S>a"), try tokenizer.encodeMasked(a, "<S>a", &.{.{ 3, 4 }}));
+}

@@ -10,7 +10,7 @@ pub const eos = @import("eos.zig");
 pub const identity = @import("identity.zig").identity;
 
 pub const Kind = models.Kind;
-pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{ UnsupportedAddedToken, BadRequestSpans, UnsafeNormalizedAddedTokenMask };
+pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{ UnsupportedAddedToken, BadRequestSpans, UnsafeNormalizedAddedTokenMask, UnsafeAddedTokenMask };
 pub const Span = [2]usize;
 pub const MaskWork = struct { spans: usize = 0, matcher: usize = 0 };
 
@@ -126,6 +126,7 @@ pub const Tokenizer = struct {
     id_to_token: IdTable,
     unk_id: ?u32 = null,
     added: []const AddedToken = &.{},
+    added_ids: []const u64 = &.{}, // loaded once; one bit per vocabulary id
     flagged_specials: []const AddedToken = &.{},
     model: models.Model,
     normalizer: ?steps.Normalizer = null,
@@ -209,7 +210,9 @@ pub const Tokenizer = struct {
             const request = cursor < valid.spans.len and valid.spans[cursor][0] < seg.end;
             const gap = valid.text[seg.start..seg.end];
             if (!request or t.normalized.ends.items.len == 0) {
+                const from = ids.items.len;
                 try t.encodeSegment(&ctx, gap, seg.start == 0, &ids);
+                if (request) try t.refuseAdded(ids.items[from..]);
             } else {
                 // A cached gap with this text may have been encoded using a different mask.
                 var clipped: std.ArrayList(Span) = .empty;
@@ -223,6 +226,14 @@ pub const Tokenizer = struct {
             }
         }
         return a.dupe(u32, ids.items);
+    }
+
+    fn refuseAdded(t: *const Tokenizer, ids: []const u32) error{UnsafeAddedTokenMask}!void {
+        for (ids) |id| {
+            const word = id / 64;
+            if (word < t.added_ids.len and t.added_ids[word] & (@as(u64, 1) << @as(u6, @intCast(id % 64))) != 0)
+                return error.UnsafeAddedTokenMask;
+        }
     }
 
     /// encodeText through the memo for a long segment: its kept ids, else encoded and kept.
@@ -284,7 +295,11 @@ pub const Tokenizer = struct {
             var pieces: std.ArrayList(steps.Piece) = .empty;
             try pieces.append(ctx.a, .{ .text = normalized[seg.start..seg.end], .first = seg.start < zero });
             if (t.pre_tokenizer) |*p| try p.apply(ctx, &pieces);
-            for (pieces.items) |piece| try t.model.tokenize(ctx, &t.vocab, piece.text, ids);
+            for (pieces.items) |piece| {
+                const from = ids.items.len;
+                try t.model.tokenize(ctx, &t.vocab, piece.text, ids);
+                if (spans.len > 0) try t.refuseAdded(ids.items[from..]);
+            }
         }
     }
 
@@ -499,6 +514,13 @@ fn addTokens(t: *Tokenizer, keep: Allocator, scratch: Allocator, list: std.json.
         // tokenizers matches and decodes a normalized added token by its normalized content.
         try t.id_to_token.put(token.id, text);
         try (if (token.normalized) &t.normalized else &t.raw).insert(keep, text, @intCast(index));
+    }
+    if (tokens.items.len > 0) {
+        const size = t.id_to_token.tokens.items.len;
+        const bits = try keep.alloc(u64, size / 64 + @intFromBool(size % 64 != 0));
+        @memset(bits, 0);
+        for (tokens.items) |token| bits[token.id / 64] |= @as(u64, 1) << @as(u6, @intCast(token.id % 64));
+        t.added_ids = bits;
     }
 }
 

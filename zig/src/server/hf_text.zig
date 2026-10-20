@@ -263,6 +263,8 @@ pub const HfText = struct {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             problem.* = if (err == error.UnsafeNormalizedAddedTokenMask)
                 "normalized added tokens cannot be matched safely through this normalizer with request text"
+            else if (err == error.UnsafeAddedTokenMask)
+                "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely"
             else
                 "the tokenizer cannot encode this prompt with request byte provenance";
             return error.Template;
