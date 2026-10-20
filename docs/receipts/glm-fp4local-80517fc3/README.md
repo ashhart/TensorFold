@@ -1,6 +1,9 @@
 # GLM-5.3-Flash FP4-Local on CUDA: final-source receipt
 
 Tested implementation: `80517fc36ea6ee9183c5237ae92b1abd70619f75` (commit.txt has the tree and the eight commits).
+Checked after it: `d23862ab`, the three commits above this receipt's first commit (comments and docs, the loader
+gate's own checks, the format names and messages; `head-d23862ab/commit.txt`), on their own binaries in
+`head-d23862ab/`. They do not retake the rest of this receipt.
 Base: `v1.1.1` (`b10231b94f8adf3d4132acebdc0a1ac87e53a838`); baseline binaries are plain v1.1.1 built the same way (`bin-b10231b9`).
 Test date: 2026-10-20. Platform: NVIDIA DGX Spark (GB10, sm_121, 128 GB shared memory), two at TP=2 over a direct
 RoCE link (two rails), three at TP=3 over a ring of direct links. Containers pinned to the efficiency cores
@@ -13,10 +16,10 @@ Grammar: `lib/libtfgrammar.so` from the v1.1.1 release archive (a source build m
 ## Scope
 
 This qualifies FP4-Local loaded as stored and served at TP=2 and TP=3: the loader gate on every layer, the lane
-invariants, served exactness (drafted = `"draft": false`, resumed = cold, concurrent = alone, prompts admitted
-together = alone), media, structured output and tool calls, prompt logprobs against a BF16 reference, per-rank load
-and peak memory, the kernel contract and glm-ref, the no-GPU CI steps, NVFP4 before and after against plain v1.1.1,
-and FP4-Local against NVFP4 on matched inputs. It does not qualify Metal, or a comparison with vLLM.
+invariants, served exactness (drafted = `"draft": false`, resumed = cold, concurrent = alone, prompts admitted together
+= alone), media and video, structured output and tool calls, prompt logprobs against a BF16 reference, per-rank load and
+peak memory, the kernel contract and glm-ref, the no-GPU CI steps, NVFP4 before and after against plain v1.1.1, and
+FP4-Local against NVFP4 on matched inputs. It does not qualify Metal, or a comparison with vLLM.
 
 ## Results
 
@@ -32,6 +35,7 @@ and FP4-Local against NVFP4 on matched inputs. It does not qualify Metal, or a c
 | Prompts sent together beside a decode (`batch`) | Four fresh prompts, each equal to its alone run, both checkpoints, TP=2 and TP=3 (GLM fills them in chunks between rounds by default) |
 | 1.1.1's batched prompt pass (`bt-*`, `TF_GLM_PROMPT_STEPS=0`) | Three fresh prompts shared one pass (first tokens 0.28 to 0.53 ms apart, `prefill_seconds` within 43 µs), each equal to its alone run: plain v1.1.1 and this head on NVFP4, this head on FP4-Local (its MXFP8 `lm_head` through `cuda_shared.heads`) |
 | Media, media resume (`--vision`, `assets/tensorfold-hero.png`) | Drafted = `"draft": false`, repeated, three at once = alone; resumed past the image = cold: FP4-Local and NVFP4 at TP=2, FP4-Local at TP=3, plain v1.1.1 for resume |
+| Video (`--vision`, `tp2/serve/vl-*` and `vd-*`; `video/`, `tools/video_*.py`) | With `LD_LIBRARY_PATH` naming the server's `lib` (`vl-fl`, `vl-nv`), upstream's `tools/zig/video_served.py` checks pass on FP4-Local and NVFP4 at TP=2: the 12 clips' prompt ids equal `Glm5NextProcessor`'s (`video/ref-*.json`), a later turn resumes past its video (2,048 of 2,271 tokens cached), drafted = `"draft": false`, repeated, four at once = alone, a video beside an image, the eight refusals. Without it (`vd-fl`, `vd-nv`, and plain v1.1.1 in `vd-111`) every video is refused: `libtfvideo.so is required for video inputs` (#1107) |
 | Structured output and tools (`s9/`, #1017's and #1018's items) | At TP=2, 26/26 on each checkpoint with drafts: schemas with thinking off and on, a schema plain already meets, `"draft": false`, seeded sampling twice, nested, resume from cache, required, named, parallel, single, nested and empty tool calls each again with `"draft": false`, mixed streams and prompts before and behind a constrained one; `--no-drafts` serves: 22/22; `compare`: all 22 shared greedy replies equal, and the resumed reply equals a cold one |
 | Prompt logprobs against BF16 (`s5/`, 144,285 positions) | Mean NLL: BF16 1.00691, FP4-Local 1.01811 (+1.11%), NVFP4 1.02069 (+1.37%); top-1 equal to BF16's 0.9282 and 0.9268; KL over BF16's top 20 (an approximation) 0.0528 and 0.0537 |
 | Memory (`memory/summary.json`, `memory_receipts.py`) | Every rank's load and cleanup receipts recorded; TP=2 FP4-Local 90.27 GiB at load end, 92.96 GiB peak, 0.00 after cleanup; TP=3 63.01, 62.88 and 57.74 GiB at load end |
@@ -57,16 +61,29 @@ Speed, medians (`tp2/serve/sp*`, `tp3/serve/sp3-*`); at TP=2 each binary and che
 | TP=3, `"draft": false` decode (tok/s) | 21.8 to 21.9 | 31.4 to 31.6 |
 | TP=3, cold prefill of 9,600 and 38,400 token ids (s) | 6.33 and 25.06 | 5.93 and 23.44 |
 
+## The head after the receipt (`head-d23862ab/`)
+
+| Check | Result |
+| --- | --- |
+| Loader gate, six layers, TP=2 (`gate/`) | Ranks 0 and 1: 115 and 72, 0 differ, as on `80517fc3` |
+| The gate's controls (`gate-controls/`, TP=2 rank 0, layer 0 and what every load holds) | `TF_GATE_TAMPER=head.codes`: `d23862ab` reports the flipped upload by name, then its rank with 1 differing, then `PASS ... red as planted`, exit 0; `80517fc3` exits 1. `TF_GATE_WORLDS=1,2 TF_GATE_RANKS=2`, which selects no rank: `d23862ab` fails, exit 1; `80517fc3` exits 0 |
+| FP4-Local golden, TP=2 (`serve/sm-fl`) | Drafted = `"draft": false`, and equal to `tp2/serve/ex-fl`'s ids, on all three prompts |
+| `capabilities --json` (`capabilities-*.json`) | `glm5_next`: `modelopt-nvfp4` and `modelopt-mixed` (`80517fc3`: `modelopt-nvfp4`); TensorFold video found on both, without `LD_LIBRARY_PATH` |
+| No-GPU CI (`ci/`) | `zig build test` 2981/2996 with fresh caches (14 skipped; the one failure is upstream's `cuda_cost_identity` mtime test, as on `80517fc3`), `test-kernel-contract` 65/65, `test-golden`, `fuzz-cortheon` 11/11 and the served Flash Next unittest pass; lean 0 new (444 on v1.1.1); `zig fmt --check` on the 35 changed Zig files clean |
+
 ## Reproduction
 
-Every serve: `tensorfold-native serve CKPT --name local-model --parallel 4 --context 40960 --port 8095`, drafts on,
-one rank a host (`TF_GLM_RANK`, `TF_GLM_WORLD`), each host's page cache of both checkpoints dropped first; `md*` and
-`mr-*` add `--vision`, `x9-*-nd` add `--no-drafts`, and `bt-*` set `TF_GLM_PROMPT_STEPS=0`. The checks are tools/:
-`golden_http.py` on dc.json, upstream's `bench_concurrent.py`, `bench_openai.py` and `bench_cache.py`,
+Every serve: `tensorfold-native serve CKPT --name local-model --parallel 4 --context 40960 --port 8095`, drafts on, one
+rank a host (`TF_GLM_RANK`, `TF_GLM_WORLD`), each host's page cache of both checkpoints dropped first; `md*` and `mr-*`
+add `--vision`, `vd-*` and `vl-*` add `--vision` with the library in the server's `../lib` (`vl-*` with
+`LD_LIBRARY_PATH` naming it), `x9-*-nd` add `--no-drafts`, and `bt-*` set `TF_GLM_PROMPT_STEPS=0`. The checks are
+tools/: `golden_http.py` on dc.json, upstream's `bench_concurrent.py`, `bench_openai.py` and `bench_cache.py`,
 `openai_aligned.py` (the `"draft": false` decode), `resume_http.py`, `batch_http.py` (`one-pass` for `bt-*`),
-`media_http.py`, `media_resume_http.py`, `x9_live.py` (and its `compare`), `s5_prompt_lp.py` (prompt_logprobs 20 on the
-128 held-out sequences) with `s5_compare.py` against `s5_bf16_ref.py`'s reference. `mkprompts.py` makes the matched
-token-id files. runs.log has one line a check.
+`media_http.py`, `media_resume_http.py`, `video_http.py` (`video_served.py`'s checks over HTTP, against the ids
+`video_ref.py` takes from transformers 5.19.0 and PyAV 19.0.1 on clips `glm_video_fixtures.py` makes;
+`video/clips-sha256.txt`), `x9_live.py` (and its `compare`), `s5_prompt_lp.py` (prompt_logprobs 20 on the 128 held-out
+sequences) with `s5_compare.py` against `s5_bf16_ref.py`'s reference. `mkprompts.py` makes the matched token-id files.
+runs.log has one line a check.
 
 ## Remaining coverage limits
 
@@ -79,9 +96,11 @@ token-id files. runs.log has one line a check.
   the default.
 - The KL is over BF16's top 20 only, and both sides' logits are bf16, so best tokens tie; `s5-compare.json` also
   gives top-1 equal within ties.
-- runs.log's FAIL lines: `smoke3-mm1` is the #1067 probe above; the first `x9-fl` ran before `libtfgrammar.so` was
-  in place (HTTP 400 naming it) and its retake is the one published; `single` is the limits line above, on this head
-  and on plain v1.1.1 alike.
+- runs.log's FAIL lines: `smoke3-mm1` is the #1067 probe above; the first `x9-fl` ran before `libtfgrammar.so` was in
+  place (HTTP 400 naming it) and its retake is the one published; `single` is the limits line above, on this head and on
+  plain v1.1.1 alike; `vd-fl`, `vd-nv` and `vd-111` are the refused video serves (#1107). The tamper controls in
+  `head-d23862ab/gate-controls/` print FAIL for the flipped upload and its rank before their PASS line: the control
+  passes when that is all that fails.
 - Metal and MLX were not run (no Mac). No vLLM comparison is claimed.
 
 ## Publication handling

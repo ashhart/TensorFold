@@ -12,3 +12,8 @@ bin-bf07ac07: bf07ac07 built from src-bf07ac07 with Zig 0.17.0 and nvcc 13.0 for
 f7ed1e7fb75b18c52bff8b0c4b64a15e61746f16062241801260c72410693630  tf-cuda-test
 5617159f17300e5d0694fca4fb329c41a67e7afc216835b656b12807c5c9479a  tensorfold
 2e9c18bcedef2d4250bd25c4e370fb4a0a273de7ee8d3138a546009498bf5721  tensorfold-native
+
+bin-d23862ab: d23862ab built from src-d23862ab with Zig 0.17.0 and nvcc 13.0 for sm_121
+a8d3fab007ebcf9d13f6f1d203f93c1e92a5dc14b09338f7edc4dd103a5d4f01  tf-cuda-test
+636bbfc4ce4725d1dd2d8445bafcfab58d8d8fc04fad8b9fa637fe08a278d429  tensorfold
+77c6eb03b189b0a45d5c0eaa71c57c1c0b7a180c9bdd553c2426337776802f0b  tensorfold-native

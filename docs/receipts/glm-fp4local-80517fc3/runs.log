@@ -112,3 +112,17 @@
 2026-10-20 10:08:02 single PASS glm-ref 11 PASS 0 FAIL, RESULT lines 14 (same as b10231b9's); glm-ref b10231b9 rc=0 glm-ref b10231b9 rc=0
 2026-10-20 10:15:59 x9-fl x9 PASS
 2026-10-20 10:16:13 x9-fl serve END rc=0
+2026-10-20 15:02:29 vd-fl video FAIL      h264-444.mp4: HTTP 400 0 ids against 63, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the opt
+2026-10-20 15:02:42 vd-fl serve END rc=1
+2026-10-20 15:09:54 vd-nv video FAIL      h264-444.mp4: HTTP 400 0 ids against 63, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the opt
+2026-10-20 15:10:08 vd-nv serve END rc=1
+2026-10-20 15:18:28 vl-fl video PASS
+2026-10-20 15:18:42 vl-fl serve END rc=0
+2026-10-20 15:26:19 vl-nv video PASS
+2026-10-20 15:26:32 vl-nv serve END rc=0
+2026-10-20 15:33:43 vd-111 video FAIL      h264-444.mp4: HTTP 400 0 ids against 63, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the opt
+2026-10-20 15:33:57 vd-111 serve END rc=1
+2026-10-20 15:36:59 gate bin-d23862ab PASS tp2 rank 0 rc=0 82s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=2 rank 0: 115 uploads as the checkpoint cut, 72 as the host packers make them (11922 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 100 GiB, 0 guard stops
+2026-10-20 15:36:59 gate bin-d23862ab PASS tp2 rank 1 rc=0 81s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=2 rank 1: 115 uploads as the checkpoint cut, 72 as the host packers make them (11922 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 102 GiB, 0 guard stops
+2026-10-20 15:45:49 sm-fl golden PASS
+2026-10-20 15:46:02 sm-fl serve END rc=0

@@ -1,0 +1,6 @@
+libtfvideo.so (aarch64, 29,663,328 bytes), sha256 2b53ae7b3b244e5ac634475092893eeb5ad1b63332427d27b88c7cb2f16c06f1, not published here
+built with `zig build video -Dffmpeg=PREFIX` on a tree whose zig/src/video, zig/build/video.zig, zig/src/core/tfvideo.zig and
+zig/src/platform/optional_libraries.zig are v1.1.1's (b10231b9), against a static FFmpeg 9.0.2
+(ffmpeg-9.0.2.tar.xz, sha256 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e): decoders h264, hevc, vp8, vp9
+and mpeg4, demuxers mov and matroska
+placed as the server's ../lib/libtfvideo.so (the release archive's lib/, beside libtfgrammar.so)

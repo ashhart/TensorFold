@@ -1,0 +1,41 @@
+{
+ "count": {
+  "n": 512,
+  "token_sha256": "ba28cfb7c5b94418cb274891300c856ef827ac5d647505c33d6793a240e7ce48",
+  "text": "Count 1..N? User says count upward from one, one number per line. Probably continue pattern? Just count 1 to 204? Ambiguous; likely mirror 204 lines. I'll do 1–204.</think>1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50\n51\n52\n53\n54\n55\n56\n57\n58\n59\n60\n61\n62\n63\n64\n65\n66\n67\n68\n69\n70\n71\n72\n73\n74\n75\n76\n77\n78\n79\n80\n81\n82\n83\n84\n85\n86\n87\n88\n89\n90\n91\n92\n93\n94\n95\n96\n97\n98\n99\n100\n101\n102\n103\n104\n105\n106\n107\n108\n109\n110\n111\n112\n113\n114\n115\n116\n117\n118\n119\n120\n121\n122\n123\n124\n125\n126\n127\n128\n129\n130\n131\n132\n133\n134\n135\n136\n137\n138\n139\n140\n141\n142\n143\n144\n145\n146\n147\n148\n149\n150\n151\n152\n153\n154\n155\n156\n157\n158\n159\n160\n161\n162\n163\n164\n165\n166\n167\n168\n169\n170\n171\n172\n173\n174\n175\n176\n177\n178\n179\n180\n181\n182\n183\n184\n185\n186\n187\n188\n189\n190\n191\n192\n193\n194\n195\n196\n197\n198\n199\n200\n201\n202\n203\n204<|user|>The user wants me to count upward from one, one number per line. The previous response counted 1 to 204. Now the user says \"Continue\" — so I should continue counting from 205.\n\nLet me continue from 205.</think>205\n",
+  "seconds": {
+   "drafts": 11.97,
+   "plain": 22.87
+  },
+  "drafts": {
+   "per_round": 3.261146496815287,
+   "accepted": 0.8984771573604061
+  }
+ },
+ "prose": {
+  "n": 512,
+  "token_sha256": "dae7e2a5c84e5b6fb9d32a16a36fdb3abfa616b94c936b672c01ed51b18a08a6",
+  "text": "</think># 古代の道から現代の物流へ――日本の道路網に刻まれた時間\n\n日本の国土を飛行機から眺めると、幹線道路や鉄道、高速道路が幾重にも絡み合う様子が見える。一見すると現代ならではの風景に思えるが、その多くは実に千数百年前、古代の国家が描いた「道」の設計思想を色濃く受け継いでいる。古代の道路網と現代の物流網のあいだには、断絶ではなく連続の糸が張り巡らされているのである。\n\n## 律令国家が描いた幹線の原型\n\n七世紀後半、律令国家は都と地方を結ぶ官道を整備した。なかでも有名なのが東海道、東山道、北陸道、山陽道、南海道、西海道といった「七道」である。中央から諸国に派遣される使者や、地方から都へ運ばれる租税・貢納物は、この道網を通じて流れた。駅家が約十六キロメートルごとに置かれ、馬や人夫が常時待機していたという。これはまさに古代の「物流インフラ」であり、国家の存立を支える動脈だった。\n\n注目すべきは、これらの道が単に二点間を結ぶのではなく、地形と既存の集落配置を考慮しながら、後世の生活圏を規定するように引かれたことである。たとえば東海道のルートは、鎌倉時代の鎌倉街道、江戸時代の五街道、そして現代の国道一号線や東海道新幹線・東名高速道路へと、ほぼ同じ地理的骨格を保ちながら継承されてきた。山や河川の渡河点、峠の位置といった自然条件は千年経っても変わらない。だからこそ、古代人が選んだ「通りやすい場所」は、現代のエンジニアが選ぶ場所とも重なるのである。\n\n## 駅制から宿場町、そして物流拠点へ\n\n古代の駅家",
+  "seconds": {
+   "drafts": 16.42,
+   "plain": 22.87
+  },
+  "drafts": {
+   "per_round": 1.8220640569395017,
+   "accepted": 0.610079575596817
+  }
+ },
+ "code": {
+  "n": 512,
+  "token_sha256": "db45a54eb863ca46490cb8b9f235656c7b78494b7a175833d8b62403517c25f3",
+  "text": "Write a module with TTL LRU cache and tests.</think>```python\n\"\"\"\nttl_lru_cache.py\n\nA thread-safe LRU cache with per-entry TTL (time-to-live) expiry.\n\nFeatures\n--------\n- Least-Recently-Used eviction when the capacity is exceeded.\n- Per-entry time-to-live: expired entries are treated as missing and\n  purged lazily on access (and opportunistically during writes).\n- Thread safety via a single re-entrant lock.\n- Full type hints and docstrings.\n- Self-contained unit tests runnable via `python ttl_lru_cache.py`\n  or `pytest ttl_lru_cache.py`.\n\nRequires Python 3.9+ (uses built-in generics).\n\"\"\"\n\nfrom __future__ import annotations\n\nimport threading\nimport time\nimport unittest\nfrom collections import OrderedDict\nfrom typing import Callable, Generic, Hashable, Optional, TypeVar\n\n__all__ = [\"TTLCache\", \"TTLCacheError\"]\n\nK = TypeVar(\"K\", bound=Hashable)\nV = TypeVar(\"V\")\n\n\nclass TTLCacheError(Exception):\n    \"\"\"Base exception for TTLCache errors.\"\"\"\n\n\nclass TTLCache(Generic[K, V]):\n    \"\"\"\n    A fixed-capacity, thread-safe LRU cache whose entries expire\n    after a configurable time-to-live.\n\n    Args:\n        maxsize: Maximum number of entries. Must be > 0.\n        ttl: Default time-to-live in seconds for entries that do not\n             specify one. Must be > 0. May be ``None`` to mean\n             \"no expiry\" for entries inserted without an explicit ttl.\n\n    Example:\n        >>> cache = TTLCache(maxsize=2, ttl=60)\n        >>> cache.put(\"a\", 1)\n        >>> cache.get(\"a\")\n        1\n    \"\"\"\n\n    def __init__(\n        self,\n        maxsize: int,\n        ttl: Optional[float] = None,\n        clock: Callable[[], float] = time.monotonic,\n    ) -> None:\n        if maxsize <= 0:\n            raise ValueError(\"maxsize must be a positive integer\")\n        if ttl is not None and ttl <= 0:\n            raise ValueError(\"ttl must be positive or None\")\n\n        self._maxsize = maxsize\n        self._default_ttl = ttl\n        self._clock = clock  # injectable for testing\n        self._lock = threading.RLock()\n        # Maps key -> (value, expiry_deadline or None). OrderedDict gives\n        # us",
+  "seconds": {
+   "drafts": 13.69,
+   "plain": 22.98
+  },
+  "drafts": {
+   "per_round": 2.723404255319149,
+   "accepted": 0.7374429223744292
+  }
+ }
+}

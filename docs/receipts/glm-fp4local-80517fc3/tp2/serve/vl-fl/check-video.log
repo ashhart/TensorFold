@@ -1,0 +1,30 @@
+     h264-444.mp4: 63 ids equal
+     h264-709.mov: 627 ids equal
+     h264-full.mp4: 83 ids equal
+     h264-hd.mp4: 3623 ids equal
+     h264-odd.mp4: 197 ids equal
+     h264.mp4: 287 ids equal
+     hevc.mp4: 245 ids equal
+     hevc10.mov: 131 ids equal
+     long.mp4: 1553 ids equal
+     mpeg4.mp4: 166 ids equal
+     vp8.mkv: 137 ids equal
+     vp9.webm: 197 ids equal
+ok   a video request's prompt ids equal the processor's: 12 of 12 clips
+ok   a video conversation's later turn resumes past its video: cached 2048 of 2271; the text alone is 1458
+ok   another video under the same text resumes only the text before it: cached 0 of 2181
+ok   a video request answers: HTTP 200/200
+ok   drafted equals "draft": false with a video: 'The video shows a colorful background with diagonal stripes '
+ok   a video request repeated answers the same
+ok   concurrent video requests equal their runs alone: 4 of 4
+ok   a video and an image in one request answer: HTTP 200
+ok   refused three videos: HTTP 400 'a request supports at most 2 videos'
+ok   refused a video in an assistant message: HTTP 400 'video_url parts are supported only in user messages'
+ok   refused a video in a tool result: HTTP 400 'video_url parts are supported only in user messages'
+ok   refused a clip too short to sample: HTTP 400 'video 1 is too short: sampled at 2 frames a second it gives no frame; send at least half a second'
+ok   refused bytes that aren't a video: HTTP 400 "video 1: the video's bytes are invalid or unsupported; use MP4 or WebM (H.264, HEVC, VP8, VP9 or MPEG-4)"
+ok   refused a URL without --vision-urls: HTTP 400 'video URLs are off on this server; send the video as a data URL, or start the server with --vision-urls'
+ok   refused another scheme: HTTP 400 'videos require data URLs or public HTTPS URLs'
+ok   refused a video_url without a url: HTTP 400 'video_url must contain a non-empty url string'
+PASS
+exit 0
