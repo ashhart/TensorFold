@@ -10,6 +10,8 @@ const live = @import("live.zig");
 const listener_mod = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server_mod = @import("server.zig");
+const idle_unload = @import("idle_unload.zig");
+const hf_text = @import("hf_text.zig");
 const routes = @import("routes.zig");
 const recall_routes = @import("recall_routes.zig");
 const Allocator = std.mem.Allocator;
@@ -82,6 +84,10 @@ pub const Setup = struct {
     served: []const u8,
     /// The checkpoint's folder (structured output reads its tokenizer.json and config.json, /slide shows its shards).
     model_dir: []const u8 = "",
+    /// The checkpoint's model_type, as `engines.open` read at startup; the idle reload opens with it.
+    model_type: []const u8 = "",
+    /// How the idle unload reopens the engine and its text; null keeps the manager off even with --idle-unload.
+    reopen: ?idle_unload.Reopen = null,
     /// Sampling defaults from generation_config.json and the flags, as a JSON object; null: greedy.
     sampling: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
@@ -161,6 +167,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .thinking_reserve = args.thinking_reserve,
         .loop_guard = args.loop_guard,
         .keep_warm_s = args.keep_warm,
+        .idle_unload_s = args.idle_unload,
         .default_sampling = s.sampling,
         .use_drafts = !args.no_drafts,
         .vision_urls = args.vision_urls,
@@ -191,6 +198,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     };
     defer srv.deinit();
     srv.recall = s.recall;
+    srv.idle_manager = idle_unload.start(gpa, io, args, s.reopen orelse .{ .ctx = undefined, .open = noReopen, .load_text = noReopenText, .close_held = noCloseHeld, .replace = noReplace }, s.model_dir, s.model_type, s.environ);
+    defer if (srv.idle_manager) |m| idle_unload.stop(m);
     if (args.loop_guard and !srv.info.loop_guard) {
         std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});
         return 2;
@@ -222,9 +231,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     if (args.thinking and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
         log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens {s}. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{if (reserved) "limits the answer, the reasoning taking up to --thinking-reserve tokens more" else "counts both"});
     if (s.recall) |r| recall_routes.line(r);
+    if (srv.idle_manager != null) log.line("idle unload on: the engine closes after {d} s idle and the next request reloads it (a full model load)", .{args.idle_unload});
     if (srv.cortheon) |c| log.line("cortheon on: chat requests get Cortheon's reasoning program, web research before building, and cortheon_search/cortheon_fetch run here ({s}); a request can send \"cortheon\": false", .{c.engine});
     live.columns_env = env(s, "COLUMNS");
-    var ticker: live.Ticker = .{ .engine = s.engine };
+    var ticker: live.Ticker = .{ .read_status = readCurrentStatus, .ctx = srv };
     const drawing = live.wanted(io, if (env(s, "TENSORFOLD_NO_LIVE")) |v| std.mem.eql(u8, v, "1") else false);
     if (drawing) ticker.start();
     // the listener stays open through the drain: new requests get 503 + Retry-After, /health "draining"
@@ -236,7 +246,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     accept.join();
     lis.close();
     if (drawing) ticker.finish();
-    s.engine.drain(); // kept states waiting for disk are written (under the engine's deadline) before the engine closes
+    srv.engine.drain(); // the current engine's disk writes finish (the idle unload may have swapped engines) before it closes
     var waited: u32 = 0;
     while (srv.open_connections.load(.acquire) > 0 and waited < 40) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     if (!closeIdle(srv, s.stop)) {
@@ -307,6 +317,27 @@ fn shownSampling(a: Allocator, sampling: ?json.Value) []const u8 {
     }
     return std.mem.join(a, ", ", parts.items) catch "greedy";
 }
+
+/// The live ticker's status reader: the CURRENT engine (the idle unload swaps engines; a captured handle would dangle).
+fn readCurrentStatus(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
+    const srv: *server_mod.Server = @ptrCast(@alignCast(ctx));
+    srv.engine.status(out, stream_tokens);
+}
+
+/// Stubs for a Setup with no reopen path: the manager refuses every reload.
+fn noReopen(_: *anyopaque, _: Allocator, _: Allocator, _: std.Io, _: []const u8, _: []const u8, _: cli.Args, problem: *[]const u8) anyerror!?api.Opened {
+    problem.* = "this server has no reopen path";
+    return null;
+}
+
+fn noReopenText(_: *anyopaque, _: Allocator, _: std.Io, _: []const u8, _: ?[]const u8, _: Allocator, problem: *[]const u8) anyerror!*hf_text.HfText {
+    problem.* = "this server has no reopen path";
+    return error.ReloadFailed;
+}
+
+fn noCloseHeld(_: *anyopaque) void {}
+
+fn noReplace(_: *anyopaque, _: api.Opened) void {}
 
 test "the targets are the hard limit, or the fallbacks under an unlimited one" {
     var buf: [2]u64 = undefined;

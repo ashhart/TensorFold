@@ -23,6 +23,7 @@ const live = @import("live.zig");
 const slide_graph = @import("slide_graph.zig");
 const slide_lesson = @import("slide_lesson.zig");
 const cortheon = @import("cortheon/cortheon.zig");
+const idle_unload = @import("idle_unload.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -55,6 +56,8 @@ pub const Config = struct {
     loop_guard: bool = false,
     /// Seconds the idle keepalive runs after the last request ends (0: off).
     keep_warm_s: i64 = 900,
+    /// Seconds of idle past the last request before the engine closes; the next request reloads it (0: never).
+    idle_unload_s: i64 = 0,
     dashboard: bool = false,
     /// Sampling when a request names none (generation_config.json and the serve flags), or null for greedy.
     default_sampling: ?Value = null,
@@ -120,6 +123,8 @@ pub const Server = struct {
     generating: std.atomic.Value(u32) = .init(0),
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
+    /// The idle-unload manager (--idle-unload); null when off. Its thread parks the engine; a wake reloads it.
+    idle_manager: ?*idle_unload.Manager = null,
     preparing: std.atomic.Value(i64) = .init(0),
     speech_inflight: std.atomic.Value(u32) = .init(0),
     arena: std.heap.ArenaAllocator,

@@ -10,6 +10,7 @@ pub const hf_text = @import("hf_text.zig");
 pub const listener = @import("listener.zig");
 pub const server = @import("server.zig");
 pub const serve = @import("serve.zig");
+pub const idle_unload = @import("idle_unload.zig");
 pub const hub = @import("hub.zig");
 pub const tool_specs = @import("tool_specs.zig");
 pub const Server = server.Server;
@@ -23,6 +24,7 @@ test {
     _ = @import("done_times_test.zig");
     _ = @import("drain_test.zig");
     _ = @import("keepalive_test.zig");
+    _ = @import("idle_unload.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");
