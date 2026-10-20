@@ -26,11 +26,25 @@ pub fn addTo(
         .optimize = optimize,
         .imports = &.{.{ .name = "json", .module = j }},
     }));
-    m.addImport("drama_prompt", b.createModule(.{
-        .root_source_file = b.path("zig/src/families/drama3/prompt.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
+    const family = if (m.import_table.get("native_engines")) |engines| engines.import_table.get("drama3") else null;
+    if (family) |drama3| {
+        const source = b.addWriteFiles().add("drama_prompt.zig",
+            \\pub const Reference = @import("drama3").prompt.Reference;
+            \\pub const build = @import("drama3").prompt.build;
+        );
+        m.addImport("drama_prompt", b.createModule(.{
+            .root_source_file = source,
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "drama3", .module = drama3 }},
+        }));
+    } else {
+        m.addImport("drama_prompt", b.createModule(.{
+            .root_source_file = b.path("zig/src/families/drama3/prompt.zig"),
+            .target = target,
+            .optimize = optimize,
+        }));
+    }
     if (m.import_table.get("engine_api")) |api| if (api.import_table.get("lanes")) |lanes| m.addImport("lanes", lanes);
     // a build whose engines learn hands the server their own living module; the rest read only its families
     if (m.import_table.get("living") == null) m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
