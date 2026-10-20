@@ -80,8 +80,11 @@ pub fn served(comptime h: Heads, comptime w: Which) []const c.Shape {
     // even starts fork; 2 and 3 tiles at 64 and 65 take prefix_2 and _3 as trees and chains; 2046 and 510 split a tree
     const two: usize = 3;
     const three: usize = if (h == .q27b) 6 else 5;
+    // 5 and 6 tiles over 64 cached chunks (8190, 8191) take prefix_5 and _6
+    const five: usize = if (h == .q27b) 11 else 9;
+    const six: usize = if (h == .q27b) 14 else 11;
     return comptime switch (w) {
-        .decode => &.{ .{ .rows = 1, .n = n, .k = 2 }, .{ .rows = two, .n = n, .k = 64 }, .{ .rows = three, .n = n, .k = 64 }, .{ .rows = two, .n = n, .k = 65 }, .{ .rows = three, .n = n, .k = 65 }, .{ .rows = 16, .n = n, .k = 2046 }, .{ .rows = 16, .n = n, .k = 2047 }, .{ .rows = 128, .n = n, .k = 510 }, .{ .rows = 128, .n = n, .k = 511 }, .{ .rows = 1, .n = n, .k = 8191 } },
+        .decode => &.{ .{ .rows = 1, .n = n, .k = 2 }, .{ .rows = two, .n = n, .k = 64 }, .{ .rows = three, .n = n, .k = 64 }, .{ .rows = two, .n = n, .k = 65 }, .{ .rows = three, .n = n, .k = 65 }, .{ .rows = 16, .n = n, .k = 2046 }, .{ .rows = 16, .n = n, .k = 2047 }, .{ .rows = 128, .n = n, .k = 510 }, .{ .rows = 128, .n = n, .k = 511 }, .{ .rows = 1, .n = n, .k = 8191 }, .{ .rows = five, .n = n, .k = 8190 }, .{ .rows = five, .n = n, .k = 8191 }, .{ .rows = six, .n = n, .k = 8190 }, .{ .rows = six, .n = n, .k = 8191 } },
         .prompt => &.{ .{ .rows = 16, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 1920 }, .{ .rows = 16, .n = n, .k = 8176 } },
     };
 }
@@ -179,8 +182,8 @@ pub const Round = struct {
 
 /// What gate 3's decode shapes would launch on tensor units, from the engine's plans alone (no M5 dispatch).
 pub const Reach = struct {
-    /// [chains, trees][tiles - 1]: the prefix launch Attention.treeRows picks, min(tiles, 4).
-    prefix: [2][4]bool = @splat(@splat(false)),
+    /// [chains, trees][tiles - 1]: the prefix launch Attention.treeRows picks (attention.prefixTiles).
+    prefix: [2][6]bool = @splat(@splat(false)),
     /// A tree whose own keys span two tail chunks, so the merge takes more than one.
     split_tree: bool = false,
 };
@@ -195,7 +198,7 @@ pub fn reach(a: std.mem.Allocator, h: Heads) !Reach {
         var ws: [planning.max_streams]planning.Window = undefined;
         var plan = try attn.Plan.init(a, r.windows(&ws), geometry(h, true));
         defer plan.deinit();
-        if (plan.prefix_chunks > 0) seen.prefix[@intFromBool(!plan.fused)][@min(plan.tiles, 4) - 1] = true;
+        if (plan.prefix_chunks > 0) seen.prefix[@intFromBool(!plan.fused)][attn.prefixTiles(plan) - 1] = true;
         for (0..r.streams) |s| {
             const ps = r.parents[r.firsts[s]..][0..r.counts[s]];
             const chain = for (ps, 0..) |p, i| {

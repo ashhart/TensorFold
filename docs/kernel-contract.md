@@ -135,7 +135,8 @@ qwen27's attention at both head counts it serves (24 query heads over 4, the 35B
 through the engine's own plan and launcher against float64 attention (the tail and merge before the M5; prefix, tail
 and merge on its tensor units), prompt rows through the prompt kernel on tensor units, and attention_io's packing and
 cache moves checked bit for bit (keep also a second time on the caches the first left). A plan check on every chip
-shows the decode shapes plan prefix_1 to _4 for chains and _2 to _4 for trees (a tree packs 2 tiles at least), and a
+shows the decode shapes plan prefix_1 to _6 for chains and _2 to _6 for trees (a tree packs 2 tiles at least; 5 and
+6 tiles over a cache of 64 chunks or more), and a
 tree over two tail chunks; it reads the engine's plans, not an M5's launches. Gate 4's inputs separate the score
 sums only; the normalizer and P V are replayed in each accumulator but sit near exact there. Gate 2's guards cover
 the test's buffers (inputs, caches, output), not the engine's own scratch and plan buffers. Its controls: a row
