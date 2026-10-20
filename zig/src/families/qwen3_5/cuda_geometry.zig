@@ -49,11 +49,12 @@ pub const Widths = struct {
 };
 
 /// How a projection is stored: MLX affine codes, or a ModelOpt checkpoint's NVFP4, FP8 or bf16 weights.
-pub const Kind = enum(u8) { affine, nvfp4, fp8, bf16, nvfp4_w16 }; // nvfp4_w16: W4A16_NVFP4, bf16 rows in either math
+pub const Kind = enum(u8) { affine, nvfp4, fp8, bf16, nvfp4_w16, fp8c }; // nvfp4_w16: W4A16_NVFP4; fp8c: FP8, a scale a row
 
 /// A ModelOpt checkpoint's kind for every module (cuda_modelopt.zig); an MLX checkpoint's are all affine.
 pub const Kinds = struct {
     modelopt: bool = false,
+    ct: bool = false, // compressed-tensors: the kinds come from the tensors the index names (cuda_modelopt.ctKinds)
     head: Kind = .affine,
     proj: [max_layers][std.enums.values(Slot).len]Kind = @splat(@splat(.affine)),
 
@@ -89,7 +90,9 @@ pub const Geometry = struct {
         defer gpa.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 22));
         defer gpa.free(bytes);
-        return parse(gpa, bytes);
+        var g = try parse(gpa, bytes);
+        if (g.kinds.ct) g.kinds = try @import("cuda_modelopt.zig").ctKinds(gpa, io, dir, g);
+        return g;
     }
 
     /// Whether the MLPs are routed experts, whose width is `intermediate` (the shared expert's too).

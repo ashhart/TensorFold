@@ -56,6 +56,7 @@ const Ignored = struct {
 
 /// Every module's kind: a MIXED_PRECISION config's quantized_layers, or a single-format NVFP4 one's `ignore` list.
 pub fn kinds(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
+    if (try compressedTensors(gpa, config)) return .{ .modelopt = true, .ct = true }; // filled from the index
     var why: core.modelopt.Why = .{};
     var r = core.modelopt.admitRecipes(gpa, config, &why) catch |err| {
         std.log.err("{s}", .{why.text()});
@@ -74,6 +75,47 @@ pub fn kinds(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
             .q, .k, .v, .o => !g.linear[i],
         };
         if (used) out.proj[i][@backingInt(slot)] = try kindOf(r.of(try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.{s}", .{ i, geometry.slot_modules.get(slot) })));
+    };
+    return out;
+}
+
+/// Whether quantization_config is compressed-tensors' (unsloth's export): its kinds are read from the tensors.
+fn compressedTensors(gpa: std.mem.Allocator, config: []const u8) !bool {
+    const doc = try std.json.parseFromSlice(std.json.Value, gpa, config, .{});
+    defer doc.deinit();
+    const q = (doc.value.object.get("quantization_config") orelse return false);
+    if (q != .object) return false;
+    const m = q.object.get("quant_method") orelse return false;
+    return m == .string and std.mem.eql(u8, m.string, "compressed-tensors");
+}
+
+/// A compressed-tensors export's kinds by its index: `weight_packed` NVFP4, a `weight_scale` FP8 (a row's), else bf16.
+pub fn ctKinds(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, g: Geometry) !Kinds {
+    const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors.index.json" });
+    defer gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26));
+    defer gpa.free(bytes);
+    const doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
+    defer doc.deinit();
+    const map = (doc.value.object.get("weight_map") orelse return error.UnsupportedQwenQuantization).object;
+    const K = struct {
+        fn of(m: std.json.ObjectMap, module: []const u8) !Kind {
+            var b: [192]u8 = undefined;
+            if (m.contains(try std.fmt.bufPrint(&b, "{s}.weight_packed", .{module}))) return .nvfp4;
+            if (m.contains(try std.fmt.bufPrint(&b, "{s}.weight_scale", .{module}))) return .fp8c;
+            return .bf16;
+        }
+    };
+    if (try K.of(map, prefix ++ "embed_tokens") != .bf16) return error.UnsupportedQwenQuantization;
+    var out: Kinds = .{ .modelopt = true, .ct = true, .head = try K.of(map, "lm_head") };
+    var buf: [128]u8 = undefined;
+    for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
+        const used = switch (slot) {
+            .gate, .up, .down => true,
+            .qkv, .z, .a, .b, .out => g.linear[i],
+            .q, .k, .v, .o => !g.linear[i],
+        };
+        if (used) out.proj[i][@backingInt(slot)] = try K.of(map, try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.{s}", .{ i, geometry.slot_modules.get(slot) }));
     };
     return out;
 }
@@ -103,6 +145,7 @@ pub fn packedBytes(n: usize, k: usize, kind: Kind) usize {
     return switch (kind) {
         .nvfp4, .nvfp4_w16 => aligned(np * k / 2) + aligned(np * k / 16),
         .fp8 => aligned(np * k),
+        .fp8c => aligned(np * k) + aligned(np * (k / 64) * 4),
         .bf16 => aligned(np * k * 2),
         .affine => unreachable,
     };
@@ -112,7 +155,7 @@ pub fn packedBytes(n: usize, k: usize, kind: Kind) usize {
 pub fn rawBytes(n: usize, k: usize, kind: Kind) usize {
     return switch (kind) {
         .nvfp4, .nvfp4_w16 => n * k / 2 + n * k / 16,
-        .fp8 => n * k,
+        .fp8, .fp8c => n * k,
         .bf16 => n * k * 2,
         .affine => unreachable,
     };
@@ -156,7 +199,7 @@ pub const Kernels = struct {
             fn bytes(lane: cuda.qmmf.Lane, p: Proj) usize {
                 return switch (p) {
                     .ql => |w| switch (w) {
-                        .nvfp4, .fp8, .bf16 => |q| lane.partBytes(engine.max_rows, q),
+                        .nvfp4, .fp8, .bf16, .fp8g => |q| lane.partBytes(engine.max_rows, q),
                         else => 0,
                     },
                     else => 0,
@@ -231,10 +274,25 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
             q.act = act;
             break :blk .{ .fp8 = q };
         },
+        .fp8c => blk: { // compressed-tensors FP8, a bf16 scale a row: the FP8G lane, every 64 inputs a row's scale
+            const t = try ck.expect(try tname(&buf, pre, name, "weight"), .f8_e4m3, &.{ n, k });
+            const rs = try ck.expect(try tname(&buf, pre, name, "weight_scale"), .bf16, &.{ n, 1 });
+            try stage.upload(0, t.bytes);
+            const w = try e.alloc(padded(n) * k);
+            try p.fp8Lane(e.stream, stage.ptr, w, n, k);
+            const tiles = try e.gpa.alloc(f32, padded(n) * (k / 64));
+            defer e.gpa.free(tiles);
+            rowScales(tiles, std.mem.bytesAsSlice(u16, rs.bytes), n, k);
+            const sd = try e.alloc(tiles.len * 4);
+            try e.arena.upload(sd - e.arena.ptr, std.mem.sliceAsBytes(tiles));
+            break :blk .{ .fp8g = cuda.fp8.weight(w, sd, n, k) };
+        },
         .nvfp4, .nvfp4_w16 => blk: {
-            const codes = try ck.expect(try tname(&buf, pre, name, "weight"), .u8, &.{ n, k / 2 });
+            // ModelOpt: weight, weight_scale_2 (multiplies); compressed-tensors: weight_packed, weight_global_scale
+            const ct = ck.has(try tname(&buf, pre, name, "weight_packed"));
+            const codes = try ck.expect(try tname(&buf, pre, name, if (ct) "weight_packed" else "weight"), .u8, &.{ n, k / 2 });
             const blocks = try ck.expect(try tname(&buf, pre, name, "weight_scale"), .f8_e4m3, &.{ n, k / 16 });
-            const global = try scalar(ck, try tname(&buf, pre, name, "weight_scale_2"));
+            const global = if (ct) 1.0 / try scalar(ck, try tname(&buf, pre, name, "weight_global_scale")) else try scalar(ck, try tname(&buf, pre, name, "weight_scale_2"));
             try stage.upload(0, codes.bytes);
             try stage.upload(codes.bytes.len, blocks.bytes);
             const words = try e.alloc(padded(n) * k / 2);
@@ -248,6 +306,15 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
     };
     try e.stream.synchronize(); // the next projection's staging overwrites this one's
     return .{ .ql = out };
+}
+
+/// A bf16 scale a row as FP8G's tiles [npad/64][k/64][64] of fp32 (fp8.packScales' order), rows past n one.
+pub fn rowScales(out: []f32, rows: []align(1) const u16, n: usize, k: usize) void {
+    const kg = k / 64;
+    for (0..padded(n) / 64) |t| for (0..kg) |g| for (0..64) |c| {
+        const row = t * 64 + c;
+        out[(t * kg + g) * 64 + c] = if (row < n) @bitCast(@as(u32, rows[row]) << 16) else 1.0;
+    };
 }
 
 /// Token rows of the bf16 embedding into `out`: an exact copy of each id's row.
@@ -337,4 +404,21 @@ test "kinds from a single-format NVFP4 config (Inferact's): NVFP4 but its ignore
     const h = try geometry.parse(std.testing.allocator, w16 ++ text_config);
     try std.testing.expectEqual(Kind.nvfp4_w16, h.kinds.of(0, .down));
     try std.testing.expectEqual(Kind.bf16, h.kinds.head);
+}
+
+test "a row's FP8 scale fills its column of every 64-input tile, padding rows one" {
+    const n = 130;
+    const k = 128;
+    var rows: [n]u16 = undefined;
+    for (&rows, 0..) |*r, i| r.* = @truncate(0x3f80 + i); // 1.0 plus a few ulps
+    var out: [256 * 2]f32 = undefined;
+    rowScales(&out, &rows, n, k);
+    const bf = struct {
+        fn f(h: u16) f32 {
+            return @bitCast(@as(u32, h) << 16);
+        }
+    }.f;
+    try std.testing.expectEqual(bf(rows[5]), out[(0 * 2 + 1) * 64 + 5]); // tile 0, group 1, row 5
+    try std.testing.expectEqual(bf(rows[129]), out[(2 * 2 + 0) * 64 + 1]); // tile 2: rows 128..
+    try std.testing.expectEqual(@as(f32, 1.0), out[(2 * 2 + 1) * 64 + 2]); // row 130: padding
 }
