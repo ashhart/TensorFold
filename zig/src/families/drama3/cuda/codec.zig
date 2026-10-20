@@ -202,6 +202,8 @@ pub const Codec = struct {
 
     pub fn poison(c: *Codec) !void {
         for (c.bufs.items[c.state_start..c.state_end]) |*buffer| try buffer.fill8(0xa5, null);
+        // Reset and decode use non-blocking streams, so the default-stream fills must finish first.
+        try c.d.synchronize();
     }
 
     pub fn destroy(c: *Codec) void {

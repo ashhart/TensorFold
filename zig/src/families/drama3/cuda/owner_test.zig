@@ -126,6 +126,37 @@ const Mock = struct {
         return error.InjectedWarmFailure;
     }
 };
+test "drama poison completes default-stream fills before reset can reuse buffers" {
+    const Fill = struct {
+        var pending: bool = false;
+        fn fill(_: u64, value: u8, _: usize) callconv(.c) c_int {
+            std.debug.assert(value == 0xa5);
+            pending = true;
+            return 0;
+        }
+        fn finish() callconv(.c) c_int {
+            pending = false;
+            return 0;
+        }
+    };
+    var e: Engine = undefined;
+    Mock.init(&e);
+    e.driver.api.cuMemsetD8_v2 = Fill.fill;
+    e.driver.api.cuCtxSynchronize = Fill.finish;
+    e.bufs = .empty;
+    defer e.bufs.deinit(a);
+    try e.bufs.append(a, .{ .d = &e.driver, .ptr = 1, .len = 256, .borrowed = true });
+    try e.poison();
+    try std.testing.expect(!Fill.pending);
+    var c: Codec = undefined;
+    c.d = &e.driver;
+    c.bufs = e.bufs;
+    c.state_start = 0;
+    c.state_end = c.bufs.items.len;
+    try c.poison();
+    try std.testing.expect(!Fill.pending);
+}
+
 test "drama owner: failed fork teardown pins shared codec buffers descriptors and module through base teardown" {
     var e: Engine = undefined;
     Mock.init(&e);
