@@ -57,7 +57,9 @@ pub fn commas(buf: []u8, n: u64) []const u8 {
 
 /// Redraws the line every half second while the server runs in a terminal.
 pub const Ticker = struct {
-    engine: api.Engine,
+    /// Reads the CURRENT engine's status each tick (the idle unload swaps engines; a captured handle would dangle).
+    read_status: *const fn (ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void,
+    ctx: *anyopaque,
     stop: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
@@ -70,7 +72,7 @@ pub const Ticker = struct {
             std.Io.sleep(log.io(), .fromMilliseconds(500), .awake) catch {};
             if (t.stop.load(.acquire)) break;
             var status: api.Status = .{};
-            t.engine.status(&status, &.{});
+            t.read_status(t.ctx, &status, &.{});
             var buf: [256]u8 = undefined;
             log.status(line(&buf, status), columns());
         }

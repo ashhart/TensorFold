@@ -24,7 +24,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--prompt-seed]" ++
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
     " [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER]" ++
-    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--compact-at COMPACT_AT]" ++
+    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--idle-unload SECONDS] [--compact-at COMPACT_AT]" ++
     " [--compact-keep COMPACT_KEEP]" ++
     " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
@@ -140,6 +140,8 @@ pub fn main(init: std.process.Init) !u8 {
         .served = served,
         .recall = record,
         .model_dir = dir,
+        .model_type = model_type,
+        .reopen = .{ .ctx = &closer, .open = Reopen.open, .load_text = Reopen.loadTextOf, .close_held = Reopen.closeHeld, .replace = Reopen.replace },
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,
         .started = started,
@@ -147,6 +149,30 @@ pub fn main(init: std.process.Init) !u8 {
         .forget_fail = if (comptime @import("build_options").slide_test_hooks) forgetFail(init.environ_map) else 0,
     });
 }
+
+/// The reopen path the idle unload takes: the same open calls `main` made at startup.
+const Reopen = struct {
+    fn open(ctx: *anyopaque, a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, mt: []const u8, cargs: cli.Args, problem: *[]const u8) anyerror!?api.Opened {
+        _ = ctx;
+        return engines.open(a, gpa, io, dir, mt, cargs, problem);
+    }
+    fn loadTextOf(ctx: *anyopaque, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, template: ?[]const u8, pa: std.mem.Allocator, problem: *[]const u8) anyerror!*hf_text.HfText {
+        _ = ctx;
+        return loadText(gpa, io, dir, template, pa, problem);
+    }
+    fn closeHeld(ctx: *anyopaque) void {
+        const c: *Closer = @ptrCast(@alignCast(ctx));
+        if (!c.closed) {
+            c.closed = true;
+            c.opened.close(c.opened.ctx); // the startup engine's weights leave the machine here
+        }
+    }
+    fn replace(ctx: *anyopaque, opened: api.Opened) void {
+        const c: *Closer = @ptrCast(@alignCast(ctx));
+        c.opened = opened; // shutdown closes the reload's engine
+        c.closed = false;
+    }
+};
 
 /// TF_SLIDE_FORGET_FAIL in a -Dslide-test-hooks build: the fact whose check a delete fails, so its put-back is seen.
 fn forgetFail(env: *const std.process.Environ.Map) u32 {
