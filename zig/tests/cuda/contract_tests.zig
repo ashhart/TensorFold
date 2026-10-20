@@ -199,6 +199,14 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&wide) |*m| m.deinit();
     for (&wide) |*m| try kernels.append(a, m.kernel());
+    var narrow: [wide_k.bf16_modes.len * 2 + 1]wide_k.Product = undefined; // bf16 out (the 27B's ModelOpt layers)
+    for (wide_k.bf16_modes, 0..) |mode, i| {
+        narrow[i * 2] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = mode, .clusters = true, .out_kind = .bf16 };
+        narrow[i * 2 + 1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .mode = mode, .clusters = false, .out_kind = .bf16 };
+    }
+    narrow[narrow.len - 1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = .fp8, .clusters = true, .out_kind = .bf16, .prompt = &prompt };
+    defer for (&narrow) |*m| m.deinit();
+    for (&narrow) |*m| try kernels.append(a, m.kernel());
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());

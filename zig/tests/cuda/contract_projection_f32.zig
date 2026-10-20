@@ -1,4 +1,4 @@
-//! Packed projections writing FP32, with independent FP64 products and mirrored accumulator stress.
+//! Packed projections (lane FP32 or bf16 out, prompt16 FP8), with independent FP64 products and mirrored stress.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -9,6 +9,23 @@ const Dense = contract.dense.Dense;
 const Rig = @import("contract_rig.zig").Rig;
 
 pub const modes = [_]cuda.qmmf.Mode{ .bf16, .fp8, .fp8g, .mxfp8 };
+/// The bf16-out lane modes a ModelOpt Qwen3.8-27B serves: NVFP4 MLPs and head, FP8 mixers, bf16 a and b.
+pub const bf16_modes = [_]cuda.qmmf.Mode{ .fp4, .fp8, .bf16 };
+/// The 27B's decode and verify rows (1 to 64) at its reductions (5120, 6144, 17408), columns cut to keep FP64 short.
+const served_27b = [_]c.Shape{
+    .{ .rows = 1, .n = 512, .k = 5120 },
+    .{ .rows = 3, .n = 48, .k = 5120 },
+    .{ .rows = 16, .n = 1024, .k = 5120 },
+    .{ .rows = 33, .n = 640, .k = 6144 },
+    .{ .rows = 64, .n = 256, .k = 17408 },
+    .{ .rows = 16, .n = 512, .k = 17408 },
+};
+/// The 27B's prompt chunks past 16 rows on prompt16's FP8 tile.
+const served_prompt = [_]c.Shape{
+    .{ .rows = 17, .n = 512, .k = 5120 },
+    .{ .rows = 128, .n = 1024, .k = 5120 },
+    .{ .rows = 300, .n = 512, .k = 6144 },
+};
 const served = [_]c.Shape{
     .{ .rows = 1, .n = 70, .k = 1024 },
     .{ .rows = 17, .n = 70, .k = 1024 },
@@ -24,11 +41,18 @@ fn depth(shape: c.Shape) usize {
     return shape.k / 16 + 24;
 }
 
+/// One fp32 chain over K in 16-deep MMA steps (prompt16).
+fn promptDepth(shape: c.Shape) usize {
+    return shape.k / 16 + 16;
+}
+
 pub const Product = struct {
     rig: Rig,
     lane: *const cuda.qmmf.Lane,
     mode: cuda.qmmf.Mode,
     clusters: bool,
+    out_kind: cuda.qmmf.Out = .f32,
+    prompt: ?*const cuda.nvfp4.Prompt = null, // set: prompt16's FP8 tile instead of the lane
     d: ?Dense = null,
     weight: cuda.qmmf.Weight = undefined,
     x: u64 = 0,
@@ -41,21 +65,36 @@ pub const Product = struct {
     }
 
     pub fn kernel(self: *Product) g.Kernel {
+        if (self.prompt != null) return .{ .spec = .{
+            .name = "cuda prompt16 FP8 tile 4",
+            .accum = .f32,
+            .depth = promptDepth,
+            .ops = 1,
+            .out = .bf16,
+            .tiles = .{ .{ .size = 128 }, .{ .size = 128, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } },
+            .served = &served_prompt,
+        }, .ctx = self, .vt = &vt };
+        const wide = self.out_kind == .f32;
         const name = switch (self.mode) {
-            .bf16 => if (self.clusters) "cuda BF16 fp32 clustered" else "cuda BF16 fp32 reduce",
-            .fp8 => if (self.clusters) "cuda FP8 fp32 clustered" else "cuda FP8 fp32 reduce",
+            .bf16 => if (!wide) (if (self.clusters) "cuda BF16 bf16 clustered" else "cuda BF16 bf16 reduce") else if (self.clusters) "cuda BF16 fp32 clustered" else "cuda BF16 fp32 reduce",
+            .fp8 => if (!wide) (if (self.clusters) "cuda FP8 bf16 clustered" else "cuda FP8 bf16 reduce") else if (self.clusters) "cuda FP8 fp32 clustered" else "cuda FP8 fp32 reduce",
+            .fp4 => if (self.clusters) "cuda FP4 bf16 clustered" else "cuda FP4 bf16 reduce",
             .fp8g => if (self.clusters) "cuda block FP8 fp32 clustered" else "cuda block FP8 fp32 reduce",
             .mxfp8 => if (self.clusters) "cuda MXFP8 fp32 clustered" else "cuda MXFP8 fp32 reduce",
-            else => unreachable,
         };
-        return .{ .spec = .{
-            .name = name,
-            .accum = .f32,
-            .depth = depth,
-            .out = .f32,
-            .tiles = .{ .{ .size = 16 }, .{ .size = 64 }, .{ .size = 512, .step = 128, .min = 128 } },
-            .served = &served,
-        }, .ctx = self, .vt = &vt };
+        return .{
+            .spec = .{
+                .name = name,
+                .accum = .f32,
+                .depth = depth,
+                .ops = if (self.mode == .fp4) 2 else 0, // the global scale is not a power of two here
+                .out = if (wide) .f32 else .bf16,
+                .tiles = .{ .{ .size = 16 }, .{ .size = 64 }, .{ .size = 512, .step = 128, .min = 128 } },
+                .served = if (wide) &served else &served_27b,
+            },
+            .ctx = self,
+            .vt = &vt,
+        };
     }
 
     const vt = g.hooks(Product);
@@ -71,9 +110,9 @@ pub const Product = struct {
         d.fillX(fill, seed, 16);
         try self.prepareWeight(shape, fill, seed);
         self.x = try self.rig.input(std.mem.sliceAsBytes(d.x));
-        const bytes = self.lane.partBytes(shape.rows, self.weight);
+        const bytes = if (self.prompt != null) 0 else self.lane.partBytes(shape.rows, self.weight);
         if (bytes > 0) self.part = try self.rig.scratch(bytes);
-        self.out = try self.rig.output(shape.rows * shape.n * 4);
+        self.out = try self.rig.output(shape.rows * shape.n * @as(usize, if (self.out_kind == .f32 and self.prompt == null) 4 else 2));
         return true;
     }
 
@@ -103,6 +142,7 @@ pub const Product = struct {
             codes[j * k + i] = codes[j * k + i - k / 2] | 0x80;
             words[j * k + i] = words[j * k + i - k / 2] | 0x8000;
         };
+        if (self.mode == .fp4) return self.prepareFp4(shape, fill, random);
         const scale: f32 = if (fill == .stress) 1 else 0.125;
         for (0..n) |j| for (0..k) |i| {
             const value = core.quant.fp8.e4m3(codes[j * k + i]);
@@ -139,9 +179,38 @@ pub const Product = struct {
         };
     }
 
+    /// NVFP4 codes and e4m3 block scales (stress: scale 1, codes 1 to 7 mirrored negative) under a global scale.
+    fn prepareFp4(self: *Product, shape: c.Shape, fill: g.Fill, random: std.Random) !void {
+        const a = self.rig.gpu.gpa;
+        const d = self.d.?;
+        const n = shape.n;
+        const k = shape.k;
+        const codes = try a.alloc(u8, n * k / 2);
+        defer a.free(codes);
+        const scales = try a.alloc(u8, n * k / 16);
+        defer a.free(scales);
+        const global: f32 = if (fill == .stress) 1 else 0.0123;
+        for (scales) |*v| v.* = if (fill == .stress) 0x38 else 0x20 + random.uintLessThan(u8, 0x28);
+        for (0..n) |j| for (0..k) |i| {
+            const mirror = if (fill == .stress and i >= k / 2) j * k + i - k / 2 else null;
+            const nib: u8 = if (mirror) |m| ((if (m % 2 == 0) codes[m / 2] & 0xf else codes[m / 2] >> 4) | 0x8) else if (fill == .stress) 1 + random.uintLessThan(u8, 7) else random.uintLessThan(u8, 16);
+            if (i % 2 == 0) codes[(j * k + i) / 2] = nib else codes[(j * k + i) / 2] |= nib << 4;
+            d.w[j * k + i] = core.quant.nvfp4.e2m1(nib) * core.quant.fp8.e4m3(scales[j * (k / 16) + i / 16]) * global;
+        };
+        const words = try a.alloc(u32, cuda.nvfp4.padded(n) / 64 * (k / cuda.nvfp4.group) * 512);
+        defer a.free(words);
+        cuda.nvfp4.packWords(words, codes, n, k);
+        const tiles = try a.alloc(u8, cuda.nvfp4.padded(n) * (k / 16));
+        defer a.free(tiles);
+        cuda.nvfp4.packScales(tiles, scales, n, k);
+        self.weight = cuda.nvfp4.weight(try self.rig.input(std.mem.sliceAsBytes(words)), try self.rig.input(tiles), global, n, k);
+    }
+
     pub fn run(self: *Product) !void {
         const shape = self.d.?.shape;
-        try self.lane.matmulOut(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, .f32, self.part);
+        if (self.prompt) |p| {
+            try p.matmul(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out);
+        } else try self.lane.matmulOut(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, self.out_kind, self.part);
         try self.rig.s.synchronize();
     }
 
