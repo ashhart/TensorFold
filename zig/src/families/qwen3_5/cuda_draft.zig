@@ -40,6 +40,9 @@ pub const Ctx = struct {
     parents: [engine.most_window]i32 = undefined,
     own: [engine.most_window]f64 = undefined,
     grown: usize = 0,
+    // the stream's tokens draft_frame has read, and whether one lay outside its spans (then drafts take the whole head)
+    scanned: usize = 0,
+    wide: bool = false,
 };
 
 pub const Draft = struct {
@@ -426,7 +429,10 @@ pub const Draft = struct {
         if (items.len == 0) return;
         if (items.len > d.frame_streams) return error.BadDraftFrame;
         var contexts: [frame.max_streams]*Ctx = undefined;
-        for (items, contexts[0..items.len]) |it, *ctx| ctx.* = d.streams.get(it.stream) orelse return error.UnknownStream;
+        for (items, contexts[0..items.len]) |it, *ctx| {
+            ctx.* = d.streams.get(it.stream) orelse return error.UnknownStream;
+            frame.scan(ctx.*, it.tokens);
+        }
         try frame.forward(d, items, contexts[0..items.len]);
     }
 

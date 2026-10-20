@@ -4,10 +4,16 @@ const cuda = @import("cuda");
 const dr = @import("lanes").drafter;
 const draft = @import("cuda_draft.zig");
 const tree = @import("cuda_draft_tree.zig");
+const layers = @import("cuda_layers.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
 pub const chunks = 9;
 const lp_words = 43;
+/// DFlash2's draft vocabulary as the Metal drafter and qwen27 engine read it: the head's first 98,304 rows, last 288.
+const spans = [2][2]usize{ .{ 0, 98304 }, .{ 248032, 248320 } };
+const span_width = spans[0][1] + spans[1][1] - spans[1][0];
+/// The tail span's 64-row tile: projected from row 248,000, its first 32 columns dropped.
+const tail_tile = spans[1][0] / 64 * 64;
 pub const Segment = extern struct { ring: u64, begin: i64, position: i64 };
 pub const segments_at = max_rows * 4;
 pub const words_at = segments_at + max_streams * @sizeOf(Segment);
@@ -102,11 +108,62 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         masked = d.h2;
     }
     try d.norm(masked, d.w.final_norm, d.x, rows);
-    try draft.precision.project(e, e.head, d.x, d.xs, d.logits, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
-    try e.draws.topkRows(e.stream, d.logits, c.vocab, @intCast(c.topk), d.parts, d.words, rows);
+    const spanned = if (narrow(contexts)) try head(d, rows) else try full(d, rows);
+    try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.stream.synchronize();
+    if (spanned != null) for (0..rows) |r| {
+        const w = std.mem.bytesAsSlice(u32, st[words_at + r * lp_words * 4 ..][0 .. lp_words * 4]);
+        for (w[2..][0..c.topk]) |*id| if (id.* >= spans[0][1]) {
+            id.* += @intCast(spans[1][0] - spans[0][1]);
+        };
+    };
     try publish(d, items, contexts);
+}
+
+/// A lane stream's prompt and reply tokens since the last scan: one outside the spans marks the stream wide.
+pub fn scan(ctx: *draft.Ctx, toks: []const u32) void {
+    if (!ctx.wide) for (toks[@min(ctx.scanned, toks.len)..]) |t| if (t >= spans[0][1] and t < spans[1][0]) {
+        ctx.wide = true;
+        break;
+    };
+    ctx.scanned = toks.len;
+}
+
+/// Whether every stream's tokens so far keep to the spans (a warmup's or standalone hold's context reads none).
+fn narrow(contexts: []const *draft.Ctx) bool {
+    for (contexts) |ctx| if (ctx.wide) return false;
+    return true;
+}
+
+/// The rows' draft logits over the spans' columns, packed in d.logits after the two projections (null: not this head).
+fn head(d: anytype, rows: usize) !?u64 {
+    const e = d.e;
+    const q = switch (e.head) {
+        .a4 => |q| q,
+        .an => return full(d, rows),
+    };
+    if (q.n != spans[1][1] or q.k % 64 != 0) return full(d, rows);
+    const first: cuda.qlinear.Affine4 = .{ .w = q.w, .s = q.s, .b = q.b, .n = spans[0][1], .k = q.k, .npad = q.npad };
+    const tail: cuda.qlinear.Affine4 = .{ .w = q.w + tail_tile * q.k / 2, .s = q.s + tail_tile * 2, .b = q.b + tail_tile * 2, .n = q.n - tail_tile, .k = q.k, .npad = q.npad };
+    const a = d.logits; // rows x 98,304, then rows x 320, then the packed rows x 98,592
+    const b = a + rows * first.n * 2;
+    const out = b + rows * tail.n * 2;
+    try draft.precision.project(e, layers.Proj{ .a4 = first }, d.x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    try draft.precision.project(e, layers.Proj{ .a4 = tail }, d.x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    const skip = spans[1][0] - tail_tile;
+    const copies = [2]cuda.abi.Memcpy2D{
+        .{ .src = a, .src_pitch = first.n * 2, .dst = out, .dst_pitch = span_width * 2, .width = first.n * 2, .height = rows },
+        .{ .src = b + skip * 2, .src_pitch = tail.n * 2, .dst = out + first.n * 2, .dst_pitch = span_width * 2, .width = (tail.n - skip) * 2, .height = rows },
+    };
+    for (&copies) |*m| try e.d.check(e.d.api.cuMemcpy2DAsync_v2(m, e.stream.handle), "cuMemcpy2DAsync");
+    return out;
+}
+
+/// The rows' draft logits over the whole vocabulary, in d.logits.
+fn full(d: anytype, rows: usize) !?u64 {
+    try draft.precision.project(d.e, d.e.head, d.x, d.xs, d.logits, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    return null;
 }
