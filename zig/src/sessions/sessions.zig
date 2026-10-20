@@ -19,6 +19,7 @@ pub const store = @import("store.zig");
 pub const Store = store.Store;
 
 test {
+    _ = @import("prefix_fail_test.zig");
     _ = @import("store_residency_linux_test.zig");
     _ = @import("store_residency_test.zig");
     _ = @import("store_failure_test.zig");
