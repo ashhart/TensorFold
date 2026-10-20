@@ -266,10 +266,14 @@ pub fn expert(L: anytype, module: []const u8, scales: []u8) !core.nvfp4.Linear {
 pub fn readRecipes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?core.modelopt.Recipes {
     const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
     defer gpa.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24)) catch return null;
+    // the entry read and admitted config.json: failing to read it here is an error, not a config without recipes
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
     defer gpa.free(text);
     var why: core.modelopt.Why = .{};
-    return core.modelopt.admitRecipes(gpa, text, &why) catch null;
+    return core.modelopt.admitRecipes(gpa, text, &why) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        else => null,
+    };
 }
 
 const testing = std.testing;
@@ -435,4 +439,52 @@ test "a W4A16_NVFP4 linear reads without an input_scale, which NVFP4's W4A4 reci
     try testing.expectEqualSlices(u8, got.scales, stored.scales);
     _ = try plainLinear(&ck, "a", .nvfp4);
     try testing.expectEqual(@as(usize, 0), ck.unused());
+}
+
+test "config.json's recipes, or null for a config the entry refuses; a failed read or allocation is an error" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [64]u8 = undefined;
+    const at = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    // a null reads every module as declared NVFP4, so the loader would refuse FP4-Local's for what they store
+    try testing.expectError(error.FileNotFound, readRecipes(testing.allocator, testing.io, at));
+    try tmp.dir.createDir(testing.io, "config.json", .default_dir);
+    try testing.expectError(error.IsDir, readRecipes(testing.allocator, testing.io, at));
+    try tmp.dir.deleteTree(testing.io, "config.json");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config.json", .data =
+        \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers": {
+        \\ "model.language_model.layers.0.self_attn.q_proj": {"quant_algo": "MXFP8", "weight_block_size": [1, 32]},
+        \\ "model.language_model.layers.3.self_attn.o_proj": {"quant_algo": "FP8_PB_WO", "weight_block_size": [128, 128]}}}}
+    });
+    // each allocation failed in turn (checkAllAllocationFailures' counts vary with the backing allocator's resizes)
+    var k: usize = 0;
+    while (true) : (k += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = k });
+        const got = readRecipes(failing.allocator(), testing.io, at);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, got);
+            continue;
+        }
+        var r = (try got).?; // past the last allocation: it reads
+        r.deinit();
+        break;
+    }
+    try testing.expect(k >= 3); // the path, the text and the parse
+    {
+        var r = (try readRecipes(testing.allocator, testing.io, at)).?;
+        defer r.deinit();
+        try testing.expectEqual(@as(?Recipe, .mxfp8), r.of("model.language_model.layers.0.self_attn.q_proj.weight"));
+        try testing.expectEqual(@as(?Recipe, .fp8_pb_wo), r.of("model.language_model.layers.3.self_attn.o_proj"));
+    }
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config.json", .data =
+        \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups":
+        \\ {"g": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}}}}
+    });
+    {
+        var r = (try readRecipes(testing.allocator, testing.io, at)).?; // none: the tensors decide
+        defer r.deinit();
+        try testing.expectEqual(@as(u32, 0), r.modules.count());
+    }
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config.json", .data = "{\"text_config\": {}}" });
+    try testing.expect((try readRecipes(testing.allocator, testing.io, at)) == null);
 }
