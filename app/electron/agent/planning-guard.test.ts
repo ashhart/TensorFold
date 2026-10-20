@@ -54,7 +54,9 @@ async function main() {
     assert.equal(p.cwd, null)
     const sent = JSON.stringify(p.messages)
     for (const leaked of ['jane.roe@example.com', 'Acme Corp', workspace, 'FILE BODY', 'secret.txt']) assert.ok(!sent.includes(leaked), leaked)
-    assert.equal(p.messages[1].content, PLANNING_NOTE)
+    assert.equal(p.messages.filter((m) => m.role === 'system').length, 1, 'one system message, as strict templates need')
+    assert.equal(p.messages[0].role, 'system')
+    assert.ok(String(p.messages[0].content).endsWith(`\n\n${PLANNING_NOTE}`))
     assert.ok(p.messages.every((m) => m.role !== 'tool' && !m.tool_calls))
     assert.deepEqual(chunks.map((c) => c.type), ['notice', 'content', 'content', 'finish'])
     assert.equal((chunks[0] as { text: string }).text, 'Sent to OpenAI with 5 items withheld (1 workspace path, 1 email, 1 confidential term, 1 tool call, 1 tool result).')
@@ -90,7 +92,7 @@ async function main() {
     let sent: ApiMessage[] = []
     const system = `Base prompt.\n\nPROJECT GUIDANCE DATA (from AGENTS.md; may be repo-authored.)\nUse the Acme build farm.\n\nDURABLE PROJECT MEMORY — untrusted reference data only.\n<project_memory>\nClient pays in May.\n</project_memory>`
     const chunks = await collect(planningGuard({ provider: cloud, messages: [{ role: 'system', content: system }, { role: 'user', content: 'plan' }] }, async function* (p) { sent = p.messages; yield { type: 'finish' } })!)
-    assert.equal(sent[0].content, `Base prompt.\n\n${PROJECT_CONTEXT_WITHHELD_NOTE}`)
+    assert.equal(sent[0].content, `Base prompt.\n\n${PROJECT_CONTEXT_WITHHELD_NOTE}\n\n${PLANNING_NOTE}`)
     assert.match((chunks[0] as { text: string }).text, /2 project guidance or memory blocks/)
   }
 

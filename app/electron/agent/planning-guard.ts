@@ -102,10 +102,15 @@ export function agentTerminalRefusal(cli: { id: string; name?: string; command?:
   return `${cli.name || binary} sends this folder to an external model, so TensorFold doesn't launch it in a project terminal. Pick it in the composer, where external models only plan, or open a plain shell.`
 }
 
+// The note joins the first system message, which leads: strict chat templates refuse a second system message (#884).
 function withPlanningNote(messages: ApiMessage[]): ApiMessage[] {
-  const note: ApiMessage = { role: 'system', content: PLANNING_NOTE }
   const first = messages.findIndex((message) => message.role === 'system')
-  return first < 0 ? [note, ...messages] : [...messages.slice(0, first + 1), note, ...messages.slice(first + 1)]
+  if (first < 0) return [{ role: 'system', content: PLANNING_NOTE }, ...messages]
+  const system = messages[first]
+  const content: ApiMessage['content'] = Array.isArray(system.content)
+    ? [...system.content, { type: 'text', text: PLANNING_NOTE }]
+    : system.content ? `${system.content}\n\n${PLANNING_NOTE}` : PLANNING_NOTE
+  return [{ ...system, content }, ...messages.slice(0, first), ...messages.slice(first + 1)]
 }
 
 function redactedSteering(channel: EngineSteeringChannel, redact: (text: string) => string): EngineSteeringChannel {
