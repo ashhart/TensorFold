@@ -105,7 +105,7 @@ runs.log has one line a check.
 
 ## Publication handling
 
-Machine names, internal addresses, home paths and working-session names replaced, CRLF line ends made LF and trailing blanks dropped; result
+Machine names, internal addresses, home paths, working-session names, and the tools' local document, records, container and image names replaced, CRLF line ends made LF and trailing blanks dropped; result
 values, token ids and token hashes kept.
 `redaction-report.json` counts the replacements a file. The memory wrapper's receipts are raw for TP=2 `ex-fl` only;
 `memory/summary.json` summarizes every receipt with its original's sha256. The prompt-logprob rows (87 MB a

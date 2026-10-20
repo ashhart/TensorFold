@@ -1,4 +1,4 @@
-"""S5 (<redacted-plan>): B-2's sequences (ids.json from s5_export.py: 128 sequences, 144,413
+"""S5 (<plan>): B-2's sequences (ids.json from s5_export.py: 128 sequences, 144,413
 tokens) through a serve's /v1/completions as token ids with prompt_logprobs 20 (1.1.1: nonstreaming only; such a
 request scores its whole prompt and never resumes from the prompt cache), one request a sequence, greedy, max_tokens 1.
 A reply's row t scores the sequence's token t from tokens 0..t-1 (row 0 is null): the given token's logprob and rank,

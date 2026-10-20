@@ -1,5 +1,5 @@
 """tools/zig/video_served.py's checks on a running ``tensorfold-native --vision``, with the processor's prompt ids
-read from a file (video_ref.py writes it on a machine with transformers 5.19 and PyAV 19.0.1; <redacted-container> has neither).
+read from a file (video_ref.py writes it on a machine with transformers 5.19 and PyAV 19.0.1; <container> has neither).
 
 usage: video_http.py URL CLIPS REF.json [IMAGE.png] OUT.json
 Each check prints "ok  " or "FAIL" as video_served.py does; the replies go into OUT.json; the last line is PASS or

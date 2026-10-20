@@ -1,4 +1,4 @@
-"""S5's comparison (<redacted-plan>): each engine run of s5_prompt_lp.py against the bf16 reference (s5_export.py's
+"""S5's comparison (<plan>): each engine run of s5_prompt_lp.py against the bf16 reference (s5_export.py's
 bf16-ref-b2.npz), position by position over B-2 (the engine's row t of sequence s is the reference's position t-1 of s:
 both score token t from tokens 0..t-1). numpy only.
   - top-1: the engine's best token equals bf16's (exact).

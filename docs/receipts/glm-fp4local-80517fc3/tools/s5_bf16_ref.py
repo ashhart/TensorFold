@@ -1,4 +1,4 @@
-"""S5's bf16 reference (<redacted-plan>), with no engine: B-2's tokens (ids.pt) through BF16's
+"""S5's bf16 reference (<plan>), with no engine: B-2's tokens (ids.pt) through BF16's
 lm_head on the BF16 model's final hidden (eval_glm.py ref's hidden.pt: after the hyper-connection head and the norm),
 with eval_glm.py compare's arithmetic (the bf16 linear's output to float32, log_softmax a 512-position chunk). For
 every predicted position (each sequence's 0..T-2): the next token's logprob, the logsumexp, the top 20 ids and
