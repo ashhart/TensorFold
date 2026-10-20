@@ -23,28 +23,28 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_tap(const __nv_bfloat16
     *reinterpret_cast<uint4*>(out + i) = ow;
 }
 
-// out = bf16(silu(gate) * up) over `total` values, rows D wide, eight a thread; XS (may be null) their group sums.
+// out = bf16(silu(gate) * up) over `total` values, rows D wide, four a thread; XS (may be null) their group sums.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_mlp_act(const __nv_bfloat16* __restrict__ GATE, const __nv_bfloat16* __restrict__ UP,
                                             __nv_bfloat16* __restrict__ OUT, long long total, const int* __restrict__ P, int D, float* __restrict__ XS) {
-    __shared__ __align__(16) __nv_bfloat16 done[2048];
+    __shared__ __align__(16) __nv_bfloat16 done[1024];
     if (P != nullptr) total = (long long)P[2] * D;
-    const long long i = ((long long)blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    const long long i = ((long long)blockIdx.x * blockDim.x + threadIdx.x) * 4;
     if (i < total) {
-        const uint4 gw = *reinterpret_cast<const uint4*>(GATE + i), uw = *reinterpret_cast<const uint4*>(UP + i);
+        const uint2 gw = *reinterpret_cast<const uint2*>(GATE + i), uw = *reinterpret_cast<const uint2*>(UP + i);
         const __nv_bfloat16* gb = reinterpret_cast<const __nv_bfloat16*>(&gw);
         const __nv_bfloat16* ub = reinterpret_cast<const __nv_bfloat16*>(&uw);
-        uint4 ow;
+        uint2 ow;
         __nv_bfloat16* ob = reinterpret_cast<__nv_bfloat16*>(&ow);
 #pragma unroll
-        for (int j = 0; j < 8; j++) {
+        for (int j = 0; j < 4; j++) {
             const float gf = bf(gb[j]);
             ob[j] = __float2bfloat16_rn(gf / (1.0f + expf(-gf)) * bf(ub[j]));
         }
-        *reinterpret_cast<uint4*>(OUT + i) = ow;
-        *reinterpret_cast<uint4*>(done + threadIdx.x * 8) = ow;
+        *reinterpret_cast<uint2*>(OUT + i) = ow;
+        *reinterpret_cast<uint2*>(done + threadIdx.x * 4) = ow;
     }
     if (XS == nullptr) return;
     __syncthreads();
-    const long long first = (long long)blockIdx.x * 2048 + threadIdx.x * 64;  // the block's 32 groups, each in order
-    if (threadIdx.x < 32 && first < total) XS[first / 64] = group_sum(done + threadIdx.x * 64);
+    const long long first = (long long)blockIdx.x * 1024 + threadIdx.x * 64;  // the block's 16 groups, each in order
+    if (threadIdx.x < 16 && first < total) XS[first / 64] = group_sum(done + threadIdx.x * 64);
 }

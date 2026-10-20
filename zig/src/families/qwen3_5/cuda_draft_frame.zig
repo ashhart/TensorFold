@@ -97,7 +97,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try conv(d, d.x, l.mlp_base, 0, d.xin, B, 0);
         try d.proj(l.gate, d.xin, d.gate, B);
         try d.projAgain(l.up, d.xin, d.up, B);
-        try e.run(e.fns.mlp_act, .{ (B * c.intermediate + 2047) / 2048, 1, 1 }, .{ 256, 1, 1 }, .{ d.gate, d.up, d.act, @as(c_longlong, @intCast(B * c.intermediate)), @as(u64, 0), @as(c_int, @intCast(c.intermediate)), d.xs });
+        try e.run(e.fns.mlp_act, .{ (B * c.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ d.gate, d.up, d.act, @as(c_longlong, @intCast(B * c.intermediate)), @as(u64, 0), @as(c_int, @intCast(c.intermediate)), d.xs });
         try d.projAgain(l.down, d.act, d.o, B);
         try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
     }
