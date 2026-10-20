@@ -19,7 +19,7 @@ const Job = struct {
     state: d3.kv_state.State = .{},
     samples: usize = 0,
 };
-pub const Options = struct { context: u32 = 8192, device: u32 = 0, lanes: u32 = 2 };
+pub const Options = struct { context: u32 = 8192, device: u32 = 0, lanes: u32 = 2, max_frames: ?u32 = null };
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -241,6 +241,7 @@ const Host = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, o: Options) !api.Opened {
     if (o.context < 1025 or o.context > 8192) return error.BadDramaContext;
+    const budget = try @import("drama_budget.zig").budget(o.context, o.max_frames);
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .io = io, .limit = undefined, .queue = try rounds.Queue.init(o.lanes), .info_ = .{} };
@@ -259,7 +260,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
             .max_ctx = o.context,
             .max_rows = 1,
             .attn_chunk = 1,
-            .max_frames = 1024,
+            .max_frames = o.max_frames orelse 1024,
             .warmup = false,
             .device = o.device,
         }) else try h.sessions[0].e.fork();
@@ -267,7 +268,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
         const t = if (made == 0) try d3.tts.Tts.create(gpa, io, e, codec, 1) else try h.sessions[0].t.fork(e);
         h.sessions[made] = .{ .e = e, .t = t };
     }
-    const frame_cap = @min(1024, o.context - 3);
+    const frame_cap = budget.frames;
     h.info_ = .{
         .name = "Drama 3",
         .text_generation = false,
@@ -275,7 +276,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
         .context_window = o.context,
         .plain_only = true,
         .prompt_cache = false,
-        .speech = .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = frame_cap, .max_prompt_tokens = @min(4096, o.context - frame_cap - 1) },
+        .speech = .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = frame_cap, .max_prompt_tokens = budget.prompt },
     };
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
