@@ -8,6 +8,8 @@ const lanes = tf.lanes;
 const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
 const qwen27 = @import("qwen27_served.zig");
+/// Qwen3.6-35B-A3B: the qwen3_5 family's adapter, opened on the 27B's engine.
+const moe35 = tf.qwen35.native_moe;
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
@@ -38,7 +40,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4_exp", .formats = affine_widths },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = affine_widths },
-    .{ .model_type = "qwen3_5_moe", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = moe35.model_type, .formats = moe35.formats },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
     .{ .model_type = "gemma4", .formats = gemma4_widths },
@@ -163,7 +165,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "qwen3_5_moe")) return openQwen27(a, gpa, io, o, problem); // the 27B's engine, expert MLPs
+    if (moe35.is(o.model_type)) return openQwen27(a, gpa, io, o, problem); // the 27B's engine, expert MLPs
     if (o.drafter != null and !dense and !isGemma4(o.model_type)) {
         problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head) and Gemma 4 dense";
         return null;
@@ -313,16 +315,14 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
     if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
-    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.6-35B-A3B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (moe35.is(t)) moe35.name else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
-    // Qwen3.6-35B-A3B's MTP drafts and images are later slices of its port
-    const later: ?[]const u8 = if (o.drafter != null) "--drafter" else if (o.vision != null) "--vision" else null;
-    if (std.mem.eql(u8, t, "qwen3_5_moe")) if (later) |f| return try std.fmt.allocPrint(a, "{s}: the native engine serves Qwen3.6-35B-A3B as text without drafts for now", .{f});
+    if (moe35.is(t)) if (moe35.later(o.drafter != null, o.vision != null)) |f| return try std.fmt.allocPrint(a, "{s}: " ++ moe35.later_words, .{f});
     if (o.learn == null) return null;
     // the 27B writes conversation states
     if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;
-    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.6-35B-A3B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (moe35.is(t)) moe35.name else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.learn_conversations) return try std.fmt.allocPrint(a, "--learn-conversations keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{name});
     const or_talks: []const u8 = if (dense) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
@@ -345,7 +345,7 @@ fn qwen27Engine(a: Allocator, io: std.Io, dir: []const u8) bool {
 /// Qwen3.8-27B on the lane host: `--parallel` streams in shared rounds, DFlash2 drafts from --drafter for one of them.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const context = o.context orelse 32768;
-    const name: []const u8 = if (std.mem.eql(u8, o.model_type, "qwen3_5_moe")) "Qwen3.6-35B-A3B" else "Qwen3.8-27B";
+    const name: []const u8 = if (moe35.is(o.model_type)) moe35.name else "Qwen3.8-27B";
     if (context <= 0 or context > 262144) {
         problem.* = try std.fmt.allocPrint(a, "--context {d} is outside {s}'s 1 to 262,144 tokens", .{ context, name });
         return null;

@@ -98,9 +98,9 @@ pub const Runner = struct {
         const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
             if (units) return err;
             std.log.info("qwen27: the prompt attention kernels do not build here ({t}); prompt rows take the decode path", .{err});
-            const base = try @import("simd_attention.zig").library(a, units, false);
-            defer a.free(base);
-            break :blk try mtl.Library.fromSource(m.device, base, mtl.CompileOptions.mlx());
+            const decode = try fallbackSource(a, geometry, units);
+            defer a.free(decode);
+            break :blk try mtl.Library.fromSource(m.device, decode, mtl.CompileOptions.mlx());
         };
         defer library.deinit();
         var attention = try attn.Attention.init(m.device, library);
@@ -196,6 +196,11 @@ pub const Runner = struct {
         return r.verifyHead(round, .all);
     }
 
+    /// What a round may record, before it runs: one stream's chain, and the head only where the round ends one.
+    pub fn admitRound(round: *const Round, head: forward.Head) !void {
+        return staged.admit(round.windows.len, round.windows.len == 1 and staged.isChain(round.windows[0].parents), head != .none);
+    }
+
     /// Prompt chunks may skip nonfinal logits or project just their last row, using the identical lane math.
     pub fn verifyHead(r: *Runner, round: *const Round, head: forward.Head) !void {
         return r.verifyImpl(round, head, false);
@@ -209,6 +214,7 @@ pub const Runner = struct {
     fn verifyImpl(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) !void {
         if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
+        if (r.stages != null) try admitRound(round, head);
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
         @memset(paths, &.{});
@@ -424,6 +430,15 @@ pub const Runner = struct {
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
     }
 };
+
+/// The decode body behind the head counts' defines: without them a 35B-A3B's kernels compile for the 27B's heads.
+pub fn fallbackSource(a: std.mem.Allocator, geometry: attn.planning.Geometry, units: bool) ![]u8 {
+    var buf: [64]u8 = undefined;
+    const head = try geometry.defines(&buf);
+    const body = try @import("simd_attention.zig").library(a, units, false);
+    defer a.free(body);
+    return std.mem.concat(a, u8, &.{ head, body });
+}
 
 fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
     const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
