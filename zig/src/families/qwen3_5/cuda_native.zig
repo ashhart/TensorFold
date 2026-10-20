@@ -38,7 +38,7 @@ pub const snap_grid: u32 = E.max_rows;
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, precision: ?@import("cuda_geometry.zig").Precision = null };
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -63,7 +63,7 @@ pub const Loaded = struct {
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
-    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
+    const e = try E.Engine.initWith(gpa, io, ctx, dir, o.kv8, o.precision);
     errdefer e.deinit();
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
     if (o.slide) _ = try @import("cuda_learn_shape.zig").from(e.g);
@@ -169,6 +169,9 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
+        error.PrecisionNotBuilt => "--precision checkpoint: this checkpoint names no ModelOpt activation formats; serve it without --precision",
+        error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
+        error.NoInputScale => "--precision checkpoint: a quantized projection has no input_scale to quantize its rows with; serve with --precision full",
         else => null,
     };
     return switch (err) {

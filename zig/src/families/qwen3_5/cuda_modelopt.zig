@@ -73,27 +73,49 @@ pub fn rawBytes(n: usize, k: usize, kind: Kind) usize {
     };
 }
 
-/// The kernels a ModelOpt checkpoint adds: the lane matmul, the prompt GEMM, the packers and the bf16 token rows.
+/// Whether the checkpoint's math runs: only when asked (the default stays the exact bf16 rows), on Blackwell.
+pub fn checkpointMath(ctx: *const cuda.Context, g: Geometry, asked: ?geometry.Precision) !bool {
+    const p = asked orelse return false;
+    if (p == .full) return false;
+    if (!g.kinds.modelopt) return error.PrecisionNotBuilt;
+    if (try ctx.attribute(.compute_capability_major) < 12) return error.CheckpointMathNeedsBlackwell;
+    return true;
+}
+
+/// The kernels a ModelOpt checkpoint adds: the lane, prompt16, the packers, the bf16 token rows; ck's in its math.
 pub const Kernels = struct {
     lane: cuda.qmmf.Lane,
     prompt: cuda.nvfp4.Prompt,
     pack: cuda.modelopt.Packer,
     embed: cuda.embed_rows.EmbedRows,
-    /// Slice partials where no cluster meets them (before sm_90): the most any projection takes at max_rows.
+    ck: ?cuda.ck.Ck = null, // --precision checkpoint: quant8 and the FP8 lane, quant4 and the NVFP4 packer
+    dense4: ?cuda.ck_dense.Dense4 = null,
+    /// Slice partials where no cluster meets them (before sm_90), and the checkpoint math's quantized rows.
     part: ?DeviceBuffer = null,
+    rows8: ?DeviceBuffer = null,
+    rows4: ?DeviceBuffer = null,
 
-    pub fn load(d: *const cuda.Driver, major: u32) !Kernels {
+    pub fn load(d: *const cuda.Driver, major: u32, sms: usize, math: bool) !Kernels {
         var lane = try cuda.qmmf.Lane.load(d, major);
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();
         var pack = try cuda.modelopt.Packer.load(d);
         errdefer pack.unload();
-        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d) };
+        var rows = try cuda.embed_rows.EmbedRows.load(d);
+        errdefer rows.unload();
+        var k: Kernels = .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = rows };
+        if (!math) return k;
+        k.ck = try cuda.ck.Ck.load(d, major, sms);
+        errdefer k.ck.?.unload();
+        k.dense4 = try cuda.ck_dense.Dense4.load(d, sms);
+        return k;
     }
 
     pub fn unload(k: *Kernels) void {
-        if (k.part) |*p| p.free();
+        for ([_]*?DeviceBuffer{ &k.part, &k.rows8, &k.rows4 }) |b| if (b.*) |*x| x.free();
+        if (k.dense4) |*x| x.unload();
+        if (k.ck) |*x| x.unload();
         k.embed.unload();
         k.pack.unload();
         k.prompt.unload();
@@ -101,45 +123,60 @@ pub const Kernels = struct {
     }
 
     pub fn linear(k: *const Kernels) cuda.qlinear.Linear {
-        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt };
+        const ptr = struct {
+            fn of(b: ?DeviceBuffer) u64 {
+                return if (b) |x| x.ptr else 0;
+            }
+        }.of;
+        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt, .ck = if (k.ck) |*c| c else null, .ck_rows = ptr(k.rows8), .ck_part = ptr(k.part), .ck4 = if (k.dense4) |*x| x else null, .ck4_rows = ptr(k.rows4) };
     }
 
-    /// The slice partials every projection of `e` takes at up to max_rows rows (none with clusters).
-    pub fn reserveParts(k: *Kernels, e: *const Engine) !void {
-        var most: usize = 0;
+    /// The slice partials and quantized rows every projection of `e` takes at up to max_rows rows.
+    pub fn reserve(k: *Kernels, e: *const Engine) !void {
+        var most = [3]usize{ 0, 0, 0 }; // partials, e4m3 rows, NVFP4 rows
+        const R = engine.max_rows;
         const Each = struct {
-            fn bytes(lane: cuda.qmmf.Lane, p: Proj) usize {
-                return switch (p) {
-                    .ql => |w| switch (w) {
-                        .nvfp4, .fp8, .bf16 => |q| lane.partBytes(engine.max_rows, q),
-                        else => 0,
-                    },
-                    else => 0,
+            fn add(kk: *const Kernels, m: *[3]usize, p: Proj) void {
+                const w = switch (p) {
+                    .ql => |x| x,
+                    else => return,
                 };
+                switch (w) {
+                    .fp8 => |q| if (q.act != 0 and kk.ck != null) {
+                        m[1] = @max(m[1], R * q.k);
+                        const sk = cuda.qmmf.splitK(q.n, q.k);
+                        if (sk > 1 and !kk.ck.?.clusters) m[0] = @max(m[0], sk * R * q.n * 4);
+                    } else {
+                        m[0] = @max(m[0], kk.lane.partBytes(R, q));
+                    },
+                    .nvfp4 => |q| if (q.act != 0 and kk.dense4 != null) {
+                        m[2] = @max(m[2], cuda.ck.rowsBytes(R, q.k));
+                    } else {
+                        m[0] = @max(m[0], kk.lane.partBytes(R, q));
+                    },
+                    .bf16 => |q| m[0] = @max(m[0], kk.lane.partBytes(R, q)),
+                    else => {},
+                }
             }
         };
-        most = Each.bytes(k.lane, e.head);
+        Each.add(k, &most, e.head);
         for (e.layers) |l| {
             switch (l.mlp) {
-                .dense => |m| for ([_]Proj{ m.gate, m.up, m.down }) |p| {
-                    most = @max(most, Each.bytes(k.lane, p));
-                },
+                .dense => |m| for ([_]Proj{ m.gate, m.up, m.down }) |p| Each.add(k, &most, p),
                 .moe => {},
             }
             switch (l.mixer) {
-                .delta => |m| for ([_]Proj{ m.qkv, m.z, m.a, m.b, m.out }) |p| {
-                    most = @max(most, Each.bytes(k.lane, p));
-                },
-                .attention => |m| for ([_]Proj{ m.q, m.k, m.v, m.o }) |p| {
-                    most = @max(most, Each.bytes(k.lane, p));
-                },
+                .delta => |m| for ([_]Proj{ m.qkv, m.z, m.a, m.b, m.out }) |p| Each.add(k, &most, p),
+                .attention => |m| for ([_]Proj{ m.q, m.k, m.v, m.o }) |p| Each.add(k, &most, p),
             }
         }
-        if (most > 0) k.part = try DeviceBuffer.alloc(e.d, most);
+        for ([_]*?DeviceBuffer{ &k.part, &k.rows8, &k.rows4 }, most) |b, n| if (n > 0) {
+            b.* = try DeviceBuffer.alloc(e.d, n);
+        };
     }
 };
 
-/// out (rows, n) = x (rows, k): prompt chunks past 16 rows on prompt16, else the lane (a row's bits at any count).
+/// out (rows, n) = x (rows, k): prompts past 16 rows on prompt16 (or ck's math), else the lane (row bits at any count).
 pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: bool) !void {
     const k = if (e.mo) |*m| m else return error.FormatNotLoaded;
     const l = k.linear();
@@ -166,8 +203,10 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
     if (k % 64 != 0) return error.UnsupportedQwenGeometry;
     const p = &(e.mo orelse return error.FormatNotLoaded).pack;
     var buf: [192]u8 = undefined;
-    // the static input scale: read for the checkpoint's math (--precision checkpoint), unused by bf16 rows
-    const act: f32 = if (kind != .bf16 and ck.has(try tname(&buf, pre, name, "input_scale"))) try scalar(ck, try tname(&buf, pre, name, "input_scale")) else 0;
+    // the static input scale: the checkpoint's math quantizes the rows with it (--precision checkpoint)
+    const math = e.mo.?.ck != null;
+    const act: f32 = if (math and kind != .bf16 and ck.has(try tname(&buf, pre, name, "input_scale"))) try scalar(ck, try tname(&buf, pre, name, "input_scale")) else 0;
+    if (math and kind != .bf16 and act == 0) return error.NoInputScale;
     const out: Weight = switch (kind) {
         .bf16 => blk: {
             const t = try ck.expect(try tname(&buf, pre, name, "weight"), .bf16, &.{ n, k });
@@ -192,6 +231,13 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
             const global = try scalar(ck, try tname(&buf, pre, name, "weight_scale_2"));
             try stage.upload(0, codes.bytes);
             try stage.upload(codes.bytes.len, blocks.bytes);
+            if (math) { // tf_ck_pack4's tiles of one expert, for the FP4 x FP4 mma
+                const c = &e.mo.?.ck.?;
+                const words = try e.alloc(n * k / 2);
+                const tiles = try e.alloc(n * k / 16);
+                try c.pack(e.stream, stage.ptr, stage.ptr + codes.bytes.len, 1, n, k, 0, k, words, tiles);
+                break :blk .{ .nvfp4 = cuda.ck_dense.weight(words, tiles, global, act, n, k) };
+            }
             const words = try e.alloc(padded(n) * k / 2);
             const tiles = try e.alloc(padded(n) * k / 16);
             try p.fp4Lane(e.stream, stage.ptr, stage.ptr + codes.bytes.len, words, tiles, n, k);

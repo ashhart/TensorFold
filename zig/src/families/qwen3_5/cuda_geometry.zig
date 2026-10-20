@@ -48,6 +48,9 @@ pub const Widths = struct {
     }
 };
 
+/// --precision: a ModelOpt checkpoint's own math (its input scales) or bf16 rows against its weights (exact).
+pub const Precision = enum { checkpoint, full };
+
 /// How a projection is stored: MLX affine codes, or a ModelOpt checkpoint's NVFP4, FP8 or bf16 weights.
 pub const Kind = enum(u8) { affine, nvfp4, fp8, bf16 };
 

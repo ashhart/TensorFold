@@ -165,9 +165,15 @@ pub const Engine = struct {
     const tables_len = Round.bytes;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool) !*Engine {
+        return initWith(gpa, io, ctx, dir, kv8, null);
+    }
+
+    /// `init` with --precision (a ModelOpt checkpoint's math; refused for any other checkpoint).
+    pub fn initWith(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, precision: ?geometry.Precision) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
         const g = try Geometry.read(gpa, io, dir);
+        const math = try modelopt.checkpointMath(ctx, g, precision);
         const d = ctx.d;
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
@@ -217,7 +223,7 @@ pub const Engine = struct {
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
         inline for (@typeInfo(Keeps).@"struct".field_names) |name| @field(e.keeps, name) = try e.mods[6].function("tf_q35k_" ++ name);
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .compact = try e.mods[9].function("tf_q35k_compact8") };
-        e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(try ctx.attribute(.compute_capability_major))) else null;
+        e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(try ctx.attribute(.compute_capability_major)), sms, math) else null;
         errdefer if (e.mo) |*m| m.unload();
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
@@ -229,7 +235,7 @@ pub const Engine = struct {
             defer stage.free();
             try weights.load(e, &ck, &stage);
         }
-        if (e.mo) |*m| try m.reserveParts(e);
+        if (e.mo) |*m| try m.reserve(e);
         _ = try e.scratch(.allocate);
         e.tables = try DeviceBuffer.alloc(d, tables_len);
         errdefer e.tables.free();
