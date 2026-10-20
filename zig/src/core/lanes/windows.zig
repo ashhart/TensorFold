@@ -230,7 +230,7 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             pr.* = try alloc.chainProbabilities(a, &.{e.cfg.copy_rate}, n);
         } else {
             fx.* = 1;
-            const chances = try nodeChances(e, p.stream, n);
+            const chances = try planChances(e, p, n);
             const controls = @import("mtp_policy.zig").Controls{ .cap = e.cfg.most_drafts, .floor = e.cfg.draft_confidence };
             pr.* = if (p.kind == .head and e.cfg.draft_confidence != null) chances[0..controls.prefix(chances)] else chances;
         }
@@ -294,6 +294,72 @@ fn trimmed(e: *Engine, plans: []Plan, t: trim.Trim) !void {
         } else try cut.prefix(a, p, c.count);
         if (p.count() == 0) p.kind = .none;
     }
+}
+
+/// The weight a stream's copy history keeps a round, so its copies' landing rate follows its content.
+const copy_decay = 0.9;
+
+/// A stream's copy history from cfg.copy_rate's prior: sixteen rows' worth, that share landed.
+fn copyPrime(e: *const Engine, s: *Stream) void {
+    if (s.copy_landed >= 0) return;
+    s.copy_landed = 16 * e.cfg.copy_rate;
+    s.copy_broke = 16 * (1 - e.cfg.copy_rate);
+}
+
+/// A copied row's landing rate for this stream: its copies' landed rows over those rows plus the chains that broke.
+pub fn copyRate(e: *const Engine, s: *Stream) f64 {
+    copyPrime(e, s);
+    return s.copy_landed / (s.copy_landed + s.copy_broke);
+}
+
+/// A verified copy of `offered` rows (its anchor landed) of which the first `kept` landed.
+pub fn observeCopy(e: *const Engine, s: *Stream, kept: u64, offered: u64) void {
+    copyPrime(e, s);
+    s.copy_landed = copy_decay * s.copy_landed + @as(f64, @floatFromInt(kept));
+    s.copy_broke = copy_decay * s.copy_broke + @as(f64, @floatFromInt(@intFromBool(kept < offered)));
+}
+
+/// A context copy's appended rows: each its parent's chance times the stream's copy rate; the drafts keep their own.
+fn planChances(e: *Engine, p: Plan, n: usize) ![]const f64 {
+    if (!p.context_copy or p.branch_from == 0 or p.parents == null or n < p.branch_from) return nodeChances(e, p.stream, n);
+    const drafts = p.branch_from - 1;
+    const out = try e.arena.allocator().alloc(f64, n);
+    if (drafts > 0) @memcpy(out[0..drafts], try nodeChances(e, p.stream, drafts));
+    const rate = copyRate(e, p.stream);
+    for (out[drafts..], p.parents.?[drafts..n]) |*o, parent| o.* = rate * (if (parent >= 0) out[@intCast(parent)] else 1);
+    return out;
+}
+
+test "copy rows: each priced at its parent's chance times the stream's copy rate, which follows its copies" {
+    const a = std.testing.allocator;
+    var cfg = try @import("config.zig").Config.init(a, .{ .exact_width = 64, .drafts = 15, .batch_rows = 128 }, 64, 15);
+    defer cfg.deinit(a);
+    var target: @import("fake.zig").Fake = .{ .gpa = a };
+    defer target.deinit();
+    var clock: @import("fake.zig").FixedClock = .{};
+    var e = Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    var s = try Stream.init(a, .{ .id = "copy", .prompt = &.{ 1, 2 }, .max_new = 64 });
+    defer s.deinit(a);
+    // two drafts, then a copy of two rows from the second draft (row parents -1, 0, 1, 2)
+    const parents = [_]i32{ -1, 0, 1, 2 };
+    const ids = [_]u32{ 5, 6, 7, 8 };
+    const p: Plan = .{ .stream = &s, .position = 2, .kind = .head, .tokens = &ids, .parents = &parents, .branch_from = 3, .context_copy = true };
+    const drafts = try nodeChances(&e, &s, 2);
+    const out = try planChances(&e, p, 4);
+    const rate = copyRate(&e, &s);
+    try std.testing.expectApproxEqAbs(cfg.copy_rate, rate, 1e-12);
+    try std.testing.expectApproxEqAbs(drafts[1], out[1], 1e-12);
+    try std.testing.expectApproxEqAbs(rate * drafts[1], out[2], 1e-12);
+    try std.testing.expectApproxEqAbs(rate * rate * drafts[1], out[3], 1e-12);
+    // copies that land whole raise the rate toward 1; copies that break lower it below the prior
+    for (0..30) |_| observeCopy(&e, &s, 12, 12);
+    try std.testing.expect(copyRate(&e, &s) > 0.99);
+    for (0..80) |_| observeCopy(&e, &s, 1, 12); // one row landed, then a miss: toward 1 / (1 + 1)
+    try std.testing.expect(copyRate(&e, &s) < 0.55);
+    // a window without a copy keeps the head's own chances
+    const plain: Plan = .{ .stream = &s, .position = 2, .kind = .head, .tokens = ids[0..2] };
+    try std.testing.expectEqualSlices(f64, try nodeChances(&e, &s, 2), try planChances(&e, plain, 2));
 }
 
 /// The head's chance for each held draft, else chain chances from the stream's per-depth acceptance.

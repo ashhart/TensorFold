@@ -369,6 +369,10 @@ pub const Engine = struct {
                     };
                     s.branch_accepted += kept_branch + kept_recall;
                     if (p.context_copy) if (s.proposer) |pr| pr.observe(@intCast(rows - p.branch_from), @intCast(kept_branch));
+                    // a copy whose anchor row landed: its kept run, and whether it broke before its end
+                    const anchor = parents[p.branch_from];
+                    if (p.context_copy and (anchor <= 0 or std.mem.indexOfScalar(u32, path, @intCast(anchor)) != null))
+                        win.observeCopy(e, s, kept_branch, rows - p.branch_from);
                 }
                 if (p.tried) {
                     // grafting nothing is the context's miss; rows Recall grafted count for Recall alone
