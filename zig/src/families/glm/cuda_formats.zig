@@ -404,6 +404,25 @@ test "csf_32x2_v1 scales read as the same NVFP4 linear as the scales stored plai
     try testing.expectError(error.BadNvfp4, csfLinear(&ck, "b", decoded[1..]));
 }
 
+test "csfLinear refuses an empty weight by its shape, before any width or scale count is read from it" {
+    const gpa = testing.allocator;
+    const tensors = [_]core.shard_edit.New{ // a header admits them: their bytes, none, match their shapes
+        .{ .name = "rows.weight", .dtype = .u8, .shape = &.{ 0, 16 }, .bytes = &.{} },
+        .{ .name = "inputs.weight", .dtype = .u8, .shape = &.{ 64, 0 }, .bytes = &.{} },
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir: [64]u8 = undefined;
+    const at = try std.fmt.bufPrint(&dir, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var path: [96]u8 = undefined;
+    try core.shard_edit.create(gpa, try std.fmt.bufPrint(&path, "{s}/model.safetensors", .{at}), &.{}, &tensors);
+    var ck = try core.Checkpoint.openModel(gpa, testing.io, at);
+    defer ck.close();
+    var none: [0]u8 = .{};
+    try testing.expectError(error.EmptyShape, csfLinear(&ck, "rows", &none));
+    try testing.expectError(error.EmptyShape, csfLinear(&ck, "inputs", &none));
+}
+
 test "a W4A16_NVFP4 linear reads without an input_scale, which NVFP4's W4A4 recipe requires" {
     const gpa = testing.allocator;
     var codes: [4 * 16]u8 = undefined; // n = 4, k = 32
