@@ -4,20 +4,23 @@ const cuda = @import("cuda");
 const Affine4 = cuda.qlinear.Affine4;
 const AffineN = cuda.qlinear.AffineN;
 
-/// A projection on the tiles of the width it is served at: Affine4's for 4-bit codes, AffineN's for the rest.
+/// A projection on the tiles of its width: Affine4's for 4-bit codes, AffineN's for the rest, qlinear's for ModelOpt's.
 pub const Proj = union(enum) {
     a4: Affine4,
     an: AffineN,
+    ql: cuda.qlinear.Weight, // NVFP4, FP8 or bf16 as a ModelOpt checkpoint stores it (cuda_modelopt.zig)
 
     pub fn outputs(p: Proj) usize {
         return switch (p) {
-            inline else => |q| q.n,
+            inline .a4, .an => |q| q.n,
+            .ql => |w| w.outputs(),
         };
     }
 
     pub fn inputs(p: Proj) usize {
         return switch (p) {
-            inline else => |q| q.k,
+            inline .a4, .an => |q| q.k,
+            .ql => |w| w.inputs(),
         };
     }
 };
