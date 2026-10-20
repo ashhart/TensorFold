@@ -72,8 +72,9 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
     h.lone_job = null;
     const handed = paused catch |e| {
         if (!job.prefill_sent) LaneHost.emit(job, .{ .prefilled = 0 });
+        if (e == error.Cancelled) return h.cancel(job);
         h.remove(job);
-        h.finish(job, if (e == error.Cancelled) .cancelled else .failed, if (e == error.Cancelled) "" else h.words(e));
+        h.finish(job, .failed, h.words(e));
         return true;
     };
     if (context.partial) {
