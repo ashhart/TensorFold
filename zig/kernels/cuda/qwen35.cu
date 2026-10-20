@@ -568,31 +568,6 @@ extern "C" __global__ void tf_q35_attn_gate(Geo geo, const __nv_bfloat16* __rest
     block_sums(done, (size_t)rows * W, XS);
 }
 
-// A tapped layer's residual bf16(h + r) into the segment's tap ring at the row's position; a 256-thread block a row.
-extern "C" __global__ void __launch_bounds__(256) tf_q35_tap(const __nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
-                                                              const Seg* __restrict__ segs, const int* __restrict__ rowseg, int tap, int D,
-                                                              const int* __restrict__ P) {
-    if (past_rows(P, blockIdx.x)) return;
-    const size_t m = blockIdx.x;
-    const Seg sg = segs[rowseg[m]];
-    if (sg.tap == 0) return;
-    const long long pos = sg.len + (long long)m - sg.row0;
-    __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(sg.tap) + ((size_t)(pos % sg.tap_rows) * sg.taps + tap) * D;
-    for (int i = threadIdx.x; i < D; i += blockDim.x) out[i] = __float2bfloat16_rn(bf(H[m * D + i]) + bf(R[m * D + i]));
-}
-
-// out = bf16(silu(gate) * up) over `total` values, rows D wide; XS (may be null) their group sums.
-extern "C" __global__ void tf_q35_mlp_act(const __nv_bfloat16* __restrict__ GATE, const __nv_bfloat16* __restrict__ UP,
-                                            __nv_bfloat16* __restrict__ OUT, long long total, const int* __restrict__ P, int D, float* __restrict__ XS) {
-    __shared__ __align__(16) __nv_bfloat16 done[256];
-    if (P != nullptr) total = (long long)P[2] * D;
-    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < total) {
-        const float gf = bf(GATE[i]);
-        OUT[i] = done[threadIdx.x] = __float2bfloat16_rn(gf / (1.0f + expf(-gf)) * bf(UP[i]));
-    }
-    block_sums(done, (size_t)total, XS);
-}
-
+#include "qwen35_rows.cuh"
 #include "qwen35_slots.cuh"
 #include "qwen35_argmax.cuh"
