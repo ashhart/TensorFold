@@ -45,7 +45,8 @@ const select_why = "eight exponentials in (0, 1], the first 1, each weight round
 const select_ops = 0x1p16 + 64;
 
 pub fn spec(w: Which) c.Spec {
-    const served: []const c.Shape = &.{ .{ .rows = 1, .n = TOPK, .k = E }, .{ .rows = 16, .n = TOPK, .k = E }, .{ .rows = 128, .n = TOPK, .k = E } };
+    // decode rounds to 128 rows, prompt passes to the frame's 2,048 (512 by default on tensor units)
+    const served: []const c.Shape = &.{ .{ .rows = 1, .n = TOPK, .k = E }, .{ .rows = 16, .n = TOPK, .k = E }, .{ .rows = 128, .n = TOPK, .k = E }, .{ .rows = 512, .n = TOPK, .k = E }, .{ .rows = 2048, .n = TOPK, .k = E } };
     return switch (w) {
         .select => .{ .name = "metal qwen27 moe select q27_moe_select", .accum = .f32, .depth = pickChain, .ops = select_ops, .out = .f32, .nan = .{ .stated = select_rule }, .served = served, .sums = .{ .f16 = 0, .bf16 = 0, .exact = false, .why = select_why } },
         .sort => .{ .name = "metal qwen27 moe sort q27_moe_sort", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = sort_rule }, .served = served },
