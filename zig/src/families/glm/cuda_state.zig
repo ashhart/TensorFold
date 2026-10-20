@@ -66,6 +66,20 @@ fn b16Shapes(w: *const weights.Weights) [12][2]usize {
     };
 }
 
+test "GLM TP3: existing scratch covers raw projections through the 127-row split-K boundary" {
+    const c = @import("config.zig").Config{};
+    const Share = @import("cuda_shard.zig").Share;
+    for (0..3) |rank| {
+        const w: weights.Weights = .{ .gpa = std.testing.allocator, .config = c, .share = try Share.of(&c, rank, 3) };
+        const shapes = b16Shapes(&w);
+        for ([_]usize{ 1, 17, 64, 65, 127, 128, 2066 }) |rows| {
+            var planned: usize = 4;
+            for (shapes) |shape| planned = @max(planned, b16.partBytes(@min(rows, b16.rows_from - 1), shape[0], shape[1]));
+            for (shapes[0..2]) |shape| try std.testing.expect(b16.partBytes(rows, shape[0], shape[1]) <= planned);
+        }
+    }
+}
+
 /// Scratch for windows of up to `rows` rows (the Python family's Buffers): a prompt buffer (`prefill`) or a decode's.
 pub const Buffers = struct {
     arena: Arena,

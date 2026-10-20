@@ -35,6 +35,7 @@ pub const native = @import("cuda_native.zig");
 pub const snapshots = @import("cuda_snapshots.zig");
 
 test {
+    _ = @import("cuda_tile.zig");
     _ = @import("cuda_kv8_test.zig");
     _ = kv8_ref;
     _ = @import("cuda_prof.zig");

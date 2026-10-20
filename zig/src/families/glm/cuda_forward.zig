@@ -39,7 +39,7 @@ pub const Modules = struct {
     experts: experts.Kernels,
     exl3: exl3.Kernels, // an EXL3 checkpoint's routed experts
     mm: mm_mod.Kernels, // glm_mm: the bf16 linears on tiled weights
-    tiled: bool = false, // the bf16 linears' weights are tiled (Engine.init, TF_GLM_MM unset or 1): glm_mm runs them
+    tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     copy_rows: cuda.Function,
     put_slot: cuda.Function,
