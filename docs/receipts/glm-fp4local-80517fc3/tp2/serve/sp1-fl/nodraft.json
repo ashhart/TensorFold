@@ -1,0 +1,128 @@
+[
+ {
+  "label": "sp1-fl",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 256,
+  "decode_tps_median": 24.541758723230426,
+  "decode_tps_all": [
+   24.76,
+   24.62,
+   24.54,
+   24.52,
+   24.5
+  ],
+  "ttft_s_median": 0.12048046698328108,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "3fcd20ce2fb0",
+    "output_sha256": "64589a335b074e19ecfe5509272975612b804e23d390b19a86b0ff9691cb70fa"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "3fcd20ce2fb0",
+    "output_sha256": "64589a335b074e19ecfe5509272975612b804e23d390b19a86b0ff9691cb70fa"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "3fcd20ce2fb0",
+    "output_sha256": "64589a335b074e19ecfe5509272975612b804e23d390b19a86b0ff9691cb70fa"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "3fcd20ce2fb0",
+    "output_sha256": "64589a335b074e19ecfe5509272975612b804e23d390b19a86b0ff9691cb70fa"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "3fcd20ce2fb0",
+    "output_sha256": "64589a335b074e19ecfe5509272975612b804e23d390b19a86b0ff9691cb70fa"
+   }
+  ],
+  "sample": " Fibonacci sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, ... The next number is found by adding up the two numbers before it. The Fibonacci sequence i"
+ },
+ {
+  "label": "sp1-fl",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 256,
+  "decode_tps_median": 24.486186987244004,
+  "decode_tps_all": [
+   24.49,
+   24.48,
+   24.61,
+   24.36,
+   24.52
+  ],
+  "ttft_s_median": 0.18679253000300378,
+  "evidence": [
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "98f95af2c394",
+    "output_sha256": "631efb36da29c99e1df3cd4d0d43d8c651caa1c915c75b14b9d9a923c6212d75"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "98f95af2c394",
+    "output_sha256": "631efb36da29c99e1df3cd4d0d43d8c651caa1c915c75b14b9d9a923c6212d75"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "98f95af2c394",
+    "output_sha256": "631efb36da29c99e1df3cd4d0d43d8c651caa1c915c75b14b9d9a923c6212d75"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "98f95af2c394",
+    "output_sha256": "631efb36da29c99e1df3cd4d0d43d8c651caa1c915c75b14b9d9a923c6212d75"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "98f95af2c394",
+    "output_sha256": "631efb36da29c99e1df3cd4d0d43d8c651caa1c915c75b14b9d9a923c6212d75"
+   }
+  ],
+  "sample": "# How GPUs Do Matrix Multiplication\n\n## The Plain-English Explanation\n\nImagine you have a huge stack of homework to grade, where each problem is completely inde"
+ }
+]

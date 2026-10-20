@@ -1,0 +1,18 @@
+2026-10-20 03:24:47 bin-bf07ac07 bf07ac07 bui /hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/423acf37583782c51c142d145aef733d72943d93 parallel 4 context 40960  env TF_GLM_MM=0; drop cache: host-a advised 53675 files; Cached 0.6 GiB / host-b advised 396 files; Cached 0.5 GiB / host-c advised 34635 files; Cached 0.9 GiB
+2026-10-20 03:24:56 NCCL id copied to peer-b and peer-c after 6 s
+2026-10-20 03:29:22 health 200 after 272 s
+host-a used 71 available 50 GiB
+host-b used 71 available 50 GiB
+host-c used 65 available 55 GiB
+info: rank 0: TF_GLM_NCCL_ID_FILE <workspace>/serve111/ex3-nv/nccl-id; NCCL_COMM_ID <ring-a>:29583 leaves NCCL's environment
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 65.27 GiB; 4 streams at once, 0.63 GiB each at a 40960-token window, of 38.0 GiB left after a 12.2 GiB reserve; prompts in passes of up to 2048 rows, a 16.0 GiB prompt cache; own glue kernels
+[tensorfold] serving local-model at http://127.0.0.1:8095/v1 (sampling: temperature 1.0, top_p 0.95; drafts: on; context: 40960; loaded in 269.2s)
+info: rank 1: TF_GLM_NCCL_ID_FILE <workspace>/serve111/ex3-nv/nccl-id; NCCL_COMM_ID <ring-a>:29583 leaves NCCL's environment
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+info: rank 2: TF_GLM_NCCL_ID_FILE <workspace>/serve111/ex3-nv/nccl-id; NCCL_COMM_ID <ring-a>:29583 leaves NCCL's environment
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+2026-10-20 03:37:06 stop: rank 0 'exit 0' rank 1 'exit 0' rank 2 'exit 0'
+guard 0: MemAvailable lowest 48 GiB, hottest 73.0 C, 0 stops
+guard 1: MemAvailable lowest 48 GiB, hottest 72.0 C, 0 stops
+guard 2: MemAvailable lowest 53 GiB, hottest 68.0 C, 0 stops

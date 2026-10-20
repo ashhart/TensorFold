@@ -1,0 +1,114 @@
+2026-10-20 00:48:23 ex-111 golden PASS
+2026-10-20 00:54:28 ex-111 conc PASS
+2026-10-20 00:54:46 ex-111 resume PASS
+2026-10-20 00:55:19 ex-111 batch PASS
+2026-10-20 00:55:32 ex-111 serve END rc=0
+2026-10-20 00:58:29 gate bin-80517fc3 PASS tp2 rank 0 rc=0 82s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=2 rank 0: 115 uploads as the checkpoint cut, 72 as the host packers make them (11922 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 100 GiB, 0 guard stops
+2026-10-20 00:58:29 gate bin-80517fc3 PASS tp2 rank 1 rc=0 80s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=2 rank 1: 115 uploads as the checkpoint cut, 72 as the host packers make them (11922 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 100 GiB, 0 guard stops
+2026-10-20 01:07:52 pair cover-bin-80517fc3-fp4local PASS 469 s
+2026-10-20 01:16:40 pair concurrent-bin-80517fc3-fp4local PASS 436 s
+2026-10-20 01:23:52 pair shared-bin-80517fc3-fp4local PASS 340 s
+2026-10-20 01:33:24 ex-nv golden PASS
+2026-10-20 01:39:29 ex-nv conc PASS
+2026-10-20 01:39:48 ex-nv resume PASS
+2026-10-20 01:40:18 ex-nv batch PASS
+2026-10-20 01:40:32 ex-nv serve END rc=0
+2026-10-20 01:49:43 ex-fl golden PASS
+2026-10-20 01:54:44 ex-fl conc PASS
+2026-10-20 01:55:01 ex-fl resume PASS
+2026-10-20 01:55:25 ex-fl batch PASS
+2026-10-20 01:55:38 ex-fl serve END rc=0
+2026-10-20 02:04:20 bt-111 batch1 PASS
+2026-10-20 02:04:33 bt-111 serve END rc=0
+2026-10-20 02:11:47 bt-nv batch1 PASS
+2026-10-20 02:12:01 bt-nv serve END rc=0
+2026-10-20 02:19:07 bt-fl batch1 PASS
+2026-10-20 02:19:21 bt-fl serve END rc=0
+2026-10-20 02:28:32 smoke3-mm1 golden FAIL     response = self.parent.error(   File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+2026-10-20 02:28:32 smoke3-mm1 serve STOP no health after golden
+2026-10-20 02:28:45 smoke3-mm1 serve END rc=2
+2026-10-20 02:35:29 smoke3 golden PASS
+2026-10-20 02:35:43 smoke3 serve END rc=0
+2026-10-20 02:38:26 gate3 bin-80517fc3 PASS tp3 rank 0 rc=0 68s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=3 rank 0: 115 uploads as the checkpoint cut, 72 as the host packers make them (8614 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 104 GiB, 0 guard stops
+2026-10-20 02:38:26 gate3 bin-80517fc3 PASS tp3 rank 1 rc=0 66s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=3 rank 1: 115 uploads as the checkpoint cut, 72 as the host packers make them (8602 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 105 GiB, 0 guard stops
+2026-10-20 02:38:26 gate3 bin-80517fc3 PASS tp3 rank 2 rc=0 63s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=3 rank 2: 115 uploads as the checkpoint cut, 72 as the host packers make them (7990 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 105 GiB, 0 guard stops
+2026-10-20 02:48:32 gate3 bin-80517fc3-all PASS tp3 rank 0 rc=0 493s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=3 rank 0: 894 uploads as the checkpoint cut, 486 as the host packers make them (62094 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 51 GiB, 0 guard stops
+2026-10-20 02:48:32 gate3 bin-80517fc3-all PASS tp3 rank 1 rc=0 509s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=3 rank 1: 894 uploads as the checkpoint cut, 486 as the host packers make them (61997 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 50 GiB, 0 guard stops
+2026-10-20 02:48:32 gate3 bin-80517fc3-all PASS tp3 rank 2 rc=0 475s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=3 rank 2: 894 uploads as the checkpoint cut, 486 as the host packers make them (56738 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 56 GiB, 0 guard stops
+2026-10-20 02:56:35 pair3 cover-bin-80517fc3-fp4local PASS 385 s
+2026-10-20 03:04:09 pair3 concurrent-bin-80517fc3-fp4local PASS 361 s
+2026-10-20 03:10:27 pair3 shared-bin-80517fc3-fp4local PASS 286 s
+2026-10-20 03:18:28 ex3-fl golden PASS
+2026-10-20 03:22:25 ex3-fl conc PASS
+2026-10-20 03:22:38 ex3-fl resume PASS
+2026-10-20 03:22:58 ex3-fl batch PASS
+2026-10-20 03:23:12 ex3-fl serve END rc=0
+2026-10-20 03:31:21 ex3-nv golden PASS
+2026-10-20 03:36:24 ex3-nv conc PASS
+2026-10-20 03:36:39 ex3-nv resume PASS
+2026-10-20 03:36:59 ex3-nv batch PASS
+2026-10-20 03:37:13 ex3-nv serve END rc=0
+2026-10-20 03:44:19 md3-fl media PASS
+2026-10-20 03:44:38 md3-fl mresume PASS
+2026-10-20 03:44:51 md3-fl serve END rc=0
+2026-10-20 03:53:13 sp3-nv nodraft PASS
+2026-10-20 03:55:23 sp3-nv prefill PASS
+2026-10-20 03:55:37 sp3-nv serve END rc=0
+2026-10-20 04:04:56 sp3-fl nodraft PASS
+2026-10-20 04:06:57 sp3-fl prefill PASS
+2026-10-20 04:07:04 sp3-fl watch PASS rank 0 'exit 1', rank 1 'exit 1' 7 s after rank 2 was killed
+2026-10-20 04:07:10 sp3-fl serve END rc=0
+2026-10-20 04:19:16 lp-fl plp PASS
+2026-10-20 04:19:29 lp-fl serve END rc=0
+2026-10-20 04:28:34 lp-nv plp PASS
+2026-10-20 04:28:48 lp-nv serve END rc=0
+2026-10-20 06:37:49 x9-fl x9 FAIL     response = self.parent.error(   File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+2026-10-20 06:38:03 x9-fl serve END rc=1
+2026-10-20 06:49:56 gate bin-80517fc3-all PASS tp2 rank 0 rc=0 616s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=2 rank 0: 894 uploads as the checkpoint cut, 486 as the host packers make them (89527 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 23 GiB, 0 guard stops
+2026-10-20 06:49:56 gate bin-80517fc3-all PASS tp2 rank 1 rc=0 617s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=2 rank 1: 894 uploads as the checkpoint cut, 486 as the host packers make them (89527 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 23 GiB, 0 guard stops
+2026-10-20 06:58:02 md-fl media PASS
+2026-10-20 06:58:15 md-fl serve END rc=0
+2026-10-20 07:06:10 md-nv media PASS
+2026-10-20 07:06:23 md-nv serve END rc=0
+2026-10-20 07:13:33 mr-111 mresume PASS
+2026-10-20 07:13:47 mr-111 serve END rc=0
+2026-10-20 07:20:57 mr-nv mresume PASS
+2026-10-20 07:21:11 mr-nv serve END rc=0
+2026-10-20 07:28:19 mr-fl mresume PASS
+2026-10-20 07:28:33 mr-fl serve END rc=0
+2026-10-20 07:38:18 sp1-111 openai PASS
+2026-10-20 07:39:40 sp1-111 cache PASS
+2026-10-20 07:39:53 sp1-111 serve END rc=0
+2026-10-20 07:51:09 sp1-nv openai PASS
+2026-10-20 07:52:30 sp1-nv cache PASS
+2026-10-20 07:55:20 sp1-nv nodraft PASS
+2026-10-20 07:57:47 sp1-nv prefill PASS
+2026-10-20 07:58:01 sp1-nv serve END rc=0
+2026-10-20 08:08:24 sp1-fl nodraft PASS
+2026-10-20 08:10:51 sp1-fl prefill PASS
+2026-10-20 08:11:05 sp1-fl serve END rc=0
+2026-10-20 08:22:20 sp2-111 openai PASS
+2026-10-20 08:23:41 sp2-111 cache PASS
+2026-10-20 08:23:54 sp2-111 serve END rc=0
+2026-10-20 08:35:10 sp2-nv openai PASS
+2026-10-20 08:36:31 sp2-nv cache PASS
+2026-10-20 08:39:21 sp2-nv nodraft PASS
+2026-10-20 08:41:48 sp2-nv prefill PASS
+2026-10-20 08:42:02 sp2-nv serve END rc=0
+2026-10-20 08:52:35 sp2-fl nodraft PASS
+2026-10-20 08:55:03 sp2-fl prefill PASS
+2026-10-20 08:55:17 sp2-fl serve END rc=0
+2026-10-20 09:19:44 single FAIL kernel-contract SUMMARY 91 kernels: 91 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 1533 limit problems; gates 567857 ms, limits 99197 ms; kernel-contract rc=1 fatbins rc=0 limits rc=1
+2026-10-20 09:19:44 single FAIL limits FAIL kernel-contract-limits: 877 problems
+2026-10-20 09:19:44 single PASS glm-ref 12 PASS 0 FAIL, RESULT lines 14 (same as b10231b9's); glm-ref 80517fc3 rc=0 glm-ref b10231b9 rc=0
+2026-10-20 09:27:47 x9-nv x9 PASS
+2026-10-20 09:28:01 x9-nv serve END rc=0
+2026-10-20 09:35:25 x9-fl-nd x9 PASS
+2026-10-20 09:35:39 x9-fl-nd serve END rc=0
+2026-10-20 09:43:16 x9-nv-nd x9 PASS
+2026-10-20 09:43:30 x9-nv-nd serve END rc=0
+2026-10-20 10:08:02 single FAIL kernel-contract SUMMARY 85 kernels: 85 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 1533 limit problems; gates 568074 ms, limits 100525 ms; kernel-contract rc=1 fatbins rc=0 limits rc=1
+2026-10-20 10:08:02 single FAIL limits FAIL kernel-contract-limits: 877 problems
+2026-10-20 10:08:02 single PASS glm-ref 11 PASS 0 FAIL, RESULT lines 14 (same as b10231b9's); glm-ref b10231b9 rc=0 glm-ref b10231b9 rc=0
+2026-10-20 10:15:59 x9-fl x9 PASS
+2026-10-20 10:16:13 x9-fl serve END rc=0

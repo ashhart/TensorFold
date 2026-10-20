@@ -1,0 +1,24 @@
+SAME draft-false: {"text": "{\"name\": \"Tokyo\", \"population\": 13960000}", "sha": "795208091607", "calls": []}
+SAME nested: {"text": "{\n  \"cities\": [\n    {\n      \"name\": \"Tokyo\",\n      \"country\": \"Japan\",\n      \"size\": \"large\"\n    },\n    {\n      \"name\": \"Osak
+SAME plain: {"text": " Paris. In French, Paris is pronounced", "sha": "09a15f0582e7", "calls": []}
+SAME resume-a-1: {"text": "{\"entry\": 17, \"boats\": 23}", "sha": "cd608af3c0b2", "calls": []}
+SAME resume-a-2: {"text": "{\"entry\": 17, \"boats\": 23}", "sha": "cd608af3c0b2", "calls": []}
+SAME same-as-plain-plain: {"text": "{\"ok\": true}", "sha": "80d142b4c0db", "calls": []}
+SAME same-as-plain-shaped: {"text": "{\"ok\": true}", "sha": "80d142b4c0db", "calls": []}
+SAME schema: {"text": "{\"name\": \"Tokyo\", \"population\": 13960000}", "sha": "795208091607", "calls": []}
+SAME schema-thinking: {"text": "{\n  \"name\": \"Tokyo\",\n  \"population\": 14047894\n}", "sha": "94687a0b2aa7", "calls": []}
+SAME tool-empty: {"text": "", "sha": "d1ff6466e51f", "calls": [["get_server_time", "{}"]]}
+SAME tool-empty-draft-false: {"text": "", "sha": "d1ff6466e51f", "calls": [["get_server_time", "{}"]]}
+SAME tool-named: {"text": "", "sha": "909c93fa814c", "calls": [["get_time", "{\"city\":\"Osaka\"}"]]}
+SAME tool-named-draft-false: {"text": "", "sha": "909c93fa814c", "calls": [["get_time", "{\"city\":\"Osaka\"}"]]}
+SAME tool-nested: {"text": "", "sha": "4beafe560502", "calls": [["plan_trip", "{\"travellers\":[{\"name\":\"Aiko\",\"age\":34},{\"name\":\"Ken\",\"age\":36}],\"stops\":[{\"city\"
+SAME tool-nested-draft-false: {"text": "", "sha": "4beafe560502", "calls": [["plan_trip", "{\"travellers\":[{\"name\":\"Aiko\",\"age\":34},{\"name\":\"Ken\",\"age\":36}],\"stops\":[{\"city\"
+SAME tool-parallel: {"text": "", "sha": "2621da3eecc5", "calls": [["get_weather", "{\"city\":\"Osaka\"}"], ["get_weather", "{\"city\":\"Sapporo\"}"]]}
+SAME tool-parallel-draft-false: {"text": "", "sha": "2621da3eecc5", "calls": [["get_weather", "{\"city\":\"Osaka\"}"], ["get_weather", "{\"city\":\"Sapporo\"}"]]}
+SAME tool-required: {"text": "", "sha": "427c0c4efc04", "calls": [["get_weather", "{\"city\":\"Osaka\"}"]]}
+SAME tool-required-3: {"text": "", "sha": "427c0c4efc04", "calls": [["get_weather", "{\"city\":\"Osaka\"}"]]}
+SAME tool-required-3-draft-false: {"text": "", "sha": "427c0c4efc04", "calls": [["get_weather", "{\"city\":\"Osaka\"}"]]}
+SAME tool-single: {"text": "", "sha": "427c0c4efc04", "calls": [["get_weather", "{\"city\":\"Osaka\"}"]]}
+SAME tool-single-draft-false: {"text": "", "sha": "427c0c4efc04", "calls": [["get_weather", "{\"city\":\"Osaka\"}"]]}
+SAME resume-b (resumed against cold): {"entry": 17, "boats": 23} | {"entry": 17, "boats": 23}
+22 shared replies; all the same

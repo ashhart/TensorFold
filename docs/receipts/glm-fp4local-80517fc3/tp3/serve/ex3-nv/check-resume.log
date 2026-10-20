@@ -1,0 +1,6 @@
+first: prompt 6595 cached 0 tokens 64 6.092 s sha256 a1110860aaf3
+repeated: prompt 6595 cached 6144 tokens 64 1.987 s sha256 a1110860aaf3 same_as_first True
+draft_false: prompt 6595 cached 6144 tokens 64 3.386 s sha256 a1110860aaf3 same_as_first True
+concurrent: prompt 6595 cached 6144 tokens 64 3.087 s sha256 a1110860aaf3 same_as_first True
+concurrent: prompt 6595 cached 6144 tokens 64 3.154 s sha256 a1110860aaf3 same_as_first True
+exit 0

@@ -1,0 +1,26 @@
+No-GPU CI steps (no-gpu.yml) on 80517fc3, Linux x86_64 under WSL2 (kernel 6.6.87), Zig 0.17.0, an LF tree.
+
+Warm caches:
+  zig build test                 211/211 steps succeeded                         test.log
+  zig build test-kernel-contract 11/11 steps, 65/65 tests passed                 test-kernel-contract.log
+  zig build test-golden          5/5 steps succeeded                             test-golden.log
+  fuzz-cortheon                  11/11 tests passed                              fuzz-cortheon.log
+  served Flash Next unittest     8 tests OK                                      flashnext-served.log
+  lean                           444 problems, 444 on v1.1.1, 0 new              lean.log, lean-base111.txt, lean-head-111.txt
+  zig fmt --check                the 35 Zig files this branch adds or changes: clean (empty)   fmt.log
+  git diff --check v1.1.1 80517fc3   clean (empty; 40 files)                     diff-check.txt
+
+Fresh caches (every test run again):
+  80517fc3   zig build test  208/211 steps, 2981/2996 tests passed, 14 skipped, 1 failed       fresh-test.log
+             the one failure: cuda_cost_identity.zig:64 (upstream's 9c11d9d9; rewrites a same-size file and expects
+             its (device, inode, size, mtime, ctime) hash to change; under WSL2's coarse timestamps both writes can
+             land in one tick)
+             test-kernel-contract 65/65 passed, test-golden 5/5 steps          fresh-test-kernel-contract.log, fresh-test-golden.log
+  v1.1.1     zig build test  207/211 steps, 2954/2973 tests passed, 14 skipped, 5 failed       base111-fresh-test.log
+             the same cuda_cost_identity test fails on plain v1.1.1; the other four are benchmark_receipt_test,
+             failing only in this git-archive extraction of v1.1.1 (they pass in the branch's working copy)
+
+Each intermediate commit (git archive, fresh build of each, shared cache)       split/
+  461d4473 2961/2980, 26894027 2962/2981, 251ef9ea 2968/2986, 0eac5947 2973/2992, 3c341bae 2974/2993,
+  4c1a57ed 2977/2995, 9e1d20f7 2977/2996 tests passed (14 skipped each): no compile errors; the failures are the
+  four benchmark_receipt_test failures of the git-archive extraction and, in five of the seven, cuda_cost_identity.

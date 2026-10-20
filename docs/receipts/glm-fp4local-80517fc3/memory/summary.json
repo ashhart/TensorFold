@@ -1,0 +1,1901 @@
+[
+ {
+  "tp": "tp2",
+  "run": "ex-111",
+  "rank": 0,
+  "source_sha256": "82eec6d26d3f9500855a09f4beb6f22e6e7b26cb6f203e12720e3dd651890ea2",
+  "source_bytes": 1188200,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 893.4,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 17005867008,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "unmeasured",
+   "rows": [],
+   "errors": [],
+   "reason": "requires one complete load/cleanup lifecycle and valid clock/rank",
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 5887,
+   "status": {
+    "recorded": 5887
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 16943976448,
+    "VmHWM_bytes": 17005867008,
+    "VmRSS_bytes": 16930418688
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "ex-111",
+  "rank": 1,
+  "source_sha256": "07909ffd09fadec58ba19247ed8f87d168974030157697fd0b5c30e7be55d27c",
+  "source_bytes": 1250374,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 893.7,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 17006067712,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "unmeasured",
+   "rows": [],
+   "errors": [],
+   "reason": "requires one complete load/cleanup lifecycle and valid clock/rank",
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 6201,
+   "status": {
+    "recorded": 6187,
+    "unsupported": 14
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 16937795584,
+    "VmHWM_bytes": 17006067712,
+    "VmRSS_bytes": 16924258304
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "ex-nv",
+  "rank": 0,
+  "source_sha256": "5b6ca1055318ac81b8963be4365c3c5e1a693f15feb99973b48f589d2ad41db9",
+  "source_bytes": 1204051,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 892.4,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 17008304128,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 3499,
+     "rank": 0,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 460643732057268,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 3499,
+     "rank": 0,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 460964659574282,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 100411034064,
+      "host": 16804480,
+      "peak": 100411034080,
+      "host_peak": 16804480,
+      "allocs": 1176
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 3499,
+     "rank": 0,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 461534056575437,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 100411034064,
+      "host": 16829056,
+      "peak": 103306715600,
+      "host_peak": 16829056,
+      "allocs": 1176
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 3499,
+     "rank": 0,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 461535331747561,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 28672,
+      "peak": 103306715600,
+      "host_peak": 16829056,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 5958,
+   "status": {
+    "recorded": 5958
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 16950874112,
+    "VmHWM_bytes": 17008304128,
+    "VmRSS_bytes": 16953012224
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "ex-nv",
+  "rank": 1,
+  "source_sha256": "5b101b94d957844cd0fbec3fb3f13b3539f42108dd7ca2412278199aa55ea19b",
+  "source_bytes": 1233896,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 892.8,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 17007874048,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 1789,
+     "rank": 1,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 460701099823014,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1789,
+     "rank": 1,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 461022007413653,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 100411034064,
+      "host": 16804480,
+      "peak": 100411034080,
+      "host_peak": 16804480,
+      "allocs": 1176
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1789,
+     "rank": 1,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 461591369293819,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 101134954448,
+      "host": 16816768,
+      "peak": 103306715600,
+      "host_peak": 16816768,
+      "allocs": 1177
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1789,
+     "rank": 1,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 461592797877744,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 16384,
+      "peak": 103306715600,
+      "host_peak": 16816768,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 6107,
+   "status": {
+    "recorded": 6105,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 16947265536,
+    "VmHWM_bytes": 17007874048,
+    "VmRSS_bytes": 16952606720
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "ex-fl",
+  "rank": 0,
+  "source_sha256": "68a78a0b0e82b3aa8291335affc572f54aad29523f464889f27e3c1f7e5f37a8",
+  "source_bytes": 1049265,
+  "published_raw": "memory/tp2-ex-fl-rank0.json",
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 798.9,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 10296545280,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 3695,
+     "rank": 0,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 461643905539791,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 3695,
+     "rank": 0,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 461976679877673,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 96922322384,
+      "host": 16804480,
+      "peak": 96922322400,
+      "host_peak": 16804480,
+      "allocs": 1397
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 3695,
+     "rank": 0,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 462440652836643,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 96922322384,
+      "host": 16824960,
+      "peak": 99818003920,
+      "host_peak": 16824960,
+      "allocs": 1397
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 3695,
+     "rank": 0,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 462441933880363,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 24576,
+      "peak": 99818003920,
+      "host_peak": 16824960,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 5193,
+   "status": {
+    "recorded": 5192,
+    "unsupported": 1
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 10228611072,
+    "VmHWM_bytes": 10296545280,
+    "VmRSS_bytes": 10275504128
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "ex-fl",
+  "rank": 1,
+  "source_sha256": "4b22d6ce4e94b097e7d5e8b4957817aa5f226a9feaac992ce394c0aa57a5c2de",
+  "source_bytes": 1087647,
+  "published_raw": "memory/tp2-ex-fl-rank1.json",
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 799.3,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 10296553472,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 1842,
+     "rank": 1,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 461701211192800,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1842,
+     "rank": 1,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 462033971621060,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 96922322384,
+      "host": 16804480,
+      "peak": 96922322400,
+      "host_peak": 16804480,
+      "allocs": 1397
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1842,
+     "rank": 1,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 462497937495107,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 97646242768,
+      "host": 16812672,
+      "peak": 99818003920,
+      "host_peak": 16812672,
+      "allocs": 1398
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1842,
+     "rank": 1,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 462499294742916,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 12288,
+      "peak": 99818003920,
+      "host_peak": 16812672,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 5384,
+   "status": {
+    "recorded": 5382,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 10229094400,
+    "VmHWM_bytes": 10296553472,
+    "VmRSS_bytes": 10271813632
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "md-fl",
+  "rank": 0,
+  "source_sha256": "005cc08f89c444785c166c356e5d9f1f25bd72e911310273df060d6298b127ce",
+  "source_bytes": 479281,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 387.6,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 10296012800,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 5676,
+     "rank": 0,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 480212422069858,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 5676,
+     "rank": 0,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 480546927104064,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 97547847188,
+      "host": 16804480,
+      "peak": 97547847204,
+      "host_peak": 16804480,
+      "allocs": 1402
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 5676,
+     "rank": 0,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 480597599506488,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 97547847188,
+      "host": 16878208,
+      "peak": 99786650004,
+      "host_peak": 83987072,
+      "allocs": 1402
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 5676,
+     "rank": 0,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 480599015801020,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 77824,
+      "peak": 99786650004,
+      "host_peak": 83987072,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 2371,
+   "status": {
+    "recorded": 2371
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 10228606976,
+    "VmHWM_bytes": 10296012800,
+    "VmRSS_bytes": 10267258880
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "md-fl",
+  "rank": 1,
+  "source_sha256": "1c84871b74657793eedaa69f73dec8c680d418cc00564c339c95b0c09b5d874f",
+  "source_bytes": 489785,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 387.8,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 10296754176,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 2814,
+     "rank": 1,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 480269743830525,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2814,
+     "rank": 1,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 480604251502599,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 97090102740,
+      "host": 16804480,
+      "peak": 97090102756,
+      "host_peak": 16804480,
+      "allocs": 1399
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2814,
+     "rank": 1,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 480654924402594,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 97090102740,
+      "host": 16820864,
+      "peak": 98873487828,
+      "host_peak": 16820864,
+      "allocs": 1399
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2814,
+     "rank": 1,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 480656306202727,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 20480,
+      "peak": 98873487828,
+      "host_peak": 16820864,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 2424,
+   "status": {
+    "recorded": 2422,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 10229327872,
+    "VmHWM_bytes": 10296754176,
+    "VmRSS_bytes": 10271571968
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "md-nv",
+  "rank": 0,
+  "source_sha256": "e9e233194639f841043d07a6b8e1518ff2ec1c6fa7f37fb476e39f44b829ff27",
+  "source_bytes": 475476,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 380.0,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 17008586752,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 5754,
+     "rank": 0,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 480707569923176,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 5754,
+     "rank": 0,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 481036043390899,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 101773183508,
+      "host": 16804480,
+      "peak": 101773183524,
+      "host_peak": 16804480,
+      "allocs": 1181
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 5754,
+     "rank": 0,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 481085369584736,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 101773183508,
+      "host": 16878208,
+      "peak": 104011986324,
+      "host_peak": 83987072,
+      "allocs": 1181
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 5754,
+     "rank": 0,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 481086841696757,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 77824,
+      "peak": 104011986324,
+      "host_peak": 83987072,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 2352,
+   "status": {
+    "recorded": 2351,
+    "unsupported": 1
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 16978580480,
+    "VmHWM_bytes": 17008586752,
+    "VmRSS_bytes": 16952991744
+   }
+  }
+ },
+ {
+  "tp": "tp2",
+  "run": "md-nv",
+  "rank": 1,
+  "source_sha256": "e76f3822a2740a76d540c2e9d73e7826d9150a5798caffca12997372b49f0c5c",
+  "source_bytes": 489310,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 380.5,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 17008345088,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 2866,
+     "rank": 1,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 480764895273613,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2866,
+     "rank": 1,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 481093321745634,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 100578814420,
+      "host": 16804480,
+      "peak": 100578814436,
+      "host_peak": 16804480,
+      "allocs": 1178
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2866,
+     "rank": 1,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 481142643694804,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 100578814420,
+      "host": 16820864,
+      "peak": 102362199508,
+      "host_peak": 16820864,
+      "allocs": 1178
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2866,
+     "rank": 1,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 481144315423928,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 20480,
+      "peak": 102362199508,
+      "host_peak": 16820864,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 2421,
+   "status": {
+    "recorded": 2419,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 16950586368,
+    "VmHWM_bytes": 17008345088,
+    "VmRSS_bytes": 16952762368
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "ex3-fl",
+  "rank": 0,
+  "source_sha256": "666fef94b40e1f6d390250fc7f5856bc4287ded69c5b8b17f2fe2076ecc20cdc",
+  "source_bytes": 879142,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 654.9,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 9097330688,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 4473,
+     "rank": 0,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 467041347863222,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4473,
+     "rank": 0,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 467326333488868,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 67661174672,
+      "host": 26624,
+      "peak": 67661174696,
+      "host_peak": 26624,
+      "allocs": 1396
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4473,
+     "rank": 0,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 467694242913303,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 67661174672,
+      "host": 47104,
+      "peak": 70353118096,
+      "host_peak": 47104,
+      "allocs": 1396
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4473,
+     "rank": 0,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 467695283904383,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 24576,
+      "peak": 70353118096,
+      "host_peak": 47104,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 4364,
+   "status": {
+    "recorded": 4363,
+    "unsupported": 1
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 9029585920,
+    "VmHWM_bytes": 9097330688,
+    "VmRSS_bytes": 9057816576
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "ex3-fl",
+  "rank": 1,
+  "source_sha256": "4dc956398cb879ad487c60fbc99afd98a5341d710071673323a4b368880d664f",
+  "source_bytes": 885880,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 655.2,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 9141420032,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 2356,
+     "rank": 1,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 467098621180253,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2356,
+     "rank": 1,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 467383654779364,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 67517560072,
+      "host": 26624,
+      "peak": 67517560096,
+      "host_peak": 26624,
+      "allocs": 1396
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2356,
+     "rank": 1,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 467751564859291,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 68185452552,
+      "host": 34816,
+      "peak": 70189129992,
+      "host_peak": 34816,
+      "allocs": 1397
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2356,
+     "rank": 1,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 467752624133938,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 12288,
+      "peak": 70189129992,
+      "host_peak": 34816,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 4398,
+   "status": {
+    "recorded": 4396,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 9073814528,
+    "VmHWM_bytes": 9141420032,
+    "VmRSS_bytes": 9118715904
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "ex3-fl",
+  "rank": 2,
+  "source_sha256": "07f90b16bede385efe938dd0a81fd3fe1389db183708ca9160b56f6bf7646068",
+  "source_bytes": 878624,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 655.9,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 8910934016,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 986,
+     "rank": 2,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 468163407687208,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 986,
+     "rank": 2,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 468448381503770,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 61999297544,
+      "host": 26624,
+      "peak": 61999297568,
+      "host_peak": 26624,
+      "allocs": 1396
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 986,
+     "rank": 2,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 468816280109895,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 62667190024,
+      "host": 34816,
+      "peak": 64670867464,
+      "host_peak": 34816,
+      "allocs": 1397
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 986,
+     "rank": 2,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 468817607991787,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 12288,
+      "peak": 64670867464,
+      "host_peak": 34816,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 4362,
+   "status": {
+    "recorded": 4360,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 8910531584,
+    "VmHWM_bytes": 8912543744,
+    "VmRSS_bytes": 8912543744
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "ex3-nv",
+  "rank": 0,
+  "source_sha256": "74ba30509daea4755cd1613449587389971abf2b33c3790080f1c8f165870584",
+  "source_bytes": 1003151,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 731.6,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 14598160384,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 4671,
+     "rank": 0,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 467805412799622,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4671,
+     "rank": 0,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 468074049232992,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 70086720400,
+      "host": 26624,
+      "peak": 70086720424,
+      "host_peak": 26624,
+      "allocs": 1175
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4671,
+     "rank": 0,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 468535099441549,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 70086720400,
+      "host": 47104,
+      "peak": 72778663824,
+      "host_peak": 47104,
+      "allocs": 1175
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4671,
+     "rank": 0,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 468536271217600,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 24576,
+      "peak": 72778663824,
+      "host_peak": 47104,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 4964,
+   "status": {
+    "recorded": 4963,
+    "unsupported": 1
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 14579591168,
+    "VmHWM_bytes": 14599659520,
+    "VmRSS_bytes": 14599659520
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "ex3-nv",
+  "rank": 1,
+  "source_sha256": "695a32b16eca93b0436606e776f9d0cf9fcf6f2f719d6e38ebdc765030ff85d4",
+  "source_bytes": 1015966,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 732.2,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 14600294400,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 2409,
+     "rank": 1,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 467862681752013,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2409,
+     "rank": 1,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 468131372321575,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 69859375368,
+      "host": 26624,
+      "peak": 69859375392,
+      "host_peak": 26624,
+      "allocs": 1175
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2409,
+     "rank": 1,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 468592403676616,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 70527267848,
+      "host": 34816,
+      "peak": 72530945288,
+      "host_peak": 34816,
+      "allocs": 1176
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2409,
+     "rank": 1,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 468593753543999,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 12288,
+      "peak": 72530945288,
+      "host_peak": 34816,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 5028,
+   "status": {
+    "recorded": 5026,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 14581366784,
+    "VmHWM_bytes": 14600294400,
+    "VmRSS_bytes": 14583558144
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "ex3-nv",
+  "rank": 2,
+  "source_sha256": "7eaccc6b932176f1a4c2c16dfe4e6e27add4e8a9dd4e20611ab32d917c9dccf1",
+  "source_bytes": 1013404,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 732.6,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 14151340032,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 1039,
+     "rank": 2,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 468927447763667,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1039,
+     "rank": 2,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 469196087944018,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 64309401608,
+      "host": 26624,
+      "peak": 64309401632,
+      "host_peak": 26624,
+      "allocs": 1175
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1039,
+     "rank": 2,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 469657132485935,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 64977294088,
+      "host": 34816,
+      "peak": 66980971528,
+      "host_peak": 34816,
+      "allocs": 1176
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1039,
+     "rank": 2,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 469658502753949,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 12288,
+      "peak": 66980971528,
+      "host_peak": 34816,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 5015,
+   "status": {
+    "recorded": 5013,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 14121634816,
+    "VmHWM_bytes": 14151340032,
+    "VmRSS_bytes": 14142726144
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "md3-fl",
+  "rank": 0,
+  "source_sha256": "c47affbec31f1d312aa962b6baee1d7917a3c07b54fca8a981268fbc09fc98cf",
+  "source_bytes": 443662,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 349.9,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 9097019392,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 4870,
+     "rank": 0,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 468645815742890,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4870,
+     "rank": 0,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 468932842458003,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 68286699476,
+      "host": 26624,
+      "peak": 68286699500,
+      "host_peak": 26624,
+      "allocs": 1401
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4870,
+     "rank": 0,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 468993388741779,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 68286699476,
+      "host": 100352,
+      "peak": 70423633236,
+      "host_peak": 67209216,
+      "allocs": 1401
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 4870,
+     "rank": 0,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 468994750356695,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 77824,
+      "peak": 70423633236,
+      "host_peak": 67209216,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 2197,
+   "status": {
+    "recorded": 2197
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 9029646336,
+    "VmHWM_bytes": 9098665984,
+    "VmRSS_bytes": 9098665984
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "md3-fl",
+  "rank": 1,
+  "source_sha256": "e7f3e0258c11ea8f6c03d2497212ce4f4933e0fcb053b1be28f1f9e5959ab08a",
+  "source_bytes": 449303,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 349.9,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 9140584448,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 2462,
+     "rank": 1,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 468703022267046,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2462,
+     "rank": 1,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 468990074796002,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 67685340428,
+      "host": 26624,
+      "peak": 67685340452,
+      "host_peak": 26624,
+      "allocs": 1398
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2462,
+     "rank": 1,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 469050614128446,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 68353232908,
+      "host": 43008,
+      "peak": 69356669708,
+      "host_peak": 43008,
+      "allocs": 1399
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 2462,
+     "rank": 1,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 469051668604010,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 20480,
+      "peak": 69356669708,
+      "host_peak": 43008,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 2226,
+   "status": {
+    "recorded": 2224,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 9073884160,
+    "VmHWM_bytes": 9140584448,
+    "VmRSS_bytes": 9126248448
+   }
+  }
+ },
+ {
+  "tp": "tp3",
+  "run": "md3-fl",
+  "rank": 2,
+  "source_sha256": "32dda98ab815c9bbde24110cb0ffa0ee5ca2f4786ec8bdce71d8c7787dff704f",
+  "source_bytes": 454718,
+  "published_raw": null,
+  "schema": 1,
+  "returncode": 0,
+  "context_tokens_operator_label": 40960,
+  "process_seconds": 350.5,
+  "resident_peak": {
+   "status": "recorded",
+   "bytes": 8910798848,
+   "scope": "Linux wait4 lifetime peak RSS, fresh process per context; not resettable"
+  },
+  "physical_footprint": {
+   "status": "unsupported",
+   "bytes": null,
+   "reason": "Linux RSS/PSS is not a total unified-memory physical-footprint peak"
+  },
+  "native": {
+   "status": "recorded",
+   "rows": [
+    {
+     "schema": 1,
+     "pid": 1090,
+     "rank": 2,
+     "phase": "load_begin",
+     "reset": true,
+     "monotonic_ns": 469767841307480,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 0,
+      "peak": 0,
+      "host_peak": 0,
+      "allocs": 0
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1090,
+     "rank": 2,
+     "phase": "load_end",
+     "reset": false,
+     "monotonic_ns": 470054853687055,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 62167077900,
+      "host": 26624,
+      "peak": 62167077924,
+      "host_peak": 26624,
+      "allocs": 1398
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1090,
+     "rank": 2,
+     "phase": "cleanup_begin",
+     "reset": false,
+     "monotonic_ns": 470115397769964,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 62834970380,
+      "host": 43008,
+      "peak": 63838407180,
+      "host_peak": 43008,
+      "allocs": 1399
+     }
+    },
+    {
+     "schema": 1,
+     "pid": 1090,
+     "rank": 2,
+     "phase": "cleanup_end",
+     "reset": false,
+     "monotonic_ns": 470116665634360,
+     "scope": "process_owned_cuda_buffers",
+     "usage": {
+      "device": 0,
+      "host": 20480,
+      "peak": 63838407180,
+      "host_peak": 43008,
+      "allocs": 0
+     }
+    }
+   ],
+   "errors": [],
+   "reason": null,
+   "scope": "owned buffers only; excludes driver, library and other untracked allocations"
+  },
+  "samples": {
+   "count": 2253,
+   "status": {
+    "recorded": 2251,
+    "unsupported": 2
+   },
+   "max": {
+    "Locked_bytes": 0,
+    "Pss_bytes": 8843414528,
+    "VmHWM_bytes": 8910798848,
+    "VmRSS_bytes": 8900059136
+   }
+  }
+ }
+]

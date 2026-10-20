@@ -1,0 +1,3 @@
+{"label": "sp2-nv", "prompt": "fibonacci-raw", "temperature": 0.0, "decode_tps_median": 18.329303887222363, "decode_tps_all": [18.4, 18.33, 18.33, 18.33, 18.33], "ttft_s_median": 0.1379799050046131}
+{"label": "sp2-nv", "prompt": "gpu-chat-no-think", "temperature": 0.0, "decode_tps_median": 18.33469682142612, "decode_tps_all": [18.33, 18.34, 18.33, 18.33, 18.35], "ttft_s_median": 0.20405855000717565}
+exit 0

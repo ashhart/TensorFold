@@ -1,0 +1,24 @@
+PASS resume-b-cold: {"text": "{\"entry\": 17, \"boats\": 23}", "cached": 0, "wall": 3.373}
+PASS schema: {"text": "{\"name\": \"Tokyo\", \"population\": 13960000}", "sha": "795208091607", "wall": 0.817}
+PASS schema-thinking: {"text": "{\n  \"name\": \"Tokyo\",\n  \"population\": 14047894\n}", "reasoning": 1664, "wall": 16.17}
+PASS same-as-plain: {"plain": "{\"ok\": true}", "shaped": "{\"ok\": true}", "shas": ["80d142b4c0db", "80d142b4c0db"]}
+PASS draft-false: {"text": "{\"name\": \"Tokyo\", \"population\": 13960000}", "wall": 0.801}
+PASS sampled: {"texts": ["{\"name\": \"Tokyo\", \"population\": 13960000}", "{\"name\": \"Tokyo\", \"population\": 13960000}"]}
+PASS tool-required: {"calls": [["get_weather", "{\"city\":\"Osaka\"}"]], "finish": "tool_calls"}
+PASS plain: {"text": " Paris. In French, Paris is pronounced", "sha": "09a15f0582e7", "against": "this run's"}
+PASS nested: {"text": "{\n  \"cities\": [\n    {\n      \"name\": \"Tokyo\",\n      \"country\": \"Japan\",\n      \"size\": \"large\"\n    },\n    {\n      \"name\": \"Osaka\",\n      \"country\": \"Japan\",\n      \"size\": \"large\"\n    },\n    {\n      \"name\": \"Yokohama\"\n      , \"country\": \"Japan\",\n      \"size\": \"large\"\n    }\n  ]\n}", "cities": 3, "wall": 3.918}
+PASS resume-a: {"text": "{\"entry\": 17, \"boats\": 23}", "cached": [0, 2048], "prompt_tokens": 3030, "walls": [2.834, 1.455]}
+PASS tool-required-3: {"calls": [["get_weather", "{\"city\":\"Osaka\"}"]], "finish": "tool_calls", "text": ""}
+PASS tool-required-3-draft-false: {"calls": [["get_weather", "{\"city\":\"Osaka\"}"]]}
+PASS tool-named: {"calls": [["get_time", "{\"city\":\"Osaka\"}"]], "finish": "tool_calls", "text": ""}
+PASS tool-named-draft-false: {"calls": [["get_time", "{\"city\":\"Osaka\"}"]]}
+PASS tool-parallel: {"calls": [["get_weather", "{\"city\":\"Osaka\"}"], ["get_weather", "{\"city\":\"Sapporo\"}"]], "finish": "tool_calls", "text": ""}
+PASS tool-parallel-draft-false: {"calls": [["get_weather", "{\"city\":\"Osaka\"}"], ["get_weather", "{\"city\":\"Sapporo\"}"]]}
+PASS tool-single: {"calls": [["get_weather", "{\"city\":\"Osaka\"}"]], "finish": "tool_calls", "text": ""}
+PASS tool-single-draft-false: {"calls": [["get_weather", "{\"city\":\"Osaka\"}"]]}
+PASS tool-nested: {"calls": [["plan_trip", "{\"travellers\":[{\"name\":\"Aiko\",\"age\":34},{\"name\":\"Ken\",\"age\":36}],\"stops\":[{\"city\":\"Kyoto\",\"nights\":2},{\"city\":\"Nara\",\"nights\":1}]}"]], "finish": "tool_calls", "text": ""}
+PASS tool-nested-draft-false: {"calls": [["plan_trip", "{\"travellers\":[{\"name\":\"Aiko\",\"age\":34},{\"name\":\"Ken\",\"age\":36}],\"stops\":[{\"city\":\"Kyoto\",\"nights\":2},{\"city\":\"Nara\",\"nights\":1}]}"]]}
+PASS tool-empty: {"calls": [["get_server_time", "{}"]], "finish": "tool_calls", "text": ""}
+PASS tool-empty-draft-false: {"calls": [["get_server_time", "{}"]]}
+all passed
+exit 0

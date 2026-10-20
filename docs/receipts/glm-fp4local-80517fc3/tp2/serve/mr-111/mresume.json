@@ -1,0 +1,57 @@
+{
+ "nonce": "18e00df353ad7676",
+ "image_bytes": 2524274,
+ "requested_reply_tokens": 64,
+ "temperature": 0,
+ "rows": [
+  {
+   "phase": "first",
+   "seconds": 9.867,
+   "prompt_tokens": 7603,
+   "cached_tokens": 0,
+   "tokens": 64,
+   "token_sha256": "7b76f642e3dc69eef1f3d228050c0db52bd93fd52ee6dd324af7a5fb84e3dd69",
+   "content": "Line 30 mentions the most stones, with 100 stones.<|user|>The user wants to know which line mentions the most stones.\nLooking at the provided text, I need to find the maximum number of stones mentioned in any line.\nLet's scan the numbers:\nLine 0: 0\nLine 1: "
+  },
+  {
+   "phase": "repeated",
+   "seconds": 3.294,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "7b76f642e3dc69eef1f3d228050c0db52bd93fd52ee6dd324af7a5fb84e3dd69",
+   "content": "Line 30 mentions the most stones, with 100 stones.<|user|>The user wants to know which line mentions the most stones.\nLooking at the provided text, I need to find the maximum number of stones mentioned in any line.\nLet's scan the numbers:\nLine 0: 0\nLine 1: ",
+   "same_as_first": true
+  },
+  {
+   "phase": "draft_false",
+   "seconds": 4.834,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "7b76f642e3dc69eef1f3d228050c0db52bd93fd52ee6dd324af7a5fb84e3dd69",
+   "content": "Line 30 mentions the most stones, with 100 stones.<|user|>The user wants to know which line mentions the most stones.\nLooking at the provided text, I need to find the maximum number of stones mentioned in any line.\nLet's scan the numbers:\nLine 0: 0\nLine 1: ",
+   "same_as_first": true
+  },
+  {
+   "phase": "concurrent",
+   "seconds": 4.897,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "7b76f642e3dc69eef1f3d228050c0db52bd93fd52ee6dd324af7a5fb84e3dd69",
+   "content": "Line 30 mentions the most stones, with 100 stones.<|user|>The user wants to know which line mentions the most stones.\nLooking at the provided text, I need to find the maximum number of stones mentioned in any line.\nLet's scan the numbers:\nLine 0: 0\nLine 1: ",
+   "same_as_first": true
+  },
+  {
+   "phase": "concurrent",
+   "seconds": 4.795,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "7b76f642e3dc69eef1f3d228050c0db52bd93fd52ee6dd324af7a5fb84e3dd69",
+   "content": "Line 30 mentions the most stones, with 100 stones.<|user|>The user wants to know which line mentions the most stones.\nLooking at the provided text, I need to find the maximum number of stones mentioned in any line.\nLet's scan the numbers:\nLine 0: 0\nLine 1: ",
+   "same_as_first": true
+  }
+ ]
+}

@@ -1,0 +1,9 @@
+alone 0: 131 prompt tokens, 64 tokens, da2fd03bc35f11b63dc178b52e05de8ab18f99c64e2958387a053b872db38c79, first token 0.35027085 s
+alone 1: 338 prompt tokens, 64 tokens, e915010b9e1ec1486abf39aa7e35698fb150885b6843ed37a429a3ccda3248ff, first token 0.481693965 s
+alone 2: 535 prompt tokens, 64 tokens, aabfbd49766d62232e8e826180cde9af8db69643e68e4ab34e80d7fc6eac4a59, first token 0.571619409 s
+PASS 0: together equal to alone (da2fd03bc35f11b63dc178b52e05de8ab18f99c64e2958387a053b872db38c79, first token 1.00621803 s, widths [])
+PASS 1: together equal to alone (e915010b9e1ec1486abf39aa7e35698fb150885b6843ed37a429a3ccda3248ff, first token 1.006286575 s, widths [])
+PASS 2: together equal to alone (aabfbd49766d62232e8e826180cde9af8db69643e68e4ab34e80d7fc6eac4a59, first token 1.006719377 s, widths [])
+INFO first tokens together: [1.006, 1.006, 1.007] s, spread 0.0005013469999999298 s; alone: [0.35027085, 0.481693965, 0.571619409]; the blocker still decoding at the end: True
+PASS one pass: first tokens by pass [[1.006, 1.006, 1.007]] (apart by under 0.175135425 s), prefill seconds [0.93697617, 0.936970378, 0.936933002], beside the blocker True
+exit 0

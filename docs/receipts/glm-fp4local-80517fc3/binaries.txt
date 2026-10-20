@@ -1,0 +1,14 @@
+bin-b10231b9: b10231b9 built from src-b10231b9 with Zig 0.17.0 and nvcc 13.0 for sm_121
+4acb451d00a1df581fa36139093e9516eff1ad971ff377b1810705e070b6e3d4  tf-cuda-test
+8599f3e6b092403149549e6bf867083c379d348ad96e4cfab0072a9688246277  tensorfold
+2632ac57a0c4ff912c6a640ab8db82c416bdba42cce2f9876273d4e99b7facfc  tensorfold-native
+
+bin-80517fc3: 80517fc3 built from src-80517fc3 with Zig 0.17.0 and nvcc 13.0 for sm_121
+68a07d82b7e26c37d41a3ee7c85e1a53775192784f23f555ee5cc5d25624c442  tf-cuda-test
+f61721fbf38e0cf724fa1c3eee678527cbbe61c88fdc48bd01ae8a731cc630d9  tensorfold
+9008f7983ade52021179d07640728b671bd2944a6af8ce841e873adce73abddc  tensorfold-native
+
+bin-bf07ac07: bf07ac07 built from src-bf07ac07 with Zig 0.17.0 and nvcc 13.0 for sm_121
+f7ed1e7fb75b18c52bff8b0c4b64a15e61746f16062241801260c72410693630  tf-cuda-test
+5617159f17300e5d0694fca4fb329c41a67e7afc216835b656b12807c5c9479a  tensorfold
+2e9c18bcedef2d4250bd25c4e370fb4a0a273de7ee8d3138a546009498bf5721  tensorfold-native

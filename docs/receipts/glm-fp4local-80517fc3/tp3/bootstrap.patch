@@ -1,0 +1,68 @@
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+index 296b6b05..01175513 100644
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -101,6 +101,36 @@ const Owned = struct {
+ };
+
+ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
++extern "c" fn unsetenv(name: [*:0]const u8) c_int;
++
++/// Local, not for upstream (TP=3 on the ring's /32 until #636): with TF_GLM_NCCL_ID_FILE, NCCL_COMM_ID names only the
++/// ranks' lines; it leaves NCCL's environment, whose bootstrap looks for an interface in that address's subnet.
++fn commIdByFile(rank: usize) ?[]const u8 {
++    const f = std.mem.span(std.c.getenv("TF_GLM_NCCL_ID_FILE") orelse return null);
++    const was = std.mem.span(std.c.getenv("NCCL_COMM_ID") orelse "");
++    std.log.info("rank {d}: TF_GLM_NCCL_ID_FILE {s}; NCCL_COMM_ID {s} leaves NCCL's environment", .{ rank, f, was });
++    _ = unsetenv("NCCL_COMM_ID");
++    return f;
++}
++
++/// Local: rank 0 writes its unique id to `path` as hex; the others read it there, waiting up to 10 minutes.
++fn idByFile(io: std.Io, path: []const u8, rank: usize, lib: *const cuda.nccl.Library, id: *cuda.nccl.UniqueId) !void {
++    if (rank == 0) {
++        try lib.check(lib.api.ncclGetUniqueId(id), "ncclGetUniqueId");
++        const hex = std.fmt.bytesToHex(id.internal, .lower);
++        return std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = &hex });
++    }
++    var hex: [256]u8 = undefined;
++    for (0..600) |_| {
++        const got = std.Io.Dir.cwd().readFile(io, path, &hex) catch hex[0..0];
++        if (got.len == hex.len) {
++            _ = try std.fmt.hexToBytes(&id.internal, &hex);
++            return;
++        }
++        std.Io.sleep(io, .fromMilliseconds(1000), .awake) catch {};
++    }
++    return error.NoCommId;
++}
+
+ /// Every peer's send/recv connected now, before the weights fill memory (connected on first use, ibv_reg_mr can fail).
+ fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
+@@ -142,14 +172,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     };
+     // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
+     if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
+-    return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes) catch |err| {
++    const id_file = commIdByFile(p.rank); // local: after the lines read NCCL_COMM_ID, before NCCL's first call
++    return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes, id_file) catch |err| {
+         cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this rank's error
+         return err;
+     };
+ }
+
+ /// `open` once the ranks' lines are up: NCCL, the engine and the link, then a follower's loop or rank 0's lanes.
+-fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings, roce_bytes: usize) !Loaded {
++fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings, roce_bytes: usize, id_file: ?[]const u8) !Loaded {
+     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
+     const own = try gpa.create(Owned);
+     errdefer gpa.destroy(own);
+@@ -162,7 +193,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     var lib = try cuda.nccl.Library.open();
+     errdefer lib.close();
+     var id: cuda.nccl.UniqueId = undefined;
+-    try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
++    if (id_file) |f| try idByFile(io, f, p.rank, &lib, &id) else try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
+     var comm: cuda.nccl.Comm = null;
+     try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
+     own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };

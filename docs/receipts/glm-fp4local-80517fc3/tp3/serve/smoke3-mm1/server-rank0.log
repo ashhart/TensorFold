@@ -1,0 +1,9 @@
+info: rank 0: TF_GLM_NCCL_ID_FILE <workspace>/serve111/smoke3-mm1/nccl-id; NCCL_COMM_ID <ring-a>:29583 leaves NCCL's environment
+info: checkpoint digest: 0.0 GiB read in 0.2 s, 42/42 cached files
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 63.01 GiB; 4 streams at once, 0.63 GiB each at a 40960-token window, of 40.0 GiB left after a 12.2 GiB reserve; prompts in passes of up to 2048 rows, a 16.0 GiB prompt cache; own glue kernels
+[tensorfold] serving local-model at http://127.0.0.1:8095/v1 (sampling: temperature 1.0, top_p 0.95; drafts: on; context: 40960; loaded in 262.7s)
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] ended cmpl-691e4a91faa6632efb1fc91c5931cbe9 reason=error (BadShape) prompt=2066 tokens=0 after=0.01s
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 500 -
+error: rank 0: rank 1 stopped (BadShape); this rank stops too
+exit 1

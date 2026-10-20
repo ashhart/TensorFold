@@ -1,0 +1,4 @@
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+info: RoCE all-gather: 2 HCA(s), shards up to 4096 KiB by RDMA writes
+info: rank 1: rank 0 ended; leaving
+exit 0

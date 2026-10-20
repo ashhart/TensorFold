@@ -1,0 +1,73 @@
+{
+ "k": 3,
+ "n": 64,
+ "nonce": "574842303",
+ "alone": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "53ea03e7562bde51aa2779e75a5324ae3a032ecfb67502126535fb76b342498d",
+   "text": " a short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\nNote 574842303-0.3: a short study of the tides of a small harbour, what one sees and measures there, and what",
+   "ttft": 0.353084068,
+   "prefill_s": 0.352545071,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "8e6256f39c83a84b6e39e39eb288293cb8b79b966d47ce5df32bb87b13386a3b",
+   "text": " A short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks.\n\nJorge Luis Borges — Library of Babel\n\nNote 574842303-1.0: a short study of how a sundial keeps time,",
+   "ttft": 0.48158393,
+   "prefill_s": 0.48086882,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "9b3f08961bb29a440c59600abd2a8b4f194291e41368d438954d21cdb7fc09a2",
+   "text": " I received a request to analyze the following content: \"a short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\" I will now provide a detailed analysis of this content.\nSummary: I received a request to analyze the following content: \"",
+   "ttft": 0.571303648,
+   "prefill_s": 0.570380808,
+   "prefill_widths": []
+  }
+ ],
+ "together": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "53ea03e7562bde51aa2779e75a5324ae3a032ecfb67502126535fb76b342498d",
+   "text": " a short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\nNote 574842303-0.3: a short study of the tides of a small harbour, what one sees and measures there, and what",
+   "ttft": 1.004841811,
+   "prefill_s": 0.935239445,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "8e6256f39c83a84b6e39e39eb288293cb8b79b966d47ce5df32bb87b13386a3b",
+   "text": " A short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks.\n\nJorge Luis Borges — Library of Babel\n\nNote 574842303-1.0: a short study of how a sundial keeps time,",
+   "ttft": 1.005037332,
+   "prefill_s": 0.935233045,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "9b3f08961bb29a440c59600abd2a8b4f194291e41368d438954d21cdb7fc09a2",
+   "text": " I received a request to analyze the following content: \"a short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\" I will now provide a detailed analysis of this content.\nSummary: I received a request to analyze the following content: \"",
+   "ttft": 1.005369031,
+   "prefill_s": 0.935203861,
+   "prefill_widths": []
+  }
+ ],
+ "ttft_spread": 0.0005272200000001614,
+ "blocker_beside": true,
+ "one_pass": true,
+ "passes": [
+  [
+   1.004841811,
+   1.005037332,
+   1.005369031
+  ]
+ ]
+}

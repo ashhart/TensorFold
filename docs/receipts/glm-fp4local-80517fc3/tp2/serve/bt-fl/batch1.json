@@ -1,0 +1,73 @@
+{
+ "k": 3,
+ "n": 64,
+ "nonce": "550998248",
+ "alone": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "0cb12a1e68e0863c5c37443fa1d3f808f8fd71c00e78bc8b4eb309981b81a4f4",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\n# Tides of a Small Harbour\n\n## 1. Introduction\n\nThe sea rises and falls twice a day along most coasts. In a small harbour this motion",
+   "ttft": 0.343480081,
+   "prefill_s": 0.342947645,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "6f2699fef794b43b698dad97a4f6a75ade18576ac03d556c8671acbe4cde6f7e",
+   "text": " a short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks.\nNote 550998248-1.8: a short study of how a sundial keeps time, what one sees and measures there, and what one would",
+   "ttft": 0.478303485,
+   "prefill_s": 0.477533865,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "6eaba4b659e7b9adf47871cf5a5fde2760c239b93adc491f65801ab17e2d2dcb",
+   "text": " a short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\nTags: barley, bread, recipe, measurement, observation, documentation, study, note, friend, question, kitchen, food, writing, record, curiosity, practice, method",
+   "ttft": 0.555701829,
+   "prefill_s": 0.554865104,
+   "prefill_widths": []
+  }
+ ],
+ "together": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "0cb12a1e68e0863c5c37443fa1d3f808f8fd71c00e78bc8b4eb309981b81a4f4",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\n# Tides of a Small Harbour\n\n## 1. Introduction\n\nThe sea rises and falls twice a day along most coasts. In a small harbour this motion",
+   "ttft": 0.990565913,
+   "prefill_s": 0.935969539,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "6f2699fef794b43b698dad97a4f6a75ade18576ac03d556c8671acbe4cde6f7e",
+   "text": " a short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks.\nNote 550998248-1.8: a short study of how a sundial keeps time, what one sees and measures there, and what one would",
+   "ttft": 0.990296408,
+   "prefill_s": 0.935974867,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "6eaba4b659e7b9adf47871cf5a5fde2760c239b93adc491f65801ab17e2d2dcb",
+   "text": " a short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\nTags: barley, bread, recipe, measurement, observation, documentation, study, note, friend, question, kitchen, food, writing, record, curiosity, practice, method",
+   "ttft": 0.990281832,
+   "prefill_s": 0.935942803,
+   "prefill_widths": []
+  }
+ ],
+ "ttft_spread": 0.0002840809999999916,
+ "blocker_beside": true,
+ "one_pass": true,
+ "passes": [
+  [
+   0.990281832,
+   0.990296408,
+   0.990565913
+  ]
+ ]
+}

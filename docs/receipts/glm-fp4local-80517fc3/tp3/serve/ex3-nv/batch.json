@@ -1,0 +1,85 @@
+{
+ "k": 4,
+ "n": 64,
+ "nonce": "347179386",
+ "alone": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "b98c19a9145501d99594161aa1dd61ed9338993582f056861a43e124a882541e",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\nJesse Livermore\n\n1. The harbour and the question\n\nThe harbour is small, with a stone quay, a slipway, and a tide gauge bolted",
+   "ttft": 0.271082169,
+   "prefill_s": 0.270304462,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "9f5044d0ccfa18092095a0618d5d7775237297f92af147bd88390b2934143f4c",
+   "text": " I went to the sundial at noon, watched the shadow move, and wrote down what I saw and measured. The shadow moved slowly, the hour lines were clear, and the whole thing felt like a small lesson in how the sun and the earth keep time together. I also wrote a short note to a friend explaining",
+   "ttft": 0.386746036,
+   "prefill_s": 0.386157084,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "de24801fc1d3effdde38a0c3a0c1dcc6e086af566ec1ce3db84f1323c0f0445b",
+   "text": " a short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\nNote 347179386-2.13: a short study of a recipe for barley bread, what one sees and measures there, and what one would write down",
+   "ttft": 0.456959259,
+   "prefill_s": 0.45625484,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 758,
+   "n": 64,
+   "token_sha256": "f56adf52168e7e109d2c9acac5953af96f24d48b925ae24c5b90c1c1946048ca",
+   "text": " A compact, practical note on the rules of a card game: what is observed, how it is measured, and how it is written down for later use.\nSummary: A compact, practical note on the rules of a card game: what is observed, how it is measured, and how it is written down for later",
+   "ttft": 0.55367473,
+   "prefill_s": 0.552499867,
+   "prefill_widths": []
+  }
+ ],
+ "together": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "b98c19a9145501d99594161aa1dd61ed9338993582f056861a43e124a882541e",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\nJesse Livermore\n\n1. The harbour and the question\n\nThe harbour is small, with a stone quay, a slipway, and a tide gauge bolted",
+   "ttft": 4.418314344,
+   "prefill_s": 0.324267409,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "9f5044d0ccfa18092095a0618d5d7775237297f92af147bd88390b2934143f4c",
+   "text": " I went to the sundial at noon, watched the shadow move, and wrote down what I saw and measured. The shadow moved slowly, the hour lines were clear, and the whole thing felt like a small lesson in how the sun and the earth keep time together. I also wrote a short note to a friend explaining",
+   "ttft": 0.511474196,
+   "prefill_s": 0.453955197,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "de24801fc1d3effdde38a0c3a0c1dcc6e086af566ec1ce3db84f1323c0f0445b",
+   "text": " a short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\nNote 347179386-2.13: a short study of a recipe for barley bread, what one sees and measures there, and what one would write down",
+   "ttft": 1.114653057,
+   "prefill_s": 1.056737205,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 758,
+   "n": 64,
+   "token_sha256": "f56adf52168e7e109d2c9acac5953af96f24d48b925ae24c5b90c1c1946048ca",
+   "text": " A compact, practical note on the rules of a card game: what is observed, how it is measured, and how it is written down for later use.\nSummary: A compact, practical note on the rules of a card game: what is observed, how it is measured, and how it is written down for later",
+   "ttft": 1.846413365,
+   "prefill_s": 1.788999048,
+   "prefill_widths": []
+  }
+ ],
+ "ttft_spread": 3.9068401479999997,
+ "blocker_beside": true,
+ "one_pass": false,
+ "passes": []
+}

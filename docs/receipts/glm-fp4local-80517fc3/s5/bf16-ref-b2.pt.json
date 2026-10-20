@@ -1,0 +1,30 @@
+{
+ "ids": "ids.pt",
+ "ids_file_sha256": "6ec42069590d444f83492545be234e2d288287f055f6c4d3ce9828118fdf0cf1",
+ "ids_sha256": "d857818d0cd8c6d3",
+ "hidden_sha256": "3b9094f8720ab62bed1438b7296e070391a3db048038ebfff4af63ac863cc21b",
+ "hidden_dtype": "torch.bfloat16",
+ "lm_head": {
+  "file": "model-00001-of-00120.safetensors",
+  "shape": [
+   154880,
+   4096
+  ],
+  "dtype": "torch.bfloat16",
+  "sha256": "aa21c427970f64edd82669db3a8fb46613084e8bc271a3728784a52eb3f25ab4"
+ },
+ "snapshot": "a5b45eb41df6402735dedc900be14a42e8d5e538",
+ "sequences": 128,
+ "positions": 144285,
+ "top": 20,
+ "chunk": 512,
+ "nll_mean": 1.0069094541699932,
+ "top1_is_next": 0.753169059753418,
+ "check": {
+  "file": "<redacted-records>/eval/b2/fp4local/summary.json",
+  "ids_sha256": "d857818d0cd8c6d3",
+  "nll_ref": 1.0069093704223633,
+  "positions": 144285,
+  "equal": true
+ }
+}

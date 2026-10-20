@@ -1,0 +1,12 @@
+tested implementation: 80517fc36ea6ee9183c5237ae92b1abd70619f75
+implementation tree: 65c5530c8c180dc1d1cd94e8d6fdb260feda49a5
+base: v1.1.1 b10231b94f8adf3d4132acebdc0a1ac87e53a838
+
+80517fc36ea6ee9183c5237ae92b1abd70619f75 glm/cuda: every rank prints the load and cleanup receipts tools/memory_receipts.py reads, and a follower frees what it owns before it leaves
+9e1d20f7df3423a0d595c8cbbf9be8f05c33759e glm/cuda: FP4-Local's image tower runs its MXFP8 and W4A16_NVFP4 projections as stored, on the engine's qlinear
+4c1a57eda857e0835f03624c6d6ba5cad94e569b glm/cuda: format classification refuses empty and overflowing shapes; docs say which float32 tensors stay float32
+3c341bae13589042ad1f5dbb0e88d472d645d674 glm/cuda: FP4-Local's float32 norm weights stay float32, read by rmsnorm_4096_f32w and hc_finish_f32w with the bf16 forms' arithmetic
+0eac5947149120a6d8f24a00c39b205ffce33193 glm/cuda: FP4-Local's MXFP8 projections run as stored on the lane: dense layers, KDA, lm_head and the MTP layer
+251ef9eaf459391a3dd219966c5eaf46fea85155 glm/cuda: MLA's projections and the shared expert stored FP8_PB_WO run as stored on qlinear's fp8g lane
+26894027ebf5aa0273b6def8bc3596bc9b083b0b glm/cuda: read the MTP layer's W4A16_NVFP4 experts as stored; glm-loader-gate checks every rank's uploads on the host
+461d44736c996b7c2d4382e0d54c50df9ed2cf48 glm/cuda: tell each projection's stored format from its MIXED_PRECISION recipe, and decode csf_32x2_v1 expert scales

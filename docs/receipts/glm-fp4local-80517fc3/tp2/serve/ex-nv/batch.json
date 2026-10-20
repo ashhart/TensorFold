@@ -1,0 +1,85 @@
+{
+ "k": 4,
+ "n": 64,
+ "nonce": "831959335",
+ "alone": [
+  {
+   "prompt_tokens": 134,
+   "n": 64,
+   "token_sha256": "f5dc8a4f779a6555fe8109ebec4c65dcb5b91ae86800ee334d5396b3616fd725",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\n# Tides of a Small Harbour\n\n## 1. What the tide looks like\n\nTwice a day the water rises and falls. The rise is called flood",
+   "ttft": 0.354270286,
+   "prefill_s": 0.353758373,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 346,
+   "n": 64,
+   "token_sha256": "27344feff93aca130df8eb95746035aae0e7b2e58a7940a4a7fba379e2e8542d",
+   "text": " A short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks. A short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks. A short study of",
+   "ttft": 0.489599685,
+   "prefill_s": 0.486540769,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 548,
+   "n": 64,
+   "token_sha256": "1ecc49107a4551e0b42af17747688c16352e9ec7ac9b3735144d1751a3ebef57",
+   "text": " A short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\n\nA short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\n\nA short study of a recipe",
+   "ttft": 0.57633516,
+   "prefill_s": 0.575507296,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 776,
+   "n": 64,
+   "token_sha256": "228ba83b08a598358ac02ef07b91ae6a4c1f1e4af2511b4114c8953851a29e3d",
+   "text": " a short study of the rules of a card game, what one sees and measures there, and what one would write down for a friend who asks.\n\nJesse Livermore\n\n1. The Rules of the Game\n\n1.1 What the game is\n\nThe game is played with a standard deck of 52 cards.",
+   "ttft": 0.687576965,
+   "prefill_s": 0.686627367,
+   "prefill_widths": []
+  }
+ ],
+ "together": [
+  {
+   "prompt_tokens": 134,
+   "n": 64,
+   "token_sha256": "f5dc8a4f779a6555fe8109ebec4c65dcb5b91ae86800ee334d5396b3616fd725",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\n# Tides of a Small Harbour\n\n## 1. What the tide looks like\n\nTwice a day the water rises and falls. The rise is called flood",
+   "ttft": 0.490052821,
+   "prefill_s": 0.420288466,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 346,
+   "n": 64,
+   "token_sha256": "27344feff93aca130df8eb95746035aae0e7b2e58a7940a4a7fba379e2e8542d",
+   "text": " A short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks. A short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks. A short study of",
+   "ttft": 1.142945447,
+   "prefill_s": 1.073129939,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 548,
+   "n": 64,
+   "token_sha256": "1ecc49107a4551e0b42af17747688c16352e9ec7ac9b3735144d1751a3ebef57",
+   "text": " A short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\n\nA short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\n\nA short study of a recipe",
+   "ttft": 1.92714895,
+   "prefill_s": 1.857327281,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 776,
+   "n": 64,
+   "token_sha256": "228ba83b08a598358ac02ef07b91ae6a4c1f1e4af2511b4114c8953851a29e3d",
+   "text": " a short study of the rules of a card game, what one sees and measures there, and what one would write down for a friend who asks.\n\nJesse Livermore\n\n1. The Rules of the Game\n\n1.1 What the game is\n\nThe game is played with a standard deck of 52 cards.",
+   "ttft": 5.648019779,
+   "prefill_s": 0.741404634,
+   "prefill_widths": []
+  }
+ ],
+ "ttft_spread": 5.157966958,
+ "blocker_beside": true,
+ "one_pass": false,
+ "passes": []
+}

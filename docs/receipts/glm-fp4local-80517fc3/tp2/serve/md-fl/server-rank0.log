@@ -1,0 +1,31 @@
+TF_MEMORY {"schema":1,"pid":5676,"rank":0,"phase":"load_begin","reset":true,"monotonic_ns":480212422069858,"scope":"process_owned_cuda_buffers","usage":{"device":0,"host":0,"peak":0,"host_peak":0,"allocs":0}}
+info: checkpoint digest: 0.0 GiB read in 0.2 s, 42/42 cached files
+info: RoCE all-gather: 2 HCA(s), shards up to 4096 KiB by RDMA writes
+TF_MEMORY {"schema":1,"pid":5676,"rank":0,"phase":"load_end","reset":false,"monotonic_ns":480546927104064,"scope":"process_owned_cuda_buffers","usage":{"device":97547847188,"host":16804480,"peak":97547847204,"host_peak":16804480,"allocs":1402}}
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 90.85 GiB; 4 streams at once, 0.83 GiB each at a 40960-token window, of 11.5 GiB left after a 12.2 GiB reserve; prompts in passes of up to 2048 rows, a 9.1 GiB prompt cache; own glue kernels
+[tensorfold] serving local-model at http://127.0.0.1:8095/v1 (sampling: temperature 1.0, top_p 0.95; drafts: on; context: 40960; loaded in 335.2s)
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: prompt cache: 2050 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 9274 MiB (hits 0, misses 1, evicted 0, refused 0, failed 0)
+[tensorfold] done chatcmpl-5313185f1244fc765d0ab059f863dc4f prompt=2050 cached=0 thinking=False effort=none tokens=128 sha=e8ad891eaff1 finish=length rounds=62 accepted=66/94 ttft=3.757 decode=3.421 elapsed=7.178 queued=0.000 tok/s=37.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: prompt cache: 2050 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 9274 MiB (hits 0, misses 2, evicted 0, refused 0, failed 0)
+[tensorfold] done chatcmpl-c40fac47586762d399fe44afce0f672b prompt=2050 cached=0 thinking=False effort=none tokens=128 sha=e8ad891eaff1 finish=length rounds=62 accepted=66/94 ttft=3.416 decode=3.431 elapsed=6.847 queued=0.000 tok/s=37.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: prompt cache: 2050 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 9274 MiB (hits 0, misses 3, evicted 0, refused 0, failed 0)
+[tensorfold] done chatcmpl-40c69056af3593a6153c2d1348a57672 prompt=2050 cached=0 thinking=False effort=none tokens=128 sha=e8ad891eaff1 finish=length rounds=127 accepted=0/0 ttft=3.410 decode=5.256 elapsed=8.666 queued=0.000 tok/s=24.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: prompt cache: 2050 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 9274 MiB (hits 0, misses 6, evicted 0, refused 0, failed 0)
+info: prompt cache: 2050 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 9274 MiB (hits 0, misses 6, evicted 0, refused 0, failed 0)
+info: prompt cache: 2050 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 9274 MiB (hits 0, misses 6, evicted 0, refused 0, failed 0)
+[tensorfold] done chatcmpl-811b604d346d50837659e3d2bc7a5d2f prompt=2050 cached=0 thinking=False effort=none tokens=128 sha=e8ad891eaff1 finish=length rounds=50 accepted=78/142 ttft=3.410 decode=13.000 elapsed=16.410 queued=0.000 tok/s=9.8
+[tensorfold] done chatcmpl-ba5edd3491c83ce38864592b0ecd5122 prompt=2050 cached=0 thinking=False effort=none tokens=128 sha=e8ad891eaff1 finish=length rounds=49 accepted=79/143 ttft=7.398 decode=9.103 elapsed=16.501 queued=2.609 tok/s=14.0
+[tensorfold] done chatcmpl-98f30af4b1135c3f50c8d2ca061e38db prompt=2050 cached=0 thinking=False effort=none tokens=128 sha=e8ad891eaff1 finish=length rounds=49 accepted=79/143 ttft=10.831 decode=5.794 elapsed=16.625 queued=2.604 tok/s=21.9
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+TF_MEMORY {"schema":1,"pid":5676,"rank":0,"phase":"cleanup_begin","reset":false,"monotonic_ns":480597599506488,"scope":"process_owned_cuda_buffers","usage":{"device":97547847188,"host":16878208,"peak":99786650004,"host_peak":83987072,"allocs":1402}}
+TF_MEMORY {"schema":1,"pid":5676,"rank":0,"phase":"cleanup_end","reset":false,"monotonic_ns":480599015801020,"scope":"process_owned_cuda_buffers","usage":{"device":0,"host":77824,"peak":99786650004,"host_peak":83987072,"allocs":0}}
+[tensorfold] shutting down: stopped
+exit 0

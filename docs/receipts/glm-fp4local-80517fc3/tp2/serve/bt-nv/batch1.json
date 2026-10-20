@@ -1,0 +1,73 @@
+{
+ "k": 3,
+ "n": 64,
+ "nonce": "136956030",
+ "alone": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "da2fd03bc35f11b63dc178b52e05de8ab18f99c64e2958387a053b872db38c79",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\n# Tides of a Small Harbour\n\n## 1. The harbour and its water\n\nThe harbour lies at the mouth of a small river, open to the sea",
+   "ttft": 0.35027085,
+   "prefill_s": 0.349366924,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "e915010b9e1ec1486abf39aa7e35698fb150885b6843ed37a429a3ccda3248ff",
+   "text": " A short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks.\n\nJorge Luis Borges\n\n# A Short Study of How a Sundial Keeps Time\n\n## I. The Shadow That Tells the Hour\n\nA sundial is a simple",
+   "ttft": 0.481693965,
+   "prefill_s": 0.480731623,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "aabfbd49766d62232e8e826180cde9af8db69643e68e4ab34e80d7fc6eac4a59",
+   "text": " A short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\n\nJournal: 2025-12-30 12:00:00\nSource: Recipe_136956030\nTags: #recipe #barley #bread",
+   "ttft": 0.571619409,
+   "prefill_s": 0.570867852,
+   "prefill_widths": []
+  }
+ ],
+ "together": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "da2fd03bc35f11b63dc178b52e05de8ab18f99c64e2958387a053b872db38c79",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\n# Tides of a Small Harbour\n\n## 1. The harbour and its water\n\nThe harbour lies at the mouth of a small river, open to the sea",
+   "ttft": 1.00621803,
+   "prefill_s": 0.93697617,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "e915010b9e1ec1486abf39aa7e35698fb150885b6843ed37a429a3ccda3248ff",
+   "text": " A short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks.\n\nJorge Luis Borges\n\n# A Short Study of How a Sundial Keeps Time\n\n## I. The Shadow That Tells the Hour\n\nA sundial is a simple",
+   "ttft": 1.006286575,
+   "prefill_s": 0.936970378,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "aabfbd49766d62232e8e826180cde9af8db69643e68e4ab34e80d7fc6eac4a59",
+   "text": " A short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\n\nJournal: 2025-12-30 12:00:00\nSource: Recipe_136956030\nTags: #recipe #barley #bread",
+   "ttft": 1.006719377,
+   "prefill_s": 0.936933002,
+   "prefill_widths": []
+  }
+ ],
+ "ttft_spread": 0.0005013469999999298,
+ "blocker_beside": true,
+ "one_pass": true,
+ "passes": [
+  [
+   1.00621803,
+   1.006286575,
+   1.006719377
+  ]
+ ]
+}
