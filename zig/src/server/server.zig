@@ -408,7 +408,7 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     const probe = (try json.parse(a, "[{\"role\": \"system\", \"content\": \"s\"}, {\"role\": \"user\", \"content\": \"u\"}, {\"role\": \"assistant\", \"content\": \"a\"}, {\"role\": \"system\", \"content\": \"tensorfold-late-system-probe\"}, {\"role\": \"user\", \"content\": \"v\"}]")).ok;
     var problem: []const u8 = "";
     const rendered = text.render(a, probe, .{ .add_generation_prompt = false }, &problem) catch return "user";
-    return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
+    return if (std.mem.indexOf(u8, rendered.text, probe_text) != null) "system" else "user";
 }
 
 /// With image input: whether a user turn holding an image part renders an image placeholder (else a startup warning).

@@ -156,3 +156,9 @@ test {
     _ = @import("cortheon/gate_test.zig");
     _ = @import("cortheon/gate_http_test.zig");
 }
+
+test {
+    _ = @import("control_tokens_http_test.zig");
+    _ = @import("request_provenance_test.zig");
+    _ = @import("request_cost_test.zig");
+}

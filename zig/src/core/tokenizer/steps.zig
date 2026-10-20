@@ -110,6 +110,18 @@ pub const Normalizer = union(enum) {
     prepend: []const u8,
     strip: struct { left: bool, right: bool },
 
+    /// Only operations known to preserve every byte position can reuse an incoming request mask.
+    pub fn preservesBytes(n: *const Normalizer) bool {
+        return switch (n.*) {
+            .sequence => |items| for (items) |*item| {
+                if (!item.preservesBytes()) break false;
+            } else true,
+            .prepend => |prefix| prefix.len == 0,
+            .strip => |s| !s.left and !s.right,
+            else => false,
+        };
+    }
+
     pub fn parse(a: Allocator, v: Value) Error!Normalizer {
         const kind = string(v, "type") orelse return error.UnsupportedNormalizer;
         if (std.mem.eql(u8, kind, "Sequence")) return .{ .sequence = try sequence(Normalizer, a, v, "normalizers") };

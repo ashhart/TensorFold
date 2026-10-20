@@ -49,7 +49,7 @@ pub const Text = struct {
     fn eosIds(_: *anyopaque) []const u32 {
         return &.{};
     }
-    fn render(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         const codec: *Text = @ptrCast(@alignCast(ctx));
         if (codec.observer) |o| o.call(o.ctx);
         var buf: std.ArrayList(u8) = .empty;
@@ -60,7 +60,7 @@ pub const Text = struct {
             try buf.append(a, '\n');
         };
         if (options.add_generation_prompt) try buf.append(a, '>');
-        return buf.items;
+        return .{ .text = (buf.items) };
     }
     fn templateSource(_: *anyopaque) []const u8 {
         return "";

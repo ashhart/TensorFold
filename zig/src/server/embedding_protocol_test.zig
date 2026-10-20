@@ -33,7 +33,7 @@ pub const ByteText = struct {
     fn eos(_: *anyopaque) []const u32 {
         return &.{};
     }
-    fn render(_: *anyopaque, _: std.mem.Allocator, _: json.Value, _: text.RenderOptions, _: *[]const u8) text.Error![]u8 {
+    fn render(_: *anyopaque, _: std.mem.Allocator, _: json.Value, _: text.RenderOptions, _: *[]const u8) text.Error!text.Rendered {
         return error.Template;
     }
     fn source(_: *anyopaque) []const u8 {

@@ -138,8 +138,8 @@ pub const TestText = struct {
         return &.{};
     }
 
-    fn render(_: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
-        return json.stringify(a, messages, .{}) catch error.OutOfMemory;
+    fn render(_: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        return .{ .text = try (json.stringify(a, messages, .{}) catch error.OutOfMemory) };
     }
 
     fn templateSource(_: *anyopaque) []const u8 {

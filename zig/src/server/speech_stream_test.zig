@@ -92,7 +92,7 @@ const Bytes = struct {
     fn eosIds(_: *anyopaque) []const u32 {
         return &.{};
     }
-    fn render(_: *anyopaque, _: std.mem.Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(_: *anyopaque, _: std.mem.Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         return error.Template;
     }
     fn templateSource(_: *anyopaque) []const u8 {

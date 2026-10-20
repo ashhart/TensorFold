@@ -5,13 +5,28 @@ const model_text = @import("model_text.zig");
 /// A test tokenizer: "<|image|>" is token 9 unless read plainly, every other byte its own id plus 100.
 pub const MarkText = struct {
     pub fn text() model_text.Text {
-        return .{ .ctx = undefined, .vtable = &.{ .encode = encode, .decode = undefined, .token_id = undefined, .token_string = tokenString, .vocab_size = undefined, .eos_ids = undefined, .render = undefined, .template_source = undefined, .encode_plain = plain } };
+        return .{ .ctx = undefined, .vtable = &.{ .encode = encode, .decode = undefined, .token_id = undefined, .token_string = tokenString, .vocab_size = undefined, .eos_ids = undefined, .render = undefined, .template_source = undefined, .encode_plain = plain, .encode_masked = masked } };
     }
     pub fn encode(_: *anyopaque, a: std.mem.Allocator, s: []const u8, _: bool) model_text.Error![]u32 {
         var out: std.ArrayList(u32) = .empty;
         var i: usize = 0;
         while (i < s.len) {
             if (std.mem.startsWith(u8, s[i..], "<|image|>")) {
+                try out.append(a, 9);
+                i += 9;
+            } else {
+                try out.append(a, @as(u32, s[i]) + 100);
+                i += 1;
+            }
+        }
+        return out.items;
+    }
+    pub fn masked(_: *anyopaque, a: std.mem.Allocator, s: []const u8, spans: []const model_text.Span, _: *[]const u8) model_text.Error![]u32 {
+        var out: std.ArrayList(u32) = .empty;
+        const rendered = model_text.Rendered{ .text = s, .spans = spans };
+        var i: usize = 0;
+        while (i < s.len) {
+            if (std.mem.startsWith(u8, s[i..], "<|image|>") and rendered.isTemplate(i, i + 9)) {
                 try out.append(a, 9);
                 i += 9;
             } else {

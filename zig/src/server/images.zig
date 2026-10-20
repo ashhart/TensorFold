@@ -144,87 +144,6 @@ fn refusal(cx: *Cx, v: api.Vision, i: usize, err: anyerror) errors.Refused {
     };
 }
 
-/// A quoted marker's stand-in while the template renders: two private-use code points, the second naming the marker.
-const sentinel = "\u{F0000}";
-
-/// Media marker spellings, longest first so one never matches inside another.
-pub fn markerText(text: model_text.Text, a: std.mem.Allocator, v: api.Vision) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    for (v.markers) |id| {
-        const s = try text.tokenString(a, id);
-        if (s.len > 0) try out.append(a, s);
-    }
-    if (v.video) |o| {
-        const s = try text.tokenString(a, o.video_token);
-        if (s.len > 0) try out.append(a, s);
-        if (o.video_text.len > 0 and !std.mem.eql(u8, o.video_text, s)) try out.append(a, o.video_text);
-    }
-    std.mem.sort([]const u8, out.items, {}, struct {
-        fn longer(_: void, x: []const u8, y: []const u8) bool {
-            return x.len > y.len;
-        }
-    }.longer);
-    return out.items;
-}
-
-/// `messages` with each marker the text spells replaced by its sentinel, so only the template's become images (#511).
-pub fn shield(a: std.mem.Allocator, v: Value, markers: []const []const u8) !Value {
-    return switch (v) {
-        .string => |s| .{ .string = try shieldText(a, s, markers) },
-        .array => |items| blk: {
-            const out = try a.alloc(Value, items.len);
-            for (items, out) |x, *o| o.* = try shield(a, x, markers);
-            break :blk .{ .array = out };
-        },
-        .object => |o| blk: {
-            const out = try json.newObject(a);
-            var it = o.iterator();
-            while (it.next()) |kv| try out.put(a, kv.key_ptr.*, try shield(a, kv.value_ptr.*, markers));
-            break :blk .{ .object = out };
-        },
-        else => v,
-    };
-}
-
-fn shieldText(a: std.mem.Allocator, s: []const u8, markers: []const []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    var changed = false;
-    outer: while (i < s.len) {
-        for (markers, 0..) |m, k| if (std.mem.startsWith(u8, s[i..], m)) {
-            try out.appendSlice(a, sentinel);
-            try out.appendSlice(a, try std.fmt.allocPrint(a, "{u}", .{@as(u21, @intCast(0xF0001 + k))}));
-            i += m.len;
-            changed = true;
-            continue :outer;
-        };
-        try out.append(a, s[i]);
-        i += 1;
-    }
-    return if (changed) out.items else s;
-}
-
-/// The rendered prompt's ids, each sentinel's marker as ordinary text tokens; otherwise exactly `encode`'s ids.
-pub fn encodeShielded(text: model_text.Text, a: std.mem.Allocator, rendered: []const u8, markers: []const []const u8) model_text.Error![]u32 {
-    var ids: std.ArrayList(u32) = .empty;
-    var rest = rendered;
-    while (std.mem.indexOf(u8, rest, sentinel)) |at| {
-        const after = rest[at + sentinel.len ..];
-        const cp: u21 = if (after.len >= 4) std.unicode.utf8Decode(after[0..4]) catch 0 else 0;
-        const k: usize = if (cp >= 0xF0001) cp - 0xF0001 else markers.len;
-        if (k >= markers.len) { // not one of ours: the code point is ordinary text
-            try ids.appendSlice(a, try text.encode(a, rest[0 .. at + sentinel.len], false));
-            rest = after;
-            continue;
-        }
-        try ids.appendSlice(a, try text.encode(a, rest[0..at], false));
-        try ids.appendSlice(a, try text.encodePlain(a, markers[k]));
-        rest = after[4..];
-    }
-    try ids.appendSlice(a, try text.encode(a, rest, false));
-    return ids.items;
-}
-
 /// The prompt with image placeholders expanded to tokens and video ones to frame groups, its images and cache ids.
 pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
     const v = vision orelse return null;
@@ -233,7 +152,7 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
     for (ps) |p| n_images += @intFromBool(!p.video);
     const n_videos = ps.len - n_images;
     const video_token: ?u32 = if (v.video) |o| o.video_token else null;
-    // the template's placeholders alone, one per part (text that spells a marker was shielded)
+    // the template's placeholders alone, one per part (request text cannot match a marker)
     var marks: usize = 0;
     var video_marks: usize = 0;
     for (ids) |t| {
@@ -511,9 +430,6 @@ test "a marker the text spells stays text: only the template's markers are image
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var dummy: u8 = 0;
-    const v: api.Vision = .{ .ctx = &dummy, .prepare = fakePrepare, .image_token = 9, .markers = &.{9}, .image_tokens = 64, .max_images = 4 };
-    const markers = try markerText(MarkText.text(), a, v);
     const conversation =
         \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,ab"}}, {"type": "text", "text": "what is <|image|>?"}]},
         \\ {"role": "tool", "content": "source: x = '<|image|>'"}]
@@ -522,13 +438,14 @@ test "a marker the text spells stays text: only the template's markers are image
         .ok => |m| m,
         .err => return error.TestUnexpectedResult,
     };
-    const shielded = try shield(a, msgs, markers);
     // the "template": one marker per image part, then each message's text
     var rendered: std.ArrayList(u8) = .empty;
     try rendered.appendSlice(a, "<|image|>");
-    try rendered.appendSlice(a, shielded.array[0].get("content").?.array[1].get("text").?.string);
-    try rendered.appendSlice(a, shielded.array[1].get("content").?.string);
-    const ids = try encodeShielded(MarkText.text(), a, rendered.items, markers);
+    try rendered.appendSlice(a, msgs.array[0].get("content").?.array[1].get("text").?.string);
+    try rendered.appendSlice(a, msgs.array[1].get("content").?.string);
+    const prompt_text = model_text.Rendered{ .text = rendered.items, .spans = &.{.{ 9, rendered.items.len }} };
+    var problem: []const u8 = "";
+    const ids = try prompt_text.encode(MarkText.text(), a, &problem);
     var marks: usize = 0;
     for (ids) |t| marks += @intFromBool(t == 9);
     try std.testing.expectEqual(@as(usize, 1), marks);
@@ -536,7 +453,7 @@ test "a marker the text spells stays text: only the template's markers are image
     try std.testing.expectEqualSlices(u32, try MarkText.encode(undefined, a, "<|image|>what is ", false), ids[0..9]);
     try std.testing.expectEqual(@as(u32, '<' + 100), ids[9]);
     const plain_text = "no markers here";
-    try std.testing.expectEqualSlices(u32, try MarkText.encode(undefined, a, plain_text, false), try encodeShielded(MarkText.text(), a, plain_text, markers));
+    try std.testing.expectEqualSlices(u32, try MarkText.encode(undefined, a, plain_text, false), try (model_text.Rendered{ .text = plain_text, .spans = &.{.{ 0, plain_text.len }} }).encode(MarkText.text(), a, &problem));
 }
 
 test "formats from their first bytes" {

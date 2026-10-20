@@ -228,6 +228,7 @@ pub const HfText = struct {
             .special = specialFn,
             .token_bytes = tokenBytesFn,
             .encode_plain = encodePlainFn,
+            .encode_masked = encodeMaskedFn,
         } };
     }
 
@@ -250,6 +251,17 @@ pub const HfText = struct {
 
     fn encodePlainFn(ctx: *anyopaque, a: Allocator, s: []const u8) model_text.Error![]u32 {
         return self(ctx).tok.encodePlain(a, s) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
+    }
+
+    fn encodeMaskedFn(ctx: *anyopaque, a: Allocator, s: []const u8, spans: []const model_text.Span, problem: *[]const u8) model_text.Error![]u32 {
+        return self(ctx).tok.encodeMasked(a, s, spans) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            problem.* = if (err == error.UnsafeNormalizedAddedTokenMask)
+                "normalized added tokens cannot be matched safely through this normalizer with request text"
+            else
+                "the tokenizer cannot encode this prompt with request byte provenance";
+            return error.Template;
+        };
     }
 
     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
@@ -282,28 +294,29 @@ pub const HfText = struct {
         return if (t.tool_source.len > 0) std.mem.concat(t.arena.allocator(), u8, &.{ t.source, " ", t.tool_source }) catch t.source else t.source;
     }
 
-    fn renderFn(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error![]u8 {
+    fn renderFn(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
         const t = self(ctx);
         const compiled = if (options.tools != null and t.tool_compiled != null) &t.tool_compiled.? else if (t.compiled) |*c| c else {
             problem.* = "this checkpoint has no chat template: send a completion prompt instead";
             return error.Template;
         };
-        var context: std.json.ObjectMap = .empty;
+        var globals: std.json.ObjectMap = .empty;
         if (t.specials == .object) {
             var it = t.specials.object.iterator();
-            while (it.next()) |e| try context.put(a, e.key_ptr.*, e.value_ptr.*);
+            while (it.next()) |e| try globals.put(a, e.key_ptr.*, e.value_ptr.*);
         }
+        try globals.put(a, "thinking_mode", .{ .string = if (options.enable_thinking) "thinking" else "chat" });
+        var context: std.json.ObjectMap = .empty;
         try context.put(a, "enable_thinking", .{ .bool = options.enable_thinking });
-        try context.put(a, "thinking_mode", .{ .string = if (options.enable_thinking) "thinking" else "chat" });
         if (options.reasoning_effort) |e| try context.put(a, "reasoning_effort", .{ .string = e });
         var diag: template.Diag = .{};
         const tools: std.json.Value = if (options.tools) |tl| try toStd(a, tl) else .null;
-        const out = template.render(a, compiled, try toStd(a, messages), tools, .{ .object = context }, options.add_generation_prompt, &diag) catch |e| {
+        const out = template.renderProvenanceGlobals(a, compiled, try toStd(a, messages), tools, .{ .object = context }, .{ .object = globals }, options.add_generation_prompt, &diag) catch |e| {
             if (e == error.OutOfMemory) return error.OutOfMemory;
             problem.* = diag.msg;
             return error.Template;
         };
-        return out;
+        return .{ .text = out.s, .spans = out.spans };
     }
 };
 
@@ -367,20 +380,20 @@ test "explicit template overrides checkpoint templates including tool prompts an
     const messages = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"H\"}]")).ok;
     const named = try HfText.load(gpa, io, dir, null, a, &problem);
     defer named.deinit();
-    try std.testing.expectEqualStrings("defaultH", try named.text().render(a, messages, .{}, &problem));
-    try std.testing.expectEqualStrings("toolsH", try named.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem));
+    try std.testing.expectEqualStrings("defaultH", (try named.text().render(a, messages, .{}, &problem)).text);
+    try std.testing.expectEqualStrings("toolsH", (try named.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem)).text);
     try tmp.dir.writeFile(io, .{ .sub_path = "override.jinja", .data = "override{{ messages[0].content }}" });
     const tool_override = try HfText.load(gpa, io, dir, path, a, &problem);
     defer tool_override.deinit();
-    try std.testing.expectEqualStrings("overrideH", try tool_override.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem));
+    try std.testing.expectEqualStrings("overrideH", (try tool_override.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem)).text);
     try tmp.dir.writeFile(io, .{ .sub_path = "chat_template.jinja", .data = "sidecar{{ messages[0].content }}" });
     const sidecar = try HfText.load(gpa, io, dir, null, a, &problem);
     defer sidecar.deinit();
-    try std.testing.expectEqualStrings("sidecarH", try sidecar.text().render(a, messages, .{}, &problem));
+    try std.testing.expectEqualStrings("sidecarH", (try sidecar.text().render(a, messages, .{}, &problem)).text);
     const overridden = try HfText.load(gpa, io, dir, path, a, &problem);
     defer overridden.deinit();
     for ([_]model_text.RenderOptions{ .{}, .{ .tools = .{ .array = &.{} } } }) |options|
-        try std.testing.expectEqualStrings("overrideH", try overridden.text().render(a, messages, options, &problem));
+        try std.testing.expectEqualStrings("overrideH", (try overridden.text().render(a, messages, options, &problem)).text);
     const missing = try std.fmt.allocPrint(a, "{s}/missing.jinja", .{dir});
     try std.testing.expectError(error.Load, HfText.load(gpa, io, dir, missing, a, &problem));
     try tmp.dir.writeFile(io, .{ .sub_path = "override.jinja", .data = "{% unknown %}" });

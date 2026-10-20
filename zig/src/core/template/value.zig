@@ -12,9 +12,13 @@ pub const Seq = enum { list, tuple, range, items, keys, values };
 
 pub const List = struct { items: []const Value, seq: Seq = .list, range: [3]i64 = .{ 0, 0, 1 } };
 
-pub const Dict = struct { map: Map };
+pub const Dict = struct {
+    map: Map,
+    request_keys: bool = false,
+    key_provenance: std.StringHashMapUnmanaged(Str) = .empty,
+};
 
-pub const Namespace = struct { map: Map };
+pub const Namespace = struct { map: Map, request_keys: bool = false };
 
 /// Jinja2's Undefined: prints empty, iterates empty, fails with `msg` on any other use.
 pub const Undef = struct { msg: []const u8 };
@@ -26,7 +30,10 @@ pub const Method = struct { self: Value, name: []const u8 };
 
 pub const Func = enum { range, namespace, raise_exception, strftime_now, dict, cycler, joiner, lipsum };
 
-pub const Str = struct { s: []const u8, safe: bool = false };
+pub const Str = @import("provenance.zig").Str;
+pub const Span = @import("provenance.zig").Span;
+pub const Buffer = @import("provenance.zig").Buffer;
+pub const Cursor = @import("provenance.zig").Cursor;
 
 pub const Loop = struct {
     items: []const Value,
@@ -54,7 +61,7 @@ pub const Value = union(enum) {
     func: Func,
     iter: *const Iter,
 
-    pub fn string(s: []const u8) Value {
+    pub fn literal(s: []const u8) Value {
         return .{ .str = .{ .s = s } };
     }
 };
@@ -94,8 +101,8 @@ pub const Rt = struct {
         return rt.list(items, .tuple);
     }
 
-    pub fn print(rt: *Rt, comptime fmt: []const u8, args: anytype) Error!Value {
-        return Value.string(try std.fmt.allocPrint(rt.a, fmt, args));
+    pub fn printLiteral(rt: *Rt, comptime fmt: []const u8, args: anytype) Error!Value {
+        return Value.literal(try std.fmt.allocPrint(rt.a, fmt, args));
     }
 };
 
@@ -318,6 +325,43 @@ pub fn toStr(rt: *Rt, v: Value) Error![]const u8 {
             return out.items;
         },
     };
+}
+
+/// String conversion preserves exact strings and conservatively marks container representations.
+pub fn asStr(rt: *Rt, x: Value) Error!Str {
+    if (x == .str) return x.str;
+    return Str.derived(rt.a, try toStr(rt, x), hasRequest(x));
+}
+
+pub fn hasRequest(x: Value) bool {
+    return requestAt(x, 0);
+}
+
+fn requestAt(x: Value, depth: usize) bool {
+    if (depth >= 1000) return true;
+    return switch (x) {
+        .str => |s| s.spans.len > 0,
+        .dict => |d| (d.request_keys and for (d.map.keys()) |name| {
+            if (name.len > 0) break true;
+        } else false) or d.key_provenance.count() > 0 or for (d.map.values()) |item| {
+            if (requestAt(item, depth + 1)) break true;
+        } else false,
+        .ns => |n| n.request_keys or for (n.map.values()) |item| {
+            if (requestAt(item, depth + 1)) break true;
+        } else false,
+        .list => |l| for (l.items) |item| {
+            if (requestAt(item, depth + 1)) break true;
+        } else false,
+        .iter => |it| for (it.items) |item| {
+            if (requestAt(item, depth + 1)) break true;
+        } else false,
+        else => false,
+    };
+}
+
+pub fn key(rt: *Rt, d: *const Dict, text: []const u8) Error!Value {
+    if (d.key_provenance.get(text)) |s| return .{ .str = s };
+    return .{ .str = try Str.derived(rt.a, text, d.request_keys) };
 }
 
 pub fn repr(rt: *Rt, v: Value) Error![]const u8 {

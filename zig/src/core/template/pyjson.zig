@@ -108,10 +108,14 @@ pub const max_depth = 1000;
 
 /// Request JSON as Python's json.loads sees it; non-finite numbers become Python infinities.
 pub fn fromJson(rt: *v.Rt, j: std.json.Value) v.Error!Value {
-    return convert(rt, j, 0);
+    return fromJsonDerived(rt, j, true);
 }
 
-fn convert(rt: *v.Rt, j: std.json.Value, depth: usize) v.Error!Value {
+pub fn fromJsonDerived(rt: *v.Rt, j: std.json.Value, request: bool) v.Error!Value {
+    return convert(rt, j, 0, request);
+}
+
+fn convert(rt: *v.Rt, j: std.json.Value, depth: usize, request: bool) v.Error!Value {
     if (depth > max_depth) return rt.fail("request JSON is nested more than {d} levels deep", .{max_depth});
     return switch (j) {
         .null => .none,
@@ -119,18 +123,18 @@ fn convert(rt: *v.Rt, j: std.json.Value, depth: usize) v.Error!Value {
         .integer => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .number_string => |s| if (std.mem.indexOfAny(u8, s, ".eE") == null) .{ .big = s } else .{ .float = if (s[0] == '-') -std.math.inf(f64) else std.math.inf(f64) },
-        .string => |s| Value.string(s),
+        .string => |s| .{ .str = try v.Str.derived(rt.a, s, request) },
         .array => |arr| blk: {
             const items = try rt.a.alloc(Value, arr.items.len);
-            for (arr.items, items) |x, *y| y.* = try convert(rt, x, depth + 1);
+            for (arr.items, items) |x, *y| y.* = try convert(rt, x, depth + 1, request);
             break :blk try rt.list(items, .list);
         },
         .object => |obj| blk: {
             const d = try rt.a.create(v.Dict);
-            d.* = .{ .map = .empty };
+            d.* = .{ .map = .empty, .request_keys = request };
             try d.map.ensureTotalCapacity(rt.a, obj.count());
             var it = obj.iterator();
-            while (it.next()) |e| d.map.putAssumeCapacity(e.key_ptr.*, try convert(rt, e.value_ptr.*, depth + 1));
+            while (it.next()) |e| d.map.putAssumeCapacity(e.key_ptr.*, try convert(rt, e.value_ptr.*, depth + 1, request));
             break :blk .{ .dict = d };
         },
     };
