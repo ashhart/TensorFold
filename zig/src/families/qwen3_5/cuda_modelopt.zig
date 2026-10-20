@@ -139,7 +139,7 @@ pub const Kernels = struct {
     }
 };
 
-/// out (rows, n) = x (rows, k): prompt chunks past 16 rows on the prompt GEMM, else the lane (a row's bits at any count).
+/// out (rows, n) = x (rows, k): prompt chunks past 16 rows on prompt16, else the lane (a row's bits at any count).
 pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: bool) !void {
     const k = if (e.mo) |*m| m else return error.FormatNotLoaded;
     const l = k.linear();
@@ -208,7 +208,7 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
 /// Token rows of the bf16 embedding into `out`: an exact copy of each id's row.
 pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize) !void {
     const k = if (e.mo) |*m| m else return error.FormatNotLoaded;
-    return k.embed.bf16(e.stream, ids, e.embed_w, out, rows, e.g.hidden);
+    return k.embed.bf16Copies(e.stream, ids, e.embed_w, out, rows, e.g.hidden, 1); // the registered copy kernel
 }
 
 test "kinds from nvidia/Qwen3.8-27B-NVFP4's recipes: NVFP4 MLPs and head, FP8 mixers, bf16 a and b" {
