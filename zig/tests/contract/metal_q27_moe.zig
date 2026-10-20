@@ -9,7 +9,7 @@ const c = contract.spec;
 const g = contract.gates;
 const rows = contract.rows;
 const q = tf.qwen27;
-const mw = q.moe_weights;
+const mw = tf.qwen35_experts;
 
 const E = 256;
 const TOPK = 8;

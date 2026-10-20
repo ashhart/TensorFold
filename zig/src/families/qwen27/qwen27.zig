@@ -41,12 +41,11 @@ pub const taps = @import("taps.zig");
 pub const tap_ring = @import("tap_ring.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
-/// The 35B-A3B's expert MLPs: their weights and their stage.
+/// The 35B-A3B's expert MLPs: their stage here, their weights in the qwen3_5 family.
 pub const moe = @import("moe.zig");
-pub const moe_weights = @import("moe_weights.zig");
 test {
     _ = moe;
-    _ = moe_weights;
+    _ = @import("core").qwen35_experts;
     _ = @import("moe_test.zig");
     _ = dflash;
     _ = disk;

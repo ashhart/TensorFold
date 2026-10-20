@@ -7,8 +7,8 @@ const route = core.moe_route;
 const sources = @import("qwen_runtime_sources");
 const Config = @import("config.zig").Config;
 const Ref = @import("projection.zig").Ref;
-const moe_weights = @import("moe_weights.zig");
-pub const Experts = moe_weights.Experts;
+const metal_experts = core.qwen35_experts;
+pub const Experts = metal_experts.Experts;
 
 /// A buffer and byte offset as core/moe_route binds them.
 const Bind = struct { buf: mtl.Buffer, off: usize = 0 };
@@ -153,7 +153,7 @@ pub const Stage = struct {
 const sort_chunks = 4;
 
 fn routeShape(c: Config) route.Shape {
-    return .{ .hidden = @intCast(c.hidden), .experts = @intCast(moe_weights.columns(c)), .topk = @intCast(c.topk) };
+    return .{ .hidden = @intCast(c.hidden), .experts = @intCast(metal_experts.columns(c.experts)), .topk = @intCast(c.topk) };
 }
 
 /// moe.metal with the config's constants at its Q27_SPECIALIZE mark; the caller frees it.
@@ -161,7 +161,7 @@ pub fn source(a: std.mem.Allocator, c: Config) ![]u8 {
     if (c.experts * sort_chunks > 1024 or c.topk == 0 or c.topk > 16 or c.hidden % 256 != 0 or c.hidden > 4096) return error.UnsupportedMoeShape; // tf_route_logits covers at most 4096
     const text = sources.moe;
     const mark = std.mem.indexOf(u8, text, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
-    const defs = try std.fmt.allocPrint(a, "constant constexpr uint E = {d}, TOPK = {d}, LS = {d}, D = {d};", .{ c.experts, c.topk, moe_weights.columns(c), c.hidden });
+    const defs = try std.fmt.allocPrint(a, "constant constexpr uint E = {d}, TOPK = {d}, LS = {d}, D = {d};", .{ c.experts, c.topk, metal_experts.columns(c.experts), c.hidden });
     defer a.free(defs);
     return std.mem.concat(a, u8, &.{ text[0..mark], defs, text[mark + "Q27_SPECIALIZE".len ..] });
 }
@@ -170,7 +170,7 @@ pub fn source(a: std.mem.Allocator, c: Config) ![]u8 {
 fn sizes(c: Config, r: usize) [std.enums.values(Field).len]usize {
     const slots = r * c.topk;
     return .{
-        r * moe_weights.columns(c) * 4, // logits
+        r * metal_experts.columns(c.experts) * 4, // logits
         slots * 4, // picks
         r * (c.topk + 1) * 4, // wts
         (c.experts + 1) * 4, // starts

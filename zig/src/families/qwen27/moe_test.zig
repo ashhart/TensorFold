@@ -6,7 +6,7 @@ const tile = core.tile_qmm;
 const route = core.moe_route;
 const Config = @import("config.zig").Config;
 const moe = @import("moe.zig");
-const mw = @import("moe_weights.zig");
+const mw = core.qwen35_experts;
 
 const hidden = 256;
 const experts = 8;
