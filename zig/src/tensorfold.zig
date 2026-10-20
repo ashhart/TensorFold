@@ -96,6 +96,8 @@ pub const tile_qmm = @import("core/tile_qmm.zig");
 pub const moe_route = @import("core/moe_route.zig");
 /// The Qwen3.5 family's config reader, which the CUDA and HIP engines read too.
 pub const qwen35_config = @import("families/qwen3_5/config.zig");
+/// The 35B-A3B's experts on Metal, which the 27B's engine loads in its one layer loop.
+pub const qwen35_experts = @import("families/qwen3_5/metal_experts.zig");
 
 pub const gpu_profile = @import("core/gpu_profile.zig");
 

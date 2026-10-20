@@ -6,7 +6,7 @@ const Config = @import("config.zig").Config;
 const projection = @import("projection.zig");
 const lane = @import("core").lane_projection;
 const widths = @import("widths.zig");
-const moe_weights = @import("moe_weights.zig");
+const metal_experts = @import("core").qwen35_experts;
 const Width = widths.Width;
 const Ref = projection.Ref;
 const Linear = projection.Linear;
@@ -16,7 +16,7 @@ pub const Gdn = struct { qkv: Linear, zba: Linear, out: Linear, conv: Tensor, a_
 pub const Attention = struct { q: Linear, kv: Linear, out: Linear, q_norm: Tensor, k_norm: Tensor };
 pub const Dense = struct { gu: Linear, down: Linear };
 /// A layer's MLP: the dense gate_up and down, or routed experts with a shared one (moe.zig runs them).
-pub const Mlp = union(enum) { dense: Dense, experts: moe_weights.Experts };
+pub const Mlp = union(enum) { dense: Dense, experts: metal_experts.Experts };
 pub const Layer = struct { norm: Tensor, post_norm: Tensor, mlp: Mlp, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
 
 pub const Weights = struct {
@@ -175,7 +175,9 @@ const Builder = struct {
                 .k_norm = try b.tensor(try Name.full(a, prefix, "self_attn.k_norm.weight"), .bf16, &.{c.head_dim}),
             } },
         };
-        const mlp: Mlp = if (c.moe()) .{ .experts = try moe_weights.load(b.allocator, b.device, b.checkpoint, b.prefix, c, b.widths, i, b.owned) } else .{ .dense = .{
+        const shape: metal_experts.Shape = .{ .experts = c.experts, .hidden = c.hidden, .moe_width = c.moe_intermediate, .shared_width = c.shared_intermediate };
+        const ew: metal_experts.Widths = .{ .experts = .{ .bits = b.widths.experts.bits, .group = b.widths.experts.group }, .router = .{ .bits = b.widths.router.bits, .group = b.widths.router.group } };
+        const mlp: Mlp = if (c.moe()) .{ .experts = try metal_experts.load(b.allocator, b.device, b.checkpoint, b.prefix, shape, ew, i, b.owned) } else .{ .dense = .{
             .gu = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = c.intermediate, .w = w[@backingInt(M.gate)] }, .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = c.intermediate, .w = w[@backingInt(M.up)] } }, c.hidden),
             .down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = c.hidden, .w = w[@backingInt(M.down)] }}, c.intermediate),
         } };
