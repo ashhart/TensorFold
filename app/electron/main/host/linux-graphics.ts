@@ -1,7 +1,4 @@
-// Wayland's Ozone backend cannot present Vulkan surfaces ("'--ozone-platform=wayland' is not
-// compatible with Vulkan"), which aborts startup on sessions where Vulkan is selected. Disable
-// only the Vulkan feature, keeping Wayland itself, and merge with any features the user already
-// disabled on the command line. Electron-free so the decision is unit-testable.
+// Wayland cannot present Vulkan surfaces, so disable only that feature, merging existing switches.
 
 export interface CommandLineLike {
   hasSwitch(name: string): boolean
