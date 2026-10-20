@@ -27,6 +27,8 @@ pub const Kernels = struct {
     twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// The same for simd_qmm_bits, per [bits, n, k].
     bit_twins: std.AutoHashMapUnmanaged([3]usize, bool) = .empty,
+    /// Per [n, k]: whether simd_qmm's chunk pairs give its tiles' bits (checked once on this chip).
+    pair_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// Set around prompt chunks: prompt rows take projection.promptSplit, decoded rows the decode split.
     prompt: bool = false,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
@@ -52,6 +54,7 @@ pub const Kernels = struct {
         if (k.simd_bits) |*pipelines| pipelines.deinit();
         k.twins.deinit(k.allocator);
         k.bit_twins.deinit(k.allocator);
+        k.pair_twins.deinit(k.allocator);
         var lane_it = k.lanes.valueIterator();
         while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
@@ -136,7 +139,7 @@ pub const Kernels = struct {
         if (p.raw) |raw| if (raw.bits == 4 and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0) {
             const m = row.simd.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off, .n = raw.n, .k = raw.k };
             const scalar = try k.twin(m); // loads the tiles before they're read
-            const call = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar);
+            const call = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, try k.pairTwin(m));
             row.simd.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
             e.barrier();
             try span.end();
@@ -250,6 +253,15 @@ pub const Kernels = struct {
         const ok = try row.simd.twinExact(&k.simd.?, k.device, m);
         if (!ok) std.log.info("qwen27: {d}x{d} rows take simdgroup tiles at every width (the scalar twin's bits differ on this chip)", .{ m.n, m.k });
         try k.twins.put(k.allocator, .{ m.n, m.k }, ok);
+        return ok;
+    }
+
+    /// Whether this shape's prompt rows may take simd_qmm's chunk pairs: checked against its tiles once per shape.
+    fn pairTwin(k: *Kernels, m: row.simd.Matrix) !bool {
+        if (k.pair_twins.get(.{ m.n, m.k })) |ok| return ok;
+        const ok = try row.simd.pairedExact(&k.simd.?, k.device, m);
+        if (!ok and row.simd.pairs(m.n, 2, row.simd.splits(m.n))) std.log.info("qwen27: {d}x{d} rows keep simd_qmm's plain tiles (chunk pairs' bits differ on this chip)", .{ m.n, m.k });
+        try k.pair_twins.put(k.allocator, .{ m.n, m.k }, ok);
         return ok;
     }
 

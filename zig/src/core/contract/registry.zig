@@ -550,7 +550,7 @@ test {
     _ = paging;
 }
 /// The Metal collector keeps measured slots and the restored vision declarations.
-pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records;
+pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records;
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
