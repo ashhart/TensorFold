@@ -126,26 +126,6 @@
 2026-10-20 15:36:59 gate bin-d23862ab PASS tp2 rank 1 rc=0 81s : 1 PASS 0 FAIL; PASS glm-loader-gate TP=2 rank 1: 115 uploads as the checkpoint cut, 72 as the host packers make them (11922 MiB), 3 left out, 0 differ or are not known  MemAvailable lowest 102 GiB, 0 guard stops
 2026-10-20 15:45:49 sm-fl golden PASS
 2026-10-20 15:46:02 sm-fl serve END rc=0
-2026-10-20 15:59:01 cap-a1 openai PASS
-2026-10-20 16:00:22 cap-a1 cache PASS
-2026-10-20 16:03:12 cap-a1 nodraft PASS
-2026-10-20 16:05:40 cap-a1 prefill PASS
-2026-10-20 16:05:53 cap-a1 serve END rc=0
-2026-10-20 16:19:17 cap-b1 openai PASS
-2026-10-20 16:20:36 cap-b1 cache PASS
-2026-10-20 16:23:23 cap-b1 nodraft PASS
-2026-10-20 16:25:48 cap-b1 prefill PASS
-2026-10-20 16:26:02 cap-b1 serve END rc=0
-2026-10-20 16:37:17 cap-b2 openai PASS
-2026-10-20 16:38:36 cap-b2 cache PASS
-2026-10-20 16:41:24 cap-b2 nodraft PASS
-2026-10-20 16:43:48 cap-b2 prefill PASS
-2026-10-20 16:44:02 cap-b2 serve END rc=0
-2026-10-20 17:11:17 cap-a2 openai PASS
-2026-10-20 17:12:39 cap-a2 cache PASS
-2026-10-20 17:15:28 cap-a2 nodraft PASS
-2026-10-20 17:17:55 cap-a2 prefill PASS
-2026-10-20 17:18:09 cap-a2 serve END rc=0
 2026-10-20 19:35:29 single FAIL kernel-contract SUMMARY 91 kernels: 91 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 red as planted, 0 missed; 1533 limit problems; gates 565643 ms, limits 101245 ms; kernel-contract rc=1 fatbins rc=0 limits rc=1
 2026-10-20 19:35:29 single FAIL limits FAIL kernel-contract-limits: 877 problems
 2026-10-20 19:35:30 single PASS glm-ref 12 PASS 0 FAIL, RESULT lines 14 (same as b10231b9's); glm-ref 797dd2e1 rc=0 glm-ref b10231b9 rc=0
