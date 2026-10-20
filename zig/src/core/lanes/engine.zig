@@ -251,7 +251,7 @@ pub const Engine = struct {
         const plans = try a.alloc(Plan, entries.len);
         for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
         try win.allocate(e, plans);
-        try win.constrainShared(e, plans);
+        for (plans) |*p| try win.constrain(e, p);
         const windows = try a.alloc(be.Window, plans.len);
         const out = try a.alloc(be.Verified, plans.len);
         var total: u64 = 0;
