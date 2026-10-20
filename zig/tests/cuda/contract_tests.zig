@@ -478,6 +478,10 @@ pub fn run(gpu: check.Gpu) !void {
     }));
     defer for (&f32ws) |*x| x.deinit();
     for (&f32ws) |*x| try kernels.append(a, x.kernel());
+    var f32w_control: f32w_k.F32w = .init(.{ .gpu = gpu, .s = s }, .norm_y, try glm_glue.function("tf_glm_rmsnorm_4096_f32w"));
+    f32w_control.bf16_gamma = true;
+    defer f32w_control.deinit();
+    try kernels.append(a, f32w_control.kernel());
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

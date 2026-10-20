@@ -51,6 +51,13 @@ pub fn spec(w: Which) c.Spec {
     };
 }
 
+/// `gamma` rounded to bf16 and back: what a kernel reading a bf16 weight multiplies by; the reference keeps float32.
+fn narrowed(a: std.mem.Allocator, gamma: []const f32) ![]f32 {
+    const out = try a.alloc(f32, gamma.len);
+    for (out, gamma) |*o, v| o.* = @floatCast(ref.bf(v));
+    return out;
+}
+
 pub const F32w = struct {
     rig: rig_.Rig,
     which: Which,
@@ -58,6 +65,7 @@ pub const F32w = struct {
     in: ?ref.In = null,
     arena: std.heap.ArenaAllocator,
     ptrs: [9]u64 = @splat(0), // norm: x, gamma, y, xs; hc: x, part, base, scale, gamma, y, xs, post, comb
+    bf16_gamma: bool = false, // gate 3's control: the weight uploaded as bf16 values, as a bf16-weight kernel reads it
 
     pub fn init(rig: rig_.Rig, which: Which, f: cuda.Function) F32w {
         return .{ .rig = rig, .which = which, .f = f, .arena = .init(rig.gpu.gpa) };
@@ -69,7 +77,9 @@ pub const F32w = struct {
     }
 
     pub fn kernel(self: *F32w) g.Kernel {
-        return .{ .spec = spec(self.which), .ctx = self, .vt = &vt };
+        var declared = spec(self.which);
+        if (self.bf16_gamma) declared.name = "control: a float32 norm weight read as bf16";
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.bf16_gamma) .shapes else null };
     }
 
     const vt = g.hooks(F32w);
@@ -95,7 +105,7 @@ pub const F32w = struct {
         const y = if (self.which == .norm_y or self.which == .hc_y) try r.output(n * d * 2) else try r.scratch(n * d * 2);
         const xs = if (exact) try r.output(n * (d / 64) * 4) else if (self.hc()) try r.scratch(n * (d / 64) * 4) else 0;
         const x = try r.input(std.mem.sliceAsBytes(in.x));
-        const gm = try r.input(std.mem.sliceAsBytes(in.gamma));
+        const gm = try r.input(std.mem.sliceAsBytes(if (self.bf16_gamma) try narrowed(self.arena.allocator(), in.gamma) else in.gamma));
         if (!self.hc()) {
             self.ptrs = .{ x, gm, y, xs, 0, 0, 0, 0, 0 };
             return true;
