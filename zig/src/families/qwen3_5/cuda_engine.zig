@@ -137,6 +137,7 @@ pub const Engine = struct {
     logits: u64,
     routed: routed.Scratch = .{}, // qwen3_5_moe's routed rows
     amax: u64, // the argmax slices' bests: most_verify rows of argmaxSlices(vocab) (f32, i32)
+    picks: u64, // drawRows' slice scratch: most_verify rows of cuda.sample.Draws.row_scratch
     // per-forward tables (ids, segments, rows' segment, parent and ancestors, the draws' rules) staged in pinned memory
     tables: DeviceBuffer,
     staged: cuda.HostBuffer,
@@ -339,6 +340,7 @@ pub const Engine = struct {
         e.logits = try t.alloc(most_verify * g.vocab * 2);
         if (g.moe()) e.routed = try routed.Scratch.carve(t, g, R);
         e.amax = try t.alloc(most_verify * argmaxSlices(g.vocab) * 8);
+        e.picks = try t.alloc(most_verify * cuda.sample.Draws.row_scratch);
         return total;
     }
 
@@ -540,7 +542,7 @@ pub const Engine = struct {
                     var n: usize = 1;
                     while (i + n < pk.len and (pk[i + n].rule != null) == sampled) n += 1;
                     if (sampled) {
-                        try e.draws.drawRows(e.stream, e.logits + i * g.vocab * 2, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, toks + i * 4, n);
+                        try e.draws.drawRows(e.stream, e.logits + i * g.vocab * 2, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, toks + i * 4, n, e.picks);
                     } else try e.argmax(i, n, toks);
                     i += n;
                 }
