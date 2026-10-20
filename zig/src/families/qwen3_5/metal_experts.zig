@@ -1,5 +1,4 @@
-//! A qwen3_5_moe layer's experts on Metal: both routers as bf16 packed for core/moe_route, the experts as the tiles
-//! read them. The 27B's engine loads them in its one layer loop (qwen27/gpu_weights.zig).
+//! A qwen3_5_moe layer's experts on Metal, loaded in the 27B's layer loop: routers bf16 for moe_route, tile experts.
 const std = @import("std");
 const mtl = @import("metal");
 const core = @import("core");

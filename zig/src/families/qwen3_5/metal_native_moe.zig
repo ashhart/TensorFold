@@ -1,5 +1,4 @@
-//! The qwen3_5_moe model type (Qwen3.6-35B-A3B) on the Metal engines: the dense 27B's engine and its lane host,
-//! routed experts in place of the dense MLP (cuda_native_moe.zig is the CUDA twin).
+//! qwen3_5_moe (Qwen3.6-35B-A3B) on the dense 27B's Metal engine and lane host; cuda_native_moe.zig is the CUDA twin.
 const std = @import("std");
 
 pub const model_type = "qwen3_5_moe";
@@ -11,8 +10,7 @@ pub fn is(t: []const u8) bool {
     return std.mem.eql(u8, t, model_type);
 }
 
-/// The flag asking for what later slices of the port bring (the checkpoint's MTP drafts, images), refused before
-/// any load; null when the open asks for neither.
+/// The flag asking for a later slice's feature (MTP drafts, images), refused before any load; null for neither.
 pub fn later(drafter: bool, vision: bool) ?[]const u8 {
     return if (drafter) "--drafter" else if (vision) "--vision" else null;
 }
