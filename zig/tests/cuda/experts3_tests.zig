@@ -124,6 +124,10 @@ fn tables(gpu: Gpu, k: Kernels, s: cuda.Stream, parts: []const [2]Codes) !Tables
 }
 
 const Shape = struct { experts: usize = 6, ni: usize = 128, dims: usize = 256, rows: usize = 40, slots: usize = 3 };
+/// Qwen3.5-35B-A3B's expert widths at a verify window of 4 rows: 8 routed picks and the shared expert a row.
+const wide: Shape = .{ .experts = 16, .ni = 512, .dims = 2048, .rows = 4, .slots = 9 };
+/// 5 K groups: the split form's last round has fewer groups than warps.
+const short: Shape = .{ .dims = 320 };
 
 /// A plan for `picks` at `tile`, on buffers that live as long as the returned Plan's owner.
 const PlanBufs = struct {
@@ -153,9 +157,8 @@ const PlanBufs = struct {
 };
 
 /// The SwiGLU pair form and down, decode and prompt rows: the 3-bit tables give the 4-bit tables' bytes.
-fn sameBits(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random) !void {
+fn sameBits(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random, sh: Shape) !void {
     const a = gpu.gpa;
-    const sh: Shape = .{};
     const e = sh.experts;
     var cs: [3][2]Codes = undefined;
     for (&cs, [_][2]usize{ .{ sh.ni, sh.dims }, .{ sh.ni, sh.dims }, .{ sh.dims, sh.ni } }) |*c, nk| c.* = .{ try Codes.init(a, r, e, nk[0], nk[1], 3), try Codes.init(a, r, 1, nk[0], nk[1], 4) };
@@ -167,11 +170,11 @@ fn sameBits(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random) !void {
     const pairs = sh.rows * sh.slots;
     const picks = try a.alloc(i32, pairs);
     defer a.free(picks);
-    for (0..sh.rows) |row| {
-        picks[row * sh.slots] = @intCast(r.uintLessThan(usize, e));
-        picks[row * sh.slots + 1] = @intCast(if (row % 4 == 0) 0 else r.uintLessThan(usize, e));
-        picks[row * sh.slots + 2] = @intCast(e); // the shared expert, as the engine's last slot
-    }
+    for (0..sh.rows) |row| for (0..sh.slots) |i| {
+        // the shared expert in the last slot, as the engine places it; expert 0 in slot 1 of every fourth row
+        const pick = if (i == sh.slots - 1) e else if (i == 1 and row % 4 == 0) 0 else r.uintLessThan(usize, e);
+        picks[row * sh.slots + i] = @intCast(pick);
+    };
     const x = try a.alloc(u16, sh.rows * sh.dims);
     defer a.free(x);
     for (x) |*v| v.* = randBf16(r, 1.0);
@@ -206,7 +209,8 @@ fn sameBits(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random) !void {
         try check.sameBytes(if (prompt) "prompt SwiGLU rows" else "decode SwiGLU rows", outs[1][0], outs[0][0]);
         const used = pairs * sh.dims * @as(usize, if (prompt) 2 else 4);
         try check.sameBytes(if (prompt) "prompt down sums" else "decode down sums", outs[1][1][0..used], outs[0][1][0..used]);
-        check.pass("experts3 {s}: {d} pairs over {d} 3-bit experts and a 4-bit shared one, SwiGLU rows and down sums byte-equal to affine-4 on the same codes", .{ form, pairs, e });
+        const pair_form = if (prompt) "" else if (k.a3.split_below == 0) ", the pair a column block a warp" else ", the pair a column block a CTA";
+        check.pass("experts3 {s} ({d} by {d}{s}): {d} pairs over {d} 3-bit experts and a 4-bit shared one, SwiGLU rows and down sums byte-equal to affine-4 on the same codes", .{ form, sh.ni, sh.dims, pair_form, pairs, e });
     }
 }
 
@@ -272,7 +276,85 @@ fn projections(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random) !void {
     }
 }
 
-pub fn run(gpu: Gpu) !void {
+/// Decode up (both pair forms) and down at the wide shape over 64 experts, fresh picks a call: us a call at 1-4 rows.
+fn timeDecode(gpu: Gpu, k: Kernels, s: cuda.Stream, r: std.Random, reps: usize) !void {
+    const a = gpu.gpa;
+    const sh: Shape = .{ .experts = 64, .ni = wide.ni, .dims = wide.dims, .slots = wide.slots };
+    const e = sh.experts;
+    var cs: [3][2]Codes = undefined;
+    for (&cs, [_][2]usize{ .{ sh.ni, sh.dims }, .{ sh.ni, sh.dims }, .{ sh.dims, sh.ni } }) |*c, nk| c.* = .{ try Codes.init(a, r, e, nk[0], nk[1], 3), try Codes.init(a, r, 1, nk[0], nk[1], 4) };
+    defer for (cs) |c| for (c) |x| x.deinit(a);
+    var pair = try tables(gpu, k, s, &.{ cs[0], cs[1] });
+    defer pair.deinit();
+    var down = try tables(gpu, k, s, &.{cs[2]});
+    defer down.deinit();
+    const l3: cuda.experts.Layer = .{ .format = .affine3, .up = pair.t3.ptr, .down = down.t3.ptr, .width = sh.ni, .dims = sh.dims, .experts = e + 1, .swiglu = true, .shared = @intCast(e), .shared_up = pair.shared4.ptr, .shared_down = down.shared4.ptr };
+    var a3 = k.a3;
+    const g: cuda.experts.Grouped = .{ .affine3 = &a3 };
+    const x = try a.alloc(u16, 4 * sh.dims);
+    defer a.free(x);
+    for (x) |*v| v.* = randBf16(r, 1.0);
+    var dx = try upload(gpu, std.mem.sliceAsBytes(x));
+    defer dx.free();
+    var act = try cuda.DeviceBuffer.alloc(gpu.d, 4 * sh.slots * sh.ni * 2);
+    defer act.free();
+    var y = try cuda.DeviceBuffer.alloc(gpu.d, 4 * sh.slots * sh.dims * 4);
+    defer y.free();
+    var t0 = try cuda.Event.init(gpu.d, true);
+    defer t0.deinit();
+    var t1 = try cuda.Event.init(gpu.d, true);
+    defer t1.deinit();
+    for ([_]usize{ 1, 2, 3, 4 }) |rows| {
+        var plans: [8]PlanBufs = undefined;
+        var made: usize = 0;
+        defer for (plans[0..made]) |*p| p.deinit();
+        for (&plans) |*p| {
+            var picks: [4 * 9]i32 = undefined;
+            for (0..rows) |row| {
+                var taken: [64]bool = @splat(false);
+                for (0..sh.slots - 1) |i| {
+                    var pick = r.uintLessThan(usize, e);
+                    while (taken[pick]) pick = r.uintLessThan(usize, e);
+                    taken[pick] = true;
+                    picks[row * sh.slots + i] = @intCast(pick);
+                }
+                picks[row * sh.slots + sh.slots - 1] = @intCast(e);
+            }
+            p.* = try PlanBufs.init(gpu, k, s, picks[0 .. rows * sh.slots], e + 1, 16);
+            made += 1;
+        }
+        try s.synchronize();
+        const rows_in: cuda.experts.Rows = .{ .x = dx.ptr, .stride = sh.dims, .slots = sh.slots };
+        const act_in: cuda.experts.Rows = .{ .x = act.ptr, .stride = sh.ni };
+        var us: [3]f64 = undefined;
+        for (0..3) |form| {
+            a3.split_below = if (form == 1) std.math.maxInt(usize) else 0;
+            // the calls replayed as one captured graph, as the engine's forwards run them
+            try cuda.graph.beginCapture(s, .thread_local);
+            for (0..reps) |i| {
+                const p = plans[i % plans.len];
+                if (form < 2) {
+                    try g.decode(s, .up, rows_in, l3, p.plan(), act.ptr, p.items_n, -1);
+                } else try g.decode(s, .down_f32, act_in, l3, p.plan(), y.ptr, p.items_n, -1);
+            }
+            var graph = try cuda.graph.endCapture(s);
+            defer graph.deinit();
+            var exec = try graph.instantiate();
+            defer exec.deinit();
+            for (0..2) |round| {
+                try t0.record(s);
+                try exec.launchOn(s);
+                try t1.record(s);
+                try t1.synchronize();
+                if (round == 1) us[form] = @as(f64, try cuda.Event.elapsedMs(t0, t1)) * 1000 / @as(f64, @floatFromInt(reps));
+            }
+        }
+        const auto = if (plans[0].items_n * (sh.ni / 32) < k.a3.split_below) "a block a CTA" else "a block a warp";
+        std.debug.print("TIME experts3 decode ({d} by {d}, {d} picks a row) at {d} rows: up a block a warp {d:.1} us, a block a CTA {d:.1} us (taken: {s}); down {d:.1} us\n", .{ sh.ni, sh.dims, sh.slots, rows, us[0], us[1], auto, us[2] });
+    }
+}
+
+pub fn run(gpu: Gpu, reps: usize) !void {
     var prng = std.Random.DefaultPrng.init(0x3b17);
     const r = prng.random();
     var mods: [5]cuda.Module = undefined;
@@ -286,6 +368,14 @@ pub fn run(gpu: Gpu) !void {
     const k: Kernels = .{ .a3 = try A3.resolve(mods[3], mods[4], sms), .a4 = try A4.resolve(mods[0], mods[1], mods[2], sms), .router = try cuda.grouped.Router.resolve(mods[0]) };
     var s = try cuda.Stream.init(gpu.d, true);
     defer s.deinit();
-    try sameBits(gpu, k, s, r);
+    // both decode pair forms: a column block a warp, and a column block a CTA
+    for ([_]usize{ 0, std.math.maxInt(usize) }) |below| {
+        var kf = k;
+        kf.a3.split_below = below;
+        try sameBits(gpu, kf, s, r, .{});
+        try sameBits(gpu, kf, s, r, wide);
+        try sameBits(gpu, kf, s, r, short);
+    }
     try projections(gpu, k, s, r);
+    if (reps > 0) try timeDecode(gpu, k, s, r, reps);
 }
