@@ -40,6 +40,8 @@ pub const Config = struct {
     sse_keepalive_s: f64 = 15,
     served_name: []const u8,
     model_dir: []const u8 = "",
+    voices_dir: ?[]const u8 = null,
+    default_voice: []const u8 = "default",
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
     default_max_tokens: i64 = 4096,
@@ -93,6 +95,7 @@ pub const Server = struct {
     info: api.Info,
     text: model_text.Text,
     config: Config,
+    voices: []const @import("drama_voice.zig").Voice = &.{},
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
@@ -140,6 +143,11 @@ pub const Server = struct {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
         };
+        if (config.voices_dir) |dir| {
+            if (srv.info.speech == null) return error.VoicesRequireSpeech;
+            srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);
+        }
+        _ = try @import("drama_voice.zig").select(srv.voices, config.default_voice, "default");
         if (!srv.info.text_generation) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;

@@ -1,9 +1,7 @@
 //! Drama 3 prompt rows in the reference-bracket-v1 layout of SGLang-Omni's prompt.py, each part tokenized on its own.
 const std = @import("std");
-const core = @import("core");
 const cfg = @import("config.zig");
 
-const Tokenizer = core.tokenizer.Tokenizer;
 const W = cfg.frame_width;
 
 pub const tts_instruction = "convert the provided text to speech";
@@ -60,7 +58,7 @@ fn refTranscript(a: std.mem.Allocator, transcript: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ body[0..tl], tagged[0..lead], body[tl..] });
 }
 
-pub fn build(gpa: std.mem.Allocator, tok: *const Tokenizer, text: []const u8, refs: []const Reference) ![][W]i32 {
+pub fn build(gpa: std.mem.Allocator, tok: anytype, text: []const u8, refs: []const Reference) ![][W]i32 {
     if (text.len == 0 or text.len > 16384 or !std.unicode.utf8ValidateSlice(text) or refs.len > 4) return error.BadPrompt;
     for (refs) |r| {
         if (r.transcript.len == 0 or r.transcript.len > 4096 or !std.unicode.utf8ValidateSlice(r.transcript) or

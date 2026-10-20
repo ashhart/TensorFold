@@ -27,6 +27,20 @@ test "max frames CLI bounds and engine request preserve the default" {
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--max-frames" }, &u));
 }
 
+test "voices: CLI defaults and explicit catalog" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const defaults = try parse(a, &.{"m"}, &u);
+    try std.testing.expect(defaults.voices == null);
+    try std.testing.expectEqualStrings("default", defaults.default_voice);
+    const named = try parse(a, &.{ "m", "--voices", "catalog", "--default-voice=tone" }, &u);
+    try std.testing.expectEqualStrings("catalog", named.voices.?);
+    try std.testing.expectEqualStrings("tone", named.default_voice);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--default-voice=../tone" }, &u));
+}
+
 test "vision image budget: explicit large budgets reach the engine, with bounded CLI inputs" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -141,7 +155,7 @@ test "an engine is asked for what the flags say, and the defaults of the flags n
     try std.testing.expectEqual(@as(u16, 29600), gpu.master_port);
     try std.testing.expectEqual(@as(?u32, 2), gpu.mtp_drafts);
     try std.testing.expectEqual(@as(?f64, 0.5), gpu.mtp_confidence);
-    try std.testing.expectEqual(@as(?i64, 3), gpu.keep);
+    try std.testing.expectEqual(@as(i64, 3), gpu.keep);
     try std.testing.expectEqualStrings("matrix=off", gpu.policy);
 }
 

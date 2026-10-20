@@ -22,6 +22,10 @@ const Script = struct {
     release: std.atomic.Value(bool) = .init(false),
     cancelled: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+    voices: []const @import("drama_voice.zig").Voice = &.{},
+    get_voices: bool = false,
+    expected_rows: ?[]const [11]i32 = null,
+    rows_equal: bool = false,
 
     fn engine(e: *Script) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .submit_speech = speech } };
@@ -32,6 +36,7 @@ const Script = struct {
     }
     fn speech(ctx: *anyopaque, id: api.Id, request: *const api.SpeechRequest, sink: api.Sink) api.SpeechSubmitError!void {
         const e: *Script = @ptrCast(@alignCast(ctx));
+        if (e.expected_rows) |expected| e.rows_equal = std.mem.eql(u8, std.mem.sliceAsBytes(expected), std.mem.sliceAsBytes(request.frames));
         if (e.inline_) return run(e, id, request, sink);
         e.thread = std.Thread.spawn(.{}, run, .{ e, id, request, sink }) catch return error.Busy;
     }
@@ -80,7 +85,8 @@ const Bytes = struct {
         for (ids, out) |id, *byte| byte.* = @intCast(id);
         return out;
     }
-    fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
+    fn tokenId(_: *anyopaque, piece: []const u8) ?u32 {
+        if (std.mem.eql(u8, piece, "<|semantic:0|>")) return 1000;
         return null;
     }
     fn tokenString(_: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error![]u8 {
@@ -118,9 +124,11 @@ const Served = struct {
         if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
         s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined, .write_ms = write_ms };
         s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+        s.srv.voices = script.voices;
         if (script.output_full) s.srv.speech_inflight.store(s.srv.info.lanes, .release);
         var head: [160]u8 = undefined;
-        try writeAll(s.client, try std.fmt.bufPrint(&head, "POST /v1/audio/speech {s}\r\nHost: t\r\nContent-Length: {d}\r\n\r\n", .{ version, body.len }));
+        const method_path = if (script.get_voices) "GET /v1/voices" else "POST /v1/audio/speech";
+        try writeAll(s.client, try std.fmt.bufPrint(&head, "{s} {s}\r\nHost: t\r\nContent-Length: {d}\r\n\r\n", .{ method_path, version, body.len }));
         try writeAll(s.client, body);
         s.route = try std.Thread.spawn(.{}, serve, .{s});
     }
@@ -413,5 +421,61 @@ test "stream needs pcm and HTTP/1.1; stream false is the whole reply" {
     defer s.deinit();
     try expectHeader(try s.readHead(), "Content-Length: 4096\r\n");
     s.join(&script);
+    try std.testing.expectEqualStrings(&pcm(1), try s.readRest());
+}
+
+test "voices: HTTP listing and reference rows use the family CLI builder" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const family = @import("drama_prompt");
+    const codes = [_][10]i32{.{ 7, 1, 2, 3, 4, 5, 6, 7, 8, 9 }};
+    const refs = [_]family.Reference{.{ .transcript = "A small cloud passes.", .codes = &codes }};
+    const voices = [_]@import("drama_voice.zig").Voice{.{ .name = "tone", .references = &refs }};
+    const CliTokenizer = struct {
+        pub fn specialTokenId(_: @This(), _: []const u8) ?u32 {
+            return 1000;
+        }
+        pub fn encode(_: @This(), alloc: std.mem.Allocator, input: []const u8) ![]u32 {
+            var unused: u8 = 0;
+            return Bytes.encode(&unused, alloc, input, true);
+        }
+    };
+    const expected = try family.build(a, CliTokenizer{}, "hi", &refs);
+    var script: Script = .{ .steps = &.{frame}, .voices = &voices, .expected_rows = expected };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", "{\"model\":\"m\",\"input\":\"hi\",\"voice\":\"tone\",\"response_format\":\"pcm\"}", 2000);
+    defer s.deinit();
+    try expectHeader(try s.readHead(), " 200 ");
+    s.join(&script);
+    try std.testing.expect(script.rows_equal);
+    try std.testing.expectEqualStrings(&pcm(1), try s.readRest());
+    var listing_script: Script = .{ .steps = &.{}, .voices = &voices, .get_voices = true };
+    var listing: Served = undefined;
+    try listing.start(&listing_script, "HTTP/1.1", "", 2000);
+    defer listing.deinit();
+    try expectHeader(try listing.readHead(), " 200 ");
+    listing.join(&listing_script);
+    try std.testing.expectEqualStrings("{\"voices\": [\"default\", \"tone\"]}", try listing.readRest());
+}
+
+test "voices: without configuration the default prompt rows stay unchanged" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var bytes: Bytes = .{};
+    const tokens = try @import("drama_prompt.zig").encode(a, bytes.text(), "hi");
+    const rows = try a.alloc([11]i32, tokens.len);
+    for (rows, tokens) |*row, token| {
+        row.* = @splat(0);
+        row[0] = @intCast(token);
+    }
+    var script: Script = .{ .steps = &.{frame}, .expected_rows = rows };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\"}", 2000);
+    defer s.deinit();
+    try expectHeader(try s.readHead(), " 200 ");
+    s.join(&script);
+    try std.testing.expect(script.rows_equal);
     try std.testing.expectEqualStrings(&pcm(1), try s.readRest());
 }

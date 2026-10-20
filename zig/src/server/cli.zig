@@ -46,6 +46,8 @@ pub const flags = [_]Flag{
     .{ .name = "--port", .native = true },
     .{ .name = "--name", .native = true },
     .{ .name = "--chat-template", .native = true },
+    .{ .name = "--voices", .native = true },
+    .{ .name = "--default-voice", .native = true },
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
     .{ .name = "--api-key-file", .native = true },
@@ -141,6 +143,8 @@ pub const Args = struct {
     port: u16 = 8080,
     name: []const u8 = "",
     chat_template: ?[]const u8 = null,
+    voices: ?[]const u8 = null,
+    default_voice: []const u8 = "default",
     alias: []const []const u8 = &.{},
     api_key: []const []const u8 = &.{},
     allowed_host: []const []const u8 = &.{},
@@ -300,6 +304,16 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     }
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (try recallFlag(a, out, name, v, u)) return;
+    if (is(name, "--voices")) {
+        out.voices = v;
+        return;
+    }
+    if (is(name, "--default-voice")) {
+        if (!std.mem.eql(u8, v, "default") and !@import("drama_voice.zig").validName(v))
+            return fail(u, a, "invalid --default-voice: {s}", .{v});
+        out.default_voice = v;
+        return;
+    }
     if (is(name, "--chat-template")) {
         out.chat_template = v;
         return;

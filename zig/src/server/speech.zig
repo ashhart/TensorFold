@@ -41,7 +41,7 @@ pub const Format = enum {
     }
 };
 
-const Plan = struct { prompt: []const u32, seed: u64, format: Format, stream: bool };
+const Plan = struct { prompt: []const u32, frames: ?[]const [11]i32 = null, seed: u64, format: Format, stream: bool };
 
 pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     const sp = srv.info.speech orelse {
@@ -105,9 +105,24 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const stream = if (raw.get("stream")) |s| s == .bool and s.bool else false;
     if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
     const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
-    if (voice.len > 0 and !std.ascii.eqlIgnoreCase(voice, "default"))
-        return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{try pyrepr.repr(cx.a, .{ .string = voice })});
+    const refs = @import("drama_voice.zig").select(srv.voices, srv.config.default_voice, voice) catch {
+        const name = try pyrepr.repr(cx.a, .{ .string = voice });
+        if (srv.config.voices_dir != null)
+            return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
+        return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
+    };
     if (try drama_prompt.problem(cx.a, input)) |message| return cx.refuse(message);
+    if (refs.len > 0) {
+        const frames = @import("drama_voice.zig").build(cx.a, srv.text, input, refs) catch |e| return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => cx.other("the tokenizer cannot encode this voice prompt"),
+        };
+        if (frames.len > sp.max_prompt_tokens)
+            return cx.fail(.request, drama_prompt.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ frames.len, sp.max_prompt_tokens });
+        const prompt = try cx.a.alloc(u32, frames.len);
+        for (frames, prompt) |row, *token| token.* = @intCast(row[0]);
+        return .{ .prompt = prompt, .frames = frames, .seed = api.seedFor(prompt, srv.config.seed_salt), .format = format, .stream = stream };
+    }
     const prompt = drama_prompt.encode(cx.a, srv.text, input) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Template => cx.other("the tokenizer cannot encode this prompt"),
@@ -131,11 +146,14 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     const pcm = srv.gpa.alloc(f32, pcm_len) catch return fail(c, cx, id, .server, "out of memory");
     defer srv.gpa.free(pcm);
     var result: api.SpeechResult = .{};
-    const frames = cx.a.alloc([11]i32, plan.prompt.len) catch return fail(c, cx, id, .server, "out of memory");
-    for (frames, plan.prompt) |*row, token| {
-        row.* = @splat(0);
-        row[0] = std.math.cast(i32, token) orelse return fail(c, cx, id, .request, "invalid speech token");
-    }
+    const frames = plan.frames orelse blk: {
+        const rows = cx.a.alloc([11]i32, plan.prompt.len) catch return fail(c, cx, id, .server, "out of memory");
+        for (rows, plan.prompt) |*row, token| {
+            row.* = @splat(0);
+            row[0] = std.math.cast(i32, token) orelse return fail(c, cx, id, .request, "invalid speech token");
+        }
+        break :blk rows;
+    };
     const request: api.SpeechRequest = .{
         .prompt = plan.prompt,
         .frames = frames,
