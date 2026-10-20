@@ -94,7 +94,7 @@ pub fn run(gpu: check.Gpu) !void {
     const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
     var affine4 = try cuda.qlinear.Affine4Kernels.resolve(gpu.d, mods[1], mods[2], mods[3], mods[4], sms, cap == 121);
     defer affine4.deinit();
-    var split = try cuda.qlinear.Split.init(gpu.d); // GB10 serves without it; other GPUs take it for K slices
+    var split = try cuda.qlinear.Split.initFor(gpu.d, 2); // GB10 serves without it; other GPUs take it for K slices
     defer split.deinit();
     var prompt = try cuda.nvfp4.Prompt.load(gpu.d);
     defer prompt.unload();

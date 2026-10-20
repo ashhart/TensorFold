@@ -80,9 +80,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try d.norm(d.h, l.input_norm, d.x, B);
         try d.projAgain(l.attn_conv, d.x, d.dyn, B);
         try conv(d, d.x, l.attn_base, 0, d.xin, B, 0);
-        try d.proj(l.q, d.xin, d.qraw, B);
-        try d.projAgain(l.k, d.xin, d.kraw, B);
-        try d.projAgain(l.v, d.xin, d.vb, B);
+        try d.projMany(&.{ l.q, l.k, l.v }, d.xin, &.{ d.qraw, d.kraw, d.vb }, B);
         try rope(d, d.qraw, l.q_norm, d.q, B, c.heads);
         try rope(d, d.kraw, l.k_norm, d.kb, B, c.kv_heads);
         try attention(d, B, i);

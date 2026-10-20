@@ -231,6 +231,7 @@ pub const symbols = struct {
     pub const prefill = "_ZN14tf_qmm_prefill14prefill_kernelILi64ELi128ELi128ELi2ELi4ELi3ELb0EEEvPK13__nv_bfloat16PKjS3_S3_Pviiiiii";
     pub const gemv = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
     pub const gemv_split = "tf_lane_gemv_split";
+    pub const gemv_seg = "tf_lane_gemv_seg";
     pub const pack_words = "tf_pack_dense";
     pub const pack_scales = "tf_transpose_pad16";
 };
@@ -242,8 +243,13 @@ pub const Parts = extern struct { p: [4]Part, count: c_int };
 /// lane_gemv.cu's Part: one projection whose column tiles the CTAs share out.
 pub const GemvPart = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int };
 
+/// lane_gemv.cu's Seg and Segs: projections of one input, each at its first block, partials and tickets.
+pub const Seg = extern struct { p: GemvPart, first: c_int, work_at: c_int, tick_at: c_int, pad: c_int = 0 };
+pub const Segs = extern struct { s: [4]Seg, count: c_int };
+
 comptime {
     std.debug.assert(@sizeOf(Part) == 56 and @sizeOf(Parts) == 232 and @sizeOf(GemvPart) == 48);
+    std.debug.assert(@sizeOf(Seg) == 64 and @sizeOf(Segs) == 264);
 }
 
 pub const group_smem: u32 = 35328; // LaneTile<64, 16, 64, 1, 4, 8>::SMEM
@@ -262,11 +268,16 @@ pub const Split = struct {
     const work_bytes = 384 * 16 * 64 * 4;
 
     pub fn init(d: *const Driver) !Split {
-        var work = try memory.DeviceBuffer.alloc(d, work_bytes);
+        return initFor(d, 1);
+    }
+
+    /// Room for `parts` split projections at once (one segmented launch).
+    pub fn initFor(d: *const Driver, parts: usize) !Split {
+        var work = try memory.DeviceBuffer.alloc(d, parts * work_bytes);
         errdefer work.free();
-        var tickets = try memory.DeviceBuffer.alloc(d, tiles_max * 4);
+        var tickets = try memory.DeviceBuffer.alloc(d, parts * tiles_max * 4);
         errdefer tickets.free();
-        try d.check(d.api.cuMemsetD32_v2(tickets.ptr, 0, tiles_max), "cuMemsetD32");
+        try d.check(d.api.cuMemsetD32_v2(tickets.ptr, 0, parts * tiles_max), "cuMemsetD32");
         return .{ .work = work, .tickets = tickets };
     }
 

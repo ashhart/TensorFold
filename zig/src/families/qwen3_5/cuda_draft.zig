@@ -260,6 +260,19 @@ pub const Draft = struct {
         return d.projSums(l, x, out, rows, false);
     }
 
+    /// proj of each of `ls` into `outs` over one x, its group sums taken once; decode() keeps each one's bits.
+    pub fn projMany(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize) !void {
+        const e = d.e;
+        if (rows > 16 or ls.len > cuda.qlinear.Affine4Kernels.segs_max) {
+            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, i == 0);
+            return;
+        }
+        try e.run(e.fns.sums, .{ rows, (ls[0].k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(ls[0].k)), @as(u64, 0) });
+        var many: [cuda.qlinear.Affine4Kernels.segs_max]cuda.qlinear.Affine4Kernels.Out = undefined;
+        for (ls, outs, many[0..ls.len]) |l, out, *m| m.* = .{ .q = l, .out = out };
+        try e.affine.decodeMany(e.stream, x, d.xs, many[0..ls.len], rows);
+    }
+
     pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize, sums: bool) !void {
         return precision.affine(d.e, l, x, d.xs, out, rows, sums, d.projection_role);
     }

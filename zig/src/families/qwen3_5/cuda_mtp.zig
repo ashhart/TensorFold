@@ -278,9 +278,7 @@ pub const Mtp = struct {
         try d.proj(.{ .a4 = w.fc_e }, d.en, d.h, rows);
         try d.proj(.{ .a4 = w.fc_h }, d.hn, d.r, rows);
         try d.norm(d.h, d.r, w.input_norm, d.x, rows);
-        try d.proj(w.q, d.x, d.qraw, rows);
-        try d.proj(w.k, d.x, d.kraw, rows);
-        try d.proj(w.v, d.x, d.vb, rows);
+        try d.e.projManySums(&.{ w.q, w.k, w.v }, d.x, d.xs, &.{ d.qraw, d.kraw, d.vb }, rows, 0);
         try e.run(d.fns.norm_rope, .{ rows * g.q_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.qraw, w.q_norm, d.q, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), p0, step, g.eps, geometry.theta });
         try e.run(d.fns.norm_rope, .{ rows * g.kv_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.kraw, w.k_norm, d.kb, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(kw)), @as(c_int, head_dim), p0, step, g.eps, geometry.theta });
         const heads: c_int = @intCast(g.q_heads);

@@ -1,4 +1,4 @@
-//! Quantized products under the contract on CUDA: qmm_group, lane_gemv's two forms, prompt16 and qmmf FP4 (fp32 too).
+//! Quantized products under the contract on CUDA: qmm_group, lane_gemv's three forms, prompt16 and qmmf FP4 (fp32 too).
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -12,7 +12,7 @@ const Dense = contract.dense.Dense;
 const qlinear = cuda.qlinear;
 const nvfp4 = cuda.nvfp4;
 
-pub const Kind = enum { qmm_group, lane_gemv, lane_gemv_split, prompt16, prompt16_f32, lane_f32, lane_f32_reduce, verify32_bits, verify32_fp64, verify64_bits, verify64_fp64, verify128_bits, verify128_fp64 };
+pub const Kind = enum { qmm_group, lane_gemv, lane_gemv_split, lane_gemv_seg, prompt16, prompt16_f32, lane_f32, lane_f32_reduce, verify32_bits, verify32_fp64, verify64_bits, verify64_fp64, verify128_bits, verify128_fp64 };
 
 /// Rows a verify kind's launch holds, 0 for the others.
 pub fn verifyTile(kind: Kind) usize {
@@ -69,6 +69,8 @@ fn across(comptime lo: usize, comptime hi: usize, comptime turn: usize, comptime
 
 pub fn spec(kind: Kind) c.Spec {
     const decode = &[_]c.Shape{ .{ .rows = 16, .n = 10304, .k = 2688 }, .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 3, .n = 4608, .k = 2688 } };
+    // Qwen3.5's projections of one input: Qwen3.8-27B's (two K slices, eight, one) and Qwen3.5-35B-A3B's
+    const segmented = &[_]c.Shape{ .{ .rows = 16, .n = 10240, .k = 5120 }, .{ .rows = 4, .n = 1024, .k = 5120 }, .{ .rows = 1, .n = 12288, .k = 5120 }, .{ .rows = 16, .n = 8192, .k = 2048 }, .{ .rows = 3, .n = 512, .k = 2048 } };
     const tiles = [3]c.Tile{ .{ .size = 16 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 512, .step = 64, .min = 64 } };
     const wide_edges = [_]c.Shape{ .{ .rows = 16, .n = 512, .k = 5120 }, .{ .rows = 17, .n = 65, .k = 512 }, .{ .rows = 32, .n = 512, .k = 17408 }, .{ .rows = 32, .n = 17408, .k = 512 }, .{ .rows = 32, .n = 5120, .k = 5120 } };
     const wide = comptime &(wide_edges ++ across(16, 32, 0, false));
@@ -93,6 +95,7 @@ pub fn spec(kind: Kind) c.Spec {
         .qmm_group => .{ .name = "cuda qmm_group (cluster tile)", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = tiles, .served = decode },
         .lane_gemv => .{ .name = "cuda lane_gemv", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "qmm_group's cluster tile", .tiles = tiles, .served = decode },
         .lane_gemv_split => .{ .name = "cuda lane_gemv split-K", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "qmm_group's cluster tile", .tiles = tiles, .served = decode },
+        .lane_gemv_seg => .{ .name = "cuda lane_gemv segmented split-K", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "affine-4 decode()", .tiles = tiles, .served = segmented },
         .prompt16 => .{ .name = "cuda prompt16 FP4 tile 4", .accum = .f32, .depth = mmaChain, .ops = 2, .out = .bf16, .tiles = prompt_tiles, .served = &.{ .{ .rows = 300, .n = 512, .k = 2560 }, .{ .rows = 64, .n = 2560, .k = 512 } } },
         .prompt16_f32 => .{ .name = "cuda prompt16 FP4 tile 4, fp32 out", .accum = .f32, .depth = mmaChain, .ops = 2, .out = .f32, .tiles = prompt_tiles, .served = &.{ .{ .rows = 300, .n = 512, .k = 2560 }, .{ .rows = 64, .n = 2560, .k = 512 }, .{ .rows = 64, .n = 4096, .k = 3072 } } },
         .lane_f32 => .{ .name = "cuda qmmf FP4 fp32 out (slices in a cluster)", .accum = .f32, .depth = laneFp4Depth, .ops = 2, .out = .f32, .tiles = fp4_tiles, .served = &fp4_lane },
@@ -137,7 +140,7 @@ pub const Mm = struct {
             else => "control: verify32 truncated FP64",
         };
         if (self.sm < 90) {
-            declared.replaces = null;
+            if (self.kind != .lane_gemv_seg) declared.replaces = null; // decode() runs on every GPU
             if (self.kind == .lane_f32) declared.name = "cuda qmmf FP4 fp32 out (slices by reduce_kernel<true>, architecture fallback)";
         }
         return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.truncate_verify) .shapes else null };
@@ -158,7 +161,7 @@ pub const Mm = struct {
         self.drop();
         if (shape.rows == 0 or shape.n == 0 or shape.k == 0 or shape.k % 64 != 0) return false;
         return switch (self.kind) {
-            .qmm_group, .lane_gemv, .lane_gemv_split, .verify32_bits, .verify32_fp64, .verify64_bits, .verify64_fp64, .verify128_bits, .verify128_fp64 => self.prepareAffine(shape, fill, seed),
+            .qmm_group, .lane_gemv, .lane_gemv_split, .lane_gemv_seg, .verify32_bits, .verify32_fp64, .verify64_bits, .verify64_fp64, .verify128_bits, .verify128_fp64 => self.prepareAffine(shape, fill, seed),
             .prompt16, .prompt16_f32, .lane_f32, .lane_f32_reduce => self.preparePrompt(shape, fill, seed),
         };
     }
@@ -198,7 +201,7 @@ pub const Mm = struct {
         try self.affine4.?.pack(self.rig.s, src_w, src_s, src_b, self.q);
         try self.rig.s.synchronize();
         const out_bytes = shape.rows * shape.n * 2;
-        if (self.kind == .lane_gemv or self.kind == .lane_gemv_split or oneRowBits(self.kind)) self.base = try self.rig.scratch(out_bytes);
+        if (self.kind == .lane_gemv or self.kind == .lane_gemv_split or self.kind == .lane_gemv_seg or oneRowBits(self.kind)) self.base = try self.rig.scratch(out_bytes);
         self.out = try self.rig.output(out_bytes);
         return true;
     }
@@ -275,6 +278,12 @@ pub const Mm = struct {
                 const f = self.f.?;
                 try self.affine4.?.gemvSplit(s, self.x, self.xs, self.q, out, f.shape.rows, qlinear.splitK(f.shape.n, f.shape.k), self.split.?.*);
             },
+            .lane_gemv_seg => {
+                const f = self.f.?;
+                // a second segment checked, so its partials and tickets sit past the first's
+                const segs = [_]qlinear.Affine4Kernels.Out{ .{ .q = self.q, .out = self.base }, .{ .q = self.q, .out = out } };
+                try self.affine4.?.gemvSeg(s, self.x, self.xs, &segs, f.shape.rows, self.split.?.*);
+            },
             .prompt16 => try self.prompt.?.matmul(s, self.x, self.d.?.shape.k, self.d.?.shape.rows, self.w4, out),
             .prompt16_f32 => try self.prompt.?.matmulOut(s, self.x, self.d.?.shape.k, self.d.?.shape.rows, self.w4, out, .f32),
             .lane_f32, .lane_f32_reduce => {
@@ -289,6 +298,11 @@ pub const Mm = struct {
         if (oneRowBits(self.kind)) {
             const f = self.f.?;
             for (0..f.shape.rows) |row| try self.affine4.?.decode(self.rig.s, self.x + row * f.shape.k * 2, self.xs + row * (f.shape.k / 64) * 4, self.q, self.base + row * f.shape.n * 2, 1);
+            return self.rig.bytes(self.base, self.count() * 2);
+        }
+        if (self.kind == .lane_gemv_seg) {
+            const f = self.f.?;
+            try self.affine4.?.decode(self.rig.s, self.x, self.xs, self.q, self.base, f.shape.rows);
             return self.rig.bytes(self.base, self.count() * 2);
         }
         if (self.kind != .lane_gemv and self.kind != .lane_gemv_split) return error.NotAReplacement;
