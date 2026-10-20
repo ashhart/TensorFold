@@ -471,22 +471,39 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (int t = k0; t < k1; t++) {
-        const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
-        const uint4 kw = *reinterpret_cast<const uint4*>(K + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
-        const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw);
-        float dot = 0.0f;
+    // KB keys' rows and dots at once, then their softmax steps in key order: each value's arithmetic as one key a step
+    constexpr int KB = 8;
+    for (int t0 = k0; t0 < k1; t0 += KB) {
+        const int n = min(KB, k1 - t0);
+        uint4 kw[KB], vw[KB];
+        float s[KB];
 #pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
-        const float s = warp_sum(dot) * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        const uint4 vw = *reinterpret_cast<const uint4*>(V + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
-        const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw);
+        for (int u = 0; u < KB; u++) {
+            if (u >= n) break;
+            const int t = t0 + u, pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
+            kw[u] = *reinterpret_cast<const uint4*>(K + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
+            vw[u] = *reinterpret_cast<const uint4*>(V + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
+        }
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
-        mx = mn;
+        for (int u = 0; u < KB; u++) {
+            if (u >= n) break;
+            const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw[u]);
+            float dot = 0.0f;
+#pragma unroll
+            for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
+            s[u] = warp_sum(dot) * scale;
+        }
+#pragma unroll
+        for (int u = 0; u < KB; u++) {
+            if (u >= n) break;
+            const float mn = fmaxf(mx, s[u]);
+            const float a = __expf(mx - mn), b = __expf(s[u] - mn);
+            l = l * a + b;
+            const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw[u]);
+#pragma unroll
+            for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
+            mx = mn;
+        }
     }
     if (lane == 0) {
         PM[slot] = mx;

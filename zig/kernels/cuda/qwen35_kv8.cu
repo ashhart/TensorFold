@@ -83,23 +83,45 @@ extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (int t = k0; t < k1; t++) {
-        const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
-        const size_t row = (size_t)h * sg.cap + pos;
-        float kf[DPL], vf[DPL];
-        widen8(*reinterpret_cast<const uint2*>(K + row * HD + lane * DPL), kf);
-        float dot = 0.0f;
+    // KB keys' codes and dots at once, then their softmax steps in key order, as tf_q35_attn_partial takes them
+    constexpr int KB = 8;
+    for (int t0 = k0; t0 < k1; t0 += KB) {
+        const int n = min(KB, k1 - t0);
+        uint2 kw[KB], vw[KB];
+        float s[KB], vs[KB];
 #pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
-        const float s = warp_sum(dot) * KS[row] * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        widen8(*reinterpret_cast<const uint2*>(V + row * HD + lane * DPL), vf);
-        const float bv = b * VS[row];
+        for (int u = 0; u < KB; u++) {
+            if (u >= n) break;
+            const int t = t0 + u, pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
+            const size_t row = (size_t)h * sg.cap + pos;
+            kw[u] = *reinterpret_cast<const uint2*>(K + row * HD + lane * DPL);
+            vw[u] = *reinterpret_cast<const uint2*>(V + row * HD + lane * DPL);
+            s[u] = KS[row];
+            vs[u] = VS[row];
+        }
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
-        mx = mn;
+        for (int u = 0; u < KB; u++) {
+            if (u >= n) break;
+            float kf[DPL];
+            widen8(kw[u], kf);
+            float dot = 0.0f;
+#pragma unroll
+            for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
+            s[u] = warp_sum(dot) * s[u] * scale;
+        }
+#pragma unroll
+        for (int u = 0; u < KB; u++) {
+            if (u >= n) break;
+            const float mn = fmaxf(mx, s[u]);
+            const float a = __expf(mx - mn), b = __expf(s[u] - mn);
+            l = l * a + b;
+            float vf[DPL];
+            widen8(vw[u], vf);
+            const float bv = b * vs[u];
+#pragma unroll
+            for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
+            mx = mn;
+        }
     }
     if (lane == 0) {
         PM[slot] = mx;
