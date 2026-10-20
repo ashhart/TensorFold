@@ -22,6 +22,7 @@ pub const PickDims = extern struct { k: i32, n: i32, group: i32, slots: i32, rep
 
 pub const Pipes = struct {
     rows: [nw]mtl.Pipeline, // dense, strided, by head
+    rows_wide: [nw]mtl.Pipeline, // 4+ rows: eights and a four first, a kernel apart so 1-3 rows keep their registers
     ids: [nw]mtl.Pipeline, // a slot through its expert
     glu_ids: [nw]mtl.Pipeline, // gate and up through it, SwiGLU'd
     sorted: [nw]mtl.Pipeline, // an expert's sorted pairs (prompt chunks)
@@ -45,6 +46,7 @@ pub const Pipes = struct {
         inline for (.{
             &p.gather,
             &p.rows,
+            &p.rows_wide,
             &p.ids,
             &p.glu_ids,
             &p.sorted,
@@ -106,7 +108,7 @@ pub const gather_source = sources.core_row_projection ++ glue_math ++ sources.gl
 
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 8 + 7 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
+    list: [nw * 9 + 7 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
     n: usize = 0,
     released: usize = 0,
 
@@ -149,6 +151,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
         inline for (bit_widths, 0..) |b, i| {
             const q = std.fmt.comptimePrint("_q{d}", .{b});
             p.rows[i] = try made.add(device, l, "glm_rows" ++ q);
+            p.rows_wide[i] = try made.add(device, l, "glm_rows_wide" ++ q);
             p.ids[i] = try made.add(device, l, "glm_rows_ids" ++ q);
             p.glu_ids[i] = try made.add(device, l, "glm_rows_glu_ids" ++ q);
             p.sorted[i] = try made.add(device, l, "glm_rows_sorted" ++ q);
@@ -231,11 +234,11 @@ fn at(bits: u8) usize {
 pub const Io = struct { in: Ref, ldx: u32, out: Ref, ldo: u32, rows: u32 };
 
 fn launch(p: *const Pipes, e: mtl.ComputeEncoder, w: [3]Ref, bits: u8, d: RowDims, in: Ref, out: Ref) void {
-    e.setPipeline(p.rows[at(bits)]);
+    e.setPipeline(if (d.rows >= 4) p.rows_wide[at(bits)] else p.rows[at(bits)]);
     bind(e, 0, .{ in, w[0], w[1], w[2] });
     e.setValue(d, 4);
     bind(e, 5, .{out});
-    e.dispatchGroups(mtl.Size.of(@intCast(@divTrunc(d.n + 7, 8)), @intCast(d.heads), 1), mtl.Size.of(64, 1, 1));
+    e.dispatchGroups(mtl.Size.of(@intCast(@divTrunc(d.n + 3, 4)), @intCast(d.heads), 1), mtl.Size.of(64, 1, 1));
 }
 
 /// x through every member of `q` at its own width, each into its own output rows.
@@ -505,7 +508,7 @@ test "a failed compile releases every pipeline built before it; a load counts ea
     defer device.deinit();
     var made: Made = .{};
     try std.testing.expectError(error.KernelCompile, build(gpa, device, "", &made)); // after the row kernels
-    try std.testing.expectEqual(@as(usize, nw * 7 + 4), made.released);
+    try std.testing.expectEqual(@as(usize, nw * 8 + 4), made.released);
     try std.testing.expectEqual(@as(usize, 0), made.n);
     var all: Made = .{};
     var p = try build(gpa, device, comptime kernels.generatedSource("kda_rows"), &all);

@@ -1,29 +1,61 @@
-// Affine 2- to 8-bit row projections without tensor units: RPS columns a simdgroup, MB rows a weight read.
+// Affine 2- to 8-bit row projections without tensor units: RPS columns a simdgroup, MB rows a pass over the weights.
 #include <metal_stdlib>
 using namespace metal;
 
 // 2^-e, exact: a code read in place at bit e times its input scaled by 2^-e is the same product.
 inline float tf_rp_p2(int e) { return as_type<float>(uint(127 - e) << 23); }
 
-// 16 bf16 inputs as floats (scaled to the nibble positions at 4 bits) and their group sum: fp32 in order, or rounded to bf16 at each add (BF16SUM, the Nemotron expert convention).
+// An input in its code's place, exact: at 4 bits divided by 16^(i % 4), at 2 bits by 4^i.
+template <int BITS>
+inline float tf_rp_x(float v, int i) {
+  if (BITS == 4) return i % 4 == 0 ? v : i % 4 == 1 ? v / 16.0f : i % 4 == 2 ? v / 256.0f : v / 4096.0f;
+  if (BITS == 2) return v * tf_rp_p2(2 * i);
+  return v;
+}
+
+// Four more inputs into a group sum: fp32 in order, or rounded to bf16 at each add (BF16SUM, Nemotron's experts).
+template <bool BF16SUM>
+inline float tf_rp_sum4(float sum, bfloat a, bfloat b, bfloat c, bfloat d) {
+  if (BF16SUM) return sum + float(bfloat(float(bfloat(float(bfloat(float(a) + float(b))) + float(c))) + float(d)));
+  sum += float(a); sum += float(b); sum += float(c); sum += float(d);
+  return sum;
+}
+
+// 16 bf16 inputs and their group sum: as floats in their codes' places, or as bf16 (tf_rp_in places them where used).
 template <int BITS, bool BF16SUM>
 inline float tf_rp_load16(const device bfloat* x, thread float* xt) {
   float sum = 0.0f;
   for (int i = 0; i < 16; i += 4) {
     const bfloat a = x[i], b = x[i + 1], c = x[i + 2], d = x[i + 3];
-    if (BF16SUM) sum += float(bfloat(float(bfloat(float(bfloat(float(a) + float(b))) + float(c))) + float(d)));
-    else { sum += float(a); sum += float(b); sum += float(c); sum += float(d); }
-    xt[i] = BITS == 2 ? float(a) * tf_rp_p2(2 * i) : float(a);
-    xt[i + 1] = BITS == 4 ? float(b) / 16.0f : BITS == 2 ? float(b) * tf_rp_p2(2 * i + 2) : float(b);
-    xt[i + 2] = BITS == 4 ? float(c) / 256.0f : BITS == 2 ? float(c) * tf_rp_p2(2 * i + 4) : float(c);
-    xt[i + 3] = BITS == 4 ? float(d) / 4096.0f : BITS == 2 ? float(d) * tf_rp_p2(2 * i + 6) : float(d);
+    sum = tf_rp_sum4<BF16SUM>(sum, a, b, c, d);
+    xt[i] = tf_rp_x<BITS>(float(a), i);
+    xt[i + 1] = tf_rp_x<BITS>(float(b), i + 1);
+    xt[i + 2] = tf_rp_x<BITS>(float(c), i + 2);
+    xt[i + 3] = tf_rp_x<BITS>(float(d), i + 3);
   }
   return sum;
 }
 
+template <int BITS, bool BF16SUM>
+inline float tf_rp_load16(const device bfloat* x, thread bfloat* xt) {
+  float sum = 0.0f;
+  for (int i = 0; i < 16; i += 4) {
+    const bfloat a = x[i], b = x[i + 1], c = x[i + 2], d = x[i + 3];
+    sum = tf_rp_sum4<BF16SUM>(sum, a, b, c, d);
+    xt[i] = a; xt[i + 1] = b; xt[i + 2] = c; xt[i + 3] = d;
+  }
+  return sum;
+}
+
+// A loaded input as a float in its code's place.
+template <int BITS>
+inline float tf_rp_in(float v, int) { return v; }
+template <int BITS>
+inline float tf_rp_in(bfloat v, int i) { return tf_rp_x<BITS>(float(v), i); }
+
 // MB rows' dots with 16 codes (3, 5, 6 bits: 8, 8, 4 codes in 3, 5, 3 bytes), unpacked once; sums in one order.
-template <int MB, int BITS>
-inline void tf_rp_qdot16(const device uint8_t* w, const thread float (*xt)[16], float scale, float bias,
+template <int MB, int BITS, typename X>
+inline void tf_rp_qdot16(const device uint8_t* w, const thread X (*xt)[16], float scale, float bias,
                          const thread float* sum, thread float* out) {
   float q[16];
   if (BITS == 2) {
@@ -63,18 +95,21 @@ inline void tf_rp_qdot16(const device uint8_t* w, const thread float (*xt)[16], 
   for (int b = 0; b < MB; b++) {
     float accum = 0.0f;
     for (int i = 0; i < 4; i++)
-      accum += (xt[b][4 * i] * q[4 * i] + xt[b][4 * i + 1] * q[4 * i + 1] +
-                xt[b][4 * i + 2] * q[4 * i + 2] + xt[b][4 * i + 3] * q[4 * i + 3]);
+      accum += (tf_rp_in<BITS>(xt[b][4 * i], 4 * i) * q[4 * i] + tf_rp_in<BITS>(xt[b][4 * i + 1], 4 * i + 1) * q[4 * i + 1] +
+                tf_rp_in<BITS>(xt[b][4 * i + 2], 4 * i + 2) * q[4 * i + 2] +
+                tf_rp_in<BITS>(xt[b][4 * i + 3], 4 * i + 3) * q[4 * i + 3]);
     out[b] += scale * accum + sum[b] * bias;
   }
 }
 
-// RPS output columns of MB rows: lanes split K in 16-input pieces (512 a pass, then a tail), one simd_sum a (row, column).
+// RPS columns of MB rows at x.x[b], lanes splitting K by 16 (512 a pass); 3 hold bf16, 4+ go in pairs; same sums.
 template <int MB> struct TfRpRows { const device bfloat* x[MB]; };
 
 template <int RPS, int MB, int BITS, bool BF16SUM>
 inline void tf_rp_rows_at(const device uint8_t* w, const device bfloat* sc, const device bfloat* bi, thread const TfRpRows<MB>& x,
-                       int K, int GS, uint lane, thread float (*acc)[RPS]) {
+                          int K, int GS, uint lane, thread float (*acc)[RPS]) {
+  typedef typename metal::conditional<(MB >= 3), bfloat, float>::type X;
+  static_assert(MB <= 3 || MB % 2 == 0, "4+ rows run in pairs");
   const int KB = K * BITS / 8;
   const int KG = K / GS;
   const int FULL = K / 512 * 512;
@@ -88,13 +123,27 @@ inline void tf_rp_rows_at(const device uint8_t* w, const device bfloat* sc, cons
     for (int b = 0; b < MB; b++) acc[b][j] = 0.0f;
   for (int k0 = 0; k0 <= FULL; k0 += 512) {
     if (k0 == FULL && !(FULL < K && int(lane) < (K - FULL) / 16)) break;
-    float xt[MB][16];
-    float sum[MB];
-    for (int b = 0; b < MB; b++) sum[b] = tf_rp_load16<BITS, BF16SUM>(x.x[b] + xl + k0, xt[b]);
-    for (int j = 0; j < RPS; j++) {
-      for (int b = 0; b < MB; b++) col[b] = acc[b][j];
-      tf_rp_qdot16<MB, BITS>(w + j * KB, xt, float(sc[j * KG]), float(bi[j * KG]), sum, col);
-      for (int b = 0; b < MB; b++) acc[b][j] = col[b];
+    if (MB > 3) {
+      for (int p = 0; p < MB; p += 2) {
+        float xt[2][16];
+        float sum[2];
+        for (int b = 0; b < 2; b++) sum[b] = tf_rp_load16<BITS, BF16SUM>(x.x[p + b] + xl + k0, xt[b]);
+        for (int j = 0; j < RPS; j++) {
+          float two[2] = {acc[p][j], acc[p + 1][j]};
+          tf_rp_qdot16<2, BITS>(w + j * KB, xt, float(sc[j * KG]), float(bi[j * KG]), sum, two);
+          acc[p][j] = two[0];
+          acc[p + 1][j] = two[1];
+        }
+      }
+    } else {
+      X xt[MB][16];
+      float sum[MB];
+      for (int b = 0; b < MB; b++) sum[b] = tf_rp_load16<BITS, BF16SUM>(x.x[b] + xl + k0, xt[b]);
+      for (int j = 0; j < RPS; j++) {
+        for (int b = 0; b < MB; b++) col[b] = acc[b][j];
+        tf_rp_qdot16<MB, BITS>(w + j * KB, xt, float(sc[j * KG]), float(bi[j * KG]), sum, col);
+        for (int b = 0; b < MB; b++) acc[b][j] = col[b];
+      }
     }
     w += 512 * BITS / 8; sc += 512 / GS; bi += 512 / GS;
   }

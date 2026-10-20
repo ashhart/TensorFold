@@ -1,4 +1,4 @@
-// Four gathered rows share a weight read, keeping glm_rows_sorted's per-row reduction and output rounding.
+// Four gathered rows share a pass over the weights, keeping glm_rows_sorted's per-row reduction and output rounding.
 struct GlmGatherDims {
   int k, n, group, bits;
   int up_group, up_bits, pairs, repeat;
@@ -50,6 +50,7 @@ inline void glm_gather_width(const device uint32_t* W, const device bfloat* S, c
 }
 
 template <bool GLU>
+[[max_total_threads_per_threadgroup(64)]]
 [[kernel]] void glm_rows_gather(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
                                 const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
                                 constant GlmGatherDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
