@@ -2,17 +2,19 @@
 const std = @import("std");
 const memory = @import("flashnext_memory");
 const checkpoint = @import("src/core/checkpoint.zig");
-test "Flash Next memory: weight stats deduplicate indexed nested shards" {
+test "Flash Next memory: weight stats deduplicate indexed shards and refuse nested shard names" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
-    try tmp.dir.createDir(io, "part", .default_dir);
-    try tmp.dir.writeFile(io, .{ .sub_path = "part/one.safetensors", .data = "abcde" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "one.safetensors", .data = "abcde" });
     try tmp.dir.writeFile(io, .{ .sub_path = "two.safetensors", .data = "xyz" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"part/one.safetensors\",\"b\":\"part/one.safetensors\",\"c\":\"two.safetensors\"}}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"one.safetensors\",\"b\":\"one.safetensors\",\"c\":\"two.safetensors\"}}" });
     const path = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     try std.testing.expectEqual(@as(u64, 8), try memory.weightBytes(checkpoint, std.testing.allocator, io, path));
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"part/one.safetensors\"}}" });
+    try std.testing.expectError(error.BadIndex, memory.weightBytes(checkpoint, std.testing.allocator, io, path));
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"one.safetensors\",\"c\":\"two.safetensors\"}}" });
     try tmp.dir.deleteFile(io, "two.safetensors");
     try std.testing.expectError(error.FileNotFound, memory.weightBytes(checkpoint, std.testing.allocator, io, path));
 }
