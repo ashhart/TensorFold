@@ -30,6 +30,16 @@ const rewrites = [_][2][]const u8{
     },
 };
 
+/// The attention kernels as this chip builds them (before M5: the tail rewritten, the prompt kernels if `prompt`).
+pub fn library(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
+    const source = @import("qwen_runtime_sources");
+    if (units) return a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt);
+    const tail = try rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
+    if (!prompt) return tail;
+    defer a.free(tail);
+    return std.mem.concat(a, u8, &.{ tail, source.attention_prompt, source.attention_prompt_sg });
+}
+
 /// The attention source with the tail kernel's result indexing in the simdgroup-matrix layout; the caller frees it.
 pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
     const begin = std.mem.indexOf(u8, source, "kernel void q27_attn_tail(") orelse return error.AttentionSource;

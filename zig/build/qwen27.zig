@@ -16,7 +16,7 @@ pub const Shared = struct {
 };
 
 /// The 27B's Metal sources, embedded by name (zig/kernels/metal/qwen27).
-const parts = [_][]const u8{ "xsum", "norm_xs", "norm_input", "mlp_xs", "mlp_ane", "glue", "copy", "attention_mpp", "attention_io", "attention_prompt", "prompt_glue", "prompt_state" };
+const parts = [_][]const u8{ "xsum", "norm_xs", "norm_input", "mlp_xs", "mlp_ane", "glue", "copy", "attention_mpp", "attention_io", "attention_prompt", "attention_prompt_sg", "prompt_glue", "prompt_state" };
 
 /// The shared modules, imported into `engine` (whose `core` is itself) for the server and the release binary.
 pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module) Shared {

@@ -1,7 +1,6 @@
 //! One command buffer verifies every layer; cache publication waits for the accepted path.
 const std = @import("std");
 const mtl = @import("metal");
-const source = @import("qwen_runtime_sources");
 const Model = @import("model.zig").Model;
 const Frame = @import("gpu_frame.zig").Frame;
 const forward = @import("forward.zig");
@@ -87,11 +86,18 @@ pub const Runner = struct {
         const units = m.device.tensorUnits();
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
-        const text = if (units) try a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt) else try @import("simd_attention.zig").rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
+        const text = try @import("simd_attention.zig").library(a, units, true);
         defer a.free(text);
-        const library = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
+        // before M5 the prompt kernels are optional: a chip that cannot build them keeps the decode path for prompts
+        const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
+            if (units) return err;
+            std.log.info("qwen27: the prompt attention kernels do not build here ({t}); prompt rows take the decode path", .{err});
+            const base = try @import("simd_attention.zig").library(a, units, false);
+            defer a.free(base);
+            break :blk try mtl.Library.fromSource(m.device, base, mtl.CompileOptions.mlx());
+        };
         defer library.deinit();
-        var attention = try attn.Attention.init(m.device, library, units);
+        var attention = try attn.Attention.init(m.device, library);
         errdefer attention.deinit();
         const limits = attn.Limits{ .rows = m.frame.capacity, .streams = slots, .keys = capacity, .shared_prefix = geometry.shared_prefix, .geometry = geometry };
         var scratch = try attn.Scratch.init(m.device, limits);
