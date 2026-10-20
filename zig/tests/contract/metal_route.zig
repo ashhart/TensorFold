@@ -26,12 +26,12 @@ fn depth(_: c.Shape) usize {
     return 16 + 5 + 7;
 }
 
-/// The rows a family calls it at: GLM's decode and prompt chunks to 16,384 (tails any height), the 35B's to 128.
+/// The rows a family calls it at: GLM's chunks to 16,384 (tails any height), the 35B's to its frame's 2,048.
 fn served(comptime w: Which) []const c.Shape {
     const s = comptime shapeOf(w);
     const n = s.experts;
     const k = s.hidden;
-    if (w == .qwen35b_router) return comptime &.{ .{ .rows = 1, .n = n, .k = k }, .{ .rows = 16, .n = n, .k = k }, .{ .rows = 128, .n = n, .k = k } };
+    if (w == .qwen35b_router) return comptime &.{ .{ .rows = 1, .n = n, .k = k }, .{ .rows = 16, .n = n, .k = k }, .{ .rows = 128, .n = n, .k = k }, .{ .rows = 512, .n = n, .k = k }, .{ .rows = 2048, .n = n, .k = k } };
     return comptime &.{ .{ .rows = 1, .n = n, .k = k }, .{ .rows = 16, .n = n, .k = k }, .{ .rows = 2047, .n = n, .k = k }, .{ .rows = 16384, .n = n, .k = k } };
 }
 

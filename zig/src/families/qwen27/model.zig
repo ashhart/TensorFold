@@ -91,7 +91,8 @@ pub const Model = struct {
         errdefer m.glue.deinit();
         m.frame = try Frame.init(m.device, c, @max(rows, promptRows()));
         errdefer m.frame.deinit();
-        m.moe = if (c.moe()) try moe_stage.Stage.init(a, m.device, c, rows, m.weights.layers[0].mlp.experts) else null;
+        // the experts take every row the frame does: a prompt pass's 512 on tensor units, not the 128 asked for
+        m.moe = if (c.moe()) try moe_stage.Stage.init(a, m.device, c, m.frame.capacity, m.weights.layers[0].mlp.experts) else null;
         errdefer if (m.moe) |s| s.deinit(a);
         m.ane = null;
         m.share_pending = true;
