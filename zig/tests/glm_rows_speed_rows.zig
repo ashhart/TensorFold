@@ -40,4 +40,3 @@ pub fn multi(b: *const speed.Bench, p: *const wide.Pipes) !void {
         std.debug.print("  {d:6.1} GB/s at 1\n", .{@as(f64, @floatFromInt(pool.bytes)) / one / 1e3});
     }
 }
-
