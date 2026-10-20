@@ -56,12 +56,14 @@ pub const Draws = struct {
     logprob_rows_fn: Function,
     topk_slices_fn: Function,
     topk_merge_fn: Function,
+    /// tf_draw_rows; null in a kernel set built before it, where drawRows falls back to one launch a row.
+    draw_rows_fn: ?Function = null,
 
     /// tf_topk_slices' slice: a row's entries a block in topkRows' first stage.
     pub const topk_slice = 4096;
 
     pub fn resolve(mod: Module) !Draws {
-        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge") };
+        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge"), .draw_rows_fn = mod.function("tf_draw_rows") catch null };
     }
 
     /// Resolve the opt-in pitched entry separately; old images keep the exact legacy symbol lookups.
@@ -110,6 +112,22 @@ pub const Draws = struct {
         a.add(ids orelse 0);
         a.add(prob orelse 0);
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, s, &a);
+    }
+
+    /// `rows` consecutive bf16 logits rows, row r under the rule at rule_ptr + r and the position at meta + r (plus 1).
+    pub fn drawRows(d: *const Draws, s: Stream, logits: u64, vocab: usize, rule_ptr: u64, meta: u64, out: u64, rows: usize) !void {
+        if (rows == 0) return;
+        const f = d.draw_rows_fn orelse {
+            for (0..rows) |i| try d.draw(s, logits + i * vocab * 2, vocab, rule_ptr + i * @sizeOf(Rule), meta + i * 4, 0, out + i * 4, 1, null, null);
+            return;
+        };
+        var a: launch_.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(rule_ptr);
+        a.add(meta);
+        a.add(out);
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &a);
     }
 
     /// Each bf16 logits row's logprob words at `out`: its pick in `picks`, its `k` best tokens, its rank if `rank`.

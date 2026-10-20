@@ -515,14 +515,14 @@ __device__ void sample_full(const __nv_bfloat16* L, unsigned V, const Rule& rl, 
     if (r.t == 0) *PROB = expf(pick - m) / z; // the pick's share of the top_k mass at T
 }
 
-// The Metal engine's choice: tf_sample_full for top_k off or past 1,024, tf_gpu_sample for the rest.
-template <bool MAP>
+// The Metal engine's choice: tf_sample_full for top_k off or past 1,024, else tf_gpu_sample; OWN: rule[r] and meta[r].
+template <bool MAP, bool OWN = false>
 __device__ void draw(const __nv_bfloat16* L, unsigned V, const Rule* rule, const int* meta, int offset, unsigned* TOK,
                      const long long* IDS, float* PROB) {
     __shared__ Shared s;
     const unsigned row = blockIdx.x;
-    const Rule rl = *rule;
-    const unsigned position = static_cast<unsigned>(meta[0] + static_cast<int>(row) + 1 + offset);
+    const Rule rl = rule[OWN ? row : 0u];
+    const unsigned position = static_cast<unsigned>(meta[OWN ? row : 0u] + static_cast<int>(OWN ? 0u : row) + 1 + offset);
     const __nv_bfloat16* L_row = L + static_cast<size_t>(row) * V;
     if (rl.top_k == 0u || rl.top_k > C) {
         sample_full<MAP>(L_row, V, rl, position, IDS, TOK + row, PROB ? PROB + row : nullptr, s);
@@ -537,6 +537,12 @@ __device__ void draw(const __nv_bfloat16* L, unsigned V, const Rule* rule, const
 extern "C" __global__ void __launch_bounds__(1024) tf_draw(const __nv_bfloat16* L, unsigned V, const tf_sample::Rule* rule,
                                                            const int* meta, int offset, unsigned* TOK, float* PROB) {
     tf_sample::draw<false>(L, V, rule, meta, offset, TOK, nullptr, PROB);
+}
+
+// Rows of bf16 logits [rows, V], row r under RULE[r] at position META[r] + 1: one launch for a window's sampled rows.
+extern "C" __global__ void __launch_bounds__(1024) tf_draw_rows(const __nv_bfloat16* L, unsigned V, const tf_sample::Rule* rule,
+                                                                const int* meta, unsigned* TOK) {
+    tf_sample::draw<false, true>(L, V, rule, meta, 0, TOK, nullptr, nullptr);
 }
 
 // The same over a column subset whose token ids are IDS (int64, a draft head's vocabulary): noise and token by id.

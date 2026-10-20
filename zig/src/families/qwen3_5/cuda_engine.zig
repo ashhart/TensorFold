@@ -534,17 +534,16 @@ pub const Engine = struct {
             .hidden => try e.stream.synchronize(), // mapped layer inputs are ready before the learner reads them
             .draws => |pk| {
                 const toks = e.tables.ptr + tokens_at;
-                var greedy: usize = 0; // the run of greedy rows ending at i, argmaxed together
-                for (pk, 0..) |p, i| {
-                    if (p.rule == null) {
-                        greedy += 1;
-                        continue;
-                    }
-                    try e.argmax(i - greedy, greedy, toks);
-                    greedy = 0;
-                    try e.draws.draw(e.stream, e.logits + i * g.vocab * 2, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, 0, toks + i * 4, 1, null, null);
+                var i: usize = 0; // runs of greedy rows argmaxed together, runs of sampled rows drawn together
+                while (i < pk.len) {
+                    const sampled = pk[i].rule != null;
+                    var n: usize = 1;
+                    while (i + n < pk.len and (pk[i + n].rule != null) == sampled) n += 1;
+                    if (sampled) {
+                        try e.draws.drawRows(e.stream, e.logits + i * g.vocab * 2, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, toks + i * 4, n);
+                    } else try e.argmax(i, n, toks);
+                    i += n;
                 }
-                try e.argmax(pk.len - greedy, greedy, toks);
                 try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(e.host_logits.bytes.ptr, toks, total * 4, e.stream.handle), "cuMemcpyDtoHAsync");
                 try e.stream.synchronize();
                 @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
