@@ -36,6 +36,11 @@ try {
   assert.equal(body?.temperature, 0.2)
   for (const field of ['max_tokens', 'top_p', 'top_k', 'min_p', 'draft']) assert.equal(body?.[field], undefined, `${field} remains scoped to the built-in engine`)
   assert.equal(body.chat_template_kwargs, undefined, 'native template flags never leak to external providers')
+  // The user's choice still maps (xhigh to high); a level the server named after refusing one goes out as is (#884).
+  for await (const _chunk of streamChat({ baseUrl: 'http://127.0.0.1:24680/v1', model: 'external-model', messages: [], reasoningEffort: 'xhigh' })) {}
+  assert.equal(body.reasoning_effort, 'high')
+  for await (const _chunk of streamChat({ baseUrl: 'http://127.0.0.1:24680/v1', model: 'external-model', messages: [], reasoningEffort: 'high', serverReasoningEffort: 'xhigh' })) {}
+  assert.equal(body.reasoning_effort, 'xhigh', 'a level the server named is sent unmapped')
   setEngineServeHook(async (model) => ({ model, baseUrl: 'http://127.0.0.1:24680/v1', apiKey: '', greedyOnly: true }))
   for await (const _chunk of streamChat({ provider: builtinEngineProvider(), model: 'example/greedy-model', messages: [], temperature: 0.1 })) {}
   assert.equal(body.temperature, 0, 'a greedy-only engine model works without creating a profile')

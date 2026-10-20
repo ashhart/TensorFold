@@ -177,6 +177,29 @@ export function classifyApiError(error: unknown): ApiErrorClassification {
   return classification('unknown', 'Unrecognized provider error — not retrying automatically.', status)
 }
 
+// --- a reasoning-effort refusal's levels -------------------------------------
+
+const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']
+const EFFORT_REFUSAL = /unexpected reasoning effort\s+([a-z]+)\.?\s+supported types are\s+([^.]+)/i
+
+/**
+ * The level a server that refused a reasoning effort takes instead (#884: llama.cpp's "Unexpected reasoning effort
+ * high. Supported types are xhigh (default), medium, and low."): the named level nearest the refused one, a tie
+ * going to more reasoning. Null for any other error.
+ */
+export function supportedEffort(error: unknown): string | null {
+  const match = EFFORT_REFUSAL.exec(extractErrorMessage(error))
+  if (!match) return null
+  const refused = EFFORT_LEVELS.indexOf(match[1].toLowerCase())
+  const named = (match[2].toLowerCase().match(/[a-z]+/g) ?? []).filter((word) => EFFORT_LEVELS.includes(word) && word !== match[1].toLowerCase())
+  if (refused < 0 || !named.length) return null
+  const distance = (level: string) => Math.abs(EFFORT_LEVELS.indexOf(level) - refused)
+  return named.reduce((best, level) => {
+    const closer = distance(level) < distance(best) || (distance(level) === distance(best) && EFFORT_LEVELS.indexOf(level) > EFFORT_LEVELS.indexOf(best))
+    return closer ? level : best
+  })
+}
+
 // --- jittered exponential backoff -------------------------------------------
 
 export interface BackoffOptions {

@@ -1,6 +1,6 @@
 // Run: jiti electron/agent/api-error-classifier.test.ts
 import assert from 'node:assert/strict'
-import { classifyApiError, jitteredBackoff, extractErrorStatus } from './api-error-classifier.ts'
+import { classifyApiError, jitteredBackoff, extractErrorStatus, supportedEffort } from './api-error-classifier.ts'
 
 let passed = 0
 const ok = (name: string) => { passed++; console.log(`  ✓ ${name}`) }
@@ -140,6 +140,18 @@ console.log('api-error-classifier tests:')
   }
   assert.equal(classifyApiError(Object.assign(new Error('HTTP 500 Internal Server Error'), { status: 500 })).retryable, true)
   ok("a chat template's refusal on HTTP 500 is not retried; a bare 500 still is")
+}
+
+{
+  // The level a reasoning-effort refusal takes instead: the nearest it names, a tie going to more reasoning (#884).
+  const refusal = (refused: string, levels: string) => new Error(`HTTP 500: Unexpected reasoning effort ${refused}. Supported types are ${levels}.`)
+  assert.equal(supportedEffort(refusal('high', 'xhigh (default), medium, and low')), 'xhigh')
+  assert.equal(supportedEffort(refusal('minimal', 'low, medium, and high')), 'low')
+  assert.equal(supportedEffort(refusal('xhigh', 'low and medium')), 'medium')
+  assert.equal(supportedEffort(refusal('high', 'high')), null)
+  assert.equal(supportedEffort(new Error('HTTP 500: System message must be at the beginning.')), null)
+  assert.equal(supportedEffort(new Error('HTTP 500 Internal Server Error')), null)
+  ok("a reasoning-effort refusal names the nearest level the server takes; other errors name none")
 }
 
 {
