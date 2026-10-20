@@ -11,6 +11,7 @@ pub const Proposer = struct {
         propose: *const fn (ptr: *anyopaque, context: []const u32, max_draft: i64) anyerror![]const u32,
         propose_after: ?*const fn (ptr: *anyopaque, history: []const u32, tail: []const u32, max_draft: i64) anyerror![]const u32 = null,
         last_match: *const fn (ptr: *anyopaque) i64,
+        last_end: ?*const fn (ptr: *anyopaque) usize = null,
         observe: ?*const fn (ptr: *anyopaque, proposed: i64, accepted: i64) void = null,
         /// The proposer prices its own drafts: `propose`'s result is taken as is, no width, length or match gate.
         priced: bool = false,
@@ -31,6 +32,11 @@ pub const Proposer = struct {
 
     pub fn lastMatch(p: Proposer) i64 {
         return p.vtable.last_match(p.ptr);
+    }
+
+    /// Where the last match's continuation starts in the history it searched (null: the proposer does not say).
+    pub fn lastEnd(p: Proposer) ?usize {
+        return if (p.vtable.last_end) |f| f(p.ptr) else null;
     }
 
     pub fn observe(p: Proposer, proposed: i64, accepted: i64) void {
@@ -71,6 +77,7 @@ pub const SuffixLookup = struct {
     silenced_rounds: i64 = 0,
     last_match: i64 = 0,
     last_confident: bool = false,
+    last_end: usize = 0, // the history index the last match's continuation starts at
 
     pub fn init(gpa: Allocator, params: Params) !SuffixLookup {
         if (params.ngram < 1 or params.ngram > max_ngram) return error.BadNgram;
@@ -91,7 +98,7 @@ pub const SuffixLookup = struct {
         return .{ .ptr = s, .vtable = &vtable };
     }
 
-    pub const vtable: Proposer.VTable = .{ .propose = proposeFn, .propose_after = afterFn, .last_match = lastMatchFn, .observe = observeFn };
+    pub const vtable: Proposer.VTable = .{ .propose = proposeFn, .propose_after = afterFn, .last_match = lastMatchFn, .last_end = lastEndFn, .observe = observeFn };
 
     fn proposeFn(ptr: *anyopaque, context: []const u32, max_draft: i64) anyerror![]const u32 {
         const s: *SuffixLookup = @ptrCast(@alignCast(ptr));
@@ -106,6 +113,11 @@ pub const SuffixLookup = struct {
     fn lastMatchFn(ptr: *anyopaque) i64 {
         const s: *SuffixLookup = @ptrCast(@alignCast(ptr));
         return s.last_match;
+    }
+
+    fn lastEndFn(ptr: *anyopaque) usize {
+        const s: *SuffixLookup = @ptrCast(@alignCast(ptr));
+        return s.last_end;
     }
 
     fn observeFn(ptr: *anyopaque, proposed: i64, accepted: i64) void {
@@ -181,6 +193,7 @@ pub const SuffixLookup = struct {
             }
         }
         s.last_match = best_len;
+        s.last_end = best_end;
         if (best_len < s.params.min_match) return s.out.items;
         s.last_confident = best_len >= s.params.confident_match;
         const count = @min(history.len - best_end, @as(usize, @intCast(max_draft)));

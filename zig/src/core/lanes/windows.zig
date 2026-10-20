@@ -30,6 +30,7 @@ pub const Plan = struct {
     branch_from: u32 = 0, // the first row of suffix-match branches (0: none; lanes/fill.zig)
     cost_probe_rows: ?u32 = null, // an unseen width selected for calibration, confirmed by a matching completed round
     context_copy: bool = false, // branch_from names a copied continuation appended to the head
+    copy_trusted: bool = true, // the copy is priced from cfg.copy_rate's prior (trustedCopy), else from short_rate's
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
     masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
@@ -98,6 +99,7 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
             }
             if (p.count() > 0) p.kind = .head;
             if (extend and copy.tokens.len > 0) try @import("context_copy.zig").extend(e, &p, copy.tokens);
+            if (p.context_copy) p.copy_trusted = trustedCopy(s);
         }
     }
     if (!p.context_copy and e.cfg.fill_lanes > 0 and s.drafts and p.kind != .forced and (p.parents == null or p.lanes != null)) try fillLanes(e, s, &p);
@@ -299,24 +301,46 @@ fn trimmed(e: *Engine, plans: []Plan, t: trim.Trim) !void {
 /// The weight a stream's copy history keeps a round, so its copies' landing rate follows its content.
 const copy_decay = 0.9;
 
-/// A stream's copy history from cfg.copy_rate's prior: sixteen rows' worth, that share landed.
-fn copyPrime(e: *const Engine, s: *Stream) void {
-    if (s.copy_landed >= 0) return;
-    s.copy_landed = 16 * e.cfg.copy_rate;
-    s.copy_broke = 16 * (1 - e.cfg.copy_rate);
+/// A context match this long earns cfg.copy_rate's prior (Qwen3.8-27B, 134 prompts: 85% of such copies' rows landed).
+pub const long_match = 20;
+/// A copy out of the prompt this early in the reply earns it too (89% on code: restating the asked-for function).
+pub const early_reply = 64;
+/// Any other copy's prior: about the share of their rows that landed (0 to 13%).
+const short_rate = 0.08;
+
+/// A copy after a long match, or out of the prompt within the reply's first early_reply tokens.
+fn trustedCopy(s: *const Stream) bool {
+    const pr = s.proposer orelse return true;
+    if (pr.lastMatch() >= long_match) return true;
+    const at = pr.lastEnd() orelse return false;
+    return at <= s.prompt_len and s.context.items.len -| s.prompt_len < early_reply;
 }
 
-/// A copied row's landing rate for this stream: its copies' landed rows over those rows plus the chains that broke.
-pub fn copyRate(e: *const Engine, s: *Stream) f64 {
-    copyPrime(e, s);
-    return s.copy_landed / (s.copy_landed + s.copy_broke);
+/// A stream's copy history from its prior: sixteen rows' worth, cfg.copy_rate's share (trusted) or short_rate's landed.
+fn copyPrime(e: *const Engine, s: *Stream, trusted: bool) void {
+    const i = @intFromBool(trusted);
+    if (s.copy_landed[i] >= 0) return;
+    const rate = if (trusted) e.cfg.copy_rate else short_rate;
+    s.copy_landed[i] = 16 * rate;
+    s.copy_broke[i] = 16 * (1 - rate);
 }
 
-/// A verified copy of `offered` rows (its anchor landed) of which the first `kept` landed.
-pub fn observeCopy(e: *const Engine, s: *Stream, kept: u64, offered: u64) void {
-    copyPrime(e, s);
-    s.copy_landed = copy_decay * s.copy_landed + @as(f64, @floatFromInt(kept));
-    s.copy_broke = copy_decay * s.copy_broke + @as(f64, @floatFromInt(@intFromBool(kept < offered)));
+/// A copied row's landing rate for this stream's trusted copies or the others': landed rows over those plus breaks.
+pub fn copyRate(e: *const Engine, s: *Stream, trusted: bool) f64 {
+    copyPrime(e, s, trusted);
+    const i = @intFromBool(trusted);
+    return s.copy_landed[i] / (s.copy_landed[i] + s.copy_broke[i]);
+}
+
+/// A verified copy of `offered` rows (anchor landed), `kept` landing; a trusted one teaches both histories.
+pub fn observeCopy(e: *const Engine, s: *Stream, trusted: bool, kept: u64, offered: u64) void {
+    for ([_]bool{ false, true }) |which| {
+        if (which and !trusted) continue;
+        copyPrime(e, s, which);
+        const i = @intFromBool(which);
+        s.copy_landed[i] = copy_decay * s.copy_landed[i] + @as(f64, @floatFromInt(kept));
+        s.copy_broke[i] = copy_decay * s.copy_broke[i] + @as(f64, @floatFromInt(@intFromBool(kept < offered)));
+    }
 }
 
 /// A context copy's appended rows: each its parent's chance times the stream's copy rate; the drafts keep their own.
@@ -325,7 +349,7 @@ fn planChances(e: *Engine, p: Plan, n: usize) ![]const f64 {
     const drafts = p.branch_from - 1;
     const out = try e.arena.allocator().alloc(f64, n);
     if (drafts > 0) @memcpy(out[0..drafts], try nodeChances(e, p.stream, drafts));
-    const rate = copyRate(e, p.stream);
+    const rate = copyRate(e, p.stream, p.copy_trusted);
     for (out[drafts..], p.parents.?[drafts..n]) |*o, parent| o.* = rate * (if (parent >= 0) out[@intCast(parent)] else 1);
     return out;
 }
@@ -347,19 +371,46 @@ test "copy rows: each priced at its parent's chance times the stream's copy rate
     const p: Plan = .{ .stream = &s, .position = 2, .kind = .head, .tokens = &ids, .parents = &parents, .branch_from = 3, .context_copy = true };
     const drafts = try nodeChances(&e, &s, 2);
     const out = try planChances(&e, p, 4);
-    const rate = copyRate(&e, &s);
+    const rate = copyRate(&e, &s, true);
     try std.testing.expectApproxEqAbs(cfg.copy_rate, rate, 1e-12);
     try std.testing.expectApproxEqAbs(drafts[1], out[1], 1e-12);
     try std.testing.expectApproxEqAbs(rate * drafts[1], out[2], 1e-12);
     try std.testing.expectApproxEqAbs(rate * rate * drafts[1], out[3], 1e-12);
     // copies that land whole raise the rate toward 1; copies that break lower it below the prior
-    for (0..30) |_| observeCopy(&e, &s, 12, 12);
-    try std.testing.expect(copyRate(&e, &s) > 0.99);
-    for (0..80) |_| observeCopy(&e, &s, 1, 12); // one row landed, then a miss: toward 1 / (1 + 1)
-    try std.testing.expect(copyRate(&e, &s) < 0.55);
+    for (0..30) |_| observeCopy(&e, &s, true, 12, 12);
+    try std.testing.expect(copyRate(&e, &s, true) > 0.99);
+    for (0..80) |_| observeCopy(&e, &s, true, 1, 12); // one row landed, then a miss: toward 1 / (1 + 1)
+    try std.testing.expect(copyRate(&e, &s, true) < 0.55);
+    // an untrusted copy starts from short_rate; trusted copies teach both histories, untrusted ones only their own
+    var fresh = try Stream.init(a, .{ .id = "short", .prompt = &.{ 1, 2 }, .max_new = 64 });
+    defer fresh.deinit(a);
+    const short: Plan = .{ .stream = &fresh, .position = 2, .kind = .head, .tokens = &ids, .parents = &parents, .branch_from = 3, .context_copy = true, .copy_trusted = false };
+    try std.testing.expectApproxEqAbs(short_rate * drafts[1], (try planChances(&e, short, 4))[2], 1e-12);
+    for (0..3) |_| observeCopy(&e, &fresh, true, 12, 12);
+    try std.testing.expect(copyRate(&e, &fresh, false) > 0.6);
+    for (0..60) |_| observeCopy(&e, &fresh, false, 0, 12);
+    try std.testing.expect(copyRate(&e, &fresh, false) < 0.1 and copyRate(&e, &fresh, true) > 0.95);
     // a window without a copy keeps the head's own chances
     const plain: Plan = .{ .stream = &s, .position = 2, .kind = .head, .tokens = ids[0..2] };
     try std.testing.expectEqualSlices(f64, try nodeChances(&e, &s, 2), try planChances(&e, plain, 2));
+}
+
+test "a copy is trusted after a long match, or out of the prompt early in the reply" {
+    const a = std.testing.allocator;
+    var look = try @import("proposer.zig").SuffixLookup.init(a, .{});
+    defer look.deinit();
+    var s = try Stream.init(a, .{ .id = "trust", .prompt = &.{ 1, 2, 3, 4 }, .max_new = 128 });
+    defer s.deinit(a);
+    s.proposer = look.proposer();
+    look.last_match = long_match;
+    look.last_end = 9;
+    try std.testing.expect(trustedCopy(&s));
+    look.last_match = long_match - 1;
+    try std.testing.expect(!trustedCopy(&s)); // a short match out of the reply
+    look.last_end = 2;
+    try std.testing.expect(trustedCopy(&s)); // out of the prompt, the reply not begun
+    for (0..early_reply) |_| try s.context.append(a, 7);
+    try std.testing.expect(!trustedCopy(&s)); // out of the prompt, past the reply's first tokens
 }
 
 /// The head's chance for each held draft, else chain chances from the stream's per-depth acceptance.
