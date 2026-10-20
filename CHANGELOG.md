@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Chat prompts keep request text out of the added vocabulary: a control-token spelling in a message, tool definition, tool result, reasoning field or decision label is encoded as ordinary text, while chat templates still see the real text (#1117). Thanks to @Acermax.
+
 - Share Flash Next's existing proposal table and exact stored rows without changing its default IDs or packs.
 
 - Prepare exact stored proposal head rows and shared scoring views without changing family defaults or precision.
