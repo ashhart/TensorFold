@@ -125,13 +125,10 @@ pub const Tower = struct {
             try k.layerNorm(s, b.h, l.norm1, l.norm1_bias, b.x, rows, hd, c.eps);
             try vit.linear(g, k, s, b.acc, b.x, l.qkv, l.qkv_bias, b.wide, rows, 3 * hd, hd);
             try t.at.full(s, b.wide, b.a, rows, c.heads, dim, scale);
-            try vit.linear(g, k, s, b.acc, b.a, l.proj, l.proj_bias, b.x, rows, hd, hd);
-            try k.pointwise(s, b.x, b.h, b.h, rows * hd, .none);
+            try vit.linearAct(g, k, s, b.acc, b.a, l.proj, l.proj_bias, b.x, rows, hd, hd, b.h, b.h, .none);
             try k.layerNorm(s, b.h, l.norm2, l.norm2_bias, b.x, rows, hd, c.eps);
-            try vit.linear(g, k, s, b.acc, b.x, l.fc1, l.fc1_bias, b.wide, rows, c.ffn, hd);
-            try k.pointwise(s, b.wide, null, b.wide, rows * c.ffn, .gelu);
-            try vit.linear(g, k, s, b.acc, b.wide, l.fc2, l.fc2_bias, b.x, rows, hd, c.ffn);
-            try k.pointwise(s, b.x, b.h, b.h, rows * hd, .none);
+            try vit.linearAct(g, k, s, b.acc, b.x, l.fc1, l.fc1_bias, b.wide, rows, c.ffn, hd, null, b.wide, .gelu);
+            try vit.linearAct(g, k, s, b.acc, b.wide, l.fc2, l.fc2_bias, b.x, rows, hd, c.ffn, b.h, b.h, .none);
         }
         if (!c.final_norm) return feats; // the patch rows: cls and registers dropped
         try k.layerNorm(s, feats, w.final, w.final_bias, b.x, n, hd, c.eps);

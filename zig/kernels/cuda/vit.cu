@@ -38,6 +38,14 @@ __device__ __forceinline__ float gelu_erf(float x) {
     return __fmul_rn(__fmul_rn(x, 0.5f), __fadd_rn(1.0f, erff(__fmul_rn(x, alpha))));
 }
 
+// bf16(act(v)), then bf16(R[at] + v) when R; v is already rounded to bf16.
+__device__ __forceinline__ __nv_bfloat16 pointwise_at(float v, const __nv_bfloat16* R, int64_t at, int act) {
+    if (act == 1) v = rbf(gelu_tanh(v));
+    if (act == 2) v = rbf(gelu_erf(v));
+    if (act == 3) v = rbf(v > 0.0f ? __fmul_rn(v, v) : 0.0f);
+    return __float2bfloat16_rn(R ? __fadd_rn(bf(R[at]), v) : v);
+}
+
 }  // namespace
 
 // Block a row: y = bf16((x - mean) * rstd * w + b), mean and variance in two fixed-order passes.
@@ -86,11 +94,16 @@ extern "C" __global__ void __launch_bounds__(NT) tf_vit_pointwise(const __nv_bfl
                                                                       int64_t count, int act) {
     const int64_t at = static_cast<int64_t>(blockIdx.x) * NT + threadIdx.x;
     if (at >= count) return;
-    float v = bf(X[at]);
-    if (act == 1) v = rbf(gelu_tanh(v));
-    if (act == 2) v = rbf(gelu_erf(v));
-    if (act == 3) v = rbf(v > 0.0f ? __fmul_rn(v, v) : 0.0f);
-    O[at] = __float2bfloat16_rn(R ? __fadd_rn(bf(R[at]), v) : v);
+    O[at] = pointwise_at(bf(X[at]), R, at, act);
+}
+
+// Block (row, column block): bias then pointwise, keeping the intermediate bf16 rounding in a register.
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_bias_act(const float* __restrict__ ACC, const __nv_bfloat16* __restrict__ BIAS,
+                                                                 const __nv_bfloat16* R, __nv_bfloat16* O, int N, int act) {
+    const int c = blockIdx.y * NT + threadIdx.x;
+    if (c >= N) return;
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * N + c;
+    O[at] = pointwise_at(rbf(__fadd_rn(ACC[at], bf(BIAS[c]))), R, at, act);
 }
 
 // Block an output row (i, j) of an h x w grid: rows (2i, 2j), (2i, 2j+1), (2i+1, 2j), (2i+1, 2j+1) side by side.
