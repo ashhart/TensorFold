@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const weights = @import("cuda_draft_weights.zig");
-const tree = @import("cuda_draft_tree.zig");
+pub const tree = @import("cuda_draft_tree.zig");
 const profile = @import("cuda_startup_profile.zig");
 pub const precision = @import("cuda_draft_precision.zig");
 
@@ -358,7 +358,8 @@ pub const Draft = struct {
         if (it.lanes) |shape| return d.selectLanes(ctx, it.pending, rows, shape);
         const limit = if (d.c.block == 16) tree.nodes() else 0;
         if (limit > 0) {
-            const n = @min(it.depth, limit);
+            // the whole budget whenever drafts are asked: the block's forward costs the same at any depth
+            const n = if (it.depth == 0) 0 else limit;
             ctx.grown = tree.grow(d.candidates(rows), it.pending, rows, n, &ctx.held, &ctx.parents, &ctx.own);
             ctx.held_n = ctx.grown;
         } else {

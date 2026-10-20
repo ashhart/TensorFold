@@ -127,9 +127,10 @@ const Head = struct {
             }
         }
         try F.publish(&h.d, items, contexts[0..items.len]);
-        if (own_trees) for (contexts[0..items.len], items) |ctx, it| {
+        // a grown tree takes the drafter's whole node budget; the engine admits its first nodes
+        if (own_trees) for (contexts[0..items.len]) |ctx| {
             try std.testing.expect(ctx.grown > 0);
-            try std.testing.expect(ctx.grown <= it.depth);
+            try std.testing.expect(ctx.grown <= q.draft.tree.nodes());
         };
     }
     fn held(p: *anyopaque, streams: []const *lanes.Stream, outs: []const []u32) !void {
