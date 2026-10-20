@@ -8,7 +8,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Drama 3 serving accepts `--max-frames` to bound synthesis frames, preserving the stock cap when omitted (#1134). Thanks to @plotarmordev.
 
-- Drama speech serving accepts opt-in attested voice catalogs with `--voices`, `--default-voice` and `GET /v1/voices`, using the family's reference prompt builder.
+- Drama speech serving accepts opt-in attested voice catalogs with `--voices`, `--default-voice` and `GET /v1/voices`, using the family's reference prompt builder. Catalog loading honors the parser's inclusive file-size bound and reports startup refusal reasons.
 
 ## 1.1.3
 

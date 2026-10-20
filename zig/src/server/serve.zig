@@ -181,6 +181,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch |err| {
         if (err == error.InvalidVisionMarkers)
             std.debug.print("tensorfold: --vision requires added-token markers; image and video input cannot be served safely with this tokenizer\n", .{})
+        else if (args.voices != null or !std.mem.eql(u8, args.default_voice, "default"))
+            std.debug.print("tensorfold: the server could not start: {s}\n", .{@errorName(err)})
         else
             std.debug.print("tensorfold: the server could not start\n", .{});
         return 1;
