@@ -44,6 +44,7 @@ pub const Affine4Kernels = struct {
     gemv_blocks: usize, // resident lane_gemv CTAs: per SM times SMs
     split: ?Split, // every GPU but GB10: lane_gemv's slices on CTAs of their own (one stream's decode() at a time)
     pdl: bool, // GB10: the decode kernels launch with programmatic dependent launch
+    wide_verify: bool, // off GB10: verify windows of 17 to 32 rows share one weight pass (sm_120, when its engine says)
 
     /// From loaded qmm_group, qmm_prefill, lane_gemv and affine4_pack modules; GB10 decodes without the split form.
     pub fn resolve(d: *const Driver, group_mod: Module, prefill_mod: Module, gemv_mod: Module, pack_mod: Module, sms: usize, gb10: bool) !Affine4Kernels {
@@ -68,6 +69,7 @@ pub const Affine4Kernels = struct {
         try a.prefill_fn.allowDynamicShared(prefill_smem);
         a.gemv_blocks = @max(1, try a.gemv_fn.occupancy(128, group_smem)) * sms;
         a.pdl = gb10;
+        a.wide_verify = false;
         a.split = if (gb10) null else try Split.initFor(d, segs_max);
         return a;
     }
@@ -144,9 +146,10 @@ pub const Affine4Kernels = struct {
         try launch_.launch(a.seg_fn, .{ .grid = .{ .x = u(blocks) }, .block = .{ .x = 128 }, .shared = split_smem }, s, &g);
     }
 
-    /// Keep legacy devices at 16 rows; GB10 verify shares one weight panel across up to eight m16 row tiles.
+    /// Keep other devices at 16 rows; GB10 verify shares one weight panel across up to eight m16 row tiles, sm_120 (when
+    /// its engine says) across two.
     pub fn verifyRows(a: *const Affine4Kernels) usize {
-        return if (a.pdl) 128 else max_rows;
+        return if (a.pdl) 128 else if (a.wide_verify) 32 else max_rows;
     }
 
     /// decode()'s bits a row, the fewest m16 row tiles that hold `rows` sharing each weight panel.

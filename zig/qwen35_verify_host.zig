@@ -55,6 +55,9 @@ fn function(d: *const cuda.Driver, id: usize) cuda.Function {
     return .{ .d = d, .handle = @ptrFromInt(id) };
 }
 pub fn engine(d: *cuda.Driver, gb10: bool) q.engine.Engine {
+    return device(d, gb10, false);
+}
+fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     d.api.cuLaunchKernel = Trace.launch;
     d.api.cuLaunchKernelEx = Trace.launchEx;
     var e: q.engine.Engine = undefined;
@@ -70,6 +73,7 @@ pub fn engine(d: *cuda.Driver, gb10: bool) q.engine.Engine {
     e.affine.gemv_blocks = 1;
     e.affine.split = null;
     e.affine.pdl = gb10;
+    e.affine.wide_verify = wide;
     return e;
 }
 fn project(e: *q.engine.Engine, rows: usize, n: usize) !void {
@@ -134,6 +138,19 @@ test "verify matmuls: graph row buckets and segment counts do not multiply proje
     try project(&e, 32, 17408);
     try t.expectEqual(@as(usize, 1), Trace.count);
     try t.expectEqual(@as(c_int, 1), Trace.calls[0].sk);
+}
+
+test "verify matmuls: sm_120 takes the 32-row tile without programmatic dependent launch" {
+    var d: cuda.Driver = undefined;
+    var e = device(&d, false, true);
+    for (17..33) |rows| {
+        try project(&e, rows, 4096);
+        try t.expectEqual(@as(usize, 1), Trace.count);
+        try t.expectEqual(@as(usize, 5), Trace.calls[0].id);
+        try t.expectEqual(rows, @as(usize, @intCast(Trace.calls[0].rows)));
+    }
+    try project(&e, 16, 4096);
+    try t.expectEqual(@as(usize, 2), Trace.calls[0].id);
 }
 
 test "verify matmuls: other devices retain the original sixteen-row dispatch" {
