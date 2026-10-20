@@ -168,6 +168,8 @@ The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite ru
 Controls dispatch real source mutations that couple rows or select the wrong expert; host tests validate their witnesses.
 CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair kernel it replaces (two controls,
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
+CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
+down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
 
 ## CUDA records per nvcc release
 

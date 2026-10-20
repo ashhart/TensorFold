@@ -337,6 +337,7 @@ pub const Nvfp4Experts = struct {
     fns: [4]Function, // by Epi, then relu^2 up
     resident: [4]usize, // blocks the grid may hold: per SM times SMs
     prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
+    fact_fns: [2]Function, // the decode form's sums on prompt tiles: SwiGLU gate-up, fp32 down
     warps: usize = 4,
 
     pub const cols = 32; // output columns a block
@@ -348,7 +349,11 @@ pub const Nvfp4Experts = struct {
         pub const down_bf16 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi3ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const up_relu2 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi1ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const prompt = [3][:0]const u8{ "tf_nvfp4_prompt_relu2", "tf_nvfp4_prompt_swiglu", "tf_nvfp4_prompt_down" };
+        pub const fact = [2][:0]const u8{ "tf_nvfp4_fact_swiglu", "tf_nvfp4_fact_down_f32" };
     };
+
+    /// The fact entries' warps a CTA (32-column blocks): SwiGLU gate-up, fp32 down; their parts, 2 and 1.
+    pub const fact_wn = [2]usize{ 4, 8 };
 
     /// The prompt entries' warps (32-column blocks) a CTA: relu^2 up, SwiGLU gate-up, down (GB10's fastest tiles).
     pub const prompt_wn = [3]usize{ 8, 4, 8 };
@@ -378,7 +383,7 @@ pub const Nvfp4Experts = struct {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
-        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .warps = warps };
+        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .fact_fns = undefined, .warps = warps };
         for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 }, 0..) |name, i| {
             var narrow: [256]u8 = undefined;
             const selected = if (warps == 1) blk: {
@@ -392,6 +397,10 @@ pub const Nvfp4Experts = struct {
             e.resident[i] = @max(1, try e.fns[i].occupancy(@intCast(warps * 32), 0)) * sms;
         }
         for (symbols.prompt, &e.prompt_fns, [3]usize{ 1, 2, 1 }, prompt_wn) |name, *f, parts, wn| {
+            f.* = try mod.function(name);
+            try f.allowDynamicShared(promptSmem(parts, wn));
+        }
+        for (symbols.fact, &e.fact_fns, [2]usize{ 2, 1 }, fact_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
             try f.allowDynamicShared(promptSmem(parts, wn));
         }
@@ -447,6 +456,31 @@ pub const Nvfp4Experts = struct {
         const fi: usize = if (!gate) 2 else if (l.relu2) 0 else 1;
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = promptSmem(parts, prompt_wn[fi]) };
         try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
+    }
+
+    /// SwiGLU gate-up (.up) or fp32 down (.down_f32) on a plan of at most `items` items of promptTile pairs: the
+    /// decode form's sums (run's bits at every row) on the prompt tiles, which read an expert's weights once an item.
+    pub fn runFact(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+        const gate = epi == .up;
+        if (epi == .down_bf16 or (gate and l.relu2)) return error.EpilogueNotBuilt;
+        const nb = (if (gate) l.width else l.dims) / cols;
+        if (items < 1) return;
+        var a: launch_.Args = .{};
+        a.add(in.x);
+        a.add(@as(i32, @intCast(in.stride)));
+        a.add(@as(i32, @intCast(if (gate) in.slots else 0)));
+        a.add(if (gate) l.up else l.down);
+        a.add(if (gate) l.up_scale else l.down_scale);
+        a.add(@as(i32, @intCast((if (gate) l.dims else l.width) / 32)));
+        a.add(@as(i32, @intCast(nb)));
+        for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
+        a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
+        a.add(if (gate) l.limit else @as(f32, 0.0));
+        a.add(skip);
+        const fi: usize = if (gate) 0 else 1;
+        const wn = fact_wn[fi];
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + wn - 1) / wn)), .y = 1, .z = 1 }, .block = .{ .x = @intCast(wn * 32), .y = 1, .z = 1 }, .shared = promptSmem(if (gate) 2 else 1, wn) };
+        try launch_.launch(e.fact_fns[fi], cfg, s, &a);
     }
 
     /// Bytes of `count` experts' blocks for n outputs from k inputs: [E][n/32][k/32][parts][144] int32.

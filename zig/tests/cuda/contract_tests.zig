@@ -23,6 +23,7 @@ const drama3_k = @import("contract_drama3.zig");
 const ck_k = @import("contract_ck.zig");
 const q35_bf16_k = @import("contract_qwen_bf16.zig");
 const e3_k = @import("contract_experts3.zig");
+const fact_k = @import("contract_nvfp4_fact.zig");
 const scan_k = @import("contract_scan.zig");
 const lane8_k = @import("contract_ck_lane.zig");
 const latent_k = @import("contract_latent.zig");
@@ -68,6 +69,7 @@ const controls = struct {
 const h3_image = struct {
     pub const bytes align(16) = @embedFile("fatbin_h3").*;
 };
+
 
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5 on this GPU.
 pub fn run(gpu: check.Gpu) !void {
@@ -313,6 +315,12 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(e3_k.Fault), &e3_splits) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &e3_mods.k, .fault = f };
     defer for (&e3_splits) |*x| x.deinit();
     for (&e3_splits) |*x| try kernels.append(a, x.kernel());
+    var nvfp4 = try cuda.experts.Nvfp4Experts.load(gpu.d, sms);
+    defer nvfp4.unload();
+    var facts: [3]fact_k.Experts = undefined;
+    for (std.enums.values(fact_k.Kind), &facts) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .k = &nvfp4, .router = try cuda.grouped.Router.resolve(mods[6]) };
+    defer for (&facts) |*x| x.deinit();
+    for (&facts) |*x| try kernels.append(a, x.kernel());
     var round_mod = try cuda.Module.load(gpu.d, kk.tree_round);
     defer round_mod.unload();
     const round_fns = try cuda.tree_round.Kernels.resolve(round_mod);

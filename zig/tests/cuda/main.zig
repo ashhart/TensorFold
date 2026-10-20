@@ -86,6 +86,7 @@ const flashnext_rank_tests = @import("flashnext_rank_tests.zig");
 const flashnext_draft_affine_tests = @import("flashnext_draft_affine_tests.zig");
 const flashnext_shared_tests = @import("flashnext_shared_tests.zig");
 const flashnext_nvfp4_tp_tests = @import("flashnext_nvfp4_tp_tests.zig");
+const nvfp4_fact_tests = @import("nvfp4_fact_tests.zig");
 const flashnext_dense_hc_tests = @import("flashnext_dense_hc_tests.zig");
 const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
 const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
@@ -122,6 +123,7 @@ const usage =
     \\  flashnext-draft-affine    proposal-head affine projection against FP64 and row-count invariance
     \\  flashnext-shared          separate MXFP8 shared expert and reserved-slot scatter against FP64
     \\  flashnext-nvfp4-tp        rank-local expert cuts and FP32 partials against FP64 (one GPU)
+    \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
@@ -299,6 +301,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "flashnext-draft-affine")) return flashnext_draft_affine_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-shared")) return flashnext_shared_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-nvfp4-tp")) return flashnext_nvfp4_tp_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-dense-hc")) return flashnext_dense_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
