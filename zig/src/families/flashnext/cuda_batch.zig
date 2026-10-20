@@ -114,11 +114,19 @@ pub fn Pass(comptime Tri: type) type {
         prepared: bool = false,
         /// The pending write-back's branch sits in fp32 in moe_f32 (something added to it, or it is kept).
         pending_f32: bool = false,
+        /// This layer's out projection leaves part's other slices alone; its writeback adds the zero slice once.
+        zero_slices: bool = false,
 
         // ---- launches ----------------------------------------------------------------------------------------
 
         /// qmm.cu's arithmetic over m rows into out (bf16) or part (fp32 K slices); returns the slices (1 when folded).
         pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !usize {
+            if (part == self.s.part and sk > 1 and (w.native == null or m * w.n > self.s.cap * dims)) self.s.part_zero = false;
+            // the writeback adds part's cap-stride zero slice in place of the sk - 1 cleared ones (zero_slices)
+            if (part == self.s.part and sk > 1 and self.zero_slices and w.native != null) {
+                try self.k.native_lane.matmulF32(self.stream, x, w.k, m, w.native.?, part, self.s.native_part);
+                return 1;
+            }
             return tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
         }
 
@@ -450,7 +458,9 @@ pub fn Pass(comptime Tri: type) type {
             const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
             if (lw.native_experts) |*native| {
                 const owned = &native.experts;
-                try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
+                // one rank writes every slot (routed pairs by the down kernel, the shared one by sharedScatter), so only
+                // a rank that skips the shared slot needs the zeros its sum over ranks adds
+                if (native.world != 1 or native.rank != 0) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
                 const pt = nvfp4_tile.size(n);
                 try self.k.router.route(self.stream, s.picks, pairs, e, pt, plan);
                 const items = cuda.grouped.maxItems(pairs, e, pt);
@@ -551,13 +561,19 @@ pub fn Pass(comptime Tri: type) type {
                 }
                 try self.writeback(0, n);
                 try self.readoutKeep(lw.attn_hc, 0, n, keep.attn_hc);
+                // one rank, nothing kept from the branch, and the zero slice intact: its native out projection's
+                // writeback reads one zero slice where it read out_sk - 1 zeroed ones (x + 0 repeated is x + 0 once)
+                self.zero_slices = self.s.part_zero and keep.mix_branch == 0 and self.m.collective == null and lw.out.native != null;
                 if (lw.linear) {
                     try self.gdnBlock(lw, layer, wt.linearIndex(layer), keep);
                 } else {
                     try self.attnBlockKeep(lw, wt.attnIndex(layer), keep);
                 }
                 if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, self.out_slices);
-                try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", n * dims, n, dims, streams, 4, 1, 1, self.out_slices);
+                if (self.zero_slices) {
+                    try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", s.cap * dims, n, dims, streams, 4, 1, 1, 2);
+                } else try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", n * dims, n, dims, streams, 4, 1, 1, self.out_slices);
+                self.zero_slices = false;
                 try self.readoutKeep(lw.mlp_hc, 0, n, keep.mlp_hc);
                 try self.moeBlockKeep(lw, keep);
                 try self.moeAdds(layer, keep);
