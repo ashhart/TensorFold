@@ -143,9 +143,10 @@ output bit-equal to float64 at its rounding points; two controls, one dropping t
 into the group's scale and bias).
 CUDA also checks qk_rows' attention inputs at head dims to 512 with a unit v norm and MLX's bf16
 rows (three controls, each dropping one option).
-CUDA also checks `window_attention`'s rows at head dim 256 (`window_rows.cu`: decode chunks and their merge, prompt
-tiles with P as bf16 or in two halves, a row's last key), each output within float64's range over the spread its fp32
-steps and tensor-core sums allow (`core/attention_range.zig`; six controls, each one planted fault).
+CUDA also checks `window_attention`'s rows at head dims 256 and 512 (`window_rows.cu`: decode chunks and their merge,
+prompt tiles with P as bf16 or in two halves, a row's last key, windows over a ring or none over a linear cache), each
+output within float64's range over the spread its fp32 steps and tensor-core sums allow (`core/attention_range.zig`;
+seven controls, each one planted fault).
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 
 ## CUDA records per nvcc release

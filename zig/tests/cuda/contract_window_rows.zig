@@ -1,4 +1,4 @@
-//! window_rows.cu under the contract on CUDA: Gemma 4's sliding layers (head dim 256), every output in float64's range.
+//! window_rows.cu under the contract: Gemma 4's sliding (256) and global (512) layers, outputs in float64's range.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -16,7 +16,7 @@ const wa = cuda.window_attention;
 const WA = wa.WindowAttention;
 
 /// A planted fault, from contract_controls.cu (window_rows.cuh's Fault), or the served bf16-P kernel (p16).
-pub const Ctl = enum { none, edge, rescale, trunc, prompt_edge, last, p16 };
+pub const Ctl = enum { none, edge, rescale, trunc, prompt_edge, last, p16, rescale512 };
 
 /// A call's fixed heads, window and ring, and which kernels it runs.
 pub const Cfg = struct {
@@ -36,6 +36,9 @@ pub const Cfg = struct {
 
 const decode_served = &[_]c.Shape{ .{ .rows = 16, .n = 16, .k = 40000 }, .{ .rows = 64, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 1100 } };
 const prompt_served = &[_]c.Shape{ .{ .rows = 512, .n = 16, .k = 0 }, .{ .rows = 512, .n = 16, .k = 5000 }, .{ .rows = 96, .n = 16, .k = 1300 } };
+const global_decode = &[_]c.Shape{ .{ .rows = 4, .n = 16, .k = 32768 }, .{ .rows = 16, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 300 } };
+const global_prompt = &[_]c.Shape{ .{ .rows = 256, .n = 16, .k = 0 }, .{ .rows = 128, .n = 16, .k = 4096 }, .{ .rows = 32, .n = 16, .k = 1000 } };
+const global31_prompt = &[_]c.Shape{ .{ .rows = 128, .n = 32, .k = 0 }, .{ .rows = 64, .n = 32, .k = 3000 } };
 
 /// Gemma 4 12B's sliding layers (16 query heads over 8 of 256, window 1024, ring 1536); controls each plant one fault.
 pub const cfgs = [_]Cfg{
@@ -48,6 +51,11 @@ pub const cfgs = [_]Cfg{
     .{ .name = "control: P32 prompt rows whose window starts a key early", .h = 16, .hk = 8, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = prompt_served },
     .{ .name = "control: P32 prompt rows ignoring an image's last key", .h = 16, .hk = 8, .prompt = true, .p32 = true, .image = true, .ctl = .last, .served = prompt_served },
     .{ .name = "control: P rounded to bf16 under the P32 range", .h = 16, .hk = 8, .prompt = true, .p32 = true, .ctl = .p16, .served = prompt_served },
+    // Gemma 4's global layers (head dim 512, no window over a linear cache): 12B 16 query heads over 1, 31B 32 over 4
+    .{ .name = "cuda window_rows decode tf_wrows_part_512 + tf_wrows_merge_512, 16/1 heads, no window, linear 32768", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 1, .served = global_decode },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_512_p32, 16/1 heads, no window, linear cache", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .served = global_prompt },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_512 (P as bf16), 32/4 heads, no window, linear cache", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .prompt = true, .served = global31_prompt },
+    .{ .name = "control: head dim 512 merge over up to 128 chunks without exp(m_c - M)", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 1, .ctl = .rescale512, .served = global_decode },
 } ++ ratio(12, 4) ++ ratio(20, 4) ++ ratio(32, 4) ++ ratio(32, 2) ++ [_]Cfg{
     .{ .name = "control: decode merge without each chunk's exp(m_c - M), 20/4 heads (GQA 5)", .h = 20, .hk = 4, .ctl = .rescale, .served = decodeAt(20) },
     .{ .name = "control: P32 prompt rows whose window starts a key early, 20/4 heads (GQA 5)", .h = 20, .hk = 4, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = promptAt(20) },
@@ -77,6 +85,7 @@ pub fn symbol(ctl: Ctl) ?[:0]const u8 {
         .none, .p16 => null,
         .edge => "tf_ctl_wrows_part_edge",
         .rescale => "tf_ctl_wrows_merge_rescale",
+        .rescale512 => "tf_ctl_wrows_merge_rescale_512",
         .trunc => "tf_ctl_wrows_merge_trunc",
         .prompt_edge => "tf_ctl_wrows_prompt_edge",
         .last => "tf_ctl_wrows_prompt_last",
@@ -133,7 +142,7 @@ pub const Rows = struct {
         const fun = try self.ctl.?.function(sym);
         switch (self.f.ctl) {
             .edge => k.part = fun,
-            .rescale, .trunc => k.merge = fun,
+            .rescale, .trunc, .rescale512 => k.merge = fun,
             else => {
                 try fun.allowDynamicShared(WA.promptShared(self.f.d));
                 k.prompt[1] = fun;
@@ -147,12 +156,14 @@ pub const Rows = struct {
         _ = self.arena.reset(.retain_capacity);
         const f = self.f;
         if (shape.n != f.h or shape.rows == 0 or (!f.prompt and shape.k == 0)) return false;
-        if (f.prompt and shape.rows + f.win > f.ring) return false; // a chunk and its window fit the ring
+        if (f.prompt and f.ring > 0 and shape.rows + f.win > f.ring) return false; // chunk + window fit the ring
         const a = self.arena.allocator();
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         const n = shape.rows;
-        const crow = if (f.prompt) f.ring else f.streams * f.ring;
+        // gate 4 without a window: at most 1,000 keys, so the mirrored integers' partial sums stay exact in fp32
+        const at = if (fill == .stress and f.win == 0) @min(shape.k, 1000) else shape.k;
+        const crow = if (f.prompt) (if (f.ring > 0) f.ring else at + n) else f.streams * f.ring;
         const q = try a.alloc(u16, n * f.h * f.d);
         const kc = try a.alloc(u16, crow * f.hk * f.d);
         const vc = try a.alloc(u16, kc.len);
@@ -162,14 +173,14 @@ pub const Rows = struct {
         const hi = try a.alloc(i32, n);
         for (pos, slot, hi, 0..) |*p, *sl, *x, i| {
             // short histories, wrapped rings, the last position; gate 4: one stream's row at the bound, every row alike
-            p.* = @intCast(if (fill == .stress or i == n - 1) shape.k -| 1 else if (i % 4 == 0) i % @min(40, shape.k) else (i * 7919) % shape.k);
+            p.* = @intCast(if (fill == .stress or i == n - 1) at -| 1 else if (i % 4 == 0) i % @min(40, shape.k) else (i * 7919) % shape.k);
             sl.* = @intCast(if (fill == .stress) 0 else i % f.streams);
-            x.* = @intCast(shape.k + i);
+            x.* = @intCast(at + i);
         }
         if (f.image and fill != .stress and n > 8) { // an image: rows n/8 .. n/2 see each other
             for (n / 8..n / 2) |i| hi[i] = @intCast(shape.k + n / 2 - 1);
         }
-        self.call = .{ .h = f.h, .hk = f.hk, .d = f.d, .win = f.win, .ring = f.ring, .scale = 1, .prompt = f.prompt, .p32 = f.p32, .rows = n, .q = q, .kc = kc, .vc = vc, .pos = pos, .slot = slot, .p0 = shape.k, .hi = if (f.image) hi else null };
+        self.call = .{ .h = f.h, .hk = f.hk, .d = f.d, .win = f.win, .ring = f.ring, .scale = 1, .prompt = f.prompt, .p32 = f.p32, .rows = n, .q = q, .kc = kc, .vc = vc, .pos = pos, .slot = slot, .p0 = at, .hi = if (f.image) hi else null };
         if (fill == .random) {
             var r: usize = 0;
             while (r < n) : (r += 3) {

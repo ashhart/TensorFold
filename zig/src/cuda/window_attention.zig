@@ -15,13 +15,15 @@ pub const Window = struct { h: usize, hk: usize, d: usize, win: usize, ring: usi
 
 /// Head dims window_rows.cu serves, with any query heads a key head up to 16.
 pub fn wide(d: usize) bool {
-    return d == 256;
+    return d == 256 or d == 512;
 }
 
 /// window_rows.cu's decode chunk: keys [c * chunk_keys, (c + 1) * chunk_keys), merged in chunk order.
 pub const chunk_keys = 256;
-/// Prompt rows' dynamic shared bytes at 256: 4 slots of 32 keys, then the warps' partial scores.
-const rows_smem = [_]u32{4 * 32 * 32 * 16 + 8 * 16 * 32 * 4};
+/// The head dim 512 decode partials' staged K and V tiles: two of 32 keys.
+const staged_smem: u32 = 2 * 32 * 512 * 2;
+/// Prompt rows' dynamic shared bytes at 256 and 512: 4 or 2 slots of 32 keys, then the warps' partial scores.
+const rows_smem = [_]u32{ 4 * 32 * 32 * 16 + 8 * 16 * 32 * 4, 2 * 32 * 64 * 16 + 8 * 16 * 32 * 4 };
 
 /// The prompt kernel's instances: head dim 128, 8 warps, 4 or 8 query heads a block (`hpc`), 8 staging slots.
 const prompt_name = "_ZN16tf_window_prompt12wattn_kernelILi128ELi8ELi{d}ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifii";
@@ -53,9 +55,10 @@ pub const WindowAttention = struct {
         var rows = try Module.load(d, kernels.window_rows);
         errdefer rows.unload();
         var wf: [rows_smem.len]Wide = undefined;
-        inline for (.{256}, &wf, rows_smem) |dim, *f, smem| {
+        inline for (.{ 256, 512 }, &wf, rows_smem) |dim, *f, smem| {
             f.* = .{ .part = try rows.function(std.fmt.comptimePrint("tf_wrows_part_{d}", .{dim})), .merge = try rows.function(std.fmt.comptimePrint("tf_wrows_merge_{d}", .{dim})), .prompt = .{ try rows.function(std.fmt.comptimePrint("tf_wrows_prompt_{d}", .{dim})), try rows.function(std.fmt.comptimePrint("tf_wrows_prompt_{d}_p32", .{dim})) } };
             for (f.prompt) |pf| try pf.allowDynamicShared(smem);
+            if (dim == 512) try f.part.allowDynamicShared(staged_smem);
         }
         return .{ .mod = mod, .part_fn = try mod.function("tf_window_part"), .merge_fn = try mod.function("tf_window_merge"), .tc_fn = tc: {
             const f = try mod.function("tf_window_decode_tc");
@@ -71,13 +74,11 @@ pub const WindowAttention = struct {
 
     /// The dynamic shared bytes window_rows.cu's prompt rows take at head dim d.
     pub fn promptShared(d: usize) u32 {
-        _ = d;
-        return rows_smem[0];
+        return rows_smem[@intFromBool(d == 512)];
     }
 
     pub fn wideFns(g: *const WindowAttention, d: usize) *const Wide {
-        _ = d;
-        return &g.wide_fns[0];
+        return &g.wide_fns[@intFromBool(d == 512)];
     }
 
     /// Chunks a wide decode row's keys can touch: the window's, or (win 0) the ring's or linear cache's positions.
@@ -156,7 +157,8 @@ pub const WindowAttention = struct {
         a.add(@as(i32, @intCast(w.win)));
         a.add(@as(i64, @intCast(w.ring)));
         a.add(w.scale);
-        try launch_.launch(f.part, .{ .grid = .{ .x = @intCast(n), .y = @intCast(w.hk), .z = @intCast(t) }, .block = .{ .x = 256 } }, s, &a);
+        const pairs = if (w.d == 512) (w.h / w.hk + 3) / 4 else 1; // head dim 512: a block 4 query heads
+        try launch_.launch(f.part, .{ .grid = .{ .x = @intCast(n), .y = @intCast(w.hk * pairs), .z = @intCast(t) }, .block = .{ .x = 256 }, .shared = if (w.d == 512) staged_smem else 0 }, s, &a);
         var b: launch_.Args = .{};
         for ([_]u64{ po, pm, pl, out }) |v| b.add(v);
         b.add(@as(i32, @intCast(w.h)));
@@ -207,7 +209,7 @@ pub const WindowAttention = struct {
         a.add(w.scale);
         a.add(@as(i32, @intCast(w.win)));
         a.add(@as(i32, @intCast(w.ring)));
-        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast((n + rows - 1) / rows), .y = @intCast(w.hk * (grp / hb)), .z = 1 }, .block = .{ .x = 256 }, .shared = rows_smem[0] };
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast((n + rows - 1) / rows), .y = @intCast(w.hk * (grp / hb)), .z = 1 }, .block = .{ .x = 256 }, .shared = promptShared(w.d) };
         try launch_.launch(f.prompt[@intFromBool(w.p32)], cfg, s, &a);
     }
 };
