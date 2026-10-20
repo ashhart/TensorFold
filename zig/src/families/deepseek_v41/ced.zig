@@ -135,3 +135,73 @@ test "the stash: the last rows of every segment, a gap restarts it, two ring run
     try std.testing.expectEqualSlices(Span, &.{.{ .row = 0, .n = 127, .at = 0 }}, spans(256, 383, &sp));
     try std.testing.expectEqual(@as(usize, 0), spans(7, 7, &sp).len);
 }
+
+test "CED compact tail and ring copies match a linear sliding-window oracle across chunk boundaries" {
+    const t = std.testing;
+    const cfg: Config = .{};
+    var ids: [521]u32 = undefined;
+    for (&ids, 0..) |*id, i| id.* = @intCast(10000 + 17 * i);
+    // The oracle scans absolute positions; it neither wraps a ring nor calls tailOf to choose visible keys.
+    for ([_]u64{ 0, 65520, (1 << 20) - ids.len }) |origin| {
+        for ([_]usize{ 1, 15, 16, 17, 127, 128, 129, 257, ids.len }) |chunk| {
+            var stash: Stash = .{};
+            var device: [ring]u32 = @splat(0);
+            var used: usize = 0;
+            while (used < ids.len) {
+                const next = @min(used + chunk, ids.len);
+                stash.extend(origin + used, ids[used..next]);
+                // Model the independent device stash, whose compact reads are driven by spans().
+                for (used..next) |i| device[(origin + i) % ring] = ids[i];
+                used = next;
+                const end = origin + used;
+                var expected: [keep]u32 = undefined;
+                var count: usize = 0;
+                for (ids[0..used], 0..) |id, i| {
+                    if (end - (origin + i) < cfg.window) {
+                        expected[count] = id;
+                        count += 1;
+                    }
+                }
+                const from = end - count;
+                try t.expect(stash.covers(from, end));
+                var got: [keep]u32 = undefined;
+                stash.tail(from, end, &got);
+                try t.expectEqualSlices(u32, expected[0..count], got[0..count]);
+                var copied: [keep]u32 = @splat(0);
+                var pieces: [2]Span = undefined;
+                var total: usize = 0;
+                for (spans(from, end, &pieces)) |piece| {
+                    @memcpy(copied[piece.at..][0..piece.n], device[piece.row..][0..piece.n]);
+                    total += piece.n;
+                }
+                try t.expectEqual(count, total);
+                try t.expectEqualSlices(u32, expected[0..count], copied[0..count]);
+                if (origin == 0) {
+                    const tail = tailOf(end);
+                    try t.expectEqual(from, tail.r0);
+                    try t.expectEqual(count, tail.m);
+                }
+                if (from > 0) try t.expect(!stash.covers(from - 1, end));
+                try t.expect(!stash.covers(from, end + 1));
+            }
+        }
+    }
+}
+
+test "CED restore or rewind cannot reuse stale rows before the replacement segment" {
+    const t = std.testing;
+    var old: [300]u32 = undefined;
+    for (&old, 0..) |*id, i| id.* = @intCast(i + 1);
+    const replacement = [_]u32{ 901, 902, 903, 904 };
+    // Both a backward restore and a forward gap invalidate the old contiguous history.
+    for ([_]u64{ 16, 127, 128, 255, 512 }) |restart| {
+        var stash: Stash = .{};
+        stash.extend(0, &old);
+        stash.extend(restart, &replacement);
+        try t.expect(!stash.covers(restart - 1, restart + replacement.len));
+        try t.expect(stash.covers(restart, restart + replacement.len));
+        var got: [replacement.len]u32 = undefined;
+        stash.tail(restart, restart + replacement.len, &got);
+        try t.expectEqualSlices(u32, &replacement, &got);
+    }
+}
