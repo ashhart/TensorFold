@@ -184,6 +184,43 @@ On GLM-5.3-Flash NVFP4, version 1.0.12 plus #1016-#1018, TP=2, with heat bands o
 completed 40/40 replies, peaking at 85.1 C; the unrestricted run stopped at the seventh reply at 94.7 C.
 Decode throughput fell 1.1% and prefill throughput 2.7%. These are the contributor's measurements, not 1.1.0 results.
 
+### GB10 GPU clock cap for long CUDA runs
+
+GB10 hosts are reported to power off under sustained GPU load, leaving no log
+([NVIDIA Developer Forums](https://forums.developer.nvidia.com/t/hard-power-off-under-sustained-gpu-load-at-90w-persists-after-full-platform-firmware-update/378315)).
+The reported workaround is a GPU clock cap at 2,200 MHz
+([tonyd2wild/dgx-spark-hard-poweroff-fix](https://github.com/tonyd2wild/dgx-spark-hard-poweroff-fix)).
+`sudo nvidia-smi -lgc 300,2200` sets the cap and `sudo nvidia-smi -rgc` removes it. To set it at each boot, save this
+unit as `/etc/systemd/system/gb10-clock-cap.service` and run `sudo systemctl enable --now gb10-clock-cap`:
+
+```ini
+[Unit]
+Description=GB10 GPU clock cap
+After=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nvidia-smi -lgc 300,2200
+ExecStop=/usr/bin/nvidia-smi -rgc
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Cap every rank's host. Under load the clock then reads 2,200 MHz or under
+(`nvidia-smi --query-gpu=clocks.gr --format=csv`). In the serves below, the hottest thermal zone (`/sys/class/thermal`)
+peaked 8 to 11 C above the GPU's own peak. The cap holds the GPU only: on a capped host the hottest zone reached 94 C
+with the GPU idle (312 MHz, 6.7 W) while the kernel contract's checks ran and nvcc built its fatbins. The cap does not
+replace the bands: without them, the 1,035,295-token prompt above (ranks not pinned) reached 97.7 C under the cap, the
+hottest host's clock held at 2,177 to 2,190 MHz.
+
+On GLM-5.3-Flash NVFP4, version 1.1.1, TP=2, each rank on the efficiency cores, @Bizuayeu's serves with the cap,
+twice without it and with it again: the cap made drafted decode about 1% slower, `"draft": false` decode about 1.5%
+slower and a cold prompt of 9,600 to 38,400 tokens 2 to 5% slower, with the same token ids; each GPU peaked at about
+60 W instead of 89 to 92 W, and the hottest thermal zone at 88.6 to 90.7 C instead of 96.8 to 98.1 C. These are the
+contributor's measurements.
+
 ## Flash Next and paired Metal serving
 
 Flash Next reads its MLX 6-bit/group-32 checkpoint directly and creates its native layouts locally.
