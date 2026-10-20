@@ -5,6 +5,15 @@ const Allocator = std.mem.Allocator;
 /// Half-open byte offsets, sorted and disjoint. Adjacent ranges may remain separate.
 pub const Span = [2]usize;
 
+fn substringOffset(source: []const u8, bytes: []const u8) ?usize {
+    const base = @intFromPtr(source.ptr);
+    const address = @intFromPtr(bytes.ptr);
+    if (address < base) return null;
+    const start = address - base;
+    if (start > source.len or bytes.len > source.len - start) return null;
+    return start;
+}
+
 pub const Str = struct {
     s: []const u8,
     safe: bool = false,
@@ -55,7 +64,7 @@ pub const Str = struct {
 
     /// A borrowed substring of this string, including an empty substring at its end.
     pub fn part(s: Str, a: Allocator, bytes: []const u8) Allocator.Error!Str {
-        const start = @intFromPtr(bytes.ptr) - @intFromPtr(s.s.ptr);
+        const start = substringOffset(s.s, bytes) orelse return Str.request(a, bytes);
         return s.slice(a, start, start + bytes.len);
     }
 };
@@ -66,7 +75,7 @@ pub const Cursor = struct {
     index: usize = 0,
 
     pub fn part(c: *Cursor, a: Allocator, bytes: []const u8) Allocator.Error!Str {
-        const start = @intFromPtr(bytes.ptr) - @intFromPtr(c.source.s.ptr);
+        const start = substringOffset(c.source.s, bytes) orelse return Str.request(a, bytes);
         const end = start + bytes.len;
         if (start == end) return .{ .s = bytes, .safe = c.source.safe };
         while (c.index < c.source.spans.len and c.source.spans[c.index][1] <= start) c.index += 1;

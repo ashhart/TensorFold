@@ -100,10 +100,6 @@ pub const Rt = struct {
         items[1] = y;
         return rt.list(items, .tuple);
     }
-
-    pub fn printLiteral(rt: *Rt, comptime fmt: []const u8, args: anytype) Error!Value {
-        return Value.literal(try std.fmt.allocPrint(rt.a, fmt, args));
-    }
 };
 
 pub fn typeName(v: Value) []const u8 {

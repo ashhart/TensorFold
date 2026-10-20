@@ -152,6 +152,12 @@ pub const Tokenizer = struct {
         return t.vocab.get(text);
     }
 
+    /// Added-token membership does not require the special flag.
+    pub fn isAdded(t: *const Tokenizer, id: u32) bool {
+        for (t.added) |token| if (token.id == id) return true;
+        return false;
+    }
+
     /// Token ids for `text`, without post-processor tokens; invalid UTF-8 reads as U+FFFD. Caller frees with `a`.
     pub fn encode(t: *const Tokenizer, a: Allocator, text: []const u8) Error![]u32 {
         var arena = std.heap.ArenaAllocator.init(a);

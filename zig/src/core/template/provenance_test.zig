@@ -230,3 +230,26 @@ test "provenance namespace representations retain request dictionary keys" {
 test "provenance retains existing markup conversion semantics" {
     try exact("{{ (x|safe)[0] + ('X'|safe) }}", "{\"x\":\"<SPECIAL>\"}", "&lt;X", &.{.{ 0, 4 }});
 }
+
+test "provenance foreign substrings fail safe in both offset helpers" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var backing: [32]u8 = @splat('x');
+    const source = v.Str{ .s = backing[8..16], .spans = &.{.{ 2, 4 }}, .safe = true };
+    for ([_][]const u8{ backing[0..4], backing[4..12], backing[12..20], backing[24..28], backing[24..24] }) |foreign| {
+        var cursor: v.Cursor = .{ .source = source };
+        for ([_]v.Str{ try source.part(a, foreign), try cursor.part(a, foreign) }) |got| {
+            try t.expectEqualStrings(foreign, got.s);
+            try t.expect(!got.safe);
+            if (foreign.len > 0) try t.expectEqualSlices(v.Span, &.{.{ 0, foreign.len }}, got.spans) else try t.expectEqual(@as(usize, 0), got.spans.len);
+        }
+        try t.expectEqual(@as(usize, 0), cursor.index);
+        const real = try cursor.part(a, backing[10..12]);
+        try t.expectEqualSlices(v.Span, &.{.{ 0, 2 }}, real.spans);
+        try t.expect(real.safe);
+    }
+    const empty = try source.part(a, backing[16..16]);
+    try t.expectEqual(@as(usize, 0), empty.spans.len);
+    try t.expect(empty.safe);
+}

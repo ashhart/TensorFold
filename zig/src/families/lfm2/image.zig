@@ -155,6 +155,15 @@ pub const Marks = struct {
     thumbnail: u32,
     tiles: [max_grid][max_grid]u32, // <|img_row_{r+1}_col_{c+1}|>
 
+    /// Every picture marker must be excluded from matching in request text.
+    pub fn firstNonAdded(m: *const Marks, t: *const Tokenizer) ?u32 {
+        for ([_]u32{ m.image, m.start, m.end, m.thumbnail }) |id| if (!t.isAdded(id)) return id;
+        for (m.tiles) |row| for (row) |id| {
+            if (!t.isAdded(id)) return id;
+        };
+        return null;
+    }
+
     /// The marks from the tokenizer's special tokens, or null when one is missing.
     pub fn resolve(t: *const Tokenizer) ?Marks {
         var m: Marks = undefined;
@@ -281,4 +290,28 @@ fn cut(patches: []f32, at: usize, rgb: []const u8, w: usize, x0: usize, y0: usiz
 
 test {
     _ = @import("image_test.zig");
+}
+
+test "vision markers: every LFM2 picture and tile marker must be added" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var added: [104]core.tokenizer.AddedToken = undefined;
+    for (&added, 0..) |*token, i| token.* = .{ .id = @intCast(i + 300), .content = "fixture", .special = false };
+    var tok = try core.tokenizer.parse(a, "{\"model\":{\"type\":\"WordLevel\",\"unk_token\":\"?\",\"vocab\":{\"?\":0}}}");
+    defer tok.deinit();
+    tok.added = &added;
+    var marks: Marks = .{ .image = 300, .start = 301, .end = 302, .thumbnail = 303, .tiles = undefined };
+    var id: u32 = 304;
+    for (&marks.tiles) |*row| for (row) |*slot| {
+        slot.* = id;
+        id += 1;
+    };
+    try std.testing.expectEqual(@as(?u32, null), marks.firstNonAdded(&tok));
+    for (0..added.len) |i| {
+        added[i].id += 1000;
+        try std.testing.expectEqual(@as(?u32, @intCast(i + 300)), marks.firstNonAdded(&tok));
+        added[i].id -= 1000;
+    }
+    std.debug.print("VISION_LFM2 markers={d}; every omitted entry refused\n", .{added.len});
 }

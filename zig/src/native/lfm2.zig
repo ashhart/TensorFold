@@ -174,7 +174,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         const path = try std.fs.path.join(a, &.{ o.dir, "tokenizer.json" });
         var tok = try core.tokenizer.loadTokenizer(io, gpa, path);
         defer tok.deinit();
-        e.marks = lfm2.image.Marks.resolve(&tok);
+        e.marks = lfm2.image.Marks.resolve(&tok) orelse {
+            problem.* = "the LFM2 tokenizer lacks required picture marker tokens; image input cannot be served safely";
+            return error.InvalidVisionMarkers;
+        };
+        if (e.marks) |*marks| if (marks.firstNonAdded(&tok)) |id| {
+            problem.* = try std.fmt.allocPrint(a, "LFM2 picture marker token {d} is not an added token in this tokenizer; image input cannot be served safely", .{id});
+            return error.InvalidVisionMarkers;
+        };
         if (e.marks != null) e.vision = try lfm2.vision.Vision.init(gpa, &e.driver, &e.cfg, vw);
     }
     return .{ .engine = .{ .ctx = e, .vtable = &Engine.vtable }, .close = Engine.close, .ctx = e };

@@ -223,6 +223,7 @@ pub const HfText = struct {
             .token_string = tokenStringFn,
             .vocab_size = vocabFn,
             .eos_ids = eosFn,
+            .added = addedFn,
             .render = renderFn,
             .template_source = sourceFn,
             .special = specialFn,
@@ -236,6 +237,10 @@ pub const HfText = struct {
         const t = self(ctx);
         const piece = t.tok.id_to_token.get(id) orelse return false;
         return t.tok.specials.contains(piece);
+    }
+
+    fn addedFn(ctx: *anyopaque, id: u32) bool {
+        return self(ctx).tok.isAdded(id);
     }
 
     fn self(ctx: *anyopaque) *HfText {

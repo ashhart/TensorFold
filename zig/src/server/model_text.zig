@@ -115,6 +115,8 @@ pub const Text = struct {
         template_source: *const fn (ctx: *anyopaque) []const u8,
         /// Whether an id is a special token (an added token flagged special); null: none are known.
         special: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
+        /// Membership in the added-token table, including entries not flagged special; null: none are known.
+        added: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
         /// Ids of ``text`` with no added token matched (a spelled special token is plain text); null: ``encode``.
         encode_plain: ?*const fn (ctx: *anyopaque, a: Allocator, text: []const u8) Error![]u32 = null,
         /// Required when rendering request ranges; absent providers fail closed.
@@ -179,6 +181,11 @@ pub const Text = struct {
 
     pub fn templateSource(t: Text) []const u8 {
         return t.vtable.template_source(t.ctx);
+    }
+
+    pub fn isAdded(t: Text, id: u32) bool {
+        const f = t.vtable.added orelse return false;
+        return f(t.ctx, id);
     }
 
     pub fn isSpecial(t: Text, id: u32) bool {
