@@ -5,23 +5,46 @@ const Runner = @import("decode_round.zig").Runner;
 const Draft = @import("dflash/runtime_model.zig").Model;
 
 /// One kept state: its bytes in a GPU buffer, its position and the drafter's committed end there.
-pub const State = struct { buf: mtl.Buffer, at: u32, bytes: usize, draft_end: u64 };
+pub const State = struct {
+    buf: mtl.Buffer,
+    at: u32,
+    bytes: usize,
+    draft_end: u64,
+    residency: ?mtl.ResidencySet.Follow = null,
+};
+
+pub fn blank(a: std.mem.Allocator, r: *const Runner, ring: ?Ring, at: u32) !*State {
+    const n = slotBytes(r, ring, at);
+    const buf = try r.model.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    errdefer buf.deinit();
+    const st = try a.create(State);
+    st.* = .{ .buf = buf, .at = at, .bytes = n, .draft_end = 0, .residency = r.residency };
+    if (st.residency) |f| f.join(f.ctx, buf);
+    return st;
+}
 
 const Part = struct { buffer: mtl.Buffer, offset: usize, len: usize };
-const ROW = 256 * 2; // a key or value row of one head (bf16)
 pub const Ring = @import("tap_ring.zig").Ring;
 
-fn parts(r: *const Runner, slot: u32, ring: ?Ring, at: u32, list: *std.ArrayList(Part), a: std.mem.Allocator) !void {
+fn parts(r: *const Runner, slot: u32, ring: ?Ring, at: u32, list: *std.ArrayList(Part), a: std.mem.Allocator, marked: bool) !void {
     if (slot >= r.ready) return error.SlotNotReady;
     for (0..r.gdn.budget.layers) |layer| for ([_]bool{ true, false }) |recurrent| {
-        const span = try r.gdn.committedSpan(layer, slot, recurrent);
+        const span: @import("gdn.zig").Span = if (marked and r.offsets[slot] != at) blk: {
+            const bank = r.gdn.marks orelse return error.NotAtMark;
+            const mark = bank.index(slot, at, r.offsets[slot]) orelse return error.NotAtMark;
+            break :blk try bank.span(layer, mark, recurrent);
+        } else blk: {
+            const live = try r.gdn.committedSpan(layer, slot, recurrent);
+            break :blk .{ .buffer = live.buffer, .offset = live.offset, .bytes = live.bytes };
+        };
         try list.append(a, .{ .buffer = span.buffer, .offset = span.offset, .len = span.bytes });
     };
+    const row_bytes = r.model.config.head_dim * @sizeOf(u16);
     for (0..r.caches.len / r.slots) |layer| {
         const cache = r.caches[layer * r.slots + slot];
         for ([_]@import("projection.zig").Ref{ cache.keys, cache.values }, [_]u32{ cache.key_stride, cache.value_stride }) |ref, stride| {
-            const head_stride = @as(usize, if (stride == 0) cache.capacity * 256 else stride) * 2;
-            for (0..r.model.config.kv_heads) |head| try list.append(a, .{ .buffer = ref.buffer, .offset = ref.offset + head * head_stride, .len = @as(usize, at) * ROW });
+            const head_stride = @as(usize, if (stride == 0) cache.capacity * r.model.config.head_dim else stride) * 2;
+            for (0..r.model.config.kv_heads) |head| try list.append(a, .{ .buffer = ref.buffer, .offset = ref.offset + head * head_stride, .len = @as(usize, at) * row_bytes });
         }
     }
     if (ring) |g| try list.append(a, .{ .buffer = g.buf, .offset = 0, .len = g.bytes(at) });
@@ -35,7 +58,8 @@ pub fn bytes(r: *const Runner, draft: ?*Draft, at: u32) usize {
 pub fn slotBytes(r: *const Runner, ring: ?Ring, at: u32) usize {
     const pool = &r.gdn;
     const gdn = pool.budget.layers * (pool.budget.shape.state * 4 + pool.budget.shape.conv * 2);
-    const kv = (r.caches.len / r.slots) * 2 * r.model.config.kv_heads * @as(usize, at) * ROW;
+    const row_bytes = r.model.config.head_dim * @sizeOf(u16);
+    const kv = (r.caches.len / r.slots) * 2 * r.model.config.kv_heads * @as(usize, at) * row_bytes;
     return gdn + kv + if (ring) |g| g.bytes(at) else 0;
 }
 
@@ -43,7 +67,7 @@ pub fn slotBytes(r: *const Runner, ring: ?Ring, at: u32) usize {
 fn copy(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, st: *const State, to_state: bool) !void {
     var list: std.ArrayList(Part) = .empty;
     defer list.deinit(a);
-    try parts(r, slot, ring, st.at, &list, a);
+    try parts(r, slot, ring, st.at, &list, a, to_state);
     var total: usize = 0;
     for (list.items) |p| {
         if (p.offset % 4 != 0 or p.len % 4 != 0) return error.SnapshotAlignment; // blits copy 4-byte words
@@ -72,7 +96,9 @@ pub fn save(a: std.mem.Allocator, r: *const Runner, draft: ?*Draft, at: u32) !*S
 
 /// Slot `slot`'s state after `at` tokens, its taps ring standing there too when it has one.
 pub fn saveSlot(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, at: u32) !*State {
-    if (at == 0 or r.failed or r.active != null or slot >= r.slots or r.offsets[slot] != at or (ring != null and ring.?.end.* != at)) return error.NotAtMark;
+    if (at == 0 or r.failed or r.active != null or slot >= r.ready) return error.NotAtMark;
+    const marked = if (r.gdn.marks) |m| m.index(slot, at, r.offsets[slot]) != null else false;
+    if ((r.offsets[slot] != at and !marked) or (ring != null and (marked or ring.?.end.* != at))) return error.NotAtMark;
     const n = slotBytes(r, ring, at);
     const buf = try r.model.device.buffer(n, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
     errdefer buf.deinit();
@@ -80,6 +106,8 @@ pub fn saveSlot(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, 
     errdefer a.destroy(st);
     st.* = .{ .buf = buf, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0 };
     try copy(a, r, slot, ring, st, true);
+    st.residency = r.residency;
+    if (st.residency) |f| f.join(f.ctx, st.buf);
     return st;
 }
 
@@ -109,8 +137,8 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
     defer src.deinit(a);
     var dst: std.ArrayList(Part) = .empty;
     defer dst.deinit(a);
-    try parts(r, from, from_ring, at, &src, a);
-    try parts(r, to, to_ring, at, &dst, a);
+    try parts(r, from, from_ring, at, &src, a, false);
+    try parts(r, to, to_ring, at, &dst, a, false);
     if (src.items.len != dst.items.len) return error.SnapshotLayout;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -132,6 +160,7 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
 }
 
 pub fn drop(a: std.mem.Allocator, st: *State) void {
+    if (st.residency) |f| f.leave(f.ctx, st.buf);
     st.buf.deinit();
     a.destroy(st);
 }

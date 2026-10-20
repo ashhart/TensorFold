@@ -1,0 +1,37 @@
+community-v1: code and chat, 2 temperatures, 5 repeats after warm-up.
+This generates model replies; use Ctrl-C to cancel. Nothing is uploaded unless you publish.
+The server gets up to 606 s to load 21 GB of weights; --startup-timeout sets another limit.
+code T=1 warm-up: ok 67.76 delivery tok/s
+code T=1 repeat 1/5: ok 67.80 delivery tok/s
+code T=1 repeat 2/5: ok 67.98 delivery tok/s
+code T=1 repeat 3/5: ok 68.01 delivery tok/s
+code T=1 repeat 4/5: ok 67.97 delivery tok/s
+code T=1 repeat 5/5: ok 67.63 delivery tok/s
+chat T=1 warm-up: ok 67.67 delivery tok/s
+chat T=1 repeat 1/5: ok 67.47 delivery tok/s
+chat T=1 repeat 2/5: ok 67.76 delivery tok/s
+chat T=1 repeat 3/5: ok 67.73 delivery tok/s
+chat T=1 repeat 4/5: ok 67.70 delivery tok/s
+chat T=1 repeat 5/5: ok 67.66 delivery tok/s
+code T=0 warm-up: ok 69.23 delivery tok/s
+code T=0 repeat 1/5: ok 69.21 delivery tok/s
+code T=0 repeat 2/5: ok 69.24 delivery tok/s
+code T=0 repeat 3/5: ok 69.26 delivery tok/s
+code T=0 repeat 4/5: ok 69.26 delivery tok/s
+code T=0 repeat 5/5: ok 69.22 delivery tok/s
+chat T=0 warm-up: ok 69.04 delivery tok/s
+chat T=0 repeat 1/5: ok 69.07 delivery tok/s
+chat T=0 repeat 2/5: ok 69.06 delivery tok/s
+chat T=0 repeat 3/5: ok 69.02 delivery tok/s
+chat T=0 repeat 4/5: ok 68.99 delivery tok/s
+chat T=0 repeat 5/5: ok 69.05 delivery tok/s
+Run ee440afd-6373-455f-ba6c-725a24fd261d | rocm | TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP
+Workload       Temp    Stream delivery tok/s    First text, s    Status
+code           1      67.97                     0.053            complete
+chat           1      67.70                     0.087            complete
+code           0      69.24                     0.052            complete
+chat           0      69.05                     0.087            complete
+Stream delivery includes transport buffering; it is not an engine token clock.
+This rocm receipt is saved locally; it cannot be published until the board accepts rocm.
+Receipt saved: ~/tf-1001-fresh-runs/out/35b-serial.json
+Draft counts: 0 of 0 drafted tokens accepted over 5100 rounds (20 of 20 attempts reported them); saved: ~/tf-1001-fresh-runs/out/35b-serial.drafts.json

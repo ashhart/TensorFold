@@ -1,0 +1,1 @@
+tensorfold benchmark: --drafter: the HIP engine runs no DFlash2 drafter yet, so a rocm run takes none; --drafter none runs without it

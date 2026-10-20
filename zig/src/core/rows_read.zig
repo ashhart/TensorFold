@@ -7,6 +7,7 @@ const chain = @import("rows_chain.zig");
 const file = @import("rows_file.zig");
 const rows_store = @import("rows_store.zig");
 const write = @import("rows_write.zig");
+const select = @import("rows_select.zig");
 const Rows = rows_store.Rows;
 const Name = chain.Name;
 
@@ -81,13 +82,16 @@ fn bad(r: *Rows, name: Name, ext: []const u8, err: anyerror) anyerror {
 /// A disk state reaching further than `have`, read back into a new RAM entry where that costs less than prefilling.
 pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry) ?*pc.Entry {
     const r = s.disk orelse return have;
-    const from = if (have) |x| x.at else 0;
-    const i = r.best(prompt, starts, spans, from) orelse return have;
-    if (!worth(r, i, from)) return have;
+    const i = select.choose(s, prompt, starts, spans, have).restore orelse return have;
     const st = r.states.items[i];
     const bytes = s.family.vtable.bytes(s.family.ptr, st.at);
     if (bytes > s.budget or s.most == 0) return have;
-    while (s.held + s.spare() + bytes > s.budget or s.entries.items.len >= s.most) { // a slot too, where states take one
+    while (!ready(s, bytes)) {
+        if (s.family.vtable.trim) |trim| {
+            const spare = s.spare();
+            trim(s.family.ptr, s.budget -| s.held -| bytes);
+            if (s.spare() < spare) continue;
+        }
         s.remove(s.victimBut(have, prompt, born) orelse return have);
         s.counts.evicted += 1;
     }
@@ -114,13 +118,11 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
     return e;
 }
 
-/// Whether reading disk state `i` costs less than prefilling the tokens it reaches past `from` (measured rates).
-pub fn worth(r: *const Rows, i: usize, from: u32) bool {
-    const s = r.states.items[i];
-    if (r.prefill_rate <= 0) return true;
-    const read_s = @as(f64, @floatFromInt(s.own + s.rows)) / r.read_rate;
-    const prefill_s = @as(f64, @floatFromInt(s.at - from)) / r.prefill_rate;
-    return read_s < prefill_s;
+fn ready(s: *const pc.Store, bytes: u64) bool {
+    if (s.held > s.budget or s.entries.items.len >= s.most) return false;
+    const room = s.budget - s.held;
+    const spare = s.spare();
+    return spare <= room and bytes <= room - spare;
 }
 
 /// How much of a prompt the server resumes, and from where, with the estimated wait for the rest.
@@ -136,22 +138,30 @@ pub const Resume = struct {
 /// Where `prompt`'s next request would resume, read on the engine thread.
 pub fn resumable(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) Resume {
     var out: Resume = .{ .tokens = @intCast(prompt.len) };
-    if (s.find(prompt, starts, spans)) |e| out.ram = e.at;
-    const r = s.disk orelse return finishResume(s, out, 0);
-    if (r.best(prompt, starts, spans, 0)) |i| {
+    const have = s.find(prompt, starts, spans);
+    if (have) |e| out.ram = e.at;
+    out.from = if (out.ram > 0) .ram else .none;
+    const r = s.disk orelse return finishResume(s, out);
+    const chosen = select.choose(s, prompt, starts, spans, have);
+    if (chosen.disk) |i| {
         const st = r.states.items[i];
         out.disk = st.at;
-        out.disk_bytes = st.own + st.rows;
-        if (st.at > out.ram and worth(r, i, out.ram)) return finishResume(s, out, @as(f64, @floatFromInt(out.disk_bytes)) / r.read_rate);
+        out.disk_bytes = st.own +| st.rows;
     }
-    return finishResume(s, out, 0);
+    if (chosen.restore != null) {
+        out.from = .disk;
+        out.seconds = chosen.read_seconds;
+    }
+    return finishResume(s, out);
 }
 
-fn finishResume(s: *const pc.Store, x: Resume, read_s: f64) Resume {
+fn finishResume(s: *const pc.Store, x: Resume) Resume {
     var out = x;
-    const start = if (read_s > 0) out.disk else out.ram;
-    out.from = if (read_s > 0) .disk else if (out.ram > 0) .ram else .none;
+    const start = if (out.from == .disk) out.disk else out.ram;
     const rate = if (s.disk) |r| r.prefill_rate else 0;
-    out.seconds = read_s + if (rate > 0) @as(f64, @floatFromInt(out.tokens -| start)) / rate else 0;
+    if (select.knownRate(rate)) {
+        const total = out.seconds + @as(f64, @floatFromInt(out.tokens -| start)) / rate;
+        if (std.math.isFinite(total)) out.seconds = total;
+    }
     return out;
 }

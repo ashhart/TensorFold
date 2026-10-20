@@ -4,6 +4,7 @@ const platform = @import("sys");
 const posix = platform.posix;
 const builtin = @import("builtin");
 const log = @import("log.zig");
+const meta = @import("file_meta.zig").meta;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -326,39 +327,6 @@ fn readKeys(fd: platform.c.fd_t, buf: []u8) !usize {
     return if (n < 0) error.ReadFailed else @intCast(n);
 }
 
-/// A file's type and permission bits, size, identity and mtime: statx on Linux (its libc has no stat), stat elsewhere.
-const Meta = struct { mode: u32, size: u64, dev: u64, ino: u64, mtime_ns: i128 };
-
-/// `path` at the working directory, or the open `fd` itself when `path` is null.
-fn meta(fd: posix.fd_t, path: ?[*:0]const u8) ?Meta {
-    if (builtin.os.tag == .linux) {
-        const linux = std.os.linux;
-        var sx: linux.Statx = undefined;
-        const want: linux.STATX = .{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .MTIME = true };
-        const rc = if (path) |p| platform.c.statx(posix.AT.FDCWD, p, 0, want, &sx) else platform.c.statx(fd, "", 0x1000, want, &sx); // AT_EMPTY_PATH
-        if (rc != 0) return null;
-        const dev = (@as(u64, sx.dev_major) << 32) | sx.dev_minor;
-        return .{ .mode = sx.mode, .size = sx.size, .dev = dev, .ino = sx.ino, .mtime_ns = @as(i128, sx.mtime.sec) * std.time.ns_per_s + sx.mtime.nsec };
-    }
-    if (builtin.os.tag == .windows) {
-        // NTFS keeps access in ACLs, not mode bits: the type and size are checked, and the profile's ACL is the guard
-        var st: platform.c.Stat = undefined;
-        const f = if (path) |p| platform.c.open(p, .{ .ACCMODE = .RDONLY }) else fd;
-        if (f < 0) return null;
-        defer if (path != null) {
-            _ = platform.c.close(f);
-        };
-        if (platform.c.fstat(f, &st) != 0) return null;
-        const t = st.mtime();
-        return .{ .mode = (st.mode & platform.c.S.IFMT) | 0o600, .size = @intCast(st.size), .dev = st.dev, .ino = st.ino, .mtime_ns = @as(i128, t.nsec) + @as(i128, t.sec) * std.time.ns_per_s };
-    }
-    var st: posix.Stat = undefined;
-    const rc = if (path) |p| posix.system.stat(p, &st) else posix.system.fstat(fd, &st);
-    if (posix.errno(rc) != .SUCCESS) return null;
-    const t = st.mtime();
-    return .{ .mode = @intCast(st.mode), .size = @intCast(st.size), .dev = @intCast(st.dev), .ino = @intCast(st.ino), .mtime_ns = std.math.lossyCast(i128, t.nsec) + @as(i128, t.sec) * std.time.ns_per_s };
-}
-
 test "the key file: refused while others can read it, read at 0600, reread after an edit" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // refusal by mode bits; NTFS keeps access in ACLs
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -432,4 +400,31 @@ fn publicAsset(path: []const u8) bool {
         if (std.mem.startsWith(u8, path, "/slide/") and std.mem.eql(u8, path[7..], name)) return true;
     }
     return false;
+}
+
+test "security: every System One alias requires a key" {
+    for ([_][]const u8{ "/systemone", "/systemone/", "/systemone?x=1", "/alternative/systemone", "/v1/systemone" }) |path| {
+        try std.testing.expect(gated(path, false));
+        try std.testing.expect(gated(path, true));
+    }
+}
+
+test "security: key files cannot be written by another user" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-local\n" });
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/keys", .{tmp.sub_path}, 0);
+    defer a.free(path);
+    var problem: []const u8 = "";
+    for ([_]u32{ 0o620, 0o602, 0o622 }) |mode| {
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(posix.AT.FDCWD, path, @intCast(mode), 0));
+        if (Store.init(a, &.{}, "", path, false, &problem)) |value| {
+            var store = value;
+            store.deinit();
+            return error.UnsafeKeyFileAccepted;
+        } else |err| try std.testing.expectEqual(error.KeyFile, err);
+    }
 }

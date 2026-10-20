@@ -11,6 +11,7 @@ const VideoText = struct {
     const table = blk: {
         var v = images.MarkText.text().vtable.*;
         v.encode = encode;
+        v.encode_masked = masked;
         v.token_string = tokenString;
         break :blk v;
     };
@@ -26,6 +27,24 @@ const VideoText = struct {
             rest = rest[at + "<SPECIAL_30>".len ..];
         }
         try out.appendSlice(a, try images.MarkText.text().encode(a, rest, false));
+        return out.items;
+    }
+    fn masked(_: *anyopaque, a: std.mem.Allocator, s: []const u8, spans: []const model_text.Span, _: *[]const u8) model_text.Error![]u32 {
+        var out: std.ArrayList(u32) = .empty;
+        const rendered = model_text.Rendered{ .text = s, .spans = spans };
+        var i: usize = 0;
+        while (i < s.len) {
+            if (std.mem.startsWith(u8, s[i..], "<SPECIAL_30>") and rendered.isTemplate(i, i + 12)) {
+                try out.append(a, 8);
+                i += 12;
+            } else if (std.mem.startsWith(u8, s[i..], "<|image|>") and rendered.isTemplate(i, i + 9)) {
+                try out.append(a, 9);
+                i += 9;
+            } else {
+                try out.append(a, @as(u32, s[i]) + 100);
+                i += 1;
+            }
+        }
         return out.items;
     }
     fn plain(_: *anyopaque, a: std.mem.Allocator, s: []const u8) model_text.Error![]u32 {
@@ -57,15 +76,19 @@ fn videoUserPrompt(a: std.mem.Allocator, ctx: *anyopaque, real: bool, alias: []c
         .ok => |m| m,
         .err => return error.TestUnexpectedResult,
     };
-    const markers = try images.markerText(VideoText.text(), a, v);
-    const shielded = try images.shield(a, msgs, markers);
     var rendered: std.ArrayList(u8) = .empty;
-    for (shielded.array[0].get("content").?.array) |part| {
+    var spans: std.ArrayList(model_text.Span) = .empty;
+    for (msgs.array[0].get("content").?.array) |part| {
         const kind = part.get("type").?.string;
-        try rendered.appendSlice(a, if (std.mem.eql(u8, kind, "video_url")) (if (alias.len > 0) alias else "<SPECIAL_30>") else part.get("text").?.string);
+        const video = std.mem.eql(u8, kind, "video_url");
+        const start = rendered.items.len;
+        try rendered.appendSlice(a, if (video) (if (alias.len > 0) alias else "<SPECIAL_30>") else part.get("text").?.string);
+        if (!video) try spans.append(a, .{ start, rendered.items.len });
     }
-    const replaced = if (alias.len > 0) try std.mem.replaceOwned(u8, a, rendered.items, alias, try VideoText.tokenString(undefined, a, v.video.?.video_token)) else rendered.items;
-    return .{ .vision = v, .messages = msgs, .ids = try images.encodeShielded(VideoText.text(), a, replaced, markers) };
+    var prompt = model_text.Rendered{ .text = rendered.items, .spans = spans.items };
+    if (alias.len > 0) prompt = try prompt.replaceTemplate(a, alias, try VideoText.tokenString(undefined, a, v.video.?.video_token));
+    var problem: []const u8 = "";
+    return .{ .vision = v, .messages = msgs, .ids = try prompt.encode(VideoText.text(), a, &problem) };
 }
 
 test "literal video spellings in a text-only message never become video placeholders" {

@@ -264,6 +264,10 @@ fn attention(r: *Rig, g: *const flash.Glue, sparse: bool) !void {
         }
     };
     for (counts[0 .. counts.len - 1], 0..) |m, c| try r.sameRows(name, u16, outs[c], got[0 .. m * q_heads * head_dim]);
+    // prompt rows' fused launch (every chunk merged in the program): the chunks then merge's bytes
+    const fused = try r.out(rows * q_heads * head_dim * 2);
+    try g.attnFused(r.s, dq, dkc, dvc, dpos, fused, dids, dnk, dspr, rows, kv_heads);
+    try r.sameRows(if (sparse) "attention sparse fused" else "attention dense fused", u16, fused, got);
 }
 
 pub fn run(gpu: check.Gpu) !void {

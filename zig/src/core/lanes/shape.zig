@@ -32,7 +32,7 @@ pub const Odds = struct {
     }
 };
 
-/// Draft lanes as a tree: each lane's parent lane (-1: the pending row), the head's rank it takes, its depth (0: first).
+/// Draft-tree lanes: parent (-1 for the pending row), head rank and depth (0 for the first level).
 pub const Shape = struct {
     parents: []i32,
     ranks: []u8,
@@ -83,7 +83,38 @@ fn higher(_: void, a: Candidate, b: Candidate) std.math.Order {
     return std.math.order(b.value, a.value);
 }
 
-/// The `lanes` drafts with the most expected tokens, best first: a lane's value is its chance of being reached and taken.
+/// One best-first traversal, with parent indices and expected sums independent of the requested prefix width.
+pub const Cursor = struct {
+    odds: Odds,
+    cap: usize,
+    queue: std.PriorityQueue(Candidate, void, higher) = .empty,
+    count: usize = 0,
+    expected: f64 = 0,
+
+    pub const Lane = struct { parent: i32, rank: u8, depth: u8 };
+
+    pub fn init(gpa: Allocator, odds: Odds, depth_cap: usize) !Cursor {
+        var out: Cursor = .{ .odds = odds, .cap = @min(depth_cap, max_depth) };
+        if (out.cap > 0) try out.queue.push(gpa, .{ .parent = -1, .depth = 0, .rank = 0, .reach = 1, .value = odds.chance(0, 0) });
+        return out;
+    }
+
+    pub fn deinit(c: *Cursor, gpa: Allocator) void {
+        c.queue.deinit(gpa);
+    }
+
+    pub fn next(c: *Cursor, gpa: Allocator) !?Lane {
+        const node = c.queue.pop() orelse return null;
+        const lane: i32 = @intCast(c.count);
+        c.count += 1;
+        c.expected += node.value;
+        if (node.rank + 1 < ranks) try c.queue.push(gpa, .{ .parent = node.parent, .depth = node.depth, .rank = node.rank + 1, .reach = node.reach, .value = node.reach * c.odds.chance(node.depth, node.rank + 1) });
+        if (node.depth + 1 < c.cap) try c.queue.push(gpa, .{ .parent = lane, .depth = node.depth + 1, .rank = 0, .reach = node.value, .value = node.value * c.odds.chance(node.depth + 1, 0) });
+        return .{ .parent = node.parent, .rank = node.rank, .depth = node.depth };
+    }
+};
+
+/// The best-first draft lanes, ordered by their chance of being reached and taken.
 pub fn best(gpa: Allocator, o: Odds, lanes: usize, depth_cap: usize) !Shape {
     var parents: std.ArrayList(i32) = .empty;
     errdefer parents.deinit(gpa);
@@ -91,22 +122,19 @@ pub fn best(gpa: Allocator, o: Odds, lanes: usize, depth_cap: usize) !Shape {
     errdefer rs.deinit(gpa);
     var ds: std.ArrayList(u8) = .empty;
     errdefer ds.deinit(gpa);
-    var queue: std.PriorityQueue(Candidate, void, higher) = .empty;
-    defer queue.deinit(gpa);
-    const cap = @min(depth_cap, max_depth);
-    var expected: f64 = 0;
-    if (lanes > 0 and cap > 0) try queue.push(gpa, .{ .parent = -1, .depth = 0, .rank = 0, .reach = 1, .value = o.chance(0, 0) });
+    var cursor = try Cursor.init(gpa, o, if (lanes > 0) depth_cap else 0);
+    defer cursor.deinit(gpa);
     while (parents.items.len < lanes) {
-        const c = queue.pop() orelse break;
-        const lane: i32 = @intCast(parents.items.len);
-        try parents.append(gpa, c.parent);
-        try rs.append(gpa, c.rank);
-        try ds.append(gpa, c.depth);
-        expected += c.value;
-        if (c.rank + 1 < ranks) try queue.push(gpa, .{ .parent = c.parent, .depth = c.depth, .rank = c.rank + 1, .reach = c.reach, .value = c.reach * o.chance(c.depth, c.rank + 1) });
-        if (c.depth + 1 < cap) try queue.push(gpa, .{ .parent = lane, .depth = c.depth + 1, .rank = 0, .reach = c.value, .value = c.value * o.chance(c.depth + 1, 0) });
+        const lane = try cursor.next(gpa) orelse break;
+        try parents.append(gpa, lane.parent);
+        try rs.append(gpa, lane.rank);
+        try ds.append(gpa, lane.depth);
     }
-    return .{ .parents = try parents.toOwnedSlice(gpa), .ranks = try rs.toOwnedSlice(gpa), .depths = try ds.toOwnedSlice(gpa), .expected = expected };
+    const out_parents = try parents.toOwnedSlice(gpa);
+    errdefer gpa.free(out_parents);
+    const out_ranks = try rs.toOwnedSlice(gpa);
+    errdefer gpa.free(out_ranks);
+    return .{ .parents = out_parents, .ranks = out_ranks, .depths = try ds.toOwnedSlice(gpa), .expected = cursor.expected };
 }
 
 test "odds that only the head's first choice lands give a chain" {

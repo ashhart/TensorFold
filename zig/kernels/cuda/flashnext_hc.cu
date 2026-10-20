@@ -237,6 +237,45 @@ extern "C" __global__ void __launch_bounds__(1024) fn_hc_reduce_act(const float*
     }
 }
 
+// fn_hc_norm's 1 / rms of each row's streams [M, SS], a thread each: the column blocks' sums in order.
+extern "C" __global__ void fn_hc_rinv(const float* __restrict__ PSS, float* __restrict__ RINV, int M, float eps, int D,
+                                      int NC, int SS) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x, r = i / SS, st = i % SS;
+    if (r >= M) return;
+    float total = 0.0f;
+    for (int c = 0; c < NC; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * NC + c) * SS + st]);
+    RINV[i] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+}
+
+// fn_hc_mix with each normed value recomputed from the streams as fn_hc_norm rounds it (no normed rows read).
+extern "C" __global__ void __launch_bounds__(256) fn_hc_mix_h(const __nv_bfloat16* __restrict__ UP, const __nv_bfloat16* __restrict__ H,
+                                                              const float* __restrict__ RINV, const float* __restrict__ SCALE,
+                                                              __nv_bfloat16* __restrict__ MIXED, float* __restrict__ XSM,
+                                                              int D, int SS) {
+    __shared__ float ms[256];
+    const int r = blockIdx.x, d = blockIdx.y * 256 + threadIdx.x;
+    const long long row = static_cast<long long>(r) * SS * D;
+    float m = 0.0f;
+    if (d < D) {
+        float total = 0.0f;
+        for (int s = 0; s < SS; ++s) {
+            const long long at = row + static_cast<long long>(s) * D + d;
+            const float nv = rbf(__fmul_rn(__fmul_rn(bf(H[at]), RINV[r * SS + s]), SCALE[s * D + d]));
+            total = __fadd_rn(total, rbf(__fmul_rn(bsig(bf(UP[at])), nv)));
+        }
+        m = rbf(__fdiv_rn(total, static_cast<float>(SS)));
+        MIXED[static_cast<long long>(r) * D + d] = __float2bfloat16_rn(m);
+    }
+    ms[threadIdx.x] = m;
+    __syncthreads();
+    const int g = threadIdx.x;
+    if (g < 8 && blockIdx.y * 256 + g * 32 < D) {
+        float sum = 0.0f;
+        for (int k = 0; k < 32; ++k) sum = __fadd_rn(sum, ms[g * 32 + k]);
+        XSM[static_cast<long long>(r) * (D / 32) + blockIdx.y * 8 + g] = sum;
+    }
+}
+
 // qmm._qmm_upmix, block (16 rows, 32 dims), two warps a stream (SS 4): the up rows, then the streams mixed in order.
 extern "C" __global__ void __launch_bounds__(256) fn_hc_upmix(const __nv_bfloat16* __restrict__ X, const float* __restrict__ XS,
                                                               const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ S,

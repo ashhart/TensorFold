@@ -58,6 +58,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.back = try g.backend.Backend.init(gpa, e);
     errdefer h.back.deinit();
     if (e.rank() == 0) try h.back.time(io);
+    try g.residency.hold(e, io, limit);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), g.gpu.max_rows, g.gpu.max_rows - 1);
     errdefer h.cfg.deinit(gpa);
     h.wall = .{ .io = io };
@@ -76,7 +77,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
-    h.warm = .{ .queue = e.queue };
+    h.warm = g.residency.target(e);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     errdefer h.host.stop();

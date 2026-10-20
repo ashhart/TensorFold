@@ -8,7 +8,10 @@ const be = lanes.backend;
 
 /// The backend's bits, made at the first structured request (one row a forward row, and a first token's).
 fn masks(b: *Metal) !*Masks {
-    if (b.masks == null) b.masks = try Masks.init(b.m.device, b.scratch.rows, b.m.config.vocab);
+    if (b.masks == null) {
+        b.masks = try Masks.init(b.m.device, b.scratch.rows, b.m.config.vocab);
+        if (b.residency) |f| @import("metal").resident.fields.apply(&b.masks.?, f, true);
+    }
     return &b.masks.?;
 }
 

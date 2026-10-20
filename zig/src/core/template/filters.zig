@@ -19,7 +19,7 @@ const jinja_tests = tests ++ [_][]const u8{ "lower", "upper" };
 
 /// Python's soft_str: strings (Markup included) pass through, anything else becomes its str().
 fn softStr(c: *Ctx, x: Value) Error!v.Str {
-    return if (x == .str) x.str else .{ .s = try v.toStr(&c.rt, x) };
+    return v.asStr(&c.rt, x);
 }
 
 fn ignoreCase(c: *Ctx, x: Value) Error!Value {
@@ -35,7 +35,7 @@ fn attrPath(c: *Ctx, item: Value, attr: Value, default: ?Value) Error!Value {
             const all_digits = p.len > 0 and for (p) |ch| {
                 if (!std.ascii.isDigit(ch)) break false;
             } else true;
-            x = try access.getitem(&c.rt, x, if (all_digits) Value{ .int = std.fmt.parseInt(i64, p, 10) catch return c.rt.fail("index too large", .{}) } else Value.string(p));
+            x = try access.getitem(&c.rt, x, if (all_digits) Value{ .int = std.fmt.parseInt(i64, p, 10) catch return c.rt.fail("index too large", .{}) } else Value{ .str = try attr.str.part(c.rt.a, p) });
             if (default) |d| if (v.isUndef(x)) {
                 x = d;
             };
@@ -130,20 +130,31 @@ fn spaces(rt: *v.Rt, n: Value) Error![]u8 {
 
 fn indent(c: *Ctx, s: v.Str, width: Value, first: bool, blank: bool) Error!Value {
     const a = c.rt.a;
-    const pad = switch (width) {
-        .str => |w| w.s,
-        .int, .boolean => try spaces(&c.rt, width),
+    const pad: v.Str = switch (width) {
+        .str => |w| w,
+        .int, .boolean => .{ .s = try spaces(&c.rt, width) },
         else => return c.rt.fail("indent width must be an int or str", .{}),
     };
-    const lines = try splitlines(c, try std.mem.concat(a, u8, &.{ s.s, "\n" }));
-    var out: std.ArrayList(u8) = .empty;
+    const joined = try std.mem.concat(a, u8, &.{ s.s, "\n" });
+    const lines = try splitlines(c, joined);
+    var out: v.Buffer = .{};
+    if (first) try out.append(a, pad);
+    var previous: usize = 0;
+    var cursor: v.Cursor = .{ .source = s };
     for (lines, 0..) |line, i| {
-        if (i > 0) try out.append(a, '\n');
-        if (i > 0 and (blank or line.len > 0)) try out.appendSlice(a, pad);
-        try out.appendSlice(a, line);
+        const start = @intFromPtr(line.ptr) - @intFromPtr(joined.ptr);
+        if (i > 0) {
+            const separator = try cursor.part(a, s.s[@min(previous, s.s.len)..@min(start, s.s.len)]);
+            const newline = try v.Str.derived(a, "\n", separator.spans.len > 0);
+            try out.append(a, newline);
+        }
+        if (i > 0 and (blank or line.len > 0)) try out.append(a, pad);
+        try out.append(a, try cursor.part(a, s.s[start..][0..line.len]));
+        previous = start + line.len;
     }
-    if (first) try out.insertSlice(a, 0, pad);
-    return .{ .str = .{ .s = out.items, .safe = s.safe } };
+    var text = out.str();
+    text.safe = s.safe;
+    return .{ .str = text };
 }
 
 pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: []const Kw) Error!Value {
@@ -152,7 +163,7 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
     if (eq(u8, name, "default") or eq(u8, name, "d")) {
         const b = try bind(rt, "default", &.{ "default_value", "boolean" }, 0, pos, kw);
         const boolean = if (b[1]) |x| v.truthy(x) else false;
-        return if (v.isUndef(value) or (boolean and !v.truthy(value))) b[0] orelse Value.string("") else value;
+        return if (v.isUndef(value) or (boolean and !v.truthy(value))) b[0] orelse Value.literal("") else value;
     }
     if (eq(u8, name, "length") or eq(u8, name, "count")) {
         _ = try bind(rt, "length", &.{}, 0, pos, kw);
@@ -166,7 +177,11 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
     if (eq(u8, name, "upper")) return methods.upperStr(rt, try softStr(c, value));
     if (eq(u8, name, "lower")) return methods.lowerStr(rt, try softStr(c, value));
     if (eq(u8, name, "capitalize")) return methods.capitalizeStr(rt, try softStr(c, value));
-    if (eq(u8, name, "safe")) return .{ .str = .{ .s = (try softStr(c, value)).s, .safe = true } };
+    if (eq(u8, name, "safe")) {
+        var text = try softStr(c, value);
+        text.safe = true;
+        return .{ .str = text };
+    }
     if (eq(u8, name, "escape") or eq(u8, name, "e")) return eval.escape(c, value);
     if (eq(u8, name, "tojson")) {
         const b = try bind(rt, "tojson", &.{ "ensure_ascii", "indent", "separators", "sort_keys" }, 0, pos, kw);
@@ -184,19 +199,23 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
             o.item_sep = pair[0].str.s;
             o.key_sep = pair[1].str.s;
         };
-        return Value.string(try pyjson.dumps(rt, value, o));
+        var request = v.hasRequest(value);
+        for (b) |arg| if (arg) |x| {
+            request = request or v.hasRequest(x);
+        };
+        return .{ .str = try v.Str.derived(rt.a, try pyjson.dumps(rt, value, o), request) };
     }
     if (eq(u8, name, "fromjson")) { // vLLM's and SGLang's json.loads, which Step-5's template uses on string arguments
         _ = try bind(rt, "fromjson", &.{}, 0, pos, kw);
         const text = try softStr(c, value);
         const parsed = std.json.parseFromSliceLeaky(std.json.Value, rt.a, text.s, .{}) catch return rt.fail("fromjson: not JSON: {s}", .{text.s});
-        return pyjson.fromJson(rt, parsed);
+        return pyjson.fromJsonDerived(rt, parsed, text.spans.len > 0);
     }
     if (eq(u8, name, "items")) {
         if (v.isUndef(value)) return rt.iter(&.{}, null);
         if (value != .dict) return rt.iter(&.{}, "Can only get item pairs from a mapping.");
         const items = try rt.a.alloc(Value, value.dict.map.count());
-        for (value.dict.map.keys(), value.dict.map.values(), items) |k, x, *it| it.* = try rt.tuple2(Value.string(k), x);
+        for (value.dict.map.keys(), value.dict.map.values(), items) |k, x, *it| it.* = try rt.tuple2(try v.key(rt, value.dict, k), x);
         return rt.iter(items, null);
     }
     if (eq(u8, name, "dictsort")) {
@@ -207,22 +226,22 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
         const items = try rt.a.alloc(Value, map.count());
         const keys = try rt.a.alloc(Value, map.count());
         for (map.keys(), map.values(), items, keys) |k, x, *it, *key| {
-            it.* = try rt.tuple2(Value.string(k), x);
-            const raw = if (by == 0) Value.string(k) else x;
+            it.* = try rt.tuple2(try v.key(rt, value.dict, k), x);
+            const raw = if (by == 0) try v.key(rt, value.dict, k) else x;
             key.* = if (b[0] != null and v.truthy(b[0].?)) raw else try ignoreCase(c, raw);
         }
         return rt.list(try sorted(c, items, keys, if (b[2]) |r| v.truthy(r) else false), .list);
     }
     if (eq(u8, name, "join")) {
         const b = try bind(rt, "join", &.{ "d", "attribute" }, 0, pos, kw);
-        const sep = if (b[0]) |d| try v.toStr(rt, d) else "";
-        var out: std.ArrayList(u8) = .empty;
+        const sep: v.Str = if (b[0]) |d| try v.asStr(rt, d) else .{ .s = "" };
+        var out: v.Buffer = .{};
         for (try access.iterate(rt, value), 0..) |item, i| {
-            if (i > 0) try out.appendSlice(rt.a, sep);
+            if (i > 0) try out.append(rt.a, sep);
             const x = if (b[1]) |at| try attrPath(c, item, at, null) else item;
-            try out.appendSlice(rt.a, try v.toStr(rt, x));
+            try out.append(rt.a, try v.asStr(rt, x));
         }
-        return Value.string(out.items);
+        return .{ .str = out.str() };
     }
     if (eq(u8, name, "list")) return rt.list(try rt.a.dupe(Value, try access.iterate(rt, value)), .list);
     if (eq(u8, name, "map")) {
@@ -268,13 +287,7 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
         return rt.iter(out.items, null);
     }
     if (eq(u8, name, "reverse")) {
-        if (value == .str) {
-            const parts = try access.codepoints(rt, value.str.s);
-            var out: std.ArrayList(u8) = .empty;
-            var i = parts.len;
-            while (i > 0) : (i -= 1) try out.appendSlice(rt.a, parts[i - 1]);
-            return .{ .str = .{ .s = out.items, .safe = value.str.safe } };
-        }
+        if (value == .str) return access.slice(rt, value, .none, .none, .{ .int = -1 });
         const items = access.iterate(rt, value) catch return rt.fail("argument must be iterable", .{});
         const out = try rt.a.dupe(Value, items);
         std.mem.reverse(Value, out);
@@ -290,7 +303,7 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
             if (b[2]) |at| if (at == .str) {
                 var list: std.ArrayList(Value) = .empty;
                 var it = std.mem.splitScalar(u8, at.str.s, ',');
-                while (it.next()) |p| try list.append(rt.a, Value.string(p));
+                while (it.next()) |p| try list.append(rt.a, .{ .str = try at.str.part(rt.a, p) });
                 attrs = list.items;
             } else if (at != .none) {
                 attrs = &.{at};
@@ -316,9 +329,9 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
     if (eq(u8, name, "replace")) {
         const b = try bind(rt, "replace", &.{ "old", "new", "count" }, 2, pos, kw);
         const count: []const Value = if (b[2]) |n| (if (n == .none) &.{} else &.{n}) else &.{};
-        const m = v.Method{ .self = Value.string(try v.toStr(rt, value)), .name = "replace" };
+        const m = v.Method{ .self = .{ .str = try v.asStr(rt, value) }, .name = "replace" };
         var args: std.ArrayList(Value) = .empty;
-        try args.appendSlice(rt.a, &.{ Value.string(try v.toStr(rt, b[0].?)), Value.string(try v.toStr(rt, b[1].?)) });
+        try args.appendSlice(rt.a, &.{ .{ .str = try v.asStr(rt, b[0].?) }, .{ .str = try v.asStr(rt, b[1].?) } });
         try args.appendSlice(rt.a, count);
         return methods.callMethod(rt, &m, args.items, &.{});
     }

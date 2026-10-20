@@ -34,8 +34,8 @@ pub const Scratch = struct {
     }
 };
 
-/// Routed experts over `total` normed rows at x into out; `wide` rows take the prefill kernels, else decode's.
-pub fn rows(e: *E.Engine, router: u64, layer: cuda.experts.Layer, x: u64, out: u64, total: usize, wide: bool) !void {
+/// Routed experts over `total` normed rows at x into out (wide: prefill kernels); `params` word 2 caps the rows.
+pub fn rows(e: *E.Engine, router: u64, layer: cuda.experts.Layer, x: u64, out: u64, total: usize, wide: bool, params: u64) !void {
     const g = e.g;
     const s = e.routed;
     const slots = g.slots();
@@ -45,9 +45,9 @@ pub fn rows(e: *E.Engine, router: u64, layer: cuda.experts.Layer, x: u64, out: u
     const items = cuda.grouped.maxItems(pairs, count, tile);
     const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
     const grouped: cuda.experts.Grouped = .{ .affine4 = &e.experts, .affine3 = &e.experts3 };
-    try e.moe.route(e.stream, x, g.hidden, total, router, s.logits, g.hidden, count);
-    try e.moe.pick(e.stream, s.logits, s.picks, s.wts, total, g.experts, g.top_k);
-    try e.plan.route(e.stream, s.picks, pairs, count, tile, plan);
+    try e.moe.route(e.stream, x, g.hidden, total, router, s.logits, g.hidden, count, params);
+    try e.moe.pick(e.stream, s.logits, s.picks, s.wts, total, g.experts, g.top_k, params);
+    try e.plan.routeRows(e.stream, s.picks, pairs, count, tile, plan, if (params == 0) 0 else params + 2 * 4, slots);
     const rows_in: cuda.experts.Rows = .{ .x = x, .stride = g.hidden, .slots = slots };
     const act_in: cuda.experts.Rows = .{ .x = s.act, .stride = g.intermediate };
     if (wide) {
@@ -57,5 +57,5 @@ pub fn rows(e: *E.Engine, router: u64, layer: cuda.experts.Layer, x: u64, out: u
         try grouped.decode(e.stream, .up, rows_in, layer, plan, s.act, items, -1);
         try grouped.decode(e.stream, .down_f32, act_in, layer, plan, s.y, items, -1);
     }
-    try e.moe.combine(e.stream, s.y, !wide, s.wts, out, total, slots, g.hidden);
+    try e.moe.combine(e.stream, s.y, !wide, s.wts, out, total, slots, g.hidden, params);
 }

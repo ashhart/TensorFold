@@ -1,6 +1,7 @@
 //! Two-rank all-gathers as one-shot RoCE writes after b12x's RoCEnante (local-inference-lab/b12x, Apache-2.0).
 
 const std = @import("std");
+const platform = @import("sys");
 const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const memory = @import("memory.zig");
@@ -212,7 +213,7 @@ const Hca = struct {
 pub const Gather = struct {
     gpa: std.mem.Allocator,
     d: *const Driver,
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: Api,
     rank: u8,
     hcas: [max_hcas]Hca = @splat(.{}),
@@ -284,7 +285,7 @@ pub const Gather = struct {
 
     fn setup(g: *Gather, gpa: std.mem.Allocator, io: std.Io, d: *const Driver, rank: u8, max_bytes: usize) !void {
         g.* = .{ .gpa = gpa, .d = d, .lib = undefined, .api = undefined, .rank = rank, .layout = .of(max_bytes), .region = undefined, .region_dev = 0, .counters = undefined, .module = undefined, .f = undefined, .max_bytes = max_bytes };
-        g.lib = std.DynLib.open("libibverbs.so.1") catch return @import("sys").optional_libraries.unavailable(.verbs);
+        g.lib = platform.DynLib.open("libibverbs.so.1") catch return platform.optional_libraries.unavailable(.verbs);
         errdefer g.lib.close();
         const info = @typeInfo(Api).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {

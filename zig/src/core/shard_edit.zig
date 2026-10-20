@@ -2,6 +2,8 @@
 const std = @import("std");
 const platform = @import("sys");
 const st = @import("safetensors.zig");
+const index_format = @import("checkpoint_index.zig");
+const atomic_file = platform.atomic_file;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Value = std.json.Value;
@@ -52,6 +54,7 @@ pub fn bake(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
     for (edits) |r| if (r.bytes.len != numel(r.shape) * r.dtype.size() or !std.mem.endsWith(u8, r.name, ".weight")) return error.BadReplacement;
     const index_path = try std.fs.path.join(arena, &.{ dir, index_name });
     const index: ?Value = readJson(arena, io, index_path) catch |e| if (e == error.FileNotFound) null else return e;
+    if (index) |ix| _ = try index_format.weightMap(ix);
     var shards: std.StringArrayHashMapUnmanaged(std.ArrayList(Replacement)) = .empty;
     for (edits) |r| {
         const shard = if (index) |ix| str((try field(try field(ix, "weight_map"), r.name))) orelse return error.BadIndex else single_name;
@@ -92,6 +95,7 @@ pub fn grow(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
     for (edits) |r| if (r.bytes.len != numel(r.shape) * r.dtype.size()) return error.BadReplacement;
     const index_path = try std.fs.path.join(arena, &.{ dir, index_name });
     const index: ?Value = readJson(arena, io, index_path) catch |e| if (e == error.FileNotFound) null else return e;
+    if (index) |ix| _ = try index_format.weightMap(ix);
     var shards: std.StringArrayHashMapUnmanaged(std.ArrayList(Replacement)) = .empty;
     for (edits) |r| {
         const shard = if (index) |ix| str((try field(try field(ix, "weight_map"), r.name))) orelse return error.BadIndex else single_name;
@@ -163,6 +167,7 @@ pub fn overwrite(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replace
     const arena = arena_state.allocator();
     const index_path = try std.fs.path.join(arena, &.{ dir, index_name });
     const index: ?Value = readJson(arena, io, index_path) catch |e| if (e == error.FileNotFound) null else return e;
+    if (index) |ix| _ = try index_format.weightMap(ix);
     for (edits) |r| {
         const shard = if (index) |ix| str((try field(try field(ix, "weight_map"), r.name))) orelse return error.BadIndex else single_name;
         const path = try std.fs.path.join(arena, &.{ dir, shard });
@@ -173,7 +178,7 @@ pub fn overwrite(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replace
 /// A tensor of a file written whole by `create`.
 pub const New = struct { name: []const u8, dtype: st.DType, shape: []const usize, bytes: []const u8 };
 
-/// A whole safetensors file at `path`, metadata first, written through `path`.tmp and renamed (old file or new).
+/// A whole safetensors file at `path`, metadata first, published through an exclusively created sibling file.
 pub fn create(gpa: Allocator, path: []const u8, metadata: []const [2][]const u8, tensors: []const New) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -349,38 +354,10 @@ fn writeJson(arena: Allocator, path: []const u8, v: Value) !void {
     try writeFile(arena, path, &.{ text, "\n" });
 }
 
-/// `parts` to `path` through `path`.tmp, synced, then renamed over it; a reader sees the old file or the new one.
-fn writeFile(arena: Allocator, path: []const u8, parts: []const []const u8) !void {
-    try commit(arena, try writeTemp(arena, path, parts), path);
-}
-
-/// `parts` written and synced to `path`.tmp, which is returned.
-fn writeTemp(arena: Allocator, path: []const u8, parts: []const []const u8) ![:0]const u8 {
-    const tmp = try std.fmt.allocPrintSentinel(arena, "{s}.tmp", .{path}, 0);
-    const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o644));
-    if (fd < 0) return error.ShardWrite;
-    errdefer _ = platform.c.unlink(tmp);
-    defer _ = platform.c.close(fd);
-    for (parts) |p| try put(fd, p);
-    if (platform.c.fsync(fd) != 0) return error.ShardWrite;
-    return tmp;
-}
-
-/// `tmp` renamed over `path`; a failed rename removes `tmp`.
-fn commit(arena: Allocator, tmp: [:0]const u8, path: []const u8) !void {
-    errdefer _ = platform.c.unlink(tmp);
-    const dest = try arena.dupeSentinel(u8, path, 0);
-    if (platform.c.rename(tmp, dest) != 0) return error.ShardWrite;
-}
-
-fn put(fd: c_int, b: []const u8) !void {
-    var done: usize = 0;
-    while (done < b.len) {
-        const n = platform.c.write(fd, b.ptr + done, @min(b.len - done, 1 << 30));
-        if (n <= 0) return error.ShardWrite;
-        done += @intCast(n);
-    }
-}
+/// Stage, sync and publish sibling files without following a preexisting temporary path.
+const writeFile = atomic_file.replace;
+const writeTemp = atomic_file.stage;
+const commit = atomic_file.commit;
 
 test "a whole file written with its metadata reads back tensor for tensor" {
     const gpa = std.testing.allocator;

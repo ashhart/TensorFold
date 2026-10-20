@@ -11,10 +11,24 @@ pub const Snap = struct {
     bytes: u64,
     /// The DFlash drafter's context for the same stream at `at` (dflash.zig keepLane), when it had one there.
     draft: ?mtl.Buffer = null,
+    follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn free(self: *Snap) void {
+        if (self.follow) |f| {
+            f.leave(f.ctx, self.buf);
+            if (self.draft) |b| f.leave(f.ctx, b);
+        }
         self.buf.deinit();
         if (self.draft) |b| b.deinit();
+    }
+
+    pub fn setDraft(self: *Snap, buffer: mtl.Buffer) void {
+        if (self.draft) |old| {
+            if (self.follow) |f| f.leave(f.ctx, old);
+            old.deinit();
+        }
+        self.draft = buffer;
+        if (self.follow) |f| f.join(f.ctx, buffer);
     }
 };
 
@@ -60,7 +74,8 @@ pub fn save(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, cache:
     const buf = try device.buffer(@intCast(@max(n, 16)), mtl.ResourceOptions.private);
     errdefer buf.deinit();
     try copy(gpa, queue, cache, cache.len, buf, true);
-    return .{ .buf = buf, .at = @intCast(cache.len), .bytes = n };
+    if (cache.follow) |f| f.join(f.ctx, buf);
+    return .{ .buf = buf, .at = @intCast(cache.len), .bytes = n, .follow = cache.follow };
 }
 
 /// Make `cache` (empty, its capacity past the state) hold `snap`'s state.

@@ -8,6 +8,9 @@ pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
+pub const EmbeddingInfo = lanes.embedding.Info;
+pub const EmbeddingBatch = lanes.embedding.Batch;
+pub const embedding_vector = @import("embedding_vector.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -52,6 +55,7 @@ pub const grammar = lanes.grammar;
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
 pub const Request = struct {
     prompt: []const u32,
+    embedding: ?lanes.embedding.Batch = null,
     max_tokens: u32,
     sampling: ?Sampling = null,
     /// Tokens that end the reply as ``stop`` (the token is delivered); empty when the request ignores EOS.
@@ -76,6 +80,8 @@ pub const Request = struct {
     think_budget: u32 = 0,
     think_close: []const u32 = &.{},
     think_end: ?u32 = null,
+    /// Reply tokens after ``think_end`` at most, within ``max_tokens`` (0: ``max_tokens`` alone; Info.answer_limit).
+    answer_max: u32 = 0,
     /// The offered tools as JSON text, for drafters that propose a call's structure; empty: no tools.
     tools_json: []const u8 = "",
     /// Set only when ``Info`` says the engine enforces it.
@@ -168,6 +174,7 @@ pub const Sink = struct {
 pub const Info = struct {
     name: []const u8 = "lanes",
     text_generation: bool = true,
+    embeddings: ?lanes.embedding.Info = null,
     speech: ?SpeechInfo = null,
     lanes: u32 = 1,
     /// Prompt plus reply tokens one request may use (0: no limit).
@@ -179,6 +186,8 @@ pub const Info = struct {
     loop_guard: bool = false,
     /// The engine enforces a token budget while the think block is open.
     thinking_budget: bool = true,
+    /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).
+    answer_limit: bool = false,
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
@@ -210,6 +219,14 @@ pub const Info = struct {
     slide_conversations: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
+
+    /// What a lane engine's streams enforce themselves (core/lanes/stream.zig): loop guards and answer limits.
+    pub fn ofLanes(i: Info) Info {
+        var out = i;
+        out.loop_guard = true;
+        out.answer_limit = true;
+        return out;
+    }
 };
 
 pub const Admit = struct {
@@ -329,7 +346,7 @@ pub const MemorySource = struct {
 pub const HealthSource = @import("engine_status.zig").HealthSource;
 pub const Status = @import("engine_status.zig").Status;
 
-pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a learner's put-back has not reached the device
+pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest }; // Stale: put-back has not reached the device
 
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
@@ -382,6 +399,14 @@ pub const Engine = struct {
     }
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
+        const info_ = e.info();
+        if (request.embedding) |batch| {
+            const cap = info_.embeddings orelse return error.InvalidRequest;
+            if (info_.text_generation or request.max_tokens != 0 or request.drafts or request.sampling != null or
+                request.images.len != 0 or request.structure != null or request.logprobs != null or
+                request.prompt_logprobs != null or request.decode_spans.len != 0) return error.InvalidRequest;
+            batch.validate(cap, request.prompt, info_.context_window) catch return error.InvalidRequest;
+        } else if (info_.embeddings != null) return error.InvalidRequest;
         return e.vtable.submit(e.ctx, id, request, sink);
     }
     pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
@@ -458,6 +483,8 @@ pub const LoneHooks = struct {
     committed: *const fn (ctx: *anyopaque) void,
     yield: *const fn (ctx: *anyopaque) bool,
     resumed: bool = false, // the stream comes from the lane core between rounds: no prompt pass, its drafts the core's
+    // After a completed nonfinal prompt call, true transfers the unfinished pass to the shared fill queue.
+    prefill_yield: ?*const fn (ctx: *anyopaque) bool = null,
 };
 
 /// The lane core served to the HTTP threads (lane_host.zig).
@@ -494,8 +521,10 @@ pub const originals = @import("originals.zig");
 pub const save_guard = @import("save_guard");
 
 test {
+    _ = @import("lane_embedding_test.zig");
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
+    _ = @import("lane_root_copy_test.zig");
     _ = @import("lane_rounds_test.zig");
     _ = @import("lane_halt_test.zig");
     _ = @import("prompt_cache.zig");

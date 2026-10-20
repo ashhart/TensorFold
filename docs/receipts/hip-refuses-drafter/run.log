@@ -1,0 +1,57 @@
+hint: Using 'master' as the name for the initial branch. This default branch name
+hint: will change to "main" in Git 3.0. To configure the initial branch name
+hint: to use in all of your new repositories, which will suppress this warning,
+hint: call:
+hint:
+hint: 	git config --global init.defaultBranch <name>
+hint:
+hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+hint: 'development'. The just-created branch can be renamed via this command:
+hint:
+hint: 	git branch -m <name>
+hint:
+hint: Disable this message with "git config set advice.defaultBranchName false"
+warning: remote HEAD refers to nonexistent ref, unable to checkout
+Trying simple merge with origin/hip-refuses-drafter
+Simple merge did not work, trying automatic merge.
+Auto-merging docs/community-benchmarks.md
+Auto-merging zig/src/server/benchmark.zig
+Trying simple merge with origin/benchmark-drafter-counts
+Simple merge did not work, trying automatic merge.
+Auto-merging docs/community-benchmarks.md
+Auto-merging zig/src/server/benchmark.zig
+Auto-merging zig/src/server/benchmark_run_test.zig
+fatal: ambiguous argument 'origin/main': unknown revision or path not in the working tree.
+Use '--' to separate paths from revisions, like this:
+'git <command> [<revision>...] -- [<file>...]'
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv  1.9T  1.7T   76G  96% /
+               total        used        free      shared  buff/cache   available
+Mem:             122          96           2           0          24          26
+~/.cache/huggingface/hub/models--TensorFold--Qwen3.6-35B-A3B-MLX-4bit-MTP/snapshots:
+f84b054c5677b6e59bdb969ae61915b0983d68bb
+
+~/.cache/huggingface/hub/models--TensorFold--Qwen3.8-27B-MLX-4bit/snapshots:
+70ae7fac63274ff2eac54152031433374cb80f2f
+llm-server: failed
+gtt_used=1129861120 busy=0 t=17:31:19
+build_exit=0
+e279e29a54b56dc81ff70985f8c4cffaa0d9aff4a7456a234eb7247667492247  ~/tf-1001/zig-out/native-hip/bin/tensorfold-native
+gtt_used=1129861120 busy=0 t=17:33:19
+R1 exit=0
+gtt_used=1129906176 busy=81 t=17:42:02
+R2a exit=1
+ls: cannot access '~/tf-1001-runs/out/27b-dflash2.json': No such file or directory
+gtt_used=1129906176 busy=78 t=17:42:02
+R2b exit=1
+gtt_used=1129861120 busy=57 t=17:42:02
+gtt_used=1129861120 busy=56 t=17:42:02
+R3 exit=0
+gtt_used=1129906176 busy=76 t=17:43:35
+R4 exit=0
+gtt_used=1129906176 busy=84 t=17:45:19
+R5 exit=0
+gtt_used=1682337792 busy=42 t=17:47:01
+RUNDONE
+llm-server: active
+llm-server chat OK after 200s: {"choices":[{"finish_reason":"length","index":0,"message":{"role":"assistant","content":"","reasoning_content":"The user's request is simple. They"}}],"created":1792345812,"model":"Qwen3.8-Flash-Next","system_fingerprint":"b111-d807f04","object":"chat.completion","usag

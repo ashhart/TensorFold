@@ -3,6 +3,7 @@ const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
 const paced_read = @import("../../core/paced_read.zig");
+const index_format = @import("../../core/checkpoint_index.zig");
 
 extern "c" fn msync(addr: *anyopaque, len: usize, flags: c_int) c_int;
 extern "c" fn mincore(addr: *const anyopaque, len: usize, vec: [*]u8) c_int;
@@ -27,9 +28,10 @@ pub fn dropCached(gpa: std.mem.Allocator, dir: []const u8, want: u64, d: *Droppe
     const a = arena_state.allocator();
     const index = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(a, "{s}/model.safetensors.index.json", .{dir}, 0));
     defer index.deinit();
+    if (index.size > index_format.max_bytes) return error.BadIndex;
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, index.bytes[0..index.size], .{ .allocate = .alloc_always });
     var files: std.StringArrayHashMapUnmanaged(void) = .empty;
-    var it = doc.object.get("weight_map").?.object.iterator();
+    var it = (try index_format.weightMap(doc)).iterator();
     while (it.next()) |kv| try files.put(a, kv.value_ptr.string, {});
     const page: usize = std.heap.pageSize();
     for (files.keys()) |name| {

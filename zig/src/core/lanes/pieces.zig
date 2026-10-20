@@ -89,7 +89,7 @@ pub fn finishStreams(e: *Engine, streams: []const *Stream, errs: []?anyerror) !u
         };
     }
     if (reqs.items.len == 0) return 0;
-    e.backend.draft(reqs.items) catch |x| {
+    e.backend.draftIn(e.arena.allocator(), reqs.items) catch |x| {
         for (joins.items) |i| errs[i] = x;
         return 0;
     };
@@ -115,9 +115,9 @@ fn joined(e: *Engine, s: *Stream) !void {
     s.pending = last;
     const position: u64 = s.prompt_len;
     const d = try open.firstDepth(e, s, .head);
-    try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = .{ .value = last }, .rows = null, .start = s.cache_len, .position = position, .depth = d }});
+    try e.backend.draftIn(e.arena.allocator(), &.{.{ .stream = s, .follow = &.{}, .first = .{ .value = last }, .rows = null, .start = s.cache_len, .position = position, .depth = d }});
     s.dropHeld(e.gpa);
-    s.next = .{ .count = d };
+    s.next = .{ .count = if (e.backend.proposals()) s.proposal_depth orelse d else d };
     try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(s.id)), f("depth", int(d)), f("position", int(position)), f("follow", .{ .u32s = &.{last} }), f("rows", .null) });
     try trail.resolve(e);
     try e.live.append(e.gpa, s);
@@ -127,7 +127,7 @@ fn joined(e: *Engine, s: *Stream) !void {
 fn joinedDrafted(e: *Engine, r: be.DraftRequest) !void {
     const s = r.stream;
     s.dropHeld(e.gpa);
-    s.next = .{ .count = r.depth };
+    s.next = .{ .count = r.heldDepth(e.backend) };
     try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(s.id)), f("depth", int(r.depth)), f("position", int(r.position)), f("follow", .{ .u32s = &.{s.pending.?} }), f("rows", .null) });
     try trail.resolve(e);
     try e.live.append(e.gpa, s);

@@ -1,0 +1,100 @@
+{
+  "candidate_size": 3,
+  "coverage": [
+    {
+      "bucket": "*",
+      "covered": 4,
+      "split": "calibration",
+      "tokens": 7
+    },
+    {
+      "bucket": "toy",
+      "covered": 4,
+      "split": "calibration",
+      "tokens": 7
+    },
+    {
+      "bucket": "*",
+      "covered": 3,
+      "split": "selection",
+      "tokens": 4
+    },
+    {
+      "bucket": "toy",
+      "covered": 3,
+      "split": "selection",
+      "tokens": 4
+    },
+    {
+      "bucket": "*",
+      "covered": 0,
+      "split": "heldout",
+      "tokens": 4
+    },
+    {
+      "bucket": "toy",
+      "covered": 0,
+      "split": "heldout",
+      "tokens": 4
+    }
+  ],
+  "identity": {
+    "drafter": {
+      "name": "synthetic-drafter",
+      "revision": "r1",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "format": "bf16",
+    "group": 0,
+    "head": {
+      "name": "proposal-head",
+      "revision": "r1",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "hidden": 8,
+    "recipe": {
+      "name": "synthetic-recipe",
+      "revision": "r1",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "scale_recipe": "none",
+    "target": {
+      "name": "synthetic-target",
+      "revision": "r1",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "tokenizer": {
+      "name": "synthetic-tokenizer",
+      "revision": "r1",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "vocab": 11
+  },
+  "ids": [
+    0,
+    3,
+    7
+  ],
+  "ids_sha256": "455857c521c1dc35d3f8853a83bd559f8405d5853db05216fafb83a14cebd157",
+  "mandatory_ids": [
+    0
+  ],
+  "provenance": {
+    "calibration_sha256": "5be52124952d2ff1e781bce9716655429d2f415ff57b718fd87ebf0747c27dbb",
+    "collector": {
+      "name": "synthetic-collector",
+      "revision": "r1",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "corpus_sha256": "9b726a3351f53f7d54b621feb64d1aae649b8085eaa1f0ff461331ab804000ae",
+    "heldout_sha256": "3135d9995ea2c20fe0b1c148a83d72a57ee1df3361ad888974340316867c2926",
+    "mandatory_source": "synthetic-recipe",
+    "policy_version": 1,
+    "prompts_sha256": "08ca137fa120d4ef4957772220c1286452670dc37d5fee891a8b9c3f34a0e10c",
+    "responses_sha256": "f614a105a5d6a07e3ecfd7b73d4dcc92ef1cbc16bd5a41dd704239062f7128f4",
+    "selection_sha256": "0f7840c288b75ad5df3b269dda34237bcae4c96c661ee107bee858fe29e3a144",
+    "settings_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "source_kind": "committed_response_ids"
+  },
+  "version": 1
+}

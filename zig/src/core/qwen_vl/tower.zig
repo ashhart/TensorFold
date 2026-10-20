@@ -88,8 +88,16 @@ const Scratch = struct {
 };
 
 /// What a tower for `max_tokens` image tokens a request holds: its weights and its scratch.
+pub const Memory = struct { source: usize, weights: usize, scratch: usize };
+
+pub fn memoryPlan(gpa: std.mem.Allocator, c: Config, max_tokens: u32) !Memory {
+    const weights = try wts.plan(gpa, c);
+    return .{ .source = weights.source, .weights = weights.device, .scratch = Scratch.of(c, @as(usize, max_tokens) * c.merge * c.merge).bytes() };
+}
+
 pub fn planBytes(gpa: std.mem.Allocator, c: Config, max_tokens: u32) !usize {
-    return try wts.bytes(gpa, c) + Scratch.of(c, @as(usize, max_tokens) * c.merge * c.merge).bytes();
+    const memory = try memoryPlan(gpa, c, max_tokens);
+    return std.math.add(usize, memory.weights, memory.scratch);
 }
 
 pub const Tower = struct {
@@ -120,13 +128,17 @@ pub const Tower = struct {
 
     /// Kernels, the checkpoint's tower weights (bf16 as stored) and scratch for images of up to `max_tokens` tokens.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: Config, max_tokens: u32) !*Tower {
+        return loadWith(gpa, io, device, dir, c, max_tokens, device);
+    }
+
+    pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: Config, max_tokens: u32, factory: anytype) !*Tower {
         const t = try gpa.create(Tower);
         errdefer gpa.destroy(t);
         t.gpa = gpa;
         t.c = c;
         t.k = try Kernels.load(gpa, device);
         errdefer t.k.deinit();
-        t.w = try wts.load(gpa, io, device, dir, c);
+        t.w = try wts.loadWith(gpa, io, factory, dir, c);
         errdefer t.w.deinit(gpa);
         t.inv = try gpa.alloc(f32, c.headDim() / 4);
         errdefer gpa.free(t.inv);
@@ -135,7 +147,7 @@ pub const Tower = struct {
         t.max_patches = @intCast(P);
         const plan = Scratch.of(c, P);
         t.chunk = plan.chunk;
-        t.scratch = try device.buffer(plan.bytes(), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        t.scratch = try factory.buffer(plan.bytes(), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer t.scratch.deinit();
         var at: usize = 0;
         const views = [_]*Ref{ &t.patches, &t.taps, &t.tap_w, &t.cos, &t.sin, &t.x, &t.xn, &t.att, &t.qkv, &t.q, &t.k_, &t.v, &t.s, &t.o, &t.mid };

@@ -5,6 +5,7 @@ const q27_back_tests = @import("q27_back_tests.zig");
 const q27_gemm_tests = @import("q27_gemm_tests.zig");
 const cuda = @import("cuda");
 const check = @import("check.zig");
+const dump = @import("byte_dump.zig");
 const runtime_tests = @import("runtime_tests.zig");
 const bench = @import("bench.zig");
 const oracle_tests = @import("oracle_tests.zig");
@@ -46,6 +47,8 @@ const exlr8_tests = @import("exlr8_tests.zig");
 const exlr8_dense_tests = @import("exlr8_dense_tests.zig");
 const norms_tests = @import("norms_tests.zig");
 const norm_rows_tests = @import("norm_rows_tests.zig");
+const norm_tail_tests = @import("norm_tail_tests.zig");
+const embed_tests = @import("embed_tests.zig");
 const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
 const contract_tests = @import("contract_tests.zig");
@@ -126,6 +129,8 @@ const usage =
     \\  triton <dir>              a Triton cubin's bits against the Python oracle's fixture
     \\  norms                     RMS norm and the residual step against float64 references (synthetic)
     \\  norm-rows                 bf16-residual and gated norms, token rows against float64 (synthetic)
+    \\  norm-tail                 bf16 residual tails (branch norm, scalar, MLX rounding) against float64 (synthetic)
+    \\  embed-rows                MLX affine token rows (2 to 8 bits, bf16 scale) against float64 (synthetic)
     \\  tree-round                tree_round.cu's picks, batched verified trees and commits against core/tree_round
     \\  act-rows                  SwiGLU, output gates, group sums, DFlash2's dynamic conv against float64 (synthetic)
     \\  gdn-prep                  Gated DeltaNet conv, norms, g and beta against float64 (synthetic)
@@ -156,7 +161,7 @@ const usage =
     \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
     \\  prompt-segments MODEL IDS_FILE   a prompt run as 2 to 4 staggered segments a call equals one uncut pass, byte for byte
     \\  cached-plans-tp2 MODEL IDS_FILE   rank-zero cached plans and prompt resumes with the existing expert rank
-    \\  shared-fork MODEL         the latent MoE's shared expert on the side stream (held back) against one stream, byte for byte
+    \\  shared-fork MODEL         the latent MoE's shared expert on the side stream (held back), lone and in shared windows of 2/4/8 streams, against one stream, byte for byte
     \\  recapture MODEL           graphs captured again while another sequence is bound: both keep their sampling rules
     \\  paged MODEL IDS_FILE      a paged sequence against the own one: prompt pass, decode, resumes across page edges
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
@@ -169,7 +174,8 @@ const usage =
     \\  affine8                   MLX affine 2 to 8-bit tiles and the 8-bit lane_gemv: widened codes, float64, rows (synthetic)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
-    \\  moe                       softmax routing and SwiGLU experts against host references
+    \\  moe                       softmax routing and SwiGLU experts against host references, then moe-live
+    \\  moe-live                  a captured bucket's padding rows: never routed, planned or combined (synthetic)
     \\  experts3                  affine-3 packing and outputs against affine-4 and fp64
     \\  ggml <dir>                Bolt's IQ2_XXS experts and Q8_0 / IQ2_XXS dense rows on real tensors against fp64 (tools/zig/bolt_ggml_fixture.py)
     \\  ggml-bench                IQ2_XXS expert and Q8_0 lm_head decode GB/s (synthetic blocks)
@@ -221,11 +227,14 @@ pub fn main(init: std.process.Init) !u8 {
     const cmd = args[1];
     const rest = args[2..];
 
+    try dump.begin(init.gpa, cmd);
     run(gpu, cmd, rest) catch |e| {
         if (std.mem.eql(u8, cmd, "cached-plans-tp2")) cuda.tp_watch.fatal(@errorName(e));
         std.debug.print("FAIL {s}: {t}\n", .{ cmd, e });
+        try dump.end(init.gpa, cmd, false);
         return 1;
     };
+    try dump.end(init.gpa, cmd, true);
     return 0;
 }
 
@@ -292,6 +301,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-vision")) return glm_vision_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-live")) return @import("moe_live_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "experts3")) return experts3_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "ggml")) return ggml_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ggml-bench")) return ggml_tests.bench(gpu);
@@ -307,6 +317,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "q35-argmax")) return sample_tests.q35Argmax(gpu);
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "norm-tail")) return norm_tail_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "embed-rows")) return embed_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "tree-round")) return tree_round_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "act-rows")) return act_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "gdn-prep")) return gdn_prep_tests.run(gpu);

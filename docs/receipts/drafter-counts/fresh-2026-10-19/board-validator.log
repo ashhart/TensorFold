@@ -1,0 +1,12 @@
+# the board's validator on each fresh receipt, run 2026-10-19T17:52:27Z on the Mac with node v26.9.0
+# protocol.mjs: https://tensorfold.dev/benchmarks/protocol.js fetched 2026-10-19, sha256 0252160a717f4f50e12f9b019beff760ee10e415503ee504d72fc6289fc9cc4b (the same file as on 18 Oct)
+out/27b-auto.json rocm REFUSED: Unsupported benchmark runtime.
+out/27b-auto.json cuda ACCEPTED
+out/35b.json rocm REFUSED: Unsupported benchmark runtime.
+out/35b.json cuda ACCEPTED
+out/35b-serial.json rocm REFUSED: Unsupported benchmark runtime.
+out/35b-serial.json cuda ACCEPTED
+out/35b-attached.json rocm REFUSED: Unsupported benchmark runtime.
+out/35b-attached.json cuda ACCEPTED
+out/35b-hipvis0.json rocm REFUSED: Unsupported benchmark runtime.
+out/35b-hipvis0.json cuda ACCEPTED

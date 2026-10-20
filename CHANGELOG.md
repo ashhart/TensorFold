@@ -2,6 +2,74 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## 1.1.2
+
+- Chat prompts keep request text out of the added vocabulary: a control-token spelling in a message, tool definition, tool result, reasoning field or decision label is encoded as ordinary text, while chat templates still see the real text (#1117). Thanks to @Acermax.
+
+- Tool parameters whose schema is a union (`oneOf`, `anyOf`, `allOf` or a type list) or a local `$ref` are decoded as JSON when the schema takes a non-string value, streamed and not; text that is not JSON keeps what the model wrote (#1121). Thanks to @aartiles.
+
+- Share Flash Next's existing proposal table and exact stored rows without changing its default IDs or packs.
+
+- Prepare exact stored proposal head rows and shared scoring views without changing family defaults or precision.
+
+- Prepare optional shared proposal routing for native and external draft heads, with full or absorb-only fallback.
+
+- The optional 27B Neural Engine share uses a measured 32 MiB private-overhead price and reserves its full size in the prompt-cache budget, including cold builds (#643).
+
+- Shared draft rounds offer one deeper row every eighth round when the row cap permits, retaining normal pricing and trimming (#1059). Thanks to @plotarmordev.
+
+- Nemotron tensor parallelism shares Flash Next's NCCL 2.30.0 minimum, refusing older loaded libraries before rank setup (#1060).
+
+- Linux checkpoint hashing reads runtime SHA2 capabilities through libc when libc owns process startup.
+
+- Streaming research waits for the HTTP response head before sending chat, Messages or Responses keepalives.
+
+- Plain Qwen3.8-27B Metal prompt caching can copy up to four interior DeltaNet marks without separate prompt calls, within the memory bound (#548, #851). Thanks to @jschmied.
+
+- Streaming research replies keep late context-length refusals on the stream while retaining pre-token keepalives (#912). Thanks to @cwschroeder and @akol1.
+
+- Shared CUDA sliding-window attention uses bounded split launches, with sigmoid-routing and dense-row contract fixtures (#798). Thanks to @jschmied.
+
+- Shared CUDA tree and DFlash block attention have exact-replay launch contracts and bounded resource records (#746). Thanks to @jschmied.
+
+- An opt-in GLM CUDA FP8 latent-cache implementation is prepared behind --kv-cache fp8. BF16 remains the default; native quality and device qualification are pending.
+
+- GLM CUDA prompt diagnostics under TF_GLM_PROF report per-rank chunk stages, pieced transport phases and event waits. Timing is diagnostic; context ownership is unchanged.
+
+- Shared serving and prompt scheduling have an embedding request contract with float/base64 output and declared MRL dimensions (#1035). Native EmbeddingGemma-2 loading and device qualification remain pending. Thanks to @jschmied for the RFC.
+
+- On the 27B CUDA path, TF_TIMING reports offered and kept rows, capture bucket and forward time for each verification frame.
+
+- Checkpoint hashing uses a bounded file pool and runtime SHA acceleration, preserving digest identities and atomic cache publication.
+
+- Qwen3.8-27B on CUDA sizes recurrent verification scratch by its live windows, retaining fp32 state and exact rollback.
+
+- Qwen3.8-27B on CUDA can prefer verified context copies over neural proposals through the shared lane core. Copy rounds keep the drafter's committed target rows current and resume neural drafting after rejection.
+
+- Flash Next can reuse precise rotary values across target layers and MTP calls on tensor-unit Metal devices. Admission keeps the direct path when the optional table does not fit.
+
+- Cluster checkpoint headers use the core safetensors parser and validate tensor ranges against the actual file length.
+
+- HTTP serving closes unfinished replies, reports token staging allocation failures, releases SSE frame storage after each write, and shares one public address policy between media and web fetches.
+
+- Mac source build instructions name full Xcode and its Metal Toolchain component, and the build example uses the package manifest's version (#1049). Thanks to @akol1.
+
+- HTTP serving bounds total request-head and body reads, caps open connections at 128, and returns 503 with Retry-After when full. Inference and streamed replies keep their existing timing policy.
+
+- Living Weights implementation and safety work is already in the 1.1.1 tree. Its model, retention and save/restart qualification remains pending; the #1029 lesson-counter repair is excluded and remains held.
+
+- Flash Next on Metal checks its weights, startup scratch and requested storage against the RAM/GPU-bounded load ceiling before loading (#1039). Thanks to @hudsonwa.
+
+- Qwen on CUDA keeps DFlash and MTP proposal and live context projections on native arithmetic regardless of shared frame size. Prompt ingestion retains its historical arithmetic.
+
+- Qwen on single-GPU HIP polls cancellation inside prompt chunks, releasing cancelled work at layer boundaries (#1028). Thanks to @ThinkOffApp.
+
+- Metal serving keeps weights, stream state and draft, image and speech working buffers resident between requests within the memory bound. GLM enables the shared set by default; `GLM_RESIDENCY=0` turns it off.
+
+- Flash Next on Metal fills response prompts through the shared lane host, with at most 32 prompt rows per choice beside a decoder. A long prompt started alone can hand unfinished work to the host when another request arrives, retaining its session and MTP lookahead (#1032). Thanks to @tpischke.
+
+- Qwen3.8-27B on M1 to M4 takes prompt chunks through the M5's prompt attention, on simdgroup matrices: on an M3 Ultra a cold 32,768-token prompt runs at 269 tokens/s instead of 176, and 8,192 tokens at 295 instead of 251. Each prompt row used to read every key alone through the decode tail kernel. A row's bits still never depend on how its prompt is cut, its error against float64 stays at bf16's half step, and decoded rows are unchanged (#918). Thanks to @astro-15-alive.
+
 ## 1.1.1
 
 - The app checks models through HTTPS Hub fake-IP proxies in both address families and honours one validated `HF_ENDPOINT` for checks and downloads. Network-policy refusals name the DNS address and proxy remedy (#1037). Thanks to @samwang0041-star.
@@ -141,7 +209,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 These changes are not shipped in 1.1.0 and remain conditional on their final gates; a failed gate moves the work to the following patch release.
 
-- Living Weights retention, rounded commit/rollback, conversation and supplied-question work, and the Flash Next/Qwen CUDA learners (#876, #877, #878, #891, #905, #992, #895, #896, #911). The existing learner's #910 correction above remains in 1.1.0. Thanks to @ZackSample, @philip-pentatonic, @akol1 and @BobClawblaw.
+- Living Weights implementation and safety work, including retention, rounded commit/rollback, conversation and supplied-question work, Flash Next/Qwen CUDA learners, lesson progress and save/restart pieces, is in 1.1.1 (#876, #877, #878, #891, #905, #992, #895, #896, #911). Model, retention and save/restart qualification remains pending. The #1029 lesson-counter repair is excluded and remains held: rejected lessons must not shift the prompts used for later training and checks. The existing learner's #910 correction above remains in 1.1.0. Thanks to @ZackSample, @philip-pentatonic, @akol1 and @BobClawblaw.
 - Flash Next on Metal's images/video and million-token window (#986, #1005), still held for the rotary-bound contract and actual probe rerun. Its separate shared-session cache-count and lone-decode repair is held for a later 1.1.x, outside the current 1.1.1 series. Thanks to @BobClawblaw, @cwschroeder and @sethforprivacy.
 - The larger Qwen CUDA lane rounds, verification trees, batched drafting and lone-stream speed work (#978), distinct from the Metal 27B speed work shipped above. Thanks to @BobClawblaw and the shared CUDA contributors.
 - DeepSeek-V4.1 runtime and family integration (#635, #636, #637, #663, #682, #667, #668, #671, #674, #686, #688, #691, #693, #694, #695, #699, #702, #703, #707, #727, #824, #825, #826, #827), and Kolibri text CUDA (#991). Shared contracts do not announce a complete DeepSeek Metal backend. Thanks to @jayleaton, @akol1, @ajensenwaud and @jschmied, retaining the common operator attributions.

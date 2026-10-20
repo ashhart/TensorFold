@@ -61,8 +61,8 @@ const Text = struct {
         return &.{eos};
     }
 
-    fn render(_: *anyopaque, a: std.mem.Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
-        return a.dupe(u8, "prompt");
+    fn render(_: *anyopaque, a: std.mem.Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        return .{ .text = try (a.dupe(u8, "prompt")) };
     }
 
     fn templateSource(_: *anyopaque) []const u8 {

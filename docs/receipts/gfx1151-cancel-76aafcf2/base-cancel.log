@@ -1,0 +1,8 @@
+FAIL cancel 0: released 4.73 s after the disconnect (max 0.50); the next short request took 6.55 s (alone 1.90 s, slack 0.50)
+FAIL cancel 1: released 4.74 s after the disconnect (max 0.50); the next short request took 6.53 s (alone 1.90 s, slack 0.50)
+FAIL cancel 2: released 4.72 s after the disconnect (max 0.50); the next short request took 6.54 s (alone 1.90 s, slack 0.50)
+server: 6 cancelled requests ended 5.08 to 5.14 s after they arrived (arrival to end, not disconnect to release)
+1.0.12 receipt 27B: next short 6.49 to 6.51 s, alone 1.90 s, cancelled requests ended 5.04 to 5.07 s after arrival
+this run: next short at most 6.55 s, alone 1.90 s: -0.06 s against the receipt's best
+summary {"model": "amd-cancel-27b", "words": 2200, "drop_after_s": 0.4, "alone_s": 1.899, "slack_s": 0.5, "release_max_s": 0.5, "trials": [{"release_s": 4.73, "after_short_s": 6.548, "running_at_drop": true, "same_text": true, "same_native_tokens": true, "ok": false}, {"release_s": 4.744, "after_short_s": 6.532, "running_at_drop": true, "same_text": true, "same_native_tokens": true, "ok": false}, {"release_s": 4.72, "after_short_s": 6.543, "running_at_drop": true, "same_text": true, "same_native_tokens": true, "ok": false}], "baseline_native_token_sha256": "ad11ca37c7fcabaf13c8fc1142956890438c4ca49c58d6f579c3eef5485b77d5", "lifetime_s": [5.13, 5.1, 5.14, 5.08, 5.12, 5.08], "failed": 3, "receipt_27b": {"after_short_s": [6.49, 6.51], "alone_s": 1.9, "lifetime_s": [5.04, 5.07]}}
+failed 3

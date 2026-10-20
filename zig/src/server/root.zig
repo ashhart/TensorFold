@@ -16,6 +16,10 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("vision_markers_test.zig");
+    _ = @import("embedding_protocol_test.zig");
+    _ = @import("embedding_service_test.zig");
+    _ = @import("http_limits_test.zig");
     _ = @import("done_times_test.zig");
     _ = @import("drain_test.zig");
     _ = @import("keepalive_test.zig");
@@ -42,7 +46,7 @@ test {
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
     _ = @import("speech.zig");
-    _ = @import("speech_stream_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
     _ = @import("drama_prompt.zig");
     _ = @import("health_test.zig");
     _ = @import("memory_routes.zig");
@@ -59,18 +63,23 @@ test {
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("logprobs_test.zig");
+    _ = @import("thinking_reserve_test.zig");
     _ = @import("late_system_test.zig");
     _ = @import("compact_test.zig");
     _ = @import("request_log.zig");
     _ = @import("completion_prompt_test.zig");
+    _ = @import("hf_eos_http_test.zig");
     _ = @import("server_init_test.zig");
     _ = @import("decisions.zig");
     _ = @import("decisions_test.zig");
     _ = @import("systemone.zig");
     _ = @import("systemone_test.zig");
     _ = @import("slide_context_test.zig");
-    _ = @import("slide_stream_test.zig");
-    _ = @import("slide_save_stream_test.zig");
+    // both run over Unix socket pairs
+    if (comptime @import("builtin").os.tag != .windows) {
+        _ = @import("slide_stream_test.zig");
+        _ = @import("slide_save_stream_test.zig");
+    }
     _ = @import("slide_writer_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_cli.zig");
@@ -116,7 +125,9 @@ test {
         _ = @import("benchmark_stream_test.zig");
         _ = @import("benchmark_server_test.zig");
         _ = @import("benchmark_facts_test.zig");
+        _ = @import("benchmark_rocm_test.zig");
         _ = @import("benchmark_manifest.zig");
+        _ = @import("benchmark_drafts.zig");
         _ = @import("benchmark_upload.zig");
         _ = @import("benchmark_upload_test.zig");
         _ = @import("benchmark_args.zig");
@@ -125,11 +136,11 @@ test {
         _ = @import("benchmark_early_test.zig");
         _ = @import("benchmark_publication_test.zig");
         _ = @import("benchmark_chat_only_test.zig");
+        _ = @import("benchmark_config_test.zig");
     }
 }
 
 test {
-    _ = @import("benchmark_config_test.zig");
     _ = @import("slide_retention_test.zig");
 }
 
@@ -139,4 +150,16 @@ test {
 
 test {
     _ = @import("slide_subject_guard_test.zig");
+    _ = @import("server_recovery_test.zig");
+}
+
+test {
+    _ = @import("cortheon/gate_test.zig");
+    _ = @import("cortheon/gate_http_test.zig");
+}
+
+test {
+    _ = @import("control_tokens_http_test.zig");
+    _ = @import("request_provenance_test.zig");
+    _ = @import("request_cost_test.zig");
 }

@@ -6,6 +6,10 @@ const production = @import("checkpoint_identity.zig");
 const identity = production.identity;
 const Content = production.Content;
 
+test {
+    _ = @import("checkpoint_parallel_test.zig");
+}
+
 /// A test checkpoint: config.json, a dense and a 1 MiB expert tensor, a manifest of `manifest_sha` (else the shard's).
 pub fn write(io: Io, dir: Io.Dir, sub: []const u8, config: []const u8, dense: u8, flip: ?usize, manifest_sha: ?[32]u8) !void {
     const gpa = std.testing.allocator;
@@ -124,6 +128,7 @@ fn fixturePaths(a: std.mem.Allocator, tmp: *const std.testing.TmpDir, sub: []con
 }
 
 test "whole and split consumers share cached file digests and still check manifests" {
+    if (!@import("digest_key.zig").persistent) return error.SkipZigTest;
     const a = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -168,6 +173,7 @@ test "full checkpoint identity includes payloads and detects changed files at re
 }
 
 test "a corrupt shared digest cache refuses the real content consumer" {
+    if (!@import("digest_key.zig").persistent) return error.SkipZigTest;
     const a = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});

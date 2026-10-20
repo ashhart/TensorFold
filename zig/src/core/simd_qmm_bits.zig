@@ -16,12 +16,15 @@ pub const Pipelines = struct {
     device: mtl.Device,
     lib: mtl.Library,
     built: [bit_widths.len][s_values.len][nt_values.len][2]?mtl.Pipeline = @splat(@splat(@splat(@splat(null)))),
+    /// Simdgroups a 16-row tile of a grid of at least 512 groups takes at most: 4 on the M1, else 16.
+    wide: usize = 16,
     scalar: [bit_widths.len][s_values.len][2][simd.max_scalar_rows]?mtl.Pipeline = @splat(@splat(@splat(@splat(null)))),
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        return .{ .device = device, .lib = try mtl.Library.fromSource(device, sources.core_simd_qmm_bits, mtl.CompileOptions.mlx()) };
+        const wide: usize = if (device.generation() == 13) 4 else 16;
+        return .{ .device = device, .lib = try mtl.Library.fromSource(device, sources.core_simd_qmm_bits, mtl.CompileOptions.mlx()), .wide = wide };
     }
 
     pub fn deinit(p: *Pipelines) void {
@@ -75,9 +78,11 @@ pub fn call(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ld: usize,
     const rt: u32 = @min(2, @as(u32, @intCast((rows + 7) / 8)));
     const nt = simd.tiles(n, rt, s);
     const pipeline = try p.get(bits, s, nt, rt);
-    const sgs: usize = @min(s, 16, pipeline.maxThreads() / 32);
+    const groups = mtl.Size{ .width = (n + 8 * nt - 1) / (8 * nt), .height = (rows + 8 * rt - 1) / (8 * rt) };
+    const many = rt == 2 and s <= 16 and groups.width * groups.height >= 512;
+    const sgs: usize = @min(s, if (many) p.wide else 16, pipeline.maxThreads() / 32);
     if (sgs == 0) return error.SimdThreads;
-    return .{ .pipeline = pipeline, .args = args, .groups = .{ .width = (n + 8 * nt - 1) / (8 * nt), .height = (rows + 8 * rt - 1) / (8 * rt) }, .threads = sgs * 32 };
+    return .{ .pipeline = pipeline, .args = args, .groups = groups, .threads = sgs * 32 };
 }
 
 /// A checkpoint's [n, k] matrix of `bits` codes: words [n][k*bits/32], scales and biases [n][k/64] bf16.

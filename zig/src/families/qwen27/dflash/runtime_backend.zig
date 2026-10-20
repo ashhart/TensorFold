@@ -26,7 +26,7 @@ pub const Tiled = struct {
     biases: mtl.Buffer,
     n: usize,
     k: usize,
-    fn init(device: mtl.Device, p: core.affine4.Prepared) !Tiled {
+    pub fn init(device: mtl.Device, p: core.affine4.Prepared) !Tiled {
         const w = try device.buffer(p.words.len * 4, options);
         errdefer w.deinit();
         const scales = try device.buffer(p.scales.len * 2, options);
@@ -37,7 +37,7 @@ pub const Tiled = struct {
         @memcpy(biases.slice(u16, p.biases.len), p.biases);
         return .{ .w = w, .scales = scales, .biases = biases, .n = p.n, .k = p.k };
     }
-    fn deinit(t: Tiled) void {
+    pub fn deinit(t: Tiled) void {
         t.w.deinit();
         t.scales.deinit();
         t.biases.deinit();
@@ -53,6 +53,7 @@ const part_ops = 40;
 const first_part_ops = 6;
 pub const Backend = struct {
     allocator: std.mem.Allocator,
+    residency: ?mtl.ResidencySet.Follow = null,
     target: *Target,
     checkpoint: *core.checkpoint_metal.Checkpoint,
     config: cfg.Config,
@@ -85,7 +86,12 @@ pub const Backend = struct {
         const caches = try newCaches(a, target.device, c, c.layers);
         return .{ .allocator = a, .target = target, .checkpoint = checkpoint, .config = c, .primitives = primitives, .attention = attention, .topk = topk, .head = head, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = caches };
     }
+    pub fn setResident(b: *Backend, hook: ?mtl.ResidencySet.Follow) void {
+        @import("../residency.zig").setDraft(b, hook);
+    }
+
     pub fn deinit(b: *Backend) void {
+        b.setResident(null);
         b.frame.deinit();
         var prepared = b.prepared.valueIterator();
         while (prepared.next()) |adapter| adapter.deinit();
@@ -129,16 +135,10 @@ pub const Backend = struct {
         defer prepared_words.deinit();
         if (order) |o| {
             const adapter = try core.affine4_lane.Adapter.init(b.allocator, b.target.device, prepared_words, try @import("../projection.zig").split(shape[0], shape[1]), o);
-            b.prepared.put(b.allocator, key, adapter) catch |err| {
-                adapter.deinit();
-                return err;
-            };
+            try @import("../residency.zig").putPrepared(b, key, adapter);
         } else {
             const t = try Tiled.init(b.target.device, prepared_words);
-            b.tiled.put(b.allocator, key, t) catch |err| {
-                t.deinit();
-                return err;
-            };
+            try @import("../residency.zig").putTiled(b, key, t);
         }
     }
     /// The draft's linears: its rank-2 weights, which q4 drafts read only through their prepared copies.

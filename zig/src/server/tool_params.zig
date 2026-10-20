@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json");
 const reply_text = @import("reply_text.zig");
 const tool_specs = @import("tool_specs.zig");
+const tool_kinds = @import("tool_kinds.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -15,8 +16,14 @@ pub fn parseObject(a: Allocator, text: []const u8) Allocator.Error!?Value {
     return if (v == .object) v else null;
 }
 
+/// One offered tool's parameter schemas: its properties, and the root its references point into.
+pub const Tool = struct {
+    properties: *const json.Object,
+    root: Value,
+};
+
 /// Each offered tool's parameter schemas by lowercase name.
-pub const Schemas = std.StringHashMapUnmanaged(*const json.Object);
+pub const Schemas = std.StringHashMapUnmanaged(Tool);
 
 pub fn schemas(a: Allocator, tools: []const Value) Allocator.Error!Schemas {
     var out: Schemas = .empty;
@@ -40,35 +47,34 @@ pub fn schemas(a: Allocator, tools: []const Value) Allocator.Error!Schemas {
             if (v == .object) try kept.put(a, k, v);
         };
         const name = if (function.get("name")) |n| try tool_specs.pyStr(a, n) else "";
-        try out.put(a, try std.ascii.allocLowerString(a, name), kept);
+        try out.put(a, try std.ascii.allocLowerString(a, name), .{ .properties = kept, .root = parameters });
     }
     return out;
 }
 
+/// One parameter's schema, with the root its references point into.
+pub const Schema = struct {
+    value: Value,
+    root: Value,
+};
+
 /// The schema of ``key`` in tool ``name``, or an empty one.
-pub fn schemaOf(s: *const Schemas, name: []const u8, key: []const u8, a: Allocator) Allocator.Error!Value {
+pub fn schemaOf(s: *const Schemas, name: []const u8, key: []const u8, a: Allocator) Allocator.Error!Schema {
     const lower = try std.ascii.allocLowerString(a, name);
-    const props = s.get(lower) orelse return .{ .object = try json.newObject(a) };
-    return props.get(key) orelse .{ .object = try json.newObject(a) };
+    const tool = s.get(lower) orelse return try emptySchema(a);
+    return .{ .value = tool.properties.get(key) orelse .{ .object = try json.newObject(a) }, .root = tool.root };
 }
 
-const Kind = enum { array, object, boolean, integer, number, null };
-
-fn kindOf(schema: Value) ?Kind {
-    const t = schema.get("type") orelse return null;
-    if (t != .string) return null;
-    return std.meta.stringToEnum(Kind, t.string);
+/// The schema of a parameter no tool declares.
+pub fn emptySchema(a: Allocator) Allocator.Error!Schema {
+    const empty = try json.newObject(a);
+    return .{ .value = .{ .object = empty }, .root = .{ .object = empty } };
 }
 
-fn valid(kind: Kind, v: Value) bool {
-    return switch (kind) {
-        .array => v == .array,
-        .object => v == .object,
-        .boolean => v == .bool,
-        .integer => v == .int,
-        .number => v == .int or v == .float,
-        .null => v == .null,
-    };
+/// The schema takes a value that is not a string: a union of them, a list of types, or a plain typed schema.
+pub fn schemaTakesJson(a: Allocator, schema: Schema) Allocator.Error!bool {
+    const kinds = (try tool_kinds.schemaKinds(a, schema.value, schema.root)) orelse return false;
+    return tool_kinds.takesJson(kinds);
 }
 
 /// ``json.dumps(v, allow_nan=False)`` succeeds: no NaN or infinity anywhere.
@@ -112,9 +118,10 @@ pub fn closedJson(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
 }
 
 /// ``decode_parameter``: the schema's type when the text spells one, else the text; ``python`` also reads Python's spelling.
-pub fn decode(a: Allocator, value: []const u8, schema: Value, python: bool) Allocator.Error!Value {
-    const kind = kindOf(schema) orelse return .{ .string = value };
-    const closed: ?[]const u8 = if (kind == .array or kind == .object) try closedJson(a, value) else null;
+pub fn decode(a: Allocator, value: []const u8, schema: Schema, python: bool) Allocator.Error!Value {
+    const kinds = (try tool_kinds.schemaKinds(a, schema.value, schema.root)) orelse return .{ .string = value };
+    if (!tool_kinds.takesJson(kinds)) return .{ .string = value };
+    const closed: ?[]const u8 = if (kinds.contains(.array) or kinds.contains(.object)) try closedJson(a, value) else null;
     for ([_]?[]const u8{ value, closed }) |candidate| {
         const text = candidate orelse continue;
         const parsed = switch (try json.parseText(a, text)) {
@@ -122,12 +129,12 @@ pub fn decode(a: Allocator, value: []const u8, schema: Value, python: bool) Allo
             .err => continue,
         };
         if (!finite(parsed)) continue;
-        return if (valid(kind, parsed)) parsed else .{ .string = value };
+        return if (tool_kinds.accepts(kinds, parsed)) parsed else .{ .string = value };
     }
     if (!python) return .{ .string = value };
     const parsed = (try pythonLiteral(a, value)) orelse return .{ .string = value };
     if (!finite(parsed)) return .{ .string = value };
-    return if (valid(kind, parsed)) parsed else .{ .string = value };
+    return if (tool_kinds.accepts(kinds, parsed)) parsed else .{ .string = value };
 }
 
 /// ``_python_literal``: True, None, quoted strings, numbers, lists, tuples and dicts; null if ``text`` is not one.
@@ -374,17 +381,23 @@ const Literal = struct {
     }
 };
 
+/// The schema of a parameter, with the root its references point into.
+fn parseSchema(a: Allocator, text: []const u8) Allocator.Error!Schema {
+    const value = (try json.parse(a, text)).ok;
+    return .{ .value = value, .root = value };
+}
+
 test "decode parameters" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const int_schema = (try json.parse(a, "{\"type\": \"integer\"}")).ok;
+    const int_schema = try parseSchema(a, "{\"type\": \"integer\"}");
     try std.testing.expectEqualStrings("5", (try decode(a, "5", int_schema, true)).int);
     try std.testing.expectEqualStrings("5.5", (try decode(a, "5.5", int_schema, true)).string);
-    const arr = (try json.parse(a, "{\"type\": \"array\"}")).ok;
+    const arr = try parseSchema(a, "{\"type\": \"array\"}");
     const closed = try decode(a, "[1, [2]", arr, true);
     try std.testing.expectEqual(@as(usize, 2), closed.array.len);
     const py = try decode(a, "['a', None, True]", arr, true);
     try std.testing.expectEqualStrings("[\"a\", null, true]", try json.stringify(a, py, .{}));
-    try std.testing.expectEqual(Value.null, (try decode(a, " None ", (try json.parse(a, "{\"type\": \"null\"}")).ok, true)));
+    try std.testing.expectEqual(Value.null, (try decode(a, " None ", try parseSchema(a, "{\"type\": \"null\"}"), true)));
 }

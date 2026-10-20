@@ -186,15 +186,16 @@ pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]
     };
     defer mapped.map.destroy(io);
     defer mapped.file.close(io);
+    if (mapped.map.memory.len > st.index.max_bytes) return error.BadIndex;
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, mapped.map.memory, .{});
     defer parsed.deinit();
-    const weight_map = parsed.value.object.get("weight_map") orelse return identityFromMapped(gpa, null, config, shards.items);
+    const weight_map = try st.index.weightMap(parsed.value);
     var names: std.ArrayList([]const u8) = .empty;
     defer {
         for (names.items) |n| gpa.free(n);
         names.deinit(gpa);
     }
-    var it = weight_map.object.iterator();
+    var it = weight_map.iterator();
     while (it.next()) |kv| {
         var dup = false;
         for (names.items) |n| if (std.mem.eql(u8, n, kv.value_ptr.string)) {
@@ -246,6 +247,20 @@ pub fn checkSource(gpa: std.mem.Allocator, io: Io, pack_path: []const u8, model_
     defer gpa.free(recorded);
     const identity = try sourceIdentity(gpa, io, model_dir);
     defer gpa.free(identity);
+    if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
+}
+
+/// Validate a supplied pack's existing identity policy using only its unpopulated mapping and header.
+pub fn checkIdentityPath(gpa: std.mem.Allocator, io: Io, path: []const u8, identity: []const u8) !void {
+    var mapped = try mapFile(io, path);
+    defer mapped.map.destroy(io);
+    defer mapped.file.close(io);
+    const hl = try headerLen(mapped.map.memory);
+    const recorded = recordedSource(gpa, mapped.map.memory[8..][0..hl]) catch |err| switch (err) {
+        error.PackHasNoSource => return, // the existing supplied-pack warning is emitted by the actual loader
+        else => return err,
+    };
+    defer gpa.free(recorded);
     if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
 }
 

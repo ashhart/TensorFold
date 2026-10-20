@@ -16,6 +16,7 @@ pub const Probe = struct {
     factor: f64 = 0,
     long_positions: bool = false,
     accuracy: ?*const f.rotary_accuracy.Receipt = null,
+    before: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque, mtl.ComputeEncoder) void } = null,
     shape: c.Shape = undefined,
     host: []u16 = &.{},
     positions: []i32 = &.{},
@@ -115,6 +116,7 @@ pub const Probe = struct {
     pub fn run(p: *Probe) !void {
         const pass = p.rig.begin();
         const e = pass.e;
+        if (p.before) |hook| hook.call(hook.ctx, e);
         e.setPipeline(p.pipe);
         if (p.which == .mask) {
             e.setBuffer(p.out[0].buf, p.out[0].off, 0);

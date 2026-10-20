@@ -1,0 +1,37 @@
+community-v1: code and chat, 2 temperatures, 5 repeats after warm-up.
+This generates model replies; use Ctrl-C to cancel. Nothing is uploaded unless you publish.
+This run passes no drafter: the HIP engine runs no DFlash2 drafter yet.
+code T=1 warm-up: ok 12.83 delivery tok/s
+code T=1 repeat 1/5: ok 12.82 delivery tok/s
+code T=1 repeat 2/5: ok 12.88 delivery tok/s
+code T=1 repeat 3/5: ok 13.53 delivery tok/s
+code T=1 repeat 4/5: ok 12.85 delivery tok/s
+code T=1 repeat 5/5: ok 12.88 delivery tok/s
+chat T=1 warm-up: ok 12.90 delivery tok/s
+chat T=1 repeat 1/5: ok 12.90 delivery tok/s
+chat T=1 repeat 2/5: ok 12.89 delivery tok/s
+chat T=1 repeat 3/5: ok 12.88 delivery tok/s
+chat T=1 repeat 4/5: ok 12.88 delivery tok/s
+chat T=1 repeat 5/5: ok 12.83 delivery tok/s
+code T=0 warm-up: ok 12.84 delivery tok/s
+code T=0 repeat 1/5: ok 12.84 delivery tok/s
+code T=0 repeat 2/5: ok 12.84 delivery tok/s
+code T=0 repeat 3/5: ok 12.85 delivery tok/s
+code T=0 repeat 4/5: ok 12.84 delivery tok/s
+code T=0 repeat 5/5: ok 12.84 delivery tok/s
+chat T=0 warm-up: ok 13.13 delivery tok/s
+chat T=0 repeat 1/5: ok 13.13 delivery tok/s
+chat T=0 repeat 2/5: ok 13.13 delivery tok/s
+chat T=0 repeat 3/5: ok 13.13 delivery tok/s
+chat T=0 repeat 4/5: ok 13.13 delivery tok/s
+chat T=0 repeat 5/5: ok 13.13 delivery tok/s
+Run f19a552e-8f32-4f08-9911-0d193bae553d | rocm | TensorFold/Qwen3.8-27B-MLX-4bit
+Workload       Temp    Stream delivery tok/s    First text, s    Status
+code           1      12.88                     0.246            complete
+chat           1      12.88                     0.493            complete
+code           0      12.84                     0.252            complete
+chat           0      13.13                     0.508            complete
+Stream delivery includes transport buffering; it is not an engine token clock.
+This rocm receipt is saved locally; it cannot be published until the board accepts rocm.
+Receipt saved: ~/tf-1001-fresh-runs/out/27b-auto.json
+Draft counts: 70 of 262 drafted tokens accepted over 5030 rounds (20 of 20 attempts reported them); saved: ~/tf-1001-fresh-runs/out/27b-auto.drafts.json

@@ -185,6 +185,7 @@ test "a pocket rounded in place is what a write hands back, and writing it again
 }
 
 test "a write that fails at the second shard leaves the first written; writing the old pocket again restores it" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the failing shard is a POSIX file mode
     if (std.c.geteuid() == 0) return error.SkipZigTest; // a read-only file stops no one running as root
     const gpa = std.testing.allocator;
     const io = std.testing.io;

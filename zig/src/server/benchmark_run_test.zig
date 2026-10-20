@@ -5,6 +5,7 @@ const cli = @import("benchmark_cli_test.zig");
 const Run = cli.Run;
 const benchmark = @import("benchmark.zig");
 const receipt = @import("benchmark_receipt.zig");
+const json = @import("json");
 
 const short = [_][]const u8{ "--tokens", "4", "--reps", "1", "--temperatures", "0" };
 
@@ -207,6 +208,36 @@ test "--drafter auto passes the family's drafter only when it is cached and says
     try std.testing.expect(!r.has(named) and !try passed(&r, "--drafter") and try passed(&r, "--no-drafts"));
 }
 
+test "a rocm run refuses a named --drafter before any serve child, and auto names no drafter on rocm" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const m = try cli.managedWorld(a, false);
+    defer m.stop();
+    r.self_exe = try cli.standIn(&r, m.port);
+    const hub = try r.path("hub");
+    try r.env.put("HF_HUB_CACHE", hub);
+    const drafter = "z-lab/Qwen3.8-27B-DFlash2";
+    try cache(a, hub, drafter);
+    const big = try r.path("big-checkpoint");
+    try std.Io.Dir.cwd().createDirPath(io, big);
+    const config = "{\"model_type\": \"qwen3_5\", \"hidden_size\": 5120, \"num_hidden_layers\": 64}";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ big, "config.json" }), .data = config });
+    for ([_][]const u8{ drafter, try r.path("hub") }) |named| {
+        try std.testing.expectEqual(@as(u8, 1), try r.command(try argv(&r, &.{ big, "--backend", "rocm", "--drafter", named })));
+        try std.testing.expect(r.has(benchmark.rocm_drafter) and !r.has("This generates model replies") and m.count() == 0);
+        try missing(try r.path("pid"));
+        try missing(try r.path(".tensorfold"));
+    }
+    const parsed = (try json.parse(a, config)).ok;
+    try std.testing.expectEqualStrings(drafter, benchmark.autoDrafter(parsed, "cuda", false).?);
+    try std.testing.expect(benchmark.autoDrafter(parsed, "rocm", false) == null and benchmark.autoDrafter(parsed, "cuda", true) == null);
+}
+
 test "a greedy-only engine's refusal is printed once with its reason and what to run instead, never saved" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -362,5 +393,57 @@ test "an attached run whose accepted manifest lacks its rank count or revision i
         try std.testing.expectEqualStrings("partial", v.get("hardware").?.get("source").?.string);
         const missing_field = if (i == 0) v.get("settings").?.get("rank_count").? else v.get("model").?.get("revision").?;
         try std.testing.expect(missing_field == .null);
+    }
+}
+
+test "the draft counts beside the receipt show whether a passed drafter drafted, and the receipt keeps the board's fields" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const hub = try r.path("hub");
+    try r.env.put("HF_HUB_CACHE", hub);
+    const drafter = "z-lab/Qwen3.8-27B-DFlash2";
+    try cache(a, hub, drafter);
+    const big = try r.path("big-checkpoint");
+    try std.Io.Dir.cwd().createDirPath(io, big);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ big, "config.json" }), .data = "{\"model_type\": \"qwen3_5\", \"hidden_size\": 5120, \"num_hidden_layers\": 64}" });
+    const out = try r.path("run.json");
+    const counts = try r.path("run.drafts.json");
+    const Case = struct { speculative: []const u8, drafter: []const u8, line: []const u8, fields: []const []const u8, unproven: bool };
+    const cases = [_]Case{
+        .{ .speculative = "\"rounds\": 3, \"drafted\": 4, \"accepted\": 3, \"acceptance_rate\": 0.75", .drafter = "auto", .line = "Draft counts: 6 of 8 drafted tokens accepted over 6 rounds (2 of 2 attempts reported them); saved: ", .fields = &.{ "\"drafter_passed\":true", "\"drafter_repo_id\":\"" ++ drafter ++ "\"", "\"accepted\":3,\"completion_tokens\":4,\"drafted\":4", "\"totals\":{\"accepted\":6,\"attempts\":2,\"drafted\":8,\"reported\":2,\"rounds\":6}" }, .unproven = false },
+        .{ .speculative = "\"rounds\": 4, \"drafted\": 0, \"accepted\": 0", .drafter = "auto", .line = "Draft counts: 0 of 0 drafted tokens accepted over 8 rounds (2 of 2 attempts reported them); saved: ", .fields = &.{"\"drafter_passed\":true"}, .unproven = true },
+        .{ .speculative = "\"rounds\": 4, \"drafted\": 0, \"accepted\": 0", .drafter = "none", .line = "Draft counts: 0 of 0 drafted tokens accepted over 8 rounds", .fields = &.{ "\"drafter_passed\":false", "\"drafter_repo_id\":null" }, .unproven = false },
+        .{ .speculative = "", .drafter = "auto", .line = "Draft counts: the server reported none; saved: ", .fields = &.{ "\"reported\":0", "\"rounds\":null" }, .unproven = false },
+        // accepted past drafted is no count at all
+        .{ .speculative = "\"rounds\": 1, \"drafted\": 1, \"accepted\": 2", .drafter = "auto", .line = "Draft counts: the server reported none; saved: ", .fields = &.{"\"reported\":0"}, .unproven = false },
+        // two attempts' valid counts near 2^64 sum past it: no totals, each attempt's counts kept, and the run goes on
+        .{ .speculative = "\"rounds\": 9223372036854775808, \"drafted\": 18446744073709551615, \"accepted\": 18446744073709551000", .drafter = "auto", .line = "Draft counts: no totals, as a sum passes 64 bits (2 of 2 attempts reported counts); saved: ", .fields = &.{ "\"totals\":{\"accepted\":null,\"attempts\":2,\"drafted\":null,\"reported\":2,\"rounds\":null}", "\"accepted\":18446744073709551000,\"completion_tokens\":4,\"drafted\":18446744073709551615" }, .unproven = false },
+    };
+    for (cases) |c| {
+        const m = try cli.draftedWorld(a, c.speculative);
+        defer m.stop();
+        r.self_exe = try cli.standIn(&r, m.port);
+        try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--drafter", c.drafter, "--output", out })));
+        try std.testing.expect(r.has(c.line) and r.has(counts));
+        try std.testing.expectEqual(c.unproven, r.has(@import("benchmark_drafts.zig").not_drafted));
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, counts, a, .limited(1 << 20));
+        for (c.fields) |f| if (std.mem.indexOf(u8, text, f) == null) {
+            std.debug.print("draft counts lack {s}: {s}\n", .{ f, text });
+            return error.TestUnexpectedResult;
+        };
+        const st = try std.Io.Dir.cwd().statFile(io, counts, .{});
+        try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.permissions.toMode() & 0o777)));
+        // the receipt itself holds exactly the board's fields, so it loads under the same rules as before
+        var problem: []const u8 = "";
+        const v = (try receipt.load(a, io, out, std.Io.Clock.real.now(io).toMilliseconds(), &problem)).?;
+        for (v.get("samples").?.array) |s| {
+            try std.testing.expect(s.get("drafted") == null and s.get("rounds") == null);
+            try std.testing.expect(std.mem.eql(u8, s.get("status").?.string, "ok") and std.mem.eql(u8, s.get("completion_tokens").?.int, "4"));
+        }
     }
 }

@@ -27,6 +27,8 @@ pub const FakeDrafter = struct {
     releases: u32 = 0,
     widest_hold: usize = 0,
     rows: u64 = 0,
+    prompt_rows: u64 = 0,
+    live_rows: u64 = 0,
     observe_first: ?*bool = null,
     ordered: bool = true,
     first_start: ?u64 = null, // the last opened stream's first absorbed row
@@ -35,7 +37,7 @@ pub const FakeDrafter = struct {
     const taps_ = [_]u32{ 44, 47, 49 };
     const unseen = fake.vocab + 1; // a row the drafter has no state for (restored by prompt reuse)
 
-    fn deinit(x: *FakeDrafter) void {
+    pub fn deinit(x: *FakeDrafter) void {
         var it = x.lanes.valueIterator();
         while (it.next()) |l| free(l);
         x.lanes.deinit(gpa);
@@ -46,7 +48,7 @@ pub const FakeDrafter = struct {
         l.held.deinit(gpa);
     }
 
-    fn drafter(x: *FakeDrafter) dr.Drafter {
+    pub fn drafter(x: *FakeDrafter) dr.Drafter {
         return .{ .ptr = x, .vtable = &.{ .taps = taps, .facts = facts, .open = open, .absorb = absorb, .hold = hold, .held = held, .release = release } };
     }
 
@@ -87,6 +89,7 @@ pub const FakeDrafter = struct {
             try l.history.appendSlice(gpa, rows[0..f.rows]);
             for (it.follow[0 .. it.follow.len - 1], rows[1..f.rows]) |a, b| if (a != b) return error.FollowMismatch;
             x.rows += f.rows;
+            if (it.prompt) x.prompt_rows += f.rows else x.live_rows += f.rows;
         }
     }
 
@@ -146,13 +149,13 @@ pub const Strict = struct {
     const Snap = struct { start: u64 = 0, rows: std.ArrayList(u32) = .empty, valid: usize = 0 };
     const poison: u32 = 0xdead;
 
-    fn deinit(x: *Strict) void {
+    pub fn deinit(x: *Strict) void {
         var it = x.snaps.valueIterator();
         while (it.next()) |v| v.rows.deinit(gpa);
         x.snaps.deinit(gpa);
     }
 
-    fn backend(x: *Strict) be.Backend {
+    pub fn backend(x: *Strict) be.Backend {
         return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .prepare_features = prepare, .features = features, .release = release } };
     }
 
@@ -252,7 +255,7 @@ pub const Strict = struct {
 };
 
 pub const Mode = enum { plain, wrapped, wrapped_early };
-const Case = struct { prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
+const Case = struct { root_copies: bool = false, prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
 pub const Out = struct {
     tokens: [][]u32,
     drafted: u64 = 0,
@@ -280,7 +283,9 @@ pub fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     var wrapped = try Drafted.init(gpa, target_backend, head.drafter());
     defer wrapped.deinit();
     try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().first_before_draft);
-    var cfg = try Config.init(gpa, if (mode != .plain) wrapped.facts(base()) else base(), 16, 15);
+    var m = base();
+    m.root_copies = cases[0].root_copies;
+    var cfg = try Config.init(gpa, if (mode != .plain) wrapped.facts(m) else m, 16, 15);
     defer cfg.deinit(gpa);
     var clock: fake.FixedClock = .{};
     var engine = Engine.init(gpa, &cfg, if (mode != .plain) wrapped.backend() else target.backend(), clock.clock());
@@ -331,19 +336,6 @@ pub const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
 const p2 = [_]u32{ 2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9 };
 pub const long = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
 pub const sampled: Sampling = .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 };
-
-test "an external drafter's rounds commit the one-token decode, greedy and sampled, and its drafts land" {
-    for ([_]?Sampling{ null, sampled }) |s| {
-        const drafted = try run(&.{.{ .prompt = &p1, .sampling = s }}, .wrapped, false);
-        defer freeOut(drafted);
-        const plain = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false }}, .plain, false);
-        defer freeOut(plain);
-        try std.testing.expectEqualSlices(u32, plain.tokens[0], drafted.tokens[0]);
-        // four in five of its drafts are the target's, so far more than chance (1 in 97) land
-        try std.testing.expect(drafted.drafted > 0 and drafted.accepted * 3 > drafted.drafted);
-        try std.testing.expect(drafted.head.rows >= p1.len - 1 + drafted.tokens[0].len - 1);
-    }
-}
 
 test "drafts off on the wrapped backend never reach the drafter" {
     for ([_]?Sampling{ null, sampled }) |s| {
@@ -597,4 +589,8 @@ test "the drafter wrapper sees the committed callback before its first hold" {
     try engine.addStreamCommitted(&stream, .{ .ptr = &seen, .call = Hook.call });
     try std.testing.expect(seen and head.ordered and head.holds > 0);
     engine.discard(&stream);
+}
+
+test {
+    _ = @import("drafted_role_test.zig");
 }

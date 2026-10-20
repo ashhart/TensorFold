@@ -202,24 +202,22 @@ test "mtp policy: the inherited policy works through 31 drafts and a resumed sha
     };
 }
 
-test "mtp policy: shared latent windows avoid per-layer side events while lone graphs retain overlap" {
+test "mtp policy: shared latent windows keep the side stream on one GPU and two ranks keep one stream" {
     var f: nemo.Forward = undefined;
     f.c.latent = 512;
     f.side = .{ .s = undefined, .fork = undefined, .join = undefined };
     f.tp = null;
     f.route = .{};
     var buffers: nemo.state.Buffers = undefined;
-    const Seg = @typeInfo(@TypeOf(f.segs)).pointer.child;
-    var parts: [4]Seg = undefined;
-    for (&parts, 0..) |*p, i| p.* = .{ .b = &buffers, .row0 = i * 8, .rows = 8, .sampled = false, .slot = @intCast(i), .untaught = i == 2 };
+    var parts: [8]nemo.Seg = undefined;
+    for (&parts, 0..) |*p, i| p.* = .{ .b = &buffers, .row0 = i * 4, .rows = 4, .sampled = false, .slot = @intCast(i), .untaught = i == 2 };
     const shared = f.routedWindow(&parts);
-    try std.testing.expect(shared.side == null);
     try std.testing.expect(shared.untaught);
-    try std.testing.expectEqual(@as(usize, 4), shared.segs.len);
-    try std.testing.expectEqual(@as(u32, 4), shared.route.count);
-    try std.testing.expect(f.routedWindow(parts[0..1]).side != null);
+    try std.testing.expectEqual(@as(usize, 8), shared.segs.len);
+    try std.testing.expectEqual(@as(u32, 8), shared.route.count);
+    for ([_]usize{ 1, 2, 4, 8 }) |n| try std.testing.expect(f.routedWindow(parts[0..n]).side != null);
     f.tp = @ptrFromInt(4096);
-    try std.testing.expect(f.routedWindow(parts[0..1]).side == null);
+    for ([_]usize{ 1, 2, 4, 8 }) |n| try std.testing.expect(f.routedWindow(parts[0..n]).side == null);
     f.tp = null;
     f.c.latent = 0;
     try std.testing.expect(f.routedWindow(&parts).side != null);

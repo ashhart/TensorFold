@@ -245,6 +245,7 @@ const Child = struct {
     extern "c" fn kill(c_int, c_int) c_int;
 };
 test "a stream and context that never complete end the process before an owner is freed" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the child process comes from fork
     const pid = Child.fork();
     if (pid < 0) return error.ForkFailed;
     if (pid == 0) {

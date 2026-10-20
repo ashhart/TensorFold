@@ -14,8 +14,9 @@ fn shardPath(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![]u8 {
     defer gpa.free(text);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
     defer parsed.deinit();
-    const file = parsed.value.object.get("weight_map").?.object.get(embed.weight_name).?.string;
-    return std.fs.path.join(gpa, &.{ dir, file });
+    const map = try core.safetensors.index.weightMap(parsed.value);
+    const file = map.get(embed.weight_name) orelse return error.MissingTensor;
+    return std.fs.path.join(gpa, &.{ dir, file.string });
 }
 
 pub fn main(init: std.process.Init) !u8 {

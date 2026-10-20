@@ -11,6 +11,7 @@ const Limit = if (is_cuda) @import("drama_limit.zig").Limit else struct {
     fn init(_: *@This(), _: std.mem.Allocator, _: std.Io, _: u32) !void {}
     fn deinit(_: *@This()) void {}
 };
+const Warm = if (is_cuda) struct {} else d3.residency.Warm;
 const Session = struct { e: *d3.Engine, t: *d3.tts.Tts };
 const Job = struct {
     id: api.Id,
@@ -25,6 +26,7 @@ const Host = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     limit: Limit,
+    warm: Warm = .{},
     queue: rounds.Queue,
     sessions: [rounds.capacity]Session = undefined,
     jobs: [rounds.capacity]?Job = @splat(null),
@@ -41,6 +43,7 @@ const Host = struct {
         .cancel = cancel,
         .status = status,
         .memory = memory,
+        .keepalive = if (is_cuda) null else keepalive,
         .drain = drain,
     };
     fn self(p: *anyopaque) *Host {
@@ -102,6 +105,10 @@ const Host = struct {
         if (!is_cuda) return null;
         const u = cuda.usage(reset_peak);
         return .{ .active = u.device, .pinned = u.host, .peak = u.peak };
+    }
+    fn keepalive(p: *anyopaque) ?api.keepalive.Target {
+        const h = self(p);
+        return .{ .ctx = &h.warm.target, .tick = @import("metal").keepalive.Target.tick };
     }
     fn sync(s: Session) !void {
         if (is_cuda) try s.e.stream.synchronize() else try s.e.flush();
@@ -228,6 +235,7 @@ const Host = struct {
             std.log.warn("speech drain failed: retaining every session and shared weight owner", .{});
             return;
         }
+        if (!is_cuda) h.warm.drop(h.sessions[0].e.g);
         var i = h.queue.lanes;
         while (i > 0) {
             i -= 1;
@@ -277,6 +285,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
         .prompt_cache = false,
         .speech = .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = frame_cap, .max_prompt_tokens = @min(4096, o.context - frame_cap - 1) },
     };
+    if (!is_cuda) try h.warm.hold(h.sessions[0].e.g, io);
+    errdefer if (!is_cuda) h.warm.drop(h.sessions[0].e.g);
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
 }

@@ -16,20 +16,25 @@ const Allocator = std.mem.Allocator;
 const gpa = std.testing.allocator;
 const io = std.testing.io;
 
-/// Bytes as tokens; renders roles, contents, calls and the offered tool names.
-const Text = struct {
-    fn text(t: *@This()) model_text.Text {
+/// Reversible byte tokens or byte pairs; renders roles, contents, calls and offered tool names.
+pub const Text = struct {
+    pair_tokens: bool = false,
+    observer: ?Observer = null,
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
-    fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
-        const ids = try a.alloc(u32, input.len);
-        for (input, ids) |byte, *id| id.* = byte;
+    fn encode(ctx: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
+        const codec: *Text = @ptrCast(@alignCast(ctx));
+        const step: usize = if (codec.pair_tokens) 2 else 1;
+        const ids = try a.alloc(u32, (input.len + step - 1) / step);
+        for (ids, 0..) |*id, i| {
+            const at = i * step;
+            id.* = if (step == 2 and at + 1 < input.len) 0x10000 | (@as(u32, input[at]) << 8) | input[at + 1] else input[at];
+        }
         return ids;
     }
     fn decode(_: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
-        const out = try a.alloc(u8, ids.len);
-        for (ids, out) |id, *byte| byte.* = @intCast(id);
-        return out;
+        return decoded(a, ids);
     }
     fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
         return null;
@@ -37,13 +42,16 @@ const Text = struct {
     fn tokenString(_: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {
         return std.fmt.allocPrint(a, "{d}", .{id});
     }
-    fn vocabSize(_: *anyopaque) u32 {
-        return 256;
+    fn vocabSize(ctx: *anyopaque) u32 {
+        const codec: *Text = @ptrCast(@alignCast(ctx));
+        return if (codec.pair_tokens) 0x20000 else 256;
     }
     fn eosIds(_: *anyopaque) []const u32 {
         return &.{};
     }
-    fn render(_: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        const codec: *Text = @ptrCast(@alignCast(ctx));
+        if (codec.observer) |o| o.call(o.ctx);
         var buf: std.ArrayList(u8) = .empty;
         if (options.tools) |t| for (t.array) |spec| try buf.print(a, "tool:{s}\n", .{tools.callName(spec)});
         if (messages == .array) for (messages.array) |m| {
@@ -52,22 +60,40 @@ const Text = struct {
             try buf.append(a, '\n');
         };
         if (options.add_generation_prompt) try buf.append(a, '>');
-        return buf.items;
+        return .{ .text = (buf.items) };
     }
     fn templateSource(_: *anyopaque) []const u8 {
         return "";
     }
 };
 
+fn decoded(a: Allocator, ids: []const u32) Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    for (ids) |id| {
+        if (id & 0x10000 != 0) try out.append(a, @truncate(id >> 8));
+        try out.append(a, @truncate(id));
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// A counter observation at a test-controlled request boundary.
+pub const Observer = struct { ctx: *anyopaque, call: *const fn (*anyopaque) void };
+
 /// Answers each request with the next scripted reply ("OK" past the end), keeping every prompt.
-const Eng = struct {
+pub const Eng = struct {
+    observer: ?Observer = null,
     script: []const []const u8 = &.{},
     next: usize = 0,
     refuse_at: ?usize = null,
     refusal: api.SubmitError = error.Closed,
     prompts: std.ArrayList([]u8) = .empty,
 
-    fn engine(e: *Eng) api.Engine {
+    pub fn sample(e: *Eng) void {
+        if (e.observer) |o| o.call(o.ctx);
+    }
+
+    pub fn engine(e: *Eng) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(_: *anyopaque) api.Info {
@@ -75,9 +101,9 @@ const Eng = struct {
     }
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e: *Eng = @ptrCast(@alignCast(ctx));
+        e.sample();
         if (e.refuse_at == e.next) return e.refusal;
-        const buf = gpa.alloc(u8, request.prompt.len) catch return error.Busy;
-        for (request.prompt, buf) |tok, *byte| byte.* = @intCast(tok);
+        const buf = decoded(gpa, request.prompt) catch return error.Busy;
         e.prompts.append(gpa, buf) catch {};
         const reply = if (e.next < e.script.len) e.script[e.next] else "OK";
         e.next += 1;
@@ -104,14 +130,20 @@ const Eng = struct {
     }
 };
 
-const Web = struct {
+pub const Web = struct {
     searches: usize = 0,
-    fn web(w: *Web) tools.Web {
+    observer: ?Observer = null,
+    empty: bool = false,
+    on_search: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
+    pub fn web(w: *Web) tools.Web {
         return .{ .ctx = w, .search = searchFn, .fetch = fetchFn };
     }
     fn searchFn(ctx: *anyopaque, a: Allocator, query: []const u8, _: usize) anyerror!tools.Found {
         const w: *Web = @ptrCast(@alignCast(ctx));
         w.searches += 1;
+        if (w.observer) |o| o.call(o.ctx);
+        if (w.on_search) |f| f.call(f.ctx);
+        if (w.empty) return .{ .engine = "Stand-in", .results = &.{} };
         const rs = try a.alloc(search.Result, 1);
         rs[0] = .{ .title = try std.fmt.allocPrint(a, "Docs for {s}", .{query}), .url = "https://docs.example/x", .snippet = "about x" };
         return .{ .engine = "Stand-in", .results = rs };
@@ -121,24 +153,42 @@ const Web = struct {
     }
 };
 
-const Got = struct {
+pub const Got = struct {
     events: std.ArrayList(Value) = .empty,
     body: ?Value = null,
     opened: bool = false,
     status: ?u16 = null,
     a: Allocator,
-    fn out(g: *Got) openai.Out {
+    opens: usize = 0,
+    terminals: usize = 0,
+    replies: usize = 0,
+    errors: usize = 0,
+    after_terminal: usize = 0,
+    close_open: bool = false,
+    close_event: bool = false,
+    pub fn out(g: *Got) openai.Out {
         return .{ .ctx = g, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
     fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
-        @as(*Got, @ptrCast(@alignCast(ctx))).opened = true;
+        const g: *Got = @ptrCast(@alignCast(ctx));
+        g.opens += 1;
+        if (g.close_open) return error.Closed;
+        g.opened = true;
     }
     fn event(ctx: *anyopaque, payload: ?Value) error{Closed}!void {
         const g: *Got = @ptrCast(@alignCast(ctx));
+        if (g.close_event) return error.Closed;
+        if (payload == null) {
+            g.terminals += 1;
+            return;
+        }
+        if (g.terminals > 0) g.after_terminal += 1;
+        if (payload.?.has("error")) g.errors += 1;
         if (payload) |p| g.events.append(g.a, json.deepCopy(g.a, p) catch return error.Closed) catch return error.Closed;
     }
     fn reply(ctx: *anyopaque, status: u16, payload: Value) void {
         const g: *Got = @ptrCast(@alignCast(ctx));
+        g.replies += 1;
         g.status = status;
         g.body = json.deepCopy(g.a, payload) catch null;
     }
@@ -165,23 +215,34 @@ const Got = struct {
     }
 };
 
-const Rig = struct {
+pub const Rig = struct {
+    minimum: std.atomic.Value(i64) = .init(0),
+    observations: std.atomic.Value(usize) = .init(0),
     eng: Eng = .{},
     text: Text = .{},
     web: Web = .{},
     srv: *server_mod.Server = undefined,
 
-    fn start(r: *Rig, on: bool) !void {
+    fn sample(ctx: *anyopaque) void {
+        const r: *Rig = @ptrCast(@alignCast(ctx));
+        _ = r.minimum.fetchMin(r.srv.preparing.load(.acquire), .monotonic);
+        _ = r.observations.fetchAdd(1, .monotonic);
+    }
+
+    pub fn start(r: *Rig, on: bool) !void {
         r.srv = try server_mod.Server.init(gpa, io, r.eng.engine(), r.text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .default_max_tokens = 2048 }, null);
+        r.eng.observer = .{ .ctx = r, .call = sample };
+        r.web.observer = .{ .ctx = r, .call = sample };
+        r.text.observer = .{ .ctx = r, .call = sample };
         if (on) r.srv.cortheon = try cortheon.State.initWith(gpa, io, r.web.web());
     }
 
-    fn stop(r: *Rig) void {
+    pub fn stop(r: *Rig) void {
         r.srv.deinit();
         r.eng.deinit();
     }
 
-    fn ask(r: *Rig, a: Allocator, body: []const u8) !Got {
+    pub fn ask(r: *Rig, a: Allocator, body: []const u8) !Got {
         var got: Got = .{ .a = a };
         var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
         openai.run(r.srv, a, got.out(), .{ .conn = &conn }, true, (try json.parse(a, body)).ok);
@@ -353,4 +414,27 @@ test "the web budget ends the research and the reply still comes back without Co
     const m = message(got.body.?);
     try std.testing.expect(m.get("tool_calls") == null);
     try std.testing.expect(std.mem.indexOf(u8, m.strField("content").?, "cortheon_search") == null);
+}
+
+test "research expansion keeps a context-window refusal streamed" {
+    for ([_]u32{ 2000, 2400 }) |window| {
+        var rig: Rig = .{ .eng = .{ .script = &.{"Zig latest release notes"} } };
+        try rig.start(true);
+        defer rig.stop();
+        rig.srv.info.context_window = window;
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const got = try rig.ask(arena.allocator(), "{\"stream\":true,\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"What is the latest release of Zig?\"}]}");
+        try std.testing.expect(rig.web.searches > 0);
+        try std.testing.expectEqual(@as(usize, 1), rig.eng.prompts.items.len);
+        try std.testing.expect(got.opened);
+        try std.testing.expectEqual(@as(?u16, null), got.status);
+        try std.testing.expect(got.body == null);
+        var context_error = false;
+        for (got.events.items) |event| if (event.get("error")) |err| {
+            if (err.strField("code")) |code| context_error = std.mem.eql(u8, code, "context_length_exceeded");
+        };
+        try std.testing.expect(context_error);
+        try std.testing.expectEqual(@as(i64, 0), rig.srv.preparing.load(.acquire));
+    }
 }

@@ -7,6 +7,7 @@ const kern = @import("kernels.zig");
 const fwd = @import("forward.zig");
 const be = @import("backend.zig");
 const snap = @import("snap.zig");
+const limits = @import("context.zig");
 
 pub const model_type = "kolibri1";
 pub const formats: []const []const u8 = &.{"fp8-block"};
@@ -68,15 +69,16 @@ const Plan = struct {
     }
 };
 
-/// Positions a stream's caches hold: the window, whole 1,024s.
-fn positions(context: usize) usize {
-    return (context + 1023) / 1024 * 1024;
+/// Physical positions include the verification reserve, in whole 1,024s; the served window is unchanged.
+fn positions(context: usize) !usize {
+    return limits.capacity(context);
 }
 
 /// The checkpoint, the shared kernels and every stream's caches.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound; // before the weights load
+    const context = try positions(o.context);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
@@ -86,7 +88,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.k.deinit();
     own.s = try cuda.Stream.init(ctx.d, false);
     errdefer own.s.deinit();
-    const context = positions(o.context);
     // every stream's caches are allocated here and none later: plan them inside the room the weights leave
     const plan: Plan = .{ .own = own, .d = ctx.d, .context = context };
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
@@ -173,7 +174,7 @@ test "every refusal of its own is worded, the rest left to the server" {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);
-    try std.testing.expectEqual(@as(usize, 65536), positions(65000));
+    try std.testing.expectEqual(@as(usize, 65536), try positions(65000));
 }
 
 /// A synthetic plan: `stream` bytes a stream plus `fixed` bytes of scratch.
@@ -205,4 +206,11 @@ test "a fixed --parallel past a round's rows refuses, whatever the room" {
     const one: Fake = .{ .stream = g, .fixed = 0 };
     try std.testing.expectError(error.ParallelPastRound, fit(1024 * g, be.round_rows + 1, true, one));
     try std.testing.expectEqual(@as(usize, be.round_rows), try fit(1024 * g, be.round_rows, true, one));
+}
+
+test "Kolibri context: native capacity producer covers the logical limit and rejects overflow" {
+    const physical = try positions(262144);
+    try std.testing.expectEqual(@as(usize, 263168), physical);
+    try std.testing.expect(limits.fits(physical, 262080, 64));
+    try std.testing.expectError(error.Overflow, positions(std.math.maxInt(usize)));
 }

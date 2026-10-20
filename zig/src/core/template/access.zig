@@ -12,6 +12,8 @@ const dict_safe = [_][]const u8{ "copy", "fromkeys", "get", "items", "keys", "va
 const dict_unsafe = [_][]const u8{ "clear", "pop", "popitem", "setdefault", "update" };
 const list_safe = [_][]const u8{ "copy", "count", "index" };
 const list_unsafe = [_][]const u8{ "append", "clear", "extend", "insert", "pop", "remove", "reverse", "sort" };
+pub const dict_methods = dict_safe ++ dict_unsafe;
+pub const list_methods = list_safe ++ list_unsafe;
 const int_methods = [_][]const u8{ "as_integer_ratio", "bit_count", "bit_length", "conjugate", "from_bytes", "is_integer", "to_bytes" };
 const float_methods = [_][]const u8{ "as_integer_ratio", "conjugate", "fromhex", "hex", "is_integer" };
 
@@ -122,7 +124,9 @@ pub fn getitem(rt: *Rt, obj: Value, key: Value) Error!Value {
                 const at = uni.offset(s.s, k);
                 var end = at;
                 _ = uni.next(s.s, &end);
-                return Value.string(s.s[at..end]);
+                var text = try s.slice(rt.a, at, end);
+                text.safe = false;
+                return .{ .str = text };
             }
         },
         else => {},
@@ -166,10 +170,12 @@ pub fn slice(rt: *Rt, obj: Value, start: Value, stop: Value, step: Value) Error!
     if (v.isUndef(obj)) return rt.fail("{s}", .{v.undefMsg(obj)});
     switch (obj) {
         .str => |s| {
-            const cps = try codepoints(rt, s.s);
-            var out: std.ArrayList(u8) = .empty;
-            for (try sliceIndices(rt, cps.len, start, stop, step)) |k| try out.appendSlice(rt.a, cps[k]);
-            return .{ .str = .{ .s = out.items, .safe = s.safe } };
+            const cps = try stringParts(rt, s);
+            var out: v.Buffer = .{};
+            for (try sliceIndices(rt, cps.len, start, stop, step)) |k| try out.append(rt.a, cps[k]);
+            var text = out.str();
+            text.safe = s.safe;
+            return .{ .str = text };
         },
         .list => |l| if (l.seq == .list or l.seq == .tuple or l.seq == .range) {
             const picks = try sliceIndices(rt, l.items.len, start, stop, step);
@@ -193,20 +199,28 @@ pub fn codepoints(rt: *Rt, s: []const u8) Error![]const []const u8 {
     return out.items;
 }
 
+fn stringParts(rt: *Rt, s: v.Str) Error![]const v.Str {
+    const parts = try codepoints(rt, s.s);
+    const out = try rt.a.alloc(v.Str, parts.len);
+    var cursor: v.Cursor = .{ .source = s };
+    for (parts, out) |p, *item| item.* = try cursor.part(rt.a, p);
+    return out;
+}
+
 /// Python iter() materialized; Undefined iterates empty.
 pub fn iterate(rt: *Rt, x: Value) Error![]const Value {
     return switch (x) {
         .missing, .undef => &.{},
         .str => |s| blk: {
-            const parts = try codepoints(rt, s.s);
+            const parts = try stringParts(rt, s);
             const items = try rt.a.alloc(Value, parts.len);
-            for (parts, items) |p, *it| it.* = .{ .str = .{ .s = p, .safe = s.safe } };
+            for (parts, items) |p, *it| it.* = .{ .str = p };
             break :blk items;
         },
         .list => |l| l.items,
         .dict => |d| blk: {
             const items = try rt.a.alloc(Value, d.map.count());
-            for (d.map.keys(), items) |k, *it| it.* = Value.string(k);
+            for (d.map.keys(), items) |k, *it| it.* = try v.key(rt, d, k);
             break :blk items;
         },
         .iter => |it| if (it.err) |msg| rt.fail("{s}", .{msg}) else it.items,

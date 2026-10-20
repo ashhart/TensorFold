@@ -52,6 +52,7 @@ fn int(x: usize) i32 {
 pub const Draws = struct {
     draw_fn: Function,
     draw_ids_fn: Function,
+    pitched_fn: ?Function = null,
     logprob_rows_fn: Function,
     topk_slices_fn: Function,
     topk_merge_fn: Function,
@@ -61,6 +62,13 @@ pub const Draws = struct {
 
     pub fn resolve(mod: Module) !Draws {
         return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge") };
+    }
+
+    /// Resolve the opt-in pitched entry separately; old images keep the exact legacy symbol lookups.
+    pub fn resolveProposal(mod: Module) !Draws {
+        var d = try resolve(mod);
+        d.pitched_fn = try mod.function("tf_draw_pitched");
+        return d;
     }
 
     /// The bytes topkRows' `parts` holds for `rows` rows of `vocab` at `k`.
@@ -81,6 +89,27 @@ pub const Draws = struct {
         a.add(prob orelse 0);
         const f = if (ids != null) d.draw_ids_fn else d.draw_fn;
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &a);
+    }
+
+    /// Per-view logical columns and pitch; draw_ids keeps noise, ties and outputs keyed by global token ID.
+    pub fn proposal(d: *const Draws, s: Stream, logits: u64, view: anytype, ids: ?u64, rule_ptr: u64, meta: u64, offset: usize, out: u64, rows: usize, prob: ?u64) !void {
+        if (@hasField(@TypeOf(view), "dtype")) if (view.dtype != .bf16) return error.ProposalBasisUnsupported;
+        if (view.logical == 0 or view.logical > view.vocab or view.stride < view.logical or (view.ids != null) != (ids != null)) return error.ProposalScoreShape;
+        if (view.ids) |map| if (map.len != view.logical) return error.ProposalScoreShape;
+        if (view.ids == null and view.logical != view.vocab) return error.ProposalScoreShape;
+        if (view.stride == view.logical) return d.draw(s, logits, view.logical, rule_ptr, meta, offset, out, rows, ids, prob);
+        const f = d.pitched_fn orelse return error.ProposalServiceUnsupported;
+        var a: launch_.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(view.logical)));
+        a.add(@as(u32, @intCast(view.stride)));
+        a.add(rule_ptr);
+        a.add(meta);
+        a.add(int(offset));
+        a.add(out);
+        a.add(ids orelse 0);
+        a.add(prob orelse 0);
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, s, &a);
     }
 
     /// Each bf16 logits row's logprob words at `out`: its pick in `picks`, its `k` best tokens, its rank if `rank`.

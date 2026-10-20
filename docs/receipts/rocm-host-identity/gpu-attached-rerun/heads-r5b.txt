@@ -1,0 +1,3 @@
+25a7201f Merge branch 'benchmark-rocm-host-identity' of https://github.com/ThinkOffApp/TensorFold into tf1001-gpu
+624e2ce6 Benchmark: a HIP or Metal server's manifest names the receipt's backend
+7b84f909 Merge remote-tracking branches 'origin/hip-refuses-drafter' and 'origin/benchmark-drafter-counts' into tf1001-gpu

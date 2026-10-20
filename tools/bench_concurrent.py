@@ -29,6 +29,7 @@ import urllib.request
 
 from bench_evidence import Evidence, token_equal
 from bench_auth import authorize, read_api_key, redact
+import bench_timing
 
 if sys.version_info < (3, 11):
     sys.exit(f"Python 3.11+ is required (this is {sys.version.split()[0]}); "
@@ -51,11 +52,14 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
     except Exception as exc:  # noqa: BLE001 - a failed request is reported, not fatal
         if gate is not None:
             gate.abort()
-        return {"prompt": item["name"], "seed": seed, "sent": None, "first": None, "last": None, "tokens": None,
-                "pieces": [], "ttft_s": None, "decode_tps": None, "token_sha": None, "token_sha256": None,
-                "completed": None,
-                "error": type(exc).__name__, "complete": False, "prompt_tokens": None,
-                "cached_tokens": None, "cache_state": "unverified", "output_sha256": None}
+        return failed_run(item, seed, type(exc).__name__)
+
+
+def failed_run(item: dict, seed: int | None, error: str) -> dict:
+    return {"prompt": item["name"], "seed": seed, "sent": None, "first": None, "last": None, "tokens": None,
+            "pieces": [], "ttft_s": None, "decode_tps": None, "token_sha": None, "token_sha256": None,
+            "completed": None, "error": error, "complete": False, "prompt_tokens": None,
+            "cached_tokens": None, "cache_state": "unverified", "output_sha256": None}
 
 
 def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None, draft: bool,
@@ -121,34 +125,43 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
             out["unmeasured"] = True
     else:
         out["unmeasured"] = True
-    return out
+    return {**out, **bench_timing.request(out)}
 
 
 def together(base: str, model: str, specs: list[tuple[dict, int | None]], tokens: int, temperature: float,
              stagger_ms: float = 0.0, *, api_key: str | None = None) -> list[dict]:
+    if not bench_timing.timestamp(stagger_ms):
+        raise ValueError("stagger_ms must be finite and nonnegative")
+    if not specs:
+        return []
     gate = threading.Barrier(len(specs))
-    out: list[dict | None] = [None] * len(specs)
+    out = [failed_run(item, seed, "worker_incomplete") for item, seed in specs]
 
     def run(i: int) -> None:
-        if stagger_ms:
-            gate.wait(timeout=30)
-            time.sleep(i * stagger_ms / 1e3)
-            out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1], api_key=api_key)
-        else:
-            out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1], gate=gate, api_key=api_key)
+        item, seed = specs[i]
+        try:
+            if stagger_ms:
+                gate.wait(timeout=30)
+                time.sleep(i * stagger_ms / 1e3)
+                out[i] = stream(base, model, item, tokens, temperature, seed, api_key=api_key)
+            else:
+                out[i] = stream(base, model, item, tokens, temperature, seed, gate=gate, api_key=api_key)
+        except Exception as exc:  # noqa: BLE001 - retain failures outside the HTTP request too
+            gate.abort()
+            out[i] = failed_run(item, seed, type(exc).__name__)
 
     threads = [threading.Thread(target=run, args=(i,)) for i in range(len(specs))]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    return [r for r in out if r is not None]
+    return out
 
 
 def aggregates(runs: list[dict]) -> dict:
     done = [r for r in runs if r["decode_tps"] is not None]
     out: dict = {"failed": sum(1 for r in runs if r.get("error")), "unmeasured": sum(1 for r in runs if r.get("unmeasured")),
-                 "aggregate_tps": 0.0}
+                 "aggregate_tps": 0.0, **bench_timing.workload(runs)}
     if not done:
         return out
     first = min(r["first"] for r in done)
@@ -184,6 +197,8 @@ def main() -> None:
     p.add_argument("--output")
     p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key from this environment variable")
     args = p.parse_args()
+    if not bench_timing.timestamp(args.stagger_ms):
+        p.error("--stagger-ms must be finite and nonnegative")
     api_key = read_api_key(p, args.api_key_env)
     if args.no_seed:
         args.alone = args.serial = False
@@ -224,7 +239,9 @@ def main() -> None:
                     rep["evidence"] = [{k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "tokens",
                                        "cache_state", "complete", "token_sha", "token_sha256", "output_sha256")}
                                        for r in runs]
-                    rep["client_intervals"] = [{"start": r["sent"], "end": r.get("completed")} for r in runs]
+                    rep["client_intervals"] = [{"start": r["sent"], "first": r.get("first"),
+                                                "last": r.get("last"), "end": r.get("completed"),
+                                                **bench_timing.request(r)} for r in runs]
                     if alone:
                         # None: the request or its solo run failed (not an exactness result)
                         rep["equal_alone"] = [token_equal(alone[(r["prompt"], r["seed"])], r) for r in runs]
@@ -241,6 +258,10 @@ def main() -> None:
                         "aggregate_tps": round(statistics.median(r["aggregate_tps"] for r in reps), 1),
                         "per_stream_tps": round(statistics.median([v for r in reps for v in r["per_stream_tps"]] or [0.0]), 1),
                         "ttft_s_max": max((t for r in reps for t in r["ttft_s"] if t is not None), default=None)}
+                valid = all(r["timing_valid"] for r in reps)
+                cell["timing_valid"] = valid
+                for key in ("end_to_end_tps", "makespan_s"):
+                    cell[key] = statistics.median(r[key] for r in reps) if valid else None
                 if all("steady_tps" in r for r in reps):
                     cell["steady_tps"] = round(statistics.median(r["steady_tps"] for r in reps), 1)
                 if alone:

@@ -30,6 +30,7 @@ pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 /// `slide` stays false: the server refuses --slide for a family without a learner (no `slide` here).
 pub const Options = struct {
     context: usize,
+    kv8: bool = false,
     drafts: bool,
     segments: usize = 1,
     slide: bool = false,
@@ -92,6 +93,8 @@ pub fn capacity(context: usize) usize {
     return std.mem.alignForward(usize, context + fw.window_rows, 64);
 }
 
+const snapshots = @import("cuda_snapshots.zig");
+
 const Owned = struct {
     gpa: std.mem.Allocator,
     group: cuda.tp_group.Group, // the ranks' communicator; two ranks add RoCE writes for the main stream's small gathers
@@ -136,10 +139,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
     var problem: []const u8 = "";
-    const set = ranks.Settings.read(&ranks.environment, &problem) catch |err| {
+    var set = ranks.Settings.read(&ranks.environment, &problem) catch |err| {
         std.log.err("{s}", .{problem});
         return err;
     };
+    set.kv8 = o.kv8;
     // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
     if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
     return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes) catch |err| {
@@ -186,6 +190,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.e.group = &own.group;
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
+    own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
     defer gpa.free(rooms);
@@ -213,6 +218,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
             return if (std.c.getenv(name)) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
         }
     }.get;
+    own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
     own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED") };
     return .{
         .backend = own.lanes.backend(),
@@ -230,11 +236,37 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 // Each rank keeps a copy under rank 0's id, in the room rank 0 admitted by (the smallest over the ranks).
 
-/// Bytes a state takes at any position: the whole state arena on each rank.
+/// The rounded pages for a committed prefix, including the head's possible verify window.
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
-    _ = at;
     const e: *engine.Engine = @ptrCast(@alignCast(ptr));
-    return e.stateBytes();
+    return e.stateBytes(at);
+}
+
+/// Reserve every spare page inside the admitted cache budget before requests can enter either rank.
+pub fn snap_ready(ptr: *engine.Engine, budget: u64) !u64 {
+    if (ptr.snap_setup) |s| try s.run(s.ptr, budget) else try ptr.prepareSnapshots(budget);
+    return 0; // the store accounts both held and spare pages through its vtable
+}
+
+fn readySnapshots(ptr: *anyopaque, budget: u64) !void {
+    const own: *Owned = @ptrCast(@alignCast(ptr));
+    try own.link.send(own.e.m.glue.put_words, .{ .kind = @backingInt(follow.Kind.snapshots), .a = budget }, &.{});
+    try snapshots.agree(own.e, budget);
+}
+
+pub fn snap_charged(ptr: *anyopaque, saved: *anyopaque) u64 {
+    const e: *engine.Engine = @ptrCast(@alignCast(ptr));
+    const k: *engine.Kept = @ptrCast(@alignCast(saved));
+    return e.snaps.get(k.id).?.lease.ids.items.len * snapshots.pages.page;
+}
+
+pub fn snap_spare(ptr: *anyopaque) u64 {
+    const e: *engine.Engine = @ptrCast(@alignCast(ptr));
+    return if (e.snap_pages) |*p| p.spare() else 0;
+}
+
+pub fn snap_reuses(ptr: *anyopaque, at: u32) bool {
+    return snap_spare(ptr) >= snap_bytes(ptr, at);
 }
 
 /// The prompt pass stands at `at` (a mark at a chunk start): copy the state there under a new id.

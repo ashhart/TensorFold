@@ -140,7 +140,7 @@ pub const Forward = struct {
     pub fn routedWindow(f: *const Forward, segs: []const Seg) Forward {
         var routed = f.*;
         routed.segs = segs;
-        if (f.c.latent > 0 and (segs.len > 1 or f.tp != null)) routed.side = null;
+        if (f.c.latent > 0 and f.tp != null) routed.side = null;
         routed.untaught = for (segs) |s| {
             if (s.untaught) break true;
         } else false;

@@ -68,34 +68,34 @@ pub const Prompt = struct {
         p.scan8 = true;
         p.tall_tiles = false; // measured: no faster than 64-row tiles (same bits)
         p.fused_gu = true;
-        const alib = try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, ks.flashnext_attn), mtl.CompileOptions.mlx());
-        p.sattn = try mtl.Pipeline.init(r.device, alib, "tf_sattn_nax", false);
-        p.scores_nax = try mtl.Pipeline.init(r.device, alib, "tf_idx_scores_nax", false);
-        const qlib = try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, ks.flashnext_qmm6), mtl.CompileOptions.mlx());
-        p.qmm6 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax", false);
-        p.gather64 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_64", false);
-        p.gather32 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_32", false);
-        p.qmm6_128 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax_128", false);
-        p.gather128 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_128", false);
-        p.gu64 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_gu6_nax_64", false);
-        p.gu32 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_gu6_nax_32", false);
-        p.router_mm = try mtl.Pipeline.init(r.device, qlib, "tf_mm_bf16_f32_t_nax", false);
-        p.attn256 = try mtl.Pipeline.init(r.device, qlib, "tf_attn256_nax", false);
-        p.splitk = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false);
-        p.parts_sum = try mtl.Pipeline.init(r.device, qlib, "tf_parts_sum", false);
+        const alib = try r.ownResource(try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, ks.flashnext_attn), mtl.CompileOptions.mlx()));
+        p.sattn = try r.ownResource(try mtl.Pipeline.init(r.device, alib, "tf_sattn_nax", false));
+        p.scores_nax = try r.ownResource(try mtl.Pipeline.init(r.device, alib, "tf_idx_scores_nax", false));
+        const qlib = try r.ownResource(try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, ks.flashnext_qmm6), mtl.CompileOptions.mlx()));
+        p.qmm6 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax", false));
+        p.gather64 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_64", false));
+        p.gather32 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_32", false));
+        p.qmm6_128 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax_128", false));
+        p.gather128 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_128", false));
+        p.gu64 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_gather_gu6_nax_64", false));
+        p.gu32 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_gather_gu6_nax_32", false));
+        p.router_mm = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_mm_bf16_f32_t_nax", false));
+        p.attn256 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_attn256_nax", false));
+        p.splitk = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false));
+        p.parts_sum = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_parts_sum", false));
         try frags.check(r.device, r.queue, r.arena);
-        const glib = try mtl.Library.fromSource(r.device, try std.mem.concat(r.arena, u8, &.{ header, ks.flashnext_prompt }), mtl.CompileOptions.mlx());
+        const glib = try r.ownResource(try mtl.Library.fromSource(r.device, try std.mem.concat(r.arena, u8, &.{ header, ks.flashnext_prompt }), mtl.CompileOptions.mlx()));
         const names = [_][:0]const u8{ "pf_hc_normed", "pf_hc_act", "pf_hc_mix", "pf_router", "pf_route", "pf_offsets", "pf_sort", "pf_gather_rows", "pf_act", "pf_scatter_y", "pf_copy", "pf_gdn_pre", "pf_gdn_scan", "pf_gdn_post", "pf_gdn_scan4", "pf_gdn_scan8" };
-        for (names, 0..) |n, i| p.pl[i] = try mtl.Pipeline.init(r.device, glib, n, false);
+        for (names, 0..) |n, i| p.pl[i] = try r.ownResource(try mtl.Pipeline.init(r.device, glib, n, false));
         // DeltaNet at the chunk's rows, storing only the last row's recurrent state (in row 0)
         const gs = r.roles.get("q4_gdn@gdn|8") orelse return error.NoSite;
         const f = try Run.variantText(r.arena, gs.v); // the embedded text when the run is checked-in, else the recorded file
         const from = "SO[((size_t(r) * NV + hv)";
         if (std.mem.count(u8, f, from) != 1) return error.GdnPatch;
         const patched = try std.mem.replaceOwned(u8, r.arena, f, from, "if (r == R - 1) SO[((size_t(0) * NV + hv)");
-        const dlib = try mtl.Library.fromSource(r.device, patched, mtl.CompileOptions.mlx());
+        const dlib = try r.ownResource(try mtl.Library.fromSource(r.device, patched, mtl.CompileOptions.mlx()));
         p.gdn = gs.v.*;
-        p.gdn.pipe = try mtl.Pipeline.init(r.device, dlib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{gs.v.name}, 0), false);
+        p.gdn.pipe = try r.ownResource(try mtl.Pipeline.init(r.device, dlib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{gs.v.name}, 0), false));
         p.gdn_grid = gs.grid;
         p.gdn_tg = gs.tg;
         try r.indexFile(try std.fmt.allocPrintSentinel(r.arena, "{s}/pack_mlx.safetensors", .{dir}, 0));
@@ -137,72 +137,16 @@ pub const Prompt = struct {
     }
 
     /// A prompt's own buffers for chunks of up to PMAX rows (each staggered segment has its own set).
-    pub fn buffers(r: *Run) !@FieldType(Prompt, "b") {
-        const B = struct {
-            fn of(rr: *Run, n: usize) !Buf {
-                return .{ .b = try rr.buffer(n) };
-            }
-        };
-        const R = PMAX;
-        return .{
-            .ids = try B.of(r, R * 4),
-            .pids = try B.of(r, R * 16 * 4),
-            .h = .{ try B.of(r, R * WIDE * 2), try B.of(r, R * WIDE * 2) },
-            .ssp = try B.of(r, R * 10 * 4 * 4),
-            .normed = try B.of(r, R * WIDE * 2),
-            .dn = try B.of(r, R * 324 * 2),
-            .hact = try B.of(r, R * 320 * 2),
-            .inj_a = try B.of(r, R * 4 * 2),
-            .inj_m = try B.of(r, R * 4 * 2),
-            .up = try B.of(r, R * WIDE * 2),
-            .mixed = try B.of(r, R * D * 2),
-            .p = try B.of(r, R * 16480 * 2),
-            .gout = try B.of(r, R * 6144 * 2),
-            .branch = try B.of(r, R * D * 2),
-            .cso = try B.of(r, CS_ROW),
-            .q = try B.of(r, R * 24 * 256 * 2),
-            .kout = try B.of(r, R * 2 * 256 * 2),
-            .iq = try B.of(r, R * 4 * 128 * 2),
-            .po = try B.of(r, 64),
-            .pm = try B.of(r, 64),
-            .aout = try B.of(r, R * 6144 * 2),
-            .pos = try B.of(r, R * 4),
-            .pos3 = try B.of(r, R * 12),
-            .nk = try B.of(r, R * 4),
-            .zeros = try B.of(r, R * 4),
-            .kvmeta = try B.of(r, 16),
-            .lg = try B.of(r, R * 513 * 4),
-            .pick = try B.of(r, R * 10 * 4),
-            .wts = try B.of(r, R * 10 * 4),
-            .cnt = try B.of(r, 512 * 4),
-            .off = try B.of(r, 513 * 4),
-            .cur = try B.of(r, 512 * 4),
-            .row_of = try B.of(r, R * 10 * 4),
-            .xs = try B.of(r, R * 10 * D * 2),
-            .g = try B.of(r, R * 10 * 640 * 2),
-            .u = try B.of(r, R * 10 * 640 * 2),
-            .a = try B.of(r, R * 10 * 640 * 2),
-            .ds = try B.of(r, R * 10 * D * 2),
-            .sg = try B.of(r, R * 640 * 2),
-            .su = try B.of(r, R * 640 * 2),
-            .sa = try B.of(r, R * 640 * 2),
-            .ydown = try B.of(r, R * 11 * D * 2),
-            .emb = try B.of(r, R * D * 2),
-            .kvp = try B.of(r, R * 12800 * 2),
-            .gated = try B.of(r, R * WIDE * 2),
-            .hout = try B.of(r, R * WIDE * 2),
-            .cin = try B.of(r, (PLE_TAIL + R) * WIDE * 2),
-            .rows = try B.of(r, 16),
-            .part = try B.of(r, 8 * R * 324 * 4),
-            .qn = try B.of(r, R * 16 * 128 * 4),
-            .kn = try B.of(r, R * 16 * 128 * 4),
-            .v = try B.of(r, R * 48 * 128 * 4),
-            .gg = try B.of(r, R * 48 * 4),
-            .beta = try B.of(r, R * 48 * 4),
-            .ys = try B.of(r, R * 6144 * 4),
-            .mids = try B.of(r, R * 4),
-            .n_add = try B.of(r, 16),
-        };
+    pub fn buffers(r: anytype) !@FieldType(Prompt, "b") {
+        const sizes = @import("flashnext_memory").prompt.sizes;
+        var out: @FieldType(Prompt, "b") = undefined;
+        inline for (@typeInfo(@TypeOf(out)).@"struct".field_names) |name| {
+            const n = @field(sizes, name);
+            if (comptime std.mem.eql(u8, name, "h")) {
+                inline for (0..2) |i| @field(out, name)[i] = .{ .b = try r.buffer(n[i]) };
+            } else @field(out, name) = .{ .b = try r.buffer(n) };
+        }
+        return out;
     }
 
     pub fn barrier(p: *Prompt) void {

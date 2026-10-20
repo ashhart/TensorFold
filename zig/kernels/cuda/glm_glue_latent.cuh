@@ -72,3 +72,14 @@ extern "C" __global__ void tf_glm_lat_write(const __nv_bfloat16* lat, int64_t la
   const int64_t r = blockIdx.x, at = (int64_t)pos[0] + r;
   for (int64_t k = threadIdx.x; k < lw; k += blockDim.x) cache[at * lw + k] = lat[r * lat_stride + k];
 }
+
+#include "kv_fp8.cuh"
+
+// One 512-wide latent row as E4M3 and its FP32 scale, with the same row-wise rounding as other FP8 caches.
+extern "C" __global__ void __launch_bounds__(512)
+    tf_glm_lat_write_fp8(const __nv_bfloat16* lat, int64_t stride, unsigned char* cache, float* scales, const int* pos) {
+  const int64_t r = blockIdx.x, at = (int64_t)pos[0] + r;
+  const int d = threadIdx.x;
+  __shared__ float red[16];
+  tf_kv_fp8::quant_row<512, true>(__bfloat162float(lat[r * stride + d]), d, cache + at * 512, scales + at, red);
+}

@@ -1,0 +1,412 @@
+616d3065d43a300693c92345bec83061de438148
+test
++- test-cuda-host
+   +- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zc/o/eaba94c481a066499f7aa14a4611fabd/test --cache-dir=./.zc --seed=0x9ca6eaef --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zc/o/a529abb901551c852fa65e556ac33565/test --cache-dir=./.zc --seed=0x9ca6eaef --listen=-
+
+Build Summary: 292/292 steps succeeded; 957/958 tests passed (1 skipped)
+test success
++- run test cached
+|  +- compile test debug native-native cached 77ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 64ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 70ms MaxRSS:32M
+|     +- options cached
+|        +- compile exe digest-writer debug native cached 63ms MaxRSS:32M
++- run test 6 pass (6 total) 15ms MaxRSS:3M
+|  +- compile test debug native cached 66ms MaxRSS:32M
++- test-flashnext-batch-host success
+|  +- run test 6 pass (6 total) 2s MaxRSS:30M
+|     +- compile test debug native cached 91ms MaxRSS:32M
+|        +- WriteFile flashnext-test-empty.zig cached
++- run test cached
+|  +- compile test debug native-native cached 66ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native-native cached 61ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native-native cached 66ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native-native cached 72ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native-native cached 80ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native-native cached 152ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 90ms MaxRSS:32M
+|     +- WriteFile drama3.metallib cached
+|        +- run xcrun (drama3.metallib) cached
+|           +- run xcrun (d3_dense.air) cached
+|           +- run xcrun (d3_gdn.air) cached
+|           +- run xcrun (d3_attn.air) cached
+|           +- run xcrun (d3_moe.air) cached
+|           +- run xcrun (d3_sample.air) cached
+|           +- run xcrun (d3_codec.air) cached
++- run test cached
+|  +- compile test fast native-native cached 85ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt cached
+|     +- WriteFile nemotron_packed.metallib cached
+|        +- run xcrun (nemotron_packed.metallib) cached
+|           +- run xcrun (coop_down_1_0.air) cached
+|           +- run xcrun (coop_down_2_0.air) cached
+|           +- run xcrun (coop_down_2_1.air) cached
+|           +- run xcrun (coop_draft_1_0.air) cached
+|           +- run xcrun (coop_draft_2_0.air) cached
+|           +- run xcrun (coop_draft_2_1.air) cached
+|           +- run xcrun (coop_eh_1_0.air) cached
+|           +- run xcrun (coop_eh_1_0_sk.air) cached
+|           +- run xcrun (coop_eh_2_0.air) cached
+|           +- run xcrun (coop_eh_2_0_sk.air) cached
+|           +- run xcrun (coop_eh_2_1.air) cached
+|           +- run xcrun (coop_eh_2_1_sk.air) cached
+|           +- run xcrun (coop_head_1_0.air) cached
+|           +- run xcrun (coop_head_2_0.air) cached
+|           +- run xcrun (coop_head_2_1.air) cached
+|           +- run xcrun (coop_in_1_0.air) cached
+|           +- run xcrun (coop_in_1_0_sk.air) cached
+|           +- run xcrun (coop_in_2_0.air) cached
+|           +- run xcrun (coop_in_2_0_sk.air) cached
+|           +- run xcrun (coop_in_2_1.air) cached
+|           +- run xcrun (coop_in_2_1_sk.air) cached
+|           +- run xcrun (coop_out_1_0.air) cached
+|           +- run xcrun (coop_out_1_0_sk.air) cached
+|           +- run xcrun (coop_out_2_0.air) cached
+|           +- run xcrun (coop_out_2_0_sk.air) cached
+|           +- run xcrun (coop_out_2_1.air) cached
+|           +- run xcrun (coop_out_2_1_sk.air) cached
+|           +- run xcrun (coop_qkv_1_0.air) cached
+|           +- run xcrun (coop_qkv_2_0.air) cached
+|           +- run xcrun (coop_qkv_2_1.air) cached
+|           +- run xcrun (coop_up_1_0.air) cached
+|           +- run xcrun (coop_up_2_0.air) cached
+|           +- run xcrun (coop_up_2_1.air) cached
+|           +- run xcrun (up_relu2_1_0.air) cached
+|           +- run xcrun (up_relu2_2_0.air) cached
+|           +- run xcrun (up_relu2_2_1.air) cached
++- run test cached
+|  +- compile test fast native-native cached 70ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 69ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 87ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 114ms MaxRSS:32M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test fast native-native cached 123ms MaxRSS:32M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- test-exl3 success
+|  +- compile obj exl3_metal_loader debug native-native cached 78ms MaxRSS:31M
+|  |  +- WriteFile exl3_projection.metal cached
+|  +- run test cached
+|  |  +- compile test fast native-native cached 76ms MaxRSS:32M
+|  |     +- WriteFile exl3_projection.metal (reused)
+|  +- run test cached
+|     +- compile test fast native-native cached 83ms MaxRSS:32M
+|        +- WriteFile exl3_projection.metal (reused)
++- run test cached
+|  +- compile test fast native-native cached 115ms MaxRSS:32M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test safe native-native cached 86ms MaxRSS:32M
+|     +- WriteFile exlr8_alias.zig cached
+|     +- WriteFile drama3_core.zig cached
+|     +- WriteFile draft_ids.txt (reused)
+|     +- WriteFile xsum.metal cached
+|     +- WriteFile drama3.metallib cached
+|     |  +- run xcrun (drama3.metallib) cached
+|     |     +- run xcrun (d3_dense.air) cached
+|     |     +- run xcrun (d3_gdn.air) cached
+|     |     +- run xcrun (d3_attn.air) cached
+|     |     +- run xcrun (d3_moe.air) cached
+|     |     +- run xcrun (d3_sample.air) cached
+|     |     +- run xcrun (d3_codec.air) cached
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test safe native-native cached 95ms MaxRSS:32M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test fast native-native cached 80ms MaxRSS:32M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test fast native-native cached 108ms MaxRSS:32M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test safe native-native cached 109ms MaxRSS:32M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test safe native-native cached 76ms MaxRSS:32M
++- run test cached
+|  +- compile test safe native-native cached 115ms MaxRSS:32M
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test safe native-native cached 79ms MaxRSS:32M
++- run test cached
+|  +- compile test safe native-native cached 63ms MaxRSS:32M
++- run test cached
+|  +- compile test safe native-native cached 100ms MaxRSS:32M
++- run test cached
+|  +- compile test safe native-native cached 105ms MaxRSS:32M
+|     +- WriteFile xsum.metal (reused)
+|     +- WriteFile xsum.metal (reused)
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test safe native-native cached 74ms MaxRSS:32M
++- run test cached
+|  +- compile test safe native-native cached 122ms MaxRSS:32M
++- run sh success 60ms
+|  +- compile exe tensorfold-native safe native-native success 2m MaxRSS:4G
+|     +- options cached
+|     +- WriteFile drama3_core.zig (reused)
+|     +- WriteFile exlr8_alias.zig cached
+|     +- WriteFile draft_ids.txt (reused)
+|     +- WriteFile xsum.metal (reused)
+|     +- WriteFile drama3.metallib (+1 more reused dependencies)
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test 433 pass (433 total) 58s MaxRSS:97M
+|  +- compile test debug native-native success 16s MaxRSS:1G
++- run test cached
+|  +- compile test debug native-native cached 56ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native-native cached 73ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native-native cached 79ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 72ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 85ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 68ms MaxRSS:32M
+|     +- WriteFile tensorfold.metallib cached
+|        +- run xcrun (tensorfold.metallib) cached
+|           +- run xcrun (runtime_tests.air) cached
+|           +- run xcrun (nemotron_expert_up.air) cached
+|           +- run xcrun (nemotron_expert_down.air) cached
++- run test cached
+|  +- compile test fast native-native cached 123ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- WriteFile xsum.metal (reused)
+|     +- WriteFile nemotron_packed.metallib (+1 more reused dependencies)
++- run test cached
+|  +- compile test fast native-native cached 73ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 72ms MaxRSS:31M
++- run test cached
+|  +- compile test fast native-native cached 61ms MaxRSS:31M
++- run test cached
+|  +- compile test fast native-native cached 113ms MaxRSS:32M
++- run test cached
+|  +- compile test fast native-native cached 80ms MaxRSS:32M
++- test-cuda-host success
+|  +- run test cached
+|  |  +- compile test debug native cached 74ms MaxRSS:32M
+|  +- run test 30 pass (30 total) 88ms MaxRSS:4M
+|  |  +- compile test debug native cached 83ms MaxRSS:32M
+|  |     +- WriteFile h3-compile-only.fatbin cached
+|  |     +- options cached
+|  +- run test cached
+|  |  +- compile test debug native cached 74ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 94ms MaxRSS:32M
+|  |     +- WriteFile draft_ids.txt (reused)
+|  |     +- options (reused)
+|  +- compile obj exl3_host_compile debug native cached 98ms MaxRSS:31M
+|  |  +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 77ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 93ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 73ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 103ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 67ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 93ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 85ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test fast native cached 94ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test fast native cached 86ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- compile obj bolt_host_compile debug aarch64-linux-gnu cached 52ms MaxRSS:31M
+|  |  +- options cached
+|  |  +- WriteFile draft_ids.txt (reused)
+|  +- run test 26 pass (26 total) 525ms MaxRSS:6M
+|  |  +- compile test debug native cached 80ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- compile obj drama_cuda_native_host debug native cached 86ms MaxRSS:31M
+|  |  +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 84ms MaxRSS:32M
+|  +- run test 433 pass (433 total) 58s MaxRSS:97M
+|  |  +- compile test debug native success 15s MaxRSS:1G
+|  +- run test cached
+|  |  +- compile test debug native cached 73ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 86ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 75ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 101ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 100ms MaxRSS:32M
+|  |     +- WriteFile draft_ids.txt (reused)
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 81ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 76ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 81ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 98ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 59ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 76ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 75ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 102ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 83ms MaxRSS:32M
+|  |     +- options (reused)
+|  |     +- WriteFile draft_ids.txt (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 74ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 86ms MaxRSS:32M
+|  |     +- options (reused)
+|  +- run test cached
+|  |  +- compile test debug native cached 87ms MaxRSS:32M
+|  +- run test cached
+|  |  +- compile test debug native cached 76ms MaxRSS:32M
+|  +- run test cached
+|     +- compile test debug native cached 99ms MaxRSS:32M
+|        +- options (reused)
+|        +- options (reused)
+|        +- WriteFile draft_ids.txt (reused)
+|        +- WriteFile exlr8_alias.zig cached
++- run test cached
+|  +- compile test debug native cached 83ms MaxRSS:32M
+|     +- options cached
++- run test cached
+|  +- compile test debug native cached 80ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 85ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 87ms MaxRSS:32M
++- test-kv-pool success
+|  +- run test cached
+|  |  +- compile test debug native cached 80ms MaxRSS:32M
+|  +- run test cached
+|     +- compile test debug native cached 82ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 78ms MaxRSS:32M
+|     +- options cached
+|     |  +- compile lib hip-mock-success debug native cached 66ms MaxRSS:31M
+|     |  +- compile lib hip-mock-failed debug native cached 73ms MaxRSS:31M
+|     |  +- compile lib hip-mock-missing debug native cached 67ms MaxRSS:31M
+|     +- WriteFile kernels.zig cached
++- run test 23 pass, 1 skip (24 total) 138ms MaxRSS:5M
+|  +- compile test debug native cached 91ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 78ms MaxRSS:32M
+|     +- WriteFile kernels.zig cached
++- run test cached
+|  +- compile test debug native cached 79ms MaxRSS:32M
+|     +- WriteFile kernels.zig (reused)
++- run test cached
+|  +- compile test debug native cached 67ms MaxRSS:32M
+|     +- WriteFile kernels.zig (reused)
++- run test cached
+|  +- compile test debug native cached 84ms MaxRSS:32M
+|     +- WriteFile kernels.zig (reused)
++- run test cached
+|  +- compile test debug native cached 80ms MaxRSS:32M
+|     +- WriteFile kernels.zig (reused)
++- compile exe tf-qwen35-test debug native cached 77ms MaxRSS:31M
+|  +- WriteFile kernels.zig (reused)
++- compile exe tensorfold-native safe native success 2s MaxRSS:256M
+|  +- options (reused)
+|  +- WriteFile exlr8_alias.zig cached
+|  +- WriteFile kernels.zig (reused)
++- run test cached
+|  +- compile test safe native-native cached 65ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 68ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 74ms MaxRSS:32M
++- run exe learned-warning-test success 11ms
+   +- compile exe learned-warning-test debug native cached 59ms MaxRSS:32M
+
+env ZIG_GLOBAL_CACHE_DIR=$HOME/tmp/zig-global-1001  build test -Dcpu=apple_m1  219.28s user 21.06s system 158% cpu 2:31.32 total
+exit=0

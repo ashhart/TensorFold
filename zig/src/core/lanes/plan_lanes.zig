@@ -1,7 +1,8 @@
-//! A lone stream's lanes each round: the head tree, or the head's chain with grafted copies, that lands the most tokens a round time.
+//! A lone stream's head tree or chain with grafted copies, priced by expected tokens per round time.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const shape = @import("shape.zig");
+const Prefixes = @import("shape_prefixes.zig").Prefixes(sizes[sizes.len - 1]);
 const Table = @import("table.zig").Table;
 
 /// Lane counts the planner weighs for a head tree (each at most the cap).
@@ -91,21 +92,23 @@ pub fn tablePrice(c: Costs, p: Pick) ?f64 {
 pub fn pick(gpa: Allocator, o: shape.Odds, c: Costs, cap: u32, depth_cap: usize, grafts: ?Grafts, wider: bool) !Pick {
     var best: Pick = .{ .choice = 0 };
     var best_rate: f64 = -1;
-    errdefer if (best.tree) |t| t.deinit(gpa);
+    var widest: usize = 0;
+    for (sizes) |n| if (n <= cap) {
+        widest = n;
+    };
+    var prefixes = try Prefixes.init(gpa, o, widest, depth_cap);
+    var selected: ?usize = null;
     for (sizes, 0..) |n, i| {
         if (n > cap) break;
-        const t = try shape.best(gpa, o, n, depth_cap);
+        const t = prefixes.view(n);
         const priced = if (t.isChain()) c.round(1 + t.parents.len, levels(t)) else c.treeRound(1 + t.parents.len, levels(t));
-        const cost = (priced orelse {
-            t.deinit(gpa);
-            continue;
-        }) + c.own(i);
+        const cost = (priced orelse continue) + c.own(i);
         const rate = (1 + t.expected) / cost;
         if (rate > best_rate) {
-            if (best.tree) |old| old.deinit(gpa);
-            best = .{ .choice = i, .tree = t, .expected = 1 + t.expected };
+            selected = n;
+            best = .{ .choice = i, .expected = 1 + t.expected };
             best_rate = rate;
-        } else t.deinit(gpa);
+        }
     }
     if (grafts) |g| if (g.rows > 0) {
         for (1..@min(4, @as(usize, cap)) + 1) |d| {
@@ -113,17 +116,18 @@ pub fn pick(gpa: Allocator, o: shape.Odds, c: Costs, cap: u32, depth_cap: usize,
             const cost = (c.round(1 + d + rows, d) orelse continue) + c.own(chain_grafts);
             const expected = 1 + chainExpected(o, @min(d, depth_cap)) + g.hit * @as(f64, @floatFromInt(rows));
             if (expected / cost > best_rate) {
-                if (best.tree) |old| old.deinit(gpa);
+                selected = null;
                 best = .{ .choice = chain_grafts, .depth = @intCast(d), .grafts = rows, .expected = expected };
                 best_rate = expected / cost;
             }
         }
     };
     if (wider and best.choice + 1 < sizes.len and sizes[best.choice + 1] <= cap) {
-        const t = try shape.best(gpa, o, sizes[best.choice + 1], depth_cap);
-        if (best.tree) |old| old.deinit(gpa);
-        best = .{ .choice = best.choice + 1, .tree = t, .expected = 1 + t.expected };
+        selected = sizes[best.choice + 1];
+        const t = prefixes.view(selected.?);
+        best = .{ .choice = best.choice + 1, .expected = 1 + t.expected };
     }
+    if (selected) |n| best.tree = try prefixes.copy(gpa, n);
     return best;
 }
 
@@ -170,4 +174,8 @@ test "grafts that keep landing win the round when they add more rows than the he
     defer if (p.tree) |t| t.deinit(gpa);
     try std.testing.expectEqual(chain_grafts, p.choice);
     try std.testing.expect(p.grafts == 20 and p.depth >= 1);
+}
+
+test {
+    _ = @import("plan_equivalence_test.zig");
 }

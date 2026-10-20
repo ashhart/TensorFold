@@ -159,6 +159,7 @@ const Child = struct {
     extern "c" fn fork() c_int;
 };
 test "kv safety: paged constructor fatal completion failure precedes every destination or parent release" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the child process comes from fork
     for ([_]Case{ .clear, .slots, .cpu, .wait }) |case| {
         const pid = Child.fork();
         if (pid < 0) return error.ForkFailed;

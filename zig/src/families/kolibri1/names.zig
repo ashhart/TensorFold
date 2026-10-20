@@ -202,7 +202,7 @@ test "every tensor of a checkpoint maps, the shared expert last" {
 }
 
 test "the pinned checkpoint (TF_KOLIBRI_DIR): 116,303 tensors, none left over" {
-    const dir = testing.environ.getPosix("TF_KOLIBRI_DIR") orelse return error.SkipZigTest;
+    const dir = @import("sys").getenv("TF_KOLIBRI_DIR") orelse return error.SkipZigTest;
     const cfg = try Config.read(testing.allocator, io, dir);
     var ck = try Checkpoint.openModel(testing.allocator, io, dir);
     defer ck.close();

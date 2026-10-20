@@ -44,6 +44,7 @@ test {
     _ = moe;
     _ = sample;
     _ = prefix;
+    _ = hip_lanes;
     _ = radix;
     _ = native_engine;
     _ = pages;

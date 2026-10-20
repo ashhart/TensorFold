@@ -2,65 +2,7 @@
 
 // A block a (row, head), a thread an element; a head's norm sums in one fixed order, never depending on the row count.
 
-#include <cuda_bf16.h>
-#include <stdint.h>
-
-namespace tf_qk {
-
-constexpr int MOST = 256; // head_dim at most
-
-// Where a row's heads come from: q, k and v (null: none) at row stride *_ld and head stride *_hs (elements).
-struct QkSrc {
-    const __nv_bfloat16* q;
-    long long q_ld, q_hs;
-    const __nv_bfloat16* k;
-    long long k_ld, k_hs;
-    const __nv_bfloat16* v;
-    long long v_ld, v_hs;
-};
-
-// The q and k norm weights: fp32 or bf16 (null q: no norm).
-struct QkW {
-    const void* q;
-    const void* k;
-    int bf16;
-};
-
-__device__ __forceinline__ float wv(const QkW& w, bool is_k, int i) {
-    const void* p = is_k ? w.k : w.q;
-    return w.bf16 ? __bfloat162float(static_cast<const __nv_bfloat16*>(p)[i]) : static_cast<const float*>(p)[i];
-}
-
-// cos and sin of p's angle on rotated dim d: from tables [positions, rot], or computed from inv [rot / 2].
-__device__ __forceinline__ void rope_at(const float* cosv, const float* sinv, const float* inv, int p, int rot, int d,
-                                        float& c, float& sn) {
-    if (inv != nullptr) {
-        const float a = __fmul_rn(static_cast<float>(p), inv[d < rot / 2 ? d : d - rot / 2]);
-        c = cosf(a);
-        sn = sinf(a);
-    } else {
-        c = cosv[static_cast<int64_t>(p) * rot + d];
-        sn = sinv[static_cast<int64_t>(p) * rot + d];
-    }
-}
-
-// Where a row's q, k and v (null: none) go, at row stride *_ld and head stride *_hs (elements).
-struct QkDst {
-    __nv_bfloat16* q;
-    long long q_ld, q_hs;
-    __nv_bfloat16* k;
-    long long k_ld, k_hs;
-    __nv_bfloat16* v;
-    long long v_ld, v_hs;
-};
-
-__device__ __forceinline__ const __nv_bfloat16* head_src(const QkSrc& s, int64_t r, int hd, int h, int hk) {
-    if (hd < h) return s.q + r * s.q_ld + hd * s.q_hs;
-    if (hd < h + hk) return s.k + r * s.k_ld + (hd - h) * s.k_hs;
-    return s.v + r * s.v_ld + (hd - h - hk) * s.v_hs;
-}
-
-}  // namespace tf_qk
+#include "qk_rows.cuh"
 
 using namespace tf_qk;
 
@@ -191,4 +133,26 @@ extern "C" __global__ void __launch_bounds__(128) tf_qk_rows_w(const QkSrc in, c
             if (kc != nullptr) kc[(at * hk + k) * D + lane + 32 * j] = out;
         }
     }
+}
+
+// tf_qk_rows to head dim 512 (qk_round.cuh), and the options it alone has: a unit v norm and MLX's rounding points.
+#include "qk_round.cuh"
+
+// tf_qk_rows' arithmetic at head dims to 512; vnorm: v by a unit RMS norm, bf16(x * inv), else as is.
+extern "C" __global__ void __launch_bounds__(tf_qk_round::WIDE) tf_qk_rows_once(const QkSrc in, const QkW nw, const float* cosv,
+                                                                                const float* sinv, const float* inv, int rot,
+                                                                                const int* pos, const int* slot, const QkDst dst,
+                                                                                __nv_bfloat16* kc, __nv_bfloat16* vc, long long len,
+                                                                                int h, int hk, float eps, int vnorm) {
+    tf_qk_round::rows(in, nw, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps, vnorm ? tf_qk_round::VNORM : 0);
+}
+
+// As tf_qk_rows_once with MLX's rounding points: q, k = bf16(w * bf16(x * inv)) before RoPE (Metal gemma_norm_rope).
+extern "C" __global__ void __launch_bounds__(tf_qk_round::WIDE) tf_qk_rows_round(const QkSrc in, const QkW nw, const float* cosv,
+                                                                                 const float* sinv, const float* inv, int rot,
+                                                                                 const int* pos, const int* slot, const QkDst dst,
+                                                                                 __nv_bfloat16* kc, __nv_bfloat16* vc, long long len,
+                                                                                 int h, int hk, float eps, int vnorm) {
+    tf_qk_round::rows(in, nw, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps,
+                      tf_qk_round::MLX | (vnorm ? tf_qk_round::VNORM : 0));
 }

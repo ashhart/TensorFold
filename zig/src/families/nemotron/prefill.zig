@@ -81,7 +81,7 @@ pub const Scratch = struct {
     upr: Buffer,
     sh: Buffer,
 
-    fn init(device: mtl.Device, c: cfg.Config, rows: usize) !Scratch {
+    pub fn init(device: mtl.Device, c: cfg.Config, rows: usize) !Scratch {
         @setEvalBranchQuota(20000);
         const d = c.hidden;
         const xd = c.inner();
@@ -120,7 +120,7 @@ pub const Scratch = struct {
         return s;
     }
 
-    fn deinit(self: *Scratch) void {
+    pub fn deinit(self: *Scratch) void {
         inline for (@typeInfo(Scratch).@"struct".field_names) |name| @field(self, name).deinit();
     }
 };

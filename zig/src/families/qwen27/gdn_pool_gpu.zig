@@ -10,6 +10,8 @@ const Tensor = @import("gpu_weights.zig").Tensor;
 const profile = @import("core").gpu_profile;
 const Kernels = @import("gdn_library.zig").Kernels;
 
+pub const PromptMarks = @import("gdn_marks_gpu.zig").Bank;
+
 const Field = enum { state, history, next_history, qkv, query, key, value, decay, mixing, snapshots, tails, recurrent };
 
 pub const Metadata = struct {
@@ -56,14 +58,31 @@ pub const Pool = struct {
     buffers: [std.enums.values(Field).len]metal.Buffer,
     kernels: Kernels,
     before: ?metal.Buffer = null,
+    marks: ?*PromptMarks = null, // borrowed through one synchronous plain prompt and its cache callbacks
     before_slots: usize = 0,
     profiler: ?*profile.Trace = null,
     tree_mode: gdn.TreeMode = .auto,
+    residency: ?metal.ResidencySet.Follow = null,
+
+    pub fn setResident(pool: *Pool, hook: ?metal.ResidencySet.Follow) void {
+        if (pool.residency) |f| metal.resident.fields.apply(pool, f, false);
+        pool.residency = hook;
+        if (hook) |f| metal.resident.fields.apply(pool, f, true);
+    }
 
     /// One state a slot: every round's keeps stay in their slots and update them in place.
     pub fn init(device: metal.Device, shape: abi.Shape, layers: usize, slots: usize, capacity: usize) !Pool {
         const budget = try Budget.init(shape, layers, slots, capacity);
         if (capacity % 16 != 0) return error.BadGdnProjectionCapacity;
+        const buffers = try allocateBuffers(device, budget);
+        errdefer for (buffers) |buffer| buffer.deinit();
+        const kernels = try Kernels.init(device);
+        return .{ .budget = budget, .buffers = buffers, .kernels = kernels };
+    }
+
+    pub fn allocateBuffers(device: metal.Device, budget: Budget) !@FieldType(Pool, "buffers") {
+        const capacity = budget.rows;
+        const shape = budget.shape;
         const widths = [_]usize{ budget.state, budget.history, budget.history, budget.projections, budget.query, budget.key, budget.value, budget.decay, budget.mixing, budget.snapshots, budget.conv_tails, capacity * shape.value * 2 };
         var buffers: [widths.len]metal.Buffer = undefined;
         var count: usize = 0;
@@ -73,11 +92,11 @@ pub const Pool = struct {
             count += 1;
         }
         for ([_]Field{ .state, .history }) |field| @memset(buffers[@backingInt(field)].contents()[0..widths[@backingInt(field)]], 0);
-        const kernels = try Kernels.init(device);
-        return .{ .budget = budget, .buffers = buffers, .kernels = kernels };
+        return buffers;
     }
 
     pub fn deinit(pool: *Pool) void {
+        pool.setResident(null);
         pool.releaseBefore();
         pool.kernels.deinit();
         for (pool.buffers) |buffer| buffer.deinit();
@@ -95,11 +114,15 @@ pub const Pool = struct {
         if (slots == 0) return;
         pool.before = try device.buffer(bytes, metal.ResourceOptions.shared | metal.ResourceOptions.untracked);
         pool.before_slots = slots;
+        if (pool.residency) |f| f.join(f.ctx, pool.before.?);
     }
 
     /// No submitted work or pending keep may reference the bank when its owner calls this.
     pub fn releaseBefore(pool: *Pool) void {
-        if (pool.before) |buffer| buffer.deinit();
+        if (pool.before) |buffer| {
+            if (pool.residency) |f| f.leave(f.ctx, buffer);
+            buffer.deinit();
+        }
         pool.before = null;
         pool.before_slots = 0;
     }
@@ -161,7 +184,10 @@ pub const Pool = struct {
         var scan = profile.begin(pool.profiler, input_encoder, .gdn_scan);
         errdefer scan.cancel();
         const wide = prompt and pool.budget.shape.c.dk == 128 and pool.budget.shape.c.dv % 4 == 0;
-        prepared.scanChain(scan.encoder, if (wide) pool.kernels.chain_wide else pool.kernels.chain, wide);
+        if (pool.marks) |m| {
+            if (!wide) return error.BadPromptMarks;
+            try m.scan(layer, prepared, scan.encoder, pool.kernels.chain_wide_marks);
+        } else prepared.scanChain(scan.encoder, if (wide) pool.kernels.chain_wide else pool.kernels.chain, wide);
         try scan.end();
         var gate = profile.begin(pool.profiler, input_encoder, .gdn_gate);
         errdefer gate.cancel();
@@ -171,6 +197,7 @@ pub const Pool = struct {
         var publication = profile.begin(pool.profiler, input_encoder, .state_publish);
         errdefer publication.cancel();
         const e = publication.encoder;
+        if (pool.marks) |m| try m.convolution(layer, prepared, e, pool.kernels.mark_conv);
         prepared.commitConv(e);
         e.setPipeline(pool.kernels.publish_conv);
         gdn.bind(e, .{prepared.b.next_history}, 0);

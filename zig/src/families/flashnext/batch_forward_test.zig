@@ -56,6 +56,7 @@ pub fn check(verify: Verify, keep: Keep) !void {
     r.xgu_pipe = .{ .name = "fz_xgu" };
     r.xdown_pipe = .{ .name = "fz_xdown" };
     r.draw_pipe = .{ .name = "draw" };
+    r.rotary_pipe = .{ .name = "tf_rotary_prepare" };
     const dummy: fz.Buf = .{ .b = try r.device.buffer(2 << 20, fz.opts) };
     try r.shapes.put(a, "Kc_shape", dummy.b);
     try r.shapes.put(a, "IDS_shape", dummy.b);
@@ -101,8 +102,10 @@ pub fn check(verify: Verify, keep: Keep) !void {
         mtl.calls = @splat(0);
         mtl.scale_calls = 0;
         r.enc = .{};
+        mtl.rotary_calls = 0;
         m.windowMeta(1);
         try m.windowEncode(1, m.t.ids8);
+        try std.testing.expectEqual(@as(usize, 1), mtl.rotary_calls);
         const legacy = m.t.picks.b.slice(u32, 1)[0];
         try std.testing.expectEqual(@as(u32, 7), legacy);
         try std.testing.expectEqual(@as(usize, 1), mtl.scale_calls);
@@ -177,7 +180,9 @@ pub fn check(verify: Verify, keep: Keep) !void {
                 mtl.wrong = 0;
                 mtl.scale_calls = 0;
                 mtl.calls = @splat(0);
+                mtl.rotary_calls = 0;
                 try core.step();
+                try std.testing.expectEqual(@as(usize, 1), mtl.rotary_calls);
                 try std.testing.expect(stream.emitted().len > 0);
                 try std.testing.expectEqual(legacy, stream.emitted()[0]);
                 try std.testing.expectEqual(@as(usize, 0), mtl.wrong);

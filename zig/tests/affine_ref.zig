@@ -272,7 +272,7 @@ fn affine(t: *Tally, device: mtl.Device, queue: mtl.Queue, s: *const Synth, ref:
 /// simd_qmm over rows [start, start + m), the scalar twin when `scalar` and it takes m rows.
 fn simdWindow(e: mtl.ComputeEncoder, p: *const sq.Pipelines, s: *const Synth, y: Out, scalar: bool, start: usize, m: usize) !void {
     const mat = sq.Matrix{ .w = s.w, .scales = s.s, .biases = s.b, .n = s.n, .k = s.k };
-    sq.encode(e, try sq.call(p, s.n, s.k, m, scalar), mat, s.x, start * s.k * 2, y.buf, start * s.n * 2);
+    sq.encode(e, try sq.call(p, s.n, s.k, m, scalar, true), mat, s.x, start * s.k * 2, y.buf, start * s.n * 2);
 }
 
 /// simd_qmm (4-bit, group 64): tiles at every window against float64 and the wide call; the twin at 1 and 2 rows.

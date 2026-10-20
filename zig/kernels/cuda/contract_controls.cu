@@ -63,6 +63,41 @@ extern "C" __global__ void tf_ctl_half_dot(const __nv_bfloat16* X, int K, float*
     if (lane == 0) Y[row] = __half2float(s);
 }
 
+// Gate 3: qk_rows.cu's tf_qk_rows_round keeping only the options in `keep`; the exact check must go red.
+#include "qk_round.cuh"
+
+extern "C" __global__ void __launch_bounds__(tf_qk_round::WIDE) tf_ctl_qk_round(const tf_qk::QkSrc in, const tf_qk::QkW nw,
+                                                                                const float* cosv, const float* sinv,
+                                                                                const float* inv, int rot, const int* pos,
+                                                                                const int* slot, const tf_qk::QkDst dst,
+                                                                                __nv_bfloat16* kc, __nv_bfloat16* vc,
+                                                                                long long len, int h, int hk, float eps, int keep) {
+    tf_qk_round::rows(in, nw, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps, keep);
+}
+
+
+// Gate 3: embed_rows.cu's scaled MLX rows keeping the rounding points in `keep`; the exact check must go red.
+#include "embed_affine.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_embed_affine(const int* ids, const uint32_t* w,
+                                                                       const __nv_bfloat16* s, const __nv_bfloat16* b,
+                                                                       __nv_bfloat16* out, int d, int bits, int group,
+                                                                       float scale, int keep) {
+    tf_embed_affine::rows(ids, w, s, b, out, d, bits, group, scale, keep);
+}
+
+
+// Gate 3: act_rows.cu's MLX activations keeping only the rounding points in `keep`; the exact check must go red.
+#include "act_round.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_act_round(const __nv_bfloat16* gate, long long g_ld,
+                                                                    const __nv_bfloat16* up, long long u_ld,
+                                                                    __nv_bfloat16* out, float* xs, int n, int geglu,
+                                                                    int keep) {
+    if (geglu) tf_act_round::rows<true>(gate, g_ld, up, u_ld, out, xs, n, keep);
+    else tf_act_round::rows<false>(gate, g_ld, up, u_ld, out, xs, n, keep);
+}
+
 // Gate 5: bounded to 256 threads a block, which the registry says its launcher gives 512.
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_bounded(const float* X, float* Y) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -85,3 +120,18 @@ extern "C" __global__ void tf_ctl_heavy(const float* X, float* Y) {
     for (int j = 0; j < 160; ++j) s += v[j] * v[159 - j];
     Y[t] = s;
 }
+
+// Gate 3: norms.cu's MLX tail with one rounding point dropped each; its test's exact rounding-point check must go red.
+#include "norms_tail.cuh"
+
+#define TF_CTL_TAIL(NAME, DROP)                                                                                    \
+    extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) NAME(                                           \
+        const __nv_bfloat16* x, const __nv_bfloat16* r, const __nv_bfloat16* wb, const __nv_bfloat16* sc,         \
+        const __nv_bfloat16* w, __nv_bfloat16* h, __nv_bfloat16* y, float* xs, int width, float eps) {            \
+        tf_rms_tail::tail<tf_rms_tail::MLX & ~(DROP)>(x, r, wb, sc, w, h, y, xs, width, eps);                     \
+    }
+TF_CTL_TAIL(tf_ctl_tail_drop_branch_row, tf_rms_tail::BRANCH_ROW)
+TF_CTL_TAIL(tf_ctl_tail_drop_branch_out, tf_rms_tail::BRANCH_OUT)
+TF_CTL_TAIL(tf_ctl_tail_drop_sum, tf_rms_tail::SUM)
+TF_CTL_TAIL(tf_ctl_tail_drop_row, tf_rms_tail::ROW)
+#undef TF_CTL_TAIL

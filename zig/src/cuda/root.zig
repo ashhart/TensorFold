@@ -70,6 +70,7 @@ pub const pack = @import("pack.zig");
 pub const graph_cache = @import("graph_cache.zig");
 
 test {
+    _ = nccl;
     _ = exl3_grouped;
     _ = gdn_train;
     _ = train_q4;
@@ -78,6 +79,7 @@ test {
     _ = memory_receipt;
     _ = @import("grouped.zig");
     _ = @import("qlinear.zig");
+    _ = @import("proposal_head_test.zig");
     _ = @import("norms.zig");
     _ = @import("embed_rows.zig");
     _ = @import("route_rows.zig");

@@ -37,6 +37,7 @@ pub const Grow = struct {
 };
 
 pub const Metal = struct {
+    residency: ?mtl.ResidencySet.Follow = null,
     gpa: std.mem.Allocator,
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
@@ -101,6 +102,7 @@ pub const Metal = struct {
     }
 
     pub fn deinit(b: *Metal) void {
+        q.residency.setBack(b, null);
         b.dropRound();
         b.dropTree();
         b.freeContexts();

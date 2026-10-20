@@ -4,7 +4,7 @@
 #include <cuda_fp8.h>
 #include <stdint.h>
 
-namespace {
+namespace tf_glm_quant {
 
 // E2M1's magnitudes in code order; experts.py's argmin keeps the first of equal distances (midpoints round down).
 __device__ __constant__ float kE2M1[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
@@ -28,7 +28,10 @@ __device__ __forceinline__ unsigned e2m1(float v) {
     return best + (v < 0.0f ? 8u : 0u);
 }
 
-}  // namespace
+}  // namespace tf_glm_quant
+
+using tf_glm_quant::e2m1;
+using tf_glm_quant::widen8;
 
 // experts._quantize's per-expert scale, a block per expert: g[e] = clamp_min(amax |w[e]| * fp32(1 / 2688), 1e-30).
 extern "C" __global__ void tf_glm_nvfp4_amax(

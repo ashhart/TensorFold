@@ -1,0 +1,554 @@
+test
++- run test w
+[default] (warn): pack <HOST_CHECKOUT>/.zig-cache/tmp/BE5wSwjd1YF4jUQ3/pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): pack pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): language_model.mtp.fc_embedding: not read at its declared width: UnsupportedQuantization
+[default] (warn): language_model.model.embed_tokens: not stored at its declared width: InvalidAffineShape
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): lane L0.att.o: LaneRowsNotFours
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+failed command: ./.zig-cache/o/6912cf8414324d74bdfa6475ced95635/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): language_model.model.layers.0: gate and up of one expert differ in width; one kernel reads both
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+[default] (warn): language_model.mtp.fc_embedding: not read at its declared width: UnsupportedQuantization
+[default] (warn): language_model.model.embed_tokens: not stored at its declared width: InvalidAffineShape
+[default] (warn): pack <HOST_CHECKOUT>/.zig-cache/tmp/Nwb_SsVEsMYuCjF_/pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): pack pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): lane L0.att.o: LaneRowsNotFours
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+failed command: ./.zig-cache/o/cd81c3b3a112571b4a0d7f5625f9fe44/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test 30 pass, 1 skip, 2 fail (33 total)
+unk's forward polls its stream's cancel (test)
+    const c = Hip.cancelOf(&s) orelse return error.TestExpectedCancel;
+                                      ^
+error: 'backend.hip.engine.prefix.test.every prompt chunk a server pass runs stops at a layer edge when cancelled' failed:
+       <HOST_ZIG_DIR>/lib/std/testing.zig:584:14: 0x1047a0b6b in expect (test)
+           if (!ok) return error.Tes
+error: 'backend.hip.engine.hip_lanes.test.a prompt chunk's forward polls its stream's cancel' failed:
+       tUnexpectedResult;
+                    ^
+       <HOST_CHECKOUT>/zig/src/families/qwen3_5/backend/hip/engine/prefix.zig:39:5: 0x1047c11c3 in test.every prompt chunk a server pass runs stops at a layer edge when cancelled (test)
+           try std.testing.expect(pollsLayers(1, chunk));
+           ^
+       <HOST_CHECKOUT>/zig/src/families/qwen3_5/backend/hip/engine/hip_lanes.zig:568:39: 0x1047c039b in test.a prompt ch
+failed command: ./.zig-cache/o/b1237ef159ceae8419897d20ca2d201d/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+failed command: ./.zig-cache/o/61f4f42007c910ae0dba3d28a8174637/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zig-cache/o/ce0681dd30466573327c4eaf83563533/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): a round could not be recorded: OutOfDeviceMemory
+failed command: ./.zig-cache/o/dd82287749019c7316954e8fb931dab1/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): glm: restoring 1500 tokens failed (PoolMoveNotDrained); pool relocation aborted
+failed command: ./.zig-cache/o/9c900e13443c4ea3333643efc5df6815/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): language_model.mtp.fc_embedding: not read at its declared width: UnsupportedQuantization
+[default] (warn): language_model.model.embed_tokens: not stored at its declared width: InvalidAffineShape
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): lane L0.att.o: LaneRowsNotFours
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): pack <HOST_CHECKOUT>/.zig-cache/tmp/VNO0g7e8zAjP-0MI/pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): pack pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+failed command: ./.zig-cache/o/349ecedab64728c1d4cb34081643bae7/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): XPU: a command list did not drain at close; its memory and context stay until the process ends
+failed command: ./.zig-cache/o/73389d3e8a9d3943258cfb4fbdd98b4c/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+failed command: ./.zig-cache/o/d2c2ff8e57a06f1a6fed88daefb31c03/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+failed command: ./.zig-cache/o/f645b174ea1a132f03379093ca69ad47/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): lane host: stopping at a round boundary: 1 running and 2 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (the planner refused): every admitted stream fails
+[default] (warn): lane host: a round failed (PlannerFull): every admitted stream fails
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (drain deadline)
+failed command: ./.zig-cache/o/a8b7681f29e9e489e82bddc04264a5b8/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 0 cannot exchange with rank 2; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 1 cannot exchange with rank 3; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 2 cannot exchange with rank 0; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 3 cannot exchange with rank 1; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+failed command: ./.zig-cache/o/2d07c8f61ec9bafcd37e5ab2f870292f/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (err): rank 0: another rank's process ended (its line closed); this rank stops instead of waiting on it
+[default] (err): rank 0: rank 1 stopped (peer OOM); this rank stops too
+failed command: ./.zig-cache/o/8af90ee1f5afbc6fa047940aa19c92a6/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zig-cache/o/9792312ce4e318cabd06e4148b317551/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): /opt/homebrew/opt/jpeg-turbo/lib/libturbojpeg.0.dylib is not libjpeg-turbo 3.1.4.1; JPEG images are refused until it is
+libjpeg-turbo 3.1.4.1 not found: LFM2's JPEG cases skipped
+libjpeg-turbo 3.1.4.1 not found: LFM2's JPEG cases skipped
+failed command: ./.zig-cache/o/a64a60772cfc1f86e858c82af44048c2/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+fake target: proposed=68 verified=68 accepted=68
+failed command: ./.zig-cache/o/95751544d95087a1be5e6edaceb4b7b9/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): qwen3_5: a failed restore's stream did not drain: its kept state's host copy stays
+[default] (warn): qwen3_5: a kept state's host copy goes to the copy-source quarantine: a restore's copies did not drain
+[default] (warn): qwen3_5: a failed restore's stream did not drain: its kept state's host copy stays
+failed command: ./.zig-cache/o/b224b01689fb39f9ece5438996601159/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+failed command: ./.zig-cache/o/4e1b9a76e32557579e3b1e47dccd71c9/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+failed command: ./.zig-cache/o/5b746291ecae1cbb01f8571f00cd90ad/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zig-cache/o/0dc554be0f759762c8e18fb548e0aab7/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): lane host: stopping at a round boundary: 1 running and 2 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (the planner refused): every admitted stream fails
+[default] (warn): lane host: a round failed (PlannerFull): every admitted stream fails
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (drain deadline)
+failed command: ./.zig-cache/o/93ba57251d862534c87fdc67cc02794e/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): /opt/homebrew/opt/jpeg-turbo/lib/libturbojpeg.0.dylib is not libjpeg-turbo 3.1.4.1; JPEG images are refused until it is
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+failed command: ./.zig-cache/o/3a63da6d7db29cdcdb66339666983ff8/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): language_model.lm_head: stored affine but declared unquantized
+[default] (warn): language_model.model.embed_tokens: stored affine but declared unquantized
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+failed command: ./.zig-cache/o/5e4ac653658c1f3fdbe92381c216b77b/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-
+
+test
++- run test w
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): slide pocket: a delete failed (UploadFailed), and its put-back did not reach the device (PutBackNotOnDevice)
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): slide pocket: a delete failed (UploadFailed), and its put-back did not reach the device (PutBackNotOnDevice)
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): checkpoint tensor text.weight stays in its file: read it through a Stage
+[default] (warn): language_model.mtp.fc_embedding: not read at its declared width: UnsupportedQuantization
+[default] (warn): language_model.model.embed_tokens: not stored at its declared width: InvalidAffineShape
+[default] (warn): lane L0.att.o: LaneRowsNotFours
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): lane L21.gdn.in: OutOfMemory
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): pack <HOST_CHECKOUT>/.zig-cache/tmp/9R288pknTUdrnabI/pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): pack pack.safetensors has no recorded source; skipping the identity check
+[default] (warn): model.layers.0.self_attn.v_proj.weight: another spelling of module layers.0.self_attn.v_proj declares a different width
+SSM pipeline capacity: forward=1024, backward=1024
+SSM seeded=false heads=2 groups=1 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0, 0 }
+SSM seeded=false heads=2 groups=1 rows=7: max abs dx/dB/dC/ddt { 0.000000011360835217022469, 0.000000002917455535836333, 0.000000004647133651849988, 0.00000008929183081818337 }
+SSM seeded=false heads=2 groups=1 rows=8: max abs dx/dB/dC/ddt { 0.00000000863441644745333, 0.0000000030472456129596037, 0.000000004647133651849988, 0.00000010044378595530645 }
+SSM seeded=false heads=2 groups=1 rows=9: max abs dx/dB/dC/ddt { 0.000000006604320090808358, 0.0000000027633473599630864, 0.0000000051661870337227356, 0.00000006044416009376441 }
+SSM seeded=false heads=2 groups=1 rows=15: max abs dx/dB/dC/ddt { 0.000000010416435020088599, 0.0000000050579541700790376, 0.000000008099387559939997, 0.00000010302938735495815 }
+SSM seeded=false heads=2 groups=1 rows=16: max abs dx/dB/dC/ddt { 0.000000010399334079633227, 0.000000004927133326337874, 0.000000008099387559939997, 0.00000010076810685877291 }
+SSM seeded=false heads=2 groups=1 rows=17: max abs dx/dB/dC/ddt { 0.00000001543697608283323, 0.000000004476264019170895, 0.000000008099387559939997, 0.000000170725301229524 }
+SSM seeded=false heads=2 groups=1 rows=25: max abs dx/dB/dC/ddt { 0.00000001223729547902841, 0.000000005462381803822414, 0.000000014270247941650105, 0.00000013346487892640368 }
+SSM seeded=false heads=4 groups=2 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0, 0 }
+SSM seeded=false heads=4 groups=2 rows=7: max abs dx/dB/dC/ddt { 0.000000015510263740026176, 0.000000006877330351040545, 0.000000003777481768357793, 0.00000016323549628660672 }
+SSM seeded=false heads=4 groups=2 rows=8: max abs dx/dB/dC/ddt { 0.0000000129148233773968, 0.000000005653858301674086, 0.000000005027532001822266, 0.00000017245745953520242 }
+SSM seeded=false heads=4 groups=2 rows=9: max abs dx/dB/dC/ddt { 0.00000002633087964332148, 0.000000006475598009203498, 0.000000005457366610700509, 0.00000029433054438143813 }
+SSM seeded=false heads=4 groups=2 rows=15: max abs dx/dB/dC/ddt { 0.00000002973828677754753, 0.000000009558005810428316, 0.000000008944659693477242, 0.0000003865198301422623 }
+SSM seeded=false heads=4 groups=2 rows=16: max abs dx/dB/dC/ddt { 0.000000025754882060358142, 0.000000008921690271973537, 0.000000008944659693477242, 0.0000003074925702950537 }
+SSM seeded=false heads=4 groups=2 rows=17: max abs dx/dB/dC/ddt { 0.00000002553487910179897, 0.000000008921690271973537, 0.00000001164840428280467, 0.00000030358411029496324 }
+SSM seeded=false heads=4 groups=2 rows=25: max abs dx/dB/dC/ddt { 0.00000003875727619395697, 0.000000014591112693085329, 0.000000022576584234046404, 0.0000004419375038144935 }
+SSM seeded=false heads=64 groups=8 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0, 0 }
+SSM seeded=false heads=64 groups=8 rows=9: max abs dx/dB/dC/ddt { 0.00000002087263310801557, 0.00000001779203438051491, 0.000000010395453171885283, 0.0000002193045710030539 }
+SSM seeded=false heads=64 groups=8 rows=17: max abs dx/dB/dC/ddt { 0.00000009930843825056712, 0.00000002114473045267129, 0.00000001602812140649723, 0.0000007270377315737875 }
+SSM pipeline capacity: forward=1024, backward=1024
+SSM seeded=true heads=2 groups=1 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0.000000015089179933314156, 0.00000003066629741810267 }
+SSM seeded=true heads=2 groups=1 rows=7: max abs dx/dB/dC/ddt { 0.000000011360835217022469, 0.000000002917455535836333, 0.000000015656003028718946, 0.00000011578910319443025 }
+SSM seeded=true heads=2 groups=1 rows=8: max abs dx/dB/dC/ddt { 0.00000000863441644745333, 0.0000000030472456129596037, 0.000000015656003028718946, 0.000000137397136557027 }
+SSM seeded=true heads=2 groups=1 rows=9: max abs dx/dB/dC/ddt { 0.000000006604320090808358, 0.0000000027633473599630864, 0.000000015656003028718946, 0.000000058752570086806344 }
+SSM seeded=true heads=2 groups=1 rows=15: max abs dx/dB/dC/ddt { 0.000000010416435020088599, 0.0000000050579541700790376, 0.00000003896021144589312, 0.00000011965777954592305 }
+SSM seeded=true heads=2 groups=1 rows=16: max abs dx/dB/dC/ddt { 0.000000010399334079633227, 0.000000004927133326337874, 0.00000004227448897886621, 0.0000001134548608394681 }
+SSM seeded=true heads=2 groups=1 rows=17: max abs dx/dB/dC/ddt { 0.00000001543697608283323, 0.000000004476264019170895, 0.00000004227448897886621, 0.00000018029616666304094 }
+SSM seeded=true heads=2 groups=1 rows=25: max abs dx/dB/dC/ddt { 0.00000001223729547902841, 0.000000005462381803822414, 0.0000000506942888084394, 0.0000001136397048684401 }
+SSM seeded=true heads=4 groups=2 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0.0000000073519402093991104, 0.000000027996068407976082 }
+SSM seeded=true heads=4 groups=2 rows=7: max abs dx/dB/dC/ddt { 0.000000015510263740026176, 0.000000006877330351040545, 0.00000001807481535276434, 0.00000021659550952790596 }
+SSM seeded=true heads=4 groups=2 rows=8: max abs dx/dB/dC/ddt { 0.0000000129148233773968, 0.000000005653858301674086, 0.000000018969054375872485, 0.00000017414204611654327 }
+SSM seeded=true heads=4 groups=2 rows=9: max abs dx/dB/dC/ddt { 0.00000002633087964332148, 0.000000006475598009203498, 0.000000018969054375872485, 0.00000017655989847931153 }
+SSM seeded=true heads=4 groups=2 rows=15: max abs dx/dB/dC/ddt { 0.00000002973828677754753, 0.000000009558005810428316, 0.000000023961633413560612, 0.0000003531072296780735 }
+SSM seeded=true heads=4 groups=2 rows=16: max abs dx/dB/dC/ddt { 0.000000025754882060358142, 0.000000008921690271973537, 0.000000023961633413560612, 0.00000024600469961111315 }
+SSM seeded=true heads=4 groups=2 rows=17: max abs dx/dB/dC/ddt { 0.00000002553487910179897, 0.000000008921690271973537, 0.000000023961633413560612, 0.0000003112589632703333 }
+SSM seeded=true heads=4 groups=2 rows=25: max abs dx/dB/dC/ddt { 0.00000003875727619395697, 0.000000014591112693085329, 0.00000002654540304236619, 0.0000004793090875310213 }
+SSM seeded=true heads=64 groups=8 rows=1: max abs dx/dB/dC/ddt { 0, 0, 0.000000013799211689979884, 0.00000008033819287600608 }
+SSM seeded=true heads=64 groups=8 rows=9: max abs dx/dB/dC/ddt { 0.00000002087263310801557, 0.00000001779203438051491, 0.000000027007305641868484, 0.0000002670173361307704 }
+SSM seeded=true heads=64 groups=8 rows=17: max abs dx/dB/dC/ddt { 0.00000009930843825056712, 0.00000002114473045267129, 0.00000003555922037379311, 0.0000006937729284395289 }
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): qwen image: num_layers is not 32; this family runs the released geometry only
+[default] (warn): /opt/homebrew/opt/jpeg-turbo/lib/libturbojpeg.0.dylib is not libjpeg-turbo 3.1.4.1; JPEG images are refused until it is
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+[default] (warn): gemma4: layers.0.self_attn.q_proj is 4-bit in groups of 32; the kernels read bits 2-6 and 8 in groups of 64
+[default] (warn): gemma4: layers.0.self_attn.q_proj is 4-bit in groups of 128; the kernels read bits 2-6 and 8 in groups of 64
+[default] (warn): gemma4: layers.3.mlp.up_proj's width is not MLX affine bits 2-6 or 8
+[default] (warn): gemma4: layers.3.mlp.up_proj's width is not MLX affine bits 2-6 or 8
+[default] (warn): gemma4: layers.3.mlp.up_proj is not a width table (false or {} marks a module unquantized); every linear is affine
+[default] (warn): gemma4: layers.3.mlp.up_proj is not a width table (false or {} marks a module unquantized); every linear is affine
+[default] (warn): model.layers.3.mlp.up_proj: another spelling of module layers.3.mlp.up_proj declares a different width
+[default] (warn): expert parallel: this Mac runs .{ .magic = 1196182853, .version = 2, .layers = 45, .run = 8, .mtp = 1, .experts = 288, .own_lo = 144, .own_hi = 288, .cap = 8256, .pad = 0, .model = 4660, .rest = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, the peer .{ .magic = 1196182853, .version = 2, .layers = 45, .run = 45, .mtp = 1, .experts = 288, .own_lo = 0, .own_hi = 144, .cap = 8256, .pad = 0, .model = 4660, .rest = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
+[default] (warn): expert parallel: this Mac runs .{ .magic = 1196182853, .version = 2, .layers = 45, .run = 45, .mtp = 1, .experts = 288, .own_lo = 0, .own_hi = 144, .cap = 8256, .pad = 0, .model = 4660, .rest = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }, the peer .{ .magic = 1196182853, .version = 2, .layers = 45, .run = 8, .mtp = 1, .experts = 288, .own_lo = 144, .own_hi = 288, .cap = 8256, .pad = 0, .model = 4660, .rest = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } }
+sparse attention (64 heads): 99.97% of outputs equal the row kernel's, at most 0.96 bf16 steps apart
+sparse attention (32 heads): 99.96% of outputs equal the row kernel's, at most 0.94 bf16 steps apart
+absorb on the tensor units: 99.99% of outputs equal the row kernel's, at most 0.98 bf16 steps apart
+KDA heads=64 rows=1: worst 0.4999 bf16 steps, state 0.000000002
+KDA heads=64 rows=2: worst 0.4999 bf16 steps, state 0.000000002
+KDA heads=64 rows=8: worst 0.4999 bf16 steps, state 0.000000003
+KDA heads=64 rows=16: worst 0.4999 bf16 steps, state 0.000000005
+KDA heads=32 rows=1: worst 0.4999 bf16 steps, state 0.000000002
+KDA heads=32 rows=2: worst 0.4999 bf16 steps, state 0.000000002
+KDA heads=32 rows=8: worst 0.4999 bf16 steps, state 0.000000003
+KDA heads=32 rows=16: worst 0.4999 bf16 steps, state 0.000000005
+[default] (warn): language_model.model.layers.1.mlp.down_proj: another spelling of module layers.1.mlp.down_proj declares a different width
+glm plan: 4 of 45 layers and the MTP layer, 1.51 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x39
+glm plan: 4 of 45 layers and the MTP layer, 1.51 GB in buffers, every tensor's name, dtype and shape checked; 2-bit/64 x2, 4-bit/64 x35, 5-bit/32 x1, 8-bit/64 x1
+glm plan: 4 of 45 layers and the MTP layer, 1.57 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x37, 5-bit/64 x4, 6-bit/64 x2, 8-bit/64 x4
+glm plan: 4 of 45 layers and the MTP layer, 1.86 GB in buffers, every tensor's name, dtype and shape checked; 2-bit/64 x3, 4-bit/64 x34, 5-bit/64 x1, 6-bit/64 x1, 8-bit/64 x1
+glm plan: 4 of 45 layers and the MTP layer, 1.56 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x40
+glm plan: 4 of 45 layers and the MTP layer, 1.51 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x39
+glm plan: 4 of 45 layers and the MTP layer, 1.56 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x40
+glm plan: 4 of 45 layers and the MTP layer, 1.56 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x40
+failed command: ./.zig-cache/o/e7a9cb5063f8c1c42e75116d0bc4ed2b/test --cache-dir=./.zig-cache --seed=0x6e010bf2 --listen=-

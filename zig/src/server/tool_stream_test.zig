@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = @import("json");
 const tool_params = @import("tool_params.zig");
+const witness = @import("tool_union_witness.zig");
 const stream = @import("tool_stream.zig");
 const Streamer = stream.Streamer;
 const Policy = stream.Policy;
@@ -33,6 +34,74 @@ test "a streamed call cut inside a value stays open" {
     const sent = try sentArguments(a, try streamed(a, tools, &.{open}));
     try std.testing.expectEqualStrings("{\"q\":\"fast c", sent);
     try std.testing.expect((try tool_params.closedJson(a, sent)) == null);
+}
+
+test "a streamed parameter whose schema is a union comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed quoted string under a union stays the text the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.quoted_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema points at a definition comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.ref_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema combines branches comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.combined_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema names a number and an integer takes the integer" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.number_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema constrains the value with every keyword comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.keyword_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema points at a definition by pointer comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.pointer_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema names no kinds constrains nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.unconstrained_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+/// The arguments the stream gives the client for one case.
+fn streamedArguments(a: Allocator, c: witness.Case) ![]const u8 {
+    const tools = try witness.toolsWith(a, c.schema, c.defs);
+    const deltas = try streamed(a, tools, &.{try witness.reply(a, c.value)});
+    return sentArguments(a, deltas);
+}
+
+/// The arguments as one canonical JSON text.
+fn canonical(a: Allocator, text: []const u8) ![]const u8 {
+    return json.stringify(a, (try json.parse(a, text)).ok, .{ .compact = true });
 }
 
 test "a one-call reply drops an unoffered call and still hides an unclosed one" {

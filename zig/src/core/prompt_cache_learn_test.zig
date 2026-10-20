@@ -23,6 +23,7 @@ test "a learned harness state outlives its store: a fresh session on a new one r
     {
         var im = try imprint.Imprint.open(gpa, root, 3, 1 << 30);
         defer im.deinit();
+        im.admission.floor = 1 << 20;
         {
             var f: Fake = .{ .gpa = gpa };
             var s = Store.init(gpa, f.learned(), rules, 1 << 20);
@@ -34,6 +35,7 @@ test "a learned harness state outlives its store: a fresh session on a new one r
         }
         var again = try imprint.Imprint.open(gpa, root, 3, 1 << 30); // a new server reads the index back
         defer again.deinit();
+        again.admission.floor = 1 << 20;
         var f: Fake = .{ .gpa = gpa };
         var s = Store.init(gpa, f.learned(), rules, 1 << 20);
         defer s.deinit();
@@ -58,6 +60,7 @@ test "past the learned-state cap the least recently used state is forgotten, and
     const two = [_]u32{ 8, 8, 8, 8, 8, 8 };
     var im = try imprint.Imprint.open(gpa, root, 3, 440); // One state plus conservative index/header allowance fits.
     defer im.deinit();
+    im.admission.floor = 1 << 20;
     var f: Fake = .{ .gpa = gpa };
     var s = Store.init(gpa, f.learned(), rules, 1 << 20);
     defer s.deinit();
@@ -94,6 +97,7 @@ test "learned states are prompt arithmetic: a request that decodes rows below on
     const harness = [_]u32{ 7, 7, 7, 7, 7, 7 };
     var im = try imprint.Imprint.open(gpa, root, 3, 1 << 30);
     defer im.deinit();
+    im.admission.floor = 1 << 20;
     {
         var f: Fake = .{ .gpa = gpa };
         var s = Store.init(gpa, f.learned(), rules, 1 << 20);

@@ -36,6 +36,7 @@ const Chain = mtp.Chain;
 const Pick = mtp.Pick;
 const Sampling = mtp.Sampling;
 const drawRow = mtp.drawRow;
+const maskRow = mtp.maskRow;
 const promote = mtp.promote;
 
 fn cint(v: usize) c_int {
@@ -142,18 +143,18 @@ pub fn Ops(comptime Tri: type) type {
                 }
                 try @import("cuda_media.zig").injectNext(d.media, o.stream(), s.ple_keys, d.len, m);
                 try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, m, dims, dims);
-                try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, m, fc_sk);
-                try p.sumSlices(s.part, s.branch, true, m * dims, fc_sk);
+                const esk = try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, m, fc_sk);
+                try p.sumSlices(s.part, s.branch, true, m * dims, esk);
                 // the hidden branch: the four streams normed as one row, fc_hidden on each stream
                 try tri.rmsnorm(rows + at * wide * 2, h.norm_h.ptr, s.norm, s.gq, eps, wide, m, wide, wide);
-                try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * m, fc_sk);
-                try p.sumSlices(s.part, s.ple_gated, true, streams * m * dims, fc_sk);
+                const hsk = try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * m, fc_sk);
+                try p.sumSlices(s.part, s.ple_gated, true, streams * m * dims, hsk);
                 try tri.addStreams(s.branch, s.ple_gated, s.h, m, dims, streams);
                 // the layer: attention over the head's own cache, its experts
                 try p.writeback(0, m);
                 try p.readout(h.layer.attn_hc, 0, m);
                 try p.attnBlock(&h.layer, 0);
-                try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, out_sk);
+                try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, p.out_slices);
                 try p.readout(h.layer.mlp_hc, 0, m);
                 try p.moeBlock(&h.layer);
                 p.pending = 0;
@@ -168,7 +169,7 @@ pub fn Ops(comptime Tri: type) type {
                         try p.copy(s.pss, s.pss + (m - 1) * pss_n * 4, pss_n * 4);
                     }
                     try p.readout(h.mixer, 0, 1);
-                    try p.lane(s.mixed, s.xsm, h.draft, d.dlogits.ptr, s.dummy, 1, 1);
+                    try h.project(&p, s.mixed, s.xsm, d.dlogits.ptr, 1);
                 }
             }
         }
@@ -185,7 +186,8 @@ pub fn Ops(comptime Tri: type) type {
         /// The draft at `position` and its temperature-1 probability (Python Engine.sample_draft).
         pub fn pick(o: Self, d: *Draft, position: u64, sm: ?Sampling) !Pick {
             const h = o.h;
-            const n = h.ids.len;
+            const view_ = h.view();
+            const n = view_.logical;
             try h.best(o.stream(), d.dlogits.ptr, n, n, 1, d.best.ptr);
             try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0..4]), d.best.ptr);
             const top = d.best_host[0];
@@ -193,7 +195,7 @@ pub fn Ops(comptime Tri: type) type {
             const greedy = if (sm) |s| s.temperature <= 0 else true;
             if (greedy) {
                 const col: usize = @intCast(@as(i32, @bitCast(d.best_host[2])));
-                return .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
+                return .{ .token = try view_.global(@intCast(col)), .prob = @exp(@as(f64, top) - @as(f64, lse)) };
             }
             const row = d.host[0..n];
             try download(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);
@@ -245,11 +247,11 @@ pub fn Ops(comptime Tri: type) type {
             d.open = keeps;
         }
 
-        /// The window's rows drawn at their keyed positions (seq position fed0 + 1 + r), as serial decoding draws.
-        pub fn draws(o: Self, d: *Draft, sm: ?Sampling, out: []u32) !void {
+        /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.
+        pub fn draws(o: Self, d: *Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
             const n = d.rows;
             const greedy = if (sm) |s| s.temperature <= 0 else true;
-            if (greedy) {
+            if (greedy and masks.len == 0) {
                 try o.h.best(o.stream(), d.logits.ptr, vocab, vocab, n, d.best.ptr);
                 try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
                 for (out[0..n], 0..) |*t, r| t.* = @intCast(@as(i32, @bitCast(d.best_host[4 * r + 2])));
@@ -257,7 +259,12 @@ pub fn Ops(comptime Tri: type) type {
             }
             const rows = d.host[0 .. n * vocab];
             try download(o.stream(), std.mem.sliceAsBytes(rows), d.logits.ptr);
-            for (out[0..n], 0..) |*t, r| t.* = try drawRow(o.e.gpa, rows[r * vocab ..][0..vocab], null, d.fed0 + 1 + r, sm);
+            const words = masks.len / n;
+            for (out[0..n], 0..) |*t, r| {
+                const row = rows[r * vocab ..][0..vocab];
+                if (words > 0) maskRow(row, masks[r * words ..][0..words]);
+                t.* = try drawRow(o.e.gpa, row, null, d.fed0 + 1 + r, sm);
+            }
         }
 
         /// Keep the window's first `keep` rows (Python forward.commit) from its saved rows; a repeat is a no-op.

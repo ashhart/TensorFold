@@ -5,6 +5,12 @@ const platform = @import("sys");
 const abi = @import("abi.zig");
 const tp_watch = @import("tp_watch.zig");
 
+pub const minimum_version: c_int = 23000;
+
+pub fn requireVersion(loaded: c_int) error{NcclVersion}!void {
+    if (loaded < minimum_version) return error.NcclVersion;
+}
+
 pub const Result = c_int;
 pub const Comm = ?*opaque {};
 pub const UniqueId = extern struct { internal: [128]u8 };
@@ -37,7 +43,7 @@ pub const Config = extern struct {
     graph_stream_ordering: c_int = std.math.minInt(c_int),
 };
 
-pub const Error = platform.optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, NcclFailed };
+pub const Error = platform.optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, NcclFailed, NcclVersion };
 
 pub const in_progress: Result = 7; // ncclInProgress: a non-blocking communicator's call is still running
 
@@ -108,6 +114,17 @@ pub const Library = struct {
         try self.check(self.api.ncclGroupEnd(), "ncclGroupEnd");
     }
 
+    pub fn requireSupportedVersion(self: *const Library) Error!void {
+        const loaded = try self.version();
+        requireVersion(loaded) catch |err| {
+            std.log.err("NCCL {d}.{d}.{d} loaded; tensor parallelism requires at least {d}.{d}.{d}", .{
+                @divTrunc(loaded, 10000),          @mod(@divTrunc(loaded, 100), 100),          @mod(loaded, 100),
+                @divTrunc(minimum_version, 10000), @mod(@divTrunc(minimum_version, 100), 100), @mod(minimum_version, 100),
+            });
+            return err;
+        };
+    }
+
     /// NCCL's version as 10000 * major + 100 * minor + patch.
     pub fn version(self: *const Library) Error!c_int {
         var v: c_int = 0;
@@ -122,4 +139,20 @@ test "nonblocking communicator config preserves the public ABI defaults" {
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(Config, "net_name"));
     try std.testing.expectEqual(@as(usize, 48), @offsetOf(Config, "comm_name"));
     try std.testing.expect(c.size == 96 and c.blocking == 0 and c.max_ctas == std.math.minInt(c_int));
+}
+
+test "NCCL minimum: 2.28.9 refuses" {
+    try std.testing.expectError(error.NcclVersion, requireVersion(22809));
+}
+
+test "NCCL minimum: 2.29.7 refuses" {
+    try std.testing.expectError(error.NcclVersion, requireVersion(22907));
+}
+
+test "NCCL minimum: 2.30.0 passes" {
+    try requireVersion(23000);
+}
+
+test "NCCL minimum: 2.30.7 passes" {
+    try requireVersion(23007);
 }

@@ -27,13 +27,15 @@ pub const Absorb = struct {
     start: u64,
     follow: []const u32,
     rows: ?[]const u32 = null,
+    prompt: bool = true, // prompt ingestion keeps its historical arithmetic; accepted live rows set false
     offered: u32 = 0, // the drafter's grown tree's first nodes the verified window carried (0: none of its own)
 };
 
 /// `depth` drafts after `pending` at `position`; with `lanes` a tree, lane i the rank-r choice after its parent.
-pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, lanes: ?*const Shape = null };
+pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, plan: ?*const @import("proposal_head.zig").Plan = null, lanes: ?*const Shape = null };
 
 pub const Drafter = struct {
+    proposal_head: ?*const @import("proposal_head.zig").Service = null,
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -45,6 +47,8 @@ pub const Drafter = struct {
         open: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         absorb: *const fn (ptr: *anyopaque, items: []const Absorb) anyerror!void,
         hold: *const fn (ptr: *anyopaque, items: []const Hold) anyerror!void,
+        hold_planned: ?*const fn (*anyopaque, []const Hold) anyerror!void = null,
+        clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// Each stream's held drafts on the host: out[i] gets streams[i]'s first out[i].len (error if it holds fewer).
         held: *const fn (ptr: *anyopaque, streams: []const *Stream, out: []const []u32) anyerror!void,
         /// The stream left the rounds (only called for an opened stream).
@@ -68,6 +72,10 @@ pub const Drafter = struct {
         return d.vtable.absorb(d.ptr, items);
     }
     pub fn hold(d: Drafter, items: []const Hold) !void {
+        if (d.proposal_head) |service| if (service.mode != .legacy) {
+            const f = d.vtable.hold_planned orelse return error.ProposalServiceUnsupported;
+            return f(d.ptr, items);
+        };
         return d.vtable.hold(d.ptr, items);
     }
     pub fn held(d: Drafter, streams: []const *Stream, out: []const []u32) !void {

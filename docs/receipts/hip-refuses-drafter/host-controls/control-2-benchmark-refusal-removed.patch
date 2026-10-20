@@ -1,0 +1,10 @@
+--- a/zig/src/server/benchmark.zig
++++ b/zig/src/server/benchmark.zig
+@@ -335,7 +335,6 @@
+         } else return fail(ctx, try std.fmt.allocPrint(a, "This build does not serve model_type {s}; tensorfold-native capabilities --json lists what it serves", .{kind}));
+         const auto = std.mem.eql(u8, args.drafter, "auto");
+         const given = !auto and !std.mem.eql(u8, args.drafter, "none") and args.drafter.len > 0;
+-        if (rocm and given) return fail(ctx, rocm_drafter);
+         // auto passes the family's own drafter only when serve's cache lookup finds it; nothing is downloaded.
+         const known = if (auto) autoDrafter(config.value, backend, args.serial) else null;
+         const drafter = if (args.serial) null else if (given) args.drafter else known;

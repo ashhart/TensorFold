@@ -5,7 +5,7 @@ const api = @import("engine_api");
 const mtl = @import("metal");
 const math = @import("cache_budget.zig");
 
-pub const GiB: u64 = 1 << 30;
+pub const GiB = mtl.ResidencySet.GiB;
 /// The share of RAM a served model may hold: the rest stays with macOS and other processes.
 pub const SHARE_PERCENT = mtl.ResidencySet.share_percent;
 /// Kept back from the cache for buffers that grow with long prompts.
@@ -40,7 +40,7 @@ pub const Ceiling = struct { bytes: u64, default: u64, asked: bool = false, capp
 pub fn ceiling(total: u64, most: u64, text: ?[]const u8) error{BadLoadLimit}!Ceiling {
     const default = total / 100 * SHARE_PERCENT;
     const t = std.mem.trim(u8, text orelse "", " \t");
-    if (t.len == 0) return .{ .bytes = default, .default = default };
+    if (t.len == 0) return .{ .bytes = @min(total, @min(most, default)), .default = default };
     const gb = std.fmt.parseFloat(f64, t) catch return error.BadLoadLimit;
     if (!std.math.isFinite(gb) or gb <= 0) return error.BadLoadLimit;
     const top: f64 = @floatFromInt(@min(total, most));
@@ -48,20 +48,10 @@ pub fn ceiling(total: u64, most: u64, text: ?[]const u8) error{BadLoadLimit}!Cei
 }
 
 /// This machine's RAM (null where the OS does not say).
-pub fn ram() ?u64 {
-    return std.process.totalSystemMemory() catch null;
-}
+pub const ram = mtl.ResidencySet.totalRam;
 
-extern "c" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *anyopaque) c_int;
-extern "c" fn getpid() c_int;
-
-/// This process's physical footprint as macOS counts it, Metal buffers included (rusage_info_v4; null elsewhere).
-pub fn footprint() ?u64 {
-    if (builtin.os.tag != .macos) return null;
-    var info: [43]u64 = undefined;
-    if (proc_pid_rusage(getpid(), 4, &info) != 0) return null;
-    return info[9];
-}
+/// The shared process-footprint reader used by load accounting and prompt-cache sizing.
+pub const footprint = @import("sys").memory_policy.footprint;
 
 /// The Mac hosts' session peak: the footprint's high-water mark since the last `reset_peak`.
 var host_peak: std.atomic.Value(u64) = .init(0);
@@ -110,7 +100,7 @@ fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64,
         return .{ .source = if (gib != null) .explicit else .metal_working_set, .budget_bytes = b, .explicit_budget = gib != null };
     }
     const ready = loaded + later;
-    const streams = if (later > 0) try std.fmt.allocPrint(a, " and {d:.1} GiB its streams take on first use", .{gibs(later)}) else "";
+    const streams = if (later > 0) try std.fmt.allocPrint(a, " and {d:.1} GiB reserved outside that reading", .{gibs(later)}) else "";
     const cap = limit orelse total / 100 * SHARE_PERCENT;
     const f = fitUnder(cap, ready, gib, over) catch |e| {
         const left = (fitUnder(cap, ready, null, false) catch unreachable).room; // without a given budget it never refuses
@@ -135,9 +125,7 @@ fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64,
 }
 
 /// GiB with one decimal, for log lines and messages.
-pub fn gibs(bytes: u64) f64 {
-    return @as(f64, @floatFromInt(bytes)) / GiB;
-}
+pub const gibs = mtl.ResidencySet.gibs;
 
 test "the default budget is what 70% of RAM leaves past the footprint at ready and the margin" {
     const ram256: u64 = 256 * GiB;

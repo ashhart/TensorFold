@@ -3,12 +3,17 @@ const std = @import("std");
 const cuda = @import("cuda");
 const q = @import("qwen35");
 const t = std.testing;
-const Trace = struct {
+pub const Trace = struct {
     const Call = struct { id: usize, x: u64, xs: u64, out: u64, rows: c_int, sk: c_int, row_tiles: c_int, grid: u32, shared: u32 };
-    var calls: [16]Call = undefined;
-    var count: usize = 0;
+    pub var calls: [128]Call = undefined;
+    pub var count: usize = 0;
+    pub var prompts: usize = 0;
     fn record(f: cuda.abi.Function, gx: u32, shared: u32, args: ?[*]?*anyopaque) cuda.abi.Result {
         const id = @intFromPtr(f);
+        if (id == 4) {
+            prompts += 1;
+            return 0;
+        }
         if (id == 1) return 0; // the input-sum producer
         const a = args.?;
         const x = @as(*const u64, @ptrCast(@alignCast(a[0].?))).*;
@@ -41,7 +46,7 @@ const Trace = struct {
 fn function(d: *const cuda.Driver, id: usize) cuda.Function {
     return .{ .d = d, .handle = @ptrFromInt(id) };
 }
-fn engine(d: *cuda.Driver, gb10: bool) q.engine.Engine {
+pub fn engine(d: *cuda.Driver, gb10: bool) q.engine.Engine {
     d.api.cuLaunchKernel = Trace.launch;
     d.api.cuLaunchKernelEx = Trace.launchEx;
     var e: q.engine.Engine = undefined;

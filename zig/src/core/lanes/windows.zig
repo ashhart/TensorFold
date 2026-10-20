@@ -56,6 +56,7 @@ pub const Copy = struct { tokens: []const u32 = &.{}, recalled: bool = false };
 pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
     const a = e.arena.allocator();
     var p: Plan = .{ .stream = s, .position = s.cache_len, .kind = .none };
+    if (e.backend.proposals() and s.proposal_depth == 0) s.dropHeld(e.gpa);
     const queued = s.next;
     s.next = null;
     defer if (queued) |q| {
@@ -73,7 +74,7 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
     } else {
         var copy: Copy = .{};
         if (copied) |c| copy = c else if (s.drafts) copy = try copyProposal(e, s);
-        const extend = e.alone and e.cfg.context_copies and !copy.recalled and queued != null and queued.?.count > 0;
+        const extend = !e.cfg.root_copies and e.alone and e.cfg.context_copies and !copy.recalled and queued != null and queued.?.count > 0;
         if (copy.tokens.len > 0 and !extend) {
             p.kind = .copy;
             p.recalled = copy.recalled;
@@ -175,7 +176,7 @@ fn headTrunk(e: *Engine, s: *Stream, p: Plan, levels: usize) !?fill.Trunk {
 
 /// A copy from the context backed by `enter_match` ids (Python `_copy_proposal`), else Recall's when it should pay.
 pub fn copyProposal(e: *Engine, s: *Stream) !Copy {
-    if (e.cfg.max_copy == 0 or s.force.items.len > 0) return .{};
+    if (e.cfg.max_copy == 0 or s.force.items.len > 0 or (e.cfg.root_copies and s.root_copy_miss)) return .{};
     const width: u32 = if (e.alone) (s.copy_width orelse e.cfg.first_copy) else e.cfg.first_copy;
     const most = @min(@as(i64, width), s.draftRoom() - 1);
     if (s.proposer) |p| if (!e.alone or e.cfg.lone_copies) {
@@ -194,6 +195,7 @@ pub fn copyProposal(e: *Engine, s: *Stream) !Copy {
 pub fn copyAhead(ptr: *anyopaque, w: *const depth.Who) bool {
     const e: *Engine = @ptrCast(@alignCast(ptr));
     const s: *Stream = @ptrCast(@alignCast(w.stream.?));
+    if (e.cfg.root_copies) return false;
     const copied = copyProposal(e, s) catch return false;
     return copied.tokens.len > 0;
 }

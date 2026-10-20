@@ -18,16 +18,11 @@ pub const Shards = struct {
         const ipath = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
         const text = try std.Io.Dir.cwd().readFileAlloc(io, ipath, a, .limited(64 << 20));
         const tree = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
-        if (tree != .object) return error.BadIndex;
-        const map = tree.object.get("weight_map") orelse return error.BadIndex;
-        if (map != .object) return error.BadIndex;
-        const wm = map.object;
+        const wm = try st.index.weightMap(tree);
         var names: std.ArrayList([]const u8) = .empty;
         var it = wm.iterator();
         while (it.next()) |e| {
-            if (e.value_ptr.* != .string) return error.BadIndex;
             const fname = e.value_ptr.string;
-            if (fname.len == 0 or std.fs.path.isAbsolute(fname) or std.mem.indexOf(u8, fname, "..") != null) return error.BadIndex;
             var idx: ?usize = null;
             for (names.items, 0..) |n, i| if (std.mem.eql(u8, n, fname)) {
                 idx = i;

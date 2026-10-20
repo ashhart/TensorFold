@@ -48,7 +48,8 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     else
         portable }));
     b.step("test-tp", "TP bootstrap, failure, settings and in-process transport tests").dependOn(&tests.step);
-    test_step.dependOn(&tests.step);
+    // the bootstrap and failure tests run over POSIX sockets: Windows checks only the Linux compile below
+    if (host.result.os.tag != .windows) test_step.dependOn(&tests.step);
     const linux = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, linux, .debug);
     const object = b.addObject(.{ .name = "tp_host_compile", .root_module = b.createModule(.{
@@ -58,6 +59,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .imports = &.{ .{ .name = "cuda", .module = check_cuda }, .{ .name = "tp", .module = module(b, linux, .debug, check_cuda) } },
     }) });
     tests.step.dependOn(&object.step);
+    if (host.result.os.tag == .windows) test_step.dependOn(&object.step);
     if (target.result.os.tag != .linux) return;
     const nvcc = b.option([]const u8, "tp-nvcc", "nvcc that builds the TP mailbox kernel");
     const prebuilt = b.option([]const u8, "tp-fatbin", "absolute path of a prebuilt tp_mailbox.fatbin to embed");

@@ -225,12 +225,37 @@ That guide's two-Mac Flash Next commands load the checkpoint directly, as one Ma
 On one Mac, GLM loads only when its weights and caches fit in 70% of RAM, 179.2 GB on a 256 GB Mac, and leaves the MTP head on disk when only the head is over.
 `GLM_LOAD_LIMIT_GB=N` sets that limit in GB, up to the GPU's recommended working set; a value that isn't a number above 0 stops the server.
 Past 70% of RAM the server warns at startup: a load that wires most of the RAM can stall macOS until its watchdog restarts the Mac, so run nothing else large beside it.
+GLM enables a shared residency set by default when its unique Metal buffers and a 2 GiB margin fit the load bound.
+`GLM_RESIDENCY=1` keeps that default, `GLM_RESIDENCY=0` disables it, and every other value stops loading before Metal allocations.
+The startup log reports the GiB held or the reason the set was skipped.
+
+A successful Metal residency set keeps weights, live stream state and working buffers wired during idle keepalive.
+This retains the memory already used by serving instead of letting macOS reclaim its pages between requests.
+The shared keepalive commits a small blit every 400 ms; the set alone is insufficient.
+The default keep-warm window is 900 seconds, and `--keep-warm 0` disables it.
+Later buffers join through their owners while they fit the same bound, and leave before they are freed or replaced.
+The bound reserves 2 GiB inside a validated family load limit, or 70% of known RAM by default.
+Neural Engine program weights are separate from Metal buffers and are outside this set.
+
 
 ## Access, context and updates
 
 To accept remote clients, choose `--host 0.0.0.0` and configure `--api-key-file` with a file readable only by its owner.
 Clients send `Authorization: Bearer KEY`.
 The default loopback server accepts local clients without a key.
+
+The server admits at most 128 open connections, including idle keep-alive connections and active replies.
+Extra connections receive `503 Service Unavailable` with `Retry-After: 1`, then close.
+The reply is best effort if the peer cannot receive it; no extra connection thread is created.
+This cap is independent of the process file limit.
+
+A new connection has 30 seconds to send its request line and all headers.
+A kept connection may wait idle for 900 seconds; its next request's first bytes start a fresh 30-second head budget.
+A fixed-length body has 30 seconds plus one second per 64 KiB declared, rounded up to a millisecond.
+Chunked bodies extend that same original budget only by declared payload bytes, within the 32 MiB body limit.
+Chunk metadata and trailers do not reset the deadline.
+The existing 120-second read-idle and 300-second write-idle limits still apply.
+Read budgets end when input is complete, so they impose no total deadline on inference or streamed replies.
 
 A context limit covers prompt plus reply tokens.
 Inspect the capacity and memory information printed at startup; larger contexts need more cache space.

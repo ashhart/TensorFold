@@ -51,9 +51,6 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
         for (s.chunks) |cut| if (cut > at and cut < end) {
             end = cut;
         };
-        for (s.reuse.marks) |mark| if (mark > at and mark < end) {
-            end = mark;
-        };
         var decoded = false;
         for (s.decode_spans) |span| {
             for (span) |cut| if (cut > at and cut < end) {
@@ -61,6 +58,35 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
             };
             decoded = decoded or (at >= span[0] and at < span[1]);
         }
+        var mark_bank: ?q.gdn_pool_gpu.PromptMarks = null;
+        defer {
+            if (mark_bank) |*m| {
+                b.runner.gdn.marks = null;
+                m.deinit();
+            }
+        }
+        const shape = b.runner.gdn.budget.shape;
+        if (s.reuse.hook != null and d == null and !decoded and !b.runner.capture_taps and b.runner.images == null and shape.c.dk == 128 and shape.c.dv % 4 == 0) {
+            const picked = try q.prompt_marks.select(@intCast(at), @intCast(end), s.reuse.marks);
+            if (picked.count > 0) if (b.grow) |g| {
+                const budget = b.runner.gdn.budget;
+                const size = try q.prompt_marks.layout(budget.layers, shape.state, shape.conv);
+                if (g.room(g.ctx, size.total, s)) {
+                    if (b.runner.gdn.marks != null) return error.RoundNotReady;
+                    mark_bank = q.gdn_pool_gpu.PromptMarks.init(b.runner.model.device, budget, b.runner.gdn.kernels, slot, @intCast(at), picked.end, picked.rows, b.runner.residency) catch |err| switch (err) {
+                        error.NoBuffer, error.UnsupportedGdnPipeline => null,
+                        else => return err,
+                    };
+                    if (mark_bank) |*m| {
+                        end = picked.end;
+                        b.runner.gdn.marks = m;
+                    }
+                }
+            };
+        }
+        if (mark_bank == null) for (s.reuse.marks) |mark| if (mark > at and mark < end) {
+            end = mark;
+        };
         const part = ids[at..end];
         const last = end == ids.len;
         if (d) |x| {
@@ -72,6 +98,14 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
         }
         at = end;
         s.fill_at.store(@intCast(at), .monotonic); // a prompt chunk waits: `at` is landed progress
+        if (s.isCancelled()) return error.Cancelled;
+        if (mark_bank) |*m| {
+            try m.complete(slot, @intCast(at));
+            if (s.reuse.hook) |k| for (m.position.rows) |row| {
+                if (s.isCancelled()) return error.Cancelled;
+                if (row != 0) k.at(k.ptr, s, m.position.start + row);
+            };
+        }
         if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
     }
 }

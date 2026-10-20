@@ -1,5 +1,6 @@
 //! POST /v1/audio/speech: WAV or raw PCM whole, or raw PCM chunks with stream; only complete synthesis is audio.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -204,6 +205,7 @@ fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechIn
         c.close = true;
         return;
     };
+    c.response_complete = true;
     log.line("speech {s} prompt={d} samples={d} format=pcm stream=true finish={s} first_audio_ready_seconds={d:.3} first_frame_written_seconds={d:.3} seconds={d:.2}", .{
         id, plan.prompt.len, sent.samples, @tagName(box.reason), clock.seconds(sent.first_ready - received), clock.seconds(sent.first_written - received), clock.seconds(clock.nowNs(srv.io) - received),
     });
@@ -276,11 +278,12 @@ fn startStream(c: *Conn, sample_rate: u32) error{Closed}!void {
     if (c.close) c.addHeader("Connection", "close") catch return error.Closed;
     // each chunk leaves at once rather than waiting on the client's acknowledgement of the last (no effect off TCP)
     const one: c_int = 1;
-    _ = std.c.setsockopt(c.fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &one, @sizeOf(c_int));
+    if (platform.windows) platform.posix.setsockopt(c.fd, platform.posix.IPPROTO.TCP, platform.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {} else _ = std.c.setsockopt(c.fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &one, @sizeOf(c_int));
     // a blocking write into a full socket returns after the stall limit, so writeAll's poll can end a stalled stream
-    const stall: std.posix.timeval = .{ .sec = @divTrunc(c.timeouts.write_ms, 1000), .usec = @rem(c.timeouts.write_ms, 1000) * 1000 };
-    std.posix.setsockopt(c.fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&stall)) catch {};
-    return c.finish("");
+    const stall: platform.posix.timeval = .{ .sec = @divTrunc(c.timeouts.write_ms, 1000), .usec = @rem(c.timeouts.write_ms, 1000) * 1000 };
+    platform.posix.setsockopt(c.fd, platform.posix.SOL.SOCKET, platform.posix.SO.SNDTIMEO, std.mem.asBytes(&stall)) catch {};
+    try c.finish("");
+    c.response_complete = false;
 }
 
 /// Ends a complete stream; audio clipped at the frame limit ends with the X-Finish-Reason trailer instead.
@@ -324,6 +327,7 @@ fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reaso
     if (header) |h| try c.out.appendSlice(c.gpa, &h);
     try c.writeAll(c.out.items);
     try c.writeAll(data);
+    c.response_complete = true;
 }
 
 pub const wav_header_len = 44;

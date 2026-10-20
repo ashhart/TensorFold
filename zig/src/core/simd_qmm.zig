@@ -15,6 +15,11 @@ pub fn tiles(n: usize, rt: u32, s: u32) u32 {
     return nt;
 }
 
+/// Two adjacent K chunks a simdgroup (tf_sq_mmp): 16 chunks at two row tiles then fit four column tiles, not two.
+pub fn pairs(n: usize, rt: u32, s: u32) bool {
+    return s == 16 and rt == 2 and n % 32 == 0 and !fits(s, 4, rt) and fits(s / 2, 4, rt);
+}
+
 /// Groups of inputs the scalar kernel stages at 1 or 2 rows (0: it can't take them).
 pub fn scalarBlock(rows: usize, s: u32) u32 {
     if (rows < 1 or rows > max_scalar_rows) return 0;
@@ -36,6 +41,7 @@ fn fits(s: u32, nt: u32, rt: u32) bool {
 pub const Pipelines = struct {
     mma: [s_values.len][nt_values.len][2]?mtl.Pipeline,
     scalar: [s_values.len][2][max_scalar_rows]mtl.Pipeline,
+    paired: mtl.Pipeline, // tf_sq_mmp_16_4_2_2: the shapes `pairs` takes
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -51,20 +57,22 @@ pub const Pipelines = struct {
                 p.scalar[si][ni][ri] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_sq_scalar_{d}_{d}_{d}", .{ s, nr, rs }), false);
             };
         }
+        p.paired = try mtl.Pipeline.init(device, lib, "tf_sq_mmp_16_4_2_2", false);
         return p;
     }
 
     pub fn deinit(p: *Pipelines) void {
         for (p.mma) |a| for (a) |b| for (b) |x| if (x) |y| y.deinit();
         for (p.scalar) |a| for (a) |b| for (b) |x| x.deinit();
+        p.paired.deinit();
     }
 };
 
 /// One dispatch: buffers x, W, S, B, args, out at 0-5; `groups` threadgroups of `threads`.
 pub const Call = struct { pipeline: mtl.Pipeline, args: Args, groups: mtl.Size, threads: usize };
 
-/// y = x W^T for 4-bit groups of 64: the scalar twin at 1-2 rows when `scalar` (checked equal), else MMA tiles.
-pub fn call(p: *const Pipelines, n: usize, k: usize, rows: usize, scalar: bool) !Call {
+/// y = x W^T, 4-bit groups of 64: the scalar twin at 1-2 rows if `scalar`, chunk pairs if `paired`, else MMA tiles.
+pub fn call(p: *const Pipelines, n: usize, k: usize, rows: usize, scalar: bool, paired: bool) !Call {
     if (n == 0 or n % 8 != 0 or n > std.math.maxInt(i32) or k == 0 or k % 64 != 0 or k > std.math.maxInt(i32)) return error.UnsupportedSimdShape;
     if (rows == 0 or rows > std.math.maxInt(i32)) return error.NoRows;
     const s = splits(n);
@@ -79,6 +87,8 @@ pub fn call(p: *const Pipelines, n: usize, k: usize, rows: usize, scalar: bool) 
         return .{ .pipeline = pipeline, .args = args, .groups = .{ .width = (n + per - 1) / per }, .threads = sgs * 32 };
     }
     const rt: u32 = @min(2, @as(u32, @intCast((rows + 7) / 8)));
+    if (paired and pairs(n, rt, s) and p.paired.maxThreads() >= 256)
+        return .{ .pipeline = p.paired, .args = args, .groups = .{ .width = n / 32, .height = (rows + 15) / 16 }, .threads = 256 };
     const nt = tiles(n, rt, s);
     const pipeline = p.mma[si][std.mem.indexOfScalar(u32, &nt_values, nt).?][rt - 1] orelse return error.UnsupportedSimdShape;
     const sgs: usize = @min(s, 16, pipeline.maxThreads() / 32);
@@ -100,6 +110,34 @@ pub fn encode(e: mtl.ComputeEncoder, c: Call, m: Matrix, x: mtl.Buffer, x_off: u
     e.dispatchGroups(c.groups, .{ .width = c.threads });
 }
 
+/// Whether chunk pairs give tf_sq_mma's bits for `m` (16 rows each way); false where `pairs` never takes it.
+pub fn pairedExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
+    if (!pairs(m.n, 2, splits(m.n))) return false;
+    const rows = 16;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const x = try device.buffer(rows * m.k * 2, mtl.ResourceOptions.shared);
+    defer x.deinit();
+    var prng = std.Random.DefaultPrng.init(0x51d_0002);
+    for (x.slice(u16, rows * m.k)) |*v| v.* = @truncate(@as(u32, @bitCast(prng.random().float(f32) * 2 - 1)) >> 16);
+    var outs: [2]mtl.Buffer = undefined;
+    for (&outs) |*o| o.* = try device.buffer(rows * m.n * 2, mtl.ResourceOptions.shared);
+    defer for (outs) |o| o.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.serial);
+    for (outs, [_]bool{ false, true }) |o, pair| encode(e, try call(p, m.n, m.k, rows, false, pair), m, x, 0, o, 0);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |why| {
+        std.log.err("simd_qmm pair check: {s}", .{why});
+        return error.SimdCheckFailed;
+    }
+    return std.mem.eql(u16, outs[0].slice(u16, rows * m.n), outs[1].slice(u16, rows * m.n));
+}
+
 /// Whether the scalar twin's 1-2 row results equal the MMA tiles' for `m`; where not, every width takes tiles.
 pub fn twinExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     const rows = 8;
@@ -113,15 +151,15 @@ pub fn twinExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     defer tiled.deinit();
     const twin = try device.buffer(rows * m.n * 2, mtl.ResourceOptions.shared);
     defer twin.deinit();
-    const pairs = try device.buffer(4 * m.n * 2, mtl.ResourceOptions.shared);
-    defer pairs.deinit();
+    const twos = try device.buffer(4 * m.n * 2, mtl.ResourceOptions.shared);
+    defer twos.deinit();
     const queue = try device.queue();
     defer queue.deinit();
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    encode(e, try call(p, m.n, m.k, rows, false), m, x, 0, tiled, 0);
-    for (0..rows) |r| encode(e, try call(p, m.n, m.k, 1, true), m, x, r * m.k * 2, twin, r * m.n * 2);
-    for ([_]usize{ 0, rows - 2 }, 0..) |r, i| encode(e, try call(p, m.n, m.k, 2, true), m, x, r * m.k * 2, pairs, i * 2 * m.n * 2);
+    encode(e, try call(p, m.n, m.k, rows, false, false), m, x, 0, tiled, 0);
+    for (0..rows) |r| encode(e, try call(p, m.n, m.k, 1, true, false), m, x, r * m.k * 2, twin, r * m.n * 2);
+    for ([_]usize{ 0, rows - 2 }, 0..) |r, i| encode(e, try call(p, m.n, m.k, 2, true, false), m, x, r * m.k * 2, twos, i * 2 * m.n * 2);
     e.end();
     cb.commit();
     cb.wait();
@@ -131,7 +169,7 @@ pub fn twinExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     }
     const all = tiled.slice(u16, rows * m.n);
     if (!std.mem.eql(u16, all, twin.slice(u16, rows * m.n))) return false;
-    const two = pairs.slice(u16, 4 * m.n);
+    const two = twos.slice(u16, 4 * m.n);
     return std.mem.eql(u16, all[0 .. 2 * m.n], two[0 .. 2 * m.n]) and std.mem.eql(u16, all[(rows - 2) * m.n ..], two[2 * m.n ..]);
 }
 

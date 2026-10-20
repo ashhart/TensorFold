@@ -6,6 +6,7 @@ const engine = @import("cuda_engine.zig");
 
 const Engine = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
+const recurrent = @import("cuda_recurrent.zig");
 
 /// Rows a drafter's tap ring holds a stream: its window and a prompt chunk more.
 pub const tap_rows = 2048 + engine.max_rows;
@@ -15,6 +16,9 @@ pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 pub const Cache = struct {
+    owner: ?*recurrent.Pool = null,
+    log_lease: ?recurrent.Lease = null,
+    before_lease: ?recurrent.Lease = null,
     untaught: bool = false,
     delta: i32 = 0,
     state: DeviceBuffer,
@@ -23,7 +27,7 @@ pub const Cache = struct {
     kv: DeviceBuffer,
     /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
     tap: ?DeviceBuffer = null,
-    /// The newest verify window's rows' records (qwen35.cuh's LogRow), most_window rows a linear layer.
+    /// The newest verify window's records (qwen35.cuh's LogRow), held until its keep completes.
     log: DeviceBuffer,
     cap: usize,
     len: usize = 0,
@@ -33,25 +37,28 @@ pub const Cache = struct {
     /// The newest verify window, until its path is kept: where it started, its rows.
     last: ?struct { start: usize, rows: usize } = null,
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
-    pub fn init(gpa: std.mem.Allocator, e: *const Engine, cap: usize) !Cache {
+    pub fn init(gpa: std.mem.Allocator, e: *Engine, cap: usize) !Cache {
         var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
         errdefer state.free();
         try state.fill8(0, null);
-        var before = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
-        errdefer before.free();
+        const adaptive = recurrent.enabled(e);
+        var before: ?DeviceBuffer = null;
+        errdefer if (before) |*b| b.free();
+        if (!adaptive) before = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
         var kv = try DeviceBuffer.alloc(e.d, e.g.kvBytes(cap, e.kv8));
         errdefer kv.free();
         try kv.fill8(0, null); // touched now, not as the first request's keys land (the driver commits on first touch)
-        var log = try DeviceBuffer.alloc(e.d, e.g.logBytes(engine.most_window));
+        var log: DeviceBuffer = .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true };
+        if (!adaptive) log = try DeviceBuffer.alloc(e.d, e.g.logBytes(engine.most_window));
         errdefer log.free();
-        try log.fill8(0, null);
+        if (!adaptive) try log.fill8(0, null);
         var tap: ?DeviceBuffer = null;
         errdefer if (tap) |*t| t.free();
         if (e.n_taps > 0) {
             tap = try DeviceBuffer.alloc(e.d, e.tapBytes());
             try tap.?.fill8(0, null);
         }
-        return .{ .state = state, .before = before, .kv = kv, .tap = tap, .log = log, .cap = cap, .logits = try gpa.alloc(u16, e.g.vocab) };
+        return .{ .owner = if (adaptive) &e.rec_scratch else null, .state = state, .before = before, .kv = kv, .tap = tap, .log = log, .cap = cap, .logits = try gpa.alloc(u16, e.g.vocab) };
     }
 
     /// Publish a completed forward's metadata, including one-row slots that already advanced in place.
@@ -63,6 +70,7 @@ pub const Cache = struct {
 
     /// Ready for another stream: no rows, the recurrences and tails zero (on the engine's stream, before its forwards).
     pub fn reset(self: *Cache, e: *const Engine) !void {
+        recurrent.release(self);
         self.len = 0;
         self.written = 0;
         self.last = null;
@@ -72,6 +80,7 @@ pub const Cache = struct {
     }
 
     pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
+        recurrent.release(self);
         self.state.free();
         if (self.before) |*b| b.free();
         self.kv.free();
@@ -90,7 +99,10 @@ pub const Cache = struct {
     pub fn keep(self: *Cache, e: *Engine, path: []const u32) !void {
         const last = self.last orelse return error.NothingToKeep;
         if (path.len == 0) {
-            if (last.rows == 1) try self.state.copyFrom(0, (self.before orelse return error.MissingQwenBefore).ptr, e.g.stateBytes(), e.stream.handle);
+            if (last.rows == 1) {
+                try recurrent.mark(self, true);
+                try self.state.copyFrom(0, (self.before orelse return error.MissingQwenBefore).ptr, e.g.stateBytes(), e.stream.handle);
+            }
             self.last = null;
             self.len = last.start;
             return;
@@ -110,6 +122,7 @@ pub const Cache = struct {
         }
         const g = e.g;
         const sg = self.seg(e, last.start, 0, last.rows);
+        try recurrent.mark(self, false);
         try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
         try e.run(e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
         if (!prefix and g.attentions() > 0) try e.run(if (e.kv8) e.fp8.compact else e.keeps.compact, .{ g.attentions(), g.kv_heads, 1 }, .{ geometry.head_dim, 1, 1 }, .{ e.geo, sg, p });

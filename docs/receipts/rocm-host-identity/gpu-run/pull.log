@@ -1,0 +1,100 @@
+start 17:19:08
+[tensorfold] downloading TensorFold/Qwen3.8-27B-MLX-4bit@70ae7fac63274ff2eac54152031433374cb80f2f from Hugging Face
+TensorFold/Qwen3.8-27B-MLX-4bit: Qwen3.5-2B or Qwen3.8-27B (qwen3_5)
+  .gitattributes: 0.00 MiB
+  LICENSE: 0.01 MiB
+  README.md: 0.01 MiB
+  chat_template.jinja: 0.01 MiB
+  config.json: 0.00 MiB
+  generation_config.json: 0.00 MiB
+  model.safetensors.index.json: 0.21 MiB
+  preprocessor_config.json: 0.00 MiB
+  processor_config.json: 0.00 MiB
+  qwen-logo.png: 0.01 MiB
+  tokenizer.json: 19.06 MiB
+  tokenizer_config.json: 0.00 MiB
+  video_preprocessor_config.json: 0.00 MiB
+  vocab.json: 6.41 MiB
+  0.54 of 14.95 GiB, 55.1 MiB/s
+  1.13 of 14.95 GiB, 57.8 MiB/s
+  1.72 of 14.95 GiB, 58.6 MiB/s
+  2.30 of 14.95 GiB, 58.7 MiB/s
+  2.86 of 14.95 GiB, 58.5 MiB/s
+  3.43 of 14.95 GiB, 58.6 MiB/s
+  4.04 of 14.95 GiB, 59.0 MiB/s
+  4.67 of 14.95 GiB, 59.7 MiB/s
+  5.30 of 14.95 GiB, 60.2 MiB/s
+  5.94 of 14.95 GiB, 60.8 MiB/s
+  6.57 of 14.95 GiB, 61.2 MiB/s
+  7.19 of 14.95 GiB, 61.3 MiB/s
+  7.82 of 14.95 GiB, 61.6 MiB/s
+  8.45 of 14.95 GiB, 61.8 MiB/s
+  9.07 of 14.95 GiB, 61.9 MiB/s
+  9.68 of 14.95 GiB, 61.9 MiB/s
+  10.31 of 14.95 GiB, 62.1 MiB/s
+  10.96 of 14.95 GiB, 62.3 MiB/s
+  11.60 of 14.95 GiB, 62.5 MiB/s
+  12.25 of 14.95 GiB, 62.7 MiB/s
+  12.90 of 14.95 GiB, 62.9 MiB/s
+  13.53 of 14.95 GiB, 63.0 MiB/s
+  14.17 of 14.95 GiB, 63.1 MiB/s
+  14.81 of 14.95 GiB, 63.2 MiB/s
+  model-00001-of-00003.safetensors: 5095.74 MiB in 160 pieces
+  model-00002-of-00003.safetensors: 5106.15 MiB in 160 pieces
+  model-00003-of-00003.safetensors: 5108.92 MiB in 160 pieces
+stored TensorFold/Qwen3.8-27B-MLX-4bit@70ae7fac63274ff2eac54152031433374cb80f2f at ~/.cache/huggingface/hub/models--TensorFold--Qwen3.8-27B-MLX-4bit/snapshots/70ae7fac63274ff2eac54152031433374cb80f2f
+27b exit=0 17:23:41
+[tensorfold] downloading TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP@f84b054c5677b6e59bdb969ae61915b0983d68bb from Hugging Face
+TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP: qwen3_5_moe (qwen3_5_moe)
+  .gitattributes: 0.00 MiB
+  README.md: 0.00 MiB
+  chat_template.jinja: 0.01 MiB
+  config.json: 0.02 MiB
+  configuration.json: 0.00 MiB
+  generation_config.json: 0.00 MiB
+  model.safetensors.index.json: 0.21 MiB
+  preprocessor_config.json: 0.00 MiB
+  processor_config.json: 0.00 MiB
+  tokenizer.json: 19.06 MiB
+  tokenizer_config.json: 0.00 MiB
+  video_preprocessor_config.json: 0.00 MiB
+  vocab.json: 6.41 MiB
+  0.58 of 19.44 GiB, 58.9 MiB/s
+  1.21 of 19.44 GiB, 61.9 MiB/s
+  1.84 of 19.44 GiB, 62.8 MiB/s
+  2.46 of 19.44 GiB, 63.0 MiB/s
+  3.10 of 19.44 GiB, 63.5 MiB/s
+  3.73 of 19.44 GiB, 63.7 MiB/s
+  4.37 of 19.44 GiB, 63.9 MiB/s
+  5.00 of 19.44 GiB, 63.9 MiB/s
+  5.63 of 19.44 GiB, 64.1 MiB/s
+  6.29 of 19.44 GiB, 64.4 MiB/s
+  6.94 of 19.44 GiB, 64.6 MiB/s
+  7.57 of 19.44 GiB, 64.5 MiB/s
+  8.20 of 19.44 GiB, 64.6 MiB/s
+  8.82 of 19.44 GiB, 64.5 MiB/s
+  9.41 of 19.44 GiB, 64.2 MiB/s
+  10.04 of 19.44 GiB, 64.3 MiB/s
+  10.70 of 19.44 GiB, 64.4 MiB/s
+  11.28 of 19.44 GiB, 64.1 MiB/s
+  11.93 of 19.44 GiB, 64.3 MiB/s
+  12.59 of 19.44 GiB, 64.4 MiB/s
+  13.21 of 19.44 GiB, 64.4 MiB/s
+  13.82 of 19.44 GiB, 64.3 MiB/s
+  14.46 of 19.44 GiB, 64.4 MiB/s
+  15.11 of 19.44 GiB, 64.4 MiB/s
+  15.75 of 19.44 GiB, 64.5 MiB/s
+  16.37 of 19.44 GiB, 64.5 MiB/s
+  17.00 of 19.44 GiB, 64.5 MiB/s
+  17.63 of 19.44 GiB, 64.4 MiB/s
+  18.26 of 19.44 GiB, 64.5 MiB/s
+  18.89 of 19.44 GiB, 64.5 MiB/s
+  19.41 of 19.44 GiB, 64.1 MiB/s
+  model-00001-of-00004.safetensors: 5043.22 MiB in 158 pieces
+  model-00002-of-00004.safetensors: 5119.77 MiB in 160 pieces
+  model-00003-of-00004.safetensors: 5119.63 MiB in 160 pieces
+  model-00004-of-00004.safetensors: 4174.43 MiB in 131 pieces
+  mtp-4bit.safetensors: 453.37 MiB in 15 pieces
+stored TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP@f84b054c5677b6e59bdb969ae61915b0983d68bb at ~/.cache/huggingface/hub/models--TensorFold--Qwen3.6-35B-A3B-MLX-4bit-MTP/snapshots/f84b054c5677b6e59bdb969ae61915b0983d68bb
+35b exit=0 17:29:21
+PULLDONE

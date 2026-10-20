@@ -6,6 +6,7 @@ const nemotron = @import("nemotron");
 const options = @import("contract_options");
 const check = @import("check.zig");
 const rows_k = @import("contract_rows.zig");
+const tail_k = @import("contract_norms_tail.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const mx_k = @import("contract_mxfp8.zig");
@@ -23,12 +24,25 @@ const ck_k = @import("contract_ck.zig");
 const scan_k = @import("contract_scan.zig");
 const lane8_k = @import("contract_ck_lane.zig");
 const latent_k = @import("contract_latent.zig");
+const act_round_k = @import("contract_act_round.zig");
 
 const round_k = @import("contract_tree_round.zig");
 
 const act_k = @import("contract_act.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
+const embed_k = @import("contract_embed.zig");
+
+const tree_k = @import("contract_tree_attn.zig");
+const block_k = @import("contract_block_attn.zig");
+
+const window_k = @import("contract_window.zig");
+const moe_k = @import("contract_moe.zig");
+const qkr_k = @import("contract_qk_round.zig");
+const fact_k = @import("contract_flashnext_fact.zig");
+const route_k = @import("contract_route_rows.zig");
+const fexp_k = @import("contract_flashnext_fexp.zig");
+const glue_k = @import("contract_flashnext_glue.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -48,7 +62,7 @@ const h3_image = struct {
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
     std.debug.print("FAIL kernel-contract: unknown image name: {s}\n", .{name});
     return error.UnknownContractImage;
@@ -97,6 +111,11 @@ pub fn run(gpu: check.Gpu) !void {
         nrows += 1;
     }
     for (row_list[0..nrows]) |*r| try kernels.append(a, r.kernel());
+    const tail_which = comptime std.enums.values(tail_k.Which);
+    var tails: [tail_which.len]tail_k.Tail = undefined;
+    for (tail_which, &tails) |w, *t| t.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .norms = &norms, .ctl = if (tail_k.control(w) != null) try mods[5].function(tail_k.symbol(w)) else null };
+    defer for (&tails) |*t| t.deinit();
+    for (&tails) |*t| try kernels.append(a, t.kernel());
     var logits = router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[0].function("tf_nemo_router") };
     defer logits.deinit();
     var logits_tiles = router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .f = logits.f, .tiles = try mods[0].function("tf_nemo_router_tiles") };
@@ -256,6 +275,10 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(act_k.Which), &acts) |w, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &act_rows, .arena = .init(a) };
     defer for (&acts) |*x| x.deinit();
     for (&acts) |*x| try kernels.append(a, x.kernel());
+    var act_rounds: [act_round_k.entries.len]act_round_k.Act = undefined;
+    for (act_round_k.entries, &act_rounds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .act = &act_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_act_round") else null };
+    defer for (&act_rounds) |*x| x.deinit();
+    for (&act_rounds) |*x| try kernels.append(a, x.kernel());
     var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
     defer gdn_prep.unload();
     var gdns: [9]gdn_k.Gdn = undefined;
@@ -268,7 +291,123 @@ pub fn run(gpu: check.Gpu) !void {
     for (&qks, qk_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .arena = .init(a) };
     defer for (&qks) |*x| x.deinit();
     for (&qks) |*x| try kernels.append(a, x.kernel());
+    var tree_paths = try cuda.tree_attention.TreeAttention.load(gpu.d);
+    defer tree_paths.unload();
+    var paths = tree_k.Paths{ .rig = .{ .gpu = gpu, .s = s }, .ta = &tree_paths };
+    defer paths.deinit();
+    try kernels.append(a, paths.kernel());
+    var trees: [tree_k.variants.len]tree_k.Tree = undefined;
+    var ntrees: usize = 0;
+    defer for (trees[0..ntrees]) |*x| {
+        x.ta.unload();
+        x.deinit();
+    };
+    for (tree_k.variants) |v| {
+        trees[ntrees] = .{ .rig = .{ .gpu = gpu, .s = s }, .v = v, .ta = try cuda.tree_attention.TreeAttention.load(gpu.d) };
+        ntrees += 1;
+    }
+    for (&trees) |*x| try kernels.append(a, x.kernel());
+    var block_attn = try cuda.block_attention.BlockAttention.load(gpu.d);
+    defer block_attn.unload();
+    var blocks: [2]block_k.Block = .{ .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = false }, .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = true } };
+    defer for (&blocks) |*x| x.deinit();
+    for (&blocks) |*x| try kernels.append(a, x.kernel());
+    var window_fns = try cuda.window_attention.WindowAttention.load(gpu.d);
+    defer window_fns.unload();
+    var windows: [window_k.cfgs.len]window_k.Window = undefined;
+    for (window_k.cfgs, &windows) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns };
+    defer for (&windows) |*x| x.deinit();
+    for (&windows) |*x| try kernels.append(a, x.kernel());
+    var moe_fns = try cuda.moe_glue.MoeGlue.load(gpu.d);
+    defer moe_fns.unload();
+    var topks: [moe_k.routes.len]moe_k.TopK = undefined;
+    for (moe_k.routes, &topks) |r, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .route = r, .g = &moe_fns };
+    defer for (&topks) |*x| x.deinit();
+    for (&topks) |*x| try kernels.append(a, x.kernel());
+    var combines: [moe_k.combos.len]moe_k.Combine = undefined;
+    for (moe_k.combos, &combines) |m, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .x = m, .g = &moe_fns };
+    defer for (&combines) |*x| x.deinit();
+    for (&combines) |*x| try kernels.append(a, x.kernel());
+    var dense_fns = try cuda.dense_rows.DenseRows.load(gpu.d);
+    defer dense_fns.unload();
+    var denses: [moe_k.dense_tiles.len]moe_k.DenseRows = undefined;
+    for (&denses, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .tile = i, .g = &dense_fns };
+    defer for (&denses) |*x| x.deinit();
+    for (&denses) |*x| try kernels.append(a, x.kernel());
+    var embed_rows = try cuda.embed_rows.EmbedRows.load(gpu.d);
+    defer embed_rows.unload();
+    var embeds: [embed_k.entries.len]embed_k.Embed = undefined;
+    for (embed_k.entries, &embeds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .e = &embed_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_embed_affine") else null };
+    defer for (&embeds) |*x| x.deinit();
+    for (&embeds) |*x| try kernels.append(a, x.kernel());
+    var qkrs: [qkr_k.forms.len]qkr_k.Qk = undefined;
+    for (&qkrs, qkr_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .ctl = if (f.keep != null) try mods[5].function("tf_ctl_qk_round") else null, .arena = .init(a) };
+    defer for (&qkrs) |*x| x.deinit();
+    for (&qkrs) |*x| try kernels.append(a, x.kernel());
+    const fparts = @import("flashnext").batch_state;
+    const ftk = @import("flashnext").tile_kernels;
+    var qmm_mod = try cuda.Module.load(gpu.d, kk.qmm);
+    defer qmm_mod.unload();
+    var fact_mod = try cuda.Module.load(gpu.d, kk.flashnext_fact);
+    defer fact_mod.unload();
+    const flane = try qmm_mod.function(fparts.cubin_qmm);
+    try flane.allowDynamicShared(fparts.qmm_smem);
+    const fprompt = try fact_mod.function(ftk.cubin_fact);
+    try fprompt.allowDynamicShared(ftk.fact_smem);
+    const ffold = try fact_mod.function(ftk.cubin_fact_fold);
+    try ffold.allowDynamicShared(ftk.fact_smem);
+    var facts: [2]fact_k.Fact = undefined;
+    for (std.enums.values(fact_k.Kind), &facts) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .lane = flane, .prompt = fprompt, .fold = ffold, .sum = try batch.function("fn_sum_slices") };
+    defer for (&facts) |*m| m.deinit();
+    for (&facts) |*m| try kernels.append(a, m.kernel());
+    var route = try cuda.route_rows.RouteRows.load(gpu.d);
+    defer route.unload();
+    var routes: [3]route_k.Logits = undefined;
+    for (std.enums.values(route_k.Kind), &routes) |kind, *r| r.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .route = &route };
+    defer for (&routes) |*r| r.deinit();
+    for (&routes) |*r| try kernels.append(a, r.kernel());
+    var rows_mod = try cuda.Module.load(gpu.d, kk.experts_rows);
+    defer rows_mod.unload();
+    var fexp_mod = try cuda.Module.load(gpu.d, kk.flashnext_fexp);
+    defer fexp_mod.unload();
+    var pack_mod = try cuda.Module.load(gpu.d, kk.experts_pack);
+    defer pack_mod.unload();
+    const fexp_fns: fexp_k.Fns = .{
+        .up = try fexp_mod.function(ftk.cubin_fexp_up),
+        .down = try fexp_mod.function(ftk.cubin_fexp_down),
+        .rows_up = try rows_mod.function(cuda.experts.RowsExperts.symbols.up),
+        .rows_down = try rows_mod.function(cuda.experts.RowsExperts.symbols.down),
+        .pack = try pack_mod.function(fexp_k.pack_symbol),
+    };
+    try fexp_fns.up.allowDynamicShared(ftk.fexp_smem);
+    try fexp_fns.down.allowDynamicShared(ftk.fexp_smem);
+    var fexps: [2]fexp_k.Fexp = undefined;
+    for (std.enums.values(fexp_k.Kind), &fexps) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = &fexp_fns };
+    defer for (&fexps) |*m| m.deinit();
+    for (&fexps) |*m| try kernels.append(a, m.kernel());
+    var attn = try cuda.Module.load(gpu.d, kk.flashnext_attn);
+    defer attn.unload();
+    var hcf_mod = try cuda.Module.load(gpu.d, kk.flashnext_hcf);
+    defer hcf_mod.unload();
+    var fglue = try @import("flashnext").Glue.load(gpu.d);
+    defer fglue.deinit();
+    const glue_fns: glue_k.Fns = .{
+        .tpr = try batch.function("fn_gdn_chain_tpr"),
+        .rows_to = try batch.function("fn_gdn_rows_to"),
+        .tile = try attn.function("_ZN8qsa_tile6scoresILi8ELi4EEEvPK13__nv_bfloat16S3_PKiPfiiii"),
+        .scores = try attn.function("fn_qsa_scores"),
+        .hcf_down = try hcf_mod.function(ftk.cubin_hcf_down),
+        .hcf_up = try hcf_mod.function(ftk.cubin_hcf_up),
+    };
+    try glue_fns.tpr.allowDynamicShared(fparts.chain_tpr_smem);
+    try glue_fns.hcf_down.allowDynamicShared(ftk.hcf_down_smem);
+    try glue_fns.hcf_up.allowDynamicShared(ftk.hcf_up_smem);
+    var glues: [3]glue_k.Glue = undefined;
+    for (std.enums.values(glue_k.Kind), &glues) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = &glue_fns, .glue = &fglue };
+    defer for (&glues) |*m| m.deinit();
+    for (&glues) |*m| try kernels.append(a, m.kernel());
     var t: g.Tally = .{};
+    try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
     try @import("gdn_back_tests.zig").run(gpu);

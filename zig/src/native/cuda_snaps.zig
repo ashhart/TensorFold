@@ -28,6 +28,9 @@ pub fn Snaps(comptime F: type, comptime image: ?*const api.prompt_cache.rows.Ima
             .restore = F.snap_restore,
             .drop = F.snap_drop,
             .rows = image,
+            .charged = if (@hasDecl(F, "snap_charged")) F.snap_charged else null,
+            .spare = if (@hasDecl(F, "snap_spare")) F.snap_spare else null,
+            .reuses = if (@hasDecl(F, "snap_reuses")) F.snap_reuses else null,
         };
     };
 }

@@ -37,6 +37,9 @@ Positive MTP caps leave copied continuations and Recall on their existing row li
 
 ## Run on two GB10s
 
+Use NCCL 2.30.7 or newer, the tested minimum for this setup. The runtime refuses versions below 2.30.0;
+2.28.9 can deadlock during startup window-cost timing (#1060).
+
 Rank 0 runs the whole model and serves; rank 1 holds only its share of every MoE layer's experts (the MTP layer's
 too) and computes it for rank 0's jobs. The ranks meet over NCCL, which the engine opens at run time from the system
 (`libnccl.so.2` on the library path); start rank 1 first, with the same binary and checkpoint on both hosts:

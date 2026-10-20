@@ -22,6 +22,7 @@ pub const split_rows = 8;
 pub const attn_rows = 16;
 
 pub const Storage = struct {
+    residency: ?mtl.ResidencySet.Follow = null,
     gpa: std.mem.Allocator,
     device: mtl.Device,
     buffers: std.ArrayList(mtl.Buffer) = .empty,
@@ -30,10 +31,20 @@ pub const Storage = struct {
         const b = try self.device.buffer(@max(bytes, 16), opts);
         errdefer b.deinit();
         try self.buffers.append(self.gpa, b);
+        if (self.residency) |f| f.join(f.ctx, b);
         return b;
     }
 
+    pub fn setResident(self: *Storage, hook: ?mtl.ResidencySet.Follow) void {
+        for (self.buffers.items) |b| {
+            if (self.residency) |f| f.leave(f.ctx, b);
+            if (hook) |f| f.join(f.ctx, b);
+        }
+        self.residency = hook;
+    }
+
     pub fn deinit(self: *Storage) void {
+        self.setResident(null);
         for (self.buffers.items) |b| b.deinit();
         self.buffers.deinit(self.gpa);
     }

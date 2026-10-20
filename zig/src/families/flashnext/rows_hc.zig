@@ -14,7 +14,16 @@ const KS = W / 32 / 32; // the down projection's input splits
 pub const Spec = struct { nd: usize, low: usize, down: [2]usize, up: [2]usize, nib: u8 };
 
 /// The per-row kernels, and for 4-bit group 32 their 8-row matrix-unit tiles (0.6.6's hc_tiles, the same bits).
-pub const Pipes = struct { down: mtl.Pipeline, up: mtl.Pipeline, tiles: ?[2]mtl.Pipeline = null };
+pub const Pipes = struct {
+    down: mtl.Pipeline,
+    up: mtl.Pipeline,
+    tiles: ?[2]mtl.Pipeline = null,
+    pub fn deinit(p: Pipes) void {
+        p.down.deinit();
+        p.up.deinit();
+        if (p.tiles) |ts| for (ts) |v| v.deinit();
+    }
+};
 
 /// Rows from which a 4/32 pair takes the tiles (HC_MMA_FROM).
 pub const tiles_from = 8;
@@ -65,14 +74,19 @@ pub fn source(a: std.mem.Allocator, s: Spec) ![]const u8 {
 pub fn pipes(a: std.mem.Allocator, device: mtl.Device, cache: *Cache, s: Spec) !Pipes {
     if (cache.get(s)) |p| return p;
     const lib = try mtl.Library.fromSource(device, try source(a, s), mtl.CompileOptions.mlx());
-    var p: Pipes = .{
-        .down = try mtl.Pipeline.init(device, lib, "qa_hc_down_split", false),
-        .up = try mtl.Pipeline.init(device, lib, "qa_hc_up2", false),
-    };
-    if (q4(s)) p.tiles = .{
-        try mtl.Pipeline.init(device, lib, "q4_hc_down_tiles", false),
-        try mtl.Pipeline.init(device, lib, "q4_hc_up_tiles", false),
-    };
+    defer lib.deinit();
+    const down = try mtl.Pipeline.init(device, lib, "qa_hc_down_split", false);
+    errdefer down.deinit();
+    const up = try mtl.Pipeline.init(device, lib, "qa_hc_up2", false);
+    errdefer up.deinit();
+    var p: Pipes = .{ .down = down, .up = up };
+    if (q4(s)) {
+        const td = try mtl.Pipeline.init(device, lib, "q4_hc_down_tiles", false);
+        errdefer td.deinit();
+        const tu = try mtl.Pipeline.init(device, lib, "q4_hc_up_tiles", false);
+        p.tiles = .{ td, tu };
+    }
+    errdefer if (p.tiles) |ts| for (ts) |v| v.deinit();
     try cache.put(a, s, p);
     return p;
 }

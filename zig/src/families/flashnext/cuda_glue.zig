@@ -11,6 +11,10 @@ const tile_heads = 16;
 fn chunkSmem(buffers: u32) u32 {
     return (tile_heads + buffers * 2 * 32) * (tile_head_dim + 8) * 2 + tile_heads * (32 + 8) * 2;
 }
+/// The one-buffer form: a tile's keys, then its values, in the same rows of shared memory.
+fn oneSmem() u32 {
+    return (tile_heads + 32) * (tile_head_dim + 8) * 2 + tile_heads * (32 + 8) * 2;
+}
 /// Rows up to which attention reads the next tile ahead (fewer blocks, so latency, not occupancy, sets the time).
 const ahead_rows = 16;
 
@@ -35,6 +39,8 @@ const Fns = struct {
     reduce_act: cuda.Function,
     upmix: cuda.Function,
     upmix_up: cuda.Function,
+    rinv: cuda.Function,
+    mix_h: cuda.Function,
     ple_gate: cuda.Function,
     ple_conv: cuda.Function,
     add_streams: cuda.Function,
@@ -44,8 +50,11 @@ const Fns = struct {
     gate: cuda.Function,
     pool: cuda.Function,
     scores: cuda.Function,
+    scores_tile: cuda.Function,
     chunks: cuda.Function,
     chunks_ahead: cuda.Function,
+    chunks_one: cuda.Function,
+    fused: cuda.Function,
     merge: cuda.Function,
 };
 
@@ -106,6 +115,8 @@ pub const Glue = struct {
             .reduce_act = try g.hc.function("fn_hc_reduce_act"),
             .upmix = try g.hc.function("fn_hc_upmix"),
             .upmix_up = try g.hc.function("fn_hc_upmix_up"),
+            .rinv = try g.hc.function("fn_hc_rinv"),
+            .mix_h = try g.hc.function("fn_hc_mix_h"),
             .ple_gate = try g.hc.function("fn_ple_gate"),
             .ple_conv = try g.hc.function("fn_ple_conv"),
             .add_streams = try g.hc.function("fn_add_streams"),
@@ -115,12 +126,17 @@ pub const Glue = struct {
             .gate = try g.attn.function("fn_attn_gate"),
             .pool = try g.attn.function("fn_qsa_pool"),
             .scores = try g.attn.function("fn_qsa_scores"),
+            .scores_tile = try g.attn.function("_ZN8qsa_tile6scoresILi8ELi4EEEvPK13__nv_bfloat16S3_PKiPfiiii"),
             .chunks = try g.attn.function("fn_attn_chunks"),
             .chunks_ahead = try g.attn.function("fn_attn_chunks_ahead"),
+            .chunks_one = try g.attn.function("fn_attn_chunks_one"),
+            .fused = try g.attn.function("fn_attn_fused"),
             .merge = try g.attn.function("fn_attn_merge"),
         };
         try g.f.chunks.allowDynamicShared(chunkSmem(1));
         try g.f.chunks_ahead.allowDynamicShared(chunkSmem(2));
+        try g.f.chunks_one.allowDynamicShared(oneSmem());
+        try g.f.fused.allowDynamicShared(oneSmem());
         return g;
     }
 
@@ -196,7 +212,19 @@ pub const Glue = struct {
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, @intFromBool(qsa) });
         const ahead = rows <= ahead_rows;
-        try go(if (ahead) g.f.chunks_ahead else g.f.chunks, s, .{ rows, kv, chunks }, 128, chunkSmem(if (ahead) 2 else 1), &a);
+        try go(if (ahead) g.f.chunks_ahead else g.f.chunks_one, s, .{ rows, kv, chunks }, 128, if (ahead) chunkSmem(2) else oneSmem(), &a);
+    }
+
+    /// Prompt rows' attention with every chunk merged in the program (fn_attn_fused): out bf16, attnChunks then
+    pub fn attnFused(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+        const group = wt.q_heads / kv;
+        if (group > tile_heads) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ q, kc, vc, pos, out, ids, nk, sparse });
+        ints(&a, &.{ wt.q_heads, kv, group, 512 });
+        a.add(@as(f32, 0.0625));
+        ints(&a, &.{ wt.index_idw, 1 });
+        try go(g.f.fused, s, .{ rows, kv, 1 }, 128, oneSmem(), &a);
     }
 
     pub fn attnMerge(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize, qsa: bool) !void {
@@ -218,6 +246,11 @@ pub const Glue = struct {
         if (wt.index_dim != 128 or wt.index_heads > 8) return error.RowShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ iq, pooled, pos, sc });
+        if (wt.index_heads == 4) {
+            // 8 rows and 256 blocks a CTA, every head, fn_qsa_scores' sums in its order (its bits)
+            ints(&a, &.{ nb, wt.index_ratio, wt.index_top, rows });
+            return go(g.f.scores_tile, s, .{ cdiv(rows, 8), cdiv(blocks, 256), 1 }, 256, 0, &a);
+        }
         ints(&a, &.{ nb, wt.index_heads, wt.index_ratio, wt.index_top });
         try go(g.f.scores, s, .{ rows, cdiv(blocks, 64), 1 }, 256, 0, &a);
     }
@@ -261,6 +294,25 @@ pub const Glue = struct {
         ptrs(&a, &.{ part, act, xs, inj });
         ints(&a, &.{ sk, rows, streams, low, has_inj, ndn });
         try go(g.f.reduce_act, s, .{ rows, 1, 1 }, @intCast(cdiv(@max(cols, low / 32), 32) * 32), 0, &a);
+    }
+
+    /// fn_hc_norm's 1 / rms of each row's streams [rows, streams].
+    pub fn hcRinv(g: *const Glue, s: cuda.Stream, pss: u64, rinv: u64, eps: f32, rows: usize, dims: usize, nc: usize, streams: usize) !void {
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ pss, rinv });
+        a.add(int(rows));
+        a.add(eps);
+        ints(&a, &.{ dims, nc, streams });
+        try go(g.f.rinv, s, .{ cdiv(rows * streams, 256), 1, 1 }, 256, 0, &a);
+    }
+
+    /// hcMix with the normed values recomputed from the streams h, rinv and scale.
+    pub fn hcMixH(g: *const Glue, s: cuda.Stream, up: u64, h: u64, rinv: u64, scale: u64, mixed: u64, xsm: u64, rows: usize, dims: usize, streams: usize) !void {
+        if (dims % 32 != 0) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ up, h, rinv, scale, mixed, xsm });
+        ints(&a, &.{ dims, streams });
+        try go(g.f.mix_h, s, .{ rows, cdiv(dims, 256), 1 }, 256, 0, &a);
     }
 
     pub fn hcUpmix(g: *const Glue, s: cuda.Stream, act: u64, xs: u64, w: u64, sc: u64, b: u64, normed: u64, mixed: u64, xs_mixed: u64, rows: usize, n: usize, k: usize, dims: usize, streams: usize) !void {

@@ -1,0 +1,47 @@
+# negative control: ranking-note
+# undone: commit 4: the ranking note never names a missing fact (unranked always null)
+# tree: 82237515afa0572705c2803b6b633e9e5cef1b02 with only this change
+# cmd: zig build test-server-cpu --summary all -j8 (zig 0.17.0)
+# started 2026-10-18T23:35:06Z
+# --- the undo, as git diff ---
+diff --git a/zig/src/server/benchmark.zig b/zig/src/server/benchmark.zig
+index af4d5cc5..da882c58 100644
+--- a/zig/src/server/benchmark.zig
++++ b/zig/src/server/benchmark.zig
+@@ -248,7 +248,7 @@ fn show(ctx: *const Context, v: json.Value) !void {
+ /// What a public managed receipt lacks of the facts the board ranks by (docs/community-benchmarks.md), else null.
+ pub fn unranked(a: Allocator, v: json.Value) !?[]const u8 {
+     const m = v.get("model").?;
+-    if (m.get("local").? != .bool or m.get("local").?.bool) return null; // a local label is refused before publishing
++    if (m.get("local").? != .null) return null; // a local label is refused before publishing
+     var lacks: std.ArrayList([]const u8) = .empty;
+     const gpus = v.get("hardware").?.get("gpus").?;
+     if (gpus != .array or gpus.array.len == 0) try lacks.append(a, "GPU");
+# --- build output ---
+test-server-cpu
++- run test 433 pass, 1 crash (434 total)
+error: 'benchmark_facts_test.test.a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no driver, and passes the save rules' terminated with signal ABRT with stderr:
+       thread 30124164 panic: attempt to use null value
+       ~/tmp/rv1001-1/zig/src/server/benchmark_facts_test.zig:347:82: 0x10514b737 in test.a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no driver, and passes the save rules (test)
+           try std.testing.expectEqualStrings("GPU", (try benchmark.unranked(a, no_gpu)).?);
+                                                                                        ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/compiler/test_runner.zig:143:68: 0x104c5e0d7 in mainServer (test)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/compiler/test_runner.zig:72:26: 0x104c5e6e3 in main (test)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/start.zig:789:88: 0x104c5c62f in callMain (test)
+           if (fn_info.param_types[0].? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ???:?:?: 0x180dabe7f in start (/usr/lib/dyld)
+failed command: ./.zc/o/5fb1dfbed58610ba73f32230b85fe5ee/test --cache-dir=./.zc --seed=0x522fb6aa --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 433/434 tests passed (1 crashed)
+test-server-cpu transitive failure
++- run test 433 pass, 1 crash (434 total)
+|  +- compile test debug native success 13s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 61ms MaxRSS:32M
+
+# exit=1 after 82s

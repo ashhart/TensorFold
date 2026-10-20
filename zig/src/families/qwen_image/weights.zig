@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
+const index_format = @import("../../core/checkpoint_index.zig");
 const cfg = @import("config.zig");
 const host = @import("host.zig");
 const Ref = @import("../../core/qwen_vl/weights.zig").Ref;
@@ -29,12 +30,12 @@ fn shards(arena: std.mem.Allocator, io: std.Io, dir: []const u8) ![][:0]const u8
     const index = try std.fs.path.join(arena, &.{ dir, "diffusion_pytorch_model.safetensors.index.json" });
     if (std.Io.Dir.cwd().readFileAlloc(io, index, arena, .limited(16 << 20))) |text| {
         const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{});
-        if (doc != .object) return error.BadIndex;
-        const map = (doc.object.get("weight_map") orelse return error.BadIndex);
-        if (map != .object) return error.BadIndex;
-        var it = map.object.iterator();
-        while (it.next()) |kv| if (kv.value_ptr.* == .string) try files.put(arena, kv.value_ptr.string, {});
-    } else |_| try files.put(arena, "diffusion_pytorch_model.safetensors", {});
+        var it = (try index_format.weightMap(doc)).iterator();
+        while (it.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+        try files.put(arena, "diffusion_pytorch_model.safetensors", {});
+    }
     const out = try arena.alloc([:0]const u8, files.count());
     for (files.keys(), out) |name, *path| path.* = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ dir, name }, 0);
     return out;

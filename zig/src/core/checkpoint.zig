@@ -3,6 +3,7 @@
 const std = @import("std");
 const Io = std.Io;
 const st = @import("safetensors.zig");
+const index_format = @import("checkpoint_index.zig");
 
 pub const Tensor = st.Tensor;
 pub const DType = st.DType;
@@ -22,14 +23,15 @@ pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
         defer parsed.deinit();
         var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer seen.deinit(gpa);
-        var it = parsed.value.object.get("weight_map").?.object.iterator();
+        var it = (try index_format.weightMap(parsed.value)).iterator();
         while (it.next()) |e| {
             const file = e.value_ptr.string;
             if ((try seen.getOrPut(gpa, file)).found_existing) continue;
             try names.ensureUnusedCapacity(gpa, 1);
             names.appendAssumeCapacity(try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, file }, 0));
         }
-    } else |_| {
+    } else |err| {
+        if (err != error.FileNotFound) return err;
         var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
         defer d.close(io);
         var it = d.iterate();
@@ -85,6 +87,7 @@ pub const Checkpoint = struct {
 
     /// One more file (an MTP head beside the model's files).
     pub fn add(self: *Checkpoint, dir: []const u8, name: []const u8) !void {
+        if (!index_format.plainName(name)) return error.BadIndex;
         const path = try std.fs.path.join(self.gpa, &.{ dir, name });
         defer self.gpa.free(path);
         try self.files.ensureUnusedCapacity(self.gpa, 1);

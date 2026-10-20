@@ -11,21 +11,7 @@ __device__ __forceinline__ unsigned char* layer_at(const Seg& sg, int layer, int
     return reinterpret_cast<unsigned char*>(sg.kv) + (size_t)layer * 2 * kvh * sg.cap * (HD + 4);
 }
 
-// The block's 256 threads' row as e4m3 into q[d], its scale (1 for a row of zeros) to *s; tf_kv_quant's bits.
-__device__ __forceinline__ void quant_row(float x, int d, unsigned char* q, float* s, float* red) {
-    float amax = fabsf(x);
-#pragma unroll
-    for (int o = 16; o > 0; o /= 2) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-    if ((d & 31) == 0) red[d >> 5] = amax;
-    __syncthreads();
-    amax = red[0];
-#pragma unroll
-    for (int w = 1; w < HD / 32; w++) amax = fmaxf(amax, red[w]);
-    __syncthreads();
-    const float inv = amax > 0.0f ? __fdiv_rn(448.0f, amax) : 1.0f;
-    q[d] = __nv_cvt_float_to_fp8(__fmul_rn(x, inv), __NV_SATFINITE, __NV_E4M3);
-    if (d == 0) *s = amax > 0.0f ? __fdiv_rn(amax, 448.0f) : 1.0f;
-}
+#include "kv_fp8.cuh"
 
 // A key and value as e4m3 rows and their scales in their cache slot; every thread of the block calls it together.
 struct StoreFp8 {
@@ -37,8 +23,8 @@ struct StoreFp8 {
         float* kscale = reinterpret_cast<float*>(values + (size_t)kvh * sg.cap * HD);
         float* vscale = kscale + (size_t)kvh * sg.cap;
         const size_t row = (size_t)h * sg.cap + slot;
-        quant_row(bf(k), d, keys + row * HD, kscale + row, red);
-        quant_row(bf(v), d, values + row * HD, vscale + row, red);
+        tf_kv_fp8::quant_row<HD>(bf(k), d, keys + row * HD, kscale + row, red);
+        tf_kv_fp8::quant_row<HD>(bf(v), d, values + row * HD, vscale + row, red);
     }
 };
 

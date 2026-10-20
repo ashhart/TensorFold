@@ -32,6 +32,7 @@ pub const Cache = struct {
     /// The drafter's rows: the prompt's last (in `last_tap`), then each verify's in the scratch.
     tap: Tap = .{},
     last_tap: ?mtl.Buffer = null,
+    follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn init(device: mtl.Device, geo: cfg.Geometry, capacity: usize) !Cache {
         var c: Cache = .{ .k = undefined, .v = undefined, .geo = geo, .capacity = capacity, .logits = try device.buffer(cfg.vocab * 2, shared) };
@@ -55,12 +56,40 @@ pub const Cache = struct {
     }
 
     pub fn deinit(c: *Cache) void {
+        c.setResident(null);
         c.logits.deinit();
         if (c.last_tap) |b| b.deinit();
         for (0..c.geo.layers) |i| {
             c.k[i].deinit();
             c.v[i].deinit();
         }
+    }
+
+    pub fn setResident(c: *Cache, hook: ?mtl.ResidencySet.Follow) void {
+        var buffers: [2 * cfg.max_layers + 2]mtl.Buffer = undefined;
+        buffers[0] = c.logits;
+        var count: usize = 1;
+        if (c.last_tap) |b| {
+            buffers[count] = b;
+            count += 1;
+        }
+        for (0..c.geo.layers) |i| {
+            buffers[count] = c.k[i];
+            buffers[count + 1] = c.v[i];
+            count += 2;
+        }
+        if (c.follow) |f| for (buffers[0..count]) |b| f.leave(f.ctx, b);
+        c.follow = hook;
+        if (hook) |f| for (buffers[0..count]) |b| f.join(f.ctx, b);
+    }
+
+    pub fn setLastTap(c: *Cache, buffer: mtl.Buffer) void {
+        if (c.last_tap) |old| {
+            if (c.follow) |f| f.leave(f.ctx, old);
+            old.deinit();
+        }
+        c.last_tap = buffer;
+        if (c.follow) |f| f.join(f.ctx, buffer);
     }
 };
 

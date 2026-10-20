@@ -1,4 +1,4 @@
-//! The hardware allowlist per OS: CPU and GPU names, memory, cores, and the CUDA driver version.
+//! The hardware allowlist per OS; on ROCm the GPUs come from rocminfo's agents and no driver version.
 const std = @import("std");
 const builtin = @import("builtin");
 const json = @import("json");
@@ -12,7 +12,7 @@ pub const unavailable: Hardware = .{};
 /// What the probes found: the hardware block, and on Linux the single driver version nvidia-smi reports.
 pub const Probe = struct { hardware: Hardware, driver: ?[]const u8 = null };
 
-/// The host's allowlisted facts for a backend; no hostname, serials, UUIDs or model identifier is read.
+/// The host's allowlisted facts for a backend; no hostname, serial, UUID or model identifier is recorded.
 pub fn detect(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, backend: []const u8) Probe {
     if (builtin.os.tag == .macos) {
         const cpu = modelName(a, sysctlString("machdep.cpu.brand_string") orelse "");
@@ -22,14 +22,145 @@ pub fn detect(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, bac
     }
     const cpu = cpuinfo(a, readProc(a, io, "/proc/cpuinfo") orelse "");
     const memory = meminfo(readProc(a, io, "/proc/meminfo") orelse "") orelse (std.process.totalSystemMemory() catch null);
-    const csv = if (gpuQuery(backend)) |argv| run(a, io, argv) orelse "" else "";
-    return linux(a, cpu, memory, csv, env.get("CUDA_VISIBLE_DEVICES"));
+    const out = if (gpuQuery(backend)) |argv| run(a, io, argv) orelse "" else "";
+    if (std.mem.eql(u8, backend, "rocm")) return rocm(a, cpu, memory, out, rocmVisible(env));
+    return linux(a, cpu, memory, out, env.get("CUDA_VISIBLE_DEVICES"));
 }
 
-/// The GPU query behind a backend's facts: nvidia-smi for cuda; none for rocm, whose GPUs and driver stay unknown.
+/// The GPU query behind a backend's facts: nvidia-smi for cuda, rocminfo for rocm; none otherwise.
 pub fn gpuQuery(backend: []const u8) ?[]const []const u8 {
+    if (std.mem.eql(u8, backend, "rocm")) return &.{"rocminfo"};
     if (!std.mem.eql(u8, backend, "cuda")) return null;
     return &.{ "nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits" };
+}
+
+/// HIP's device list as clr reads it (rocdevice.cpp): HIP_VISIBLE_DEVICES, else CUDA_VISIBLE_DEVICES; null for none.
+pub fn rocmVisible(env: *const std.process.Environ.Map) ?[]const u8 {
+    // ROCR_VISIBLE_DEVICES is not read: ROCr applies it inside rocminfo, which lists only those GPUs, in its order
+    const hip = clrString(env.get("HIP_VISIBLE_DEVICES"));
+    const list = if (hip.len > 0) hip else clrString(env.get("CUDA_VISIBLE_DEVICES"));
+    return if (list.len > 0) list else null;
+}
+
+/// A string variable as clr's flags.cpp reads it: unset is "", set but empty is " ", and one pair of quotes is dropped.
+fn clrString(value: ?[]const u8) []const u8 {
+    const v = value orelse return "";
+    if (v.len == 0) return " ";
+    const quoted = std.mem.trimEnd(u8, std.mem.trimStart(u8, v, " "), " ");
+    if (quoted.len < 2 or quoted[0] != '"' or quoted[quoted.len - 1] != '"') return v;
+    return quoted[1 .. quoted.len - 1];
+}
+
+/// ROCm facts from the GPU agents rocminfo lists that HIP keeps; an APU ("... Graphics") is ``unified``.
+pub fn rocm(a: Allocator, cpu: ?[]const u8, memory: ?u64, text: []const u8, visible: ?[]const u8) Probe {
+    const none: Probe = .{ .hardware = summarize(cpu, memory, &.{}, false) };
+    var sure = true;
+    // indices count every GPU agent, so selecting an agent with no reportable name lists no GPU, never the next one
+    const agents = hipVisible(a, amdAgents(a, text), visible, &sure) orelse return none;
+    var kept: std.ArrayList(Gpu) = .empty;
+    for (agents) |agent| {
+        const g = agent.gpu orelse {
+            sure = false;
+            continue;
+        };
+        kept.append(a, g) catch return none;
+    }
+    const gpus = kept.items;
+    var h = summarize(cpu, memory, gpus, false);
+    // a GPU HIP keeps that has no reportable name, or an entry no Uuid resolves, leaves the list short
+    if (!sure and std.mem.eql(u8, h.source, "detected")) h.source = "partial";
+    if (gpus.len > 0) h.memory_type = for (gpus) |g| {
+        if (!std.mem.endsWith(u8, g.name, " Graphics")) break "dedicated";
+    } else "unified";
+    return .{ .hardware = h };
+}
+
+/// A rocminfo GPU agent: its facts (null when the name fails the allowlist) and its Uuid, which only selects.
+pub const Agent = struct { gpu: ?Gpu, uuid: ?[]const u8 };
+
+/// Every rocminfo GPU agent in order (vendor-prefixed name, first GLOBAL pool, compute units, Uuid).
+pub fn amdAgents(a: Allocator, text: []const u8) []const Agent {
+    var out: std.ArrayList(Agent) = .empty;
+    var agents = std.mem.splitSequence(u8, text, "*******");
+    while (agents.next()) |block| {
+        var marketing: []const u8 = "";
+        var vendor: []const u8 = "";
+        var uuid: ?[]const u8 = null;
+        var gpu = false;
+        var g: Gpu = .{ .name = "" };
+        var lines = std.mem.splitScalar(u8, block, '\n');
+        var segment_global = false;
+        while (lines.next()) |l| {
+            const colon = std.mem.indexOfScalar(u8, l, ':') orelse continue;
+            const key = std.mem.trim(u8, l[0..colon], " \t");
+            const value = std.mem.trim(u8, l[colon + 1 ..], " \t\r");
+            if (std.mem.eql(u8, key, "Marketing Name")) marketing = value;
+            if (std.mem.eql(u8, key, "Vendor Name")) vendor = value;
+            if (std.mem.eql(u8, key, "Uuid") and uuid == null) uuid = value;
+            if (std.mem.eql(u8, key, "Device Type")) gpu = std.mem.eql(u8, value, "GPU");
+            if (std.mem.eql(u8, key, "Compute Unit") and g.cores == null) g.cores = std.fmt.parseInt(u64, value, 10) catch null;
+            if (std.mem.eql(u8, key, "Segment")) segment_global = std.mem.startsWith(u8, value, "GLOBAL");
+            if (std.mem.eql(u8, key, "Size") and segment_global and g.memory_bytes == null) g.memory_bytes = kib(value);
+        }
+        if (!gpu) continue;
+        const full = if (vendor.len > 0 and !std.mem.startsWith(u8, marketing, vendor))
+            std.fmt.allocPrint(a, "{s} {s}", .{ vendor, marketing }) catch return &.{}
+        else
+            marketing;
+        const name = modelName(a, full);
+        const facts: ?Gpu = if (name) |n| .{ .name = n, .memory_bytes = g.memory_bytes, .cores = g.cores } else null;
+        out.append(a, .{ .gpu = facts, .uuid = uuid }) catch return &.{};
+    }
+    return out.items;
+}
+
+/// rocminfo's ``125829120(0x7800000) KB`` in bytes.
+fn kib(value: []const u8) ?u64 {
+    var end: usize = 0;
+    while (end < value.len and std.ascii.isDigit(value[end])) end += 1;
+    if (end == 0 or !std.mem.endsWith(u8, value, " KB")) return null;
+    const n = std.fmt.parseInt(u64, value[0..end], 10) catch return null;
+    return if (n > 0 and n < 1 << 43) n * 1024 else null;
+}
+
+/// The agents HIP keeps (clr Device::init): the first bad or out-of-range entry ends the list; a repeat is skipped.
+fn hipVisible(a: Allocator, agents: []const Agent, list: ?[]const u8, sure: *bool) ?[]const Agent {
+    const ordinals = list orelse "";
+    if (ordinals.len == 0) return agents;
+    const seen = a.alloc(bool, agents.len) catch return null;
+    @memset(seen, false);
+    var kept: std.ArrayList(Agent) = .empty;
+    var pos: usize = 0;
+    while (pos < ordinals.len) {
+        const end = std.mem.indexOfScalarPos(u8, ordinals, pos, ',') orelse ordinals.len;
+        const id = ordinals[pos..end];
+        pos = end + 1;
+        const n = (if (std.mem.indexOf(u8, id, "GPU-") != null) uuidIndex(agents, id, sure) else hipIndex(id)) orelse break;
+        if (n >= agents.len) break;
+        if (seen[n]) continue;
+        seen[n] = true;
+        kept.append(a, agents[n]) catch return null;
+    }
+    return kept.items;
+}
+
+/// The first GPU agent whose Uuid contains ``id``, as clr matches it; null, and not sure, past an agent with no Uuid.
+fn uuidIndex(agents: []const Agent, id: []const u8, sure: *bool) ?usize {
+    for (agents, 0..) |agent, i| {
+        const uuid = agent.uuid orelse {
+            sure.* = false;
+            return null;
+        };
+        if (std.mem.indexOf(u8, uuid, id) != null) return i;
+    }
+    return null;
+}
+
+/// An index clr accepts, one ``std::to_string(atoi(id))`` writes back: digits only, no sign, space or leading zero.
+fn hipIndex(id: []const u8) ?usize {
+    if (id.len == 0 or (id[0] == '0' and id.len > 1)) return null;
+    for (id) |ch| if (!std.ascii.isDigit(ch)) return null;
+    return std.fmt.parseInt(usize, id, 10) catch null;
 }
 
 /// Linux facts from the CPU and memory probes and the nvidia-smi rows, empty when no query ran.
@@ -59,13 +190,14 @@ pub fn summarize(cpu: ?[]const u8, memory: ?u64, gpus: []const Gpu, mlx: bool) H
     return .{ .cpu_model = cpu, .system_memory_bytes = memory, .memory_type = memory_type, .gpus = gpus, .source = if (complete) "detected" else if (evidence) "partial" else "unavailable" };
 }
 
-/// A processor or GPU description from the allowlist, whitespace collapsed and a clock suffix dropped; else null.
+/// An allowlisted CPU or GPU name: spaces collapsed, "w/" as "with", clock suffix dropped; else null.
 pub fn modelName(a: Allocator, text: []const u8) ?[]const u8 {
     var words: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeAny(u8, text, " \t\n\r\x0b\x0c");
     while (it.next()) |w| {
         if (words.items.len > 0) words.append(a, ' ') catch return null;
-        words.appendSlice(a, w) catch return null;
+        // AMD's "w/" (Ryzen AI MAX+ 395 w/ Radeon 8060S) becomes "with", inside the board's name pattern
+        words.appendSlice(a, if (std.mem.eql(u8, w, "w/")) "with" else w) catch return null;
     }
     const name = dropClock(words.items);
     if (name.len > 120 or std.mem.eql(u8, name, "NVIDIA NPU")) return null;
