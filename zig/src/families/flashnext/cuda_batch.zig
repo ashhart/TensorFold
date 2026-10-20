@@ -224,7 +224,7 @@ pub fn Pass(comptime Tri: type) type {
                 try self.tri.hcDenseMix(s.hc_up, norm, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
                 return;
             }
-            if (n >= 64 and std.meta.eql(keep, HcKeep{})) return self.readoutTiles(hc_w, r0, n);
+            if (n >= 64 and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return self.readoutTiles(hc_w, r0, n);
             try self.copy(keep.h, h, n * wide * 2);
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
             if (keep.v != 0) try self.sumSlices(s.hc_part, keep.v, false, n * hc_w.n_down, hc_sk);
@@ -380,7 +380,7 @@ pub fn Pass(comptime Tri: type) type {
             if (self.seq.media) |m| try m.pooled(self.stream, ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n) else try self.tri.qsaPool(ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n);
             const nb = scoreStride(self.seq.cap);
             // prompt rows: selections for up to fused_rows rows, then one fused launch (chunks merged in the program)
-            const fused = n > att_rows;
+            const fused = n > att_rows and self.tri.fusedAttentionOwned();
             const group: usize = if (fused) parts.fused_rows else att_rows;
             var g0: usize = 0;
             while (g0 < n) : (g0 += group) {

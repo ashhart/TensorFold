@@ -82,6 +82,16 @@ pub const Tri = struct {
         return if (g.mixed & glue_.entryBit(name) != 0) g else null;
     }
 
+    /// The read-out tiles replace down, reduction and upmix together; mixed operation ownership stays on its route.
+    pub fn readoutTilesOwned(t: Tri) bool {
+        return t.glue("_qmm_hcdown") != null and t.glue("_hc_reduce_act") != null and t.glue("_qmm_upmix") != null;
+    }
+
+    /// Fusing chunks and merge requires both operations to belong to our glue.
+    pub fn fusedAttentionOwned(t: Tri) bool {
+        return t.glue("_chunks") != null and t.glue("_merge") != null;
+    }
+
     /// glue.embed: ids (R,) int32 into (R, copies * dims) bf16, MLX 4-bit group 32.
     pub fn embed(t: Tri, ids: u64, weight: u64, scales: u64, biases: u64, out: u64, dims: usize, copies: usize, rows: usize) !void {
         if (t.glue("_embed")) |g| return g.embed(t.s, ids, weight, scales, biases, out, dims, copies, rows);
@@ -435,4 +445,26 @@ pub const fn_back = @import("cuda_fn_back.zig");
 pub const gradient_gate = @import("cuda_gradient_gate.zig");
 test {
     _ = gradient_gate;
+}
+
+test "prompt tiles retain per-operation ownership" {
+    var set: aot.Set = undefined;
+    var own: Glue = undefined;
+    var t: Tri = .{ .own = &own, .s = undefined };
+    try std.testing.expect(t.readoutTilesOwned());
+    try std.testing.expect(t.fusedAttentionOwned());
+    t.set = &set;
+    t.own = null;
+    try std.testing.expect(!t.readoutTilesOwned());
+    try std.testing.expect(!t.fusedAttentionOwned());
+    t.own = &own;
+    const entries_ = .{ "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_chunks", "_merge" };
+    for (0..32) |mask| {
+        own.mixed = 0;
+        inline for (entries_, 0..) |name, i| {
+            if (mask & (@as(usize, 1) << i) != 0) own.mixed |= glue_.entryBit(name);
+        }
+        try std.testing.expectEqual(mask & 7 == 7, t.readoutTilesOwned());
+        try std.testing.expectEqual(mask & 24 == 24, t.fusedAttentionOwned());
+    }
 }
