@@ -26,6 +26,7 @@ pub const Kernels = struct {
     layer_norm_fn: module.Function,
     pointwise_fn: module.Function,
     bias_fn: module.Function,
+    bias_act_fn: module.Function,
     unshuffle_fn: module.Function,
     cast_fn: module.Function,
     position_fn: module.Function,
@@ -39,6 +40,7 @@ pub const Kernels = struct {
             .layer_norm_fn = try mod.function("tf_vit_layer_norm"),
             .pointwise_fn = try mod.function("tf_vit_pointwise"),
             .bias_fn = try mod.function("tf_vit_bias"),
+            .bias_act_fn = try mod.function("tf_vit_bias_act"),
             .unshuffle_fn = try mod.function("tf_vit_unshuffle"),
             .cast_fn = try mod.function("tf_vit_cast"),
             .position_fn = try mod.function("tf_vit_position_add"),
@@ -74,6 +76,15 @@ pub const Kernels = struct {
         for ([_]u64{ acc, b, o }) |p| a.add(p);
         a.add(int(n));
         try go(k.bias_fn, s, rows, blocks(n, threads), &a);
+    }
+
+    /// o [rows, n] = bf16(act(bf16(acc + b)) + r), acc f32; r may be o.
+    pub fn biasAct(k: *const Kernels, s: Stream, acc: u64, b: u64, r: ?u64, o: u64, rows: usize, n: usize, act: Act) !void {
+        var a: Args = .{};
+        for ([_]u64{ acc, b, r orelse 0, o }) |p| a.add(p);
+        a.add(int(n));
+        a.add(@backingInt(act));
+        try go(k.bias_act_fn, s, rows, blocks(n, threads), &a);
     }
 
     /// y [h/2 * w/2, 4c] = the projector's pixel unshuffle of x [h * w, c], an even grid.
@@ -166,6 +177,17 @@ pub fn linear(g: *Gemms, k: *const Kernels, s: Stream, acc: u64, x: u64, w: u64,
     if (p.epilogue == .bias) return p.runBias(x, w, b, y, g.workspace.ptr, workspace_bytes, s.handle);
     try g.run(s, x, w, acc, rows, n, kk, .f32);
     try k.bias(s, acc, b, y, rows, n);
+}
+
+/// out = bf16(act(bf16(x . w^T + b)) + r); y holds the intermediate only when the GEMM fuses bias.
+pub fn linearAct(g: *Gemms, k: *const Kernels, s: Stream, acc: u64, x: u64, w: u64, b: u64, y: u64, rows: usize, n: usize, kk: usize, r: ?u64, out: u64, act: Act) !void {
+    const p = try g.plan(rows, n, kk, .bf16, .bias);
+    if (p.epilogue == .bias) {
+        try p.runBias(x, w, b, y, g.workspace.ptr, workspace_bytes, s.handle);
+        return k.pointwise(s, y, r, out, rows * n, act);
+    }
+    try g.run(s, x, w, acc, rows, n, kk, .f32);
+    try k.biasAct(s, acc, b, r, out, rows, n, act);
 }
 
 /// prefill_attention.cu's full_kernel<D, WARPS, slots>, or vision_kernel<D, WARPS> without slots: 16 rows a warp.

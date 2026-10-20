@@ -15,6 +15,7 @@ pub const hip_records = @import("contract/hip_records.zig");
 test {
     _ = @import("contract/qwen_served_records.zig");
     _ = @import("contract/delta_slots_records.zig");
+    _ = @import("contract/vit_records.zig");
     _ = @import("contract/simd_pairs_records.zig");
     _ = spec;
     _ = gates;

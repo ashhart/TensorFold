@@ -24,6 +24,7 @@ const ck_k = @import("contract_ck.zig");
 const scan_k = @import("contract_scan.zig");
 const lane8_k = @import("contract_ck_lane.zig");
 const latent_k = @import("contract_latent.zig");
+const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
 
 const round_k = @import("contract_tree_round.zig");
@@ -106,6 +107,18 @@ pub fn run(gpu: check.Gpu) !void {
     defer rank_sum.unload();
     var kernels: std.ArrayList(g.Kernel) = .empty;
     defer kernels.deinit(a);
+    var vit = try cuda.vit.Kernels.load(gpu.d);
+    defer vit.unload();
+    var glue: [12]vit_k.Glue = undefined;
+    for (&glue, 0..) |*item, i| item.* = .{
+        .rig = .{ .gpu = gpu, .s = s },
+        .k = &vit,
+        .act = @fromBackingInt(@intCast(i % 4)),
+        .residual = i >= 4,
+        .in_place = i >= 8,
+    };
+    defer for (&glue) |*item| item.deinit();
+    for (&glue) |*item| try kernels.append(a, item.kernel());
     var row_list: [7]rows_k.Row = undefined;
     var nrows: usize = 0;
     defer for (row_list[0..nrows]) |*r| r.deinit();

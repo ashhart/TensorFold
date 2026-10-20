@@ -151,6 +151,9 @@ output within float64's range over the spread its fp32 steps and tensor-core sum
 seven controls, each one planted fault).
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 
+RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
+`tf_vit_pointwise`, byte for byte.
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.
