@@ -48,6 +48,20 @@ pub const Widths = struct {
     }
 };
 
+/// How a projection is stored: MLX affine codes, or a ModelOpt checkpoint's NVFP4, FP8 or bf16 weights.
+pub const Kind = enum(u8) { affine, nvfp4, fp8, bf16 };
+
+/// A ModelOpt checkpoint's kind for every module (cuda_modelopt.zig); an MLX checkpoint's are all affine.
+pub const Kinds = struct {
+    modelopt: bool = false,
+    head: Kind = .affine,
+    proj: [max_layers][std.enums.values(Slot).len]Kind = @splat(@splat(.affine)),
+
+    pub fn of(k: *const Kinds, layer: usize, slot: Slot) Kind {
+        return k.proj[layer][@backingInt(slot)];
+    }
+};
+
 pub const Geometry = struct {
     pocket: usize = 0,
     hidden: usize,
@@ -63,6 +77,7 @@ pub const Geometry = struct {
     context: usize,
     linear: [max_layers]bool,
     bits: Widths = .{},
+    kinds: Kinds = .{},
     /// Routed experts (qwen3_5_moe): their count and the picks a row makes; 0: a dense MLP of `intermediate`.
     experts: usize = 0,
     top_k: usize = 0,
@@ -237,7 +252,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     const rope = try object(t.get("rope_parameters") orelse return error.UnsupportedQwenRotary);
     try is(rope, if (rope.get("rope_type") != null) "rope_type" else "type", []const u8, "default"); // "type": the older key
     if (try number(rope, "rope_theta") != 10000000 or try number(rope, "partial_rotary_factor") != 0.25) return error.UnsupportedQwenRotary;
-    const q = try object(root.get("quantization") orelse return error.UnsupportedQwenQuantization);
+    // an MLX table, else a ModelOpt quantization_config (bf16 activations; --precision checkpoint reads its scales)
+    const modelopt = root.get("quantization") == null and root.get("quantization_config") != null;
+    const qv = root.get("quantization");
+    if (!modelopt and qv == null) return error.UnsupportedQwenQuantization;
     var g: Geometry = .{
         .hidden = try integer(t, "hidden_size"),
         .intermediate = try integer(t, if (moe) "moe_intermediate_size" else "intermediate_size"),
@@ -265,12 +283,13 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     }
     if (g.layers > max_layers or g.hidden % 256 != 0 or g.hidden > 8192 or g.intermediate % 64 != 0) return error.UnsupportedQwenGeometry;
     if (moe) {
+        if (modelopt) return error.UnsupportedQwenQuantization; // the routed experts read MLX tables only
         g.experts = try integer(t, "num_experts");
         g.top_k = try integer(t, "num_experts_per_tok");
         // the shared expert runs in the routed experts' table, so it needs their width
         if (try integer(t, "shared_expert_intermediate_size") != g.intermediate) return error.UnsupportedQwenGeometry;
         if (g.experts > 256 or g.top_k > 31 or g.top_k >= g.experts) return error.UnsupportedQwenGeometry;
-        const w = try expertBits(q, g.layers);
+        const w = try expertBits(try object(qv.?), g.layers);
         if (w.count != 0 and w.count != 3 * g.layers) return error.UnsupportedQwenQuantization;
         g.expert_bits = w.bits;
     }
@@ -281,7 +300,14 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         if (kind != .string) return error.UnsupportedQwenGeometry;
         if (std.mem.eql(u8, kind.string, "linear_attention")) g.linear[i] = true else if (!std.mem.eql(u8, kind.string, "full_attention")) return error.UnsupportedQwenGeometry;
     }
-    g.bits = try widths(gpa, root, q, g);
+    if (modelopt) {
+        if (g.pocket > 0) return error.UnsupportedLearningFormat;
+        g.kinds = try @import("cuda_modelopt.zig").kinds(gpa, bytes, g);
+        g.bits.embed = 16; // bf16 rows: no MLX width, so learning (4-bit only) refuses it
+        g.bits.head = 16;
+        return g;
+    }
+    g.bits = try widths(gpa, root, try object(qv.?), g);
     if (g.pocket > 0) {
         if (g.moe()) return error.UnsupportedLearningFormat;
         for (0..g.layers) |i| for ([_]Slot{ .gate, .up, .down }) |slot| {
@@ -428,4 +454,5 @@ test "fp8 caches take e4m3 rows and a scale each: 520 bytes a position and head 
 
 test {
     _ = @import("cuda_quant_admission_test.zig");
+    _ = @import("cuda_modelopt.zig");
 }

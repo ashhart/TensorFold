@@ -17,6 +17,8 @@ pub const Recipe = enum {
     mxfp8,
     /// FP8_PB_WO: e4m3 weights, an f32 scale every 128 x 128 block.
     fp8_pb_wo,
+    /// FP8: e4m3 weights under one f32 weight_scale, a static f32 input_scale (nvidia/Qwen3.8-27B-NVFP4's mixers).
+    fp8,
 };
 
 /// The modules a MIXED_PRECISION checkpoint quantizes and their recipes; none for a single-format NVFP4 one.
@@ -118,6 +120,7 @@ fn recipeOf(entry: ?std.json.ObjectMap) ?Recipe {
         return if ((group == null or int(group) == 32) and (blocks == null or pair(blocks, 1, 32))) .mxfp8 else null;
     }
     if (std.ascii.eqlIgnoreCase(algo, "FP8_PB_WO")) return if (group == null and pair(blocks, 128, 128)) .fp8_pb_wo else null;
+    if (std.ascii.eqlIgnoreCase(algo, "FP8")) return if (group == null and blocks == null) .fp8 else null;
     return null;
 }
 
@@ -228,7 +231,7 @@ test "nvidia/GLM-5.3-Flash-FP4-Local's recipes: a module's, and its tensors' und
     var count = std.EnumArray(Recipe, usize).initFill(0);
     var it = r.modules.valueIterator();
     while (it.next()) |v| count.getPtr(v.*).* += 1;
-    try std.testing.expectEqualSlices(usize, &.{ 0, 42, 77, 205, 170 }, &count.values); // the vision tower's MLPs too
+    try std.testing.expectEqualSlices(usize, &.{ 0, 42, 77, 205, 170, 0 }, &count.values); // the vision tower's MLPs too
     const at = "model.language_model.layers.";
     const cases = [_]struct { []const u8, ?Recipe }{
         .{ at ++ "3.mlp.experts.17.gate_proj.weight", .nvfp4_csf }, // routed experts: one entry a layer
@@ -297,6 +300,9 @@ test "recipes this engine does not read are refused by module" {
     try expectRecipesRefused(
         \\, "quantized_layers": {"m.s": 7}
     , "m.s: no recipe");
+    try expectRecipesRefused( // per-tensor FP8 has one scale: a group or block size is not it
+        \\, "quantized_layers": {"m.f": {"quant_algo": "FP8", "group_size": 128}}
+    , "m.f: FP8");
     var why: Why = .{};
     try std.testing.expectError(error.UnsupportedQuant, admitRecipes(std.testing.allocator,
         \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "FP8"}}
@@ -307,4 +313,11 @@ test "recipes this engine does not read are refused by module" {
     , &why);
     defer r.deinit();
     try std.testing.expectEqual(@as(?Recipe, .nvfp4), r.of("m.experts.0.gate_proj.weight"));
+    var mixed = try admitRecipes(std.testing.allocator,
+        \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers":
+        \\ {"m.out_proj": {"quant_algo": "FP8"}, "m.mlp.up_proj": {"quant_algo": "NVFP4", "group_size": 16}}}}
+    , &why);
+    defer mixed.deinit();
+    try std.testing.expectEqual(@as(?Recipe, .fp8), mixed.of("m.out_proj.weight_scale"));
+    try std.testing.expectEqual(@as(?Recipe, .nvfp4), mixed.of("m.mlp.up_proj"));
 }

@@ -10,6 +10,7 @@ const routed = @import("cuda_routed.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const pocket = @import("cuda_pocket.zig");
 const profile = @import("cuda_startup_profile.zig");
+const modelopt = @import("cuda_modelopt.zig");
 pub const recurrent = @import("cuda_recurrent.zig");
 
 pub const Geometry = geometry.Geometry;
@@ -87,6 +88,7 @@ pub const Engine = struct {
     wide: cuda.qlinear.AffineNKernels, // the tiles of every width but 4, and their packs
     experts: cuda.experts.Affine4Experts,
     experts3: cuda.experts3.Affine3Experts,
+    mo: ?modelopt.Kernels = null, // a ModelOpt checkpoint's lane, prompt GEMM, packers and bf16 rows
     plan: cuda.grouped.Router,
     moe: cuda.moe.Fns,
     fns: Fns,
@@ -226,6 +228,8 @@ pub const Engine = struct {
         e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
         try e.int8.resolve(e.mods[18]);
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .compact = try e.mods[9].function("tf_q35k_compact8") };
+        e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(try ctx.attribute(.compute_capability_major))) else null;
+        errdefer if (e.mo) |*m| m.unload();
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
@@ -236,6 +240,7 @@ pub const Engine = struct {
             defer stage.free();
             try weights.load(e, &ck, &stage);
         }
+        if (e.mo) |*m| try m.reserveParts(e);
         _ = try e.scratch(.allocate);
         e.tables = try DeviceBuffer.alloc(d, tables_len);
         errdefer e.tables.free();
@@ -280,6 +285,7 @@ pub const Engine = struct {
         e.affine.deinit();
         e.wide.deinit();
         e.int8.deinit();
+        if (e.mo) |*m| m.unload();
         for (&e.mods) |*m| m.unload();
         e.stream.deinit();
         e.gpa.destroy(e);
@@ -367,6 +373,7 @@ pub const Engine = struct {
 
     /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
     pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
+        if (e.embed_bits == 16) return modelopt.embed(e, ids, out, rows); // bf16 rows; padding rows' ids are zeroed
         const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
@@ -421,6 +428,7 @@ pub const Engine = struct {
         // the tables
         const st = e.staged.bytes;
         @memcpy(std.mem.bytesAsSlice(u32, st[ids_at..][0 .. total * 4]), ids);
+        @memset(st[ids_at + total * 4 .. ids_at + max_rows * 4], 0); // a bucket's padding rows read token 0
         const segs = std.mem.bytesAsSlice(Seg, st[segs_at..][0 .. parts.len * @sizeOf(Seg)]);
         const slot_peak = try Round.build(st, parts, record);
         for (parts) |p| {

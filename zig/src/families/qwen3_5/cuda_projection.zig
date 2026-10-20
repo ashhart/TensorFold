@@ -34,21 +34,24 @@ pub fn projManySums(e: *Engine, ls: []const Proj, x: u64, xs: u64, outs: []const
 pub const projectMany = @import("cuda_projection_many.zig").projectMany;
 
 pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
+    if (l == .ql) return @import("cuda_modelopt.zig").project(e, l.ql, x, out, rows, prompt);
     const n_out = l.outputs();
     const k = l.inputs();
     if (prompt and e.int8.on) switch (l) {
         // every prompt row of an int8 request takes int8; an exceptional chunk returns to the default precision
         .a4 => |q| if (try int8_prompt.projectRows(e, q, x, xs, out, rows, sums, params, k)) return,
         .an => {},
+        .ql => unreachable,
     };
     if (prompt and rows > 16) return switch (l) {
         .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
         .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
+        .ql => unreachable,
     };
     if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
     const tile: usize = switch (l) {
         .a4 => e.affine.verifyRows(),
-        .an => 16,
+        .an, .ql => 16,
     };
     var at: usize = 0;
     while (at < rows) : (at += tile) {
@@ -59,6 +62,7 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
         switch (l) {
             .a4 => |q| try e.affine.verify(e.stream, xa, sa, q, oa, n),
             .an => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
+            .ql => unreachable,
         }
     }
 }

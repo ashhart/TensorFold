@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
+const modelopt = @import("cuda_modelopt.zig");
 
 const Geometry = geometry.Geometry;
 const Slot = geometry.Slot;
@@ -78,15 +79,16 @@ fn raw3Bytes(count: usize, n: usize, k: usize) usize {
 
 /// What `load` takes from the arena: every packed projection and vector, each allocation aligned.
 pub fn total(g: Geometry) usize {
-    var t: usize = embedBytes(g);
-    t += packedBytes(g.vocab, g.hidden, g.bits.head); // the head, tied or not
+    const mo = g.kinds.modelopt;
+    var t: usize = if (mo) aligned(g.vocab * g.hidden * 2) else embedBytes(g);
+    t += if (mo) modelopt.packedBytes(g.vocab, g.hidden, g.kinds.head) else packedBytes(g.vocab, g.hidden, g.bits.head); // the head
     t += aligned(g.hidden * 2);
     for (0..g.layers) |i| {
         t += 2 * aligned(g.hidden * 2);
         if (g.moe()) t += routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
-            t += packedBytes(nk[0], nk[1], g.bits.of(i, slot));
+            t += if (mo) modelopt.packedBytes(nk[0], nk[1], g.kinds.of(i, slot)) else packedBytes(nk[0], nk[1], g.bits.of(i, slot));
         }
         if (g.linear[i]) {
             t += aligned(g.convWidth() * geometry.taps * 2) + aligned(geometry.dk * 2) + aligned(g.v_heads * 4) + aligned(g.v_heads * 2);
@@ -99,6 +101,14 @@ pub fn total(g: Geometry) usize {
 
 /// The largest projection's bytes as stored: the staging buffer the load packs each one from (and widens through).
 pub fn stageBytes(g: Geometry) usize {
+    if (g.kinds.modelopt) {
+        var raw = modelopt.rawBytes(g.vocab, g.hidden, g.kinds.head);
+        for (0..g.layers) |i| for (slots(g, i)) |slot| {
+            const nk = shape(g, slot);
+            raw = @max(raw, modelopt.rawBytes(nk[0], nk[1], g.kinds.of(i, slot)));
+        };
+        return raw;
+    }
     var most = rawBytes(g.vocab, g.hidden, g.bits.head);
     if (rowBits(g.bits.embed) != g.bits.embed) most = @max(most, rawBytes(g.vocab, g.hidden, g.bits.embed));
     for (0..g.layers) |i| for (slots(g, i)) |slot| {
@@ -136,6 +146,17 @@ fn f32vec(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anyt
 pub fn tensor(into: anytype, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.checkpoint.DType, shape_: []const usize) !u64 {
     var buf: [160]u8 = undefined;
     return put(into, try ck.expect(try std.fmt.bufPrint(&buf, fmt, args), dtype, shape_));
+}
+
+/// An RMSNorm's weights: MLX stores 1 + w (mlx_lm's sanitize), HF stores w; `shift` adds the 1 as MLX does (bf16 RNE).
+fn normVec(e: *Engine, ck: *core.Checkpoint, shift: bool, comptime fmt: []const u8, args: anytype, dtype: core.checkpoint.DType, shape_: []const usize) !u64 {
+    if (!shift) return tensor(e, ck, fmt, args, dtype, shape_);
+    var buf: [160]u8 = undefined;
+    const t = try ck.expect(try std.fmt.bufPrint(&buf, fmt, args), dtype, shape_);
+    const h = try e.gpa.alloc(u16, t.bytes.len / 2);
+    defer e.gpa.free(h);
+    for (h, std.mem.bytesAsSlice(u16, t.bytes)) |*o, w| o.* = f32bf16(bf16f(w) + 1.0);
+    return upload(e, std.mem.sliceAsBytes(h));
 }
 
 /// Raw words, scales and biases staged in order; each part's device pointer.
@@ -307,25 +328,36 @@ fn embedWords(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, m: []const
 
 pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     const g = e.g;
-    const m = "language_model.model.";
-    e.embed_bits = rowBits(g.bits.embed);
-    e.embed_w = try embedWords(e, ck, stage, m);
-    e.embed_s = try tensor(e, ck, "{s}embed_tokens.scales", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
-    e.embed_b = try tensor(e, ck, "{s}embed_tokens.biases", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
-    e.head = if (g.tied) try linear(e, e, ck, stage, m, "embed_tokens", g.vocab, g.hidden, g.bits.head) else try linear(e, e, ck, stage, "language_model.", "lm_head", g.vocab, g.hidden, g.bits.head);
-    e.final_norm = try tensor(e, ck, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
+    const mo = g.kinds.modelopt;
+    const m = if (mo) modelopt.prefix else "language_model.model.";
+    if (mo) {
+        e.embed_bits = 16; // bf16 rows as stored
+        e.embed_w = try tensor(e, ck, "{s}embed_tokens.weight", .{m}, .bf16, &.{ g.vocab, g.hidden });
+        e.embed_s = 0;
+        e.embed_b = 0;
+        e.head = try modelopt.linear(e, ck, stage, "", "lm_head", g.vocab, g.hidden, g.kinds.head);
+    } else {
+        e.embed_bits = rowBits(g.bits.embed);
+        e.embed_w = try embedWords(e, ck, stage, m);
+        e.embed_s = try tensor(e, ck, "{s}embed_tokens.scales", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
+        e.embed_b = try tensor(e, ck, "{s}embed_tokens.biases", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
+        e.head = if (g.tied) try linear(e, e, ck, stage, m, "embed_tokens", g.vocab, g.hidden, g.bits.head) else try linear(e, e, ck, stage, "language_model.", "lm_head", g.vocab, g.hidden, g.bits.head);
+    }
+    e.final_norm = try normVec(e, ck, mo, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
     const conv = g.convWidth();
+    const taps_shape: []const usize = if (mo) &.{ conv, 1, geometry.taps } else &.{ conv, geometry.taps, 1 }; // the same bytes
     for (e.layers, 0..) |*l, i| {
         var pbuf: [96]u8 = undefined;
         const p = try std.fmt.bufPrint(&pbuf, "{s}layers.{d}.", .{ m, i });
         var ps: std.enums.EnumArray(Slot, Proj) = .initUndefined();
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
-            ps.set(slot, try linear(e, e, ck, stage, p, geometry.slot_modules.get(slot), nk[0], nk[1], g.bits.of(i, slot)));
+            const name = geometry.slot_modules.get(slot);
+            ps.set(slot, if (mo) try modelopt.linear(e, ck, stage, p, name, nk[0], nk[1], g.kinds.of(i, slot)) else try linear(e, e, ck, stage, p, name, nk[0], nk[1], g.bits.of(i, slot)));
         }
         l.* = .{
-            .input_norm = try tensor(e, ck, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
-            .post_norm = try tensor(e, ck, "{s}post_attention_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
+            .input_norm = try normVec(e, ck, mo, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
+            .post_norm = try normVec(e, ck, mo, "{s}post_attention_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
             .mlp = if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
             .mixer = undefined,
         };
@@ -337,7 +369,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
                 .a = ps.get(.a),
                 .b = ps.get(.b),
                 .out = ps.get(.out),
-                .conv = try tensor(e, ck, "{s}linear_attn.conv1d.weight", .{p}, .bf16, &.{ conv, geometry.taps, 1 }),
+                .conv = try tensor(e, ck, "{s}linear_attn.conv1d.weight", .{p}, .bf16, taps_shape),
                 .norm = try tensor(e, ck, "{s}linear_attn.norm.weight", .{p}, .bf16, &.{geometry.dk}),
                 .a_log = try f32vec(e, ck, "{s}linear_attn.A_log", .{p}, g.v_heads),
                 .dt_bias = try tensor(e, ck, "{s}linear_attn.dt_bias", .{p}, .bf16, &.{g.v_heads}),
@@ -348,8 +380,8 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
                 .k = ps.get(.k),
                 .v = ps.get(.v),
                 .o = ps.get(.o),
-                .q_norm = try tensor(e, ck, "{s}self_attn.q_norm.weight", .{p}, .bf16, &.{head_dim}),
-                .k_norm = try tensor(e, ck, "{s}self_attn.k_norm.weight", .{p}, .bf16, &.{head_dim}),
+                .q_norm = try normVec(e, ck, mo, "{s}self_attn.q_norm.weight", .{p}, .bf16, &.{head_dim}),
+                .k_norm = try normVec(e, ck, mo, "{s}self_attn.k_norm.weight", .{p}, .bf16, &.{head_dim}),
             } };
         }
     }
