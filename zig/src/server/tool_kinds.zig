@@ -32,12 +32,20 @@ fn insertKind(kinds: *Kinds, kind: Kind) void {
 /// How deep a chain of references may go before the schema is left alone.
 const max_ref_depth = 32;
 
+/// What a reference resolved to: still being resolved, or the kinds it names.
+const Resolution = union(enum) {
+    /// The reference is being resolved, so reaching it again is a cycle.
+    in_progress,
+    /// The kinds the reference names, or null when it names none.
+    done: ?Kinds,
+};
+
 /// The kinds a schema accepts, with the references it points into resolved.
 const Resolver = struct {
     a: Allocator,
     root: Value,
-    /// The kinds each reference names, and null while it is being resolved.
-    memo: std.StringHashMapUnmanaged(?Kinds) = .empty,
+    /// What each reference resolved to, and that it is still being resolved.
+    memo: std.StringHashMapUnmanaged(Resolution) = .empty,
     /// The references resolved so far.
     resolved: usize = 0,
     depth: usize = 0,
@@ -96,20 +104,23 @@ const Resolver = struct {
         return named;
     }
 
-    /// The kinds the reference points at, or null when it points nowhere.
+    /// The kinds the reference points at, or null when it names none.
     fn refKinds(self: *Resolver, ref: []const u8) Allocator.Error!?Kinds {
         if (self.depth >= max_ref_depth) return null;
-        if (self.memo.getEntry(ref)) |entry| return entry.value_ptr.*;
+        if (self.memo.getEntry(ref)) |entry| switch (entry.value_ptr.*) {
+            .in_progress => return null,
+            .done => |found| return found,
+        };
         const target = (try resolvePointer(self.a, self.root, ref)) orelse {
-            try self.memo.put(self.a, ref, null);
+            try self.memo.put(self.a, ref, .{ .done = null });
             return null;
         };
-        try self.memo.put(self.a, ref, null);
+        try self.memo.put(self.a, ref, .in_progress);
         self.resolved += 1;
         self.depth += 1;
         defer self.depth -= 1;
-        const found = (try self.kinds(target)) orelse Kinds.empty;
-        try self.memo.put(self.a, ref, found);
+        const found = try self.kinds(target);
+        try self.memo.put(self.a, ref, .{ .done = found });
         return found;
     }
 };

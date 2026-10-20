@@ -79,6 +79,13 @@ test "a parameter whose schema points at a definition by pointer comes back as t
     for (witness.pointer_cases) |c| try std.testing.expectEqualStrings(c.expected, try caseArguments(a, c));
 }
 
+test "a parameter whose schema names no kinds constrains nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.unconstrained_cases) |c| try std.testing.expectEqualStrings(c.expected, try caseArguments(a, c));
+}
+
 /// The arguments the parser gives the client for one case.
 fn caseArguments(a: std.mem.Allocator, c: witness.Case) ![]const u8 {
     const tools = try witness.toolsWith(a, c.schema, c.defs);

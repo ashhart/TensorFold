@@ -85,6 +85,13 @@ test "a streamed parameter whose schema points at a definition by pointer comes 
     for (witness.pointer_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
 }
 
+test "a streamed parameter whose schema names no kinds constrains nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.unconstrained_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
 /// The arguments the stream gives the client for one case.
 fn streamedArguments(a: Allocator, c: witness.Case) ![]const u8 {
     const tools = try witness.toolsWith(a, c.schema, c.defs);

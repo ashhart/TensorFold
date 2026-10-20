@@ -86,6 +86,9 @@ pub const chain_schema = "{\"$ref\":\"#/$defs/First\"}";
 /// A reference that points back at itself.
 pub const cycle_schema = "{\"$ref\":\"#/$defs/Loop\"}";
 
+/// The definitions the cycle points at.
+pub const cycle_defs = "\"$defs\":{\"Loop\":{\"$ref\":\"#/$defs/Loop\"}}";
+
 /// A reference to a definition that is not there.
 pub const missing_schema = "{\"$ref\":\"#/$defs/Missing\"}";
 
@@ -139,7 +142,7 @@ pub const ref_cases = [_]Case{
     },
     .{
         .schema = cycle_schema,
-        .defs = "\"$defs\":{\"Loop\":{\"$ref\":\"#/$defs/Loop\"}}",
+        .defs = cycle_defs,
         .value = "{\"id\": 7}",
         .expected = "{\"request\":\"{\\\"id\\\": 7}\"}",
     },
@@ -198,4 +201,21 @@ pub const pointer_defs = "\"$defs\":{\"a~b\":{\"type\":\"object\",\"properties\"
 pub const pointer_cases = [_]Case{
     .{ .schema = bad_escape_schema, .defs = pointer_defs, .value = "{\"x\": 1}", .expected = "{\"request\":\"{\\\"x\\\": 1}\"}" },
     .{ .schema = percent_escape_schema, .defs = pointer_defs, .value = "{\"y\": 2}", .expected = "{\"request\":{\"y\":2}}" },
+};
+
+/// A reference to a definition that names no kinds.
+pub const free_schema = "{\"$ref\":\"#/$defs/Free\"}";
+
+/// An object type with a reference to a definition that names no kinds.
+pub const typed_free_schema = "{\"type\":\"object\",\"$ref\":\"#/$defs/Free\"}";
+
+/// The definition that names no kinds.
+pub const free_defs = "\"$defs\":{\"Free\":{\"description\":\"anything\"}}";
+
+/// The schemas whose reference names no kinds, and the ones that name nothing at all.
+pub const unconstrained_cases = [_]Case{
+    .{ .schema = typed_free_schema, .defs = free_defs, .value = "{\"a\": 1}", .expected = "{\"request\":{\"a\":1}}" },
+    .{ .schema = free_schema, .defs = free_defs, .value = "{\"a\": 1}", .expected = "{\"request\":\"{\\\"a\\\": 1}\"}" },
+    .{ .schema = cycle_schema, .defs = cycle_defs, .value = "{\"id\": 7}", .expected = "{\"request\":\"{\\\"id\\\": 7}\"}" },
+    .{ .schema = missing_schema, .value = "{\"id\": 7}", .expected = "{\"request\":\"{\\\"id\\\": 7}\"}" },
 };
