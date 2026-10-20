@@ -385,8 +385,9 @@ fn laneMade(p: *Plan, parts: []const Part, what: []const u8) !Want {
     defer p.gpa.free(tiles);
     try FP.pack(p.gpa, shares[0..parts.len], codes, tiles);
     if (want_codes) return .{ .made = codes };
+    const scales = try p.gpa.dupe(u8, std.mem.sliceAsBytes(tiles)); // dupe first: the errdefer owns codes
     p.gpa.free(codes);
-    return .{ .made = try p.gpa.dupe(u8, std.mem.sliceAsBytes(tiles)) };
+    return .{ .made = scales };
 }
 
 /// The bytes `cuts` make: each piece's elements in order, written as its dtype.
@@ -432,10 +433,10 @@ fn bf16(v: f32) u16 {
     return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
 }
 
-/// What a run changes on purpose: one bit of upload `name`'s downloaded bytes, and how many copies it changed.
-const Tamper = struct { name: ?[]const u8, done: usize = 0 };
+/// What a run changes on purpose: one bit of upload `name`'s downloaded bytes; the copies changed and those caught.
+const Tamper = struct { name: ?[]const u8, done: usize = 0, caught: usize = 0 };
 
-/// Rank `rank` of `world` loaded, and each upload compared: how many differ or are not known.
+/// Rank `rank` of `world` loaded, each upload compared: how many differ or are not known, one more if none was.
 fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *const Config, m: *const glm.forward.Modules, stream: cuda.Stream, dir: []const u8, layers: []const u32, rank: usize, world: usize, tamper: *Tamper) !usize {
     const s = try glm.shard.Share.of(c, rank, world);
     var w = try glm.weights.load(gpu.gpa, gpu.io, gpu.d, stream, m.tools(), dir, c.*, s, layers, true);
@@ -457,7 +458,11 @@ fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *cons
                 try left.append(a, .{ n.name, why });
                 continue;
             },
-            .cut => try bytesOf(gpu.gpa, ck, p.cuts.items),
+            .cut => bytesOf(gpu.gpa, ck, p.cuts.items) catch |e| {
+                std.debug.print("FAIL TP={d} rank {d} {s}: {t}\n", .{ world, rank, n.name, e });
+                bad += 1;
+                continue;
+            },
             .made => |b| b,
         };
         defer gpu.gpa.free(want);
@@ -472,6 +477,9 @@ fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *cons
         var label: [160]u8 = undefined;
         check.sameBytes(try std.fmt.bufPrint(&label, "TP={d} rank {d} {s}", .{ world, rank, n.name }), got, want) catch {
             bad += 1;
+            if (tamper.name) |t| if (eql(t, n.name)) {
+                tamper.caught += 1;
+            };
             continue;
         };
         if (how == .made) made += 1 else cut += 1;
@@ -480,9 +488,10 @@ fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *cons
     const line = "glm-loader-gate TP={d} rank {d}: {d} uploads as the checkpoint cut, {d} as the host packers make them " ++
         "({d} MiB), {d} left out, {d} differ or are not known";
     const args = .{ world, rank, cut, made, bytes >> 20, left.items.len, bad };
-    if (bad == 0) check.pass(line, args) else std.debug.print("FAIL " ++ line ++ "\n", args);
+    const none = cut + made == 0; // a rank that compared nothing proves nothing
+    if (bad == 0 and !none) check.pass(line, args) else std.debug.print("FAIL " ++ line ++ "\n", args);
     if (world == 1) for (left.items) |x| std.debug.print("  left out: {s} ({s})\n", .{ x[0], x[1] });
-    return bad;
+    return bad + @intFromBool(none);
 }
 
 /// Numbers from an environment value like "0-3,41,44", each under `max`; `all` when the variable is unset.
@@ -520,12 +529,22 @@ pub fn run(gpu: check.Gpu, dir: []const u8) !void {
     const ranks = try picks(a, "TF_GATE_RANKS", &.{ 0, 1, 2 }, 3);
     var tamper: Tamper = .{ .name = glm.ranks.environment("TF_GATE_TAMPER") };
     var bad: usize = 0;
+    var gated: usize = 0;
     for (worlds) |world| {
         if (world == 0) return error.BadGateList;
         for (ranks) |rank| if (rank < world) {
             bad += try rankGate(gpu, a, &ck, &c, &m, stream, dir, layers, rank, world, &tamper);
+            gated += 1;
         };
     }
-    if (tamper.name) |t| try check.expect(tamper.done > 0, "glm-loader-gate: TF_GATE_TAMPER={s} names no upload it compares", .{t});
+    try check.expect(gated > 0, "glm-loader-gate: TF_GATE_WORLDS and TF_GATE_RANKS leave no rank to gate", .{});
+    if (tamper.name) |t| {
+        try check.expect(tamper.done > 0, "glm-loader-gate: TF_GATE_TAMPER={s} names no upload it compares", .{t});
+        const ok = tamper.caught == tamper.done and bad == tamper.caught;
+        const why = "glm-loader-gate: TF_GATE_TAMPER={s}: {d} of {d} flipped copies caught, {d} uploads differ";
+        try check.expect(ok, why, .{ t, tamper.caught, tamper.done, bad });
+        check.pass("glm-loader-gate: TF_GATE_TAMPER={s} red as planted, {d} copies caught", .{ t, tamper.done });
+        return;
+    }
     try check.expect(bad == 0, "glm-loader-gate: {d} uploads differ from the checkpoint or are not known", .{bad});
 }
