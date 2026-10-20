@@ -1,4 +1,4 @@
-//! qwen27's Metal launch records (experts, routers' logits, attention at both head counts) in registry.metal.
+//! qwen27's Metal launch records (experts, routers' logits, attention) in registry.metal; `pending` in all_metal.
 const M = @import("limits.zig").MetalLaunch;
 
 pub const metal = [_]M{
@@ -9,6 +9,17 @@ pub const metal = [_]M{
     .{ .name = "moe_route logits glm indexer gate tf_route_logits", .threads = 256, .tg_memory = 512, .reserved = 256 },
     .{ .name = "moe_route logits qwen27 35B-A3B router tf_route_logits", .threads = 256, .tg_memory = 512, .reserved = 256 },
 } ++ attention("27B") ++ attention("35B-A3B");
+
+/// Prefix launches at 5 and 6 tiles (a cache of 64 chunks or more): tensor-op kernels past 256 threads, unreserved.
+pub const pending = wide("27B") ++ wide("35B-A3B");
+
+fn wide(comptime heads: []const u8) [2]M {
+    const p = "qwen27 attention " ++ heads ++ " ";
+    return .{
+        .{ .name = p ++ "q27_attn_prefix_5", .threads = 320, .tg_memory = 2048, .offline = false },
+        .{ .name = p ++ "q27_attn_prefix_6", .threads = 384, .tg_memory = 2048, .offline = false },
+    };
+}
 
 /// qwen27's attention at one head count: prefix at the 1-4 tiles launched (2,048 bytes: its P tile), tail, prompt, io.
 fn attention(comptime heads: []const u8) [16]M {

@@ -7,6 +7,10 @@ const glue = @import("glue.zig");
 pub const planning = @import("attention_plan.zig");
 pub const Plan = planning.Plan;
 pub const Cache = struct { keys: Ref, values: Ref, capacity: u32, key_stride: u32 = 0, value_stride: u32 = 0 };
+/// The prefix kernel's tiles a threadgroup (q27_attn_prefix_N): 6 when a cache has 64 chunks or more, else 4.
+pub fn prefixTiles(plan: Plan) u32 {
+    return @min(plan.tiles, if (plan.prefix_chunks >= 64) @as(u32, 6) else 4);
+}
 const CachePtrs = extern struct { keys: u64, values: u64 };
 pub const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
 const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32 };
@@ -382,7 +386,7 @@ pub const Attention = struct {
         e.barrier();
         const scale: f32 = 0.0625;
         if (plan.prefix_chunks > 0) {
-            const sg: u32 = @min(plan.tiles, if (plan.prefix_chunks >= 64) @as(u32, 6) else 4); // a pair a tile; a long cache reads each chunk once for six tiles
+            const sg = prefixTiles(plan);
             e.setPipeline(a.prefix[sg - 1]);
             bind(e, .{ scratch.get(.qa), binding.get(.caches) });
             e.setValue(scale, 2);

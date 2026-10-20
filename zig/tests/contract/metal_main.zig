@@ -305,7 +305,7 @@ pub fn main(init: std.process.Init) !u8 {
             all = all and (x or (i == 1 and j == 0));
         };
         if (!all) t.failed += 1;
-        std.debug.print("{s} reach {s}: planned prefix_1-4 as chains {any}, as trees {any}; a tree over two tail chunks {}\n", .{ if (all) "PASS" else "FAIL", name, seen.prefix[0], seen.prefix[1], seen.split_tree });
+        std.debug.print("{s} reach {s}: planned prefix_1-6 as chains {any}, as trees {any}; a tree over two tail chunks {}\n", .{ if (all) "PASS" else "FAIL", name, seen.prefix[0], seen.prefix[1], seen.split_tree });
     };
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
