@@ -52,23 +52,82 @@ pub fn schemaOf(s: *const Schemas, name: []const u8, key: []const u8, a: Allocat
     return props.get(key) orelse .{ .object = try json.newObject(a) };
 }
 
-const Kind = enum { array, object, boolean, integer, number, null };
+/// The kinds a schema accepts: its own type, a list of types, and the branches of oneOf, anyOf and allOf.
+const Kinds = struct {
+    array: bool = false,
+    object: bool = false,
+    boolean: bool = false,
+    integer: bool = false,
+    number: bool = false,
+    null: bool = false,
+    string: bool = false,
 
-fn kindOf(schema: Value) ?Kind {
-    const t = schema.get("type") orelse return null;
-    if (t != .string) return null;
-    return std.meta.stringToEnum(Kind, t.string);
-}
+    /// The kinds the schema accepts.
+    fn of(schema: Value) Kinds {
+        var kinds: Kinds = .{};
+        kinds.addSchema(schema);
+        return kinds;
+    }
 
-fn valid(kind: Kind, v: Value) bool {
-    return switch (kind) {
-        .array => v == .array,
-        .object => v == .object,
-        .boolean => v == .bool,
-        .integer => v == .int,
-        .number => v == .int or v == .float,
-        .null => v == .null,
-    };
+    fn addSchema(self: *Kinds, schema: Value) void {
+        if (schema != .object) return;
+        self.addType(schema.get("type"));
+        for ([_][]const u8{ "oneOf", "anyOf", "allOf" }) |key| {
+            const branches = schema.get(key) orelse continue;
+            if (branches != .array) continue;
+            for (branches.array) |branch| self.addSchema(branch);
+        }
+    }
+
+    fn addType(self: *Kinds, t: ?Value) void {
+        const v = t orelse return;
+        switch (v) {
+            .string => self.addName(v.string),
+            .array => for (v.array) |one| if (one == .string) self.addName(one.string),
+            else => {},
+        }
+    }
+
+    fn addName(self: *Kinds, name: []const u8) void {
+        if (std.mem.eql(u8, name, "array")) {
+            self.array = true;
+        } else if (std.mem.eql(u8, name, "object")) {
+            self.object = true;
+        } else if (std.mem.eql(u8, name, "boolean")) {
+            self.boolean = true;
+        } else if (std.mem.eql(u8, name, "integer")) {
+            self.integer = true;
+        } else if (std.mem.eql(u8, name, "number")) {
+            self.number = true;
+        } else if (std.mem.eql(u8, name, "null")) {
+            self.null = true;
+        } else if (std.mem.eql(u8, name, "string")) {
+            self.string = true;
+        }
+    }
+
+    /// The schema takes a value that is not a string.
+    fn takesJson(self: Kinds) bool {
+        return self.array or self.object or self.boolean or self.integer or self.number or self.null;
+    }
+
+    /// The value is one the schema accepts.
+    fn accepts(self: Kinds, v: Value) bool {
+        return switch (v) {
+            .array => self.array,
+            .object => self.object,
+            .bool => self.boolean,
+            .int => self.integer or self.number,
+            .float => self.number,
+            .null => self.null,
+            .string => self.string,
+        };
+    }
+};
+
+/// The schema takes a value that is not a string: a union of them, a list of types, or a plain typed schema.
+pub fn takesJson(schema: Value) bool {
+    return Kinds.of(schema).takesJson();
 }
 
 /// ``json.dumps(v, allow_nan=False)`` succeeds: no NaN or infinity anywhere.
@@ -113,8 +172,9 @@ pub fn closedJson(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
 
 /// ``decode_parameter``: the schema's type when the text spells one, else the text; ``python`` also reads Python's spelling.
 pub fn decode(a: Allocator, value: []const u8, schema: Value, python: bool) Allocator.Error!Value {
-    const kind = kindOf(schema) orelse return .{ .string = value };
-    const closed: ?[]const u8 = if (kind == .array or kind == .object) try closedJson(a, value) else null;
+    const kinds = Kinds.of(schema);
+    if (!kinds.takesJson()) return .{ .string = value };
+    const closed: ?[]const u8 = if (kinds.array or kinds.object) try closedJson(a, value) else null;
     for ([_]?[]const u8{ value, closed }) |candidate| {
         const text = candidate orelse continue;
         const parsed = switch (try json.parseText(a, text)) {
@@ -122,12 +182,12 @@ pub fn decode(a: Allocator, value: []const u8, schema: Value, python: bool) Allo
             .err => continue,
         };
         if (!finite(parsed)) continue;
-        return if (valid(kind, parsed)) parsed else .{ .string = value };
+        return if (kinds.accepts(parsed)) parsed else .{ .string = value };
     }
     if (!python) return .{ .string = value };
     const parsed = (try pythonLiteral(a, value)) orelse return .{ .string = value };
     if (!finite(parsed)) return .{ .string = value };
-    return if (valid(kind, parsed)) parsed else .{ .string = value };
+    return if (kinds.accepts(parsed)) parsed else .{ .string = value };
 }
 
 /// ``_python_literal``: True, None, quoted strings, numbers, lists, tuples and dicts; null if ``text`` is not one.

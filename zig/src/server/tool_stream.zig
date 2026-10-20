@@ -306,10 +306,7 @@ fn trimTail(rest: []const u8, tail: usize) usize {
 }
 
 fn typedSchema(schema: Value) bool {
-    const t = schema.get("type") orelse return false;
-    if (t != .string) return false;
-    for ([_][]const u8{ "array", "object", "boolean", "integer", "number", "null" }) |k| if (std.mem.eql(u8, k, t.string)) return true;
-    return false;
+    return tool_params.takesJson(schema);
 }
 
 const wrap = @import("tool_parse.zig").wrapCalls;

@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json");
 const tool_parse = @import("tool_parse.zig");
 const tool_closers = @import("tool_closers.zig");
+const witness = @import("tool_union_witness.zig");
 const parse = tool_parse.parse;
 const closeCall = tool_parse.closeCall;
 const repairGlmKeys = tool_parse.repairGlmKeys;
@@ -27,6 +28,17 @@ test "families" {
     const kept = try parse(a, "hi <tool_call>{\"name\":\"other tool\"}</tool_call>", tools, null);
     try std.testing.expect(kept.calls == null);
     try std.testing.expectEqualStrings("hi <tool_call>{\"name\":\"other tool\"}</tool_call>", kept.content);
+}
+
+test "a parameter whose schema is a union comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.cases) |c| {
+        const tools = try witness.tools(a, c.schema);
+        const r = try parse(a, try witness.reply(a, c.value), tools, null);
+        try std.testing.expectEqualStrings(c.expected, r.calls.?[0].get("function").?.get("arguments").?.string);
+    }
 }
 
 test "a reply of many calls searches each opener once, not again after every call" {

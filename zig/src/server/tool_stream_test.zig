@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = @import("json");
 const tool_params = @import("tool_params.zig");
+const witness = @import("tool_union_witness.zig");
 const stream = @import("tool_stream.zig");
 const Streamer = stream.Streamer;
 const Policy = stream.Policy;
@@ -33,6 +34,23 @@ test "a streamed call cut inside a value stays open" {
     const sent = try sentArguments(a, try streamed(a, tools, &.{open}));
     try std.testing.expectEqualStrings("{\"q\":\"fast c", sent);
     try std.testing.expect((try tool_params.closedJson(a, sent)) == null);
+}
+
+test "a streamed parameter whose schema is a union comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.cases) |c| {
+        const tools = try witness.tools(a, c.schema);
+        const deltas = try streamed(a, tools, &.{try witness.reply(a, c.value)});
+        // the stream spells the value its own way, so the two arguments compare as values
+        try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try sentArguments(a, deltas)));
+    }
+}
+
+/// The arguments as one canonical JSON text.
+fn canonical(a: Allocator, text: []const u8) ![]const u8 {
+    return json.stringify(a, (try json.parse(a, text)).ok, .{ .compact = true });
 }
 
 test "a one-call reply drops an unoffered call and still hides an unclosed one" {
