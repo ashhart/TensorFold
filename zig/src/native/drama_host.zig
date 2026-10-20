@@ -19,7 +19,12 @@ const Job = struct {
     state: d3.kv_state.State = .{},
     samples: usize = 0,
 };
-pub const Options = struct { context: u32 = 8192, device: u32 = 0, lanes: u32 = 2 };
+pub const Options = struct {
+    context: u32 = 8192,
+    device: u32 = 0,
+    lanes: u32 = 2,
+    prefill_rows: u32 = if (is_cuda) 128 else 1,
+};
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -155,8 +160,9 @@ const Host = struct {
                 if (is_cuda) try s.t.c.reset(s.t.cs) else try s.t.c.reset();
                 j.state.started = true;
             }
-            try s.e.promptChunk(r.frames.len, j.state.prompt, 1, null);
-            j.state.prompt += 1;
+            const count = s.e.o.promptRows(r.frames.len - j.state.prompt);
+            try s.e.promptChunk(r.frames.len, j.state.prompt, count, null);
+            j.state.prompt += count;
             if (j.state.prompt == r.frames.len) {
                 try s.e.finishPrompt(r.frames);
                 h.lock();
@@ -241,6 +247,7 @@ const Host = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, o: Options) !api.Opened {
     if (o.context < 1025 or o.context > 8192) return error.BadDramaContext;
+    try (d3.Options{ .max_rows = o.prefill_rows, .attn_chunk = o.prefill_rows }).validatePrefill();
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .io = io, .limit = undefined, .queue = try rounds.Queue.init(o.lanes), .info_ = .{} };
@@ -257,8 +264,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
     while (made < o.lanes) : (made += 1) {
         const e = if (made == 0) try d3.Engine.create(gpa, io, dir, .{
             .max_ctx = o.context,
-            .max_rows = 1,
-            .attn_chunk = 1,
+            .max_rows = o.prefill_rows,
+            .attn_chunk = o.prefill_rows,
             .max_frames = 1024,
             .warmup = false,
             .device = o.device,

@@ -24,6 +24,11 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
+    const prefill_rows = try setting(a, null, "TF_DRAMA_PREFILL_ROWS", 128, problem) orelse return null;
+    if (prefill_rows == 0 or prefill_rows > 1024) {
+        problem.* = "TF_DRAMA_PREFILL_ROWS must be 1 through 1024";
+        return null;
+    }
     const segments = try setting(a, o.segments, "TF_CUDA_SEGMENTS", 1, problem) orelse return null;
     if (segments != 1) {
         problem.* = "Drama 3 uses one prompt segment at a time: use --segments 1";
@@ -33,7 +38,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "Drama 3 uses embedded native kernels, not captured kernel sets: unset TENSORFOLD_CUDA_KERNELS or set it to native";
         return null;
     };
-    return drama_host.open(gpa, io, o.dir, "", .{ .context = @intCast(window), .device = device, .lanes = if (o.lanes_fixed) o.lanes else 2 }) catch |e| {
+    return drama_host.open(gpa, io, o.dir, "", .{
+        .context = @intCast(window),
+        .device = device,
+        .lanes = if (o.lanes_fixed) o.lanes else 2,
+        .prefill_rows = prefill_rows,
+    }) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native Drama 3 CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
         return null;
     };

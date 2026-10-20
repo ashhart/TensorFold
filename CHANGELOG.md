@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Drama 3 on CUDA prefills bounded row chunks in each shared round. `TF_DRAMA_PREFILL_ROWS` selects 1 through 1024 rows (default 128); the generation tool uses `--max-rows`. Batched projections and attention can change rounding relative to single-row prefill; oracle checks now compare the selected prompt chunks at their reference-row offsets.
+
 ## 1.1.1
 
 - The app checks models through HTTPS Hub fake-IP proxies in both address families and honours one validated `HF_ENDPOINT` for checks and downloads. Network-policy refusals name the DNS address and proxy remedy (#1037). Thanks to @samwang0041-star.
