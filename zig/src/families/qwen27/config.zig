@@ -1,9 +1,10 @@
 //! Qwen text shapes (a dense MLP or routed experts), layer schedule, rotary metadata and ordered checkpoint EOS ids.
 const std = @import("std");
+const family = @import("core").qwen35_config;
 
 pub const Kind = enum { linear, attention };
-pub const max_layers = 128;
-pub const max_eos = 8;
+pub const max_layers = family.checks.max_layers;
+pub const max_eos = family.checks.max_eos;
 
 pub const Config = struct {
     hidden: usize,
@@ -66,47 +67,9 @@ pub fn object(v: std.json.Value) !std.json.ObjectMap {
     return if (v == .object) v.object else error.BadConfig;
 }
 
-fn integer(v: std.json.Value, zero: bool) !usize {
-    if (v != .integer or v.integer < 0 or (!zero and v.integer == 0)) return error.BadConfig;
-    if (v.integer > std.math.maxInt(u32)) return error.BadConfig;
-    return @intCast(v.integer);
-}
-
-fn required(o: std.json.ObjectMap, key: []const u8) !usize {
-    return integer(o.get(key) orelse return error.BadConfig, false);
-}
-
-fn number(v: std.json.Value) !f64 {
-    const n: f64 = switch (v) {
-        .integer => |x| @floatFromInt(x),
-        .float => |x| x,
-        else => return error.BadConfig,
-    };
-    return if (std.math.isFinite(n)) n else error.BadConfig;
-}
-
-fn optional(o: std.json.ObjectMap, key: []const u8, fallback: f64) !f64 {
-    const v = o.get(key) orelse return fallback;
-    return if (v == .null) fallback else number(v);
-}
-
 fn flag(o: std.json.ObjectMap, key: []const u8) !bool {
     const v = o.get(key) orelse return false;
     return if (v == .bool) v.bool else error.BadConfig;
-}
-
-fn eos(c: *Config, v: std.json.Value) !void {
-    if (v == .null) return;
-    if (v == .array) {
-        for (v.array.items) |id| try eos(c, id);
-        return;
-    }
-    const id: u32 = @intCast(try integer(v, true));
-    if (id >= c.vocab) return error.BadEos;
-    if (c.isEos(id)) return;
-    if (c.eos_count == max_eos) return error.TooManyEos;
-    c.eos[c.eos_count] = id;
-    c.eos_count += 1;
 }
 
 fn shapeProducts(c: Config) !void {
@@ -122,84 +85,66 @@ fn shapeProducts(c: Config) !void {
     _ = try std.math.mul(usize, c.hidden, c.vocab);
 }
 
+/// config.json through the family's reader, the CUDA and HIP engines' too; the Metal engine refuses a tied head.
 pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) !Config {
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
-    defer parsed.deinit();
-    const root = try object(parsed.value);
-    const t = if (root.get("text_config")) |v| try object(v) else root;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    return read(arena.allocator(), json, generation) catch |e| switch (e) {
+        error.InvalidConfig, error.MissingField, error.InvalidMoe, error.InvalidRotary, error.InvalidLayerTypes => error.BadConfig,
+        else => e,
+    };
+}
+
+fn read(a: std.mem.Allocator, json: []const u8, generation: ?[]const u8) !Config {
+    const root = try object(try std.json.parseFromSliceLeaky(std.json.Value, a, json, .{}));
+    const t = try family.textTower(root);
     const model = t.get("model_type") orelse root.get("model_type") orelse return error.BadConfig;
     if (model != .string) return error.NotQwenDense;
     const moe = std.mem.eql(u8, model.string, "qwen3_5_moe") or std.mem.eql(u8, model.string, "qwen3_5_moe_text");
     if (!moe and !std.mem.eql(u8, model.string, "qwen3_5") and !std.mem.eql(u8, model.string, "qwen3_5_text")) return error.NotQwenDense;
-    if (!moe) if (t.get("num_experts")) |v| if (try integer(v, true) != 0) return error.NotQwenDense;
+    if (!moe) if (t.get("num_experts")) |v| if (v != .null and !(v == .integer and v.integer == 0)) return error.NotQwenDense;
     // the router's weights are the picks' softmax, renormalized (Qwen's default)
     if (moe) if (t.get("norm_topk_prob")) |v| if (v != .bool or !v.bool) return error.UnsupportedRouter;
     if (try flag(root, "tie_word_embeddings") or try flag(t, "tie_word_embeddings")) return error.TiedEmbeddingHead;
-    if (t.get("attn_output_gate")) |v| if (v != .bool or !v.bool) return error.UnsupportedAttentionGate;
-    inline for (.{ .{ "hidden_act", "silu" }, .{ "output_gate_type", "swish" }, .{ "linear_attn_state_dtype", "float32" } }) |entry| {
-        if (t.get(entry[0])) |v| if (v != .string or !std.mem.eql(u8, v.string, entry[1])) return error.UnsupportedActivation;
+    // the bits and group are the checkpoint's, read per module (widths.zig)
+    const s = try family.geometry(t, 4, 64);
+    if (!moe and s.experts != 0) return error.NotQwenDense;
+    if (moe and (s.experts == 0 or s.shared_width == 0)) return error.BadConfig;
+    if (!moe and s.intermediate == 0) return error.BadConfig;
+    for ([_]usize{ s.hidden, s.n_layers, s.vocab, s.heads, s.kv_heads, s.head_dim, s.key_heads, s.value_heads, s.key_dim, s.value_dim, s.conv }) |x| {
+        if (x == 0 or x > std.math.maxInt(u32)) return error.BadConfig;
     }
-    const heads = try required(t, "num_attention_heads");
-    const hidden = try required(t, "hidden_size");
-    const head_dim = if (t.get("head_dim")) |v| blk: {
-        if (v == .null or (v == .integer and v.integer == 0)) break :blk hidden / heads;
-        break :blk try integer(v, false);
-    } else hidden / heads;
-    const rope = if (t.get("rope_parameters")) |v| (if (v == .null) null else try object(v)) else null;
-    const factor = if (rope) |r| try optional(r, "partial_rotary_factor", try optional(t, "partial_rotary_factor", 0.25)) else try optional(t, "partial_rotary_factor", 0.25);
-    if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
-        .hidden = hidden,
-        .intermediate = if (moe) 0 else try required(t, "intermediate_size"),
-        .layers = try required(t, "num_hidden_layers"),
-        .vocab = try required(t, "vocab_size"),
-        .heads = heads,
-        .kv_heads = try required(t, "num_key_value_heads"),
-        .head_dim = head_dim,
-        .k_heads = try required(t, "linear_num_key_heads"),
-        .v_heads = try required(t, "linear_num_value_heads"),
-        .dk = try required(t, "linear_key_head_dim"),
-        .dv = try required(t, "linear_value_head_dim"),
-        .conv_kernel = try required(t, "linear_conv_kernel_dim"),
-        .eps = @floatCast(try optional(t, "rms_norm_eps", 1e-6)),
-        .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
-        .rope_theta = if (rope) |r| try optional(r, "rope_theta", try optional(t, "rope_theta", 10000000)) else try optional(t, "rope_theta", 10000000),
+        .hidden = s.hidden,
+        .intermediate = if (moe) 0 else s.intermediate,
+        .layers = s.n_layers,
+        .vocab = s.vocab,
+        .heads = s.heads,
+        .kv_heads = s.kv_heads,
+        .head_dim = s.head_dim,
+        .k_heads = s.key_heads,
+        .v_heads = s.value_heads,
+        .dk = s.key_dim,
+        .dv = s.value_dim,
+        .conv_kernel = s.conv,
+        .eps = @floatCast(s.eps),
+        .rope_dims = s.rotary_dim,
+        .rope_theta = s.rope_theta,
+        .mrope_section = s.mrope.section,
+        .mrope_interleaved = s.mrope.interleaved,
+        .max_position = s.max_position,
+        .experts = s.experts,
+        .topk = s.top_k,
+        .moe_intermediate = s.moe_width,
+        .shared_intermediate = s.shared_width,
     };
-    if (moe) {
-        c.experts = try required(t, "num_experts");
-        c.topk = try required(t, "num_experts_per_tok");
-        c.moe_intermediate = try required(t, "moe_intermediate_size");
-        c.shared_intermediate = try required(t, "shared_expert_intermediate_size");
-        if (c.topk > c.experts) return error.BadConfig;
-    }
-    if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
-    if (rope) |r| if (r.get("mrope_interleaved")) |v| {
-        if (v != .bool or !v.bool) return error.UnsupportedMrope;
-        c.mrope_interleaved = v.bool;
-    };
-    if (c.layers > max_layers or c.head_dim == 0 or c.heads % c.kv_heads != 0 or c.v_heads % c.k_heads != 0) return error.BadConfig;
-    if (!std.math.isFinite(c.eps) or c.eps <= 0 or c.rope_theta <= 0 or c.rope_dims == 0 or c.rope_dims % 2 != 0) return error.BadConfig;
-    if (rope) |r| if (r.get("mrope_section")) |v| {
-        if (v != .array or v.array.items.len != 3) return error.BadConfig;
-        for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true);
-    };
-    if (t.get("layer_types")) |v| {
-        if (v != .array or v.array.items.len != c.layers) return error.BadConfig;
-        for (v.array.items, 0..) |x, i| {
-            if (x != .string) return error.BadConfig;
-            c.kinds[i] = if (std.mem.eql(u8, x.string, "linear_attention")) .linear else if (std.mem.eql(u8, x.string, "full_attention")) .attention else return error.UnsupportedLayer;
-        }
-    } else {
-        const interval = if (t.get("full_attention_interval")) |v| try integer(v, false) else 4;
-        for (c.kinds[0..c.layers], 0..) |*k, i| k.* = if ((i + 1) % interval == 0) .attention else .linear;
-    }
-    if (root.get("eos_token_id") orelse t.get("eos_token_id")) |v| try eos(&c, v);
-    if (generation) |text| {
-        const gen = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
-        defer gen.deinit();
-        if ((try object(gen.value)).get("eos_token_id")) |v| try eos(&c, v);
-    }
-    if (c.eos_count == 0) return error.MissingEos;
+    if (!std.math.isFinite(c.eps) or c.eps <= 0 or !std.math.isFinite(c.rope_theta) or c.rope_theta <= 0) return error.BadConfig;
+    for (c.kinds[0..c.layers], s.full_layers[0..c.layers]) |*k, full| k.* = if (full) .attention else .linear;
+    const gen = if (generation) |text| try object(try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{})) else null;
+    var ids: [family.checks.max_eos]u32 = undefined;
+    const eos = try family.checks.eos(&ids, root, t, gen, c.vocab);
+    @memcpy(c.eos[0..eos.len], eos);
+    c.eos_count = eos.len;
     try shapeProducts(c);
     return c;
 }
@@ -339,7 +284,10 @@ test "text execution refuses unsupported gates and activation contracts" {
     const gate = try edit(a, "attn_output_gate", .{ .bool = false });
     defer a.free(gate);
     try std.testing.expectError(error.UnsupportedAttentionGate, parse(a, gate, null));
-    const act = try edit(a, "output_gate_type", .{ .string = "sigmoid" });
+    const out_gate = try edit(a, "output_gate_type", .{ .string = "sigmoid" });
+    defer a.free(out_gate);
+    try std.testing.expectError(error.UnsupportedAttentionGate, parse(a, out_gate, null));
+    const act = try edit(a, "hidden_act", .{ .string = "gelu" });
     defer a.free(act);
     try std.testing.expectError(error.UnsupportedActivation, parse(a, act, null));
 }

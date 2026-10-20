@@ -93,6 +93,8 @@ pub const shared_attention = @import("core/shared_attention.zig");
 
 pub const tile_qmm = @import("core/tile_qmm.zig");
 pub const moe_route = @import("core/moe_route.zig");
+/// The Qwen3.5 family's config reader, which the CUDA and HIP engines read too.
+pub const qwen35_config = @import("families/qwen3_5/config.zig");
 
 pub const gpu_profile = @import("core/gpu_profile.zig");
 
