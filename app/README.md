@@ -51,6 +51,22 @@ Electron/node-pty runtime pieces by itself.
 Then open **Settings → Providers**, paste an API key (or point at a local endpoint), pick a model
 in the composer, choose a workspace folder, and start a task.
 
+### Optional Parallel web research
+
+Ask the built-in agent to “Use Parallel to search the web” or “Use Parallel to read this URL.”
+The `web_search` and `web_fetch` tools accept `provider: "parallel"` for
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp): general web results
+and readable page excerpts, with no account or API key. Anonymous search uses Fast mode and
+has service rate limits. Queries and requested URLs go to Parallel when this provider is selected.
+
+Omitting `provider` keeps Google News RSS search and direct page fetching. Explicit
+`provider: "google_news"` for search and `provider: "direct"` for fetching select those paths.
+There is no automatic provider fallback after an error. Existing web-tool permissions and
+local-only conversation restrictions apply. Parallel calls share an opaque conversation ID
+across search, fetch and follow-up turns; a new chat gets a new ID. MCP requests time out
+after 20 seconds and stop when the owning run is cancelled. Fetches return excerpts rather
+than a complete page; `max_chars` still caps the displayed text.
+
 ### Browser demo mode
 
 Open `http://localhost:5173` in a browser (no Electron) and TensorFold runs in **demo mode** with
