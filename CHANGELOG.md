@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- A host test runs Nemotron's CUDA lane prefill with two images through a test-only stand-in for the RADIO tower (`Vision.test_encode`) and checks that each image goes through the tower once per prompt pass; before #1057 removed the second `Vision.begin`, each went through twice. Release builds compile no hook.
+
 ## 1.1.0
 
 - Structured output and forced tool calls work with Nemotron 3.5 Super VL (`nemotron_h_omni`), whose text vocabulary is in `llm_config`: the server read `vocab_size` only from `text_config` and the top level, and refused those requests (reported in #951). A `vocab_size` that is not a positive integer within the C ABI's range is skipped rather than cast (#953). Thanks to @swbiggart and @BobClawblaw.

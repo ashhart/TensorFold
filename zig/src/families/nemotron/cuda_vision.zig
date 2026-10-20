@@ -10,6 +10,8 @@ pub const video = radio.video;
 pub const Limits = struct { image_tokens: u32, max_images: u32, video_tokens: u32 = 0 };
 
 pub const Vision = struct {
+    // Host fixtures replace only the tower pass; planning and the rows budget stay real.
+    pub var test_encode: if (@import("builtin").is_test) ?*const fn ([]const radio.Span) anyerror!void else void = if (@import("builtin").is_test) null else {};
     gpa: std.mem.Allocator,
     io: std.Io,
     cfg: radio.Config,
@@ -64,6 +66,7 @@ pub const Vision = struct {
         if (images.len == 0) return;
         v.spans = try radio.plan(v.gpa, images, @intCast(from));
         if (radio.rows.total(v.spans) > v.rows.limit) return error.ImageRows;
+        if (comptime @import("builtin").is_test) if (test_encode) |run| return run(v.spans);
         try v.tower.encode(s, images, v.spans, &v.rows);
     }
 
