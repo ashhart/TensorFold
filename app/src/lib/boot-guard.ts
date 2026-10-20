@@ -1,6 +1,4 @@
-// The boot splash in index.html is static: if the renderer throws while starting, or the main
-// process never answers, the window stays on that splash with no explanation. Surface the first
-// failure in the static panel and also report a boot that never completes.
+// The splash in index.html is static; surface the first startup failure and a boot that never ends.
 
 export interface BootGuardWindow {
   addEventListener(type: 'error' | 'unhandledrejection', handler: (event: any) => void): void

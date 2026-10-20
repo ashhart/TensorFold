@@ -4,9 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { commandShell } from './cli-path'
 
-// Linux command sandbox on bubblewrap, mirroring the macOS sandbox-exec profiles in
-// sandbox.ts: deny-by-default filesystem with per-profile read/write roots and an
-// optional network namespace. Args only; the caller spawns and owns timeouts/kill.
+// Linux command sandbox on bubblewrap: macOS sandbox-exec profiles, mirrored as bwrap argv only.
 
 export const LINUX_SANDBOX_IMPLEMENTATION = 'linux-bwrap'
 
@@ -74,12 +72,7 @@ function compatSymlinks(roots: ResolvedRoot[]): string[] {
   return args
 }
 
-// A writable workspace still may not touch git's control files (see gitControlWriteDeny in
-// sandbox.ts). A writable bind of .git itself pins the entry against rename/replace (mountpoints
-// reject it with EBUSY); the control entries are ro-bound over themselves, which also blocks
-// unlink. Refs and objects stay writable so git-mutate commands work. Two gaps versus SBPL:
-// a worktree .git pointer file's external gitdir is not covered, and nested repos' .git entries
-// below the top level are not pinned.
+// Git control files stay read-only under a writable workspace; refs and objects stay writable.
 function gitControlReadOnlyBinds(cwd: string): string[] {
   const args: string[] = []
   const git = path.join(cwd, '.git')
