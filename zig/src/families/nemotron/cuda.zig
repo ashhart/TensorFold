@@ -63,6 +63,7 @@ test {
 
 test {
     _ = @import("cuda_vision_test.zig");
+    _ = @import("cuda_vision_lanes_test.zig");
 }
 
 test {
