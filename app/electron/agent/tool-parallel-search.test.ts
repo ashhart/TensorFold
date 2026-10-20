@@ -117,6 +117,11 @@ try {
   fault = ''
   await search(a)
   assert.equal(calls().at(-1).arguments.session_id, ids[0], 'quota retry retains conversation identity')
+  for (const name of ['web_search', 'web_fetch']) {
+    const standalone = await executeTool(name, { provider: 'parallel', query: 'public question', url: publicPage }, { cwd: '' })
+    assert.equal(standalone.ok, true, standalone.output)
+    assert.equal('session_id' in calls().at(-1).arguments, false, 'standalone hosts have no conversation boundary to identify')
+  }
   for (const [kind, message] of [['missing', /does not advertise/], ['invalid', /JSON|Unexpected/], ['mismatch', /matching/], ['rpc', /Invalid arguments/], ['size', /limit/], ['tool', /Extraction refused/], ['shape', /invalid web result/], ['private-result', /private|local/]]) {
     fault = kind as string
     assert.match((await search(a)).output, message as RegExp)
