@@ -35,6 +35,7 @@ pub const Model = model.Model;
 
 test {
     _ = @import("state.zig");
+    _ = @import("backend_slots_test.zig");
     _ = @import("train_check.zig");
     _ = @import("model.zig");
     _ = @import("timing.zig");

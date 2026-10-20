@@ -375,6 +375,7 @@ pub const Metal = struct {
         const out = self.take(1);
         if (c.len + 1 > c.kv[0].capacity) return error.ContextFull;
         const state = try self.slotFor(c, .full);
+        errdefer self.pool.give(@intCast(state));
         const Step = struct {
             in: u64,
             out: u64,
@@ -410,6 +411,8 @@ pub const Metal = struct {
         var fills: [st.max_rows]Fill = undefined;
         if (windows.len > segs.len) return error.WindowTooWide;
         var total: usize = 0;
+        var taken: usize = 0; // windows whose fresh slot segs holds until hold() hands it to their cache
+        errdefer for (segs[0..taken]) |g| if (g.slot >= 0) self.pool.give(@intCast(g.slot));
         for (windows, 0..) |w, i| {
             const c = try self.cacheOf(w.stream);
             self.settle(c);
@@ -424,7 +427,9 @@ pub const Metal = struct {
             staged[stage % ring] = w.pending;
             for (w.tokens, 0..) |t, r| staged[(stage + 1 + r) % ring] = t;
             fills[i] = .{ .stage = stage, .held = w.held, .n = w.tokens.len };
-            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = drawOf(w.stream, w.positions[0]), .mask_row = try grammar.stage(self, w, total) };
+            const mask_row = try grammar.stage(self, w, total);
+            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = drawOf(w.stream, w.positions[0]), .mask_row = mask_row };
+            taken = i + 1;
             c.start = total;
             c.rows = rows;
             total += rows;
