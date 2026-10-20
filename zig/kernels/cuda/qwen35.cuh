@@ -116,7 +116,7 @@ __device__ __forceinline__ void row_positions(const Seg& sg, Ancestor anc, size_
     for (int a = 0; a < 3; a++) pos[a] = M != nullptr ? M[a * MAXR + m] : text;
 }
 
-// The rope kernels' body for either cache: queries rotated in place, each key head's rotated key and value stored.
+// The rope kernels' body, a block a row and head (y: query heads, then key heads): rotated in place, or stored.
 template <typename Store>
 __device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                           const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
@@ -130,11 +130,16 @@ __device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restr
     int pos[3];
     row_positions(sg, rowanc[m], m, M, pos);
     const int slot = sg.len + (int)m - sg.row0;
-    __shared__ __nv_bfloat16 qs[MAXQ * HD];
-    for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
-    __syncthreads();
-    for (int h = 0; h < QH; h++) Qn[(m * QH + h) * HD + d] = rotate(qs + h * HD, d, pos);
-    for (int h = 0; h < KVH; h++) store(sg, h, slot, d, rotate(Kn + (m * KVH + h) * HD, d, pos), Vr[(m * KVH + h) * HD + d]);
+    const int h = blockIdx.y;
+    if (h < QH) {
+        __shared__ __nv_bfloat16 qs[HD];
+        qs[d] = Qn[(m * QH + h) * HD + d];
+        __syncthreads();
+        Qn[(m * QH + h) * HD + d] = rotate(qs, d, pos);
+    } else if (h < QH + KVH) {
+        const int kh = h - QH;
+        store(sg, kh, slot, d, rotate(Kn + (m * KVH + kh) * HD, d, pos), Vr[(m * KVH + kh) * HD + d]);
+    }
 }
 
 }  // namespace tf_q35
