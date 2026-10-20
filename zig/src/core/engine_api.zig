@@ -257,6 +257,7 @@ pub const Open = struct {
     dir: []const u8,
     model_type: []const u8,
     context: ?i64 = null,
+    max_frames: ?u32 = null,
     lanes: u32 = 8,
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,

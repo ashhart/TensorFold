@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Drama3 CUDA replay waits for poison fills to finish before reset, prefill or decode reuses the buffers.
 
+- Drama 3 serving accepts `--max-frames` to bound synthesis frames, preserving the stock cap when omitted.
+
 ## 1.1.3
 
 - Flash Next image chats that add another image resume from their cached prompt instead of processing it again: image streams sit in the standard frame, and positioned pooling reads the image's three position axes. Malformed image spans are refused before anything is allocated (#1200). Thanks to @sethforprivacy.

@@ -59,6 +59,7 @@ pub const flags = [_]Flag{
     .{ .name = "--vision-image-tokens", .native = true },
     .{ .name = "--vision-video-tokens", .native = true },
     .{ .name = "--context", .native = true },
+    .{ .name = "--max-frames", .native = true },
     .{ .name = "--speed-up", .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
@@ -148,6 +149,7 @@ pub const Args = struct {
     metrics_open: bool = false,
     dashboard: bool = false,
     context: ?i64 = null,
+    max_frames: ?u32 = null,
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
@@ -302,6 +304,12 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.chat_template = v;
         return;
     }
+    if (is(name, "--max-frames")) {
+        const n = try int(u, a, name, v);
+        if (n < 1 or n > 8190) return fail(u, a, "argument --max-frames: expected 1 through 8190: '{s}'", .{v});
+        out.max_frames = @intCast(n);
+        return;
+    }
     if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
@@ -435,6 +443,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .dir = dir,
         .model_type = model_type,
         .context = args.context,
+        .max_frames = args.max_frames,
         .lanes = parallel(args.parallel) orelse 8,
         .lanes_fixed = parallelFixed(args.parallel),
         .drafts = !args.no_drafts,

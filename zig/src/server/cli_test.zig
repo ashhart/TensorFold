@@ -7,6 +7,26 @@ const parse = cli.parse;
 const request = cli.request;
 const capabilities = cli.capabilities;
 
+test "max frames CLI bounds and engine request preserve the default" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const defaults = try parse(a, &.{"m"}, &u);
+    try std.testing.expectEqual(@as(?u32, null), defaults.max_frames);
+    try std.testing.expectEqual(@as(?u32, null), (try request(a, "d", "fish_omni", defaults)).max_frames);
+    for ([_][]const u8{ "1", "1024", "4096", "8190" }) |value| {
+        const args = try parse(a, &.{ "m", "--max-frames", value }, &u);
+        const expected = try std.fmt.parseInt(u32, value, 10);
+        try std.testing.expectEqual(@as(?u32, expected), args.max_frames);
+        try std.testing.expectEqual(args.max_frames, (try request(a, "d", "fish_omni", args)).max_frames);
+    }
+    for ([_][]const u8{ "0", "-1", "8191", "4294967296", "nan", "1.5" }) |value| {
+        try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--max-frames", value }, &u));
+    }
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--max-frames" }, &u));
+}
+
 test "vision image budget: explicit large budgets reach the engine, with bounded CLI inputs" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
