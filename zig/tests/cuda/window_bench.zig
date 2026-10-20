@@ -25,7 +25,7 @@ pub const callers = [_]Shape{
 
 const contexts = [_]usize{ 1024, 8192, 32768, 131072 };
 
-/// Gemma 4's sliding layers (head dim 256, window 1024, ring 1536): decode rows and 512-row prompt chunks.
+/// Gemma 4's sliding (256, window 1024, ring 1536) and global layers (512, linear): decode rows, 512-row prompt chunks.
 pub fn sliding(out: []Shape) []Shape {
     var n: usize = 0;
     for (contexts) |ctx| {
@@ -39,6 +39,19 @@ pub fn sliding(out: []Shape) []Shape {
             out[n] = .{ .name = if (p32) "12B sliding prompt (16/8 x 256), P32" else "12B sliding prompt (16/8 x 256), P bf16", .h = 16, .hk = 8, .d = 256, .win = 1024, .ring = 1536, .rows = 512, .at = ctx - 512, .prompt = true, .p32 = p32 };
             n += 1;
         }
+        if (!wa.wide(512)) continue;
+        for ([_]usize{ 1, 4 }) |rows| {
+            out[n] = .{ .name = "12B global decode (16/1 x 512)", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = ctx, .rows = rows, .at = ctx - 1, .prompt = false };
+            n += 1;
+        }
+        out[n] = .{ .name = "31B global decode (32/4 x 512)", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = ctx, .rows = 1, .at = ctx - 1, .prompt = false };
+        n += 1;
+        for ([_]bool{ true, false }) |p32| {
+            out[n] = .{ .name = if (p32) "12B global prompt (16/1 x 512), P32" else "12B global prompt (16/1 x 512), P bf16", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = ctx, .rows = 512, .at = ctx - 512, .prompt = true, .p32 = p32 };
+            n += 1;
+        }
+        out[n] = .{ .name = "31B global prompt (32/4 x 512), P32", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = ctx, .rows = 512, .at = ctx - 512, .prompt = true, .p32 = true };
+        n += 1;
     }
     return out[0..n];
 }

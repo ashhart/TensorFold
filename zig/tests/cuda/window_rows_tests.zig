@@ -63,12 +63,12 @@ fn report(what: []const u8, st: ar.Stats) void {
     check.pass("{s}: {d} outputs bit-equal to float64's value, {d} within their range, {d} non-finite as float64", .{ what, st.decided, st.ranged, st.nonfinite });
 }
 
-const DCase = struct { name: []const u8, h: usize, hk: usize, d: usize, win: usize, ring: usize, streams: usize, top: usize };
+const DCase = struct { name: []const u8, h: usize, hk: usize, d: usize, win: usize, ring: usize, streams: usize, top: usize, rows: usize = 64 };
 
-/// Decode at 1, 3, 17, 64 rows: every output in range, a row's bits at any row count and (linear) cache length.
+/// Decode at 1, 3 and c.rows rows: every output in range, a row's bits at any row count and (linear) cache length.
 fn decode1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const wa.WindowAttention, rng: std.Random, c: DCase, total: *ar.Stats) !void {
-    const counts = [_]usize{ 1, 3, 17, 64 };
-    const most = counts[counts.len - 1];
+    const counts = [_]usize{ 1, 3, c.rows };
+    const most = c.rows;
     var b: Bufs = .{ .gpu = gpu };
     defer b.deinit();
     const q = try a.alloc(u16, most * c.h * c.d);
@@ -110,7 +110,7 @@ fn decode1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const wa.Wi
         try b.get(o, got);
         try check.sameBytes("window rows decode: a row count's bits equal the widest call's", std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(wide[0 .. m * c.h * c.d]));
     }
-    if (c.win == 0 and c.streams == 1) { // the linear cache declared 16x longer: 16x the chunks, the same bits
+    if (c.win == 0 and c.streams == 1 and c.ring <= 32768) { // a cache declared 16x longer: the same bits
         var w2 = w;
         w2.ring = 16 * c.ring;
         const o2 = try b.out(s, most * c.h * c.d * 2);
@@ -188,6 +188,20 @@ pub const sliding_decode = [_]DCase{
     .{ .name = "no window over a linear cache (16/4 heads of 256, 3000 positions)", .h = 16, .hk = 4, .d = 256, .win = 0, .ring = 3000, .streams = 1, .top = 3000 },
 };
 
+/// Gemma 4's global layers: head dim 512, no window over a linear cache (12B 16 query heads over 1, 31B 32 over 4).
+pub const global_decode = [_]DCase{
+    .{ .name = "12B global decode (16/1 heads of 512, linear cache of 262144, a row at its end)", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 262144, .streams = 1, .top = 262144, .rows = 4 },
+    .{ .name = "12B global decode (16/1 heads of 512, linear cache of 20000)", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 20000, .streams = 1, .top = 20000, .rows = 17 },
+    .{ .name = "31B global decode (32/4 heads of 512, linear caches of 40000, 2 streams)", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 40000, .streams = 2, .top = 40000, .rows = 17 },
+};
+
+pub const global_prompt = [_]PCase{
+    .{ .name = "12B global prompt, 128 rows at 8000, P32", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .p0 = 8000, .n = 128, .p32 = true },
+    .{ .name = "12B global prompt, 16 rows at 130000, P32", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .p0 = 130000, .n = 16, .p32 = true },
+    .{ .name = "31B global prompt, 300 rows at 0, P32", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .p0 = 0, .n = 300, .p32 = true },
+    .{ .name = "31B global prompt, 96 rows at 3000, P as bf16", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .p0 = 3000, .n = 96, .p32 = false },
+};
+
 pub const sliding_prompt = [_]PCase{
     .{ .name = "12B sliding prompt, first chunk, P32", .h = 16, .hk = 8, .d = 256, .win = 1024, .ring = 1536, .p0 = 0, .n = 512, .p32 = true },
     .{ .name = "12B sliding prompt, the ring wraps, P32", .h = 16, .hk = 8, .d = 256, .win = 1024, .ring = 1536, .p0 = 5000, .n = 512, .p32 = true },
@@ -205,11 +219,11 @@ pub fn run(gpu: check.Gpu) !void {
     defer g.unload();
     var prng = std.Random.DefaultPrng.init(0x6a77);
     var total: ar.Stats = .{};
-    for (sliding_decode) |c| {
+    for (sliding_decode ++ global_decode) |c| {
         _ = arena.reset(.retain_capacity);
         try decode1(gpu, arena.allocator(), s, &g, prng.random(), c, &total);
     }
-    for (sliding_prompt) |c| {
+    for (sliding_prompt ++ global_prompt) |c| {
         _ = arena.reset(.retain_capacity);
         try prompt1(gpu, arena.allocator(), s, &g, prng.random(), c, &total);
     }
