@@ -351,7 +351,7 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
     }
     const model_width = try requiredInt(tower, "hidden_size");
     const attn_heads = try requiredInt(tower, "num_attention_heads");
-    const per_head = if (truthy(tower.get("head_dim"))) try toInt(tower.get("head_dim").?) else model_width / attn_heads;
+    const per_head = if (truthy(tower.get("head_dim"))) try toInt(tower.get("head_dim").?) else if (attn_heads == 0) return error.InvalidConfig else model_width / attn_heads;
     const rope = if (truthy(tower.get("rope_parameters"))) try objectOf(tower.get("rope_parameters").?) else std.json.ObjectMap.empty;
     const partial = try numberOf(rope.get("partial_rotary_factor") orelse tower.get("partial_rotary_factor") orelse .{ .float = 0.25 });
     const product = @as(f64, @floatFromInt(per_head)) * partial;
@@ -521,6 +521,27 @@ test "the geometry refuses what the kernels do not compute and sizes past 32 bit
         defer a.free(text);
         try std.testing.expectError(c[2], geometry(try textTower(try declared(arena.allocator(), text)), 4, 64));
     }
+}
+
+test "geometry: every mix of zero heads, widths and head_dim forms is a Spec or an error, never a division by zero" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const dims = [_][]const u8{ "\"head_dim_absent\": 256", "\"head_dim\": null", "\"head_dim\": 0", "\"head_dim\": 256" };
+    for ([_][]const u8{ "0", "1", "16" }) |heads| for ([_][]const u8{ "0", "4096" }) |width| for (dims, 0..) |dim, d| {
+        const h = try std.fmt.allocPrint(a, "\"num_attention_heads\": {s}", .{heads});
+        defer a.free(h);
+        const w = try std.fmt.allocPrint(a, "\"hidden_size\": {s}", .{width});
+        defer a.free(w);
+        const t1 = try std.mem.replaceOwned(u8, a, sample_text, "\"num_attention_heads\": 16", h);
+        defer a.free(t1);
+        const t2 = try std.mem.replaceOwned(u8, a, t1, "\"hidden_size\": 4096", w);
+        defer a.free(t2);
+        const text = try std.mem.replaceOwned(u8, a, t2, "\"head_dim\": 256", dim);
+        defer a.free(text);
+        const got = geometry(try textTower(try declared(arena.allocator(), text)), 4, 64);
+        if (std.mem.eql(u8, heads, "0") and d < 3) try std.testing.expectError(error.InvalidConfig, got) else _ = got catch {};
+    };
 }
 
 test "the Python loader's refusals" {
