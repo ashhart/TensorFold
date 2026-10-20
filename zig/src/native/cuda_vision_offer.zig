@@ -158,6 +158,7 @@ test "actual offer prepares bounded video and plans mixed rows through the share
     var v: nemotron.native.vision.Vision = undefined;
     v.gpa = a;
     v.spans = &.{};
+    v.encoder = null;
     defer v.end();
     v.cfg = .{ .hidden = 1280, .layers = 32, .heads = 16, .ffn = 5120, .eps = 1e-6, .patch = 16, .prefix = 10, .side = 128, .projector_hidden = 20480, .text_hidden = 4096, .final_norm = false, .mean = .{ 0.5, 0.5, 0.5 }, .std = .{ 0.25, 0.25, 0.25 }, .min_patches = 1024, .max_patches = 13312, .max_model_len = 16384, .image_token = 18, .video_temporal = 2 };
     v.marks = .{ .image = 18, .open = 19, .close = 20, .video = 30 };
