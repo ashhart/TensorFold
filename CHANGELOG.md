@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Chat prompts keep request text out of the added vocabulary: a control-token spelling in a message, tool definition, tool result, reasoning field or decision label is encoded as ordinary text, while chat templates still see the real text (#1117). Thanks to @Acermax.
 
+- Tool parameters whose schema is a union (`oneOf`, `anyOf`, `allOf` or a type list) or a local `$ref` are decoded as JSON when the schema takes a non-string value, streamed and not; text that is not JSON keeps what the model wrote (#1121). Thanks to @aartiles.
+
 - Share Flash Next's existing proposal table and exact stored rows without changing its default IDs or packs.
 
 - Prepare exact stored proposal head rows and shared scoring views without changing family defaults or precision.
