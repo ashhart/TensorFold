@@ -2,7 +2,8 @@
 const std = @import("std");
 const fixture = @import("pack_test.zig");
 const pack = @import("pack.zig");
-const previous_peaks = [_]usize{ 636288, 628370 };
+/// The frozen builder's peaks on this fixture with its relative paths; the pack's own peaks stay at or under them.
+const previous_peaks = [_]usize{ 636195, 628339 };
 const expected_hashes = [2][3][]const u8{
     .{ "bc88b43fa3b82ecf971cc41dcce78118fdffcb72a54987621fbb17d9189d7f3b", "ff6342967562d9a73c82756e197659fcb180af2173a7baef39dc64334e1e5eca", "bcdd04bf3a681fda5d0b9529fdecd328d054d88e0848799afd36c66b898612e0" },
     .{ "eaf35876b18a5471b1921e3b6cfa78af3bb9d3ce1f08d999687afc162f062b95", "ff6342967562d9a73c82756e197659fcb180af2173a7baef39dc64334e1e5eca", "bcdd04bf3a681fda5d0b9529fdecd328d054d88e0848799afd36c66b898612e0" },
@@ -64,6 +65,7 @@ test "Flash Next memory: pack phases retain whole-file bytes and fit the predece
         var counter = PackCounter{ .child = a };
         _ = try pack.build(counter.allocator(), io, dir, out, draft);
         try std.testing.expectEqual(@as(usize, 0), counter.live);
+        // The fixture's paths are relative, so this peak is the same wherever the checkout lives.
         if (@import("builtin").os.tag == .macos) try std.testing.expect(counter.peak <= previous_peaks[mode]);
         std.debug.print("PACK_PHASE_PEAK {d} {d}\n", .{ mode, counter.peak });
         for ([_][]const u8{ "pack.safetensors", "pack_mlx.safetensors", "pack_mtp_mlx.safetensors" }, 0..) |name, file_index| {
