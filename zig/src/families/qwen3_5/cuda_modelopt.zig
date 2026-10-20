@@ -139,19 +139,14 @@ pub const Kernels = struct {
     }
 };
 
-/// out (rows, n) = x (rows, k): prompt chunks past 16 rows on the prompt GEMM, else 16-row decode tiles (verify bits).
+/// out (rows, n) = x (rows, k): prompt chunks past 16 rows on the prompt GEMM, else the lane (a row's bits at any count).
 pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: bool) !void {
     const k = if (e.mo) |*m| m else return error.FormatNotLoaded;
     const l = k.linear();
-    const part: u64 = if (k.part) |p| p.ptr else 0;
-    if (prompt and rows > 16) return l.prompt(e.stream, w, .{ .x = x, .part = part }, out, rows);
-    const kk = w.inputs();
-    const n = w.outputs();
-    var at: usize = 0;
-    while (at < rows) : (at += 16) {
-        const m = @min(16, rows - at);
-        try l.decode(e.stream, w, .{ .x = x + at * kk * 2, .part = part }, out + at * n * 2, m);
-    }
+    const in: cuda.qlinear.Rows = .{ .x = x, .part = if (k.part) |p| p.ptr else 0 };
+    if (prompt and rows > 16) return l.prompt(e.stream, w, in, out, rows);
+    if (rows >= cuda.qmmf.fused_rows) return error.WindowTooWide; // the fused tile sums its slices in another order
+    return l.decode(e.stream, w, in, out, rows);
 }
 
 /// An fp32 tensor of one element.
