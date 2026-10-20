@@ -39,7 +39,7 @@ pub const Streamer = struct {
     schemas: tool_params.Schemas,
     known: std.StringHashMapUnmanaged([]const u8) = .empty,
     current: []const u8 = "",
-    value_schema: Value = .null,
+    value_schema: tool_params.Schema = undefined,
     typed: bool = false,
     buffer: std.ArrayList(u8) = .empty,
     pos: usize = 0,
@@ -239,7 +239,7 @@ pub const Streamer = struct {
                     if (opening(rest, "<parameter=")) |m| {
                         const key = reply_text.pyStrip(m.name);
                         s.value_schema = try tool_params.schemaOf(&s.schemas, s.current, key, s.a);
-                        s.typed = typedSchema(s.value_schema);
+                        s.typed = try typedSchema(s.a, s.value_schema);
                         s.buffer.clearRetainingCapacity();
                         const quoted = try json.quote(s.a, key, .{ .ascii = false });
                         try out.append(s.a, try s.args(try std.mem.concat(s.a, u8, &.{ if (s.args_open) "," else "{", quoted, if (s.typed) ":" else ":\"" })));
@@ -305,8 +305,8 @@ fn trimTail(rest: []const u8, tail: usize) usize {
     return rest.len - reply_text.afterChars(rest, chars - tail).len;
 }
 
-fn typedSchema(schema: Value) bool {
-    return tool_params.takesJson(schema);
+fn typedSchema(a: Allocator, schema: tool_params.Schema) Allocator.Error!bool {
+    return tool_params.schemaTakesJson(a, schema);
 }
 
 const wrap = @import("tool_parse.zig").wrapCalls;

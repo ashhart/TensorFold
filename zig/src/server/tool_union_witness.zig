@@ -31,6 +31,8 @@ pub const string_union_schema = "{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"s
 /// One schema, one value the model wrote, and the arguments the client must see.
 pub const Case = struct {
     schema: []const u8,
+    /// The members of the parameters root the schema's references point into.
+    defs: []const u8 = "",
     value: []const u8,
     expected: []const u8,
 };
@@ -51,7 +53,13 @@ pub const cases = [_]Case{
 
 /// The shell tool the issue offers, with its request parameter declared by `schema`.
 pub fn tools(a: A, schema: []const u8) A.Error![]V {
-    const text = try std.mem.concat(a, u8, &.{ "[{\"type\":\"function\",\"function\":{\"name\":\"shell\",\"description\":\"Run a shell command\",\"parameters\":{\"type\":\"object\",\"required\":[\"request\"],\"properties\":{\"request\":", schema, "}}}}]" });
+    return toolsWith(a, schema, "");
+}
+
+/// The shell tool with its request parameter declared by `schema`, and `defs` beside the properties.
+pub fn toolsWith(a: A, schema: []const u8, defs: []const u8) A.Error![]V {
+    const comma = if (defs.len == 0) "" else ",";
+    const text = try std.mem.concat(a, u8, &.{ "[{\"type\":\"function\",\"function\":{\"name\":\"shell\",\"description\":\"Run a shell command\",\"parameters\":{\"type\":\"object\",\"required\":[\"request\"],\"properties\":{\"request\":", schema, "}", comma, defs, "}}}]" });
     return (try json.parse(a, text)).ok.array;
 }
 
@@ -59,3 +67,94 @@ pub fn tools(a: A, schema: []const u8) A.Error![]V {
 pub fn reply(a: A, value: []const u8) A.Error![]const u8 {
     return std.fmt.allocPrint(a, "<tool_call>\n<function=shell>\n<parameter=request>\n{s}\n</parameter>\n</function>\n</tool_call>", .{value});
 }
+
+/// A union of a string and an integer.
+pub const string_or_integer_schema = "{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}";
+
+/// Pydantic's discriminated union of two actions, by reference.
+pub const pydantic_union_schema = "{\"oneOf\":[{\"$ref\":\"#/$defs/Run\"},{\"$ref\":\"#/$defs/Poll\"}],\"discriminator\":{\"propertyName\":\"action\",\"mapping\":{\"run\":\"#/$defs/Run\",\"poll\":\"#/$defs/Poll\"}}}";
+
+/// Pydantic's Optional[Model], by reference.
+pub const pydantic_optional_schema = "{\"anyOf\":[{\"$ref\":\"#/$defs/Address\"},{\"type\":\"null\"}]}";
+
+/// A reference into the definitions of the parameters root.
+pub const definitions_schema = "{\"$ref\":\"#/definitions/Thing\"}";
+
+/// A reference that points at another reference.
+pub const chain_schema = "{\"$ref\":\"#/$defs/First\"}";
+
+/// A reference that points back at itself.
+pub const cycle_schema = "{\"$ref\":\"#/$defs/Loop\"}";
+
+/// A reference to a definition that is not there.
+pub const missing_schema = "{\"$ref\":\"#/$defs/Missing\"}";
+
+/// An allOf whose branches agree on an object.
+pub const all_of_object_schema = "{\"allOf\":[{\"type\":\"object\"},{\"required\":[\"a\"]}]}";
+
+/// An allOf whose branches disagree.
+pub const all_of_disagreeing_schema = "{\"allOf\":[{\"type\":\"object\"},{\"type\":\"array\"}]}";
+
+/// An enum of integers.
+pub const enum_schema = "{\"enum\":[1,2]}";
+
+/// A const object.
+pub const const_schema = "{\"const\":{\"action\":\"run\"}}";
+
+/// An object type with a oneOf of two constraints.
+pub const object_with_one_of_schema = "{\"type\":\"object\",\"oneOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}";
+
+/// A quoted string keeps the text the model wrote, whatever the schema says.
+pub const quoted_cases = [_]Case{
+    .{ .schema = string_schema, .value = "\"hello\"", .expected = "{\"request\":\"\\\"hello\\\"\"}" },
+    .{ .schema = string_or_object_schema, .value = "\"hello\"", .expected = "{\"request\":\"\\\"hello\\\"\"}" },
+    .{ .schema = string_or_integer_schema, .value = "\"hello\"", .expected = "{\"request\":\"\\\"hello\\\"\"}" },
+};
+
+/// The schemas that point at definitions of the parameters root.
+pub const ref_cases = [_]Case{
+    .{
+        .schema = pydantic_union_schema,
+        .defs = "\"$defs\":{\"Run\":{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"run\"]},\"command\":{\"type\":\"string\"}},\"required\":[\"action\",\"command\"]},\"Poll\":{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"poll\"]},\"handle\":{\"type\":\"string\"}},\"required\":[\"action\",\"handle\"]}}",
+        .value = "{\"action\": \"run\", \"command\": \"cat probe.txt\"}",
+        .expected = "{\"request\":{\"action\":\"run\",\"command\":\"cat probe.txt\"}}",
+    },
+    .{
+        .schema = pydantic_optional_schema,
+        .defs = "\"$defs\":{\"Address\":{\"type\":\"object\",\"properties\":{\"street\":{\"type\":\"string\"}}}}",
+        .value = "{\"street\": \"Main Street\"}",
+        .expected = "{\"request\":{\"street\":\"Main Street\"}}",
+    },
+    .{
+        .schema = definitions_schema,
+        .defs = "\"definitions\":{\"Thing\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}}}",
+        .value = "{\"id\": 7}",
+        .expected = "{\"request\":{\"id\":7}}",
+    },
+    .{
+        .schema = chain_schema,
+        .defs = "\"$defs\":{\"First\":{\"$ref\":\"#/$defs/Second\"},\"Second\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}}}",
+        .value = "{\"id\": 7}",
+        .expected = "{\"request\":{\"id\":7}}",
+    },
+    .{
+        .schema = cycle_schema,
+        .defs = "\"$defs\":{\"Loop\":{\"$ref\":\"#/$defs/Loop\"}}",
+        .value = "{\"id\": 7}",
+        .expected = "{\"request\":\"{\\\"id\\\": 7}\"}",
+    },
+    .{
+        .schema = missing_schema,
+        .value = "{\"id\": 7}",
+        .expected = "{\"request\":\"{\\\"id\\\": 7}\"}",
+    },
+};
+
+/// The schemas that name their kinds through their combiners.
+pub const combined_cases = [_]Case{
+    .{ .schema = all_of_object_schema, .value = "{\"a\": 1}", .expected = "{\"request\":{\"a\":1}}" },
+    .{ .schema = all_of_disagreeing_schema, .value = "{\"a\": 1}", .expected = "{\"request\":\"{\\\"a\\\": 1}\"}" },
+    .{ .schema = enum_schema, .value = "5", .expected = "{\"request\":5}" },
+    .{ .schema = const_schema, .value = "{\"action\": \"run\"}", .expected = "{\"request\":{\"action\":\"run\"}}" },
+    .{ .schema = object_with_one_of_schema, .value = "{\"a\": 1}", .expected = "{\"request\":{\"a\":1}}" },
+};

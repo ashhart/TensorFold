@@ -40,12 +40,35 @@ test "a streamed parameter whose schema is a union comes back as the value the m
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for (witness.cases) |c| {
-        const tools = try witness.tools(a, c.schema);
-        const deltas = try streamed(a, tools, &.{try witness.reply(a, c.value)});
-        // the stream spells the value its own way, so the two arguments compare as values
-        try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try sentArguments(a, deltas)));
-    }
+    for (witness.cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed quoted string under a union stays the text the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.quoted_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema points at a definition comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.ref_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema combines branches comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.combined_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+/// The arguments the stream gives the client for one case.
+fn streamedArguments(a: Allocator, c: witness.Case) ![]const u8 {
+    const tools = try witness.toolsWith(a, c.schema, c.defs);
+    const deltas = try streamed(a, tools, &.{try witness.reply(a, c.value)});
+    return sentArguments(a, deltas);
 }
 
 /// The arguments as one canonical JSON text.

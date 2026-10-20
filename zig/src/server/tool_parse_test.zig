@@ -34,11 +34,35 @@ test "a parameter whose schema is a union comes back as the value the model wrot
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for (witness.cases) |c| {
-        const tools = try witness.tools(a, c.schema);
-        const r = try parse(a, try witness.reply(a, c.value), tools, null);
-        try std.testing.expectEqualStrings(c.expected, r.calls.?[0].get("function").?.get("arguments").?.string);
-    }
+    for (witness.cases) |c| try std.testing.expectEqualStrings(c.expected, try caseArguments(a, c));
+}
+
+test "a quoted string under a union stays the text the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.quoted_cases) |c| try std.testing.expectEqualStrings(c.expected, try caseArguments(a, c));
+}
+
+test "a parameter whose schema points at a definition comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.ref_cases) |c| try std.testing.expectEqualStrings(c.expected, try caseArguments(a, c));
+}
+
+test "a parameter whose schema combines branches comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.combined_cases) |c| try std.testing.expectEqualStrings(c.expected, try caseArguments(a, c));
+}
+
+/// The arguments the parser gives the client for one case.
+fn caseArguments(a: std.mem.Allocator, c: witness.Case) ![]const u8 {
+    const tools = try witness.toolsWith(a, c.schema, c.defs);
+    const r = try parse(a, try witness.reply(a, c.value), tools, null);
+    return r.calls.?[0].get("function").?.get("arguments").?.string;
 }
 
 test "a reply of many calls searches each opener once, not again after every call" {
