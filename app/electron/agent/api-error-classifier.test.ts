@@ -127,6 +127,22 @@ console.log('api-error-classifier tests:')
 }
 
 {
+  // llama.cpp answers a chat template's refusal with HTTP 500; the same body would fail again (#884).
+  for (const msg of [
+    'HTTP 500: System message must be at the beginning.',
+    'HTTP 500: Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.',
+    'HTTP 500: Conversation roles must alternate user/assistant/user/assistant/...',
+  ]) {
+    const c = classifyApiError(Object.assign(new Error(msg), { status: 500 }))
+    assert.equal(c.category, 'unknown', msg)
+    assert.equal(c.retryable, false, msg)
+    assert.equal(c.status, 500)
+  }
+  assert.equal(classifyApiError(Object.assign(new Error('HTTP 500 Internal Server Error'), { status: 500 })).retryable, true)
+  ok("a chat template's refusal on HTTP 500 is not retried; a bare 500 still is")
+}
+
+{
   // Tolerant of odd shapes (string, plain object, undefined).
   assert.equal(classifyApiError('overloaded').category, 'transient')
   assert.equal(classifyApiError({ message: 'HTTP 502 Bad Gateway', status: 502 }).category, 'transient')

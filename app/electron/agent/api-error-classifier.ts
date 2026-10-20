@@ -102,6 +102,10 @@ const AUTH_MSG =
 const CONTEXT_MSG =
   /\b(context[_\s-]?length[_\s-]?exceeded|context window|maximum context|context length|too many tokens|token limit|reduce the length|input too large|payload too large|request too large|prompt is too long|maximum (?:input|prompt) length)\b/i
 
+// A chat template that refuses the request's shape (llama.cpp answers HTTP 500): the same body fails every time (#884).
+const TEMPLATE_MSG =
+  /\b(system message must be at the beginning|unexpected reasoning effort|chat template|jinja|conversation roles must alternate)\b/i
+
 const CONTENT_POLICY_MSG =
   /\b(content[_\s-]?policy|content[_\s-]?filter|safety (?:policy|system|filter)|moderation|flagged|responsible ai|prohibited content|policy violation|cannot assist with that request)\b/i
 
@@ -150,6 +154,11 @@ export function classifyApiError(error: unknown): ApiErrorClassification {
   // 3. Auth → fail fast (retrying a bad key just burns the run).
   if ((status != null && AUTH_STATUS.has(status)) || AUTH_MSG.test(message)) {
     return classification('auth', 'Authentication or permission failure — check the provider key/credentials.', status)
+  }
+
+  // 3b. A chat template's refusal → fail fast: a 500 that names the template is the request, not the server.
+  if (TEMPLATE_MSG.test(message)) {
+    return classification('unknown', "The server's chat template refused this request; sending it again would fail the same way.", status)
   }
 
   // 4. Transient → retry with backoff. Status family OR a dropped-socket code OR
