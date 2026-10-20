@@ -26,17 +26,17 @@ and FP4-Local against NVFP4 on matched inputs. It does not qualify Metal, or a c
 | Loader gate, TP=3, every layer (`tp3/gate/all-layers-*`) | Ranks 0, 1 and 2: 894 and 486, 0 differ (TP=3's FP8 shares start inside a 128 block: #1024's repacking from the origin, per rank) |
 | Loader gate, six layers (0, 3, 4, 43, 44, MTP) | TP=2 and TP=3: 115 and 72, 0 differ |
 | `glm-lanes-cover`, `glm-lanes-concurrent`, `glm-shared-check` | TP=2 and TP=3: 40/40, 38/38, and 108 rows of 5 streams over 12 rounds equal to their lone twins byte for byte |
-| Golden ids (`tp2/serve/ex-*`) | NVFP4 on this head equals plain v1.1.1 on all three prompts (count `6faafd98`, prose `b82116bd`, code `ddd42119`), drafts and tokens per round included; FP4-Local drafted = `"draft": false` on all three |
+| Golden ids (`tp2/serve/ex-*`) | NVFP4 on this head equals plain v1.1.1 on all three prompts (count `6faafd98`, prose `b82116bd`, code `ddd42119`), drafts and tokens per round included; FP4-Local drafted = `"draft": false` on all three; at TP=3 (`tp3/serve/ex3-*`) drafted = `"draft": false` on both checkpoints |
 | Concurrent (`bench_concurrent.py --alone --serial`, levels 1, 2, 4) | 12 cells a checkpoint at TP=2 and TP=3, 0 unequal, 0 failed |
-| Resume (a 6,593-token chat resumed from its kept state, `"draft": false`, two at once) | Every reply equals the cold one, both checkpoints, TP=2 and TP=3 |
+| Resume (a chat of 6,593 to 6,595 tokens resumed from its kept state, `"draft": false`, two at once) | Every reply equals the cold one, both checkpoints, TP=2 and TP=3 |
 | Prompts sent together beside a decode (`batch`) | Four fresh prompts, each equal to its alone run, both checkpoints, TP=2 and TP=3 (GLM fills them in chunks between rounds by default) |
-| 1.1.1's batched prompt pass (`bt-*`, `TF_GLM_PROMPT_STEPS=0`) | Three fresh prompts shared one pass (first tokens within 0.3 to 0.5 ms, equal `prefill_seconds`), each equal to its alone run: plain v1.1.1 and this head on NVFP4, this head on FP4-Local (its MXFP8 `lm_head` through `cuda_shared.heads`) |
+| 1.1.1's batched prompt pass (`bt-*`, `TF_GLM_PROMPT_STEPS=0`) | Three fresh prompts shared one pass (first tokens 0.28 to 0.53 ms apart, `prefill_seconds` within 43 µs), each equal to its alone run: plain v1.1.1 and this head on NVFP4, this head on FP4-Local (its MXFP8 `lm_head` through `cuda_shared.heads`) |
 | Media, media resume (`--vision`, `assets/tensorfold-hero.png`) | Drafted = `"draft": false`, repeated, three at once = alone; resumed past the image = cold: FP4-Local and NVFP4 at TP=2, FP4-Local at TP=3, plain v1.1.1 for resume |
-| Structured output and tools (`s9/`, #1017's and #1018's items) | 26/26 on each checkpoint with drafts: schemas with thinking off and on, a schema plain already meets, `"draft": false`, seeded sampling twice, nested, resume from cache, required, named, parallel, single, nested and empty tool calls each again with `"draft": false`, mixed streams and prompts before and behind a constrained one; `--no-drafts` serves: 22/22; `compare`: all 22 shared greedy replies equal, and the resumed reply equals a cold one |
+| Structured output and tools (`s9/`, #1017's and #1018's items) | At TP=2, 26/26 on each checkpoint with drafts: schemas with thinking off and on, a schema plain already meets, `"draft": false`, seeded sampling twice, nested, resume from cache, required, named, parallel, single, nested and empty tool calls each again with `"draft": false`, mixed streams and prompts before and behind a constrained one; `--no-drafts` serves: 22/22; `compare`: all 22 shared greedy replies equal, and the resumed reply equals a cold one |
 | Prompt logprobs against BF16 (`s5/`, 144,285 positions) | Mean NLL: BF16 1.00691, FP4-Local 1.01811 (+1.11%), NVFP4 1.02069 (+1.37%); top-1 equal to BF16's 0.9282 and 0.9268; KL over BF16's top 20 (an approximation) 0.0528 and 0.0537 |
 | Memory (`memory/summary.json`, `memory_receipts.py`) | Every rank's load and cleanup receipts recorded; TP=2 FP4-Local 90.27 GiB at load end, 92.96 GiB peak, 0.00 after cleanup; TP=3 63.01, 62.88 and 57.74 GiB at load end |
 | TP=3 rank loss (`tp3/serve/sp3-fl`) | Rank 2 killed: ranks 0 and 1 left 7 s later |
-| kernel contract (`single/`) | `SUMMARY 91 kernels: 91 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 1533 limit problems`; plain v1.1.1 (`single-v1.1.1/`): 85 kernels, 85 pass, the same 1533 |
+| kernel contract (`single/`) | `SUMMARY 91 kernels: 91 pass gates 1-4, 0 fail, 0 known findings; 7 controls: 7 red as planted, 0 missed; 1533 limit problems`; plain v1.1.1 (`single-v1.1.1/`): 85 kernels, 85 pass, the same 1533 (the contract counts each output: the two new kernels add six, rmsnorm's rows and 64-sums and hc_finish's rows, 64-sums, post and comb, and the launches go from 1101 to 1103) |
 | kernel-contract-limits, sm_80 to sm_121 | 877 problems, the same 877 on plain v1.1.1; this branch's two kernels (`tf_glm_rmsnorm_4096_f32w`, `tf_glm_hc_finish_f32w`) pass on all five (3000 PASS lines against 2990) |
 | glm-ref | 12 pass, every RESULT line equal to plain v1.1.1's |
 | No-GPU CI (`ci/`) | See ci/ci-summary.txt: every step passes; with fresh caches upstream's `cuda_cost_identity` mtime test fails here, on plain v1.1.1 too |
@@ -60,16 +60,19 @@ Speed, medians (`tp2/serve/sp*`, `tp3/serve/sp3-*`); at TP=2 each binary and che
 ## Reproduction
 
 Every serve: `tensorfold-native serve CKPT --name local-model --parallel 4 --context 40960 --port 8095`, drafts on,
-one rank a host (`TF_GLM_RANK`, `TF_GLM_WORLD`), each host's page cache of both checkpoints dropped first. The checks
-are tools/: `golden_http.py` on dc.json, upstream's `bench_concurrent.py`, `bench_openai.py` and `bench_cache.py`,
-`resume_http.py`, `batch_http.py` (`one-pass` for `bt-*`), `media_http.py`, `media_resume_http.py`, `x9_live.py`
-(and its `compare`), `s5_prompt_lp.py` (prompt_logprobs 20 on B-2's 128 sequences) with `s5_compare.py` against
-`s5_bf16_ref.py`'s reference. `mkprompts.py` makes the matched token-id files. runs.log has one line a check.
+one rank a host (`TF_GLM_RANK`, `TF_GLM_WORLD`), each host's page cache of both checkpoints dropped first; `md*` and
+`mr-*` add `--vision`, `x9-*-nd` add `--no-drafts`, and `bt-*` set `TF_GLM_PROMPT_STEPS=0`. The checks are tools/:
+`golden_http.py` on dc.json, upstream's `bench_concurrent.py`, `bench_openai.py` and `bench_cache.py`,
+`openai_aligned.py` (the `"draft": false` decode), `resume_http.py`, `batch_http.py` (`one-pass` for `bt-*`),
+`media_http.py`, `media_resume_http.py`, `x9_live.py` (and its `compare`), `s5_prompt_lp.py` (prompt_logprobs 20 on the
+128 held-out sequences) with `s5_compare.py` against `s5_bf16_ref.py`'s reference. `mkprompts.py` makes the matched
+token-id files. runs.log has one line a check.
 
 ## Remaining coverage limits
 
 - TP=3 needs `TF_GLM_MM=0` on every rank: the default glm_mm refuses KDA's input stack there with `BadShape`
-  (#1067; still so on 1.1.1, `tp3/serve/smoke3-mm1`), so TP=3 has no batched prompt pass (it needs glm_mm's tiles).
+  (#1067, whose thread has plain 1.1.1's run; here `tp3/serve/smoke3-mm1`, this branch with the bootstrap on FP4-Local),
+  so TP=3 has no batched prompt pass (it needs glm_mm's tiles).
 - TP=3's ranks meet through a local bootstrap commit that is not part of this branch (`tp3/bootstrap.patch`); the
   gate and the lanes at TP=3 ran this branch's own binaries.
 - 1.1.1's batched prompt pass runs only with `TF_GLM_PROMPT_STEPS=0` on rank 0; `bt-*` set it, the other serves ran

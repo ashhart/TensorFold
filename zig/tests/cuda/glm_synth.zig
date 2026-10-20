@@ -74,7 +74,7 @@ const Out = struct {
         try o.put(name, .bf16, shape, std.mem.sliceAsBytes(v));
     }
 
-    /// A float32 norm weight 1 + u 2^-9 bf16 does not hold (FP4-Local's, D1), from `g`, not the weights' stream.
+    /// A float32 norm weight 1 + u 2^-9 bf16 does not hold (FP4-Local's), from `g`, not the weights' stream.
     fn norm32(o: *Out, name: []const u8, g: std.Random) !void {
         const v = try o.a.alloc(f32, hidden);
         for (v) |*x| x.* = 1 + g.float(f32) * 0x1p-9;
@@ -267,7 +267,7 @@ pub fn run(gpu: check.Gpu, out_dir: []const u8, form: Kind) !void {
     const a = arena.allocator();
     var prng = std.Random.DefaultPrng.init(53);
     var o: Out = .{ .a = a, .rng = prng.random() };
-    var g32 = std.Random.DefaultPrng.init(32); // local's float32 norms: the other tensors keep the bytes they had
+    var g32 = std.Random.DefaultPrng.init(32); // local's float32 norms: a stream apart from the other tensors'
     const fp8 = form != .nvfp4;
     const mx = form == .local;
     const g: ?std.Random = if (mx) g32.random() else null;

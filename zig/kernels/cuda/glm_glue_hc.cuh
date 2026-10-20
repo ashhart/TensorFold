@@ -231,7 +231,7 @@ extern "C" __global__ void __launch_bounds__(256)
   glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
 }
 
-// FP4-Local's float32 post-attention norm weight (D1): hc_finish's arithmetic, the weight read as float32.
+// FP4-Local's float32 post-attention norm weight: hc_finish's arithmetic, the weight read as float32.
 extern "C" __global__ void __launch_bounds__(256)
     tf_glm_hc_finish_f32w(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
                           const float* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,

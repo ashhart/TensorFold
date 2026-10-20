@@ -33,7 +33,7 @@ __device__ __forceinline__ void load_s(const __nv_bfloat16* p, float* v, bool ve
     for (int j = 0; j < S; ++j) v[j] = bf(p[j]);
   }
 }
-// A norm's weight as float: bf16 (load_s's packing), or float32 (FP4-Local's hidden norms, D1) in 16-byte loads.
+// A norm's weight as float: bf16 (load_s's packing), or float32 (FP4-Local's hidden norms) in 16-byte loads.
 template <int S>
 __device__ __forceinline__ bool wpacked(const __nv_bfloat16* w) {
   return packed<S>(w, 0);
@@ -146,7 +146,7 @@ RMSNORM(4096, 4096, 8, 8)
 RMSNORM(1536, 2048, 4, 8)
 RMSNORM(512, 512, 4, 4)
 
-// FP4-Local's float32 hidden norm weight (D1): rmsnorm_4096's arithmetic, the weight read as float32.
+// FP4-Local's float32 hidden norm weight: rmsnorm_4096's arithmetic, the weight read as float32.
 extern "C" __global__ void __launch_bounds__(256)
     tf_glm_rmsnorm_4096_f32w(const __nv_bfloat16* x, int64_t x_stride, const float* w, __nv_bfloat16* out,
                              int64_t o_stride, float* xs, float eps, int sums) {

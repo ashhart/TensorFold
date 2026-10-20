@@ -96,8 +96,7 @@ E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -
 
 
 def dequant(w, scale, scale2):
-    """A projection stored MXFP8 (e4m3, a UE8M0 byte a 32 inputs) or NVFP4 (two e2m1 codes a byte, the low nibble
-    first, an e4m3 scale a 16 inputs and a global scale) as the float32 values its codes and scales hold."""
+    """An MXFP8 (e4m3, UE8M0 a 32) or NVFP4 (e2m1 low nibble first, e4m3 a 16, global) projection as float32 values."""
     if scale2 is None:
         n, k = w.shape
         return (w.view(torch.float8_e4m3fn).float().reshape(n, k // 32, 32) * torch.exp2(scale.float() - 127)[..., None]).reshape(n, k)

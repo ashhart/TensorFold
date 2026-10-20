@@ -79,7 +79,7 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
     switch (l.proj) {
         .bf16 => |p| try b16.matmul(selected, stream, x, x_stride, p, s.p, s.mm_part, rows, w, l.dims, false),
         .split => |sp| { // each part on its own kernel into its columns of s.p: one row straight there, more through tmp
-            // cc-defer: two row copies a window; an output row stride on the lane and glm_mm when 03 times them
+            // cc-defer: two row copies a window; an output row stride on the lane and glm_mm if a profile flags them
             const one = rows == 1;
             try projection.matmul(set, stream, .{ .mxfp8 = sp.qkv }, x, x_stride, if (one) s.p else s.tmp, s.mm_part, rows, fa, l.dims, false);
             if (!one) try columns(set, stream, s.tmp, fa, s.p, w, rows);

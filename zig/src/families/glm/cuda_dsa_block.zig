@@ -16,7 +16,7 @@ pub const Index = struct { kw: projection.Proj, gate: u64, ln_w: u64, ln_b: u64,
 
 /// One DSA layer on a rank of `heads` heads: proj, norms, q_b, kv_b per head as wk/wv, o, indexer; shapes from config.
 pub const Layer = struct {
-    proj: projection.Proj, // [q_a | kv_a], q_b and o as the checkpoint stores them: bf16 or block FP8
+    proj: projection.Proj, // [q_a | kv_a], q_b and o as the checkpoint stores them: bf16, block FP8 or the MTP's MXFP8
     q_norm: u64,
     kv_norm: u64,
     q_b: projection.Proj,

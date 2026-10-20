@@ -15,7 +15,7 @@ pub const Layer = struct {
     routed: cuda.experts.Layer, // NVFP4 experts, or only the shape (width, dims, limit) when `exl3` holds them
     exl3: ?exl3.Experts = null,
     count: usize,
-    shared_gu: projection.Proj, // as the checkpoint stores them: bf16 or block FP8
+    shared_gu: projection.Proj, // as the checkpoint stores them: bf16, block FP8 or the MTP's MXFP8
     shared_down: projection.Proj,
     shared: usize,
     top_k: usize,

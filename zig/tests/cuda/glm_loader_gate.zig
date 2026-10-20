@@ -32,7 +32,7 @@ const Plan = struct {
         try p.cuts.append(p.a, .{ .name = name, .lo = 0, .hi = (try p.ck.get(name)).dim(0), .to = to });
     }
 
-    /// A hidden-size norm as the loader keeps it: float32 when stored so (FP4-Local's, D1), else bf16.
+    /// A hidden-size norm as the loader keeps it: float32 when stored so (FP4-Local's), else bf16.
     fn norm(p: *Plan, comptime fmt: []const u8, args: anytype) !void {
         const name = try std.fmt.allocPrint(p.a, fmt, args);
         const t = try p.ck.get(name);

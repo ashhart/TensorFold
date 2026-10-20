@@ -1,4 +1,4 @@
-//! FP4-Local's float32 norm weights (D1) under the contract: rmsnorm_4096_f32w and hc_finish_f32w, each output alone.
+//! FP4-Local's float32 norm weights under the contract: rmsnorm_4096_f32w and hc_finish_f32w, each output alone.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");

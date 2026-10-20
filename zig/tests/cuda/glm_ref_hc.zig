@@ -1,4 +1,4 @@
-//! GLM's hyper-connection dots (hcPre: 24 dots + squares a 1,024 block) vs float64; hc_partial8 = hc_partial bytes.
+//! GLM's hyper-connection dots (hcPre: 24 dots + squares a 1,024 block) vs float64; hc_partial8, _f32w: same bytes.
 const std = @import("std");
 const check = @import("check.zig");
 const qr = @import("quant_ref_tests.zig");
@@ -29,7 +29,7 @@ fn mixWeights(r: *Rig) ![3]u64 {
     return .{ try r.dev(std.mem.sliceAsBytes(try r.bfs(mixes * wide, 0.02))), try r.dev(std.mem.sliceAsBytes(base)), try r.dev(std.mem.asBytes(&scale)) };
 }
 
-/// A float32 norm weight (FP4-Local's, D1) holding bf16 values: the _f32w kernels give the bf16 weight's bytes.
+/// A float32 norm weight (FP4-Local's) holding bf16 values: the _f32w kernels give the bf16 weight's bytes.
 pub fn gammas(r: *Rig, set: glue.Set) !void {
     const rows = 70;
     const w = try mixWeights(r);

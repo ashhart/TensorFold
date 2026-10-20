@@ -61,7 +61,7 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
     }
 }
 
-/// Every linear b16.matmul reads, as the fields holding them; the head last.
+/// Every linear b16.matmul reads, as the fields holding them; the head last, when it is bf16.
 fn linears(w: *Weights, list: *std.ArrayList(Lin)) !void {
     for (w.layers) |*l| try layerLinears(w.gpa, l, list);
     if (w.mtp) |*m| {

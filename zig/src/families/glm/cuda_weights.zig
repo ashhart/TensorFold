@@ -98,7 +98,7 @@ const Loader = struct {
         return L.ck.get(L.last);
     }
 
-    /// Hidden-size norm `fmt` uploaded as `up`: bf16 as stored, or kept float32 (D1) for the _f32w kernels.
+    /// Hidden-size norm `fmt` uploaded as `up`: bf16 as stored, or kept float32 for the _f32w kernels.
     pub fn norm(L: *Loader, comptime fmt: []const u8, args: anytype, comptime up: []const u8) !glue.Norm {
         const t = try L.get(fmt, args);
         const kept = t.dtype == .f32;
