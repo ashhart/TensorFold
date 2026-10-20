@@ -93,8 +93,6 @@ pub const Server = struct {
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
-    /// With image input: whether the chat template writes an image placeholder for an image part (templateImages).
-    template_images: bool = true,
     markers: reply_text.Markers = reply_text.think_markers,
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
@@ -155,8 +153,8 @@ pub const Server = struct {
         srv.late_system = try lateSystem(a, text);
         srv.needs_user_after_tool = needsUserAfterTool(source);
         if (srv.info.vision != null) {
-            srv.template_images = templateImages(srv);
-            if (!srv.template_images) log.line("warning: --vision: the chat template writes no image placeholder for an image part, so image requests will fail; serve with --chat-template naming a template that has an image path", .{});
+            const template_images = templateImages(srv);
+            if (!template_images) log.line("warning: --vision: the chat template writes no image placeholder for an image part, so image requests will fail; serve with --chat-template naming a template that has an image path", .{});
         }
         if (text.tokenId("</think>")) |end| {
             const lead = try text.encode(a, "\n", false);
