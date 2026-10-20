@@ -66,7 +66,7 @@ pub fn load(a: Allocator, io: std.Io, path: []const u8) ![]const Voice {
         const name = entry.name[0 .. entry.name.len - 5];
         if (entry.kind != .file or !validName(name)) return error.BadVoiceName;
         if (voices.items.len >= 256) return error.TooManyVoices;
-        const bytes = try dir.readFileAlloc(io, entry.name, a, .limited(max_file_bytes));
+        const bytes = try dir.readFileAlloc(io, entry.name, a, .limited(max_file_bytes + 1));
         try voices.append(a, .{ .name = try a.dupe(u8, name), .references = try parse(a, bytes) });
     }
     std.mem.sort(Voice, voices.items, {}, struct {
@@ -123,6 +123,18 @@ test "voices: synthetic parsing, attestation, bounds and selection" {
     const loaded = try load(a, std.testing.io, path);
     try std.testing.expectEqualStrings("tone", loaded[0].name);
     try std.testing.expectEqualSlices([10]i32, refs[0].codes, loaded[0].references[0].codes);
+    const padded = try a.alloc(u8, max_file_bytes + 1);
+    @memcpy(padded[0..fixture.len], fixture);
+    @memset(padded[fixture.len..], ' ');
+    for ([_]usize{ max_file_bytes - 1, max_file_bytes }) |size| {
+        _ = try parse(a, padded[0..size]);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tone.json", .data = padded[0..size] });
+        const boundary = try load(a, std.testing.io, path);
+        try std.testing.expectEqualSlices([10]i32, refs[0].codes, boundary[0].references[0].codes);
+    }
+    try std.testing.expectError(error.BadVoice, parse(a, padded));
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tone.json", .data = padded });
+    try std.testing.expectError(error.StreamTooLong, load(a, std.testing.io, path));
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tone.json", .data = "{\"format\":\"drama3-http-voice/1\"}" });
     try std.testing.expectError(error.MissingAttestation, load(a, std.testing.io, path));
     try std.testing.expectEqual(@as(i32, 4095), refs[0].codes[0][0]);
