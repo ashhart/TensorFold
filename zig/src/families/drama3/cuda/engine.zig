@@ -214,6 +214,8 @@ pub const Engine = struct {
         try e.stream.synchronize();
         try e.stream2.synchronize();
         for (e.bufs.items) |*buffer| try buffer.fill8(0xa5, null);
+        // cuMemsetD8 may return before completion; non-blocking streams do not wait for it.
+        try e.driver.synchronize();
     }
 
     fn alloc(e: *Engine, bytes: usize) !u64 {
