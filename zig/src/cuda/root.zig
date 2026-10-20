@@ -53,6 +53,7 @@ pub const relay_plan = @import("relay_plan.zig");
 pub const tp_group = @import("tp_group.zig");
 pub const tp_watch = @import("tp_watch.zig");
 pub const ck = @import("ck.zig");
+pub const ck_dense = @import("ck_dense.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const tree_attention = @import("tree_attention.zig");
 pub const block_attention = @import("block_attention.zig");
@@ -106,6 +107,7 @@ test {
     _ = exl3_upload;
     _ = @import("modelopt.zig");
     _ = @import("ck.zig");
+    _ = @import("ck_dense.zig");
     _ = @import("tp_watch.zig");
     _ = @import("shared_test.zig");
     _ = @import("tree_attention.zig");
