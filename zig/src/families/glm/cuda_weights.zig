@@ -171,7 +171,7 @@ const Loader = struct {
             switch (to) {
                 .f32 => try L.host.appendSlice(L.gpa, std.mem.asBytes(&v)),
                 .bf16 => try L.host.appendSlice(L.gpa, std.mem.asBytes(&(narrow(v) orelse {
-                    std.log.err("{s}: a float32 value bf16 does not hold; only the hidden norms keep float32", .{L.last});
+                    std.log.err("{s}: a float32 value bf16 does not hold, and its kernels read bf16", .{L.last});
                     return error.InexactBf16;
                 }))),
                 else => return error.UnexpectedTensor,

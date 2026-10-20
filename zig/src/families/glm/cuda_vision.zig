@@ -74,7 +74,7 @@ fn plan(ck: *core.Checkpoint, q: Quant) !Plan {
 /// The refusal, by the module's name: what it declares, what it stores and why the tower cannot read it.
 fn refuse(module: []const u8, declared: formats.Declared, stored: formats.Stored, e: anyerror) error{UnreadableFormat} {
     var why: [320]u8 = undefined;
-    std.log.err("{s} ({t}); the image tower reads MXFP8 and W4A16_NVFP4 projections", .{ formats.describe(&why, module, declared, stored), e });
+    std.log.err("{s} ({t}); the image tower reads MXFP8 and NVFP4 projections", .{ formats.describe(&why, module, declared, stored), e });
     return error.UnreadableFormat;
 }
 

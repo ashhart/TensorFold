@@ -15,7 +15,7 @@ const dflash = @import("dflash.zig");
 const dflash_load = @import("dflash_load.zig");
 
 pub const model_type = "glm5_next";
-pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
+pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "modelopt-mixed" };
 // cc-defer: a fixed window; the Python family sizes it from free memory (capacity.admit), port that when serving needs
 pub const default_context: i64 = 8192;
 pub const max_segments: u32 = 1;
@@ -338,7 +338,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
             .{ ranks.max_world, ranks.max_world },
         ),
-        error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4 checkpoints (the log names what config.json has)",
+        error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4 and MIXED_PRECISION checkpoints (the log names what config.json has)",
         error.UnreadableFormat => "a projection is stored in a format GLM-5.3-Flash on CUDA does not read (the log names its module, recipe and tensors)",
         else => null,
     };
