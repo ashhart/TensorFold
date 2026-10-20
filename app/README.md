@@ -62,8 +62,8 @@ has service rate limits. Queries and requested URLs go to Parallel when this pro
 Omitting `provider` keeps Google News RSS search and direct page fetching. Explicit
 `provider: "google_news"` for search and `provider: "direct"` for fetching select those paths.
 There is no automatic provider fallback after an error. Existing web-tool permissions and
-local-only conversation restrictions apply. Parallel calls share an opaque conversation ID
-across search, fetch and follow-up turns; a new chat gets a new ID. MCP requests time out
+local-only conversation restrictions apply. In the built-in agent loop, Parallel calls share
+an opaque conversation ID across search, fetch and follow-up turns; a new chat gets a new ID. MCP requests time out
 after 20 seconds and stop when the owning run is cancelled. Fetches return excerpts rather
 than a complete page; `max_chars` still caps the displayed text.
 

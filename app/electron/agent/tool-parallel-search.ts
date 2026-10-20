@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { readBoundedResponseText } from './bounded-response'
 import { assertFetchableUrl, safePublicWebUrl } from './tool-web'
 import type { ToolContext, ToolResult } from './tools'
@@ -77,15 +77,15 @@ export async function executeParallelWebTool(name: 'web_search' | 'web_fetch', a
   }
   ctx.signal?.throwIfAborted()
   // Hash the host-owned random thread UUID to keep one opaque identity across turns and app restarts.
-  const sessionId = ctx.currentThread
-    ? createHash('sha256').update(`tensorfold-parallel:${ctx.currentThread.id}`).digest('hex')
-    : randomUUID()
+  const conversation = ctx.currentThread
+    ? { session_id: createHash('sha256').update(`tensorfold-parallel:${ctx.currentThread.id}`).digest('hex') }
+    : {}
   const query = String(args.query ?? '').trim()
   if (name === 'web_search' && !query) throw new Error('Search query is required.')
   const url = name === 'web_fetch' ? await assertFetchableUrl(String(args.url ?? '')) : null
   const parameters = name === 'web_search'
-    ? { objective: query, search_queries: [query], session_id: sessionId }
-    : { urls: [url!.href], session_id: sessionId }
+    ? { objective: query, search_queries: [query], ...conversation }
+    : { urls: [url!.href], ...conversation }
   const data = resultData(await callParallel(name, parameters, ctx.signal))
   const rawLimit = Number(args.limit ?? 5)
   const limit = Math.max(1, Math.min(8, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 5))
