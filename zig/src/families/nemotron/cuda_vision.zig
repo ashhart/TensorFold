@@ -9,6 +9,12 @@ pub const video = radio.video;
 /// What a request may hold: image tokens in all (the rows buffer), and images.
 pub const Limits = struct { image_tokens: u32, max_images: u32, video_tokens: u32 = 0 };
 
+/// Takes a prompt pass's images in the tower's place, so a host test can count them without a GPU.
+pub const Encoder = struct {
+    ctx: *anyopaque,
+    encode: *const fn (ctx: *anyopaque, s: cuda.Stream, images: []const lanes.stream.Image, spans: []const radio.Span, rows: *const radio.Rows) anyerror!void,
+};
+
 pub const Vision = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -19,6 +25,7 @@ pub const Vision = struct {
     limits: Limits,
     mark_ids: [3]u32, // the placeholder and its wrapper: text that spells one stays text
     spans: []radio.Span = &.{}, // the prompt pass in progress
+    encoder: ?Encoder = null, // null: the tower
 
     /// The checkpoint's tower and a rows buffer for `limits`; null with `problem` when it cannot take images.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, limits: Limits, problem: *[]const u8) !?*Vision {
@@ -64,6 +71,7 @@ pub const Vision = struct {
         if (images.len == 0) return;
         v.spans = try radio.plan(v.gpa, images, @intCast(from));
         if (radio.rows.total(v.spans) > v.rows.limit) return error.ImageRows;
+        if (v.encoder) |x| return x.encode(x.ctx, s, images, v.spans, &v.rows);
         try v.tower.encode(s, images, v.spans, &v.rows);
     }
 

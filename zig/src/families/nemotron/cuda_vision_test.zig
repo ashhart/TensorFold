@@ -8,6 +8,7 @@ test "low independent image and video budgets reach the actual tower boundary" {
         var v: vision.Vision = undefined;
         v.gpa = std.testing.allocator;
         v.spans = &.{};
+        v.encoder = null;
         defer v.end();
         v.rows = .{ .d = undefined, .buf = undefined, .hidden = 4096, .limit = try vision.reservation(.{ .image_tokens = c[0], .video_tokens = c[1], .max_images = 4 }, true) };
         v.tower.c.text_hidden = 1;
