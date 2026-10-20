@@ -306,10 +306,10 @@ pub const Stream = struct {
     }
 
     /// A long cycle ending at the last committed token (the runs before it indexed), then that token's run indexed.
-    fn longCycle(s: *Stream, gpa: Allocator) !?u32 {
+    fn longCycle(s: *Stream) ?u32 {
         const e = s.emitted();
         const period = s.long_loop.cycleAt(e, &.{}, e.len);
-        try s.long_loop.add(gpa, e);
+        s.long_loop.addAssumeCapacity(e);
         return period;
     }
 
@@ -403,6 +403,14 @@ pub const Stream = struct {
         try s.context.ensureUnusedCapacity(gpa, tokens.len);
         if (rows.len > 0) try s.rows.ensureUnusedCapacity(gpa, rows.len);
         if (s.loop_guard and s.think_open) try s.force.ensureTotalCapacity(gpa, s.think_close.len);
+        if (s.loop_guard and s.think_open and s.think_end >= 0 and s.loop_period == null) {
+            var end: usize = 0;
+            for (tokens) |t| {
+                if (@as(i64, t) == s.think_end) break;
+                end += 1;
+            }
+            try s.long_loop.reserve(gpa, s.emitted().len + end);
+        }
         var landed: usize = 0;
         for (tokens, 0..) |t, i| {
             if (s.finished) break;
@@ -429,7 +437,7 @@ pub const Stream = struct {
                 }
             }
             const guarded = s.loop_guard and s.think_open and s.think_end >= 0 and s.loop_period == null;
-            const fire = if (guarded) detectLoop(s.emitted()) orelse try s.longCycle(gpa) else null;
+            const fire = if (guarded) detectLoop(s.emitted()) orelse s.longCycle() else null;
             if (s.isEos(t) or s.stopped()) {
                 s.finished = true;
                 s.reason = .stop;

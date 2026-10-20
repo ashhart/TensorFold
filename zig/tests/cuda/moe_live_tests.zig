@@ -166,8 +166,7 @@ pub fn run(gpu: Gpu) !void {
     @memset(stale, stale_pick);
     var params = [8]i32{ 0, 0, 0, 0, 0, 0, 0, 0 };
     const dparams = try c.put(std.mem.sliceAsBytes(&params));
-    // each bucket captured once, then replayed at live counts in this order (the count is read at each replay);
-    // nine pairs a row, so buckets past 113 rows take the wide plan, and 114 live rows are its first wide count
+    // Capture each bucket once, then replay the live counts; nine pairs per row take the wide plan past 113 rows.
     const sweeps = [_]struct { bucket: usize, live: []const usize }{
         .{ .bucket = 1, .live = &.{1} },
         .{ .bucket = 16, .live = &.{ 1, 2, 3, 7, 15, 16, 3, 14, 2 } },
@@ -189,8 +188,7 @@ pub fn run(gpu: Gpu) !void {
         var exec = try graph.instantiate();
         defer exec.deinit();
         for (sw.live) |live| {
-            // poisoned padding: rows from `live` up NaN, +huge and -huge in turn; stale picks name a real expert,
-            // stale weights and logits are NaN, and the experts' pair outputs hold a sentinel
+            // Poison padding with NaN and huge rows, real stale picks, NaN weights/logits and sentinel expert outputs.
             @memcpy(poisoned, x);
             for (live..most) |row| @memset(poisoned[row * dims ..][0..dims], switch (row % 3) {
                 0 => 0x7fc0,

@@ -87,8 +87,7 @@ fn liveRows(gpu: check.Gpu, s: cuda.Stream, fns: cuda.moe.Fns, mode: ref.Mode, f
     try check.expect(try rig.intact() and !rig.overlap(), "{s} broke a guard at {d} live rows", .{ ref.symbol(mode), live });
 }
 
-/// routeRows at n live rows equals route over those rows' pairs byte for byte, padding pairs never planned; buckets
-/// past 113 rows (1,024 pairs) take the wide plan.
+/// Live-row plans equal plans over the live pairs, including buckets past the 1,024-pair single-block limit.
 fn planRows(gpu: check.Gpu, s: cuda.Stream) !void {
     var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
     defer mod.unload();

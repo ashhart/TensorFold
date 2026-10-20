@@ -137,3 +137,37 @@ test "commit storage: empty and finished branches allocate and advance no gramma
     try t.expect(rules.accepted == 1 and !fail.has_induced_failure);
     try t.expectEqualSlices(u32, &.{7}, s.emitted());
 }
+
+fn indexReservation(map: bool) !void {
+    var rules: Rules = .{};
+    var constraint = grammar.Constraint.init(rules.rules(), 1, null);
+    var s = try Stream.init(a, .{ .id = "index reserve", .prompt = &.{ 1, 2 }, .max_new = 100, .logprobs = 0, .grammar = &constraint, .think_end = 8, .think_open = true, .think_close = &close, .loop_guard = true });
+    defer s.deinit(a);
+    const tokens: [33]u32 = @splat(7);
+    const rows: [33]Row = @splat(.{ .token = 7, .logprob = -1 });
+    try s.context.ensureUnusedCapacity(a, tokens.len);
+    try s.rows.ensureUnusedCapacity(a, rows.len);
+    try s.force.append(a, 9);
+    try s.force.ensureTotalCapacity(a, close.len);
+    if (map) try s.long_loop.prev.ensureTotalCapacity(a, tokens.len);
+    var fail = t.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    try t.expectError(error.OutOfMemory, s.commit(fail.allocator(), &tokens, &rows));
+    try t.expect(fail.has_induced_failure);
+    try t.expectEqualSlices(u32, &.{ 1, 2 }, s.context.items);
+    try t.expectEqual(@as(usize, 0), s.rows.items.len);
+    try t.expectEqualSlices(u32, &.{9}, s.force.items);
+    try t.expect(rules.accepted == 0 and s.think_open and s.answer_from == null);
+    try t.expect(!s.finished and s.reason == .none and s.problem.len == 0 and s.loop_period == null);
+    try t.expect(s.long_loop.upto == 0 and s.long_loop.prev.items.len == 0 and s.long_loop.last.count() == 0);
+    try t.expectEqual(@as(usize, 33), try s.commit(a, &tokens, &rows));
+    try t.expectEqualSlices(u32, &tokens, s.emitted());
+    try t.expectEqual(@as(usize, 33), rules.accepted);
+    try t.expectEqual(@as(usize, 33), s.rows.items.len);
+    try t.expectEqual(@as(usize, 33), s.long_loop.upto);
+}
+test "commit storage: index rows reserve before grammar and publication, then retry" {
+    try indexReservation(false);
+}
+test "commit storage: index map reserves before grammar and publication, then retries" {
+    try indexReservation(true);
+}

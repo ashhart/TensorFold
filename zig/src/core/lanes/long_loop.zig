@@ -19,13 +19,27 @@ pub const Index = struct {
         x.prev.deinit(gpa);
     }
 
+    /// Reserve every possible new run before publishing tokens or changing the index's logical state.
+    pub fn reserve(x: *Index, gpa: Allocator, upto: usize) !void {
+        if (upto <= x.upto) return;
+        try x.prev.ensureTotalCapacity(gpa, upto);
+        const first = @max(x.upto, gram - 1);
+        if (upto > first) try x.last.ensureUnusedCapacity(gpa, @intCast(upto - first));
+    }
+
     /// Index every run end up to `tokens.len` (tokens: emitted(), committed only).
     pub fn add(x: *Index, gpa: Allocator, tokens: []const u32) !void {
+        try x.reserve(gpa, tokens.len);
+        x.addAssumeCapacity(tokens);
+    }
+
+    /// Commit runs after reserve succeeded, without an allocation that could fail after token publication.
+    pub fn addAssumeCapacity(x: *Index, tokens: []const u32) void {
         while (x.upto < tokens.len) {
             x.upto += 1;
-            try x.prev.append(gpa, 0);
+            x.prev.appendAssumeCapacity(0);
             if (x.upto < gram) continue;
-            const got = try x.last.getOrPut(gpa, hash(tokens, &.{}, x.upto));
+            const got = x.last.getOrPutAssumeCapacity(hash(tokens, &.{}, x.upto));
             x.prev.items[x.upto - 1] = if (got.found_existing) got.value_ptr.* else 0;
             got.value_ptr.* = @intCast(x.upto);
         }
