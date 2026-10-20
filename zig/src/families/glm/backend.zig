@@ -17,6 +17,8 @@ const fwd = @import("forward.zig");
 /// One stream's window and a shared forward's rows, ms on one M5 Ultra (a pair times its own at load: timing.zig).
 const one_mac_window_costs = costTable(13.0, 4.1);
 const one_mac_shared_costs = costTable(8.4 + 4.1, 4.1);
+/// The acceptance estimates' rate, below the core's 0.15: a stream takes about twice the misses in a row to go plain.
+const depth_rate = 0.08;
 
 fn costTable(comptime one: f64, comptime row: f64) [st.max_rows]lanes.config.Cost {
     var c: [st.max_rows]lanes.config.Cost = undefined;
@@ -61,7 +63,7 @@ pub const Backend = struct {
             .drafts = 4,
             .window_costs = if (b.costs) |*c| &c.window else if (b.sl.e.ep == null) &one_mac_window_costs else &.{},
             .mtp_step_ms = if (b.costs) |c| c.head_ms else 1.3,
-            .depth_rate = if (b.costs != null) timing.depth_rate else 0,
+            .depth_rate = depth_rate,
             .streams_exact = true,
             .hidden_rows = true,
             .batch_rows = st.max_rows,
