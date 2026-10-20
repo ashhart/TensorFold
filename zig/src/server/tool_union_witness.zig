@@ -158,3 +158,44 @@ pub const combined_cases = [_]Case{
     .{ .schema = const_schema, .value = "{\"action\": \"run\"}", .expected = "{\"request\":{\"action\":\"run\"}}" },
     .{ .schema = object_with_one_of_schema, .value = "{\"a\": 1}", .expected = "{\"request\":{\"a\":1}}" },
 };
+
+/// A number and an integer union.
+pub const number_any_of_schema = "{\"type\":\"number\",\"anyOf\":[{\"type\":\"integer\"},{\"type\":\"null\"}]}";
+
+/// A number and an integer intersection.
+pub const number_all_of_schema = "{\"allOf\":[{\"type\":\"number\"},{\"type\":\"integer\"}]}";
+
+/// The schemas where a number and an integer meet.
+pub const number_cases = [_]Case{
+    .{ .schema = number_any_of_schema, .value = "5", .expected = "{\"request\":5}" },
+    .{ .schema = number_all_of_schema, .value = "5", .expected = "{\"request\":5}" },
+};
+
+/// A union of two constraints that name different kinds.
+pub const one_and_any_schema = "{\"oneOf\":[{\"type\":\"object\"},{\"type\":\"string\"}],\"anyOf\":[{\"type\":\"object\"},{\"type\":\"array\"}]}";
+
+/// A type list and an enum that disagree.
+pub const type_and_enum_schema = "{\"type\":[\"object\",\"null\"],\"enum\":[null]}";
+
+/// The schemas where every keyword constrains the value.
+pub const keyword_cases = [_]Case{
+    .{ .schema = one_and_any_schema, .value = "[1]", .expected = "{\"request\":\"[1]\"}" },
+    .{ .schema = one_and_any_schema, .value = "{\"a\": 1}", .expected = "{\"request\":{\"a\":1}}" },
+    .{ .schema = type_and_enum_schema, .value = "{\"a\": 1}", .expected = "{\"request\":\"{\\\"a\\\": 1}\"}" },
+    .{ .schema = type_and_enum_schema, .value = "null", .expected = "{\"request\":null}" },
+};
+
+/// A reference whose tilde escapes nothing.
+pub const bad_escape_schema = "{\"$ref\":\"#/$defs/a~xb\"}";
+
+/// A reference with a percent escape.
+pub const percent_escape_schema = "{\"$ref\":\"#/$defs/a%20b\"}";
+
+/// The definitions the two references point into.
+pub const pointer_defs = "\"$defs\":{\"a~b\":{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"integer\"}}},\"a b\":{\"type\":\"object\",\"properties\":{\"y\":{\"type\":\"integer\"}}}}";
+
+/// The schemas whose references are pointers.
+pub const pointer_cases = [_]Case{
+    .{ .schema = bad_escape_schema, .defs = pointer_defs, .value = "{\"x\": 1}", .expected = "{\"request\":\"{\\\"x\\\": 1}\"}" },
+    .{ .schema = percent_escape_schema, .defs = pointer_defs, .value = "{\"y\": 2}", .expected = "{\"request\":{\"y\":2}}" },
+};

@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json");
 const reply_text = @import("reply_text.zig");
 const tool_specs = @import("tool_specs.zig");
+const tool_kinds = @import("tool_kinds.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -70,187 +71,10 @@ pub fn emptySchema(a: Allocator) Allocator.Error!Schema {
     return .{ .value = .{ .object = empty }, .root = .{ .object = empty } };
 }
 
-/// The JSON kinds a schema can name.
-const Kind = enum { array, object, boolean, integer, number, null, string };
-
-/// The kinds a schema accepts.
-const Kinds = std.EnumSet(Kind);
-
-/// The kind a JSON value is.
-fn kindOfValue(v: Value) ?Kind {
-    return switch (v) {
-        .array => .array,
-        .object => .object,
-        .bool => .boolean,
-        .int => .integer,
-        .float => .number,
-        .null => .null,
-        .string => .string,
-    };
-}
-
-/// How deep a chain of references may go before the schema is left alone.
-const max_ref_depth = 32;
-
-/// The kinds a schema accepts, with the references it points into resolved.
-const Resolver = struct {
-    a: Allocator,
-    root: Value,
-    /// The references on the path, so a cycle stops.
-    path: [max_ref_depth][]const u8 = @splat(""),
-    depth: usize = 0,
-
-    /// The kinds the schema accepts: its own kinds and its combiners' kinds.
-    fn kinds(self: *Resolver, schema: Value) Allocator.Error!?Kinds {
-        const own = try self.ownKinds(schema);
-        const combined = try self.combinedKinds(schema);
-        if (own) |o| {
-            if (combined) |c| return o.intersectWith(c);
-            return o;
-        }
-        return combined;
-    }
-
-    /// The kinds the schema names itself: its type, its enum or const, and what its reference points at.
-    fn ownKinds(self: *Resolver, schema: Value) Allocator.Error!?Kinds {
-        if (schema != .object) return null;
-        var named: ?Kinds = null;
-        named = addKinds(named, typeKinds(schema.get("type")));
-        if (schema.get("enum")) |e| {
-            if (e == .array) named = addKinds(named, valueKinds(e.array));
-        }
-        if (schema.get("const")) |c| named = addKinds(named, valueKinds(&.{c}));
-        if (schema.get("$ref")) |r| {
-            if (r == .string) named = addKinds(named, try self.refKinds(r.string));
-        }
-        return named;
-    }
-
-    /// The kinds the schema's combiners name: oneOf and anyOf take the union, allOf the intersection.
-    fn combinedKinds(self: *Resolver, schema: Value) Allocator.Error!?Kinds {
-        if (schema != .object) return null;
-        var either: ?Kinds = null;
-        for ([_][]const u8{ "oneOf", "anyOf" }) |key| {
-            const branches = schema.get(key) orelse continue;
-            if (branches != .array) continue;
-            for (branches.array) |branch| {
-                const branch_kinds = (try self.kinds(branch)) orelse continue;
-                if (branch_kinds.count() == 0) continue;
-                either = if (either) |e| e.unionWith(branch_kinds) else branch_kinds;
-            }
-        }
-        var all: ?Kinds = null;
-        if (schema.get("allOf")) |branches| {
-            if (branches == .array) for (branches.array) |branch| {
-                const branch_kinds = (try self.kinds(branch)) orelse continue;
-                if (branch_kinds.count() == 0) continue;
-                all = if (all) |a| a.intersectWith(branch_kinds) else branch_kinds;
-            };
-        }
-        if (either) |e| {
-            if (all) |a| return e.intersectWith(a);
-            return e;
-        }
-        return all;
-    }
-
-    /// The kinds the reference points at, or null when it points nowhere.
-    fn refKinds(self: *Resolver, ref: []const u8) Allocator.Error!?Kinds {
-        if (self.depth >= max_ref_depth) return null;
-        for (self.path[0..self.depth]) |seen| if (std.mem.eql(u8, seen, ref)) return null;
-        const target = (try resolvePointer(self.a, self.root, ref)) orelse return null;
-        self.path[self.depth] = ref;
-        self.depth += 1;
-        defer self.depth -= 1;
-        return try self.kinds(target);
-    }
-};
-
-/// The kinds a schema's type names: one name, or a list of them.
-fn typeKinds(t: ?Value) ?Kinds {
-    const v = t orelse return null;
-    var kinds: Kinds = .empty;
-    switch (v) {
-        .string => if (std.meta.stringToEnum(Kind, v.string)) |k| kinds.insert(k),
-        .array => for (v.array) |one| if (one == .string) if (std.meta.stringToEnum(Kind, one.string)) |k| kinds.insert(k),
-        else => {},
-    }
-    return if (kinds.count() > 0) kinds else null;
-}
-
-/// The kinds the values of an enum or a const are.
-fn valueKinds(values: []const Value) ?Kinds {
-    var kinds: Kinds = .empty;
-    for (values) |v| if (kindOfValue(v)) |k| kinds.insert(k);
-    return if (kinds.count() > 0) kinds else null;
-}
-
-/// The kinds the two sets share, with a set that names none adding nothing.
-fn addKinds(kinds: ?Kinds, more: ?Kinds) ?Kinds {
-    const m = more orelse return kinds;
-    if (m.count() == 0) return kinds;
-    return if (kinds) |k| k.unionWith(m) else m;
-}
-
-/// The value a local reference points at, or null when it points nowhere.
-fn resolvePointer(a: Allocator, root: Value, ref: []const u8) Allocator.Error!?Value {
-    if (ref.len == 0 or ref[0] != '#') return null;
-    var current = root;
-    const rest = ref[1..];
-    if (rest.len == 0) return current;
-    if (rest[0] != '/') return null;
-    var tokens = std.mem.splitScalar(u8, rest[1..], '/');
-    while (tokens.next()) |token| {
-        const name = try unescapePointer(a, token);
-        switch (current) {
-            .object => current = current.object.get(name) orelse return null,
-            .array => {
-                const index = std.fmt.parseInt(usize, name, 10) catch return null;
-                if (index >= current.array.len) return null;
-                current = current.array[index];
-            },
-            else => return null,
-        }
-    }
-    return current;
-}
-
-/// The JSON pointer token with its `~1` and `~0` unescaped.
-fn unescapePointer(a: Allocator, token: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.indexOfScalar(u8, token, '~') == null) return token;
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < token.len) : (i += 1) {
-        if (token[i] != '~' or i + 1 >= token.len) {
-            try out.append(a, token[i]);
-            continue;
-        }
-        i += 1;
-        try out.append(a, if (token[i] == '1') '/' else if (token[i] == '0') '~' else '~');
-    }
-    return out.items;
-}
-
-/// The schema takes a value that is not a string.
-fn takesJson(kinds: Kinds) bool {
-    var without_string = kinds;
-    without_string.remove(.string);
-    return without_string.count() > 0;
-}
-
-/// The parsed value is one the schema accepts; a string keeps the text the model wrote.
-fn accepts(kinds: Kinds, v: Value) bool {
-    const kind = kindOfValue(v) orelse return false;
-    if (kind == .string) return false;
-    if (kinds.contains(kind)) return true;
-    return kind == .integer and kinds.contains(.number);
-}
-
 /// The schema takes a value that is not a string: a union of them, a list of types, or a plain typed schema.
 pub fn schemaTakesJson(a: Allocator, schema: Schema) Allocator.Error!bool {
-    var resolver: Resolver = .{ .a = a, .root = schema.root };
-    const kinds = (try resolver.kinds(schema.value)) orelse return false;
-    return takesJson(kinds);
+    const kinds = (try tool_kinds.schemaKinds(a, schema.value, schema.root)) orelse return false;
+    return tool_kinds.takesJson(kinds);
 }
 
 /// ``json.dumps(v, allow_nan=False)`` succeeds: no NaN or infinity anywhere.
@@ -295,9 +119,8 @@ pub fn closedJson(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
 
 /// ``decode_parameter``: the schema's type when the text spells one, else the text; ``python`` also reads Python's spelling.
 pub fn decode(a: Allocator, value: []const u8, schema: Schema, python: bool) Allocator.Error!Value {
-    var resolver: Resolver = .{ .a = a, .root = schema.root };
-    const kinds = (try resolver.kinds(schema.value)) orelse return .{ .string = value };
-    if (!takesJson(kinds)) return .{ .string = value };
+    const kinds = (try tool_kinds.schemaKinds(a, schema.value, schema.root)) orelse return .{ .string = value };
+    if (!tool_kinds.takesJson(kinds)) return .{ .string = value };
     const closed: ?[]const u8 = if (kinds.contains(.array) or kinds.contains(.object)) try closedJson(a, value) else null;
     for ([_]?[]const u8{ value, closed }) |candidate| {
         const text = candidate orelse continue;
@@ -306,12 +129,12 @@ pub fn decode(a: Allocator, value: []const u8, schema: Schema, python: bool) All
             .err => continue,
         };
         if (!finite(parsed)) continue;
-        return if (accepts(kinds, parsed)) parsed else .{ .string = value };
+        return if (tool_kinds.accepts(kinds, parsed)) parsed else .{ .string = value };
     }
     if (!python) return .{ .string = value };
     const parsed = (try pythonLiteral(a, value)) orelse return .{ .string = value };
     if (!finite(parsed)) return .{ .string = value };
-    return if (accepts(kinds, parsed)) parsed else .{ .string = value };
+    return if (tool_kinds.accepts(kinds, parsed)) parsed else .{ .string = value };
 }
 
 /// ``_python_literal``: True, None, quoted strings, numbers, lists, tuples and dicts; null if ``text`` is not one.

@@ -64,6 +64,27 @@ test "a streamed parameter whose schema combines branches comes back as the valu
     for (witness.combined_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
 }
 
+test "a streamed parameter whose schema names a number and an integer takes the integer" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.number_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema constrains the value with every keyword comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.keyword_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
+test "a streamed parameter whose schema points at a definition by pointer comes back as the value the model wrote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (witness.pointer_cases) |c| try std.testing.expectEqualStrings(try canonical(a, c.expected), try canonical(a, try streamedArguments(a, c)));
+}
+
 /// The arguments the stream gives the client for one case.
 fn streamedArguments(a: Allocator, c: witness.Case) ![]const u8 {
     const tools = try witness.toolsWith(a, c.schema, c.defs);

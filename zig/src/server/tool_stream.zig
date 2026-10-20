@@ -39,7 +39,7 @@ pub const Streamer = struct {
     schemas: tool_params.Schemas,
     known: std.StringHashMapUnmanaged([]const u8) = .empty,
     current: []const u8 = "",
-    value_schema: tool_params.Schema = undefined,
+    value_schema: tool_params.Schema = .{ .value = .null, .root = .null },
     typed: bool = false,
     buffer: std.ArrayList(u8) = .empty,
     pos: usize = 0,
