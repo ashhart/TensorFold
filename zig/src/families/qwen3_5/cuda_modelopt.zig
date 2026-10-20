@@ -23,13 +23,38 @@ pub const prefix = "model.language_model.";
 fn kindOf(r: ?core.modelopt.Recipe) !Kind {
     const recipe = r orelse return .bf16;
     return switch (recipe) {
-        .nvfp4, .w4a16_nvfp4 => .nvfp4,
+        .nvfp4 => .nvfp4,
+        .w4a16_nvfp4 => .nvfp4_w16,
         .fp8 => .fp8,
         else => error.UnsupportedQwenQuantization,
     };
 }
 
-/// Every module's kind from a MIXED_PRECISION config's quantized_layers; a single-format one names no modules.
+/// A single-format NVFP4 config's `ignore` (or `exclude_modules`) names: modules, or prefixes ending in `*`.
+const Ignored = struct {
+    doc: std.json.Parsed(std.json.Value),
+    names: []const std.json.Value,
+
+    fn read(gpa: std.mem.Allocator, config: []const u8) !Ignored {
+        const doc = try std.json.parseFromSlice(std.json.Value, gpa, config, .{});
+        errdefer doc.deinit();
+        const q = if (doc.value.object.get("quantization_config")) |v| v.object else return error.UnsupportedQwenQuantization;
+        const list = q.get("ignore") orelse q.get("exclude_modules") orelse return .{ .doc = doc, .names = &.{} };
+        if (list != .array) return error.UnsupportedQwenQuantization;
+        return .{ .doc = doc, .names = list.array.items };
+    }
+
+    fn has(i: Ignored, module: []const u8) bool {
+        for (i.names) |v| if (v == .string) {
+            const n = v.string;
+            if (std.mem.endsWith(u8, n, "*") and std.mem.startsWith(u8, module, n[0 .. n.len - 1])) return true;
+            if (std.mem.eql(u8, n, module)) return true;
+        };
+        return false;
+    }
+};
+
+/// Every module's kind: a MIXED_PRECISION config's quantized_layers, or a single-format NVFP4 one's `ignore` list.
 pub fn kinds(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
     var why: core.modelopt.Why = .{};
     var r = core.modelopt.admitRecipes(gpa, config, &why) catch |err| {
@@ -37,7 +62,8 @@ pub fn kinds(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
         return if (err == error.OutOfMemory) err else error.UnsupportedQwenQuantization;
     };
     defer r.deinit();
-    if (r.modules.count() == 0 or g.tied) return error.UnsupportedQwenQuantization;
+    if (g.tied) return error.UnsupportedQwenQuantization;
+    if (r.modules.count() == 0) return single(gpa, config, g);
     if (r.of(prefix ++ "embed_tokens") != null) return error.UnsupportedQwenQuantization; // the rows stay bf16
     var out: Kinds = .{ .modelopt = true, .head = try kindOf(r.of("lm_head")) };
     var buf: [128]u8 = undefined;
@@ -52,11 +78,30 @@ pub fn kinds(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
     return out;
 }
 
+/// quant_algo NVFP4 throughout (Inferact's export): every linear NVFP4 but those `ignore` names, which stay bf16.
+fn single(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
+    const ig = try Ignored.read(gpa, config);
+    defer ig.doc.deinit();
+    if (!ig.has(prefix ++ "embed_tokens")) return error.UnsupportedQwenQuantization;
+    var out: Kinds = .{ .modelopt = true, .head = if (ig.has("lm_head")) .bf16 else .nvfp4 };
+    var buf: [128]u8 = undefined;
+    for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
+        const used = switch (slot) {
+            .gate, .up, .down => true,
+            .qkv, .z, .a, .b, .out => g.linear[i],
+            .q, .k, .v, .o => !g.linear[i],
+        };
+        const name = try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.{s}", .{ i, geometry.slot_modules.get(slot) });
+        if (used) out.proj[i][@backingInt(slot)] = if (ig.has(name)) .bf16 else .nvfp4;
+    };
+    return out;
+}
+
 /// The device bytes of an n-by-k projection of `kind` in the lane's layout (rows padded to 128).
 pub fn packedBytes(n: usize, k: usize, kind: Kind) usize {
     const np = padded(n);
     return switch (kind) {
-        .nvfp4 => aligned(np * k / 2) + aligned(np * k / 16),
+        .nvfp4, .nvfp4_w16 => aligned(np * k / 2) + aligned(np * k / 16),
         .fp8 => aligned(np * k),
         .bf16 => aligned(np * k * 2),
         .affine => unreachable,
@@ -66,7 +111,7 @@ pub fn packedBytes(n: usize, k: usize, kind: Kind) usize {
 /// The checkpoint's bytes of an n-by-k projection of `kind`: codes, then block scales.
 pub fn rawBytes(n: usize, k: usize, kind: Kind) usize {
     return switch (kind) {
-        .nvfp4 => n * k / 2 + n * k / 16,
+        .nvfp4, .nvfp4_w16 => n * k / 2 + n * k / 16,
         .fp8 => n * k,
         .bf16 => n * k * 2,
         .affine => unreachable,
@@ -186,7 +231,7 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
             q.act = act;
             break :blk .{ .fp8 = q };
         },
-        .nvfp4 => blk: {
+        .nvfp4, .nvfp4_w16 => blk: {
             const codes = try ck.expect(try tname(&buf, pre, name, "weight"), .u8, &.{ n, k / 2 });
             const blocks = try ck.expect(try tname(&buf, pre, name, "weight_scale"), .f8_e4m3, &.{ n, k / 16 });
             const global = try scalar(ck, try tname(&buf, pre, name, "weight_scale_2"));
@@ -253,4 +298,43 @@ test "kinds from nvidia/Qwen3.8-27B-NVFP4's recipes: NVFP4 MLPs and head, FP8 mi
     try std.testing.expectError(error.UnsupportedQwenQuantization, geometry.parse(std.testing.allocator, pb));
     try std.testing.expectEqual(@as(usize, 512 * 5120 / 2 + 512 * 5120 / 16), packedBytes(500, 5120, .nvfp4));
     try std.testing.expectEqual(@as(usize, 48 * 5120 * 2), rawBytes(48, 5120, .bf16));
+}
+
+test "kinds from a single-format NVFP4 config (Inferact's): NVFP4 but its ignore list, W4A16 recipes weight-only" {
+    const head =
+        \\{"model_type":"qwen3_5","tie_word_embeddings":false,
+        \\ "quantization_config":{"quant_method":"modelopt","quant_algo":"NVFP4","config_groups":{"group_0":
+        \\   {"weights":{"num_bits":4,"type":"float","group_size":16},"targets":["Linear"]}},
+        \\   "ignore":["lm_head","model.language_model.embed_tokens","model.language_model.layers.0.linear_attn.in_proj_qkv",
+        \\     "model.language_model.layers.0.linear_attn.in_proj_a","model.language_model.layers.0.linear_attn.in_proj_b","mtp*"]},
+    ;
+    const text_config =
+        \\ "text_config":{"model_type":"qwen3_5_text","attention_bias":false,"attn_output_gate":true,"hidden_act":"silu",
+        \\ "head_dim":256,"linear_key_head_dim":128,"linear_value_head_dim":128,"linear_conv_kernel_dim":4,
+        \\ "hidden_size":5120,"intermediate_size":17408,"num_hidden_layers":2,"vocab_size":248320,"linear_num_key_heads":16,
+        \\ "linear_num_value_heads":48,"num_attention_heads":24,"num_key_value_heads":4,"rms_norm_eps":1e-06,
+        \\ "max_position_embeddings":262144,"tie_word_embeddings":false,
+        \\ "layer_types":["linear_attention","full_attention"],
+        \\ "rope_parameters":{"rope_type":"default","rope_theta":10000000,"partial_rotary_factor":0.25}}}
+    ;
+    const g = try geometry.parse(std.testing.allocator, head ++ text_config);
+    try std.testing.expectEqual(Kind.bf16, g.kinds.head);
+    try std.testing.expectEqual(Kind.bf16, g.kinds.of(0, .qkv));
+    try std.testing.expectEqual(Kind.nvfp4, g.kinds.of(0, .z)); // not in the list
+    try std.testing.expectEqual(Kind.nvfp4, g.kinds.of(0, .out));
+    try std.testing.expectEqual(Kind.nvfp4, g.kinds.of(1, .q));
+    try std.testing.expectEqual(Kind.nvfp4, g.kinds.of(1, .down));
+    // an embedding the list leaves out would be NVFP4 rows: refused
+    const quantized_rows = try std.mem.replaceOwned(u8, std.testing.allocator, head ++ text_config, "\"model.language_model.embed_tokens\",", "");
+    defer std.testing.allocator.free(quantized_rows);
+    try std.testing.expectError(error.UnsupportedQwenQuantization, geometry.parse(std.testing.allocator, quantized_rows));
+    const w16 =
+        \\{"model_type":"qwen3_5","tie_word_embeddings":false,
+        \\ "quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{
+        \\   "model.language_model.layers.0.mlp.down_proj":{"quant_algo":"W4A16_NVFP4","group_size":16},
+        \\   "model.language_model.layers.0.linear_attn.out_proj":{"quant_algo":"FP8"}}},
+    ;
+    const h = try geometry.parse(std.testing.allocator, w16 ++ text_config);
+    try std.testing.expectEqual(Kind.nvfp4_w16, h.kinds.of(0, .down));
+    try std.testing.expectEqual(Kind.bf16, h.kinds.head);
 }

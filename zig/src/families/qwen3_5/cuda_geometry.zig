@@ -49,7 +49,7 @@ pub const Widths = struct {
 };
 
 /// How a projection is stored: MLX affine codes, or a ModelOpt checkpoint's NVFP4, FP8 or bf16 weights.
-pub const Kind = enum(u8) { affine, nvfp4, fp8, bf16 };
+pub const Kind = enum(u8) { affine, nvfp4, fp8, bf16, nvfp4_w16 }; // nvfp4_w16: W4A16_NVFP4, bf16 rows in either math
 
 /// A ModelOpt checkpoint's kind for every module (cuda_modelopt.zig); an MLX checkpoint's are all affine.
 pub const Kinds = struct {
