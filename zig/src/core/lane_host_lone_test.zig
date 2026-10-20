@@ -1,4 +1,4 @@
-//! The lone driver reclaims the lane core's last stream between rounds: every token served once, in order.
+//! The lone driver: reclaiming the lane core's last stream between rounds, and a halt during its prompt pass.
 const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
@@ -14,6 +14,7 @@ const Box = struct {
     mutex: std.Io.Mutex = .init,
     tokens: std.ArrayList(u32) = .empty,
     done: ?Reason = null,
+    message: []const u8 = "",
 
     fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
         const b: *Box = @ptrCast(@alignCast(ctx));
@@ -21,7 +22,10 @@ const Box = struct {
         defer b.mutex.unlock(std.testing.io);
         switch (e.*) {
             .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
-            .finished => |f| b.done = f.reason,
+            .finished => |f| {
+                b.done = f.reason;
+                b.message = f.message;
+            },
             else => {},
         }
     }
@@ -114,4 +118,59 @@ test "a lone driver that only opens streams never gets the lane core's last stre
     const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24 }, false);
     try std.testing.expectEqual(@as(u32, 1), runs.opened);
     try std.testing.expectEqual(@as(u32, 0), runs.resumed);
+}
+
+test "halt fails a request in the lone driver's prompt pass with the reason" {
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    // the stream's lane is released once, by the driver's failed opening, not again when the halt ends the request
+    const Releases = struct {
+        n: u32 = 0,
+        fn count(ctx: *anyopaque, _: *lanes.Stream) void {
+            const r: *@This() = @ptrCast(@alignCast(ctx));
+            r.n += 1;
+        }
+    };
+    var releases: Releases = .{};
+    target.release_hook = Releases.count;
+    target.release_hook_ctx = &releases;
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    // the driver holds its prompt pass until the halt is requested; the pass then finds the host closing
+    const Held = struct {
+        be: lanes.backend.Backend,
+        entered: std.Io.Event = .unset,
+        go: std.Io.Event = .unset,
+        fn run(ctx: *anyopaque, s: *lanes.Stream, _: api.LoneHooks) anyerror!bool {
+            const l: *@This() = @ptrCast(@alignCast(ctx));
+            l.entered.set(std.testing.io);
+            l.go.waitUncancelable(std.testing.io);
+            _ = try l.be.opening(gpa, s); // error.Cancelled, the stream released
+            return error.NotCancelled;
+        }
+    };
+    var held: Held = .{ .be = target.backend() };
+    host.lone = .{ .ctx = &held, .run = Held.run };
+    try host.start();
+    defer host.stop();
+    var box: Box = .{};
+    defer box.tokens.deinit(gpa);
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 24 };
+    try host.engine().submit(1, &request, .{ .ctx = &box, .event = Box.event });
+    held.entered.waitUncancelable(std.testing.io);
+    const halter = try std.Thread.spawn(.{}, LaneHost.halt, .{ &host, "server restarting: retry shortly" });
+    host.mutex.lockUncancelable(std.testing.io);
+    while (host.halt_reason == null) host.wake.waitUncancelable(std.testing.io, &host.mutex);
+    host.mutex.unlock(std.testing.io);
+    held.go.set(std.testing.io);
+    halter.join();
+    try std.testing.expectEqual(@as(?Reason, .failed), box.done);
+    try std.testing.expectEqualStrings("server restarting: retry shortly", box.message);
+    try std.testing.expectEqual(@as(usize, 0), box.tokens.items.len);
+    try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
+    try std.testing.expectEqual(@as(u32, 1), releases.n);
 }
