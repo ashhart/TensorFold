@@ -17,3 +17,8 @@ bin-d23862ab: d23862ab built from src-d23862ab with Zig 0.17.0 and nvcc 13.0 for
 a8d3fab007ebcf9d13f6f1d203f93c1e92a5dc14b09338f7edc4dd103a5d4f01  tf-cuda-test
 636bbfc4ce4725d1dd2d8445bafcfab58d8d8fc04fad8b9fa637fe08a278d429  tensorfold
 77c6eb03b189b0a45d5c0eaa71c57c1c0b7a180c9bdd553c2426337776802f0b  tensorfold-native
+
+bin-797dd2e1: 797dd2e1 built from src-797dd2e1 with Zig 0.17.0 and nvcc 13.0 for sm_121
+0d0ba95f6956ff351b509713c510879e62ebe251fa577178df9b0ef42240b1fe  tf-cuda-test
+7fe1dc25eb0e49b345a9e6068c9e833b54584f9955e3dd150ada0ab82628acd3  tensorfold
+07cc5ee2b9ca324768c05f3e50913c0dea4449d47cf858e517c917945e06b2ce  tensorfold-native

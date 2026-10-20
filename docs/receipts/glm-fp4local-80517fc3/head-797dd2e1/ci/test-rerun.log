@@ -1,0 +1,75 @@
+test
++- test-cuda-host
+   +- run test 0 pass, 1 fail (1 total)
+error: 'cuda_cost_identity.test.cost identity: stable reads reuse a drafter, while a changed payload at the same path invalidates it' failed:
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:584:14: 0x123f289 in expect (std.zig)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       <home>/zt/dev-pr/zig/src/families/qwen3_5/cuda_cost_identity.zig:64:5: 0x123fd33 in test.cost identity: stable reads reuse a drafter, while a changed payload at the same path invalidates it (cuda_cost_identity.zig)
+           try std.testing.expect(!std.mem.eql(u8, &first, &changed));
+           ^
+failed command: ./.zig-cache/o/f00ebbed3ae936933802aaa609e1e052/test --cache-dir=./.zig-cache --seed=0xde9eef5c --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zig-cache/o/b7d75875d329bf89f6e26992cf31439f/test --cache-dir=./.zig-cache --seed=0xde9eef5c --listen=-
+
+discovery verbs: retained through TLS, atexit and destructor; child exit 0
+discovery grammar: retained through TLS, atexit and destructor; child exit 0
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zig-cache/o/5de3e9dca412420643031ffdac5c241a/test --cache-dir=./.zig-cache --seed=0xde9eef5c --listen=-
+
+Build Summary: 208/211 steps succeeded (1 failed); 605/607 tests passed (1 skipped, 1 failed)
+test transitive failure
++- test-cuda-host transitive failure
+   +- run test 0 pass, 1 fail (1 total)

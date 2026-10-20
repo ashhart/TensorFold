@@ -3,11 +3,13 @@
 Tested implementation: `80517fc36ea6ee9183c5237ae92b1abd70619f75` (commit.txt has the tree and the eight commits).
 Checked after it: `d23862ab`, the three commits above this receipt's first commit (comments and docs, the loader
 gate's own checks, the format names and messages; `head-d23862ab/commit.txt`), on their own binaries in
-`head-d23862ab/`. They do not retake the rest of this receipt.
+`head-d23862ab/`, and `797dd2e1`, four more (the loader's refusal of an FP8 projection a GPU's lane cannot run,
+`readRecipes`' errors, a test of `csfLinear`'s empty-weight refusal and a kernel contract control;
+`head-797dd2e1/commit.txt`), on its own binaries in `head-797dd2e1/`. They do not retake the rest of this receipt.
 Base: `v1.1.1` (`b10231b94f8adf3d4132acebdc0a1ac87e53a838`); baseline binaries are plain v1.1.1 built the same way (`bin-b10231b9`).
-Test date: 2026-10-20. Platform: NVIDIA DGX Spark (GB10, sm_121, 128 GB shared memory), two at TP=2 over a direct
-RoCE link (two rails), three at TP=3 over a ring of direct links. Containers pinned to the efficiency cores
-(`--cpuset-cpus=0-4,10-14`, as 1.1.1's runbook in #1033).
+Test date: 2026-10-20. Platform: MSI EdgeXpert (GB10, DGX Spark-compatible; sm_121, 128 GB shared memory), two at
+TP=2 over a direct RoCE link (two rails), three at TP=3 over a ring of direct links. Containers pinned to the efficiency
+cores (`--cpuset-cpus=0-4,10-14`, as 1.1.1's runbook in #1033).
 Toolchain: Zig 0.17.0, nvcc 13.0 (V13.0.88) for sm_121; runtime NCCL 2.30.7. binaries.txt has every binary's sha256.
 Checkpoints: `nvidia/GLM-5.3-Flash-FP4-Local` at `76348ddb2be2e35e39ecfc00e75dc07703f4f3d5`,
 `nvidia/GLM-5.3-Flash-NVFP4` at `423acf37583782c51c142d145aef733d72943d93`.
@@ -71,6 +73,17 @@ Speed, medians (`tp2/serve/sp*`, `tp3/serve/sp3-*`); at TP=2 each binary and che
 | `capabilities --json` (`capabilities-*.json`) | `glm5_next`: `modelopt-nvfp4` and `modelopt-mixed` (`80517fc3`: `modelopt-nvfp4`); TensorFold video found on both, without `LD_LIBRARY_PATH` |
 | No-GPU CI (`ci/`) | `zig build test` 2981/2996 with fresh caches (14 skipped; the one failure is upstream's `cuda_cost_identity` mtime test, as on `80517fc3`), `test-kernel-contract` 65/65, `test-golden`, `fuzz-cortheon` 11/11 and the served Flash Next unittest pass; lean 0 new (444 on v1.1.1); `zig fmt --check` on the 35 changed Zig files clean |
 
+## The head after the fixes (`head-797dd2e1/`)
+
+| Check | Result |
+| --- | --- |
+| Kernel contract (`single/`) | `SUMMARY 91 kernels: 91 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 red as planted, 0 missed; 1533 limit problems`; the new control, `rmsnorm_4096_f32w` given its float32 weight as bf16 values, red at gate 3 as planted; the limits as on `80517fc3` and plain v1.1.1 |
+| glm-ref (`single/`) | 12 pass, every RESULT line equal to plain v1.1.1's |
+| Loader gate, six layers, TP=2 (`gate/`) | Ranks 0 and 1: 115 and 72, 0 differ, as on `80517fc3` and `d23862ab` |
+| FP4-Local golden, TP=2 (`serve/sm-fl`) | Drafted = `"draft": false`, and equal to `tp2/serve/ex-fl`'s ids, on all three prompts |
+| `capabilities --json` (`capabilities-797dd2e1.json`) | As `d23862ab`'s: `modelopt-nvfp4` and `modelopt-mixed` |
+| No-GPU CI (`ci/`) | `zig build test` 2983/2999 with fresh caches (14 skipped; the failures are upstream's `cuda_cost_identity` mtime test, as on `80517fc3`, and `cortheon`'s linear-time fuzz test, a timing test this branch does not touch: `toText` took 2 ms on 16 KiB and 65 ms on 128 KiB; its rerun passed, `test-rerun.log`, where `cuda_cost_identity` is the one failure), `test-kernel-contract` 65/65, `test-golden`, `fuzz-cortheon` 11/11 and the served Flash Next unittest pass; lean 0 new (444 on v1.1.1); `zig fmt --check` on the 35 changed Zig files clean |
+
 ## Reproduction
 
 Every serve: `tensorfold-native serve CKPT --name local-model --parallel 4 --context 40960 --port 8095`, drafts on, one
@@ -94,13 +107,15 @@ runs.log has one line a check.
   gate and the lanes at TP=3 ran this branch's own binaries.
 - 1.1.1's batched prompt pass runs only with `TF_GLM_PROMPT_STEPS=0` on rank 0; `bt-*` set it, the other serves ran
   the default.
+- `797dd2e1`'s refusal at load of an FP8 projection the lane cannot run applies on a GPU without thread block
+  clusters (before sm_90); every GPU here is a GB10, where every FP8 lane weight fits, so it was not run.
 - The KL is over BF16's top 20 only, and both sides' logits are bf16, so best tokens tie; `s5-compare.json` also
   gives top-1 equal within ties.
 - runs.log's FAIL lines: `smoke3-mm1` is the #1067 probe above; the first `x9-fl` ran before `libtfgrammar.so` was in
-  place (HTTP 400 naming it) and its retake is the one published; `single` is the limits line above, on this head and on
-  plain v1.1.1 alike; `vd-fl`, `vd-nv` and `vd-111` are the refused video serves (#1107). The tamper controls in
-  `head-d23862ab/gate-controls/` print FAIL for the flipped upload and its rank before their PASS line: the control
-  passes when that is all that fails.
+  place (HTTP 400 naming it) and its retake is the one published; `single` is the limits line above, on this head, on
+  `797dd2e1` and on plain v1.1.1 alike; `vd-fl`, `vd-nv` and `vd-111` are the refused video serves (#1107). The tamper
+  controls in `head-d23862ab/gate-controls/` print FAIL for the flipped upload and its rank before their PASS line: the
+  control passes when that is all that fails.
 - Metal and MLX were not run (no Mac). No vLLM comparison is claimed.
 
 ## Publication handling
