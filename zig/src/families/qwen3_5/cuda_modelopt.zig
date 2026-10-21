@@ -166,7 +166,6 @@ pub fn checkpointMath(ctx: *const cuda.Context, g: Geometry, asked: ?geometry.Pr
     const p = asked orelse return false;
     if (p == .full) return false;
     if (!g.kinds.modelopt) return error.PrecisionNotBuilt;
-    if (g.kinds.ct) return error.DynamicActivationsNotBuilt; // per-token FP8 and per-block NVFP4 rows at run time
     if (try ctx.attribute(.compute_capability_major) < 12) return error.CheckpointMathNeedsBlackwell;
     return true;
 }
@@ -179,6 +178,8 @@ pub const Kernels = struct {
     embed: cuda.embed_rows.EmbedRows,
     ck: ?cuda.ck.Ck = null, // --precision checkpoint: quant8 and the FP8 lane, quant4 and the NVFP4 packer
     dense4: ?cuda.ck_dense.Dense4 = null,
+    lane8t: ?cuda.ck_lane8t.Lane8t = null, // a compressed-tensors export's FP8 math: rows a token's scale
+    rs: ?DeviceBuffer = null, // those rows' scales, fp32 a row
     /// Slice partials where no cluster meets them (before sm_90), and the checkpoint math's quantized rows.
     part: ?DeviceBuffer = null,
     rows8: ?DeviceBuffer = null,
@@ -198,11 +199,14 @@ pub const Kernels = struct {
         k.ck = try cuda.ck.Ck.load(d, major, sms);
         errdefer k.ck.?.unload();
         k.dense4 = try cuda.ck_dense.Dense4.load(d, sms);
+        errdefer k.dense4.?.unload();
+        k.lane8t = try cuda.ck_lane8t.Lane8t.load(d);
         return k;
     }
 
     pub fn unload(k: *Kernels) void {
-        for ([_]*?DeviceBuffer{ &k.part, &k.rows8, &k.rows4 }) |b| if (b.*) |*x| x.free();
+        for ([_]*?DeviceBuffer{ &k.part, &k.rows8, &k.rows4, &k.rs }) |b| if (b.*) |*x| x.free();
+        if (k.lane8t) |*x| x.unload();
         if (k.dense4) |*x| x.unload();
         if (k.ck) |*x| x.unload();
         k.embed.unload();
@@ -228,6 +232,14 @@ pub const Kernels = struct {
             fn add(kk: *const Kernels, m: *[3]usize, p: Proj) void {
                 const w = switch (p) {
                     .ql => |x| x,
+                    .ct8 => |q| {
+                        m[1] = @max(m[1], R * q.k);
+                        return;
+                    },
+                    .ct4 => |q| {
+                        m[2] = @max(m[2], cuda.ck.rowsBytes(R, q.w.k));
+                        return;
+                    },
                     else => return,
                 };
                 switch (w) {
@@ -262,12 +274,31 @@ pub const Kernels = struct {
         for ([_]*?DeviceBuffer{ &k.part, &k.rows8, &k.rows4 }, most) |b, n| if (n > 0) {
             b.* = try DeviceBuffer.alloc(e.d, n);
         };
+        if (k.lane8t != null and most[1] > 0) k.rs = try DeviceBuffer.alloc(e.d, R * 4);
     }
 };
 
 /// out (rows, n) = x (rows, k): prompts past 16 rows on prompt16 (or ck's math), else the lane (row bits at any count).
-pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: bool) !void {
+pub fn project(e: *Engine, proj: Proj, x: u64, out: u64, rows: usize, prompt: bool) !void {
     const k = if (e.mo) |*m| m else return error.FormatNotLoaded;
+    switch (proj) {
+        .ct8 => |q| { // compressed-tensors FP8: e4m3 rows a token's scale, the same tiles' order at every count
+            const t = k.lane8t orelse return error.FormatNotLoaded;
+            const codes = (k.rows8 orelse return error.NoCheckpointRows).ptr;
+            const rs = (k.rs orelse return error.NoCheckpointRows).ptr;
+            try t.quantRows(e.stream, x, q.k, rows, q.k, codes, rs);
+            return t.matmul(e.stream, codes, rs, rows, q, out);
+        },
+        .ct4 => |q| { // compressed-tensors NVFP4: rows under input_global_scale itself
+            const c = &(k.ck orelse return error.FormatNotLoaded);
+            const rows4 = (k.rows4 orelse return error.NoCheckpointRows).ptr;
+            try c.quant4Global(e.stream, x, q.w.k, rows, q.w.k, q.g, rows4);
+            return k.dense4.?.matmul(e.stream, rows4, rows, q.w, out);
+        },
+        .ql => {},
+        else => unreachable,
+    }
+    const w = proj.ql;
     const l = k.linear();
     const in: cuda.qlinear.Rows = .{ .x = x, .part = if (k.part) |p| p.ptr else 0 };
     if (prompt and rows > 16) return l.prompt(e.stream, w, in, out, rows);
@@ -292,10 +323,12 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
     if (k % 64 != 0) return error.UnsupportedQwenGeometry;
     const p = &(e.mo orelse return error.FormatNotLoaded).pack;
     var buf: [192]u8 = undefined;
-    // the static input scale: the checkpoint's math quantizes the rows with it (--precision checkpoint)
-    const math = e.mo.?.ck != null and kind != .nvfp4_w16; // a W4A16 layer's own math is weight-only
-    const act: f32 = if (math and kind != .bf16 and ck.has(try tname(&buf, pre, name, "input_scale"))) try scalar(ck, try tname(&buf, pre, name, "input_scale")) else 0;
-    if (math and kind != .bf16 and act == 0) return error.NoInputScale;
+    // checkpoint math: ModelOpt input_scale; compressed-tensors per-token FP8, NVFP4 input_global_scale
+    const ct = ck.has(try tname(&buf, pre, name, "weight_packed")) or kind == .fp8c;
+    const gis: ?f32 = if (ct and ck.has(try tname(&buf, pre, name, "input_global_scale"))) try scalar(ck, try tname(&buf, pre, name, "input_global_scale")) else null;
+    const math = e.mo.?.ck != null and kind != .nvfp4_w16 and (!ct or kind == .fp8c or gis != null);
+    const act: f32 = if (math and !ct and kind != .bf16 and ck.has(try tname(&buf, pre, name, "input_scale"))) try scalar(ck, try tname(&buf, pre, name, "input_scale")) else 0;
+    if (math and !ct and kind != .bf16 and act == 0) return error.NoInputScale;
     const out: Weight = switch (kind) {
         .bf16 => blk: {
             const t = try ck.expect(try tname(&buf, pre, name, "weight"), .bf16, &.{ n, k });
@@ -320,6 +353,15 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
             try stage.upload(0, t.bytes);
             const w = try e.alloc(padded(n) * k);
             try p.fp8Lane(e.stream, stage.ptr, w, n, k);
+            if (math) { // the scales a column as fp32 for ck_lane8t's epilogue
+                const cs = try e.gpa.alloc(f32, n);
+                defer e.gpa.free(cs);
+                for (cs, std.mem.bytesAsSlice(u16, rs.bytes)) |*o, h| o.* = @bitCast(@as(u32, h) << 16);
+                const cd = try e.alloc(n * 4);
+                try e.arena.upload(cd - e.arena.ptr, std.mem.sliceAsBytes(cs));
+                try e.stream.synchronize();
+                return .{ .ct8 = .{ .codes = w, .cs = cd, .n = n, .k = k } };
+            }
             const tiles = try e.gpa.alloc(f32, padded(n) * (k / 64));
             defer e.gpa.free(tiles);
             rowScales(tiles, std.mem.bytesAsSlice(u16, rs.bytes), n, k);
@@ -329,7 +371,6 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
         },
         .nvfp4, .nvfp4_w16 => blk: {
             // ModelOpt: weight, weight_scale_2 (multiplies); compressed-tensors: weight_packed, weight_global_scale
-            const ct = ck.has(try tname(&buf, pre, name, "weight_packed"));
             const codes = try ck.expect(try tname(&buf, pre, name, if (ct) "weight_packed" else "weight"), .u8, &.{ n, k / 2 });
             const blocks = try ck.expect(try tname(&buf, pre, name, "weight_scale"), .f8_e4m3, &.{ n, k / 16 });
             const global = if (ct) 1.0 / try scalar(ck, try tname(&buf, pre, name, "weight_global_scale")) else try scalar(ck, try tname(&buf, pre, name, "weight_scale_2"));
@@ -340,6 +381,12 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
                 const words = try e.alloc(n * k / 2);
                 const tiles = try e.alloc(n * k / 16);
                 try c.pack(e.stream, stage.ptr, stage.ptr + codes.bytes.len, 1, n, k, 0, k, words, tiles);
+                if (ct) { // alpha = 1 / (input_global_scale * weight_global_scale), as fp32 rounds each step
+                    const wgs = try scalar(ck, try tname(&buf, pre, name, "weight_global_scale"));
+                    const alpha: f32 = 1.0 / (gis.? * wgs);
+                    try e.stream.synchronize();
+                    return .{ .ct4 = .{ .w = cuda.ck_dense.weight(words, tiles, alpha, 1.0, n, k), .g = gis.? } };
+                }
                 break :blk .{ .nvfp4 = cuda.ck_dense.weight(words, tiles, global, act, n, k) };
             }
             const words = try e.alloc(padded(n) * k / 2);

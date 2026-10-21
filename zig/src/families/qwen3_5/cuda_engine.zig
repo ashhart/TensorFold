@@ -366,18 +366,18 @@ pub const Engine = struct {
     }
 
     fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
-        if (l == .ql) return modelopt.project(e, l.ql, x, out, rows, prompt); // no group sums
+        if (l == .ql or l == .ct8 or l == .ct4) return modelopt.project(e, l, x, out, rows, prompt); // no group sums
         const n_out = l.outputs();
         const k = l.inputs();
         if (prompt and rows > 16) return switch (l) {
             .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
             .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
-            .ql => unreachable,
+            .ql, .ct8, .ct4 => unreachable,
         };
         if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
         const tile: usize = switch (l) {
             .a4 => e.affine.verifyRows(),
-            .an, .ql => 16,
+            .an, .ql, .ct8, .ct4 => 16,
         };
         var at: usize = 0;
         while (at < rows) : (at += tile) {
@@ -388,7 +388,7 @@ pub const Engine = struct {
             switch (l) {
                 .a4 => |q| try e.affine.verify(e.stream, xa, sa, q, oa, n),
                 .an => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
-                .ql => unreachable,
+                .ql, .ct8, .ct4 => unreachable,
             }
         }
     }

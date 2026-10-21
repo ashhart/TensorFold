@@ -172,7 +172,6 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.PrecisionNotBuilt => "--precision checkpoint: this checkpoint names no ModelOpt activation formats; serve it without --precision",
         error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
         error.NoInputScale => "--precision checkpoint: a quantized projection has no input_scale to quantize its rows with; serve with --precision full",
-        error.DynamicActivationsNotBuilt => "--precision checkpoint: this export quantizes its rows at run time (per token), which is not built; serve with --precision full",
         else => null,
     };
     return switch (err) {

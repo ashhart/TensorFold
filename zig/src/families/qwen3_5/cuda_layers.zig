@@ -9,20 +9,30 @@ pub const Proj = union(enum) {
     a4: Affine4,
     an: AffineN,
     ql: cuda.qlinear.Weight, // NVFP4, FP8 or bf16 as a ModelOpt checkpoint stores it (cuda_modelopt.zig)
+    ct8: cuda.ck_lane8t.Weight, // compressed-tensors FP8 in its math: e4m3 rows a token's scale, a scale a column
+    ct4: Ct4, // compressed-tensors NVFP4 in its math: NVFP4 rows under input_global_scale
 
     pub fn outputs(p: Proj) usize {
         return switch (p) {
-            inline .a4, .an => |q| q.n,
+            inline .a4, .an, .ct8 => |q| q.n,
             .ql => |w| w.outputs(),
+            .ct4 => |q| q.w.n,
         };
     }
 
     pub fn inputs(p: Proj) usize {
         return switch (p) {
-            inline .a4, .an => |q| q.k,
+            inline .a4, .an, .ct8 => |q| q.k,
             .ql => |w| w.inputs(),
+            .ct4 => |q| q.w.k,
         };
     }
+};
+
+/// A ck-packed NVFP4 weight whose alpha (scale, act 1) is 1 / (input_global_scale * weight_global_scale), and `g`.
+pub const Ct4 = struct {
+    w: cuda.qmmf.Weight,
+    g: f32,
 };
 
 pub const Delta = struct { qkv: Proj, z: Proj, a: Proj, b: Proj, out: Proj, conv: u64, norm: u64, a_log: u64, dt_bias: u64 };
