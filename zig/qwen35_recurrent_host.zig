@@ -196,5 +196,41 @@ test "Shared verification: allocation refusal retains a queued keep's old log ow
     try std.testing.expectEqual(@as(usize, 0), Driver.unsafe_frees);
     _ = Driver.sync(e.stream.handle);
     rec.completed(&e);
+    try std.testing.expectEqual(e.g.logBytes(64), e.rec_scratch.residentBytes()); // completed: kept for another window
+    rec.idle(&e);
     try std.testing.expectEqual(@as(usize, 0), e.rec_scratch.residentBytes());
+}
+
+test "Shared verification: streams cycling window widths reuse their scratch instead of freeing it each round" {
+    Driver.reset();
+    var d: cuda.Driver = undefined;
+    var e: q.engine.Engine = undefined;
+    engine(&e, &d);
+    var c = try q.engine.Cache.init(a, &e, 1024);
+    var o = try q.engine.Cache.init(a, &e, 1024);
+    defer {
+        _ = Driver.sync(e.stream.handle);
+        rec.completed(&e);
+        o.deinit(a);
+        c.deinit(a);
+        rec.shutdown(&e);
+    }
+    try std.testing.expectEqual(2 * rec.bound(&e), e.rec_scratch.cap);
+    const widths = [_]usize{ 1, 8, 3, 16, 1, 5 };
+    var settled: usize = 0;
+    for (0..4) |cycle| {
+        for (widths, 0..) |rows, i| {
+            const other = widths[(i + 3) % widths.len];
+            try rec.prepare(&e, &c, rows, true);
+            try rec.prepare(&e, &o, other, true);
+            try forwardDone(&e, &c, rows);
+            try rec.mark(&o, false);
+            if (other == 1) try rec.mark(&o, true);
+            o.advanced(other, true);
+            try std.testing.expect(e.rec_scratch.residentBytes() <= e.rec_scratch.cap);
+        }
+        if (cycle == 0) settled = Driver.allocs;
+    }
+    try std.testing.expectEqual(settled, Driver.allocs); // after one cycle no round allocates
+    try std.testing.expectEqual(@as(usize, 0), Driver.unsafe_frees);
 }

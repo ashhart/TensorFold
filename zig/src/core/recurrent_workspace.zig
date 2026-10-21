@@ -22,6 +22,8 @@ pub fn Workspace(comptime Resource: type) type {
         entries: std.ArrayList(Entry) = .empty,
         issued: u64 = 0,
         completed: u64 = 0,
+        /// Resident bytes a miss may reach before it frees idle scratch first (0: it always frees first).
+        cap: usize = 0,
 
         pub fn init(gpa: std.mem.Allocator, domain: usize) Self {
             return .{ .gpa = gpa, .domain = domain };
@@ -50,7 +52,7 @@ pub fn Workspace(comptime Resource: type) type {
                 e.leased = true;
                 return .{ .slot = i, .generation = generation };
             }
-            try self.collect(domain, provider);
+            if (self.residentBytes() + bytes > self.cap) try self.collect(domain, provider);
             var at: ?usize = null;
             for (self.entries.items, 0..) |e, i| if (e.resource == null) {
                 at = i;

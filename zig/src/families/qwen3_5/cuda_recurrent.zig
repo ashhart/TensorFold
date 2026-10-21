@@ -55,10 +55,7 @@ fn ensure(e: *Engine, c: *Cache, before: bool, bytes: usize, reuse_pending: bool
 pub fn prepare(e: *Engine, c: *Cache, rows: usize, record: bool) !void {
     const pool = c.owner orelse return;
     if (pool != &e.rec_scratch) return error.ForeignRecurrentQueue;
-    if (!record) {
-        release(c);
-        return pool.collect(@intFromPtr(e), Provider{ .e = e });
-    }
+    if (!record) return release(c); // its scratch stays for another window until idle or the cap frees it
     const n = try common.rowClass(rows, @import("cuda_engine.zig").most_window);
     if (rows > 1) clear(c, true);
     try ensure(e, c, false, e.g.logBytes(n), rows == 1);
@@ -71,15 +68,21 @@ pub fn mark(c: *Cache, before: bool) !void {
     if (lease) |l| try pool.markUsed(pool.domain, l);
 }
 
+/// The queue's work so far is done; idle scratch stays for the next window (idle or the cap frees it).
 pub fn completed(e: *Engine) void {
     e.rec_scratch.complete(@intFromPtr(e)) catch unreachable;
-    e.rec_scratch.collect(@intFromPtr(e), Provider{ .e = e }) catch unreachable;
 }
 
 pub fn idle(e: *Engine) void {
     if (e.rec_scratch.issued != e.rec_scratch.completed)
         cuda.completion.drain(e.d, e.stream, "recurrent scratch keep work did not drain");
     completed(e);
+    e.rec_scratch.collect(@intFromPtr(e), Provider{ .e = e }) catch unreachable;
+}
+
+/// What one scratch-owning cache may hold at once: a rollback copy and a widest window's log (1.1.1's own two).
+pub fn bound(e: *const Engine) usize {
+    return e.g.stateBytes() + e.g.logBytes(@import("cuda_engine.zig").most_window);
 }
 
 pub fn shutdown(e: *Engine) void {

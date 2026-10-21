@@ -19,6 +19,8 @@ pub const Cache = struct {
     owner: ?*recurrent.Pool = null,
     log_lease: ?recurrent.Lease = null,
     before_lease: ?recurrent.Lease = null,
+    /// Bytes this cache adds to its owner's cap while it lives (recurrent.bound).
+    scratch: usize = 0,
     untaught: bool = false,
     delta: i32 = 0,
     state: DeviceBuffer,
@@ -58,7 +60,10 @@ pub const Cache = struct {
             tap = try DeviceBuffer.alloc(e.d, e.tapBytes());
             try tap.?.fill8(0, null);
         }
-        return .{ .owner = if (adaptive) &e.rec_scratch else null, .state = state, .before = before, .kv = kv, .tap = tap, .log = log, .cap = cap, .logits = try gpa.alloc(u16, e.g.vocab) };
+        const logits = try gpa.alloc(u16, e.g.vocab);
+        const scratch = if (adaptive) recurrent.bound(e) else 0;
+        e.rec_scratch.cap += scratch;
+        return .{ .owner = if (adaptive) &e.rec_scratch else null, .scratch = scratch, .state = state, .before = before, .kv = kv, .tap = tap, .log = log, .cap = cap, .logits = logits };
     }
 
     /// Publish a completed forward's metadata, including one-row slots that already advanced in place.
@@ -81,6 +86,7 @@ pub const Cache = struct {
 
     pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
         recurrent.release(self);
+        if (self.owner) |p| p.cap -= self.scratch;
         self.state.free();
         if (self.before) |*b| b.free();
         self.kv.free();
