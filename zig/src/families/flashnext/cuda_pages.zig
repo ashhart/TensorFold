@@ -31,7 +31,12 @@ pub fn layerBytes(tokens: usize) usize {
 
 /// Bytes a page takes: every attention layer's share.
 pub fn pageBytes(tokens: usize) usize {
-    return wt.attn_n * layerBytes(tokens);
+    return pageBytesOf(tokens, wt.attn_n);
+}
+
+/// Bytes a page of `layers` attention layers takes (the model's, and the MTP head's cache when it drafts).
+pub fn pageBytesOf(tokens: usize, layers: usize) usize {
+    return layers * layerBytes(tokens);
 }
 
 /// Where `part` of attention layer `layer` starts inside a page.
@@ -87,9 +92,11 @@ pub const Paged = struct {
     /// The page test's own arena.
     arena: ?cuda.DeviceBuffer = null,
     stream: ?cuda.Stream = null,
+    /// Attention layers a page holds: the model's, and the MTP head's after them in a pool's pages.
+    layers: usize = wt.attn_n,
 
     pub fn pg(p: *const Paged) Pg {
-        return .{ .pt = p.table.ptr, .ps = @intCast(pageBytes(p.tokens) / 2), .ptok = @intCast(p.tokens) };
+        return .{ .pt = p.table.ptr, .ps = @intCast(pageBytesOf(p.tokens, p.layers) / 2), .ptok = @intCast(p.tokens) };
     }
 
     /// `part` of attention layer `layer` in page 0: the cache pointer a kernel takes beside pg().
@@ -100,7 +107,7 @@ pub const Paged = struct {
     /// Byte address of row `row` of `part` of `layer` (a position, or a block for pooled).
     pub fn rowAt(p: *const Paged, layer: usize, part: Part, row: usize) u64 {
         const per = rows(part, p.tokens);
-        return p.base + @as(u64, p.ids[row / per]) * pageBytes(p.tokens) + offset(p.tokens, layer, part) + (row % per) * rowBytes(part);
+        return p.base + @as(u64, p.ids[row / per]) * pageBytesOf(p.tokens, p.layers) + offset(p.tokens, layer, part) + (row % per) * rowBytes(part);
     }
 
     /// Borrowed views of each attention layer's `part` in page 0 (what kc, vc, ikc and pooled hold when paged).

@@ -7,6 +7,7 @@ const batch = @import("cuda_batch.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
 const mtp = @import("cuda_mtp.zig");
+const pages = @import("cuda_pages.zig");
 
 const dims = wt.dims;
 const streams = wt.streams;
@@ -52,6 +53,8 @@ pub const Draft = struct {
     ikc: cuda.DeviceBuffer,
     /// Its pooled indexer keys [cap / 4, 128] bf16, for sparse attention past 2,048 keys (Python State.mtp_pooled).
     pooled: cuda.DeviceBuffer,
+    /// The cache's pages (a pool lane's: its stream's, the layer after the model's), or contiguous.
+    pg: @import("cuda_glue.zig").Pg = .{},
     /// Entries the head's cache holds (Python mtp_len), the last `drafted` of them a chain's.
     len: usize = 0,
     drafted: usize = 0,
@@ -126,6 +129,12 @@ pub const Draft = struct {
         errdefer cuda.completion.drain(driver, stream, "Flash Next draft fills did not drain before rollback");
         // zeroed on the compute stream, ahead of the passes that read them
         for ([_]cuda.DeviceBuffer{ d.kc, d.vc, d.ikc, d.pooled }) |b| try b.fill8(0, stream.handle);
+        d.point();
+        return d;
+    }
+
+    /// The keep's history and projection rows in `saved`, and the end states into the spares.
+    fn point(d: *Draft) void {
         var li: usize = 0;
         for (&d.keep.layers, 0..) |*lk, layer| {
             if (!wt.linearLayer(layer)) continue;
@@ -134,6 +143,39 @@ pub const Draft = struct {
             li += 1;
         }
         d.aim();
+    }
+
+    /// Device bytes `initIn` takes from a run: every buffer but the head's cache, each on a 256-byte boundary.
+    pub fn runBytes(draft_n: usize, rows: usize) usize {
+        return bytes(0, draft_n, rows) + (6 + linear_n) * 256;
+    }
+
+    /// A pool lane's head: its cache on `paged`'s pages after the model's layers, its buffers from `base`'s run.
+    pub fn initIn(gpa: std.mem.Allocator, driver: *cuda.Driver, cap: usize, draft_n: usize, rows: usize, paged: *const pages.Paged, base: u64, len: usize) !Draft {
+        if (len < runBytes(draft_n, rows)) return error.FlashNextRunTooShort;
+        var at = base;
+        const Carve = struct {
+            fn take(d: *const cuda.Driver, p: *u64, n: usize) cuda.DeviceBuffer {
+                const b: cuda.DeviceBuffer = .{ .d = d, .ptr = p.*, .len = n, .borrowed = true };
+                p.* += std.mem.alignForward(usize, n, 256);
+                return b;
+            }
+            fn page(d: *const cuda.Driver, ptr: u64) cuda.DeviceBuffer {
+                return .{ .d = d, .ptr = ptr, .len = 0, .borrowed = true };
+            }
+        };
+        const head = wt.attn_n;
+        var d: Draft = .{ .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
+        d.streams = Carve.take(driver, &at, d.rows_cap * wide * 2);
+        d.out = Carve.take(driver, &at, wide * 2);
+        d.logits = Carve.take(driver, &at, max_rows * vocab * 2);
+        d.dlogits = Carve.take(driver, &at, draft_n * 2);
+        d.best = Carve.take(driver, &at, max_rows * 16);
+        d.saved = Carve.take(driver, &at, saved_bytes);
+        for (&d.spare) |*b| b.* = Carve.take(driver, &at, state_n * 4);
+        std.debug.assert(at - base <= len);
+        d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
+        d.point();
         return d;
     }
 

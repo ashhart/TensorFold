@@ -301,12 +301,20 @@ pub const Engine = struct {
 
     /// A fresh cache. `cap` is how many tokens it can hold, prompt plus generated.
     pub fn newSeq(e: *Engine, cap: usize) !Seq {
+        const test_pages = try pages.pageTest();
+        return e.newSeqOn(cap, if (test_pages > 0) try pages.testPages(e.gpa, e.driver, e.stream.*, cap, test_pages) else null);
+    }
+
+    /// A fresh cache whose attention caches are `given` pages (owned by the cache from here), else contiguous.
+    pub fn newSeqOn(e: *Engine, cap: usize, given: ?pages.Paged) !Seq {
+        var paged = given;
+        errdefer if (paged) |*p| p.deinit(e.gpa);
         e.round_graph.clear();
         if (cap == 0 or cap > max_tokens) return error.UnexpectedTensor;
-        const test_pages = try pages.pageTest();
-        _ = try seqBytesPaged(cap, test_pages);
+        _ = try seqBytesPaged(cap, if (paged) |p| p.page_tokens else 0);
         var seq: Seq = .{
             .stream = e.stream.*,
+            .paged = paged,
             .conv = &.{},
             .state = &.{},
             .kc = &.{},
@@ -324,7 +332,7 @@ pub const Engine = struct {
         seq.logits = try e.gpa.alloc(u8, vocab * 2);
         seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
         seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, state_n * 4);
-        seq.paged = if (test_pages > 0) try pages.testPages(e.gpa, e.driver, e.stream.*, cap, test_pages) else null;
+        paged = null; // seq owns the pages from here
         seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         seq.ikc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .index) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * index_dim * 2);
@@ -332,6 +340,18 @@ pub const Engine = struct {
         seq.tail = try cuda.DeviceBuffer.alloc(e.driver, ple_tail_n * wide * 2);
         try seq.tail.fill8(0, e.stream.handle);
         return seq;
+    }
+
+    /// A pool lane's cache made fresh for its next stream: zero states and tail, nothing fed, `cap` rows.
+    pub fn clearSeq(e: *Engine, s: *Seq, cap: usize) !void {
+        e.round_graph.clear();
+        for (s.conv) |b| try b.fill8(0, e.stream.handle);
+        for (s.state) |b| try b.fill8(0, e.stream.handle);
+        try s.tail.fill8(0, e.stream.handle);
+        s.history = .{ e.eos, e.eos };
+        s.fed = 0;
+        s.cap = cap;
+        s.untaught = false;
     }
 
     /// Run `ids` on from `seq.fed` and leave the next token's scores in `seq.logits`.

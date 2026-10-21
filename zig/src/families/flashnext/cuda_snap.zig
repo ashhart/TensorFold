@@ -62,16 +62,19 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
     }
     for (pieces[0..count], 0..) |p, pi| for (p.bufs, 0..) |b, layer| {
         if (p.n == 0) continue;
-        if (pi >= 2 and pi < 6) if (seq.paged) |*pg| {
+        // the model's caches on the stream's pages; the head's too in a pool lane (the layer after the model's)
+        const head = pi >= 7 and d != null and d.?.pg.pt != 0;
+        if ((pi >= 2 and pi < 6) or head) if (seq.paged) |*pg| {
             // the same bytes in the same order as a contiguous cache's, a run a page
-            const part: pages.Part = @fromBackingInt(@intCast(pi - 2));
+            const part: pages.Part = @fromBackingInt(@intCast(if (head) pi - 7 else pi - 2));
+            const at_layer = if (head) wt.attn_n else layer;
             const row = pages.rowBytes(part);
             const per = pages.rows(part, pg.tokens);
             const n = p.n / row;
             var r: usize = 0;
             while (r < n) {
                 const run = @min(per - r % per, n - r);
-                const at_row = pg.rowAt(layer, part, r);
+                const at_row = pg.rowAt(at_layer, part, r);
                 const dst, const src = if (way == .save) .{ base + off, at_row } else .{ at_row, base + off };
                 try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
                 off += run * row;
