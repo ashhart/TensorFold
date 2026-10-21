@@ -216,6 +216,13 @@ pub const Dense = struct {
         return slot.*.?.ptr;
     }
 
+    /// Grow every scratch buffer to what 128 rows of `w` need, so a call inside a graph capture allocates nothing.
+    pub fn reserve(de: *Dense, w: Weight) !void {
+        if (plan(w.k, w.n, 192, 8).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128));
+        _ = try de.scratch(&de.counters, Linear.counterBytes(w));
+        _ = try de.scratch(&de.xh, 128 * w.k * 2);
+    }
+
     /// Decode rows: one call (the kernel takes 1..128), any count above in 128-row blocks.
     pub fn decode(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
         if (de.implementation == .tiles) return de.tiles(s, w, x, x_dtype, rows, y, y_dtype, false);
