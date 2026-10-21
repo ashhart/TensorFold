@@ -4,6 +4,7 @@ const platform = @import("sys");
 const posix = platform.posix;
 const Allocator = std.mem.Allocator;
 const log = @import("log.zig");
+const deadline = @import("http_deadline.zig");
 
 pub const max_line = 65536;
 pub const max_headers = 100;
@@ -14,6 +15,7 @@ pub const Timeouts = struct {
     idle_ms: i32 = 900_000, // a kept-alive connection waiting for its next request
     read_ms: i32 = 120_000, // a request whose next bytes stop arriving
     write_ms: i32 = 300_000, // a client that stops reading
+    request: deadline.Policy = .{},
 };
 
 pub const IoError = error{ Closed, Timeout };
@@ -27,10 +29,19 @@ pub const StatusHook = struct {
     call: *const fn (ctx: *anyopaque, conn: *Conn, code: u16) void,
 };
 
+pub const ReadHooks = struct {
+    ctx: *anyopaque,
+    now: *const fn (*anyopaque) i64,
+    read: *const fn (*anyopaque, []u8, i32) IoError!usize,
+};
+
 pub const Conn = struct {
     fd: posix.socket_t,
     peer: []const u8,
     timeouts: Timeouts = .{},
+    budget: deadline.Budget = .{},
+    read_hooks: ?ReadHooks = null,
+    write_hooks: ?struct { ctx: *anyopaque, write: *const fn (*anyopaque, []const u8) error{Closed}!void } = null,
     buf: []u8,
     start: usize = 0,
     end: usize = 0,
@@ -38,6 +49,7 @@ pub const Conn = struct {
     gpa: Allocator,
     /// Per request, reset by ``readRequest``.
     close: bool = true,
+    response_complete: bool = false,
     version: []const u8 = "HTTP/0.9",
     method: []const u8 = "",
     path: []const u8 = "",
@@ -68,12 +80,22 @@ pub const Conn = struct {
             c.end -= c.start;
             c.start = 0;
         }
-        var fds = [_]posix.pollfd{.{ .fd = c.fd, .events = posix.POLL.IN, .revents = 0 }};
-        const ready = posix.poll(&fds, timeout_ms) catch return error.Closed;
-        if (ready == 0) return error.Timeout;
-        const got = posix.read(c.fd, c.buf[c.end..]) catch return error.Closed;
+        const wait = try c.budget.wait(c.nowMs(), timeout_ms);
+        const got = if (c.read_hooks) |h| try h.read(h.ctx, c.buf[c.end..], wait) else blk: {
+            var fds = [_]posix.pollfd{.{ .fd = c.fd, .events = posix.POLL.IN, .revents = 0 }};
+            const ready = posix.poll(&fds, wait) catch return error.Closed;
+            if (ready == 0) return error.Timeout;
+            break :blk posix.read(c.fd, c.buf[c.end..]) catch return error.Closed;
+        };
+        if (got > 0) c.budget.arrived(c.nowMs(), c.timeouts.request);
+        _ = try c.budget.wait(c.nowMs(), timeout_ms);
         c.end += got;
         return got;
+    }
+
+    pub fn nowMs(c: *const Conn) i64 {
+        if (c.read_hooks) |h| return h.now(h.ctx);
+        return @intCast(std.Io.Clock.awake.now(log.io()).toMilliseconds());
     }
 
     /// ``rfile.readline(limit)``: through the newline, ``limit`` bytes, or what is left before EOF.
@@ -81,6 +103,7 @@ pub const Conn = struct {
         var line: std.ArrayList(u8) = .empty;
         var wait = timeout_ms;
         while (true) {
+            _ = try c.budget.wait(c.nowMs(), wait);
             const avail = c.buf[c.start..c.end];
             const scan = avail[0..@min(avail.len, limit - line.items.len)];
             if (std.mem.indexOfScalar(u8, scan, '\n')) |i| {
@@ -100,6 +123,7 @@ pub const Conn = struct {
     pub fn readExact(c: *Conn, a: Allocator, list: *std.ArrayList(u8), n: usize) (IoError || Allocator.Error)!usize {
         var want = n;
         while (want > 0) {
+            _ = try c.budget.wait(c.nowMs(), c.timeouts.read_ms);
             if (c.start == c.end and try c.fill(c.timeouts.read_ms) == 0) break;
             const take = @min(want, c.end - c.start);
             try list.appendSlice(a, c.buf[c.start .. c.start + take]);
@@ -127,6 +151,7 @@ pub const Conn = struct {
     /// Writes ``data`` whole; a write that cannot progress for ``write_ms`` marks the client gone.
     pub fn writeAll(c: *Conn, data: []const u8) error{Closed}!void {
         if (c.broken) return error.Closed;
+        if (c.write_hooks) |h| return h.write(h.ctx, data) catch c.fail();
         var sent: usize = 0;
         while (sent < data.len) {
             var fds = [_]posix.pollfd{.{ .fd = c.fd, .events = posix.POLL.OUT, .revents = 0 }};
@@ -166,8 +191,11 @@ pub const Conn = struct {
 
     /// Reads and parses one request head; error replies are sent here, as ``parse_request`` sends them.
     pub fn readRequest(c: *Conn, a: Allocator, idle: bool) Allocator.Error!Outcome {
+        c.budget.head(c.nowMs(), idle and c.start == c.end, c.timeouts.request);
+        defer c.budget = .{};
         c.key_label = null;
         c.counted = false;
+        c.response_complete = false;
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -239,10 +267,17 @@ pub const Conn = struct {
         while (true) {
             const line = c.readLine(a, max_line + 1, c.timeouts.read_ms) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => "",
+                else => {
+                    c.close = true;
+                    return false;
+                },
             };
             if (line.len > max_line) {
                 try c.sendError(a, 431, "Line too long", "got more than 65536 bytes when reading header line");
+                return false;
+            }
+            if (line.len == 0 or !std.mem.endsWith(u8, line, "\r\n")) {
+                try c.sendError(a, 400, "Incomplete or malformed request headers", null);
                 return false;
             }
             if (lines.items.len > max_headers) {
@@ -250,17 +285,16 @@ pub const Conn = struct {
                 return false;
             }
             try lines.append(a, line);
-            if (line.len == 0 or std.mem.eql(u8, line, "\r\n") or std.mem.eql(u8, line, "\n")) break;
+            if (std.mem.eql(u8, line, "\r\n")) break;
         }
         var headers: std.ArrayList(Header) = .empty;
         for (lines.items) |line| {
-            if (line.len == 0 or line[0] == '\r' or line[0] == '\n') break;
-            const text = std.mem.trimEnd(u8, line, "\r\n");
-            const colon = std.mem.indexOfScalar(u8, text, ':') orelse return c.badHead(a);
-            const name = text[0..colon];
-            if (!headerName(name)) return c.badHead(a);
-            const value = std.mem.trimStart(u8, text[colon + 1 ..], " \t");
-            for (value) |ch| if ((ch < 0x20 and ch != '\t') or ch == 0x7f) return c.badHead(a);
+            if (std.mem.eql(u8, line, "\r\n")) break;
+            if (line[0] == ' ' or line[0] == '\t') return c.badHead(a); // folded continuation lines are refused
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse return c.badHead(a);
+            const name = line[0..colon];
+            const value = std.mem.trim(u8, line[colon + 1 .. line.len - 2], " \t");
+            if (!headerName(name) or !headerValue(value)) return c.badHead(a);
             try headers.append(a, .{ .name = name, .value = value });
         }
         c.headers = headers.items;
@@ -275,6 +309,7 @@ pub const Conn = struct {
 
     /// Python's ``send_response`` head: status line, Server and Date (nothing for HTTP/0.9).
     pub fn startResponse(c: *Conn, code: u16, phrase: ?[]const u8) Allocator.Error!void {
+        c.response_complete = false;
         c.out.clearRetainingCapacity();
         if (c.quiet_log) c.quiet_log = false else log.request(c, code);
         if (code >= 200 and !c.counted) {
@@ -300,6 +335,7 @@ pub const Conn = struct {
         c.out.appendSlice(c.gpa, body) catch return c.fail();
         try c.writeAll(c.out.items);
         c.out.clearRetainingCapacity();
+        c.response_complete = true;
     }
 
     /// A JSON reply with Python's ``_send_json`` headers.
@@ -358,8 +394,14 @@ const error_page =
 ;
 
 fn headerName(name: []const u8) bool {
-    if (name.len == 0) return false;
-    for (name) |ch| if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", ch) == null) return false;
+    for (name) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", ch) == null) return false;
+    }
+    return name.len > 0;
+}
+
+fn headerValue(value: []const u8) bool {
+    for (value) |ch| if ((ch < 0x20 and ch != '\t') or ch == 0x7f) return false;
     return true;
 }
 

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 
 const workspace = readFileSync(new URL('./workspace-runtime-ipc.ts', import.meta.url), 'utf8')
 const main = readFileSync(new URL('./remote-host-api.ts', import.meta.url), 'utf8')
-const remote = readFileSync(new URL('../../agent/remote-control.ts', import.meta.url), 'utf8')
+const remote = readFileSync(new URL('../../agent/remote-control-mutations.ts', import.meta.url), 'utf8')
 const store = readFileSync(new URL('../../../src/lib/store/slices/roomsSlice.ts', import.meta.url), 'utf8')
 const view = readFileSync(new URL('../../../src/components/rooms/RoomView.tsx', import.meta.url), 'utf8')
 

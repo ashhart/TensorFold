@@ -1,0 +1,64 @@
+# negative control: cores
+# undone: commit 3: the manifest sends cores as null and the client does not read them
+# tree: 82237515afa0572705c2803b6b633e9e5cef1b02 with only this change
+# cmd: zig build test-server-cpu --summary all -j8 (zig 0.17.0)
+# started 2026-10-18T23:32:45Z
+# --- the undo, as git diff ---
+diff --git a/zig/src/server/benchmark_manifest.zig b/zig/src/server/benchmark_manifest.zig
+index 601f8fdb..08573982 100644
+--- a/zig/src/server/benchmark_manifest.zig
++++ b/zig/src/server/benchmark_manifest.zig
+@@ -147,7 +147,8 @@ fn hardwareOf(a: Allocator, v: Value) ?receipt.Hardware {
+             if (n < 0 or n > 100000) return null;
+             break :blk @as(?u64, @intCast(n));
+         } else null;
+-        slot.* = .{ .name = name, .memory_bytes = mem, .cores = cores };
++        _ = cores;
++        slot.* = .{ .name = name, .memory_bytes = mem };
+     }
+     const count = v.get("gpu_count") orelse return null;
+     if (count != .null) {
+@@ -233,7 +234,7 @@ pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.M
+         const one = try json.newObject(a);
+         try one.put(a, "name", .{ .string = g.name });
+         if (g.memory_bytes) |n| try one.put(a, "memory_bytes", try json.intValue(a, n)) else try one.put(a, "memory_bytes", .null);
+-        if (g.cores) |n| try one.put(a, "cores", try json.intValue(a, n)) else try one.put(a, "cores", .null);
++        try one.put(a, "cores", .null);
+         slot.* = .{ .object = one };
+     }
+     try hardware.put(a, "gpus", .{ .array = gpus });
+# --- build output ---
+test-server-cpu
++- run test 432 pass, 2 fail (434 total)
+error: 'benchmark_facts_test.test.a server's manifest names the checkpoint a managed run records: the snapshot's revision and the same hashes' failed:
+       expected 40, found null
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:173:21: 0x102ae0653 in expectEqualInner__func_4293 (test)
+                           return error.TestExpectedEqual;
+                           ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x102af39db in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1/zig/src/server/benchmark_facts_test.zig:88:9: 0x102af3a5b in test.a server's manifest names the checkpoint a managed run records: the snapshot's revision and the same hashes (test)
+               try std.testing.expectEqual(want.cores, got.cores);
+               ^
+error: 'benchmark_facts_test.test.a manifest's GPU cores reach the attached receipt; cores past the board's range refuse the manifest' failed:
+       expected 40, found null
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:173:21: 0x102ae0653 in expectEqualInner__func_4293 (test)
+                           return error.TestExpectedEqual;
+                           ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x102aef34b in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1/zig/src/server/benchmark_facts_test.zig:139:5: 0x102aef407 in test.a manifest's GPU cores reach the attached receipt; cores past the board's range refuse the manifest (test)
+           try std.testing.expectEqual(@as(?u64, 40), facts.hardware.gpus[0].cores);
+           ^
+failed command: ./.zc/o/133c044ea333fd8d1591b6942de3a118/test --cache-dir=./.zc --seed=0xf23c77fe --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 432/434 tests passed (2 failed)
+test-server-cpu transitive failure
++- run test 432 pass, 2 fail (434 total)
+|  +- compile test debug native success 15s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 57ms MaxRSS:32M
+
+# exit=1 after 72s

@@ -70,15 +70,14 @@ try {
   assert.deepEqual(planningCommand(plain, '/bin/echo', ['hi'], { cwd: '/x', env: { A: '1' } }), { command: '/bin/echo', args: ['hi'], cwd: '/x', env: { A: '1' } })
 
   // Install roots include the link's prefix and its target's, but never the home dir itself.
-  // On usrmerge Linux /bin/sh resolves into /usr, adding '/usr' beside '/bin'.
   const fakeHome = path.join(scratch, 'home')
   mkdirSync(path.join(fakeHome, '.local', 'bin'), { recursive: true })
   writeFileSync(path.join(fakeHome, '.local', 'bin', 'tool'), '#!/bin/sh\n')
   const roots = cliInstallRoots(path.join(fakeHome, '.local', 'bin', 'tool'), {}, fakeHome)
-  const installRoot = path.join(fakeHome, '.local', 'bin')
-  assert.equal(roots[0], installRoot)
-  assert.ok(roots.includes('/bin'), 'interpreter prefix is a root')
-  assert.ok(roots.every((rootPath) => rootPath === installRoot || rootPath === '/bin' || rootPath === '/usr'), `only the install dir and interpreter prefixes, got ${roots}`)
+  const interpreter = realpathSync('/bin/sh')
+  const prefix = path.dirname(path.dirname(interpreter))
+  const interpreterRoot = prefix === '/' ? path.dirname(interpreter) : prefix
+  assert.deepEqual(roots, [path.join(fakeHome, '.local', 'bin'), '/bin', ...(interpreter !== '/bin/sh' ? [interpreterRoot] : [])])
 
   // The workspace is denied last, unless it holds the CLI's own dirs (a home-folder workspace).
   {

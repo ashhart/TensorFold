@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { installDnsFixture } from '../../agent/test-fixtures/dns'
 import { assertOutboundWebhookUrlResolved, isSafeExternalUrl, isSecretMask } from '../../agent/security'
 
 // Regression guard for: "webhooks:save update branch mutated the live store entry
@@ -157,4 +158,5 @@ async function main() {
   console.log('all webhook-ipc tests passed')
 }
 
-void main()
+const restoreDns = installDnsFixture({ 'example.com': '8.8.8.8', localhost: '127.0.0.1' })
+void main().finally(restoreDns)

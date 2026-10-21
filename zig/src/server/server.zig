@@ -43,6 +43,8 @@ pub const Config = struct {
     enable_thinking: bool = true,
     reasoning_effort: ?[]const u8 = null,
     thinking_budget: i64 = 0,
+    /// With thinking on, reply tokens the reasoning may use beyond the request's max_tokens (0: none).
+    thinking_reserve: i64 = 0,
     loop_guard: bool = false,
     /// Seconds the idle keepalive runs after the last request ends (0: off).
     keep_warm_s: i64 = 900,
@@ -74,6 +76,7 @@ pub const Config = struct {
     /// --learn-conversations: /v1/imprint answers; without it each of its routes refuses and names the flag.
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
+    max_connections: u32 = @import("http_admission.zig").default_limit,
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
     /// The process environment GET /v1/benchmark/manifest reads (rank count, revision, the hardware probe); null: none.
@@ -128,6 +131,11 @@ pub const Server = struct {
         const srv = try gpa.create(Server);
         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
+        if (srv.info.embeddings != null and srv.info.text_generation) return error.InvalidEmbeddingCapabilities;
+        if (srv.info.vision) |vision| if (@import("vision_markers.zig").firstUnsafe(text, vision)) |id| {
+            log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
+            return error.InvalidVisionMarkers;
+        };
         if (!srv.info.text_generation) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;
@@ -148,6 +156,10 @@ pub const Server = struct {
             std.mem.indexOf(u8, source, "thinking_mode") != null;
         srv.late_system = try lateSystem(a, text);
         srv.needs_user_after_tool = needsUserAfterTool(source);
+        if (srv.info.vision != null) {
+            const template_images = templateImages(srv);
+            if (!template_images) log.line("warning: --vision: the chat template writes no image placeholder for an image part, so image requests will fail; serve with --chat-template naming a template that has an image path", .{});
+        }
         if (text.tokenId("</think>")) |end| {
             const lead = try text.encode(a, "\n", false);
             const trail = try text.encode(a, "\n\n", false);
@@ -287,7 +299,7 @@ pub const Server = struct {
         const loopback_bind = if (listener.boundAddress()) |a| auth.loopbackAddress(a) else true;
         while (listener.accept(stop)) |c| {
             // counted before its thread runs, so a zero count once this loop ends means no connection is left
-            _ = srv.open_connections.fetchAdd(1, .acq_rel);
+            if (!srv.admitConnection(c.fd)) continue;
             const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind }) catch {
                 _ = srv.open_connections.fetchSub(1, .acq_rel);
                 _ = platform.posix.system.close(c.fd);
@@ -295,6 +307,13 @@ pub const Server = struct {
             };
             t.detach();
         }
+    }
+
+    pub fn admitConnection(srv: *Server, fd: platform.posix.socket_t) bool {
+        const admission = @import("http_admission.zig");
+        if (admission.acquire(&srv.open_connections, srv.config.max_connections)) return true;
+        admission.reject(fd);
+        return false;
     }
 
     fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool) void {
@@ -311,10 +330,12 @@ pub const Server = struct {
         if (conn.auth_enabled) conn.hook = .{ .ctx = srv, .call = countReply };
         var arena: std.heap.ArenaAllocator = .init(srv.gpa);
         defer arena.deinit();
+        var first = true;
         while (true) {
             _ = arena.reset(.retain_capacity);
             const a = arena.allocator();
-            const outcome = conn.readRequest(a, true) catch break;
+            const outcome = conn.readRequest(a, !first) catch break;
+            first = false;
             switch (outcome) {
                 .closed => break,
                 .handled => if (conn.close) break else continue,
@@ -323,9 +344,14 @@ pub const Server = struct {
             if (!request_guard.allow(&conn, browser, a)) break;
             if (!srv.authenticate(&conn, a)) break;
             if (conn.header("Expect")) |expect| if (std.ascii.eqlIgnoreCase(expect, "100-continue") and std.mem.order(u8, conn.version, "HTTP/1.1") != .lt) conn.sendContinue();
-            routes.dispatch(srv, &conn, a);
+            srv.dispatch(&conn, a);
             if (conn.close or conn.broken) break;
         }
+    }
+
+    pub fn dispatch(srv: *Server, conn: *http_conn.Conn, a: Allocator) void {
+        routes.dispatch(srv, conn, a);
+        if (!conn.response_complete) conn.close = true;
     }
 
     fn countReply(ctx: *anyopaque, conn: *http_conn.Conn, code: u16) void {
@@ -386,7 +412,20 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     const probe = (try json.parse(a, "[{\"role\": \"system\", \"content\": \"s\"}, {\"role\": \"user\", \"content\": \"u\"}, {\"role\": \"assistant\", \"content\": \"a\"}, {\"role\": \"system\", \"content\": \"tensorfold-late-system-probe\"}, {\"role\": \"user\", \"content\": \"v\"}]")).ok;
     var problem: []const u8 = "";
     const rendered = text.render(a, probe, .{ .add_generation_prompt = false }, &problem) catch return "user";
-    return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
+    return if (std.mem.indexOf(u8, rendered.text, probe_text) != null) "system" else "user";
+}
+
+/// With image input: whether a user turn holding an image part renders an image placeholder (else a startup warning).
+fn templateImages(srv: *Server) bool {
+    const v = srv.info.vision orelse return true;
+    var arena: std.heap.ArenaAllocator = .init(srv.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: errors.Cx = .{ .a = a };
+    const probe = (json.parse(a, "[{\"role\": \"user\", \"content\": [{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,AA==\"}}, {\"type\": \"text\", \"text\": \"x\"}]}]") catch return true).ok;
+    const ids = @import("prompt.zig").renderIds(srv, &cx, probe, &.{}, false, null, true) catch return true; // a render failure is the request's to report
+    for (ids) |t| if (t == v.image_token) return true;
+    return false;
 }
 
 /// Templates requiring a user query gain a user turn after trailing tool results replace their last user turn.

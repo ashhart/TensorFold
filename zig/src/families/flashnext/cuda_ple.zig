@@ -365,7 +365,7 @@ pub const Ngram = struct {
         defer gpa.free(text);
         const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
         defer parsed.deinit();
-        const wm = parsed.value.object.get("weight_map").?.object;
+        const wm = try core.safetensors.index.weightMap(parsed.value);
         const first = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
         const modelopt = wm.contains(first);
         g.format = if (modelopt) .nvfp4 else .mlx;
@@ -388,7 +388,7 @@ pub const Ngram = struct {
             const file = findOpen(g.files.items, path) orelse file: {
                 var o = try Open.load(gpa, io, path);
                 errdefer o.close(gpa);
-                std.posix.madvise(o.file.map.memory.ptr, o.file.map.memory.len, std.posix.MADV.RANDOM) catch {};
+                if (@import("builtin").os.tag != .windows) std.posix.madvise(o.file.map.memory.ptr, o.file.map.memory.len, std.posix.MADV.RANDOM) catch {};
                 try g.files.append(gpa, o);
                 break :file &g.files.items[g.files.items.len - 1];
             };

@@ -1,0 +1,10 @@
+//! CUDA row additions in registry.cuda; incoming values remain owed to the GPU gate on this stack.
+const CudaRecord = @import("registry.zig").CudaRecord;
+
+pub const cuda = [_]CudaRecord{
+    .{ .launch = .{ .name = "embed_rows tf_embed_rows_affine", .symbol = "tf_embed_rows_affine", .image = "embed_rows", .threads = 256 }, .usage = .{ .{ .regs = 38, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "qk_rows tf_qk_rows_once 512 threads", .symbol = "tf_qk_rows_once", .image = "qk_rows", .threads = 512 }, .usage = .{ .{ .regs = 30, .static = 64, .bound = 512 }, .{ .regs = 36, .static = 64, .bound = 512 }, .{ .regs = 36, .static = 64, .bound = 512 }, .{ .regs = 34, .static = 64, .bound = 512 }, .{ .regs = 34, .static = 64, .bound = 512 } } },
+    .{ .launch = .{ .name = "qk_rows tf_qk_rows_round 512 threads", .symbol = "tf_qk_rows_round", .image = "qk_rows", .threads = 512 }, .usage = .{ .{ .regs = 30, .static = 64, .bound = 512 }, .{ .regs = 36, .static = 64, .bound = 512 }, .{ .regs = 36, .static = 64, .bound = 512 }, .{ .regs = 34, .static = 64, .bound = 512 }, .{ .regs = 34, .static = 64, .bound = 512 } } },
+    .{ .launch = .{ .name = "norms tf_add_rms_rows_bf16h_tail", .symbol = "tf_add_rms_rows_bf16h_tail", .image = "norms", .threads = 256 }, .usage = .{ .{ .regs = 94, .static = 64, .bound = 256 }, .{ .regs = 95, .static = 64, .bound = 256 }, .{ .regs = 95, .static = 64, .bound = 256 }, .{ .regs = 147, .static = 64, .bound = 256 }, .{ .regs = 147, .static = 64, .bound = 256 } } },
+    .{ .launch = .{ .name = "norms tf_add_rms_rows_bf16h_tail_round", .symbol = "tf_add_rms_rows_bf16h_tail_round", .image = "norms", .threads = 256 }, .usage = .{ .{ .regs = 94, .static = 64, .bound = 256 }, .{ .regs = 95, .static = 64, .bound = 256 }, .{ .regs = 95, .static = 64, .bound = 256 }, .{ .regs = 147, .static = 64, .bound = 256 }, .{ .regs = 147, .static = 64, .bound = 256 } } },
+};

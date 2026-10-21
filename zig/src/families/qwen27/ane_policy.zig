@@ -3,6 +3,8 @@ const std = @import("std");
 pub const default_columns: u32 = 0;
 /// Loading the optional fp16 share does not establish exact output identity with the GPU path.
 pub const exact_output_qualified = false;
+/// 32 MiB bounds four-slice 27B private overhead across 20 fresh processes and the first 8K prompt.
+pub const build_runtime_overhead: ?u64 = 32 << 20;
 
 pub fn columns(value: ?[]const u8) !u32 {
     return if (value) |text| std.fmt.parseInt(u32, text, 10) else default_columns;
@@ -30,4 +32,8 @@ test "ANE policy: malformed and overflowing overrides keep refusing" {
     try std.testing.expectError(error.Overflow, columns("-1"));
     try std.testing.expectError(error.InvalidCharacter, columns("no"));
     try std.testing.expectError(error.Overflow, columns("4294967296"));
+}
+
+test "ANE policy: the measured private-overhead price is 32 MiB independent of columns" {
+    try std.testing.expectEqual(@as(?u64, 32 << 20), build_runtime_overhead);
 }

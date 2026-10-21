@@ -150,6 +150,9 @@ fn putStack(out: *pio.Out, gpa: std.mem.Allocator, name: []const u8, given: []co
     var buf: [8]Run = undefined;
     const runs = try runsOf(specs[0..given.len], rows[0..given.len], &buf);
     const a = out.arena.allocator();
+    var scratch = std.heap.ArenaAllocator.init(gpa);
+    defer scratch.deinit();
+    const work = scratch.allocator();
     var place: [16][3]u32 = undefined; // run, row within the run, row within the fused output
     var fused: u32 = 0;
     for (runs, 0..) |r, ri| {
@@ -158,7 +161,7 @@ fn putStack(out: *pio.Out, gpa: std.mem.Allocator, name: []const u8, given: []co
         var at: u32 = 0;
         for (given, 0..) |m, i| {
             if ((r.members >> @intCast(i)) & 1 == 0) continue;
-            storage[count] = try widen.regroup(a, m, r.group);
+            storage[count] = try widen.regroup(work, m, r.group);
             count += 1;
             place[i] = .{ @intCast(ri), at, 0 };
             at += @intCast(m.rows);

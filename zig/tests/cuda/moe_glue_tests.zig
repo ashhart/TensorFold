@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
+const dump = @import("byte_dump.zig");
 
 const ref = core.moe_ref;
 const counts = [_]usize{ 1, 3, 17, 300 };
@@ -75,6 +76,8 @@ fn topkCase(r: *Rig, route: cuda.moe_glue.Route, with_bias: bool) !void {
     }
     const gp = try r.back(ps[counts.len - 1], most * slots * 4);
     const gw = try r.back(ws[counts.len - 1], most * slots * 4);
+    try dump.output(r.a, "moe-glue", label, "picks", &.{ most, slots }, .u32, .{ .bias = with_bias }, gp);
+    try dump.output(r.a, "moe-glue", label, "weights", &.{ most, slots }, .f32, .{ .bias = with_bias }, gw);
     const picks = std.mem.bytesAsSlice(u32, @as([]align(1) u8, gp));
     var q_most: f64 = 0;
     for (want_p, 0..) |p, i| try check.expect(picks[i] == p, "{s}: pick {d} is {d}, want {d}", .{ label, i, picks[i], p });
@@ -82,8 +85,12 @@ fn topkCase(r: *Rig, route: cuda.moe_glue.Route, with_bias: bool) !void {
     r.worst = @max(r.worst, q_most);
     try check.expect(q_most <= 1, "{s}: weights within 2^-20 (worst {d:.3})", .{ label, q_most });
     for (counts[0 .. counts.len - 1], ps[0 .. counts.len - 1], ws[0 .. counts.len - 1]) |m, p, w| {
-        try check.sameBytes(label, try r.back(p, m * slots * 4), gp[0 .. m * slots * 4]);
-        try check.sameBytes(label, try r.back(w, m * slots * 4), gw[0 .. m * slots * 4]);
+        const got_p = try r.back(p, m * slots * 4);
+        const got_w = try r.back(w, m * slots * 4);
+        try dump.output(r.a, "moe-glue", label, "picks", &.{ m, slots }, .u32, .{ .bias = with_bias }, got_p);
+        try dump.output(r.a, "moe-glue", label, "weights", &.{ m, slots }, .f32, .{ .bias = with_bias }, got_w);
+        try check.sameBytes(label, got_p, gp[0 .. m * slots * 4]);
+        try check.sameBytes(label, got_w, gw[0 .. m * slots * 4]);
     }
 }
 
@@ -126,6 +133,7 @@ fn combineCase(r: *Rig, slots: usize, dims: usize, y_bf16: bool) !void {
         try r.g.combine(r.s, dy, if (y_bf16) .bf16 else .f32, dw, o.*, .bf16, m, slots, dims);
     }
     const wide = try r.back(outs[counts.len - 1], most * dims * 2);
+    try dump.output(r.a, "moe-glue", label, "sum", &.{ most, dims }, .bf16, .{ .slots = slots, .bf16_input = y_bf16 }, wide);
     var q_most: f64 = 0;
     for (want, tol, 0..) |x, t, i| {
         const got: f64 = @as(f32, @bitCast(@as(u32, std.mem.readInt(u16, wide[2 * i ..][0..2], .little)) << 16));
@@ -133,7 +141,11 @@ fn combineCase(r: *Rig, slots: usize, dims: usize, y_bf16: bool) !void {
     }
     r.worst = @max(r.worst, q_most);
     try check.expect(q_most <= 1, "{s}: within its float64 tolerance (worst {d:.3})", .{ label, q_most });
-    for (counts[0 .. counts.len - 1], outs[0 .. counts.len - 1]) |m, o| try check.sameBytes(label, try r.back(o, m * dims * 2), wide[0 .. m * dims * 2]);
+    for (counts[0 .. counts.len - 1], outs[0 .. counts.len - 1]) |m, o| {
+        const got = try r.back(o, m * dims * 2);
+        try dump.output(r.a, "moe-glue", label, "sum", &.{ m, dims }, .bf16, .{ .slots = slots, .bf16_input = y_bf16 }, got);
+        try check.sameBytes(label, got, wide[0 .. m * dims * 2]);
+    }
 }
 
 pub fn run(gpu: check.Gpu) !void {

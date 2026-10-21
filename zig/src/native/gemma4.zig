@@ -38,10 +38,10 @@ const Host = struct {
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         if (h.wrap) |*w| w.deinit();
+        g.residency.drop(h);
         if (h.draft) |d| d.deinit();
         if (h.assist) |d| d.deinit();
         h.config.deinit(h.gpa);
-        if (h.resident) |*r| r.deinit();
         h.metal.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
@@ -127,48 +127,12 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     try enableCache(h, a, o, @intCast(window), problem);
     errdefer if (h.cache) |*store| store.deinit();
     h.warm = .{ .queue = model.queue };
-    holdResident(h) catch |err| std.log.warn("gemma4: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
-    errdefer if (h.resident) |*r| r.deinit();
+    g.residency.hold(h) catch |err| std.log.warn("gemma4: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
+    errdefer g.residency.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start(); // the host's lists are empty until its thread runs, so a failed start leaves nothing to free
     std.log.info("gemma4: Gemma 4 {s}, context {d} tokens, {d} streams{s}{s}", .{ model.config.geo.name, window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else if (h.assist != null) ", MTP assistant drafts" else "", if (vis != null) ", images" else "" });
     return h;
-}
-
-/// The buffers that outlive a request, in one set the idle keepalive holds wired (a stream's caches come and go).
-fn holdResident(h: *Host) !void {
-    var list: std.ArrayList(mtl.Buffer) = .empty;
-    defer list.deinit(h.gpa);
-    const m = h.model;
-    for (m.checkpoint.shards.items) |sh| try list.append(h.gpa, sh.buffer); // the weights, the tower's among them
-    try list.appendSlice(h.gpa, m.weights.owned.items);
-    try list.appendSlice(h.gpa, &.{ m.inv_sliding, m.inv_global });
-    try buffersOf(h.gpa, &list, &h.metal.scratch);
-    try buffersOf(h.gpa, &list, &h.metal.prompt_scratch);
-    if (h.draft) |d| {
-        try list.appendSlice(h.gpa, d.w.owned.items);
-        try buffersOf(h.gpa, &list, d);
-    }
-    if (h.assist) |d| {
-        try list.appendSlice(h.gpa, d.w.owned.items);
-        try buffersOf(h.gpa, &list, d);
-    }
-    if (m.vision) |v| try v.appendBuffers(h.gpa, &list);
-    h.resident = try Resident.hold(h.gpa, h.io, m.device, m.queue, list.items, "gemma4") orelse return;
-    h.warm = (&h.resident.?).target();
-}
-
-/// `x`'s buffer fields, plain, optional or in arrays: a scratch's or the drafter's working buffers.
-fn buffersOf(gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer), x: anytype) !void {
-    const info = @typeInfo(@TypeOf(x.*)).@"struct";
-    inline for (info.field_names, info.field_types) |name, T| {
-        const v = @field(x.*, name);
-        switch (@typeInfo(T)) {
-            .array => |a| if (a.child == mtl.Buffer) try list.appendSlice(gpa, &v),
-            .optional => |o| if (o.child == mtl.Buffer) if (v) |b| try list.append(gpa, b),
-            else => if (T == mtl.Buffer) try list.append(gpa, v),
-        }
-    }
 }
 
 /// The prompt cache's copies of a stream: the target's caches at a mark (backend.zig), and the drafter's context there.

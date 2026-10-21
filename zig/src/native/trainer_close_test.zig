@@ -192,6 +192,7 @@ pub fn run(comptime Host: type, comptime serve: anytype, comptime closeHost: any
     try close(Host, serve, closeHost);
     F.fail_wait = false;
     try close(Host, serve, closeHost);
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the fatal case's child comes from fork
     const pid = Child.fork();
     if (pid < 0) return error.ForkFailed;
     if (pid == 0) {

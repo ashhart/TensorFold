@@ -64,6 +64,7 @@ pub const Rule = struct {
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
     greedy_ms: Table = .{}, // round_ms from greedy rounds alone: what greedy streams price by
+    shared_rounds: u64 = 0,
     greedy_overhead: std.ArrayList(Overhead) = .empty, // overhead from rounds without a sampled stream
 
     pub fn deinit(r: *Rule) void {
@@ -235,6 +236,7 @@ pub const Rule = struct {
         else
             try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), @max(whos.len, r.batch_rows), head);
         defer r.gpa.free(counts);
+        r.probeShared(whos, most, counts);
         if (r.plain_guard) {
             // no draft where none pays; a probe after a growing run of plain rounds
             for (whos, counts) |w, *c| {
@@ -249,6 +251,23 @@ pub const Rule = struct {
             return;
         }
         for (whos, most, counts, out) |*w, m, c, *o| o.* = try r.headDepth(w, @min(m, @max(1, @as(i64, c))), probe);
+    }
+
+    // One extra offered row, rotating streams; the normal window allocator still prices and trims it.
+    fn probeShared(r: *Rule, whos: []const Who, most: []const i64, counts: []u32) void {
+        r.shared_rounds +%= 1;
+        const every = r.k.depth_probe_every;
+        if (whos.len == 0 or every == 0 or r.shared_rounds % every != 0) return;
+        var rows: u64 = whos.len;
+        for (counts) |c| rows += c;
+        if (rows >= @max(whos.len, r.batch_rows)) return;
+        const first: usize = @intCast((r.shared_rounds / every -% 1) % whos.len);
+        for (0..whos.len) |offset| {
+            const i = (first + offset) % whos.len;
+            if (whos[i].finished or whos[i].forced or counts[i] == 0 or counts[i] >= most[i]) continue;
+            counts[i] += 1;
+            return;
+        }
     }
 
     /// A shared round's ms beyond its forward at this many streams (the nearest measured count, first seen on ties).

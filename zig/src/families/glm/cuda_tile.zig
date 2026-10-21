@@ -19,9 +19,11 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
     switch (l.mixer) {
         .kda => |*x| {
             const n = x.heads * kd;
-            try add(list, gpa, &x.proj, x.width(), x.dims);
-            try add(list, gpa, &x.fb, n, kd);
-            try add(list, gpa, &x.gb, n, kd);
+            if (x.tiledInput()) {
+                try add(list, gpa, &x.proj, x.width(), x.dims);
+                try add(list, gpa, &x.fb, n, kd);
+                try add(list, gpa, &x.gb, n, kd);
+            }
             try add(list, gpa, &x.o, x.dims, n);
         },
         .mla => |*x| {
@@ -78,7 +80,7 @@ fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, byte
     return was -| nb.len;
 }
 
-/// Every linear retiled in place: dense at `dense_bits`, the head at `head_bits` (16: bf16); the packed ones' table.
+/// Eligible linears tiled in place; uneven KDA inputs and their views stay bf16 for the row-major kernels.
 pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernels, s: cuda.Stream, d: *const cuda.Driver, dense_bits: u8, head_bits: u8) !mm_mod.Packed {
     var list: std.ArrayList(Lin) = .empty;
     defer list.deinit(w.gpa);
@@ -143,4 +145,25 @@ pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernel
     };
     std.sort.pdqContext(0, ptrs.len, Ctx{ .p = ptrs, .b = bits_out });
     return .{ .ptrs = ptrs, .bits = bits_out };
+}
+
+test "GLM TP3: the tiler keeps unsupported KDA input and view weights in row-major order" {
+    const c = @import("config.zig").Config{};
+    const Share = @import("cuda_shard.zig").Share;
+    const a = std.testing.allocator;
+    for ([_]usize{ 1, 2, 3, 4, 5, 8 }) |world| for (0..world) |rank| {
+        const share = try Share.of(&c, rank, world);
+        var l: Layer = undefined;
+        l.mixer = .{ .kda = .{ .proj = 1, .fb = 2, .gb = 3, .o = 4, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = share.kda.len(), .dims = c.hidden } };
+        l.ffn = .{ .dense = .{ .w = .{ .nvfp4 = undefined }, .width = share.dense.len(), .dims = c.hidden, .limit = 0 } };
+        var list: std.ArrayList(Lin) = .empty;
+        defer list.deinit(a);
+        try layerLinears(a, &l, &list);
+        const aligned = share.kda.len() % 8 == 0;
+        try std.testing.expectEqual(@as(usize, if (aligned) 4 else 1), list.items.len);
+        try std.testing.expectEqual(&l.mixer.kda.o, list.items[list.items.len - 1].field);
+        if (aligned) {
+            for (list.items, [_]u64{ 1, 2, 3, 4 }) |linear, ptr| try std.testing.expectEqual(ptr, linear.field.*);
+        }
+    };
 }

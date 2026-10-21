@@ -66,6 +66,7 @@ pub fn save(e: *Engine, id: u32, i: u32, at: u32) !*Snap {
     errdefer s.buf.deinit();
     try copy(e, i, at, s.buf, true);
     try e.snaps.put(e.gpa, id, s);
+    if (e.resident) |*r| r.add(&.{s.buf});
     return s;
 }
 
@@ -79,6 +80,7 @@ pub fn restore(e: *Engine, i: u32, id: u32) !void {
 
 pub fn drop(e: *Engine, id: u32) void {
     const kv = e.snaps.fetchRemove(id) orelse return;
+    if (e.resident) |*r| r.remove(kv.value.buf);
     kv.value.buf.deinit();
     e.gpa.destroy(kv.value);
 }
@@ -86,6 +88,7 @@ pub fn drop(e: *Engine, id: u32) void {
 pub fn deinit(e: *Engine) void {
     var it = e.snaps.valueIterator();
     while (it.next()) |s| {
+        if (e.resident) |*r| r.remove(s.*.buf);
         s.*.buf.deinit();
         e.gpa.destroy(s.*);
     }

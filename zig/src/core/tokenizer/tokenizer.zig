@@ -5,11 +5,14 @@ const steps = @import("steps.zig");
 const models = @import("model.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
+pub const eos = @import("eos.zig");
 /// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
 pub const identity = @import("identity.zig").identity;
 
 pub const Kind = models.Kind;
-pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{UnsupportedAddedToken};
+pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{ UnsupportedAddedToken, BadRequestSpans, UnsafeNormalizedAddedTokenMask, UnsafeAddedTokenMask };
+pub const Span = [2]usize;
+pub const MaskWork = struct { spans: usize = 0, matcher: usize = 0 };
 
 pub const AddedToken = struct {
     id: u32,
@@ -63,8 +66,13 @@ const Trie = struct {
     }
 
     fn next(t: *const Trie, s: []const u8, from: usize) ?Match {
+        return t.nextCounted(s, from, null);
+    }
+
+    fn nextCounted(t: *const Trie, s: []const u8, from: usize, work: ?*MaskWork) ?Match {
         if (t.ends.items.len == 0) return null;
         for (from..s.len) |i| {
+            if (work) |w| w.matcher += 1;
             var node = t.first[s[i]];
             if (node == 0) continue;
             var best: ?Match = null;
@@ -72,6 +80,7 @@ const Trie = struct {
             while (true) {
                 if (t.ends.items[node]) |token| best = .{ .start = i, .end = j, .token = token };
                 if (j == s.len) break;
+                if (work) |w| w.matcher += 1;
                 node = t.edges.get(@as(u64, node) << 8 | s[j]) orelse break;
                 j += 1;
             }
@@ -80,6 +89,32 @@ const Trie = struct {
         return null;
     }
 };
+
+/// Lossy UTF-8 replacement keeps unchanged byte offsets and marks replacements that consume request bytes.
+fn validMasked(a: Allocator, text: []const u8, spans: []const Span) Allocator.Error!struct { text: []const u8, spans: []const Span } {
+    if (std.unicode.utf8ValidateSlice(text)) return .{ .text = text, .spans = spans };
+    var out: std.ArrayList(u8) = .empty;
+    var mapped: std.ArrayList(Span) = .empty;
+    var at: usize = 0;
+    var cursor: usize = 0;
+    while (at < text.len) {
+        const step = unicode.scan(text, at);
+        const offset = out.items.len;
+        if (step.cp == null) try out.appendSlice(a, "\u{fffd}") else try out.appendSlice(a, text[at..][0..step.len]);
+        while (cursor < spans.len and spans[cursor][1] <= at) cursor += 1;
+        var j = cursor;
+        while (j < spans.len and spans[j][0] < at + step.len) : (j += 1) {
+            const p = spans[j];
+            const from = if (step.cp == null) offset else offset + @max(at, p[0]) - at;
+            const to = if (step.cp == null) out.items.len else offset + @min(at + step.len, p[1]) - at;
+            if (mapped.items.len > 0 and mapped.items[mapped.items.len - 1][1] >= from) {
+                mapped.items[mapped.items.len - 1][1] = @max(mapped.items[mapped.items.len - 1][1], to);
+            } else try mapped.append(a, .{ from, to });
+        }
+        at += step.len;
+    }
+    return .{ .text = out.items, .spans = mapped.items };
+}
 
 const Segment = struct { start: usize, end: usize, id: ?u32 };
 
@@ -91,6 +126,7 @@ pub const Tokenizer = struct {
     id_to_token: IdTable,
     unk_id: ?u32 = null,
     added: []const AddedToken = &.{},
+    added_ids: []const u64 = &.{}, // loaded once; one bit per vocabulary id
     flagged_specials: []const AddedToken = &.{},
     model: models.Model,
     normalizer: ?steps.Normalizer = null,
@@ -117,6 +153,12 @@ pub const Tokenizer = struct {
         return t.vocab.get(text);
     }
 
+    /// Added-token membership does not require the special flag.
+    pub fn isAdded(t: *const Tokenizer, id: u32) bool {
+        for (t.added) |token| if (token.id == id) return true;
+        return false;
+    }
+
     /// Token ids for `text`, without post-processor tokens; invalid UTF-8 reads as U+FFFD. Caller frees with `a`.
     pub fn encode(t: *const Tokenizer, a: Allocator, text: []const u8) Error![]u32 {
         var arena = std.heap.ArenaAllocator.init(a);
@@ -133,6 +175,65 @@ pub const Tokenizer = struct {
             if (seg.id) |id| try ids.append(ctx.a, id) else if (seg.end > seg.start) try t.encodeSegment(&ctx, valid[seg.start..seg.end], seg.start == 0, &ids);
         }
         return a.dupe(u32, ids.items);
+    }
+
+    /// Request spans cannot participate in an added spelling, including across adjacent strings.
+    pub fn encodeMasked(t: *const Tokenizer, a: Allocator, text: []const u8, spans: []const Span) Error![]u32 {
+        return t.encodeMaskedCounted(a, text, spans, null);
+    }
+
+    /// The optional work receipt counts span visits and trie transitions, independent of timing.
+    pub fn encodeMaskedCounted(t: *const Tokenizer, a: Allocator, text: []const u8, spans: []const Span, work: ?*MaskWork) Error![]u32 {
+        if (spans.len == 0) return t.encode(a, text);
+        var previous: usize = 0;
+        for (spans) |p| {
+            if (work) |w| w.spans += 1;
+            if (p[0] < previous or p[0] >= p[1] or p[1] > text.len) return error.BadRequestSpans;
+            previous = p[1];
+        }
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
+        const valid = try validMasked(ctx.a, text, spans);
+        var ids: std.ArrayList(u32) = .empty;
+        var cursor: usize = 0;
+        for (try t.splitAddedMasked(&ctx, &t.raw, valid.text, valid.spans, work)) |seg| {
+            if (seg.id) |id| {
+                try ids.append(ctx.a, id);
+                continue;
+            }
+            if (seg.start == seg.end) continue;
+            while (cursor < valid.spans.len and valid.spans[cursor][1] <= seg.start) {
+                cursor += 1;
+                if (work) |w| w.spans += 1;
+            }
+            const request = cursor < valid.spans.len and valid.spans[cursor][0] < seg.end;
+            const gap = valid.text[seg.start..seg.end];
+            if (!request or t.normalized.ends.items.len == 0) {
+                const from = ids.items.len;
+                try t.encodeSegment(&ctx, gap, seg.start == 0, &ids);
+                if (request) try t.refuseAdded(ids.items[from..]);
+            } else {
+                // A cached gap with this text may have been encoded using a different mask.
+                var clipped: std.ArrayList(Span) = .empty;
+                var j = cursor;
+                while (j < valid.spans.len and valid.spans[j][0] < seg.end) : (j += 1) {
+                    const p = valid.spans[j];
+                    try clipped.append(ctx.a, .{ @max(seg.start, p[0]) - seg.start, @min(seg.end, p[1]) - seg.start });
+                    if (work) |w| w.spans += 1;
+                }
+                try t.encodeTextMasked(&ctx, gap, seg.start == 0, &ids, true, clipped.items);
+            }
+        }
+        return a.dupe(u32, ids.items);
+    }
+
+    fn refuseAdded(t: *const Tokenizer, ids: []const u32) error{UnsafeAddedTokenMask}!void {
+        for (ids) |id| {
+            const word = id / 64;
+            if (word < t.added_ids.len and t.added_ids[word] & (@as(u64, 1) << @as(u6, @intCast(id % 64))) != 0)
+                return error.UnsafeAddedTokenMask;
+        }
     }
 
     /// encodeText through the memo for a long segment: its kept ids, else encoded and kept.
@@ -166,10 +267,25 @@ pub const Tokenizer = struct {
     }
 
     fn encodeTextWith(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool) Error!void {
+        return t.encodeTextMasked(ctx, text, first, ids, added, &.{});
+    }
+
+    fn encodeTextMasked(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool, spans: []const Span) Error!void {
         var zero: usize = if (first) unicode.decodeAt(text, 0).len else 0;
         const normalized = if (t.normalizer) |*n| try n.apply(ctx, text, &zero) else text;
         const whole = [_]Segment{.{ .start = 0, .end = normalized.len, .id = null }};
-        const segs: []const Segment = if (added) try t.splitAdded(ctx, &t.normalized, normalized) else &whole;
+        // A normalized match in a mixed gap requires exact byte offsets; otherwise refuse it.
+        const exact_offsets = if (t.normalizer) |*n| n.preservesBytes() else true;
+        if (added and spans.len > 0 and !exact_offsets and t.normalized.next(normalized, 0) != null)
+            return error.UnsafeNormalizedAddedTokenMask;
+        const segs: []const Segment = if (!added)
+            &whole
+        else if (spans.len == 0)
+            try t.splitAdded(ctx, &t.normalized, normalized)
+        else if (exact_offsets)
+            try t.splitAddedMasked(ctx, &t.normalized, normalized, spans, null)
+        else
+            &whole;
         for (segs) |seg| {
             if (seg.id) |id| {
                 try ids.append(ctx.a, id);
@@ -179,7 +295,11 @@ pub const Tokenizer = struct {
             var pieces: std.ArrayList(steps.Piece) = .empty;
             try pieces.append(ctx.a, .{ .text = normalized[seg.start..seg.end], .first = seg.start < zero });
             if (t.pre_tokenizer) |*p| try p.apply(ctx, &pieces);
-            for (pieces.items) |piece| try t.model.tokenize(ctx, &t.vocab, piece.text, ids);
+            for (pieces.items) |piece| {
+                const from = ids.items.len;
+                try t.model.tokenize(ctx, &t.vocab, piece.text, ids);
+                if (spans.len > 0) try t.refuseAdded(ids.items[from..]);
+            }
         }
     }
 
@@ -190,6 +310,48 @@ pub const Tokenizer = struct {
         var at: usize = 0;
         while (trie.next(s, at)) |hit| {
             at = hit.end;
+            const token = t.added[hit.token];
+            var start = hit.start;
+            var stop = hit.end;
+            if (token.lstrip) {
+                var k = start;
+                while (k > done) {
+                    var c = k - 1;
+                    while (s[c] & 0xC0 == 0x80) c -= 1;
+                    if (!unicode.isSpace(unicode.decodeAt(s, c).cp)) break;
+                    k = c;
+                }
+                start = k;
+            }
+            if (token.rstrip) while (stop < s.len) {
+                const d = unicode.decodeAt(s, stop);
+                if (!unicode.isSpace(d.cp)) break;
+                stop += d.len;
+            };
+            if (start > done) try out.append(ctx.a, .{ .start = done, .end = start, .id = null });
+            try out.append(ctx.a, .{ .start = start, .end = stop, .id = token.id });
+            done = stop;
+        }
+        if (done < s.len) try out.append(ctx.a, .{ .start = done, .end = s.len, .id = null });
+        return out.items;
+    }
+
+    fn splitAddedMasked(t: *const Tokenizer, ctx: *steps.Context, trie: *const Trie, s: []const u8, spans: []const Span, work: ?*MaskWork) Error![]const Segment {
+        var hits: std.ArrayList(Trie.Match) = .empty;
+        var run_start: usize = 0;
+        for (0..spans.len + 1) |i| {
+            if (work) |w| w.spans += 1;
+            const end = if (i < spans.len) spans[i][0] else s.len;
+            var at: usize = 0;
+            while (trie.nextCounted(s[run_start..end], at, work)) |hit| {
+                try hits.append(ctx.a, .{ .start = run_start + hit.start, .end = run_start + hit.end, .token = hit.token });
+                at = hit.end;
+            }
+            if (i < spans.len) run_start = spans[i][1];
+        }
+        var out: std.ArrayList(Segment) = .empty;
+        var done: usize = 0;
+        for (hits.items) |hit| {
             const token = t.added[hit.token];
             var start = hit.start;
             var stop = hit.end;
@@ -353,242 +515,16 @@ fn addTokens(t: *Tokenizer, keep: Allocator, scratch: Allocator, list: std.json.
         try t.id_to_token.put(token.id, text);
         try (if (token.normalized) &t.normalized else &t.raw).insert(keep, text, @intCast(index));
     }
-}
-
-test "byte-level BPE with merges, added tokens and decode" {
-    const json =
-        \\{"added_tokens":[{"id":7,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],
-        \\ "normalizer":{"type":"NFC"},
-        \\ "pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":" ?\\S+|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]},
-        \\ "decoder":{"type":"ByteLevel"},
-        \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
-        \\  "vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6},"merges":[["Ġ","a"],"a b","Ġa b"]}}
-    ;
-    const a = std.testing.allocator;
-    var t = try parse(a, json);
-    defer t.deinit();
-    const ids = try t.encode(a, "ab ab<|end|>c");
-    defer a.free(ids);
-    try std.testing.expectEqualSlices(u32, &.{ 3, 5, 7, 6 }, ids);
-    const text = try t.decode(a, ids, false);
-    defer a.free(text);
-    try std.testing.expectEqualStrings("ab ab<|end|>c", text);
-    const skipped = try t.decode(a, ids, true);
-    defer a.free(skipped);
-    try std.testing.expectEqualStrings("ab abc", skipped);
-    try std.testing.expectEqual(@as(?u32, 7), t.specialTokenId("<|end|>"));
-    try std.testing.expectEqual(@as(usize, 1), t.flagged_specials.len);
-    const marker = (try t.tokenBytes(a, 7)).?;
-    defer a.free(marker);
-    try std.testing.expectEqualStrings("<|end|>", marker);
-    const unknown = (try t.tokenBytes(a, 99)).?;
-    defer a.free(unknown);
-    try std.testing.expectEqualStrings("", unknown);
-}
-
-test "with the memo, long segments encode as without it, and the second encode takes their kept ids" {
-    const json =
-        \\{"added_tokens":[{"id":7,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],
-        \\ "pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":" ?\\S+|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]},
-        \\ "decoder":{"type":"ByteLevel"},
-        \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
-        \\  "vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6},"merges":[["Ġ","a"],"a b","Ġa b"]}}
-    ;
-    const a = std.testing.allocator;
-    var t = try parse(a, json);
-    defer t.deinit();
-    var text: std.ArrayList(u8) = .empty;
-    defer text.deinit(a);
-    for (0..300) |_| try text.appendSlice(a, "ab abc ");
-    try text.appendSlice(a, "<|end|>");
-    for (0..300) |_| try text.appendSlice(a, " ab cab");
-    const plain = try t.encode(a, text.items);
-    defer a.free(plain);
-    t.memo = try Memo.create(a, 1 << 20);
-    for (0..2) |_| {
-        const kept = try t.encode(a, text.items);
-        defer a.free(kept);
-        try std.testing.expectEqualSlices(u32, plain, kept);
-    }
-    try std.testing.expectEqual(@as(u64, 2), t.memo.?.hits); // both segments, the second time
-}
-
-test "a kept segment's ids equal a fresh encode's wherever the segment sits" {
-    const added =
-        \\{"added_tokens":[{"id":20,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true},
-        \\ {"id":21,"content":"<|l|>","single_word":false,"lstrip":true,"rstrip":false,"normalized":false,"special":true},
-        \\ {"id":22,"content":"<|r|>","single_word":false,"lstrip":false,"rstrip":true,"normalized":false,"special":true}],
-    ;
-    const kinds = [_][]const u8{
-        added ++
-            \\ "pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":" ?\\S+|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]},
-            \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
-            \\  "vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6,"x":7,"ï":8,"¿":9,"½":10},"merges":[["Ġ","a"],"a b","Ġa b"]}}
-        ,
-        added ++
-            \\ "pre_tokenizer":{"type":"Metaspace","replacement":"▁","prepend_scheme":"first","split":true},
-            \\ "model":{"type":"BPE","unk_token":"<unk>","fuse_unk":true,"byte_fallback":true,
-            \\  "vocab":{"<unk>":0,"a":1,"b":2,"▁":3,"ab":4,"▁a":5,"▁ab":6,"c":7,"x":8,"<0xEF>":9,"<0xBF>":10,"<0xBD>":11},"merges":["a b","▁ a","▁a b"]}}
-        ,
-    };
-    const a = std.testing.allocator;
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(a);
-    for (0..200) |i| try body.appendSlice(a, if (i % 3 == 0) "ab abc " else "cab ab ");
-    const b = body.items;
-    // first or not, after lstrip and rstrip tokens, with a leading space, around a lossy byte, repeated in one prompt
-    const texts = [_][]const []const u8{
-        &.{b},               &.{ "<|end|>", b }, &.{ b, "<|end|>", b }, &.{ "x  <|l|>", b },
-        &.{ "<|r|>   ", b }, &.{ " ", b },       &.{ b, "\xff", b },    &.{ "<|end|> ", b, "<|r|>", b },
-    };
-    for (kinds, 0..) |json, kind| {
-        var t = try parse(a, json);
-        defer t.deinit();
-        var fresh: [texts.len][]u32 = undefined;
-        for (texts, &fresh) |parts, *ids| {
-            const s = try std.mem.concat(a, u8, parts);
-            defer a.free(s);
-            ids.* = try t.encode(a, s);
-        }
-        defer for (fresh) |ids| a.free(ids);
-        // the Metaspace tokenizer prepends to the first segment alone, so a memo blind to `first` fails below
-        if (kind == 1) try std.testing.expect(!std.mem.eql(u32, fresh[0], fresh[1][1..]));
-        t.memo = try Memo.create(a, 1 << 20);
-        for (0..2) |round| for (0..texts.len) |k| {
-            const i = if (round == 0) k else texts.len - 1 - k;
-            const s = try std.mem.concat(a, u8, texts[i]);
-            defer a.free(s);
-            const kept = try t.encode(a, s);
-            defer a.free(kept);
-            try std.testing.expectEqualSlices(u32, fresh[i], kept);
-        };
-        try std.testing.expect(t.memo.?.hits >= 10); // every long segment of the second round, at least
-    }
-}
-
-test "sentencepiece-style BPE with byte fallback" {
-    const json =
-        \\{"added_tokens":[],"normalizer":{"type":"Replace","pattern":{"String":" "},"content":"▁"},
-        \\ "pre_tokenizer":{"type":"Split","pattern":{"String":" "},"behavior":"MergedWithPrevious","invert":false},
-        \\ "decoder":{"type":"Sequence","decoders":[{"type":"Replace","pattern":{"String":"▁"},"content":" "},{"type":"ByteFallback"},{"type":"Fuse"}]},
-        \\ "model":{"type":"BPE","unk_token":"<unk>","fuse_unk":true,"byte_fallback":true,
-        \\  "vocab":{"<unk>":0,"<0xC3>":1,"<0xA9>":2,"h":3,"i":4,"▁":5,"hi":6,"▁h":7},"merges":["h i","▁ h"]}}
-    ;
-    const a = std.testing.allocator;
-    var t = try parse(a, json);
-    defer t.deinit();
-    const ids = try t.encode(a, "hi h\u{E9}");
-    defer a.free(ids);
-    try std.testing.expectEqualSlices(u32, &.{ 6, 7, 1, 2 }, ids);
-    const text = try t.decode(a, ids, false);
-    defer a.free(text);
-    try std.testing.expectEqualStrings("hi h\u{E9}", text);
-    try std.testing.expectEqual(@as(?u32, 0), t.unk_id);
-    const first = (try t.tokenBytes(a, 1)).?;
-    defer a.free(first);
-    const second = (try t.tokenBytes(a, 2)).?;
-    defer a.free(second);
-    try std.testing.expectEqualSlices(u8, &.{0xc3}, first);
-    try std.testing.expectEqualSlices(u8, &.{0xa9}, second);
-    const space = (try t.tokenBytes(a, 7)).?;
-    defer a.free(space);
-    try std.testing.expectEqualStrings(" h", space);
-}
-
-test "without a decoder, decode joins known ids' tokens with spaces" {
-    const a = std.testing.allocator;
-    var t = Tokenizer{ .allocator = a, .vocab = .init(a), .id_to_token = .{ .allocator = a }, .model = .empty(.wordpiece) };
-    defer t.deinit();
-    try t.vocab.put("t1", 1);
-    try t.id_to_token.put(1, "t1");
-    try t.id_to_token.put(4, "t4");
-    const text = try t.decode(a, &.{ 1, 4, 9 }, false);
-    defer a.free(text);
-    try std.testing.expectEqualStrings("t1 t4", text);
-    try std.testing.expectEqual(@as(?u32, null), t.unk_id);
-    try std.testing.expect((try t.tokenBytes(a, 1)) == null);
-}
-
-test "raw ByteLevel pieces preserve an incomplete UTF-8 character" {
-    const a = std.testing.allocator;
-    var t = Tokenizer{
-        .allocator = a,
-        .vocab = .init(a),
-        .id_to_token = .{ .allocator = a },
-        .model = .empty(.bpe),
-        .decoder = .byte_level,
-    };
-    defer t.deinit();
-    try t.id_to_token.put(0, "\u{c3}");
-    try t.id_to_token.put(1, "\u{a9}");
-    const first = (try t.tokenBytes(a, 0)).?;
-    defer a.free(first);
-    const second = (try t.tokenBytes(a, 1)).?;
-    defer a.free(second);
-    try std.testing.expectEqualSlices(u8, &.{0xc3}, first);
-    try std.testing.expectEqualSlices(u8, &.{0xa9}, second);
-    const decoded = try t.decode(a, &.{ 0, 1 }, false);
-    defer a.free(decoded);
-    try std.testing.expectEqualStrings("\u{e9}", decoded);
-    const partial = try t.decode(a, &.{0}, false);
-    defer a.free(partial);
-    try std.testing.expectEqualStrings("\u{fffd}", partial);
-}
-
-test "raw token bytes refuse replacements after the decoder joins token boundaries" {
-    const a = std.testing.allocator;
-    const decoders = [_]steps.Decoder{
-        .byte_level, .{ .replace = .{ .pattern = .{ .literal = "ab" }, .content = "x" } },
-    };
-    var t = Tokenizer{
-        .allocator = a,
-        .vocab = .init(a),
-        .id_to_token = .{ .allocator = a },
-        .model = .empty(.bpe),
-        .decoder = .{ .sequence = &decoders },
-    };
-    defer t.deinit();
-    try t.id_to_token.put(0, "a");
-    try t.id_to_token.put(1, "b");
-    const decoded = try t.decode(a, &.{ 0, 1 }, false);
-    defer a.free(decoded);
-    try std.testing.expectEqualStrings("x", decoded);
-    try std.testing.expect((try t.tokenBytes(a, 0)) == null);
-}
-
-test "raw token bytes conservatively refuse context-sensitive decoder kinds" {
-    const a = std.testing.allocator;
-    var scratch = std.heap.ArenaAllocator.init(a);
-    defer scratch.deinit();
-    const pattern = try @import("regex.zig").Regex.compile(scratch.allocator(), "a+");
-    const after_fuse = [_]steps.Decoder{
-        .fuse, .{ .replace = .{ .pattern = .{ .literal = "ab" }, .content = "x" } },
-    };
-    const decoders = [_]steps.Decoder{
-        .{ .strip = .{ .content = ' ', .start = 1, .stop = 0 } },
-        .{ .metaspace = .{ .replacement = 0x2581, .scheme = .always } },
-        .{ .wordpiece = .{ .prefix = "##", .cleanup = false } },
-        .{ .replace = .{ .pattern = .{ .regex = pattern }, .content = "x" } },
-        .{ .sequence = &after_fuse },
-    };
-    var t = Tokenizer{
-        .allocator = a,
-        .vocab = .init(a),
-        .id_to_token = .{ .allocator = a },
-        .model = .empty(.bpe),
-    };
-    defer t.deinit();
-    try t.id_to_token.put(0, "a");
-    for (decoders) |decoder| {
-        t.decoder = decoder;
-        try std.testing.expect((try t.tokenBytes(a, 0)) == null);
+    if (tokens.items.len > 0) {
+        const size = t.id_to_token.tokens.items.len;
+        const bits = try keep.alloc(u64, size / 64 + @intFromBool(size % 64 != 0));
+        @memset(bits, 0);
+        for (tokens.items) |token| bits[token.id / 64] |= @as(u64, 1) << @as(u6, @intCast(token.id % 64));
+        t.added_ids = bits;
     }
 }
 
 test {
-    _ = @import("memo.zig");
-}
-
-test {
-    _ = @import("identity.zig");
+    _ = @import("tokenizer_test.zig");
+    _ = @import("masked_test.zig");
 }

@@ -48,7 +48,7 @@ pub fn embedding(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, hist
     defer gpa.free(text);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
     defer parsed.deinit();
-    const wm = parsed.value.object.get("weight_map").?.object;
+    const wm = try core.safetensors.index.weightMap(parsed.value);
     const scale = try tableScale(gpa, io, model_dir, wm);
     const heads = hash.heads;
     const dh = hash.dh;
@@ -118,7 +118,7 @@ pub fn table(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, model_dir: 
     defer gpa.free(text);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
     defer parsed.deinit();
-    const wm = parsed.value.object.get("weight_map").?.object;
+    const wm = try core.safetensors.index.weightMap(parsed.value);
 
     var cname: [160]u8 = undefined;
     const mult_name = try std.fmt.bufPrint(&cname, "language_model.model.layers.{d}.ple.ple_embedding.layer_multipliers", .{layer});

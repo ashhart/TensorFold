@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const mac = builtin.os.tag == .macos;
 const win = builtin.os.tag == .windows;
+pub const video_library = @import("video_library.zig");
 
 pub const Id = enum { cublaslt, cublas, nccl, verbs, video, jpeg, webp, grammar, rccl, mcdma_rpc, mcdma_fabric };
 pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
@@ -29,7 +30,7 @@ pub const all = [_]Spec{
     item(.cublas, "cuBLAS", &.{ "libcublas.so.13", "libcublas.so" }, "Drama CUDA prompt and codec GEMMs", "install the NVIDIA CUDA 13 cuBLAS runtime; " ++ loader_path ++ "", error.CublasUnavailable, null, false),
     item(.nccl, "NCCL", &.{"libnccl.so.2"}, "CUDA ranks (including the GLM pair)", "install the NVIDIA NCCL 2 runtime compatible with CUDA 13; " ++ loader_path ++ "", error.NcclUnavailable, null, false),
     item(.verbs, "RDMA verbs", if (mac) &.{"/usr/lib/librdma.dylib"} else &.{"libibverbs.so.1"}, "RoCE/RDMA gathers", if (mac) "use a macOS installation with its RDMA runtime" else "install rdma-core's libibverbs runtime and the provider for the network adapter", error.VerbsUnavailable, null, false),
-    item(.video, "TensorFold video", if (mac) &.{"libtfvideo.dylib"} else if (win) &.{"tfvideo.dll"} else &.{"libtfvideo.so"}, "video inputs (--vision)", "build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md", error.VideoLibraryUnavailable, null, true),
+    item(.video, "TensorFold video", if (mac) &.{"libtfvideo.dylib"} else if (win) &.{"tfvideo.dll"} else &.{video_library.soname}, "video inputs (--vision)", "build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md", error.VideoLibraryUnavailable, null, true),
     item(.jpeg, "libjpeg-turbo", if (mac) &.{"libturbojpeg.0.dylib"} else if (win) &.{"turbojpeg.dll"} else &.{"libturbojpeg.so.0"}, "JPEG inputs (--vision)", "install libjpeg-turbo 3.1.4.1 and set TENSORFOLD_LIBTURBOJPEG to its file, or put it on the documented loader path", error.JpegLibraryUnavailable, "TENSORFOLD_LIBTURBOJPEG", true),
     item(.webp, "libwebp", if (mac) &.{"libwebpdecoder.3.dylib"} else &.{"libwebpdecoder.so.3"}, "WebP inputs (--vision)", "install libwebp 1.6.0 and set TENSORFOLD_LIBWEBP to its decoder file, or put it on the documented loader path", error.WebpLibraryUnavailable, "TENSORFOLD_LIBWEBP", true),
     item(.grammar, "TensorFold grammar", if (mac) &.{"libtfgrammar.dylib"} else &.{"libtfgrammar.so"}, "structured output and required tool calls", "restore the matching release archive's lib directory or build zig build grammar", error.GrammarLibraryUnavailable, null, true),
@@ -92,6 +93,7 @@ pub fn probe(a: std.mem.Allocator, io: std.Io, comptime Sys: type) ![]Status {
 }
 
 pub fn found(s: Spec, a: std.mem.Allocator, comptime Sys: type, exe: ?[]const u8) bool {
+    if (builtin.os.tag == .linux and s.id == .video) return video_library.open(a, Sys, exe) != null;
     if (s.env) |name| if (Sys.getenv(name)) |value| {
         if (value.len == 0 and s.id != .mcdma_rpc) return false;
         if (value.len > 0) return loads(Sys, value);

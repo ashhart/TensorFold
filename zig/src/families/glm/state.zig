@@ -17,6 +17,7 @@ pub const Arena = struct {
     buffers: std.ArrayList(mtl.Buffer) = .empty,
     bytes: usize = 0,
     dry: bool = false, // count the bytes only (a size for a plan)
+    follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn buffer(a: *Arena, len: usize) !Ref {
         if (a.dry) {
@@ -30,11 +31,15 @@ pub const Arena = struct {
         };
         a.bytes += @max(len, 16);
         @memset(b.contents()[0..@max(len, 16)], 0);
+        if (a.follow) |f| f.join(f.ctx, b);
         return .{ .buf = b };
     }
 
     pub fn deinit(a: *Arena) void {
-        for (a.buffers.items) |b| b.deinit();
+        for (a.buffers.items) |b| {
+            if (a.follow) |f| f.leave(f.ctx, b);
+            b.deinit();
+        }
         a.buffers.deinit(a.gpa);
     }
 };

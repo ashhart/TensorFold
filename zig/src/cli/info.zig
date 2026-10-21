@@ -2,12 +2,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hub = @import("hub.zig");
+const core = @import("core");
+const checkpoint = if (@hasDecl(core, "checkpoint_host")) core.checkpoint_host else core.checkpoint;
 
 pub const GiB: u64 = 1 << 30;
 
-/// Kept back for kernels, activations and buffers that grow with long prompts; the same margin the
-/// server's prompt-cache budget reserves (native/cache_fit.zig's MARGIN).
-pub const runtime_margin: u64 = 2 * GiB;
+/// The same reserve the native residency and preflight bounds keep.
+pub const runtime_margin = @import("sys").memory_policy.margin;
 
 /// Prints what a Zig family would serve from `model` (a directory or a cached repo id).
 /// Returns the process exit code.
@@ -35,7 +36,8 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
         try out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ model, model_type });
         return 1;
     };
-    const weights = try hub.sizeOf(a, io, dir);
+    const flash_metal = @import("builtin").os.tag == .macos and std.mem.eql(u8, model_type, "qwen4_exp");
+    const weights = if (flash_metal) try @import("flashnext_memory").weightBytes(checkpoint, a, io, dir) else try hub.sizeOf(a, io, dir);
     try out.print("family: {s} ({s})\n", .{ family.title, family.model_type });
     if (hub.quantization(a, io, dir)) |q| {
         try out.print("format: {d}-bit, group {d}\n", .{ q.bits, q.group });
@@ -46,7 +48,13 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
         try out.print("context: {d}\n", .{context});
     }
     try out.print("weights: {d:.2} GiB ({d} bytes)\n", .{ @as(f64, @floatFromInt(weights)) / GiB, weights });
-    try out.print("memory floor: {d:.2} GiB (weights plus a {d:.2} GiB runtime margin)\n", .{
+    if (flash_metal) {
+        const memory = @import("flashnext_memory");
+        const inventory = try memory.weights_plan.read(core.Checkpoint, core.quant.mlx, a, io, dir);
+        const plan = try memory.budget(weights, memory.trained, inventory, 0);
+        try out.print("startup budget: {d:.2} GiB (conservative raw/packed text weights, both prompt planes/selectors, KV/state, keepalive and {d} GiB runtime reserve; trained window)\n", .{ @as(f64, @floatFromInt(plan.steady)) / GiB, runtime_margin >> 30 });
+        try out.print("cold pack budget: {d:.2} GiB (source pages, one output phase and conversion scratch; skipped with a validated pack; vision and requested storage are additional at load)\n", .{@as(f64, @floatFromInt(plan.building)) / GiB});
+    } else try out.print("memory floor: {d:.2} GiB (weights plus a {d:.2} GiB runtime margin)\n", .{
         @as(f64, @floatFromInt(weights + runtime_margin)) / GiB,
         @as(f64, @floatFromInt(runtime_margin)) / GiB,
     });
@@ -67,15 +75,26 @@ test "info prints family, format, context, weights and floor for a cached checkp
     try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ root, "models--Org--Flash/snapshots/rev1/config.json" }), .data = "{\"model_type\": \"qwen4_exp\", \"quantization\": {\"bits\": 6, \"group_size\": 32}, \"max_position_embeddings\": 65536}" });
     var weights: [8192]u8 = undefined;
     @memset(&weights, 'x');
-    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ root, "models--Org--Flash/snapshots/rev1/weights.safetensors" }), .data = &weights });
+    const header = "{\"language_model.fixture\":{\"dtype\":\"U8\",\"shape\":[8192],\"data_offsets\":[0,8192]}}";
+    const model_bytes = try a.alloc(u8, 8 + header.len + weights.len);
+    std.mem.writeInt(u64, model_bytes[0..8], header.len, .little);
+    @memcpy(model_bytes[8..][0..header.len], header);
+    @memcpy(model_bytes[8 + header.len ..], &weights);
+    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ root, "models--Org--Flash/snapshots/rev1/model.safetensors" }), .data = model_bytes });
 
     var out: std.Io.Writer.Allocating = .init(a);
     try std.testing.expectEqual(@as(u8, 0), try run(a, io, &out.writer, null, root, "Org/Flash"));
     try std.testing.expect(has(out.written(), "family: Qwen3.8 Flash Next (qwen4_exp)"));
     try std.testing.expect(has(out.written(), "format: 6-bit, group 32"));
     try std.testing.expect(has(out.written(), "context: 65536"));
-    try std.testing.expect(has(out.written(), "weights: 0.00 GiB (8300 bytes)"));
-    try std.testing.expect(has(out.written(), "memory floor: 2.00 GiB"));
+    try std.testing.expect(has(out.written(), try std.fmt.allocPrint(a, "weights: 0.00 GiB ({d} bytes)", .{model_bytes.len + (if (@import("builtin").os.tag == .macos) @as(usize, 0) else @as(usize, 108))})));
+    if (@import("builtin").os.tag == .macos) {
+        try std.testing.expect(has(out.written(), "startup budget:"));
+        try std.testing.expect(has(out.written(), "conservative raw/packed text weights"));
+        try std.testing.expect(has(out.written(), "cold pack budget:"));
+        try std.testing.expect(has(out.written(), "skipped with a validated pack"));
+        try std.testing.expect(has(out.written(), "both prompt planes/selectors, KV/state"));
+    } else try std.testing.expect(has(out.written(), "memory floor: 2.00 GiB"));
 
     var refused: std.Io.Writer.Allocating = .init(a);
     try w.createDirPath(io, try std.fs.path.join(a, &.{ root, "models--Org--Draft/snapshots/rev2" }));

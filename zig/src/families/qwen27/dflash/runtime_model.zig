@@ -219,6 +219,7 @@ pub const Model = struct {
 };
 /// A stream's own drafter state, parked while another stream drafts: its taps ring, rolling K/V and session.
 pub const Context = struct {
+    residency: ?mtl.ResidencySet.Follow = null,
     pending: mtl.Buffer,
     committed_end: u64 = 0,
     caches: []Cache,
@@ -234,10 +235,22 @@ pub const Context = struct {
         const pending = try device.buffer(@as(usize, c.window) * c.tapWidth() * 2, opts);
         errdefer pending.deinit();
         const caches = try backend_mod.newCaches(a, device, c, if (drafting) c.layers else 0);
+        errdefer backend_mod.freeCaches(a, caches);
         x.* = .{ .pending = pending, .caches = caches, .session = try Session.init(c, 1, 0) };
+        x.setResident(m.backend.residency);
         return x;
     }
+    pub fn setResident(x: *Context, hook: ?mtl.ResidencySet.Follow) void {
+        if (x.residency) |f| x.apply(f, false);
+        x.residency = hook;
+        if (hook) |f| x.apply(f, true);
+    }
+    fn apply(x: *Context, f: mtl.ResidencySet.Follow, joining: bool) void {
+        mtl.resident.fields.apply(x, f, joining);
+        for (x.caches) |*c| mtl.resident.fields.apply(c, f, joining);
+    }
     pub fn deinit(x: *Context, a: std.mem.Allocator) void {
+        x.setResident(null);
         backend_mod.freeCaches(a, x.caches);
         x.pending.deinit();
         a.destroy(x);

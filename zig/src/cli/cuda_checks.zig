@@ -133,11 +133,21 @@ fn npy(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) ![
     defer gpa.free(path);
     const all = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 28));
     defer gpa.free(all);
-    if (all.len < 10 or !std.mem.eql(u8, all[1..6], "NUMPY")) return error.NotNpy;
-    const v1 = all[6] == 1;
-    const hlen: usize = if (v1) std.mem.readInt(u16, all[8..10], .little) else std.mem.readInt(u32, all[8..12], .little);
-    const start = (if (v1) @as(usize, 10) else 12) + hlen;
-    return gpa.dupe(u8, all[start..]);
+    const array = try @import("core").npy.parse(all);
+    return gpa.dupe(u8, array.data);
+}
+
+test "security: CUDA oracle files reject incomplete NumPy headers" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    for ([_][]const u8{ "\x93NUMPY\x02\x00\x00\x00", "\x93NUMPY\x01\x00\xff\xff" }) |data| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "oracle.npy", .data = data });
+        try std.testing.expectError(error.BadHeader, npy(a, io, dir, "oracle.npy"));
+    }
 }
 
 /// Compare MTP topk and keyed draws with recorded drafts and confidence.

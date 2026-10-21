@@ -1,0 +1,100 @@
+{
+  "candidate_size": 3,
+  "coverage": [
+    {
+      "bucket": "*",
+      "covered": 3,
+      "split": "calibration",
+      "tokens": 4
+    },
+    {
+      "bucket": "toy",
+      "covered": 3,
+      "split": "calibration",
+      "tokens": 4
+    },
+    {
+      "bucket": "*",
+      "covered": 3,
+      "split": "selection",
+      "tokens": 4
+    },
+    {
+      "bucket": "toy",
+      "covered": 3,
+      "split": "selection",
+      "tokens": 4
+    },
+    {
+      "bucket": "*",
+      "covered": 3,
+      "split": "heldout",
+      "tokens": 4
+    },
+    {
+      "bucket": "toy",
+      "covered": 3,
+      "split": "heldout",
+      "tokens": 4
+    }
+  ],
+  "identity": {
+    "drafter": {
+      "name": "synthetic-drafter",
+      "revision": "r1",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "format": "bf16",
+    "group": 0,
+    "head": {
+      "name": "proposal-head",
+      "revision": "r1",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "hidden": 8,
+    "recipe": {
+      "name": "synthetic-recipe",
+      "revision": "r1",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "scale_recipe": "none",
+    "target": {
+      "name": "synthetic-target",
+      "revision": "r1",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "tokenizer": {
+      "name": "synthetic-tokenizer",
+      "revision": "r1",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "vocab": 11
+  },
+  "ids": [
+    0,
+    3,
+    7
+  ],
+  "ids_sha256": "455857c521c1dc35d3f8853a83bd559f8405d5853db05216fafb83a14cebd157",
+  "mandatory_ids": [
+    0
+  ],
+  "provenance": {
+    "calibration_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "collector": {
+      "name": "synthetic-collector",
+      "revision": "r1",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "corpus_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "heldout_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "mandatory_source": "synthetic-recipe",
+    "policy_version": 1,
+    "prompts_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "responses_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "selection_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "settings_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "source_kind": "committed_response_ids"
+  },
+  "version": 1
+}

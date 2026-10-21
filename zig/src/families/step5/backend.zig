@@ -25,6 +25,7 @@ pub const Metal = struct {
     scratch: st.Scratch, // decode rounds
     prompt: st.Scratch, // prompt chunks
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    follow: ?mtl.ResidencySet.Follow = null,
     held: u64 = 0, // bytes the streams' caches hold
     room: ?Room = null, // the prompt cache, which takes what the streams leave of the budget
 
@@ -38,6 +39,7 @@ pub const Metal = struct {
     }
 
     pub fn deinit(self: *Metal) void {
+        self.setResident(null);
         var it = self.caches.valueIterator();
         while (it.next()) |cache| {
             cache.*.deinit();
@@ -47,6 +49,28 @@ pub const Metal = struct {
         self.scratch.deinit();
         self.prompt.deinit();
         self.gpa.destroy(self);
+    }
+
+    pub fn setResident(self: *Metal, hook: ?mtl.ResidencySet.Follow) void {
+        if (self.follow) |f| {
+            mtl.resident.fields.apply(&self.scratch, f, false);
+            mtl.resident.fields.apply(&self.prompt, f, false);
+        }
+        self.follow = hook;
+        if (hook) |f| {
+            mtl.resident.fields.apply(&self.scratch, f, true);
+            mtl.resident.fields.apply(&self.prompt, f, true);
+        }
+        var it = self.caches.valueIterator();
+        while (it.next()) |cache| cache.*.setResident(hook);
+    }
+
+    pub fn createCache(self: *Metal, capacity: usize) !*st.Cache {
+        const cache = try self.gpa.create(st.Cache);
+        errdefer self.gpa.destroy(cache);
+        cache.* = try st.Cache.init(self.model.device, &self.model.config, capacity);
+        cache.setResident(self.follow);
+        return cache;
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
@@ -119,9 +143,8 @@ pub const Metal = struct {
         }
         // kept states give way first
         if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, stream.reuse.saved, ids);
-        const cache = try self.gpa.create(st.Cache);
+        const cache = try self.createCache(capacity);
         errdefer self.gpa.destroy(cache);
-        cache.* = try st.Cache.init(self.model.device, &self.model.config, capacity);
         errdefer cache.deinit();
         try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
         errdefer _ = self.caches.remove(stream);

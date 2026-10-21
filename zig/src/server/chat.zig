@@ -71,6 +71,31 @@ pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
 const nowNs = clock.nowNs;
 const seconds = clock.seconds;
 
+test "Server recovery: token staging allocation failure ends the loop without consuming tokens" {
+    for (0..2) |fail_index| {
+        var m: Mailbox = .{ .io = std.testing.io, .gpa = std.testing.allocator, .finished = true };
+        defer m.deinit();
+        try m.tokens.append(std.testing.allocator, 42);
+        try m.chunks.append(std.testing.allocator, 1);
+        try m.rows.append(std.testing.allocator, .{ .token = 42, .logprob = -1 });
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var g: Generation = undefined;
+        g.a = failing.allocator();
+        g.box = &m;
+        g.chunk_index = 0;
+        g.consumed = 0;
+        g.lp = .{};
+        const Gone = struct {
+            pub fn check(_: @This()) bool {
+                return false;
+            }
+        };
+        try std.testing.expectError(error.OutOfMemory, g.loop(Gone{}));
+        try std.testing.expectEqual(@as(usize, 0), g.consumed);
+        try std.testing.expectEqual(@as(usize, 0), g.chunk_index);
+    }
+}
+
 /// Python's ``bool(fields.get(key))`` on the sampling fields.
 fn flag(f: Value, key: []const u8) ?bool {
     const v = f.get(key) orelse return null;
@@ -160,6 +185,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
             request.think_close = srv.think_close;
             request.think_end = srv.think_close_end;
         }
+        // The answer quota is separate only on engines that enforce it.
+        if (srv.info.answer_limit) @import("thinking_reserve.zig").apply(&request, srv.config.thinking_reserve, if (window > 0) window - n else std.math.maxInt(u32), srv.think_close_end);
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, thinking, request.think_budget, count);
     request.prompt_logprobs = input.prompt_logprobs;
@@ -201,6 +228,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
         error.Closed => cx.fail(.capacity, "the engine is unavailable; retry after it restarts", .{}),
         error.InvalidSpans => cx.fail(.request, "the prompt span layout is invalid", .{}),
+        error.InvalidRequest => cx.fail(.request, "the request does not match the loaded model", .{}),
         error.Stale => cx.fail(.server, "{s}", .{api.stale_message}),
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
@@ -384,9 +412,16 @@ const Generation = struct {
             var ended = false;
             if (g.chunk_index < m.chunks.items.len) {
                 const end = m.chunks.items[g.chunk_index];
+                chunk = g.a.dupe(u32, m.tokens.items[g.consumed..end]) catch |e| {
+                    m.mutex.unlock(m.io);
+                    return e;
+                };
+                if (g.lp) |*l| l.rows.appendSlice(g.a, m.rows.items[g.consumed..end]) catch |e| {
+                    g.a.free(chunk.?);
+                    m.mutex.unlock(m.io);
+                    return e;
+                };
                 g.chunk_index += 1;
-                chunk = g.a.dupe(u32, m.tokens.items[g.consumed..end]) catch null;
-                if (g.lp) |*l| l.rows.appendSlice(g.a, m.rows.items[g.consumed..end]) catch {};
                 g.consumed = end;
             } else if (m.finished) {
                 ended = true;

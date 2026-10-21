@@ -11,6 +11,7 @@ const be = lanes.backend;
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
 
 pub const Metal = struct {
+    residency: ?mtl.ResidencySet.Follow = null,
     gpa: std.mem.Allocator,
     model: *Model,
     options: Options,
@@ -35,6 +36,7 @@ pub const Metal = struct {
     }
 
     pub fn deinit(self: *Metal) void {
+        mtl.resident.streams.set(self, null);
         var it = self.caches.valueIterator();
         while (it.next()) |cache| {
             cache.*.deinit();
@@ -61,14 +63,21 @@ pub const Metal = struct {
         return self.caches.get(stream) orelse error.UnknownQwenStream;
     }
 
+    pub fn newCache(self: *Metal, capacity: usize) !*st.Cache {
+        const cache = try self.gpa.create(st.Cache);
+        errdefer self.gpa.destroy(cache);
+        cache.* = try st.Cache.init(self.gpa, self.model.device, capacity);
+        cache.memory.setResident(self.residency);
+        return cache;
+    }
+
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
-        const cache = try self.gpa.create(st.Cache);
-        errdefer self.gpa.destroy(cache);
         const capacity = @min(self.options.capacity, ids.len + stream.max_new + st.window_rows);
-        cache.* = try st.Cache.init(self.gpa, self.model.device, capacity);
+        const cache = try self.newCache(capacity);
+        errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
         var at: usize = 0;
         while (at < ids.len) {

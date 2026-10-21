@@ -154,6 +154,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .enable_thinking = args.thinking,
         .reasoning_effort = args.reasoning_effort,
         .thinking_budget = args.thinking_budget,
+        .thinking_reserve = args.thinking_reserve,
         .loop_guard = args.loop_guard,
         .keep_warm_s = args.keep_warm,
         .default_sampling = s.sampling,
@@ -175,8 +176,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .identity = s.identity,
         .environ = s.environ,
     };
-    const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
-        std.debug.print("tensorfold: the server could not start\n", .{});
+    const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch |err| {
+        if (err == error.InvalidVisionMarkers)
+            std.debug.print("tensorfold: --vision requires added-token markers; image and video input cannot be served safely with this tokenizer\n", .{})
+        else
+            std.debug.print("tensorfold: the server could not start\n", .{});
         return 1;
     };
     defer srv.deinit();
@@ -206,8 +210,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         s.served,                                                   args.host,                                                                                   port,   shownSampling(a, s.sampling),
         if (args.no_drafts or srv.info.plain_only) "off" else "on", if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
     });
+    const reserved = args.thinking_reserve > 0 and srv.info.answer_limit;
+    if (args.thinking_reserve > 0 and !srv.info.answer_limit) log.line("--thinking-reserve is not applied: this engine cannot limit the answer apart from the reasoning", .{});
     if (args.thinking and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
-        log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{});
+        log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens {s}. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{if (reserved) "limits the answer, the reasoning taking up to --thinking-reserve tokens more" else "counts both"});
     if (s.recall) |r| recall_routes.line(r);
     if (srv.cortheon) |c| log.line("cortheon on: chat requests get Cortheon's reasoning program, web research before building, and cortheon_search/cortheon_fetch run here ({s}); a request can send \"cortheon\": false", .{c.engine});
     live.columns_env = env(s, "COLUMNS");

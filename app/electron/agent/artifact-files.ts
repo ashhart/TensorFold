@@ -6,7 +6,7 @@ export const MAX_ARTIFACT_IPC_TEXT_BYTES = 16 * 1024 * 1024
 /** Read only the requested prefix; never materialize the rest of a large artifact. */
 export async function readArtifactTextPrefix(file: string, maxBytes: number): Promise<string> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('Artifact preview limit must be a positive integer.')
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const info = await handle.stat()
     if (!info.isFile()) throw new Error('Artifact path is not a regular file.')
@@ -25,7 +25,7 @@ export async function readArtifactTextPrefix(file: string, maxBytes: number): Pr
  */
 export async function readArtifactTextBounded(file: string, maxBytes = MAX_ARTIFACT_IPC_TEXT_BYTES): Promise<string> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('Artifact text limit must be a positive integer.')
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const info = await handle.stat()
     if (!info.isFile()) throw new Error('Artifact path is not a regular file.')

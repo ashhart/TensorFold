@@ -5,6 +5,10 @@ const t = std.testing;
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+test {
+    _ = @import("digest_parallel_test.zig");
+}
+
 const Reader = struct {
     io: Io = t.io,
     calls: ?*usize = null,
@@ -174,8 +178,12 @@ test "digest cache stays bounded and evicts old identities" {
     try t.expectEqual(@as(usize, 3), records.items.len);
     var it = dir.iterate();
     var count: usize = 0;
-    while (try it.next(t.io)) |_| count += 1;
-    try t.expectEqual(@as(usize, 2), count);
+    while (try it.next(t.io)) |entry| {
+        try t.expect(std.mem.eql(u8, entry.name, "index.bin") or std.mem.eql(u8, entry.name, "index.lock") or
+            (std.mem.startsWith(u8, entry.name, "hash-") and std.mem.endsWith(u8, entry.name, ".lock")));
+        count += 1;
+    }
+    try t.expect(count <= 2 + @import("digest_lock.zig").stripes);
     const first = try path(t.allocator, &tmp, "file-0");
     defer t.allocator.free(first);
     try t.expect(!(try get(c, first, &calls)).hit);

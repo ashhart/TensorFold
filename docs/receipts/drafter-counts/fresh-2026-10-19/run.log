@@ -1,0 +1,32 @@
+merge 7f4db1cf9ef7f4d8fb281d204c62d3fcd8b0cd0c
+main 76aafcf2
+benchmark-rocm-host-identity c949cc9887e722740845c2d6b4e285a374b6cffa
+hip-refuses-drafter f2c78eebe05bc96999bb543ea688a3310110f7f5
+benchmark-drafter-counts 134a5f4326e3cfff63106438e131a1f4f0ef436c
+/dev/mapper/ubuntu--vg-ubuntu--lv  1.9T  1.7T   75G  96% /
+Mem:             122          96           3           0          24          26
+no *_VISIBLE_DEVICES set
+llm-server: inactive
+gtt_used=1682292736 busy=1 t=17:31:37
+gtt_used=1682292736 busy=1 t=17:31:37
+R1 exit=0
+gtt_used=1682337792 busy=81 t=17:40:21
+R2a exit=1
+ls: cannot access '~/tf-1001-fresh-runs/out/27b-dflash2.json': No such file or directory
+gtt_used=1682292736 busy=72 t=17:40:21
+R2b exit=1
+gtt_used=1682292736 busy=53 t=17:40:21
+gtt_used=1682292736 busy=52 t=17:40:21
+R3 exit=0
+gtt_used=1682292736 busy=82 t=17:42:16
+R4 exit=0
+gtt_used=1682292736 busy=81 t=17:43:59
+R5 exit=0
+gtt_used=1682337792 busy=41 t=17:45:35
+gtt_used=1682292736 busy=41 t=17:45:35
+R6 exit=0
+gtt_used=1682292736 busy=74 t=17:47:28
+RUNDONE
+llm-server: active t=17:47:28
+llm-server chat OK after 190s t=17:50:29
+LLMBACK

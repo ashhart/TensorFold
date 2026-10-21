@@ -51,6 +51,7 @@ pub const Drafter = struct {
     /// The assistant's glue at its own width: sliding and global kinds (q-only qkv_prep, the target's key heads).
     kinds: [2]kernels.Kind,
     projections: weights.Projections,
+    follow: ?mtl.ResidencySet.Follow = null,
     lanes: std.AutoHashMapUnmanaged(*Stream, *Lane) = .empty,
     /// The target's layers each kind reads: its last sliding and its last global layer.
     sources: [2]usize,
@@ -102,6 +103,7 @@ pub const Drafter = struct {
         d.step_ms = 0;
         d.chain_ms = .{ 0, 0 };
         d.pending = null;
+        d.follow = null;
         d.trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null;
         d.projections = .{ .geo = geo };
         errdefer d.projections.deinit(gpa); // warm's chains fill it
@@ -144,6 +146,7 @@ pub const Drafter = struct {
 
     pub fn deinit(d: *Drafter) void {
         d.settle() catch {};
+        d.setResident(null);
         var it = d.lanes.valueIterator();
         while (it.next()) |l| d.dropLane(l.*);
         d.lanes.deinit(d.gpa);
@@ -152,6 +155,10 @@ pub const Drafter = struct {
         for (d.kinds) |k| k.deinit();
         d.w.deinit(d.gpa);
         d.gpa.destroy(d);
+    }
+
+    pub fn setResident(d: *Drafter, hook: ?mtl.ResidencySet.Follow) void {
+        @import("draft_residency.zig").set(d, hook);
     }
 
     /// Releases the first `made` scratch buffers in init's order, so a failed init frees what it made.
@@ -194,14 +201,16 @@ pub const Drafter = struct {
         try d.lanes.put(d.gpa, s, l);
     }
 
-    fn newLane(d: *Drafter) !*Lane {
+    pub fn newLane(d: *Drafter) !*Lane {
         const l = try d.gpa.create(Lane);
         errdefer d.gpa.destroy(l);
         l.* = .{ .h = try d.target.device.buffer(d.target.config.geo.hidden * 2, private) };
+        if (d.follow) |f| @import("draft_residency.zig").lane(d, l, f, true);
         return l;
     }
 
-    fn dropLane(d: *Drafter, l: *Lane) void {
+    pub fn dropLane(d: *Drafter, l: *Lane) void {
+        if (d.follow) |f| @import("draft_residency.zig").lane(d, l, f, false);
         l.h.deinit();
         d.gpa.destroy(l);
     }

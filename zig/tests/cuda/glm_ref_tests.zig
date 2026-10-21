@@ -198,6 +198,7 @@ pub fn run(gpu: Gpu) !void {
     try routers(&r, set);
     try @import("glm_ref_attn.zig").dense(&r, set);
     try @import("glm_ref_attn.zig").sparse(&r, set);
+    try @import("glm_ref_fp8.zig").run(&r, set);
     try @import("glm_ref_hc.zig").mixing(&r, set);
     try @import("glm_ref_kda.zig").chains(&r);
     var ops = try cuda.Module.load(gpu.d, cuda.kernels.glm_ops);

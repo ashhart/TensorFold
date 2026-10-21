@@ -91,8 +91,8 @@ fn vocab(_: *anyopaque) u32 {
 fn eos(_: *anyopaque) []const u32 {
     return &.{};
 }
-fn render(_: *anyopaque, a: std.mem.Allocator, _: json.Value, _: @import("model_text.zig").RenderOptions, _: *[]const u8) @import("model_text.zig").Error![]u8 {
-    return a.dupe(u8, "prompt");
+fn render(_: *anyopaque, a: std.mem.Allocator, _: json.Value, _: @import("model_text.zig").RenderOptions, _: *[]const u8) @import("model_text.zig").Error!@import("model_text.zig").Rendered {
+    return .{ .text = try (a.dupe(u8, "prompt")) };
 }
 fn template(_: *anyopaque) []const u8 {
     return "";

@@ -1,0 +1,37 @@
+community-v1: code and chat, 2 temperatures, 5 repeats after warm-up.
+This generates model replies; use Ctrl-C to cancel. Nothing is uploaded unless you publish.
+The server gets up to 606 s to load 21 GB of weights; --startup-timeout sets another limit.
+code T=1 warm-up: ok 79.24 delivery tok/s
+code T=1 repeat 1/5: ok 78.65 delivery tok/s
+code T=1 repeat 2/5: ok 86.00 delivery tok/s
+code T=1 repeat 3/5: ok 88.60 delivery tok/s
+code T=1 repeat 4/5: ok 78.24 delivery tok/s
+code T=1 repeat 5/5: ok 78.51 delivery tok/s
+chat T=1 warm-up: ok 71.15 delivery tok/s
+chat T=1 repeat 1/5: ok 73.94 delivery tok/s
+chat T=1 repeat 2/5: ok 73.09 delivery tok/s
+chat T=1 repeat 3/5: ok 74.36 delivery tok/s
+chat T=1 repeat 4/5: ok 70.52 delivery tok/s
+chat T=1 repeat 5/5: ok 69.63 delivery tok/s
+code T=0 warm-up: ok 101.81 delivery tok/s
+code T=0 repeat 1/5: ok 101.87 delivery tok/s
+code T=0 repeat 2/5: ok 101.99 delivery tok/s
+code T=0 repeat 3/5: ok 102.15 delivery tok/s
+code T=0 repeat 4/5: ok 102.05 delivery tok/s
+code T=0 repeat 5/5: ok 102.44 delivery tok/s
+chat T=0 warm-up: ok 75.67 delivery tok/s
+chat T=0 repeat 1/5: ok 77.55 delivery tok/s
+chat T=0 repeat 2/5: ok 77.60 delivery tok/s
+chat T=0 repeat 3/5: ok 78.63 delivery tok/s
+chat T=0 repeat 4/5: ok 73.06 delivery tok/s
+chat T=0 repeat 5/5: ok 75.41 delivery tok/s
+Run b46ba73a-e62a-4f31-83cd-98daa4ad5c91 | rocm | TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP
+Workload       Temp    Stream delivery tok/s    First text, s    Status
+code           1      78.65                     0.059            complete
+chat           1      73.09                     0.093            complete
+code           0      102.05                    0.055            complete
+chat           0      77.55                     0.089            complete
+Stream delivery includes transport buffering; it is not an engine token clock.
+This rocm receipt is saved locally; it cannot be published until the board accepts rocm.
+Receipt saved: ~/tf-1001-runs/out/35b.json
+Draft counts: 2615 of 4490 drafted tokens accepted over 2495 rounds (20 of 20 attempts reported them); saved: ~/tf-1001-runs/out/35b.drafts.json

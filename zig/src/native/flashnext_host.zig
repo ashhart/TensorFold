@@ -448,7 +448,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
 }
 
 pub fn openConfigured(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, vision: ?api.VisionOpen, a: Allocator, why: *[]const u8, settings: tf.flashnext_replay.WindowSettings) !*Host {
-    const eng = try fx.Engine.loadConfigured(gpa, io, dir, dump, speed_up, settings);
+    const budget_settings = try images.budgetSettings(io, dir, vision, speed_up != null or std.c.getenv("TF_FLASHNEXT_TP") != null, a, why, try @import("flashnext_memory").withCache(settings, cache_gib));
+    const eng = try fx.Engine.loadConfigured(gpa, io, dir, dump, speed_up, budget_settings);
     errdefer eng.deinit();
     if (learn != null and eng.r.tp != null) {
         why.* = "--learn is not kept across a Flash Next pair yet: leave it out, or serve on one Mac";
@@ -460,7 +461,7 @@ pub fn openConfigured(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]cons
     };
     const vis: ?*images.Vision = if (vision) |o| try images.open(gpa, io, eng, dir, o, a, why) else null;
     errdefer if (vis) |v| v.deinit();
-    return openWarmed(gpa, io, eng, window, cache_gib, over_cap, learn, null, vis, a, why);
+    return openWarmed(gpa, io, eng, window, cache_gib, over_cap, learn, eng.r.load_limit, vis, a, why);
 }
 
 /// Takes a warmed engine and its image tower, if any, without loading or warming; the caller keeps both on error.

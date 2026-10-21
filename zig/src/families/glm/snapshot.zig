@@ -12,6 +12,7 @@ pub const Snap = struct {
     at: u32,
     buf: mtl.Buffer,
     bytes: usize,
+    follow: ?mtl.ResidencySet.Follow = null,
     home: ?u32 = null, // resident: the slot whose MLA caches hold this state's prefix
     stale: bool = false, // resident, and its slot has since written a row below `at`
     held: ?[2]u32 = null, // resident in a shared pool after its slot left: the blocks (start, count) holding its prefix

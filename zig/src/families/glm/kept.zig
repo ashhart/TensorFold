@@ -39,6 +39,7 @@ pub fn save(sl: *Slots, i: u32, at: u32, id: u32, home: bool) !*snapshot.Snap {
     try copySnap(sl, slot, snap, true);
     try sl.snaps.put(sl.gpa, snap.id, snap);
     sl.next_snap = @max(sl.next_snap, snap.id + 1);
+    enroll(sl, snap);
     return snap;
 }
 
@@ -114,8 +115,10 @@ fn whole(sl: *Slots, snap: *snapshot.Snap) !void {
     const b = sl.e.begin();
     snapshot.spill(&x, b.enc, .{ .buf = snap.buf }, .{ .buf = buf }, snap.at, &sl.slots[home].s);
     try sl.e.finish(b.cb, b.enc);
+    if (snap.follow) |f| f.leave(f.ctx, snap.buf);
     snap.buf.deinit();
     snap.buf = buf;
+    if (snap.follow) |f| f.join(f.ctx, buf);
     snap.bytes = n;
     snap.home = null;
     std.log.info("glm: a kept state of {d} tokens copied its prefixes out of slot {d} before the slot wrote below it ({d} MiB more)", .{ snap.at, home, (n - snapshot.bytes(&sl.e.c, snap.at, true)) >> 20 });
@@ -158,6 +161,7 @@ pub fn readSnap(sl: *Slots, id: u32, at: u32, file: [:0]const u8) !*snapshot.Sna
     try snapshot.readFile(snap, file);
     try sl.snaps.put(sl.gpa, id, snap);
     sl.next_snap = @max(sl.next_snap, id + 1);
+    enroll(sl, snap);
     return snap;
 }
 
@@ -171,6 +175,7 @@ pub fn blank(sl: *Slots, at: u32) !*snapshot.Snap {
     snap.* = .{ .id = sl.next_snap, .at = at, .buf = buf, .bytes = n };
     try sl.snaps.put(sl.gpa, snap.id, snap);
     sl.next_snap += 1;
+    enroll(sl, snap);
     return snap;
 }
 
@@ -181,8 +186,16 @@ pub fn drop(sl: *Slots, id: u32) void {
 }
 
 pub fn freeSnap(gpa: std.mem.Allocator, snap: *snapshot.Snap) void {
+    if (snap.follow) |f| f.leave(f.ctx, snap.buf);
     snap.buf.deinit();
     gpa.destroy(snap);
+}
+
+fn enroll(sl: *Slots, snap: *snapshot.Snap) void {
+    if (sl.e.residency) |*r| {
+        snap.follow = r.follow();
+        r.add(&.{snap.buf});
+    }
 }
 
 fn copySnap(sl: *Slots, slot: *Slot, snap: *snapshot.Snap, into: bool) !void {

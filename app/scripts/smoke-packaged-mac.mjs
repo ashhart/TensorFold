@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { chmod, lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { lstat, mkdtemp, open, readFile, realpath, rm, stat } from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
@@ -19,6 +20,7 @@ const DEFAULT_READY_TIMEOUT_MS = 30_000
 const DEFAULT_REQUEST_TIMEOUT_MS = 1_500
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000
 const DEFAULT_LISTENER_CLOSE_TIMEOUT_MS = 5_000
+const profileHandles = new WeakMap()
 // The packaged command is macOS-only. Use the system /tmp root directly instead of
 // inheriting TMPDIR, which a caller could point at a non-temporary or profile path.
 const DEFAULT_SMOKE_TEMP_DIR = process.platform === 'win32' ? os.tmpdir() : '/tmp'
@@ -64,16 +66,25 @@ export async function createIsolatedSmokeProfile(options = {}) {
 
   const root = await mkdtemp(path.join(canonicalTemp, PACKAGED_SMOKE_PROFILE_PREFIX))
   const profile = { root: path.resolve(root), tempParent: path.resolve(canonicalTemp) }
+  let handle
   try {
-    await chmod(profile.root, 0o700)
-    const [info, canonicalRoot] = await Promise.all([lstat(profile.root, { bigint: true }), realpath(profile.root)])
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Packaged smoke profile is not a private directory.')
+    handle = await open(profile.root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    await handle.chmod(0o700)
+    const [info, entry, canonicalRoot] = await Promise.all([
+      handle.stat({ bigint: true }), lstat(profile.root, { bigint: true }), realpath(profile.root),
+    ])
+    if (!info.isDirectory() || entry.isSymbolicLink() || info.dev !== entry.dev || info.ino !== entry.ino) {
+      throw new Error('Packaged smoke profile is not a private directory.')
+    }
     if ((info.mode & 0o777n) !== 0o700n) throw new Error('Packaged smoke profile permissions are not mode 0700.')
     if (canonicalRoot !== profile.root || path.dirname(profile.root) !== profile.tempParent || !path.basename(profile.root).startsWith(PACKAGED_SMOKE_PROFILE_PREFIX)) {
       throw new Error('Packaged smoke profile escaped its exact OS temporary directory.')
     }
-    return { ...profile, identity: { dev: info.dev, ino: info.ino, uid: info.uid } }
+    const owned = { ...profile, identity: { dev: info.dev, ino: info.ino, uid: info.uid } }
+    profileHandles.set(owned, handle)
+    return owned
   } catch (error) {
+    await handle?.close()
     await rm(profile.root, { recursive: true, force: true })
     throw error
   }
@@ -81,21 +92,32 @@ export async function createIsolatedSmokeProfile(options = {}) {
 
 export async function removeExactSmokeProfile(profile, remove = rm) {
   assertExactSmokeProfile(profile)
-  let current
-  try { current = await lstat(profile.root, { bigint: true }) } catch (error) {
-    if (error?.code === 'ENOENT') return
-    throw error
+  try {
+    let current
+    try { current = await lstat(profile.root, { bigint: true }) } catch (error) {
+      if (error?.code === 'ENOENT') return
+      throw error
+    }
+    const pinned = await profileHandles.get(profile)?.stat({ bigint: true })
+    const expected = profile.identity
+    const processUid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : expected.uid
+    if (!pinned || !current.isDirectory() || current.isSymbolicLink() ||
+        current.dev !== pinned.dev || current.ino !== pinned.ino ||
+        current.dev !== expected.dev || current.ino !== expected.ino ||
+        current.uid !== expected.uid || current.uid !== processUid ||
+        (current.mode & 0o777n) !== 0o700n) {
+      throw new Error('Packaged smoke profile identity or ownership changed; refusing cleanup of the replaced path.')
+    }
+    await remove(profile.root, { recursive: true, force: true })
+  } finally {
+    await releaseSmokeProfile(profile)
   }
-  const expected = profile.identity
-  const processUid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : expected.uid
-  if (!current.isDirectory() || current.isSymbolicLink() ||
-      current.dev !== expected.dev || current.ino !== expected.ino ||
-      current.uid !== expected.uid || current.uid !== processUid ||
-      (current.mode & 0o777n) !== 0o700n) {
-    // Fail closed and deliberately leave an attacker-replaced path untouched.
-    throw new Error('Packaged smoke profile identity or ownership changed; refusing cleanup of the replaced path.')
-  }
-  await remove(profile.root, { recursive: true, force: true })
+}
+
+export async function releaseSmokeProfile(profile) {
+  const handle = profileHandles.get(profile)
+  profileHandles.delete(profile)
+  await handle?.close()
 }
 
 export function buildPackagedSmokeEnvironment(baseEnv, profileRoot, port) {

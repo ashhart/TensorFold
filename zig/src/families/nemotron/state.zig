@@ -31,6 +31,24 @@ pub const Pool = struct {
     free: std.ArrayList(u32) = .empty,
     rids: std.ArrayList(i32) = .empty,
     gpa: std.mem.Allocator,
+    residency: ?mtl.ResidencySet.Follow = null,
+
+    pub fn setResident(self: *Pool, hook: ?mtl.ResidencySet.Follow) void {
+        if (self.residency) |f| self.followBuffers(f, false);
+        self.residency = hook;
+        if (hook) |f| self.followBuffers(f, true);
+    }
+
+    fn followBuffers(self: *Pool, hook: mtl.ResidencySet.Follow, joining: bool) void {
+        for (0..self.layers) |i| for ([_]mtl.Buffer{ self.conv[i], self.ssm[i], self.raw[i], self.dtraw[i] }) |b|
+            mtl.resident.fields.one(b, hook, joining);
+        mtl.resident.fields.one(self.tree, hook, joining);
+    }
+
+    pub fn appendBuffers(self: *const Pool, gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
+        for (0..self.layers) |i| try list.appendSlice(gpa, &.{ self.conv[i], self.ssm[i], self.raw[i], self.dtraw[i] });
+        try list.append(gpa, self.tree);
+    }
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, c: cfg.Config, slots: usize, streams: usize) !Pool {
         var p = Pool{ .layers = c.count(.mamba), .slots = slots, .gpa = gpa };
@@ -76,6 +94,7 @@ pub const Pool = struct {
     }
 
     pub fn deinit(self: *Pool) void {
+        self.setResident(null);
         for (0..self.layers) |m| {
             self.conv[m].deinit();
             self.ssm[m].deinit();
@@ -96,7 +115,9 @@ pub const Kv = struct {
 
     fn init(device: mtl.Device, c: cfg.Config, capacity: usize) !Kv {
         const bytes = c.kv_heads * capacity * c.head_dim * 2;
-        return .{ .k = try device.buffer(bytes, opts), .v = try device.buffer(bytes, opts), .capacity = capacity };
+        const k = try device.buffer(bytes, opts);
+        errdefer k.deinit();
+        return .{ .k = k, .v = try device.buffer(bytes, opts), .capacity = capacity };
     }
 
     fn deinit(self: Kv) void {
@@ -135,15 +156,47 @@ pub const Cache = struct {
     topk: mtl.Buffer, // the head's last drafts' best 4 by level: u32 ids [max_levels, 4], then f32 probabilities
     levels: usize = 0, // levels the head last drafted (a tree's trunk: its rank-0 path's steps)
     trunk: [max_levels]u8 = std.simd.iota(u8, max_levels), // each trunk level's top-k slot
+    residency: ?mtl.ResidencySet.Follow = null,
+
+    pub fn setResident(self: *Cache, hook: ?mtl.ResidencySet.Follow) void {
+        if (self.residency) |f| self.followBuffers(f, false);
+        self.residency = hook;
+        if (hook) |f| self.followBuffers(f, true);
+    }
+
+    fn followBuffers(self: *Cache, hook: mtl.ResidencySet.Follow, joining: bool) void {
+        mtl.resident.fields.apply(self, hook, joining);
+        for (self.kv[0..self.attentions]) |*kv| mtl.resident.fields.apply(kv, hook, joining);
+        if (self.mtp) |*kv| mtl.resident.fields.apply(kv, hook, joining);
+    }
+
+    pub fn appendBuffers(self: *const Cache, gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
+        try mtl.resident.fields.append(gpa, list, self);
+        for (self.kv[0..self.attentions]) |*kv| try mtl.resident.fields.append(gpa, list, kv);
+        if (self.mtp) |*kv| try mtl.resident.fields.append(gpa, list, kv);
+    }
 
     pub fn init(device: mtl.Device, c: cfg.Config, capacity: usize, head: bool) !Cache {
+        const first = try device.buffer(max_rows * 4, opts);
+        errdefer first.deinit();
+        const second = try device.buffer(max_rows * 4, opts);
+        errdefer second.deinit();
+        const follow = try device.buffer(max_rows * 4, opts);
+        errdefer follow.deinit();
+        const topk = try device.buffer(2 * max_levels * 4 * 4, opts);
+        errdefer topk.deinit();
         var s = Cache{
             .attentions = c.count(.attention),
-            .windows = .{ try device.buffer(max_rows * 4, opts), try device.buffer(max_rows * 4, opts) },
-            .follow = try device.buffer(max_rows * 4, opts),
-            .topk = try device.buffer(2 * max_levels * 4 * 4, opts),
+            .windows = .{ first, second },
+            .follow = follow,
+            .topk = topk,
         };
-        for (0..s.attentions) |a| s.kv[a] = try Kv.init(device, c, capacity);
+        var made: usize = 0;
+        errdefer for (s.kv[0..made]) |kv| kv.deinit();
+        for (0..s.attentions) |a| {
+            s.kv[a] = try Kv.init(device, c, capacity);
+            made += 1;
+        }
         if (head) s.mtp = try Kv.init(device, c, capacity);
         return s;
     }
@@ -172,6 +225,7 @@ pub const Cache = struct {
     }
 
     pub fn deinit(self: *Cache, pool: *Pool) void {
+        self.setResident(null);
         if (self.pending) |p| if (p.slot) |s| pool.give(s);
         pool.give(self.slot);
         pool.giveRid(self.rid);

@@ -34,6 +34,7 @@ pub const Kernels = struct {
     absorb_q: cuda.Function,
     expand_v: cuda.Function,
     lat_write: cuda.Function,
+    lat_write_fp8: cuda.Function,
     index_write: cuda.Function,
     pool_keys: cuda.Function,
     select_rows: cuda.Function,
@@ -47,6 +48,8 @@ pub const Kernels = struct {
     bmm_d64s2: cuda.Function,
     chunks_16: cuda.Function,
     chunks_32: cuda.Function,
+    chunks_16_fp8: cuda.Function,
+    chunks_32_fp8: cuda.Function,
     merge: cuda.Function,
     scores: cuda.Function,
 
@@ -57,6 +60,8 @@ pub const Kernels = struct {
         try k.bmm_tile1.allowDynamicShared(bmm_tile1_smem[1]);
         try k.chunks_16.allowDynamicShared(chunksSmem(16));
         try k.chunks_32.allowDynamicShared(chunksSmem(32));
+        try k.chunks_16_fp8.allowDynamicShared(chunksSmem(16));
+        try k.chunks_32_fp8.allowDynamicShared(chunksSmem(32));
         return k;
     }
 };

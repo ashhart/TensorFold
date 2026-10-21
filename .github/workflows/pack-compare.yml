@@ -1,6 +1,12 @@
 name: Flash Next pack comparison
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/zig/pack_compare.py'
+      - 'tools/zig/pack_compare_test.py'
+      - '.github/workflows/pack-compare.yml'
   pull_request:
     paths:
       - 'tools/zig/pack_compare.py'

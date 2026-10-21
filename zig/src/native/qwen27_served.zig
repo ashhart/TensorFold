@@ -9,6 +9,7 @@ const q = tf.qwen27;
 const lanes = tf.lanes;
 const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
+const share_fit = @import("qwen27_share_fit.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
@@ -124,8 +125,12 @@ const Snaps = struct {
         const h = host(ptr);
         const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const slot = h.back.slotOf(s) orelse return error.UnknownStream;
+        // Scratch already occupies its bytes; do not let cache growth spend that same free room again.
+        if (h.runner.gdn.marks != null) {
+            const need = q.snapshot.slotBytes(&h.runner, h.back.ringOf(slot), at);
+            if (need > room(h.model) -| h.runner.gdn.missingBeforeBytes()) return error.LaneMemory;
+        }
         const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at);
-        if (h.resident) |*r| r.add(&.{st.buf}); // joins the set at its next flush, inside the same 70% limit
         return @ptrCast(st);
     }
     fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
@@ -134,14 +139,17 @@ const Snaps = struct {
     fn drop(ptr: *anyopaque, saved: pc.Saved) void {
         const h = host(ptr);
         const st: *q.snapshot.State = @ptrCast(@alignCast(saved));
-        if (h.resident) |*r| r.remove(st.buf); // out of the set first: its own reference would keep the memory
         q.snapshot.drop(h.gpa, st);
     }
 };
 
-/// Whether the Neural Engine's share of `bytes` keeps this server inside the 70% load limit beside what it loaded.
-fn shareFits(bytes: u64) bool {
-    return cache_fit.fitsLoadLimit((cache_fit.footprint() orelse 0) +| bytes, cache_fit.ram() orelse 0);
+/// The optional share's room after residency; unknown readings refuse it, and guards only reduce the room.
+fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
+    const guards = share_fit.Guards.read() catch |err| {
+        why.* = "TF_QWEN27_FIT_RAM_BYTES and TF_QWEN27_FIT_FOOTPRINT_BYTES must be positive byte counts";
+        return err;
+    };
+    return share_fit.room(cache_fit.ram(), cache_fit.footprint(), try laterFootprint(h), guards);
 }
 
 /// Room left beside the weights and an 8 GiB margin.
@@ -269,7 +277,7 @@ fn laterBytes(h: *const Host) u64 {
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const model = try q.model.Model.load(gpa, io, dir, 128, shareFits);
+    const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken
@@ -332,7 +340,16 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.warm = .{ .queue = model.queue };
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
     holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
-    errdefer if (h.resident) |*r| r.deinit();
+    errdefer q.residency.drop(h);
+    // Decide before cache sizing and the worker starts, with ready state wired and future buffers reserved.
+    if (model.share_pending) {
+        const before = cache_fit.footprint();
+        q.residency.finishShare(h, try shareRoom(h, why)) catch |err| {
+            why.* = "the optional Neural Engine share could not join the residency owner within its load limit";
+            return err;
+        };
+        if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
+    }
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
     if (o.learn) |l| try disk.attach(h, io, a, l);
@@ -343,12 +360,17 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     return h;
 }
 
+/// Reserve later buffers and the loaded share's priced bytes that its construction left outside the footprint.
+fn laterFootprint(h: *const Host) !u64 {
+    const tower: u64 = if (h.back.vision) |v| v.firstUse() else 0;
+    const share = try h.model.shareCacheBytes();
+    return std.math.add(u64, try std.math.add(u64, laterBytes(h), tower), share);
+}
+
 /// Prompt reuse in up to 16 GiB of what 70% of RAM leaves once every slot has its memory; CacheOverCap: `why` says why.
 fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
-    const later = laterBytes(h);
-    // the tower's scratch and rows join the footprint at the first image: the budget counts them now, as room() does
-    const tower: u64 = if (h.back.vision) |v| v.firstUse() else 0;
-    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later + tower, a, why, "");
+    const later = try laterFootprint(h);
+    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
     h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .rows = &disk.image } }, .{ .warm = .on, .chunk = @intCast(h.back.chunk) }, plan.budget_bytes);
@@ -360,26 +382,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
 }
 
 /// Weights, the ready slots' state and the drafter join one residency set the idle keepalive uses.
-fn holdResident(h: *Host, io: std.Io) !void {
-    var list: std.ArrayList(mtl.Buffer) = .empty;
-    defer list.deinit(h.gpa);
-    for (h.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
-    try list.appendSlice(h.gpa, h.model.weights.owned.items);
-    try list.appendSlice(h.gpa, &h.model.frame.buffers);
-    try list.appendSlice(h.gpa, &h.runner.gdn.buffers);
-    try h.runner.readyBuffers(h.gpa, &list);
-    for (h.back.contexts) |c| if (c) |x| try x.buffers(&list, h.gpa);
-    if (h.draft) |d| {
-        for (d.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
-        try list.append(h.gpa, d.model.pending);
-    }
-    if (h.back.vision) |v| {
-        const held = v.buffers();
-        try list.appendSlice(h.gpa, &held);
-    }
-    h.resident = try Resident.hold(h.gpa, io, h.model.device, h.model.queue, list.items, "qwen27") orelse return;
-    h.warm = (&h.resident.?).target();
-}
+const holdResident = q.residency.hold;
 
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
@@ -387,10 +390,9 @@ pub fn close(ptr: *anyopaque) void {
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
-    if (h.resident) |*r| r.deinit();
-    h.resident = null;
-    if (h.disk_stage) |b| b.deinit();
     h.core.deinit();
+    q.residency.drop(h);
+    if (h.disk_stage) |b| b.deinit();
     h.cfg.deinit(h.gpa);
     h.back.deinit();
     if (h.draft) |d| d.deinit();
@@ -398,4 +400,8 @@ pub fn close(ptr: *anyopaque) void {
     if (h.vision) |v| v.deinit();
     if (h.owns_model) h.model.deinit();
     h.gpa.destroy(h);
+}
+
+test {
+    _ = @import("qwen27_share_fit.zig");
 }

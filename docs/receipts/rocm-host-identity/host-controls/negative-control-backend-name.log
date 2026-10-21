@@ -1,0 +1,54 @@
+# negative control: backend-name
+# undone: commit 5: the manifest names the engine (hip, metal) instead of the receipt's backend
+# tree: 82237515afa0572705c2803b6b633e9e5cef1b02 with only this change
+# cmd: zig build test-server-cpu --summary all -j8 (zig 0.17.0)
+# started 2026-10-18T23:30:15Z
+# --- the undo, as git diff ---
+diff --git a/zig/src/server/benchmark_manifest.zig b/zig/src/server/benchmark_manifest.zig
+index 601f8fdb..c0275f72 100644
+--- a/zig/src/server/benchmark_manifest.zig
++++ b/zig/src/server/benchmark_manifest.zig
+@@ -197,8 +197,6 @@ pub fn attestedRevision(env: *const std.process.Environ.Map, model_dir: []const
+
+ /// The receipt's name for an engine backend, as the board names them: HIP is ``rocm``, Metal is ``mlx``.
+ pub fn receiptBackend(engine: []const u8) []const u8 {
+-    if (std.mem.eql(u8, engine, "hip")) return "rocm";
+-    if (std.mem.eql(u8, engine, "metal")) return "mlx";
+     return engine;
+ }
+
+# --- build output ---
+test-server-cpu
++- run test 433 pass, 1 fail (434 total)
+ver/benchmark_facts_test.zig:98:9: 0x104d32223 in test.a HIP or Metal server's manifest names the receipt's backend, so an attached rocm or mlx run reads it (test)
+        try std.testing.expectEqualStrings(pair[1], manifest.receiptBackend(pair[0]));
+        ^
+error: 'benchmark_facts_test.test.a HIP or Metal server's manifest names the receipt's backend, so an attached rocm or mlx run reads it' failed:
+       ====== expected this output: =========
+       rocm␃
+
+       ======== instead found this: =========
+       hip␃
+
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       rocm
+       ^ ('\x72')
+       found:
+       hip
+       ^ ('\x68')
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:696:9: 0x104b524c7 in expectEqualStrings (test)
+               return error.TestExpectedEqual;
+               ^
+       ~/tmp/rv1001-1/zig/src/ser
+failed command: ./.zc/o/ffa7cb62923c1037c8e4a3cac9e22339/test --cache-dir=./.zc --seed=0xd9c0c5f5 --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 433/434 tests passed (1 failed)
+test-server-cpu transitive failure
++- run test 433 pass, 1 fail (434 total)
+|  +- compile test debug native success 17s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 64ms MaxRSS:31M
+
+# exit=1 after 75s

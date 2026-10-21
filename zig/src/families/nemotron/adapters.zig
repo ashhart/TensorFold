@@ -66,6 +66,7 @@ pub const Sites = struct {
     device: mtl.Device,
     steps: u64 = 0, // the open block's Adam steps
     kept_steps: u64 = 0,
+    residency: ?mtl.ResidencySet.Follow = null,
 
     /// Room for `blocks` blocks per layer (`room` at least), none in use: the forward is unchanged until one opens.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, c: cfg.Config, rows: usize, blocks: usize) !Sites {
@@ -113,9 +114,27 @@ pub const Sites = struct {
     }
 
     pub fn deinit(s: *Sites) void {
+        s.setResident(null);
         for (s.list) |*site| free(site);
         s.gpa.free(s.list);
         inline for (.{ "xa", "xn", "gates", "need", "latch", "score" }) |f| @field(s, f).deinit();
+    }
+
+    pub fn appendBuffers(s: *const Sites, gpa: std.mem.Allocator, list: *std.ArrayList(Buffer)) !void {
+        try mtl.resident.fields.append(gpa, list, s);
+        for (s.list) |*site| try mtl.resident.fields.append(gpa, list, site);
+    }
+
+    pub fn setResident(s: *Sites, hook: ?mtl.ResidencySet.Follow) void {
+        if (s.residency) |f| {
+            mtl.resident.fields.apply(s, f, false);
+            for (s.list) |*site| mtl.resident.fields.apply(site, f, false);
+        }
+        s.residency = hook;
+        if (hook) |f| {
+            mtl.resident.fields.apply(s, f, true);
+            for (s.list) |*site| mtl.resident.fields.apply(site, f, true);
+        }
     }
 
     fn free(s: *Site) void {
@@ -153,7 +172,7 @@ pub const Sites = struct {
     }
 
     /// Room for `blocks` blocks at every layer, buffers doubled as needed; the forward reads them once attached again.
-    fn grow(s: *Sites, blocks: usize) !void {
+    pub fn grow(s: *Sites, blocks: usize) !void {
         if (blocks <= s.cap) return;
         if (blocks > max_blocks) return error.LearnedChangeFull;
         var cap = s.cap;
@@ -177,10 +196,14 @@ pub const Sites = struct {
             made += 1;
         }
         for (s.list, fresh) |*site, f| {
-            for ([_]*Buffer{ &site.a, &site.b, &site.tau }) |x| x.deinit();
+            for ([_]*Buffer{ &site.a, &site.b, &site.tau }) |x| {
+                if (s.residency) |h| h.leave(h.ctx, x.*);
+                x.deinit();
+            }
             site.a = f[0];
             site.b = f[1];
             site.tau = f[2];
+            if (s.residency) |h| for (f) |b| h.join(h.ctx, b);
         }
         s.cap = cap;
     }

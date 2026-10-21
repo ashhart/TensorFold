@@ -17,6 +17,8 @@ const sample = @import("batch_sample.zig");
 const think = @import("think.zig");
 const batch_costs = @import("batch_costs.zig");
 const grammar = @import("grammar.zig");
+const fill = @import("prefill.zig");
+const prompt_gpu = @import("prefill_metal.zig");
 
 /// A stream's images through the host's tower: its prompt pass's rows and frame (in `a`), then their release.
 pub const Images = struct { ctx: *anyopaque, build: *const fn (ctx: *anyopaque, a: std.mem.Allocator, images: []const lanes.stream.Image, prompt_len: usize, from: usize) anyerror!*fz.vis_prompt.VisPrompt, release: *const fn (ctx: *anyopaque, p: *fz.vis_prompt.VisPrompt) void };
@@ -27,6 +29,7 @@ pub const Backend = struct {
     primary: *fz.Model,
     sessions: []Session,
     by: std.AutoHashMapUnmanaged(*Stream, usize) = .empty,
+    filling: std.AutoHashMapUnmanaged(*Stream, fill.State) = .empty,
     hidden: Buf,
     window_count: u64 = 0,
     shared_count: u64 = 0,
@@ -72,6 +75,11 @@ pub const Backend = struct {
     }
 
     pub fn deinit(b: *Backend) void {
+        while (b.filling.count() > 0) {
+            var it = b.filling.keyIterator();
+            b.abortPrompt(it.next().?.*);
+        }
+        b.filling.deinit(b.gpa);
         b.e.m = b.primary;
         b.paused.deinit(b.gpa);
         b.by.deinit(b.gpa);
@@ -82,18 +90,18 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held } };
     }
 
     pub const facts = batch_costs.facts;
 
-    fn self(ptr: *anyopaque) *Backend {
+    pub fn self(ptr: *anyopaque) *Backend {
         return @ptrCast(@alignCast(ptr));
     }
     fn session(b: *Backend, s: *Stream) !*Session {
         return &b.sessions[b.by.get(s) orelse return error.UnknownStream];
     }
-    fn settle(b: *Backend) !void {
+    pub fn settle(b: *Backend) !void {
         var needed = false;
         for (b.sessions) |*s| if (s.used) {
             if (s.round.pending) try s.keep(s.round.rows);
@@ -123,7 +131,7 @@ pub const Backend = struct {
     }
 
     /// Chooses a slot; LaneMemory means wait, ContextFull means no session can hold the reply.
-    fn slotFor(b: *Backend, prompt: usize, max_new: usize) !usize {
+    pub fn slotFor(b: *Backend, prompt: usize, max_new: usize) !usize {
         var caps: [fz.MAXR]usize = undefined;
         var used: [fz.MAXR]bool = undefined;
         var most: usize = 0;
@@ -213,84 +221,40 @@ pub const Backend = struct {
         return true;
     }
 
-    fn prefill(ptr: *anyopaque, stream: *Stream) anyerror!void {
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        try self(ptr).fill(stream, null);
+    pub fn promptPool(_: *Backend) @TypeOf(mtl.objc.Pool.push()) {
+        return mtl.objc.Pool.push();
     }
-
-    /// A stream's whole prompt pass, in session `slot` when given (free), else the first free one.
-    fn fill(b: *Backend, stream: *Stream, slot: ?usize) !void {
-        const prompt = stream.prompt();
-        if (prompt.len == 0) return error.EmptyPrompt;
+    pub fn beginPrompt(b: *Backend, stream: *Stream, slot: ?usize) !fill.State {
+        return prompt_gpu.begin(b, stream, slot);
+    }
+    pub fn settlePrompt(b: *Backend, _: *Stream) !void {
         try b.settle();
-        const i = slot orelse try b.slotFor(prompt.len, stream.max_new);
-        if (b.sessions[i].used) return error.NoFreeSlot;
-        if (slot != null and prompt.len + stream.max_new + slots.WINDOW > b.sessions[i].m.cap) return error.ContextFull;
-        const s = &b.sessions[i];
-        try b.by.put(b.gpa, stream, i);
-        errdefer {
-            _ = b.by.remove(stream);
-            s.used = false;
+    }
+    pub fn finishChunk(b: *Backend, _: *Stream) !void {
+        try b.settle();
+    }
+    pub fn promptRows(b: *Backend, at: u32, end: u32) u32 {
+        return prompt_gpu.rows(b, at, end);
+    }
+    pub fn chunkPrompt(b: *Backend, stream: *Stream, slot: usize, at: u32, rows: u32) !void {
+        try prompt_gpu.chunk(b, stream, slot, at, rows);
+    }
+    pub fn markPrompt(b: *Backend, stream: *Stream, at: u32) !void {
+        try prompt_gpu.mark(b, stream, at);
+    }
+    pub fn finishPrompt(b: *Backend, stream: *Stream) !void {
+        try prompt_gpu.finish(b, stream);
+    }
+    pub fn abortPrompt(b: *Backend, stream: *Stream) void {
+        release(b, stream);
+    }
+    pub fn decoding(b: *const Backend) bool {
+        var it = b.by.keyIterator();
+        while (it.next()) |key| {
+            const s = key.*;
+            if (!b.filling.contains(s) and !s.paused and !s.finished) return true;
         }
-        s.used = true;
-        s.held_n = 0;
-        s.round = .{};
-        s.row0 = 0;
-        outputs(b, s, 0);
-        const old = try b.bind(s);
-        defer old.restore(b.e);
-        s.m.reset();
-        stream.cached = 0;
-        if (stream.reuse.saved) |saved| {
-            const state: *snap.State = @ptrCast(@alignCast(saved));
-            if (state.at < prompt.len and state.at < s.m.cap) {
-                try snap.restore(b.e, state);
-                stream.cached = @intCast(state.at);
-            } else stream.reuse_failed = true;
-        }
-        var arena: std.heap.ArenaAllocator = .init(b.gpa);
-        defer arena.deinit();
-        const vis: ?*fz.vis_prompt.VisPrompt = if (stream.images.len > 0) try (b.images orelse return error.NoImageTower).build(b.images.?.ctx, arena.allocator(), stream.images, prompt.len, s.m.pos) else null;
-        s.m.vis = vis;
-        defer s.m.vis = null;
-        defer if (vis) |p| b.images.?.release(b.images.?.ctx, p);
-        var at: usize = s.m.pos;
-        while (at < prompt.len) {
-            if (stream.isCancelled()) return error.Cancelled;
-            var end = prompt.len;
-            for (stream.chunks) |mark| if (mark > at) {
-                end = @min(end, mark);
-                break;
-            };
-            for (stream.reuse.marks) |mark| if (mark > at) {
-                end = @min(end, mark);
-                break;
-            };
-            const step = fz.chunkRows(at, b.e.pr.step); // past the trained window a chunk scores more blocks a row
-            const call = if (b.e.segments) segments.next(end - at, step, @import("engine.zig").SEG_MIN) else segments.Call{ .rows = @min(end - at, step), .parts = 1 };
-            end = at + call.rows;
-            const ps = [2]*fz.Prompt{ b.e.pr, b.e.pr2 };
-            s.first = try fz.Prompt.chunkN(ps[0..call.parts], &s.m, b.gpa, prompt[at..end]);
-            if (end == prompt.len and stream.grammar != null) try b.grammar.keepFirst(b.gpa, i, b.sessions.len, s.m.t.logits);
-            // Sample before the next forward replaces the last prompt row's logits.
-            if (end == prompt.len) if (sample.active(stream.sampling)) |p| {
-                s.first = try sample.first(b.e, &s.m, p, @intCast(prompt.len));
-            };
-            for (ps[0..call.parts], 0..) |p, k| {
-                const start = at + segments.start(call.rows, call.parts, k);
-                const rows = segments.rows(call.rows, call.parts, k);
-                const count = if (start + rows < prompt.len) rows else rows - 1;
-                try p.mtpKeys(&s.m, start, prompt[start + 1 .. start + 1 + count], p.last);
-                if (start + rows == prompt.len) Session.copy(p.last.at((rows - 1) * fz.WIDE * 2), s.last, fz.WIDE * 2);
-            }
-            s.normalize();
-            at = end;
-            if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null)
-                if (stream.reuse.hook) |hook| hook.at(hook.ptr, stream, @intCast(at));
-        }
-        s.m.mtp.pos = prompt.len - 1;
-        s.m.mtp.drafted = 0;
+        return false;
     }
 
     /// Runs a lone request in session 0 until it finishes or hands over to shared rounds.
@@ -302,7 +266,10 @@ pub const Backend = struct {
         if (stream.prompt().len + stream.max_new + @import("engine.zig").MARGIN > s.m.cap) return error.ContextFull;
         var handed = false;
         defer if (!handed) release(b, stream);
-        try b.fill(stream, 0);
+        if (!try fill.lone(b, stream, hooks)) {
+            handed = true;
+            return true;
+        }
         const prompt = try @import("lone_stream.zig").commitFirst(b.gpa, stream, s.first); // decode copies it to the rounds' history before any round commits
         hooks.committed(hooks.ctx);
         if (stream.finished) return false;
@@ -373,6 +340,7 @@ pub const Backend = struct {
     }
 
     fn first(ptr: *anyopaque, stream: *Stream, position: u64) anyerror!u64 {
+        if (self(ptr).filling.contains(stream)) return error.PromptIncomplete;
         const s = try self(ptr).session(stream);
         if (position != s.m.pos) return error.PositionMismatch;
         return s.first;
@@ -552,6 +520,7 @@ pub const Backend = struct {
 
     fn release(ptr: *anyopaque, stream: *Stream) void {
         const b = self(ptr);
+        prompt_gpu.clear(b, stream);
         if (std.mem.indexOfScalar(*Stream, b.paused.items, stream)) |k| _ = b.paused.orderedRemove(k);
         const kv = b.by.fetchRemove(stream) orelse return;
         b.sessions[kv.value].used = false;

@@ -50,6 +50,7 @@ pub const Drafter = struct {
     attention: attention.Attention,
     picks: round.Ops,
     projections: weights.Projections,
+    follow: ?mtl.ResidencySet.Follow = null,
     lanes: std.AutoHashMapUnmanaged(*Stream, *Lane) = .empty,
     step_ms: f64 = 0,
     block_ms: [2]f64 = .{ 0, 0 }, // a 1-draft and a 15-draft block's wall time at load
@@ -96,6 +97,7 @@ pub const Drafter = struct {
         d.step_ms = 0;
         d.block_ms = .{ 0, 0 };
         d.pending = null;
+        d.follow = null;
         d.trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null;
         errdefer d.projections.deinit(gpa); // warm's blocks fill it
         d.config = try dw.Config.read(gpa, io, dir, target.config.geo);
@@ -127,6 +129,7 @@ pub const Drafter = struct {
 
     pub fn deinit(d: *Drafter) void {
         d.settle() catch {};
+        d.setResident(null);
         var it = d.lanes.valueIterator();
         while (it.next()) |l| d.dropLane(l.*);
         d.lanes.deinit(d.gpa);
@@ -137,6 +140,10 @@ pub const Drafter = struct {
         d.ops.deinit();
         d.w.deinit(d.gpa);
         d.gpa.destroy(d);
+    }
+
+    pub fn setResident(d: *Drafter, hook: ?mtl.ResidencySet.Follow) void {
+        @import("draft_residency.zig").set(d, hook);
     }
 
     /// Releases the first `made` buffers in init's order, so a failed init frees what it made.
@@ -186,7 +193,7 @@ pub const Drafter = struct {
         try d.lanes.put(d.gpa, s, l);
     }
 
-    fn newLane(d: *Drafter, capacity: usize) !*Lane {
+    pub fn newLane(d: *Drafter, capacity: usize) !*Lane {
         const c = &d.config;
         const l = try d.gpa.create(Lane);
         errdefer d.gpa.destroy(l);
@@ -205,10 +212,12 @@ pub const Drafter = struct {
             };
             made += 1;
         }
+        if (d.follow) |f| @import("draft_residency.zig").lane(d, l, f, true);
         return l;
     }
 
-    fn dropLane(d: *Drafter, l: *Lane) void {
+    pub fn dropLane(d: *Drafter, l: *Lane) void {
+        if (d.follow) |f| @import("draft_residency.zig").lane(d, l, f, false);
         for (0..d.config.layers) |i| {
             l.k[i].deinit();
             l.v[i].deinit();
@@ -267,7 +276,7 @@ pub const Drafter = struct {
         const buf = try d.target.device.buffer(@intCast(d.keptBytes(snap.at)), private);
         errdefer buf.deinit();
         try d.copyLane(l, snap.at, buf, true);
-        snap.draft = buf;
+        snap.setDraft(buf);
     }
 
     /// The lane takes the context kept with the state its stream's prompt pass resumed at `start`.

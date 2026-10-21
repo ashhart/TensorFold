@@ -8,6 +8,7 @@ const Config = @import("config.zig").Config;
 
 /// Program rows: 128 rows of a prompt pass a call, zero past its last (rows never depend on each other).
 pub const width = 128;
+pub const max_slices = 16;
 
 pub const Share = struct {
     allocator: std.mem.Allocator,
@@ -31,15 +32,43 @@ pub const Share = struct {
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+    footprint_growth: ?u64 = null,
 
     /// The fp16 weights a share of `columns` holds: every layer's gate, up and down over those columns.
     pub fn bytes(c: Config, columns: u32) u64 {
         return 3 * @as(u64, columns) * c.hidden * 2 * c.layers;
     }
 
+    /// Known persistent payload: program weights, fp32 partials and both fp16 surfaces for every slice.
+    pub fn admissionBytes(c: Config, columns: u32, slices: u32) !u64 {
+        if (columns == 0 or slices == 0 or slices > max_slices) return error.BadAneShare;
+        const mul = std.math.mul;
+        const weights = try mul(u64, try mul(u64, try mul(u64, 6, columns), c.hidden), c.layers);
+        const buffers = try mul(u64, try mul(u64, try mul(u64, slices, width), c.hidden), 8);
+        return std.math.add(u64, weights, buffers);
+    }
+
+    /// An absent private build/runtime peak price refuses admission rather than silently pricing it at zero.
+    pub fn totalBytes(c: Config, columns: u32, slices: u32, overhead: ?u64) !u64 {
+        const known = try admissionBytes(c, columns, slices);
+        return std.math.add(u64, known, overhead orelse return error.MissingAneOverhead);
+    }
+
+    /// Reserve the full priced share less only the footprint growth observed across its successful construction.
+    pub fn cacheBytes(s: *const Share, c: Config) !u64 {
+        const total = try totalBytes(c, s.columns, s.slices, @import("ane_policy.zig").build_runtime_overhead);
+        return total -| (s.footprint_growth orelse 0);
+    }
+
     /// Every layer's program from the affine rows (w = q * scale + bias, rounded once to fp16), columns [0, c).
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, checkpoint: *const cp.Checkpoint, c: Config, columns: u32, slices: u32) !*Share {
-        if (columns == 0 or columns % 64 != 0 or columns > c.intermediate or slices == 0 or slices > 16) return error.BadAneShare;
+        if (columns == 0 or columns % 64 != 0 or columns > c.intermediate or slices == 0 or slices > max_slices) return error.BadAneShare;
+        const memory_policy = @import("sys").memory_policy;
+        const before = memory_policy.footprint();
+        var loaded: ?*Share = null;
+        defer if (loaded) |share| {
+            share.footprint_growth = memory_policy.growth(before, memory_policy.footprint());
+        };
         const s = try a.create(Share);
         errdefer a.destroy(s);
         const programs = try a.alloc(ane.Program, c.layers);
@@ -88,6 +117,7 @@ pub const Share = struct {
         for (threads) |t| t.join();
         if (b.failed.load(.acquire)) return error.AneShareBuild;
         s.thread = try std.Thread.spawn(.{}, work, .{s});
+        loaded = s;
         return s;
     }
 

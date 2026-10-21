@@ -9,7 +9,7 @@ const Value = v.Value;
 const Rt = v.Rt;
 const Error = v.Error;
 
-pub const Kw = struct { name: []const u8, value: Value };
+pub const Kw = struct { name: []const u8, value: Value, name_spans: []const v.Span = &.{} };
 
 /// Binds Python parameters by position then keyword; the first `min` are required.
 pub fn bind(rt: *Rt, comptime fname: []const u8, comptime names: []const []const u8, min: usize, pos: []const Value, kw: []const Kw) Error![names.len]?Value {
@@ -104,13 +104,15 @@ fn stripChars(rt: *Rt, s: []const u8, chars: ?Value, left: bool, right: bool) Er
     return s[start..end];
 }
 
-fn listOf(rt: *Rt, parts: []const []const u8) Error!Value {
+fn listOf(rt: *Rt, source: v.Str, parts: []const []const u8) Error!Value {
     const items = try rt.a.alloc(Value, parts.len);
-    for (parts, items) |p, *x| x.* = Value.string(p);
+    var cursor: v.Cursor = .{ .source = source };
+    for (parts, items) |p, *x| x.* = .{ .str = try cursor.part(rt.a, p) };
     return rt.list(items, .list);
 }
 
-fn split(rt: *Rt, s: []const u8, sep_: ?Value, max_: ?Value, from_right: bool) Error!Value {
+fn split(rt: *Rt, source: v.Str, sep_: ?Value, max_: ?Value, from_right: bool) Error!Value {
+    const s = source.s;
     const sep: ?[]const u8 = if (sep_) |x| (if (x == .none) null else try str(rt, x, "separator")) else null;
     var max: i64 = if (max_) |m| try int(rt, m) else -1;
     if (max < 0) max = std.math.maxInt(i64);
@@ -135,7 +137,7 @@ fn split(rt: *Rt, s: []const u8, sep_: ?Value, max_: ?Value, from_right: bool) E
             try parts.append(rt.a, rest);
             std.mem.reverse([]const u8, parts.items);
         }
-        return listOf(rt, parts.items);
+        return listOf(rt, source, parts.items);
     }
     if (!from_right) {
         var i: usize = 0;
@@ -171,40 +173,42 @@ fn split(rt: *Rt, s: []const u8, sep_: ?Value, max_: ?Value, from_right: bool) E
         }
         std.mem.reverse([]const u8, parts.items);
     }
-    return listOf(rt, parts.items);
+    return listOf(rt, source, parts.items);
 }
 
-fn replace(rt: *Rt, s: []const u8, old: []const u8, new: []const u8, count_: ?Value) Error![]const u8 {
+fn replace(rt: *Rt, source: v.Str, old: []const u8, replacement: v.Str, count_: ?Value) Error!v.Str {
     var count: i64 = if (count_) |c| try int(rt, c) else -1;
     if (count < 0) count = std.math.maxInt(i64);
-    var out: std.ArrayList(u8) = .empty;
+    const s = source.s;
+    var out: v.Buffer = .{};
+    var cursor: v.Cursor = .{ .source = source };
     if (old.len == 0) {
         var i: usize = 0;
         while (true) {
             if (count > 0) {
-                try out.appendSlice(rt.a, new);
+                try out.append(rt.a, replacement);
                 count -= 1;
             }
             if (i >= s.len) break;
             const start = i;
             _ = uni.next(s, &i);
-            try out.appendSlice(rt.a, s[start..i]);
+            try out.append(rt.a, try cursor.part(rt.a, s[start..i]));
             if (count == 0) {
-                try out.appendSlice(rt.a, s[i..]);
+                try out.append(rt.a, try cursor.part(rt.a, s[i..]));
                 break;
             }
         }
-        return out.items;
+    } else {
+        var at: usize = 0;
+        while (count > 0) : (count -= 1) {
+            const hit = std.mem.indexOfPos(u8, s, at, old) orelse break;
+            try out.append(rt.a, try cursor.part(rt.a, s[at..hit]));
+            try out.append(rt.a, replacement);
+            at = hit + old.len;
+        }
+        try out.append(rt.a, try cursor.part(rt.a, s[at..]));
     }
-    var rest = s;
-    while (count > 0) : (count -= 1) {
-        const at = std.mem.indexOf(u8, rest, old) orelse break;
-        try out.appendSlice(rt.a, rest[0..at]);
-        try out.appendSlice(rt.a, new);
-        rest = rest[at + old.len ..];
-    }
-    try out.appendSlice(rt.a, rest);
-    return out.items;
+    return out.str();
 }
 
 fn find(rt: *Rt, s: []const u8, sub: []const u8, start: ?Value, end: ?Value, last: bool) Error!i64 {
@@ -226,7 +230,9 @@ fn affix(rt: *Rt, s: []const u8, arg: Value, start: ?Value, end: ?Value, suffix:
 
 fn caseMap(rt: *Rt, s: v.Str, up: bool) Error!Value {
     const out = try (if (up) uni.upper(rt.a, s.s) else uni.lower(rt.a, s.s));
-    return .{ .str = .{ .s = out, .safe = s.safe } };
+    var text = try v.Str.derived(rt.a, out, s.spans.len > 0);
+    text.safe = s.safe;
+    return .{ .str = text };
 }
 
 pub fn lowerStr(rt: *Rt, s: v.Str) Error!Value {
@@ -238,11 +244,13 @@ pub fn upperStr(rt: *Rt, s: v.Str) Error!Value {
 }
 
 pub fn capitalizeStr(rt: *Rt, s: v.Str) Error!Value {
-    return .{ .str = .{ .s = try uni.capitalize(rt.a, s.s), .safe = s.safe } };
+    var text = try v.Str.derived(rt.a, try uni.capitalize(rt.a, s.s), s.spans.len > 0);
+    text.safe = s.safe;
+    return .{ .str = text };
 }
 
 pub fn strip(rt: *Rt, s: v.Str, chars: ?Value) Error!Value {
-    return .{ .str = .{ .s = try stripChars(rt, s.s, chars, true, true), .safe = s.safe } };
+    return .{ .str = try s.part(rt.a, try stripChars(rt, s.s, chars, true, true)) };
 }
 
 fn strMethod(rt: *Rt, s: v.Str, name: []const u8, pos: []const Value, kw: []const Kw) Error!Value {
@@ -256,15 +264,16 @@ fn strMethod(rt: *Rt, s: v.Str, name: []const u8, pos: []const Value, kw: []cons
     }
     if (eq(u8, name, "split") or eq(u8, name, "rsplit")) {
         const b = try bind(rt, "split", &.{ "sep", "maxsplit" }, 0, pos, kw);
-        return split(rt, t, b[0], b[1], name[0] == 'r');
+        return split(rt, s, b[0], b[1], name[0] == 'r');
     }
     if (eq(u8, name, "strip") or eq(u8, name, "lstrip") or eq(u8, name, "rstrip")) {
         const b = try bind(rt, "strip", &.{"chars"}, 0, pos, kw);
-        return Value.string(try stripChars(rt, t, b[0], name[0] != 'r', name[0] != 'l'));
+        return .{ .str = try s.part(rt.a, try stripChars(rt, t, b[0], name[0] != 'r', name[0] != 'l')) };
     }
     if (eq(u8, name, "replace")) {
         const b = try bind(rt, "replace", &.{ "old", "new", "count" }, 2, pos, kw);
-        return Value.string(try replace(rt, t, try str(rt, b[0].?, "replace arg"), try str(rt, b[1].?, "replace arg"), b[2]));
+        _ = try str(rt, b[1].?, "replace arg");
+        return .{ .str = try replace(rt, s, try str(rt, b[0].?, "replace arg"), b[1].?.str, b[2]) };
     }
     if (eq(u8, name, "find") or eq(u8, name, "rfind") or eq(u8, name, "index") or eq(u8, name, "rindex")) {
         const b = try bind(rt, "find", &.{ "sub", "start", "end" }, 1, pos, kw);
@@ -289,18 +298,18 @@ fn strMethod(rt: *Rt, s: v.Str, name: []const u8, pos: []const Value, kw: []cons
     if (eq(u8, name, "removeprefix") or eq(u8, name, "removesuffix")) {
         const b = try bind(rt, "removeprefix", &.{"affix"}, 1, pos, kw);
         const x = try str(rt, b[0].?, "removeprefix arg");
-        if (name[6] == 'p') return Value.string(if (std.mem.startsWith(u8, t, x)) t[x.len..] else t);
-        return Value.string(if (x.len > 0 and std.mem.endsWith(u8, t, x)) t[0 .. t.len - x.len] else t);
+        if (name[6] == 'p') return .{ .str = try s.part(rt.a, if (std.mem.startsWith(u8, t, x)) t[x.len..] else t) };
+        return .{ .str = try s.part(rt.a, if (x.len > 0 and std.mem.endsWith(u8, t, x)) t[0 .. t.len - x.len] else t) };
     }
     if (eq(u8, name, "join")) {
         const b = try bind(rt, "join", &.{"iterable"}, 1, pos, kw);
-        var out: std.ArrayList(u8) = .empty;
+        var out: v.Buffer = .{};
         for (try access.iterate(rt, b[0].?), 0..) |item, i| {
             if (item != .str) return rt.fail("sequence item {d}: expected str instance, {s} found", .{ i, v.typeName(item) });
-            if (i > 0) try out.appendSlice(rt.a, t);
-            try out.appendSlice(rt.a, item.str.s);
+            if (i > 0) try out.append(rt.a, s);
+            try out.append(rt.a, item.str);
         }
-        return Value.string(out.items);
+        return .{ .str = out.str() };
     }
     return rt.fail("str.{s}() is not supported", .{name});
 }
@@ -318,7 +327,7 @@ fn dictMethod(rt: *Rt, d: *const v.Dict, self: Value, name: []const u8, pos: []c
     _ = try bind(rt, "items", &.{}, 0, pos, kw);
     if (eq(u8, name, "items")) {
         const items = try rt.a.alloc(Value, d.map.count());
-        for (d.map.keys(), d.map.values(), items) |k, x, *it| it.* = try rt.tuple2(Value.string(k), x);
+        for (d.map.keys(), d.map.values(), items) |k, x, *it| it.* = try rt.tuple2(try v.key(rt, d, k), x);
         return rt.list(items, .items);
     }
     if (eq(u8, name, "keys")) return rt.list(try access.iterate(rt, self), .keys);
@@ -368,22 +377,30 @@ pub fn callMethod(rt: *Rt, m: *const v.Method, pos: []const Value, kw: []const K
 }
 
 /// dict(*args, **kwargs) as namespace() and dict() build them.
-fn mapping(rt: *Rt, comptime fname: []const u8, pos: []const Value, kw: []const Kw) Error!v.Map {
-    var map: v.Map = .empty;
+fn mapping(rt: *Rt, comptime fname: []const u8, pos: []const Value, kw: []const Kw) Error!v.Dict {
+    var result: v.Dict = .{ .map = .empty };
     if (pos.len > 1) return rt.fail(fname ++ " expected at most 1 argument, got {d}", .{pos.len});
     if (pos.len == 1) switch (pos[0]) {
-        .dict => |d| {
-            var it = d.map.iterator();
-            while (it.next()) |e| try map.put(rt.a, e.key_ptr.*, e.value_ptr.*);
+        .dict => |d| for (d.map.keys(), d.map.values()) |name, value| {
+            const k = (try v.key(rt, d, name)).str;
+            try result.map.put(rt.a, name, value);
+            if (k.spans.len > 0) try result.key_provenance.put(rt.a, name, k);
         },
         else => for (try access.iterate(rt, pos[0])) |pair| {
             const kv = try access.unpack(rt, pair, 2);
             if (kv[0] != .str) return rt.fail("only string keys are supported", .{});
-            try map.put(rt.a, kv[0].str.s, kv[1]);
+            const k = kv[0].str;
+            try result.map.put(rt.a, k.s, kv[1]);
+            if (k.spans.len > 0) try result.key_provenance.put(rt.a, k.s, k) else _ = result.key_provenance.remove(k.s);
         },
     };
-    for (kw) |k| try map.put(rt.a, k.name, k.value);
-    return map;
+    for (kw) |k| {
+        try result.map.put(rt.a, k.name, k.value);
+        if (k.name_spans.len > 0) {
+            try result.key_provenance.put(rt.a, k.name, .{ .s = k.name, .spans = k.name_spans });
+        } else _ = result.key_provenance.remove(k.name);
+    }
+    return result;
 }
 
 fn range(rt: *Rt, pos: []const Value, kw: []const Kw) Error!Value {
@@ -410,12 +427,13 @@ pub fn callFunc(rt: *Rt, f: v.Func, pos: []const Value, kw: []const Kw) Error!Va
         .range => return range(rt, pos, kw),
         .namespace => {
             const ns = try rt.a.create(v.Namespace);
-            ns.* = .{ .map = try mapping(rt, "Namespace", pos, kw) };
+            const fields = try mapping(rt, "Namespace", pos, kw);
+            ns.* = .{ .map = fields.map, .request_keys = fields.key_provenance.count() > 0 };
             return .{ .ns = ns };
         },
         .dict => {
             const d = try rt.a.create(v.Dict);
-            d.* = .{ .map = try mapping(rt, "dict", pos, kw) };
+            d.* = try mapping(rt, "dict", pos, kw);
             return .{ .dict = d };
         },
         .raise_exception => {
@@ -426,7 +444,7 @@ pub fn callFunc(rt: *Rt, f: v.Func, pos: []const Value, kw: []const Kw) Error!Va
         },
         .strftime_now => {
             const b = try bind(rt, "strftime_now", &.{"format"}, 1, pos, kw);
-            return Value.string(try strftimeNow(rt, try str(rt, b[0].?, "format")));
+            return .{ .str = try v.Str.derived(rt.a, try strftimeNow(rt, try str(rt, b[0].?, "format")), v.hasRequest(b[0].?)) };
         },
         .cycler, .joiner, .lipsum => return rt.fail("{s}() is not supported", .{@tagName(f)}),
     }

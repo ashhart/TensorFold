@@ -237,3 +237,24 @@ test "a request's videos are limited by the engine's offer, not by a constant" {
     try std.testing.expectError(error.Refused, images.expand(v, null, images.MarkText.text(), &cx, two, &[_]u32{ 8, 8 }, 0));
     try std.testing.expectEqualStrings("a request supports at most 1 videos", cx.message);
 }
+
+test "a template that writes no image placeholder is named as the cause, a miscount keeps its counts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var dummy: u8 = 0;
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = noPrepare, .image_token = 9, .image_tokens = 64, .max_images = 4 };
+    const two = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}},
+        \\  {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}}, {"type": "text", "text": "x"}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    var cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, images.expand(v, null, images.MarkText.text(), &cx, two, &[_]u32{ 1, 2 }, 0));
+    try std.testing.expectEqualStrings("the chat template wrote no image placeholder for 2 image parts; a template that turns media parts into text has no image path: serve with --chat-template naming one that writes the image token", cx.message);
+    cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, images.expand(v, null, images.MarkText.text(), &cx, two, &[_]u32{ 1, 9 }, 0));
+    try std.testing.expectEqualStrings("the chat template wrote 1 image placeholders for 2 image parts", cx.message);
+}

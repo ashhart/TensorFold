@@ -19,3 +19,5 @@ test {
     _ = moe;
     _ = @import("../../core/pair.zig");
 }
+
+pub const residency = @import("residency.zig");

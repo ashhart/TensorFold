@@ -215,13 +215,16 @@ fn ours(name: []const u8) bool {
 fn indexed(gpa: Allocator, io: std.Io, dir: []const u8) !?std.StringHashMapUnmanaged(void) {
     const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors.index.json" });
     defer gpa.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 27)) catch return null;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 27)) catch |err| {
+        if (err == error.FileNotFound) return null;
+        return err;
+    };
     defer gpa.free(text);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
     defer parsed.deinit();
     var out: std.StringHashMapUnmanaged(void) = .empty;
     errdefer freeNames(gpa, &out);
-    var it = (parsed.value.object.get("weight_map") orelse return error.BadIndex).object.iterator();
+    var it = (try core.safetensors.index.weightMap(parsed.value)).iterator();
     while (it.next()) |e| if (ours(e.key_ptr.*) and !out.contains(e.value_ptr.string)) {
         try out.put(gpa, try gpa.dupe(u8, e.value_ptr.string), {});
     };

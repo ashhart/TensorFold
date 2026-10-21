@@ -421,3 +421,30 @@ test "an EXLR8 node's whole files land in a relative directory, small files and 
     try std.testing.expectEqualStrings(FakeHub.config_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(1 << 20)));
     try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "weights.safetensors" }), a, .limited(1 << 20)));
 }
+
+test "security: a hub response cannot write beyond the manifest file size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var fake = try FakeHub.open();
+    fake.start();
+    defer fake.stopServer();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const url = try std.fmt.allocPrint(a, "{s}{s}", .{ try fake.endpoint(a), FakeHub.weights_path });
+    var client: std.http.Client = .{ .allocator = a, .io = io };
+    defer client.deinit();
+    var out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectError(error.SizeMismatch, single.downloadRetrying(a, io, &client, &out.writer, url, dir, .{
+        .path = "overflow.bin",
+        .size = 8,
+    }));
+    const partial = try std.fs.path.join(a, &.{ dir, "overflow.bin.incomplete" });
+    const written = single.fileStat(io, partial) catch |err| switch (err) {
+        error.FileNotFound => 0,
+        else => return err,
+    };
+    try std.testing.expect(written <= 8);
+}

@@ -1,5 +1,6 @@
 //! cuBLAS (the classic API) opened at run time: the strided batched GEMM Drama 3's prompt rows and codec take.
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 
 pub const Status = c_int;
@@ -33,7 +34,7 @@ pub const Api = struct {
 
 /// The library and one handle with its workspace, bound to a stream per call.
 pub const Blas = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: Api,
     h: Handle,
 
@@ -50,7 +51,7 @@ pub const Blas = struct {
     }
 
     fn openPath(path: []const u8, workspace: Ptr, workspace_bytes: usize) Error!Blas {
-        var lib = std.DynLib.open(path) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.open(path) catch return error.LibraryUnavailable;
         errdefer lib.close();
         var b: Blas = .{ .lib = lib, .api = undefined, .h = null };
         const info = @typeInfo(Api).@"struct";

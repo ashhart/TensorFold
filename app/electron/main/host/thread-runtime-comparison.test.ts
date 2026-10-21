@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { installDnsFixture } from '../../agent/test-fixtures/dns'
 
 const home = await mkdtemp(path.join(os.tmpdir(), 'tf-compare-run-admission-'))
 process.env.VONTRA_HOME = home
@@ -25,10 +26,12 @@ const guard = new WorkspaceMutationGuard()
 let hostChecks = 0, claims = 0, contextReads = 0
 const service = new EngineService({ binaryPath: '/fixture/engine', binary: h.binary, childEnv: h.env, appHome: h.root, emit: () => {}, pollMs: 10, totalMemoryBytes: 32 * 1024 ** 3 })
 const runtime = createThreadRuntime({ aborters, workspaceMutationGuard: guard, assertLocalEngineAdmission: () => { hostChecks++; service.assertLocalWorkAdmission() }, pendingApprovalMeta: new Map(), jobLeaseOwner: 'synthetic', threadJobHeartbeatMs: 5000, sshManager: { ensureConnected: async () => {} }, emitToRenderer() {}, persistThreads() {}, fullToolContext: () => { contextReads++; throw new Error('Synthetic stop before context'); }, approvalResolver: () => async () => 'deny', isHighRiskTool: () => false, claimJob: () => { claims++; throw new Error('Synthetic stop before job or transport'); }, patchJob: (job) => job, replaceJobResult: (result) => result.job!, heartbeatJob: (job) => job, settleThreadRunJob() {}, renderProjectMemoryBucket: () => { throw new Error('No project memory reads'); }, effectiveContextLimit: () => 4096 })
+const input = { id: 'comparison_run_admission_1', models: ['Fixture/A', 'Fixture/B'] as [string, string], prompt: 'Synthetic comparison' }
+let pending: ReturnType<typeof service.compareModels> | undefined
+const restoreDns = installDnsFixture({ 'example.com': '93.184.216.34' })
 try {
   await Promise.all([seedModel(h.hub, 'Fixture/A'), seedModel(h.hub, 'Fixture/B')]); service.install()
-  const input = { id: 'comparison_run_admission_1', models: ['Fixture/A', 'Fixture/B'] as [string, string], prompt: 'Synthetic comparison' }
-  const pending = service.compareModels(input)
+  pending = service.compareModels(input)
   await waitFor(() => service.comparisonStatus(input.id)?.rows[0].state === 'running')
   for (const id of ['bound-local', 'unbound-local']) {
     const before = structuredClone(store.threads.find((thread) => thread.id === id))
@@ -43,5 +46,15 @@ try {
   service.cancelComparison(input.id); await pending
   assert.doesNotThrow(() => service.assertLocalWorkAdmission(), 'finished comparison releases local startup admission')
   assert.equal(aborters.size, 0)
-} finally { await service.supervisor.stop(); service.shutdown(); store.settings = saved.settings; store.threads = saved.threads; await h.cleanup(); await rm(home, { recursive: true, force: true }) }
+} finally {
+  restoreDns()
+  service.cancelComparison(input.id)
+  await pending?.catch(() => {})
+  await service.supervisor.stop()
+  service.shutdown()
+  store.settings = saved.settings
+  store.threads = saved.threads
+  await h.cleanup()
+  await rm(home, { recursive: true, force: true })
+}
 console.log('Actual thread-runtime comparison seam: bound/unbound local starts rejected before history/job/context/aborter mutation; cloud startup unaffected and cancellation releases admission.')

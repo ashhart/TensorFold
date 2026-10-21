@@ -8,6 +8,7 @@ const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
 
 const Host = struct {
+    resident: ?mtl.resident.Resident = null,
     gpa: std.mem.Allocator,
     model: *q.Model,
     metal: *q.backend.Metal,
@@ -23,6 +24,7 @@ const Host = struct {
         h.host.stop();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
+        mtl.resident.streams.drop(h);
         h.config.deinit(h.gpa);
         h.metal.deinit();
         h.model.deinit();
@@ -49,7 +51,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         "lfm2: serving {d} of the checkpoint's {d} positions, all its attention holds",
         .{ most, config.context },
     );
-    const model = q.Model.load(gpa, io, o.dir) catch |err| {
+    const model = q.Model.loadWithResidency(gpa, io, o.dir, false) catch |err| {
         problem.* = try std.fmt.allocPrint(a, cannot, .{@errorName(err)});
         return null;
     };
@@ -58,6 +60,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
+    h.resident = null;
     const chunk = 2048;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = window, .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
@@ -92,7 +95,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
-    h.warm = .{ .queue = h.metal.model.queue };
+    try mtl.resident.streams.hold(h, io, "lfm2 moe");
+    errdefer mtl.resident.streams.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };

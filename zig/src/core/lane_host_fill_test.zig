@@ -170,4 +170,5 @@ test "status reads a filling prompt's tokens while its pass runs, and none once 
 
 test {
     _ = @import("lane_host_fill_aging_test.zig");
+    _ = @import("lane_host_fill_progress_test.zig");
 }

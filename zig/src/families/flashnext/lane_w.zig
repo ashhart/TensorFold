@@ -85,7 +85,9 @@ pub fn pipeline(a: std.mem.Allocator, device: mtl.Device, cache: *Cache, s: Spec
     if (cache.get(s)) |p| return p;
     const text = try source(a, try template(device.tensorUnits()), s);
     const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+    defer lib.deinit();
     const pipe = try mtl.Pipeline.init(device, lib, try functionName(a, text), false);
+    errdefer pipe.deinit();
     try cache.put(a, s, pipe);
     return pipe;
 }

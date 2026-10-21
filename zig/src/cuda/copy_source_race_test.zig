@@ -97,7 +97,7 @@ pub fn run(reaper: *const fn (*const Driver) void, completing: bool) !void {
     Fake.reaper = reaper;
     Fake.completing = completing;
     var d: Driver = undefined;
-    d.lib = try std.DynLib.open(if (builtin.os.tag == .windows) "kernel32.dll" else if (builtin.os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
+    d.lib = try @import("sys").DynLib.open(if (builtin.os.tag == .windows) "kernel32.dll" else if (builtin.os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
     d.api.cuMemHostAlloc = Fake.alloc;
     d.api.cuMemFreeHost = Fake.free;
     d.api.cuMemcpyHtoDAsync_v2 = Fake.copy;

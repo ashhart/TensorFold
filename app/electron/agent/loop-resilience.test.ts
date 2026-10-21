@@ -24,6 +24,17 @@ const base = { compactRetries: 0, canCompact: true, random: () => 0 }
   ok('cancelled tools retain explicit partial-mutation ownership evidence')
 }
 
+// --- a refused reasoning effort is resent once with the level the server names (#884) --------
+{
+  const refusal = Object.assign(new Error('HTTP 500: Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.'), { status: 500 })
+  assert.deepEqual(streamRetryDecision(refusal, 1, base), { kind: 'effort', effort: 'xhigh' })
+  assert.equal(streamRetryDecision(refusal, 1, { ...base, effortRetried: true }).kind, 'fail', 'once a turn, then the refusal stands')
+  assert.equal(streamRetryDecision(refusal, 1, { ...base, delegated: true }).kind, 'fail')
+  const misplaced = Object.assign(new Error('HTTP 500: System message must be at the beginning.'), { status: 500 })
+  assert.equal(streamRetryDecision(misplaced, 1, base).kind, 'fail', "a chat template's refusal is not retried")
+  ok('a refused reasoning effort resends once with the nearest named level; other template refusals fail at once')
+}
+
 // --- delegated engines are never re-run ----------------------------------------
 {
   const timeout = new Error('Claude CLI total timeout exceeded.')

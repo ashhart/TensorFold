@@ -38,6 +38,8 @@ export interface ChatParams {
   /** Host engine capability; the route replaces any caller value. */
   greedyOnly?: boolean
   reasoningEffort?: string
+  /** A level the server named after refusing `reasoningEffort` (#884), sent as is on chat completions. */
+  serverReasoningEffort?: string
   serviceTier?: string
   approvalMode?: ApprovalMode
   cwd?: string | null
@@ -589,7 +591,7 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
 
   if (!p.baseUrl) throw new Error('Provider base URL is required.')
   const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider, undefined, assertRequestAllowed) : createLocalProviderFetch(p.baseUrl, undefined, assertRequestAllowed))
-  const reasoningEffort = chatCompletionsReasoningEffort(p.reasoningEffort, p.provider, p.model)
+  const reasoningEffort = p.serverReasoningEffort ?? chatCompletionsReasoningEffort(p.reasoningEffort, p.provider, p.model)
   // Only trusted local servers (the built-in engine, loopback oMLX/Ollama/LM Studio) are asked for usage.
   const wantUsage = classifyProvider(p.provider, p.baseUrl) === 'trusted-local'
   const requestAt = Date.now()

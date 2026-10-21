@@ -18,14 +18,22 @@ pub const Store = struct {
     kv: usize, // an attention layer's keys (or values) for up to `rows` rows, bf16 [rows, kv heads x head dim]
     mambas: usize,
     attentions: usize,
+    residency: ?mtl.ResidencySet.Follow = null,
 
     pub fn init(device: mtl.Device, c: cfg.Config, rows: usize) Store {
         return .{ .device = device, .conv = 3 * c.convDim() * 2, .ssm = c.mamba_heads * c.mamba_head_dim * c.state * 4, .kv = rows * c.kv_heads * c.head_dim * 2, .mambas = c.count(.mamba), .attentions = c.count(.attention) };
     }
 
     pub fn deinit(s: *Store, gpa: std.mem.Allocator) void {
-        for (s.slots.items) |b| b.deinit();
-        s.slots.deinit(gpa);
+        s.drop(gpa);
+    }
+
+    pub fn setResident(s: *Store, hook: ?mtl.ResidencySet.Follow) void {
+        for (s.slots.items) |b| {
+            if (s.residency) |h| h.leave(h.ctx, b);
+            if (hook) |h| h.join(h.ctx, b);
+        }
+        s.residency = hook;
     }
 
     fn bytes(s: *const Store) usize {
@@ -34,7 +42,10 @@ pub const Store = struct {
 
     /// Every slot freed.
     pub fn drop(s: *Store, gpa: std.mem.Allocator) void {
-        for (s.slots.items) |b| b.deinit();
+        for (s.slots.items) |b| {
+            if (s.residency) |h| h.leave(h.ctx, b);
+            b.deinit();
+        }
         s.slots.clearAndFree(gpa);
     }
 
@@ -45,6 +56,7 @@ pub const Store = struct {
             const b = try s.device.buffer(s.bytes(), opts);
             errdefer b.deinit();
             try s.slots.append(gpa, b);
+            if (s.residency) |h| h.join(h.ctx, b);
         }
     }
 

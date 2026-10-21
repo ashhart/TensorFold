@@ -340,7 +340,7 @@ fn functionBlock(a: Allocator, block: []const u8, schemas: ?*const tool_params.S
     const arguments = try json.newObject(a);
     for (params.items) |p| {
         const key = strip(p.key);
-        const schema: Value = if (schemas) |s| try tool_params.schemaOf(s, name, key, a) else .{ .object = try json.newObject(a) };
+        const schema: tool_params.Schema = if (schemas) |s| try tool_params.schemaOf(s, name, key, a) else try tool_params.emptySchema(a);
         try arguments.put(a, key, try tool_params.decode(a, p.value, schema, true));
     }
     return .{ .name = name, .arguments = .{ .object = arguments } };
@@ -446,7 +446,7 @@ fn glmCall(a: Allocator, written: []const u8, schemas: ?*const tool_params.Schem
     const arguments = try json.newObject(a);
     for (pairs.items) |p| {
         const key = strip(p.key);
-        const schema: Value = if (schemas) |s| try tool_params.schemaOf(s, name, key, a) else .{ .object = try json.newObject(a) };
+        const schema: tool_params.Schema = if (schemas) |s| try tool_params.schemaOf(s, name, key, a) else try tool_params.emptySchema(a);
         try arguments.put(a, key, try tool_params.decode(a, p.value, schema, false));
     }
     return .{ .name = name, .arguments = .{ .object = arguments } };

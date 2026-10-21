@@ -1,4 +1,4 @@
-//! Prefer foreground and short prompts, with bounded waiting for every admitted fill.
+//! Prefer foreground and least remaining prefill work, with bounded waiting for every admitted fill.
 const LaneHost = @import("lane_host.zig").LaneHost;
 
 pub const preference_rounds = 8;
@@ -16,10 +16,18 @@ pub fn next(h: *const LaneHost) usize {
             if (j.fill_wait > best.fill_wait) at = i;
         } else if (j.request.background != best.request.background) {
             if (!j.request.background) at = i;
-        } else if (j.stream.prompt_len - j.stream.cached < best.stream.prompt_len - best.stream.cached) at = i;
+        } else if (remaining(h, j) < remaining(h, best)) at = i;
     }
     for (h.filling.items, 0..) |j, i| j.fill_wait = if (i == at) 0 else j.fill_wait +| 1;
     return at;
+}
+
+fn remaining(h: *const LaneHost, j: *const LaneHost.Job) u64 {
+    const completed = if (j.fill_began and h.core.backend.vtable.reports_fill)
+        @max(j.stream.cached, j.stream.fill_at.load(.monotonic))
+    else
+        j.stream.cached;
+    return j.stream.prompt_len -| completed;
 }
 
 /// Takes `job` off the filling list, wherever it is.

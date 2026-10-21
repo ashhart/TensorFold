@@ -42,8 +42,8 @@ pub fn laneTiles(r: *Run, role: []const u8, ins: []const Buf, y: Buf, ranges: []
             text = try swap(a, text, "device bfloat16_t* Y [[buffer(5)]]", "device float* Y [[buffer(5)]]", 1);
             text = try swap(a, text, "static_cast<bfloat>(C[t][f * 8 + r * 4 + j])", "C[t][f * 8 + r * 4 + j]", 1);
         }
-        const lib = try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx());
-        const pipe = try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(a, "{s}", .{s.v.name}, 0), false);
+        const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
+        const pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(a, "{s}", .{s.v.name}, 0), false));
         try r.tp_lane.put(a, h.final(), pipe);
         break :blk pipe;
     };
@@ -71,8 +71,8 @@ pub fn gdnHeads(r: *Run, role: []const u8, as_rows: usize, ins: []const Buf, out
         const text = try Run.variantText(r.arena, s.v);
         if (std.mem.count(u8, text, from) != 1) return error.GdnPatch;
         const patched = try std.mem.replaceOwned(u8, r.arena, text, from, "const int hv = int(threadgroup_position_in_grid.x) + 24;");
-        const lib = try mtl.Library.fromSource(r.device, patched, mtl.CompileOptions.mlx());
-        const pipe = try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{s.v.name}, 0), false);
+        const lib = try r.ownResource(try mtl.Library.fromSource(r.device, patched, mtl.CompileOptions.mlx()));
+        const pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{s.v.name}, 0), false));
         try r.tp_gdn.put(r.arena, s.v, pipe);
         break :blk pipe;
     };

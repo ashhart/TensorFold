@@ -21,6 +21,10 @@ pub const Model = struct {
     resident: ?mtl.ResidencySet = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
+        return loadWithResidency(gpa, io, dir, true);
+    }
+
+    pub fn loadWithResidency(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, hold_weights: bool) !*Model {
         const config = try cfg.Config.read(gpa, io, dir);
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
@@ -39,13 +43,15 @@ pub const Model = struct {
         m.kernels = try kernels.load(m.device);
         m.kernels.twin = try twins(m);
         m.resident = null;
-        if (m.device.residencySet(m.checkpoint.shards.items.len)) |set| {
-            for (m.checkpoint.shards.items) |shard| set.add(shard.buffer);
-            set.commit();
-            set.requestResidency();
-            m.queue.addResidencySet(set);
-            m.resident = set;
-        } else |_| {}
+        if (hold_weights) {
+            if (m.device.residencySet(m.checkpoint.shards.items.len)) |set| {
+                for (m.checkpoint.shards.items) |shard| set.add(shard.buffer);
+                set.commit();
+                set.requestResidency();
+                m.queue.addResidencySet(set);
+                m.resident = set;
+            } else |_| {}
+        }
         return m;
     }
 
@@ -77,11 +83,16 @@ pub const Model = struct {
         return true;
     }
 
-    pub fn deinit(m: *Model) void {
+    pub fn dropResident(m: *Model) void {
         if (m.resident) |set| {
             m.queue.removeResidencySet(set);
             set.deinit();
         }
+        m.resident = null;
+    }
+
+    pub fn deinit(m: *Model) void {
+        m.dropResident();
         m.kernels.deinit();
         m.checkpoint.deinit();
         m.queue.deinit();

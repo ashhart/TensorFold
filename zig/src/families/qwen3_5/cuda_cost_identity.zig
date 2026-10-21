@@ -1,5 +1,6 @@
 //! Checkpoint structure and descriptor stamps identify the drafter without hashing its weight payload again.
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core");
 
 pub fn checkpoint(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
@@ -59,6 +60,8 @@ test "cost identity: stable reads reuse a drafter, while a changed payload at th
     const first = try checkpoint(a, io, root);
     try std.testing.expectEqualSlices(u8, &first, &try checkpoint(a, io, root));
     bytes[bytes.len - 1] = 1;
+    // NTFS stamps a write from the clock's tick (up to ~16 ms): rewrite a tick later, as any real change comes
+    if (builtin.os.tag == .windows) try std.Io.sleep(io, .fromMilliseconds(50), .awake);
     try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &bytes });
     const changed = try checkpoint(a, io, root);
     try std.testing.expect(!std.mem.eql(u8, &first, &changed));

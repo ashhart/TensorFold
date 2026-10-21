@@ -64,6 +64,7 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
     const t = &m.t;
     const h = &m.mtp;
     r.rows = rows;
+    try @import("rotary_cache.zig").append(r, t.log2base, sl.pos8, rows);
     var ce: [2]variants.Const = undefined;
     try variants.callAs(r, "mtp:qa_embed_rows@embed", rows, &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb}, variants.width(&ce, "BITS", "GS", m.embed_w));
     try r.call("mtp:q4_rms_rows@mtp.enorm", &.{ h.emb, h.enorm, t.eps }, &.{h.en});

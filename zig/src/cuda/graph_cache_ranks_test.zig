@@ -1,6 +1,7 @@
 //! Two in-process ranks with fake engines: equal effective settings vote on misses only; a mismatch is a stall.
 
 const std = @import("std");
+const platform = @import("sys");
 const cache = @import("graph_cache.zig");
 const Stream = @import("stream.zig").Stream;
 const no_stream: Stream = .{ .d = undefined, .handle = null };
@@ -53,8 +54,8 @@ const Board = struct {
     }
 
     fn now() u64 {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        var ts: platform.c.timespec = undefined;
+        _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
         return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
     }
 };

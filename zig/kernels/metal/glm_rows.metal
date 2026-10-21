@@ -221,6 +221,80 @@ template <int BITS, bool GLU>
   }
 }
 
+// OUT[m, c] = sum_k X[m,k]*W[c,k] on tensor units: fp32 8x8 mma, RNE writeback; B from the W^T staging non-transposed.
+template <int BM, int BN>
+[[kernel]] void glm_rows_bf16_nax(const device bfloat* X [[buffer(0)]], const device bfloat* W [[buffer(1)]],
+                                  constant GlmRowDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
+                                  uint3 tg [[threadgroup_position_in_grid]],
+                                  uint ti [[thread_index_in_threadgroup]]) {
+  constexpr int SG_M = BM / 8;
+  constexpr int SG_N = BN / 8;
+  constexpr int SG_TOTAL = SG_M * SG_N;
+  constexpr int TG_THREADS = SG_TOTAL * 32;
+  constexpr int A_PAD = 8 + 8;       // bf16 X tile: 8 rows × (8+8)-padded cols
+  constexpr int B_PAD = BN + 8;      // bf16 W tile: 8 rows × (BN+8)-padded cols (transposed)
+  constexpr int W_PAD = BN + 8;      // simdgroup_store writeback stride
+  if (TG_THREADS > 1024) return;     // threadgroup cap on M-series GPUs
+  const int sg_id = int(ti) / 32;
+  const int sg_m = sg_id / SG_N;
+  const int sg_n = sg_id % SG_N;
+  const int m0 = int(tg.y) * BM + sg_m * 8;
+  const int n0 = int(tg.x) * BN + sg_n * 8;
+  threadgroup float xs_pad[BM * A_PAD];                  // X tile buffer
+  threadgroup float ws_pad[8 * B_PAD];                    // W tile buffer (8 rows × BN cols)
+  threadgroup float wb[BM * W_PAD];                       // simdgroup_store writeback (overlaps unused TG)
+  simdgroup_matrix<float, 8, 8> acc(0.0f);
+  const bool m_in = m0 < d.rows;
+  if (m_in) {
+    const long x_base = long(m0) * d.ldx;
+    for (int k0 = 0; k0 < d.k; k0 += 8) {
+      // Cooperatively load X[BM, BK=8] from device bf16 into xs_pad (padded row-major; out-of-bounds = 0).
+      for (int e = int(ti); e < BM * 8; e += TG_THREADS) {
+        const int r = e / 8;
+        const int c = e % 8;
+        const int global_r = m0 + r;
+        const int global_c = k0 + c;
+        xs_pad[r * A_PAD + c] = (global_r < d.rows && global_c < d.k) ? float(X[x_base + long(r) * d.ldx + k0 + c]) : 0.0f;
+      }
+      // Load W[BN rows of K=8] into ws_pad as W^T [BK=8, BN]; the column base is threadgroup-scoped (tg.x * BN).
+      const int n_base = int(tg.x) * BN;
+      for (int e = int(ti); e < 8 * BN; e += TG_THREADS) {
+        const int kk = e / BN; // K position (rows of B)
+        const int nn = e % BN; // W column (cols of B)
+        const int global_nn = n_base + nn;
+        const int global_kk = k0 + kk;
+        ws_pad[kk * B_PAD + nn] = (global_nn < d.n && global_kk < d.k) ? float(W[long(global_nn) * d.k + global_kk]) : 0.0f;
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      simdgroup_matrix<float, 8, 8> a_mat;
+      simdgroup_matrix<float, 8, 8> b_mat;
+      simdgroup_load(a_mat, xs_pad, ulong(A_PAD));
+      // This tile's W slice is staged [kk][nn] = W^T: the load is non-transposed, b[l][j] = W[n0+j][k0+l].
+      simdgroup_load(b_mat, ws_pad + sg_n * 8, ulong(B_PAD), ulong2(0, 0), false);
+      simdgroup_multiply_accumulate(acc, a_mat, b_mat, acc);
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    simdgroup_store(acc, wb + sg_m * 8 * W_PAD + sg_n * 8, ulong(W_PAD));
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (m_in) {
+    for (int e = int(ti); e < BM * BN; e += TG_THREADS) {
+      const int rr = e / BN;
+      const int cc = e % BN;
+      const int out_m = int(tg.y) * BM + rr;
+      const int out_n = int(tg.x) * BN + cc;
+      if (out_m < d.rows && out_n < d.n) {
+        OUT[long(out_m) * d.ldo + out_n] = bfloat(wb[rr * W_PAD + cc]);
+      }
+    }
+  }
+}
+
+// bf16 GEMM on tensor units: 8 x 64 output tile per threadgroup (1 x 8 simdgroups, BM=8 BN=64).
+
+// D=4096 / BN=64 = 64 N-tiles; rows (p.rows chunks 2048..16384, all multiples of 8) / BM=8 covers M in full.
+template [[host_name("glm_rows_bf16_nax")]] [[kernel]] decltype(glm_rows_bf16_nax<8, 64>) glm_rows_bf16_nax<8, 64>;
+
 #define GLM_ROWS_AT(B)                                                                                                 \
   template [[host_name("glm_rows_q" #B)]] [[kernel]] decltype(glm_rows<B>) glm_rows<B>;                                \
   template [[host_name("glm_rows_ids_q" #B)]] [[kernel]] decltype(glm_rows_ids<B, false>) glm_rows_ids<B, false>;      \

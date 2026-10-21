@@ -75,13 +75,15 @@ pub const Checkpoint = struct {
         };
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
-        const header_len = std.mem.readInt(u64, &head, .little);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
+        if (end < 8) return error.BadSafetensors;
+        const file_size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+        const header_len = try st.headerSize(std.mem.readInt(u64, &head, .little), file_size);
         const header = try self.allocator.alloc(u8, header_len);
         defer self.allocator.free(header);
         try readAll(fd, header, 8);
-        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         const data_start = 8 + header_len;
-        const data_len: usize = @as(usize, @intCast(end)) - data_start;
+        const data_len = file_size - data_start;
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();

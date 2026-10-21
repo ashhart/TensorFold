@@ -90,7 +90,7 @@ pub const Scorer = struct {
         errdefer file.close(io);
         var head: [1024]u8 = undefined;
         const n = try file.readPositionalAll(io, &head, 0);
-        const a = try npy.parse(head[0..n]);
+        const a = try npy.parseHeader(head[0..n]);
         if (a.rank != 2) return error.BadTruth;
         const wide = std.mem.eql(u8, a.descr, "<f8");
         if (!wide and !std.mem.eql(u8, a.descr, "<f4")) return error.BadTruth;

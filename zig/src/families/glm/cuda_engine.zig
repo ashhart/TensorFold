@@ -37,6 +37,7 @@ pub const shared_rows = 32;
 pub const max_shared = 16;
 
 const types = @import("cuda_engine_types.zig");
+const snapshots = @import("cuda_snapshots.zig");
 pub const Part = types.Part;
 pub const Kept = types.Kept;
 const Seq = types.Seq;
@@ -58,6 +59,7 @@ pub const Engine = struct {
     packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
+    profiling_prompt: ?*prof_mod.Prof = null,
     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
     checkpoint_digest: [32]u8,
     settings: ranks.Settings,
@@ -79,6 +81,8 @@ pub const Engine = struct {
     heat_gate: heat.Gate, // upstream's bands (off unless set), read before each prompt chunk on the gathered maximum
     shared_buf: cuda.DeviceBuffer, // one f64 every rank all-reduces to its maximum
     snaps: std.AutoHashMapUnmanaged(u64, Snap) = .empty, // kept prompt states by id (the same ids on every rank)
+    snap_pages: ?snapshots.pages.Pool = null,
+    snap_setup: ?snapshots.Setup = null,
     next_snap: u64 = 1, // rank 0: the next id
     announce: u64 = 0, // rank 0: a state kept at this chunk's mark, for the other ranks to copy at its gate
     dropped: std.ArrayList(u32) = .empty, // rank 0: ids dropped since the other ranks last heard (cuda_follow)
@@ -204,6 +208,7 @@ pub const Engine = struct {
         var it = e.snaps.valueIterator();
         while (it.next()) |s| e.freeSnap(s);
         e.snaps.deinit(e.gpa);
+        if (e.snap_pages) |*p| p.deinit();
         e.dropped.deinit(e.gpa);
         e.shared_buf.free();
         e.freeProfs();
@@ -244,7 +249,7 @@ pub const Engine = struct {
         if (e.seqs.items[slot] == null) {
             const q = try e.gpa.create(Seq);
             errdefer e.gpa.destroy(q);
-            q.* = .{ .st = try fw.State.init(e.gpa, e.d, &e.w, e.capacity) };
+            q.* = .{ .st = try fw.State.initFormat(e.gpa, e.d, &e.w, e.capacity, e.settings.kv8) };
             e.seqs.items[slot] = q;
         }
         e.cur = e.seqs.items[slot].?;
@@ -322,13 +327,27 @@ pub const Engine = struct {
         if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
         f.prof = e.prompt_profs[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3];
         const labels = [_][]const u8{ "prompt chunk to 64 rows", "prompt chunk to 256 rows", "prompt chunk to 1024 rows", "prompt chunk to 2048 rows" };
-        if (f.prof) |p| try p.begin(e.stream, labels[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3]);
+        if (f.prof) |p| try p.beginPrompt(e.stream, labels[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3], .{ .rank = e.share.rank, .slot = e.slot, .start = start, .rows = rows }, e.c.run, e.pieces.count);
+        if (f.prof) |p| e.profiling_prompt = p;
+        defer if (f.prof != null) {
+            e.profiling_prompt = null;
+        };
         defer if (f.prof) |p| p.end();
+        errdefer if (f.prof) |p| {
+            p.prompt.?.invalid = true;
+        };
+        var stamp = prof_mod.span(f.prof, e.stream, .gate);
         try e.gate(cancel);
+        stamp.end();
         if (f.prof) |p| p.mark(e.stream, .gate);
         try f.run(as_i32[0..rows]);
+        stamp = prof_mod.span(f.prof, e.stream, .prompt_score);
         if (e.prompt_logprobs) |p| if (part.len > 1) try prompt_lp.run(e, p, part[1..]);
+        stamp.end();
+        stamp = prof_mod.span(f.prof, e.stream, .drafter);
         if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
+        stamp.end();
+        stamp = prof_mod.span(f.prof, e.stream, .draw);
         const last = start + rows == len;
         var first: ?u32 = null;
         if (last) {
@@ -336,29 +355,33 @@ pub const Engine = struct {
             try e.draw(e.bp.logits, 1, len, 0, &t);
             first = t[0];
         }
+        stamp.end();
         if (f.prof) |p| p.mark(e.stream, .draw);
         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
+        stamp = prof_mod.span(f.prof, e.stream, .mtp);
         if (e.mtp) {
             const nxt = as_i32[1..];
             if (nxt.len > 0) { // decode._absorb_rows
                 const mp = f.prof;
+                defer f.prof = mp;
                 f.prof = null; // the head's pass as one section
                 try f.mtp(nxt, &.{e.bp.fnormed});
                 f.prof = mp;
                 try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
             }
         }
+        stamp.end();
         if (f.prof) |p| p.mark(e.stream, .mtp);
+        stamp = prof_mod.span(f.prof, e.stream, .commit);
         try f.commit(rows);
+        stamp.end();
         if (f.prof) |p| p.mark(e.stream, .commit);
         return first;
     }
 
     /// The chunk gate on every rank: a kept state at the mark, the heat wait, rank 0's cancel; the id exchanged first.
     pub fn gate(e: *Engine, cancel: ?Cancel) !void {
-        const kept = try e.shared(@floatFromInt(e.announce));
-        e.announce = 0;
-        if (kept > 0 and e.share.rank != 0) try e.keepAs(@intFromFloat(kept));
+        try snapshots.gate(e);
         if (e.heat_gate.bands != null) {
             var w: Wait = .{ .e = e, .cancel = cancel };
             const before = e.heat_gate.waited_s;
@@ -368,62 +391,22 @@ pub const Engine = struct {
         if (try e.shared(if (cancel) |c| @floatFromInt(@intFromBool(c.check(c.ptr))) else 0) > 0) return error.Cancelled;
     }
 
-    /// Bytes one kept state takes on this rank: the whole state arena (its caches are sized for the window, not `at`).
-    pub fn stateBytes(e: *const Engine) u64 {
-        return e.cur.st.arena.buf.len;
-    }
-
-    /// Rank 0, at a mark in a prompt pass: a copy of the state under a new id, named to the other ranks at the gate.
-    pub fn keepState(e: *Engine) !u64 {
-        const id = e.next_snap;
-        try e.keepAs(id);
-        e.next_snap += 1;
-        e.announce = id;
-        return id;
-    }
-
-    fn keepAs(e: *Engine, id: u64) !void {
-        if (e.snaps.contains(id)) return error.StateKept;
-        var buf = try cuda.DeviceBuffer.alloc(e.d, e.cur.st.arena.buf.len);
-        errdefer buf.free();
-        try e.copy(buf.ptr, e.cur.st.arena.buf.ptr, buf.len);
-        try e.stream.synchronize();
-        const cur = try e.gpa.dupe(u1, e.cur.st.cur);
-        errdefer e.gpa.free(cur);
-        try e.snaps.put(e.gpa, id, .{ .buf = buf, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base } });
-    }
-
-    /// The live state made kept state `id`'s; a rank without it refuses rather than prefill from another position.
-    fn restoreState(e: *Engine, id: u64) !void {
-        const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
-        try e.copy(e.cur.st.arena.buf.ptr, s.buf.ptr, s.buf.len);
-        try e.cur.st.restoreHost(e.stream, s.pos, s.mtp_len, s.cur, s.bases);
-        e.cur.in_head = 0;
-        try e.stream.synchronize();
-    }
-
-    pub fn holds(e: *const Engine, id: u64) bool {
-        return e.snaps.contains(id);
-    }
-
-    /// Frees kept state `id`; rank 0 also notes it for the other ranks (cuda_follow sends it before its next step).
-    pub fn dropState(e: *Engine, id: u64) void {
-        var kv = e.snaps.fetchRemove(id) orelse return;
-        e.freeSnap(&kv.value);
-        if (e.share.rank == 0 and e.share.world > 1) e.dropped.append(e.gpa, @intCast(id)) catch
-            std.log.warn("kept state {d}: the other ranks keep their copy until they exit (no memory for the note)", .{id});
-    }
-
-    fn freeSnap(e: *Engine, s: *Snap) void {
-        s.buf.free();
-        e.gpa.free(s.cur);
-    }
+    pub const stateBytes = snapshots.bytes;
+    pub const prepareSnapshots = snapshots.prepare;
+    pub const keepState = snapshots.keep;
+    pub const keepAs = snapshots.keepAs;
+    pub const restoreState = snapshots.restore;
+    pub const holds = snapshots.holds;
+    pub const dropState = snapshots.drop;
+    const freeSnap = snapshots.free;
 
     /// The ranks' maximum of `v` (an all-reduce on the engine's stream).
     pub fn shared(e: *Engine, v: f64) !f64 {
         var x = v;
         try e.shared_buf.uploadAsync(0, std.mem.asBytes(&x), e.stream.handle);
+        const stamp = prof_mod.span(e.profiling_prompt, e.stream, .control_reduce);
         try e.lib.check(e.lib.api.ncclAllReduce(e.shared_buf.ptr, e.shared_buf.ptr, 1, .f64, .max, e.comm, e.stream.handle), "ncclAllReduce");
+        stamp.end();
         try e.stream.synchronize();
         try e.shared_buf.download(0, std.mem.asBytes(&x));
         return x;
@@ -476,10 +459,7 @@ pub const Engine = struct {
         if (f.prof) |p| p.end();
     }
 
-    fn verifyLabel(rows: usize) []const u8 {
-        const l = [_][]const u8{ "verify 1 row", "verify 2 rows", "verify 3 rows", "verify 4 rows", "verify 5 rows", "verify 6 rows", "verify 7 rows", "verify 8 rows" };
-        return l[@min(rows, l.len) - 1];
-    }
+    const verifyLabel = @import("cuda_engine_prof.zig").verifyLabel;
 
     /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
     pub fn verifyShared(e: *Engine, parts: []const Part) !void {
@@ -565,28 +545,7 @@ pub const Engine = struct {
     pub const drawWhole = @import("cuda_structured.zig").drawWhole;
     pub const redrawFirst = @import("cuda_structured.zig").redrawFirst;
     /// decode.sample_rows' greedy pick: per-rank top-1 (tf_glm_top1), all-gathered, largest value then lowest id.
-    fn greedy(e: *Engine, logits: u64) !u32 {
-        const world = e.share.world;
-        var a: cuda.Args = .{};
-        a.add(logits);
-        a.add(@as(i64, @intCast(e.share.vocab.len())));
-        a.add(@as(u32, @intCast(e.share.vocab.lo)));
-        a.add(e.pairs.ptr + e.share.rank * pair_bytes);
-        try cuda.launch.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
-        const mine = e.pairs.ptr + e.share.rank * pair_bytes;
-        if (e.group) |g| try g.allGather(e.stream, mine, e.pairs.ptr, pair_bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, e.pairs.ptr, pair_bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");
-        try e.stream.synchronize();
-        try e.checkGathers();
-        var all: [ranks.max_world][4]u32 = undefined; // Engine.init refuses a larger world
-        try e.d.check(e.d.api.cuMemcpyDtoH_v2(&all, e.pairs.ptr, world * pair_bytes), "cuMemcpyDtoH");
-        var pick = all[0];
-        for (all[1..world]) |p| {
-            const v: f32 = @bitCast(p[0]);
-            const b: f32 = @bitCast(pick[0]);
-            if (v > b or (v == b and p[1] < pick[1])) pick = p;
-        }
-        return pick[1];
-    }
+    const greedy = @import("cuda_engine_pick.zig").greedy;
 
     /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
     pub fn checkGathers(e: *const Engine) !void {

@@ -31,7 +31,8 @@ pub fn Io(comptime core: type) type {
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var files: Files = .{ .gpa = gpa, .io = io, .dir = dir, .paths = .init(gpa) };
-            defer files.close();
+            var mapped = true;
+            defer if (mapped) files.close();
             var edits: std.ArrayList(se.Replacement) = .empty;
             var bytes: usize = 0;
             const n = neurons * d;
@@ -51,6 +52,9 @@ pub fn Io(comptime core: type) type {
                 // the MTP head's expert in the index: grown with the model's own, zero neurons
                 bytes += try expert(F, arena, &files, &edits, m.base, own, neurons, d, &zs, z);
             };
+            // the replacements own their bytes (arena copies): unmap first, as Windows will not replace a mapped file
+            files.close();
+            mapped = false;
             try se.save_guard.begin(io, dir);
             if (widen) try se.grow(gpa, io, dir, edits.items) else try se.overwrite(gpa, io, dir, edits.items);
             if (mtp) |m| if (m.file) |name| {
@@ -59,8 +63,11 @@ pub fn Io(comptime core: type) type {
                 if (hasMtp(F, gpa, io, path, m.base)) {
                     var only: std.ArrayList(se.Replacement) = .empty;
                     var single: Files = .{ .gpa = gpa, .io = io, .dir = dir, .single = path, .paths = .init(gpa) };
-                    defer single.close();
+                    var single_mapped = true;
+                    defer if (single_mapped) single.close();
                     bytes += try expert(F, arena, &single, &only, m.base, own, neurons, d, &zs, z);
+                    single.close(); // as above: the file's map goes before its rewrite
+                    single_mapped = false;
                     _ = try se.rewrite(gpa, io, path, only.items);
                 }
             };

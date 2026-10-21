@@ -136,7 +136,8 @@ pub fn quantization(a: Allocator, io: std.Io, dir: []const u8) ?struct { bits: u
     const q = parsed.value.object.get("quantization") orelse return null;
     if (q != .object) return null;
     const bits = if (q.object.get("bits")) |b| (if (b == .integer) b.integer else return null) else return null;
-    const group = if (q.object.get("group_size")) |g| (if (g == .integer) g.integer else 32) else 32;
+    const group = if (q.object.get("group_size")) |g| (if (g == .integer) g.integer else return null) else 32;
+    if (bits <= 0 or group <= 0) return null;
     return .{ .bits = @intCast(bits), .group = @intCast(group) };
 }
 
@@ -168,6 +169,29 @@ pub fn isDir(io: std.Io, path: []const u8) bool {
 
 fn readSmall(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch null;
+}
+
+test "security: negative quantization metadata is refused without a cast trap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    for ([_][]const u8{
+        "{\"quantization\":{\"bits\":-1,\"group_size\":32}}",
+        "{\"quantization\":{\"bits\":4,\"group_size\":-1}}",
+        "{\"quantization\":{\"bits\":0,\"group_size\":32}}",
+        "{\"quantization\":{\"bits\":4,\"group_size\":0}}",
+    }) |data| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = data });
+        try std.testing.expect(quantization(a, io, dir) == null);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"quantization\":{\"bits\":4}}" });
+    const valid = quantization(a, io, dir).?;
+    try std.testing.expectEqual(@as(u64, 4), valid.bits);
+    try std.testing.expectEqual(@as(u64, 32), valid.group);
 }
 
 test "family detection matches the registry and refuses unknown types" {

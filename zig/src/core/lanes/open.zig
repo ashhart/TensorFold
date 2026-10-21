@@ -74,6 +74,15 @@ pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
 }
 
 fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !void {
+    if (s.embedding != null) {
+        if (s.isCancelled()) {
+            e.backend.release(s);
+            return error.Cancelled;
+        }
+        s.cache_len = s.prompt_len;
+        s.pending = null;
+        return;
+    }
     if (e.backend.first_before_draft and e.cfg.family_mtp and s.drafts) return @import("open_first.zig").opened(e, s, reach, hook);
     if (s.isCancelled()) { // cancelled in its last chunk: no first token
         e.backend.release(s);
@@ -90,12 +99,15 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
     var asked: ?u32 = null;
     if (e.cfg.family_mtp and s.drafts) {
         // the head reads the prompt's last row and the first token, and drafts the one after it
-        const d = try firstDepth(e, s, reach);
+        const wanted = try firstDepth(e, s, reach);
+        const requests = try @import("root_copy.zig").prepare(e, &.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = wanted }});
+        var d = requests[0].depth;
         asked = d;
-        try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }});
+        try e.backend.draftIn(e.arena.allocator(), requests);
+        if (e.backend.proposals()) d = requests[0].heldDepth(e.backend);
         s.dropHeld(e.gpa);
         s.next = .{ .count = d };
-        if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
+        if (d > 0) if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
             s.next = held; // a tree head's first drafts as host tokens, as every later round's
         };
     } else if (e.cfg.pipelined and s.logprobs == null and s.grammar == null) {

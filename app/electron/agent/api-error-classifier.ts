@@ -102,6 +102,10 @@ const AUTH_MSG =
 const CONTEXT_MSG =
   /\b(context[_\s-]?length[_\s-]?exceeded|context window|maximum context|context length|too many tokens|token limit|reduce the length|input too large|payload too large|request too large|prompt is too long|maximum (?:input|prompt) length)\b/i
 
+// A chat template that refuses the request's shape (llama.cpp answers HTTP 500): the same body fails every time (#884).
+const TEMPLATE_MSG =
+  /\b(system message must be at the beginning|unexpected reasoning effort|chat template|jinja|conversation roles must alternate)\b/i
+
 const CONTENT_POLICY_MSG =
   /\b(content[_\s-]?policy|content[_\s-]?filter|safety (?:policy|system|filter)|moderation|flagged|responsible ai|prohibited content|policy violation|cannot assist with that request)\b/i
 
@@ -152,6 +156,11 @@ export function classifyApiError(error: unknown): ApiErrorClassification {
     return classification('auth', 'Authentication or permission failure — check the provider key/credentials.', status)
   }
 
+  // 3b. A chat template's refusal → fail fast: a 500 that names the template is the request, not the server.
+  if (TEMPLATE_MSG.test(message)) {
+    return classification('unknown', "The server's chat template refused this request; sending it again would fail the same way.", status)
+  }
+
   // 4. Transient → retry with backoff. Status family OR a dropped-socket code OR
   //    a recognizable "overloaded / unavailable / timeout" message.
   if (status != null && TRANSIENT_STATUS.has(status)) {
@@ -166,6 +175,29 @@ export function classifyApiError(error: unknown): ApiErrorClassification {
 
   // 5. Anything else → unknown, treated conservatively (no automatic retry).
   return classification('unknown', 'Unrecognized provider error — not retrying automatically.', status)
+}
+
+// --- a reasoning-effort refusal's levels -------------------------------------
+
+const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']
+const EFFORT_REFUSAL = /unexpected reasoning effort\s+([a-z]+)\.?\s+supported types are\s+([^.]+)/i
+
+/**
+ * The level a server that refused a reasoning effort takes instead (#884: llama.cpp's "Unexpected reasoning effort
+ * high. Supported types are xhigh (default), medium, and low."): the named level nearest the refused one, a tie
+ * going to more reasoning. Null for any other error.
+ */
+export function supportedEffort(error: unknown): string | null {
+  const match = EFFORT_REFUSAL.exec(extractErrorMessage(error))
+  if (!match) return null
+  const refused = EFFORT_LEVELS.indexOf(match[1].toLowerCase())
+  const named = (match[2].toLowerCase().match(/[a-z]+/g) ?? []).filter((word) => EFFORT_LEVELS.includes(word) && word !== match[1].toLowerCase())
+  if (refused < 0 || !named.length) return null
+  const distance = (level: string) => Math.abs(EFFORT_LEVELS.indexOf(level) - refused)
+  return named.reduce((best, level) => {
+    const closer = distance(level) < distance(best) || (distance(level) === distance(best) && EFFORT_LEVELS.indexOf(level) > EFFORT_LEVELS.indexOf(best))
+    return closer ? level : best
+  })
 }
 
 // --- jittered exponential backoff -------------------------------------------

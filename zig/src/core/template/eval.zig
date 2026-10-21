@@ -22,9 +22,9 @@ const max_depth = 400;
 pub const Ctx = struct {
     rt: v.Rt,
     vars: *const v.Map,
-    out: *std.ArrayList(u8),
+    out: *v.Buffer,
     depth: usize = 0,
-    acc: std.ArrayList(u8) = .empty,
+    acc: v.Buffer = .{},
 
     fn resolve(c: *Ctx, name: []const u8) Error!Value {
         if (c.vars.get(name)) |x| return x;
@@ -36,20 +36,23 @@ pub const Ctx = struct {
 const acc_min = 4096;
 
 fn isAcc(c: *const Ctx, s: []const u8) bool {
-    return s.len > 0 and s.ptr == c.acc.items.ptr and s.len == c.acc.items.len;
+    return s.len > 0 and s.ptr == c.acc.text.items.ptr and s.len == c.acc.text.items.len;
 }
 
-fn join(c: *Ctx, l: []const u8, r: []const u8) Error![]const u8 {
+fn join(c: *Ctx, l: v.Str, r: v.Str) Error!v.Str {
     const a = c.rt.a;
-    if (l.len < acc_min and !isAcc(c, l)) return std.mem.concat(a, u8, &.{ l, r });
-    const fresh = !isAcc(c, l);
-    if (fresh or c.acc.items.len + r.len > c.acc.capacity) {
-        var grown: std.ArrayList(u8) = try .initCapacity(a, if (fresh) l.len + r.len else (l.len + r.len) * 2);
-        grown.appendSliceAssumeCapacity(l);
-        c.acc = grown;
+    if (l.s.len < acc_min and !isAcc(c, l.s)) {
+        var out: v.Buffer = .{};
+        try out.append(a, l);
+        try out.append(a, r);
+        return out.str();
     }
-    c.acc.appendSliceAssumeCapacity(r);
-    return c.acc.items;
+    if (!isAcc(c, l.s)) {
+        c.acc = .{};
+        try c.acc.append(a, l);
+    }
+    try c.acc.append(a, r);
+    return c.acc.str();
 }
 
 const Flow = enum { normal, brk, cont };
@@ -104,8 +107,8 @@ fn assignByName(c: *Ctx, act: *Activation, t: ast.Target, x: Value) Error!void {
 fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
     for (body) |st| switch (st) {
         .output => |pieces| for (pieces) |pc| switch (pc) {
-            .text => |t| try c.out.appendSlice(c.rt.a, t),
-            .expr => |e| try c.out.appendSlice(c.rt.a, try v.toStr(&c.rt, try eval(c, act, e))),
+            .text => |t| try c.out.literal(c.rt.a, t),
+            .expr => |e| try c.out.append(c.rt.a, try v.asStr(&c.rt, try eval(c, act, e))),
         },
         .for_ => |f| try execFor(c, act, f),
         .if_ => |n| {
@@ -115,7 +118,7 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
         .assign => |as| try assign(c, act, as.target, try eval(c, act, as.value)),
         .block_set => |b| {
             const inner = try enter(c, act, b.frame);
-            var text = Value.string(try capture(c, inner, b.body));
+            var text = Value{ .str = try capture(c, inner, b.body) };
             if (b.filter) |f| text = try applyFilters(c, inner, f, text);
             try assign(c, act, b.target, text);
         },
@@ -124,20 +127,20 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
             mv.* = .{ .node = m, .closure = act, .name = m.name.id };
             (try slotOf(c, act, m.name.frame, m.name.slot)).* = .{ .macro = mv };
         },
-        .scoped => |sc| try c.out.appendSlice(c.rt.a, try capture(c, try enter(c, act, sc.frame), sc.body)),
+        .scoped => |sc| try c.out.append(c.rt.a, try capture(c, try enter(c, act, sc.frame), sc.body)),
         .break_ => return .brk,
         .continue_ => return .cont,
     };
     return .normal;
 }
 
-fn capture(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error![]const u8 {
+fn capture(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!v.Str {
     const saved = c.out;
-    var buf: std.ArrayList(u8) = .empty;
+    var buf: v.Buffer = .{};
     c.out = &buf;
     defer c.out = saved;
     _ = try exec(c, act, body);
-    return buf.items;
+    return buf.str();
 }
 
 fn execIf(c: *Ctx, act: *Activation, n: *const ast.If) Error!Flow {
@@ -187,7 +190,7 @@ fn args(c: *Ctx, act: *Activation, a: ast.Args) Error!struct { []Value, []Kw } {
             for (kw[0..a.kw.len]) |existing| {
                 if (std.mem.eql(u8, name, existing.name)) return c.rt.fail("got multiple values for keyword argument '{s}'", .{name});
             }
-            x.* = .{ .name = name, .value = value };
+            x.* = .{ .name = name, .value = value, .name_spans = (try v.key(&c.rt, expanded.dict, name)).str.spans };
         }
     }
     return .{ pos, kw };
@@ -238,7 +241,7 @@ fn callMacro(c: *Ctx, m: *const v.Macro, pos: []const Value, kw: []const Kw) Err
     if (c.depth >= max_depth) return c.rt.fail("maximum recursion depth exceeded", .{});
     c.depth += 1;
     defer c.depth -= 1;
-    return Value.string(try capture(c, act, node.body));
+    return .{ .str = try capture(c, act, node.body) };
 }
 
 fn number(c: *Ctx, x: Value, op: []const u8) Error!Value {
@@ -282,7 +285,11 @@ fn htmlEscape(c: *Ctx, s: []const u8) Error![]const u8 {
 
 pub fn escape(c: *Ctx, x: Value) Error!Value {
     if (x == .str and x.str.safe) return x;
-    return .{ .str = .{ .s = try htmlEscape(c, try v.toStr(&c.rt, x)), .safe = true } };
+    const original = try v.asStr(&c.rt, x);
+    const text = try htmlEscape(c, original.s);
+    var out = if (std.mem.eql(u8, text, original.s)) original else try v.Str.derived(c.rt.a, text, original.spans.len > 0);
+    out.safe = true;
+    return .{ .str = out };
 }
 
 /// CPython's float floor division and modulo, signed like the divisor.
@@ -358,9 +365,11 @@ fn binop(c: *Ctx, op: ast.BinOp, l: Value, r: Value) Error!Value {
     if (isNum(l) and isNum(r)) return arith(c, op, l, r);
     if (op == .add and l == .str and r == .str) {
         const safe = l.str.safe or r.str.safe;
-        const ls = if (safe and !l.str.safe) try htmlEscape(c, l.str.s) else l.str.s;
-        const rs = if (safe and !r.str.safe) try htmlEscape(c, r.str.s) else r.str.s;
-        return .{ .str = .{ .s = try join(c, ls, rs), .safe = safe } };
+        const ls = if (safe and !l.str.safe) (try escape(c, l)).str else l.str;
+        const rs = if (safe and !r.str.safe) (try escape(c, r)).str else r.str;
+        var out = try join(c, ls, rs);
+        out.safe = safe;
+        return .{ .str = out };
     }
     if (op == .add and l == .list and r == .list and l.list.seq == r.list.seq and (l.list.seq == .list or l.list.seq == .tuple))
         return rt.list(try std.mem.concat(rt.a, Value, &.{ l.list.items, r.list.items }), l.list.seq);
@@ -368,9 +377,11 @@ fn binop(c: *Ctx, op: ast.BinOp, l: Value, r: Value) Error!Value {
         const seq = if (isNum(l)) r else l;
         const n = @max(0, intOf(if (isNum(l)) l else r));
         if (seq == .str) {
-            var out: std.ArrayList(u8) = .empty;
-            for (0..@intCast(n)) |_| try out.appendSlice(rt.a, seq.str.s);
-            return .{ .str = .{ .s = out.items, .safe = seq.str.safe } };
+            var out: v.Buffer = .{};
+            for (0..@intCast(n)) |_| try out.append(rt.a, seq.str);
+            var text = out.str();
+            text.safe = seq.str.safe;
+            return .{ .str = text };
         }
         if (seq.list.seq == .list or seq.list.seq == .tuple) {
             var out: std.ArrayList(Value) = .empty;
@@ -418,7 +429,7 @@ pub fn eval(c: *Ctx, act: *Activation, e: *const ast.Expr) Error!Value {
             .int => |i| .{ .int = i },
             .big => |b| .{ .big = b },
             .float => |f| .{ .float = f },
-            .str => |s| Value.string(s),
+            .str => |s| Value.literal(s),
         },
         .name => |n| load(c, act, n),
         .getattr => |g| access.getattr(rt, try eval(c, act, g.obj), g.attr),
@@ -473,16 +484,9 @@ pub fn eval(c: *Ctx, act: *Activation, e: *const ast.Expr) Error!Value {
         },
         .binop => |b| binop(c, b.op, try eval(c, act, b.l), try eval(c, act, b.r)),
         .concat => |items| blk: {
-            const first = try v.toStr(rt, try eval(c, act, items[0]));
-            if (isAcc(c, first) or first.len >= acc_min) {
-                var out = first;
-                for (items[1..]) |x| out = try join(c, out, try v.toStr(rt, try eval(c, act, x)));
-                break :blk Value.string(out);
-            }
-            var out: std.ArrayList(u8) = .empty;
-            try out.appendSlice(rt.a, first);
-            for (items[1..]) |x| try out.appendSlice(rt.a, try v.toStr(rt, try eval(c, act, x)));
-            break :blk Value.string(out.items);
+            var out = try v.asStr(rt, try eval(c, act, items[0]));
+            for (items[1..]) |x| out = try join(c, out, try v.asStr(rt, try eval(c, act, x)));
+            break :blk .{ .str = out };
         },
         .list, .tuple => |items| blk: {
             const vals = try rt.a.alloc(Value, items.len);
@@ -495,6 +499,7 @@ pub fn eval(c: *Ctx, act: *Activation, e: *const ast.Expr) Error!Value {
             for (pairs) |p| {
                 const key = try eval(c, act, p.key);
                 if (key != .str) break :blk rt.fail("dict literals with non-string keys are not supported", .{});
+                if (key.str.spans.len > 0) try d.key_provenance.put(rt.a, key.str.s, key.str) else _ = d.key_provenance.remove(key.str.s);
                 try d.map.put(rt.a, key.str.s, try eval(c, act, p.value));
             }
             break :blk .{ .dict = d };

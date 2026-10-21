@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
+const dump = @import("byte_dump.zig");
 
 const tree = cuda.tree_attention;
 
@@ -78,7 +79,9 @@ fn call(x: *Set, s: cuda.Stream, g: *const tree.TreeAttention, d: usize, rows: [
     const rws: tree.Rows = .{ .row_stream = try x.up(std.mem.sliceAsBytes(rs)), .streams = streams_dev, .offs = offs, .origin = origin, .paths = paths, .depths = depths };
     try g.run(s, try x.up(std.mem.sliceAsBytes(q)), try x.up(std.mem.sliceAsBytes(kn)), try x.up(std.mem.sliceAsBytes(vn)), rws, tree.TreeAttention.scratch(sc_base, n, h, hk, ng, d), out, n, h, hk, d, ng, scale);
     try s.synchronize();
-    return x.down(u16, out, n * h * d);
+    const got = try x.down(u16, out, n * h * d);
+    try dump.output(x.a, "tree", "attention", "rows", &.{ n, h, d }, .bf16, .{ .hk = hk, .groups = ng, .row_ids = rows, .shared_blocks = g.shared_blocks, .sms = g.sms }, std.mem.sliceAsBytes(got));
+    return got;
 }
 
 fn case(gpu: check.Gpu, d: usize, h: usize, hk: usize, seed: u64, worst_all: *f64) !void {

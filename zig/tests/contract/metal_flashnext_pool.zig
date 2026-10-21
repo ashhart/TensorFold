@@ -16,6 +16,7 @@ pub const Probe = struct {
     long_positions: bool = false,
     calibration: bool = false,
     accuracy: ?*const f.rotary_accuracy.Receipt = null,
+    before: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque, mtl.ComputeEncoder) void } = null,
     shape: c.Shape = undefined,
     host: []u16 = &.{},
     raw: rig_.Ref = undefined,
@@ -96,6 +97,7 @@ pub const Probe = struct {
     pub fn run(p: *Probe) !void {
         const pass = p.rig.begin();
         const e = pass.e;
+        if (p.before) |hook| hook.call(hook.ctx, e);
         e.setPipeline(p.pipe);
         for ([_]rig_.Ref{ p.raw, p.select, p.weights, p.eps, p.base, p.out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
         e.dispatchGroups(mtl.Size.of(1, p.shape.rows, 1), mtl.Size.of(128, 1, 1));

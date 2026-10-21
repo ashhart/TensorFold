@@ -12,6 +12,7 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 
 /// What a backend reports about its loaded model: the attributes the Python engine reads at setup.
 pub const Model = struct {
+    root_copies: bool = false, // verified context copies precede head drafts and skip their proposal pass
     copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
 
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
@@ -48,6 +49,7 @@ pub const Model = struct {
 };
 
 pub const Config = struct {
+    root_copies: bool = false,
     family_width: u32,
     max_copy: u32,
     first_copy: u32,
@@ -125,6 +127,7 @@ pub const Config = struct {
         const depth_prior = try gpa.dupe(f64, prior);
         errdefer gpa.free(depth_prior);
         return .{
+            .root_copies = m.root_copies and m.copy_drafts,
             .context_copies = m.context_copies and m.copy_drafts,
             .enter_match = @max(1, m.copy_match),
             .lone_copies = m.lone_copies,
@@ -134,7 +137,7 @@ pub const Config = struct {
             .first_copy = first_copy,
             .base_width = @min(width, first_copy + 1),
             .family_mtp = m.mtp and width >= 2 and m.speculate,
-            .speculate_early = m.speculate_early,
+            .speculate_early = m.speculate_early and !(m.root_copies and m.copy_drafts),
             .pipelined = m.gpu_tokens,
             .plain_guard = m.plain_guard,
             .most_drafts = @min(m.drafts, @min(width - 1, max_draft)),

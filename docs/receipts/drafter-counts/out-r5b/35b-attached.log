@@ -1,0 +1,37 @@
+community-v1: code and chat, 2 temperatures, 5 repeats after warm-up.
+This generates model replies; use Ctrl-C to cancel. Nothing is uploaded unless you publish.
+code T=1 warm-up: ok 82.70 delivery tok/s
+code T=1 repeat 1/5: ok 78.77 delivery tok/s
+code T=1 repeat 2/5: ok 87.01 delivery tok/s
+code T=1 repeat 3/5: ok 89.07 delivery tok/s
+code T=1 repeat 4/5: ok 79.24 delivery tok/s
+code T=1 repeat 5/5: ok 79.52 delivery tok/s
+chat T=1 warm-up: ok 73.30 delivery tok/s
+chat T=1 repeat 1/5: ok 70.11 delivery tok/s
+chat T=1 repeat 2/5: ok 74.20 delivery tok/s
+chat T=1 repeat 3/5: ok 70.57 delivery tok/s
+chat T=1 repeat 4/5: ok 69.25 delivery tok/s
+chat T=1 repeat 5/5: ok 68.50 delivery tok/s
+code T=0 warm-up: ok 101.78 delivery tok/s
+code T=0 repeat 1/5: ok 101.55 delivery tok/s
+code T=0 repeat 2/5: ok 101.88 delivery tok/s
+code T=0 repeat 3/5: ok 100.96 delivery tok/s
+code T=0 repeat 4/5: ok 102.84 delivery tok/s
+code T=0 repeat 5/5: ok 102.12 delivery tok/s
+chat T=0 warm-up: ok 73.39 delivery tok/s
+chat T=0 repeat 1/5: ok 78.44 delivery tok/s
+chat T=0 repeat 2/5: ok 75.87 delivery tok/s
+chat T=0 repeat 3/5: ok 79.11 delivery tok/s
+chat T=0 repeat 4/5: ok 76.78 delivery tok/s
+chat T=0 repeat 5/5: ok 78.58 delivery tok/s
+Run 23c5e792-c249-4f55-904a-c2aef1070d16 | rocm | TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP
+Workload       Temp    Stream delivery tok/s    First text, s    Status
+code           1      79.52                     0.077            complete
+chat           1      70.11                     0.102            complete
+code           0      101.88                    0.094            complete
+chat           0      78.44                     0.112            complete
+Stream delivery includes transport buffering; it is not an engine token clock.
+The attached server's manifest does not attest a rank count and checkpoint revision; this result is unranked.
+This rocm receipt is saved locally; it cannot be published until the board accepts rocm.
+Receipt saved: ~/tf-1001-runs/out-r5b/35b-attached.json
+Draft counts: 2636 of 4576 drafted tokens accepted over 2473 rounds (20 of 20 attempts reported them); saved: ~/tf-1001-runs/out-r5b/35b-attached.drafts.json

@@ -49,11 +49,12 @@ pub const Session = struct {
             hash.update(try r.gdn.committed(layer, 0, true));
             hash.update(try r.gdn.committed(layer, 0, false));
         }
+        const head_dim = r.model.config.head_dim;
         for (0..r.caches.len / r.slots) |layer| {
             const cache = r.caches[layer * r.slots];
             for ([_]@import("projection.zig").Ref{ cache.keys, cache.values }, [_]u32{ cache.key_stride, cache.value_stride }) |ref, stride| {
-                const head_stride = if (stride == 0) cache.capacity * 256 else stride;
-                for (0..r.model.config.kv_heads) |head| hash.update(ref.buffer.contents()[ref.offset + head * @as(usize, head_stride) * 2 ..][0 .. @as(usize, r.offsets[0]) * 256 * 2]);
+                const head_stride = if (stride == 0) cache.capacity * head_dim else stride;
+                for (0..r.model.config.kv_heads) |head| hash.update(ref.buffer.contents()[ref.offset + head * @as(usize, head_stride) * 2 ..][0 .. @as(usize, r.offsets[0]) * head_dim * @sizeOf(u16)]);
             }
         }
         hash.update(r.model.frame.get(.logits).buffer.contents()[0 .. r.model.config.vocab * 2]);

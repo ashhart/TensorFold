@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
 const rows = @import("norm_rows_tests.zig");
+const act_ = @import("act_round_check.zig");
 
 const aref = core.act_ref;
 const counts = rows.counts;
@@ -108,6 +109,33 @@ fn dconv(r: *Rig, g: *const cuda.act_rows.ActRows, d: usize, gs: usize, seg: usi
         try check.sameBytes(label, std.mem.sliceAsBytes(try r.back(u16, os[c], m * d)), std.mem.sliceAsBytes(got[0 .. m * d]));
 }
 
+/// MLX's GeGLU or SwiGLU steps over [gate | up] rows (fused) or two buffers with padded rows; bits at every row count.
+fn mlx(r: *Rig, g: *const cuda.act_rows.ActRows, n: usize, geglu: bool, fused: bool, stats: *act_.Stats) !void {
+    const ld = if (fused) 2 * n else n + 64;
+    const gate = r.bfs(most * ld, 4);
+    const up = if (fused) gate[n..] else r.bfs(most * ld, 2);
+    const dg = try r.dev(std.mem.sliceAsBytes(gate));
+    const du = if (fused) dg + 2 * n else try r.dev(std.mem.sliceAsBytes(up));
+    var os: [counts.len]u64 = undefined;
+    var xss: [counts.len]u64 = undefined;
+    for (counts, 0..) |m, c| {
+        os[c] = try r.out(m * n * 2);
+        xss[c] = try r.out(m * n / 64 * 4);
+        if (geglu) try g.geglu(r.s, dg, ld, du, ld, os[c], xss[c], m, n) else try g.swigluRound(r.s, dg, ld, du, ld, os[c], xss[c], m, n);
+    }
+    var name: [96]u8 = undefined;
+    const label = try std.fmt.bufPrint(&name, "{s} in MLX's bf16 steps, {d} wide{s}", .{ if (geglu) "geglu" else "swiglu", n, if (fused) ", [gate | up] rows" else "" });
+    const o = try r.back(u16, os[counts.len - 1], most * n);
+    const xs = try r.back(f32, xss[counts.len - 1], most * n / 64);
+    var msg: [200]u8 = undefined;
+    const k: act_.Case = .{ .geglu = geglu, .rows = most, .n = n, .gate = gate, .g_ld = ld, .up = up, .u_ld = ld };
+    if (try act_.verify(k, o, xs, stats, &msg)) |why| try check.expect(false, "{s}: {s}", .{ label, why });
+    for (counts[0 .. counts.len - 1], 0..) |m, c| {
+        try check.sameBytes(label, std.mem.sliceAsBytes(try r.back(u16, os[c], m * n)), std.mem.sliceAsBytes(o[0 .. m * n]));
+        try check.sameBytes(label, std.mem.sliceAsBytes(try r.back(f32, xss[c], m * n / 64)), std.mem.sliceAsBytes(xs[0 .. m * n / 64]));
+    }
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
@@ -128,5 +156,14 @@ pub fn run(gpu: check.Gpu) !void {
     try dconv(&r, &g, 5120, 16, 16, 0, false); // DFlash2's block conv (groups of 16)
     try dconv(&r, &g, 5120, 16, 16, 1, true);
     try dconv(&r, &g, 256, 64, 7, 0, true);
+    var stats: act_.Stats = .{};
+    for ([_]usize{ 15360, 21504 }) |n| for ([_]bool{ true, false }) |fused| try mlx(&r, &g, n, true, fused, &stats); // Gemma 4 12B, 31B
+    try mlx(&r, &g, 8192, true, true, &stats); // the 12B's assistant
+    try mlx(&r, &g, 10752, false, true, &stats); // the 31B's DFlash drafter
+    try mlx(&r, &g, 10752, false, false, &stats);
+    for ([_]usize{ 64, 960, 1024, 1088, 2048, 2112 }) |n| for ([_]bool{ true, false }) |geglu| try mlx(&r, &g, n, geglu, true, &stats);
+    try std.testing.expectError(error.RowShape, g.geglu(r.s, 0, 128, 0, 128, 0, null, 1, 96));
+    try std.testing.expectError(error.RowShape, g.swigluRound(r.s, 0, 100, 0, 128, 0, null, 1, 64));
     check.pass("act rows: swiglu, output gate, dconv within float64 tolerance (worst {d:.3}), group sums of the stored outputs, every row count's bits equal", .{r.worst});
+    check.pass("act rows MLX steps: {d} outputs bit-equal to float64's rounding points, {d} within tanhf's or expf's ulps, {d} non-finite as float64; {d} group sums equal to the fp32 tree; every row count's bits equal", .{ stats.decided, stats.ranged, stats.nonfinite, stats.sums });
 }

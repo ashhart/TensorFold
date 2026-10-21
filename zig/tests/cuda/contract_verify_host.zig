@@ -28,17 +28,68 @@ test "verify contract: numerical and exact one-row comparisons both cover the ne
     }
 }
 
-test "verify contract: the one-CTA and clustered launch remain explicitly unmeasured" {
+test "verify contract: the one-CTA and clustered launch carry their measured usage within every SM's limits" {
     var found: usize = 0;
     for (c.registry.all_cuda) |r| if (std.mem.eql(u8, r.launch.symbol, cuda.qlinear.symbols.verify32)) {
         found += 1;
         try t.expectEqual(@as(u32, 128), r.launch.threads);
         try t.expectEqual(@as(u32, 32640), r.launch.dynamic);
         try t.expect(r.launch.opt_in);
-        for (r.usage) |u| try t.expectEqual(@as(u32, 0), u.regs);
-        try t.expect(try c.registry.checkCuda(t.allocator, &.{r}, true) > 0);
+        for (r.usage) |u| try t.expect(u.regs > 0);
+        try t.expectEqual(@as(usize, 0), try c.registry.checkCuda(t.allocator, &.{r}, true));
     };
     try t.expectEqual(@as(usize, 2), found);
+}
+
+/// Each real projection is served once at rows in (lo, hi], the vocabulary heads only where bits are compared.
+fn covers(s: c.spec.Spec, lo: usize, hi: usize) !void {
+    for (mm.projections, 0..) |p, i| {
+        var seen = false;
+        for (s.served) |shape| seen = seen or (shape.n == p[0] and shape.k == p[1] and shape.rows > lo and shape.rows <= hi);
+        try t.expectEqual(s.replaces != null or i < mm.projections.len - mm.heads, seen);
+    }
+}
+
+test "verify contract: every tile serves the 27B's, the 35B's and their drafters' projections" {
+    for ([_][2]mm.Kind{ .{ .verify32_bits, .verify32_fp64 }, .{ .verify64_bits, .verify64_fp64 }, .{ .verify128_bits, .verify128_fp64 } }) |w| {
+        for (w) |kind| try covers(mm.spec(kind), mm.verifyTile(kind) / 2, mm.verifyTile(kind));
+    }
+}
+
+/// qmm_frag.cuh's LaneTile<64, rows, 64, 1, 4, stages>::SMEM: its stages, or its parked K-slice partials if larger.
+fn laneTileSmem(rows: u32, stages: u32) u32 {
+    const stage = rows * 128 + 64 * 64 / 2 + 2 * 64 * 2 + rows * 4;
+    return @max(stages * stage, rows / 16 * 2 * 4 * 128 * 4);
+}
+
+test "verify contract: 64- and 128-row tiles serve wide frames and carry their measured usage" {
+    const Wide = struct { tile: usize, bits: mm.Kind, fp64: mm.Kind, symbol: []const u8, shared: u32 };
+    try t.expectEqual(laneTileSmem(32, 5), cuda.qlinear.verify_smem);
+    for ([_]Wide{
+        .{ .tile = 64, .bits = .verify64_bits, .fp64 = .verify64_fp64, .symbol = cuda.qlinear.symbols.verify64, .shared = laneTileSmem(64, 4) },
+        .{ .tile = 128, .bits = .verify128_bits, .fp64 = .verify128_fp64, .symbol = cuda.qlinear.symbols.verify128, .shared = laneTileSmem(128, 3) },
+    }) |w| {
+        for ([_]mm.Kind{ w.bits, w.fp64 }) |kind| {
+            const s = mm.spec(kind);
+            try t.expectEqual(kind == w.bits, s.replaces != null);
+            var widest: usize = 0;
+            for (s.served) |shape| widest = @max(widest, shape.rows);
+            try t.expectEqual(w.tile, widest);
+            try t.expectEqual(w.tile, s.tiles[0].size);
+            try t.expectEqual(w.tile, mm.verifyTile(kind));
+        }
+        var found: usize = 0;
+        for (c.registry.all_cuda) |r| if (std.mem.eql(u8, r.launch.symbol, w.symbol)) {
+            found += 1;
+            try t.expectEqual(w.shared, r.launch.dynamic);
+            try t.expect(r.launch.opt_in);
+            for (r.usage) |u| try t.expect(u.regs > 0);
+            try t.expectEqual(@as(usize, 0), try c.registry.checkCuda(t.allocator, &.{r}, true));
+        };
+        try t.expectEqual(@as(usize, 2), found);
+    }
+    try t.expectEqual(laneTileSmem(64, 4), cuda.qlinear.verify64_smem);
+    try t.expectEqual(laneTileSmem(128, 3), cuda.qlinear.verify128_smem);
 }
 
 const Cpu = struct {

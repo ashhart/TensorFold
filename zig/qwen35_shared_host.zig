@@ -4,6 +4,10 @@ const cuda = @import("cuda");
 const q = @import("qwen35");
 const a = std.testing.allocator;
 
+test {
+    _ = @import("qwen35_recurrent_host.zig");
+}
+
 test "Shared verification: all 128 streams share one bounded verification frame" {
     try std.testing.expectEqual(@as(usize, 128), q.engine.max_segs);
     try std.testing.expectEqual(@as(usize, 128), q.engine.most_verify);

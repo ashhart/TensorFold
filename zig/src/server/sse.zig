@@ -14,7 +14,10 @@ pub fn open(conn: *Conn) error{Closed}!void {
 }
 
 /// ``data: {json}`` and a blank line, sent at once.
-pub fn data(conn: *Conn, a: Allocator, payload: json.Value) error{Closed}!void {
+pub fn data(conn: *Conn, _: Allocator, payload: json.Value) error{Closed}!void {
+    var frame = std.heap.ArenaAllocator.init(conn.gpa);
+    defer frame.deinit();
+    const a = frame.allocator();
     const text = json.stringify(a, payload, .{}) catch return error.Closed;
     return conn.writeAll(std.mem.concat(a, u8, &.{ "data: ", text, "\n\n" }) catch return error.Closed);
 }
@@ -29,7 +32,10 @@ pub fn done(conn: *Conn) error{Closed}!void {
 }
 
 /// ``event: KIND`` then its data line (Responses and Messages events).
-pub fn event(conn: *Conn, a: Allocator, kind: []const u8, payload: json.Value) error{Closed}!void {
+pub fn event(conn: *Conn, _: Allocator, kind: []const u8, payload: json.Value) error{Closed}!void {
+    var frame = std.heap.ArenaAllocator.init(conn.gpa);
+    defer frame.deinit();
+    const a = frame.allocator();
     const text = json.stringify(a, payload, .{}) catch return error.Closed;
     return conn.writeAll(std.fmt.allocPrint(a, "event: {s}\ndata: {s}\n\n", .{ kind, text }) catch return error.Closed);
 }

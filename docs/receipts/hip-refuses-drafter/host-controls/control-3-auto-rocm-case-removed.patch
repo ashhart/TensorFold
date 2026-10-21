@@ -1,0 +1,12 @@
+--- a/zig/src/server/benchmark.zig
++++ b/zig/src/server/benchmark.zig
+@@ -282,7 +282,8 @@
+ 
+ /// The drafter ``--drafter auto`` names: the family's own; none under --serial or on rocm (HIP runs no DFlash2 yet).
+ pub fn autoDrafter(config: json.Value, backend: []const u8, serial: bool) ?[]const u8 {
+-    if (serial or std.mem.eql(u8, backend, "rocm")) return null;
++    _ = backend;
++    if (serial) return null;
+     return model.knownDrafter(config);
+ }
+ 

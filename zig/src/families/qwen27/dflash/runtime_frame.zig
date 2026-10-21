@@ -31,8 +31,17 @@ pub const Frame = struct {
     parts: [8]mtl.CommandBuffer = undefined,
     part_count: usize = 0,
     ops: u32 = 0,
+    residency: ?mtl.ResidencySet.Follow = null,
+    pub fn setResident(f: *Frame, hook: ?mtl.ResidencySet.Follow) void {
+        for (f.pool.items) |buffer| {
+            if (f.residency) |h| h.leave(h.ctx, buffer);
+            if (hook) |h| h.join(h.ctx, buffer);
+        }
+        f.residency = hook;
+    }
     pub fn deinit(f: *Frame) void {
         f.release();
+        f.setResident(null);
         if (f.fence) |fence| mtl.objc.release(fence);
         for (f.pool.items) |buffer| buffer.deinit();
         f.pool.deinit(f.allocator);
@@ -105,10 +114,13 @@ pub const Frame = struct {
                 buffer.deinit();
                 return err;
             };
+            if (f.residency) |h| h.join(h.ctx, buffer);
         } else if (f.pool.items[f.cursor].length() < bytes) {
             const buffer = try f.device.buffer(bytes, options);
+            if (f.residency) |h| h.leave(h.ctx, f.pool.items[f.cursor]);
             f.pool.items[f.cursor].deinit();
             f.pool.items[f.cursor] = buffer;
+            if (f.residency) |h| h.join(h.ctx, buffer);
         }
         const buffer = f.pool.items[f.cursor];
         f.cursor += 1;

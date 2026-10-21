@@ -23,6 +23,7 @@ pub fn native(b: *std.Build, step: *std.Build.Step, family: *std.Build.Module, c
     mod.addImport("drama3", family);
     mod.addImport("core", core);
     mod.addImport("engine_api", api);
+    if (family.import_table.get("metal")) |runtime| mod.addImport("metal", runtime);
     if (cuda) |c| mod.addImport("cuda", c);
     step.dependOn(&b.addObject(.{ .name = name, .root_module = mod }).step);
 }

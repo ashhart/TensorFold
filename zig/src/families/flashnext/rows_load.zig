@@ -280,6 +280,7 @@ pub fn attach(p: *const Prompt, m: *Model, mtp_root: []const u8) !void {
         .device = r.device,
         .sums = .{ .{ .b = try r.buffer(sums) }, .{ .b = try r.buffer(sums) } },
     };
+    r.rows_cleanup = .{ .ctx = sh, .call = rows_w.Shared.deinit };
     for (&m.layers, 0..) |*L, i| {
         const kind = if (L.linear) "gdn" else "att";
         L.proj.rows = try fromPack(

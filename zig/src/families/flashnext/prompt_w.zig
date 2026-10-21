@@ -60,10 +60,10 @@ fn key(b: Buf) Key {
 pub fn compile(r: *Run, bits: u8, group: u16) !Pipes {
     const head = try std.fmt.allocPrint(r.arena, "#define WB {d}\n#define WG {d}\n", .{ bits, group });
     const text = try frags.source(r.device, r.arena, try std.mem.concat(r.arena, u8, &.{ head, ks.flashnext_qmmw }));
-    const lib = try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx());
+    const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const p = struct {
         fn of(rr: *Run, l: mtl.Library, name: [:0]const u8) !mtl.Pipeline {
-            return mtl.Pipeline.init(rr.device, l, name, false);
+            return rr.ownResource(try mtl.Pipeline.init(rr.device, l, name, false));
         }
     };
     return .{

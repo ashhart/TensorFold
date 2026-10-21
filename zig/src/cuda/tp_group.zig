@@ -21,6 +21,7 @@ pub const Group = struct {
         if (std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
         var lib = try nccl.Library.open();
         errdefer lib.close();
+        try lib.requireSupportedVersion();
         var id: nccl.UniqueId = undefined;
         try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId");
         var comm: nccl.Comm = null;

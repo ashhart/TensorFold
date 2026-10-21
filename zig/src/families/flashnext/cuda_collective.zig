@@ -23,7 +23,7 @@ pub const Collective = struct {
         if (rank > 1 or timeout_ms == 0) return error.BadRank;
         var c: Collective = .{ .lib = try nccl.Library.open(), .api = undefined, .link = link, .timeout_ms = timeout_ms };
         errdefer c.lib.close();
-        if (try c.lib.version() < 23000) return error.NcclVersion;
+        try c.lib.requireSupportedVersion();
         const info = @typeInfo(Advanced).@"struct";
         inline for (info.field_names, info.field_types) |name, T| @field(c.api, name) = c.lib.lib.lookup(T, name) orelse return error.MissingSymbol;
         var id: nccl.UniqueId = undefined;

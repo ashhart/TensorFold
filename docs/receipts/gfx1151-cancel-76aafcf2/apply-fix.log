@@ -1,0 +1,4 @@
+patching file zig/src/families/qwen3_5/backend/hip/engine/engine.zig
+patching file zig/src/families/qwen3_5/backend/hip/engine/hip_lanes.zig
+patching file zig/src/families/qwen3_5/backend/hip/engine/prefix.zig
+patching file zig/src/families/qwen3_5/hip.zig

@@ -1,10 +1,11 @@
 //! One load owns its capacity and rotary policy; planning a later load changes no live engine.
 const std = @import("std");
-pub const trained: usize = 262144;
+pub const trained: usize = @import("flashnext_memory").trained;
 pub const maximum: usize = 4 * trained + 64;
 pub const Settings = struct {
     capacity: usize = trained,
     factor: f64 = 0,
+    startup_extra: u64 = 0,
     pub fn validate(s: Settings, paired: bool) !void {
         if (s.capacity < trained or s.capacity > maximum or s.capacity % 4 != 0) return error.ContextTooLong;
         if (s.factor != (if (s.capacity > trained) @as(f64, 4) else 0)) return error.BadRotaryPolicy;

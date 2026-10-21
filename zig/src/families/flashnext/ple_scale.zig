@@ -47,12 +47,15 @@ pub fn of(r: *replay.Run, map: std.json.ObjectMap) !?Scale {
     };
     if (!std.math.isFinite(value) or value == 0) return error.NgramTableScale;
     if (value == 1) return null;
-    return try compile(r.device, value);
+    var scale = try compile(r.device, value);
+    scale.pipe = try r.ownResource(scale.pipe);
+    return scale;
 }
 
 /// The kernel for `value`; a compile failure refuses the load.
 pub fn compile(device: mtl.Device, value: f32) !Scale {
     const lib = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
+    defer lib.deinit();
     return .{ .pipe = try mtl.Pipeline.init(device, lib, "tf_ple_scale", false), .value = value };
 }
 

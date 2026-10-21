@@ -24,7 +24,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (h.cache) |store| if (r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
+    if (h.cache) |store| if (r.embedding == null and r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
         job.entry = l.entry;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
@@ -37,6 +37,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
     job.stream = lanes.Stream.init(h.gpa, .{
         .id = "request",
         .prompt = r.prompt,
+        .embedding = r.embedding,
         .max_new = r.max_tokens,
         .eos = r.eos,
         .sampling = r.sampling,
@@ -49,6 +50,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .think_budget = r.think_budget,
         .think_close = r.think_close,
         .think_end = if (r.think_end) |t| t else -1,
+        .answer_max = r.answer_max,
         .logprobs = r.logprobs,
         .prompt_logprobs = r.prompt_logprobs,
         .loop_guard = r.loop_guard,

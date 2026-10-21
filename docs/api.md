@@ -304,6 +304,7 @@ Drafting stays enabled and uses the same grammar masks as plain decoding.
 
 This requires the loaded backend's structured-output capability and `libtfgrammar`. Nemotron, Qwen3.5-2B,
 Qwen3.8-27B (`qwen27`), Gemma 4 31B, Step-5, LFM2 MoE and Flash Next shared sessions on Metal have that capability; Qwen27 on Intel also has it.
+Flash Next on CUDA has it too.
 Qwen3.8-27B applies the grammar to its first draw, each verified row and each branch of its draft proposals.
 Structured requests use its shared lane core, including when the ordinary lone-request serial optimization is enabled.
 CUDA determines support from its loaded backend's mask hook. GLM Metal
@@ -357,10 +358,17 @@ submitting the request if the engine does not support thinking budgets. This als
 `--thinking-budget` inherited by an absent or zero request field. With no positive budget, requests remain valid
 on those engines; with thinking disabled, the budget is not applied.
 
+`--thinking-reserve N` (off by default) keeps a client's `max_tokens` for the answer when thinking is on. The
+server adds N to the reply's limit, capped by the context window, and the engine ends the reply when the tokens
+after the closing think marker reach the request's `max_tokens` (`finish_reason` `length`). Reasoning shorter than
+N leaves the answer its full `max_tokens`; longer reasoning counts against it. Lane engines apply it; on other
+engines, and with thinking disabled, `max_tokens` limits the whole reply as before.
+
 The native `--loop-guard` flag is off by default and watches only an open think block. It closes a repeated exact
 cycle of at most eight tokens after 256 predecessor matches, when the detected region starts at least 64 reply tokens
-in; the reply continues after the forced close, and reports `runtime.loop: {"period": N}` plus `loop=period:N` in the
-server log. The native engine refuses the flag on backends that do not enforce it, and prints that refusal as
+in. It also closes a longer passage repeated verbatim: once a period of nine tokens or more has repeated in full and
+for at least 1,024 tokens, the period found from where the reasoning's last 32-token run occurred before. The reply
+continues after the forced close, and reports `runtime.loop: {"period": N}` plus `loop=period:N` in the server log. The native engine refuses the flag on backends that do not enforce it, and prints that refusal as
 a startup error.
 
 ## Context and errors

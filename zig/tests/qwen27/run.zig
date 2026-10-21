@@ -10,13 +10,14 @@ const core_lane = @import("core_lane");
 const help =
     \\tf-qwen27-run --run --model DIR --tokens IDS.json [--max-tokens 256]
     \\  [--chunk 128] [--compare-chunk 16] [--reference GENERATED.json] [--force-length]
-    \\  [--no-warmup] [--profile-steps N] [--teacher] [--seams N]
+    \\  [--no-warmup] [--profile-steps N] [--profile-prompt] [--teacher] [--seams N]
     \\IDs and reference files are JSON arrays of unsigned token IDs, already chat-rendered.
     \\Greedy only, drafts off; JSON receipt on stdout, errors on stderr.
     \\--teacher feeds every reference token and records native top2 at all positions; margin timing is diagnostic.
     \\--max-tokens 0 reports prompt tok/s including the final single-row head.
     \\--compare-chunk reruns the whole prompt and decode and checks prompt state/KV/logits bytes.
     \\--seams N (with --compare-chunk): state/KV/logits bytes every N prompt rows under both chunks and after decode.
+    \\--profile-prompt: GPU seconds by class over the timed prompt (split command buffers, so slower than unprofiled).
     \\CPU only: --help or --emit-sources EXISTING_DIR, no Metal device or model load.
 ;
 
@@ -91,6 +92,7 @@ pub fn main(init: std.process.Init) !void {
     var force = false;
     var warmup = true;
     var teacher = false;
+    var profile_prompt = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -108,6 +110,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, arg, "--no-warmup")) {
             warmup = false;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--profile-prompt")) {
+            profile_prompt = true;
             continue;
         }
         if (i + 1 >= args.len) return error.MissingValue;
@@ -136,12 +142,14 @@ pub fn main(init: std.process.Init) !void {
         try s.prefill(ids[0..@min(ids.len, 128)], 128);
         try runner.reset(0);
     }
+    var trace = profile.Trace{ .queue = m.queue };
+    if (profile_steps > 0 or profile_prompt) runner.profile(&trace);
+    trace.enabled = profile_prompt;
     const start = std.Io.Clock.awake.now(io);
     try s.prefill(ids, chunk);
     const prompt_ns = start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
+    trace.enabled = false;
     const digest = try s.fingerprint();
-    var trace = profile.Trace{ .queue = m.queue };
-    if (profile_steps > 0) runner.profile(&trace);
     const decode_start = std.Io.Clock.awake.now(io);
     const generation = try generated(a, s, count, force, expected, if (profile_steps > 0) &trace else null, profile_steps, teacher);
     const out = generation.tokens;
@@ -193,10 +201,11 @@ pub fn main(init: std.process.Init) !void {
         .first_difference = generation.first_difference,
         .logit_dtype = "bf16",
         .profile_steps = profile_steps,
-        .profile_dense_shapes = if (profile_steps > 0) @as(?[]const profile.Shape, trace.shapes[0..trace.shape_count]) else null,
+        .profile_prompt = profile_prompt,
+        .profile_dense_shapes = if (profile_steps > 0 or profile_prompt) @as(?[]const profile.Shape, trace.shapes[0..trace.shape_count]) else null,
         .profile_shapes_overflow = trace.shapes_overflow,
-        .profile_split_buffers = profile_steps > 0,
-        .profile = if (profile_steps > 0) @as(?[]const ProfileRecord, &timings) else null,
+        .profile_split_buffers = profile_steps > 0 or profile_prompt,
+        .profile = if (profile_steps > 0 or profile_prompt) @as(?[]const ProfileRecord, &timings) else null,
         .force_length = force,
         .warmed = warmup,
         .load_ns = load_ns,

@@ -260,7 +260,6 @@ pub const Engine = struct {
                 const none: [12]u32 = @splat(0);
                 tp.sendRequest(std.mem.asBytes(&none), &.{}) catch {};
             }
-            tp.deinit();
         }
         const gpa = e.gpa;
         var kept = e.peer_kept.valueIterator();
@@ -268,6 +267,8 @@ pub const Engine = struct {
         e.peer_kept.deinit(gpa);
         e.snap_pool.deinit();
         e.peer_drops.deinit(gpa);
+        e.r.deinit();
+        e.r.device.deinit();
         e.arena_state.deinit();
         gpa.destroy(e);
     }

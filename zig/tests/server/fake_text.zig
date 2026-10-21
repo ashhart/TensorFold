@@ -101,7 +101,7 @@ pub const FakeText = struct {
     }
 
     pub fn text(t: *FakeText) model_text.Text {
-        return .{ .ctx = t, .vtable = &.{ .encode = encodeFn, .decode = decodeFn, .token_id = idFn, .token_string = strFn, .vocab_size = vocabFn, .eos_ids = eosFn, .render = renderFn, .template_source = sourceFn } };
+        return .{ .ctx = t, .vtable = &.{ .encode = encodeFn, .encode_masked = maskedFn, .decode = decodeFn, .token_id = idFn, .token_string = strFn, .vocab_size = vocabFn, .eos_ids = eosFn, .render = renderFn, .template_source = sourceFn } };
     }
 
     fn self(ctx: *anyopaque) *FakeText {
@@ -110,6 +110,11 @@ pub const FakeText = struct {
 
     fn encodeFn(ctx: *anyopaque, a: Allocator, s: []const u8, _: bool) model_text.Error![]u32 {
         return self(ctx).encode(a, s);
+    }
+
+    // The scripted pieces are ordinary model vocabulary; this fixture has no added-token table.
+    fn maskedFn(ctx: *anyopaque, a: Allocator, input: []const u8, _: []const model_text.Span, _: *[]const u8) model_text.Error![]u32 {
+        return self(ctx).encode(a, input);
     }
 
     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
@@ -137,8 +142,8 @@ pub const FakeText = struct {
         return &self(ctx).eos;
     }
 
-    fn renderFn(ctx: *anyopaque, a: Allocator, messages: Value, o: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
-        return self(ctx).render(a, messages, o);
+    fn renderFn(ctx: *anyopaque, a: Allocator, messages: Value, o: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        return .{ .text = try (self(ctx).render(a, messages, o)) };
     }
 
     fn sourceFn(_: *anyopaque) []const u8 {

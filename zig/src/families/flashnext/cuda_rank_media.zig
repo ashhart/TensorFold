@@ -58,5 +58,5 @@ test "rank media frames are bounded and rebuild the same image plan" {
 }
 
 test {
-    _ = @import("cuda_rank_media_test.zig");
+    if (@import("builtin").os.tag != .windows) _ = @import("cuda_rank_media_test.zig"); // over a Unix socket pair
 }

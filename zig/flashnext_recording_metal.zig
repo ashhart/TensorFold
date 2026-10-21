@@ -11,6 +11,7 @@ pub var scale_calls: usize = 0;
 pub var first_blit: ?struct { offset: usize, bytes: usize } = null;
 pub var blits: usize = 0;
 pub var draws: usize = 0;
+pub var rotary_calls: usize = 0;
 pub const Buffer = struct {
     id: usize,
     data: []align(256) u8,
@@ -26,6 +27,9 @@ pub const Buffer = struct {
     pub fn deinit(_: Buffer) void {}
 };
 pub const Device = struct {
+    pub fn allocated(_: Device) u64 {
+        return 0;
+    }
     pub fn buffer(_: Device, n: usize, _: usize) !Buffer {
         const data = try allocator.alignedAlloc(u8, .fromByteUnits(256), n);
         @memset(data, 0);
@@ -44,6 +48,7 @@ pub const CompileOptions = struct {
     }
 };
 pub const Library = struct {
+    id: usize = 0,
     text: []const u8,
     pub fn fromSource(_: Device, text: []const u8, _: CompileOptions) !Library {
         return .{ .text = text };
@@ -51,6 +56,7 @@ pub const Library = struct {
     pub fn deinit(_: Library) void {}
 };
 pub const Pipeline = struct {
+    id: usize = 0,
     name: []const u8 = "noop",
     text: []const u8 = "",
     pub fn init(_: Device, lib: Library, name: []const u8, _: bool) !Pipeline {
@@ -88,6 +94,10 @@ pub const ComputeEncoder = struct {
         };
     }
     pub fn dispatchThreads(_: ComputeEncoder, grid: Size, _: Size) void {
+        if (std.mem.eql(u8, pipe.name, "tf_rotary_prepare")) {
+            rotary_calls += 1;
+            return;
+        }
         if (std.mem.eql(u8, pipe.name, "fz_xgu") or std.mem.eql(u8, pipe.name, "fz_xdown")) {
             calls[if (std.mem.eql(u8, pipe.name, "fz_xgu")) @as(usize, 2) else 3] += 1;
             for (expected, [_]usize{ 6, 32, 6, 32 }) |want, actual| if (want != actual) {
@@ -114,6 +124,7 @@ pub const ComputeEncoder = struct {
     pub fn end(_: ComputeEncoder) void {}
 };
 pub const Queue = struct {
+    pub fn deinit(_: @This()) void {}
     pub fn commandBuffer(_: Queue) CommandBuffer {
         return .{};
     }
@@ -147,8 +158,13 @@ pub const BlitEncoder = struct {
 pub const ResidencySet = struct {
     pub const Follow = struct { ctx: *anyopaque, join: *const fn (*anyopaque, Buffer) void, leave: *const fn (*anyopaque, Buffer) void };
 };
-pub const SharedEvent = struct {};
+pub const SharedEvent = struct {
+    id: usize = 0,
+    pub fn deinit(_: @This()) void {}
+};
 pub const objc = struct {
+    pub const Id = usize;
+    pub fn release(_: Id) void {}
     pub const Pool = struct {
         pub fn push() @This() {
             return .{};

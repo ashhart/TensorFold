@@ -228,8 +228,36 @@ __global__ void __launch_bounds__(PLAN_THREADS)
   }
 }
 
+// plan_kernel over the first *rows rows' pairs (per a row): a captured bucket's padding rows get no items.
 __global__ void __launch_bounds__(PLAN_THREADS)
-    plan_rank(const int* __restrict__ picks, int P, int E, int* __restrict__ rank, int* __restrict__ hist) {
+    plan_rows(const int* __restrict__ picks, int P, int E, int T, int* __restrict__ members,
+              int* __restrict__ items, int* __restrict__ counts, const int* __restrict__ rows, int per) {
+  P = min(P, *rows * per);
+  __shared__ int pk[PSMALL];
+  __shared__ int cnt[EMAX];
+  __shared__ int off[EMAX];
+  const int tid = threadIdx.x;
+  for (int e = tid; e < EMAX; e += PLAN_THREADS) cnt[e] = 0;
+  __syncthreads();
+  for (int p = tid; p < P; p += PLAN_THREADS) {
+    const int e = picks[p];
+    pk[p] = e;
+    atomicAdd(&cnt[e], 1);
+  }
+  __syncthreads();
+  const int o = place_items(tid < E ? cnt[tid] : 0, E, T, items, counts);
+  if (tid < E) off[tid] = o;
+  __syncthreads();
+  for (int p = tid; p < P; p += PLAN_THREADS) {
+    const int e = pk[p];
+    int rank = 0;
+    for (int q = 0; q < p; ++q) rank += pk[q] == e;
+    members[off[e] + rank] = p;
+  }
+}
+
+__device__ __forceinline__ void rank_pairs(const int* __restrict__ picks, int P, int E, int* __restrict__ rank,
+                                           int* __restrict__ hist) {
   __shared__ int cnt[EMAX];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   for (int e = tid; e < E; e += PLAN_THREADS) cnt[e] = 0;
@@ -252,6 +280,18 @@ __global__ void __launch_bounds__(PLAN_THREADS)
 }
 
 __global__ void __launch_bounds__(PLAN_THREADS)
+    plan_rank(const int* __restrict__ picks, int P, int E, int* __restrict__ rank, int* __restrict__ hist) {
+  rank_pairs(picks, P, E, rank, hist);
+}
+
+// plan_rank over the first *rows rows' pairs (per a row): a captured bucket's padding pairs count nowhere.
+__global__ void __launch_bounds__(PLAN_THREADS)
+    plan_rank_rows(const int* __restrict__ picks, int P, int E, int* __restrict__ rank, int* __restrict__ hist,
+                   const int* __restrict__ rows, int per) {
+  rank_pairs(picks, min(P, *rows * per), E, rank, hist);
+}
+
+__global__ void __launch_bounds__(PLAN_THREADS)
     plan_offsets(int nblk, int E, int T, int* __restrict__ hist, int* __restrict__ items, int* __restrict__ counts) {
   const int tid = threadIdx.x;
   int c = 0;
@@ -271,6 +311,14 @@ __global__ void plan_scatter(const int* __restrict__ picks, int P, int E, const 
                              const int* __restrict__ hist, int* __restrict__ members) {
   const int p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p < P) members[hist[(size_t)(p / PLAN_THREADS) * E + picks[p]] + rank[p]] = p;
+}
+
+// plan_scatter over the first *rows rows' pairs (per a row).
+__global__ void plan_scatter_rows(const int* __restrict__ picks, int P, int E, const int* __restrict__ rank,
+                                  const int* __restrict__ hist, int* __restrict__ members, const int* __restrict__ rows,
+                                  int per) {
+  const int p = blockIdx.x * blockDim.x + threadIdx.x;
+  if (p < min(P, *rows * per)) members[hist[(size_t)(p / PLAN_THREADS) * E + picks[p]] + rank[p]] = p;
 }
 
 } // namespace tf_experts

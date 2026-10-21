@@ -43,14 +43,14 @@ const Text = struct {
     fn source(_: *anyopaque) []const u8 {
         return "";
     }
-    fn render(ptr: *anyopaque, g: std.mem.Allocator, _: json.Value, _: mt.RenderOptions, _: *[]const u8) mt.Error![]u8 {
+    fn render(ptr: *anyopaque, g: std.mem.Allocator, _: json.Value, _: mt.RenderOptions, _: *[]const u8) mt.Error!mt.Rendered {
         const t: *Text = @ptrCast(@alignCast(ptr));
-        return g.dupe(u8, switch (t.form) {
+        return .{ .text = try (g.dupe(u8, switch (t.form) {
             .xml => "<tool_call><function=tfprobe_fn><parameter=tfprobe_k>v</parameter></function></tool_call>",
             .json => "<tool_call>{\"name\":\"tfprobe_fn\",\"arguments\":{\"tfprobe_k\":\"v\"}}</tool_call>",
             .gemma => "<|tool_call>call:tfprobe_fn{tfprobe_k:<|\"|>v<|\"|>}<tool_call|>",
             .unknown => "prompt",
-        });
+        })) };
     }
 };
 const Stub = struct {

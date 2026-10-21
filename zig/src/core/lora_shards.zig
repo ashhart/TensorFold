@@ -34,16 +34,15 @@ pub fn requireRegular(io: Io, w: *Io.Writer, path: []const u8) !bool {
 
 /// A non-empty file name with no separator, not `.` or `..`: a path that stays inside its folder.
 pub fn plainName(name: []const u8) bool {
-    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
-    return std.mem.indexOfAny(u8, name, "/\\\x00") == null;
+    return st.index.plainName(name);
 }
 
-/// `path` as a JSON object, or null when it is missing or not an object.
+/// `path` as a JSON object, or null only when it is missing.
 pub fn readObject(arena: Allocator, io: Io, w: *Io.Writer, path: []const u8) !?std.json.ObjectMap {
     if (!try requireRegular(io, w, path)) return null;
     const text = try Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 26));
     const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{});
-    return if (v == .object) v.object else null;
+    return if (v == .object) v.object else refuse(w, std.fs.path.basename(path), "not a JSON object");
 }
 
 /// A checkpoint folder's shards: the index's `weight_map`, or the one `model.safetensors`.
@@ -84,7 +83,10 @@ pub const Shards = struct {
         const path = try std.fs.path.join(s.gpa, &.{ s.dir, shard });
         defer s.gpa.free(path);
         if (!try requireRegular(s.io, s.w, path)) return null;
-        var file = try st.File.open(s.gpa, s.io, path);
+        var file = st.File.open(s.gpa, s.io, path) catch |err| {
+            if (err == error.OverlappingTensors) return refuse(s.w, shard, "tensor payload ranges overlap");
+            return err;
+        };
         errdefer file.close(s.io);
         try s.files.put(s.gpa, shard, file);
         return s.files.getPtr(shard);

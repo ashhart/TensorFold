@@ -50,6 +50,7 @@ const slot_shift = 40;
 pub const Ref = struct { buf: mtl.Buffer, off: usize };
 
 pub const Gpu = struct {
+    follow: ?mtl.ResidencySet.Follow = null,
     gpa: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
@@ -86,15 +87,31 @@ pub const Gpu = struct {
         return g;
     }
 
+    pub fn setResident(g: *Gpu, hook: ?mtl.ResidencySet.Follow) void {
+        for (g.bufs.items[1..]) |buffer| {
+            if (g.follow) |f| f.leave(f.ctx, buffer);
+            if (hook) |f| f.join(f.ctx, buffer);
+        }
+        g.follow = hook;
+    }
+
     pub fn releaseFrom(g: *Gpu, first: usize) void {
         g.flush() catch {};
-        for (g.bufs.items[first..], g.owned.items[first..]) |buffer, own| if (own) buffer.deinit();
+        std.debug.assert(first >= 1 and first <= g.bufs.items.len);
+        for (g.bufs.items[first..], g.owned.items[first..]) |buffer, own| {
+            const retained = for (g.bufs.items[1..first]) |kept| {
+                if (kept.id == buffer.id) break true;
+            } else false;
+            if (!retained) if (g.follow) |f| f.leave(f.ctx, buffer);
+            if (own) buffer.deinit();
+        }
         g.bufs.shrinkRetainingCapacity(first);
         g.owned.shrinkRetainingCapacity(first);
     }
 
     pub fn close(g: *Gpu) void {
         g.flush() catch {};
+        g.setResident(null);
         for (g.bufs.items[1..], g.owned.items[1..]) |b, own| if (own) b.deinit();
         g.bufs.deinit(g.gpa);
         g.owned.deinit(g.gpa);
@@ -129,6 +146,7 @@ pub const Gpu = struct {
         try g.owned.ensureUnusedCapacity(g.gpa, 1);
         g.bufs.appendAssumeCapacity(b);
         g.owned.appendAssumeCapacity(own);
+        if (g.follow) |f| f.join(f.ctx, b);
         return @as(u64, g.bufs.items.len - 1) << slot_shift;
     }
 

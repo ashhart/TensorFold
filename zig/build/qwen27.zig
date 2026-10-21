@@ -16,7 +16,7 @@ pub const Shared = struct {
 };
 
 /// The 27B's Metal sources, embedded by name (zig/kernels/metal/qwen27).
-const parts = [_][]const u8{ "xsum", "norm_xs", "norm_input", "mlp_xs", "mlp_ane", "glue", "copy", "attention_mpp", "attention_io", "attention_prompt", "prompt_glue", "prompt_state" };
+const parts = [_][]const u8{ "xsum", "norm_xs", "norm_input", "mlp_xs", "mlp_ane", "glue", "copy", "attention_mpp", "attention_io", "attention_prompt", "attention_prompt_sg", "prompt_glue", "prompt_state" };
 
 /// The shared modules, imported into `engine` (whose `core` is itself) for the server and the release binary.
 pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module) Shared {
@@ -130,6 +130,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-classes", "Build the per-class projection GPU time against the weight-bytes roofline on real weights", "zig/tests/qwen27/classes.zig", target, false, served);
     _ = program(b, "tf-qwen27-streams", "Build the real-weight check that shared rounds keep each stream's logits alone", "zig/tests/qwen27/streams.zig", target, false, served);
     _ = program(b, "tf-qwen27-reuse", "Qwen27 prompt reuse through the served host against fresh prompt passes: states and replies", "zig/tests/qwen27/reuse.zig", target, false, served);
+    _ = program(b, "tf-qwen27-marks", "Build native marked-prefix state and continuation checks on real weights", "zig/tests/qwen27/marks.zig", target, false, served);
     _ = program(b, "tf-qwen27-runtime", "Compile native Qwen interfaces without running a GPU", "zig/tests/qwen27/runtime.zig", target, false, &.{.{ .name = "qwen27", .module = qwen27 }});
     _ = program(b, "tf-qwen27-weights", "Build CPU-only Qwen checkpoint metadata validator", "zig/tests/qwen27/weights.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core } });
     _ = program(b, "tf-qwen27-dflash-inspect", "Build CPU-only target/drafter graph validator", "zig/tests/qwen27/dflash_weights.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core } });

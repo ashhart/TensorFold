@@ -1,0 +1,9 @@
+# lint on fb8eaf85081880f686bbb0b12a5852f64b81fe26 against main 76aafcf2, 2026-10-19T08:53:07Z, the same steps CI runs
+# zig fmt --check build.zig zig (zig 0.17.0)
+# exit=0
+# python3 tools/zig/lean_check.py on main 76aafcf2 (git archive of zig/ and tools/zig/, this branch's lean_check.py) and on this branch
+# main: 2625 files, 503 problems
+# branch: 2626 files, 503 problems
+# python3 tools/zig/lean_new.py main.txt branch.txt
+lean: 503 problems, 503 on the base, 0 new
+# exit=0

@@ -33,24 +33,18 @@ try {
   ok('a default scan reads only the configured sources, never Outlook\'s container')
 
   // The opt-in probe runs against a fake home, never the real Outlook container.
-  // The Outlook store path layout is macOS-only by design, so the probe only exists there.
-  if (process.platform === 'darwin') {
-    const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'vontra-email-home-'))
-    const realHome = process.env.HOME
-    process.env.HOME = fakeHome
-    try {
-      touched.length = 0
-      await scanEmailMessages({ ...settings, detectOutlook: true })
-      assert.ok(touched.some((p) => p.startsWith(fakeHome) && p.includes(path.join('Group Containers', 'UBF8T346G9.Office'))), 'opting in looks for Outlook')
-      ok('detectOutlook opts in to the Outlook probe')
-    } finally {
-      process.env.HOME = realHome
-      await fs.rm(fakeHome, { recursive: true, force: true })
-    }
-  } else {
-    const { sources: unchanged } = await scanEmailMessages({ ...settings, detectOutlook: true })
-    assert.deepEqual(unchanged.map((s) => s.kind), ['eml_dir'], 'no Outlook probe off macOS')
-    ok('detectOutlook adds no source on platforms without the macOS Outlook layout')
+  const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'vontra-email-home-'))
+  const realHome = process.env.HOME
+  process.env.HOME = fakeHome
+  try {
+    touched.length = 0
+    await scanEmailMessages({ ...settings, detectOutlook: true })
+    const probed = touched.some((p) => p.startsWith(fakeHome) && p.includes(path.join('Group Containers', 'UBF8T346G9.Office')))
+    assert.equal(probed, process.platform === 'darwin', 'Outlook detection probes only on its supported platform')
+    ok('detectOutlook respects the platform gate')
+  } finally {
+    process.env.HOME = realHome
+    await fs.rm(fakeHome, { recursive: true, force: true })
   }
 } finally {
   ;(fs as any).readdir = realReaddir

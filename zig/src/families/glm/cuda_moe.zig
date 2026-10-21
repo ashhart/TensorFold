@@ -54,8 +54,12 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     const d = l.routed.dims;
     const slots = l.top_k + 1;
     const shared_id: i32 = @intCast(l.count);
+    var stamp = prof_mod.span(k.prof, stream, .router);
     try glue.router(k.set, stream, x, x_stride, l.router, s.mlog, s.router_part, rows, d, l.count);
     try glue.select(k.set, stream, s.mlog, l.bias, s.pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm);
+    stamp.end();
+    stamp = prof_mod.span(k.prof, stream, .experts);
+    defer stamp.end();
     if (k.prof) |p| p.mark(stream, .router);
     defer if (k.prof) |p| p.mark(stream, .routed);
     if (l.exl3) |w| return exl3.run(k.exl3, k.experts, stream, w, s.x3, s.plan, x, x_stride, s.pick, slots, rows, l.count, d, l.routed.width, l.routed.limit, prompt, s.ey, s.eact);
@@ -67,6 +71,8 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
 
 /// moe_block's fill of rows lo..hi: shared expert into the last slot, slot sum into out fp32 (any range, same bits).
 pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, lo: usize, hi: usize, prompt: bool, out: u64) !void {
+    const stamp = prof_mod.span(k.prof, stream, .shared_expert);
+    defer stamp.end();
     const d = l.routed.dims;
     const slots = l.top_k + 1;
     const n = hi - lo;

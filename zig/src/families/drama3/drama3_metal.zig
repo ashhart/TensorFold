@@ -35,3 +35,5 @@ test {
     _ = wav;
     _ = kernels;
 }
+
+pub const residency = @import("metal/residency.zig");

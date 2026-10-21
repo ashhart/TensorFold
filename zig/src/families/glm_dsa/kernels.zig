@@ -194,14 +194,17 @@ pub fn indexKey(p: *const Pipelines, e: mtl.ComputeEncoder, proj: Ref, w: Ref, b
     e.dispatchGroups(.{ .width = a.rows }, .{ .width = 32 });
 }
 
-/// Every row's scores over keys [0, its position], then its top-k list in position order.
+/// Every row's top-k list in position order; scores are needed only past the all-visible prefix.
 pub fn indexTopk(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, proj: Ref, cache: Ref, rows: Ref, a: IndexArgs, score: Ref, inv: Ref, keys: Ref, last_pos: u32) void {
-    e.setPipeline(p.index_scores);
-    inline for (.{ q, proj, cache, rows }, 0..) |r, i| bind(e, i, r);
-    e.setValue(a, 4);
-    bind(e, 5, score);
-    bind(e, 6, inv);
-    e.dispatchGroups(.{ .width = last_pos / 256 + 1, .height = a.rows }, .{ .width = 256 });
+    // last_pos is the maximum zero-based position; top-k keeps every visible key through position 2047.
+    if (last_pos >= 2048) {
+        e.setPipeline(p.index_scores);
+        inline for (.{ q, proj, cache, rows }, 0..) |r, i| bind(e, i, r);
+        e.setValue(a, 4);
+        bind(e, 5, score);
+        bind(e, 6, inv);
+        e.dispatchGroups(.{ .width = last_pos / 256 + 1, .height = a.rows }, .{ .width = 256 });
+    }
     e.barrier();
     e.setPipeline(p.topk);
     bind(e, 0, score);

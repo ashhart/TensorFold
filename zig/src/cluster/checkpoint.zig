@@ -1,19 +1,21 @@
 //! A safetensors checkpoint as the planner sees it: files, and every tensor's dtype, shape, byte range and role.
 const std = @import("std");
 const roles = @import("roles.zig");
+const safetensors = @import("core").safetensors;
 
 const Allocator = std.mem.Allocator;
 
 pub const DType = enum(u8) { bf16, f16, f32, f64, i64, i32, i16, i8, u8, u16, u32, u64, f8_e4m3, f8_e5m2, f8_e8m0, boolean };
 
 pub fn dtypeOf(text: []const u8) ?DType {
-    const table = [_]struct { []const u8, DType }{
-        .{ "BF16", .bf16 },       .{ "F16", .f16 },         .{ "F32", .f32 },         .{ "F64", .f64 },      .{ "I64", .i64 }, .{ "I32", .i32 },
-        .{ "I16", .i16 },         .{ "I8", .i8 },           .{ "U8", .u8 },           .{ "U16", .u16 },      .{ "U32", .u32 }, .{ "U64", .u64 },
-        .{ "F8_E4M3", .f8_e4m3 }, .{ "F8_E5M2", .f8_e5m2 }, .{ "F8_E8M0", .f8_e8m0 }, .{ "BOOL", .boolean },
+    return dtype(safetensors.DType.parse(text) orelse return null);
+}
+
+fn dtype(value: safetensors.DType) DType {
+    return switch (value) {
+        .bool => .boolean,
+        inline else => |v| @field(DType, @tagName(v)),
     };
-    for (table) |row| if (std.mem.eql(u8, text, row[0])) return row[1];
-    return null;
 }
 
 pub fn size(d: DType) u64 {
@@ -68,36 +70,27 @@ pub const Checkpoint = struct {
 
 pub const Error = error{ BadHeader, BadIndex, BadDType, Inconsistent };
 
-/// One safetensors header (the u64 length, then JSON); `bytes` holds at least 8 + that length.
+/// A complete safetensors file image; tensor ranges must lie within its payload.
 pub fn parseHeader(a: Allocator, file: u32, bytes: []const u8) ![]Tensor {
-    if (bytes.len < 8) return error.BadHeader;
+    return parseHeaderInFile(a, file, bytes, bytes.len);
+}
+
+/// A header-only read with the actual file length, using the core parser for every tensor entry.
+pub fn parseHeaderInFile(a: Allocator, file: u32, bytes: []const u8, file_len: u64) ![]Tensor {
+    if (bytes.len < 8 or file_len < 8) return error.BadHeader;
     const n = std.mem.readInt(u64, bytes[0..8], .little);
-    if (n > bytes.len - 8) return error.BadHeader;
-    const root = std.json.parseFromSliceLeaky(std.json.Value, a, bytes[8..][0..n], .{}) catch return error.BadHeader;
-    if (root != .object) return error.BadHeader;
+    if (n > bytes.len - 8 or n > file_len - 8) return error.BadHeader;
+    const data_len = std.math.cast(usize, file_len - 8 - n) orelse return error.BadHeader;
+    const header = safetensors.parseHeader(a, bytes[8..][0..n], data_len) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.UnsupportedDType => error.BadDType,
+        else => error.BadHeader,
+    };
     var out: std.ArrayList(Tensor) = .empty;
-    var it = root.object.iterator();
-    while (it.next()) |kv| {
-        if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
-        const v = kv.value_ptr.*;
-        if (v != .object) return error.BadHeader;
-        const dt = dtypeOf(str(v.object.get("dtype")) orelse return error.BadHeader) orelse return error.BadDType;
-        const offs = (v.object.get("data_offsets") orelse return error.BadHeader);
-        if (offs != .array or offs.array.items.len != 2) return error.BadHeader;
-        const begin = uint(offs.array.items[0]) orelse return error.BadHeader;
-        const end = uint(offs.array.items[1]) orelse return error.BadHeader;
-        if (end < begin or end > std.math.maxInt(u64) - 8 - n) return error.BadHeader;
-        var t: Tensor = .{ .name = try a.dupe(u8, kv.key_ptr.*), .file = file, .start = 8 + n + begin, .bytes = end - begin, .dtype = dt };
-        const shape = v.object.get("shape") orelse return error.BadHeader;
-        if (shape != .array or shape.array.items.len > max_rank) return error.BadHeader;
-        // saturating: a zero dimension anywhere still gives 0, and the end check keeps bytes below the overflow cap
-        var want: u64 = size(dt);
-        for (shape.array.items, 0..) |d, i| {
-            t.shape[i] = uint(d) orelse return error.BadHeader;
-            want *|= t.shape[i];
-        }
-        t.rank = @intCast(shape.array.items.len);
-        if (want != t.bytes) return error.Inconsistent;
+    for (header.keys(), header.values()) |name, entry| {
+        if (entry.rank > max_rank) return error.BadHeader;
+        var t: Tensor = .{ .name = try a.dupe(u8, name), .file = file, .start = 8 + n + entry.begin, .bytes = entry.end - entry.begin, .dtype = dtype(entry.dtype), .rank = entry.rank };
+        for (entry.shape[0..entry.rank], 0..) |d, i| t.shape[i] = d;
         t.class = roles.classify(t.name);
         try out.append(a, t);
     }
@@ -139,14 +132,16 @@ pub fn load(io: std.Io, a: Allocator, dir: []const u8) !Checkpoint {
         const path = try std.fs.path.join(a, &.{ dir, f });
         const file = try cwd.openFile(io, path, .{});
         defer file.close(io);
+        const len = try file.length(io);
+        if (len < 8) return error.BadHeader;
         var head: [8]u8 = undefined;
         if (try file.readPositionalAll(io, &head, 0) != 8) return error.BadHeader;
         const n = std.mem.readInt(u64, &head, .little);
-        if (n > 1 << 30) return error.BadHeader;
+        if (n > 1 << 30 or n > len - 8) return error.BadHeader;
         const buf = try a.alloc(u8, 8 + n);
         if (try file.readPositionalAll(io, buf, 0) != buf.len) return error.BadHeader;
-        try tensors.appendSlice(a, try parseHeader(a, @intCast(i), buf));
-        try files.append(a, .{ .name = f, .size = try file.length(io) });
+        try tensors.appendSlice(a, try parseHeaderInFile(a, @intCast(i), buf, len));
+        try files.append(a, .{ .name = f, .size = len });
     }
     return .{ .files = files.items, .tensors = tensors.items };
 }
@@ -158,14 +153,6 @@ fn lessStr(_: void, x: []const u8, y: []const u8) bool {
 fn str(v: ?std.json.Value) ?[]const u8 {
     const x = v orelse return null;
     return if (x == .string) x.string else null;
-}
-
-fn uint(v: std.json.Value) ?u64 {
-    return switch (v) {
-        .integer => |i| if (i < 0) null else @intCast(i),
-        .number_string => |s| std.fmt.parseInt(u64, s, 10) catch null,
-        else => null,
-    };
 }
 
 /// Build a safetensors file image in memory (tests and the loader's fixtures); tensors are laid out in the order given.
@@ -219,36 +206,25 @@ test "a safetensors header gives absolute byte ranges, dtypes, shapes and roles"
     try std.testing.expectError(error.BadHeader, parseHeader(a, 0, bad));
 }
 
-test "byte counts and end offsets past 64 bits are refused; a zero dimension still empties a tensor" {
+test "byte counts and absolute end offsets past file bounds are refused before late zero dimensions" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const cases = [_]struct { ?anyerror, []const u8 }{
-        // 2^62 rows of 4 bytes is 2^64 bytes, which wraps to 0: the size of the empty range [0, 0]
-        .{ error.Inconsistent, "{\"t\":{\"dtype\":\"U8\",\"shape\":[4611686018427387904,4],\"data_offsets\":[0,0]}}" },
-        // 2^63 elements fit in 64 bits, their 2^64 bytes of BF16 do not
-        .{ error.Inconsistent, "{\"t\":{\"dtype\":\"BF16\",\"shape\":[9223372036854775808],\"data_offsets\":[0,0]}}" },
-        // the header's own bytes push a start offset of 2^64 - 1 past 64 bits
-        .{ error.BadHeader, "{\"t\":{\"dtype\":\"U8\",\"shape\":[0],\"data_offsets\":[18446744073709551615,18446744073709551615]}}" },
-        // a consistent tensor whose start fits but whose end, start + bytes, does not
-        .{ error.BadHeader, "{\"t\":{\"dtype\":\"U8\",\"shape\":[18446744073709551615],\"data_offsets\":[0,18446744073709551615]}}" },
-        // 2^63 elements, so 2^64 bytes in BF16, before the trailing zero makes the tensor empty
-        .{ null, "{\"t\":{\"dtype\":\"BF16\",\"shape\":[16777216,16777216,32768,0],\"data_offsets\":[0,0]}}" },
-        // the same empty tensor in 117 header bytes at the last end that fits: 8 + 117 + end is 2^64 - 1
-        .{ null, "{\"t\":{\"dtype\":\"BF16\",\"shape\":[16777216,16777216,32768,0],\"data_offsets\":[18446744073709551490,18446744073709551490]}}" },
-        // one byte further in 91 header bytes: the start offset 8 + 91 + begin is 2^64
-        .{ error.BadHeader, "{\"t\":{\"dtype\":\"U8\",\"shape\":[0],\"data_offsets\":[18446744073709551517,18446744073709551517]}}" },
+    const cases = [_][]const u8{
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[4611686018427387904,4],\"data_offsets\":[0,0]}}",
+        "{\"t\":{\"dtype\":\"BF16\",\"shape\":[9223372036854775808],\"data_offsets\":[0,0]}}",
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[0],\"data_offsets\":[18446744073709551615,18446744073709551615]}}",
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[18446744073709551615],\"data_offsets\":[0,18446744073709551615]}}",
+        "{\"t\":{\"dtype\":\"BF16\",\"shape\":[16777216,16777216,32768,0],\"data_offsets\":[0,0]}}",
     };
-    for (cases) |c| {
-        const img = try a.alloc(u8, 8 + c[1].len);
-        std.mem.writeInt(u64, img[0..8], c[1].len, .little);
-        @memcpy(img[8..], c[1]);
-        if (c[0]) |err| try std.testing.expectError(err, parseHeader(a, 0, img)) else {
-            const t = (try parseHeader(a, 0, img))[0];
-            try std.testing.expectEqual(@as(u64, 0), t.bytes);
-            try std.testing.expectEqualSlices(u64, &.{ 16777216, 16777216, 32768, 0 }, t.shape[0..t.rank]);
-        }
+    for (cases) |json| {
+        const img = try a.alloc(u8, 8 + json.len);
+        std.mem.writeInt(u64, img[0..8], json.len, .little);
+        @memcpy(img[8..], json);
+        try std.testing.expectError(error.BadHeader, parseHeader(a, 0, img));
     }
+    const empty = try image(a, &.{.{ .name = "empty", .dtype = "BF16", .shape = &.{ 4, 0 }, .fill = 0 }});
+    try std.testing.expectEqual(@as(u64, 0), (try parseHeader(a, 0, empty))[0].bytes);
 }
 
 test "an index maps tensors to files" {

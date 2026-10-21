@@ -2,17 +2,14 @@
 const std = @import("std");
 const mtl = @import("metal");
 const store = @import("store.zig");
+const header = @import("shard_header.zig");
+const st = @import("safetensors");
 
-const Entry = struct { offset: usize, bytes: usize, dtype: store.DType, shape: [3]u32, rank: u8 };
+const Entry = header.Entry;
 const File = struct { path: [:0]const u8, map: ?mtl.MappedFile = null, buffer: ?mtl.Buffer = null, entries: std.StringHashMapUnmanaged(Entry) = .empty };
 
 /// Our tensor name for a checkpoint name: the language model's prefixes dropped; null for vision tensors.
-pub fn shortName(name: []const u8) ?[]const u8 {
-    for ([_][]const u8{ "language_model.model.", "language_model." }) |p| {
-        if (std.mem.startsWith(u8, name, p)) return name[p.len..];
-    }
-    return null;
-}
+pub const shortName = header.shortName;
 
 pub const Shards = struct {
     gpa: std.mem.Allocator,
@@ -27,17 +24,22 @@ pub const Shards = struct {
         var s = Shards{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa), .device = device };
         errdefer s.deinit();
         const a = s.arena.allocator();
-        const index = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" }), a, .limited(1 << 30));
-        const Index = struct { weight_map: std.json.ArrayHashMap([]const u8) };
-        const parsed = try std.json.parseFromSliceLeaky(Index, a, index, .{ .ignore_unknown_fields = true });
+        const index = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" }), a, .limited(st.index.max_bytes));
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, index, .{});
+        const map = try st.index.weightMap(parsed);
         var file_of = std.StringHashMapUnmanaged(u32){};
-        for (parsed.weight_map.map.keys(), parsed.weight_map.map.values()) |name, file| {
+        for (map.keys(), map.values()) |name, value| {
+            const file = value.string;
             const gop = try file_of.getOrPut(a, file);
             if (!gop.found_existing) {
                 gop.value_ptr.* = @intCast(s.files.items.len);
                 try s.files.append(a, .{ .path = try std.fs.path.joinZ(a, &.{ dir, file }) });
             }
-            if (shortName(name)) |short| try s.where.put(a, short, gop.value_ptr.*);
+            if (shortName(name)) |short| {
+                const slot = try s.where.getOrPut(a, short);
+                if (slot.found_existing) return error.DuplicateTensor;
+                slot.value_ptr.* = gop.value_ptr.*;
+            }
         }
         return s;
     }
@@ -49,22 +51,7 @@ pub const Shards = struct {
         const a = s.arena.allocator();
         const map = try mtl.MappedFile.open(f.path);
         errdefer map.deinit();
-        const header_len = std.mem.readInt(u64, map.bytes[0..8], .little);
-        const data = 8 + header_len;
-        if (data % 8 != 0 or data > map.size) return error.MisalignedShard;
-        const header = try std.json.parseFromSliceLeaky(std.json.Value, a, map.bytes[8..data], .{});
-        var it = header.object.iterator();
-        while (it.next()) |kv| {
-            const name = shortName(kv.key_ptr.*) orelse continue;
-            const o = kv.value_ptr.object;
-            const off = o.get("data_offsets").?.array.items;
-            const shape = o.get("shape").?.array.items;
-            if (shape.len > 3) return error.RankTooHigh;
-            var e = Entry{ .offset = data + @as(usize, @intCast(off[0].integer)), .bytes = @intCast(off[1].integer - off[0].integer), .dtype = try store.DType.parse(o.get("dtype").?.string), .shape = .{ 1, 1, 1 }, .rank = @intCast(shape.len) };
-            for (shape, 0..) |d, k| e.shape[k] = @intCast(d.integer);
-            if (e.offset % 8 != 0 or e.offset + e.bytes > map.size) return error.MisalignedTensor;
-            try f.entries.put(a, name, e);
-        }
+        f.entries = try header.parse(a, map.bytes[0..map.size]);
         f.buffer = try s.device.bufferNoCopy(map.bytes.ptr, map.bytes.len, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         f.map = map;
         return f;
@@ -85,7 +72,13 @@ pub const Shards = struct {
             std.log.err("{s} is not in {s}'s header", .{ name, f.path });
             return error.MissingTensor;
         };
-        const t = store.Tensor{ .ref = .{ .buf = f.buffer.?, .off = e.offset }, .dtype = e.dtype, .shape = e.shape, .rank = e.rank };
+        const dtype_in_store: store.DType = switch (e.dtype) {
+            .bf16 => .bf16,
+            .f32 => .f32,
+            .u8 => .u8,
+            else => return error.UnsupportedDType,
+        };
+        const t = store.Tensor{ .ref = .{ .buf = f.buffer.?, .off = e.offset }, .dtype = dtype_in_store, .shape = e.shape, .rank = e.rank };
         if (shape.len == 0) {
             if (t.dtype != dtype) return error.TensorShape;
         } else t.expect(dtype, shape) catch |err| {
