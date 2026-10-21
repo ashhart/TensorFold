@@ -37,6 +37,11 @@ jobs:
         run: zig build fuzz-cortheon
       - name: Served Flash Next gate regressions
         run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
+      # The generated Engram tables: committing a table that its generator no longer reproduces is a silent drift.
+      - name: NFKD tables are current
+        run: |
+          python3 tools/zig/nfkd_tables.py --check --zig "$(command -v zig)" ||
+            { echo "regen: python3 tools/zig/nfkd_tables.py --zig zig"; exit 1; }
       # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
       - name: lean check
         env:
