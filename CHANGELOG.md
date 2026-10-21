@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Drama speech serving accepts opt-in attested voice catalogs with `--voices`, `--default-voice` and `GET /v1/voices`, using the family's reference prompt builder. Catalog loading honors the parser's inclusive file-size bound and reports startup refusal reasons.
+- `drama3-voice` writes an attested voice catalog file from reference WAVs and transcripts, with codes from `drama3-generate --encode`, and refuses a file without `--source-kind` and `--source-note`.
 
 ## 1.1.1
 
