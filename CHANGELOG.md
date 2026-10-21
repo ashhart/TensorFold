@@ -14,11 +14,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Prepare optional shared proposal routing for native and external draft heads, with full or absorb-only fallback.
 
-- The optional 27B Neural Engine share uses a measured 32 MiB private-overhead price and reserves its full size in the prompt-cache budget, including cold builds (#643).
+- The optional 27B Neural Engine share uses a measured 32 MiB private-overhead price and reserves its full size in the prompt-cache budget, including cold builds (#643). Thanks to @RS91Dev.
 
 - Shared draft rounds offer one deeper row every eighth round when the row cap permits, retaining normal pricing and trimming (#1059). Thanks to @plotarmordev.
 
-- Nemotron tensor parallelism shares Flash Next's NCCL 2.30.0 minimum, refusing older loaded libraries before rank setup (#1060).
+- Nemotron tensor parallelism shares Flash Next's NCCL 2.30.0 minimum, refusing older loaded libraries before rank setup (#1060). Thanks to @plotarmordev.
 
 - Linux checkpoint hashing reads runtime SHA2 capabilities through libc when libc owns process startup.
 
@@ -69,6 +69,42 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next on Metal fills response prompts through the shared lane host, with at most 32 prompt rows per choice beside a decoder. A long prompt started alone can hand unfinished work to the host when another request arrives, retaining its session and MTP lookahead (#1032). Thanks to @tpischke.
 
 - Qwen3.8-27B on M1 to M4 takes prompt chunks through the M5's prompt attention, on simdgroup matrices: on an M3 Ultra a cold 32,768-token prompt runs at 269 tokens/s instead of 176, and 8,192 tokens at 295 instead of 251. Each prompt row used to read every key alone through the decode tail kernel. A row's bits still never depend on how its prompt is cut, its error against float64 stays at bf16's half step, and decoded rows are unchanged (#918). Thanks to @astro-15-alive.
+
+- Flash Next on CUDA takes prompt rows through factored tiles: dense matmuls, routed experts, hyper-connection read-out, router logits and 1,024-row attention launches, each bit-equal to the 1.1.0 kernel it replaces and registered with the kernel contract. The tiles run only where native glue owns every operation they replace, and `TF_FLASHNEXT_CHUNK` takes 1 to 16,384 rows, refusing anything else before loading (#1046). Thanks to @Mirrdhyn.
+
+- Flash Next on CUDA serves structured output and required tool calls: the grammar masks the first draw and every draw in a verification window (#1062). Thanks to @Mirrdhyn.
+
+- `--thinking-reserve N` keeps `max_tokens` for the answer when thinking is on: lane engines allow up to N more tokens for reasoning, within the context window, and end the reply when the answer reaches `max_tokens`. It is off by default, and other engines say at startup that it is not applied (#1064). Thanks to @BobClawblaw.
+
+- `--loop-guard` also closes reasoning that repeats a long passage verbatim (a whole period and at least 1,024 tokens), not only short cycles. It still acts only while the think block is open, and reserves its index before tokens are published (#1075). Thanks to @BobClawblaw.
+
+- With `--vision`, startup warns when the chat template renders an image part without an image placeholder, naming `--chat-template`, and an image request whose template writes none says so rather than reading as an engine failure (#1076). Thanks to @BobClawblaw.
+
+- For stored bf16 `eh_proj` weights, GLM-5.3-Flash on Metal runs the MTP draft head's prompt-side `eh_proj` on a tensor-unit tile kernel by default; if its pipeline cannot build, it warns once and uses the scalar path, and `GLM_EHPROJ_NAX=0` selects the scalar path. Quantized `eh_proj` weights keep their quantized path (#1066). Thanks to @EugeneClaw.
+
+- GLM tensor parallelism on CUDA lets waiting ranks sleep between requests instead of polling at full load: rank 0 sends an idle step when its last stream ends and wakes them before its next step, and a rank that fails while the others sleep still stops them (#1053). Thanks to @Bizuayeu.
+
+- On M1, quantized matmul tiles covering 16 rows use at most four simdgroups when the grid has at least 512 groups and the K-split count is at most 16; partial sums keep their fixed reduction order, so results are unchanged (#1055). Thanks to @mrv777.
+
+- Nemotron on CUDA runs the RADIO vision tower once per image prompt instead of twice (#1057), and shared windows of several sequences on one GPU run the latent shared expert on its side stream again, with tensor-parallel runs keeping the main stream (#1058). Thanks to @plotarmordev.
+
+- Qwen3.5-family MoE models on CUDA route only a captured bucket's live rows through the experts: padding rows no longer reach the router, top-k, plan or combine, so their experts' weights are not read (#1047). Thanks to @jschmied.
+
+- Shared CUDA operators gain MLX's bf16 rounding steps, ready for families to adopt: residual tails with an optional branch norm and layer scalar (#1056), GeGLU and rounded SwiGLU rows (#1068), affine embedding rows at 2 to 6 and 8 bits with a bf16 scale (#1070), and q/k rows to head dimension 512 with a unit V norm (#1071). Each is registered with the kernel contract, and existing kernels are unchanged. Thanks to @jschmied.
+
+- The `ck_lane` kernel-contract fixture sizes its zero buffer for the input rows as well as the weights, fixing a panic in Debug and ReleaseSafe contract builds at 129-row shapes (#1073). Thanks to @jschmied.
+
+- ROCm benchmark receipts name the GPU, read from rocminfo under HIP's device-visibility rules, and the CPU. An attached server can attest the checkpoint revision, GPU identity and receipt backend through a valid benchmark manifest; without one, the attached run stays unranked. ROCm board publication remains disabled (#1043). Thanks to @ThinkOffApp.
+
+- HIP refuses `--drafter` before loading, since it does not run a DFlash2 drafter yet; the refusal leaves the engine's native drafting settings unchanged. A managed ROCm run of `tensorfold benchmark` refuses a named external `--drafter` and records none; an attached run does not configure the server's drafter (#1044). Thanks to @ThinkOffApp.
+
+- `tensorfold benchmark` keeps each attempt's draft counts (verify rounds, drafted and accepted tokens) in a local file beside the receipt, and reports no totals rather than overflowing when a sum would pass 64 bits; the published receipt is unchanged (#1045). Thanks to @ThinkOffApp.
+
+- The Flash Next CUDA recipe adds single-GB10 measurements of the ModelOpt FP4-Local checkpoint, labelled with the earlier build they ran on (#1042). Thanks to @balancedscorpion and @akol1.
+
+- Windows host builds and tests build again: dynamic libraries, clocks, environment reads and socket options go through the portable system layer, Flash Next's rank wire refuses on Windows, and POSIX-only tests skip there, while Linux and macOS run what they did (#1034). Thanks to @jayleaton.
+
+- The session prefix store reserves its free lists before publishing a slot, so removal and rollback no longer allocate, with the two allocation-failure tests from #637. Thanks to @jayleaton.
 
 ## 1.1.1
 
