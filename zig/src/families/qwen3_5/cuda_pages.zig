@@ -30,7 +30,7 @@ fn mostPages(capacity: usize, tokens: usize) usize {
 
 /// A stream's fixed part (state, log, tap ring, table), its keys and values a token, a kept state's recurrences.
 pub fn layout(e: *const Engine, capacity: usize, tokens: usize) kv.Layout {
-    return .{ .fixed_bytes = e.streamBytes(0) + mostPages(capacity, tokens) * 4, .token_bytes = e.g.kvBytes(1, false), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes() };
+    return .{ .fixed_bytes = e.streamBytes(0) + mostPages(capacity, tokens) * 4, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes() };
 }
 
 /// One pool lane: a cache whose table maps its stream's pages, and that stream's lease.
