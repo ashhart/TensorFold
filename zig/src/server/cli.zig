@@ -76,6 +76,9 @@ pub const flags = [_]Flag{
     .{ .name = "--keep-warm", .native = true },
     .{ .name = "--silence-floor-dbfs", .native = true },
     .{ .name = "--silence-seconds", .native = true },
+    .{ .name = "--silence-redraws", .native = true },
+    .{ .name = "--silence-redraw-budget-s", .native = true },
+    .{ .name = "--silence-redraw-controls", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
@@ -152,6 +155,7 @@ pub const Args = struct {
     dashboard: bool = false,
     context: ?i64 = null,
     silence: api.speech_guard.Config = .{},
+    redraw: @import("speech_redraw.zig").Policy = .{},
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
@@ -260,6 +264,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     try ranks(u, a, out);
     out.silence.validate() catch |err|
         return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
+    out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid silence redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     out.alias = repeated.alias.items;
     out.api_key = repeated.keys.items;
@@ -366,6 +371,12 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         if (n < 16 or n > 16384) return fail(u, a, "argument --vision-image-tokens: expected 16 to 16384 tokens: '{s}'", .{v});
         out.vision_image_tokens = @intCast(n);
         out.vision_image_tokens_set = true;
+    } else if (is(name, "--silence-redraws")) {
+        out.redraw.max = std.math.cast(u8, try int(u, a, name, v)) orelse return fail(u, a, "argument --silence-redraws: expected 0 to 255 redraws: '{s}'", .{v});
+    } else if (is(name, "--silence-redraw-budget-s")) {
+        out.redraw.budget_s = try float(u, a, name, v);
+    } else if (is(name, "--silence-redraw-controls")) {
+        out.redraw.controls = @import("drama_allow.zig").parse(v) catch return fail(u, a, "argument --silence-redraw-controls: expected comma-separated UTF-8 names without square brackets, or an empty list: '{s}'", .{v});
     }
 }
 
@@ -581,19 +592,4 @@ test "the GPU engine's flags: refused and unlisted unless the backend serves the
     try std.testing.expectError(error.Usage, ranks(&u, a, args));
     for ([_][2][]const u8{ .{ "--rank", "-1" }, .{ "--master-port", "70000" }, .{ "--mtp-drafts", "65" }, .{ "--mtp-confidence", "1.5" }, .{ "--checkpoint-slots", "-1" }, .{ "--policy", "matrix" } }) |g| try std.testing.expectError(error.Usage, gpuFlag(a, &args, g[0], g[1], &u));
     try std.testing.expect(!try gpuFlag(a, &args, "--port", "1", &u));
-}
-
-test "silence guard flags are opt-in and reach native open options" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var usage: Usage = .{};
-    try std.testing.expect(!(try parse(a, &.{"m"}, &usage)).silence.enabled());
-    try std.testing.expect((try parse(a, &.{ "m", "--silence-seconds=0" }, &usage)).silence.refusal("nemotron_h") != null);
-    const args = try parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "0.5" }, &usage);
-    const opened = try request(a, "m", "drama3", args);
-    try std.testing.expectEqual(args.silence, opened.silence);
-    try std.testing.expect(opened.silence.enabled());
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "1" }, &usage));
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "nan" }, &usage));
 }

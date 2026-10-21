@@ -7,13 +7,18 @@ const model_text = @import("model_text.zig");
 const routes = @import("routes.zig");
 const Conn = @import("http_conn.zig").Conn;
 
-const frame = 2048;
+pub const frame = 2048;
 const gpa = std.testing.allocator;
 
-/// Publishes 0.5-filled steps then finishes: inside submit (`inline_`), else on a thread that may `hold` for `release`.
-const Script = struct {
+/// Publishes steps of 0.5 / (take + 1), then finishes: inside submit (`inline_`), else on a thread that may `hold`.
+pub const Script = struct {
     steps: []const usize,
     reason: api.Reason = .stop,
+    /// Each take's reason, then `reason` for later takes.
+    reasons: []const api.Reason = &.{},
+    busy_from: usize = std.math.maxInt(usize),
+    busy_redraws: usize = 0,
+    busy_replies: usize = 0,
     message: []const u8 = "",
     hold: usize = 0,
     inline_: bool = false,
@@ -22,6 +27,8 @@ const Script = struct {
     release: std.atomic.Value(bool) = .init(false),
     cancelled: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+    seeds: [4]u64 = undefined,
+    takes: usize = 0,
 
     fn engine(e: *Script) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .submit_speech = speech } };
@@ -32,23 +39,32 @@ const Script = struct {
     }
     fn speech(ctx: *anyopaque, id: api.Id, request: *const api.SpeechRequest, sink: api.Sink) api.SpeechSubmitError!void {
         const e: *Script = @ptrCast(@alignCast(ctx));
-        if (e.inline_) return run(e, id, request, sink);
-        e.thread = std.Thread.spawn(.{}, run, .{ e, id, request, sink }) catch return error.Busy;
+        if (e.takes >= e.busy_from) return error.Busy;
+        if (e.takes > 0 and e.busy_replies < e.busy_redraws) {
+            e.busy_replies += 1;
+            return error.Busy;
+        }
+        const take = e.takes;
+        e.seeds[take] = request.seed;
+        e.takes += 1;
+        if (e.inline_) return run(e, id, request, sink, take);
+        e.thread = std.Thread.spawn(.{}, run, .{ e, id, request, sink, take }) catch return error.Busy;
     }
-    fn run(e: *Script, id: api.Id, request: *const api.SpeechRequest, sink: api.Sink) void {
+    fn run(e: *Script, id: api.Id, request: *const api.SpeechRequest, sink: api.Sink, take: usize) void {
+        const reason = if (take < e.reasons.len) e.reasons[take] else e.reason;
         var done: usize = 0;
         for (e.steps, 0..) |n, i| {
             if (e.hold > 0 and i == e.hold) {
                 while (!e.release.load(.acquire)) std.Thread.yield() catch {};
                 if (e.cancelled.load(.acquire)) return sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .cancelled } });
             }
-            @memset(request.pcm[done..n], 0.5);
+            @memset(request.pcm[done..n], 0.5 / @as(f32, @floatFromInt(take + 1)));
             if (request.stream) sink.event(sink.ctx, id, &.{ .audio = n });
             done = n;
         }
-        if (e.reason == .stop or e.reason == .length or e.reason == .silence) request.result.samples = done;
-        request.result.reason = e.reason;
-        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = e.reason, .message = e.message } });
+        if (reason == .stop or reason == .length or reason == .silence) request.result.samples = done;
+        request.result.reason = reason;
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = reason, .message = e.message } });
     }
     fn cancel(ctx: *anyopaque, _: api.Id) void {
         const e: *Script = @ptrCast(@alignCast(ctx));
@@ -67,8 +83,8 @@ const Script = struct {
 };
 
 /// Every byte is its own token: the route's prompt encoding needs no vocabulary.
-const Bytes = struct {
-    fn text(t: *Bytes) model_text.Text {
+pub const Bytes = struct {
+    pub fn text(t: *Bytes) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
     fn encode(_: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
@@ -102,7 +118,7 @@ const Bytes = struct {
 };
 
 /// One request served on its own thread; the test reads the reply from the client end as it arrives.
-const Served = struct {
+pub const Served = struct {
     srv: *server.Server,
     text: Bytes = .{},
     client: std.c.fd_t,
@@ -115,13 +131,18 @@ const Served = struct {
     client_open: bool = true,
 
     fn start(s: *Served, script: *Script, version: []const u8, body: []const u8, write_ms: i32) !void {
+        return s.open(script, .{ .served_name = "m", .model_ids = &.{"m"} }, "", version, body, write_ms);
+    }
+
+    /// Serves `body` under `config`, with `headers` (each ending in CRLF) after Host.
+    pub fn open(s: *Served, script: *Script, config: server.Config, headers: []const u8, version: []const u8, body: []const u8, write_ms: i32) !void {
         var pair: [2]std.c.fd_t = undefined;
         if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
         s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined, .write_ms = write_ms };
-        s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+        s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), config, null);
         if (script.output_full) s.srv.speech_inflight.store(s.srv.info.lanes, .release);
-        var head: [160]u8 = undefined;
-        try writeAll(s.client, try std.fmt.bufPrint(&head, "POST /v1/audio/speech {s}\r\nHost: t\r\nContent-Length: {d}\r\n\r\n", .{ version, body.len }));
+        var head: [256]u8 = undefined;
+        try writeAll(s.client, try std.fmt.bufPrint(&head, "POST /v1/audio/speech {s}\r\nHost: t\r\n{s}Content-Length: {d}\r\n\r\n", .{ version, headers, body.len }));
         try writeAll(s.client, body);
         s.route = try std.Thread.spawn(.{}, serve, .{s});
     }
@@ -138,13 +159,13 @@ const Served = struct {
     }
 
     /// Waits for the route, then for the engine's own thread.
-    fn join(s: *Served, script: *Script) void {
+    pub fn join(s: *Served, script: *Script) void {
         s.route.join();
         if (script.thread) |t| t.join();
         script.thread = null;
     }
 
-    fn deinit(s: *Served) void {
+    pub fn deinit(s: *Served) void {
         if (s.client_open) _ = std.c.close(s.client);
         _ = std.c.close(s.route_fd);
         s.got.deinit(gpa);
@@ -166,7 +187,7 @@ const Served = struct {
         return true;
     }
 
-    fn readHead(s: *Served) ![]const u8 {
+    pub fn readHead(s: *Served) ![]const u8 {
         while (std.mem.indexOf(u8, s.got.items, "\r\n\r\n") == null) if (!try s.more(2000)) return error.NoHead;
         const end = std.mem.indexOf(u8, s.got.items, "\r\n\r\n").? + 4;
         s.read_at = end;
@@ -205,7 +226,7 @@ const Served = struct {
     }
 
     /// The rest of a reply the route has finished writing.
-    fn readRest(s: *Served) ![]const u8 {
+    pub fn readRest(s: *Served) ![]const u8 {
         while (try s.more(200)) {}
         return s.got.items[s.read_at..];
     }
@@ -220,7 +241,7 @@ fn writeAll(fd: std.c.fd_t, data: []const u8) !void {
     }
 }
 
-const stream_body = "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\",\"stream\":true}";
+pub const stream_body = "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\",\"stream\":true}";
 /// `n` frames of 0.5, which quantizes to 16383 (0x3fff), as PCM16LE.
 fn pcm(comptime n: usize) [2 * frame * n]u8 {
     var bytes: [2 * frame * n]u8 = undefined;
@@ -228,7 +249,7 @@ fn pcm(comptime n: usize) [2 * frame * n]u8 {
     return bytes;
 }
 
-fn expectHeader(head: []const u8, line: []const u8) !void {
+pub fn expectHeader(head: []const u8, line: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, head, line) != null);
 }
 

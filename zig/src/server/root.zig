@@ -43,6 +43,8 @@ test {
     _ = @import("status_routes.zig");
     _ = @import("speech.zig");
     _ = @import("speech_stream_test.zig");
+    _ = @import("speech_redraw.zig");
+    _ = @import("speech_redraw_test.zig");
     _ = @import("drama_prompt.zig");
     _ = @import("health_test.zig");
     _ = @import("memory_routes.zig");
