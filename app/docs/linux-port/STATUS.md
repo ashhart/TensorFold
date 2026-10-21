@@ -19,7 +19,7 @@ command-sandbox conformance test, typechecks and checks patch whitespace.
 | Check | Evidence |
 | --- | --- |
 | Dev build + typecheck | `npm run build` and `tsc --noEmit` pass |
-| Full test suite | `npm test` → 832/832 passed |
+| Full test suite | `npm test` → 845/845 passed (after merging `upstream/main`) |
 | Window chrome | native Linux frame; window, close/draft and spacing tests pass |
 | Linux packaging | `npm run pack:linux:dev` → `release/linux/linux-unpacked` |
 | Artifact contents | no `resources/engine`, no `resources/computer-use`; notices only |
