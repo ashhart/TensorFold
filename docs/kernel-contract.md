@@ -40,7 +40,9 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
 3. Shapes. Every served shape, then each tiled dimension at its least size, a tile minus a step, a tile, a tile plus a
    step and the largest served size. Each output must be within `|want| * outputs' half ulp + gamma(depth) * magnitude`
    of float64, or for a replacement kernel bit-equal to the kernel it replaces. Control: a row sum whose partial tail
-   loses its last input; it passes at whole tiles and fails at the edges.
+   loses its last input; it passes at whole tiles and fails at the edges. A kernel with bf16 rounding points between
+   its steps (MLX's op-by-op rows) checks each output against float64's value at those points, as a range over the
+   spread its fp32 steps allow, and its controls each drop one rounding point, which that check must catch.
 4. fp32 sums. The inputs are integers whose partial sums reach about 2^20 in any order and stay below 2^24, so fp32
    sums are exact whatever the kernel's order; the second half of each row mirrors the first, so the result is small.
    Before the kernel runs, the harness replays the sums on the CPU in fp16 and bf16 (one chain, contiguous halves, and
@@ -115,7 +117,9 @@ rows, fp32 down and the down summing two width shares, each bit-equal to the ker
 reduce-scatter's `tf_rank_sum`, and `window_attention`'s rows at head dims 256 and 512 (`window_rows.cu`: decode chunks
 and their merge, prompt tiles with P as bf16 or in two halves, a row's last key, windows over a ring or none over a
 linear cache), each output within float64's range over the spread its fp32 steps and tensor-core sums allow
-(`core/attention_range.zig`; seven controls, each one planted fault).
+(`core/attention_range.zig`; seven controls, each one planted fault), and the activation rows in MLX's bf16 steps (GeGLU, and
+SwiGLU as DFlash drafters round it; twelve controls, each dropping one rounding point; their 64-value sums bit-equal to
+the fp32 tree).
 
 ## CUDA records per nvcc release
 

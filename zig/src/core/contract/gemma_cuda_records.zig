@@ -1,0 +1,9 @@
+//! Gemma 4's CUDA launch records (act_rows' activations in MLX's bf16 steps) in registry.cuda.
+const CudaRecord = @import("registry.zig").CudaRecord;
+
+pub const cuda = [_]CudaRecord{
+    .{ .launch = .{ .name = "act_rows tf_geglu_rows 256 threads", .symbol = "tf_geglu_rows", .image = "act_rows", .threads = 256 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "act_rows tf_geglu_rows 128 threads", .symbol = "tf_geglu_rows", .image = "act_rows", .threads = 128 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "act_rows tf_swiglu_rows_round 256 threads", .symbol = "tf_swiglu_rows_round", .image = "act_rows", .threads = 256 }, .usage = .{ .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "act_rows tf_swiglu_rows_round 128 threads", .symbol = "tf_swiglu_rows_round", .image = "act_rows", .threads = 128 }, .usage = .{ .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 } } },
+};
