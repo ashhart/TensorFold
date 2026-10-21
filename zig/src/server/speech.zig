@@ -204,32 +204,33 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     if (settle(srv, c, &box, engine_id, null) == null) return left(srv, c, id, plan.prompt.len, received);
     if (why(&box, result.samples, pcm.len)) |message| return fail(c, cx, id, metadata.*, .server, message);
     const take: Take = .{ .pcm = pcm[0..result.samples], .reason = box.reason, .silence_mid = result.silence_mid };
-    if (take.reason != .silence or srv.config.redraw.count() == 0) return reply(srv, c, cx, id, sp, plan, received, take, metadata.*);
+    if (srv.config.redraw.count() == 0 or !srv.config.redraw.trips(take.reason, take.pcm.len, sp.sample_rate, plan.input)) return reply(srv, c, cx, id, sp, plan, received, take, metadata.*);
     const spare = srv.gpa.alloc(f32, pcm.len) catch return reply(srv, c, cx, id, sp, plan, received, unused(id, 1, take, "out of memory"), metadata.*);
     defer srv.gpa.free(spare);
     const sent = redraw(srv, c, cx, id, sp, plan, received, request, started, take, spare, metadata) orelse return;
     reply(srv, c, cx, id, sp, plan, received, sent, metadata.*);
 }
 
-/// Redraws a silenced take as seed salt + k while redraws and the budget last; the last take with audio, null if left.
-fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, first: api.SpeechRequest, started: i96, silenced: Take, spare: []f32, metadata: *Metadata) ?Take {
+/// Redraws a tripped take as seed salt + k while redraws and the budget last; the last take with audio, null if left.
+fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, first: api.SpeechRequest, started: i96, tripped: Take, spare: []f32, metadata: *Metadata) ?Take {
     var next = first;
+    var input = plan.input;
     if (srv.config.redraw.controls) |controls| {
-        const input = @import("speech_plain.zig").filter(cx.a, controls, plan.input) catch return unused(id, 1, silenced, "out of memory");
+        input = @import("speech_plain.zig").filter(cx.a, controls, plan.input) catch return unused(id, 1, tripped, "out of memory");
         if (input.ptr != plan.input.ptr) {
-            const made = @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, plan.refs) catch |e| return unused(id, 1, silenced, if (e == error.OutOfMemory) "out of memory" else cx.message);
+const made = @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, plan.refs) catch |e| return unused(id, 1, tripped, if (e == error.OutOfMemory) "out of memory" else cx.message);
             if (made) |voice| {
                 next.prompt = voice.prompt;
                 next.frames = voice.frames;
             } else {
-                next.prompt = promptOf(srv, cx, sp, input) catch |e| return unused(id, 1, silenced, if (e == error.OutOfMemory) "out of memory" else cx.message);
-                next.frames = rows(cx.a, next.prompt) catch |e| return unused(id, 1, silenced, @errorName(e));
+                next.prompt = promptOf(srv, cx, sp, input) catch |e| return unused(id, 1, tripped, if (e == error.OutOfMemory) "out of memory" else cx.message);
+                next.frames = rows(cx.a, next.prompt) catch |e| return unused(id, 1, tripped, @errorName(e));
             }
         }
     }
     const buffers = [2][]f32{ first.pcm, spare };
     var live: usize = 0;
-    var take = silenced;
+    var take = tripped;
     var start = started;
     for (1..@as(usize, srv.config.redraw.count()) + 1) |k| {
         const now = clock.nowNs(srv.io);
@@ -253,7 +254,7 @@ fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, p
         live = 1 - live;
         take = .{ .pcm = buffers[live][0..result.samples], .reason = box.reason, .silence_mid = result.silence_mid };
         log.line("speech {s} redraw {d} finish={s}", .{ id, k, @tagName(take.reason) });
-        if (take.reason != .silence) break;
+        if (!srv.config.redraw.trips(take.reason, take.pcm.len, sp.sample_rate, input)) break;
     }
     return take;
 }

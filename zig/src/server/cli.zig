@@ -87,6 +87,8 @@ pub const flags = [_]Flag{
     .{ .name = "--silence-redraws", .native = true },
     .{ .name = "--silence-redraw-budget-s", .native = true },
     .{ .name = "--silence-redraw-controls", .native = true },
+    .{ .name = "--short-reply-ratio", .native = true },
+    .{ .name = "--short-reply-chars-per-s", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
@@ -408,7 +410,7 @@ if (is(name, "--max-frames")) {
         out.redraw.max = std.math.cast(u8, try int(u, a, name, v)) orelse return fail(u, a, "argument --silence-redraws: expected 0 to 255 redraws: '{s}'", .{v});
     } else if (is(name, "--silence-redraw-budget-s")) {
         out.redraw.budget_s = try float(u, a, name, v);
-    } else if (is(name, "--silence-redraw-controls")) {
+    } else if (is(name, "--short-reply-ratio")) out.redraw.short_ratio = try float(u, a, name, v) else if (is(name, "--short-reply-chars-per-s")) out.redraw.short_chars_per_s = try float(u, a, name, v) else if (is(name, "--silence-redraw-controls")) {
         out.redraw.controls = @import("drama_allow.zig").parse(v) catch return fail(u, a, "argument --silence-redraw-controls: expected comma-separated UTF-8 names without square brackets, or an empty list: '{s}'", .{v});
     }
 }

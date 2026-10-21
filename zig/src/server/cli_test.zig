@@ -99,10 +99,13 @@ test "silence redraw flags are opt-in and need a redraw count and the guard" {
     var u: Usage = .{};
     try std.testing.expectEqualDeep(@import("speech_redraw.zig").Policy{}, (try parse(a, &.{"m"}, &u)).redraw);
     const guard = [_][]const u8{ "m", "--silence-floor-dbfs=-60", "--silence-seconds=1" };
-    const on = try parse(a, &(guard ++ .{ "--silence-redraws", "2", "--silence-redraw-budget-s=30", "--silence-redraw-controls=" }), &u);
+    const on = try parse(a, &(guard ++ .{ "--silence-redraws", "2", "--silence-redraw-budget-s=30", "--silence-redraw-controls=", "--short-reply-ratio=0.25", "--short-reply-chars-per-s", "12" }), &u);
     try std.testing.expectEqual(@as(?u8, 2), on.redraw.max);
     try std.testing.expectEqual(@as(?f64, 30), on.redraw.budget_s);
     try std.testing.expectEqualStrings("", on.redraw.controls.?.list);
+    try std.testing.expectEqual(@as(?f64, 0.25), on.redraw.short_ratio);
+    try std.testing.expectEqual(@as(?f64, 12), on.redraw.short_chars_per_s);
+    try std.testing.expect(on.redraw.refusal("nemotron_h") != null);
     const zero = try parse(a, &.{ "m", "--silence-redraws=0" }, &u);
     try std.testing.expect(zero.redraw.refusal("nemotron_h") != null);
     try std.testing.expect(zero.redraw.refusal("fish_omni") == null);
@@ -113,10 +116,15 @@ test "silence redraw flags are opt-in and need a redraw count and the guard" {
         &(guard ++ .{ "--silence-redraws", "256" }),
         &(guard ++ .{ "--silence-redraws", "1", "--silence-redraw-budget-s", "0" }),
         &(guard ++ .{ "--silence-redraws", "1", "--silence-redraw-controls", "[sighs]" }),
+        &(guard ++ .{ "--short-reply-ratio", "0.25", "--short-reply-chars-per-s", "12" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--short-reply-ratio", "0.25" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--short-reply-chars-per-s", "12" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--short-reply-ratio", "1", "--short-reply-chars-per-s", "12" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--short-reply-ratio", "0.25", "--short-reply-chars-per-s", "0" }),
     }) |bad| try std.testing.expectError(error.Usage, parse(a, bad, &u));
     var out: std.Io.Writer.Allocating = .init(a);
     try capabilities(&out.writer, .{ .version = "test" });
-    for ([_][]const u8{ "--silence-redraws", "--silence-redraw-budget-s", "--silence-redraw-controls" }) |flag|
+    for ([_][]const u8{ "--silence-redraws", "--silence-redraw-budget-s", "--silence-redraw-controls", "--short-reply-ratio", "--short-reply-chars-per-s" }) |flag|
         try std.testing.expect(std.mem.indexOf(u8, out.written(), try std.fmt.allocPrint(a, "\"{s}\": {{}}", .{flag})) != null);
 }
 

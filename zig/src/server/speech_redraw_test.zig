@@ -122,6 +122,47 @@ test "redraw controls filter the redrawn input; an input with nothing left is no
     try expectReply(&empty, .{ .max = 1, .controls = try drama_allow.parse("") }, "", "[sighs]", "X-Finish-Reason: silence\r\n", 0, 1);
 }
 
+/// 200 characters, the fewest a stop is judged short on.
+const long: []const u8 = &@as([200]u8, @splat('a'));
+
+/// The rate at which one take, a frame at 44100 Hz, is exactly a quarter of `long`'s expected length.
+const quarter: f64 = 0.25 * 200 * 44100 / @as(f64, frame);
+
+fn short(chars_per_s: f64) Policy {
+    return .{ .max = 2, .short_ratio = 0.25, .short_chars_per_s = chars_per_s };
+}
+
+test "a stop under the ratio of its expected length is redrawn with seed salt + k while redraws last" {
+    var script: Script = .{ .steps = &.{frame}, .inline_ = true };
+    try expectReply(&script, short(quarter / 2), "", long, "X-Finish-Reason: stop\r\n", 2, 3);
+    for (script.seeds[0..3], 0..) |got, k| try std.testing.expectEqual(try seed(long, @intCast(k)), got);
+}
+
+test "a stop at or above the ratio of its expected length is sent" {
+    for ([_]f64{ quarter, 2 * quarter }) |rate| {
+        var script: Script = .{ .steps = &.{frame}, .inline_ = true };
+        try expectReply(&script, short(rate), "", long, "X-Finish-Reason: stop\r\n", 0, 1);
+    }
+}
+
+test "a length finish, or a stop of fewer than 200 characters, is never judged short" {
+    var length: Script = .{ .steps = &.{frame}, .reason = .length, .inline_ = true };
+    try expectReply(&length, short(quarter / 2), "", long, "X-Finish-Reason: length\r\n", 0, 1);
+    var fewer: Script = .{ .steps = &.{frame}, .inline_ = true };
+    try expectReply(&fewer, short(quarter / 2), "", long[1..], "X-Finish-Reason: stop\r\n", 0, 1);
+}
+
+test "a redraw is judged short by the input it spoke after its controls" {
+    var script: Script = .{ .steps = &.{frame}, .inline_ = true };
+    const p: Policy = .{ .max = 2, .controls = try drama_allow.parse(""), .short_ratio = 0.25, .short_chars_per_s = quarter / 2 };
+    try expectReply(&script, p, "", @as([195]u8, @splat('a')) ++ " [sighs]", "X-Finish-Reason: stop\r\n", 1, 2);
+}
+
+test "without the short reply flags a short stop is sent once" {
+    var script: Script = .{ .steps = &.{frame}, .inline_ = true };
+    try expectReply(&script, .{ .max = 1 }, "", long, "X-Finish-Reason: stop\r\n", 0, 1);
+}
+
 test "an empty redraw list seeds the reference plain text" {
     var script: Script = .{ .steps = &.{frame}, .reasons = &.{ .silence, .stop }, .inline_ = true };
     try expectReply(&script, .{ .max = 1, .controls = try drama_allow.parse("") }, "", "[sighs] hello [unknown]", "X-Finish-Reason: stop\r\n", 1, 2);
