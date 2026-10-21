@@ -18,6 +18,8 @@ pub const records = [_]CudaRecord{
     .{ .launch = .{ .name = "qwen35_keep tf_q35k_apply", .symbol = "tf_q35k_apply", .image = "qwen35_keep", .threads = 128 }, .usage = none },
     .{ .launch = .{ .name = "qwen35_keep tf_q35k_compact", .symbol = "tf_q35k_compact", .image = "qwen35_keep", .threads = 256 }, .usage = none },
     .{ .launch = .{ .name = "qwen35_kv8 tf_q35k_compact8", .symbol = "tf_q35k_compact8", .image = "qwen35_kv8", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "w4a8_prefill tf_w4a8_quantize", .symbol = "tf_w4a8_quantize", .image = "w4a8_prefill", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "w4a8_prefill tf_w4a8_prefill", .symbol = "tf_w4a8_prefill", .image = "w4a8_prefill", .threads = 256, .dynamic = 55296, .opt_in = true }, .usage = none },
     .{ .launch = .{ .name = "qwen35_draft tf_q35d_gather_rows", .symbol = "tf_q35d_gather_rows", .image = "qwen35_draft", .threads = 256 }, .usage = none },
     .{ .launch = .{ .name = "qwen35 tf_q35_gdn_pre", .symbol = "tf_q35_gdn_pre", .image = "qwen35", .threads = 32 }, .usage = none },
     .{ .launch = .{ .name = "qwen35 tf_q35_conv_commit", .symbol = "tf_q35_conv_commit", .image = "qwen35", .threads = 256 }, .usage = none },

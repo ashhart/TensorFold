@@ -287,6 +287,7 @@ pub const Open = struct {
     /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.
     recall: bool = false,
     kv8: bool = false, // --kv-cache fp8: e4m3 attention caches, an fp32 scale a row (families whose Options take kv8)
+    prompt_int8: bool = false, // --prompt-precision int8: prompt matmuls on int8 activations (Options taking prompt_int8)
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
