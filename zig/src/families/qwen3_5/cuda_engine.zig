@@ -10,6 +10,7 @@ const routed = @import("cuda_routed.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const pocket = @import("cuda_pocket.zig");
 const profile = @import("cuda_startup_profile.zig");
+const x3w = @import("cuda_exl3_weights.zig");
 
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
@@ -101,7 +102,8 @@ pub const Engine = struct {
     embed_w: u64,
     embed_s: u64,
     embed_b: u64,
-    embed_bits: u8, // the embedding's rows' width: 4 or 8
+    embed_bits: u8, // the embedding's rows' width: 4 or 8 (16: bf16 rows, an EXL3 checkpoint's)
+    kit: ?*x3w.Kit = null, // an EXL3 checkpoint's kernels (g.exl3)
     head: Proj,
     final_norm: u64,
     layers: []Layer,
@@ -178,6 +180,7 @@ pub const Engine = struct {
         e.learning = null;
         e.mlp = null;
         e.taught = 0;
+        e.kit = null;
         e.d = d;
         e.g = g;
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
@@ -190,7 +193,11 @@ pub const Engine = struct {
         e.features = 0;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
-        e.arena = try DeviceBuffer.alloc(d, weights.total(g) + try e.scratch(.measure));
+        var ck = try core.Checkpoint.openModel(gpa, io, dir);
+        defer ck.close();
+        // an EXL3 checkpoint's weights are sized by a dry run of its loader (trellis widths come from the tensors)
+        const wbytes = if (g.exl3) try x3w.measure(e, &ck) else weights.total(g);
+        e.arena = try DeviceBuffer.alloc(d, wbytes + try e.scratch(.measure));
         errdefer e.arena.free();
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
         const kk = cuda.kernels;
@@ -217,9 +224,11 @@ pub const Engine = struct {
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .compact = try e.mods[9].function("tf_q35k_compact8") };
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
-        var ck = try core.Checkpoint.openModel(gpa, io, dir);
-        defer ck.close();
-        {
+        if (g.exl3) {
+            e.kit = try x3w.Kit.init(gpa, d, g);
+            errdefer e.kit.?.deinit(gpa);
+            try x3w.load(e, &ck);
+        } else {
             // each projection as stored, packed from here; freed before the server counts what streams can use
             var stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
             defer stage.free();
@@ -254,6 +263,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.pockets.deinit();
+        if (e.kit) |k| k.deinit(e.gpa);
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
@@ -356,14 +366,22 @@ pub const Engine = struct {
     fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
         const n_out = l.outputs();
         const k = l.inputs();
+        // EXL3 trellis rows and bf16 matrices need no group sums: rows go through their own kernels at any count
+        switch (l) {
+            .x3 => |q| return if (prompt and rows > 16) e.kit.?.dense.prompt(e.stream, q, x, .bf16, rows, out, .bf16) else e.kit.?.dense.decode(e.stream, q, x, .bf16, rows, out, .bf16),
+            .bf => |q| return e.kit.?.b16.denseRows(e.stream, x, q.w, out, rows, q.n, q.k),
+            else => {},
+        }
         if (prompt and rows > 16) return switch (l) {
             .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
             .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
+            .x3, .bf => unreachable,
         };
         if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
         const tile: usize = switch (l) {
             .a4 => e.affine.verifyRows(),
             .an => 16,
+            .x3, .bf => unreachable,
         };
         var at: usize = 0;
         while (at < rows) : (at += tile) {
@@ -374,12 +392,14 @@ pub const Engine = struct {
             switch (l) {
                 .a4 => |q| try e.affine.verify(e.stream, xa, sa, q, oa, n),
                 .an => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
+                .x3, .bf => unreachable,
             }
         }
     }
 
     /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
     pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
+        if (e.kit) |kit| return kit.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
         const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }

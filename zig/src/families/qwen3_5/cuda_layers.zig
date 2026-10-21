@@ -8,6 +8,10 @@ const AffineN = cuda.qlinear.AffineN;
 pub const Proj = union(enum) {
     a4: Affine4,
     an: AffineN,
+    /// EXL3 trellis projection (cuda.exl3.Dense, bf16 in and out); only in an EXL3 checkpoint's engine.
+    x3: cuda.exl3.Weight,
+    /// A small unquantized bf16 matrix [n][k] (the GDN in_proj_a / in_proj_b), cuda_bf16.zig's denseRows.
+    bf: Bf16,
 
     pub fn outputs(p: Proj) usize {
         return switch (p) {
@@ -21,6 +25,8 @@ pub const Proj = union(enum) {
         };
     }
 };
+
+pub const Bf16 = struct { w: u64, n: usize, k: usize };
 
 pub const Delta = struct { qkv: Proj, z: Proj, a: Proj, b: Proj, out: Proj, conv: u64, norm: u64, a_log: u64, dt_bias: u64 };
 pub const Attention = struct { q: Proj, k: Proj, v: Proj, o: Proj, q_norm: u64, k_norm: u64 };

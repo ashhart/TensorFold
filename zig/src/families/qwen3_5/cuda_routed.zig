@@ -44,7 +44,7 @@ pub fn rows(e: *E.Engine, router: u64, layer: cuda.experts.Layer, x: u64, out: u
     const tile: usize = if (wide) 64 else 16;
     const items = cuda.grouped.maxItems(pairs, count, tile);
     const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
-    const grouped: cuda.experts.Grouped = .{ .affine4 = &e.experts, .affine3 = &e.experts3 };
+    const grouped: cuda.experts.Grouped = .{ .affine4 = &e.experts, .affine3 = &e.experts3, .exl3 = if (e.kit) |k| &k.grouped else null };
     try e.moe.route(e.stream, x, g.hidden, total, router, s.logits, g.hidden, count);
     try e.moe.pick(e.stream, s.logits, s.picks, s.wts, total, g.experts, g.top_k);
     try e.plan.route(e.stream, s.picks, pairs, count, tile, plan);
