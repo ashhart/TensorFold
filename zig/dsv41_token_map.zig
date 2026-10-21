@@ -33,8 +33,8 @@ pub fn main(init: std.process.Init) !void {
     const ka = key_arena.allocator();
     var keys: std.StringArrayHashMapUnmanaged(u32) = .empty;
     defer keys.deinit(a);
-    const raw_vocab: usize = config.vocab;
-    const compressed_expected: usize = config.engram_compressed_vocab;
+    const raw_vocab: usize = config.text_config.vocab_size;
+    const compressed_expected: usize = config.text_config.engram_compressed_vocab_size;
     const lookup = try a.alloc(u32, raw_vocab);
     defer a.free(lookup);
     for (0..raw_vocab) |id| {
@@ -56,8 +56,8 @@ pub fn main(init: std.process.Init) !void {
         return error.TokenizerMismatch;
     }
 
-    const order: u64 = config.engram_max_ngram;
-    const heads: u64 = config.engram_heads;
+    const order: u64 = config.text_config.engram_max_ngram_size;
+    const heads: u64 = config.text_config.engram_n_heads;
     if (order != 4 or heads != 8) return error.UnsupportedEngramShape;
     const compressed = keys.count();
     const bound: u64 = @max(1, ((@as(u64, 1) << 63) - 1) / compressed / 2);
@@ -65,11 +65,11 @@ pub fn main(init: std.process.Init) !void {
     // Each layer owns 24 distinct prime buckets; PCG64 multipliers use seed 10007 * layer.
     var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
     defer seen.deinit(a);
-    const layer_count = config.engram_layers.len;
+    const layer_count = config.text_config.engram_layer_ids.len;
     const layers = try a.alloc(Layer, layer_count);
     defer a.free(layers);
-    const engram_vocab_size = config.engram_vocab;
-    for (config.engram_layers.items(), config.engram_rows.items(), 0..) |layer_id, rows, li| {
+    const engram_vocab_size = config.text_config.engram_vocab_size;
+    for (config.text_config.engram_layer_ids, config.text_config.engram_num_embeddings, 0..) |layer_id, rows, li| {
         var primes: [24]u32 = undefined;
         var offsets: [24]u32 = undefined;
         var n: usize = 0;
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
         layers[li] = .{ .layer_id = layer_id, .rows = rows, .primes = primes, .offsets = offsets, .multipliers = multipliers };
     }
 
-    const pad_id: usize = config.engram_pad;
+    const pad_id: usize = config.text_config.engram_pad_token_id;
     const pad = lookup[pad_id];
 
     // LE layout: magic, geometry, provenance hashes, layer blocks, then the token lookup array.

@@ -1,307 +1,223 @@
-//! DeepSeek-V4.1-Flash text config (config.json -> text_config) and the per-layer CSA2 topology.
-
+//! The admitted DeepSeek V4.1 EXL3 architecture and its source-owned global caches.
 const std = @import("std");
 
-/// Fixed-capacity id lists of the config (layers, sources, Engram tables); the release's longest has 43 entries.
-pub fn List(comptime T: type, comptime cap: usize) type {
-    return struct {
-        const Self = @This();
-        buf: [cap]T = undefined,
-        len: usize = 0,
-
-        pub fn of(values: []const T) Self {
-            var s: Self = .{};
-            for (values) |v| s.push(v) catch unreachable;
-            return s;
-        }
-
-        pub fn push(s: *Self, v: T) !void {
-            if (s.len == cap) return error.ConfigListTooLong;
-            s.buf[s.len] = v;
-            s.len += 1;
-        }
-
-        pub fn items(s: *const Self) []const T {
-            return s.buf[0..s.len];
-        }
-
-        pub fn contains(s: *const Self, v: T) bool {
-            return std.mem.indexOfScalar(T, s.items(), v) != null;
-        }
-    };
-}
-
-pub const Ids = List(u32, 64);
-
 pub const Rope = struct {
-    theta: f64 = 10000.0,
-    compress_theta: f64 = 160000.0,
-    factor: f64 = 16.0,
-    original_max_positions: u64 = 65536,
-    beta_fast: f64 = 32.0,
-    beta_slow: f64 = 1.0,
-    max_positions: u64 = 1048576,
-    yarn: bool = true,
+    rope_type: []const u8,
+    factor: f32,
+    beta_fast: f32,
+    beta_slow: f32,
+    original_max_position_embeddings: u32,
 };
 
-/// The attention a layer runs: sliding window only, KV source + indexer, own indexer on a source's keys, or reuse.
-pub const Mode = enum { swa, full, reindex, reuse };
+pub const Text = struct {
+    vocab_size: u32,
+    hidden_size: u32,
+    moe_intermediate_size: u32,
+    num_hidden_layers: u32,
+    num_attention_heads: u32,
+    num_key_value_heads: u32,
+    head_dim: u32,
+    qk_rope_head_dim: u32,
+    q_lora_rank: u32,
+    o_lora_rank: u32,
+    o_groups: u32,
+    swiglu_limit: f32,
+    rms_norm_eps: f32,
+    max_position_embeddings: u32,
+    rope_theta: f32,
+    rope_scaling: Rope,
+    n_routed_experts: u32,
+    n_shared_experts: u32,
+    num_experts_per_tok: u32,
+    scoring_func: []const u8,
+    topk_method: []const u8,
+    norm_topk_prob: bool,
+    routed_scaling_factor: f32,
+    sliding_window: u32,
+    compress_ratios: []const u32,
+    compress_rope_theta: f32,
+    kv_source_layer_ids: []const u32,
+    index_source_layer_ids: []const u32,
+    index_n_heads: u32,
+    index_head_dim: u32,
+    index_topk: u32,
+    candidate_source_layer_id: u32,
+    candidate_topk_blocks: u32,
+    candidate_block_size: u32,
+    hc_mult: u32,
+    hc_sinkhorn_iters: u32,
+    hc_eps: f32,
+    engram_layer_ids: []const u32,
+    engram_num_embeddings: []const u64,
+    engram_max_ngram_size: u32,
+    engram_vocab_size: u32,
+    engram_n_heads: u32,
+    engram_head_dim: u32,
+    engram_pad_token_id: u32,
+    engram_compressed_vocab_size: u32,
+    num_nextn_predict_layers: u32,
+};
 
 pub const Config = struct {
-    vocab: u32 = 129280,
-    hidden: u32 = 5120,
-    layers: u32 = 40,
-    heads: u32 = 64,
-    head_dim: u32 = 512,
-    rope_dim: u32 = 64,
-    q_lora: u32 = 1280,
-    o_lora: u32 = 1024,
-    o_groups: u32 = 8,
-    eps: f32 = 1e-20,
-    window: u32 = 128,
-    experts: u32 = 384,
-    shared_experts: u32 = 1,
-    topk: u32 = 6,
-    expert_width: u32 = 2304,
-    routed_scale: f32 = 1.5,
-    norm_topk: bool = true,
-    swiglu_limit: f32 = 10.0,
-    compress_ratios: Ids = Ids.of(&.{ 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0 }),
-    kv_sources: Ids = Ids.of(&.{ 2, 8, 14, 20 }),
-    index_sources: Ids = Ids.of(&.{ 2, 8, 14, 20, 24, 28, 32, 36 }),
-    index_heads: u32 = 32,
-    index_dim: u32 = 128,
-    index_topk: u32 = 512,
-    candidate_source: i64 = 20,
-    candidate_blocks: u32 = 2048,
-    candidate_block_size: u32 = 8,
-    hc_mult: u32 = 4,
-    hc_sinkhorn_iters: u32 = 20,
-    hc_eps: f32 = 1e-6,
-    hc_post_alpha: f32 = 2.0,
-    engram_layers: Ids = Ids.of(&.{ 1, 14 }),
-    engram_rows: List(u64, 8) = List(u64, 8).of(&.{ 384006168, 384016682 }),
-    engram_max_ngram: u32 = 4,
-    engram_vocab: u64 = 16000000,
-    engram_heads: u32 = 8,
-    engram_head_dim: u32 = 256,
-    engram_pad: u32 = 2,
-    engram_compressed_vocab: u32 = 99092,
-    engram_gate_clamp: f32 = 1e-6,
-    mtp_layers: u32 = 3,
-    dspark_block: u32 = 5,
-    dspark_noise_token: u32 = 128799,
-    dspark_targets: Ids = Ids.of(&.{ 37, 38, 39 }),
-    dspark_markov_rank: u32 = 256,
-    dspark_experts: u32 = 128,
-    dspark_topk: u32 = 3,
-    rope: Rope = .{},
-    engram_table_dir: List(u8, 4096) = .{},
-    bos: u32 = 0,
-    eos: u32 = 1,
+    model_type: []const u8,
+    text_config: Text,
+    quantization_config: struct { quant_method: []const u8, version: []const u8 },
+    engram_table_dir: ?[]const u8 = null,
 
-    /// config.json in `dir`.
-    pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
-        const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
-        defer gpa.free(path);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
-        defer gpa.free(bytes);
-        return parse(gpa, bytes);
+    pub fn load(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
+        const path = try std.fs.path.join(arena, &.{ dir, "config.json" });
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20));
+        return parse(arena, bytes);
     }
 
-    /// Checkpoint JSON (text_config, else top level); absent keys keep release values, unknown routing is refused.
-    pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
-        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{ .parse_numbers = false });
-        defer parsed.deinit();
-        if (parsed.value != .object) return error.BadConfig;
-        const top = parsed.value.object;
-        const text = if (top.get("text_config")) |t| (if (t == .object) t.object else return error.BadConfig) else top;
-        // The exporter uses only the canonical checked pad field. Legacy aliases are refused at either level.
-        if (top.contains("engram_pad_id") or text.contains("engram_pad_id")) return error.BadConfig;
-        var c: Config = .{};
-        const ints = .{
-            .{ "vocab", "vocab_size" },                         .{ "hidden", "hidden_size" },
-            .{ "layers", "num_hidden_layers" },                 .{ "heads", "num_attention_heads" },
-            .{ "head_dim", "head_dim" },                        .{ "rope_dim", "qk_rope_head_dim" },
-            .{ "q_lora", "q_lora_rank" },                       .{ "o_lora", "o_lora_rank" },
-            .{ "o_groups", "o_groups" },                        .{ "window", "sliding_window" },
-            .{ "experts", "n_routed_experts" },                 .{ "shared_experts", "n_shared_experts" },
-            .{ "topk", "num_experts_per_tok" },                 .{ "expert_width", "moe_intermediate_size" },
-            .{ "index_heads", "index_n_heads" },                .{ "index_dim", "index_head_dim" },
-            .{ "index_topk", "index_topk" },                    .{ "candidate_source", "candidate_source_layer_id" },
-            .{ "candidate_blocks", "candidate_topk_blocks" },   .{ "candidate_block_size", "candidate_block_size" },
-            .{ "hc_mult", "hc_mult" },                          .{ "hc_sinkhorn_iters", "hc_sinkhorn_iters" },
-            .{ "engram_max_ngram", "engram_max_ngram_size" },   .{ "engram_vocab", "engram_vocab_size" },
-            .{ "engram_heads", "engram_n_heads" },              .{ "engram_head_dim", "engram_head_dim" },
-            .{ "engram_pad", "engram_pad_token_id" },           .{ "engram_compressed_vocab", "engram_compressed_vocab_size" },
-            .{ "mtp_layers", "num_nextn_predict_layers" },      .{ "dspark_block", "dspark_block_size" },
-            .{ "dspark_noise_token", "dspark_noise_token_id" }, .{ "dspark_markov_rank", "dspark_markov_rank" },
-            .{ "dspark_experts", "dspark_n_routed_experts" },   .{ "dspark_topk", "dspark_num_experts_per_tok" },
+    pub fn parse(arena: std.mem.Allocator, bytes: []const u8) !Config {
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .parse_numbers = false });
+        const text = try field(root, "text_config");
+        const rope = try field(text, "rope_scaling");
+        const quant = try field(root, "quantization_config");
+        const c: Config = .{
+            .model_type = try string(try field(root, "model_type")),
+            .text_config = .{
+                .vocab_size = try unsigned(u32, try field(text, "vocab_size")),
+                .hidden_size = try unsigned(u32, try field(text, "hidden_size")),
+                .moe_intermediate_size = try unsigned(u32, try field(text, "moe_intermediate_size")),
+                .num_hidden_layers = try unsigned(u32, try field(text, "num_hidden_layers")),
+                .num_attention_heads = try unsigned(u32, try field(text, "num_attention_heads")),
+                .num_key_value_heads = try unsigned(u32, try field(text, "num_key_value_heads")),
+                .head_dim = try unsigned(u32, try field(text, "head_dim")),
+                .qk_rope_head_dim = try unsigned(u32, try field(text, "qk_rope_head_dim")),
+                .q_lora_rank = try unsigned(u32, try field(text, "q_lora_rank")),
+                .o_lora_rank = try unsigned(u32, try field(text, "o_lora_rank")),
+                .o_groups = try unsigned(u32, try field(text, "o_groups")),
+                .swiglu_limit = try float(try field(text, "swiglu_limit")),
+                .rms_norm_eps = try float(try field(text, "rms_norm_eps")),
+                .max_position_embeddings = try unsigned(u32, try field(text, "max_position_embeddings")),
+                .rope_theta = try float(try field(text, "rope_theta")),
+                .rope_scaling = .{
+                    .rope_type = try string(try field(rope, "rope_type")),
+                    .factor = try float(try field(rope, "factor")),
+                    .beta_fast = try float(try field(rope, "beta_fast")),
+                    .beta_slow = try float(try field(rope, "beta_slow")),
+                    .original_max_position_embeddings = try unsigned(u32, try field(rope, "original_max_position_embeddings")),
+                },
+                .n_routed_experts = try unsigned(u32, try field(text, "n_routed_experts")),
+                .n_shared_experts = try unsigned(u32, try field(text, "n_shared_experts")),
+                .num_experts_per_tok = try unsigned(u32, try field(text, "num_experts_per_tok")),
+                .scoring_func = try string(try field(text, "scoring_func")),
+                .topk_method = try string(try field(text, "topk_method")),
+                .norm_topk_prob = try boolean(try field(text, "norm_topk_prob")),
+                .routed_scaling_factor = try float(try field(text, "routed_scaling_factor")),
+                .sliding_window = try unsigned(u32, try field(text, "sliding_window")),
+                .compress_ratios = try integers(u32, arena, try field(text, "compress_ratios")),
+                .compress_rope_theta = try float(try field(text, "compress_rope_theta")),
+                .kv_source_layer_ids = try integers(u32, arena, try field(text, "kv_source_layer_ids")),
+                .index_source_layer_ids = try integers(u32, arena, try field(text, "index_source_layer_ids")),
+                .index_n_heads = try unsigned(u32, try field(text, "index_n_heads")),
+                .index_head_dim = try unsigned(u32, try field(text, "index_head_dim")),
+                .index_topk = try unsigned(u32, try field(text, "index_topk")),
+                .candidate_source_layer_id = try unsigned(u32, try field(text, "candidate_source_layer_id")),
+                .candidate_topk_blocks = try unsigned(u32, try field(text, "candidate_topk_blocks")),
+                .candidate_block_size = try unsigned(u32, try field(text, "candidate_block_size")),
+                .hc_mult = try unsigned(u32, try field(text, "hc_mult")),
+                .hc_sinkhorn_iters = try unsigned(u32, try field(text, "hc_sinkhorn_iters")),
+                .hc_eps = try float(try field(text, "hc_eps")),
+                .engram_layer_ids = try integers(u32, arena, try field(text, "engram_layer_ids")),
+                .engram_num_embeddings = try integers(u64, arena, try field(text, "engram_num_embeddings")),
+                .engram_max_ngram_size = try unsigned(u32, try field(text, "engram_max_ngram_size")),
+                .engram_vocab_size = try unsigned(u32, try field(text, "engram_vocab_size")),
+                .engram_n_heads = try unsigned(u32, try field(text, "engram_n_heads")),
+                .engram_head_dim = try unsigned(u32, try field(text, "engram_head_dim")),
+                .engram_pad_token_id = try unsigned(u32, try field(text, "engram_pad_token_id")),
+                .engram_compressed_vocab_size = try unsigned(u32, try field(text, "engram_compressed_vocab_size")),
+                .num_nextn_predict_layers = try unsigned(u32, try field(text, "num_nextn_predict_layers")),
+            },
+            .quantization_config = .{
+                .quant_method = try string(try field(quant, "quant_method")),
+                .version = try string(try field(quant, "version")),
+            },
+            .engram_table_dir = if (root.object.get("engram_table_dir")) |v|
+                (if (v == .null) null else try string(v))
+            else
+                null,
         };
-        inline for (ints) |p| if (text.get(p[1])) |v| {
-            @field(c, p[0]) = try intAs(@TypeOf(@field(c, p[0])), v);
-        };
-        const floats = .{
-            .{ "eps", "rms_norm_eps" }, .{ "routed_scale", "routed_scaling_factor" }, .{ "swiglu_limit", "swiglu_limit" },
-            .{ "hc_eps", "hc_eps" },    .{ "hc_post_alpha", "hc_post_alpha" },        .{ "engram_gate_clamp", "engram_gate_clamp" },
-        };
-        inline for (floats) |p| if (text.get(p[1])) |v| {
-            @field(c, p[0]) = @floatCast(try float(v));
-        };
-        if (text.get("norm_topk_prob")) |v| c.norm_topk = if (v == .bool) v.bool else return error.BadConfig;
-        const lists = .{
-            .{ "compress_ratios", "compress_ratios" },        .{ "kv_sources", "kv_source_layer_ids" },
-            .{ "index_sources", "index_source_layer_ids" },   .{ "engram_layers", "engram_layer_ids" },
-            .{ "dspark_targets", "dspark_target_layer_ids" }, .{ "engram_rows", "engram_num_embeddings" },
-        };
-        inline for (lists) |p| if (text.get(p[1])) |v| {
-            @field(c, p[0]) = try list(@TypeOf(@field(c, p[0])), v);
-        };
-        // routing the kernels implement: sqrt(softplus) scores, bias-corrected top-k (vLLM noaux_tc)
-        if (text.get("scoring_func")) |v| if (v != .string or !std.mem.eql(u8, v.string, "sqrtsoftplus")) return error.UnsupportedScoring;
-        if (text.get("topk_method")) |v| if (v != .string or !std.mem.eql(u8, v.string, "noaux_tc")) return error.UnsupportedScoring;
-        c.rope = try rope(text);
-        if (top.get("bos_token_id")) |v| c.bos = try intAs(u32, v);
-        if (top.get("eos_token_id")) |v| c.eos = try intAs(u32, v);
-        if (top.get("engram_table_dir")) |v| {
-            if (v != .null) {
-                if (v != .string) return error.BadConfig;
-                for (v.string) |byte| try c.engram_table_dir.push(byte);
-            }
-        }
         try c.validate();
-        try requireCheckpoint(top, text);
-        try c.validateRelease();
         return c;
     }
 
-    /// Shapes the kernels and the loader assume; a release that breaks one is refused before any allocation.
-    pub fn validate(c: *const Config) !void {
-        if (c.o_groups == 0 or c.heads == 0 or c.hidden == 0 or c.vocab == 0 or c.expert_width == 0 or
-            c.layers == 0 or c.layers > 64 or c.mtp_layers > 64 - c.layers or c.engram_max_ngram < 2 or
-            c.engram_max_ngram > 8 or c.engram_heads == 0 or c.engram_heads > 64 / (c.engram_max_ngram - 1) or
-            c.engram_layers.len > 4 or c.engram_pad >= c.vocab or c.bos >= c.vocab or c.eos >= c.vocab or
-            c.topk == 0 or c.experts == 0 or c.head_dim == 0 or c.window == 0) return error.BadConfig;
-        inline for (.{ c.eps, c.hc_eps, c.engram_gate_clamp, c.routed_scale, c.swiglu_limit }) |v|
-            if (!std.math.isFinite(v) or v <= 0) return error.BadConfig;
-        inline for (.{ c.rope.theta, c.rope.compress_theta, c.rope.factor, c.rope.beta_fast, c.rope.beta_slow }) |v|
-            if (!std.math.isFinite(v) or v <= 0) return error.BadConfig;
-        if (c.hidden % 128 != 0 or c.expert_width % 128 != 0 or c.vocab % 128 != 0) return error.BadConfig;
-        if (c.heads % c.o_groups != 0 or c.rope_dim > c.head_dim or c.topk > c.experts) return error.BadConfig;
-        if (c.dspark_topk > c.dspark_experts and c.dspark_experts != 0) return error.BadConfig;
-        if (c.compress_ratios.len < c.layers) return error.BadConfig;
-        for (c.compress_ratios.items()) |r| if (r > 2) return error.BadConfig;
-        for (c.kv_sources.items()) |s| if (s >= c.layers or c.compressRatio(s) == 0) return error.BadConfig;
-        for (c.index_sources.items()) |s| if (s >= c.layers or c.compressRatio(s) == 0) return error.BadConfig;
-        if (c.engram_layers.len != c.engram_rows.len) return error.BadConfig;
-        // every compressed layer needs a KV source and an index source at or before it
-        var l: u32 = 0;
-        while (l < c.layers) : (l += 1) if (c.compressRatio(l) > 0 and (c.kvSource(l) == null or c.indexSource(l) == null)) return error.BadConfig;
-    }
-
-    /// Shared release capability; small logical fixtures are constructed explicitly with tiny().
-    pub fn validateRelease(c: *const Config) !void {
-        try c.validate();
-        const release: Config = .{};
-        inline for (.{ "vocab", "hidden", "layers", "heads", "head_dim", "rope_dim", "q_lora", "o_lora", "o_groups", "window", "experts", "shared_experts", "topk", "expert_width", "routed_scale", "norm_topk", "swiglu_limit", "index_heads", "index_dim", "index_topk", "candidate_source", "candidate_blocks", "candidate_block_size", "hc_mult", "hc_sinkhorn_iters", "hc_post_alpha", "engram_max_ngram", "engram_vocab", "engram_heads", "engram_head_dim", "engram_pad", "engram_compressed_vocab", "mtp_layers", "dspark_block", "dspark_noise_token", "dspark_markov_rank", "dspark_experts", "dspark_topk", "bos", "eos" }) |name| {
-            if (@field(c.*, name) != @field(release, name)) return error.UnsupportedArchitecture;
+    pub fn validate(c: Config) !void {
+        const t = c.text_config;
+        if (!std.mem.eql(u8, c.model_type, "deepseek_v41") or
+            !std.mem.eql(u8, c.quantization_config.quant_method, "exl3")) return error.UnsupportedCheckpoint;
+        if (t.hidden_size != 5120 or t.moe_intermediate_size != 2304 or t.num_hidden_layers != 40 or
+            t.num_attention_heads != 64 or t.num_key_value_heads != 1 or t.head_dim != 512 or
+            t.qk_rope_head_dim != 64 or t.q_lora_rank != 1280 or t.o_lora_rank != 1024 or t.o_groups != 8 or
+            t.vocab_size != 129280 or t.max_position_embeddings != 1048576) return error.UnsupportedArchitecture;
+        if (t.n_routed_experts != 384 or t.n_shared_experts != 1 or t.num_experts_per_tok != 6 or
+            !std.mem.eql(u8, t.scoring_func, "sqrtsoftplus") or !std.mem.eql(u8, t.topk_method, "noaux_tc") or
+            !t.norm_topk_prob or t.routed_scaling_factor != 1.5 or t.swiglu_limit != 10 or
+            t.sliding_window != 128 or t.hc_mult != 4 or t.hc_sinkhorn_iters != 20 or
+            t.index_n_heads != 32 or t.index_head_dim != 128 or t.index_topk != 512 or
+            t.candidate_source_layer_id != 20 or t.candidate_topk_blocks != 2048 or
+            t.candidate_block_size != 8) return error.UnsupportedArchitecture;
+        if (!std.mem.eql(u32, t.kv_source_layer_ids, &.{ 2, 8, 14, 20 }) or
+            !std.mem.eql(u32, t.index_source_layer_ids, &.{ 2, 8, 14, 20, 24, 28, 32, 36 }) or
+            !std.mem.eql(u32, t.engram_layer_ids, &.{ 1, 14 }) or t.compress_ratios.len != 43 or
+            !std.mem.eql(u64, t.engram_num_embeddings, &.{ 384006168, 384016682 })) return error.UnsupportedCacheLayout;
+        for (t.compress_ratios, 0..) |ratio, layer| {
+            const expected: u32 = if (layer < 2 or layer >= 40) 0 else if (layer < 20) 2 else 1;
+            if (ratio != expected) return error.UnsupportedCacheLayout;
         }
-        inline for (.{ "compress_ratios", "kv_sources", "index_sources", "engram_layers", "dspark_targets" }) |name| {
-            if (!std.mem.eql(u32, @field(c.*, name).items(), @field(release, name).items()))
-                return error.UnsupportedCacheLayout;
-        }
-        if (!std.mem.eql(u64, c.engram_rows.items(), release.engram_rows.items())) return error.UnsupportedCacheLayout;
-        if (!c.rope.yarn or c.rope.factor != 16 or c.rope.original_max_positions != 65536 or
-            c.rope.max_positions != 1048576 or c.rope.theta <= 1 or c.rope.compress_theta <= 1)
+        if (t.engram_vocab_size != 16000000 or
+            t.engram_max_ngram_size != 4 or t.engram_n_heads != 8 or t.engram_head_dim != 256 or
+            t.engram_pad_token_id != 2 or t.engram_compressed_vocab_size != 99092 or
+            t.num_nextn_predict_layers != 3 or !std.mem.eql(u8, t.rope_scaling.rope_type, "yarn") or
+            t.rope_scaling.factor != 16 or t.rope_scaling.original_max_position_embeddings != 65536 or
+            !std.math.isFinite(t.rms_norm_eps) or t.rms_norm_eps <= 0 or
+            !std.math.isFinite(t.hc_eps) or t.hc_eps <= 0) return error.UnsupportedArchitecture;
+        if (!std.math.isFinite(t.rope_theta) or t.rope_theta <= 1 or
+            !std.math.isFinite(t.compress_rope_theta) or t.compress_rope_theta <= 1 or
+            !std.math.isFinite(t.rope_scaling.beta_fast) or t.rope_scaling.beta_fast <= 0 or
+            !std.math.isFinite(t.rope_scaling.beta_slow) or t.rope_scaling.beta_slow <= 0)
             return error.UnsupportedArchitecture;
     }
 
-    /// Layers the forward runs: the backbone, then the DSpark blocks (checkpoint mtp.*).
-    pub fn allLayers(c: *const Config) u32 {
-        return c.layers + c.mtp_layers;
-    }
-
-    pub fn compressRatio(c: *const Config, layer: u32) u32 {
-        return if (layer < c.compress_ratios.len) c.compress_ratios.buf[layer] else 0;
-    }
-
-    pub fn isBackbone(c: *const Config, layer: u32) bool {
-        return layer < c.layers;
-    }
-
-    /// The latest source at or before `layer` (null for sliding-window layers).
-    fn latest(c: *const Config, sources: *const Ids, layer: u32) ?u32 {
-        if (c.compressRatio(layer) == 0) return null;
-        var best: ?u32 = null;
-        for (sources.items()) |s| if (s <= layer and (best == null or s > best.?)) {
-            best = s;
-        };
-        return best;
-    }
-
-    pub fn kvSource(c: *const Config, layer: u32) ?u32 {
-        return c.latest(&c.kv_sources, layer);
-    }
-
-    pub fn indexSource(c: *const Config, layer: u32) ?u32 {
-        return c.latest(&c.index_sources, layer);
-    }
-
-    pub fn isKvSource(c: *const Config, layer: u32) bool {
-        return c.isBackbone(layer) and c.kv_sources.contains(layer);
-    }
-
-    pub fn isIndexSource(c: *const Config, layer: u32) bool {
-        return c.isBackbone(layer) and c.index_sources.contains(layer);
-    }
-
-    pub fn isCandidateSource(c: *const Config, layer: u32) bool {
-        return c.candidate_source == layer and c.candidate_blocks > 0;
-    }
-
-    pub fn usesCandidates(c: *const Config, layer: u32) bool {
-        return c.isIndexSource(layer) and c.candidate_blocks > 0 and c.candidate_source >= 0 and c.candidate_source < layer;
-    }
-
-    pub fn mode(c: *const Config, layer: u32) Mode {
-        if (c.compressRatio(layer) == 0) return .swa;
-        if (c.isKvSource(layer)) return .full;
-        if (c.isIndexSource(layer)) return .reindex;
-        return .reuse;
-    }
-
-    pub fn isEngram(c: *const Config, layer: u32) bool {
-        return c.engram_layers.contains(layer);
-    }
-
-    /// (routed experts, experts a token) of a backbone layer or a DSpark block.
-    pub fn expertsOf(c: *const Config, layer: u32) struct { count: u32, topk: u32 } {
-        if (c.isBackbone(layer)) return .{ .count = c.experts, .topk = c.topk };
-        return .{ .count = if (c.dspark_experts != 0) c.dspark_experts else c.experts, .topk = if (c.dspark_topk != 0) c.dspark_topk else c.topk };
-    }
-
-    /// Engram's hash columns: (max n-gram - 1) x heads.
-    pub fn hashCols(c: *const Config) u32 {
-        return (c.engram_max_ngram - 1) * c.engram_heads;
+    pub fn context(c: Config, requested: u32) !u32 {
+        const limit = c.text_config.max_position_embeddings;
+        if (requested > limit) return error.ContextFull;
+        return if (requested == 0) limit else requested;
     }
 };
 
-fn numberText(v: std.json.Value) ![]const u8 {
-    return switch (v) {
+fn field(value: std.json.Value, name: []const u8) !std.json.Value {
+    if (value != .object) return error.UnexpectedToken;
+    return value.object.get(name) orelse error.MissingField;
+}
+
+fn string(value: std.json.Value) ![]const u8 {
+    if (value != .string) return error.UnexpectedToken;
+    return value.string;
+}
+
+fn boolean(value: std.json.Value) !bool {
+    if (value != .bool) return error.UnexpectedToken;
+    return value.bool;
+}
+
+fn numberText(value: std.json.Value) ![]const u8 {
+    return switch (value) {
         .number_string, .string => |s| s,
-        else => error.BadConfig,
+        else => error.UnexpectedToken,
     };
 }
-fn intAs(comptime T: type, v: std.json.Value) !T {
-    const n = unsigned(u64, v) catch return error.BadConfig;
-    return std.math.cast(T, n) orelse error.BadConfig;
+
+fn float(value: std.json.Value) !f32 {
+    const result = try std.fmt.parseFloat(f32, try numberText(value));
+    if (!std.math.isFinite(result)) return error.Overflow;
+    return result;
 }
-fn float(v: std.json.Value) !f64 {
-    const n = std.fmt.parseFloat(f64, try numberText(v)) catch return error.BadConfig;
-    if (!std.math.isFinite(n)) return error.BadConfig;
-    return n;
-}
-pub fn unsigned(comptime T: type, value: std.json.Value) !T {
+
+/// Decode integral decimal/exponent notation from digits exactly, without floating-point coercion.
+fn unsigned(comptime T: type, value: std.json.Value) !T {
     const text = try numberText(value);
     if (text.len == 0) return error.InvalidCharacter;
     if (std.fmt.parseInt(T, text, 10)) |n| return n else |_| {}
@@ -355,99 +271,11 @@ pub fn unsigned(comptime T: type, value: std.json.Value) !T {
     return n;
 }
 
-fn list(comptime L: type, v: std.json.Value) !L {
-    if (v != .array) return error.BadConfig;
-    var out: L = .{};
-    const T = @TypeOf(out.buf[0]);
-    for (v.array.items) |x| try out.push(try intAs(T, x));
-    return out;
-}
-
-/// rope_theta, compress_rope_theta and rope_scaling (or rope_parameters), as RopeConfig.from_dict.
-fn rope(text: std.json.ObjectMap) !Rope {
-    var r: Rope = .{};
-    if (text.get("rope_theta")) |v| r.theta = try float(v);
-    if (text.get("compress_rope_theta")) |v| r.compress_theta = try float(v);
-    if (text.get("max_position_embeddings")) |v| r.max_positions = try intAs(u64, v);
-    const scaling = text.get("rope_scaling") orelse text.get("rope_parameters");
-    r.factor = 1.0;
-    r.original_max_positions = r.max_positions;
-    r.yarn = false;
-    if (scaling) |s| if (s == .object) {
-        const o = s.object;
-        if (o.get("factor")) |v| r.factor = try float(v);
-        if (o.get("original_max_position_embeddings")) |v| r.original_max_positions = try intAs(u64, v);
-        if (o.get("beta_fast")) |v| r.beta_fast = try float(v);
-        if (o.get("beta_slow")) |v| r.beta_slow = try float(v);
-        const kind = o.get("rope_type") orelse o.get("type");
-        r.yarn = if (kind) |k| (k == .string and !std.mem.eql(u8, k.string, "default")) else false;
-    };
-    return r;
-}
-
-/// A small config with every V4.1 mechanism; split widths are 256 so TP=2 keeps 128-value blocks.
-pub fn tiny() Config {
-    return .{
-        .vocab = 256,
-        .hidden = 256,
-        .layers = 8,
-        .heads = 4,
-        .head_dim = 64,
-        .rope_dim = 8,
-        .q_lora = 32,
-        .o_lora = 128,
-        .o_groups = 2,
-        .eps = 1e-6,
-        .window = 4,
-        .experts = 8,
-        .topk = 2,
-        .expert_width = 256,
-        .compress_ratios = Ids.of(&.{ 0, 0, 2, 2, 1, 1, 1, 1, 0, 0 }),
-        .kv_sources = Ids.of(&.{ 2, 4 }),
-        .index_sources = Ids.of(&.{ 2, 4, 6 }),
-        .index_heads = 2,
-        .index_dim = 16,
-        .index_topk = 3,
-        .candidate_source = 4,
-        .candidate_blocks = 2,
-        .candidate_block_size = 2,
-        .engram_layers = Ids.of(&.{1}),
-        .engram_rows = List(u64, 8).of(&.{0}),
-        .engram_max_ngram = 3,
-        .engram_vocab = 31,
-        .engram_heads = 2,
-        .engram_head_dim = 8,
-        .engram_compressed_vocab = 50,
-        .mtp_layers = 2,
-        .dspark_block = 3,
-        .dspark_noise_token = 96,
-        .dspark_targets = Ids.of(&.{ 5, 6, 7 }),
-        .dspark_markov_rank = 8,
-        .dspark_experts = 4,
-        .dspark_topk = 2,
-        .rope = .{ .factor = 4.0, .original_max_positions = 64, .max_positions = 256 },
-    };
-}
-
-fn requireCheckpoint(top: std.json.ObjectMap, text: std.json.ObjectMap) !void {
-    const model = top.get("model_type") orelse return error.MissingField;
-    if (model != .string or !std.mem.eql(u8, model.string, "deepseek_v41")) return error.UnsupportedCheckpoint;
-    const quant = top.get("quantization_config") orelse return error.MissingField;
-    if (quant != .object) return error.BadConfig;
-    const method = quant.object.get("quant_method") orelse return error.MissingField;
-    const version = quant.object.get("version") orelse return error.MissingField;
-    if (method != .string or !std.mem.eql(u8, method.string, "exl3") or version != .string or
-        (!std.mem.eql(u8, version.string, "1") and !std.mem.startsWith(u8, version.string, "1."))) return error.UnsupportedCheckpoint;
-    inline for (.{ "candidate_block_size", "candidate_source_layer_id", "candidate_topk_blocks", "compress_ratios", "compress_rope_theta", "engram_compressed_vocab_size", "engram_head_dim", "engram_layer_ids", "engram_max_ngram_size", "engram_n_heads", "engram_num_embeddings", "engram_pad_token_id", "engram_vocab_size", "hc_eps", "hc_mult", "hc_sinkhorn_iters", "head_dim", "hidden_size", "index_head_dim", "index_n_heads", "index_source_layer_ids", "index_topk", "kv_source_layer_ids", "max_position_embeddings", "moe_intermediate_size", "n_routed_experts", "n_shared_experts", "norm_topk_prob", "num_attention_heads", "num_experts_per_tok", "num_hidden_layers", "num_key_value_heads", "num_nextn_predict_layers", "o_groups", "o_lora_rank", "q_lora_rank", "qk_rope_head_dim", "rms_norm_eps", "rope_theta", "routed_scaling_factor", "scoring_func", "sliding_window", "swiglu_limit", "topk_method", "vocab_size" }) |key| {
-        if (!text.contains(key)) return error.MissingField;
-    }
-    if (try intAs(u32, text.get("num_key_value_heads").?) != 1) return error.UnsupportedArchitecture;
-    const r = text.get("rope_scaling") orelse return error.MissingField;
-    if (r != .object) return error.BadConfig;
-    inline for (.{ "rope_type", "factor", "beta_fast", "beta_slow", "original_max_position_embeddings" }) |key|
-        if (!r.object.contains(key)) return error.MissingField;
-    const kind = r.object.get("rope_type").?;
-    if (kind != .string or !std.mem.eql(u8, kind.string, "yarn")) return error.UnsupportedArchitecture;
+fn integers(comptime T: type, arena: std.mem.Allocator, value: std.json.Value) ![]const T {
+    if (value != .array) return error.UnexpectedToken;
+    const result = try arena.alloc(T, value.array.items.len);
+    for (value.array.items, result) |item, *out| out.* = try unsigned(T, item);
+    return result;
 }
 
 test "config integers retain exact unsigned boundaries and integral notation" {
@@ -466,16 +294,50 @@ test "config integers retain exact unsigned boundaries and integral notation" {
     try std.testing.expectError(error.Overflow, unsigned(u32, .{ .number_string = "1e100" }));
 }
 
-test "Engram pad alias cannot override the admitted token id" {
-    const a = std.testing.allocator;
-    const good = @embedFile("fixtures/config.json");
-    const bad = try std.fmt.allocPrint(a, "{{\"engram_pad_id\":129280,{s}", .{good[1..]});
-    defer a.free(bad);
-    try std.testing.expectError(error.BadConfig, Config.parse(a, bad));
-    const nested = try std.mem.replaceOwned(u8, a, good, "\"engram_pad_token_id\": 2", "\"engram_pad_token_id\": 2, \"engram_pad_id\": 129280");
-    defer a.free(nested);
-    try std.testing.expectError(error.BadConfig, Config.parse(a, nested));
-    const conflict = try std.fmt.allocPrint(a, "{{\"engram_pad_id\":3,{s}", .{good[1..]});
-    defer a.free(conflict);
-    try std.testing.expectError(error.BadConfig, Config.parse(a, conflict));
+test "config decoding rejects missing fields and wrong shapes without defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.MissingField, Config.parse(arena.allocator(), "{}"));
+    try std.testing.expectError(error.UnexpectedToken, Config.parse(arena.allocator(), "[]"));
+    try std.testing.expectError(error.UnexpectedToken, Config.parse(arena.allocator(), "{\"text_config\":false}"));
+    try std.testing.expectError(error.UnexpectedToken, boolean(.{ .string = "true" }));
+    try std.testing.expectError(error.UnexpectedToken, unsigned(u32, .{ .bool = true }));
+    try std.testing.expectError(error.Overflow, float(.{ .number_string = "1e100" }));
+}
+
+test "released architecture rejects inconsistent Engram buckets and nonfinite rotary parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const checkpoint =
+        \\{"model_type":"deepseek_v41","quantization_config":{"quant_method":"exl3","version":"1"},
+        \\"text_config":{"vocab_size":129280,"hidden_size":5120,"moe_intermediate_size":2304,
+        \\"num_hidden_layers":40,"num_attention_heads":64,"num_key_value_heads":1,"head_dim":512,
+        \\"qk_rope_head_dim":64,"q_lora_rank":1280,"o_lora_rank":1024,"o_groups":8,
+        \\"swiglu_limit":10,"rms_norm_eps":0.000001,"max_position_embeddings":1048576,
+        \\"rope_theta":10000,"rope_scaling":{"rope_type":"yarn","factor":16,"beta_fast":32,
+        \\"beta_slow":1,"original_max_position_embeddings":65536},"n_routed_experts":384,
+        \\"n_shared_experts":1,"num_experts_per_tok":6,"scoring_func":"sqrtsoftplus",
+        \\"topk_method":"noaux_tc","norm_topk_prob":true,"routed_scaling_factor":1.5,
+        \\"sliding_window":128,"compress_ratios":[0,0,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+        \\1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0],"compress_rope_theta":10000,
+        \\"kv_source_layer_ids":[2,8,14,20],"index_source_layer_ids":[2,8,14,20,24,28,32,36],
+        \\"index_n_heads":32,"index_head_dim":128,"index_topk":512,"candidate_source_layer_id":20,
+        \\"candidate_topk_blocks":2048,"candidate_block_size":8,"hc_mult":4,"hc_sinkhorn_iters":20,
+        \\"hc_eps":0.000001,"engram_layer_ids":[1,14],"engram_num_embeddings":[384006168,384016682],
+        \\"engram_max_ngram_size":4,"engram_vocab_size":16000000,"engram_n_heads":8,"engram_head_dim":256,
+        \\"engram_pad_token_id":2,"engram_compressed_vocab_size":99092,"num_nextn_predict_layers":3}
+    ;
+    const absent = try Config.parse(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{s}}}", .{checkpoint}));
+    var invalid = absent;
+    invalid.text_config.engram_vocab_size = 1;
+    try std.testing.expectError(error.UnsupportedArchitecture, invalid.validate());
+    invalid = absent;
+    invalid.text_config.engram_vocab_size = invalid.text_config.vocab_size;
+    try std.testing.expectError(error.UnsupportedArchitecture, invalid.validate());
+    invalid = absent;
+    invalid.text_config.rope_theta = 1;
+    try std.testing.expectError(error.UnsupportedArchitecture, invalid.validate());
+    invalid = absent;
+    invalid.text_config.rope_scaling.beta_slow = std.math.nan(f32);
+    try std.testing.expectError(error.UnsupportedArchitecture, invalid.validate());
 }

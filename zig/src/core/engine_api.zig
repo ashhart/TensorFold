@@ -256,6 +256,8 @@ pub const Precision = enum { checkpoint, full };
 pub const Open = struct {
     dir: []const u8,
     model_type: []const u8,
+    /// Original Engram table shards, fully resident; null uses the checkpoint's explicit configuration.
+    engram_table_dir: ?[]const u8 = null,
     context: ?i64 = null,
     lanes: u32 = 8,
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.

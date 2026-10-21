@@ -155,6 +155,10 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const kernels_mod = embedded(b, lib, "tensorfold.metallib");
     counters_build.targets(b, target, optimize, metal, mods.sources, test_step);
 
+    // DeepSeek V4.1: resident weight staging and the Metal operator qualification below.
+    const dsv41_build = @import("deepseek_v41.zig");
+    test_step.dependOn(dsv41_build.weights(b, target, optimize, metal));
+
     // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
     const engines = b.createModule(.{
@@ -164,6 +168,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
     });
+    // The Engram token map builder and the native server share the one tokenizer module.
+    engines.addImport("tokenizer", mods.tokenizer);
     @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
     @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, test_step);
 
@@ -247,6 +253,13 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.getInstallStep().dependOn(&b.addInstallFile(packed_lib, "lib/nemotron_packed.metallib").step);
     sources.addImport("nemotron_packed_metallib", embedded(b, packed_lib, "nemotron_packed.metallib"));
     const engine = mods.engine;
+
+    // DeepSeek V4.1's Metal operators, each against its fp64-dot reference.
+    {
+        const dsv41 = dsv41_build.checks(b, target, optimize, metal, sources, engine);
+        test_step.dependOn(dsv41.device);
+        test_step.dependOn(dsv41.reference);
+    }
     // FlashNext's CPU contracts, with the family module's imports so the replay graph type-checks
     const flash_host = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/flashnext_host.zig"),
@@ -325,6 +338,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-gemma4-vision", .path = "zig/tests/gemma4/vision.zig", .about = "Gemma 4's image tower against gemma4_vision_fixtures.py's dumps: patches bit for bit, each stage's error beside torch bf16's" },
         .{ .name = "tf-gemma4-bench", .path = "zig/tests/gemma4/bench.zig", .about = "Gemma 4 dense step costs: projections alone by rows against whole forwards" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
+        .{ .name = "tf-dsv41-token-map", .path = "zig/dsv41_token_map.zig", .about = "Build the Engram token map from a tokenizer and inference config, byte-identical to the release's" },
+        .{ .name = "tf-dsv41-run", .path = "zig/deepseek_v41_run.zig", .about = "Full-resident DeepSeek V4.1 admission, teacher-forced logits, chunk seams and decode timing" },
     };
     for (engine_programs) |p| {
         const mod = b.createModule(.{
@@ -465,7 +480,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }
 }
 
-pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module) struct { metal: *std.Build.Module, lanes: *std.Build.Module, fabric: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, living: *std.Build.Module, qwen27: qwen27_build.Shared } {
+pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module) struct { metal: *std.Build.Module, lanes: *std.Build.Module, fabric: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, living: *std.Build.Module, tokenizer: *std.Build.Module, qwen27: qwen27_build.Shared } {
     const metal = b.createModule(.{
         .root_source_file = b.path("zig/src/metal/metal.zig"),
         .target = target,
@@ -481,14 +496,16 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     // Living Weights' family-neutral learner, which Nemotron's lessons and the server's view of them share
     const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    // DeepSeek's Engram token map builder shares one tokenizer with the server, never two in one compilation.
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const engine = b.createModule(.{
         .root_source_file = b.path("zig/src/tensorfold.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living } },
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living }, .{ .name = "tokenizer", .module = tokenizer } },
     });
-    return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .living = living, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
+    return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .living = living, .tokenizer = tokenizer, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
 }
 
 pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, sdk: []const u8) *std.Build.Step.Compile {

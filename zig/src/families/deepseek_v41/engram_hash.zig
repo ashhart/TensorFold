@@ -45,7 +45,7 @@ fn word(bytes: []const u8, at: usize) u32 {
     return std.mem.readInt(u32, bytes[at..][0..4], .little);
 }
 
-/// Borrowed packed metadata; the caller owns the blob; adapters own any device upload.
+/// Borrowed packed metadata; parent owns both the blob and its resident Metal upload.
 pub const TokenMap = struct {
     bytes: []const u8,
 
@@ -111,7 +111,6 @@ pub const History = struct {
     }
 
     pub fn push(self: *History, compressed: i32, meta: Layer) ![columns]u32 {
-        if (self.position == std.math.maxInt(u64)) return error.InvalidEngramChunk;
         if (compressed < dead or compressed >= compressed_vocab) return error.InvalidEngramCompressedId;
         var tokens: [order]u32 = @splat(pad_id);
         var blocked = compressed == dead;
@@ -121,7 +120,14 @@ pub const History = struct {
             if (!blocked) tokens[i + 1] = @intCast(self.tail[i]);
         }
         var result: [columns]u32 = undefined;
-        hashValues(&tokens, &meta.multipliers, &meta.primes, &meta.offsets, heads, &result);
+        var rolling = @as(u64, tokens[0]) * meta.multipliers[0];
+        for (1..order) |shift| {
+            rolling ^= @as(u64, tokens[shift]) * meta.multipliers[shift];
+            for (0..heads) |head| {
+                const col = (shift - 1) * heads + head;
+                result[col] = @as(u32, @intCast(rolling % meta.primes[col])) + meta.offsets[col];
+            }
+        }
         self.tail[2] = self.tail[1];
         self.tail[1] = self.tail[0];
         self.tail[0] = compressed;
@@ -133,24 +139,10 @@ pub const History = struct {
 /// Single sequence, token mask bytes (0=DEAD), output [tokens,24], no allocations or lost chunk history.
 pub fn hashChunk(history: *History, map: TokenMap, meta: Layer, ids: []const u32, mask: ?[]const u8, out: [][columns]u32) !void {
     if (out.len != ids.len or (mask != null and mask.?.len != ids.len)) return error.InvalidEngramChunk;
-    if (ids.len > std.math.maxInt(u64) - history.position) return error.InvalidEngramChunk;
     // Validate the entire chunk before mutating history.
     for (ids) |token| _ = try map.get(token);
     for (ids, 0..) |token, i| {
         const compressed: i32 = if (mask != null and mask.?[i] == 0) dead else @intCast(try map.get(token));
         out[i] = try history.push(compressed, meta);
-    }
-}
-
-/// One hash equation for canonical history and the chain's window/lookback adapter.
-pub fn hashValues(tokens: []const u32, mult: anytype, primes: anytype, offsets: anytype, head_count: usize, out: anytype) void {
-    var rolling: u64 = 0;
-    for (tokens, 0..) |token, shift| {
-        rolling ^= @as(u64, token) *% @as(u64, @intCast(mult[shift]));
-        if (shift == 0) continue;
-        for (0..head_count) |head| {
-            const col = (shift - 1) * head_count + head;
-            out[col] = @intCast(rolling % @as(u64, @intCast(primes[col])) + @as(u64, @intCast(offsets[col])));
-        }
     }
 }

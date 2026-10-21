@@ -1,0 +1,535 @@
+//! CPU CSA2 from DeepSeek AI inference/{model,kernel}.py, rev 2cba9e42; Module(Real) runs it FP32 or fully FP64.
+
+const std = @import("std");
+const tf = @import("tensorfold");
+const math = @import("math.zig");
+const m = math; // FP32 surface retained for consumers; Module bodies use their own instance below.
+const projection = @import("projection.zig");
+const Config = tf.deepseek_v41_config.Text;
+const Attention = tf.deepseek_v41_weights.Attention;
+
+pub const max_capacity = 4096;
+/// Kernel-shaped key addressing: window rows at physical ring slots, then compressed rows.
+pub const KeyTable = struct {
+    window: []const u16,
+    window_stride: usize = 512,
+    compressed: []const u16 = &[_]u16{},
+    compressed_stride: usize = 512,
+    pub fn keyRow(t: KeyTable, at: usize) []const u16 {
+        if (at < 128) return t.window[at * t.window_stride ..][0..512];
+        const row = at - 128;
+        return t.compressed[row * t.compressed_stride ..][0..512];
+    }
+};
+/// Compressor softmax pooling at reference precision T: FP32 is the source contract, FP64 the ideal.
+pub fn poolOf(comptime T: type, kv: [2][]const T, gate: [2][]const T, out: []u16) void {
+    @setFloatMode(.strict);
+    for (out, 0..) |*o, d| {
+        const high = @max(gate[0][d], gate[1][d]);
+        const p0 = @exp(gate[0][d] - high);
+        const p1 = @exp(gate[1][d] - high);
+        const denominator = p0 + p1;
+        const pooled = kv[0][d] * (p0 / denominator) + kv[1][d] * (p1 / denominator);
+        o.* = if (T == f32) m.b(@floatCast(pooled)) else m.b64(pooled);
+    }
+}
+fn narrow(comptime T: type, x: f64) T {
+    return if (T == f32) @as(f32, @floatCast(x)) else x;
+}
+/// The sparse-attention head at reference precision T, with the pre-normalization quotients if asked.
+pub fn sparseHeadPre(
+    comptime T: type,
+    q: []const u16,
+    keys: KeyTable,
+    indices: []const i32,
+    sink: f32,
+    out: []u16,
+    pre: ?[]T,
+) void {
+    @setFloatMode(.strict);
+    const scale: T = if (T == f32) 1 / @sqrt(@as(f32, 512)) else 1 / @sqrt(@as(f64, 512));
+    var acc: [512]T = @splat(0);
+    var high: T = m.wide(T, -1e30);
+    var denominator: T = 0;
+    var base: usize = 0;
+    while (base < indices.len) : (base += 64) {
+        var probabilities: [64]T = undefined;
+        const width = @min(64, indices.len - base);
+        var next_high = high;
+        for (0..width) |j| {
+            const index = indices[base + j];
+            var dot: f64 = 0;
+            if (index >= 0) {
+                const key = keys.keyRow(@intCast(index));
+                for (q, key) |a, v| dot += m.d64(a) * m.d64(v);
+            }
+            probabilities[j] = if (index < 0) -std.math.inf(T) else narrow(T, dot) * scale;
+            next_high = @max(next_high, probabilities[j]);
+        }
+        const correction = @exp(high - next_high);
+        var sum: f64 = 0;
+        for (0..width) |j| {
+            probabilities[j] = @exp(probabilities[j] - next_high);
+            sum += probabilities[j];
+        }
+        denominator = denominator * correction + narrow(T, sum);
+        for (0..512) |d| {
+            var accumulated: f64 = acc[d] * correction;
+            for (0..width) |j| if (indices[base + j] >= 0) {
+                // Online 64-column source kernel rounds unnormalized probabilities to BF16 before P*V.
+                const p: f64 = if (T == f32) @as(f64, m.f(m.b(probabilities[j]))) else m.d64(m.b64(probabilities[j]));
+                accumulated += p * m.d64(keys.keyRow(@intCast(indices[base + j]))[d]);
+            };
+            acc[d] = @floatCast(accumulated);
+        }
+        high = next_high;
+    }
+    denominator += @exp(m.wide(T, sink) - high);
+    for (out, acc, 0..) |*v, a, i| {
+        const quotient = a / denominator;
+        if (pre) |cells| cells[i] = quotient;
+        v.* = if (T == f32) m.b(quotient) else m.b64(quotient);
+    }
+}
+
+pub fn Module(comptime Real: type) type {
+    return struct {
+        const Self = @This();
+        const wr = math.Module(Real).wr;
+        const m64 = math.Module(Real);
+        const proj = projection.Module(Real);
+
+        pub const State = struct {
+            gpa: std.mem.Allocator,
+            capacity: usize,
+            window: []u16,
+            sources: []u16,
+            scores: []Real,
+            candidates: []bool,
+            blocks: []Real,
+            active_owner: usize = 0,
+            selected: [512]u32 = undefined,
+            selected_len: usize = 0,
+            partial_kv: [4][2][512]Real = undefined,
+            partial_gate: [4][2][512]Real = undefined,
+            qr: [1280]u16 = undefined,
+            q: [32768]u16 = undefined,
+            index_q: [4096]u16 = undefined,
+            index_weights: [32]Real = undefined,
+            latent: [512]u16 = undefined,
+            index_key: [128]u16 = undefined,
+            kv: [512]u16 = undefined,
+            o: [32768]u16 = undefined,
+            grouped: [8192]u16 = undefined,
+            observer: ?Observer = null,
+            sparse_snapshot: ?[]u16 = null,
+            /// Indexer-selection probe on the retained FP32 path: contract and ideal margins plus pick flips.
+            score_probe: ?ScoreProbe = null,
+            score_copy: []f32 = &.{},
+            ideal_scores: []f32 = &.{},
+            ideal_copy: []f32 = &.{},
+            pick_work: []f32 = &.{},
+            selected_ideal: []u32 = &.{},
+            pub const ScoreProbe = struct {
+                ctx: *anyopaque,
+                record: *const fn (*anyopaque, layer: usize, position: usize, count: usize, selected_len: usize, margin: f32, margin_ideal: f32, flips: usize, lowest: f32, highest_unselected: f32) void,
+            };
+            pub const Observer = struct {
+                ctx: *anyopaque,
+                capture: *const fn (*anyopaque, tf.deepseek_v41.attention.DiagnosticStage, []const u16) void,
+            };
+            fn observe(self: *Self.State, stage: tf.deepseek_v41.attention.DiagnosticStage, values: []const u16) void {
+                if (self.observer) |observer| observer.capture(observer.ctx, stage, values);
+            }
+
+            pub fn init(gpa: std.mem.Allocator, capacity: usize) !Self.State {
+                if (capacity == 0 or capacity > max_capacity) return error.InvalidAttentionReferenceCapacity;
+                const window = try gpa.alloc(u16, 40 * 128 * 512);
+                errdefer gpa.free(window);
+                const sources = try gpa.alloc(u16, 4 * capacity * 640);
+                errdefer gpa.free(sources);
+                const scores = try gpa.alloc(Real, capacity);
+                errdefer gpa.free(scores);
+                const candidates = try gpa.alloc(bool, capacity);
+                errdefer gpa.free(candidates);
+                const blocks = try gpa.alloc(Real, (capacity + 7) / 8);
+                errdefer gpa.free(blocks);
+                const score_copy = try gpa.alloc(f32, capacity);
+                errdefer gpa.free(score_copy);
+                const ideal_scores = try gpa.alloc(f32, capacity);
+                errdefer gpa.free(ideal_scores);
+                const ideal_copy = try gpa.alloc(f32, capacity);
+                errdefer gpa.free(ideal_copy);
+                const pick_work = try gpa.alloc(f32, capacity);
+                errdefer gpa.free(pick_work);
+                const selected_ideal = try gpa.alloc(u32, capacity);
+                @memset(window, 0);
+                return .{ .gpa = gpa, .capacity = capacity, .window = window, .sources = sources, .scores = scores, .candidates = candidates, .blocks = blocks, .score_copy = score_copy, .ideal_scores = ideal_scores, .ideal_copy = ideal_copy, .pick_work = pick_work, .selected_ideal = selected_ideal };
+            }
+            pub fn deinit(self: *Self.State) void {
+                self.gpa.free(self.window);
+                self.gpa.free(self.sources);
+                self.gpa.free(self.scores);
+                self.gpa.free(self.candidates);
+                self.gpa.free(self.blocks);
+                self.gpa.free(self.score_copy);
+                self.gpa.free(self.ideal_scores);
+                self.gpa.free(self.ideal_copy);
+                self.gpa.free(self.pick_work);
+                self.gpa.free(self.selected_ideal);
+                self.* = undefined;
+            }
+            fn mainRow(self: *Self.State, owner: usize, row: usize) []u16 {
+                return self.sources[owner * self.capacity * 640 + row * 640 ..][0..512];
+            }
+            fn indexRow(self: *Self.State, owner: usize, row: usize) []u16 {
+                return self.sources[owner * self.capacity * 640 + row * 640 + 512 ..][0..128];
+            }
+            fn publish(self: *Self.State, a: Attention, layer: usize, x: []const u16, position: usize, c: Config, scratch: *projection.Scratch) !bool {
+                @setFloatMode(.strict);
+                const compressor = a.compressor orelse return false;
+                const owner = (layer - 2) / 6;
+                self.active_owner = owner;
+                const ratio: usize = c.compress_ratios[layer];
+                if (ratio == 1) {
+                    try proj.apply(compressor.wkv, x, &self.latent, scratch);
+                } else {
+                    const slot = position % ratio;
+                    try proj.applyF32(compressor.wkv, x, &self.partial_kv[owner][slot], scratch);
+                    try proj.applyF32(compressor.wgate.?, x, &self.partial_gate[owner][slot], scratch);
+                    if ((position + 1) % ratio != 0) return false;
+                    for (0..512) |d| {
+                        const high = @max(self.partial_gate[owner][0][d], self.partial_gate[owner][1][d]);
+                        const p0 = @exp(self.partial_gate[owner][0][d] - high);
+                        const p1 = @exp(self.partial_gate[owner][1][d] - high);
+                        const denominator = p0 + p1;
+                        const weighted0 = self.partial_kv[owner][0][d] * (p0 / denominator);
+                        const weighted1 = self.partial_kv[owner][1][d] * (p1 / denominator);
+                        const pooled = weighted0 + weighted1;
+                        self.latent[d] = m64.b(pooled);
+                    }
+                }
+                m64.rms(&self.latent, compressor.norm, c.rms_norm_eps, &self.latent);
+                const indexer = a.indexer.?;
+                try proj.apply(indexer.wk.?, &self.latent, &self.index_key, scratch);
+                m64.rms(&self.index_key, indexer.k_norm.?, c.rms_norm_eps, &self.index_key);
+                const group_position = position + 1 - ratio;
+                m64.rope(&self.index_key, group_position, true, false, c);
+                m64.quantize(&self.index_key, .index);
+                const row = position / ratio;
+                @memcpy(self.indexRow(owner, row), &self.index_key);
+                m64.rope(&self.latent, group_position, true, false, c);
+                m64.quantize(&self.latent, .main);
+                @memcpy(self.mainRow(owner, row), &self.latent);
+                return true;
+            }
+            fn chooseCandidates(self: *Self.State, count: usize, c: Config) void {
+                @memset(self.candidates[0..count], false);
+                const nblocks = (count + 7) / 8;
+                for (0..nblocks) |block| {
+                    var score: Real = -std.math.inf(Real);
+                    for (block * 8..@min(block * 8 + 8, count)) |row| score = @max(score, self.scores[row]);
+                    self.blocks[block] = score;
+                }
+                if (nblocks == 0) return;
+                self.blocks[nblocks - 1] = std.math.inf(Real);
+                for (0..@min(nblocks, c.candidate_topk_blocks)) |_| {
+                    var best: usize = 0;
+                    for (0..nblocks) |i| if (self.blocks[i] > self.blocks[best]) {
+                        best = i;
+                    };
+                    if (self.blocks[best] == -std.math.inf(Real)) break;
+                    for (best * 8..@min(best * 8 + 8, count)) |row| self.candidates[row] = true;
+                    self.blocks[best] = -std.math.inf(Real);
+                }
+            }
+            fn selectPositions(self: *Self.State, a: Attention, layer: usize, x: []const u16, position: usize, count: usize, c: Config, scratch: *projection.Scratch) !void {
+                const indexer = a.indexer orelse return;
+                self.selected_len = @min(count, c.index_topk);
+                if (count == 0) return;
+                try proj.apply(indexer.wq_b, &self.qr, &self.index_q, scratch);
+                for (0..32) |head| {
+                    const q = self.index_q[head * 128 ..][0..128];
+                    m64.rope(q, position, true, false, c);
+                    m64.quantize(q, .index);
+                }
+                m64.dense(indexer.weights_proj, x, &self.index_weights);
+                const scale: Real = 1 / @sqrt(@as(Real, 128 * 32));
+                // Python scalar multiplication preserves the source weights projection's BF16 dtype.
+                for (&self.index_weights) |*v| v.* = m64.f(m64.b(m64.f(m64.b(v.*)) * scale));
+                for (0..count) |row| {
+                    const key = self.indexRow(self.active_owner, row);
+                    var score: f64 = 0;
+                    for (0..32) |head| {
+                        var dot: f64 = 0;
+                        for (key, 0..) |v, d| dot += @as(f64, m64.f(v)) * m64.f(self.index_q[head * 128 + d]);
+                        // einsum produces BF16, then BF16 multiply and head sum, in the pinned source.
+                        const rectified = @max(m64.f(m64.b(@floatCast(dot))), 0);
+                        const weighted = m64.f(m64.b(rectified * self.index_weights[head]));
+                        score += weighted;
+                    }
+                    self.scores[row] = m64.f(m64.b(@floatCast(score)));
+                }
+                if (layer == c.candidate_source_layer_id) self.chooseCandidates(count, c);
+                if (layer > c.candidate_source_layer_id) for (0..count) |row| {
+                    if (!self.candidates[row]) self.scores[row] = -std.math.inf(Real);
+                };
+                if (self.score_probe != null) {
+                    for (0..count) |row| self.score_copy[row] = @floatCast(self.scores[row]);
+                    self.idealScores(a, count);
+                }
+                for (0..self.selected_len) |pick| {
+                    var best: usize = 0;
+                    for (0..count) |i| if (self.scores[i] > self.scores[best]) {
+                        best = i;
+                    };
+                    self.selected[pick] = @intCast(best);
+                    self.scores[best] = -std.math.inf(Real);
+                }
+                std.mem.sort(u32, self.selected[0..self.selected_len], {}, std.sort.asc(u32));
+                if (self.score_probe) |probe| self.reportSelection(probe, layer, position, count);
+            }
+            /// Contract-vs-ideal selection margins: the same BF16 inputs scored without intermediate roundings.
+            fn idealScores(self: *Self.State, a: Attention, count: usize) void {
+                @setFloatMode(.strict);
+                if (a.indexer == null) return;
+                for (0..count) |row| {
+                    if (self.score_copy[row] == -std.math.inf(f32)) {
+                        self.ideal_scores[row] = -std.math.inf(f32);
+                        continue;
+                    }
+                    const key = self.indexRow(self.active_owner, row);
+                    var score: f64 = 0;
+                    for (0..32) |head| {
+                        var dot: f64 = 0;
+                        for (key, 0..) |v, d| dot += @as(f64, m64.f(v)) * @as(f64, m64.f(self.index_q[head * 128 + d]));
+                        score += @max(dot, 0) * @as(f64, @floatCast(self.index_weights[head]));
+                    }
+                    self.ideal_scores[row] = @floatCast(score);
+                }
+            }
+            fn pickTop(self: *Self.State, scores: []const f32, into: []u32) void {
+                @memcpy(self.pick_work[0..scores.len], scores);
+                const work = self.pick_work[0..scores.len];
+                for (into) |*pick| {
+                    var best: usize = 0;
+                    for (work, 0..) |v, i| if (v > work[best]) {
+                        best = i;
+                    };
+                    pick.* = @intCast(best);
+                    work[best] = -std.math.inf(f32);
+                }
+                std.mem.sort(u32, into, {}, std.sort.asc(u32));
+            }
+            fn pickedAt(selection: []const u32, row: usize) bool {
+                var lo: usize = 0;
+                var hi: usize = selection.len;
+                while (lo < hi) {
+                    const mid = (lo + hi) / 2;
+                    if (selection[mid] == row) return true;
+                    if (selection[mid] < row) lo = mid + 1 else hi = mid;
+                }
+                return false;
+            }
+            fn reportSelection(self: *Self.State, probe: ScoreProbe, layer: usize, position: usize, count: usize) void {
+                var lowest: f32 = std.math.inf(f32);
+                var highest_unselected: f32 = -std.math.inf(f32);
+                for (self.selected[0..self.selected_len]) |row| {
+                    lowest = @min(lowest, self.score_copy[row]);
+                }
+                for (0..count) |row| {
+                    if (!pickedAt(self.selected[0..self.selected_len], row) and self.score_copy[row] > -std.math.inf(f32))
+                        highest_unselected = @max(highest_unselected, self.score_copy[row]);
+                }
+                const margin: f32 = if (self.selected_len == 0 or lowest == std.math.inf(f32)) 0 else lowest - highest_unselected;
+                @memcpy(self.ideal_copy[0..count], self.ideal_scores[0..count]);
+                const ideal_len = @min(self.selected_len, self.selected_ideal.len);
+                self.pickTop(self.ideal_copy[0..count], self.selected_ideal[0..ideal_len]);
+                var flips: usize = 0;
+                if (self.selected_len == ideal_len) {
+                    for (self.selected[0..self.selected_len], self.selected_ideal[0..ideal_len]) |s, i| {
+                        if (s != i) flips += 1;
+                    }
+                } else flips = self.selected_len;
+                var ideal_lowest: f32 = std.math.inf(f32);
+                var ideal_highest_unselected: f32 = -std.math.inf(f32);
+                for (self.selected_ideal[0..ideal_len]) |row| {
+                    ideal_lowest = @min(ideal_lowest, self.ideal_scores[row]);
+                }
+                for (0..count) |row| {
+                    if (!pickedAt(self.selected_ideal[0..ideal_len], row) and self.ideal_scores[row] > -std.math.inf(f32))
+                        ideal_highest_unselected = @max(ideal_highest_unselected, self.ideal_scores[row]);
+                }
+                const margin_ideal: f32 = if (ideal_len == 0 or ideal_lowest == std.math.inf(f32)) 0 else ideal_lowest - ideal_highest_unselected;
+                probe.record(probe.ctx, layer, position, count, self.selected_len, margin, margin_ideal, flips, lowest, highest_unselected);
+            }
+            pub fn apply(self: *Self.State, a: Attention, layer: usize, x: []const u16, position: usize, c: Config, out: []u16, scratch: *projection.Scratch) !void {
+                const compressed = c.compress_ratios[layer] != 0;
+                try proj.applyTrellis(a.wq_a, x, &self.qr, scratch);
+                self.observe(.qr_projection, &self.qr);
+                m64.rms(&self.qr, a.q_norm, c.rms_norm_eps, &self.qr);
+                self.observe(.qr_norm, &self.qr);
+                try proj.applyTrellis(a.wq_b, &self.qr, &self.q, scratch);
+                self.observe(.q_projection, &self.q);
+                for (0..64) |head| m64.rope(self.q[head * 512 ..][0..512], position, compressed, false, c);
+                self.observe(.q, &self.q);
+                try proj.applyTrellis(a.wkv, x, &self.kv, scratch);
+                self.observe(.kv_projection, &self.kv);
+                m64.rms(&self.kv, a.kv_norm, c.rms_norm_eps, &self.kv);
+                self.observe(.kv_norm, &self.kv);
+                m64.rope(&self.kv, position, compressed, false, c);
+                self.observe(.kv_rope, &self.kv);
+                m64.quantize(&self.kv, .window);
+                self.observe(.kv_quantized, &self.kv);
+                const window = self.window[layer * 128 * 512 ..][0 .. 128 * 512];
+                @memcpy(window[(position % 128) * 512 ..][0..512], &self.kv);
+                var count: usize = 0;
+                if (compressed) {
+                    _ = try self.publish(a, layer, x, position, c, scratch);
+                    count = (position + 1) / c.compress_ratios[layer];
+                    try self.selectPositions(a, layer, x, position, count, c, scratch);
+                }
+                var indices: [640]i32 = undefined;
+                var slots: usize = 0;
+                if (position == 0) {
+                    indices[0] = 0;
+                    slots = 1;
+                } else {
+                    const oldest = position % 128 + 1;
+                    for (0..128) |i| {
+                        const at = (oldest + i) % 128;
+                        indices[i] = if (at > position) -1 else @intCast(at);
+                    }
+                    slots = 128;
+                }
+                if (compressed) for (self.selected[0..self.selected_len]) |row| {
+                    indices[slots] = @intCast(128 + row);
+                    slots += 1;
+                };
+                for (0..64) |head| {
+                    self.sparseHead(self.q[head * 512 ..][0..512], window, indices[0..slots], m64.value(a.sink, head), self.o[head * 512 ..][0..512]);
+                    self.observeHead(head);
+                    m64.rope(self.o[head * 512 ..][0..512], position, compressed, true, c);
+                }
+                if (self.sparse_snapshot) |snapshot| self.observe(.sparse_o, snapshot);
+                self.observe(.o, &self.o);
+                for (0..8) |group| try proj.applyTrellis(a.wo_a[group], self.o[group * 4096 ..][0..4096], self.grouped[group * 1024 ..][0..1024], scratch);
+                self.observe(.grouped, &self.grouped);
+                try proj.applyTrellis(a.wo_b, &self.grouped, out, scratch);
+                self.observe(.wo_b, out);
+            }
+            fn observeHead(self: *Self.State, head: usize) void {
+                if (self.sparse_snapshot) |snapshot|
+                    @memcpy(snapshot[head * 512 ..][0..512], self.o[head * 512 ..][0..512]);
+            }
+            fn keyRow(self: *Self.State, window: []const u16, key_id: i32) []const u16 {
+                const at: usize = @intCast(key_id);
+                return if (at < 128) window[at * 512 ..][0..512] else self.mainRow(self.active_owner, at - 128);
+            }
+            pub fn sparseHead(self: *Self.State, q: []const u16, window: []const u16, indices: []const i32, sink: Real, out: []u16) void {
+                @setFloatMode(.strict);
+                var acc: [512]Real = @splat(0);
+                var high: Real = -1e30;
+                var denominator: Real = 0;
+                var base: usize = 0;
+                while (base < indices.len) : (base += 64) {
+                    var probabilities: [64]Real = undefined;
+                    const width = @min(64, indices.len - base);
+                    var next_high = high;
+                    for (0..width) |j| {
+                        const index = indices[base + j];
+                        var dot: f64 = 0;
+                        if (index >= 0) {
+                            const key = self.keyRow(window, index);
+                            for (q, key) |a, v| dot += @as(f64, m64.f(a)) * m64.f(v);
+                        }
+                        probabilities[j] = if (index < 0) -std.math.inf(Real) else @as(Real, @floatCast(dot)) * (1 / @sqrt(@as(Real, 512)));
+                        next_high = @max(next_high, probabilities[j]);
+                    }
+                    const correction = @exp(high - next_high);
+                    var sum: f64 = 0;
+                    for (0..width) |j| {
+                        probabilities[j] = @exp(probabilities[j] - next_high);
+                        sum += probabilities[j];
+                    }
+                    denominator = denominator * correction + @as(Real, @floatCast(sum));
+                    for (0..512) |d| {
+                        var accumulated: f64 = @as(f64, acc[d] * correction);
+                        for (0..width) |j| if (indices[base + j] >= 0) {
+                            // Online 64-column source kernel rounds unnormalized probabilities to BF16 before P*V.
+                            accumulated += @as(f64, m64.f(m64.b(probabilities[j]))) * m64.f(self.keyRow(window, indices[base + j])[d]);
+                        };
+                        acc[d] = @floatCast(accumulated);
+                    }
+                    high = next_high;
+                }
+                denominator += @exp(sink - high);
+                for (out, acc) |*v, a| v.* = m64.b(a / denominator);
+            }
+        };
+    };
+}
+
+const f32_module = Module(f32);
+pub const State = f32_module.State;
+
+test "online 64-column sparse attention rounds probabilities before value GEMM" {
+    var state = try State.init(std.testing.allocator, 2);
+    defer state.deinit();
+    var q: [512]u16 = @splat(0);
+    q[0] = m.b(8);
+    state.window[1] = m.b(1);
+    state.window[512] = m.b(1);
+    var indices: [65]i32 = @splat(-1);
+    indices[0] = 0;
+    indices[1] = 1;
+    indices[64] = 0;
+    var out: [512]u16 = undefined;
+    state.sparseHead(&q, state.window[0..1024], &indices, 0, &out);
+    const probability = @exp(-@as(f32, 8) * (1 / @sqrt(@as(f32, 512))));
+    var denominator = @as(f32, @floatCast(@as(f64, probability) + 1));
+    denominator += probability;
+    denominator += probability;
+    const expected = m.b((2 * m.f(m.b(probability))) / denominator);
+    try std.testing.expectEqual(expected, out[1]);
+}
+
+test "attention reference capacity rejects unbounded history before allocation" {
+    try std.testing.expectError(error.InvalidAttentionReferenceCapacity, State.init(std.testing.allocator, 0));
+    try std.testing.expectError(error.InvalidAttentionReferenceCapacity, State.init(std.testing.allocator, max_capacity + 1));
+}
+
+test "frozen FP32 pooling and sparse-head boundaries match the pre-repair oracle" {
+    // Frozen at 53b790082 (pre-repair): poolOf and this head's value GEMM are FP32, so both words stay.
+    const a_values = [_]f32{
+        1,        1 + 0x1p-7, 1,      -1,       0, 0x1p-24, 1 - 0x1p-7, 3 * 0x1p-125,
+        0x1p-126, 0x1p126,    0x1p-8, -0x1p-24, 1, 0x1p-7,  1.5,        2,
+    };
+    const b_values = [_]f32{
+        1 + 0x1p-7, 1 + 0x1p-6, 3,      -1 - 0x1p-7,  0,  3 * 0x1p-24, 1 - 0x1p-6, 5 * 0x1p-125,
+        0x1p-126,   0x1p126,    0x1p-8, -3 * 0x1p-24, -1, 3 * 0x1p-7,  2.5,        2,
+    };
+    // Equal gates give exact 1/2 probabilities; equal scores give the sparse rows 1, with a -inf sink.
+    var window: [2 * 512]u16 = @splat(0);
+    var kv: [2][512]f32 = undefined;
+    for (0..512) |d| {
+        const column = d % a_values.len;
+        window[d] = m.b(a_values[column]);
+        window[512 + d] = m.b(b_values[column]);
+        kv[0][d] = m.f(window[d]);
+        kv[1][d] = m.f(window[512 + d]);
+    }
+    var gates: [2][512]f32 = .{ @splat(0), @splat(0) };
+    var pooled: [512]u16 = undefined;
+    poolOf(f32, .{ &kv[0], &kv[1] }, .{ &gates[0], &gates[1] }, &pooled);
+    var q: [512]u16 = @splat(0);
+    var indices = [2]i32{ 0, 1 };
+    var sparse: [512]u16 = @splat(0);
+    sparseHeadPre(f32, &q, .{ .window = &window, .window_stride = 512 }, &indices, -std.math.inf(f32), &sparse, null);
+    try std.testing.expectEqualSlices(u16, &pooled, &sparse);
+    const frozen = [_]u16{
+        0x3f80, 0x3f82, 0x4000, 0xbf80, 0x0000, 0x3400, 0x3f7d, 0x0200,
+        0x0080, 0x7e80, 0x3b80, 0xb400, 0x0000, 0x3c80, 0x4000, 0x4000,
+    };
+    try std.testing.expectEqualSlices(u16, &frozen, pooled[0..16]);
+}
