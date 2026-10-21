@@ -76,16 +76,12 @@ jobs:
             app/mobile/package-lock.json
       - name: Use the package-manager pin
         run: npm install --global --ignore-scripts npm@10.9.8
-      - name: Install the command sandbox used by Linux tests
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends bubblewrap
       - name: Install locked desktop dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
       - name: Install mobile fixtures required by the shared test runner
         run: npm --prefix mobile ci --ignore-scripts
       - name: Desktop security and runtime tests
         run: npm test
-      - name: Linux command-sandbox conformance
-        run: TENSORFOLD_LINUX_SANDBOX=1 node node_modules/jiti/lib/jiti-cli.mjs electron/agent/linux-sandbox.conformance.test.ts
       - name: Typecheck desktop
         run: npm run typecheck
       - name: Check patch whitespace
@@ -95,6 +91,41 @@ jobs:
           else
             git show --format= --check HEAD
           fi
+
+  appimage-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      # electron-builder packages the real Electron runtime.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '0'
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Use the package-manager pin
+        run: npm install --global --ignore-scripts npm@10.9.8
+      - name: Install locked desktop dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Install Electron and rebuild node-pty
+        run: npm run deps:trusted-scripts
+      - name: Build the Ubuntu 24.04 AppImage
+        run: npm run dist:linux
+      - name: Clean-install smoke of the AppImage
+        run: APPIMAGE_EXTRACT_AND_RUN=1 npm run smoke:linux:packaged -- --appimage
+      - name: Upload the AppImage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tensorfold-linux-appimage
+          path: app/release/linux/*.AppImage
+          if-no-files-found: error
 
   mobile:
     runs-on: ubuntu-24.04

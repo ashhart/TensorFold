@@ -44,9 +44,8 @@ clean-machine install.
   a dialog.
 - Wayland cannot present Vulkan surfaces; the app now merges `Vulkan` into `--disable-features` when
   a Wayland session is detected, leaving X11 and macOS untouched.
-- The **TensorFold** network preset is marked `trustedNetwork`: it counts as a local engine (bots,
-  phone guard, local-only features) while its address stays loopback, RFC1918, IPv6 unique-local or
-  `.local`. A public address, a CLI transport, or a hand-added LAN provider stays external.
+- LAN providers stay **external**, as the maintainer asked: the TensorFold network preset is only a
+  convenience for adding the endpoint, and bots/phone guard do not run against it.
 - Thread and bot chrome no longer says "this Mac" on Linux; a trusted network engine is labelled
   "Network" rather than "On this Mac".
 
@@ -56,19 +55,21 @@ clean-machine install.
   read the workspace on any platform. Attachments are the supported way to give a bot file content;
   workspace work belongs to a task or project chat.
 
-## Linux command sandbox
+## Linux command sandbox — separate work, not in this change
 
-The bubblewrap backend is functional and conformance-tested, but it stays **opt-in**
-(`TENSORFOLD_LINUX_SANDBOX=1`) rather than defaulting on, because three deviations from the macOS
-sandbox profile remain:
+Per the maintainer's review, the bubblewrap backend is not part of this client portability change:
+commands stay refused on Linux until the git and worktree gaps are closed. The implementation and its
+conformance test are preserved on the `sandbox-followup` branch for a separate PR. It remains
+**opt-in** (`TENSORFOLD_LINUX_SANDBOX=1`) because three deviations from the macOS sandbox profile
+remain:
 
 1. Creating a brand-new `.git` where none exists cannot be denied; existing repositories pin `.git`
    against rename and pin `config`, `config.worktree`, `hooks` and `info` read-only.
 2. Nested repositories and submodule gitdirs below the workspace root are not pinned.
 3. A worktree `.git` pointer file is mounted writable, so its external gitdir is not protected.
 
-Without the opt-in, Linux `run_command` keeps the existing fail-closed behavior; the
-development-only `VONTRA_ALLOW_UNSANDBOXED_COMMANDS=1` escape hatch is unchanged. Details and review
+On this branch the Linux backend is absent entirely, so `run_command` keeps the existing fail-closed
+behavior; the development-only `VONTRA_ALLOW_UNSANDBOXED_COMMANDS=1` escape hatch is unchanged. Details and review
 history: [SANDBOX-REVIEW.md](SANDBOX-REVIEW.md).
 
 ## Connecting to a Mac engine

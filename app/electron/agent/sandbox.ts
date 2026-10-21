@@ -6,7 +6,6 @@ import path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { approvalPolicyScope, isReadOnlyShellCommand } from './approval-policy'
 import { commandShell, commandShellArgs } from './cli-path'
-import { canUseLinuxSandbox, linuxSandboxArgv, linuxSandboxBinary } from './linux-sandbox'
 import { commandApprovalReason } from './command-policy'
 import { hostGitEnv } from './host-git-env'
 import { redactCommandStreams } from './command-output-redaction'
@@ -75,7 +74,7 @@ export interface SandboxArtifactBundle {
   command: string
   cwd: string
   profile: SandboxProfileId | 'unsandboxed'
-  implementation: 'macos-sandbox-exec' | 'linux-bwrap' | 'unsandboxed'
+  implementation: 'macos-sandbox-exec' | 'unsandboxed'
   inputSnapshot: SandboxFileArtifact[]
   outputFiles: SandboxFileArtifact[]
   screenshots: SandboxFileArtifact[]
@@ -91,7 +90,7 @@ export interface SandboxedCommandResult {
   stderr: string
   sandboxed: boolean
   profile: SandboxProfileId | 'unsandboxed'
-  implementation: 'macos-sandbox-exec' | 'linux-bwrap' | 'unsandboxed'
+  implementation: 'macos-sandbox-exec' | 'unsandboxed'
   /** Number of value-level secrets removed from stdout/stderr before this result left the sandbox. */
   redactionCount?: number
   artifacts?: SandboxArtifactBundle
@@ -359,20 +358,6 @@ export async function runSandboxedCommand(command: string, options: SandboxedCom
         sandboxed: true,
         profile,
         implementation: 'macos-sandbox-exec',
-        signal: options.signal,
-      })
-      return attachSandboxArtifacts(command, cwd, result, baseline)
-    }
-    if (canUseLinuxSandbox()) {
-      const definition = SANDBOX_PROFILES[profile]
-      const bwrapArgv = linuxSandboxArgv(cwd, { allowCwdWrite: definition.allowCwdWrite, allowNetwork })
-      const result = await runShell([linuxSandboxBinary()!, ...bwrapArgv, commandShell(), ...commandShellArgs(), command], {
-        cwd,
-        timeoutMs: options.timeoutMs,
-        maxBuffer: options.maxBuffer,
-        sandboxed: true,
-        profile,
-        implementation: 'linux-bwrap',
         signal: options.signal,
       })
       return attachSandboxArtifacts(command, cwd, result, baseline)

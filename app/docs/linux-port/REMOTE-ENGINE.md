@@ -57,14 +57,9 @@ Then use `http://127.0.0.1:18080/v1` in the provider.
 
 ## What the app classifies each choice as
 
-The **TensorFold** preset marks its provider `trustedNetwork`, so it is treated like a local engine
-— bots, phone-guard and other local-only features work — but only while its address stays loopback,
-RFC1918 private, IPv6 unique-local or an mDNS `.local` name. A public address stays external even
-with the mark, and any other provider (including a hand-added LAN address) remains external, which
-restricts it to planning-only work. This is a deliberate product distinction: the preset is for
-*your own* engine on *your* network.
-
-A tunnel keeps the endpoint loopback, which is implicitly trusted.
+**A LAN endpoint is external by design**, whatever preset added it: the provider is planning-only,
+so features that require a local model (bots, phone guard) do not run against it. A tunnel keeps the
+endpoint on loopback, where it is implicitly trusted and those features work.
 
 ## Limits
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { assertSafeLinuxSmokeTemp, linuxSmokeEnvironment, resolvePackagedLinuxExecutable } from './smoke-packaged-linux.mjs'
+import { assertSafeLinuxSmokeTemp, linuxSmokeEnvironment, resolvePackagedLinuxAppImage, resolvePackagedLinuxExecutable } from './smoke-packaged-linux.mjs'
 
 assert.equal(assertSafeLinuxSmokeTemp('/tmp', ['/home/example']), '/tmp')
 assert.throws(() => assertSafeLinuxSmokeTemp('tmp', ['/home/example']), /absolute temporary directory/)
@@ -39,6 +39,13 @@ try {
   assert.equal(resolved, path.join(root, 'release', 'linux', 'linux-unpacked', 'tensorfold-studio'))
   await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'tensorfold-studio', build: { linux: { executableName: 'tensorfold' } } }))
   assert.equal(await resolvePackagedLinuxExecutable(root, 'linux', 'x64'), path.join(root, 'release', 'linux', 'linux-unpacked', 'tensorfold'))
+  // AppImage resolution: exactly one built image, and errors are actionable.
+  await assert.rejects(() => resolvePackagedLinuxAppImage(root, 'linux', 'x64'), /Expected exactly one built AppImage/)
+  await mkdir(path.join(root, 'release', 'linux'), { recursive: true })
+  await writeFile(path.join(root, 'release', 'linux', 'TensorFold-1.0.0-linux-x86_64.AppImage'), 'stub')
+  assert.equal(await resolvePackagedLinuxAppImage(root, 'linux', 'x64'), path.join(root, 'release', 'linux', 'TensorFold-1.0.0-linux-x86_64.AppImage'))
+  await writeFile(path.join(root, 'release', 'linux', 'TensorFold-1.0.1-linux-x86_64.AppImage'), 'stub')
+  await assert.rejects(() => resolvePackagedLinuxAppImage(root, 'linux', 'x64'), /found 2/)
 } finally {
   await rm(root, { recursive: true, force: true })
 }

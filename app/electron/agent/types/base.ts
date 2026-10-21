@@ -109,12 +109,6 @@ export interface Provider {
   kind?: 'cloud' | 'local'
   /** Transport may be loopback forwarding; computation still leaves this device. */
   remoteCompute?: true
-  /**
-   * The user declared this endpoint as their own machine on a private network (a TensorFold
-   * engine on the LAN). It is then treated like a local engine, but only while the address stays
-   * loopback or private; a public address is always external.
-   */
-  trustedNetwork?: true
   source?: 'openai' | 'openrouter' | 'ai-gateway' | 'ollama' | 'lmstudio' | 'omlx' | 'tensorfold' | 'custom'
   cliPath?: string
   cliProfile?: string
