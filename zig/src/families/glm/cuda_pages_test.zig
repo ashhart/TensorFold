@@ -137,6 +137,18 @@ test "a follower maps rank 0's ids, and refuses ids past its pool or a slot that
     try expect(p.pool.idle()); // a follower's pool lends nothing
 }
 
+test "a follower refuses rank 0's pool when its KV page has other bytes, and makes no pool" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    const more = l.pageBytes() + 1088 * 512; // rank 0 with one more paged layer
+    try std.testing.expectError(error.RankMismatch, pages_mod.Pages.follow(std.testing.allocator, &f.e, 2, 8, more));
+    try expectEqual(@as(usize, 0), F.live); // no arena, no paged sequence
+    const p = try pages_mod.Pages.follow(std.testing.allocator, &f.e, 2, 8, l.pageBytes());
+    defer f.deinit(p);
+    try expect(!p.leader and p.pool.total() == 8);
+}
+
 test "TF_KV_POISON: every page a stream takes is filled with NaN before its rows are written" {
     var f: Fake = undefined;
     try f.init(std.testing.allocator);

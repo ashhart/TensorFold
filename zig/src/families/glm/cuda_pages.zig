@@ -71,6 +71,16 @@ pub const Pages = struct {
         return p;
     }
 
+    /// Another rank: the pool rank 0's `pool` step names; a page of other bytes than rank 0's is error.RankMismatch.
+    pub fn follow(gpa: std.mem.Allocator, e: *Engine, streams: usize, pages: usize, page_bytes: u64) !*Pages {
+        const l = try layout(gpa, e, 0);
+        if (l.pageBytes() != page_bytes) {
+            if (!@import("builtin").is_test) std.log.err("rank {d}: a KV page is {d} bytes here and {d} on rank 0", .{ e.share.rank, l.pageBytes(), page_bytes });
+            return error.RankMismatch;
+        }
+        return init(gpa, e, l, streams, pages, false);
+    }
+
     fn poisoned() bool {
         const v = std.c.getenv("TF_KV_POISON") orelse return false;
         return std.mem.eql(u8, std.mem.span(v), "1");

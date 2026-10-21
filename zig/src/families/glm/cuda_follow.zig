@@ -325,12 +325,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
             },
             .pool => {
                 if (e.pages != null) return error.BadStep;
-                const l = try pages_mod.layout(e.gpa, e, 0);
-                if (l.pageBytes() != h.seed) {
-                    std.log.err("rank {d}: a KV page is {d} bytes here and {d} on rank 0", .{ e.share.rank, l.pageBytes(), h.seed });
-                    return error.RankMismatch;
-                }
-                e.pages = try pages_mod.Pages.init(e.gpa, e, l, h.depth, @intCast(h.a), false);
+                e.pages = try pages_mod.Pages.follow(e.gpa, e, h.depth, @intCast(h.a), h.seed);
             },
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
