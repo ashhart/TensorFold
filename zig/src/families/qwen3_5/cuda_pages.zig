@@ -28,9 +28,9 @@ fn mostPages(capacity: usize, tokens: usize) usize {
     return (capacity + window_rows + tokens - 1) / tokens;
 }
 
-/// A lane's table; its keys and values a token; its state, rollback copy, log and tap ring a run; a kept state.
-pub fn layout(e: *const Engine, capacity: usize, tokens: usize) kv.Layout {
-    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes(), .run_bytes = Cache.runBytes(e) };
+/// A lane's table and `fixed` bytes; its keys and values a token; a run of its state, log, taps and a `ring`-byte ring.
+pub fn layout(e: *const Engine, capacity: usize, tokens: usize, ring: usize, fixed: usize) kv.Layout {
+    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + fixed, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes(), .run_bytes = Cache.runBytes(e, ring) };
 }
 
 /// One pool lane: a cache whose table maps its stream's pages, that stream's lease and its run's first page.
@@ -41,19 +41,20 @@ pub const Pages = struct {
     e: *Engine,
     layout: kv.Layout,
     capacity: usize,
+    ring: usize,
     pool: kv.Pool,
     arena: cuda.DeviceBuffer,
     lanes: []Lane,
 
-    /// `streams` lanes and `pages` pages, made and touched now.
-    pub fn init(gpa: std.mem.Allocator, e: *Engine, capacity: usize, tokens: usize, streams: usize, pages: usize) !*Pages {
-        const l = layout(e, capacity, tokens);
+    /// `streams` lanes and `pages` pages of layout `l`, made and touched now; each run holds a `ring`-byte ring.
+    pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, capacity: usize, ring: usize, streams: usize, pages: usize) !*Pages {
+        const tokens: usize = l.page_tokens;
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
         var arena = try cuda.DeviceBuffer.alloc(e.d, pages * l.pageBytes());
         errdefer arena.free();
         try arena.fill8(0, null); // committed now (the driver commits on first touch)
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .pool = try kv.Pool.init(gpa, pages, l.pageBytes()), .arena = arena, .lanes = &.{} };
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, l.pageBytes()), .arena = arena, .lanes = &.{} };
         errdefer p.pool.deinit();
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
@@ -113,7 +114,7 @@ pub const Pages = struct {
         errdefer p.pool.releaseRun(run, k);
         var up: Upload = .{ .p = p, .cache = x.cache };
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
-        try x.cache.mapRun(p.e, p.arena.ptr + run * p.layout.pageBytes());
+        try x.cache.mapRun(p.e, p.arena.ptr + run * p.layout.pageBytes(), k * p.layout.pageBytes(), p.ring);
         try x.cache.reset(p.e);
         x.cache.paged.?.ids = x.lease.ids.items;
         x.cache.cap = n * p.layout.page_tokens;
