@@ -34,6 +34,9 @@ const Lane = struct {
     images: ?cuda.DeviceBuffer = null, // the prompt's images through the embedder, while its pass runs
 };
 
+/// A drafter's context beside a kept state: its bytes at a position, and its copy into the state.
+pub const Keeper = struct { ctx: *anyopaque, bytes: *const fn (*anyopaque, usize) u64, keep: *const fn (*anyopaque, *const Stream, *snap.Saved) anyerror!void };
+
 /// A stream's rows in the last forward: rows [row, row + rows) at positions [start, start + rows) while gen holds.
 const Tap = struct { row: usize = 0, start: u64 = 0, rows: usize = 0, gen: u64 = 0 };
 
@@ -54,6 +57,7 @@ pub const Gemma = struct {
     gen: u64 = 1, // forwards run: a tap is current while its gen is this
     tapped: bool = false, // a drafter reads the last layer's rows (prepare_features)
     vision: ?*cv.Vision = null, // --vision: the embedder a prompt's images go through
+    keeper: ?Keeper = null, // a drafter whose context a kept prompt state carries (DFlash's)
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -103,37 +107,43 @@ pub const Gemma = struct {
 
     const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true, .prepare_features = prepareFeatures, .features = features, .prefill_features = prefillFeatures };
 
-    /// The drafter's taps: the last layer's output (before the final norm), the only one a forward keeps.
+    /// The drafter's taps: those layers' outputs (before the next norm), kept by every forward from now on.
     fn prepareFeatures(ptr: *anyopaque, taps: []const u32) anyerror!void {
         const x = self(ptr);
-        if (taps.len != 1 or taps[0] + 1 != x.m.layers) return error.GemmaTapNotServed;
+        if (x.lanes.count() != 0) return error.TapsAfterStreams;
+        try x.m.setTaps(taps);
         x.tapped = true;
+    }
+
+    fn tapsMatch(x: *const Gemma, taps: []const u32) bool {
+        return x.tapped and std.mem.eql(u32, taps, x.m.taps[0..x.m.tap_count]);
     }
 
     /// Rows [start, start + count) of the stream's last forward, on the device until the next forward.
     fn features(ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
         const x = self(ptr);
-        if (!x.tapped or taps.len != 1 or taps[0] + 1 != x.m.layers) return error.GemmaTapNotServed;
+        if (!x.tapsMatch(taps)) return error.GemmaTapNotServed;
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         return x.featuresOf(l.tap, start, count);
     }
 
     fn featuresOf(x: *const Gemma, t: Tap, start: u64, count: u32) !be.Features {
         if (t.gen != x.gen or start < t.start or start + count > t.start + t.rows or count == 0) return error.RowsNotHeld;
-        const width = x.m.geo.hidden * 2;
-        return .{ .buffer = x.m.s.h[0], .offset = (t.row + start - t.start) * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+        const width = x.m.tap_count * x.m.geo.hidden * 2;
+        return .{ .buffer = x.m.taps_buf.?.ptr, .offset = (t.row + start - t.start) * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
     }
 
     /// The prompt pass, `sink` taking each chunk's rows as the chunk is made.
     fn prefillFeatures(ptr: *anyopaque, s: *Stream, taps: []const u32, sink: be.FeatureSink) anyerror!void {
         const x = self(ptr);
-        if (!x.tapped or taps.len != 1 or taps[0] + 1 != x.m.layers) return error.GemmaTapNotServed;
+        if (!x.tapsMatch(taps)) return error.GemmaTapNotServed;
         const l = try x.opening(s);
         errdefer x.dropLane(s);
         while (true) {
             const at = l.fill.?;
-            const done = try x.chunk(s, l);
+            const done = try x.chunk(s, l, true);
             try sink.take(sink.ptr, s, try x.featuresOf(l.tap, at, @intCast(l.tap.rows)), at);
+            x.marked(s, at + l.tap.rows);
             if (done) return;
         }
     }
@@ -191,7 +201,10 @@ pub const Gemma = struct {
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
-        return snap.save(x.gpa, x.m, x.s, l.slot, at);
+        const k = try snap.save(x.gpa, x.m, x.s, l.slot, at);
+        errdefer snap.drop(x.gpa, x.s, k);
+        if (x.keeper) |kp| try kp.keep(kp.ctx, s, k);
+        return k;
     }
 
     pub fn restoreState(x: *Gemma, owner: ?*anyopaque, k: *const snap.Saved) !void {
@@ -273,7 +286,8 @@ pub const Gemma = struct {
     fn resumeAt(x: *Gemma, s: *Stream, l: *const Lane, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         const k: *const snap.Saved = @ptrCast(@alignCast(saved));
-        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or insideImage(s, k.at)) {
+        // a drafter that keeps context resumes only a state that carries it
+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or insideImage(s, k.at) or (x.keeper != null and s.drafts and k.draft == null)) {
             s.reuse_failed = true;
             return 0;
         }
@@ -286,7 +300,7 @@ pub const Gemma = struct {
     }
 
     /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row's logits are written.
-    fn chunk(x: *Gemma, s: *Stream, l: *Lane) !bool {
+    fn chunk(x: *Gemma, s: *Stream, l: *Lane, streamed: bool) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
@@ -323,15 +337,21 @@ pub const Gemma = struct {
                 l.images = null;
             }
         }
-        if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
+        if (!streamed) x.marked(s, end); // else after the drafter's absorb of the chunk (prefillFeatures)
         return done;
+    }
+
+    /// The prompt cache's mark at `end`: the state there is copied (with a drafter's context, once it holds it).
+    fn marked(x: *Gemma, s: *Stream, end: usize) void {
+        _ = x;
+        if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
         const l = try x.opening(s);
         errdefer x.dropLane(s);
-        while (!try x.chunk(s, l)) {}
+        while (!try x.chunk(s, l, false)) {}
     }
 
     fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
@@ -339,7 +359,7 @@ pub const Gemma = struct {
         const going = if (x.lanes.getPtr(s)) |l| l.fill != null else false;
         const l = if (going) x.lanes.getPtr(s).? else try x.opening(s);
         errdefer x.dropLane(s);
-        return x.chunk(s, l);
+        return x.chunk(s, l, false);
     }
 
     fn handle(x: *Gemma) usize {

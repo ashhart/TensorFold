@@ -61,6 +61,10 @@ pub const Model = struct {
     /// Decode forwards of n rows as CUDA graphs, captured at their first use ([n]; null: not yet, or graphs off).
     graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
     graphed: bool = true,
+    /// A drafter's tapped layers: each one's output rows (before the next norm) at taps_buf [rows, taps, hidden].
+    taps: [8]u32 = undefined,
+    tap_count: usize = 0,
+    taps_buf: ?DeviceBuffer = null,
 
     const Scratch = struct { ids: u64, pos: u64, slot: u64, hi: u64, h: [2]u64, n: u64, xs: u64, q: u64, k: u64, v: u64, qr: u64, kr: u64, vr: u64, att: u64, o: u64, gate: u64, up: u64, act: u64, y: u64, part: u64, logits: u64 };
 
@@ -172,6 +176,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         for (&m.graphs) |*g| if (g.*) |*e| e.deinit();
+        if (m.taps_buf) |*b| b.free();
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
         m.gpa.free(m.kc);
@@ -180,6 +185,21 @@ pub const Model = struct {
 
     fn upload(m: *const Model, s: cuda.Stream, dst: u64, bytes: []const u8) !void {
         try m.d.check(m.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, s.handle), "cuMemcpyHtoDAsync");
+    }
+
+    /// The layers whose outputs every forward keeps for a drafter (before any graph is captured with the old set).
+    pub fn setTaps(m: *Model, taps: []const u32) !void {
+        if (taps.len == 0 or taps.len > m.taps.len) return error.GemmaTapNotServed;
+        for (taps, 0..) |t, i| if (t >= m.layers or (i > 0 and t <= taps[i - 1])) return error.GemmaTapNotServed;
+        if (m.taps_buf) |*b| b.free();
+        m.taps_buf = null;
+        m.taps_buf = try DeviceBuffer.alloc(m.d, prompt_rows * taps.len * m.geo.hidden * 2);
+        @memcpy(m.taps[0..taps.len], taps);
+        m.tap_count = taps.len;
+        for (&m.graphs) |*g| if (g.*) |*e| { // captured without the tap copies
+            e.deinit();
+            g.* = null;
+        };
     }
 
     /// x [rows, k] through `l` into out [rows, n]: a prompt chunk's GEMM, or decode rows on their group sums `xs`.
@@ -317,6 +337,10 @@ pub const Model = struct {
         try m.project(k, s, l.down, x.act, x.xs, x.y, rows, prompt);
         const next = if (i + 1 < m.layers) m.w.layers[i + 1].input_norm else m.w.final_norm;
         try k.norms.addRmsTail(s, x.y, x.h[1], next, x.h[0], x.n, x.xs, rows, h, cfg.eps, .{ .round = true, .branch = l.post_feedforward, .scalar = l.scalar });
+        if (std.mem.indexOfScalar(u32, m.taps[0..m.tap_count], @intCast(i))) |j| {
+            const p: cuda.abi.Memcpy2D = .{ .src = x.h[0], .src_pitch = h * 2, .dst = m.taps_buf.?.ptr + j * h * 2, .dst_pitch = m.tap_count * h * 2, .width = h * 2, .height = rows };
+            try m.d.check(m.d.api.cuMemcpy2DAsync_v2(&p, s.handle), "cuMemcpy2DAsync");
+        }
     }
 };
 

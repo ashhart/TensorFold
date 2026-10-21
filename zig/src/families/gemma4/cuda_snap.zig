@@ -5,7 +5,7 @@ const cfg = @import("cuda_config.zig");
 const fwd = @import("cuda_forward.zig");
 
 /// A kept state: per layer K then V, global layers' positions [0, at), sliding layers' last positions in order.
-pub const Saved = struct { at: u32, buf: cuda.DeviceBuffer };
+pub const Saved = struct { at: u32, buf: cuda.DeviceBuffer, draft: ?cuda.DeviceBuffer = null };
 
 /// Positions a sliding layer keeps at `at`.
 fn tail(at: usize) usize {
@@ -71,6 +71,7 @@ pub fn restore(m: *const fwd.Model, s: cuda.Stream, slot: usize, k: *const Saved
 pub fn drop(gpa: std.mem.Allocator, s: cuda.Stream, k: *Saved) void {
     s.synchronize() catch {};
     k.buf.free();
+    if (k.draft) |*b| b.free();
     gpa.destroy(k);
 }
 

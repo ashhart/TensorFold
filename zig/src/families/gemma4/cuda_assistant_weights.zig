@@ -180,29 +180,29 @@ pub const Weights = struct {
     }
 };
 
-const Loader = struct {
+pub const Loader = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     s: cuda.Stream,
     k: *const kern.Kernels,
     ck: *core.checkpoint.Checkpoint,
-    w: *Weights,
+    bufs: *std.ArrayList(cuda.DeviceBuffer), // owns what it allocates
 
-    fn keep(x: *Loader, b: cuda.DeviceBuffer) !u64 {
+    pub fn keep(x: *Loader, b: cuda.DeviceBuffer) !u64 {
         errdefer {
             var y = b;
             y.free();
         }
-        try x.w.buffers.append(x.gpa, b);
+        try x.bufs.append(x.gpa, b);
         return b.ptr;
     }
 
-    fn vector(x: *Loader, name: []const u8, len: usize) !u64 {
+    pub fn vector(x: *Loader, name: []const u8, len: usize) !u64 {
         return x.keep(try cuda.DeviceBuffer.fromHost(x.d, (try x.ck.expect(name, .bf16, &.{len})).bytes));
     }
 
     /// An n-by-k bf16 matrix quantized to MLX affine 4/64 on every core, packed into qlinear's tiles.
-    fn affine4(x: *Loader, name: []const u8, n: usize, k: usize) !Affine4 {
+    pub fn affine4(x: *Loader, name: []const u8, n: usize, k: usize) !Affine4 {
         const t = try x.ck.expect(name, .bf16, &.{ n, k });
         const src = std.mem.bytesAsSlice(u16, @as([]align(1) const u8, t.bytes));
         const host = try x.gpa.alloc(u16, n * k);
@@ -241,7 +241,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     defer ck.close();
     var w: Weights = .{ .pre = undefined, .post = undefined, .head = undefined, .norm = 0, .layers = undefined };
     errdefer w.deinit(gpa);
-    var x: Loader = .{ .gpa = gpa, .d = d, .s = s, .k = k, .ck = &ck, .w = &w };
+    var x: Loader = .{ .gpa = gpa, .d = d, .s = s, .k = k, .ck = &ck, .bufs = &w.buffers };
     const hid = c.hidden;
     w.pre = try x.affine4("pre_projection.weight", hid, 2 * geo.hidden);
     w.post = try x.affine4("post_projection.weight", geo.hidden, hid);
