@@ -281,6 +281,7 @@ pub fn run(gpu: check.Gpu) !void {
     std.debug.print("PASS gradient component suites (FP64 and finite-difference checks); resource receipts still required\n", .{});
     const t1 = check.now(gpu.io);
     try @import("contract_qwen_served.zig").run(gpu);
+    try @import("contract_qwen_pages.zig").run(gpu);
     try @import("contract_qwen_learning.zig").numerical(gpu);
     const lim = try live(gpu);
     const t2 = check.now(gpu.io);

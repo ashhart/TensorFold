@@ -394,10 +394,9 @@ extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfl
 struct StoreBf16 {
     int layer, kvh;
     __device__ __forceinline__ void operator()(const Seg& sg, int h, int slot, int d, __nv_bfloat16 k, __nv_bfloat16 v) const {
-        __nv_bfloat16* keys = reinterpret_cast<__nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * kvh * sg.cap * HD;
-        const size_t dst = ((size_t)h * sg.cap + slot) * HD + d;
-        keys[dst] = k;
-        keys[(size_t)kvh * sg.cap * HD + dst] = v;
+        __nv_bfloat16* kv = reinterpret_cast<__nv_bfloat16*>(sg.kv);
+        kv[kv_row(sg, kvh, layer, 0, h, slot) + d] = k;
+        kv[kv_row(sg, kvh, layer, 1, h, slot) + d] = v;
     }
 };
 
@@ -434,8 +433,7 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
         }
         return;
     }
-    const __nv_bfloat16* K = reinterpret_cast<const __nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * KVH * sg.cap * HD;
-    const __nv_bfloat16* V = K + (size_t)KVH * sg.cap * HD;
+    const __nv_bfloat16* KV = reinterpret_cast<const __nv_bfloat16*>(sg.kv);
     float q[DPL], o[DPL];
 #pragma unroll
     for (int i = 0; i < DPL; i++) {
@@ -445,7 +443,7 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
     float mx = -INFINITY, l = 0.0f;
     for (int t = k0; t < k1; t++) {
         const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
-        const uint4 kw = *reinterpret_cast<const uint4*>(K + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
+        const uint4 kw = *reinterpret_cast<const uint4*>(KV + kv_row(sg, KVH, layer, 0, h, pos) + lane * DPL);
         const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw);
         float dot = 0.0f;
 #pragma unroll
@@ -454,7 +452,7 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
         const float mn = fmaxf(mx, s);
         const float a = __expf(mx - mn), b = __expf(s - mn);
         l = l * a + b;
-        const uint4 vw = *reinterpret_cast<const uint4*>(V + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
+        const uint4 vw = *reinterpret_cast<const uint4*>(KV + kv_row(sg, KVH, layer, 1, h, pos) + lane * DPL);
         const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw);
 #pragma unroll
         for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
