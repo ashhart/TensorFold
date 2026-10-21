@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const glue = @import("cuda_glue.zig");
+const latent = @import("cuda_latent.zig");
 
 /// sparse.POOL, TOPK_POOLS, SELECT_LIST, SCORE_LOOP_FROM, SCORE_LOOP; geometry.MLA_SELECT_ROWS.
 pub const pool = 4;
@@ -19,12 +20,12 @@ fn cdiv(a: usize, b: usize) usize {
 }
 
 /// sparse.index_update: the window's LayerNormed index keys and gates into ik and ig at pos, completed pools into pk.
-pub fn indexUpdate(set: glue.Set, stream: cuda.Stream, k_raw: u64, k_stride: usize, gate: u64, ln_w: u64, ln_b: u64, ape: u64, ik: u64, ig: u64, pk: u64, pos: u64, rows: usize) !void {
+pub fn indexUpdate(set: glue.Set, stream: cuda.Stream, k_raw: u64, k_stride: usize, gate: u64, ln_w: u64, ln_b: u64, ape: u64, ik: u64, ig: u64, pk: u64, t: latent.Table, pos: u64, rows: usize) !void {
     var a: cuda.Args = .{};
     inline for (.{ k_raw, @as(i64, @intCast(k_stride)), gate, ln_w, ln_b, ik, ig, pos, @as(f32, 1e-6) }) |v| a.add(v);
     try cuda.launch.launch(set.glue.index_write, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 32 } }, stream, &a);
     var b: cuda.Args = .{};
-    inline for (.{ ik, ig, ape, pk, pos, @as(i64, @intCast(rows)) }) |v| b.add(v);
+    inline for (.{ ik, ig, ape, pk, pos, @as(i64, @intCast(rows)), t.pt, @as(i64, @intCast(t.ps)) }) |v| b.add(v);
     try cuda.launch.launch(set.glue.pool_keys, .{ .grid = .{ .x = @intCast(rows / 4 + 2) }, .block = .{ .x = 32 } }, stream, &b);
 }
 
@@ -49,11 +50,11 @@ pub fn headScale(heads: usize) f32 {
 pub const Scratch = struct { scores: u64, ls: u64, li: u64, pools: u64, at: u64 };
 
 /// sparse.select_tokens: each row's tokens (i32 [rows][width], ascending, -1 padded), count 0 under the dense limit.
-pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64) !void {
-    return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, pos, host_pos, rows, heads, d, np_max_cap, s, tokens, counts, null);
+pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64) !void {
+    return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, t, pos, host_pos, rows, heads, d, np_max_cap, s, tokens, counts, null);
 }
 
-pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64, profile: ?*@import("cuda_prof.zig").Prof) !void {
+pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64, profile: ?*@import("cuda_prof.zig").Prof) !void {
     const prof = @import("cuda_prof.zig");
     const np_max = poolBucket(host_pos, rows, np_max_cap);
     const b = @min(rows, select_rows);
@@ -73,7 +74,7 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
         }
         const nb = cdiv(scoreColumns(host_pos + a, n, np_max), 64);
         var sa: cuda.Args = .{};
-        inline for (.{ qi + a * heads * d * 2, wts + a * w_stride * 2, @as(i64, @intCast(w_stride)), pk, s.scores, at, @as(i64, @intCast(np_max)), @as(i64, @intCast(nb)), @as(f32, @floatCast(std.math.pow(f64, @floatFromInt(d), -0.5))), headScale(heads), @as(i64, @intCast(heads)), @as(c_int, @intCast(loop)) }) |v| sa.add(v);
+        inline for (.{ qi + a * heads * d * 2, wts + a * w_stride * 2, @as(i64, @intCast(w_stride)), pk, s.scores, at, @as(i64, @intCast(np_max)), @as(i64, @intCast(nb)), @as(f32, @floatCast(std.math.pow(f64, @floatFromInt(d), -0.5))), headScale(heads), @as(i64, @intCast(heads)), @as(c_int, @intCast(loop)), t.pt, @as(i64, @intCast(t.ps)) }) |v| sa.add(v);
         if (d != 128 or heads > 32) return error.IndexShape;
         var stamp = prof.span(profile, stream, .index_score);
         try cuda.launch.launch(set.glue.scores, .{ .grid = .{ .x = @intCast(n), .y = @intCast(cdiv(nb, loop)) }, .block = .{ .x = 128 } }, stream, &sa);

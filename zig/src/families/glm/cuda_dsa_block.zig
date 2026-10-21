@@ -35,7 +35,16 @@ pub const Layer = struct {
 };
 
 /// The caches: latent bf16 [capacity][lw], index keys/gates bf16 [capacity][128], pooled keys bf16 [pk_rows][128].
-pub const Caches = struct { lc: u64, ls: u64 = 0, ik: u64, ig: u64, pk: u64, pk_rows: usize };
+pub const Caches = struct {
+    lc: u64,
+    ls: u64 = 0,
+    ik: u64,
+    ig: u64,
+    pk: u64,
+    pk_rows: usize,
+    pt: u64 = 0, // on pages: the stream's table (i32 page ids), lc and pk then this cache's place in page 0; 0: rows
+    ps: u64 = 0, // on pages: bytes from one page to the next
+};
 
 /// The block's scratch for up to `rows` rows.
 pub const Scratch = struct {
@@ -124,11 +133,12 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     v.qa += r0 * l.heads * l.lw * 2;
     v.ol += r0 * l.heads * l.lw * 2;
     v.qi += r0 * ix.heads * ix.d * 2;
+    const t: latent.Table = .{ .pt = c.pt, .ps = c.ps };
     var stamp = prof.span(k.prof, stream, .cache_write);
-    try latent.latentWriteFormat(set, stream, v.lat, l.lw, c.lc, c.ls, pos, rows, l.lw);
+    try latent.latentWriteFormat(set, stream, v.lat, l.lw, c.lc, c.ls, t, pos, rows, l.lw);
     stamp.end();
     stamp = prof.span(k.prof, stream, .index_update);
-    try sparse.indexUpdate(set, stream, v.ikr, kw_rows, v.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, pos, rows);
+    try sparse.indexUpdate(set, stream, v.ikr, kw_rows, v.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, t, pos, rows);
     stamp.end();
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
     if (host_pos < l.dense_limit) {
@@ -137,10 +147,10 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
-        try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.prof);
+        try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, t, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.prof);
         stamp = prof.span(k.prof, stream, .mla);
         defer stamp.end();
-        try latent.sparseAttentionFormat(set, stream, v.qa, c.lc, c.ls, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
+        try latent.sparseAttentionFormat(set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
     }
 }
 
@@ -160,6 +170,6 @@ fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scrat
             at = s.at;
         }
         const off = r0 * l.heads * l.lw * 2;
-        try latent.attentionFormat(k.set, stream, s.qa + off, c.lc, c.ls, at, s.partials, s.ol + off, s.dummy, n, l.heads, l.lw, nch, scale, hb);
+        try latent.attentionFormat(k.set, stream, s.qa + off, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, s.partials, s.ol + off, s.dummy, n, l.heads, l.lw, nch, scale, hb);
     }
 }

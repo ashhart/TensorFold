@@ -109,23 +109,41 @@ test "GLM FP8 KV: real launchers preserve BF16 ABI and pass FP8 scale pointers f
     const set: glue.Set = .{ .glue = &ks };
     const stream: cuda.Stream = .{ .d = &d, .handle = null };
     Launch.n = 0;
-    try latent.latentWriteFormat(set, stream, 100, 512, 200, 0, 300, 3, 512);
-    try latent.latentWriteFormat(set, stream, 100, 512, 200, 400, 300, 3, 512);
+    try latent.latentWriteFormat(set, stream, 100, 512, 200, 0, .{}, 300, 3, 512);
+    try latent.latentWriteFormat(set, stream, 100, 512, 200, 400, .{}, 300, 3, 512);
     try t.expectEqualSlices(usize, &.{ 1, 2 }, Launch.ids[0..2]);
     try t.expectEqualSlices(u32, &.{ 128, 512 }, Launch.blocks[0..2]);
     try t.expectEqual(@as(u64, 400), Launch.scales[1]);
     const p: latent.Partials = .{ .po = 1000, .pm = 2000, .pl = 3000 };
     for ([_]usize{ 16, 32 }) |hb| for ([_]u64{ 0, 400 }) |scale| {
         Launch.n = 0;
-        try latent.attentionFormat(set, stream, 100, 200, scale, 300, p, 500, 600, 3, 32, 512, 1, 0.125, hb);
+        try latent.attentionFormat(set, stream, 100, 200, scale, .{}, 300, p, 500, 600, 3, 32, 512, 1, 0.125, hb);
         try t.expectEqual(@as(usize, if (hb == 16) 3 else 5) + @intFromBool(scale != 0), Launch.ids[0]);
         try t.expectEqual(scale, Launch.scales[0]);
         try t.expectEqual(@as(usize, 7), Launch.ids[1]);
     };
     Launch.n = 0;
-    try latent.sparseAttentionFormat(set, stream, 100, 200, 400, 500, 600, 2051, p, 700, 3, 32, 512, 0.125);
+    try latent.sparseAttentionFormat(set, stream, 100, 200, 400, .{}, 500, 600, 2051, p, 700, 3, 32, 512, 0.125);
     try t.expectEqual(@as(usize, 4), Launch.ids[0]);
     try t.expectEqual(@as(u64, 400), Launch.scales[0]);
+}
+
+test "GLM FP8 KV: an FP8 cache takes no page table, so its writes and reads refuse one before they launch" {
+    const glue = @import("cuda_glue.zig");
+    const latent = @import("cuda_latent.zig");
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Launch.run;
+    var ks: glue.Kernels = undefined;
+    inline for (@typeInfo(glue.Kernels).@"struct".field_names) |name| @field(ks, name) = .{ .d = &d, .handle = @ptrFromInt(10) };
+    const set: glue.Set = .{ .glue = &ks };
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    const paged: latent.Table = .{ .pt = 900, .ps = 6_684_672 };
+    const p: latent.Partials = .{ .po = 1000, .pm = 2000, .pl = 3000 };
+    Launch.n = 0;
+    try t.expectError(error.Fp8OnPages, latent.latentWriteFormat(set, stream, 100, 512, 200, 400, paged, 300, 3, 512));
+    try t.expectError(error.Fp8OnPages, latent.attentionFormat(set, stream, 100, 200, 400, paged, 300, p, 500, 600, 3, 32, 512, 1, 0.125, 16));
+    try t.expectError(error.Fp8OnPages, latent.sparseAttentionFormat(set, stream, 100, 200, 400, paged, 500, 600, 2051, p, 700, 3, 32, 512, 0.125));
+    try t.expectEqual(@as(usize, 0), Launch.n);
 }
 
 const Ops = struct {

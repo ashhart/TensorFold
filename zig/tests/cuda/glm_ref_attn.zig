@@ -74,7 +74,7 @@ fn attend(r: *Rig, set: glm.glue.Set, q: u64, cache: u64, pos: usize, rows: usiz
     const out = try r.zeros(rows * heads * lw * 2);
     const p0: i32 = @intCast(pos);
     const at = try r.dev(std.mem.asBytes(&p0));
-    try latent.attention(set, r.s, q, cache, at, try partials(r, nch, rows), out, try r.zeros(4), rows, heads, lw, nch, scale, hb);
+    try latent.attention(set, r.s, q, cache, .{}, at, try partials(r, nch, rows), out, try r.zeros(4), rows, heads, lw, nch, scale, hb);
     return out;
 }
 
@@ -142,19 +142,19 @@ pub fn sparse(r: *Rig, set: glm.glue.Set) !void {
     const dcnt = try r.dev(std.mem.sliceAsBytes(cnt));
     const out = try r.zeros(rows * heads * lw * 2);
     const nch = latent.chunksFor(w);
-    try latent.sparseAttention(set, r.s, dq, c.dev, dtok, dcnt, w, try partials(r, nch, rows), out, rows, heads, lw, scale);
+    try latent.sparseAttention(set, r.s, dq, c.dev, .{}, dtok, dcnt, w, try partials(r, nch, rows), out, rows, heads, lw, scale);
     const ref64 = try reference(r, q, c.f64s, sets, scale);
     var name: [128]u8 = undefined;
     try ref.closeCols(r, try std.fmt.bufPrint(&name, "latent sparse attention {d} rows, up to {d} of {d} keys", .{ rows, w, keys }), out, false, ref64.want, ref64.tol, lw);
     const all = try r.back(out, rows * heads * lw * 2);
     for ([_]usize{ 0, 37, 69 }) |row| {
         const one = try r.zeros(heads * lw * 2);
-        try latent.sparseAttention(set, r.s, dq + row * heads * lw * 2, c.dev, dtok + row * w * 4, dcnt + row * 4, w, try partials(r, nch, 1), one, 1, heads, lw, scale);
+        try latent.sparseAttention(set, r.s, dq + row * heads * lw * 2, c.dev, .{}, dtok + row * w * 4, dcnt + row * 4, w, try partials(r, nch, 1), one, 1, heads, lw, scale);
         try sameRow(r, try std.fmt.bufPrint(&name, "latent sparse attention: row {d} alone equals its row in the {d}-row call", .{ row, rows }), all, one, row);
     }
     const none: i32 = 0;
     const left = try r.zeros(heads * lw * 2);
-    try latent.sparseAttention(set, r.s, dq, c.dev, dtok, try r.dev(std.mem.asBytes(&none)), w, try partials(r, nch, 1), left, 1, heads, lw, scale);
+    try latent.sparseAttention(set, r.s, dq, c.dev, .{}, dtok, try r.dev(std.mem.asBytes(&none)), w, try partials(r, nch, 1), left, 1, heads, lw, scale);
     for (try r.back(left, heads * lw * 2)) |b| try check.expect(b == 0xff, "latent sparse attention: a row with count 0 is left alone", .{});
     check.pass("latent sparse attention over up to {d} tokens: within float64 tolerance, one-row windows equal, count 0 left alone", .{w});
 }

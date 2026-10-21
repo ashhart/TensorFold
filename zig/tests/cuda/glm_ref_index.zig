@@ -32,7 +32,7 @@ pub fn selection(r: *Rig, set: glm.glue.Set, ops: cuda.Module) !void {
     const s: sp.Scratch = .{ .scores = try r.zeros(rows * np * 4), .ls = try r.zeros(rows * sp.select_list * 4), .li = try r.zeros(rows * sp.select_list * 4), .pools = try r.zeros(rows * sp.topk_pools * 8), .at = try r.zeros(4) };
     const tokens = try r.zeros(rows * sp.width * 4);
     const counts = try r.zeros(rows * 4);
-    try sp.selectTokens(set, ops, r.s, try r.dev(std.mem.sliceAsBytes(qi)), try r.dev(std.mem.sliceAsBytes(wts)), heads, try r.dev(std.mem.sliceAsBytes(pk)), try r.dev(std.mem.asBytes(&p0)), pos, rows, heads, d, cap, s, tokens, counts);
+    try sp.selectTokens(set, ops, r.s, try r.dev(std.mem.sliceAsBytes(qi)), try r.dev(std.mem.sliceAsBytes(wts)), heads, try r.dev(std.mem.sliceAsBytes(pk)), .{}, try r.dev(std.mem.asBytes(&p0)), pos, rows, heads, d, cap, s, tokens, counts);
     const raw = try r.back(s.scores, rows * np * 4);
     const got = std.mem.bytesAsSlice(f32, raw);
 
