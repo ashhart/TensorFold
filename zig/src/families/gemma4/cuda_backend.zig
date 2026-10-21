@@ -29,7 +29,11 @@ const Lane = struct {
     rule: u64, // sample.cu's Rule, when the stream samples
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
+    tap: Tap = .{},
 };
+
+/// A stream's rows in the last forward: rows [row, row + rows) at positions [start, start + rows) while gen holds.
+const Tap = struct { row: usize = 0, start: u64 = 0, rows: usize = 0, gen: u64 = 0 };
 
 pub const Gemma = struct {
     gpa: std.mem.Allocator,
@@ -45,6 +49,8 @@ pub const Gemma = struct {
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
+    gen: u64 = 1, // forwards run: a tap is current while its gen is this
+    tapped: bool = false, // a drafter reads the last layer's rows (prepare_features)
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -92,7 +98,54 @@ pub const Gemma = struct {
         return .{ .ptr = x, .vtable = &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true, .prepare_features = prepareFeatures, .features = features, .prefill_features = prefillFeatures };
+
+    /// The drafter's taps: the last layer's output (before the final norm), the only one a forward keeps.
+    fn prepareFeatures(ptr: *anyopaque, taps: []const u32) anyerror!void {
+        const x = self(ptr);
+        if (taps.len != 1 or taps[0] + 1 != x.m.layers) return error.GemmaTapNotServed;
+        x.tapped = true;
+    }
+
+    /// Rows [start, start + count) of the stream's last forward, on the device until the next forward.
+    fn features(ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        const x = self(ptr);
+        if (!x.tapped or taps.len != 1 or taps[0] + 1 != x.m.layers) return error.GemmaTapNotServed;
+        const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        return x.featuresOf(l.tap, start, count);
+    }
+
+    fn featuresOf(x: *const Gemma, t: Tap, start: u64, count: u32) !be.Features {
+        if (t.gen != x.gen or start < t.start or start + count > t.start + t.rows or count == 0) return error.RowsNotHeld;
+        const width = x.m.geo.hidden * 2;
+        return .{ .buffer = x.m.s.h[0], .offset = (t.row + start - t.start) * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+    }
+
+    /// The prompt pass, `sink` taking each chunk's rows as the chunk is made.
+    fn prefillFeatures(ptr: *anyopaque, s: *Stream, taps: []const u32, sink: be.FeatureSink) anyerror!void {
+        const x = self(ptr);
+        if (!x.tapped or taps.len != 1 or taps[0] + 1 != x.m.layers) return error.GemmaTapNotServed;
+        const l = try x.opening(s);
+        errdefer x.dropLane(s);
+        while (true) {
+            const at = l.fill.?;
+            const done = try x.chunk(s, l);
+            try sink.take(sink.ptr, s, try x.featuresOf(l.tap, at, @intCast(l.tap.rows)), at);
+            if (done) return;
+        }
+    }
+
+    /// One forward of the model, its rows' taps current until the next.
+    pub fn run(x: *Gemma, chains: []const fwd.Chain, prompt: bool, head0: usize, heads: usize) !void {
+        x.gen += 1;
+        try x.m.forward(x.k, x.s, chains, prompt, head0, heads);
+    }
+
+    /// The stream's cache slot and length, for a drafter reading its caches.
+    pub fn slotOf(x: *const Gemma, s: *const Stream) ?struct { slot: usize, len: u64 } {
+        const l = x.lanes.getPtr(s) orelse return null;
+        return .{ .slot = l.slot, .len = l.len };
+    }
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Gemma) lanes.Model {
@@ -206,7 +259,8 @@ pub const Gemma = struct {
             end = mk;
         };
         const done = end == p.len;
-        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
+        try x.run(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
+        l.tap = .{ .row = 0, .start = at, .rows = end - at, .gen = x.gen };
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(end), .monotonic);
         l.fill = if (done) null else end;
@@ -257,7 +311,8 @@ pub const Gemma = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
-        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
+        try x.run(&.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
+        l.tap = .{ .row = 0, .start = l.len, .rows = 1, .gen = x.gen };
         l.len += 1;
         const h = x.next;
         try x.drawRows(l, x.m.s.logits, 0, 1, position, x.handle(), 0);
@@ -292,10 +347,11 @@ pub const Gemma = struct {
             total += l.rows.items.len;
         }
         if (total > round_rows) return error.RoundTooWide;
-        try x.m.forward(x.k, x.s, chains, false, 0, total);
+        try x.run(chains, false, 0, total);
         var at: usize = 0;
         for (windows, 0..) |w, i| {
             const l = x.lanes.getPtr(w.stream).?;
+            l.tap = .{ .row = at, .start = l.base, .rows = l.rows.items.len, .gen = x.gen };
             try x.drawRows(l, x.m.s.logits, at, l.rows.items.len, w.positions[0], ring + at, i);
             at += l.rows.items.len;
         }

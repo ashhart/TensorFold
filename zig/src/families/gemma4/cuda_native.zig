@@ -7,6 +7,7 @@ const kern = @import("cuda_kernels.zig");
 const fwd = @import("cuda_forward.zig");
 const be = @import("cuda_backend.zig");
 const snap = @import("cuda_snap.zig");
+const asst = @import("cuda_assistant.zig");
 
 /// The registry's entry for one model_type: gemma4_unified (12B) or gemma4 (31B).
 pub fn Family(comptime name: []const u8) type {
@@ -17,8 +18,8 @@ pub fn Family(comptime name: []const u8) type {
         pub const max_segments: u32 = 1;
         pub const prompt_rows: u32 = be.prompt_rows;
         pub const snap_lookahead: u32 = 0;
-        pub const takes_drafter = false;
-        pub const drafter_refusal = "--drafter: Gemma 4 on CUDA loads no drafter yet; serve it without --drafter";
+        pub const takes_drafter = true;
+        pub const openDrafter = native.openDrafter;
         pub const explains_open = true;
         pub const Room = native.Room;
         pub const Options = native.Options;
@@ -150,7 +151,11 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PastContext => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream's caches are in use: retry once another request ends",
-        error.NoDraftHead => "Gemma 4 on CUDA has no draft head yet: drafts come from the prompt's own text only",
+        error.NoDraftHead => "Gemma 4 on CUDA drafts with an assistant loaded by --drafter, or from the prompt's own text",
+        error.GemmaDrafterNotServed => "--drafter: Gemma 4 on CUDA loads the MTP assistant (gemma4_unified_assistant) so far; a DFlash drafter is not built yet",
+        error.AssistantForAnotherTarget => "--drafter: this assistant was trained for another Gemma 4 target (its backbone width or key heads differ)",
+        error.UnsupportedAssistantGeometry, error.UnsupportedAssistantType, error.UnsupportedAssistantRotary, error.UnsupportedAssistantQuantization, error.AssistantOrderedEmbeddingsNotServed => "--drafter: this Gemma 4 assistant's layout is not the stock one this engine serves",
+        error.DrafterBitsUnsupported => "--drafter-bits: the Gemma 4 assistant runs at 4 bits on CUDA",
         error.StructuresUnsupported => "structured output is not built for Gemma 4 on CUDA yet",
         error.NonFiniteLogits => "the model's logits went non-finite at this row: the request is stopped rather than answered from them",
         error.GemmaCudaWidthNotServed => "Gemma 4 on CUDA serves MLX affine 4-bit, group 64 checkpoints so far; other widths are not built yet",
@@ -161,6 +166,23 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         else => null,
     };
 }
+
+/// --drafter: the 12B's MTP assistant over the target's caches (a DFlash drafter is #1048's step 11).
+pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
+    if (bits != 4) return error.DrafterBitsUnsupported;
+    const own: *Owned = @ptrCast(@alignCast(p));
+    if (own.gb.lanes.count() != 0) return error.TapsAfterStreams;
+    if (!try asst.isAssistant(gpa, io, dir)) return error.GemmaDrafterNotServed;
+    const d = try asst.Drafter.init(gpa, io, &own.gb, dir);
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveNone };
+}
+
+fn closeDrafter(p: *anyopaque) void {
+    const d: *asst.Drafter = @ptrCast(@alignCast(p));
+    d.deinit();
+}
+
+fn reserveNone(_: *anyopaque, _: u32) anyerror!void {}
 
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
@@ -173,7 +195,7 @@ fn release(p: *anyopaque) void {
 }
 
 test "every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.GemmaCudaWidthNotServed, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.GemmaCudaWidthNotServed, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);
