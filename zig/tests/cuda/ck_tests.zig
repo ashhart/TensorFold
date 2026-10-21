@@ -162,6 +162,80 @@ fn lane(r: *Rig, q: *const cuda.ck.Ck, n: usize, k: usize) !void {
     check.pass("checkpoint FP8: {d} rows x [{d}, {d}], {d} K slices, prompt byte-equal to rows alone", .{ m, n, k, sk });
 }
 
+/// ck_lane8t: the per-token quantizer against its definition, the 64/128-row tiles against the 16-row, float64's bound.
+fn lane8t(r: *Rig, n: usize, k: usize) !void {
+    const fp8 = @import("core").quant.fp8;
+    var l = try cuda.ck_lane8t.Lane8t.load(r.gpu.d);
+    defer l.unload();
+    const m = 129;
+    const xs = try r.a.alloc(u16, m * k);
+    for (xs, 0..) |*h, i| {
+        const v: f32 = (r.rng.float(f32) * 2 - 1) * @as(f32, if (i / k == 3) 0 else if (i / k == 5) 1e-6 else 4);
+        h.* = @truncate(@as(u32, @bitCast(v)) >> 16);
+    }
+    const x = try r.dev(std.mem.sliceAsBytes(xs));
+    const codes = try r.zeros(m * k);
+    const rs = try r.zeros(m * 4);
+    try l.quantRows(r.s, x, k, m, k, codes, rs);
+    const got = try r.back(codes, m * k);
+    const scales = std.mem.bytesAsSlice(f32, try r.back(rs, m * 4));
+    var bad: usize = 0;
+    const xq = try r.a.alloc(u8, m * k); // the codes in input order (quant8's fragment order undone)
+    for (0..m) |row| {
+        var amax: f32 = 0;
+        for (xs[row * k ..][0..k]) |h| amax = @max(amax, @abs(@as(f32, @bitCast(@as(u32, h) << 16))));
+        const scale = amax / 448.0;
+        if (scales[row] != scale) bad += 1;
+        for (0..k / 16) |grp| for (0..16) |slot| {
+            const q = slot / 4;
+            const j = slot % 4;
+            const kk = grp * 16 + 2 * q + (j % 2) + 8 * (j / 2);
+            const v: f32 = @as(f32, @bitCast(@as(u32, xs[row * k + kk]) << 16));
+            const want = if (scale > 0) fp8.toE4m3(@as(f64, v / scale)) else 0;
+            xq[row * k + kk] = got[row * k + grp * 16 + slot];
+            if (fp8.e4m3(got[row * k + grp * 16 + slot]) != want) bad += 1;
+        };
+    }
+    try check.expect(bad == 0, "ck_lane8t quant: {d} codes or scales differ from the definition", .{bad});
+    // weights e4m3, a scale a column; the 16-row tile is the reference for the others' bytes
+    const wc = try r.a.alloc(u8, n * k);
+    for (wc) |*v| v.* = r.rng.int(u8) & 0x77;
+    const wsrc = try r.dev(wc);
+    const wd = try r.zeros(cuda.modelopt.padded(n) * k);
+    var pk = try cuda.modelopt.Packer.load(r.gpu.d);
+    defer pk.unload();
+    try pk.fp8Lane(r.s, wsrc, wd, n, k);
+    const cs = try floats(r, n, 0.001, 0.01);
+    const w: cuda.ck_lane8t.Weight = .{ .codes = wd, .cs = cs, .n = n, .k = k };
+    var outs: [3]u64 = undefined;
+    for ([_]usize{ 16, 64, 128 }, &outs) |bm, *o| {
+        o.* = try r.zeros(m * n * 2);
+        try l.matmulTile(r.s, codes, rs, m, w, o.*, bm);
+    }
+    const base = try r.back(outs[0], m * n * 2);
+    try check.sameBytes("ck_lane8t 64-row tile", try r.back(outs[1], m * n * 2), base);
+    try check.sameBytes("ck_lane8t 128-row tile", try r.back(outs[2], m * n * 2), base);
+    const csh = std.mem.bytesAsSlice(f32, try r.back(cs, n * 4));
+    var worst: f64 = 0;
+    for (0..m) |row| for (0..n) |col| {
+        var sum: f64 = 0;
+        var mag: f64 = 0;
+        for (0..k) |kk| {
+            const t = fp8.e4m3(xq[row * k + kk]) * fp8.e4m3(wc[col * k + kk]);
+            sum += t;
+            mag += @abs(t);
+        }
+        const want = sum * scales[row] * csh[col];
+        const h = std.mem.readInt(u16, base[(row * n + col) * 2 ..][0..2], .little);
+        const v: f64 = @as(f32, @bitCast(@as(u32, h) << 16));
+        const bound = @abs(want) * 0x1p-8 + (@as(f64, @floatFromInt(k / 32 + 32)) * 0x1p-24 * 1.01) * mag * scales[row] * csh[col] + 3 * 0x1p-24 * @abs(want);
+        if (@abs(v - want) > bound) bad += 1;
+        if (bound > 0) worst = @max(worst, @abs(v - want) / bound);
+    };
+    try check.expect(bad == 0, "ck_lane8t: {d} outputs past float64's bound", .{bad});
+    check.pass("ck_lane8t: per-token quant exact ({d} rows x {d}), 64/128-row tiles byte-equal to 16, float64 bound (worst {d:.3}) [{d}, {d}]", .{ m, k, worst, n, k });
+}
+
 pub fn run(gpu: check.Gpu) !void {
     const major: u32 = @intCast(try gpu.ctx.attribute(.compute_capability_major));
     if (major < 12) {
@@ -189,4 +263,6 @@ pub fn run(gpu: check.Gpu) !void {
     try lane(&r, &q, 192, 256);
     try lane(&r, &q, 192, 2048);
     try lane(&r, &q, 4096, 8192);
+    try lane8t(&r, 256, 5120);
+    try lane8t(&r, 512, 6144);
 }

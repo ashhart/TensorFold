@@ -175,12 +175,17 @@ pub const Ck = struct {
 
     /// bf16 rows [m, k] (`ldx` apart) to NVFP4 under input scale `act`: codes [m][k/2] then scales [m][k/16] at `out`.
     pub fn quant4(c: *const Ck, s: Stream, x: u64, ldx: usize, m: usize, k: usize, act: f32, out: u64) !void {
+        return c.quant4Global(s, x, ldx, m, k, inverse(act), out);
+    }
+
+    /// quant4 under the global scale `g` itself (a compressed-tensors input_global_scale, no reciprocal taken).
+    pub fn quant4Global(c: *const Ck, s: Stream, x: u64, ldx: usize, m: usize, k: usize, g: f32, out: u64) !void {
         var a: launch_.Args = .{};
         a.add(x);
         a.add(@as(i32, @intCast(ldx)));
         a.add(@as(i32, @intCast(m)));
         a.add(@as(i32, @intCast(k)));
-        a.add(inverse(act));
+        a.add(g);
         a.add(out);
         a.add(out + m * k / 2);
         try go(c.quant4_fn, s, .{ (m * (k / 16) + 127) / 128, 1, 1 }, 128, 0, &a);
