@@ -34,7 +34,18 @@ struct Seg {
     unsigned long long before; // exact pre-round state for a one-row in-place update
     int cap, len, row0, rows, tap_rows, taps;
     int delta;                // an image prompt's rotary shift: rows past it rotate at position + delta
+    unsigned long long pt;    // the stream's KV page table (int a page; 0: kv holds cap contiguous rows)
+    unsigned long long ps;    // elements a KV page holds: every attention layer's keys and values of ptok positions
+    int ptok;                 // positions a KV page holds
 };
+
+// Seg.kv's element of layer a's key (s 0) or value (s 1) at pos, head h: cap rows a head, or pos's page's row.
+__device__ __forceinline__ size_t kv_row(const Seg& sg, int kvh, int a, int s, int h, int pos) {
+    const size_t blk = ((size_t)a * 2 + s) * kvh + h;
+    if (sg.pt == 0) return (blk * sg.cap + pos) * HD;
+    const int* pt = reinterpret_cast<const int*>(sg.pt);
+    return (size_t)pt[pos / sg.ptok] * sg.ps + (blk * sg.ptok + pos % sg.ptok) * HD;
+}
 
 // A window row's record of one linear layer (Seg.log).
 struct LogRow {

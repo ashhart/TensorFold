@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
+const caches = @import("cuda_cache.zig");
 
 const Engine = engine.Engine;
 const Cache = engine.Cache;
@@ -90,6 +91,41 @@ const Layout = struct {
     }
 };
 
+/// A piece's device spans: one, or with a page table a run a page (the host copy keeps the contiguous order).
+const Runs = struct {
+    base: u64,
+    pages: ?caches.Paged,
+    page_bytes: usize,
+    in_page: usize,
+    len: usize,
+    page: usize = 0,
+    done: usize = 0,
+
+    const Run = struct { dev: u64, at: usize, len: usize };
+
+    fn of(e: *const Engine, cache: *const Cache, l: Layout, i: usize, p: Piece) Runs {
+        if (!p.kv or cache.paged == null) return .{ .base = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off, .pages = null, .page_bytes = 0, .in_page = 0, .len = p.len };
+        const pg = cache.paged.?;
+        const row = head_dim * 2; // bf16 only: a paged cache refuses fp8 at init
+        std.debug.assert(l.format == .bf16);
+        return .{ .base = pg.base, .pages = pg, .page_bytes = pg.elems(e.g) * 2, .in_page = (i - 1) * pg.tokens * row, .len = p.len };
+    }
+
+    fn next(r: *Runs) ?Run {
+        if (r.done >= r.len) return null;
+        const pg = r.pages orelse {
+            r.done = r.len;
+            return .{ .dev = r.base, .at = 0, .len = r.len };
+        };
+        const span = pg.tokens * head_dim * 2;
+        const n = @min(span, r.len - r.done);
+        const run: Run = .{ .dev = r.base + pg.ids[r.page] * r.page_bytes + r.in_page, .at = r.done, .len = n };
+        r.page += 1;
+        r.done += n;
+        return run;
+    }
+};
+
 /// Whether a request's images match a kept state's: the same identities at the same rows, for every image before `at`.
 pub fn sameImages(kept: []const Seen, request: []const Seen, at: usize) bool {
     var n: usize = 0;
@@ -135,8 +171,8 @@ pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen)
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
-        const dev = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off;
-        if (p.len > 0) try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(copy.host.bytes.ptr + off, dev, p.len, e.stream.handle), "cuMemcpyDtoHAsync");
+        var it = Runs.of(e, cache, l, i, p);
+        while (it.next()) |r| try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(copy.host.bytes.ptr + off + r.at, r.dev, r.len, e.stream.handle), "cuMemcpyDtoHAsync");
         off += p.len;
     }
     try e.stream.synchronize();
@@ -174,8 +210,8 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
-        const dev = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off;
-        if (p.len > 0) try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(dev, copy.host.bytes.ptr + off, p.len, e.stream.handle), "cuMemcpyHtoDAsync");
+        var it = Runs.of(e, cache, l, i, p);
+        while (it.next()) |r| try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(r.dev, copy.host.bytes.ptr + off + r.at, r.len, e.stream.handle), "cuMemcpyHtoDAsync");
         off += p.len;
     }
     try e.stream.synchronize(); // the host copy may be dropped once this returns
