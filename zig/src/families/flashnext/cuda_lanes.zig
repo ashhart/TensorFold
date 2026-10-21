@@ -13,6 +13,7 @@ const Glue = @import("cuda_glue.zig").Glue;
 const living = @import("living");
 const slide_mod = @import("cuda_slide.zig");
 const train = @import("cuda_train.zig");
+const kvl = @import("cuda_kv_lanes.zig");
 
 const be = lanes.backend;
 const ring = 1024;
@@ -40,6 +41,17 @@ pub fn Namespace(comptime Tri: type) type {
         pub const snap_save = snapSave;
         pub const snap_restore = snapRestore;
         pub const snap_drop = snapDrop;
+        /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
+        pub const window_rows = kvl.window_rows;
+        pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
+            const own = of(p);
+            own.kv.pool = try kvl.Pool.init(own.gpa, own.engine, own.kv.layout.?, own.context, own.kv.head, streams, count);
+            own.kv.paged_only = kvl.pagedOnly() and streams > 0;
+        }
+        pub fn fits(p: *anyopaque, rows: u32, max_tokens: u32) bool {
+            return of(p).kv.fits(rows, max_tokens);
+        }
+
         /// The pass ignores its cuts, so states keep at any token; the MTP head reads one token on (lookahead 1).
         pub const cache_rules = struct {
             pub const lookahead: u32 = 1;
@@ -85,6 +97,8 @@ pub fn Namespace(comptime Tri: type) type {
             /// Whether our own glue runs (no captured set given, or one without this family's entry points).
             own_glue: bool = true,
             follow: ?*const fn (*anyopaque) anyerror!void = null,
+            /// TF_FLASHNEXT_KV_PAGES: the streams beside the first take pages of one pool (null: their own caches).
+            layout: ?@import("core").kv_pool.Layout = null,
         };
 
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
@@ -128,6 +142,8 @@ pub fn Namespace(comptime Tri: type) type {
             return switch (err) {
                 error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
                 error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
+                error.BadFlashNextKvPages, error.BadFlashNextPageTest => "TF_FLASHNEXT_KV_PAGES and _PAGE_TEST take positions a page, a multiple of 4",
+                error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs one rank, our own glue and no --slide: unset it",
                 error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
                 error.TensorRankDraftSnapshotUnavailable => "tensor-rank MTP snapshots are unavailable: disable the prompt cache for this configuration",
                 error.RankDisconnected, error.RankTimeout, error.RemoteRank, error.BadRankFrame => "a tensor-parallel rank failed; restart both ranks from the same checkpoint before retrying",
@@ -145,6 +161,8 @@ pub fn Namespace(comptime Tri: type) type {
             chain: mtp.Chain = .{},
             /// The prompt's next row while its pass runs a chunk a call; null once the prompt is in.
             filled: ?usize = 0,
+            /// Where its caches came from: the pool's lanes, or its own (the one a pool leaves beside it).
+            from: kvl.From = .none,
         };
 
         const Ops = mtp.Ops(Tri);
@@ -169,6 +187,7 @@ pub fn Namespace(comptime Tri: type) type {
             next: u64 = 0,
             /// --slide: the pocket's layout, from config.json at load.
             lay: living.Layout = undefined,
+            kv: kvl.State = .{},
 
             fn tri(self: *Cuda) Tri {
                 return .{ .set = if (self.set) |*x| x else null, .own = &self.glue, .s = self.stream };
@@ -273,17 +292,19 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 // a window's rows past the reply's last token (its drafts) still need cache slots
                 const cap = @min(ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), prompt.max_tokens);
-                gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.create(cap) else self.engine.newSeq(cap)) catch |err| {
+                const from = self.kv.choose();
+                gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.create(cap) else if (from == .pool) self.kv.pool.?.open(cap) else self.engine.newSeq(cap)) catch |err| {
                     self.lanes.removeByPtr(gop.key_ptr);
                     return err;
-                } };
+                }, .from = from };
+                self.kv.opened(from);
                 const l = gop.value_ptr;
                 l.seq.untaught = s.untaught;
                 errdefer {
                     dropLane(self, l);
                     self.lanes.removeByPtr(gop.key_ptr);
                 }
-                if (drafting) l.draft = try mtp.Draft.init(self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk);
+                if (drafting) l.draft = if (from == .pool) try self.kv.pool.?.draft(&l.seq, cap) else try mtp.Draft.init(self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk);
                 if (s.images.len != 0) {
                     const v = self.vision orelse return error.VisionNotEnabled;
                     l.seq.media = try v.state(ids, s.images);
@@ -370,6 +391,7 @@ pub fn Namespace(comptime Tri: type) type {
             if (own.head) |h| h.deinit();
             if (own.vision) |v| v.deinit();
             if (own.ranks) |r| r.deinit();
+            if (own.kv.pool) |kp| kp.deinit();
             own.engine.deinit();
             if (own.set) |*x| x.deinit();
             own.glue.deinit();
@@ -379,7 +401,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         fn dropLane(self: *Cuda, l: *Lane) void {
             if (l.draft) |*d| d.deinit();
-            if (self.ranks) |r| r.drop(&l.seq) else l.seq.deinit(self.gpa);
+            if (self.ranks) |r| r.drop(&l.seq) else if (!self.kv.close(l.from, &l.seq)) l.seq.deinit(self.gpa);
         }
 
         fn of(ptr: *anyopaque) *Cuda {
