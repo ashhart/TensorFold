@@ -332,6 +332,7 @@ test "a restore refuses another cache format, another length, a position past th
     if (comptime @hasField(Engine, "kv8")) e.kv8 = false;
     var cache: Cache = undefined;
     cache.cap = 64;
+    cache.paged = null; // contiguous: restoreCache reads it, and undefined bytes can read as a page table
     const d: u64 = 9;
     var images = [_]Seen{.{ .at = 2, .id = d }};
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
@@ -391,6 +392,7 @@ test "a failed restore's host copy stays through a drop until a wait, the restor
     if (comptime @hasField(Engine, "kv8")) e.kv8 = false;
     var cache: Cache = undefined;
     cache.cap = 64;
+    cache.paged = null; // contiguous: restoreCache reads it, and undefined bytes can read as a page table
     cache.kv = .{ .d = &d, .ptr = 0x10000, .len = 0 };
     cache.state = .{ .d = &d, .ptr = 0x20000, .len = 0 };
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
