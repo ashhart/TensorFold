@@ -79,6 +79,37 @@ fn symbol(
     return std.fmt.comptimePrint(name, .{ @backingInt(mode), bm, flags[0], flags[1], flags[2] });
 }
 
+/// The 16-row tile at 32 columns a block (MXFP8 and BF16): plain, then with a cluster.
+fn halfSymbol(comptime mode: Mode, comptime cluster: bool, comptime wide: bool) [:0]const u8 {
+    const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi16ELi32ELi1ELi4ELi4ELb{d}ELb{d}ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
+    return std.fmt.comptimePrint(name, .{ @backingInt(mode), @intFromBool(wide), @intFromBool(cluster) });
+}
+
+/// Dynamic shared bytes of the half tile: a stage holds half the weights (and scales) of the 64-column tile's.
+pub fn halfShared(mode: Mode) u32 {
+    const w: u32 = if (mode == .bf16) 32 * group * 2 else 32 * group;
+    const s: u32 = if (mode == .mxfp8) 32 * 2 else 0;
+    const stage = (16 * group * 2 + w + s + 127) / 128 * 128;
+    const partials = 1 * 1 * 4 * threads * 4;
+    return @max(4 * stage, partials);
+}
+
+/// MXFP8/BF16 decode calls take half tiles below this many 64-column blocks (TF_QMMF_HALF_BELOW; 0 never): same sums.
+pub const half_below_default: usize = 96;
+
+fn halfBelow() usize {
+    const v = std.c.getenv("TF_QMMF_HALF_BELOW") orelse return half_below_default;
+    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch half_below_default;
+}
+
+pub fn halfModeIndex(mode: Mode) ?usize {
+    return switch (mode) {
+        .mxfp8 => 0,
+        .bf16 => 1,
+        else => null,
+    };
+}
+
 pub const reduce_symbols = [2][:0]const u8{
     "_ZN7tf_qmmf13reduce_kernelILb0EEEvPKfPvxif",
     "_ZN7tf_qmmf13reduce_kernelILb1EEEvPKfPvxif",
@@ -105,6 +136,8 @@ pub const Lane = struct {
     fns: [modes.len][7]Function, // per mode: lane16, lane16c, lane32, lane32c, lane64, lane64c, fused
     f32_fns: [modes.len][7]Function,
     reduce: [2]Function, // by Out
+    half: [2][2][2]Function, // by halfModeIndex, Out, then plain / cluster
+    half_below: usize = half_below_default,
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
@@ -116,6 +149,7 @@ pub const Lane = struct {
             .fns = undefined,
             .f32_fns = undefined,
             .reduce = undefined,
+            .half = undefined,
             .clusters = capability_major >= 9,
         };
         inline for (modes, 0..) |mode, mi| {
@@ -123,6 +157,12 @@ pub const Lane = struct {
             l.f32_fns[mi] = try loadTiles(mod, mode, true);
         }
         for (&l.reduce, reduce_symbols) |*f, name| f.* = try mod.function(name);
+        inline for (.{ Mode.mxfp8, Mode.bf16 }, 0..) |mode, mi| inline for (.{ false, true }, 0..) |wide, oi| inline for (.{ false, true }, 0..) |cl, ci| {
+            const f = try mod.function(halfSymbol(mode, cl, wide));
+            try f.allowDynamicShared(halfShared(mode));
+            l.half[mi][oi][ci] = f;
+        };
+        l.half_below = halfBelow();
         return l;
     }
 
@@ -152,8 +192,11 @@ pub const Lane = struct {
         if (p.reduce and part == 0) return error.MissingLanePart;
         const set = (if (out == .f32) l.f32_fns else l.fns)[modeIndex(w.mode)];
         const ti: usize = if (p.bm == 16) 0 else if (p.bm == 32) 1 else 2;
-        const f = if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const rows_t = (m + p.bm - 1) / p.bm;
+        const hm = halfModeIndex(w.mode);
+        const half = hm != null and p.bm == 16 and !p.fused and rows_t * ((w.n + bn - 1) / bn) * p.sk < l.half_below;
+        const f = if (half) l.half[hm.?][@backingInt(out)][@intFromBool(p.cluster)] else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
+        const cols: usize = if (half) 32 else bn;
         const band = @max(1, @min(rows_t, (12 << 20) / (@as(usize, p.bm) * w.k * 2)));
         var args: launch_.Args = .{};
         args.add(x);
@@ -170,9 +213,9 @@ pub const Lane = struct {
         args.add(@as(i32, @intCast(if (m == 1) w.k else ldx)));
         args.add(@as(i32, @intCast(band)));
         try launch_.launch(f, .{
-            .grid = .{ .x = @intCast(rows_t * ((w.n + bn - 1) / bn)), .y = 1, .z = if (p.fused) 1 else p.sk },
+            .grid = .{ .x = @intCast(rows_t * ((w.n + cols - 1) / cols)), .y = 1, .z = if (p.fused) 1 else p.sk },
             .block = .{ .x = threads, .y = 1, .z = 1 },
-            .shared = sharedBytes(w.mode, p.bm),
+            .shared = if (half) halfShared(w.mode) else sharedBytes(w.mode, p.bm),
             .cluster = if (p.cluster) .{ .x = 1, .y = 1, .z = p.sk } else null,
         }, s, &args);
         if (p.reduce) {

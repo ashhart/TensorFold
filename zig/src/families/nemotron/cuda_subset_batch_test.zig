@@ -192,7 +192,7 @@ test "restored head: 15 and 16 token transitions reach mixed shrinking real chai
     e.k.ck = null;
     e.k.ggml = null;
     const f: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(1) };
-    const lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = @splat(@splat(f)), .f32_fns = @splat(@splat(f)), .reduce = @splat(f), .clusters = false };
+    const lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = @splat(@splat(f)), .f32_fns = @splat(@splat(f)), .reduce = @splat(f), .half = @splat(@splat(@splat(f))), .half_below = 0, .clusters = false };
     e.k.modelopt = .{ .lane = lane, .gemm = undefined, .experts = undefined, .pack = undefined };
     e.k.draws.draw_fn = .{ .d = &d, .handle = @ptrFromInt(2) };
     e.k.draws.draw_ids_fn = .{ .d = &d, .handle = @ptrFromInt(3) };
