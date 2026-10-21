@@ -63,6 +63,7 @@ pub const Config = struct {
     vision_urls: bool = false,
     seed_salt: i64 = 0,
     silence_mid: bool = false,
+    silence_guard: bool = false,
     /// --prompt-seed keeps historical prompt-keyed sampling when a request omits its seed.
     prompt_seed: bool = false,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.

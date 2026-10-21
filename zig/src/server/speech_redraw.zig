@@ -1,4 +1,4 @@
-//! Opt-in redraws of whole speech replies that the silence guard ended or that stopped short of their input.
+//! Opt-in redraws of whole speech replies that the silence or register guard tripped, or that stopped short.
 const std = @import("std");
 const api = @import("engine_api");
 const clock = @import("clock.zig");
@@ -15,6 +15,8 @@ pub const Policy = struct {
     short_ratio: ?f64 = null,
     /// Input characters per second of audio in complete replies of the served voice; the expected length's rate.
     short_chars_per_s: ?f64 = null,
+    /// The register guard's thresholds: off unless all are set.
+    register: @import("speech_register.zig").Rule = .{},
 
     pub fn count(p: Policy) u8 {
         return p.max orelse 0;
@@ -26,13 +28,14 @@ pub const Policy = struct {
         if (p.short_chars_per_s) |c| if (!std.math.isFinite(c) or c <= 0) return error.BadShortReplyRate;
         if (p.short_ratio != null and p.short_chars_per_s == null) return error.MissingShortReplyRate;
         if (p.short_chars_per_s != null and p.short_ratio == null) return error.MissingShortReplyRatio;
-        if (p.count() == 0 and (p.budget_s != null or p.controls != null or p.short_ratio != null)) return error.MissingRedrawCount;
+        try p.register.validate();
+        if (p.count() == 0 and (p.controls != null or p.short_ratio != null or p.budget_s != null and !p.register.on())) return error.MissingRedrawCount;
         if (p.count() > 0 and !silence.enabled()) return error.MissingSilenceGuard;
     }
 
     pub fn refusal(p: Policy, model_type: []const u8) ?[]const u8 {
-        if (p.max != null and !std.mem.eql(u8, model_type, "fish_omni"))
-            return "--silence-redraws and its options are for Drama speech: serve without them";
+        if ((p.max != null or p.register.on()) and !std.mem.eql(u8, model_type, "fish_omni"))
+            return "--silence-redraws, the register flags and their options are for Drama speech: serve without them";
         return null;
     }
 
@@ -66,13 +69,16 @@ pub fn fits(budget_s: ?f64, received: i96, started: i96, now: i96) bool {
     return clock.seconds(now - received) + clock.seconds(now - started) <= limit;
 }
 
-test "redraw policy is off by default and needs a count and an enabled guard" {
+test "redraw policy is off by default; redraws need the guard, a budget redraws or the register guard" {
     const guard: api.speech_guard.Config = .{ .floor_dbfs = -60, .seconds = 1 };
+    const register: @import("speech_register.zig").Rule = .{ .st = 6, .high = 50, .high_hz = 300 };
     try (Policy{}).validate(.{});
     try (Policy{ .max = 2, .budget_s = 30, .controls = .{}, .short_ratio = 0.25, .short_chars_per_s = 10 }).validate(guard);
+    try (Policy{ .budget_s = 30, .register = register }).validate(.{});
     try std.testing.expectError(error.MissingSilenceGuard, (Policy{ .max = 1 }).validate(.{}));
     try std.testing.expectError(error.MissingRedrawCount, (Policy{ .budget_s = 30 }).validate(guard));
     try std.testing.expectError(error.MissingRedrawCount, (Policy{ .controls = .{} }).validate(guard));
+    try std.testing.expectError(error.MissingRedrawCount, (Policy{ .controls = .{}, .register = register }).validate(guard));
     try std.testing.expectError(error.MissingRedrawCount, (Policy{ .short_ratio = 0.25, .short_chars_per_s = 10 }).validate(guard));
     try std.testing.expectError(error.MissingShortReplyRate, (Policy{ .max = 1, .short_ratio = 0.25 }).validate(guard));
     try std.testing.expectError(error.MissingShortReplyRatio, (Policy{ .max = 1, .short_chars_per_s = 10 }).validate(guard));
@@ -103,8 +109,8 @@ test "a stop of enough characters trips only under the ratio of its expected len
     try std.testing.expect(off.trips(.silence, 1, 1000, input));
 }
 
-test "an explicit redraw count, even 0, is refused on text and accepted on Drama speech" {
-    for ([_]Policy{ .{ .max = 0 }, .{ .max = 2 } }) |p| {
+test "an explicit redraw count, even 0, or the register guard is refused on text and accepted on Drama speech" {
+    for ([_]Policy{ .{ .max = 0 }, .{ .max = 2 }, .{ .register = .{ .st = 6, .high = 50, .high_hz = 300 } } }) |p| {
         try std.testing.expect(p.refusal("nemotron_h") != null);
         try std.testing.expect(p.refusal("fish_omni") == null);
     }

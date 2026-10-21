@@ -50,6 +50,7 @@ test {
 _ = @import("drama_voice_tool.zig");
     _ = @import("speech_redraw.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_redraw_test.zig"); // over a Unix socket pair
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_register_test.zig"); // over a Unix socket pair
     _ = @import("drama_prompt.zig");
     _ = @import("health_test.zig");
     _ = @import("memory_routes.zig");

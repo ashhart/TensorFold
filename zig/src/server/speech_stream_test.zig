@@ -18,6 +18,8 @@ pub const Script = struct {
     mid_enabled: bool = false,
     /// Each take's reason, then `reason` for later takes.
     reasons: []const api.Reason = &.{},
+    /// Each take's samples in place of the fill, then the fill for later takes.
+    audio: []const []const f32 = &.{},
     busy_from: usize = std.math.maxInt(usize),
     busy_redraws: usize = 0,
     busy_replies: usize = 0,
@@ -65,7 +67,7 @@ pub const Script = struct {
                 while (!e.release.load(.acquire)) std.Thread.yield() catch {};
                 if (e.cancelled.load(.acquire)) return sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .cancelled } });
             }
-            @memset(request.pcm[done..n], 0.5 / @as(f32, @floatFromInt(take + 1)));
+            if (take < e.audio.len) @memcpy(request.pcm[done..n], e.audio[take][done..n]) else @memset(request.pcm[done..n], 0.5 / @as(f32, @floatFromInt(take + 1)));
             if (request.stream) sink.event(sink.ctx, id, &.{ .audio = n });
             done = n;
         }

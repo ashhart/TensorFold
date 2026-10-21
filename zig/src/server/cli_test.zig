@@ -128,6 +128,30 @@ test "silence redraw flags are opt-in and need a redraw count and the guard" {
         try std.testing.expect(std.mem.indexOf(u8, out.written(), try std.fmt.allocPrint(a, "\"{s}\": {{}}", .{flag})) != null);
 }
 
+test "register flags are opt-in, all or none, and may set a redraw budget without silence redraws" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expect(!(try parse(a, &.{"m"}, &u)).redraw.register.on());
+    const rule = [_][]const u8{ "m", "--register-redraw-st", "6", "--register-redraw-high=50", "--register-high-hz", "300" };
+    const on = try parse(a, &(rule ++ .{ "--silence-redraw-budget-s", "30" }), &u);
+    try std.testing.expectEqualDeep(@import("speech_register.zig").Rule{ .st = 6, .high = 50, .high_hz = 300 }, on.redraw.register);
+    try std.testing.expectEqual(@as(?f64, 30), on.redraw.budget_s);
+    for ([_][]const []const u8{
+        &.{ "m", "--register-redraw-st", "6" },
+        &.{ "m", "--register-redraw-high", "50", "--register-high-hz", "300" },
+        rule[0..4],
+        &(rule ++ .{ "--register-redraw-st", "0" }),
+        &(rule ++ .{ "--register-high-hz", "700" }),
+        &(rule ++ .{ "--silence-redraw-controls", "sighs" }),
+    }) |bad| try std.testing.expectError(error.Usage, parse(a, bad, &u));
+    var out: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&out.writer, .{ .version = "test" });
+    for ([_][]const u8{ "--register-redraw-st", "--register-redraw-high", "--register-high-hz" }) |flag|
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), try std.fmt.allocPrint(a, "\"{s}\": {{}}", .{flag})) != null);
+}
+
 test "parse and capabilities share the table" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

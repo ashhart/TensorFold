@@ -5,6 +5,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Drama3 CUDA replay waits for poison fills to finish before reset, prefill or decode reuses the buffers.
+- Register redraws that trip silence reenter the remaining silence retry pipeline before take selection, preserving the held audio and separate admission counts.
+
 - Native Drama speech can opt into `--silence-onset-s` with `--silence-onset-voiced-s` to end a synthesis as `silence` once that many seconds run silent while it has voiced less than the given minimum. Both are off unless given together, and need the silence guard.
 
 - Native Drama speech can opt into `--silence-floor-dbfs` and `--silence-seconds` to keep audio through a sustained silent tail and finish as `silence`, including an HTTP finish header or stream trailer. The default is off.
@@ -14,7 +16,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `serve --allowed-controls LIST` opts into stripping unlisted bracketed speech controls before input validation and tokenization. Omission preserves the input unchanged; see [speech controls](docs/speech-controls.md) for the open-vocabulary name grammar and malformed-input policy.
 - `serve --silence-redraws N` opts into drawing a whole speech reply the silence guard ended again, as seed salt + k, while `--silence-redraw-budget-s` and the request's `X-Deadline-S` allow; `--silence-redraw-controls LIST` filters redrawn input with the allowlist rules. Streams are never redrawn and the default is off; see [speech redraws](docs/speech-redraws.md).
 - `serve --short-reply-ratio R --short-reply-chars-per-s CPS` also redraws a whole speech reply of 200 characters or more that finished `stop` with less than R × characters / CPS seconds of audio. Neither flag has a default, each needs the other, and CPS is calibrated on the served voice; see [speech redraws](docs/speech-redraws.md).
+- `serve --register-redraw-st ST --register-redraw-high PERCENT --register-high-hz HZ` opts into drawing a whole speech reply once more when a phrase after the first opens ST semitones above the median of the other phrase openings with PERCENT of its voiced frames above HZ, and sends the take with the smaller jump. The flags have no defaults and are set together; see [speech redraws](docs/speech-redraws.md#register) to calibrate them on your voice.
 - Enabled speech redraws report admitted redraws in `X-Silence-Redraws`, including zero on streams and errors, validate stream deadlines, and wait out a busy engine only until the latest admissible redraw start.
+- Configured whole speech replies report latched register trips and admitted register redraws in `X-Register-Trip` and `X-Register-Redraws`, including zero; register retries are excluded from silence retry counts. Register selection retains ties and silence finishes, permits a smaller-jump length finish, and permits unmeasured redraws only with the silence guard enabled.
 
 - Drama 3 serving accepts `--max-frames` to bound synthesis frames, preserving the stock cap when omitted (#1134). Thanks to @plotarmordev.
 
