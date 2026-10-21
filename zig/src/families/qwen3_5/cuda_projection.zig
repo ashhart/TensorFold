@@ -37,21 +37,29 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
     if (l == .ql) return @import("cuda_modelopt.zig").project(e, l.ql, x, out, rows, prompt);
     const n_out = l.outputs();
     const k = l.inputs();
+    // EXL3 and BF16 matrices use their own row kernels at every width.
+    switch (l) {
+        .x3 => |q| return if (prompt and rows > 16) e.kit.?.dense.prompt(e.stream, q, x, .bf16, rows, out, .bf16) else e.kit.?.dense.decode(e.stream, q, x, .bf16, rows, out, .bf16),
+        .bf => |q| return e.kit.?.b16.denseRows(e.stream, x, q.w, out, rows, q.n, q.k),
+        else => {},
+    }
     if (prompt and e.int8.on) switch (l) {
         // every prompt row of an int8 request takes int8; an exceptional chunk returns to the default precision
         .a4 => |q| if (try int8_prompt.projectRows(e, q, x, xs, out, rows, sums, params, k)) return,
-        .an => {},
+        .an, .x3, .bf => {},
         .ql => unreachable,
     };
     if (prompt and rows > 16) return switch (l) {
         .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
         .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
         .ql => unreachable,
+        .x3, .bf => unreachable,
     };
     if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
     const tile: usize = switch (l) {
         .a4 => e.affine.verifyRows(),
         .an, .ql => 16,
+        .x3, .bf => unreachable,
     };
     var at: usize = 0;
     while (at < rows) : (at += tile) {
@@ -63,6 +71,7 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
             .a4 => |q| try e.affine.verify(e.stream, xa, sa, q, oa, n),
             .an => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
             .ql => unreachable,
+            .x3, .bf => unreachable,
         }
     }
 }

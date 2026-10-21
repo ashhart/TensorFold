@@ -84,6 +84,8 @@ pub const Geometry = struct {
     top_k: usize = 0,
     /// The routed experts' code width: 4, or 3 where every layer's switch_mlp overrides say so.
     expert_bits: u8 = 4,
+    /// An EXL3 checkpoint (quant_method "exl3", HF tensor names): trellis projections, bf16 or f16 the rest.
+    exl3: bool = false,
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Geometry {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -203,6 +205,14 @@ fn expertBits(q: std.json.ObjectMap, layers: usize) !struct { bits: u8, count: u
     return .{ .bits = @intCast(bits orelse 4), .count = count };
 }
 
+/// Whether config.json's quantization_config says quant_method "exl3" (Mia-AiLab's HF-layout checkpoints).
+fn isExl3(root: std.json.ObjectMap) bool {
+    const q = root.get("quantization_config") orelse return false;
+    if (q != .object) return false;
+    const m = q.object.get("quant_method") orelse return false;
+    return m == .string and std.mem.eql(u8, m.string, "exl3");
+}
+
 fn object(v: std.json.Value) !std.json.ObjectMap {
     return if (v == .object) v.object else error.BadQwenConfig;
 }
@@ -259,6 +269,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     const modelopt = root.get("quantization") == null and root.get("quantization_config") != null;
     const qv = root.get("quantization");
     if (!modelopt and qv == null) return error.UnsupportedQwenQuantization;
+    const exl3 = isExl3(root);
     var g: Geometry = .{
         .hidden = try integer(t, "hidden_size"),
         .intermediate = try integer(t, if (moe) "moe_intermediate_size" else "intermediate_size"),
@@ -276,6 +287,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         },
         .context = try integer(t, "max_position_embeddings"),
         .linear = @splat(false),
+        .exl3 = exl3,
     };
     if (t.get("tensorfold_learned_neurons")) |pocket| {
         if (pocket != .integer or pocket.integer < 0 or pocket.integer > 128 or @mod(pocket.integer, 64) != 0)
@@ -292,9 +304,11 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         // the shared expert runs in the routed experts' table, so it needs their width
         if (try integer(t, "shared_expert_intermediate_size") != g.intermediate) return error.UnsupportedQwenGeometry;
         if (g.experts > 256 or g.top_k > 31 or g.top_k >= g.experts) return error.UnsupportedQwenGeometry;
-        const w = try expertBits(try object(qv.?), g.layers);
-        if (w.count != 0 and w.count != 3 * g.layers) return error.UnsupportedQwenQuantization;
-        g.expert_bits = w.bits;
+        if (!exl3) {
+            const w = try expertBits(try object(qv.?), g.layers);
+            if (w.count != 0 and w.count != 3 * g.layers) return error.UnsupportedQwenQuantization;
+            g.expert_bits = w.bits;
+        }
     }
     if (g.v_heads % g.k_heads != 0 or g.q_heads % g.kv_heads != 0 or g.q_heads > max_query_heads) return error.UnsupportedQwenGeometry;
     const types = t.get("layer_types") orelse return error.UnsupportedQwenGeometry;
@@ -308,6 +322,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         g.kinds = try @import("cuda_modelopt.zig").kinds(gpa, bytes, g);
         g.bits.embed = 16; // bf16 rows: no MLX width, so learning (4-bit only) refuses it
         g.bits.head = 16;
+        return g;
+    }
+    if (exl3) {
+        if (!moe or g.pocket != 0) return error.UnsupportedQwenQuantization;
         return g;
     }
     g.bits = try widths(gpa, root, try object(qv.?), g);
@@ -458,4 +476,5 @@ test "fp8 caches take e4m3 rows and a scale each: 520 bytes a position and head 
 test {
     _ = @import("cuda_quant_admission_test.zig");
     _ = @import("cuda_modelopt.zig");
+    _ = @import("cuda_exl3_admission_test.zig");
 }

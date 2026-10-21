@@ -11,6 +11,7 @@ const hooks = @import("cuda_learn_hooks.zig");
 const pocket = @import("cuda_pocket.zig");
 const profile = @import("cuda_startup_profile.zig");
 const modelopt = @import("cuda_modelopt.zig");
+const x3w = @import("cuda_exl3_weights.zig");
 pub const recurrent = @import("cuda_recurrent.zig");
 
 pub const Geometry = geometry.Geometry;
@@ -103,7 +104,8 @@ pub const Engine = struct {
     embed_w: u64,
     embed_s: u64,
     embed_b: u64,
-    embed_bits: u8, // the embedding's rows' width: 4 or 8
+    embed_bits: u8, // the embedding's rows' width: 4 or 8 (16: bf16 rows, an EXL3 checkpoint's)
+    kit: ?*x3w.Kit = null, // an EXL3 checkpoint's kernels (g.exl3)
     head: Proj,
     final_norm: u64,
     layers: []Layer,
@@ -181,6 +183,7 @@ pub const Engine = struct {
         e.learning = null;
         e.mlp = null;
         e.taught = 0;
+        e.kit = null;
         e.d = d;
         e.g = g;
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
@@ -194,7 +197,11 @@ pub const Engine = struct {
         e.features = 0;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
-        e.arena = try DeviceBuffer.alloc(d, weights.total(g) + try e.scratch(.measure));
+        var ck = try core.Checkpoint.openModel(gpa, io, dir);
+        defer ck.close();
+        // an EXL3 checkpoint's weights are sized by a dry run of its loader (trellis widths come from the tensors)
+        const wbytes = if (g.exl3) try x3w.measure(e, &ck) else weights.total(g);
+        e.arena = try DeviceBuffer.alloc(d, wbytes + try e.scratch(.measure));
         errdefer e.arena.free();
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
         const kk = cuda.kernels;
@@ -232,9 +239,11 @@ pub const Engine = struct {
         errdefer if (e.mo) |*m| m.unload();
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
-        var ck = try core.Checkpoint.openModel(gpa, io, dir);
-        defer ck.close();
-        {
+        if (g.exl3) {
+            e.kit = try x3w.Kit.init(gpa, d, g);
+            errdefer e.kit.?.deinit(gpa);
+            try x3w.load(e, &ck);
+        } else {
             // each projection as stored, packed from here; freed before the server counts what streams can use
             var stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
             defer stage.free();
@@ -272,6 +281,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
+        if (e.kit) |k| k.deinit(e.gpa);
         e.pockets.deinit();
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
@@ -374,6 +384,7 @@ pub const Engine = struct {
     /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
     pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
         if (e.embed_bits == 16) return modelopt.embed(e, ids, out, rows); // bf16 rows; padding rows' ids are zeroed
+        if (e.kit) |kit| return kit.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
         const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
