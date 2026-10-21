@@ -35,6 +35,14 @@ test "a wrapped family's plan: drafter buffers a stream, a first window without 
     try std.testing.expectEqual(@as(?kv_pool.Layout, null), served(null, 0, 1, 2, 3).layout);
 }
 
+/// served() on the family's layout; a family that places a drafter's buffers itself (pagedLayout) plans it again.
+pub fn wrapped(comptime F: type, loaded: anytype, free: u32, stream_bytes: u64, room: u64) @TypeOf(served(null, 0, 0, 0, 0)) {
+    const own = comptime @hasDecl(F, "pagedLayout");
+    const l = layout(loaded);
+    const planned = if (own) (if (l != null) F.pagedLayout(loaded.ctx, stream_bytes - loaded.stream_bytes) else null) else l;
+    return served(planned, free, if (own) stream_bytes else loaded.stream_bytes, stream_bytes, room);
+}
+
 /// The real native startup room before page planning and cache allocation.
 pub fn startupRoom(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, available: u64, host_budget: u64, problem: *[]const u8) !?u64 {
     const memory = @import("cuda_family_memory.zig");

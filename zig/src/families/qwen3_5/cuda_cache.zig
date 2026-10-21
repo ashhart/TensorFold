@@ -50,6 +50,8 @@ pub const Cache = struct {
     untaught: bool = false,
     /// Keys and values through a page table (null: cap contiguous rows a head).
     paged: ?Paged = null,
+    /// A pool lane's drafter ring in its run (the drafter borrows it for the lane's stream).
+    drafter_ring: ?u64 = null,
     delta: i32 = 0,
     state: DeviceBuffer,
     /// The exact state before a recorded one-row round advances its stable slot in place.
@@ -97,31 +99,32 @@ pub const Cache = struct {
         return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
     }
 
-    /// Bytes of the parts a pool lane maps from its run: state, before, log, tap ring, each 256-byte aligned.
-    pub fn runBytes(e: *const Engine) usize {
+    /// Bytes of a pool lane's run: state, before, log, tap ring and a drafter's ring (`ring`), each 256-aligned.
+    pub fn runBytes(e: *const Engine, ring: usize) usize {
         var n: usize = 0;
-        for (runParts(e)) |len| n += std.mem.alignForward(usize, len, 256);
+        for (runParts(e, ring)) |len| n += std.mem.alignForward(usize, len, 256);
         return n;
     }
 
-    fn runParts(e: *const Engine) [4]usize {
-        return .{ e.g.stateBytes(), e.g.stateBytes(), e.g.logBytes(engine.most_window), e.tapBytes() };
+    fn runParts(e: *const Engine, ring: usize) [5]usize {
+        return .{ e.g.stateBytes(), e.g.stateBytes(), e.g.logBytes(engine.most_window), e.tapBytes(), ring };
     }
 
-    /// A pool lane's state, before, log and tap ring as views of the run at `base`, zeroed but `before`.
-    pub fn mapRun(self: *Cache, e: *const Engine, base: u64) !void {
+    /// A lane's state, before, log, taps and drafter ring as views of the run at `base`; a short run is refused.
+    pub fn mapRun(self: *Cache, e: *const Engine, base: u64, len: usize, ring: usize) !void {
+        if (runBytes(e, ring) > len) return error.QwenRunTooShort;
         var at = base;
-        var views: [4]DeviceBuffer = undefined;
-        for (runParts(e), &views) |len, *v| {
-            v.* = .{ .d = e.d, .ptr = at, .len = len, .borrowed = true };
-            at += std.mem.alignForward(usize, len, 256);
+        var views: [5]DeviceBuffer = undefined;
+        for (runParts(e, ring), &views) |n, *v| {
+            v.* = .{ .d = e.d, .ptr = at, .len = n, .borrowed = true };
+            at += std.mem.alignForward(usize, n, 256);
         }
         self.state = views[0];
         self.before = views[1];
         self.log = views[2];
         self.tap = if (e.n_taps > 0) views[3] else null;
-        try self.log.fill8(0, e.stream.handle);
-        if (self.tap) |t| try t.fill8(0, e.stream.handle);
+        self.drafter_ring = if (ring > 0) views[4].ptr else null;
+        for ([_]DeviceBuffer{ views[2], views[3], views[4] }) |v| if (v.len > 0) try v.fill8(0, e.stream.handle);
     }
 
     /// A closed lane's views dropped: its run went back to the pool.
@@ -131,6 +134,7 @@ pub const Cache = struct {
         self.before = none;
         self.log = none;
         self.tap = null;
+        self.drafter_ring = null;
     }
 
     /// The parts every cache holds itself beside `kv` and `paged` (the caller's to free on failure).

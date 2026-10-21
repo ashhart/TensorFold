@@ -106,6 +106,10 @@ pub const Draft = struct {
     frame_streams: usize = 1,
     scratch_one: usize = 0,
     target_taps: usize = 0,
+    /// TF_QWEN_KV_PAGES: a stream's ring is a view of its target lane's run (null: the contexts own theirs).
+    ring_of: ?RingOf = null,
+
+    pub const RingOf = struct { ctx: *anyopaque, ring: *const fn (*anyopaque, *Stream) ?u64 };
 
     const words_at = frame.words_at;
     const hp_at = frame.hp_at;
@@ -241,8 +245,9 @@ pub const Draft = struct {
         const started = profile.now(d.io);
         const previous_times = d.startup;
         try memory.resize(d, n);
-        try d.pool.ensureTotalCapacity(d.gpa, n);
-        while (d.pool.items.len < n) d.pool.appendAssumeCapacity(try d.create());
+        const own = if (d.ring_of != null) @min(n, 1) else n; // with a pool the other streams' rings are lane runs
+        try d.pool.ensureTotalCapacity(d.gpa, own);
+        while (d.pool.items.len < own) d.pool.appendAssumeCapacity(try d.create());
         d.startup.reserve += profile.elapsed(d.io, started) - (d.startup.warmups - previous_times.warmups) - (d.startup.reserve - previous_times.reserve);
     }
 
@@ -399,6 +404,12 @@ pub const Draft = struct {
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
         const d = cast(p);
         if (d.streams.contains(s)) return error.StreamOpen;
+        if (d.ring_of) |r| if (r.ring(r.ctx, s)) |ptr| { // the lane's run holds it: a context borrowing it
+            const ctx = try d.gpa.create(Ctx);
+            errdefer d.gpa.destroy(ctx);
+            ctx.* = .{ .ring = .{ .d = d.e.d, .ptr = ptr, .len = d.c.ringBytes(), .borrowed = true } };
+            return d.streams.put(d.gpa, s, ctx);
+        };
         const ctx = d.pool.pop() orelse try d.create();
         errdefer d.pool.append(d.gpa, ctx) catch d.drop(ctx);
         ctx.* = .{ .ring = ctx.ring };
@@ -470,7 +481,10 @@ pub const Draft = struct {
 
     fn releaseFn(p: *anyopaque, s: *Stream) void {
         const d = cast(p);
-        if (d.streams.fetchRemove(s)) |kv| d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
+        if (d.streams.fetchRemove(s)) |kv| {
+            if (kv.value.ring.borrowed) return d.gpa.destroy(kv.value); // its lane's run goes back with the lane
+            d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
+        }
     }
 };
 

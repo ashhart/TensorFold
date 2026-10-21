@@ -67,10 +67,24 @@ pub const Loaded = struct {
     layout: ?kv_pool.Layout = null,
 };
 
+/// The pool's layout with a drafter (`extra` bytes a stream): DFlash2's ring and taps in the run, the rest fixed.
+pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    if (l.page_tokens == 0) return null;
+    const ring = l.ringBytes();
+    const in_run = ring + if (l.draft != null) l.e.tapBytes() else 0;
+    l.extra = @intCast(extra -| in_run);
+    return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra);
+}
+
 /// The pool beside the first stream's window: `streams` lanes and `pages` pages, made now.
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const l: *Lanes = @ptrCast(@alignCast(p));
-    l.pages = try pages_mod.Pages.init(l.gpa, l.e, l.capacity, l.page_tokens, streams, pages);
+    const ring = l.ringBytes();
+    l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, streams, pages);
+    if (l.draft) |d| if (streams > 0) {
+        d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf };
+    };
     l.paged_only = pages_mod.pagedOnly() and streams > 0; // checks: every stream on pages, the reserved window idle
 }
 
@@ -117,7 +131,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .reserve = reserve,
         .vision = v,
         .target = &l.target,
-        .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens) else null,
+        .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
     };
 }
 
@@ -147,6 +161,7 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     d.target_taps = l.e.tapBytes();
     cost_adapter.identify(l, dir, .dflash);
     l.calibration = d;
+    l.draft = d;
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter, .prepare = .{ .ctx = l, .run = calibrateDrafter, .bytes = if (l.capacity < l.e.window_rows) l.e.streamBytes(l.e.window_rows) else 0 } };
 }
 
@@ -270,6 +285,10 @@ const Lanes = struct {
     page_tokens: usize = 0,
     pages: ?*pages_mod.Pages = null,
     paged_only: bool = false,
+    /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' runs.
+    draft: ?*Draft = null,
+    /// A drafter's bytes a stream outside the lanes' runs (pagedLayout).
+    extra: usize = 0,
     cost_context: ?*const cuda.Context = null,
     cost_identity: ?[32]u8 = null,
     cost_kind: cost_adapter.Kind = .dflash,
@@ -345,6 +364,18 @@ const Lanes = struct {
 
     fn backend(self: *Lanes) be.Backend {
         return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+    }
+
+    /// A drafter ring's bytes in each lane's run (0: no DFlash2 drafter).
+    fn ringBytes(self: *const Lanes) usize {
+        return if (self.draft) |d| d.c.ringBytes() else 0;
+    }
+
+    /// The ring in the run of the lane `stream`'s cache holds; null: its cache is a reserved window's.
+    fn ringOf(ptr: *anyopaque, stream: *lanes.Stream) ?u64 {
+        const self = cast(ptr);
+        const cache = self.caches.get(stream) orelse return null;
+        return cache.drafter_ring;
     }
 
     fn cast(ptr: *anyopaque) *Lanes {

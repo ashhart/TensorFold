@@ -347,7 +347,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const free = loaded.free_streams;
     const grow = budget.growRoom(room, !@hasField(F.Options, "lanes"));
-    const wrapped = kv_pages.served(kv_pages.layout(loaded), free, loaded.stream_bytes, served.stream_bytes, room);
+    const wrapped = kv_pages.wrapped(F, loaded, free, served.stream_bytes, room);
     const layout = wrapped.layout;
     var paged: ?kv_pages.Plan = null;
     const streams = if (layout) |l| blk: {
