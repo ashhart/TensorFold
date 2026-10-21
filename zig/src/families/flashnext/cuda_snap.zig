@@ -6,6 +6,7 @@ const prompt = @import("cuda_prompt.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const gdn = @import("cuda_gdn.zig");
 const Draft = @import("cuda_mtp_draft.zig").Draft;
+const pages = @import("cuda_pages.zig");
 
 const conv_bytes = (gdn.taps - 1) * gdn.conv_dim * 2;
 const state_bytes = wt.state_n * 4;
@@ -59,8 +60,25 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
         pieces[7..11].* = attnPieces((&h.kc)[0..1], (&h.vc)[0..1], (&h.ikc)[0..1], (&h.pooled)[0..1], at);
         count = 11;
     }
-    for (pieces[0..count]) |p| for (p.bufs) |b| {
+    for (pieces[0..count], 0..) |p, pi| for (p.bufs, 0..) |b, layer| {
         if (p.n == 0) continue;
+        if (pi >= 2 and pi < 6) if (seq.paged) |*pg| {
+            // the same bytes in the same order as a contiguous cache's, a run a page
+            const part: pages.Part = @fromBackingInt(@intCast(pi - 2));
+            const row = pages.rowBytes(part);
+            const per = pages.rows(part, pg.tokens);
+            const n = p.n / row;
+            var r: usize = 0;
+            while (r < n) {
+                const run = @min(per - r % per, n - r);
+                const at_row = pg.rowAt(layer, part, r);
+                const dst, const src = if (way == .save) .{ base + off, at_row } else .{ at_row, base + off };
+                try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
+                off += run * row;
+                r += run;
+            }
+            continue;
+        };
         const dst, const src = if (way == .save) .{ base + off, b.ptr } else .{ b.ptr, base + off };
         try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, p.n, stream.handle), "cuMemcpyDtoDAsync");
         off += p.n;
