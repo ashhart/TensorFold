@@ -60,6 +60,8 @@ test "every F32 and BF16 fixture dispatch rejects a no-op after a valid stale pr
         .fns = @splat(@splat(f)),
         .f32_fns = @splat(@splat(f)),
         .reduce = @splat(f),
+        .half = @splat(@splat(@splat(f))),
+        .half_below = 0,
         .clusters = false,
     };
     const weight: cuda.qmmf.Weight = .{ .mode = .fp4, .codes = 0, .scales = 0, .n = 70, .k = 1024, .npad = 128 };
