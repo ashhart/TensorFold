@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
-- Chat prompts keep request text out of the added vocabulary: a control-token spelling in a message, tool definition, tool result, reasoning field or decision label is encoded as ordinary text, while chat templates still see the real text (#1117). Thanks to @Acermax.
+- Chat prompts keep request text out of the added vocabulary: a control-token spelling in a message, tool definition, tool result, reasoning field or decision label is encoded as ordinary text, while chat templates still see the real text. A request whose text would still encode to an added-token id is refused instead, explicit `--vision` refuses to start when an image marker is not an added token, and LFM2's automatic image input turns off with a warning rather than failing the load (#1117). Thanks to @Acermax.
 
 - Tool parameters whose schema is a union (`oneOf`, `anyOf`, `allOf` or a type list) or a local `$ref` are decoded as JSON when the schema takes a non-string value, streamed and not; text that is not JSON keeps what the model wrote (#1121). Thanks to @aartiles.
 
@@ -70,7 +70,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on M1 to M4 takes prompt chunks through the M5's prompt attention, on simdgroup matrices: on an M3 Ultra a cold 32,768-token prompt runs at 269 tokens/s instead of 176, and 8,192 tokens at 295 instead of 251. Each prompt row used to read every key alone through the decode tail kernel. A row's bits still never depend on how its prompt is cut, its error against float64 stays at bf16's half step, and decoded rows are unchanged (#918). Thanks to @astro-15-alive.
 
-- Flash Next on CUDA takes prompt rows through factored tiles: dense matmuls, routed experts, hyper-connection read-out, router logits and 1,024-row attention launches, each bit-equal to the 1.1.0 kernel it replaces and registered with the kernel contract. The tiles run only where native glue owns every operation they replace, and `TF_FLASHNEXT_CHUNK` takes 1 to 16,384 rows, refusing anything else before loading (#1046). Thanks to @Mirrdhyn.
+- Flash Next on CUDA takes prompt rows through factored tiles: dense matmuls, routed experts, hyper-connection read-out, router logits, the recurrence at two threads a state row, indexer scores and 1,024-row attention launches, each bit-equal to the 1.1.0 kernel it replaces and registered with the kernel contract. The tiles run only where native glue owns every operation they replace, and `TF_FLASHNEXT_CHUNK` takes 1 to 16,384 rows, refusing anything else before loading; CUDA startup reports the chunk actually loaded (#1046). Thanks to @Mirrdhyn.
 
 - Flash Next on CUDA serves structured output and required tool calls: the grammar masks the first draw and every draw in a verification window (#1062). Thanks to @Mirrdhyn.
 
@@ -94,7 +94,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - The `ck_lane` kernel-contract fixture sizes its zero buffer for the input rows as well as the weights, fixing a panic in Debug and ReleaseSafe contract builds at 129-row shapes (#1073). Thanks to @jschmied.
 
-- ROCm benchmark receipts name the GPU, read from rocminfo under HIP's device-visibility rules, and the CPU. An attached server can attest the checkpoint revision, GPU identity and receipt backend through a valid benchmark manifest; without one, the attached run stays unranked. ROCm board publication remains disabled (#1043). Thanks to @ThinkOffApp.
+- ROCm benchmark receipts name the GPU, read from rocminfo under HIP's device-visibility rules, and the CPU. An attached server can attest the checkpoint revision, GPU identity and receipt backend through a valid benchmark manifest; without one, the attached run stays unranked. Managed runs, inspect and publish say which facts the board ranks by a receipt lacks, before any upload. ROCm board publication remains disabled (#1043). Thanks to @ThinkOffApp.
 
 - HIP refuses `--drafter` before loading, since it does not run a DFlash2 drafter yet; the refusal leaves the engine's native drafting settings unchanged. A managed ROCm run of `tensorfold benchmark` refuses a named external `--drafter` and records none; an attached run does not configure the server's drafter (#1044). Thanks to @ThinkOffApp.
 
@@ -105,6 +105,48 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Windows host builds and tests build again: dynamic libraries, clocks, environment reads and socket options go through the portable system layer, Flash Next's rank wire refuses on Windows, and POSIX-only tests skip there, while Linux and macOS run what they did (#1034). Thanks to @jayleaton.
 
 - The session prefix store reserves its free lists before publishing a slot, so removal and rollback no longer allocate, with the two allocation-failure tests from #637. Thanks to @jayleaton.
+
+- HTTP serving consumes and validates GET and DELETE bodies before routing, so a body cannot become a later request, refuses incomplete or malformed request heads and folded header lines, and bounds all chunk framing together. An API-key file that a group or other users can read or write is refused.
+
+- `TENSORFOLD_REQUEST_LOG` writes only to a regular file that no one but its owner can read or write; it refuses a symbolic link or a shared file with one warning instead of appending prompts there, and creates a new log 0600.
+
+- Research web redirects that leave the first URL's scheme, host or port drop the request's extra headers, such as a configured search key, for the rest of the chain.
+
+- Model pulls refuse unsafe portable paths and fallback blob names, follow nested snapshot links at their real depth, and never write past a file's declared size. Model inspection refuses non-positive quantization bits or group sizes.
+
+- Checkpoint shard indexes need checked JSON types and names inside the model folder, and checkpoint writes stage in an exclusive sibling file opened without following links before replacing the target atomically. The secondary Metal, GLM, Flash Next and Kimi readers share the bounded safetensors header checks and refuse tensors whose payloads overlap.
+
+- HTTP serving and the Kolibri runner share one end-of-sequence resolver that merges the model's and the generation config's EOS ids, so a declared second end token also stops HTTP replies. A present EOS entry with a negative, fractional, boolean or out-of-range id refuses loading.
+
+- Kolibri keeps its 16 verification rows past the advertised window in its caches, memory pricing and admission, so a request at the advertised edge no longer fails admission. The advertised context is unchanged.
+
+- GLM on CUDA keeps each committed prompt prefix in bounded, preallocated snapshot pages instead of its whole context arena, so saved prompt states stay inside the prompt-cache budget; prompt arithmetic is unchanged (#993). Thanks to @ss-cong.
+
+- GLM on CUDA runs the uneven KDA input projections of TP=3 (22, 21 and 21 heads) on the existing row-major matmuls instead of refusing them; aligned shares keep the tiled path. TP=3 device qualification is pending (#1067). Thanks to @Bizuayeu.
+
+- GLM-5.3 on Metal skips the sparse indexer's scoring pass while its 2,048-key top-k already holds every causal key, where those scores were never read. Longer windows are unchanged, and the timing gain is not yet measured (#1054). Thanks to @Chris9121.
+
+- Linux video looks for `libtfvideo.so` in the executable's `../lib` directory, then beside the executable, then on the loader's path, as capability discovery does. Real video through that layout remains unchecked (#1107). Thanks to @Bizuayeu.
+
+- Qwen3.8-27B on Metal takes prompt matmuls of 16 K chunks in 16 by 32 tiles, each simdgroup adding a pair of chunks, after a once-per-shape check on the chip that the pairs give the earlier tiles' bits; shapes that fail it keep the earlier tiles.
+
+- Flash Next on Metal releases its buffers, pipelines, mappings and files after a partial load or at shutdown, draining its queues first.
+
+- Shared lane rounds let other streams use spare rows when a forced window does not fit, keeping their waiting age, and shared prompt scheduling prefers admitted prompts with less work left, keeping foreground preference and bounded waits.
+
+- Shared lanes reserve context, paired-row and loop-close storage before grammar transitions and token publication, so an allocation failure publishes no rejected token and keeps a pending thinking close.
+
+- Prompt-cache recall picks a disk restore by its estimated time saved over the best RAM state, within the memory budget, and keeps the longest compatible prefix when timing rates are unknown. The tokenizer's memo cache keeps recently used segments when it evicts.
+
+- `tf-qwen27-run --profile-prompt` splits a timed Qwen3.8-27B prompt's GPU time by class. It is off by default, and profiling slows the prompt. The cache and concurrent benchmark tools time a whole workload from its first request to its last completion, keep failed workers in the result and refuse incomplete throughput totals.
+
+- Prepare immutable shared proposal-vocabulary artifacts and an offline `tools/draft_vocab.py responses` builder from committed response IDs. No artifact is activated and defaults are unchanged.
+
+- The README opens with a pinned native-model quick start for Mac and Linux and a table of native model choices.
+
+- The app checks credentials, remote access, MCP launches and workspace files before use: restored masked credentials stay bound to their endpoint and account, revoking a paired device or rotating the owner credential ends its live streams, a stopped MCP server starts only after native confirmation of its whole launch configuration, Git hygiene and artifact reads stay inside the workspace, and verified downloads refuse invalid sizes, looping pagination and links that leave the configured Hub endpoint.
+
+- The app puts its planning-only note in the first system message, does not retry a recognized chat-template refusal, and retries a refused reasoning effort once at the nearest level the server names, saying so in the timeline (#884). Thanks to @Gogo6969.
 
 ## 1.1.1
 
