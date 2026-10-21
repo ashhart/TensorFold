@@ -3,9 +3,10 @@ const std = @import("std");
 const cuda = @import("cuda");
 
 pub const Kernels = struct {
-    /// qmm_group, qmm_prefill, lane_gemv, affine4_pack (the affine-4 projections), sample, tree_round.
-    mods: [6]cuda.Module,
+    /// qmm_group, qmm_prefill, lane_gemv, affine4_pack, sample, tree_round, affine8, affine_prefill (other widths).
+    mods: [8]cuda.Module,
     affine: cuda.qlinear.Affine4Kernels,
+    wide: cuda.qlinear.AffineNKernels,
     draws: cuda.sample.Draws,
     round: cuda.tree_round.Kernels,
     embed: cuda.embed_rows.EmbedRows,
@@ -19,7 +20,7 @@ pub const Kernels = struct {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var k: Kernels = undefined;
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.sample, kk.tree_round };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.sample, kk.tree_round, kk.affine8, kk.affine_prefill };
         var loaded: usize = 0;
         errdefer for (k.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -30,6 +31,8 @@ pub const Kernels = struct {
         const gb10 = try ctx.capability() == 121;
         k.affine = try cuda.qlinear.Affine4Kernels.resolve(d, k.mods[0], k.mods[1], k.mods[2], k.mods[3], sms, gb10);
         errdefer k.affine.deinit();
+        k.wide = try cuda.qlinear.AffineNKernels.resolve(d, k.mods[6], k.mods[7], k.mods[3], sms, gb10);
+        errdefer k.wide.deinit();
         k.draws = try cuda.sample.Draws.resolve(k.mods[4]);
         k.round = try cuda.tree_round.Kernels.resolve(k.mods[5]);
         k.embed = try cuda.embed_rows.EmbedRows.load(d);
@@ -50,6 +53,7 @@ pub const Kernels = struct {
         k.qk.unload();
         k.norms.unload();
         k.embed.unload();
+        k.wide.deinit();
         k.affine.deinit();
         for (&k.mods) |*m| m.unload();
     }
