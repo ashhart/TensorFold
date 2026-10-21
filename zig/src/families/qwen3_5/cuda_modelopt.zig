@@ -217,7 +217,7 @@ pub const Kernels = struct {
                 return if (b) |x| x.ptr else 0;
             }
         }.of;
-        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt, .ck = if (k.ck) |*c| c else null, .ck_rows = ptr(k.rows8), .ck_part = ptr(k.part), .ck4 = if (k.dense4) |*x| x else null, .ck4_rows = ptr(k.rows4) };
+        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt, .ck = if (k.ck) |*c| c else null, .ck_rows = ptr(k.rows8), .ck_part = ptr(k.part), .ck4 = if (k.dense4) |*x| x else null, .ck4_rows = ptr(k.rows4), .ck_prompt_whole = true };
     }
 
     /// The slice partials and quantized rows every projection of `e` takes at up to max_rows rows.

@@ -235,7 +235,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer packer.unload();
     const ck_kinds = comptime std.enums.values(ck_k.Kind);
     var ck_experts: [ck_kinds.len]ck_k.Experts = undefined;
-    var lanes: [2]lane8_k.Lane = undefined;
+    var lanes: [3]lane8_k.Lane = undefined;
     var nck: usize = 0;
     var nlane: usize = 0;
     defer for (ck_experts[0..nck]) |*x| x.deinit();
@@ -251,7 +251,7 @@ pub fn run(gpu: check.Gpu) !void {
             try kernels.append(a, ck_experts[nck].kernel());
             nck += 1;
         }
-        for ([_]lane8_k.Kind{ .cluster, .reduce }, [_]*const cuda.ck.Ck{ q, &ck_reduce.? }) |kind, by| {
+        for ([_]lane8_k.Kind{ .cluster, .reduce, .whole }, [_]*const cuda.ck.Ck{ q, &ck_reduce.?, q }) |kind, by| {
             lanes[nlane] = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .ck = by, .packer = &packer };
             try kernels.append(a, lanes[nlane].kernel());
             nlane += 1;

@@ -104,6 +104,7 @@ pub const Linear = struct {
     ggml: ?*const ggml.Kernels = null, // q8_0 and iq2xxs rows of both kinds
     ck4: ?*const ck_dense.Dense4 = null, // the checkpoint's own math: an nvfp4 weight with an input scale (ck packing)
     ck4_rows: u64 = 0, // its NVFP4 rows (at least ck.rowsBytes(rows, k)), quant4's under the input scale
+    ck_prompt_whole: bool = false, // FP8 prompt rows past 16 on lane8's 128-row tile with K whole (prompt-only bits)
 
     /// e4m3 rows of x times an fp8 weight under its input scale, bf16 out: decode and prompt rows alike (row-exact).
     fn checkpoint(l: Linear, s: Stream, c: *const ck.Ck, q: qmmf.Weight, in: Rows, out: u64, rows: usize) !void {
@@ -158,7 +159,13 @@ pub const Linear = struct {
             .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
             .mxfp8 => |q| return l.onLane(s, q, .mxfp8, in, out, rows),
             .nvfp4 => |q| return if (q.act != 0 and l.ck4 != null) l.checkpoint4(s, l.ck4.?, q, in, out, rows) else l.onPrompt(s, q, .fp4, in, out, rows),
-            .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onPrompt(s, q, .fp8, in, out, rows),
+            .fp8 => |q| {
+                if (q.act == 0 or l.ck == null) return l.onPrompt(s, q, .fp8, in, out, rows);
+                if (!l.ck_prompt_whole or rows <= 16) return l.checkpoint(s, l.ck.?, q, in, out, rows);
+                if (l.ck_rows == 0) return error.NoCheckpointRows;
+                try l.ck.?.quant8(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q.k, q.act, l.ck_rows);
+                return l.ck.?.lane8Prompt(s, l.ck_rows, rows, q, q.act, out);
+            },
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
             // prompt rows always take the prompt GEMM: a row's bits must not depend on where a prompt's chunks are cut
             .q8_0, .iq2xxs => |q| return (l.ggml orelse return error.FormatNotLoaded).promptRows(s, q, in.x, in.ldx, rows, out, .bf16),

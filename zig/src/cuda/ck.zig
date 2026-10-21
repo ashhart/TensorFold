@@ -127,8 +127,16 @@ pub const Ck = struct {
 
     /// lane8 on row tile `ti` of `lane`'s order: 16, 32, 64 (whole tiles of m), 64 skipping, 128 skipping.
     pub fn lane8Tile(c: *const Ck, s: Stream, ti: usize, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64, part: u64) !void {
+        return c.lane8Slices(s, ti, x8, m, w, act, y, part, qmmf.splitK(w.n, w.k));
+    }
+
+    /// lane8 over prompt rows on the 128-row tile with K whole (no slices): a prompt's own bits, not a decode row's.
+    pub fn lane8Prompt(c: *const Ck, s: Stream, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64) !void {
+        return c.lane8Slices(s, 4, x8, m, w, act, y, 0, 1);
+    }
+
+    fn lane8Slices(c: *const Ck, s: Stream, ti: usize, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64, part: u64, sk: u32) !void {
         if (w.mode != .fp8) return error.FormatMismatch;
-        const sk = qmmf.splitK(w.n, w.k);
         const cluster = sk > 1 and sk <= 8 and c.clusters;
         if (sk > 1 and !cluster and part == 0) return error.NeedsPartials;
         const prompt = ti == 4;
