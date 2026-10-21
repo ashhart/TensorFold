@@ -12,8 +12,7 @@ struct Row8 {
     float *ks, *vs;
 };
 
-// Layer `layer`'s rows at pos, head h: a layer's block is kvh * n rows of HD bytes for keys then values, then kvh * n
-// fp32 scales for each; n is cap, or with a page table ptok inside pos's page (Seg.ps bytes a page).
+// Codes and scales at (layer, h, pos): a layer's block of n = cap rows a head, or of ptok rows in pos's page.
 __device__ __forceinline__ Row8 row8(const Seg& sg, int layer, int kvh, int h, int pos) {
     unsigned char* base = reinterpret_cast<unsigned char*>(sg.kv);
     int n = sg.cap, p = pos;

@@ -2,8 +2,7 @@
 const warm = @import("cuda_warm.zig");
 const E = @import("cuda_engine.zig");
 
-/// `streams` windows reserved and warmed; with a page pool (TF_QWEN_KV_PAGES) the first stream's window only, the
-/// shared shapes warmed on lanes opened for one row and closed again.
+/// `streams` windows reserved and warmed; with a pool the first only, the shapes warmed on one-row lanes.
 pub fn target(comptime Cache: type, comptime Part: type, l: anytype, streams: u32) !void {
     const started = warm.profile.now(l.io);
     var warm_ns: i96 = 0;
