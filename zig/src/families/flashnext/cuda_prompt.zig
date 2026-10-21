@@ -113,6 +113,7 @@ pub fn pooledBytes(cap: usize) usize {
 }
 
 const round_graph = @import("cuda_round_graph.zig");
+const pages = @import("cuda_pages.zig");
 
 /// One loaded checkpoint: the embedding table, every layer, the mixer and head, and the batched pass's scratch.
 pub const Engine = struct {
@@ -287,6 +288,14 @@ pub const Engine = struct {
 
     /// A fresh cache. `cap` is how many tokens it can hold, prompt plus generated.
     pub fn newSeq(e: *Engine, cap: usize) !Seq {
+        const test_pages = try pages.pageTest();
+        return e.newSeqOn(cap, if (test_pages > 0) try pages.testPages(e.gpa, e.driver, e.stream.*, cap, test_pages) else null);
+    }
+
+    /// A fresh cache whose attention caches are `given` pages (owned by the cache from here), else contiguous.
+    pub fn newSeqOn(e: *Engine, cap: usize, given: ?pages.Paged) !Seq {
+        var paged = given;
+        errdefer if (paged) |*p| p.deinit(e.gpa);
         e.round_graph.clear();
         if (cap == 0) return error.UnexpectedTensor;
         const logits = try e.gpa.alloc(u8, vocab * 2);
@@ -295,13 +304,13 @@ pub const Engine = struct {
         errdefer freeOwned(e.gpa, conv);
         const state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, state_n * 4);
         errdefer freeOwned(e.gpa, state);
-        const kc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
+        const kc = if (paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         errdefer freeOwned(e.gpa, kc);
-        const vc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
+        const vc = if (paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         errdefer freeOwned(e.gpa, vc);
-        const ikc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * index_dim * 2);
+        const ikc = if (paged) |*p| try p.views(e.gpa, e.driver, .index) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * index_dim * 2);
         errdefer freeOwned(e.gpa, ikc);
-        const pooled = try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap));
+        const pooled = if (paged) |*p| try p.views(e.gpa, e.driver, .pooled) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap));
         errdefer freeOwned(e.gpa, pooled);
         var tail = try cuda.DeviceBuffer.alloc(e.driver, ple_tail_n * wide * 2);
         errdefer tail.free();
@@ -313,12 +322,25 @@ pub const Engine = struct {
             .vc = vc,
             .ikc = ikc,
             .pooled = pooled,
+            .paged = paged,
             .tail = tail,
             .history = .{ e.eos, e.eos },
             .fed = 0,
             .logits = logits,
             .cap = cap,
         };
+    }
+
+    /// A pool lane's cache made fresh for its next stream: zero states and tail, nothing fed, `cap` rows.
+    pub fn clearSeq(e: *Engine, s: *Seq, cap: usize) !void {
+        e.round_graph.clear();
+        for (s.conv) |b| try b.fill8(0, e.stream.handle);
+        for (s.state) |b| try b.fill8(0, e.stream.handle);
+        try s.tail.fill8(0, e.stream.handle);
+        s.history = .{ e.eos, e.eos };
+        s.fed = 0;
+        s.cap = cap;
+        s.untaught = false;
     }
 
     /// Run `ids` on from `seq.fed` and leave the next token's scores in `seq.logits`.
@@ -449,6 +471,8 @@ pub const Seq = struct {
     vc: []cuda.DeviceBuffer,
     ikc: []cuda.DeviceBuffer,
     pooled: []cuda.DeviceBuffer,
+    /// kc, vc, ikc and pooled as borrowed views of page 0 of these pages (null: each its own contiguous buffer).
+    paged: ?pages.Paged = null,
     tail: cuda.DeviceBuffer,
     history: [2]i64,
     fed: usize,
@@ -459,7 +483,12 @@ pub const Seq = struct {
 
     /// The caches a batched pass reads and leaves; `scores` the engine's block scores (Engine.reserveScores).
     pub fn view(s: *Seq, scores: u64) batch.SeqState {
-        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores };
+        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg() };
+    }
+
+    /// The attention kernels' page argument (zero: contiguous caches).
+    pub fn pg(s: *const Seq) @import("cuda_glue.zig").Pg {
+        return if (s.paged) |*p| p.pg() else .{};
     }
 
     pub fn deinit(s: *Seq, gpa: std.mem.Allocator) void {
@@ -476,6 +505,7 @@ pub const Seq = struct {
         gpa.free(s.vc);
         gpa.free(s.ikc);
         gpa.free(s.pooled);
+        if (s.paged) |*p| p.deinit(gpa);
         if (s.tail.ptr != 0) s.tail.free();
         gpa.free(s.logits);
     }

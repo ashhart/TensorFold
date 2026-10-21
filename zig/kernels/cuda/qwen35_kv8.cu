@@ -6,9 +6,26 @@
 
 using namespace tf_q35;
 
-// A layer's block in Seg.kv: kvh * cap rows of HD bytes for keys then values, then kvh * cap fp32 scales for each.
-__device__ __forceinline__ unsigned char* layer_at(const Seg& sg, int layer, int kvh) {
-    return reinterpret_cast<unsigned char*>(sg.kv) + (size_t)layer * 2 * kvh * sg.cap * (HD + 4);
+// A key's and value's codes and scales.
+struct Row8 {
+    unsigned char *k, *v;
+    float *ks, *vs;
+};
+
+// Codes and scales at (layer, h, pos): a layer's block of n = cap rows a head, or of ptok rows in pos's page.
+__device__ __forceinline__ Row8 row8(const Seg& sg, int layer, int kvh, int h, int pos) {
+    unsigned char* base = reinterpret_cast<unsigned char*>(sg.kv);
+    int n = sg.cap, p = pos;
+    if (sg.pt != 0) {
+        base += (size_t)reinterpret_cast<const int*>(sg.pt)[pos / sg.ptok] * sg.ps;
+        n = sg.ptok;
+        p = pos % sg.ptok;
+    }
+    unsigned char* keys = base + (size_t)layer * 2 * kvh * n * (HD + 4);
+    unsigned char* values = keys + (size_t)kvh * n * HD;
+    float* kscale = reinterpret_cast<float*>(values + (size_t)kvh * n * HD);
+    const size_t row = (size_t)h * n + p;
+    return {keys + row * HD, values + row * HD, kscale + row, kscale + (size_t)kvh * n + row};
 }
 
 // The block's 256 threads' row as e4m3 into q[d], its scale (1 for a row of zeros) to *s; tf_kv_quant's bits.
@@ -32,13 +49,9 @@ struct StoreFp8 {
     int layer, kvh;
     float* red;
     __device__ __forceinline__ void operator()(const Seg& sg, int h, int slot, int d, __nv_bfloat16 k, __nv_bfloat16 v) const {
-        unsigned char* keys = layer_at(sg, layer, kvh);
-        unsigned char* values = keys + (size_t)kvh * sg.cap * HD;
-        float* kscale = reinterpret_cast<float*>(values + (size_t)kvh * sg.cap * HD);
-        float* vscale = kscale + (size_t)kvh * sg.cap;
-        const size_t row = (size_t)h * sg.cap + slot;
-        quant_row(bf(k), d, keys + row * HD, kscale + row, red);
-        quant_row(bf(v), d, values + row * HD, vscale + row, red);
+        const Row8 r = row8(sg, layer, kvh, h, slot);
+        quant_row(bf(k), d, r.k, r.ks, red);
+        quant_row(bf(v), d, r.v, r.vs, red);
     }
 };
 
@@ -86,10 +99,6 @@ extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __
         }
         return;
     }
-    const unsigned char* K = layer_at(sg, layer, KVH);
-    const unsigned char* V = K + (size_t)KVH * sg.cap * HD;
-    const float* KS = reinterpret_cast<const float*>(V + (size_t)KVH * sg.cap * HD);
-    const float* VS = KS + (size_t)KVH * sg.cap;
     float q[DPL], o[DPL];
 #pragma unroll
     for (int i = 0; i < DPL; i++) {
@@ -97,23 +106,32 @@ extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (int t = k0; t < k1; t++) {
-        const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
-        const size_t row = (size_t)h * sg.cap + pos;
-        float kf[DPL], vf[DPL];
-        widen8(*reinterpret_cast<const uint2*>(K + row * HD + lane * DPL), kf);
-        float dot = 0.0f;
+    // the keys in order; a row's codes and scales by `at` (one branch here, not one a key)
+    const auto scan = [&](auto at) {
+        for (int t = k0; t < k1; t++) {
+            const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
+            const Row8 r = at(pos);
+            float kf[DPL], vf[DPL];
+            widen8(*reinterpret_cast<const uint2*>(r.k + lane * DPL), kf);
+            float dot = 0.0f;
 #pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
-        const float s = warp_sum(dot) * KS[row] * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        widen8(*reinterpret_cast<const uint2*>(V + row * HD + lane * DPL), vf);
-        const float bv = b * VS[row];
+            for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
+            const float s = warp_sum(dot) * *r.ks * scale;
+            const float mn = fmaxf(mx, s);
+            const float a = __expf(mx - mn), b = __expf(s - mn);
+            l = l * a + b;
+            widen8(*reinterpret_cast<const uint2*>(r.v + lane * DPL), vf);
+            const float bv = b * *r.vs;
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
-        mx = mn;
+            for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
+            mx = mn;
+        }
+    };
+    if (sg.pt == 0) {
+        const Row8 r0 = row8(sg, layer, KVH, h, 0); // row p is row 0's plus p rows
+        scan([&](int pos) { return Row8{r0.k + (size_t)pos * HD, r0.v + (size_t)pos * HD, r0.ks + pos, r0.vs + pos}; });
+    } else {
+        scan([&](int pos) { return row8(sg, layer, KVH, h, pos); });
     }
     if (lane == 0) {
         PM[slot] = mx;
@@ -127,20 +145,16 @@ extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __
 extern "C" __global__ void __launch_bounds__(256) tf_q35k_compact8(Geo geo, Seg sg, Path path) {
     const int KVH = geo.kvh;
     const int layer = blockIdx.x, h = blockIdx.y;
-    unsigned char* keys = layer_at(sg, layer, KVH);
-    unsigned char* values = keys + (size_t)KVH * sg.cap * HD;
-    float* kscale = reinterpret_cast<float*>(values + (size_t)KVH * sg.cap * HD);
-    float* vscale = kscale + (size_t)KVH * sg.cap;
-    const size_t base = (size_t)h * sg.cap;
     const int d = threadIdx.x;
     for (int j = 0; j < path.n; j++) {
         const int from = sg.len + path.rows[j], to = sg.len + j;
         if (from != to) {
-            keys[(base + to) * HD + d] = keys[(base + from) * HD + d];
-            values[(base + to) * HD + d] = values[(base + from) * HD + d];
+            const Row8 a = row8(sg, layer, KVH, h, from), b = row8(sg, layer, KVH, h, to);
+            b.k[d] = a.k[d];
+            b.v[d] = a.v[d];
             if (d == 0) {
-                kscale[base + to] = kscale[base + from];
-                vscale[base + to] = vscale[base + from];
+                *b.ks = *a.ks;
+                *b.vs = *a.vs;
             }
         }
         __syncthreads();
