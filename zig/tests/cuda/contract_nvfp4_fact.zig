@@ -1,5 +1,4 @@
-//! NVFP4 experts' prompt tiles with the decode form's factored sums (nvfp4_experts.cu's tf_nvfp4_fact_*) under the
-//! contract: each replaces the decode form it stands for (nvfp4_expert_kernel<2, 2, 4> and <1, 0, 4>) bit for bit.
+//! NVFP4 prompt tiles with the decode form's sums under the contract: each replaces its decode form bit for bit.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -11,8 +10,7 @@ const g = contract.gates;
 const fx = cuda.experts.Nvfp4Experts;
 const grouped = cuda.grouped;
 
-/// SwiGLU gate-up to bf16 rows, fp32 down to slot rows; and the control: the existing scaled-code prompt tile
-/// (tf_nvfp4_prompt_swiglu, one fp32 sum over K) posing as the decode form's replacement, which gate 3 must refuse.
+/// SwiGLU gate-up, fp32 down, and a control: tf_nvfp4_prompt_swiglu posing as a replacement, which gate 3 refuses.
 pub const Kind = enum { up, down, control };
 
 const experts = 4;
@@ -115,7 +113,7 @@ pub const Experts = struct {
         return self.scales[(e * self.parts() + part) * per ..][0..per];
     }
 
-    /// Random codes, block scales, globals and inputs; non-finite: planted values; stress: integer sums, mirrored halves.
+    /// Random codes, scales, globals and inputs; non-finite: planted values; stress: integer sums, mirrored halves.
     pub fn prepare(self: *Experts, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.n == 0 or shape.n % 32 != 0 or shape.k == 0 or shape.k % 32 != 0) return false;
         self.free();
@@ -170,9 +168,7 @@ pub const Experts = struct {
         return true;
     }
 
-    /// Gate 4: inputs 128..255 (bf16 integers), codes 4 and 6 at scale 1 and globals 1; the second half of K mirrors
-    /// the first with negated codes, x's first a step lower: sums reach ~2^20 in fp32, exact in any order, and end at one
-    /// code (so SwiGLU's bf16 roundings, which scale with the result, stay far below a bf16 sum's loss).
+    /// Gate 4: bf16-integer inputs, codes 4 and 6 at scale 1, K's halves mirrored: fp32 sums exact in any order.
     fn stress(self: *Experts, rng: std.Random) void {
         const k = self.shape.k;
         @memset(self.scales, 0x38);

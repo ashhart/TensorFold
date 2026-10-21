@@ -1,5 +1,4 @@
-//! NVFP4 experts' prompt tiles with the decode form's sums (nvfp4_experts.cu's tf_nvfp4_fact_*), in registry.cuda.
-//! Records from nvcc 13.0.88 cubins (sm_80/86/89/120a/121a, cuobjdump --dump-resource-usage).
+//! tf_nvfp4_fact_* (nvfp4_experts.cu) in registry.cuda, from nvcc 13.0.88 cubins (sm_80/86/89/120a/121a).
 const CudaRecord = @import("registry.zig").CudaRecord;
 
 pub const cuda = [_]CudaRecord{
