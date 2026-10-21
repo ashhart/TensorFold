@@ -103,6 +103,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
     own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, context, n);
     errdefer own.m.deinit();
+    own.m.graphed = !envOff("TENSORFOLD_GEMMA4_GRAPHS"); // =0: every decode forward eager
     own.gb = try be.Gemma.init(gpa, ctx.d, &own.m, &own.k, own.s);
     return .{
         .backend = own.gb.backend(),
@@ -114,6 +115,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = release,
         .target = &own.gb,
     };
+}
+
+fn envOff(name: [*:0]const u8) bool {
+    const v = std.c.getenv(name) orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "0");
 }
 
 fn gib(bytes: u64) f64 {

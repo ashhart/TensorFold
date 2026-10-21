@@ -56,6 +56,9 @@ pub const Model = struct {
     s: Scratch,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
     planned: ?usize = null, // a plan: the bytes counted, nothing allocated
+    /// Decode forwards of n rows as CUDA graphs, captured at their first use ([n]; null: not yet, or graphs off).
+    graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
+    graphed: bool = true,
 
     const Scratch = struct { ids: u64, pos: u64, slot: u64, h: [2]u64, n: u64, xs: u64, q: u64, k: u64, v: u64, qr: u64, kr: u64, vr: u64, att: u64, o: u64, gate: u64, up: u64, act: u64, y: u64, part: u64, logits: u64 };
 
@@ -165,6 +168,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        for (&m.graphs) |*g| if (g.*) |*e| e.deinit();
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
         m.gpa.free(m.kc);
@@ -189,7 +193,6 @@ pub const Model = struct {
 
     /// Every chain's rows (a prompt chunk, or decode windows); rows [head0, head0 + heads)'s capped logits at s.logits.
     pub fn forward(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, prompt: bool, head0: usize, heads: usize) !void {
-        const geo = m.geo;
         var rows: usize = 0;
         for (chains) |c| {
             if (c.tokens.len == 0 or c.slot >= m.slots or c.p0 + c.tokens.len > m.context) return error.BadChain;
@@ -211,7 +214,31 @@ pub const Model = struct {
         try m.upload(s, m.s.ids, std.mem.sliceAsBytes(ids[0..rows]));
         try m.upload(s, m.s.pos, std.mem.sliceAsBytes(ids[rows .. 2 * rows]));
         try m.upload(s, m.s.slot, std.mem.sliceAsBytes(ids[2 * rows ..]));
-        const h = geo.hidden;
+        // a decode forward's launches depend on its row count only (positions and slots are read on the device)
+        if (prompt or !m.graphed or head0 != 0 or heads != rows) return m.launch(k, s, chains, rows, prompt, head0, heads);
+        if (m.graphs[rows] == null) m.graphs[rows] = try m.capture(k, s, rows);
+        try m.graphs[rows].?.launchOn(s);
+    }
+
+    /// A decode forward of `rows` rows, every row's logits, captured as a graph.
+    fn capture(m: *Model, k: *const kern.Kernels, s: cuda.Stream, rows: usize) !cuda.graph.Exec {
+        try s.synchronize();
+        try cuda.graph.beginCapture(s, .thread_local);
+        m.launch(k, s, &.{}, rows, false, 0, rows) catch |e| {
+            if (cuda.graph.endCapture(s)) |g| {
+                var gg = g;
+                gg.deinit();
+            } else |_| {}
+            return e;
+        };
+        var g = try cuda.graph.endCapture(s);
+        defer g.deinit();
+        return g.instantiate();
+    }
+
+    /// The forward's launches over staged ids, positions and slots: no host copies, so a graph can hold them.
+    fn launch(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, rows: usize, prompt: bool, head0: usize, heads: usize) !void {
+        const h = m.geo.hidden;
         const x = m.s;
         try k.embed.affine(s, x.ids, m.w.embed_w, m.w.embed_s, m.w.embed_b, x.h[0], rows, h, .{ .bits = 4, .group = cfg.group, .scale = embedScale(h) });
         // layer 0's input norm alone; every later one is the previous layer's dense tail
