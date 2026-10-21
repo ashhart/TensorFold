@@ -27,6 +27,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--drafter DRAFTER]" ++
     " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS]" ++
     " [--silence-floor-dbfs DBFS] [--silence-seconds SECONDS]" ++
+    " [--silence-onset-s SECONDS] [--silence-onset-voiced-s SECONDS]" ++
     " [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
     " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++

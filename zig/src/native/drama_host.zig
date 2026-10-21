@@ -321,52 +321,75 @@ const budget = try @import("drama_budget.zig").budget(o.context, o.max_frames);
     if (!is_cuda) try h.warm.hold(h.sessions[0].e.g, io);
     errdefer if (!is_cuda) h.warm.drop(h.sessions[0].e.g);
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
-    if (o.silence.enabled())
-        std.log.info("drama3: silence guard on: a reply ends after {d} s below {d} dBFS", .{ o.silence.seconds.?, o.silence.floor_dbfs.? });
+    if (o.silence.enabled()) std.log.info("drama3: silence guard on: {f}", .{o.silence});
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
 }
 
-test "native silence guard: whole and stream share decode cuts; off preserves PCM" {
-    const Fake = struct {
-        calls: usize = 0,
-        const pcm = [_]f32{ 0.25, -0.25, 0, 0, 0, 0, 0.25, -0.25 };
-        pub fn flush(t: *@This(), from: usize, to: usize, sink: d3.tts.Sink) !void {
-            t.calls += 1;
-            try sink.audio(sink.ctx, pcm[from * 2 .. to * 2]);
+/// Two-sample frames at 8 Hz, decoded through the host's PCM callback and the shared decode schedule.
+const FakeCodec = struct {
+    pcm: []const f32,
+    calls: usize = 0,
+
+    pub fn flush(t: *FakeCodec, from: usize, to: usize, sink: d3.tts.Sink) !void {
+        t.calls += 1;
+        try sink.audio(sink.ctx, t.pcm[from * 2 .. to * 2]);
+    }
+
+    fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
+
+    /// Generates every frame until the guard trips; the samples kept into `out`, and whether it tripped.
+    fn run(t: *FakeCodec, silence: api.speech_guard.Config, stream: bool, out: []f32) !struct { usize, bool } {
+        var result: api.SpeechResult = .{};
+        const r: api.SpeechRequest = .{ .prompt = &.{}, .pcm = out, .result = &result, .seed = 0, .stream = stream };
+        var j: Job = .{ .id = 0, .request = &r, .sink = .{ .ctx = t, .event = event }, .guard = .init(silence, 8), .frame_length = 2 };
+        const sink: d3.tts.Sink = .{ .ctx = &j, .audio = Host.copyAudio };
+        const frames = t.pcm.len / 2;
+        for (0..frames) |i| {
+            try decode.flush(t, j.incremental(), i, i + 1, false, sink);
+            if (j.guard.tripped) return .{ j.samples, true };
         }
-        fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
-    };
+        try decode.flush(t, j.incremental(), frames, frames, true, sink);
+        return .{ j.samples, false };
+    }
+};
+
+test "native silence guard: whole and stream share decode cuts; off preserves PCM" {
+    const pcm = [_]f32{ 0.25, -0.25, 0, 0, 0, 0, 0.25, -0.25 };
     for ([_]bool{ false, true }) |enabled| {
         for ([_]bool{ false, true }) |stream| {
-            var pcm: [Fake.pcm.len]f32 = undefined;
-            var result: api.SpeechResult = .{};
-            const r: api.SpeechRequest = .{
-                .prompt = &.{},
-                .pcm = &pcm,
-                .result = &result,
-                .seed = 0,
-                .stream = stream,
-            };
-            var t: Fake = .{};
-            var j: Job = .{
-                .id = 0,
-                .request = &r,
-                .sink = .{ .ctx = &t, .event = Fake.event },
-                .guard = .init(if (enabled) .{ .floor_dbfs = -20, .seconds = 0.5 } else .{}, 8),
-                .frame_length = 2,
-            };
-            const sink: d3.tts.Sink = .{ .ctx = &j, .audio = Host.copyAudio };
-            for (0..Fake.pcm.len / 2) |i| {
-                try decode.flush(&t, j.incremental(), i, i + 1, false, sink);
-                if (j.guard.tripped) break;
-            }
-            if (!j.guard.tripped)
-                try decode.flush(&t, j.incremental(), Fake.pcm.len / 2, Fake.pcm.len / 2, true, sink);
-            const kept: usize = if (enabled) 6 else Fake.pcm.len;
-            try std.testing.expectEqual(kept, j.samples);
-            try std.testing.expectEqual(enabled, j.guard.tripped);
-            try std.testing.expectEqualSlices(f32, Fake.pcm[0..kept], pcm[0..j.samples]);
-            if (!enabled and !stream) try std.testing.expectEqual(@as(usize, 1), t.calls);
+            var codec: FakeCodec = .{ .pcm = &pcm };
+            var out: [pcm.len]f32 = undefined;
+            const samples, const tripped = try codec.run(if (enabled) .{ .floor_dbfs = -20, .seconds = 0.5 } else .{}, stream, &out);
+            const kept: usize = if (enabled) 6 else pcm.len;
+            try std.testing.expectEqual(kept, samples);
+            try std.testing.expectEqual(enabled, tripped);
+            try std.testing.expectEqualSlices(f32, pcm[0..kept], out[0..samples]);
+            if (!enabled and !stream) try std.testing.expectEqual(@as(usize, 1), codec.calls);
+        }
+    }
+}
+
+test "native silence guard: onset silence cuts whole and stream at one frame; speech past the minimum is kept" {
+    const word = [_]f32{ 0.25, -0.25 };
+    const hush = [_]f32{ 0, 0 };
+    const one_word = word ++ hush ++ hush ++ hush ++ hush ++ word;
+    const late = hush ++ word ++ word ++ hush ++ hush ++ hush ++ word;
+    const tail: api.speech_guard.Config = .{ .floor_dbfs = -20, .seconds = 1 };
+    const onset: api.speech_guard.Config = .{ .floor_dbfs = -20, .seconds = 1, .onset_seconds = 0.5, .onset_voiced_seconds = 0.5 };
+    const cases = [_]struct { []const f32, api.speech_guard.Config, usize }{
+        .{ &one_word, onset, 6 }, // one voiced frame, then two silent ones
+        .{ &one_word, tail, 10 }, // onset off: four silent frames
+        .{ &late, onset, late.len }, // a short silent start, then two voiced frames before the pause
+    };
+    for (cases) |case| {
+        const pcm, const silence, const kept = case;
+        for ([_]bool{ false, true }) |stream| {
+            var codec: FakeCodec = .{ .pcm = pcm };
+            var out: [late.len]f32 = undefined;
+            const samples, const tripped = try codec.run(silence, stream, &out);
+            try std.testing.expectEqual(kept, samples);
+            try std.testing.expectEqual(kept < pcm.len, tripped);
+            try std.testing.expectEqualSlices(f32, pcm[0..kept], out[0..samples]);
         }
     }
 }

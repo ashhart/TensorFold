@@ -80,6 +80,8 @@ pub const flags = [_]Flag{
     .{ .name = "--keep-warm", .native = true },
     .{ .name = "--silence-floor-dbfs", .native = true },
     .{ .name = "--silence-seconds", .native = true },
+    .{ .name = "--silence-onset-s", .native = true },
+    .{ .name = "--silence-onset-voiced-s", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
@@ -338,13 +340,13 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.chat_template = v;
         return;
     }
-    if (is(name, "--max-frames")) {
+if (is(name, "--max-frames")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 8190) return fail(u, a, "argument --max-frames: expected 1 through 8190: '{s}'", .{v});
         out.max_frames = @intCast(n);
         return;
     }
-    if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
+    if (is(name, "--silence-onset-s")) out.silence.onset_seconds = try float(u, a, name, v) else if (is(name, "--silence-onset-voiced-s")) out.silence.onset_voiced_seconds = try float(u, a, name, v) else if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);

@@ -5,6 +5,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Drama3 CUDA replay waits for poison fills to finish before reset, prefill or decode reuses the buffers.
+- Native Drama speech can opt into `--silence-onset-s` with `--silence-onset-voiced-s` to end a synthesis as `silence` once that many seconds run silent while it has voiced less than the given minimum. Both are off unless given together, and need the silence guard.
+
 - Native Drama speech can opt into `--silence-floor-dbfs` and `--silence-seconds` to keep audio through a sustained silent tail and finish as `silence`, including an HTTP finish header or stream trailer. The default is off.
 
 - `serve --allowed-controls LIST` opts into stripping unlisted bracketed speech controls before input validation and tokenization. Omission preserves the input unchanged; see [speech controls](docs/speech-controls.md) for the open-vocabulary name grammar and malformed-input policy.
