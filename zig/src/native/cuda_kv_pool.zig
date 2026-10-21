@@ -43,6 +43,11 @@ pub fn wrapped(comptime F: type, loaded: anytype, free: u32, stream_bytes: u64, 
     return served(planned, free, if (own) stream_bytes else loaded.stream_bytes, stream_bytes, room);
 }
 
+/// Whether the family keeps prompts itself (qwen3_5's TF_QWEN_KV_SHARE): the host makes no prompt cache then.
+pub fn ownCache(loaded: anytype) bool {
+    return if (comptime @hasField(@TypeOf(loaded), "own_prompt_cache")) loaded.own_prompt_cache else false;
+}
+
 /// The real native startup room before page planning and cache allocation.
 pub fn startupRoom(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, available: u64, host_budget: u64, problem: *[]const u8) !?u64 {
     const memory = @import("cuda_family_memory.zig");

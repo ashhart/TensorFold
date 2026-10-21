@@ -16,6 +16,7 @@ const reuse = @import("cuda_reuse.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
 const pages_mod = @import("cuda_pages.zig");
 const cache_mod = @import("cuda_cache.zig");
+const prefix_mod = @import("cuda_prefix.zig");
 const kv_pool = @import("core").kv_pool;
 const be = lanes.backend;
 pub const round_timing = @import("cuda_round_timing.zig");
@@ -69,6 +70,8 @@ pub const Loaded = struct {
     target: *reuse.Target,
     /// TF_QWEN_KV_PAGES: the streams beside the first take pages of one pool (null: a window each).
     layout: ?kv_pool.Layout = null,
+    /// TF_QWEN_KV_SHARE: the family keeps prompts as pool pages itself; the host makes no prompt cache of its own.
+    own_prompt_cache: bool = false,
 };
 
 fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
@@ -94,7 +97,9 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
         if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf };
         if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf };
     }
-    l.paged_only = pages_mod.pagedOnly() and streams > 0; // checks: every stream on pages, the reserved window idle
+    // checks, and TF_QWEN_KV_SHARE: every stream on pages (each can adopt the kept ones), the reserved window idle
+    l.paged_only = (pages_mod.pagedOnly() or l.share_snaps > 0) and streams > 0;
+    if (l.share_snaps > 0 and streams > 0) l.prefix = try prefix_mod.Prefix.init(l.gpa, l.e, l.pages.?, l.share_snaps);
 }
 
 /// The lane host's admission: the first stream's window is free, or a lane and the request's pages are.
@@ -112,6 +117,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
+    const share_snaps = try prefix_mod.sharing();
+    // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
+    if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
     errdefer e.deinit();
     if (o.prompt_int8) try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
@@ -124,7 +132,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .page_test = page_test, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .learns = if (o.slide) e else null,
@@ -139,6 +147,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .vision = v,
         .target = &l.target,
         .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
+        .own_prompt_cache = share_snaps > 0,
     };
 }
 
@@ -234,6 +243,8 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
+        error.QwenShareNeedsPages => "TF_QWEN_KV_SHARE keeps prompts as pool pages: set TF_QWEN_KV_PAGES to a divisor of the 4096-row prompt chunk",
+        error.BadQwenKvShare => "TF_QWEN_KV_SHARE takes the most recurrent-state snapshots the prompt cache keeps (0 or unset: off)",
         error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
         else => null,
@@ -272,6 +283,9 @@ const Lanes = struct {
     page_test: usize = 0,
     pages: ?*pages_mod.Pages = null,
     paged_only: bool = false,
+    /// TF_QWEN_KV_SHARE's snapshots (0: off) and the prompt cache over the pool's pages `attach` made.
+    share_snaps: usize = 0,
+    prefix: ?*prefix_mod.Prefix = null,
     /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' runs.
     draft: ?*Draft = null,
     /// The MTP drafter (qwen3_5_moe), when attached: its ring and state go into the pool lanes' runs.
@@ -307,6 +321,7 @@ const Lanes = struct {
         var fills = self.fills.valueIterator();
         while (fills.next()) |f| f.deinit();
         self.fills.deinit(self.gpa);
+        if (self.prefix) |x| x.deinit(); // its pages back to the pool before the pool goes
         if (self.pages) |p| p.deinit();
         if (self.vision) |v| v.deinit();
         self.e.deinit();
