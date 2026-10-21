@@ -17,6 +17,24 @@ pub fn enginePaged(loaded: anytype) bool {
     return if (comptime @hasField(@TypeOf(loaded), "engine_paged")) loaded.engine_paged else false;
 }
 
+/// The plan's view of a wrapped family: drafter buffers join the fixed part; no free stream pays its window first.
+pub fn served(l: ?kv_pool.Layout, free_streams: u32, family_bytes: u64, stream_bytes: u64, room: u64) struct { layout: ?kv_pool.Layout, room: u64 } {
+    var out = l orelse return .{ .layout = null, .room = room };
+    out.fixed_bytes += stream_bytes -| family_bytes;
+    return .{ .layout = out, .room = if (free_streams == 0) room -| stream_bytes else room };
+}
+
+test "a wrapped family's plan: drafter buffers a stream, a first window without a free stream" {
+    const l: kv_pool.Layout = .{ .fixed_bytes = 10, .token_bytes = 1, .page_tokens = 4, .snap_bytes = 1 };
+    const nemotron = served(l, 1, 500, 500, 1000); // its own sequence is in the model's bytes: nothing moves
+    try std.testing.expectEqual(@as(u64, 10), nemotron.layout.?.fixed_bytes);
+    try std.testing.expectEqual(@as(u64, 1000), nemotron.room);
+    const qwen = served(l, 0, 500, 530, 1000); // a drafter's 30 bytes a stream, the first stream's 530 first
+    try std.testing.expectEqual(@as(u64, 40), qwen.layout.?.fixed_bytes);
+    try std.testing.expectEqual(@as(u64, 470), qwen.room);
+    try std.testing.expectEqual(@as(?kv_pool.Layout, null), served(null, 0, 1, 2, 3).layout);
+}
+
 /// The real native startup room before page planning and cache allocation.
 pub fn startupRoom(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, available: u64, host_budget: u64, problem: *[]const u8) !?u64 {
     const memory = @import("cuda_family_memory.zig");

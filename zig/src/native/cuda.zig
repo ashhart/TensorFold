@@ -347,10 +347,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const free = loaded.free_streams;
     const grow = budget.growRoom(room, !@hasField(F.Options, "lanes"));
-    const layout = kv_pages.layout(loaded);
+    const wrapped = kv_pages.served(kv_pages.layout(loaded), free, loaded.stream_bytes, served.stream_bytes, room);
+    const layout = wrapped.layout;
     var paged: ?kv_pages.Plan = null;
     const streams = if (layout) |l| blk: {
-        paged = try kv_pages.plan(F, a, l, room, o, @intCast(window), problem, host_cache, kv_pages.enginePaged(loaded)) orelse return null;
+        paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(window), problem, host_cache, kv_pages.enginePaged(loaded)) orelse return null;
         break :blk paged.?.lanes;
     } else budget.admit(grow, served.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {

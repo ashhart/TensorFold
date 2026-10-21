@@ -13,6 +13,8 @@ const Draft = @import("cuda_draft.zig").Draft;
 const vision_prompt = @import("cuda_vision_prompt.zig");
 const reuse = @import("cuda_reuse.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
+const pages_mod = @import("cuda_pages.zig");
+const kv_pool = @import("core").kv_pool;
 const be = lanes.backend;
 pub const round_timing = @import("cuda_round_timing.zig");
 pub const vision = @import("cuda_vision.zig");
@@ -26,6 +28,8 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = E.max_rows;
 /// --drafter loads the DFlash2 draft model (openDrafter); the checkpoints have no head of their own.
 pub const takes_drafter = true;
+/// A request's pages hold one more forward past its prompt and reply (TF_QWEN_KV_PAGES).
+pub const window_rows: u32 = pages_mod.window_rows;
 
 /// Kept prompt states for the shared cache (cuda_reuse.zig), in pinned host memory, on the zero-anchored chunk grid.
 pub const snap_bytes = reuse.bytes;
@@ -59,11 +63,30 @@ pub const Loaded = struct {
     vision: ?*vision.Vision = null,
     /// What the prompt cache's saves copy: the engine and the streams' caches.
     target: *reuse.Target,
+    /// TF_QWEN_KV_PAGES: the streams beside the first take pages of one pool (null: a window each).
+    layout: ?kv_pool.Layout = null,
 };
+
+/// The pool beside the first stream's window: `streams` lanes and `pages` pages, made now.
+pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    l.pages = try pages_mod.Pages.init(l.gpa, l.e, l.capacity, l.page_tokens, streams, pages);
+    l.paged_only = pages_mod.pagedOnly() and streams > 0; // checks: every stream on pages, the reserved window idle
+}
+
+/// The lane host's admission: the first stream's window is free, or a lane and the request's pages are.
+pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    if (l.pool.items.len > 0 and !l.paged_only) return true;
+    const pg = l.pages orelse return true;
+    return pg.fits(prompt, max_tokens);
+}
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
+    const page_tokens = try pages_mod.paging();
+    if (page_tokens > 0 and (o.kv8 or o.slide)) return error.QwenPagesNeedBf16;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
     errdefer e.deinit();
     if (o.prompt_int8) try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
@@ -76,7 +99,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .learns = if (o.slide) e else null,
@@ -94,6 +117,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .reserve = reserve,
         .vision = v,
         .target = &l.target,
+        .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens) else null,
     };
 }
 
@@ -109,7 +133,8 @@ pub fn laneFacts(window: u32, verify: u32) lanes.Model {
 
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     const l: *Lanes = @ptrCast(@alignCast(p));
-    try reservation.target(E.Cache, E.Part, l, streams);
+    // with a pool the first stream's window is the one reserved; `attach` made the other streams' lanes
+    try reservation.target(E.Cache, E.Part, l, if (l.pages != null) @min(streams, 1) else streams);
 }
 /// The DFlash2 drafter in `dir` over engine `p`, 4-bit only, and the target's windows timed for the round loop.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void, prepare: struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!lanes.drafter.Facts, bytes: usize } } {
@@ -179,6 +204,8 @@ fn closeDrafter(p: *anyopaque) void {
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
+        error.QwenPagesNeedBf16 => "TF_QWEN_KV_PAGES: paged caches hold bf16 rows and serve no learner yet; drop --kv-cache fp8 and --slide, or unset it",
+        error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
         else => null,
     };
@@ -240,6 +267,10 @@ const Lanes = struct {
     io: std.Io,
     e: *E.Engine,
     capacity: usize,
+    /// TF_QWEN_KV_PAGES's positions a page (0: no pool) and the pool `attach` made.
+    page_tokens: usize = 0,
+    pages: ?*pages_mod.Pages = null,
+    paged_only: bool = false,
     cost_context: ?*const cuda.Context = null,
     cost_identity: ?[32]u8 = null,
     cost_kind: cost_adapter.Kind = .dflash,
@@ -259,7 +290,7 @@ const Lanes = struct {
 
     fn deinit(self: *Lanes) void {
         var it = self.caches.valueIterator();
-        while (it.next()) |cache| self.drop(cache.*);
+        while (it.next()) |cache| self.give(cache.*); // a pool lane's pages back, a window to the reserve
         self.caches.deinit(self.gpa);
         var seen = self.seen.valueIterator();
         while (seen.next()) |v| self.gpa.free(v.*);
@@ -269,6 +300,7 @@ const Lanes = struct {
         var fills = self.fills.valueIterator();
         while (fills.next()) |f| f.deinit();
         self.fills.deinit(self.gpa);
+        if (self.pages) |p| p.deinit();
         if (self.vision) |v| v.deinit();
         self.e.deinit();
         if (self.trace) |x| self.gpa.destroy(x);
@@ -284,12 +316,13 @@ const Lanes = struct {
         self.gpa.destroy(cache);
     }
 
-    /// A cache for a new stream: a pooled one reset, else one more (a window beyond the reserve).
-    fn take(self: *Lanes) !*E.Cache {
-        if (self.pool.pop()) |cache| {
+    /// A cache for a new stream: a pooled one reset, a pool lane with its pages, else one more window.
+    fn take(self: *Lanes, prompt: usize, max_new: usize) !*E.Cache {
+        if (!self.paged_only) if (self.pool.pop()) |cache| {
             try cache.reset(self.e);
             return cache;
-        }
+        };
+        if (self.pages) |p| return p.open(prompt, max_new); // LaneMemory: the lane host waits for a stream to end
         const cache = try self.gpa.create(E.Cache);
         errdefer self.gpa.destroy(cache);
         cache.* = try E.Cache.init(self.gpa, self.e, self.capacity);
@@ -297,6 +330,7 @@ const Lanes = struct {
     }
 
     fn give(self: *Lanes, cache: *E.Cache) void {
+        if (self.pages) |p| if (p.close(cache)) return;
         if (cache.owner != null) {
             cache.last = null;
             E.recurrent.release(cache);
@@ -387,7 +421,7 @@ const Lanes = struct {
             return err;
         };
         errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
-        const cache = try self.take();
+        const cache = try self.take(ids.len, stream.max_new);
         errdefer self.give(cache);
         // the stream's cache is found by a save at a mark (cuda_reuse.zig) while its pass runs
         try self.caches.put(self.gpa, stream, cache);

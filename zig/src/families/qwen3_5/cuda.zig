@@ -28,6 +28,7 @@ test {
     _ = @import("cuda_vision_prompt.zig");
     _ = reuse;
     _ = native;
+    _ = @import("cuda_pages.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");

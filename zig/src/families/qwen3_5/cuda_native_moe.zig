@@ -10,6 +10,9 @@ pub const prompt_rows = native.prompt_rows;
 pub const takes_drafter = true;
 pub const Options = native.Options;
 pub const open = native.open;
+pub const attach = native.attach; // TF_QWEN_KV_PAGES: the same pool as the dense models'
+pub const fits = native.fits;
+pub const window_rows = native.window_rows;
 pub const openDrafter = native.openMtp;
 pub const explain = native.explain;
 /// The dense family's kept prompt states, its open refusals' words and its image tower: the MLP is the only change.
