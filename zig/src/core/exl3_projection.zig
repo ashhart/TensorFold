@@ -138,6 +138,7 @@ pub const Pipelines = struct {
     rotate_in: mtl.Pipeline,
     matmul: mtl.Pipeline,
     rotate_out: mtl.Pipeline,
+    dense: mtl.Pipeline,
     prefill: ?mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -151,6 +152,8 @@ pub const Pipelines = struct {
         errdefer mm.deinit();
         const ro = try mtl.Pipeline.init(device, lib, "tf_exl3_rotate_out", false);
         errdefer ro.deinit();
+        const dn = try mtl.Pipeline.init(device, lib, "tf_exl3_dense", false);
+        errdefer dn.deinit();
         for ([_]mtl.Pipeline{ ri, mm, ro }) |p|
             if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedExl3Simd;
         var prefill = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill", false) catch null;
@@ -160,12 +163,13 @@ pub const Pipelines = struct {
                 prefill = null;
             }
         }
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill };
+        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .dense = dn, .prefill = prefill };
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
         p.matmul.deinit();
         p.rotate_out.deinit();
+        p.dense.deinit();
         if (p.prefill) |pf| pf.deinit();
     }
 };
@@ -286,6 +290,61 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y:
     a.tile_k_stride = try m.kStride();
     a.tile_n_stride = m.nStride();
     stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r);
+}
+
+/// A kept-dense EXL3 matrix: a bf16 weight beside the input/output rotation scales, no trellis.
+pub const DenseMatrix = struct {
+    weight: View,
+    suh: View,
+    svh: View,
+    bias: ?View = null,
+    k: usize,
+    n: usize,
+};
+
+/// Kept-dense: quantized rotate stages, trellis to dense, f32 in rotate_out sums; sequential k, as the fp64 reference.
+pub fn encodeDense(p: *const Pipelines, e: mtl.ComputeEncoder, m: DenseMatrix, x: View, y: View, scratch: View, r: Rows) !void {
+    try shape(m.k, m.n);
+    var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
+    if (r.grouped) return error.InvalidExl3GroupedRows;
+    a.su_signs = 0;
+    a.sv_signs = 0;
+    a.has_bias = @intFromBool(m.bias != null);
+    const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + try rotatedBytes(m.k, r.count) };
+    const sums_bytes = try std.math.mul(usize, try std.math.mul(usize, m.n, r.count), 4);
+    try readonly(m.weight, try std.math.mul(usize, try std.math.mul(usize, m.n, m.k), 2), y, 0, scratch, sums_bytes);
+    try readonly(m.suh, m.k * 2, y, 0, scratch, sums_bytes);
+    try readonly(m.svh, m.n * 2, y, 0, scratch, sums_bytes);
+    if (m.bias) |b| try readonly(b, m.n * 2, y, 0, scratch, sums_bytes);
+    e.setPipeline(p.rotate_in);
+    bind(e, x, 0);
+    bind(e, m.suh, 1);
+    bind(e, scratch, 2);
+    e.setValue(a, 3);
+    bind(e, scratch, 4);
+    bind(e, scratch, 5);
+    bind(e, scratch, 6);
+    e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
+    e.barrier();
+    e.setPipeline(p.dense);
+    bind(e, scratch, 0);
+    bind(e, m.weight, 1);
+    bind(e, sums, 2);
+    e.setValue(a, 3);
+    bind(e, scratch, 4);
+    e.dispatchThreads(.{ .width = a.n, .height = a.rows }, .{ .width = 64 });
+    e.barrier();
+    e.setPipeline(p.rotate_out);
+    bind(e, sums, 0);
+    bind(e, m.svh, 1);
+    bind(e, m.bias orelse m.svh, 2);
+    bind(e, y, 3);
+    e.setValue(a, 4);
+    bind(e, scratch, 5);
+    bind(e, scratch, 6);
+    bind(e, scratch, 7);
+    e.dispatchGroups(.{ .width = a.n / 128, .height = a.rows }, .{ .width = 32 });
+    e.barrier();
 }
 
 /// GPU routes choose caller-validated resident descriptors; grouped padding uses maxInt(u32).

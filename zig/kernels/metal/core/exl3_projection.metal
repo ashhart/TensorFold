@@ -241,6 +241,25 @@ kernel void tf_exl3_state_window_check(const device uint4* inputs [[buffer(0)]],
   outputs[tid] = tf_exl3_mapped_state(tile, (off << 6) | (1u << 11));
 }
 
+// Kept-dense: rotated rows x bf16 weight, f32 in rotate_out sums; sequential k, one thread an output, in fp64 order.
+kernel void tf_exl3_dense(const device half* rotated [[buffer(0)]],
+                          const device bfloat* weight [[buffer(1)]],
+                          device float* sums [[buffer(2)]],
+                          constant TfExl3Args& a [[buffer(3)]],
+                          const device uint* input_ids [[buffer(4)]],
+                          uint2 g [[thread_position_in_grid]]) {
+  const uint row = a.input_ids ? input_ids[g.y] : g.y;
+  // The reference's dot is FP64-sequential; this hi/lo pair carries the same exactness through FP32.
+  float hi = 0, lo = 0;
+  for (uint k = 0; k < a.k; ++k) {
+    float prod = float(rotated[ulong(g.y) * a.k + k]) * float(weight[ulong(g.x) * a.k + k]);
+    float t = hi + prod;
+    lo += (hi - t) + prod;
+    hi = t;
+  }
+  sums[ulong(g.y) * a.n + g.x] = hi + lo;
+}
+
 // Four SIMDgroups share decoded weights while each retains its original eight-row compensated dots.
 kernel void tf_exl3_matmul_prefill(const device half* x [[buffer(0)]],
                                   const device uchar* trellis [[buffer(1)]],
