@@ -7,8 +7,7 @@ export function botVmSupported(platform: string): boolean {
   return platform === 'darwin'
 }
 
-/** Trust badge: a network engine is not "on this Mac", even though it is trusted like one. */
-export function threadTrustSource(platform: string, trustedNetwork: boolean): 'On this Mac' | 'Network' | 'Local' {
-  if (trustedNetwork) return 'Network'
+/** Trust badge wording for a thread running on a trusted local engine. */
+export function threadTrustSource(platform: string): 'On this Mac' | 'Local' {
   return platform === 'darwin' ? 'On this Mac' : 'Local'
 }

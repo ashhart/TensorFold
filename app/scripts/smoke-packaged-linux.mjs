@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { lstat, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -37,6 +37,15 @@ export function linuxSmokeEnvironment(baseEnv, profileRoot, port) {
     if (typeof baseEnv[key] === 'string' && baseEnv[key]) env[key] = baseEnv[key]
   }
   return { ...env, VONTRA_HOME: profileRoot, VONTRA_HEADLESS: '1', VONTRA_HEADLESS_PORT: String(port) }
+}
+
+export async function resolvePackagedLinuxAppImage(root = fileURLToPath(new URL('..', import.meta.url)), platform = process.platform, arch = process.arch) {
+  if (platform !== 'linux') throw new Error('The packaged Linux smoke command can run only on Linux.')
+  if (arch !== 'x64') throw new Error('Initial packaged Linux smoke covers x64 only.')
+  const dir = path.join(root, 'release', 'linux')
+  const images = (await readdir(dir).catch(() => [])).filter((name) => name.endsWith('.AppImage')).sort()
+  if (images.length !== 1) throw new Error(`Expected exactly one built AppImage in ${dir}; found ${images.length}. Run npm run dist:linux first.`)
+  return path.join(dir, images[0])
 }
 
 export async function resolvePackagedLinuxExecutable(root = fileURLToPath(new URL('..', import.meta.url)), platform = process.platform, arch = process.arch) {
@@ -79,7 +88,8 @@ async function waitForHealthy(port, timeoutMs, child) {
 }
 
 export async function runPackagedLinuxSmoke(options = {}) {
-  const executable = options.executablePath ?? await resolvePackagedLinuxExecutable()
+  const appImage = options.appImage === true
+  const executable = options.executablePath ?? await (appImage ? resolvePackagedLinuxAppImage() : resolvePackagedLinuxExecutable())
   const info = await stat(executable).catch(() => null)
   if (!info?.isFile()) throw new Error(`No packaged Linux executable at ${executable}. Run npm run pack:linux:dev first.`)
   const tempParent = assertSafeLinuxSmokeTemp(options.tempDir ?? '/tmp', [os.homedir(), process.env.HOME].filter(Boolean))
@@ -87,13 +97,17 @@ export async function runPackagedLinuxSmoke(options = {}) {
   const port = options.port ?? 20_000 + Math.floor(Math.random() * 20_000)
   let child = null
   try {
+    const baseEnv = options.baseEnv ?? process.env
     child = spawn(executable, ['--headless-server', '--ozone-platform=headless'], {
-      env: linuxSmokeEnvironment(options.baseEnv ?? process.env, profile, port),
+      // A clean host may lack FUSE; extracting the image still proves the installed artifact runs.
+      env: appImage ? { ...linuxSmokeEnvironment(baseEnv, profile, port), APPIMAGE_EXTRACT_AND_RUN: '1' } : linuxSmokeEnvironment(baseEnv, profile, port),
       stdio: ['ignore', 'ignore', 'ignore'],
     })
     await waitForHealthy(port, options.readyTimeoutMs ?? READY_TIMEOUT_MS, child)
-    const bundled = await lstat(path.join(path.dirname(executable), 'resources'))
-    if (!bundled.isDirectory()) throw new Error('Packaged resources directory is missing.')
+    if (!appImage) {
+      const bundled = await lstat(path.join(path.dirname(executable), 'resources'))
+      if (!bundled.isDirectory()) throw new Error('Packaged resources directory is missing.')
+    }
     return { executable, port, profile }
   } finally {
     if (child && child.exitCode === null) {
@@ -107,11 +121,12 @@ export async function runPackagedLinuxSmoke(options = {}) {
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  if (process.argv.length > 2) {
-    console.error('The packaged Linux smoke accepts no arguments.')
+  const args = process.argv.slice(2)
+  if (args.some((arg) => arg !== '--appimage') || args.length > 1) {
+    console.error('The packaged Linux smoke accepts only --appimage.')
     process.exitCode = 1
   } else {
-    runPackagedLinuxSmoke().then(({ executable, port }) => {
+    runPackagedLinuxSmoke({ appImage: args[0] === '--appimage' }).then(({ executable, port }) => {
       console.log(`Packaged Linux smoke passed: ${executable} answered /health on 127.0.0.1:${port}.`)
     }, (error) => {
       console.error(error?.message || error)

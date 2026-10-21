@@ -270,7 +270,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           models: foundModels ?? p.defaultModels,
           kind: 'local',
           source: p.source as Provider['source'],
-          ...(p.trustedNetwork ? { trustedNetwork: true as const } : {}),
         }
       }
 
