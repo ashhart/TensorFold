@@ -28,13 +28,13 @@ fn mostPages(capacity: usize, tokens: usize) usize {
     return (capacity + window_rows + tokens - 1) / tokens;
 }
 
-/// A stream's fixed part (state, log, tap ring, table), its keys and values a token, a kept state's recurrences.
+/// A lane's table; its keys and values a token; its state, rollback copy, log and tap ring a run; a kept state.
 pub fn layout(e: *const Engine, capacity: usize, tokens: usize) kv.Layout {
-    return .{ .fixed_bytes = e.streamBytes(0) + mostPages(capacity, tokens) * 4, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes() };
+    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4, .token_bytes = e.g.kvBytes(1, e.kv8), .page_tokens = @intCast(tokens), .snap_bytes = e.g.stateBytes(), .run_bytes = Cache.runBytes(e) };
 }
 
-/// One pool lane: a cache whose table maps its stream's pages, and that stream's lease.
-const Lane = struct { cache: *Cache, lease: kv.Lease = .{}, used: bool = false };
+/// One pool lane: a cache whose table maps its stream's pages, that stream's lease and its run's first page.
+const Lane = struct { cache: *Cache, lease: kv.Lease = .{}, used: bool = false, run: u32 = 0 };
 
 pub const Pages = struct {
     gpa: std.mem.Allocator,
@@ -75,7 +75,10 @@ pub const Pages = struct {
     pub fn deinit(p: *Pages) void {
         p.e.stream.synchronize() catch std.log.warn("qwen3_5: the pool's stream did not drain at close", .{});
         for (p.lanes) |*x| {
-            if (x.used) p.pool.finish(&x.lease);
+            if (x.used) {
+                p.pool.releaseRun(x.run, p.layout.runPages());
+                p.pool.finish(&x.lease);
+            }
             x.cache.deinit(p.gpa);
             p.gpa.destroy(x.cache);
         }
@@ -89,9 +92,9 @@ pub const Pages = struct {
         return p.layout.need(prompt, max_tokens, window_rows);
     }
 
-    /// Whether a lane is free and the pool can promise a request's pages now.
+    /// Whether a lane is free, the pool can promise a request's pages now and a run of them is free.
     pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
-        for (p.lanes) |x| if (!x.used) return p.pool.fits(p.need(prompt, max_tokens));
+        for (p.lanes) |x| if (!x.used) return p.pool.fits(p.need(prompt, max_tokens)) and p.pool.findRun(p.layout.runPages()) != null;
         return false;
     }
 
@@ -100,15 +103,21 @@ pub const Pages = struct {
         const x = for (p.lanes) |*x| {
             if (!x.used) break x;
         } else return error.LaneMemory;
-        const n = p.need(prompt, max_tokens);
+        const k = p.layout.runPages();
+        const n = p.need(prompt, max_tokens) - k; // keys and values
         if (n > mostPages(p.capacity, p.layout.page_tokens)) return error.InvalidQwenPrompt;
-        try p.pool.promise(&x.lease, n);
+        try p.pool.promise(&x.lease, n + k);
         errdefer p.pool.finish(&x.lease);
+        // the run first: KV pages fill from the bottom, runs from the top; a fragmented pool waits (LaneMemory)
+        const run = p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
+        errdefer p.pool.releaseRun(run, k);
         var up: Upload = .{ .p = p, .cache = x.cache };
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
+        try x.cache.mapRun(p.e, p.arena.ptr + run * p.layout.pageBytes());
         try x.cache.reset(p.e);
         x.cache.paged.?.ids = x.lease.ids.items;
         x.cache.cap = n * p.layout.page_tokens;
+        x.run = run;
         x.used = true;
         return x.cache;
     }
@@ -121,7 +130,9 @@ pub const Pages = struct {
         if (!x.used) return true;
         // a page another stream takes next may still be read by queued work on the engine's stream
         p.e.stream.synchronize() catch std.log.warn("qwen3_5: a closed stream's forwards did not drain; its pages go back", .{});
+        p.pool.releaseRun(x.run, p.layout.runPages());
         p.pool.finish(&x.lease);
+        cache.unmapRun(p.e);
         cache.paged.?.ids = &.{};
         cache.cap = 0;
         x.used = false;
