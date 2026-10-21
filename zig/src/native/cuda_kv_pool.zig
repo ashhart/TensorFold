@@ -71,7 +71,8 @@ pub const Kept = struct { snaps: usize, copied: u64, snap_bytes: u64, host: bool
 
 pub fn kept(comptime F: type, loaded: anytype, paged: ?Plan, o: api.Open, room: u64, held: u64, host_budget: u64, host_mode: bool) Kept {
     if (host_mode) return .{ .snaps = 0, .copied = hostBudget(o, host_budget), .snap_bytes = stagingBytes(F, loaded, hostBudget(o, host_budget)), .host = true, .most = named(o) orelse std.math.maxInt(usize) };
-    if (comptime !@hasDecl(F, "snap_slots")) return .{ .snaps = 0, .copied = if (@hasDecl(F, "snap_save")) budget.cacheBytes(o.prompt_cache_gib, room, held) else 0, .snap_bytes = 0 };
+    // on pages the plan set the cache aside already; `held` counts every stream at a whole window
+    if (comptime !@hasDecl(F, "snap_slots")) return .{ .snaps = 0, .copied = if (!@hasDecl(F, "snap_save")) 0 else if (paged) |p| p.copied else budget.cacheBytes(o.prompt_cache_gib, room, held), .snap_bytes = 0 };
     const b: u64 = loaded.snap_bytes;
     const s = if (paged) |p| kv_pool.split(p.snaps * b + p.copied, b, p.snaps) else kv_pool.split(budget.cacheBytes(o.prompt_cache_gib, room, held), b, named(o));
     return .{ .snaps = s.snaps, .copied = s.copied, .snap_bytes = b };
@@ -151,6 +152,18 @@ test "kv placement: a discrete card keeps prompt states when the asked cache fit
     try std.testing.expect(std.mem.startsWith(u8, on_host, ", prompt states on host, the cache doesn't fit on the card: a 8.0 GiB"));
     const on_device = (try text(Placing, a, 1 << 30, l, null, 70000, .{ .snaps = 64, .copied = 13 << 30, .snap_bytes = 48 << 20 }, false))[1];
     try std.testing.expect(std.mem.startsWith(u8, on_device, ", prompt states on device: a prompt cache of 64 snapshot slots"));
+}
+const Copies = struct {
+    pub const snap_save = 1;
+};
+test "kv pages: a family without snapshot slots keeps the paged plan's cache, not what window-sized streams leave" {
+    const l: kv_pool.Layout = .{ .fixed_bytes = 180 << 20, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const p = try kv_pool.plan(l, .{ .room = 40 << 30, .engine = 0, .lanes = 4, .cache = 16 << 30 });
+    const o: api.Open = .{ .dir = "", .model_type = "g", .lanes = 4 };
+    const k = kept(Copies, .{}, p, o, 40 << 30, 3 * (12 << 30), 0, false); // held: three streams at a 1M window
+    try std.testing.expectEqual(@as(u64, 16 << 30), k.copied);
+    try std.testing.expectEqual(@as(usize, 0), k.snaps);
+    try std.testing.expectEqual(@as(u64, 4 << 30), kept(Copies, .{}, null, o, 40 << 30, 3 * (12 << 30), 0, false).copied);
 }
 test "kv merge: host armed-state staging is reserved once before planning the page pool" {
     const loaded = .{ .host_snaps = true, .snap_bytes = @as(u64, 8 << 20) };

@@ -10,7 +10,7 @@ pub const Layout = struct {
     token_bytes: u64,
     /// Tokens a page holds.
     page_tokens: u32,
-    /// Bytes of one kept snapshot's slot, outside the pages.
+    /// Bytes of one kept snapshot's slot, outside the pages (0: no slots, the family's kept states are copies alone).
     snap_bytes: u64,
 
     pub fn pageBytes(l: Layout) u64 {
@@ -54,6 +54,7 @@ pub const Plan = struct { lanes: u32, snaps: usize, copied: u64, pages: usize };
 
 /// The prompt cache's split: slots for its snapshots, the rest for their copied KV rows (no slot: no cache).
 pub fn split(cache: u64, snap_bytes: u64, named: ?usize) struct { snaps: usize, copied: u64 } {
+    if (snap_bytes == 0) return .{ .snaps = 0, .copied = cache }; // a family without slots: its states are all copies
     const snaps = @min(most_snaps, named orelse cache / 2 / snap_bytes, cache / snap_bytes);
     return .{ .snaps = @intCast(snaps), .copied = if (snaps > 0) cache - snaps * snap_bytes else 0 };
 }
