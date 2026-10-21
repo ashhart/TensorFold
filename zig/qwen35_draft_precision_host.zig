@@ -17,17 +17,20 @@ fn reset() void {
     Trace.count = 0;
     Trace.prompts = 0;
 }
-fn check(rows: usize, role: P.Role) !void {
+/// Native rows in the fewest verify tiles (decode's bits a row), never the prompt GEMM unless the role is a prompt's.
+fn check(rows: usize, role: P.Role, tile: usize) !void {
     const prompt = role == .prompt and rows > 16;
     try T.expectEqual(@as(usize, @intFromBool(prompt)), Trace.prompts);
-    try T.expectEqual(if (prompt) @as(usize, 0) else (rows + 15) / 16, Trace.count);
+    try T.expectEqual(if (prompt) @as(usize, 0) else (rows + tile - 1) / tile, Trace.count);
     for (Trace.calls[0..Trace.count], 0..) |call, i| {
-        const at = i * 16;
-        try T.expectEqual(@as(c_int, @intCast(@min(16, rows - at))), call.rows);
+        const at = i * tile;
+        const m = @min(tile, rows - at);
+        try T.expectEqual(@as(c_int, @intCast(m)), call.rows);
         try T.expectEqual(@as(u64, x + at * k * 2), call.x);
         try T.expectEqual(@as(u64, xs + at * (k / 64) * 4), call.xs);
         try T.expectEqual(@as(u64, out + at * n * 2), call.out);
-        try T.expect(call.id != 5);
+        try T.expect(call.id != 4);
+        if (m > 16) try T.expectEqual(@as(usize, if (m <= 32) 5 else if (m <= 64) 6 else 7), call.id);
     }
 }
 
@@ -43,10 +46,10 @@ test "Draft precision: DFlash projections preserve each role across row and stre
             for ([_]usize{ 16, 17, 32, 64, 65 }) |rows| for ([_]usize{ 1, 2, 4 }) |streams| {
                 reset();
                 try d.proj(weight, x, out, rows * streams);
-                try check(rows * streams, role);
+                try check(rows * streams, role, e.affine.verifyRows());
                 reset();
                 try d.projAgain(weight, x, out, rows * streams);
-                try check(rows * streams, role);
+                try check(rows * streams, role, e.affine.verifyRows());
             };
         }
     }
@@ -65,10 +68,10 @@ test "Draft precision: MTP projections and the DFlash vocabulary head retain nat
             for ([_]usize{ 16, 17, 32, 64, 65 }) |rows| for ([_]usize{ 1, 2, 4 }) |streams| {
                 reset();
                 try d.proj(l, x, out, rows * streams);
-                try check(rows * streams, role);
+                try check(rows * streams, role, e.affine.verifyRows());
                 reset();
                 try P.project(&e, l, x, xs, out, rows * streams, .proposal, P.dflash_projection_prompt_cutoff);
-                try check(rows * streams, .proposal);
+                try check(rows * streams, .proposal, e.affine.verifyRows());
             };
         }
     }
