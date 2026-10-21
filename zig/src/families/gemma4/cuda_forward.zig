@@ -18,7 +18,10 @@ const attend_rows = 16;
 pub const ring = cfg.window + prompt_rows;
 
 /// A stream's rows in one forward: its cache slot, first position, tokens.
-pub const Chain = struct { slot: usize, p0: usize, tokens: []const u32 };
+pub const Chain = struct { slot: usize, p0: usize, tokens: []const u32, images: []const Inject = &.{} };
+
+/// An image's rows in a chunk: rows [row, row + rows) take `src`'s (unscaled), seeing all of them on sliding layers.
+pub const Inject = struct { row: usize, rows: usize, src: u64 };
 
 /// sqrt(hidden) as MLX multiplies by it: a weak-typed scalar, rounded to bf16 first (Metal forward.embedScale).
 pub fn embedScale(hidden: usize) f32 {
@@ -59,7 +62,7 @@ pub const Model = struct {
     graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
     graphed: bool = true,
 
-    const Scratch = struct { ids: u64, pos: u64, slot: u64, h: [2]u64, n: u64, xs: u64, q: u64, k: u64, v: u64, qr: u64, kr: u64, vr: u64, att: u64, o: u64, gate: u64, up: u64, act: u64, y: u64, part: u64, logits: u64 };
+    const Scratch = struct { ids: u64, pos: u64, slot: u64, hi: u64, h: [2]u64, n: u64, xs: u64, q: u64, k: u64, v: u64, qr: u64, kr: u64, vr: u64, att: u64, o: u64, gate: u64, up: u64, act: u64, y: u64, part: u64, logits: u64 };
 
     fn alloc(m: *Model, bytes: usize) !u64 {
         if (m.planned) |*p| {
@@ -143,6 +146,7 @@ pub const Model = struct {
         const part = @max(cuda.window_attention.WindowAttention.scratchBytes(wide, attend_rows), cuda.window_attention.WindowAttention.scratchBytes(narrow, attend_rows));
         m.s = .{
             .ids = try m.alloc(r * 4),
+            .hi = try m.alloc(prompt_rows * 4),
             .pos = try m.alloc(r * 4),
             .slot = try m.alloc(r * 4),
             .h = .{ try m.alloc(r * h * 2), try m.alloc(r * h * 2) },
@@ -225,6 +229,15 @@ pub const Model = struct {
         try m.upload(s, m.s.ids, std.mem.sliceAsBytes(ids[0..rows]));
         try m.upload(s, m.s.pos, std.mem.sliceAsBytes(ids[rows .. 2 * rows]));
         try m.upload(s, m.s.slot, std.mem.sliceAsBytes(ids[2 * rows ..]));
+        if (prompt and chains[0].images.len > 0) { // each row's last key: its own, an image row's the image's last
+            const c = chains[0];
+            const hi = ids[rows .. 2 * rows];
+            for (c.images) |im| {
+                if (im.rows == 0 or im.row + im.rows > rows) return error.BadWindow;
+                @memset(hi[im.row..][0..im.rows], @intCast(c.p0 + im.row + im.rows - 1));
+            }
+            try m.upload(s, m.s.hi, std.mem.sliceAsBytes(hi));
+        }
         // a decode forward's launches depend on its row count only (positions and slots are read on the device)
         if (prompt or !m.graphed or head0 != 0 or heads != rows) return m.launch(k, s, chains, rows, prompt, head0, heads);
         if (m.graphs[rows] == null) m.graphs[rows] = try m.capture(k, s, rows);
@@ -252,6 +265,9 @@ pub const Model = struct {
         const h = m.geo.hidden;
         const x = m.s;
         try k.embed.affine(s, x.ids, m.w.embed_w, m.w.embed_s, m.w.embed_b, x.h[0], rows, h, .{ .bits = @intCast(m.w.embed_bits), .group = cfg.group, .scale = embedScale(h) });
+        if (prompt) for (chains[0].images) |im| {
+            try m.d.check(m.d.api.cuMemcpyDtoDAsync_v2(x.h[0] + im.row * h * 2, im.src, im.rows * h * 2, s.handle), "cuMemcpyDtoDAsync");
+        };
         // layer 0's input norm alone; every later one is the previous layer's dense tail
         try k.norms.addRmsTail(s, x.h[0], null, m.w.layers[0].input_norm, x.h[1], x.n, x.xs, rows, h, cfg.eps, .{ .round = true });
         for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt);
@@ -283,7 +299,8 @@ pub const Model = struct {
         if (prompt) {
             const c = chains[0];
             const off = c.slot * len * kw * 2;
-            try k.win.promptRows(s, x.qr, m.kc[i] + off, m.vc[i] + off, x.att, c.p0, rows, if (global) .{ .h = w.h, .hk = w.hk, .d = w.d, .win = 0, .ring = 0, .scale = 1, .p32 = true } else w, null);
+            const hi: ?u64 = if (!global and c.images.len > 0) x.hi else null;
+            try k.win.promptRows(s, x.qr, m.kc[i] + off, m.vc[i] + off, x.att, c.p0, rows, if (global) .{ .h = w.h, .hk = w.hk, .d = w.d, .win = 0, .ring = 0, .scale = 1, .p32 = true } else w, hi);
         } else {
             var r: usize = 0;
             while (r < rows) : (r += attend_rows) {

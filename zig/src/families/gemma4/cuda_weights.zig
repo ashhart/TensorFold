@@ -57,6 +57,8 @@ pub const Weights = struct {
     head: Proj = undefined,
     final_norm: u64 = 0,
     layers: []Layer = &.{},
+    /// The 12B's image embedder (--vision), null without.
+    vision: ?Vision = null,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
 
     pub fn deinit(w: *Weights) void {
@@ -86,6 +88,25 @@ pub const Weights = struct {
         return b.ptr;
     }
 };
+
+/// The 12B's image embedder: LayerNorms, patch_dense bf16, the position table, the projection at its width (or bf16).
+pub const Vision = struct {
+    ln1_w: u64,
+    ln1_b: u64,
+    dense_w: u64,
+    dense_b: u64,
+    ln2_w: u64,
+    ln2_b: u64,
+    table: u64,
+    pos_w: u64,
+    pos_b: u64,
+    proj: union(enum) { q: Proj, bf16: u64 },
+};
+
+/// The embedder's sizes: a merged 48-px patch's values, the output width, each axis's position rows.
+pub const merged_width = 6912;
+pub const vision_width = 3840;
+pub const table_rows = 1120;
 
 const Ctx = struct {
     w: *Weights,
@@ -134,7 +155,7 @@ const Ctx = struct {
 const lm = "language_model.model.";
 
 /// Admission as Metal's (MLX affine 2-6 and 8 bits, groups of 64), every tensor checked. `layers` caps them (checks).
-pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, layers: ?usize) !Weights {
+pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, layers: ?usize, images: bool) !Weights {
     const c = try cfg.Config.read(gpa, io, dir);
     const geo = c.geo;
     var w: Weights = .{ .gpa = gpa, .config = c };
@@ -182,5 +203,31 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
         l.post_feedforward = try x.tensor(try name(&buf, p, "post_feedforward_layernorm.weight"), .bf16, &.{h});
         l.scalar = try x.tensor(try name(&buf, p, "layer_scalar"), .bf16, &.{1});
     }
+    if (images) w.vision = try vision(&x, c);
     return w;
+}
+
+/// The image embedder's tensors; a quantized patch_dense (the bf16 GEMM's input) is refused by name.
+fn vision(x: *Ctx, c: cfg.Config) !Vision {
+    if (!c.geo.unified()) return error.GemmaVisionTowerNotServed;
+    if (!x.ck.has("vision_embedder.patch_dense.weight")) return error.NoGemmaVision;
+    if (x.ck.has("vision_embedder.patch_dense.scales")) return error.GemmaVisionDenseQuantized;
+    const e = "vision_embedder.";
+    const mw = merged_width;
+    const vw = vision_width;
+    var v: Vision = .{
+        .ln1_w = try x.tensor(e ++ "patch_ln1.weight", .bf16, &.{mw}),
+        .ln1_b = try x.tensor(e ++ "patch_ln1.bias", .bf16, &.{mw}),
+        .dense_w = try x.tensor(e ++ "patch_dense.weight", .bf16, &.{ vw, mw }),
+        .dense_b = try x.tensor(e ++ "patch_dense.bias", .bf16, &.{vw}),
+        .ln2_w = try x.tensor(e ++ "patch_ln2.weight", .bf16, &.{vw}),
+        .ln2_b = try x.tensor(e ++ "patch_ln2.bias", .bf16, &.{vw}),
+        .table = try x.tensor(e ++ "pos_embedding", .bf16, &.{ table_rows, 2, vw }),
+        .pos_w = try x.tensor(e ++ "pos_norm.weight", .bf16, &.{vw}),
+        .pos_b = try x.tensor(e ++ "pos_norm.bias", .bf16, &.{vw}),
+        .proj = undefined,
+    };
+    const pp = "embed_vision.embedding_projection";
+    v.proj = if (x.ck.has(pp ++ ".scales")) .{ .q = try x.linear(pp, c.geo.hidden, vw, c.widths.vision.bits) } else .{ .bf16 = try x.tensor(pp ++ ".weight", .bf16, &.{ c.geo.hidden, vw }) };
+    return v;
 }
