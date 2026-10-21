@@ -96,7 +96,7 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const model = raw.strField("model") orelse return cx.fail(.request, "model is required: send {s}", .{srv.config.served_name});
     if (!listed(srv.config.model_ids, model))
         return cx.fail(.request, "model {s} is not served here: send {s}", .{ try pyrepr.repr(cx.a, .{ .string = model }), srv.config.served_name });
-    const input = raw.strField("input") orelse return cx.refuse("input must be a non-empty string");
+    const input = try @import("drama_allow.zig").filter(cx.a, srv.config.allowed_controls, raw.strField("input") orelse return cx.refuse("input must be a non-empty string"));
     if (!std.unicode.utf8ValidateSlice(input)) return cx.refuse("input must be valid UTF-8 text");
     if (reply_text.pyStrip(input).len == 0) return cx.refuse("input must be a non-empty string");
     if ((std.unicode.utf8CountCodepoints(input) catch unreachable) > max_input_chars)
@@ -463,4 +463,25 @@ test "response_format is WAV or PCM, stripped and case-folded as Python does" {
     try std.testing.expectEqual(Format.wav, try responseFormat(&cx, " WAV\n"));
     try std.testing.expectEqual(Format.pcm, try responseFormat(&cx, "\u{3000}Pcm\x1c"));
     for ([_][]const u8{ "mp3", "", "wave", "pcm16" }) |bad| try std.testing.expectError(error.Refused, responseFormat(&cx, bad));
+}
+
+test "allowed controls filters before speech input validation" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var srv: Server = undefined;
+    srv.config = .{ .served_name = "m", .model_ids = &.{"m"}, .allowed_controls = try @import("drama_allow.zig").parse("") };
+    const sp: api.SpeechInfo = .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = 1024, .max_prompt_tokens = 4096 };
+    const long = try a.alloc(u8, max_input_chars + 1);
+    @memset(long, 'x');
+    const body = (try json.parse(a, try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"input\":\"[{s}]\"}}", .{long}))).ok;
+    var cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, prepare(&srv, &cx, sp, body));
+    try std.testing.expectEqualStrings("input must be at most 4096 characters", cx.message);
+    const controls = (try json.parse(a, "{\"model\":\"m\",\"input\":\"[sighs]\"}")).ok;
+    try std.testing.expectError(error.Refused, prepare(&srv, &cx, sp, controls));
+    try std.testing.expectEqualStrings("input must be a non-empty string", cx.message);
+    srv.config.allowed_controls = null;
+    try std.testing.expectError(error.Refused, prepare(&srv, &cx, sp, body));
+    try std.testing.expectEqualStrings("input must be at most 4096 characters", cx.message);
 }

@@ -147,6 +147,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     };
     const config: server_mod.Config = .{
         .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
+        .allowed_controls = args.allowed_controls,
         .served_name = s.served,
         .model_dir = s.model_dir,
         .voices_dir = args.voices,

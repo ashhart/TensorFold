@@ -65,6 +65,25 @@ test "vision image budget: explicit large budgets reach the engine, with bounded
         try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision", "--vision-image-tokens", bad }, &u));
 }
 
+test "allowed controls CLI is opt-in and validates name syntax only" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expect((try parse(a, &.{"m"}, &u)).allowed_controls == null);
+    const on = try parse(a, &.{ "m", "--allowed-controls", "sighs, laughs" }, &u);
+    try std.testing.expectEqualDeep(try @import("drama_allow.zig").parse("sighs, laughs"), on.allowed_controls.?);
+    const empty = try parse(a, &.{ "m", "--allowed-controls=" }, &u);
+    try std.testing.expectEqualDeep(try @import("drama_allow.zig").parse(""), empty.allowed_controls.?);
+    const open = try parse(a, &.{ "m", "--allowed-controls", "whisper,unknown,gentle robot" }, &u);
+    try std.testing.expectEqualStrings("whisper,unknown,gentle robot", open.allowed_controls.?.list);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--allowed-controls", "[whisper]" }, &u));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--allowed-controls" }, &u));
+    var out: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&out.writer, .{ .version = "test" });
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"--allowed-controls\": {}") != null);
+}
+
 test "parse and capabilities share the table" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
