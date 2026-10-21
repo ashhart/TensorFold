@@ -1,5 +1,5 @@
 /// Mono PCM written before a successful speech request's finished event.
-pub const SpeechResult = struct { samples: usize = 0 };
+pub const SpeechResult = struct { samples: usize = 0, reason: @import("engine_api.zig").Reason = .stop };
 
 /// Caller-owned until finished, even on cancellation; a streamed request's pcm[0..n] is the caller's after ``audio`` n.
 pub const SpeechRequest = struct {
@@ -12,7 +12,7 @@ pub const SpeechRequest = struct {
     temperature: f32 = 1,
     top_p: f32 = 0.9,
     top_k: u32 = 30,
-    /// True decodes while generating and publishes audio prefixes; false decodes after EOS or the frame limit.
+    /// Publishes decoded prefixes; whole replies also decode incrementally when a speech guard is enabled.
     stream: bool = false,
 };
 

@@ -123,7 +123,8 @@ pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
-pub const Reason = enum { stop, length, cancelled, failed };
+pub const Reason = enum { stop, length, cancelled, failed, silence };
+pub const speech_guard = @import("speech_guard.zig");
 
 /// What a finished reply's rounds did, for its runtime fields and /metrics.
 pub const Stats = struct {
@@ -240,6 +241,7 @@ pub const Open = struct {
     dir: []const u8,
     model_type: []const u8,
     context: ?i64 = null,
+    silence: speech_guard.Config = .{},
     lanes: u32 = 8,
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,
@@ -494,6 +496,7 @@ pub const originals = @import("originals.zig");
 pub const save_guard = @import("save_guard");
 
 test {
+    _ = speech_guard;
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
     _ = @import("lane_rounds_test.zig");

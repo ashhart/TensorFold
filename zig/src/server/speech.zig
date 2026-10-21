@@ -180,10 +180,10 @@ fn left(srv: *Server, c: *Conn, id: []const u8, prompt_len: usize, received: i96
     log.line("{s}", .{log.ended(&buf, id, null, prompt_len, 0, clock.seconds(clock.nowNs(srv.io) - received))});
 }
 
-/// Why a finished synthesis has no complete audio, or null; clipped audio (length) is sent with X-Finish-Reason.
+/// Why audio is incomplete, or null; length and silence retain audio with X-Finish-Reason.
 fn why(box: *const Mailbox, samples: usize, capacity: usize) ?[]const u8 {
     return switch (box.reason) {
-        .stop, .length => if (samples == 0 or samples > capacity) "the engine finished without complete audio" else null,
+        .stop, .length, .silence => if (samples == 0 or samples > capacity) "the engine finished without complete audio" else null,
         .cancelled => "speech synthesis was cancelled",
         .failed => if (box.message.len > 0) box.message else "speech synthesis failed",
     };
@@ -200,7 +200,7 @@ fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechIn
         log.line("speech {s} stream ended incomplete after samples={d}: {s}", .{ id, sent.samples, message });
         return;
     }
-    c.writeAll(if (box.reason == .length) length_chunk else last_chunk) catch {
+    c.writeAll(if (box.reason == .silence) silence_chunk else if (box.reason == .length) length_chunk else last_chunk) catch {
         c.close = true;
         return;
     };
@@ -283,9 +283,10 @@ fn startStream(c: *Conn, sample_rate: u32) error{Closed}!void {
     return c.finish("");
 }
 
-/// Ends a complete stream; audio clipped at the frame limit ends with the X-Finish-Reason trailer instead.
+/// Ends a complete stream; length and silence use an X-Finish-Reason trailer instead.
 const last_chunk = "0\r\n\r\n";
 const length_chunk = "0\r\nX-Finish-Reason: length\r\n\r\n";
+const silence_chunk = "0\r\nX-Finish-Reason: silence\r\n\r\n";
 
 fn refuse(c: *Conn, cx: *Cx, id: []const u8, e: errors.Refused) void {
     if (e == error.OutOfMemory) {

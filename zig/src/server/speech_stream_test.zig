@@ -46,7 +46,8 @@ const Script = struct {
             if (request.stream) sink.event(sink.ctx, id, &.{ .audio = n });
             done = n;
         }
-        if (e.reason == .stop or e.reason == .length) request.result.samples = done;
+        if (e.reason == .stop or e.reason == .length or e.reason == .silence) request.result.samples = done;
+        request.result.reason = e.reason;
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = e.reason, .message = e.message } });
     }
     fn cancel(ctx: *anyopaque, _: api.Id) void {
@@ -388,4 +389,22 @@ test "stream needs pcm and HTTP/1.1; stream false is the whole reply" {
     try expectHeader(try s.readHead(), "Content-Length: 4096\r\n");
     s.join(&script);
     try std.testing.expectEqualStrings(&pcm(1), try s.readRest());
+}
+
+test "silence keeps audio with a whole header or stream trailer" {
+    for ([_]bool{ false, true }) |stream| {
+        var script: Script = .{ .steps = &.{frame}, .reason = .silence, .inline_ = true };
+        var s: Served = undefined;
+        const whole = "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\"}";
+        try s.start(&script, "HTTP/1.1", if (stream) stream_body else whole, 2000);
+        defer s.deinit();
+        const head = try s.readHead();
+        try expectHeader(head, "HTTP/1.1 200");
+        try expectHeader(head, if (stream) "Trailer: X-Finish-Reason\r\n" else "X-Finish-Reason: silence\r\n");
+        const rest = try s.readRest();
+        s.join(&script);
+        if (stream) {
+            try std.testing.expectEqualStrings("1000\r\n" ++ pcm(1) ++ "\r\n0\r\nX-Finish-Reason: silence\r\n\r\n", rest);
+        } else try std.testing.expectEqualStrings(&pcm(1), rest);
+    }
 }
