@@ -10,14 +10,27 @@ const Module = module.Module;
 const Function = module.Function;
 const Stream = stream_.Stream;
 
-/// A packed row's heads: h query, hk key and hk value heads of `dim` (a multiple of 32, at most 256).
+/// A packed row's heads: h query, hk key and hk value heads of `dim` (a multiple of 32, at most 512).
 pub const Heads = struct { h: usize, hk: usize, dim: usize };
 
 /// Where a row's heads come from: q, k and v (0: none) at row stride *_ld and head stride *_hs (elements).
 pub const Src = extern struct { q: u64, q_ld: i64, q_hs: i64, k: u64, k_ld: i64, k_hs: i64, v: u64 = 0, v_ld: i64 = 0, v_hs: i64 = 0 };
 
 /// q/k norms [2, dim] (or q's with norm_k), fp32 or bf16; RoPE on `rot` dims: cos/sin tables or inv [rot / 2].
-pub const Shape = struct { norms: ?u64 = null, norm_k: ?u64 = null, norms_bf16: bool = false, cos: ?u64 = null, sin: ?u64 = null, inv: ?u64 = null, rot: usize = 0, eps: f32 = 1e-6 };
+pub const Shape = struct {
+    norms: ?u64 = null,
+    norm_k: ?u64 = null,
+    norms_bf16: bool = false,
+    cos: ?u64 = null,
+    sin: ?u64 = null,
+    inv: ?u64 = null,
+    rot: usize = 0,
+    eps: f32 = 1e-6,
+    /// MLX's rows: q and k = bf16(w * bf16(x * inv)) before RoPE.
+    round: bool = false,
+    /// v by a unit RMS norm, bf16(x * inv); else v as is.
+    v_norm: bool = false,
+};
 
 /// qk_rows.cu's QkW.
 const W = extern struct { q: u64, k: u64, bf16: i32 };
@@ -45,12 +58,15 @@ pub const QkRows = struct {
     fn_: Function,
     /// tf_qk_rows_w: dim 128 with no or full rotation, a warp a head.
     warp_fn: Function,
+    /// tf_qk_rows_once and tf_qk_rows_round: dims past 256, a unit v norm, MLX's rounding points.
+    once_fn: Function,
+    round_fn: Function,
 
     pub fn load(d: *const Driver) !QkRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.qk_rows);
         errdefer mod.unload();
-        return .{ .mod = mod, .fn_ = try mod.function("tf_qk_rows"), .warp_fn = try mod.function("tf_qk_rows_w") };
+        return .{ .mod = mod, .fn_ = try mod.function("tf_qk_rows"), .warp_fn = try mod.function("tf_qk_rows_w"), .once_fn = try mod.function("tf_qk_rows_once"), .round_fn = try mod.function("tf_qk_rows_round") };
     }
 
     pub fn unload(g: *QkRows) void {
@@ -67,7 +83,12 @@ pub const QkRows = struct {
 
     /// As `rows`, the heads read from `src` (e.g. [q | gate] rows: q_hs = 2 dim); no v source: no v out or vc.
     pub fn rowsFrom(g: *const QkRows, s: Stream, src: Src, hs: Heads, shape: Shape, pos: u64, slot: ?u64, out: Out, n: usize) !void {
-        if (hs.dim % 32 != 0 or hs.dim > 256 or shape.rot % 2 != 0 or shape.rot > hs.dim) return error.HeadShape;
+        return g.rowsVia(null, 0, s, src, hs, shape, pos, slot, out, n);
+    }
+
+    /// rowsFrom through `f` (null: the kernel the shape selects) on tf_qk_rows_round's arguments, `last` its final int.
+    pub fn rowsVia(g: *const QkRows, f: ?Function, last: i32, s: Stream, src: Src, hs: Heads, shape: Shape, pos: u64, slot: ?u64, out: Out, n: usize) !void {
+        if (hs.dim % 32 != 0 or hs.dim > 512 or shape.rot % 2 != 0 or shape.rot > hs.dim) return error.HeadShape;
         if ((shape.cos == null) != (shape.sin == null) or (shape.cos != null and shape.inv != null)) return error.HeadShape;
         const roped = shape.cos != null or shape.inv != null;
         if (roped and shape.rot == 0) return error.HeadShape;
@@ -97,6 +118,11 @@ pub const QkRows = struct {
         a.add(@as(i32, @intCast(hs.hk)));
         a.add(shape.eps);
         const heads = hs.h + (if (src.v != 0) 2 * hs.hk else hs.hk);
+        if (f != null or hs.dim > 256 or shape.round or shape.v_norm) {
+            a.add(if (f != null) last else @as(i32, @intFromBool(shape.v_norm)));
+            const grid: launch_.Dim3 = .{ .x = @intCast(n), .y = @intCast(heads), .z = 1 };
+            return launch_.launch(f orelse if (shape.round) g.round_fn else g.once_fn, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) } }, s, &a);
+        }
         if (hs.dim == 128 and (!roped or shape.rot == 128)) {
             const grid: launch_.Dim3 = .{ .x = @intCast(n), .y = @intCast((heads + 3) / 4), .z = 1 };
             return launch_.launch(g.warp_fn, .{ .grid = grid, .block = .{ .x = 128 } }, s, &a);
