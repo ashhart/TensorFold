@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- `serve --allowed-controls LIST` opts into stripping unlisted bracketed speech controls before input validation and tokenization. Omission preserves the input unchanged; see [speech controls](docs/speech-controls.md) for the open-vocabulary name grammar and malformed-input policy.
+
 ## 1.1.1
 
 - The app checks models through HTTPS Hub fake-IP proxies in both address families and honours one validated `HF_ENDPOINT` for checks and downloads. Network-policy refusals name the DNS address and proxy remedy (#1037). Thanks to @samwang0041-star.

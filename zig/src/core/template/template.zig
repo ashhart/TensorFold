@@ -9,6 +9,7 @@ const pyjson = @import("pyjson.zig");
 const eval = @import("eval.zig");
 const filters = @import("filters.zig");
 const access = @import("access.zig");
+pub const unicode = @import("unicode.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{ TemplateFailed, OutOfMemory };
