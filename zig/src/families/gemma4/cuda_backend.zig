@@ -6,6 +6,7 @@ const cfg = @import("cuda_config.zig");
 const fwd = @import("cuda_forward.zig");
 const kern = @import("cuda_kernels.zig");
 const snap = @import("cuda_snap.zig");
+const cv = @import("cuda_vision.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -30,6 +31,7 @@ const Lane = struct {
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
     tap: Tap = .{},
+    images: ?cuda.DeviceBuffer = null, // the prompt's images through the embedder, while its pass runs
 };
 
 /// A stream's rows in the last forward: rows [row, row + rows) at positions [start, start + rows) while gen holds.
@@ -51,6 +53,7 @@ pub const Gemma = struct {
     next: u64 = 0,
     gen: u64 = 1, // forwards run: a tap is current while its gen is this
     tapped: bool = false, // a drafter reads the last layer's rows (prepare_features)
+    vision: ?*cv.Vision = null, // --vision: the embedder a prompt's images go through
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -228,16 +231,49 @@ pub const Gemma = struct {
             l.sampled = true;
         };
         s.cached = 0;
+        if (s.images.len > 0) try x.encodeImages(s, l);
         l.fill = x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);
         return l;
+    }
+
+    /// Every image of the prompt through the embedder into the lane's buffer, in prompt order.
+    fn encodeImages(x: *Gemma, s: *Stream, l: *Lane) !void {
+        const v = x.vision orelse return error.GemmaServedWithoutVision;
+        const p = s.prompt();
+        var rows: usize = 0;
+        var end: usize = 0;
+        for (s.images) |im| {
+            if (im.at < end or im.at + im.tokens > p.len or im.tokens * image_pool * image_pool != im.gh * im.gw) return error.GemmaImageRows;
+            end = im.at + im.tokens;
+            rows += im.tokens;
+        }
+        if (l.images) |*b| b.free();
+        l.images = null;
+        const width = x.m.geo.hidden * 2;
+        var buf = try cuda.DeviceBuffer.alloc(x.d, rows * width);
+        errdefer buf.free();
+        var at: usize = 0;
+        for (s.images) |im| {
+            try v.e.encode(x.d, x.s, im.pixels, im.gh, im.gw, buf.ptr + at * width);
+            at += im.tokens;
+        }
+        l.images = buf;
+    }
+
+    const image_pool = @import("cuda_image.zig").pool;
+
+    /// Whether position `p` cuts through an image (strictly inside its rows).
+    fn insideImage(s: *const Stream, p: usize) bool {
+        for (s.images) |im| if (im.at < p and p < im.at + im.tokens) return true;
+        return false;
     }
 
     /// The kept state's position, restored into the slot (0: none, or not this prompt's).
     fn resumeAt(x: *Gemma, s: *Stream, l: *const Lane, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         const k: *const snap.Saved = @ptrCast(@alignCast(saved));
-        if (k.at != s.reuse.at or k.at == 0 or k.at >= len) {
+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or insideImage(s, k.at)) {
             s.reuse_failed = true;
             return 0;
         }
@@ -255,16 +291,38 @@ pub const Gemma = struct {
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
         var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
-        for (s.reuse.marks) |mk| if (mk > at and mk < end) {
+        for (s.reuse.marks) |mk| if (mk > at and mk < end and !insideImage(s, mk)) {
             end = mk;
         };
+        // never through an image: its rows see each other, so a chunk holds all of them (one is at most 280)
+        for (s.images) |im| if (im.at < end and end < im.at + im.tokens) {
+            end = if (im.at > at) im.at else im.at + im.tokens;
+        };
+        var injects: [8]fwd.Inject = undefined;
+        var n: usize = 0;
+        var off: usize = 0;
+        for (s.images) |im| {
+            if (im.at >= at and im.at + im.tokens <= end) {
+                if (n == injects.len) return error.GemmaImagesInChunk;
+                injects[n] = .{ .row = im.at - at, .rows = im.tokens, .src = l.images.?.ptr + off * x.m.geo.hidden * 2 };
+                n += 1;
+            }
+            off += im.tokens;
+        }
         const done = end == p.len;
-        try x.run(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
+        try x.run(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end], .images = injects[0..n] }}, true, end - at - 1, @intFromBool(done));
         l.tap = .{ .row = 0, .start = at, .rows = end - at, .gen = x.gen };
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(end), .monotonic);
         l.fill = if (done) null else end;
-        if (done) l.len = p.len;
+        if (done) {
+            l.len = p.len;
+            if (l.images) |*b| {
+                try x.s.synchronize(); // the last chunk read them
+                b.free();
+                l.images = null;
+            }
+        }
         if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
         return done;
     }
@@ -388,6 +446,10 @@ pub const Gemma = struct {
             var l = kv.value;
             x.free[l.slot] = true;
             l.rows.deinit(x.gpa);
+            if (l.images) |*b| {
+                x.s.synchronize() catch {};
+                b.free();
+            }
         }
     }
 

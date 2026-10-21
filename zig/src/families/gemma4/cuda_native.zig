@@ -8,6 +8,7 @@ const fwd = @import("cuda_forward.zig");
 const be = @import("cuda_backend.zig");
 const snap = @import("cuda_snap.zig");
 const asst = @import("cuda_assistant.zig");
+const cv = @import("cuda_vision.zig");
 
 /// The registry's entry for one model_type: gemma4_unified (12B) or gemma4 (31B).
 pub fn Family(comptime name: []const u8) type {
@@ -21,6 +22,9 @@ pub fn Family(comptime name: []const u8) type {
         pub const takes_drafter = true;
         pub const openDrafter = native.openDrafter;
         pub const explains_open = true;
+        /// An image's most tokens (the processor's largest budget) unless --image-tokens says otherwise.
+        pub const default_image_tokens: u32 = 280;
+        pub const vision = cv;
         pub const Room = native.Room;
         pub const Options = native.Options;
         pub const Loaded = native.Loaded;
@@ -37,8 +41,8 @@ const native = @This();
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-/// No `vision` or `precision` field: the server refuses --vision and --precision for this family by name.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null };
+/// No `precision` field: the server refuses --precision for this family by name. --vision: the 12B's image embedder.
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null };
 
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
@@ -49,9 +53,11 @@ pub const Loaded = struct {
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
     target: *be.Gemma,
+    /// --vision: what the server's image requests reach (native/cuda_vision_offer.zig).
+    vision: ?*cv.Vision = null,
 };
 
-const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, gb: be.Gemma };
+const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, gb: be.Gemma, v: ?*cv.Vision = null };
 
 /// Streams to allocate in `room`: as asked, else (auto) the most that fit; a fixed count past them or a round refuses.
 fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
@@ -85,12 +91,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound;
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
-    own.gpa = gpa;
+    own.* = .{ .gpa = gpa, .w = undefined, .k = undefined, .s = undefined, .m = undefined, .gb = undefined };
     own.k = try kern.Kernels.load(ctx);
     errdefer own.k.deinit();
     own.s = try cuda.Stream.init(ctx.d, false);
     errdefer own.s.deinit();
-    own.w = try wts.load(gpa, io, ctx.d, own.s, &own.k, dir, null);
+    own.w = try wts.load(gpa, io, ctx.d, own.s, &own.k, dir, null, o.vision != null);
     errdefer own.w.deinit();
     const context = @min(positions(o.context), own.w.config.context);
     const plan: Plan = .{ .own = own, .d = ctx.d, .context = context };
@@ -106,6 +112,14 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_GEMMA4_GRAPHS"); // =0: every decode forward eager
     own.gb = try be.Gemma.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    errdefer own.gb.deinit();
+    if (o.vision) |lim| {
+        const v = try gpa.create(cv.Vision);
+        errdefer gpa.destroy(v);
+        v.* = .{ .gpa = gpa, .io = io, .limits = lim, .e = try cv.Embedder.init(gpa, ctx.d, &own.w.vision.?, &own.k) };
+        own.v = v;
+        own.gb.vision = v;
+    }
     return .{
         .backend = own.gb.backend(),
         .facts = own.gb.facts(),
@@ -115,6 +129,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = own,
         .deinit = release,
         .target = &own.gb,
+        .vision = own.v,
     };
 }
 
@@ -156,6 +171,10 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.AssistantForAnotherTarget => "--drafter: this assistant was trained for another Gemma 4 target (its backbone width or key heads differ)",
         error.UnsupportedAssistantGeometry, error.UnsupportedAssistantType, error.UnsupportedAssistantRotary, error.UnsupportedAssistantQuantization, error.AssistantOrderedEmbeddingsNotServed => "--drafter: this Gemma 4 assistant's layout is not the stock one this engine serves",
         error.DrafterBitsUnsupported => "--drafter-bits: the Gemma 4 assistant runs at 4 bits on CUDA",
+        error.GemmaVisionTowerNotServed => "--vision: the 31B's image tower is not built on CUDA yet (the 12B's embedder is); serve it without --vision",
+        error.NoGemmaVision => "--vision: this Gemma 4 checkpoint has no image embedder (vision_embedder. and embed_vision. tensors)",
+        error.GemmaVisionDenseQuantized => "--vision: this checkpoint's patch_dense is quantized, and the embedder reads it as bf16 (as the reference does): use a conversion that keeps it bf16",
+        error.GemmaServedWithoutVision => "this request has images, and the server was started without --vision",
         error.StructuresUnsupported => "structured output is not built for Gemma 4 on CUDA yet",
         error.NonFiniteLogits => "the model's logits went non-finite at this row: the request is stopped rather than answered from them",
         error.CapturedKernels => "Gemma 4 runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
@@ -186,6 +205,10 @@ fn reserveNone(_: *anyopaque, _: u32) anyerror!void {}
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.gb.deinit();
+    if (own.v) |v| {
+        v.e.deinit();
+        own.gpa.destroy(v);
+    }
     own.m.deinit();
     own.w.deinit();
     own.s.deinit();
@@ -194,7 +217,7 @@ fn release(p: *anyopaque) void {
 }
 
 test "every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported, error.GemmaVisionTowerNotServed, error.NoGemmaVision, error.GemmaVisionDenseQuantized }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);

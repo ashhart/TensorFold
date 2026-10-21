@@ -10,13 +10,15 @@ pub const forward = @import("cuda_forward.zig");
 pub const snap = @import("cuda_snap.zig");
 pub const backend = @import("cuda_backend.zig");
 pub const assistant = @import("cuda_assistant.zig");
+pub const vision = @import("cuda_vision.zig");
+pub const image = @import("cuda_image.zig");
 pub const native = @import("cuda_native.zig").Family("gemma4_unified");
 pub const native31 = @import("cuda_native.zig").Family("gemma4");
 
-test "cuda_config.zig and cuda_widths.zig are config.zig and widths.zig but for their first lines (doc and imports)" {
+test "cuda_config, cuda_widths and cuda_image are config, widths and image but for their first lines (doc, imports)" {
     // the copies' width tests log the refusals they plant, as Metal's do: warnings, meant
     std.testing.log_level = .err;
-    const pairs = [_][2][]const u8{ .{ @embedFile("config.zig"), @embedFile("cuda_config.zig") }, .{ @embedFile("widths.zig"), @embedFile("cuda_widths.zig") } };
+    const pairs = [_][2][]const u8{ .{ @embedFile("config.zig"), @embedFile("cuda_config.zig") }, .{ @embedFile("widths.zig"), @embedFile("cuda_widths.zig") }, .{ @embedFile("image.zig"), @embedFile("cuda_image.zig") } };
     for (pairs) |p| {
         var a = std.mem.splitScalar(u8, p[0], '\n');
         var b = std.mem.splitScalar(u8, p[1], '\n');
@@ -39,5 +41,7 @@ test {
     _ = @import("cuda_backend.zig");
     _ = @import("cuda_assistant.zig");
     _ = @import("cuda_assistant_weights.zig");
+    _ = @import("cuda_vision.zig");
+    _ = @import("cuda_image.zig");
     _ = @import("cuda_native.zig");
 }
