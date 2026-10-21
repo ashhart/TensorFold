@@ -13,6 +13,7 @@ const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
 const decide = @import("qwen27_decide.zig");
+const joint = @import("qwen27_joint.zig");
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
 const Allocator = std.mem.Allocator;
@@ -28,6 +29,7 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    joint_head: ?[]const u8 = null, // --joint-head: a decision side-head; score/decide read its option-final rows
 };
 
 pub const Host = struct {
@@ -46,6 +48,7 @@ pub const Host = struct {
     warm: mtl.keepalive.Target,
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
+    joint: ?*joint.Head = null, // --joint-head's loaded side-head
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -87,7 +90,7 @@ pub const Host = struct {
     /// LaneHost's decision hook: Ornith's label reads over a shared trunk, on an idle engine.
     fn decideRun(ptr: *anyopaque, task: *api.DecisionTask) error{ Failed, Refused }!void {
         const h = of(ptr);
-        return decide.run(h.back, h.host.info_.context_window, task);
+        return decide.run(h.back, h.joint, h.host.info_.context_window, task);
     }
 };
 
@@ -316,6 +319,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
         return error.DrafterLoad;
     };
     errdefer if (h.draft) |d| d.deinit();
+    h.joint = null;
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
     h.back.chunk = h.runner.promptRows(q.model.promptRows(h.runner.model.config));
@@ -346,6 +350,17 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     if (o.learn) |l| try disk.attach(h, io, a, l);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    if (o.joint_head) |p| {
+        h.joint = joint.Head.open(gpa, io, p) catch |err| {
+            why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B joint head cannot load {s} ({s})", .{ p, @errorName(err) });
+            return error.JointHeadLoad;
+        };
+        if (h.joint.?.cfg.dim != model.config.hidden) {
+            why.* = try std.fmt.allocPrint(a, "--joint-head's dim {d} does not match this checkpoint's hidden width {d}", .{ h.joint.?.cfg.dim, model.config.hidden });
+            return error.JointHeadDim;
+        }
+    }
+    errdefer if (h.joint) |j| j.close();
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
     return h;
@@ -401,6 +416,7 @@ pub fn close(ptr: *anyopaque) void {
     h.core.deinit();
     h.cfg.deinit(h.gpa);
     h.back.deinit();
+    if (h.joint) |j| j.close();
     if (h.draft) |d| d.deinit();
     h.runner.deinit();
     if (h.vision) |v| v.deinit();

@@ -125,6 +125,8 @@ pub const flags = [_]Flag{
     .{ .name = "--recall-dir", .native = true },
     .{ .name = "--recall-gib", .native = true },
     .{ .name = "--recall-read-only", .kind = .store_true, .native = true },
+    // the native server's own: a decision side-head (joint_head_config.json + bf16 safetensors) scoring option-final rows
+    .{ .name = "--joint-head", .native = true },
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
 };
@@ -178,6 +180,7 @@ pub const Args = struct {
     compact_memory: ?[]const u8 = null,
     drafter: ?[]const u8 = null,
     drafter_bits: u8 = 4,
+    joint_head: ?[]const u8 = null, // --joint-head: a decision side-head; score/decide labels become option-final token positions
     record: ?[]const u8 = null, // drafter training rows written under this folder
     kv_cache: []const u8 = "bf16", // fp8: e4m3 attention caches with a scale a row, about twice the context
     slide: bool = false, // Sliding Weights learns what /v1/slide/learn is told into the served weights, live
@@ -319,7 +322,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.learn_daily_gib = try gib(u, a, name, v);
     } else if (is(name, "--prompt-seed")) {
         out.prompt_seed = true;
-    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--joint-head")) out.joint_head = v else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
@@ -438,6 +441,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .drafts = !args.no_drafts,
         .drafter = args.drafter,
         .drafter_bits = args.drafter_bits,
+        .joint_head = args.joint_head,
         .record = args.record,
         .kv8 = std.mem.eql(u8, args.kv_cache, "fp8"),
         .speed_up = args.speed_up,

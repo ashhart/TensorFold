@@ -286,6 +286,8 @@ pub const Open = struct {
     policy: []const u8 = "",
     /// --vision: load the checkpoint's image tower (null: text only; an engine without one refuses).
     vision: ?VisionOpen = null,
+    /// --joint-head: a decision side-head's folder; when set, score/decide labels are option-final token positions.
+    joint_head: ?[]const u8 = null,
 };
 
 /// A packed decision: a trunk (pictures expand at `at`), a branch a question, and each branch's labels (`counts`).
