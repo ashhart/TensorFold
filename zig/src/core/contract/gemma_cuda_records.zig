@@ -1,4 +1,4 @@
-//! Gemma 4's CUDA launch records (act_rows' activations in MLX's bf16 steps) in registry.cuda.
+//! Gemma 4's CUDA launch records (act_rows' MLX activations, embed_rows' and qk_rows' MLX rows).
 const CudaRecord = @import("registry.zig").CudaRecord;
 
 pub const cuda = [_]CudaRecord{
@@ -6,4 +6,7 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "act_rows tf_geglu_rows 128 threads", .symbol = "tf_geglu_rows", .image = "act_rows", .threads = 128 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "act_rows tf_swiglu_rows_round 256 threads", .symbol = "tf_swiglu_rows_round", .image = "act_rows", .threads = 256 }, .usage = .{ .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "act_rows tf_swiglu_rows_round 128 threads", .symbol = "tf_swiglu_rows_round", .image = "act_rows", .threads = 128 }, .usage = .{ .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "embed_rows tf_embed_rows_affine", .symbol = "tf_embed_rows_affine", .image = "embed_rows", .threads = 256 }, .usage = .{ .{ .regs = 38, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "qk_rows tf_qk_rows_once 512 threads", .symbol = "tf_qk_rows_once", .image = "qk_rows", .threads = 512 }, .usage = .{ .{ .regs = 30, .static = 64, .bound = 512 }, .{ .regs = 36, .static = 64, .bound = 512 }, .{ .regs = 36, .static = 64, .bound = 512 }, .{ .regs = 34, .static = 64, .bound = 512 }, .{ .regs = 34, .static = 64, .bound = 512 } } },
+    .{ .launch = .{ .name = "qk_rows tf_qk_rows_round 512 threads", .symbol = "tf_qk_rows_round", .image = "qk_rows", .threads = 512 }, .usage = .{ .{ .regs = 30, .static = 64, .bound = 512 }, .{ .regs = 36, .static = 64, .bound = 512 }, .{ .regs = 36, .static = 64, .bound = 512 }, .{ .regs = 34, .static = 64, .bound = 512 }, .{ .regs = 34, .static = 64, .bound = 512 } } },
 };
