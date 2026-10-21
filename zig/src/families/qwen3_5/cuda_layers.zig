@@ -65,4 +65,4 @@ pub const Fns = struct {
 pub const Keeps = struct { apply: cuda.Function, conv: cuda.Function, compact: cuda.Function };
 
 /// qwen35_kv8.cu's kernels: the cache writes, attention reads and keep's moves over e4m3 rows (--kv-cache fp8).
-pub const Kv8 = struct { rope: cuda.Function, attn_partial: cuda.Function, compact: cuda.Function };
+pub const Kv8 = struct { rope: cuda.Function, attn_partial: cuda.Function, attn_rows: cuda.Function, compact: cuda.Function };
