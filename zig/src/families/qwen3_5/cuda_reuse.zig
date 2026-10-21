@@ -97,18 +97,20 @@ const Runs = struct {
     pages: ?caches.Paged,
     page_bytes: usize,
     in_page: usize,
+    span: usize = 0, // a full page's run of the piece
     len: usize,
     page: usize = 0,
     done: usize = 0,
 
     const Run = struct { dev: u64, at: usize, len: usize };
 
-    fn of(e: *const Engine, cache: *const Cache, l: Layout, i: usize, p: Piece) Runs {
+    fn of(cache: *const Cache, l: Layout, i: usize, p: Piece) Runs {
         if (!p.kv or cache.paged == null) return .{ .base = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off, .pages = null, .page_bytes = 0, .in_page = 0, .len = p.len };
         const pg = cache.paged.?;
-        const row = head_dim * 2; // bf16 only: a paged cache refuses fp8 at init
-        std.debug.assert(l.format == .bf16);
-        return .{ .base = pg.base, .pages = pg, .page_bytes = pg.elems(e.g) * 2, .in_page = (i - 1) * pg.tokens * row, .len = p.len };
+        // the piece's offset inside a page: its layout at cap = tokens (Layout.piece), a run of tokens rows a page
+        const in_page: Layout = .{ .g = l.g, .format = l.format, .cap = pg.tokens, .at = pg.tokens };
+        const q = in_page.piece(i);
+        return .{ .base = pg.base, .pages = pg, .page_bytes = in_page.kvBytes(), .in_page = q.off, .span = q.len, .len = p.len };
     }
 
     fn next(r: *Runs) ?Run {
@@ -117,8 +119,7 @@ const Runs = struct {
             r.done = r.len;
             return .{ .dev = r.base, .at = 0, .len = r.len };
         };
-        const span = pg.tokens * head_dim * 2;
-        const n = @min(span, r.len - r.done);
+        const n = @min(r.span, r.len - r.done);
         const run: Run = .{ .dev = r.base + pg.ids[r.page] * r.page_bytes + r.in_page, .at = r.done, .len = n };
         r.page += 1;
         r.done += n;
@@ -171,7 +172,7 @@ pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen)
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
-        var it = Runs.of(e, cache, l, i, p);
+        var it = Runs.of(cache, l, i, p);
         while (it.next()) |r| try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(copy.host.bytes.ptr + off + r.at, r.dev, r.len, e.stream.handle), "cuMemcpyDtoHAsync");
         off += p.len;
     }
@@ -210,7 +211,7 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
-        var it = Runs.of(e, cache, l, i, p);
+        var it = Runs.of(cache, l, i, p);
         while (it.next()) |r| try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(r.dev, copy.host.bytes.ptr + off + r.at, r.len, e.stream.handle), "cuMemcpyHtoDAsync");
         off += p.len;
     }

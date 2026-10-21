@@ -86,7 +86,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();
-    if (page_tokens > 0 and (o.kv8 or o.slide)) return error.QwenPagesNeedBf16;
+    if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
     errdefer e.deinit();
     if (o.prompt_int8) try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
@@ -203,7 +203,7 @@ fn closeDrafter(p: *anyopaque) void {
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
-        error.QwenPagesNeedBf16 => "TF_QWEN_KV_PAGES: paged caches hold bf16 rows and serve no learner yet; drop --kv-cache fp8 and --slide, or unset it",
+        error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
         error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
         else => null,

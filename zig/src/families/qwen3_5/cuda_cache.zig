@@ -27,9 +27,9 @@ pub const Paged = struct {
     /// The cache owns `ids` (TF_QWEN_KV_PAGE_TEST); a pool's lane maps its lease's.
     own_ids: bool = true,
 
-    /// Elements (bf16) a page holds: every attention layer's keys and values of `tokens` positions.
-    pub fn elems(p: Paged, g: geometry.Geometry) usize {
-        return g.attentions() * 2 * g.kv_heads * p.tokens * geometry.head_dim;
+    /// Elements a page holds (bf16, or bytes for fp8 rows and their scales): every attention layer's of `tokens` rows.
+    pub fn elems(p: Paged, g: geometry.Geometry, kv8: bool) usize {
+        return if (kv8) g.kvBytes(p.tokens, true) else g.kvBytes(p.tokens, false) / 2;
     }
 };
 
@@ -69,7 +69,6 @@ pub const Cache = struct {
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, cap: usize) !Cache {
         const test_pages = try pageTest();
-        if (test_pages > 0 and e.kv8) return error.PagedKvNeedsBf16;
         const rows = if (test_pages > 0) (cap + test_pages - 1) / test_pages * test_pages else cap;
         var kv = try DeviceBuffer.alloc(e.d, e.g.kvBytes(rows, e.kv8));
         errdefer kv.free();
@@ -91,7 +90,6 @@ pub const Cache = struct {
 
     /// A pool lane's cache: its own state, log, tap ring and table of `pages` pages at `base`, mapped at open.
     pub fn initPaged(gpa: std.mem.Allocator, e: *Engine, pages: usize, tokens: usize, base: u64) !Cache {
-        if (e.kv8) return error.PagedKvNeedsBf16;
         var table = try DeviceBuffer.alloc(e.d, pages * 4);
         errdefer table.free();
         try table.fill8(0, null);
@@ -161,7 +159,7 @@ pub const Cache = struct {
         if (self.paged) |p| {
             sg.kv = p.base;
             sg.pt = p.table.ptr;
-            sg.ps = p.elems(g);
+            sg.ps = p.elems(g, e.kv8);
             sg.ptok = @intCast(p.tokens);
         }
         return sg;

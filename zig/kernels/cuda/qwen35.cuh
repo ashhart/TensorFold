@@ -35,7 +35,7 @@ struct Seg {
     int cap, len, row0, rows, tap_rows, taps;
     int delta;                // an image prompt's rotary shift: rows past it rotate at position + delta
     unsigned long long pt;    // the stream's KV page table (int a page; 0: kv holds cap contiguous rows)
-    unsigned long long ps;    // elements a KV page holds: every attention layer's keys and values of ptok positions
+    unsigned long long ps;    // elements a KV page holds (bf16, or bytes for fp8): every attention layer's ptok rows
     int ptok;                 // positions a KV page holds
 };
 
