@@ -1,10 +1,13 @@
 //! Startup-owned voice references; only catalog names, never request paths, select files.
 const std = @import("std");
+const api = @import("engine_api");
 const json = @import("json");
 const prompt = @import("drama_prompt");
 const text_mod = @import("model_text.zig");
 const checks = @import("drama_prompt.zig");
+const errors = @import("errors.zig");
 const Allocator = std.mem.Allocator;
+const Cx = errors.Cx;
 
 pub const Voice = struct { name: []const u8, references: []const prompt.Reference };
 pub const max_frames = (30 * 44100 + 2047) / 2048;
@@ -96,6 +99,30 @@ const Tokenizer = struct {
 
 pub fn build(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs: []const prompt.Reference) ![][11]i32 {
     return prompt.build(a, Tokenizer{ .value = tokenizer }, input, refs);
+}
+
+/// A voice's prompt: its own ids and frame rows.
+pub const Prompt = struct { prompt: []const u32, frames: []const [11]i32 };
+
+/// A voice's prompt ids and frame rows for an input.
+pub fn promptFor(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs: []const prompt.Reference) !Prompt {
+    const frames = try build(a, tokenizer, input, refs);
+    const ids = try a.alloc(u32, frames.len);
+    for (frames, ids) |row, *token| token.* = @intCast(row[0]);
+    return .{ .prompt = ids, .frames = frames };
+}
+
+/// A voice's prompt for a speech request: its ids and frame rows; null when the request named no voice.
+pub fn requestPrompt(cx: *Cx, text: text_mod.Text, sp: api.SpeechInfo, input: []const u8, refs: []const prompt.Reference) errors.Refused!?Prompt {
+    if (refs.len == 0) return null;
+    if (try checks.problem(cx.a, input)) |message| return cx.refuse(message);
+    const made = promptFor(cx.a, text, input, refs) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => cx.other("the tokenizer cannot encode this voice prompt"),
+    };
+    if (made.frames.len > sp.max_prompt_tokens)
+        return cx.fail(.request, checks.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ made.frames.len, sp.max_prompt_tokens });
+    return made;
 }
 
 pub fn listing(a: Allocator, voices: []const Voice) !json.Value {

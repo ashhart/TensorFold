@@ -12,6 +12,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Native Drama speech can opt into `--silence-mid-s` (below `--silence-seconds`) with an explicit `--silence-mid-min-voiced-s` to finish as `silence` when end of speech falls in a long silent run after enough voiced audio. Configured whole replies carry the decimal `X-Silence-Mid-Trips` count, including zero; streams and errors omit it. The default is off.
 
 - `serve --allowed-controls LIST` opts into stripping unlisted bracketed speech controls before input validation and tokenization. Omission preserves the input unchanged; see [speech controls](docs/speech-controls.md) for the open-vocabulary name grammar and malformed-input policy.
+- `serve --silence-redraws N` opts into drawing a whole speech reply the silence guard ended again, as seed salt + k, while `--silence-redraw-budget-s` and the request's `X-Deadline-S` allow; `--silence-redraw-controls LIST` filters redrawn input with the allowlist rules. Streams are never redrawn and the default is off; see [speech redraws](docs/speech-redraws.md).
+- Enabled speech redraws report admitted redraws in `X-Silence-Redraws`, including zero on streams and errors, validate stream deadlines, and wait out a busy engine only until the latest admissible redraw start.
 
 - Drama 3 serving accepts `--max-frames` to bound synthesis frames, preserving the stock cap when omitted (#1134). Thanks to @plotarmordev.
 

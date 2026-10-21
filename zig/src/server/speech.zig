@@ -10,6 +10,7 @@ const openai = @import("openai.zig");
 const pyrepr = @import("pyrepr.zig");
 const reply_text = @import("reply_text.zig");
 const drama_prompt = @import("drama_prompt.zig");
+const speech_redraw = @import("speech_redraw.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
 const clock = @import("clock.zig");
@@ -41,7 +42,21 @@ pub const Format = enum {
     }
 };
 
-const Plan = struct { prompt: []const u32, frames: ?[]const [11]i32 = null, seed: u64, format: Format, stream: bool };
+const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, refs: []const @import("drama_prompt").Reference = &.{}, seed: u64, format: Format, stream: bool, budget_s: ?f64 = null };
+
+/// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
+const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false };
+
+const Metadata = struct {
+    enabled: bool,
+    redraws: u8 = 0,
+
+    fn add(m: Metadata, c: *Conn) !void {
+        if (!m.enabled) return;
+        var buf: [3]u8 = undefined;
+        try c.addHeader("X-Silence-Redraws", std.fmt.bufPrint(&buf, "{d}", .{m.redraws}) catch unreachable);
+    }
+};
 
 pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     const sp = srv.info.speech orelse {
@@ -52,11 +67,15 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     var cx: Cx = .{ .a = a };
     const id = try ids.make(a, "speech-", 32);
     const received = clock.nowNs(srv.io);
-    const raw = http_body.readJson(c, &cx) catch |e| return refuse(c, &cx, id, e);
-    const plan = prepare(srv, &cx, sp, raw) catch |e| return refuse(c, &cx, id, e);
+    var metadata: Metadata = .{ .enabled = srv.config.redraw.count() > 0 };
+    const raw = http_body.readJson(c, &cx) catch |e| return refuse(c, &cx, id, metadata, e);
+    var plan = prepare(srv, &cx, sp, raw) catch |e| return refuse(c, &cx, id, metadata, e);
     // only chunked framing tells a client that a stream which ends early is incomplete
-    if (plan.stream and !std.mem.eql(u8, c.version, "HTTP/1.1")) return fail(c, &cx, id, .request, "stream=true requires HTTP/1.1");
-    synthesize(srv, c, &cx, id, sp, plan, received);
+    if (plan.stream and !std.mem.eql(u8, c.version, "HTTP/1.1")) return fail(c, &cx, id, metadata, .request, "stream=true requires HTTP/1.1");
+    if (srv.config.redraw.count() > 0)
+        plan.budget_s = speech_redraw.budget(srv.config.redraw.budget_s, c.header("X-Deadline-S")) catch
+            return fail(c, &cx, id, metadata, .request, "X-Deadline-S must be a positive number of seconds");
+    synthesize(srv, c, &cx, id, sp, plan, received, &metadata);
 }
 
 fn listed(names: []const []const u8, key: []const u8) bool {
@@ -111,48 +130,50 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
             return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
         return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
     };
+    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .seed = api.seedFor(made.prompt, srv.config.seed_salt), .format = format, .stream = stream };
+    const prompt = try promptOf(srv, cx, sp, input);
+    return .{ .input = input, .prompt = prompt, .seed = api.seedFor(prompt, srv.config.seed_salt), .format = format, .stream = stream };
+}
+
+/// The prompt ids of a valid UTF-8 input, refused when it cannot be spoken or is too long.
+fn promptOf(srv: *Server, cx: *Cx, sp: api.SpeechInfo, input: []const u8) errors.Refused![]const u32 {
     if (try drama_prompt.problem(cx.a, input)) |message| return cx.refuse(message);
-    if (refs.len > 0) {
-        const frames = @import("drama_voice.zig").build(cx.a, srv.text, input, refs) catch |e| return switch (e) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => cx.other("the tokenizer cannot encode this voice prompt"),
-        };
-        if (frames.len > sp.max_prompt_tokens)
-            return cx.fail(.request, drama_prompt.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ frames.len, sp.max_prompt_tokens });
-        const prompt = try cx.a.alloc(u32, frames.len);
-        for (frames, prompt) |row, *token| token.* = @intCast(row[0]);
-        return .{ .prompt = prompt, .frames = frames, .seed = api.seedFor(prompt, srv.config.seed_salt), .format = format, .stream = stream };
-    }
     const prompt = drama_prompt.encode(cx.a, srv.text, input) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Template => cx.other("the tokenizer cannot encode this prompt"),
     };
     if (prompt.len > sp.max_prompt_tokens)
         return cx.fail(.request, drama_prompt.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ prompt.len, sp.max_prompt_tokens });
-    return .{ .prompt = prompt, .seed = api.seedFor(prompt, srv.config.seed_salt), .format = format, .stream = stream };
+    return prompt;
+}
+
+/// One frame row a prompt token, the token in the text column.
+fn rows(a: Allocator, prompt: []const u32) error{ OutOfMemory, InvalidToken }![]const [11]i32 {
+    const frames = try a.alloc([11]i32, prompt.len);
+    for (frames, prompt) |*row, token| {
+        row.* = @splat(0);
+        row[0] = std.math.cast(i32, token) orelse return error.InvalidToken;
+    }
+    return frames;
 }
 
 /// One synthesis: submit, then send the whole audio after the finished event, or stream it as the engine publishes it.
-fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96) void {
+fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, metadata: *Metadata) void {
     var held = srv.speech_inflight.load(.acquire);
     while (true) {
-        if (held >= @max(1, srv.info.lanes)) return fail(c, cx, id, .capacity, "speech output capacity is full");
+        if (held >= @max(1, srv.info.lanes)) return fail(c, cx, id, metadata.*, .capacity, "speech output capacity is full");
         if (srv.speech_inflight.cmpxchgWeak(held, held + 1, .acq_rel, .acquire)) |now| held = now else break;
     }
     defer _ = srv.speech_inflight.fetchSub(1, .acq_rel);
     const pcm_len = std.math.mul(usize, sp.max_frames, sp.frame_length) catch 0;
     if (pcm_len == 0 or sp.sample_rate == 0 or sp.sample_rate > std.math.maxInt(u32) / 2)
-        return fail(c, cx, id, .server, "the engine advertises no usable speech output");
-    const pcm = srv.gpa.alloc(f32, pcm_len) catch return fail(c, cx, id, .server, "out of memory");
+        return fail(c, cx, id, metadata.*, .server, "the engine advertises no usable speech output");
+    const pcm = srv.gpa.alloc(f32, pcm_len) catch return fail(c, cx, id, metadata.*, .server, "out of memory");
     defer srv.gpa.free(pcm);
     var result: api.SpeechResult = .{};
-    const frames = plan.frames orelse blk: {
-        const rows = cx.a.alloc([11]i32, plan.prompt.len) catch return fail(c, cx, id, .server, "out of memory");
-        for (rows, plan.prompt) |*row, token| {
-            row.* = @splat(0);
-            row[0] = std.math.cast(i32, token) orelse return fail(c, cx, id, .request, "invalid speech token");
-        }
-        break :blk rows;
+    const frames = plan.frames orelse rows(cx.a, plan.prompt) catch |e| return switch (e) {
+        error.OutOfMemory => fail(c, cx, id, metadata.*, .server, "out of memory"),
+        error.InvalidToken => fail(c, cx, id, metadata.*, .request, "invalid speech token"),
     };
     const request: api.SpeechRequest = .{
         .prompt = plan.prompt,
@@ -171,24 +192,99 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     const engine_id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin();
     defer if (srv.keepalive) |k| k.end();
+    const started = clock.nowNs(srv.io);
     srv.engine.submitSpeech(engine_id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
-        error.Busy => fail(c, cx, id, .capacity, "the engine is busy; retry shortly"),
-        error.Closed => fail(c, cx, id, .other, "the scheduler is closed"),
-        error.InvalidRequest => fail(c, cx, id, .request, "the engine refused this speech request's prompt, frame limit or sampling"),
-        error.Unsupported => fail(c, cx, id, .request, "this model does not support speech synthesis"),
+        error.Busy => fail(c, cx, id, metadata.*, .capacity, "the engine is busy; retry shortly"),
+        error.Closed => fail(c, cx, id, metadata.*, .other, "the scheduler is closed"),
+        error.InvalidRequest => fail(c, cx, id, metadata.*, .request, "the engine refused this speech request's prompt, frame limit or sampling"),
+        error.Unsupported => fail(c, cx, id, metadata.*, .request, "this model does not support speech synthesis"),
     };
     // The engine holds request, prompt, pcm and result until finished; no path below returns before that.
-    if (plan.stream) return streamReply(srv, c, cx, id, sp, plan, received, &box, engine_id, pcm, &result);
+    if (plan.stream) return streamReply(srv, c, cx, id, sp, plan, received, &box, engine_id, pcm, &result, metadata.*);
     if (settle(srv, c, &box, engine_id, null) == null) return left(srv, c, id, plan.prompt.len, received);
-    const samples = result.samples;
-    if (why(&box, samples, pcm.len)) |message| return fail(c, cx, id, .server, message);
-    const data = quantizeInPlace(pcm[0..samples]) catch return fail(c, cx, id, .server, "the synthesized audio has non-finite samples");
-    if (data.len > std.math.maxInt(u32) - 36) return fail(c, cx, id, .server, "the synthesized audio is too long for one reply");
-    sendAudio(c, plan.format, sp.sample_rate, data, box.reason, if (srv.config.silence_mid) @intFromBool(result.silence_mid) else null) catch {
+    if (why(&box, result.samples, pcm.len)) |message| return fail(c, cx, id, metadata.*, .server, message);
+    const take: Take = .{ .pcm = pcm[0..result.samples], .reason = box.reason, .silence_mid = result.silence_mid };
+    if (take.reason != .silence or srv.config.redraw.count() == 0) return reply(srv, c, cx, id, sp, plan, received, take, metadata.*);
+    const spare = srv.gpa.alloc(f32, pcm.len) catch return reply(srv, c, cx, id, sp, plan, received, unused(id, 1, take, "out of memory"), metadata.*);
+    defer srv.gpa.free(spare);
+    const sent = redraw(srv, c, cx, id, sp, plan, received, request, started, take, spare, metadata) orelse return;
+    reply(srv, c, cx, id, sp, plan, received, sent, metadata.*);
+}
+
+/// Redraws a silenced take as seed salt + k while redraws and the budget last; the last take with audio, null if left.
+fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, first: api.SpeechRequest, started: i96, silenced: Take, spare: []f32, metadata: *Metadata) ?Take {
+    var next = first;
+    if (srv.config.redraw.controls) |controls| {
+        const input = @import("speech_plain.zig").filter(cx.a, controls, plan.input) catch return unused(id, 1, silenced, "out of memory");
+        if (input.ptr != plan.input.ptr) {
+            const made = @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, plan.refs) catch |e| return unused(id, 1, silenced, if (e == error.OutOfMemory) "out of memory" else cx.message);
+            if (made) |voice| {
+                next.prompt = voice.prompt;
+                next.frames = voice.frames;
+            } else {
+                next.prompt = promptOf(srv, cx, sp, input) catch |e| return unused(id, 1, silenced, if (e == error.OutOfMemory) "out of memory" else cx.message);
+                next.frames = rows(cx.a, next.prompt) catch |e| return unused(id, 1, silenced, @errorName(e));
+            }
+        }
+    }
+    const buffers = [2][]f32{ first.pcm, spare };
+    var live: usize = 0;
+    var take = silenced;
+    var start = started;
+    for (1..@as(usize, srv.config.redraw.count()) + 1) |k| {
+        const now = clock.nowNs(srv.io);
+        if (!speech_redraw.fits(plan.budget_s, received, start, now)) return unused(id, k, take, "t + d exceeds the budget");
+        const start_by = if (plan.budget_s) |s| s - clock.seconds(now - start) else null;
+        start = now;
+        var result: api.SpeechResult = .{};
+        next.pcm = buffers[1 - live];
+        next.result = &result;
+        next.seed = api.seedFor(next.prompt, srv.config.seed_salt +% @as(i64, @intCast(k)));
+        var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
+        defer box.deinit();
+        const engine_id = srv.next_id.fetchAdd(1, .monotonic);
+        submitRedraw(srv, c, engine_id, &next, &box, received, start_by) catch |e| return unused(id, k, take, @errorName(e));
+        metadata.redraws += 1;
+        if (settle(srv, c, &box, engine_id, null) == null) {
+            left(srv, c, id, plan.prompt.len, received);
+            return null;
+        }
+        if (why(&box, result.samples, next.pcm.len)) |message| return unused(id, k, take, message);
+        live = 1 - live;
+        take = .{ .pcm = buffers[live][0..result.samples], .reason = box.reason, .silence_mid = result.silence_mid };
+        log.line("speech {s} redraw {d} finish={s}", .{ id, k, @tagName(take.reason) });
+        if (take.reason != .silence) break;
+    }
+    return take;
+}
+
+fn submitRedraw(srv: *Server, c: *Conn, id: api.Id, request: *const api.SpeechRequest, box: *Mailbox, received: i96, start_by: ?f64) api.SpeechSubmitError!void {
+    while (true) {
+        if (start_by) |by| if (clock.seconds(clock.nowNs(srv.io) - received) > by) return error.Busy;
+        srv.engine.submitSpeech(id, request, .{ .ctx = box, .event = Mailbox.onEvent }) catch |e| {
+            if (e != error.Busy or start_by == null or c.peerGone()) return e;
+            std.Io.sleep(srv.io, .fromMilliseconds(20), .awake) catch {};
+            continue;
+        };
+        return;
+    }
+}
+
+/// Logs why redraw `k` gave no take; `take` stays the reply.
+fn unused(id: []const u8, k: usize, take: Take, why_not: []const u8) Take {
+    log.line("speech {s} redraw {d} not used: {s}", .{ id, k, why_not });
+    return take;
+}
+
+/// Sends a whole take under its finish reason.
+fn reply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, take: Take, metadata: Metadata) void {
+    const data = quantizeInPlace(take.pcm) catch return fail(c, cx, id, metadata, .server, "the synthesized audio has non-finite samples");
+    if (data.len > std.math.maxInt(u32) - 36) return fail(c, cx, id, metadata, .server, "the synthesized audio is too long for one reply");
+    sendAudio(c, plan.format, sp.sample_rate, data, take.reason, if (srv.config.silence_mid) @intFromBool(take.silence_mid) else null, metadata) catch {
         c.close = true; // a head already started or a client gone: nothing more can be sent on this connection
         return;
     };
-    log.line("speech {s} prompt={d} samples={d} format={s} finish={s} seconds={d:.2}", .{ id, plan.prompt.len, samples, @tagName(plan.format), @tagName(box.reason), clock.seconds(clock.nowNs(srv.io) - received) });
+    log.line("speech {s} prompt={d} samples={d} format={s} finish={s} seconds={d:.2}", .{ id, plan.prompt.len, take.pcm.len, @tagName(plan.format), @tagName(take.reason), clock.seconds(clock.nowNs(srv.io) - received) });
 }
 
 /// The client left before the reply ended; the synthesis was cancelled and waited out.
@@ -209,14 +305,14 @@ fn why(box: *const Mailbox, samples: usize, capacity: usize) ?[]const u8 {
 }
 
 /// An error reply when synthesis ends before any audio; else the chunks, and the terminator only after a complete one.
-fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, box: *Mailbox, engine_id: api.Id, pcm: []f32, result: *const api.SpeechResult) void {
-    const sent = streamAudio(srv, c, sp, box, engine_id, pcm) orelse return left(srv, c, id, plan.prompt.len, received);
+fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, box: *Mailbox, engine_id: api.Id, pcm: []f32, result: *const api.SpeechResult, metadata: Metadata) void {
+    const sent = streamAudio(srv, c, sp, box, engine_id, pcm, metadata) orelse return left(srv, c, id, plan.prompt.len, received);
     const mismatch: ?[]const u8 = if (result.samples != sent.samples) "the finished synthesis does not match the audio it published" else null;
     const problem = why(box, result.samples, pcm.len) orelse mismatch;
     if (sent.samples == 0) {
-        if (problem) |message| return fail(c, cx, id, .server, message);
+        if (problem) |message| return fail(c, cx, id, metadata, .server, message);
         // the model closed without a frame: an empty stream, not a fault
-        startStream(c, sp.sample_rate) catch {
+        startStream(c, sp.sample_rate, metadata) catch {
             c.close = true;
             return;
         };
@@ -247,7 +343,7 @@ fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechIn
 const Sent = struct { samples: usize = 0, first_ready: i96 = 0, first_written: i96 = 0 };
 
 /// Sends everything published since the last send as one chunk, converted in place; null: the client left.
-fn streamAudio(srv: *Server, c: *Conn, sp: api.SpeechInfo, box: *Mailbox, engine_id: api.Id, pcm: []f32) ?Sent {
+fn streamAudio(srv: *Server, c: *Conn, sp: api.SpeechInfo, box: *Mailbox, engine_id: api.Id, pcm: []f32, metadata: Metadata) ?Sent {
     var sent: Sent = .{};
     var size: [20]u8 = undefined;
     while (true) {
@@ -256,7 +352,7 @@ fn streamAudio(srv: *Server, c: *Conn, sp: api.SpeechInfo, box: *Mailbox, engine
         const first = sent.samples == 0;
         if (first) {
             sent.first_ready = clock.nowNs(srv.io);
-            startStream(c, sp.sample_rate) catch return abandon(srv, box, engine_id);
+            startStream(c, sp.sample_rate, metadata) catch return abandon(srv, box, engine_id);
         }
         // the audio event made pcm[..now] final: this thread converts it in place
         const bytes = quantizeInPlace(pcm[sent.samples..now]) catch return abandon(srv, box, engine_id);
@@ -298,7 +394,7 @@ fn settle(srv: *Server, c: *Conn, box: *Mailbox, engine_id: api.Id, sent: ?usize
 }
 
 /// 200 with raw PCM16LE in HTTP/1.1 chunks, under the reference's sample-format headers.
-fn startStream(c: *Conn, sample_rate: u32) error{Closed}!void {
+fn startStream(c: *Conn, sample_rate: u32, metadata: Metadata) error{Closed}!void {
     c.startResponse(200, null) catch return error.Closed;
     c.addHeader("Content-Type", Format.pcm.contentType()) catch return error.Closed;
     c.addHeader("Transfer-Encoding", "chunked") catch return error.Closed;
@@ -307,6 +403,7 @@ fn startStream(c: *Conn, sample_rate: u32) error{Closed}!void {
     c.addHeader("X-Channels", "1") catch return error.Closed;
     c.addHeader("X-Bit-Depth", "16") catch return error.Closed;
     c.addHeader("Trailer", "X-Finish-Reason") catch return error.Closed;
+    metadata.add(c) catch return error.Closed;
     if (c.close) c.addHeader("Connection", "close") catch return error.Closed;
     // each chunk leaves at once rather than waiting on the client's acknowledgement of the last (no effect off TCP)
     const one: c_int = 1;
@@ -323,30 +420,39 @@ const last_chunk = "0\r\n\r\n";
 const length_chunk = "0\r\nX-Finish-Reason: length\r\n\r\n";
 const silence_chunk = "0\r\nX-Finish-Reason: silence\r\n\r\n";
 
-fn refuse(c: *Conn, cx: *Cx, id: []const u8, e: errors.Refused) void {
+fn refuse(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata, e: errors.Refused) void {
     if (e == error.OutOfMemory) {
         cx.kind = .server;
         cx.message = "out of memory";
     }
-    send(c, cx, id);
+    send(c, cx, id, metadata);
 }
 
-fn fail(c: *Conn, cx: *Cx, id: []const u8, kind: errors.Kind, message: []const u8) void {
+fn fail(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata, kind: errors.Kind, message: []const u8) void {
     cx.kind = kind;
     cx.message = message;
-    send(c, cx, id);
+    send(c, cx, id, metadata);
 }
 
 /// OpenAI's error object, logged first: the access line shows only the status.
-fn send(c: *Conn, cx: *Cx, id: []const u8) void {
+fn send(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata) void {
     var buf: [1400]u8 = undefined;
     log.line("{s}", .{log.refused(&buf, id, cx.message)});
     const body = openai.errorBody(cx.a, cx, null) catch return;
-    routes.sendValue(c, cx.a, cx.status(), openai.wrapError(cx.a, body) catch return);
+    const text = json.stringify(cx.a, openai.wrapError(cx.a, body) catch return, .{}) catch return;
+    c.startResponse(cx.status(), null) catch return;
+    c.addHeader("Content-Type", "application/json") catch return;
+    var len: [24]u8 = undefined;
+    c.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{text.len}) catch unreachable) catch return;
+    metadata.add(c) catch return;
+    if (c.close) c.addHeader("Connection", "close") catch return;
+    c.finish(text) catch {
+        c.close = true;
+    };
 }
 
 /// The head, then the WAV header and the samples where they lie: the audio is never copied to prepend a header.
-fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reason: api.Reason, silence_mid: ?u8) error{ Closed, OutOfMemory }!void {
+fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reason: api.Reason, silence_mid: ?u8, metadata: Metadata) error{ Closed, OutOfMemory }!void {
     const header: ?[wav_header_len]u8 = if (format == .wav) wavHeader(sample_rate, @intCast(data.len)) else null;
     const header_len: usize = if (header != null) wav_header_len else 0;
     try c.startResponse(200, null);
@@ -358,6 +464,7 @@ fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reaso
         var count: [3]u8 = undefined;
         try c.addHeader("X-Silence-Mid-Trips", std.fmt.bufPrint(&count, "{d}", .{trips}) catch unreachable);
     }
+    try metadata.add(c);
     if (c.close) try c.addHeader("Connection", "close");
     defer c.out.clearRetainingCapacity();
     if (!std.mem.eql(u8, c.version, "HTTP/0.9")) try c.out.appendSlice(c.gpa, "\r\n");

@@ -84,6 +84,9 @@ pub const flags = [_]Flag{
     .{ .name = "--silence-onset-voiced-s", .native = true },
     .{ .name = "--silence-mid-s", .native = true },
     .{ .name = "--silence-mid-min-voiced-s", .native = true },
+    .{ .name = "--silence-redraws", .native = true },
+    .{ .name = "--silence-redraw-budget-s", .native = true },
+    .{ .name = "--silence-redraw-controls", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
@@ -163,6 +166,7 @@ pub const Args = struct {
     context: ?i64 = null,
 max_frames: ?u32 = null,
     silence: api.speech_guard.Config = .{},
+    redraw: @import("speech_redraw.zig").Policy = .{},
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
@@ -272,6 +276,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     try ranks(u, a, out);
     out.silence.validate() catch |err|
         return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
+    out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid silence redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     out.alias = repeated.alias.items;
     out.api_key = repeated.keys.items;
@@ -399,6 +404,12 @@ if (is(name, "--max-frames")) {
         if (n < 16 or n > 262144) return fail(u, a, "argument --vision-image-tokens: expected 16 to 262144 tokens: '{s}'", .{v});
         out.vision_image_tokens = @intCast(n);
         out.vision_image_tokens_set = true;
+    } else if (is(name, "--silence-redraws")) {
+        out.redraw.max = std.math.cast(u8, try int(u, a, name, v)) orelse return fail(u, a, "argument --silence-redraws: expected 0 to 255 redraws: '{s}'", .{v});
+    } else if (is(name, "--silence-redraw-budget-s")) {
+        out.redraw.budget_s = try float(u, a, name, v);
+    } else if (is(name, "--silence-redraw-controls")) {
+        out.redraw.controls = @import("drama_allow.zig").parse(v) catch return fail(u, a, "argument --silence-redraw-controls: expected comma-separated UTF-8 names without square brackets, or an empty list: '{s}'", .{v});
     }
 }
 

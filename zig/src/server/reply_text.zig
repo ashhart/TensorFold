@@ -298,7 +298,7 @@ pub fn isSpaceByte(ch: u8) bool {
     return ch == ' ' or (ch >= 0x09 and ch <= 0x0d) or (ch >= 0x1c and ch <= 0x1f);
 }
 
-fn spaceAt(s: []const u8, i: usize) usize {
+pub fn spaceAt(s: []const u8, i: usize) usize {
     const c = s[i];
     if (c == ' ' or (c >= 0x09 and c <= 0x0d) or (c >= 0x1c and c <= 0x1f)) return 1;
     if (c < 0x80) return 0;
