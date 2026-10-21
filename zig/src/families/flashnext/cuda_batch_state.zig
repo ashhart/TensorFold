@@ -529,6 +529,8 @@ pub const SeqState = struct {
     cap: usize,
     /// Block scores for an attention block's rows [min(rows, att_rows), scoreStride(cap)] fp32 (the engine's).
     scores: u64,
+    /// The attention caches' pages (pt 0: kc, vc, ikc and pooled are contiguous rows).
+    pg: @import("cuda_glue.zig").Pg = .{},
 };
 
 /// The block scores' row stride for a cache of `cap` tokens: its blocks rounded up to 16 (the captured _scores').

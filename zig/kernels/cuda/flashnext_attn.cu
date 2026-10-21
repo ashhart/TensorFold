@@ -53,6 +53,19 @@ __device__ __forceinline__ int partner(int d, int half) {
     return d < half ? d + half : (d < 2 * half ? d - half : d);
 }
 
+// A stream's cache pages (cuda_pages.zig's layout): pt[i] holds positions [i * ptok, (i + 1) * ptok); null: contiguous.
+struct Pg {
+    const int* pt;
+    long long ps;
+    int ptok, pad;
+};
+
+// Element offset of item i (a position, or a block with per = ptok / RATIO) of `row` elements, contiguous or paged.
+__device__ __forceinline__ long long pg_at(const Pg& pg, int i, int per, long long row) {
+    if (pg.pt == nullptr) return static_cast<long long>(i) * row;
+    return static_cast<long long>(pg.pt[i / per]) * pg.ps + static_cast<long long>(i % per) * row;
+}
+
 }  // namespace fn_attn
 
 using namespace fn_attn;
@@ -70,13 +83,13 @@ __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restric
                                                                __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
                                                                __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
                                                                __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
-                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta) {
+                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta, Pg pg) {
     __shared__ float scratch[32];
     const int r = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     const int pos = POS0[0] + r;
     const long long row = static_cast<long long>(r) * PW;
     if (head >= NQ + NKV + NI) {
-        if (d < IHD) IKC[static_cast<long long>(pos) * IHD + d] = P[row + NQ * 2 * HD + 2 * NKV * HD + NI * IHD + d];
+        if (d < IHD) IKC[pg_at(pg, pos, pg.ptok, IHD) + d] = P[row + NQ * 2 * HD + 2 * NKV * HD + NI * IHD + d];
         return;
     }
     const bool index = head >= NQ + NKV;
@@ -94,9 +107,9 @@ __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restric
     if (head < NQ) {
         Q[(static_cast<long long>(r) * NQ + head) * HD + d] = out;
     } else if (!index) {
-        const long long slot = static_cast<long long>(pos) * NKV + head - NQ;
-        KC[slot * HD + d] = out;
-        VC[slot * HD + d] = P[row + NQ * 2 * HD + NKV * HD + (head - NQ) * HD + d];
+        const long long slot = pg_at(pg, pos, pg.ptok, static_cast<long long>(NKV) * HD) + (head - NQ) * HD;
+        KC[slot + d] = out;
+        VC[slot + d] = P[row + NQ * 2 * HD + NKV * HD + (head - NQ) * HD + d];
     } else {
         IQ[(static_cast<long long>(r) * NI + head - NQ - NKV) * IHD + d] = out;
     }
@@ -108,8 +121,8 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_prep(const __nv_bfloat
                                                                __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
                                                                __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
                                                                __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
-                                                               int NI, int IHD, int HALF) {
-    fn_attn_prep_body(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, nullptr, 0, 0);
+                                                               int NI, int IHD, int HALF, Pg pg) {
+    fn_attn_prep_body(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, nullptr, 0, 0, pg);
 }
 
 extern "C" __global__ void __launch_bounds__(256) fn_attn_prep_media(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
@@ -118,8 +131,8 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_prep_media(const __nv_
                                                                __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
                                                                __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
                                                                __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
-                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta) {
-    fn_attn_prep_body(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, rope3, n, delta);
+                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta, Pg pg) {
+    fn_attn_prep_body(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, rope3, n, delta, pg);
 }
 
 // glue._attn_gate, program (row, head) of HD threads: bf16(o / (1 + e^-gate)) and its 32-group sums.
@@ -138,41 +151,42 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_gate(const __nv_bfloat
 __device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
                                                               const int* __restrict__ POS0, const float* __restrict__ W,
                                                               const float* __restrict__ INV, float eps, int R, int DI, int HALF,
-                                                              int RATIO, const int* rope3, int n, int delta) {
+                                                              int RATIO, const int* rope3, int n, int delta, Pg pg) {
     __shared__ float scratch[32];
     __shared__ float xs[256];
     const int p0 = POS0[0];
     const int b = p0 / RATIO + blockIdx.x, d = threadIdx.x;
     if (RATIO * b + RATIO > p0 + R) return;
-    float acc = bf(IKC[static_cast<long long>(RATIO) * b * DI + d]);
-    for (int k = 1; k < RATIO; ++k) acc = __fadd_rn(acc, bf(IKC[(static_cast<long long>(RATIO) * b + k) * DI + d]));
+    const long long at = pg_at(pg, RATIO * b, pg.ptok, DI) + d;  // a block's RATIO rows share a page
+    float acc = bf(IKC[at]);
+    for (int k = 1; k < RATIO; ++k) acc = __fadd_rn(acc, bf(IKC[at + static_cast<long long>(k) * DI]));
     const float x = rbf(__fdiv_rn(acc, static_cast<float>(RATIO)));
     xs[d] = x;
     const float rinv = inv_rms(block_sum(__fmul_rn(x, x), scratch), DI, eps);
     const int p = partner(d, HALF);
     const float xn = rbf(__fmul_rn(__fmul_rn(x, rinv), W[d]));
     const float xpn = rbf(__fmul_rn(__fmul_rn(xs[p], rinv), W[p]));
-    POOLED[static_cast<long long>(b) * DI + d] = __float2bfloat16_rn(rope(xn, xpn, d, HALF, media_pos(RATIO * b, d, HALF, rope3, n, delta), INV));
+    POOLED[pg_at(pg, b, pg.ptok / RATIO, DI) + d] = __float2bfloat16_rn(rope(xn, xpn, d, HALF, media_pos(RATIO * b, d, HALF, rope3, n, delta), INV));
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
                                                               const int* __restrict__ POS0, const float* __restrict__ W,
                                                               const float* __restrict__ INV, float eps, int R, int DI, int HALF,
-                                                              int RATIO) {
-    fn_qsa_pool_body(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, nullptr, 0, 0);
+                                                              int RATIO, Pg pg) {
+    fn_qsa_pool_body(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, nullptr, 0, 0, pg);
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool_media(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
                                                               const int* __restrict__ POS0, const float* __restrict__ W,
                                                               const float* __restrict__ INV, float eps, int R, int DI, int HALF,
-                                                              int RATIO, const int* rope3, int n, int delta) {
-    fn_qsa_pool_body(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, rope3, n, delta);
+                                                              int RATIO, const int* rope3, int n, int delta, Pg pg) {
+    fn_qsa_pool_body(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, rope3, n, delta, pg);
 }
 
 // attention._scores, program (row, 64 blocks): the heads' sum of relu(q . k) / sqrt(DI), rows past TOP (DI 128).
 extern "C" __global__ void __launch_bounds__(256) fn_qsa_scores(const __nv_bfloat16* __restrict__ IQ, const __nv_bfloat16* __restrict__ POOLED,
                                                                 const int* __restrict__ POS0, float* __restrict__ SC, int NB, int HI,
-                                                                int RATIO, int TOP) {
+                                                                int RATIO, int TOP, Pg pg) {
     constexpr int DI = 128;
     __shared__ float qs[8][DI];
     const int r = blockIdx.x, j = blockIdx.y;
@@ -186,7 +200,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_qsa_scores(const __nv_bfloa
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
         const int b = j * 64 + warp * 8 + i;
-        raw[i] = b < complete ? *reinterpret_cast<const uint2*>(POOLED + static_cast<long long>(b) * DI + 4 * lane) : make_uint2(0, 0);
+        raw[i] = b < complete ? *reinterpret_cast<const uint2*>(POOLED + pg_at(pg, b, pg.ptok / RATIO, DI) + 4 * lane) : make_uint2(0, 0);
     }
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
@@ -210,7 +224,7 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
                                             const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
                                             float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
                                             const int* __restrict__ IDS, const int* __restrict__ NKR, const int* __restrict__ SPR,
-                                            int H, int HK, int G, int CH, int NCH, float SCALE, int IDW, int QSA) {
+                                            int H, int HK, int G, int CH, int NCH, float SCALE, int IDW, int QSA, Pg pg = {}) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
     typedef __nv_bfloat16 Row[HD + 8];
     Row* qs = reinterpret_cast<Row*>(smem_raw);                  // [QR] the row's query heads
@@ -219,6 +233,7 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
     __nv_bfloat16 (*ps)[TK + 8] = reinterpret_cast<__nv_bfloat16 (*)[TK + 8]>(tiles_kv + (ONE ? TK : NB * 2 * TK));
     __shared__ float red_m[4][QR], red_l[4][QR];
     __shared__ int key_ids[NB][TK];
+    __shared__ long long key_at[NB][TK];
     const int r = blockIdx.x, hk = blockIdx.y, c = blockIdx.z;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
     int n = POS0[0] + r + 1;
@@ -239,15 +254,17 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
     auto load = [&](int t0, int buf) {
         if (threadIdx.x < TK) {
             const int ki = start + t0 + threadIdx.x;
-            key_ids[buf][threadIdx.x] = ki < n ? (sparse ? IDS[static_cast<long long>(r) * IDW + ki] : ki) : -1;
+            const int key = ki < n ? (sparse ? IDS[static_cast<long long>(r) * IDW + ki] : ki) : -1;
+            key_ids[buf][threadIdx.x] = key;
+            key_at[buf][threadIdx.x] = pg_at(pg, max(key, 0), pg.ptok, static_cast<long long>(HK) * HD) + hk * HD;
         }
         __syncthreads();
         for (int pass = 0; pass < 2; ++pass) {
             const __nv_bfloat16* src = pass == 0 ? KC : VC;
             Row* dst = tiles_kv + (buf * 2 + pass) * TK;
             for (int e = threadIdx.x; e < TK * HD / 8; e += blockDim.x) {
-                const int k = e / (HD / 8), v = e % (HD / 8), key = key_ids[buf][k];
-                qmm_frag::cp16z(&dst[k][8 * v], src + (static_cast<long long>(max(key, 0)) * HK + hk) * HD + 8 * v, key >= 0);
+                const int k = e / (HD / 8), v = e % (HD / 8);
+                qmm_frag::cp16z(&dst[k][8 * v], src + key_at[buf][k] + 8 * v, key_ids[buf][k] >= 0);
             }
             qmm_frag::commit();
         }
@@ -428,8 +445,8 @@ extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks(const __nv_bflo
                                                                  float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
                                                                  const int* __restrict__ IDS, const int* __restrict__ NKR,
                                                                  const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
-                                                                 float SCALE, int IDW, int QSA) {
-    attn_chunks<1>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
+                                                                 float SCALE, int IDW, int QSA, Pg pg) {
+    attn_chunks<1>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA, pg);
 }
 
 // attn_chunks on one buffer, a row's chunks merged in place (prompt rows): OUT bf16 in PO's place, no partials.
@@ -457,8 +474,8 @@ extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_ahead(const __n
                                                                        float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
                                                                        const int* __restrict__ IDS, const int* __restrict__ NKR,
                                                                        const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
-                                                                       float SCALE, int IDW, int QSA) {
-    attn_chunks<2>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
+                                                                       float SCALE, int IDW, int QSA, Pg pg) {
+    attn_chunks<2>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA, pg);
 }
 
 // attention._merge, program (row, head) of HD threads: the head's chunk partials merged in chunk order, o / l.

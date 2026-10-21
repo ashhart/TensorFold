@@ -77,7 +77,7 @@ fn prep(r: *Rig, g: *const flash.Glue) !void {
         kcs[c] = try r.out(cap * kv_heads * head_dim * 2);
         vcs[c] = try r.out(cap * kv_heads * head_dim * 2);
         ikcs[c] = try r.out(cap * index_dim * 2);
-        try g.attnPrep(r.s, dp, dpos, dqw, dkw, diw, dinv, qs[c], kcs[c], vcs[c], iqs[c], ikcs[c], eps, m);
+        try g.attnPrep(r.s, dp, dpos, dqw, dkw, diw, dinv, qs[c], kcs[c], vcs[c], iqs[c], ikcs[c], eps, m, .{});
     }
     const last = counts.len - 1;
     const q = try r.back(u16, qs[last], most * q_heads * head_dim);
@@ -142,7 +142,7 @@ fn indexer(r: *Rig, g: *const flash.Glue) !void {
     const dikc = try r.dev(std.mem.sliceAsBytes(ikc));
     const dpos = try r.dev(std.mem.sliceAsBytes(&[_]i32{ pos0, 0, 0, 0 }));
     const pooled = try r.out((cap / 4) * index_dim * 2);
-    try g.qsaPool(r.s, dikc, pooled, dpos, try r.dev(std.mem.sliceAsBytes(w)), try r.dev(std.mem.sliceAsBytes(inv)), eps, rows);
+    try g.qsaPool(r.s, dikc, pooled, dpos, try r.dev(std.mem.sliceAsBytes(w)), try r.dev(std.mem.sliceAsBytes(inv)), eps, rows, .{});
     const got = try r.back(u16, pooled, (cap / 4) * index_dim);
     var b: usize = pos0 / 4;
     while (4 * b + 4 <= pos0 + rows) : (b += 1) {
@@ -171,7 +171,7 @@ fn indexer(r: *Rig, g: *const flash.Glue) !void {
     var scs: [2]u64 = undefined;
     for ([_]usize{ 1, rows }, 0..) |m, c| {
         scs[c] = try r.out(m * nb * 4);
-        try g.qsaScores(r.s, diq, dkeys, dpos, scs[c], nb, m, (pos0 + rows) / 4);
+        try g.qsaScores(r.s, diq, dkeys, dpos, scs[c], nb, m, (pos0 + rows) / 4, .{});
     }
     const sc = try r.back(f32, scs[1], rows * nb);
     for (0..rows) |row| {
@@ -227,7 +227,7 @@ fn attention(r: *Rig, g: *const flash.Glue, sparse: bool) !void {
     for (counts, 0..) |m, c| {
         outs[c] = try r.out(m * q_heads * head_dim * 2);
         const chunks = if (sparse) (idw + 511) / 512 else (pos0 + m + 511) / 512;
-        try g.attnChunks(r.s, dq, dkc, dvc, dpos, po, pm, pl, dids, dnk, dspr, m, kv_heads, chunks, true);
+        try g.attnChunks(r.s, dq, dkc, dvc, dpos, po, pm, pl, dids, dnk, dspr, m, kv_heads, chunks, true, .{});
         try g.attnMerge(r.s, po, pm, pl, dpos, outs[c], dnk, dspr, m, kv_heads, true);
     }
     const got = try r.back(u16, outs[counts.len - 1], rows * q_heads * head_dim);

@@ -38,6 +38,7 @@ pub const native = @import("cuda_lanes.zig").Namespace(Tri);
 /// Our own glue kernels, which every launch takes when no captured set is loaded
 pub const Glue = glue_.Glue;
 const glue_ = @import("cuda_glue.zig");
+pub const Pg = glue_.Pg;
 
 const p = aot.ptr;
 
@@ -146,8 +147,9 @@ pub const Tri = struct {
     }
 
     /// glue.attn_prep for text positions, bf16 KV (BITS 0, the scale pointers unread); `length` unused at MODE 0.
-    pub fn attnPrep(t: Tri, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, rope: u64, delta: u64, eps: f32, rows: usize, length: usize) !void {
-        if (t.glue("_attn_prep")) |g| return g.attnPrep(t.s, proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc, eps, rows);
+    pub fn attnPrep(t: Tri, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, rope: u64, delta: u64, eps: f32, rows: usize, length: usize, pg: Pg) !void {
+        if (t.glue("_attn_prep")) |g| return g.attnPrep(t.s, proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc, eps, rows, pg);
+        if (pg.pt != 0) return error.PagedKvNeedsGlue;
         try t.run("_attn_prep", .{ u(rows), u(24 + 2 + 4 + 1), 1 }, &.{
             p("P", "*bf16", proj),
             p("POS0", "*i32", pos),
@@ -170,8 +172,9 @@ pub const Tri = struct {
     }
 
     /// attention._chunks over 512-key chunks, bf16 KV; `qsa` the sparse form (NCH 5, QSA 1), else dense (NCH 3, QSA 0).
-    pub fn attnChunks(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize, qsa: bool) !void {
-        if (t.glue("_chunks")) |g| return g.attnChunks(t.s, q, kc, vc, pos, po, pm, pl, ids, nk, sparse, rows, kv, chunks, qsa);
+    pub fn attnChunks(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize, qsa: bool, pg: Pg) !void {
+        if (t.glue("_chunks")) |g| return g.attnChunks(t.s, q, kc, vc, pos, po, pm, pl, ids, nk, sparse, rows, kv, chunks, qsa, pg);
+        if (pg.pt != 0) return error.PagedKvNeedsGlue;
         try t.run("_chunks", .{ u(rows), u(kv), u(chunks) }, &.{
             p("Q", "*bf16", q),
             p("KC", "*bf16", kc),
@@ -203,8 +206,9 @@ pub const Tri = struct {
     }
 
     /// attention.qsa_pool for text rows (MODE 0): every complete block of 4 indexer keys pooled, normed and roped.
-    pub fn qsaPool(t: Tri, ikc: u64, pooled: u64, pos: u64, k_scale: u64, inv: u64, eps: f32, rows: usize) !void {
-        if (t.glue("_pool")) |g| return g.qsaPool(t.s, ikc, pooled, pos, k_scale, inv, eps, rows);
+    pub fn qsaPool(t: Tri, ikc: u64, pooled: u64, pos: u64, k_scale: u64, inv: u64, eps: f32, rows: usize, pg: Pg) !void {
+        if (t.glue("_pool")) |g| return g.qsaPool(t.s, ikc, pooled, pos, k_scale, inv, eps, rows, pg);
+        if (pg.pt != 0) return error.PagedKvNeedsGlue;
         try t.run("_pool", .{ u(rows / 4 + 2), 1, 1 }, &.{
             p("IKC", "*bf16", ikc),
             p("POOLED", "*bf16", pooled),
@@ -218,8 +222,9 @@ pub const Tri = struct {
     }
 
     /// attention._scores: rows' complete blocks scored; `nb` is the row stride (a multiple of 16), `blocks` the grid.
-    pub fn qsaScores(t: Tri, iq: u64, pooled: u64, pos: u64, sc: u64, nb: usize, rows: usize, blocks: usize) !void {
-        if (t.glue("_scores")) |g| return g.qsaScores(t.s, iq, pooled, pos, sc, nb, rows, blocks);
+    pub fn qsaScores(t: Tri, iq: u64, pooled: u64, pos: u64, sc: u64, nb: usize, rows: usize, blocks: usize, pg: Pg) !void {
+        if (t.glue("_scores")) |g| return g.qsaScores(t.s, iq, pooled, pos, sc, nb, rows, blocks, pg);
+        if (pg.pt != 0) return error.PagedKvNeedsGlue;
         try t.run("_scores", .{ u(rows), cdiv(blocks, 64), 1 }, &.{
             p("IQ", "*bf16", iq),
             p("POOLED", "*bf16", pooled),
@@ -416,6 +421,7 @@ test {
     _ = mtp;
     _ = native;
     _ = @import("cuda_snap.zig");
+    _ = @import("cuda_pages.zig");
     _ = @import("cuda_config.zig");
     _ = @import("cuda_projection_load.zig");
     _ = @import("cuda_rank_engine.zig");
