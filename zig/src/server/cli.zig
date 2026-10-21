@@ -256,7 +256,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     try ranks(u, a, out);
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
-    if (out.idle_unload < 0) return fail(u, a, "argument --idle-unload: expected a seconds count from 0 (off): '{d}'", .{out.idle_unload});
+    if (out.idle_unload < 0 or out.idle_unload > std.math.maxInt(i64) / std.time.ns_per_s) return fail(u, a, "argument --idle-unload: expected a seconds count from 0 (off) under {d}: '{d}'", .{ std.math.maxInt(i64) / std.time.ns_per_s, out.idle_unload });
     out.alias = repeated.alias.items;
     out.api_key = repeated.keys.items;
     if (repeated.hosts.items.len > 64 or repeated.origins.items.len > 64) return fail(u, a, "at most 64 --allowed-host and 64 --allowed-origin entries are allowed", .{});
