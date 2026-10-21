@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     // draining: the engine is not asked, it may be stopping
     if (srv.draining.load(.seq_cst)) return routes.sendDraining(conn, try std.fmt.allocPrint(a, "{{\"status\": \"draining\", \"requests_in_progress\": {d}}}", .{srv.generating.load(.seq_cst)}));
+    if (srv.idle_manager) |m| if (m.isParked()) return conn.sendJson(503, "{\"status\": \"unavailable\"}"); // parked: no engine to ask
     var status: api.Status = .{};
     srv.engine.status(&status, &.{});
     if (!status.healthy) return conn.sendJson(503, "{\"status\": \"unavailable\"}");
@@ -32,17 +33,22 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     try o.put(a, "max_batch_size", try json.intValue(a, srv.info.lanes));
     if (srv.info.policy.len > 0) try o.put(a, "policy", .{ .string = srv.info.policy });
     var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
-    try o.put(a, "warming", .{ .bool = status.warming });
+    if (srv.idleParked()) {
+        try o.put(a, "warming", .{ .bool = false }); // parked: the stub's numbers, no closed-engine read
+    } else {
+        srv.engine.status(&status, &.{});
+        try o.put(a, "warming", .{ .bool = status.warming });
+    }
     const memory = try json.newObject(a);
-    if (srv.engine.memory(reset_peak)) |mem| {
+    const device: ?api.Memory = if (srv.idleParked()) null else srv.engine.memory(reset_peak);
+    if (device) |mem| {
         try memory.put(a, "active", try json.intValue(a, mem.active));
         try memory.put(a, "cache", try json.intValue(a, mem.cache));
         try memory.put(a, "peak", try json.intValue(a, mem.peak));
         if (mem.limit) |limit| try memory.put(a, "limit", try json.intValue(a, limit));
     }
     try o.put(a, "memory", .{ .object = memory });
-    try o.put(a, "live", try live.snapshot(a, srv.engine));
+    if (!srv.idleParked()) try o.put(a, "live", try live.snapshot(a, srv.engine));
     const ident = srv.config.identity;
     for ([_][2][]const u8{
         .{ "version", ident.version },
@@ -116,7 +122,9 @@ fn reasoningValue(
 /// Prometheus text, version 0.0.4.
 pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: std.Io.Writer.Allocating = .init(a);
-    srv.metrics.render(srv.io, &out.writer, srv.engine, srv.info.context_window) catch return;
+    if (srv.idleParked()) { // parked: no engine holds counters; the HTTP and process families still render
+        srv.metrics.renderParked(srv.io, &out.writer, srv.info.context_window) catch return;
+    } else srv.metrics.render(srv.io, &out.writer, srv.engine, srv.info.context_window) catch return;
     const body = out.written();
     conn.startResponse(200, null) catch return;
     conn.addHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8") catch return;
@@ -137,8 +145,10 @@ pub fn dashboard(srv: *Server, conn: *Conn, a: Allocator) void {
 pub fn stats(srv: *Server, conn: *Conn, a: Allocator) void {
     if (!srv.config.dashboard) return routes.unknown(conn, a);
     var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
-    const memory = srv.engine.memory(false);
+    if (srv.idleParked()) {
+        status.healthy = false; // parked: the dashboard's unavailable state, no closed-engine read
+    } else srv.engine.status(&status, &.{});
+    const memory = if (srv.idleParked()) null else srv.engine.memory(false);
     srv.metrics.mutex.lockUncancelable(srv.io);
     const prompt = srv.metrics.prompt;
     const generation = srv.metrics.generation;

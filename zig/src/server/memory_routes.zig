@@ -9,7 +9,8 @@ const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
 
 pub fn get(srv: *Server, conn: *Conn, a: Allocator) !void {
-    const value = try snapshot(a, srv.info, process.read(), srv.engine.memory(false));
+    const device: ?api.Memory = if (srv.idleParked()) null else srv.engine.memory(false); // parked: no engine holds device memory
+    const value = try snapshot(a, srv.info, process.read(), device);
     routes.sendValue(conn, a, 200, value);
 }
 

@@ -93,6 +93,43 @@ pub const Metrics = struct {
         m.disconnects += 1;
     }
 
+    /// The scrape body for a parked server: no engine reads, the request and process families only.
+    pub fn renderParked(m: *Metrics, io: std.Io, w: *std.Io.Writer, window: u32) !void {
+        _ = window; // no live streams render while parked: no KV families, so no window
+        var snap: Metrics = undefined;
+        const requests = blk: {
+            m.mutex.lockUncancelable(io);
+            defer m.mutex.unlock(io);
+            snap = m.*;
+            break :blk try m.gpa.dupe(@TypeOf(m.requests.items[0]), m.requests.items);
+        };
+        defer m.gpa.free(requests);
+        if (requests.len > 0) {
+            try family(w, "requests_total", "counter", "HTTP replies by API key label and status.");
+            for (requests) |r| try w.print("{s}requests_total{{key=\\\"{s}\\\",status=\\\"{d}\\\"}} {d}\\n", .{ prefix, r.key, r.status, r.count });
+        }
+        try gauge(w, "requests_running", "gauge", "Requests in prefill or decode.", 0);
+        try gauge(w, "requests_waiting", "gauge", "Requests queued or held until a lane is free.", 0);
+        try gauge(w, "generation_tokens_running", "gauge", "Generated tokens held by live streams.", 0);
+        try gauge(w, "prompt_tokens_total", "counter", "Prompt tokens of finished requests.", snap.prompt);
+        try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
+        try gauge(w, "mtp_drafted_total", "counter", "Draft tokens verified on finished requests.", snap.drafted);
+        try gauge(w, "mtp_accepted_total", "counter", "Draft tokens kept on finished requests.", snap.accepted);
+        try histogram(w, "request_latency_seconds", "Seconds from arrival to the reply leaving.", snap.latency);
+        try histogram(w, "time_to_first_token_seconds", "Seconds from arrival to the first generated token.", snap.ttft);
+        try histogram(w, "request_decode_seconds", "Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.", snap.decode);
+        try histogram(w, "request_time_per_output_token_seconds", "Seconds from the first generated token to the last, divided by the tokens less one.", snap.tpot);
+        try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
+        try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
+        try processGauges(w, process.read());
+        try gauge(w, "num_requests_running", "gauge", "Requests in prefill or decode. A mirror of tensorfold:requests_running.", 0);
+        try gauge(w, "num_requests_waiting", "gauge", "Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.", 0);
+        try histogram(w, "e2e_request_latency_seconds", "Seconds from arrival to the reply leaving, under vLLM's name.", snap.latency);
+        try histogram(w, "request_decode_time_seconds", "Seconds a finished request spent decoding, under vLLM's name.", snap.decode);
+        try histogram(w, "request_prefill_time_seconds", "Seconds a finished request's prompt pass took, under vLLM's name.", snap.prefill);
+        try gauge(w, "client_disconnections_total", "counter", "Requests a client left before the reply left the server.", snap.disconnects);
+    }
+
     /// The scrape body, ending in a newline.
     pub fn render(m: *Metrics, io: std.Io, w: *std.Io.Writer, engine: api.Engine, window: u32) !void {
         var status: api.Status = .{};

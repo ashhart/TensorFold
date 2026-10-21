@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !u8 {
         .recall = record,
         .model_dir = dir,
         .model_type = model_type,
-        .reopen = .{ .ctx = &closer, .open = Reopen.open, .load_text = Reopen.loadTextOf, .close_held = Reopen.closeHeld, .replace = Reopen.replace },
+        .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .replace = Reopen.replace },
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,
         .started = started,
@@ -166,10 +166,6 @@ const Reopen = struct {
     fn open(ctx: *anyopaque, a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, mt: []const u8, cargs: cli.Args, problem: *[]const u8) anyerror!?api.Opened {
         _ = ctx;
         return engines.open(a, gpa, io, dir, mt, cargs, problem);
-    }
-    fn loadTextOf(ctx: *anyopaque, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, template: ?[]const u8, pa: std.mem.Allocator, problem: *[]const u8) anyerror!*hf_text.HfText {
-        _ = ctx;
-        return loadText(gpa, io, dir, template, pa, problem);
     }
     fn closeHeld(ctx: *anyopaque) void {
         const c: *Closer = @ptrCast(@alignCast(ctx));

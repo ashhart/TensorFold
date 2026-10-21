@@ -117,6 +117,8 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     // counted before the drain flag is read: a stop that sees no request in progress sees every later one refused
     _ = srv.generating.fetchAdd(1, .seq_cst);
     defer _ = srv.generating.fetchSub(1, .seq_cst);
+    if (srv.idle_manager) |m| m.begin(); // engine work starts: the idle window restarts at this route's end
+    defer if (srv.idle_manager) |m| m.end();
     if (@import("builtin").is_test) if (counted_hook) |h| h();
     if (srv.draining.load(.seq_cst)) {
         discardBody(conn, a);

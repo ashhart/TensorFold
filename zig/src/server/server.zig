@@ -201,6 +201,12 @@ pub const Server = struct {
         srv.keepalive = null;
     }
 
+    /// Whether --idle-unload has the engine parked: the request paths then see the stub, readers skip it.
+    pub fn idleParked(srv: *Server) bool {
+        const m = srv.idle_manager orelse return false;
+        return m.isParked();
+    }
+
     pub fn deinit(srv: *Server) void {
         srv.stopKeepalive();
         if (srv.grammars) |g| g.close();

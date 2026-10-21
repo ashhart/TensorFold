@@ -221,18 +221,15 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (stops_opt.strings.len > 0) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
     defer box.deinit();
-    // the idle unload's wake: the park's first request closes the held engine (the weights leave) and reopens it
-    if (srv.idle_manager) |m| if (idle_unload.waking(m)) {
-        idle_unload.park(m, srv) catch {
-            log.line("idle unload failed to park the engine", .{});
-            return cx.fail(.server, "the idle unload could not free the engine; serve it again", .{});
-        };
+    // the idle unload's wake: a parked server reloads here, under the manager's lifetime lock, before submitting
+    if (srv.idle_manager) |m| {
         var problem: []const u8 = "";
-        idle_unload.reload(m, srv, &problem) catch {
+        idle_unload.reload(m, srv, &problem) catch |e| {
             log.line("idle reload failed: {s}", .{problem});
+            if (e == error.OutOfMemory) return error.OutOfMemory;
             return cx.fail(.server, "the idle-unloaded model could not reload ({s}); send the request again", .{problem});
         };
-    };
+    }
     const id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();
