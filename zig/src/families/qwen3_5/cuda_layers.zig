@@ -51,6 +51,7 @@ pub const Fns = struct {
     head_norm: cuda.Function,
     rope: cuda.Function,
     attn_partial: cuda.Function,
+    attn_rows: cuda.Function,
     attn_merge: cuda.Function,
     attn_gate: cuda.Function,
     mlp_act: cuda.Function,

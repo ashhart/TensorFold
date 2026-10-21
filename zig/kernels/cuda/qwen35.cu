@@ -1,6 +1,7 @@
 // Qwen3.5's hybrids (2B, 27B) on CUDA: the Metal kernels' arithmetic and rounding; a segment is one stream's window.
 
 #include "qwen35.cuh"
+#include "qwen35_attn_tc.cuh"
 
 using namespace tf_q35;
 
@@ -437,80 +438,21 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
     rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, StoreBf16{layer, geo.kvh});
 }
 
-// Causal attention in chunks of chunk_keys(the row's keys), a warp a query head; grid (rows, key heads, chunks).
-extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
-                                                 const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
-                                                 const int* __restrict__ P, float scale,
-                                                 float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
-    constexpr int DPL = HD / 32;
-    const int QH = geo.qh, KVH = geo.kvh;
-    const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
-    const int c = blockIdx.z, h = blockIdx.y;
-    if (c >= MAXCH || past_rows(P, blockIdx.x)) return;
-    const size_t m = blockIdx.x;
-    const int qh = h * (QH / KVH) + g;
-    const Seg sg = segs[rowseg[m]];
-    const Ancestor anc = rowanc[m];
-    // chunks cut at logical positions (a window key's: the stream's length plus its ancestors), as a step's are
-    const int keys = sg.len + rows_seen(anc), ck = chunk_keys(keys);
-    const int k0 = c * ck, k1 = min(k0 + ck, keys);
-    const size_t slot = (m * QH + qh) * MAXCH + c;
-    if (k0 >= k1) {
-        if (lane == 0) {
-            PM[slot] = -INFINITY;
-            PL[slot] = 0.0f;
-        }
-        return;
-    }
-    const __nv_bfloat16* K = reinterpret_cast<const __nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * KVH * sg.cap * HD;
-    const __nv_bfloat16* V = K + (size_t)KVH * sg.cap * HD;
-    float q[DPL], o[DPL];
-#pragma unroll
-    for (int i = 0; i < DPL; i++) {
-        q[i] = bf(Q[(m * QH + qh) * HD + lane * DPL + i]);
-        o[i] = 0.0f;
-    }
-    float mx = -INFINITY, l = 0.0f;
-    // KB keys' rows and dots at once, then their softmax steps in key order: each value's arithmetic as one key a step
-    constexpr int KB = 8;
-    for (int t0 = k0; t0 < k1; t0 += KB) {
-        const int n = min(KB, k1 - t0);
-        uint4 kw[KB], vw[KB];
-        float s[KB];
-#pragma unroll
-        for (int u = 0; u < KB; u++) {
-            if (u >= n) break;
-            const int t = t0 + u, pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
-            kw[u] = *reinterpret_cast<const uint4*>(K + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
-            vw[u] = *reinterpret_cast<const uint4*>(V + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
-        }
-#pragma unroll
-        for (int u = 0; u < KB; u++) {
-            if (u >= n) break;
-            const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw[u]);
-            float dot = 0.0f;
-#pragma unroll
-            for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
-            s[u] = warp_sum(dot) * scale;
-        }
-#pragma unroll
-        for (int u = 0; u < KB; u++) {
-            if (u >= n) break;
-            const float mn = fmaxf(mx, s[u]);
-            const float a = __expf(mx - mn), b = __expf(s[u] - mn);
-            l = l * a + b;
-            const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw[u]);
-#pragma unroll
-            for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
-            mx = mn;
-        }
-    }
-    if (lane == 0) {
-        PM[slot] = mx;
-        PL[slot] = l;
-    }
-#pragma unroll
-    for (int i = 0; i < DPL; i++) PO[slot * HD + lane * DPL + i] = o[i];
+// Decode attention over bf16 rows on tensor cores (qwen35_attn_tc.cuh), tiles in two dynamic shared buffers.
+extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+                                                                        const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
+                                                                        const int* __restrict__ P, float scale,
+                                                                        float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+    extern __shared__ __align__(16) uint4 attn_tiles[];
+    tf_q35_tc::attn_one<tf_q35_tc::Bf16Tiles<128>>({attn_tiles, nullptr, nullptr, nullptr}, geo, Q, segs, rowseg, rowanc, layer, P, scale, PM, PL, PO);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_q35_attn_rows(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+                                                                     const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
+                                                                     const int* __restrict__ P, float scale, int total,
+                                                                     float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+    extern __shared__ __align__(16) uint4 attn_tiles[];
+    tf_q35_tc::attn_rows<4, tf_q35_tc::Bf16Tiles<256>>({attn_tiles, nullptr, nullptr, nullptr}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO);
 }
 
 // A row's chunks' partials into each (row, query head)'s output, rows qh * HD wide. Grid (qh, rows), a warp each.
