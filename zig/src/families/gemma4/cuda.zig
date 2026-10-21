@@ -9,6 +9,7 @@ pub const kernels = @import("cuda_kernels.zig");
 pub const forward = @import("cuda_forward.zig");
 pub const snap = @import("cuda_snap.zig");
 pub const backend = @import("cuda_backend.zig");
+pub const assistant = @import("cuda_assistant.zig");
 pub const native = @import("cuda_native.zig").Family("gemma4_unified");
 pub const native31 = @import("cuda_native.zig").Family("gemma4");
 
@@ -36,5 +37,7 @@ test {
     _ = @import("cuda_forward.zig");
     _ = @import("cuda_snap.zig");
     _ = @import("cuda_backend.zig");
+    _ = @import("cuda_assistant.zig");
+    _ = @import("cuda_assistant_weights.zig");
     _ = @import("cuda_native.zig");
 }
