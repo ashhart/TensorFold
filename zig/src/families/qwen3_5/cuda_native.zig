@@ -133,8 +133,7 @@ pub fn laneFacts(window: u32, verify: u32) lanes.Model {
 
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     const l: *Lanes = @ptrCast(@alignCast(p));
-    // with a pool the first stream's window is the one reserved; `attach` made the other streams' lanes
-    try reservation.target(E.Cache, E.Part, l, if (l.pages != null) @min(streams, 1) else streams);
+    try reservation.target(E.Cache, E.Part, l, streams); // with a pool: the first window, the shapes on its lanes
 }
 /// The DFlash2 drafter in `dir` over engine `p`, 4-bit only, and the target's windows timed for the round loop.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void, prepare: struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!lanes.drafter.Facts, bytes: usize } } {
