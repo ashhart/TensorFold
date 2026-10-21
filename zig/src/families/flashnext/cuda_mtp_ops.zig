@@ -30,6 +30,8 @@ const proj_bytes = mtp.proj_bytes;
 const fc_sk = mtp.fc_sk;
 const piece_rows = mtp.piece_rows;
 const pss_n = mtp.pss_n;
+/// Streams one batched head pass drafts for at most.
+pub const max_lanes: usize = 16;
 const Head = mtp.Head;
 const Draft = mtp.Draft;
 const Chain = mtp.Chain;
@@ -226,6 +228,157 @@ pub fn Ops(comptime Tri: type) type {
                     d.drafted += 1;
                 }
             }
+        }
+
+        /// forwardHead over several drafts in one pass, a lane each (its own cache at d.len): `nexts[i]` rows of streams
+        /// `rows[i]`, each lane's last row in its d.out and (scores) its draft scores in its d.dlogits. Every row runs the
+        /// ops a lone forwardHead runs on it, each row's sums its own, so each draft gets what drafting alone gives it.
+        pub fn forwardHeadMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, scores: bool) !void {
+            const e = o.e;
+            const tri = o.tri;
+            const h = o.h;
+            const n_l = ds.len;
+            if (n_l == 0) return;
+            var total: usize = 0;
+            var cap: usize = 0;
+            for (ds, nexts) |d, nx| {
+                if (nx.len == 0 or nx.len > piece_rows or d.media != null) return error.UnexpectedTensor;
+                if (d.len + nx.len > d.cap) return error.PromptTooLong;
+                total += nx.len;
+                cap = @max(cap, d.cap);
+            }
+            const s = try e.reserve(@max(@as(usize, 32), 2 * total));
+            if (total > s.cap or n_l > max_lanes) return error.UnexpectedTensor;
+            const score_rows = try e.reserveScores(cap, piece_rows);
+            var lane_buf: [max_lanes]batch.Lane = undefined;
+            var ids_buf: [max_lanes * piece_rows]u32 = undefined;
+            var at: usize = 0;
+            for (ds, nexts, 0..) |d, nx, i| {
+                lane_buf[i] = .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = nx.len };
+                @memcpy(ids_buf[at..][0..nx.len], nx);
+                at += nx.len;
+            }
+            var p: batch.Pass(Tri) = .{
+                .gpa = e.gpa,
+                .io = e.io,
+                .stream = e.stream.*,
+                .tri = tri,
+                .k = &e.batch_k,
+                .s = s,
+                .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
+                .seq = lane_buf[0].seq,
+                .hooks = .{ .logits = .none },
+                .lanes = lane_buf[0..n_l],
+            };
+            p.rows = total;
+            p.pos0 = 0;
+            p.pending = null;
+            try p.stage(ids_buf[0..total]);
+            if (e.table.dense) {
+                try tri.embedDense(s.ids, e.table.w.ptr, s.ple_keys, dims, streams, total);
+            } else {
+                try tri.embed(s.ids, e.table.w.ptr, e.table.s.ptr, e.table.b.ptr, s.ple_keys, dims, streams, total);
+            }
+            try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, total, dims, dims);
+            try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, total, fc_sk);
+            try p.sumSlices(s.part, s.branch, true, total * dims, fc_sk);
+            // each lane's rows of main-model streams, side by side (the head reads them as one block of rows)
+            at = 0;
+            for (rows, nexts) |r, nx| {
+                try p.copy(s.ple_nrow + at * wide * 2, r, nx.len * wide * 2);
+                at += nx.len;
+            }
+            try tri.rmsnorm(s.ple_nrow, h.norm_h.ptr, s.norm, s.gq, eps, wide, total, wide, wide);
+            try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * total, fc_sk);
+            try p.sumSlices(s.part, s.ple_gated, true, streams * total * dims, fc_sk);
+            try tri.addStreams(s.branch, s.ple_gated, s.h, total, dims, streams);
+            try p.writeback(0, total);
+            try p.readout(h.layer.attn_hc, 0, total);
+            try p.attnBlock(&h.layer, 0);
+            try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", total * dims, total, dims, streams, 4, 1, 1, out_sk);
+            try p.readout(h.layer.mlp_hc, 0, total);
+            try p.moeBlock(&h.layer);
+            p.pending = 0;
+            try p.writeback(0, total);
+            // each lane's last row: its d.out, and gathered to row i for the draft head (row i <= its last row)
+            at = 0;
+            for (ds, nexts, 0..) |d, nx, i| {
+                const last = at + nx.len - 1;
+                try p.copy(d.out.ptr, s.h + last * wide * 2, wide * 2);
+                if (scores and last != i) {
+                    try p.copy(s.h + i * wide * 2, s.h + last * wide * 2, wide * 2);
+                    try p.copy(s.pss + i * pss_n * 4, s.pss + last * pss_n * 4, pss_n * 4);
+                }
+                d.len += nx.len;
+                at += nx.len;
+            }
+            if (!scores) return;
+            try p.readout(h.mixer, 0, n_l);
+            const n_ids = h.ids.len;
+            try p.lane(s.mixed, s.xsm, h.draft, s.head_local, s.dummy, n_l, 1);
+            for (ds, 0..) |d, i| try p.copy(d.dlogits.ptr, s.head_local + i * n_ids * 2, n_ids * 2);
+        }
+
+        /// draft over several greedy drafts at once: absorb each one's kept rows in one pass, then chain them a step a
+        /// pass, each stream picking and stopping as it would alone (same confidence rule, same count).
+        pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, confidence: f64, outs: []const *Chain) !void {
+            const h = o.h;
+            const n_l = ds.len;
+            for (ds, outs) |d, out| {
+                out.n = 0;
+                if (d.drafted > 0) {
+                    d.len -= d.drafted;
+                    d.drafted = 0;
+                }
+            }
+            try o.forwardHeadMany(ds, nexts, rows, true);
+            var act: [max_lanes]usize = undefined;
+            var n_act: usize = 0;
+            for (counts, 0..) |c, i| if (c > 0) {
+                act[n_act] = i;
+                n_act += 1;
+            };
+            var j: usize = 0;
+            var best_host: [max_lanes * 4]f32 = undefined;
+            var step_ds: [max_lanes]*Draft = undefined;
+            var step_next: [max_lanes][1]u32 = undefined;
+            var step_nexts: [max_lanes][]const u32 = undefined;
+            var step_rows: [max_lanes]u64 = undefined;
+            while (n_act > 0 and j < max_chain) : (j += 1) {
+                // every active lane's best draft (fn_row_best on its own scores), then one download of all of them
+                for (act[0..n_act], 0..) |i, r| try h.best(o.stream(), ds[i].dlogits.ptr, h.ids.len, h.ids.len, 1, ds[0].best.ptr + r * 16);
+                try download(o.stream(), std.mem.sliceAsBytes(best_host[0 .. n_act * 4]), ds[0].best.ptr);
+                var next_act: usize = 0;
+                var n_step: usize = 0;
+                for (act[0..n_act], 0..) |i, r| {
+                    const top = best_host[r * 4];
+                    const lse = best_host[r * 4 + 1];
+                    const col: usize = @intCast(@as(i32, @bitCast(best_host[r * 4 + 2])));
+                    const got: Pick = .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
+                    const out = outs[i];
+                    const low = confidence > 0 and got.prob < confidence;
+                    if (low and j > 0) continue;
+                    out.tokens[out.n] = got.token;
+                    out.probs[out.n] = got.prob;
+                    out.n += 1;
+                    if (low) continue;
+                    if (j + 1 < @min(counts[i], max_chain)) {
+                        step_ds[n_step] = ds[i];
+                        step_next[n_step] = .{got.token};
+                        step_nexts[n_step] = &step_next[n_step];
+                        step_rows[n_step] = ds[i].out.ptr;
+                        n_step += 1;
+                        act[next_act] = i;
+                        next_act += 1;
+                    }
+                }
+                if (n_step > 0) {
+                    try o.forwardHeadMany(step_ds[0..n_step], step_nexts[0..n_step], step_rows[0..n_step], true);
+                    for (step_ds[0..n_step]) |d| d.drafted += 1;
+                }
+                n_act = next_act;
+            }
+            _ = n_l;
         }
 
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
