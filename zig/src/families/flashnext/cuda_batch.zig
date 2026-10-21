@@ -107,6 +107,8 @@ pub fn Pass(comptime Tri: type) type {
         prepared: bool = false,
         /// The pending write-back's branch sits in fp32 in moe_f32 (something added to it, or it is kept).
         pending_f32: bool = false,
+        /// This layer's out projection leaves part's other slices alone; its writeback adds the zero slice once.
+        zero_slices: bool = false,
 
         // ---- launches ----------------------------------------------------------------------------------------
 
@@ -115,11 +117,15 @@ pub fn Pass(comptime Tri: type) type {
             if (w.native) |native| {
                 if (sk == 1) return self.k.native_lane.matmul(self.stream, x, w.k, m, native, out, self.s.native_part);
                 // Legacy callers consume SK slices; the native lane has already reduced its own shape-driven slices.
+                if (part == self.s.part and m * w.n > self.s.cap * dims) self.s.part_zero = false;
                 try self.k.native_lane.matmulF32(self.stream, x, w.k, m, native, part, self.s.native_part);
+                // the writeback adds part's cap-stride zero slice in their place (zero_slices)
+                if (part == self.s.part and self.zero_slices) return;
                 const bytes = m * w.n * 4;
                 if (sk > 1) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(part + bytes, 0, bytes * (sk - 1), self.stream.handle), "cuMemsetD8Async");
                 return;
             }
+            if (part == self.s.part and sk > 1) self.s.part_zero = false;
             const bm: usize = 16;
             const bn: usize = 64;
             const k = w.k;
@@ -435,7 +441,8 @@ pub fn Pass(comptime Tri: type) type {
             const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
             if (lw.native_experts) |*native| {
                 const owned = &native.experts;
-                try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
+                // one rank writes every slot; only a rank that skips the shared one needs zeros for the sum over ranks
+                if (native.world != 1 or native.rank != 0) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
                 try self.k.router.route(self.stream, s.picks, pairs, e, 16, plan);
                 const items = cuda.grouped.maxItems(pairs, e, 16);
                 try self.k.nvfp4.run(self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
@@ -527,13 +534,18 @@ pub fn Pass(comptime Tri: type) type {
                 }
                 try self.writeback(0, n);
                 try self.readoutKeep(lw.attn_hc, 0, n, keep.attn_hc);
+                // one rank, nothing kept, zero slice intact: the writeback adds one zero slice, not out_sk - 1 zeroed
+                self.zero_slices = self.s.part_zero and keep.mix_branch == 0 and self.m.collective == null and lw.out.native != null;
                 if (lw.linear) {
                     try self.gdnBlock(lw, wt.linearIndex(layer), keep);
                 } else {
                     try self.attnBlockKeep(lw, wt.attnIndex(layer), keep);
                 }
                 if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, out_sk);
-                try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", n * dims, n, dims, streams, 4, 1, 1, out_sk);
+                if (self.zero_slices) {
+                    try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", s.cap * dims, n, dims, streams, 4, 1, 1, 2);
+                } else try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", n * dims, n, dims, streams, 4, 1, 1, out_sk);
+                self.zero_slices = false;
                 try self.readoutKeep(lw.mlp_hc, 0, n, keep.mlp_hc);
                 try self.moeBlockKeep(lw, keep);
                 try self.moeAdds(layer, keep);
