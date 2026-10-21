@@ -30,12 +30,13 @@ pub const ActRows = struct {
     dconv_fn: Function,
     geglu_fn: Function,
     swiglu_round_fn: Function,
+    softcap_fn: Function,
 
     pub fn load(d: *const Driver) !ActRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.act_rows);
         errdefer mod.unload();
-        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round") };
+        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round"), .softcap_fn = try mod.function("tf_softcap_rows") };
     }
 
     pub fn unload(g: *ActRows) void {
@@ -70,6 +71,19 @@ pub const ActRows = struct {
         a.add(@as(i32, @intCast(n)));
         const t = launch_.rowThreads(rows, threads, 128);
         try launch_.launch(f, .{ .grid = grid(rows, n, t), .block = .{ .x = t } }, s, &a);
+    }
+
+    /// out [rows, n] = bf16(cap * tanh(x / cap)) in MLX's bf16 steps (x / cap and tanh rounded); out may be x.
+    pub fn softcap(g: *const ActRows, s: Stream, x: u64, out: u64, rows: usize, n: usize, cap: f32) !void {
+        if (n % 8 != 0 or n > std.math.maxInt(i32) or !aligned(&.{ x, out }, &.{n})) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(out);
+        a.add(@as(i32, @intCast(n)));
+        a.add(cap);
+        const t = launch_.rowThreads(rows, threads, 128);
+        try launch_.launch(g.softcap_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((n / 8 + t - 1) / t), .z = 1 }, .block = .{ .x = t } }, s, &a);
     }
 
     /// out = bf16(o * sigmoid(gate)), head h's gate at r * g_ld + h * g_hs ([q | gate]: q + d, 2 d); xs: sums.
