@@ -17,14 +17,22 @@ pub fn isUniform(w: Width) bool {
 }
 
 /// A layer's projections; a layer stores entries for both mixers and uses those of its kind.
-pub const Member = enum { gate, up, down, qkv, z, b, a, out, q, k, v, o };
-const members = @backingInt(Member.o) + 1;
+pub const Member = enum { gate, up, down, qkv, z, b, a, out, q, k, v, o, router, shared_gate, egate, eup, edown };
+const members = @backingInt(Member.edown) + 1;
+/// The routed block's members: the router, the shared expert's gate and the stacked experts.
+pub const routed = [_]Member{ .router, .shared_gate, .egate, .eup, .edown };
 
-pub fn leaf(m: Member) []const u8 {
+/// A member's module under its layer; with experts, `gate`, `up` and `down` are the shared expert's.
+pub fn leaf(c: cfg.Config, m: Member) []const u8 {
     return switch (m) {
-        .gate => "mlp.gate_proj",
-        .up => "mlp.up_proj",
-        .down => "mlp.down_proj",
+        .gate => if (c.moe()) "mlp.shared_expert.gate_proj" else "mlp.gate_proj",
+        .up => if (c.moe()) "mlp.shared_expert.up_proj" else "mlp.up_proj",
+        .down => if (c.moe()) "mlp.shared_expert.down_proj" else "mlp.down_proj",
+        .router => "mlp.gate",
+        .shared_gate => "mlp.shared_expert_gate",
+        .egate => "mlp.switch_mlp.gate_proj",
+        .eup => "mlp.switch_mlp.up_proj",
+        .edown => "mlp.switch_mlp.down_proj",
         .qkv => "linear_attn.in_proj_qkv",
         .z => "linear_attn.in_proj_z",
         .b => "linear_attn.in_proj_b",
@@ -37,11 +45,15 @@ pub fn leaf(m: Member) []const u8 {
     };
 }
 
-/// Output rows and input width of a member.
+/// Output rows and input width of a member (one expert's, for the stacked experts).
 pub fn shape(c: cfg.Config, m: Member) [2]usize {
     return switch (m) {
         .gate, .up => .{ c.intermediate, c.hidden },
         .down => .{ c.hidden, c.intermediate },
+        .router => .{ c.experts, c.hidden },
+        .shared_gate => .{ 1, c.hidden },
+        .egate, .eup => .{ c.moe_intermediate, c.hidden },
+        .edown => .{ c.hidden, c.moe_intermediate },
         .qkv => .{ c.gdnQkvDim(), c.hidden },
         .z => .{ c.gdnValueDim(), c.hidden },
         .b, .a => .{ c.v_heads, c.hidden },
@@ -85,7 +97,10 @@ pub const Widths = struct {
         for (layers, 0..) |*l, i| {
             l.* = @splat(uniform);
             for (stacks(c.kind(i))) |stack| for (stack) |m| {
-                l[@backingInt(m)] = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(m) }));
+                l[@backingInt(m)] = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(c, m) }));
+            };
+            if (c.moe()) for (routed) |m| {
+                l[@backingInt(m)] = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(c, m) }));
             };
         }
         return .{ .allocator = a, .layers = layers, .embed = try one(f, "model.embed_tokens"), .head = try one(f, "lm_head") };
@@ -151,10 +166,17 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
             var n: usize = 0;
             for (stack[r[0]..][0..r[1]]) |m| n += shape(c, m)[0];
             check(chip, n, shape(c, stack[r[0]])[1], ws[r[0]]) catch |err| {
-                why.* = .{ .layer = i, .module = leaf(stack[r[0]]), .width = ws[r[0]], .reason = err };
+                why.* = .{ .layer = i, .module = leaf(c, stack[r[0]]), .width = ws[r[0]], .reason = err };
                 return error.UnqualifiedQwenFormat;
             };
         }
+    };
+    if (c.moe()) for (0..c.layers) |i| for (routed) |m| {
+        const x = w.of(i, m);
+        checkRouted(c, chip, m, x) catch |err| {
+            why.* = .{ .layer = i, .module = leaf(c, m), .width = x, .reason = err };
+            return error.UnqualifiedQwenFormat;
+        };
     };
     glue.checkEmbed(.{ .width = @intCast(c.hidden), .rows = 1, .vocab = @intCast(c.vocab), .bits = w.embed.bits, .group = w.embed.group, .metadata = .bf16 }) catch |err| {
         why.* = .{ .module = "embed_tokens", .width = w.embed, .reason = err };
@@ -175,6 +197,23 @@ fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
     if (isUniform(w) and n % 8 == 0) return;
     if (std.mem.indexOfScalar(u8, chip.row_bits, w.bits) == null) return error.UnsupportedRowBits;
     return (row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = n, .k = k, .group = w.group }).validate();
+}
+
+/// The routed block's kernels: the router's row matrix; the experts' row kernels and (tensor units) affine_mm gathers.
+fn checkRouted(c: cfg.Config, chip: Chip, m: Member, w: Width) !void {
+    const s = shape(c, m);
+    if (std.mem.indexOfScalar(u8, chip.row_bits, w.bits) == null) return error.UnsupportedRowBits;
+    const n = if (m == .router or m == .shared_gate) routerRows(c.experts) else s[0];
+    try (row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = n, .k = s[1], .group = w.group, .bits = w.bits }).validate();
+    if (m == .egate or m == .eup or m == .edown) {
+        if (chip.tensor_units and (w.group != 32 and w.group != 64 and w.group != 128)) return error.UnsupportedLaneGroup;
+        if (chip.tensor_units and (s[0] % 64 != 0 or s[1] % 64 != 0)) return error.UnsupportedExpertShape;
+    }
+}
+
+/// The router matrix's rows: the experts, the shared gate, then zero rows to a multiple of 64 (whole weight tiles).
+pub fn routerRows(experts: usize) usize {
+    return (experts + 1 + 63) / 64 * 64;
 }
 
 const all_rows = [_]u8{ 2, 3, 4, 5, 6, 8 };

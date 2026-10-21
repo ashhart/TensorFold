@@ -79,6 +79,13 @@ pub const Stages = struct {
         try m.kernels.norm(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
+        if (layer.moe) |*mo| if (!m.moe.?.sorted(mo, s.rows, m.kernels.prompt)) {
+            // decode rows: the routed block runs the shared expert as one more slot of the experts' kernel
+            try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
+            lane.enc.barrier();
+            s.pending = f.get(.output);
+            return;
+        };
         var up = f.get(.mixed);
         up.offset += @as(usize, m.config.intermediate) * 2;
         const width: u32 = @intCast(m.config.intermediate);
@@ -103,6 +110,10 @@ pub const Stages = struct {
                 try m.kernels.addAne(lane.enc, .{ .buffer = share.partial }, .{ .buffer = share.outputs[slice].buffer }, f.get(.output), h, width, share.columns, @min(ane_mlp.width, s.rows - base), base);
             }
             lane.enc.barrier();
+            if (layer.moe) |*mo| {
+                try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
+                lane.enc.barrier();
+            }
             s.pending = f.get(.output);
             return;
         } else {
@@ -113,6 +124,11 @@ pub const Stages = struct {
         lane.enc.barrier();
         try m.kernels.quant(lane.enc, layer.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), f.get(.output), s.rows);
         lane.enc.barrier();
+        if (layer.moe) |*mo| {
+            // the shared expert's rows in f.output take the routed experts' weighted rows and the shared gate
+            try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
+            lane.enc.barrier();
+        }
         s.pending = f.get(.output);
     }
     pub fn finish(s: *Stages, lane: *@import("core").segments.Lane) !void {

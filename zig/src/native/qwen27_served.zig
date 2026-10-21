@@ -177,7 +177,7 @@ fn slotCost(model: *const q.model.Model, context: u32, drafting: bool) usize {
     var attention: usize = 0;
     for (0..c.layers) |i| attention += @intFromBool(c.kind(i) == .attention);
     const kv = attention * 2 * @as(usize, context) * c.kvDim() * 2;
-    const ring_bytes: usize = if (drafting) 2048 * 5 * c.hidden * 2 else 0;
+    const ring_bytes: usize = if (drafting) 2048 * 8 * c.hidden * 2 else 0; // a drafter's window of up to eight taps
     return kv + ring_bytes + (256 << 20); // DeltaNet states, conv tails and scratch, generously
 }
 
@@ -271,6 +271,13 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     defer pool.pop();
     const model = try q.model.Model.load(gpa, io, dir, 128, shareFits);
     errdefer model.deinit();
+    // past the trained window the rotation stretches with static YaRN, every prompt alike
+    const trained = model.config.max_position;
+    model.config.extend(o.context) catch |err| {
+        why.* = try std.fmt.allocPrint(a, "--context {d} is past this checkpoint's {d}-token window and the YaRN x4 reach the engine stretches it to", .{ o.context, trained });
+        return err;
+    };
+    if (model.config.yarn_factor != 0) std.log.info("qwen27: static YaRN x{d} over a {d}-token window: {d} tokens a stream", .{ model.config.yarn_factor, model.config.yarn_original, model.config.max_position });
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
@@ -311,7 +318,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     errdefer if (h.draft) |d| d.deinit();
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
-    h.back.chunk = h.runner.promptRows(q.model.promptRows());
+    h.back.chunk = h.runner.promptRows(q.model.promptRows(h.runner.model.config));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
     if (h.draft != null) try h.back.measure(io);

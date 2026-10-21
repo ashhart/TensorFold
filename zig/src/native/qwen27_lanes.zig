@@ -128,7 +128,9 @@ pub const Metal = struct {
         const shared = b.runner.slots > 1;
         // a lone stream drafts DFlash2 trees, as in 1.0.5: copies land less often there (TF_QWEN27_COPIES=1 opts in)
         const lone_copies = if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
-        return .{ .exact_width = if (drafting or shared) max_rows else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else max_rows, .max_streams = b.runner.slots, .lone_copies = lone_copies, .draft_streams = drafting and b.draft_slots > 1 };
+        // routed experts make a drafted window read most expert weights: plain rounds compete with drafted depths
+        const routed = b.runner.model.config.moe();
+        return .{ .exact_width = if (drafting or shared) max_rows else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else max_rows, .max_streams = b.runner.slots, .lone_copies = lone_copies, .draft_streams = drafting and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
@@ -384,7 +386,7 @@ pub const Metal = struct {
         var ended = false;
         errdefer if (!ended) e.end();
         try r.keepDevice(&b.round.?, e, g.commit, ref);
-        try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = 5 });
+        try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = @intCast(r.taps.count) });
         try g.commit.head(e, ref, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = rows, .width = vocab, .stride = vocab });
         e.end();
         ended = true;

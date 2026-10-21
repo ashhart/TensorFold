@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const source = @import("qwen_runtime_sources");
 const glue = @import("glue.zig");
+const config = @import("config.zig");
 const axis = @import("core").qwen_vl.rope.axis;
 
 const rows = 4;
@@ -21,6 +22,10 @@ const Rig = struct {
 
     /// Y for X at the planes' positions; h_end = w_end = 0 reads plane 0 alone.
     fn run(r: *Rig, planes: [3][rows]i32, h_end: u32, w_end: u32) ![rows * heads * width]u16 {
+        return r.runWith(planes, h_end, w_end, null);
+    }
+
+    fn runWith(r: *Rig, planes: [3][rows]i32, h_end: u32, w_end: u32, yarn: ?config.Yarn) ![rows * heads * width]u16 {
         const p = r.pos.slice(i32, 3 * plane);
         for (planes, 0..) |row, k| @memcpy(p[k * plane ..][0..rows], &row);
         const cb = r.queue.commandBuffer();
@@ -28,7 +33,13 @@ const Rig = struct {
         e.setPipeline(r.pipe);
         e.setBuffer(r.x, 0, 0);
         e.setBuffer(r.pos, 0, 1);
-        e.setValue(glue.Rope{ .width = width, .heads = heads, .rows = rows, .rotary = 64, .activation = .bf16, .theta = 1e7, .h_end = h_end, .w_end = w_end, .plane = plane }, 2);
+        var rope = glue.Rope{ .width = width, .heads = heads, .rows = rows, .rotary = 64, .activation = .bf16, .theta = 1e7, .h_end = h_end, .w_end = w_end, .plane = plane };
+        if (yarn) |y| {
+            rope.yarn = 1;
+            rope.scale = y.scale;
+            rope.freq = y.freq;
+        }
+        e.setValue(rope, 2);
         e.setBuffer(r.y, 0, 3);
         e.dispatchThreads(mtl.Size.of(width, heads, rows), mtl.Size.of(32, 1, 1));
         e.end();
@@ -76,5 +87,51 @@ test "q27_rope: t = h = w is plain rope bit for bit, and an image row's pairs tu
         // past the rotary dims every plane copies
         const k: usize = if (x < 64) axis(@intCast(x % 32), .{ 11, 11, 10 }) else 0;
         try std.testing.expectEqual(at[k][i], image[i]);
+    };
+}
+
+fn bf16(v: u16) f64 {
+    return @as(f32, @bitCast(@as(u32, v) << 16));
+}
+
+test "q27_rope under YaRN x4: a million rows from the end of the window turn as float64 says, scaled" {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var r: Rig = .{ .device = device, .queue = try device.queue(), .lib = undefined, .pipe = undefined, .x = undefined, .pos = undefined, .y = undefined };
+    defer r.queue.deinit();
+    r.lib = try mtl.Library.fromSource(device, source.glue, mtl.CompileOptions.mlx());
+    defer r.lib.deinit();
+    r.pipe = try mtl.Pipeline.init(device, r.lib, "q27_rope", false);
+    defer r.pipe.deinit();
+    const n = rows * heads * width;
+    r.x = try device.buffer(n * 2, mtl.ResourceOptions.shared);
+    defer r.x.deinit();
+    r.pos = try device.buffer(3 * plane * 4, mtl.ResourceOptions.shared);
+    defer r.pos.deinit();
+    r.y = try device.buffer(n * 2, mtl.ResourceOptions.shared);
+    defer r.y.deinit();
+    var rng = std.Random.DefaultPrng.init(0x7a24);
+    for (r.x.slice(u16, n)) |*v| v.* = @truncate(@as(u32, @bitCast(rng.random().floatNorm(f32))) >> 16);
+    var c: config.Config = .{ .hidden = 0, .intermediate = 0, .layers = 0, .vocab = 0, .heads = 0, .kv_heads = 0, .head_dim = 256, .k_heads = 0, .v_heads = 0, .dk = 0, .dv = 0, .conv_kernel = 0, .eps = 1e-6, .rope_dims = 64, .rope_theta = 1e7 };
+    try c.extend(1048576);
+    const y = c.yarn().?;
+    const text = [rows]i32{ 7, 262143, 700001, 1048575 };
+    const got = try r.runWith(.{ text, @splat(0), @splat(0) }, 0, 0, y);
+    const x = r.x.slice(u16, n);
+    for (0..rows) |row| for (0..heads) |hd| for (0..width) |i| {
+        const base = (row * heads + hd) * width;
+        var want = bf16(x[base + i]);
+        if (i < 64) {
+            const d = i % 32;
+            const angle: f64 = @as(f32, @floatFromInt(text[row])) * y.freq[d]; // the reference's float32 product
+            const cs = @cos(angle) * y.scale;
+            const sn = @sin(angle) * y.scale;
+            const a = bf16(x[base + d]);
+            const b = bf16(x[base + d + 32]);
+            want = if (i < 32) a * cs - b * sn else b * cs + a * sn;
+        }
+        try std.testing.expectApproxEqAbs(want, bf16(got[base + i]), 0.008 * @max(1, @abs(want)));
     };
 }

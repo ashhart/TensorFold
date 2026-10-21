@@ -17,7 +17,7 @@ pub const Norm = extern struct { width: u32, rows: u32, activation: Float, gain:
 pub const Head = extern struct { width: u32, rows: u32, stride: u32, activation: Float, gain: Float, eps: f32 };
 pub const Embed = extern struct { width: u32, rows: u32, vocab: u32, bits: u32, group: u32, metadata: Float };
 /// h_end, w_end: M-RoPE's interleaved h and w pairs end there (0: every pair turns by plane 0); planes `plane` apart.
-pub const Rope = extern struct { width: u32, heads: u32, rows: u32, rotary: u32, activation: Float, theta: f32, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0 };
+pub const Rope = extern struct { width: u32, heads: u32, rows: u32, rotary: u32, activation: Float, theta: f32, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, yarn: u32 = 0, scale: f32 = 1, freq: [32]f32 = @splat(0) };
 pub const Element = extern struct { width: u32, heads: u32, rows: u32, activation: Float };
 pub const Post = extern struct { width: u32, heads: u32, rows: u32, stride: u32, offset: u32, activation: Float, gain: Float, eps: f32 };
 
@@ -40,8 +40,9 @@ test "operator parameters match their Metal structs word for word" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(Norm));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(Head));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(Embed));
-    try std.testing.expectEqual(@as(usize, 36), @sizeOf(Rope));
+    try std.testing.expectEqual(@as(usize, 172), @sizeOf(Rope));
     try std.testing.expectEqual(@as(usize, 24), @offsetOf(Rope, "h_end"));
+    try std.testing.expectEqual(@as(usize, 44), @offsetOf(Rope, "freq"));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Element));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(Post));
     try std.testing.expectEqual(@as(usize, 20), @offsetOf(Norm, "eps"));

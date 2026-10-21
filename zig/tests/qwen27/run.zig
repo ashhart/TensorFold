@@ -18,6 +18,8 @@ const help =
     \\--compare-chunk reruns the whole prompt and decode and checks prompt state/KV/logits bytes.
     \\--seams N (with --compare-chunk): state/KV/logits bytes every N prompt rows under both chunks and after decode.
     \\CPU only: --help or --emit-sources EXISTING_DIR, no Metal device or model load.
+    \\TF_LAYERS=N runs the first N layers only; TF_LOGITS_DUMP=FILE writes every step's bf16 logits row (a port's checks);
+    \\TF_PROFILE_PROMPT=1 with --profile-steps counts the prompt pass's kernels into the profile.
 ;
 
 fn tokens(a: std.mem.Allocator, io: std.Io, file: []const u8) ![]const u32 {
@@ -48,6 +50,8 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
 }
 const Difference = struct { position: usize, expected: ?u32, actual: u32, top2: q.session.TopTwo };
 const Generated = struct { tokens: []u32, first_difference: ?Difference, top2: ?[]q.session.TopTwo };
+/// TF_LOGITS_DUMP names a file that takes every step's bf16 logits row (a check's teacher-forced distributions).
+var logits_dump: std.ArrayList(u8) = .empty;
 fn generated(a: std.mem.Allocator, s: q.session.Session, count: usize, force: bool, expected: ?[]const u32, trace: ?*profile.Trace, profile_steps: usize, teacher: bool) !Generated {
     var out: std.ArrayList(u32) = .empty;
     var difference: ?Difference = null;
@@ -55,6 +59,7 @@ fn generated(a: std.mem.Allocator, s: q.session.Session, count: usize, force: bo
     for (0..count) |i| {
         const token = try s.greedy();
         if (margins) |values| values[i] = try q.session.topTwo(s.runner.model.frame.get(.logits).buffer.slice(u16, s.runner.model.config.vocab));
+        if (std.c.getenv("TF_LOGITS_DUMP") != null) try logits_dump.appendSlice(a, std.mem.sliceAsBytes(s.runner.model.frame.get(.logits).buffer.slice(u16, s.runner.model.config.vocab)));
         if (expected) |wanted| if (difference == null and (i >= wanted.len or token != wanted[i])) {
             difference = .{ .position = i, .expected = if (i < wanted.len) wanted[i] else null, .actual = token, .top2 = try q.session.topTwo(s.runner.model.frame.get(.logits).buffer.slice(u16, s.runner.model.config.vocab)) };
         };
@@ -136,14 +141,18 @@ pub fn main(init: std.process.Init) !void {
         try s.prefill(ids[0..@min(ids.len, 128)], 128);
         try runner.reset(0);
     }
+    var trace = profile.Trace{ .queue = m.queue };
+    if (profile_steps > 0) runner.profile(&trace);
+    // TF_PROFILE_PROMPT=1 (with --profile-steps) counts the prompt pass's kernels into the profile too
+    trace.enabled = profile_steps > 0 and std.c.getenv("TF_PROFILE_PROMPT") != null;
     const start = std.Io.Clock.awake.now(io);
     try s.prefill(ids, chunk);
     const prompt_ns = start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
+    trace.enabled = false;
     const digest = try s.fingerprint();
-    var trace = profile.Trace{ .queue = m.queue };
-    if (profile_steps > 0) runner.profile(&trace);
     const decode_start = std.Io.Clock.awake.now(io);
     const generation = try generated(a, s, count, force, expected, if (profile_steps > 0) &trace else null, profile_steps, teacher);
+    if (std.c.getenv("TF_LOGITS_DUMP")) |v| try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = std.mem.span(v), .data = logits_dump.items });
     const out = generation.tokens;
     const decode_ns = decode_start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
     const decoded = if (compare > 0) try s.fingerprint() else digest;

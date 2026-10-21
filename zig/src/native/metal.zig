@@ -38,6 +38,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4_exp", .formats = affine_widths },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = affine_widths },
+    .{ .model_type = "qwen3_5_moe", .formats = affine_widths },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
     .{ .model_type = "gemma4", .formats = gemma4_widths },
@@ -153,13 +154,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     defer report.deinit();
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
-    const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
+    // the 27B engine serves the dense 27B class and the routed Qwen3.5-MoE class (Ornith-1.5-122B)
+    const dense = (std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir)) or std.mem.eql(u8, o.model_type, "qwen3_5_moe");
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;
         return null;
     }
     if (o.drafter != null and !dense and !isGemma4(o.model_type)) {
-        problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head) and Gemma 4 dense";
+        problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe) and Gemma 4 dense";
         return null;
     }
     if (dense) return openQwen27(a, gpa, io, o, problem);
@@ -339,8 +341,9 @@ fn qwen27Engine(a: Allocator, io: std.Io, dir: []const u8) bool {
 /// Qwen3.8-27B on the lane host: `--parallel` streams in shared rounds, DFlash2 drafts from --drafter for one of them.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const context = o.context orelse 32768;
-    if (context <= 0 or context > 262144) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside Qwen3.8-27B's 1 to 262,144 tokens", .{context});
+    // the checkpoint's window, or up to four times it with static YaRN (the served host checks its own window)
+    if (context <= 0 or context > 4 * 262144) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside 1 to 1,048,576 tokens (a 262,144-token Qwen window, stretched up to four times with YaRN)", .{context});
         return null;
     }
     if (o.drafts and o.drafter != null and o.drafter_bits != 0 and o.drafter_bits != 4) {
@@ -351,7 +354,7 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     const drafter = if (o.drafts) o.drafter else null;
     const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib) } else null else null;
     const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .learn = learn, .vision = o.vision }, a, &why) catch |err| {
-        problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
+        problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native Qwen engine (27B class) cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };
     return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };

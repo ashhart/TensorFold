@@ -110,6 +110,15 @@ pub const Model = struct {
             try m.session.absorb(m.backend.ops(), &m.graph, m.preparation, .{ .values = view, .positions = positions[0..rows], .layers = m.graph.config.taps, .target_end = first + rows });
         }
     }
+    /// The tree search's options for `nodes` drafts; TF_DRAFT_CHILDREN, TF_DRAFT_TAU, TF_DRAFT_EDGE override them.
+    pub fn selectorOptions(m: *const Model, nodes: u32) selector.Options {
+        _ = m;
+        var o = selector.Options{ .nodes = nodes };
+        if (std.c.getenv("TF_DRAFT_CHILDREN")) |v| o.children = std.fmt.parseInt(u32, std.mem.span(v), 10) catch o.children;
+        if (std.c.getenv("TF_DRAFT_TAU")) |v| o.tau = std.fmt.parseFloat(f64, std.mem.span(v)) catch o.tau;
+        if (std.c.getenv("TF_DRAFT_EDGE")) |v| o.edge = std.fmt.parseFloat(f64, std.mem.span(v)) catch o.edge;
+        return o;
+    }
     pub fn setTreeBlock(m: *Model, block: u32) !void {
         if (block == 0 or block > 16 or m.backend.failed or m.backend.frame.active or m.backend.transaction != null) return error.BadRuntimeBlock;
         m.tree_block = block;
@@ -181,7 +190,7 @@ pub const Model = struct {
         var made: usize = 0;
         errdefer for (out[0..made]) |*t| t.deinit();
         for (entries, streams[0..n], lattices[0..n], out) |en, s2, l, *t| {
-            t.* = try selector.propose(m.allocator, &m.graph, l, en.pending, s2.context.end + 1, .{ .nodes = en.nodes });
+            t.* = try selector.propose(m.allocator, &m.graph, l, en.pending, s2.context.end + 1, m.selectorOptions(en.nodes));
             made += 1;
         }
     }
@@ -210,11 +219,11 @@ pub const Model = struct {
             for (positions[0..rows], 0..) |*position, i| position.* = m.session.context.end + i;
             const stride = @as(usize, m.graph.config.tapWidth()) * 2;
             const view = try m.backend.frame.borrow(.{ .buf = m.pending, .off = @as(usize, slot) * stride }, rows, m.graph.config.tapWidth());
-            return m.session.absorbTreeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, .{ .values = view, .positions = positions[0..rows], .layers = m.graph.config.taps, .target_end = m.session.context.end + rows }, pending, block, .{ .nodes = nodes });
+            return m.session.absorbTreeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, .{ .values = view, .positions = positions[0..rows], .layers = m.graph.config.taps, .target_end = m.session.context.end + rows }, pending, block, m.selectorOptions(nodes));
         }
         try m.flush();
         const first = try m.session.firstDraw();
-        return m.session.treeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, pending, first, block, .{ .nodes = nodes });
+        return m.session.treeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, pending, first, block, m.selectorOptions(nodes));
     }
 };
 /// A stream's own drafter state, parked while another stream drafts: its taps ring, rolling K/V and session.

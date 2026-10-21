@@ -1,4 +1,4 @@
-//! Dense Qwen text shapes, layer schedule, rotary metadata and ordered checkpoint EOS ids.
+//! Qwen3.5-class text shapes (dense or routed), layer schedule, rotary metadata and ordered checkpoint EOS ids.
 const std = @import("std");
 
 pub const Kind = enum { linear, attention };
@@ -27,6 +27,22 @@ pub const Config = struct {
     eos_count: usize = 0,
     max_position: usize = 262144,
     mrope_interleaved: bool = true,
+    /// Static YaRN: factor (0: plain), stretched window, ramp betas, attention factor (0: 0.1 ln(factor) + 1).
+    yarn_factor: f64 = 0,
+    yarn_original: usize = 0,
+    yarn_beta: [2]f64 = .{ 32, 1 },
+    yarn_attention: f64 = 0,
+    /// Routed experts (qwen3_5_moe): their count and the picks a row makes; 0: a dense MLP of `intermediate`.
+    experts: usize = 0,
+    top_k: usize = 0,
+    /// A routed expert's width; `intermediate` is then the shared expert's (the same, as the CUDA family requires).
+    moe_intermediate: usize = 0,
+    /// Whether a row's top-k softmax weights are renormalized to sum to one (`norm_topk_prob`).
+    renorm: bool = false,
+
+    pub fn moe(c: Config) bool {
+        return c.experts != 0;
+    }
 
     pub fn kind(c: Config, layer: usize) Kind {
         return c.kinds[layer];
@@ -48,10 +64,48 @@ pub const Config = struct {
         return 2 * c.k_heads * c.dk + c.gdnValueDim();
     }
 
+    /// Fit `context` past the trained window with static YaRN at the window multiple rounded up (at most 4: 1M).
+    pub fn extend(c: *Config, context: usize) !void {
+        if (context <= c.max_position) return;
+        if (c.yarn_factor != 0 or c.rope_dims != 64) return error.ContextFull;
+        const factor = std.math.divCeil(usize, context, c.max_position) catch unreachable;
+        if (factor > 4) return error.ContextFull;
+        c.yarn_factor = @floatFromInt(factor);
+        c.yarn_original = c.max_position;
+        c.max_position *= factor;
+    }
+
+    /// The rotary pairs' YaRN frequencies and cos/sin scale (null: plain rope), built as vLLM's YaRN rotary does.
+    pub fn yarn(c: Config) ?Yarn {
+        if (c.yarn_factor == 0) return null;
+        const dim: f64 = 64;
+        const original: f64 = @floatFromInt(c.yarn_original);
+        const dimOf = struct {
+            fn f(rotations: f64, base: f64, positions: f64) f64 {
+                return 64 * @log(positions / (rotations * 2 * std.math.pi)) / (2 * @log(base));
+            }
+        }.f;
+        const low = @max(@floor(dimOf(c.yarn_beta[0], c.rope_theta, original)), 0);
+        var high = @min(@ceil(dimOf(c.yarn_beta[1], c.rope_theta, original)), dim - 1);
+        if (low == high) high += 0.001;
+        var y: Yarn = .{ .freq = undefined, .scale = @floatCast(if (c.yarn_attention != 0) c.yarn_attention else 0.1 * @log(c.yarn_factor) + 1) };
+        for (&y.freq, 0..) |*f, k| {
+            const kf: f64 = @floatFromInt(k);
+            const pos_freq: f32 = @floatCast(std.math.pow(f64, c.rope_theta, @as(f64, @as(f32, @floatCast(2 * kf / dim)))));
+            const extrapolated: f32 = 1.0 / pos_freq;
+            const interpolated: f32 = 1.0 / (@as(f32, @floatCast(c.yarn_factor)) * pos_freq);
+            const keep: f32 = 1 - @as(f32, @floatCast(std.math.clamp((kf - low) / (high - low), 0, 1)));
+            f.* = interpolated * (1 - keep) + extrapolated * keep;
+        }
+        return y;
+    }
+
     pub fn isEos(c: Config, token: u32) bool {
         return std.mem.indexOfScalar(u32, c.eos[0..c.eos_count], token) != null;
     }
 };
+
+pub const Yarn = struct { freq: [32]f32, scale: f32 };
 
 pub fn object(v: std.json.Value) !std.json.ObjectMap {
     return if (v == .object) v.object else error.BadConfig;
@@ -100,6 +154,26 @@ fn eos(c: *Config, v: std.json.Value) !void {
     c.eos_count += 1;
 }
 
+/// `rope_parameters.rope_type` (default or yarn), or a `rope_scaling` block beside it in either config level.
+fn scaling(c: *Config, root: std.json.ObjectMap, t: std.json.ObjectMap, rope: ?std.json.ObjectMap) !void {
+    const block = for ([_]?std.json.ObjectMap{ if (t.get("rope_scaling")) |v| (if (v == .null) null else try object(v)) else null, if (root.get("rope_scaling")) |v| (if (v == .null) null else try object(v)) else null, rope }) |b| {
+        const o = b orelse continue;
+        const kind = o.get("rope_type") orelse o.get("type") orelse continue;
+        if (kind != .string) return error.UnsupportedRope;
+        if (std.mem.eql(u8, kind.string, "default")) continue;
+        if (!std.mem.eql(u8, kind.string, "yarn")) return error.UnsupportedRope;
+        break o;
+    } else return;
+    if (block.get("mscale") != null or block.get("mscale_all_dim") != null or c.rope_dims != 64) return error.UnsupportedRope;
+    c.yarn_factor = try number(block.get("factor") orelse return error.BadConfig);
+    if (c.yarn_factor <= 1) return error.BadConfig;
+    c.yarn_original = if (block.get("original_max_position_embeddings")) |v| try integer(v, false) else c.max_position;
+    c.yarn_beta = .{ try optional(block, "beta_fast", 32), try optional(block, "beta_slow", 1) };
+    c.yarn_attention = try optional(block, "attention_factor", 0);
+    if (c.yarn_beta[0] <= c.yarn_beta[1] or c.yarn_beta[1] <= 0 or c.yarn_attention < 0) return error.BadConfig;
+    c.max_position = @max(c.max_position, @as(usize, @intFromFloat(@floor(c.yarn_factor * @as(f64, @floatFromInt(c.yarn_original))))));
+}
+
 fn shapeProducts(c: Config) !void {
     const q = try std.math.mul(usize, c.heads, c.head_dim);
     _ = try std.math.mul(usize, q, 2);
@@ -119,8 +193,13 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     const root = try object(parsed.value);
     const t = if (root.get("text_config")) |v| try object(v) else root;
     const model = t.get("model_type") orelse root.get("model_type") orelse return error.BadConfig;
-    if (model != .string or (!std.mem.eql(u8, model.string, "qwen3_5") and !std.mem.eql(u8, model.string, "qwen3_5_text"))) return error.NotQwenDense;
-    if (t.get("num_experts")) |v| if (try integer(v, true) != 0) return error.NotQwenDense;
+    const kinds_of = [_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text" };
+    if (model != .string) return error.NotQwenDense;
+    const routed = for (kinds_of, 0..) |k, i| {
+        if (std.mem.eql(u8, model.string, k)) break i >= 2;
+    } else return error.NotQwenDense;
+    const experts = if (t.get("num_experts")) |v| try integer(v, true) else 0;
+    if (routed != (experts != 0)) return error.NotQwenDense;
     if (try flag(root, "tie_word_embeddings") or try flag(t, "tie_word_embeddings")) return error.TiedEmbeddingHead;
     if (t.get("attn_output_gate")) |v| if (v != .bool or !v.bool) return error.UnsupportedAttentionGate;
     inline for (.{ .{ "hidden_act", "silu" }, .{ "output_gate_type", "swish" }, .{ "linear_attn_state_dtype", "float32" } }) |entry| {
@@ -137,7 +216,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
         .hidden = hidden,
-        .intermediate = try required(t, "intermediate_size"),
+        .intermediate = if (routed) try required(t, "shared_expert_intermediate_size") else try required(t, "intermediate_size"),
         .layers = try required(t, "num_hidden_layers"),
         .vocab = try required(t, "vocab_size"),
         .heads = heads,
@@ -152,6 +231,14 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
         .rope_theta = if (rope) |r| try optional(r, "rope_theta", try optional(t, "rope_theta", 10000000)) else try optional(t, "rope_theta", 10000000),
     };
+    if (routed) {
+        c.experts = experts;
+        c.top_k = try required(t, "num_experts_per_tok");
+        c.moe_intermediate = try required(t, "moe_intermediate_size");
+        // absent means true, as Qwen3.5-MoE's reference config and the CUDA family read it
+        c.renorm = if (t.get("norm_topk_prob")) |v| (if (v == .bool) v.bool else return error.BadConfig) else true;
+        if (c.experts > 256 or c.top_k >= c.experts or c.top_k > 15 or c.moe_intermediate != c.intermediate) return error.UnsupportedRouting;
+    }
     if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
     if (rope) |r| if (r.get("mrope_interleaved")) |v| {
         if (v != .bool or !v.bool) return error.UnsupportedMrope;
@@ -159,6 +246,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     };
     if (c.layers > max_layers or c.head_dim == 0 or c.heads % c.kv_heads != 0 or c.v_heads % c.k_heads != 0) return error.BadConfig;
     if (!std.math.isFinite(c.eps) or c.eps <= 0 or c.rope_theta <= 0 or c.rope_dims == 0 or c.rope_dims % 2 != 0) return error.BadConfig;
+    try scaling(&c, root, t, rope);
     if (rope) |r| if (r.get("mrope_section")) |v| {
         if (v != .array or v.array.items.len != 3) return error.BadConfig;
         for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true);
@@ -238,6 +326,30 @@ test "rope parameters preserve precision and section metadata" {
     try std.testing.expectEqualSlices(usize, &.{ 2, 1, 1 }, &c.mrope_section);
 }
 
+test "a routed config reads its experts, the shared expert's width as the layer's and the routing flag" {
+    const a = std.testing.allocator;
+    const json =
+        \\{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":3072,"intermediate_size":1024,
+        \\"moe_intermediate_size":1024,"shared_expert_intermediate_size":1024,"num_experts":256,"num_experts_per_tok":8,
+        \\"num_hidden_layers":48,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":64,"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}
+    ;
+    const c = try parse(a, json, null);
+    try std.testing.expect(c.moe());
+    try std.testing.expectEqual(@as(usize, 256), c.experts);
+    try std.testing.expectEqual(@as(usize, 8), c.top_k);
+    try std.testing.expectEqual(@as(usize, 1024), c.moe_intermediate);
+    try std.testing.expectEqual(@as(usize, 1024), c.intermediate);
+    try std.testing.expect(c.renorm); // absent: renormalized
+    try std.testing.expectEqual(Kind.attention, c.kind(3));
+    try std.testing.expectEqual(Kind.linear, c.kind(2));
+    // a routed model type without experts, and a dense one with them, are refused
+    const dense_typed = try std.mem.replaceOwned(u8, a, json, "\"num_experts\":256", "\"num_experts\":0");
+    defer a.free(dense_typed);
+    try std.testing.expectError(error.NotQwenDense, parse(a, dense_typed, null));
+}
+
 test "dense config refuses MoE and tied embedding heads" {
     const a = std.testing.allocator;
     const moe = try edit(a, "num_experts", .{ .integer = 8 });
@@ -301,4 +413,40 @@ test "text execution refuses unsupported gates and activation contracts" {
     const act = try edit(a, "output_gate_type", .{ .string = "sigmoid" });
     defer a.free(act);
     try std.testing.expectError(error.UnsupportedActivation, parse(a, act, null));
+}
+
+test "a yarn rope_scaling block stretches the window, its table vLLM's (theta 1e7, x4 over 262,144: ramp 14 to 22)" {
+    const a = std.testing.allocator;
+    const json = try std.mem.replaceOwned(u8, a, fixture, "\"head_dim\":16,", "\"head_dim\":256,\"rope_scaling\":{\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":262144},");
+    defer a.free(json);
+    const c = try parse(a, json, null);
+    try std.testing.expectEqual(@as(usize, 1048576), c.max_position);
+    const y = c.yarn().?;
+    try std.testing.expectApproxEqRel(@as(f32, 1.1386294), y.scale, 1e-6);
+    // pairs below the ramp keep their frequency, above it a quarter of it, between a blend (numpy float32)
+    for ([_]usize{ 0, 5, 10, 16, 20, 31 }, [_]f32{ 1.0, 0.08058421313762665, 0.006493816617876291, 0.00025693507632240653, 1.844922371674329e-05, 4.1370427084075345e-08 }) |k, want| {
+        try std.testing.expectApproxEqRel(want, y.freq[k], 2e-6);
+    }
+}
+
+test "a context past the window turns on YaRN by the window multiple, up to four; other rope types refuse" {
+    const a = std.testing.allocator;
+    var c = try parse(a, fixture, null);
+    c.rope_dims = 64;
+    try c.extend(262144);
+    try std.testing.expect(c.yarn() == null);
+    var half = c;
+    try half.extend(500000);
+    try std.testing.expectEqual(@as(f64, 2), half.yarn_factor);
+    try c.extend(1000000);
+    try std.testing.expectEqual(@as(f64, 4), c.yarn_factor);
+    try std.testing.expectEqual(@as(usize, 1048576), c.max_position);
+    var far = try parse(a, fixture, null);
+    far.rope_dims = 64;
+    try std.testing.expectError(error.ContextFull, far.extend(1048577));
+    const p = try std.json.parseFromSlice(std.json.Value, a, "{\"rope_type\":\"linear\",\"factor\":2.0}", .{});
+    defer p.deinit();
+    const json = try edit(a, "rope_scaling", p.value);
+    defer a.free(json);
+    try std.testing.expectError(error.UnsupportedRope, parse(a, json, null));
 }

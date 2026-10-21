@@ -65,6 +65,7 @@ pub const Pipelines = struct {
     relu2: [variants]mtl.Pipeline,
     indexed: [variants]mtl.Pipeline,
     indexed_relu2: [variants]mtl.Pipeline,
+    indexed_extra: [variants]mtl.Pipeline,
     strided: [variants]mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -79,6 +80,7 @@ pub const Pipelines = struct {
             p.relu2[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_relu2_q{d}_{s}", .{ bits, sum }), false);
             p.indexed[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_indexed_q{d}_{s}", .{ bits, sum }), false);
             p.indexed_relu2[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_indexed_relu2_q{d}_{s}", .{ bits, sum }), false);
+            p.indexed_extra[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_indexed_extra_q{d}_{s}", .{ bits, sum }), false);
             p.strided[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_strided_q{d}_{s}", .{ bits, sum }), false);
         };
         return p;
@@ -89,6 +91,7 @@ pub const Pipelines = struct {
         for (p.relu2) |x| x.deinit();
         for (p.indexed) |x| x.deinit();
         for (p.indexed_relu2) |x| x.deinit();
+        for (p.indexed_extra) |x| x.deinit();
         for (p.strided) |x| x.deinit();
     }
 };
@@ -118,6 +121,16 @@ pub fn callIndexed(p: *const Pipelines, x: Experts, slots: usize, relu2: bool) !
     if (slots == 0 or slots % x.repeat != 0 or slots > std.math.maxInt(u16)) return error.NoRows;
     const i = x.one.variant();
     return .{ .pipeline = if (relu2) p.indexed_relu2[i] else p.indexed[i], .dims = .{ @intCast(x.one.k), @intCast(x.one.n), @intCast(x.one.group), @intCast(slots), @intCast(x.experts), @intCast(x.repeat) }, .groups = x.one.n / (columns * groups), .slots = slots };
+}
+
+/// `callIndexed` with one more matrix `extra` of the experts' shape at id `experts` (buffers 7, 8, 9: its W, S, B).
+pub fn callIndexedExtra(p: *const Pipelines, x: Experts, extra: Weights, slots: usize) !Call {
+    try x.validate();
+    try extra.validate();
+    const one = x.one;
+    if (extra.n != one.n or extra.k != one.k or extra.group != one.group or extra.bits != one.bits or extra.sum != one.sum) return error.UnsupportedExpertShape;
+    if (slots == 0 or slots % x.repeat != 0 or slots > std.math.maxInt(u16)) return error.NoRows;
+    return .{ .pipeline = p.indexed_extra[one.variant()], .dims = .{ @intCast(one.k), @intCast(one.n), @intCast(one.group), @intCast(slots), @intCast(x.experts), @intCast(x.repeat) }, .groups = one.n / (columns * groups), .slots = slots };
 }
 
 test {

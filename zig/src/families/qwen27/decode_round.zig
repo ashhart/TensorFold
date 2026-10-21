@@ -84,13 +84,18 @@ pub const Runner = struct {
         const units = m.device.tensorUnits();
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
-        const text = if (units) try a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt) else try @import("simd_attention.zig").rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
+        // the kernels' KV group: query heads a KV head, prepended as the defines attention_mpp.metal reads
+        const defines = try std.fmt.allocPrint(a, "#define Q27_G {d}\n#define Q27_KVH {d}\n", .{ m.config.heads / m.config.kv_heads, m.config.kv_heads });
+        defer a.free(defines);
+        const body = if (units) try std.mem.concat(a, u8, &.{ source.glue, source.attention_mpp, source.attention_io, source.attention_prompt }) else try @import("simd_attention.zig").rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
+        defer a.free(body);
+        const text = try std.mem.concat(a, u8, &.{ defines, body });
         defer a.free(text);
         const library = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
         defer library.deinit();
         var attention = try attn.Attention.init(m.device, library, units);
         errdefer attention.deinit();
-        const limits = attn.Limits{ .rows = m.frame.capacity, .streams = slots, .keys = capacity, .shared_prefix = m.device.tensorUnits() };
+        const limits = attn.Limits{ .rows = m.frame.capacity, .streams = slots, .keys = capacity, .shared_prefix = m.device.tensorUnits(), .heads = @intCast(m.config.heads), .kv_heads = @intCast(m.config.kv_heads) };
         var scratch = try attn.Scratch.init(m.device, limits);
         errdefer scratch.deinit();
         const bindings = try a.alloc(attn.Binding, na);
@@ -168,6 +173,7 @@ pub const Runner = struct {
         r.model.glue.profiler = trace;
         r.gdn.profiler = trace;
         r.attention.profiler = trace;
+        if (r.model.moe) |*k| k.profiler = trace;
     }
 
     pub fn verify(r: *Runner, round: *const Round) !void {
@@ -354,14 +360,14 @@ pub const Runner = struct {
     }
 
     pub fn promptRows(r: *const Runner, requested: u32) u32 {
-        return (attn.planning.Geometry{ .shared_prefix = r.model.device.tensorUnits() }).promptRows(@min(requested, r.model.frame.capacity));
+        return (attn.planning.Geometry{ .shared_prefix = r.model.device.tensorUnits(), .heads = @intCast(r.model.config.heads), .kv_heads = @intCast(r.model.config.kv_heads) }).promptRows(@min(requested, r.model.frame.capacity));
     }
 
     fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, 0..) |window, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.capacity };
-        return attn.Plan.init(r.allocator, windows[0..round.windows.len], .{ .shared_prefix = r.model.device.tensorUnits() });
+        return attn.Plan.init(r.allocator, windows[0..round.windows.len], .{ .shared_prefix = r.model.device.tensorUnits(), .heads = @intCast(r.model.config.heads), .kv_heads = @intCast(r.model.config.kv_heads) });
     }
 
     fn layerCaches(r: *Runner, layer: usize, round: *const Round, views: *[attn.planning.max_streams]attn.Cache) []const attn.Cache {
@@ -385,10 +391,11 @@ pub const Runner = struct {
         try r.model.kernels.quant(e, weights.q, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.q_gate), rows);
         try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
         e.barrier();
-        try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = 1024, .stride = 2048, .offset = 0 });
-        try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = 1024, .stride = 2048, .offset = 1024 });
+        const kv: u32 = @intCast(r.model.config.kvDim());
+        try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = 0 });
+        try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
         e.barrier();
-        try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity });
+        try r.attention.preprocess(e, .{ .heads = @intCast(r.model.config.heads), .kv_heads = @intCast(r.model.config.kv_heads), .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .yarn = r.model.config.yarn(), .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity });
         try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt);
     }
 

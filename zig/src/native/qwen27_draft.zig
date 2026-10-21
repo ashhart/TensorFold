@@ -10,7 +10,8 @@ pub const Draft = struct {
     owns_model: bool,
     generation: df.generation.Generation,
     previous_capture: bool,
-    previous_taps: [5]usize,
+    previous_taps: [q.taps.max_planes]usize,
+    previous_count: usize,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, target: *q.model.Model, runner: *q.decode_round.Runner, dir: []const u8, mode: df.operators.Mode) !*Draft {
         if (runner.model != target) return error.TargetBinding;
@@ -28,12 +29,14 @@ pub const Draft = struct {
         errdefer gpa.destroy(d);
         const previous_capture = runner.capture_taps;
         const previous_taps = runner.taps.ids;
+        const previous_count = runner.taps.count;
         const generation = df.generation.Generation.init(gpa, runner, model) catch |err| {
             runner.capture_taps = previous_capture;
             runner.taps.ids = previous_taps;
+            runner.taps.count = previous_count;
             return err;
         };
-        d.* = .{ .gpa = gpa, .runner = runner, .model = model, .owns_model = owns_model, .generation = generation, .previous_capture = previous_capture, .previous_taps = previous_taps };
+        d.* = .{ .gpa = gpa, .runner = runner, .model = model, .owns_model = owns_model, .generation = generation, .previous_capture = previous_capture, .previous_taps = previous_taps, .previous_count = previous_count };
         return d;
     }
     pub fn reset(d: *Draft) !void {
@@ -63,6 +66,7 @@ pub const Draft = struct {
         d.generation.deinit();
         d.runner.capture_taps = d.previous_capture;
         d.runner.taps.ids = d.previous_taps;
+        d.runner.taps.count = d.previous_count;
         if (d.owns_model) d.model.deinit();
         d.gpa.destroy(d);
     }
