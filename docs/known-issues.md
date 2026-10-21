@@ -27,6 +27,12 @@ release fixes it, and the release notes say which one.
   request is back to speed. The tokens are the same.
 - Qwen3.8-Flash-Next on a Mac: a turn more than `--keep-warm` seconds after the last request (900 by default) takes
   about 2 s to its first token on an M3 Ultra, even when its prompt is cached, while macOS wires the model again.
+- Qwen3.8-Flash-Next on one GB10 reads its n-gram embedding tables (29.8 GiB in the MLX 4-bit MTP checkpoint) from
+  the checkpoint files through the page cache, so they compete with the server's own memory. With
+  `TF_FLASHNEXT_CHUNK=16384` the larger prompt scratch leaves too little room for all of them: in our runs, time to
+  first token at 65,536 tokens ranged from 32.9 s to 49.1 s, about 1.5 times, with heavy paging in the slow runs. With
+  the default 1,536-token chunks and the prompt cache off, three runs differed by at most 2.2%; saved prompt states
+  (up to 16 GiB by default) use the same memory and can push table rows out at that chunk size too.
 - On a Mac without tensor units (M1 to M4), Flash Next's uniform 6-bit checkpoint decodes different tokens from 1.0.9
   since 1.0.10's faster products. `FZ_M3_LANES=1` keeps the earlier kernels and their tokens.
 - @Bizuayeu's regression run on shipped 1.1.0 loaded the whole GLM-5.3-Flash NVFP4 checkpoint on two GB10s at TP=2 in 302.1 s, kept one token hash per prompt across three runs and found a passphrase in 199,307 tokens; scored prompts and more than two ranks were not covered ([#1040](https://github.com/ashhart/TensorFold/issues/1040)).
