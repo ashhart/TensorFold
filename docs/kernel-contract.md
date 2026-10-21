@@ -112,7 +112,9 @@ bit-equal to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4 tiles w
 cluster, fused, or by `reduce_kernel<true>`), the checkpoint math's FP8 128-row prompt tiles (both slice meetings,
 bit-equal to the 64-row tiles) and NVFP4 experts: the decode-sized forms and the prompt tiles (up to down's NVFP4
 rows, fp32 down and the down summing two width shares, each bit-equal to the kernels it replaces; sm_120 up), and the
-reduce-scatter's `tf_rank_sum`.
+reduce-scatter's `tf_rank_sum`, and Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU
+gate-up and fp32 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted
+control).
 
 ## CUDA records per nvcc release
 
