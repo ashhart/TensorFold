@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "glue_math.cuh"
+#include "vit_norm.cuh"
 
 using namespace tf_glue;
 
@@ -12,17 +13,7 @@ namespace {
 
 constexpr int NT = 256;    // threads a row block
 constexpr int MAXE = 8;    // elements a thread holds: LayerNorm rows up to NT * MAXE = 2048 wide
-
-// A block's values summed: warp butterflies, then the warps in order; every thread gets the sum.
-__device__ __forceinline__ float block_sum(float v, float* red) {
-    v = warp_sum(v);
-    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = v;
-    __syncthreads();
-    float s = red[0];
-    for (int w = 1; w < NT / 32; ++w) s = __fadd_rn(s, red[w]);
-    __syncthreads();
-    return s;
-}
+constexpr int MAXE_WIDE = 32;
 
 // torch's GELU kernels in fp32: the tanh approximation, and the exact form through erf.
 __device__ __forceinline__ float gelu_tanh(float x) {
@@ -48,39 +39,21 @@ __device__ __forceinline__ __nv_bfloat16 pointwise_at(float v, const __nv_bfloat
 
 }  // namespace
 
-// Block a row: y = bf16((x - mean) * rstd * w + b), mean and variance in two fixed-order passes.
+// Block a row: y = bf16((x - mean) * rstd * w + b), mean and variance in two fixed-order passes (vit_norm.cuh).
 extern "C" __global__ void __launch_bounds__(NT) tf_vit_layer_norm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                        const __nv_bfloat16* __restrict__ B, __nv_bfloat16* __restrict__ Y, int D,
                                                                        float eps) {
-    __shared__ float red[NT / 32];
-    const int64_t at = static_cast<int64_t>(blockIdx.x) * D;
-    float x[MAXE];
-    float acc = 0.0f;
-#pragma unroll
-    for (int k = 0; k < MAXE; ++k) {
-        const int i = threadIdx.x + k * NT;
-        if (i >= D) continue;
-        x[k] = bf(X[at + i]);
-        acc = __fadd_rn(acc, x[k]);
-    }
-    const float mean = __fdiv_rn(block_sum(acc, red), static_cast<float>(D));
-    acc = 0.0f;
-#pragma unroll
-    for (int k = 0; k < MAXE; ++k) {
-        if (threadIdx.x + k * NT >= D) continue;
-        x[k] = __fsub_rn(x[k], mean);
-        acc = __fadd_rn(acc, __fmul_rn(x[k], x[k]));
-    }
-    const float var = __fdiv_rn(block_sum(acc, red), static_cast<float>(D));
-    const float rstd = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(var, eps)));
-#pragma unroll
-    for (int k = 0; k < MAXE; ++k) {
-        const int i = threadIdx.x + k * NT;
-        if (i < D) Y[at + i] = __float2bfloat16_rn(__fadd_rn(__fmul_rn(__fmul_rn(x[k], rstd), bf(W[i])), bf(B[i])));
-    }
+    tf_vit_norm::layer_norm<MAXE>(X, W, B, Y, D, eps, tf_vit_norm::ALL);
 }
 
-// Block (row, column block): o = bf16(acc + bias), for a Linear whose cuBLASLt algorithm cannot fuse its bias.
+// The same rows up to NT * MAXE_WIDE = 8192 wide (Gemma 4 12B's image embedder: 6912 and 3840).
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_layer_norm_wide(const __nv_bfloat16* __restrict__ X,
+                                                                            const __nv_bfloat16* __restrict__ W,
+                                                                            const __nv_bfloat16* __restrict__ B,
+                                                                            __nv_bfloat16* __restrict__ Y, int D, float eps) {
+    tf_vit_norm::layer_norm<MAXE_WIDE>(X, W, B, Y, D, eps, tf_vit_norm::ALL);
+}
+
 extern "C" __global__ void __launch_bounds__(NT) tf_vit_bias(const float* __restrict__ ACC, const __nv_bfloat16* __restrict__ BIAS,
                                                                  __nv_bfloat16* __restrict__ O, int N) {
     const int c = blockIdx.y * NT + threadIdx.x;

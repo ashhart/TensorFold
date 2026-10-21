@@ -24,6 +24,7 @@ pub const Act = enum(i32) { none = 0, gelu_tanh = 1, gelu = 2, relu2 = 3 };
 pub const Kernels = struct {
     mod: module.Module,
     layer_norm_fn: module.Function,
+    layer_norm_wide_fn: module.Function,
     pointwise_fn: module.Function,
     bias_fn: module.Function,
     bias_act_fn: module.Function,
@@ -38,6 +39,7 @@ pub const Kernels = struct {
         return .{
             .mod = mod,
             .layer_norm_fn = try mod.function("tf_vit_layer_norm"),
+            .layer_norm_wide_fn = try mod.function("tf_vit_layer_norm_wide"),
             .pointwise_fn = try mod.function("tf_vit_pointwise"),
             .bias_fn = try mod.function("tf_vit_bias"),
             .bias_act_fn = try mod.function("tf_vit_bias_act"),
@@ -59,6 +61,16 @@ pub const Kernels = struct {
         a.add(int(width));
         a.add(eps);
         try go(k.layer_norm_fn, s, rows, 1, &a);
+    }
+
+    /// layerNorm over rows up to 8192 wide (tf_vit_layer_norm_wide: the same sums, 32 values a thread).
+    pub fn layerNormWide(k: *const Kernels, s: Stream, x: u64, w: u64, b: u64, y: u64, rows: usize, width: usize, eps: f32) !void {
+        if (width > 4 * norm_most) return error.RowShape;
+        var a: Args = .{};
+        for ([_]u64{ x, w, b, y }) |p| a.add(p);
+        a.add(int(width));
+        a.add(eps);
+        try go(k.layer_norm_wide_fn, s, rows, 1, &a);
     }
 
     /// o [count] = x (a Linear's bf16 output) through `act`, then plus r when given; x or r may be o.
