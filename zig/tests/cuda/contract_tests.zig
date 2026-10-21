@@ -10,6 +10,7 @@ const tail_k = @import("contract_norms_tail.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const mx_k = @import("contract_mxfp8.zig");
+const half_k = @import("contract_lane_half.zig");
 const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
@@ -209,6 +210,11 @@ pub fn run(gpu: check.Gpu) !void {
     };
     defer for (&mx) |*m| m.deinit();
     for (&mx) |*m| try kernels.append(a, m.kernel());
+    var half_lane = lane;
+    var halves: [3]half_k.Half = undefined;
+    for (std.enums.values(half_k.Kind), &halves) |kind, *h| h.* = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind };
+    defer for (&halves) |*h| h.deinit();
+    for (&halves) |*h| try kernels.append(a, h.kernel());
     var wide: [wide_k.modes.len * 2]wide_k.Product = undefined;
     for (wide_k.modes, 0..) |mode, i| {
         wide[i * 2] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = mode, .clusters = true };
