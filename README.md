@@ -245,6 +245,8 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
 | `--silence-floor-dbfs DBFS` | Drama speech only: explicit frame-power floor for the silence guard, with no default floor. Calibrate below quiet intended speech using public or built-in speech. |
 | `--silence-seconds SECONDS` | Drama speech only: stop after this continuous duration below the explicit floor, retaining audio and reporting `silence`. Unset by default: off; calibrate above intentional pauses. |
+| `--silence-mid-s SECONDS` | Drama speech only: with the silence guard on, finish as `silence` when end of speech falls in a run this long below the floor, after the explicit voiced minimum. Whole replies carry the decimal `X-Silence-Mid-Trips` count, including zero. Must be below `--silence-seconds` and paired with `--silence-mid-min-voiced-s`. Unset by default: off. |
+| `--silence-mid-min-voiced-s SECONDS` | Required with `--silence-mid-s`: positive finite cumulative voiced duration before the mid rule applies, including equality. No default; calibrate with the other silence thresholds. |
 | `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
 | `--prompt-cache-gib GIB` | Retained-prefix budget, 16 GiB by default or less where memory is short; 0 disables it. |
 | `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
