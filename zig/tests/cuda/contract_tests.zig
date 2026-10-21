@@ -13,6 +13,7 @@ const mx_k = @import("contract_mxfp8.zig");
 const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
+const hcnorm_k = @import("contract_hc_normalize.zig");
 const utility_k = @import("contract_utility.zig");
 const best_k = @import("contract_row_best.zig");
 const qsa_k = @import("contract_qsa_select.zig");
@@ -238,6 +239,10 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&writebacks) |*w| w.deinit();
     for (&writebacks) |*w| try kernels.append(a, w.kernel());
+    var hcnorms: [2]hcnorm_k.Normalize = undefined;
+    for (std.enums.values(hcnorm_k.Kind), &hcnorms) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .cols_fn = try hc.function("fn_hc_normalize_cols"), .old_fn = try hc.function("fn_hc_normalize") };
+    defer for (&hcnorms) |*x| x.deinit();
+    for (&hcnorms) |*x| try kernels.append(a, x.kernel());
     var batch = try cuda.Module.load(gpu.d, kk.flashnext_batch);
     defer batch.unload();
     var sums: [2]utility_k.Sum = undefined;

@@ -450,6 +450,23 @@ extern "C" __global__ void fn_hc_normalize(const __nv_bfloat16* H, const float* 
     }
 }
 
+// fn_hc_normalize a block a (row, stream, 256-column slice): each block sums the stream the same way, so the same bits.
+extern "C" __global__ void __launch_bounds__(256) fn_hc_normalize_cols(const __nv_bfloat16* H, const float* PSS, const float* SCALE,
+                                                                       __nv_bfloat16* OUT, float eps, int D, int SS) {
+    __shared__ float rinv;
+    const int r = blockIdx.x, stream = blockIdx.y, nc = D / 256;
+    if (threadIdx.x == 0) {
+        float total = 0.0f;
+        for (int c = 0; c < nc; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * nc + c) * SS + stream]);
+        rinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+    }
+    __syncthreads();
+    const int d = blockIdx.z * 256 + threadIdx.x;
+    const int col = stream * D + d;
+    const long long at = static_cast<long long>(r) * SS * D + col;
+    OUT[at] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(bf(H[at]), rinv), SCALE[col]));
+}
+
 // Dense up-projection values are already BF16: sigmoid, product and stream mean keep their original rounding seams.
 extern "C" __global__ void fn_hc_dense_mix(const __nv_bfloat16* UP, const __nv_bfloat16* NORMED,
                                             __nv_bfloat16* MIXED, float* XSM, int D, int SS) {
