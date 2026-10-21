@@ -122,7 +122,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
             uint2 xw;
             __nv_bfloat16* xb = reinterpret_cast<__nv_bfloat16*>(&xw);
 #pragma unroll
-            for (int j = 0; j < 4; j++) xb[j] = __float2bfloat16_rn(bf(wb[j]) * (hv[i + j] * inv));
+            for (int j = 0; j < 4; j++) xb[j] = __float2bfloat16_rn((bf(wb[j]) + ((P != nullptr && P[5]) ? 1.0f : 0.0f)) * (hv[i + j] * inv));
             *reinterpret_cast<uint2*>(X + row * D + d) = xw;
             *reinterpret_cast<uint2*>(xrow + d) = xw;
         }
@@ -131,7 +131,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
         for (int i = 0; i < MAXE; i++) {
             if (i >= E) break;
             const int d = t * E + i;
-            const __nv_bfloat16 x = __float2bfloat16_rn(bf(W[d]) * (hv[i] * inv));
+            const __nv_bfloat16 x = __float2bfloat16_rn((bf(W[d]) + ((P != nullptr && P[5]) ? 1.0f : 0.0f)) * (hv[i] * inv));
             X[row * D + d] = x;
             xrow[d] = x;
         }
@@ -386,7 +386,7 @@ extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfl
 #pragma unroll
     for (int i = 0; i < 4; i++) {
         const int d = 4 * t + i;
-        OUT[(m * heads + head) * HD + d] = __float2bfloat16_rn(bf(W[d]) * (v[i] * inv));
+        OUT[(m * heads + head) * HD + d] = __float2bfloat16_rn((bf(W[d]) + ((P != nullptr && P[5]) ? 1.0f : 0.0f)) * (v[i] * inv));
     }
 }
 
@@ -537,3 +537,5 @@ extern "C" __global__ void tf_q35_mlp_act(const __nv_bfloat16* __restrict__ GATE
 
 #include "qwen35_slots.cuh"
 #include "qwen35_argmax.cuh"
+
+#include "qwen35_scores.cuh"

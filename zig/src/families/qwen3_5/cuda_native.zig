@@ -60,7 +60,13 @@ pub const Loaded = struct {
     target: *reuse.Target,
 };
 
+/// BF16 scoring stays in its experimental runner until native lane and checkpoint gates are qualified.
+pub fn requireQualifiedFormat(g: E.Geometry) !void {
+    if (g.bf16) return error.ExperimentalQwenBf16;
+}
+
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    try requireQualifiedFormat(try E.Geometry.read(gpa, io, dir));
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
@@ -167,6 +173,7 @@ fn closeDrafter(p: *anyopaque) void {
 /// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
+        error.ExperimentalQwenBf16 => "dense BF16 Qwen scoring is experimental and not qualified for native serving",
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
         else => null,

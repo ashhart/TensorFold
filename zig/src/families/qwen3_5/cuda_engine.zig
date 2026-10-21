@@ -62,13 +62,18 @@ pub const Images = struct {
 };
 
 /// What a forward keeps: a prompt chunk its last row's logits, a verify window every row's draw or logits and log.
-pub const Keep = union(enum) { last, draws: []const Draw, logits, hidden };
+pub const Keep = union(enum) { last, scores, draws: []const Draw, logits, hidden };
 
 /// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
 pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
 
 pub const Engine = struct {
     startup: profile.Times = .{},
+    bf16_lt: ?cuda.cublaslt.Library = null,
+    bf16_workspace: ?DeviceBuffer = null,
+    bf16_embed: ?cuda.embed_rows.EmbedRows = null,
+    bf16_plans: std.AutoHashMapUnmanaged(u64, cuda.cublaslt.Linear) = .empty,
+    score_plans: std.AutoHashMapUnmanaged(usize, cuda.cublaslt.Linear) = .empty,
     gpa: std.mem.Allocator,
     dir: []const u8,
     pockets: pocket.Pockets,
@@ -133,6 +138,10 @@ pub const Engine = struct {
     pl: u64,
     po: u64,
     logits: u64,
+    score_logits: u64,
+    score_stats: u64,
+    score_labels: u64,
+    host_score_logits: cuda.HostBuffer,
     routed: routed.Scratch = .{}, // qwen3_5_moe's routed rows
     amax: u64, // the argmax slices' bests: most_verify rows of argmaxSlices(vocab) (f32, i32)
     // per-forward tables (ids, segments, rows' segment, parent and ancestors, the draws' rules) staged in pinned memory
@@ -156,7 +165,7 @@ pub const Engine = struct {
     pub const rowanc_at = Round.rowanc_at;
     const rules_at = Round.rules_at;
     const meta_at = Round.meta_at;
-    const tokens_at = Round.tokens_at;
+    pub const tokens_at = Round.tokens_at;
     pub const params_at = Round.params_at;
     pub const src_at = Round.src_at;
     pub const mpos_at = Round.mpos_at;
@@ -171,6 +180,8 @@ pub const Engine = struct {
         errdefer gpa.destroy(e);
         e.* = undefined;
         e.gpa = gpa;
+        try @import("cuda_bf16.zig").init(e, d, g.bf16);
+        errdefer @import("cuda_bf16.zig").deinit(e);
         e.dir = try gpa.dupe(u8, dir);
         errdefer gpa.free(e.dir);
         e.pockets = try pocket.Pockets.init(gpa, d, g.hidden, g.layers);
@@ -232,6 +243,8 @@ pub const Engine = struct {
         errdefer e.staged.free();
         e.host_logits = try cuda.HostBuffer.alloc(d, most_verify * g.vocab * 2);
         errdefer e.host_logits.free();
+        e.host_score_logits = try cuda.HostBuffer.alloc(d, if (g.bf16) 288 else 4);
+        errdefer e.host_score_logits.free();
         try e.stream.synchronize();
         const warm_start = profile.now(io);
         e.startup = .{ .load = warm_start - started };
@@ -253,10 +266,12 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        e.host_score_logits.free();
         e.pockets.deinit();
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
+        @import("cuda_bf16.zig").deinit(e);
         e.host_logits.free();
         e.staged.free();
         e.tables.free();
@@ -327,6 +342,9 @@ pub const Engine = struct {
         e.pl = try t.alloc(R * g.q_heads * max_chunks * 4);
         e.po = try t.alloc(R * g.q_heads * max_chunks * head_dim * 4);
         e.logits = try t.alloc(most_verify * g.vocab * 2);
+        e.score_logits = try t.alloc(if (g.bf16) 4 * g.vocab * 4 + 32 else 4);
+        e.score_stats = try t.alloc(288);
+        e.score_labels = try t.alloc(272);
         if (g.moe()) e.routed = try routed.Scratch.carve(t, g, R);
         e.amax = try t.alloc(most_verify * argmaxSlices(g.vocab) * 8);
         return total;
@@ -353,33 +371,13 @@ pub const Engine = struct {
         return e.project(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at, false);
     }
 
-    fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
-        const n_out = l.outputs();
-        const k = l.inputs();
-        if (prompt and rows > 16) return switch (l) {
-            .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
-            .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
-        };
-        if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
-        const tile: usize = switch (l) {
-            .a4 => e.affine.verifyRows(),
-            .an => 16,
-        };
-        var at: usize = 0;
-        while (at < rows) : (at += tile) {
-            const n = @min(tile, rows - at);
-            const xa = x + at * k * 2;
-            const sa = xs + at * (k / 64) * 4;
-            const oa = out + at * n_out * 2;
-            switch (l) {
-                .a4 => |q| try e.affine.verify(e.stream, xa, sa, q, oa, n),
-                .an => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
-            }
-        }
-    }
+    pub const validateScoreLabels = @import("cuda_bf16.zig").validateLabels;
+    pub const scoreHead = @import("cuda_bf16.zig").head;
+    const project = @import("cuda_projection.zig").run;
 
     /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
     pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
+        if (e.embed_bits == 16) return e.bf16_embed.?.bf16(e.stream, ids, e.embed_w, out, rows, e.g.hidden);
         const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
@@ -401,20 +399,23 @@ pub const Engine = struct {
     /// Refuse the whole frame before settling any prior window or launching work.
     pub fn admit(e: *const Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
+        if (keep == .scores and !g.bf16) return error.UnsupportedScoreFormat;
+        if (keep == .scores and parts.len > 4) return error.InvalidScoreBatch;
         var total: usize = 0;
         if (parts.len == 0 or parts.len > max_segs) return error.InvalidQwenSegments;
         for (parts, 0..) |p, index| {
             for (parts[0..index]) |prior| if (prior.cache == p.cache) return error.InvalidQwenSegments;
             if (p.rows == 0 or p.cache.len > p.cache.cap or p.rows > p.cache.cap - p.cache.len) return error.QwenContextFull;
             if (p.rows > max_rows - total) return error.InvalidQwenSegments;
+            if (keep == .scores) try @import("cuda_bf16.zig").validateLabels(&p.cache.score_labels, g.vocab);
             total += p.rows;
         }
         if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
         if (e.learning != null and total != 1) return error.BadLearningRows;
         if (keep == .hidden and e.learning == null) return error.BadLearningRows;
-        const record = keep != .last;
+        const record = keep != .last and keep != .scores;
         if (record and total > e.verify_rows) return error.InvalidQwenSegments;
-        if (!record and parts.len != 1) return error.InvalidQwenSegments;
+        if (!record and keep != .scores and parts.len != 1) return error.InvalidQwenSegments;
         if (keep == .draws and keep.draws.len != total) return error.InvalidQwenSegments;
         for (ids) |id| if (id >= g.vocab) return error.InvalidQwenToken;
         for (parts) |p| if (p.parents != null and !record) return error.InvalidQwenParents;
@@ -425,14 +426,17 @@ pub const Engine = struct {
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         try e.admit(parts, ids, keep);
         const g = e.g;
+        if (keep == .scores) try @import("cuda_bf16.zig").stageLabels(e, parts);
         const total = ids.len;
-        const record = keep != .last;
-        const heads: usize = if (record) total else 1;
+        const record = keep != .last and keep != .scores;
+        const heads: usize = if (keep == .scores) parts.len else if (record) total else 1;
         // the prompt GEMM only for prompt chunks: a window's rows keep the bits of one-row steps
         const prompt = !record;
         // the tables
         const st = e.staged.bytes;
         @memcpy(std.mem.bytesAsSlice(u32, st[ids_at..][0 .. total * 4]), ids);
+        // BF16 row gather has no device-count argument; padded graph rows read a valid dummy ID.
+        if (g.bf16) @memset(st[ids_at + total * 4 .. max_rows * 4], 0);
         const segs = std.mem.bytesAsSlice(Seg, st[segs_at..][0 .. parts.len * @sizeOf(Seg)]);
         const slot_peak = try Round.build(st, parts, record);
         for (parts) |p| try p.cache.settle(e);
@@ -456,6 +460,15 @@ pub const Engine = struct {
         params[2] = @intCast(total);
         params[3] = @intCast(parts.len);
         params[4] = @intFromBool(record);
+        params[5] = @intFromBool(g.bf16);
+        if (keep == .scores) {
+            const last_ids = std.mem.bytesAsSlice(u32, st[tokens_at..][0 .. parts.len * 4]);
+            var last_index: usize = 0;
+            for (parts, last_ids) |part, *last_id| {
+                last_index += part.rows;
+                last_id.* = @intCast(last_index - 1);
+            }
+        }
         defer e.taught = 0;
         try @import("cuda_forward_extra.zig").stageScales(e, parts, total);
         // an image prompt's chunk (one part, its rows at prompt positions len..): feature rows and t, h, w positions
@@ -471,6 +484,8 @@ pub const Engine = struct {
         try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
         var shape = Shape.init(total, parts.len, record, e.n_taps > 0, @intCast(Round.variant(slot_peak)));
         shape.hidden = keep == .hidden;
+        shape.scores = keep == .scores;
+        if (g.bf16) try @import("cuda_bf16.zig").prepare(e, shape.total, if (keep == .scores) shape.nseg else if (record) shape.total else 1);
         if (e.learning != null or e.pockets.any()) {
             var exact = shape;
             exact.total = @intCast(total);
@@ -478,7 +493,7 @@ pub const Engine = struct {
             e.features = if (images) |im| im.features else 0;
             defer e.features = 0;
             try e.body(exact);
-        } else if (prompt) {
+        } else if (prompt and keep != .scores) {
             // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length's graph would pay the stall
             e.features = if (images) |im| im.features else 0;
             defer e.features = 0;
@@ -520,6 +535,7 @@ pub const Engine = struct {
                 try e.stream.synchronize();
                 @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
             },
+            .scores => try @import("cuda_bf16.zig").read(e, parts, heads),
             .logits, .last => {
                 const out = e.host_logits.bytes[0 .. heads * g.vocab * 2];
                 try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(out.ptr, e.logits, out.len, e.stream.handle), "cuMemcpyDtoHAsync");

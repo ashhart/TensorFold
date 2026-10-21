@@ -30,6 +30,10 @@ pub const Cache = struct {
     /// Positions the newest forward wrote up to: a tap ring holds them until the next forward, whatever `keep` lands.
     written: usize = 0,
     logits: []u16,
+    scores: [16]f32 = undefined,
+    score_labels: [17]u32 = @splat(0),
+    score_lse: f32 = 0,
+    score_token: u32 = 0,
     /// The newest verify window, until its path is kept: where it started, its rows.
     last: ?struct { start: usize, rows: usize } = null,
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.

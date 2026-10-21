@@ -25,7 +25,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const nseg: usize = shape.nseg;
     const record = shape.record;
     const prompt = shape.prompt;
-    const heads: usize = if (record) total else 1;
+    const heads: usize = if (shape.scores) nseg else if (record) total else 1;
     const t_ids = e.tables.ptr + ids_at;
     const t_segs = e.tables.ptr + segs_at;
     const t_rows = e.tables.ptr + rowseg_at;
@@ -94,7 +94,12 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             try e.run(e.fns.tap, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
         };
     }
-    try finish(e, total, heads, shape.hidden);
+    if (shape.scores) {
+        try e.norm(true, e.final_norm, total);
+        // Gather final normalized hidden rows; no intermediate prompt row needs a vocabulary projection.
+        try e.bf16_embed.?.bf16(e.stream, e.tables.ptr + E.Engine.tokens_at, e.x, e.h, heads, g.hidden);
+        try e.scoreHead(e.h, heads);
+    } else try finish(e, total, heads, shape.hidden);
 }
 
 /// Layer inputs are already kept; hidden reads need neither the final norm nor the vocabulary head.

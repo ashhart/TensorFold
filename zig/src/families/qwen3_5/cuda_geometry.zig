@@ -49,6 +49,7 @@ pub const Widths = struct {
 };
 
 pub const Geometry = struct {
+    bf16: bool = false,
     pocket: usize = 0,
     hidden: usize,
     intermediate: usize,
@@ -229,8 +230,14 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     const rope = try object(t.get("rope_parameters") orelse return error.UnsupportedQwenRotary);
     try is(rope, if (rope.get("rope_type") != null) "rope_type" else "type", []const u8, "default"); // "type": the older key
     if (try number(rope, "rope_theta") != 10000000 or try number(rope, "partial_rotary_factor") != 0.25) return error.UnsupportedQwenRotary;
-    const q = try object(root.get("quantization") orelse return error.UnsupportedQwenQuantization);
+    const q = if (root.get("quantization")) |v| try object(v) else null;
+    if (q == null and moe) return error.UnsupportedQwenQuantization;
+    if (q == null) {
+        const dtype = t.get("dtype") orelse root.get("dtype") orelse root.get("torch_dtype") orelse return error.UnsupportedQwenQuantization;
+        if (dtype != .string or !std.mem.eql(u8, dtype.string, "bfloat16")) return error.UnsupportedQwenQuantization;
+    }
     var g: Geometry = .{
+        .bf16 = q == null,
         .hidden = try integer(t, "hidden_size"),
         .intermediate = try integer(t, if (moe) "moe_intermediate_size" else "intermediate_size"),
         .layers = try integer(t, "num_hidden_layers"),
@@ -262,7 +269,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         // the shared expert runs in the routed experts' table, so it needs their width
         if (try integer(t, "shared_expert_intermediate_size") != g.intermediate) return error.UnsupportedQwenGeometry;
         if (g.experts > 256 or g.top_k > 31 or g.top_k >= g.experts) return error.UnsupportedQwenGeometry;
-        const w = try expertBits(q, g.layers);
+        const w = try expertBits(q.?, g.layers);
         if (w.count != 0 and w.count != 3 * g.layers) return error.UnsupportedQwenQuantization;
         g.expert_bits = w.bits;
     }
@@ -273,7 +280,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         if (kind != .string) return error.UnsupportedQwenGeometry;
         if (std.mem.eql(u8, kind.string, "linear_attention")) g.linear[i] = true else if (!std.mem.eql(u8, kind.string, "full_attention")) return error.UnsupportedQwenGeometry;
     }
-    g.bits = try widths(gpa, root, q, g);
+    if (q) |quant| g.bits = try widths(gpa, root, quant, g);
+    if (g.bf16 and g.pocket > 0) return error.UnsupportedLearningFormat;
     if (g.pocket > 0) {
         if (g.moe()) return error.UnsupportedLearningFormat;
         for (0..g.layers) |i| for ([_]Slot{ .gate, .up, .down }) |slot| {

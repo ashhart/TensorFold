@@ -86,6 +86,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     @import("h3_host.zig").library(b, target, optimize, h3_image);
     const cuda = runtime(b, target, optimize, if (nvcc != null or prebuilt != null) &images else &.{});
     const mods = family(b, target, optimize, cuda, draft_ids);
+    const qwen_score = b.createModule(.{ .root_source_file = b.path("zig/qwen35_score.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    qwen_score.addImport("cuda", cuda);
+    qwen_score.addImport("qwen35", mods.qwen35);
+    const qwen_score_host = b.createModule(.{ .root_source_file = b.path("zig/qwen35_bf16_host.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    qwen_score_host.addImport("qwen35", mods.qwen35);
+    b.step("test-qwen35-bf16-host", "Check BF16 admission and scoring graph identity").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen_score_host })).step);
+    const qwen_score_exe = b.addExecutable(.{ .name = "tf-qwen35-score", .root_module = qwen_score });
+    b.step("qwen35-score", "Build the native BF16 selected-label scoring worker").dependOn(&b.addInstallArtifact(qwen_score_exe, .{}).step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     cli.addImport("cuda", cuda);
     cli.addImport("core", mods.core);

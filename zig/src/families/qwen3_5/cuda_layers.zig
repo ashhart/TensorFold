@@ -8,6 +8,7 @@ const AffineN = cuda.qlinear.AffineN;
 pub const Proj = union(enum) {
     a4: Affine4,
     an: AffineN,
+    bf16: struct { w: u64, n: usize, k: usize },
 
     pub fn outputs(p: Proj) usize {
         return switch (p) {
@@ -56,6 +57,7 @@ pub const Fns = struct {
     mlp_act: cuda.Function,
     argmax: cuda.Function,
     argmax_slices: cuda.Function,
+    score_stats: cuda.Function,
     argmax_merge: cuda.Function,
     tap: cuda.Function,
     splice: cuda.Function,
