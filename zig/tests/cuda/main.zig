@@ -93,9 +93,11 @@ const fn_pocket_tests = @import("fn_pocket_tests.zig");
 const kolibri_tests = @import("kolibri_tests.zig");
 const kolibri_layer_tests = @import("kolibri_layer_tests.zig");
 const aot_fallback_tests = @import("aot_fallback_tests.zig");
+const qwen_draft_frames = @import("qwen_draft_frames.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
+    \\  qwen-draft-frames MODEL DRAFTER IDS OUT  native 27B DFlash frames: raw bytes equal across partitions, controls red
     \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
     \\  route-rows                route_rows.cu's router logits and softmax top-k against float64 (synthetic rows)
     \\  flashnext-fidelity-single MODEL FIXTURE OUTPUT  single-rank reference isolation
@@ -247,6 +249,10 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+    if (std.mem.eql(u8, cmd, "qwen-draft-frames")) {
+        if (rest.len != 4) return error.FrameGateArguments;
+        return qwen_draft_frames.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
+    }
     if (std.mem.eql(u8, cmd, "experts-rows")) return experts_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "route-rows")) return route_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-fidelity-single")) return flashnext_fidelity_tests.runSingle(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), false);

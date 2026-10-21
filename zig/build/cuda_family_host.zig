@@ -28,6 +28,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const precision_run = b.addRunArtifact(b.addTest(.{ .root_module = precision, .filters = &.{"Draft precision:"} }));
     b.step("test-qwen35-draft-precision-host", "Draft arithmetic roles and canonical native launches without devices").dependOn(&precision_run.step);
     step.dependOn(&precision_run.step);
+    const frames = b.createModule(.{ .root_source_file = b.path("zig/qwen35_draft_frames_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "lanes", .module = mods.lanes } } });
+    const frames_run = b.addRunArtifact(b.addTest(.{ .root_module = frames, .filters = &.{"Draft frames:"} }));
+    b.step("test-qwen35-draft-frames-host", "Fixed frame schedules, returned byte records and controls without devices").dependOn(&frames_run.step);
+    step.dependOn(&frames_run.step);
     const startup = b.createModule(.{ .root_source_file = b.path("zig/cuda_startup_costs_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
     b.step("test-cuda-startup-costs-host", "Eager measured CUDA costs and transactional failure controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = startup })).step);
 
