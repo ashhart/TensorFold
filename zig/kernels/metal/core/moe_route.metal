@@ -6,20 +6,21 @@ using namespace metal;
 #define TF_OUT_T float
 #endif
 constant constexpr int ITERS = TF_K / 32;
+constant constexpr int PERL = ITERS / 32; // the 32-wide slices of k each lane takes
 constant constexpr int PER = (TF_E + 31) / 32;
 
-// Logits [rows, E] = x W^T: a 4-expert block (tg.x) for four rows (tg.y); simdgroup s sums k = 32 i + 4 s + tm, lane l taking i = 4 l..4 l + 3, then the eight partials in order.
+// Logits [rows, E] = x W^T: a 4-expert block (tg.x) for four rows (tg.y); simdgroup s sums k = 32 i + 4 s + tm, lane l taking i = PERL l..PERL l + PERL - 1, then the eight partials in order.
 [[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
                                 constant int& rows [[buffer(2)]], device TF_OUT_T* OUT [[buffer(3)]],
                                 uint2 tg [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]], uint s [[simdgroup_index_in_threadgroup]]) {
   threadgroup float part[8][16];
   const int q = int(tg.x), r0 = int(tg.y) * 4;
-  const device uint4* w = RP + ((size_t(q) * 8 + s) * ITERS + 4 * lane) * 2;
+  const device uint4* w = RP + ((size_t(q) * 8 + s) * ITERS + PERL * lane) * 2;
   float acc[4][4]; // [row][expert]
   for (int c = 0; c < 4; c++)
     for (int tn = 0; tn < 4; tn++) acc[c][tn] = 0.0f;
-  for (int ii = 0; ii < 4; ii++) {
+  for (int ii = 0; ii < PERL; ii++) {
     float inter[4][4];
     for (int h = 0; h < 2; h++) {
       const uint4 v = w[ii * 2 + h];
@@ -30,7 +31,7 @@ constant constexpr int PER = (TF_E + 31) / 32;
         inter[(e + 1) / 4][(e + 1) % 4] = as_type<float>(words[j] & 0xffff0000u);
       }
     }
-    const int k = 32 * (4 * int(lane) + ii) + 4 * int(s);
+    const int k = 32 * (PERL * int(lane) + ii) + 4 * int(s);
     for (int c = 0; c < 4; c++) {
       const device bfloat* x = X + size_t(min(r0 + c, rows - 1)) * TF_K + k;
       for (int tm = 0; tm < 4; tm++) {
@@ -49,6 +50,9 @@ constant constexpr int PER = (TF_E + 31) / 32;
   if (o < 16 && r0 + o / 4 < rows) {
     float v = part[0][o];
     for (int k = 1; k < 8; k++) v += part[k][o];
+#ifdef TF_ROUND_LOGITS
+    v = float(bfloat(v));
+#endif
     OUT[size_t(r0 + o / 4) * TF_E + 4 * q + o % 4] = static_cast<TF_OUT_T>(v);
   }
 }

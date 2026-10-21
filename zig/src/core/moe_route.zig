@@ -3,13 +3,14 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 
-/// The router's shape: hidden width, experts (a multiple of 4, at most 512), picks a row, rows a launch at most.
-pub const Shape = struct { hidden: u32, experts: u32, topk: u32, max_rows: u32 = 16, out_bf16: bool = false };
+/// The router's shape: hidden (1024s), experts (4s, to 512), picks, rows a launch; round_logits: MLX's bf16 logits.
+pub const Shape = struct { hidden: u32, experts: u32, topk: u32, max_rows: u32 = 16, out_bf16: bool = false, round_logits: bool = false };
 
 /// The kernel source with `shape`'s constants.
 pub fn source(a: std.mem.Allocator, s: Shape) ![]u8 {
-    if (s.experts % 4 != 0 or s.experts > 512 or s.hidden % 64 != 0 or s.max_rows > 16 or s.topk * s.max_rows > 512) return error.UnsupportedRouterShape;
-    return std.fmt.allocPrint(a, "#define TF_K {d}\n#define TF_E {d}\n#define TF_TOPK {d}\n#define TF_MAXR {d}\n{s}{s}", .{ s.hidden, s.experts, s.topk, s.max_rows, if (s.out_bf16) "#define TF_OUT_T bfloat\n" else "", ks.core_moe_route });
+    // each lane sums hidden / 1024 slices of 32: the hidden width is a multiple of 1024
+    if (s.experts % 4 != 0 or s.experts > 512 or s.hidden == 0 or s.hidden % 1024 != 0 or s.max_rows > 16 or s.topk * s.max_rows > 512) return error.UnsupportedRouterShape;
+    return std.fmt.allocPrint(a, "#define TF_K {d}\n#define TF_E {d}\n#define TF_TOPK {d}\n#define TF_MAXR {d}\n{s}{s}{s}", .{ s.hidden, s.experts, s.topk, s.max_rows, if (s.out_bf16) "#define TF_OUT_T bfloat\n" else "", if (s.round_logits) "#define TF_ROUND_LOGITS 1\n" else "", ks.core_moe_route });
 }
 
 pub const names = [2][:0]const u8{ "tf_route_logits", "tf_route_select" };
