@@ -175,9 +175,7 @@ __device__ __forceinline__ void mma_z(float (&d)[4], uint32_t a0, uint32_t a1, u
       : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(0.f));
 }
 
-// Prompt rows, 64 inputs a stage; NT (row tiles a warp) is constant so no branch splits mma. FACT false: one fp32
-// sum over K of the scaled codes. FACT true: the decode form's factored sums, bit for bit at every row: each
-// 16-input block's mma of the raw codes from zero, then fma(p, its e4m3 scale, acc), blocks in ascending K.
+// Prompt rows, 64 inputs a stage, NT row tiles a warp. FACT: the decode form's sums (per-16 mma from zero, then fma).
 template <int M, int EPI, int RT, int WM, int WN, int NT, bool FACT = false>
 __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                              const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
@@ -369,8 +367,7 @@ TF_NVFP4_PROMPT(tf_nvfp4_prompt_relu2, 1, 1, 8)
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_swiglu, 2, 2, 4)
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_down, 1, 3, 8)
 
-// The decode form's factored sums on the prompt tiles (bit-equal to nvfp4_expert_kernel<2, 2, *> and <1, 0, *> at
-// every row): SwiGLU gate-up to bf16, down to fp32 slot rows.
+// The decode form's factored sums on the prompt tiles, bit for bit: SwiGLU gate-up to bf16, down to fp32 slot rows.
 #define TF_NVFP4_FACT(NAME, M, EPI, WN)                                                                                \
   extern "C" __global__ void __launch_bounds__(WN * 32) NAME(                                                        \
       const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,                     \

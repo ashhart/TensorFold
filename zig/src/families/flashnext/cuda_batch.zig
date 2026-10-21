@@ -89,19 +89,15 @@ fn profile() bool {
     return std.mem.eql(u8, std.mem.span(v), "1");
 }
 
-/// Rows from which a pass's NVFP4 experts take the prompt tiles (TF_FLASHNEXT_FACT_ROWS, 0 for never); the bits
-/// are the decode form's either way, so this only sets speed.
+/// Rows from which NVFP4 experts take the prompt tiles (TF_FLASHNEXT_FACT_ROWS, 0 never): same bits, only speed.
 fn factRows() usize {
-    const S = struct {
-        var rows: ?usize = null;
-    };
-    if (S.rows) |r| return r;
-    var r: usize = 64;
-    if (std.c.getenv("TF_FLASHNEXT_FACT_ROWS")) |v| r = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 64;
-    if (r == 0) r = std.math.maxInt(usize);
-    S.rows = r;
-    return r;
+    if (fact_rows == null) {
+        const r = if (std.c.getenv("TF_FLASHNEXT_FACT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 64 else 64;
+        fact_rows = if (r == 0) std.math.maxInt(usize) else r;
+    }
+    return fact_rows.?;
 }
+var fact_rows: ?usize = null;
 
 pub fn Pass(comptime Tri: type) type {
     return struct {

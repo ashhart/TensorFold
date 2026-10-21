@@ -458,30 +458,8 @@ pub const Nvfp4Experts = struct {
         try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
     }
 
-    /// SwiGLU gate-up (.up) or fp32 down (.down_f32) on a plan of at most `items` items of promptTile pairs: the
-    /// decode form's sums (run's bits at every row) on the prompt tiles, which read an expert's weights once an item.
-    pub fn runFact(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
-        const gate = epi == .up;
-        if (epi == .down_bf16 or (gate and l.relu2)) return error.EpilogueNotBuilt;
-        const nb = (if (gate) l.width else l.dims) / cols;
-        if (items < 1) return;
-        var a: launch_.Args = .{};
-        a.add(in.x);
-        a.add(@as(i32, @intCast(in.stride)));
-        a.add(@as(i32, @intCast(if (gate) in.slots else 0)));
-        a.add(if (gate) l.up else l.down);
-        a.add(if (gate) l.up_scale else l.down_scale);
-        a.add(@as(i32, @intCast((if (gate) l.dims else l.width) / 32)));
-        a.add(@as(i32, @intCast(nb)));
-        for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
-        a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
-        a.add(if (gate) l.limit else @as(f32, 0.0));
-        a.add(skip);
-        const fi: usize = if (gate) 0 else 1;
-        const wn = fact_wn[fi];
-        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + wn - 1) / wn)), .y = 1, .z = 1 }, .block = .{ .x = @intCast(wn * 32), .y = 1, .z = 1 }, .shared = promptSmem(if (gate) 2 else 1, wn) };
-        try launch_.launch(e.fact_fns[fi], cfg, s, &a);
-    }
+    /// The decode form's sums on the prompt tiles (experts_fact.zig).
+    pub const runFact = @import("experts_fact.zig").runFact;
 
     /// Bytes of `count` experts' blocks for n outputs from k inputs: [E][n/32][k/32][parts][144] int32.
     pub fn bytes(count: usize, n: usize, k: usize, parts: usize) usize {
