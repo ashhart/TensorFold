@@ -19,8 +19,20 @@ const Job = struct {
     sink: api.Sink,
     state: d3.kv_state.State = .{},
     samples: usize = 0,
+    guard: api.speech_guard.Guard = .{},
+    frame_length: usize = 0,
+
+    fn incremental(j: *const Job) bool {
+        return j.request.stream or j.guard.limit > 0;
+    }
 };
-pub const Options = struct { context: u32 = 8192, device: u32 = 0, lanes: u32 = 2, max_frames: ?u32 = null };
+pub const Options = struct {
+    context: u32 = 8192,
+    device: u32 = 0,
+    lanes: u32 = 2,
+    silence: api.speech_guard.Config = .{},
+    max_frames: ?u32 = null,
+};
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -31,6 +43,7 @@ const Host = struct {
     sessions: [rounds.capacity]Session = undefined,
     jobs: [rounds.capacity]?Job = @splat(null),
     info_: api.Info,
+    silence: api.speech_guard.Config,
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Condition = .init,
     worker: ?std.Thread = null,
@@ -80,7 +93,13 @@ const Host = struct {
         for (&h.jobs) |*job| if (job.*) |*j| if (j.id == id) return error.InvalidRequest;
         const lane = try h.queue.admit();
         r.result.* = .{};
-        h.jobs[lane] = .{ .id = id, .request = r, .sink = sink };
+        h.jobs[lane] = .{
+            .id = id,
+            .request = r,
+            .sink = sink,
+            .guard = .init(h.silence, h.info_.speech.?.sample_rate),
+            .frame_length = h.info_.speech.?.frame_length,
+        };
         h.wake.signal(h.io);
     }
     fn cancel(p: *anyopaque, id: api.Id) void {
@@ -179,21 +198,23 @@ const Host = struct {
         var frame: d3.model.Frame = undefined;
         try s.e.download(s.e.frames_out + j.state.frames * 11 * 4, std.mem.asBytes(&frame));
         if (frame[0] == s.e.c.ids.eos) {
-            try decode.flush(s.t, r.stream, j.state.frames, j.state.frames, true, @as(d3.tts.Sink, .{ .ctx = j, .audio = copyAudio }));
-            return h.finish(i, .stop, "");
+            try decode.flush(s.t, j.incremental(), j.state.frames, j.state.frames, true, @as(d3.tts.Sink, .{ .ctx = j, .audio = copyAudio }));
+            return h.finish(i, if (j.guard.tripped) .silence else .stop, "");
         }
         const from = j.state.frames;
         j.state.frames += 1;
-        try decode.flush(s.t, r.stream, from, j.state.frames, j.state.frames == r.max_frames, @as(d3.tts.Sink, .{ .ctx = j, .audio = copyAudio }));
+        try decode.flush(s.t, j.incremental(), from, j.state.frames, j.state.frames == r.max_frames, @as(d3.tts.Sink, .{ .ctx = j, .audio = copyAudio }));
         if (r.stream) j.sink.event(j.sink.ctx, j.id, &.{ .audio = j.samples });
+        if (j.guard.tripped) return h.finish(i, .silence, "");
         if (j.state.frames == r.max_frames) h.finish(i, .length, "");
     }
     fn copyAudio(p: *anyopaque, samples: []const f32) !void {
         const j: *Job = @ptrCast(@alignCast(p));
         if (samples.len > j.request.pcm.len - j.samples) return error.AudioOverflow;
         for (samples) |x| if (!std.math.isFinite(x)) return error.NonFiniteAudio;
-        @memcpy(j.request.pcm[j.samples..][0..samples.len], samples);
-        j.samples += samples.len;
+        const kept = j.guard.hear(samples, j.frame_length);
+        @memcpy(j.request.pcm[j.samples..][0..kept], samples[0..kept]);
+        j.samples += kept;
     }
     fn finish(h: *Host, lane: usize, reason: api.Reason, message: []const u8) void {
         var state: completion.State = .{};
@@ -203,7 +224,9 @@ const Host = struct {
         h.lock();
         if (!completed) h.failed.closed = true;
         const j = h.jobs[lane].?;
-        if (final_reason == .stop or final_reason == .length) j.request.result.samples = j.samples;
+        if (final_reason == .stop or final_reason == .length or final_reason == .silence)
+            j.request.result.samples = j.samples;
+        j.request.result.reason = final_reason;
         h.jobs[lane] = null;
         h.queue.release(lane);
         h.unlock();
@@ -249,11 +272,19 @@ const Host = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, o: Options) !api.Opened {
     if (o.context < 1025 or o.context > 8192) return error.BadDramaContext;
-    const budget = try @import("drama_budget.zig").budget(o.context, o.max_frames);
+const budget = try @import("drama_budget.zig").budget(o.context, o.max_frames);
     if (!is_cuda) try d3.load_limit.admit(gpa, io, dir, o.context); // refused before a weight is read: the floor's one-Mac limit
+    try o.silence.validate();
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    h.* = .{ .gpa = gpa, .io = io, .limit = undefined, .queue = try rounds.Queue.init(o.lanes), .info_ = .{} };
+    h.* = .{
+        .gpa = gpa,
+        .io = io,
+        .limit = undefined,
+        .queue = try rounds.Queue.init(o.lanes),
+        .info_ = .{},
+        .silence = o.silence,
+    };
     try h.limit.init(gpa, io, o.device);
     errdefer h.limit.deinit();
     var made: usize = 0;
@@ -290,5 +321,52 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
     if (!is_cuda) try h.warm.hold(h.sessions[0].e.g, io);
     errdefer if (!is_cuda) h.warm.drop(h.sessions[0].e.g);
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
+    if (o.silence.enabled())
+        std.log.info("drama3: silence guard on: a reply ends after {d} s below {d} dBFS", .{ o.silence.seconds.?, o.silence.floor_dbfs.? });
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
+}
+
+test "native silence guard: whole and stream share decode cuts; off preserves PCM" {
+    const Fake = struct {
+        calls: usize = 0,
+        const pcm = [_]f32{ 0.25, -0.25, 0, 0, 0, 0, 0.25, -0.25 };
+        pub fn flush(t: *@This(), from: usize, to: usize, sink: d3.tts.Sink) !void {
+            t.calls += 1;
+            try sink.audio(sink.ctx, pcm[from * 2 .. to * 2]);
+        }
+        fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
+    };
+    for ([_]bool{ false, true }) |enabled| {
+        for ([_]bool{ false, true }) |stream| {
+            var pcm: [Fake.pcm.len]f32 = undefined;
+            var result: api.SpeechResult = .{};
+            const r: api.SpeechRequest = .{
+                .prompt = &.{},
+                .pcm = &pcm,
+                .result = &result,
+                .seed = 0,
+                .stream = stream,
+            };
+            var t: Fake = .{};
+            var j: Job = .{
+                .id = 0,
+                .request = &r,
+                .sink = .{ .ctx = &t, .event = Fake.event },
+                .guard = .init(if (enabled) .{ .floor_dbfs = -20, .seconds = 0.5 } else .{}, 8),
+                .frame_length = 2,
+            };
+            const sink: d3.tts.Sink = .{ .ctx = &j, .audio = Host.copyAudio };
+            for (0..Fake.pcm.len / 2) |i| {
+                try decode.flush(&t, j.incremental(), i, i + 1, false, sink);
+                if (j.guard.tripped) break;
+            }
+            if (!j.guard.tripped)
+                try decode.flush(&t, j.incremental(), Fake.pcm.len / 2, Fake.pcm.len / 2, true, sink);
+            const kept: usize = if (enabled) 6 else Fake.pcm.len;
+            try std.testing.expectEqual(kept, j.samples);
+            try std.testing.expectEqual(enabled, j.guard.tripped);
+            try std.testing.expectEqualSlices(f32, Fake.pcm[0..kept], pcm[0..j.samples]);
+            if (!enabled and !stream) try std.testing.expectEqual(@as(usize, 1), t.calls);
+        }
+    }
 }

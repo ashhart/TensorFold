@@ -25,8 +25,9 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
     " [--thinking-budget THINKING_BUDGET] [--thinking-reserve THINKING_RESERVE] [--loop-guard] [--no-drafts]" ++
     " [--drafter DRAFTER]" ++
-    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--compact-at COMPACT_AT]" ++
-    " [--compact-keep COMPACT_KEEP]" ++
+    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS]" ++
+    " [--silence-floor-dbfs DBFS] [--silence-seconds SECONDS]" ++
+    " [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
     " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
     " [--segments SEGMENTS] model\n";
@@ -106,6 +107,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (e == error.OutOfMemory) return e;
         return fail(problem);
     };
+    if (args.silence.refusal(model_type)) |why| return fail(why);
     // the model folder held while this process reads it, so a rollback refuses it: exclusive with --slide, else shared
     var unheld: []const u8 = "";
     const held = api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {

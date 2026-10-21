@@ -37,7 +37,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "Drama 3 uses embedded native kernels, not captured kernel sets: unset TENSORFOLD_CUDA_KERNELS or set it to native";
         return null;
     };
-    return drama_host.open(gpa, io, o.dir, "", .{ .context = @intCast(window), .device = device, .lanes = if (o.lanes_fixed) o.lanes else 2, .max_frames = o.max_frames }) catch |e| {
+return drama_host.open(gpa, io, o.dir, "", .{
+        .context = @intCast(window),
+        .device = device,
+        .lanes = if (o.lanes_fixed) o.lanes else 2,
+        .silence = o.silence,
+        .max_frames = o.max_frames,
+    }) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native Drama 3 CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
         return null;
     };
@@ -56,11 +62,16 @@ pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = "Drama 3 needs context 1025..8192, 1..8 frame lanes and no text, vision, TP or cache modifiers";
         return null;
     }
-    if (frameProblem(@intCast(window), o.max_frames)) |why| {
+if (frameProblem(@intCast(window), o.max_frames)) |why| {
         problem.* = why;
         return null;
     }
-    return drama_host.open(gpa, io, o.dir, "", .{ .context = @intCast(window), .lanes = if (o.lanes_fixed) o.lanes else 2, .max_frames = o.max_frames }) catch |err| {
+    return drama_host.open(gpa, io, o.dir, "", .{
+        .context = @intCast(window),
+        .lanes = if (o.lanes_fixed) o.lanes else 2,
+        .silence = o.silence,
+        .max_frames = o.max_frames,
+    }) catch |err| {
         problem.* = if (err == error.OverMemoryLimit)
             try std.fmt.allocPrint(a, "Drama 3 needs more memory than this Mac's load limit allows (70% of RAM, or DRAMA_LOAD_LIMIT_GB); the log names the sizes", .{})
         else

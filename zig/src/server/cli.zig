@@ -78,6 +78,8 @@ pub const flags = [_]Flag{
     .{ .name = "--loop-guard", .kind = .store_true, .native = true },
     .{ .name = "--no-drafts", .kind = .store_true, .native = true },
     .{ .name = "--keep-warm", .native = true },
+    .{ .name = "--silence-floor-dbfs", .native = true },
+    .{ .name = "--silence-seconds", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
@@ -155,7 +157,8 @@ pub const Args = struct {
     metrics_open: bool = false,
     dashboard: bool = false,
     context: ?i64 = null,
-    max_frames: ?u32 = null,
+max_frames: ?u32 = null,
+    silence: api.speech_guard.Config = .{},
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
@@ -263,6 +266,8 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     }
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     try ranks(u, a, out);
+    out.silence.validate() catch |err|
+        return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     out.alias = repeated.alias.items;
     out.api_key = repeated.keys.items;
@@ -296,6 +301,14 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
             return std.mem.eql(u8, x, y);
         }
     }.f;
+    if (is(name, "--silence-floor-dbfs")) {
+        out.silence.floor_dbfs = try float(u, a, name, v);
+        return;
+    }
+    if (is(name, "--silence-seconds")) {
+        out.silence.seconds = try float(u, a, name, v);
+        return;
+    }
     if (is(name, "--allowed-controls")) {
         out.allowed_controls = @import("drama_allow.zig").parse(v) catch
             return fail(u, a, "argument --allowed-controls: expected comma-separated UTF-8 names without square brackets: '{s}'", .{v});
@@ -464,7 +477,8 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .dir = dir,
         .model_type = model_type,
         .context = args.context,
-        .max_frames = args.max_frames,
+.max_frames = args.max_frames,
+        .silence = args.silence,
         .lanes = parallel(args.parallel) orelse 8,
         .lanes_fixed = parallelFixed(args.parallel),
         .drafts = !args.no_drafts,
@@ -592,4 +606,19 @@ test "the GPU engine's flags: refused and unlisted unless the backend serves the
     try std.testing.expectError(error.Usage, ranks(&u, a, args));
     for ([_][2][]const u8{ .{ "--rank", "-1" }, .{ "--master-port", "70000" }, .{ "--mtp-drafts", "65" }, .{ "--mtp-confidence", "1.5" }, .{ "--checkpoint-slots", "-1" }, .{ "--policy", "matrix" } }) |g| try std.testing.expectError(error.Usage, gpuFlag(a, &args, g[0], g[1], &u));
     try std.testing.expect(!try gpuFlag(a, &args, "--port", "1", &u));
+}
+
+test "silence guard flags are opt-in and reach native open options" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var usage: Usage = .{};
+    try std.testing.expect(!(try parse(a, &.{"m"}, &usage)).silence.enabled());
+    try std.testing.expect((try parse(a, &.{ "m", "--silence-seconds=0" }, &usage)).silence.refusal("nemotron_h") != null);
+    const args = try parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "0.5" }, &usage);
+    const opened = try request(a, "m", "drama3", args);
+    try std.testing.expectEqual(args.silence, opened.silence);
+    try std.testing.expect(opened.silence.enabled());
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "1" }, &usage));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "nan" }, &usage));
 }
