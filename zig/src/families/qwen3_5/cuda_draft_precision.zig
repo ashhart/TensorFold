@@ -12,7 +12,7 @@ pub fn prompt(role: Role, rows: usize, cutoff: usize) bool {
 pub fn affine(e: anytype, l: anytype, x: u64, xs: u64, out: u64, rows: usize, sums: bool, role: Role) !void {
     if (prompt(role, rows, dflash_projection_prompt_cutoff)) return e.affine.prompt(e.stream, x, l, out, rows);
     if (sums) try e.run(e.fns.sums, .{ rows, (l.k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(l.k)), @as(u64, 0) });
-    const tile = e.affine.verifyRows(); // verify keeps decode()'s chains a row: two m16 tiles a weight panel on GB10
+    const tile = e.affine.verifyRows(); // verify keeps decode()'s chains a row: up to eight m16 tiles a weight panel on GB10
     var at: usize = 0;
     while (at < rows) : (at += tile) {
         try e.affine.verify(e.stream, x + at * l.k * 2, xs + at * (l.k / 64) * 4, l, out + at * l.n * 2, @min(tile, rows - at));

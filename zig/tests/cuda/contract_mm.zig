@@ -52,22 +52,43 @@ const fp4_lane = [_]c.Shape{
 const fp4_tiles = [3]c.Tile{ .{ .size = 16 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 512, .step = 64, .min = 64 } };
 const prompt_tiles = [3]c.Tile{ .{ .size = 128 }, .{ .size = 128, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } };
 
+/// GB10 verify tiles' affine-4 projections (N, K): the 27B's, the 35B's, their drafters', then both vocabulary heads.
+pub const projections = [_][2]usize{
+    .{ 10240, 5120 }, .{ 6144, 5120 }, .{ 48, 5120 },   .{ 5120, 6144 }, .{ 12288, 5120 }, .{ 1024, 5120 },   .{ 17408, 5120 },
+    .{ 5120, 17408 }, .{ 8192, 2048 }, .{ 4096, 2048 }, .{ 32, 2048 },   .{ 2048, 4096 },  .{ 512, 2048 },    .{ 2048, 512 },
+    .{ 5120, 25600 }, .{ 256, 5120 },  .{ 4096, 5120 }, .{ 5120, 4096 }, .{ 1280, 5120 },  .{ 248320, 5120 }, .{ 248320, 2048 },
+};
+pub const heads = 2;
+
+/// Every projection once at rows in (lo, hi], full and partial tiles in turn; `bits` keeps the heads (no FP64 there).
+fn across(comptime lo: usize, comptime hi: usize, comptime turn: usize, comptime bits: bool) [projections.len - if (bits) 0 else heads]c.Shape {
+    var out: [projections.len - if (bits) 0 else heads]c.Shape = undefined;
+    for (&out, 0..) |*s, i| s.* = .{ .rows = if ((i + turn) % 2 == 0) hi else lo + 1 + (hi - lo - 2) * i / projections.len, .n = projections[i][0], .k = projections[i][1] };
+    return out;
+}
+
 pub fn spec(kind: Kind) c.Spec {
     const decode = &[_]c.Shape{ .{ .rows = 16, .n = 10304, .k = 2688 }, .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 3, .n = 4608, .k = 2688 } };
     const tiles = [3]c.Tile{ .{ .size = 16 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 512, .step = 64, .min = 64 } };
-    const wide = &[_]c.Shape{ .{ .rows = 16, .n = 512, .k = 5120 }, .{ .rows = 17, .n = 65, .k = 512 }, .{ .rows = 32, .n = 512, .k = 17408 }, .{ .rows = 32, .n = 17408, .k = 512 }, .{ .rows = 32, .n = 5120, .k = 5120 } };
+    const wide_edges = [_]c.Shape{ .{ .rows = 16, .n = 512, .k = 5120 }, .{ .rows = 17, .n = 65, .k = 512 }, .{ .rows = 32, .n = 512, .k = 17408 }, .{ .rows = 32, .n = 17408, .k = 512 }, .{ .rows = 32, .n = 5120, .k = 5120 } };
+    const wide = comptime &(wide_edges ++ across(16, 32, 0, false));
+    const wide_bits = comptime &(wide_edges ++ across(16, 32, 0, true));
     const wide_tiles = [3]c.Tile{ .{ .size = 32 }, .{ .size = 64, .min = 1 }, .{ .size = 512, .step = 64, .min = 64 } };
-    // the 27B's DFlash2 drafter in shared frames: q, k/v, o, the selector and fc's K, past each row-tile edge
-    const wide64 = &[_]c.Shape{ .{ .rows = 33, .n = 65, .k = 512 }, .{ .rows = 64, .n = 1024, .k = 5120 }, .{ .rows = 48, .n = 512, .k = 4096 }, .{ .rows = 64, .n = 256, .k = 5120 }, .{ .rows = 64, .n = 512, .k = 17408 } };
-    const wide128 = &[_]c.Shape{ .{ .rows = 65, .n = 65, .k = 512 }, .{ .rows = 128, .n = 1024, .k = 5120 }, .{ .rows = 120, .n = 4096, .k = 5120 }, .{ .rows = 100, .n = 512, .k = 4096 }, .{ .rows = 128, .n = 256, .k = 5120 }, .{ .rows = 112, .n = 512, .k = 25600 }, .{ .rows = 128, .n = 17408, .k = 512 } };
+    // frames past each row-tile edge, ragged panels and long K, then every real projection at full and partial tiles
+    const wide64_edges = [_]c.Shape{ .{ .rows = 33, .n = 65, .k = 512 }, .{ .rows = 64, .n = 1024, .k = 5120 }, .{ .rows = 48, .n = 512, .k = 4096 }, .{ .rows = 64, .n = 256, .k = 5120 }, .{ .rows = 64, .n = 512, .k = 17408 } };
+    const wide128_edges = [_]c.Shape{ .{ .rows = 65, .n = 65, .k = 512 }, .{ .rows = 128, .n = 1024, .k = 5120 }, .{ .rows = 120, .n = 4096, .k = 5120 }, .{ .rows = 100, .n = 512, .k = 4096 }, .{ .rows = 128, .n = 256, .k = 5120 }, .{ .rows = 112, .n = 512, .k = 25600 }, .{ .rows = 128, .n = 17408, .k = 512 } };
+    const wide64 = comptime &(wide64_edges ++ across(32, 64, 1, false));
+    const wide64_bits = comptime &(wide64_edges ++ across(32, 64, 1, true));
+    const wide128 = comptime &(wide128_edges ++ across(64, 128, 0, false));
+    const wide128_bits = comptime &(wide128_edges ++ across(64, 128, 0, true));
     const wide64_tiles = [3]c.Tile{ .{ .size = 64 }, .{ .size = 64, .min = 1 }, .{ .size = 512, .step = 64, .min = 64 } };
     const wide128_tiles = [3]c.Tile{ .{ .size = 128 }, .{ .size = 64, .min = 1 }, .{ .size = 512, .step = 64, .min = 64 } };
     return switch (kind) {
-        .verify32_bits => .{ .name = "cuda affine4 verify32 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide_tiles, .served = wide },
+        .verify32_bits => .{ .name = "cuda affine4 verify32 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide_tiles, .served = wide_bits },
         .verify32_fp64 => .{ .name = "cuda affine4 verify32 FP64", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = wide_tiles, .served = wide },
-        .verify64_bits => .{ .name = "cuda affine4 verify64 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide64_tiles, .served = wide64 },
+        .verify64_bits => .{ .name = "cuda affine4 verify64 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide64_tiles, .served = wide64_bits },
         .verify64_fp64 => .{ .name = "cuda affine4 verify64 FP64", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = wide64_tiles, .served = wide64 },
-        .verify128_bits => .{ .name = "cuda affine4 verify128 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide128_tiles, .served = wide128 },
+        .verify128_bits => .{ .name = "cuda affine4 verify128 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide128_tiles, .served = wide128_bits },
         .verify128_fp64 => .{ .name = "cuda affine4 verify128 FP64", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = wide128_tiles, .served = wide128 },
         .qmm_group => .{ .name = "cuda qmm_group (cluster tile)", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = tiles, .served = decode },
         .lane_gemv => .{ .name = "cuda lane_gemv", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "qmm_group's cluster tile", .tiles = tiles, .served = decode },
