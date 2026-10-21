@@ -470,22 +470,32 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (int t = k0; t < k1; t++) {
-        const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
-        const uint4 kw = *reinterpret_cast<const uint4*>(KV + kv_row(sg, KVH, layer, 0, h, pos) + lane * DPL);
-        const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw);
-        float dot = 0.0f;
+    // the keys in order; a key's and value's rows by `row` (one branch here, not one a key)
+    const auto scan = [&](auto row) {
+        for (int t = k0; t < k1; t++) {
+            const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
+            const uint4 kw = *reinterpret_cast<const uint4*>(row(0, pos) + lane * DPL);
+            const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw);
+            float dot = 0.0f;
 #pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
-        const float s = warp_sum(dot) * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        const uint4 vw = *reinterpret_cast<const uint4*>(KV + kv_row(sg, KVH, layer, 1, h, pos) + lane * DPL);
-        const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw);
+            for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
+            const float s = warp_sum(dot) * scale;
+            const float mn = fmaxf(mx, s);
+            const float a = __expf(mx - mn), b = __expf(s - mn);
+            l = l * a + b;
+            const uint4 vw = *reinterpret_cast<const uint4*>(row(1, pos) + lane * DPL);
+            const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw);
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
-        mx = mn;
+            for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
+            mx = mn;
+        }
+    };
+    if (sg.pt == 0) {
+        const __nv_bfloat16* K = KV + kv_row(sg, KVH, layer, 0, h, 0);
+        const __nv_bfloat16* V = KV + kv_row(sg, KVH, layer, 1, h, 0);
+        scan([&](int s, int pos) { return (s == 0 ? K : V) + (size_t)pos * HD; });
+    } else {
+        scan([&](int s, int pos) { return KV + kv_row(sg, KVH, layer, s, h, pos); });
     }
     if (lane == 0) {
         PM[slot] = mx;

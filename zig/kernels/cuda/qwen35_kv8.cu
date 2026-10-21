@@ -94,23 +94,32 @@ extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (int t = k0; t < k1; t++) {
-        const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
-        const Row8 r = row8(sg, layer, KVH, h, pos);
-        float kf[DPL], vf[DPL];
-        widen8(*reinterpret_cast<const uint2*>(r.k + lane * DPL), kf);
-        float dot = 0.0f;
+    // the keys in order; a row's codes and scales by `at` (one branch here, not one a key)
+    const auto scan = [&](auto at) {
+        for (int t = k0; t < k1; t++) {
+            const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
+            const Row8 r = at(pos);
+            float kf[DPL], vf[DPL];
+            widen8(*reinterpret_cast<const uint2*>(r.k + lane * DPL), kf);
+            float dot = 0.0f;
 #pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
-        const float s = warp_sum(dot) * *r.ks * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        widen8(*reinterpret_cast<const uint2*>(r.v + lane * DPL), vf);
-        const float bv = b * *r.vs;
+            for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
+            const float s = warp_sum(dot) * *r.ks * scale;
+            const float mn = fmaxf(mx, s);
+            const float a = __expf(mx - mn), b = __expf(s - mn);
+            l = l * a + b;
+            widen8(*reinterpret_cast<const uint2*>(r.v + lane * DPL), vf);
+            const float bv = b * *r.vs;
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
-        mx = mn;
+            for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
+            mx = mn;
+        }
+    };
+    if (sg.pt == 0) {
+        const Row8 r0 = row8(sg, layer, KVH, h, 0); // row p is row 0's plus p rows
+        scan([&](int pos) { return Row8{r0.k + (size_t)pos * HD, r0.v + (size_t)pos * HD, r0.ks + pos, r0.vs + pos}; });
+    } else {
+        scan([&](int pos) { return row8(sg, layer, KVH, h, pos); });
     }
     if (lane == 0) {
         PM[slot] = mx;
