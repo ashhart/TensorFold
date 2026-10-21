@@ -187,3 +187,12 @@ TF_CTL_TAIL(tf_ctl_tail_drop_branch_out, tf_rms_tail::BRANCH_OUT)
 TF_CTL_TAIL(tf_ctl_tail_drop_sum, tf_rms_tail::SUM)
 TF_CTL_TAIL(tf_ctl_tail_drop_row, tf_rms_tail::ROW)
 #undef TF_CTL_TAIL
+
+// Gate 3: vit.cu's LayerNorm rows (8192 wide) keeping the points in `keep`; the shapes gate must go red.
+#include "vit_norm.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_vit_norm(const __nv_bfloat16* x, const __nv_bfloat16* w,
+                                                                   const __nv_bfloat16* b, __nv_bfloat16* y, int d,
+                                                                   float eps, int keep) {
+    tf_vit_norm::layer_norm<32>(x, w, b, y, d, eps, keep);
+}
