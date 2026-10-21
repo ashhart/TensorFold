@@ -44,6 +44,9 @@ pub const Ctx = struct {
 /// How a layer pass attends: absorbed or chained rows over the ring and the block's earlier rows, into the ring too.
 const Pass = union(enum) { ring, tree: u64 };
 
+/// Where a stream's ring and state are when its target lane's run holds them (Mtp.ring_of).
+pub const RingOf = struct { ctx: *anyopaque, area: *const fn (*anyopaque, *Stream) ?u64 };
+
 pub const Mtp = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -89,6 +92,8 @@ pub const Mtp = struct {
     streams: std.AutoHashMapUnmanaged(*Stream, *Ctx) = .empty,
     /// Contexts between streams, allocated and run once (`reserve`), as the driver stalls a buffer's first kernel.
     pool: std.ArrayList(*Ctx) = .empty,
+    /// TF_QWEN_KV_PAGES: a stream's ring and state are views of its target lane's run (null: the contexts own theirs).
+    ring_of: ?RingOf = null,
     /// One draft level's cost (timed at load): a chained row, or a tree's rows at one depth.
     step_ms: f64 = 1.0,
     /// The target's window ms by rows (cuda_native.zig times them), for the round loop's prices.
@@ -176,6 +181,11 @@ pub const Mtp = struct {
         return 2 * d.capacity * d.kvWidth() * 2;
     }
 
+    /// A stream's buffers in a pool lane's run: its ring, then (256-aligned) its newest row's state.
+    pub fn areaBytes(d: *const Mtp) usize {
+        return std.mem.alignForward(usize, d.ringBytes(), 256) + d.e.g.hidden * 2;
+    }
+
     fn scratchBytes(d: *Mtp) usize {
         d.at = 0;
         return d.layout(false) catch unreachable;
@@ -234,8 +244,9 @@ pub const Mtp = struct {
 
     /// `n` contexts ready in the pool, for the streams the server admits.
     pub fn reserve(d: *Mtp, n: usize) !void {
-        try d.pool.ensureTotalCapacity(d.gpa, n);
-        while (d.pool.items.len < n) d.pool.appendAssumeCapacity(try d.create());
+        const own = if (d.ring_of != null) @min(n, 1) else n; // with a pool the other streams' buffers are lane runs
+        try d.pool.ensureTotalCapacity(d.gpa, own);
+        while (d.pool.items.len < own) d.pool.appendAssumeCapacity(try d.create());
     }
 
     pub fn ringK(d: *Mtp, ctx: *Ctx) u64 {
@@ -494,6 +505,13 @@ pub const Mtp = struct {
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
         const d = cast(p);
         if (d.streams.contains(s)) return error.StreamOpen;
+        if (d.ring_of) |r| if (r.area(r.ctx, s)) |base| { // the lane's run holds them, zeroed: a context borrowing it
+            const ctx = try d.gpa.create(Ctx);
+            errdefer d.gpa.destroy(ctx);
+            const last = base + std.mem.alignForward(usize, d.ringBytes(), 256);
+            ctx.* = .{ .ring = .{ .d = d.e.d, .ptr = base, .len = d.ringBytes(), .borrowed = true }, .last = .{ .d = d.e.d, .ptr = last, .len = d.e.g.hidden * 2, .borrowed = true } };
+            return d.streams.put(d.gpa, s, ctx);
+        };
         const ctx = d.pool.pop() orelse try d.create();
         errdefer d.pool.append(d.gpa, ctx) catch d.drop(ctx);
         d.resetCtx(ctx);
@@ -535,7 +553,10 @@ pub const Mtp = struct {
 
     fn releaseFn(p: *anyopaque, s: *Stream) void {
         const d = cast(p);
-        if (d.streams.fetchRemove(s)) |kv| d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
+        if (d.streams.fetchRemove(s)) |kv| {
+            if (kv.value.ring.borrowed) return d.gpa.destroy(kv.value); // its lane's run goes back with the lane
+            d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
+        }
     }
 };
 
