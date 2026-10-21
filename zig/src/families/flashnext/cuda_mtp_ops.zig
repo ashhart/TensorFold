@@ -230,9 +230,7 @@ pub fn Ops(comptime Tri: type) type {
             }
         }
 
-        /// forwardHead over several drafts in one pass, a lane each (its own cache at d.len): `nexts[i]` rows of streams
-        /// `rows[i]`, each lane's last row in its d.out and (scores) its draft scores in its d.dlogits. Every row runs the
-        /// ops a lone forwardHead runs on it, each row's sums its own, so each draft gets what drafting alone gives it.
+        /// forwardHead over several drafts in one pass, a lane each: every row's ops and sums as a lone forwardHead's.
         pub fn forwardHeadMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, scores: bool) !void {
             const e = o.e;
             const tri = o.tri;
@@ -319,8 +317,7 @@ pub fn Ops(comptime Tri: type) type {
             for (ds, 0..) |d, i| try p.copy(d.dlogits.ptr, s.head_local + i * n_ids * 2, n_ids * 2);
         }
 
-        /// draft over several greedy drafts at once: absorb each one's kept rows in one pass, then chain them a step a
-        /// pass, each stream picking and stopping as it would alone (same confidence rule, same count).
+        /// draft over several greedy drafts: kept rows in one pass, then a pass a step, each chaining as it would alone
         pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, confidence: f64, outs: []const *Chain) !void {
             const h = o.h;
             const n_l = ds.len;
