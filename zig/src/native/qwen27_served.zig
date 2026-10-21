@@ -87,10 +87,15 @@ pub const Host = struct {
         return images.prepare(h.vision.?, h.clock.io, a, bytes, max_tokens);
     }
 
-    /// LaneHost's decision hook: Ornith's label reads over a shared trunk, on an idle engine.
-    fn decideRun(ptr: *anyopaque, task: *api.DecisionTask) error{ Failed, Refused }!void {
+    /// LaneHost's decision hook: Ornith's label reads over a shared trunk, beside live rounds on a free slot.
+    fn decideRun(ptr: *anyopaque, task: *api.DecisionTask) error{ Failed, Refused, Busy }!void {
         const h = of(ptr);
         return decide.run(h.back, h.joint, h.host.info_.context_window, task);
+    }
+
+    /// The host's busy gate: a queued decision may take a slot beside the live streams when one is free.
+    fn decideReady(ptr: *anyopaque) bool {
+        return decide.ready(of(ptr).back);
     }
 };
 
@@ -335,7 +340,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
-    h.host.decider = .{ .ctx = h, .run = Host.decideRun }; // the engine still answers text: info_.decides stays off
+    h.host.decider = .{ .ctx = h, .run = Host.decideRun, .ready = Host.decideReady }; // the engine still answers text: info_.decides stays off
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
     // a lone greedy request takes the serial loop on tensor units, where it is faster (TF_QWEN27_LANES overrides)
     const units = model.device.tensorUnits();

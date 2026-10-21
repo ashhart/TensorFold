@@ -77,7 +77,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
 }
 
 /// After a GPU failure whose streams have all left, the runner and drafter take rounds again; `s` takes its slot now.
-fn recover(b: *Metal, s: *const lanes.Stream) !void {
+pub fn recover(b: *Metal, s: *const lanes.Stream) !void {
     const drafter = if (b.draft) |d| d.model.backend.failed else false;
     if (!b.runner.failed and !drafter) return;
     for (b.owners[0..b.runner.slots]) |o| if (o != null and o != s) return error.RoundGpuFailure;
@@ -90,7 +90,7 @@ fn recover(b: *Metal, s: *const lanes.Stream) !void {
 }
 
 /// Empty `slot`'s own drafter state past slot 0 (its taps ring and session), as a fresh prompt starts it.
-fn clearContext(b: *Metal, slot: u32) !void {
+pub fn clearContext(b: *Metal, slot: u32) !void {
     if (slot == 0) return;
     const d = b.draft orelse return;
     if (b.contexts[slot]) |x| try x.reset(d.model.graph.config);

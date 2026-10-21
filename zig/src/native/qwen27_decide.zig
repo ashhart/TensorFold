@@ -1,25 +1,75 @@
-//! The 27B lane backend's decision passes on an idle engine: the trunk's state kept once, each branch read over it.
+//! The 27B lane backend's decision passes: a synthetic stream's admission on a free slot, beside the
+//! live rounds as a new stream's prompt pass would, or alone on the idle engine as before.
 const std = @import("std");
 const api = @import("engine_api");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
+const lanes = tf.lanes;
 const lb = @import("qwen27_lanes.zig");
+const slots = @import("qwen27_slots.zig");
 const joint = @import("qwen27_joint.zig");
 
-/// A queued decision's GPU work on the idle host: score the row after its prompt; decide, each branch's last row.
-pub fn run(b: *lb.Metal, head: ?*joint.Head, window: u32, task: *api.DecisionTask) error{ Failed, Refused }!void {
+/// The LaneHost's busy gate: a decision pass may take a slot beside the live streams when one is free.
+pub fn ready(b: *const lb.Metal) bool {
+    return b.freeSlot() != null;
+}
+
+/// A queued decision's GPU work (LaneHost runs it alone): score reads the row after its prompt; decide, each branch's last row.
+/// `head` loaded: `labels` are instead option-final token positions, each read of the pass's post-final-norm hidden rows.
+/// The pass binds a free slot as a synthetic stream — its rows join the rounds as any admitted prompt's do,
+/// it never draws a token — or stays queued (error.Busy) while the batch gives no slot.
+pub fn run(b: *lb.Metal, head: ?*joint.Head, window: u32, task: *api.DecisionTask) error{ Failed, Refused, Busy }!void {
     switch (task.*) {
-        .score => |*s| s.out = try score(b, head, s.prompt, s.labels, s.logits, s.mass),
-        .decide => |d| try decide(b, head, window, d),
+        .score => |*s| {
+            var stream = try synthetic(b, s.prompt);
+            defer stream.deinit(b.gpa);
+            const slot = try bind(b, &stream);
+            defer b.unbind(&stream);
+            s.out = try score(b, head, slot, s.prompt, s.labels, s.logits, s.mass);
+        },
+        .decide => |d| {
+            try check(window, d);
+            var stream = try synthetic(b, d.trunk);
+            defer stream.deinit(b.gpa);
+            const slot = try bind(b, &stream);
+            defer b.unbind(&stream);
+            try decide(b, head, slot, d);
+        },
     }
 }
 
-/// `labels`' logits at the row after `prompt` (`.last` head, logits row 0); a JointHead scores option-final rows.
-fn score(b: *lb.Metal, head: ?*joint.Head, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
+/// The pass's synthetic stream: a slot's owner for the pass's rows; drafts off, it never generates.
+fn synthetic(b: *lb.Metal, ids: []const u32) error{Failed}!lanes.Stream {
+    return lanes.Stream.init(b.gpa, .{ .id = "decision", .prompt = ids, .max_new = 0, .drafts = false }) catch return error.Failed;
+}
+
+/// `s` bound to a free slot the way a new stream's admission binds one: its buffers grown where needed,
+/// the slot's held drafts dropped and its runner state reset. `b.unbind(s)` frees it (the caller's defer).
+/// error.Busy: no slot is free, or one's buffers do not fit yet — the pass stays queued for the next gap.
+fn bind(b: *lb.Metal, s: *lanes.Stream) error{ Failed, Busy }!u32 {
+    b.settle() catch {}; // a pending verify's rows are kept before the pass touches the shared frame
+    b.dropRound();
+    const slot = b.freeSlot() orelse return error.Busy;
+    b.ready(slot, s) catch |e| return switch (e) {
+        error.LaneMemory => error.Busy,
+        else => failed("a decision's slot", e),
+    };
+    b.dropTreeOf(slot);
+    b.owners[slot] = s;
+    b.runner.rope[slot] = .{};
+    b.runner.images = null;
+    slots.recover(b, s) catch |e| return failed("recovering the device", e);
+    if (b.drafter(slot)) |d| d.reset() catch |e| return failed("resetting a decision's slot", e) else b.runner.reset(slot) catch |e| return failed("resetting a decision's slot", e);
+    slots.clearContext(b, slot) catch |e| return failed("clearing a decision's slot", e);
+    return slot;
+}
+
+/// `labels`' logits at the row after `prompt` on `slot`: a prefill's `.last` head leaves them in logits row 0.
+/// A JointHead instead: `labels` are each option's final-token position, scored on that row's hidden state.
+fn score(b: *lb.Metal, head: ?*joint.Head, slot: u32, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
     const r = b.runner;
     if (prompt.len == 0 or prompt.len > r.capacity or logits.len < labels.len) return error.Failed;
-    try reset(b);
-    const session = q.session.Session{ .runner = r };
+    const session = q.session.Session{ .runner = r, .slot = slot };
     if (head) |h| {
         try forward(h, b, session, 0, prompt, labels, logits);
         return massOf(logits[0..labels.len], mass);
@@ -28,9 +78,8 @@ fn score(b: *lb.Metal, head: ?*joint.Head, prompt: []const u32, labels: []const 
     return read(row0(r), labels, logits, mass);
 }
 
-/// Each branch's label logits at its last row after the shared trunk; a `head` reads option-final positions.
-fn decide(b: *lb.Metal, head: ?*joint.Head, window: u32, d: *api.Decision) error{ Failed, Refused }!void {
-    const r = b.runner;
+/// What a packed decision needs before it takes a slot (its refusal words reach the requester).
+fn check(window: u32, d: *api.Decision) error{ Failed, Refused }!void {
     if (d.pictures.len > 0) return refuse(d, "decisions with pictures are not served by this engine yet");
     if (d.trunk.len == 0 or d.branches.len == 0 or d.counts.len != d.branches.len) return error.Failed;
     var wanted: usize = 0;
@@ -41,15 +90,21 @@ fn decide(b: *lb.Metal, head: ?*joint.Head, window: u32, d: *api.Decision) error
         wanted = std.math.add(usize, wanted, n) catch return error.Failed;
     }
     if (d.labels.len < wanted or d.logits.len < wanted) return error.Failed;
-    try reset(b);
-    const session = q.session.Session{ .runner = r };
+}
+
+/// Each branch's label logits at its last row after the shared trunk on `slot`: the trunk's state is kept once
+/// and restored a branch at a time; every branch's rows stand on the same trunk state.
+/// A JointHead instead: `labels` are option-final positions in the whole sequence (trunk's length on a branch's rows).
+fn decide(b: *lb.Metal, head: ?*joint.Head, slot: u32, d: *api.Decision) error{Failed}!void {
+    const r = b.runner;
+    const session = q.session.Session{ .runner = r, .slot = slot };
     session.prefill(d.trunk, b.chunk) catch |e| return failed("the trunk's prompt pass", e);
-    const st = q.snapshot.saveSlot(b.gpa, r, 0, null, @intCast(d.trunk.len)) catch |e| return failed("keeping the trunk's state", e);
+    const st = q.snapshot.saveSlot(b.gpa, r, slot, null, @intCast(d.trunk.len)) catch |e| return failed("keeping the trunk's state", e);
     defer q.snapshot.drop(b.gpa, st);
     d.read = d.trunk.len;
     var at: usize = 0;
     for (d.branches, d.counts) |br, n| {
-        q.snapshot.restoreSlot(b.gpa, r, 0, null, st) catch |e| return failed("restoring the trunk's state", e);
+        q.snapshot.restoreSlot(b.gpa, r, slot, null, st) catch |e| return failed("restoring the trunk's state", e);
         if (head) |h| {
             try forward(h, b, session, d.trunk.len, br, d.labels[at..][0..n], d.logits[at..][0..n]);
         } else {
@@ -59,10 +114,11 @@ fn decide(b: *lb.Metal, head: ?*joint.Head, window: u32, d: *api.Decision) error
         d.read += br.len;
         at += n;
     }
-    reset(b) catch {}; // slot 0 stands empty for the next stream, whatever its prompt was
 }
 
-/// `ids` prefilled in chunks: each `positions` entry is an option's final-token position offset by `base`.
+/// `ids` prefilled in chunks (each chunk's rows alone stand in `input`): a `positions` inside the chunk
+/// is that option's final-token position, base the rows' offset in the whole sequence (0 for a prompt,
+/// the trunk's length on a branch); the JointHead's score lands in `logits`.
 fn forward(h: *joint.Head, b: *lb.Metal, session: q.session.Session, base: usize, ids: []const u32, positions: []const u32, logits: []f64) error{Failed}!void {
     const r = b.runner;
     for (positions) |p| if (p < base or p - base >= ids.len) return error.Failed;
@@ -78,16 +134,6 @@ fn forward(h: *joint.Head, b: *lb.Metal, session: q.session.Session, base: usize
         }
         first = end;
     }
-}
-
-/// Slot 0 empty for a pass: a pending keep ends first, and the drafter's reset covers its session too.
-fn reset(b: *lb.Metal) error{Failed}!void {
-    b.settle() catch {};
-    b.dropRound();
-    b.runner.rope[0] = .{};
-    b.runner.images = null;
-    if (b.draft) |d| d.reset() catch |e| return failed("resetting slot 0", e);
-    return b.runner.reset(0) catch |e| failed("resetting slot 0", e);
 }
 
 /// The last pass's logits row 0: bf16, `vocab` wide; the `.last` head leaves its one row there.

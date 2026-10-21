@@ -314,10 +314,14 @@ pub const DecisionTask = union(enum) {
     decide: *Decision,
 };
 
-/// A lane-hosted backend's decision passes, run on the engine thread once no stream is live.
+/// A lane-hosted backend's decision passes: an idle engine runs them; one whose ``ready`` says a
+/// slot is free runs them beside the live streams, as a new stream's prompt pass would.
 pub const Decider = struct {
     ctx: *anyopaque,
-    run: *const fn (ctx: *anyopaque, task: *DecisionTask) error{ Failed, Refused }!void,
+    /// A pass on the engine thread; ``error.Busy`` leaves it queued for the next gap (its slot went).
+    run: *const fn (ctx: *anyopaque, task: *DecisionTask) error{ Failed, Refused, Busy }!void,
+    /// Engine thread, the host locked: may a pass take a slot beside the live streams (null: idle only)?
+    ready: ?*const fn (ctx: *anyopaque) bool = null,
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.

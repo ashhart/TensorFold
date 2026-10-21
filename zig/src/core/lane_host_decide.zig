@@ -1,6 +1,7 @@
 //! A lane host's decision passes: HTTP threads queue them; the engine thread runs them while no stream lives.
 const std = @import("std");
 const api = @import("engine_api.zig");
+const admit = @import("lane_host_admit.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 
 /// One queued decision pass: its task in, the failure and completion its requester waits on.
@@ -42,25 +43,52 @@ pub fn wait(h: *LaneHost, work: *Work) error{ Failed, Refused }!void {
     if (work.failed) |e| return e;
 }
 
-/// The oldest queued decision's pass: an idle engine runs it, a stale one fails the waiters instead.
+/// The oldest queued decision's pass: an idle engine runs it; a decider whose ``ready`` says a
+/// slot is free runs it beside the live streams. A stale host fails the waiters instead.
 pub fn step(h: *LaneHost) void {
     h.lock();
     if (h.stale) {
         h.unlock();
         return failAll(h);
     }
-    const idle = !h.closing and h.decider != null and h.admitted.items.len == 0 and h.filling.items.len == 0 and h.core.activeCount() == 0;
-    const work: ?*Work = if (idle and h.decisions.items.len > 0) h.decisions.orderedRemove(0) else null;
+    const work = head(h);
     h.unlock();
     const w = work orelse return;
     const decider = h.decider.?;
     decider.run(decider.ctx, &w.task) catch |e| {
-        w.failed = e;
+        switch (e) {
+            error.Busy => return, // the slot the pass wanted went: it keeps the queue's head for the next gap
+            else => |x| w.failed = @errorCast(x),
+        }
     };
     h.lock();
+    _ = h.decisions.orderedRemove(0); // it is still the head: only this thread takes works out
     w.finished = true;
     h.unlock();
     h.decided.broadcast(h.io);
+}
+
+/// The queue's head when a pass may run now (the caller holds the lock): always on an idle engine;
+/// beside the live streams when the decider's ``ready`` says a slot is free and no queued request
+/// the lanes would serve waits for that turn (a decision takes the same turn a new stream would).
+fn head(h: *LaneHost) ?*Work {
+    if (h.closing or h.decisions.items.len == 0) return null;
+    const decider = h.decider orelse return null;
+    const idle = h.admitted.items.len == 0 and h.filling.items.len == 0 and h.core.activeCount() == 0;
+    if (idle) return h.decisions.items[0];
+    const ready = decider.ready orelse return null;
+    if (h.filling.items.len > 0) return null;
+    const lane_free = h.admitted.items.len < @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes);
+    if (lane_free and h.queued.items.len > 0 and admit.pick(h) != null) return null; // a request's turn
+    return if (ready(decider.ctx)) h.decisions.items[0] else null;
+}
+
+/// A queued decision a free slot could start now (the caller holds the lock): the lone driver hands
+/// its stream to the lane core for it rather than hold the engine through the whole reply.
+pub fn waiting(h: *LaneHost) bool {
+    const decider = h.decider orelse return false;
+    const ready = decider.ready orelse return false;
+    return h.decisions.items.len > 0 and ready(decider.ctx);
 }
 
 /// Every queued decision failed (the host is closing or the device went stale): requesters wake.

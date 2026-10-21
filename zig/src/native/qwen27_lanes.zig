@@ -112,10 +112,10 @@ pub const Metal = struct {
 
     pub const lone = slots.lone;
     const prefillSlot = slots.prefill;
-    const freeSlot = slots.free;
+    pub const freeSlot = slots.free;
     const ringChunk = slots.ringChunk;
-    const unbind = slots.unbind;
-    const ready = slots.ready;
+    pub const unbind = slots.unbind;
+    pub const ready = slots.ready;
     const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {

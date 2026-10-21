@@ -1,6 +1,7 @@
 //! A lane host's lone driver: the backend's own loop runs a lone stream until a foreground request or a cancel waits.
 const LaneHost = @import("lane_host.zig").LaneHost;
 const status = @import("lane_host_status.zig");
+const decide = @import("lane_host_decide.zig");
 const Job = LaneHost.Job;
 
 /// An idle backend driver takes a lone drafted request, sampled, with logprobs, a budget or a grammar when supported.
@@ -55,7 +56,7 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
             const host: *LaneHost = @ptrCast(@alignCast(ctx));
             host.lock();
             defer host.unlock();
-            return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing;
+            return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing or decide.waiting(host);
         }
     };
     const paused = lone.run(lone.ctx, &job.stream, .{ .ctx = h, .committed = Hooks.committed, .yield = Hooks.yield, .resumed = resumed });

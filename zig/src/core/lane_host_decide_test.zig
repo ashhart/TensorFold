@@ -12,8 +12,14 @@ const Request = api.Request;
 const Record = struct {
     core: *lanes.Engine,
     calls: usize = 0,
-    idle: bool = true, // activeCount at every pass: decisions only ever run on an idle engine
+    idle: bool = true, // activeCount at every pass: false once a pass ran beside a live stream
+    live_ok: bool = false, // what `ready` answers when the host asks beside live work (false: idle only)
     fail: ?error{ Failed, Refused } = null,
+
+    fn ready(ctx: *anyopaque) bool {
+        const r: *Record = @ptrCast(@alignCast(ctx));
+        return r.live_ok;
+    }
 
     fn run(ctx: *anyopaque, task: *api.DecisionTask) error{ Failed, Refused }!void {
         const r: *Record = @ptrCast(@alignCast(ctx));
@@ -159,4 +165,56 @@ test "a queued decision runs once the live stream ends, and the text reply still
     try std.testing.expectEqual(@as(usize, 64), box.tokens);
     try std.testing.expect(record.idle);
     try std.testing.expectEqual(@as(usize, 1), record.calls);
+}
+
+test "a decider that can take a slot beside the rounds answers a queued decision while a reply is live" {
+    const gpa = std.testing.allocator;
+    var cfg = try config(gpa);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    var record = Record{ .core = &core, .live_ok = true };
+    host.decider = .{ .ctx = &record, .run = Record.run, .ready = Record.ready };
+    try host.start();
+    defer host.stop();
+    const Box = struct {
+        mutex: std.Io.Mutex = .init,
+        done: ?Reason = null,
+        tokens: usize = 0,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .tokens => |t| b.tokens += t.len,
+                .finished => |f| b.done = f.reason,
+                else => {},
+            }
+        }
+        fn read(b: *@This()) struct { done: ?Reason, tokens: usize } {
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            return .{ .done = b.done, .tokens = b.tokens };
+        }
+    };
+    const prompt = [_]u32{ 2, 7, 1, 8 };
+    var box: Box = .{};
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 1_000_000 };
+    const e = host.engine();
+    try e.submit(1, &request, .{ .ctx = &box, .event = Box.event });
+    // the reply is live (its first tokens landed) before the decision is queued: it must not wait for the end
+    while (box.read().tokens == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    const labels = [_]u32{5};
+    var logits = [_]f64{0};
+    try std.testing.expectEqual(@as(f64, 0), try e.score(&prompt, &labels, &logits, false));
+    try std.testing.expectEqualSlices(f64, &.{5}, &logits);
+    try std.testing.expect(!record.idle); // the pass ran beside the reply, not after it
+    try std.testing.expectEqual(@as(usize, 1), record.calls);
+    e.cancel(1);
+    while (box.read().done == null) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    try std.testing.expectEqual(Reason.cancelled, box.read().done.?);
 }

@@ -64,8 +64,8 @@ pub const LaneHost = struct {
     memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
-    decider: ?api.Decider = null, // the backend's decision passes, run while the engine is idle
-    decisions: std.ArrayList(*decide.Work) = .empty, // score/decide calls waiting for an idle engine, in order
+    decider: ?api.Decider = null, // the backend's decision passes: an idle engine's, or beside the live streams when its `ready` says a slot is free
+    decisions: std.ArrayList(*decide.Work) = .empty, // score/decide calls waiting for a pass, in order
     decided: std.Io.Condition = .init, // a queued decision finished; its requester wakes
     lessons: std.ArrayList(Lesson) = .empty, // learn requests waiting for an idle engine
     lesson_open: bool = false, // the learner holds a begun job (engine thread only)
@@ -526,7 +526,7 @@ pub const LaneHost = struct {
             ends.takeCancels(h);
             rows_host.answer(h);
             learn.refuse(h);
-            decide.step(h); // a queued decision takes an idle engine before new work; a stale one fails it
+            decide.step(h); // a queued decision's pass: an idle engine's, or a free slot beside the live streams
             while (h.admitOne()) {}
             h.fillOne();
             h.core.sweep() catch |err| {

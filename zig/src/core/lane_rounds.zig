@@ -266,7 +266,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         ends.takeCancels(h);
         rows_host.answer(h);
         learn.refuse(h);
-        decide.step(h); // a queued decision takes an idle engine before new work; a stale one fails it
+        decide.step(h); // a queued decision's pass: an idle engine's, or a free slot beside the live streams
         h.lock();
         if (h.closing) {
             const left = h.queued.items.len + h.admitted.items.len;
