@@ -14,6 +14,7 @@ const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
 const hcnorm_k = @import("contract_hc_normalize.zig");
+const hcmix_k = @import("contract_hc_mix.zig");
 const utility_k = @import("contract_utility.zig");
 const best_k = @import("contract_row_best.zig");
 const qsa_k = @import("contract_qsa_select.zig");
@@ -243,6 +244,10 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(hcnorm_k.Kind), &hcnorms) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .cols_fn = try hc.function("fn_hc_normalize_cols"), .old_fn = try hc.function("fn_hc_normalize") };
     defer for (&hcnorms) |*x| x.deinit();
     for (&hcnorms) |*x| try kernels.append(a, x.kernel());
+    var hcmixes: [2]hcmix_k.Mix = undefined;
+    for (std.enums.values(hcmix_k.Kind), &hcmixes) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .new_fn = try hc.function("fn_hc_dense_mix8"), .old_fn = try hc.function("fn_hc_dense_mix") };
+    defer for (&hcmixes) |*x| x.deinit();
+    for (&hcmixes) |*x| try kernels.append(a, x.kernel());
     var batch = try cuda.Module.load(gpu.d, kk.flashnext_batch);
     defer batch.unload();
     var sums: [2]utility_k.Sum = undefined;

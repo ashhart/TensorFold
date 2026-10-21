@@ -489,6 +489,30 @@ extern "C" __global__ void fn_hc_dense_mix(const __nv_bfloat16* UP, const __nv_b
     }
 }
 
+// fn_hc_dense_mix, a warp a 32-column group and eight a block: the same ops, lane 0 summing its group in order.
+extern "C" __global__ void __launch_bounds__(256) fn_hc_dense_mix8(const __nv_bfloat16* UP, const __nv_bfloat16* NORMED,
+                                                                   __nv_bfloat16* MIXED, float* XSM, int D, int SS) {
+    __shared__ float row[8][32];
+    const int r = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int group = blockIdx.y * 8 + warp, d = group * 32 + lane;
+    if (group >= D / 32) return;
+    float total = 0.0f;
+    for (int stream = 0; stream < SS; ++stream) {
+        const long long at = (static_cast<long long>(r) * SS + stream) * D + d;
+        const float value = rbf(__fmul_rn(bsig(bf(UP[at])), bf(NORMED[at])));
+        total = __fadd_rn(total, value);
+    }
+    const float mixed = rbf(__fdiv_rn(total, static_cast<float>(SS)));
+    MIXED[static_cast<long long>(r) * D + d] = __float2bfloat16_rn(mixed);
+    row[warp][lane] = mixed;
+    __syncwarp();
+    if (lane == 0) {
+        float sum = 0.0f;
+        for (int i = 0; i < 32; ++i) sum = __fadd_rn(sum, row[warp][i]);
+        XSM[static_cast<long long>(r) * (D / 32) + group] = sum;
+    }
+}
+
 // Shared expert uses its own BF16 projection outputs and rounding boundaries.
 extern "C" __global__ void fn_shared_swiglu(const __nv_bfloat16* GATE, const __nv_bfloat16* UP,
                                              __nv_bfloat16* ACT, int W) {
