@@ -79,6 +79,9 @@ pub const flags = [_]Flag{
     .{ .name = "--silence-redraws", .native = true },
     .{ .name = "--silence-redraw-budget-s", .native = true },
     .{ .name = "--silence-redraw-controls", .native = true },
+    .{ .name = "--register-redraw-st", .native = true },
+    .{ .name = "--register-redraw-high", .native = true },
+    .{ .name = "--register-high-hz", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
@@ -264,7 +267,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     try ranks(u, a, out);
     out.silence.validate() catch |err|
         return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
-    out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid silence redraw configuration: {s}", .{@errorName(err)});
+    out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     out.alias = repeated.alias.items;
     out.api_key = repeated.keys.items;
@@ -377,7 +380,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.redraw.budget_s = try float(u, a, name, v);
     } else if (is(name, "--silence-redraw-controls")) {
         out.redraw.controls = @import("drama_allow.zig").parse(v) catch return fail(u, a, "argument --silence-redraw-controls: expected comma-separated UTF-8 names without square brackets, or an empty list: '{s}'", .{v});
-    }
+    } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v);
 }
 
 /// --recall and the flags that imply it; false for any other flag.

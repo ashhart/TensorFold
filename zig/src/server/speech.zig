@@ -10,6 +10,7 @@ const pyrepr = @import("pyrepr.zig");
 const reply_text = @import("reply_text.zig");
 const drama_prompt = @import("drama_prompt.zig");
 const speech_redraw = @import("speech_redraw.zig");
+const speech_register = @import("speech_register_log.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
 const clock = @import("clock.zig");
@@ -44,18 +45,9 @@ pub const Format = enum {
 const Plan = struct { input: []const u8, prompt: []const u32, seed: u64, format: Format, stream: bool, budget_s: ?f64 = null };
 
 /// One whole take: its audio and why it ended.
-const Take = struct { pcm: []f32, reason: api.Reason };
+const Take = struct { pcm: []f32, reason: api.Reason, trip: bool = false, jump: ?f64 = null };
 
-const Metadata = struct {
-    enabled: bool,
-    redraws: u8 = 0,
-
-    fn add(m: Metadata, c: *Conn) !void {
-        if (!m.enabled) return;
-        var buf: [3]u8 = undefined;
-        try c.addHeader("X-Silence-Redraws", std.fmt.bufPrint(&buf, "{d}", .{m.redraws}) catch unreachable);
-    }
-};
+const Metadata = @import("speech_metadata.zig").Metadata;
 
 pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     const sp = srv.info.speech orelse {
@@ -66,12 +58,12 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     var cx: Cx = .{ .a = a };
     const id = try ids.make(a, "speech-", 32);
     const received = clock.nowNs(srv.io);
-    var metadata: Metadata = .{ .enabled = srv.config.redraw.count() > 0 };
+    var metadata: Metadata = .{ .enabled = srv.config.redraw.count() > 0, .register_on = srv.config.redraw.register.on() };
     const raw = http_body.readJson(c, &cx) catch |e| return refuse(c, &cx, id, metadata, e);
     var plan = prepare(srv, &cx, sp, raw) catch |e| return refuse(c, &cx, id, metadata, e);
     // only chunked framing tells a client that a stream which ends early is incomplete
     if (plan.stream and !std.mem.eql(u8, c.version, "HTTP/1.1")) return fail(c, &cx, id, metadata, .request, "stream=true requires HTTP/1.1");
-    if (srv.config.redraw.count() > 0)
+    if (srv.config.redraw.count() > 0 or srv.config.redraw.register.on())
         plan.budget_s = speech_redraw.budget(srv.config.redraw.budget_s, c.header("X-Deadline-S")) catch
             return fail(c, &cx, id, metadata, .request, "X-Deadline-S must be a positive number of seconds");
     synthesize(srv, c, &cx, id, sp, plan, received, &metadata);
@@ -198,52 +190,76 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     if (settle(srv, c, &box, engine_id, null) == null) return left(srv, c, id, plan.prompt.len, received);
     if (why(&box, result.samples, pcm.len)) |message| return fail(c, cx, id, metadata.*, .server, message);
     const take: Take = .{ .pcm = pcm[0..result.samples], .reason = box.reason };
-    if (take.reason != .silence or srv.config.redraw.count() == 0) return reply(srv, c, cx, id, sp, plan, received, take, metadata.*);
-    const spare = srv.gpa.alloc(f32, pcm.len) catch return reply(srv, c, cx, id, sp, plan, received, unused(id, 1, take, "out of memory"), metadata.*);
+    var spare: []f32 = &.{};
     defer srv.gpa.free(spare);
-    const sent = redraw(srv, c, cx, id, sp, plan, received, request, started, take, spare, metadata) orelse return;
+    const sent = redraw(srv, c, cx, id, sp, plan, received, request, started, take, &spare, metadata) orelse return;
     reply(srv, c, cx, id, sp, plan, received, sent, metadata.*);
 }
 
-/// Redraws a silenced take as seed salt + k while redraws and the budget last; the last take with audio, null if left.
-fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, first: api.SpeechRequest, started: i96, silenced: Take, spare: []f32, metadata: *Metadata) ?Take {
+fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, first: api.SpeechRequest, started: i96, drawn: Take, spare: *[]f32, metadata: *Metadata) ?Take {
+    const policy = srv.config.redraw;
     var next = first;
-    if (srv.config.redraw.controls) |controls| {
-        const input = @import("speech_plain.zig").filter(cx.a, controls, plan.input) catch return unused(id, 1, silenced, "out of memory");
-        if (input.ptr != plan.input.ptr) {
-            next.prompt = promptOf(srv, cx, sp, input) catch |e| return unused(id, 1, silenced, if (e == error.OutOfMemory) "out of memory" else cx.message);
-            next.frames = rows(cx.a, next.prompt) catch |e| return unused(id, 1, silenced, @errorName(e));
-        }
-    }
-    const buffers = [2][]f32{ first.pcm, spare };
-    var live: usize = 0;
-    var take = silenced;
+    var take = drawn;
+    var held: ?Take = null;
     var start = started;
-    for (1..@as(usize, srv.config.redraw.count()) + 1) |k| {
+    var k: usize = 1;
+    while (true) : (k += 1) {
+        take.trip = policy.count() > 0 and take.reason == .silence;
+        const fallback = keep(take, held, srv.config.silence_guard);
+        if (take.trip) {
+            if (metadata.redraws == policy.count()) break;
+            if (metadata.redraws == 0) if (policy.controls) |controls| {
+                const input = @import("speech_plain.zig").filter(cx.a, controls, plan.input) catch return unused(id, k, fallback, "out of memory");
+                if (input.ptr != plan.input.ptr) {
+                    next.prompt = promptOf(srv, cx, sp, input) catch |e| return unused(id, k, fallback, if (e == error.OutOfMemory) "out of memory" else cx.message);
+                    next.frames = rows(cx.a, next.prompt) catch |e| return unused(id, k, fallback, @errorName(e));
+                }
+            };
+        } else {
+            if (!policy.register.on()) break;
+            take.jump = speech_register.jump(cx.a, id, take.pcm, sp.sample_rate, policy.register);
+            if ((take.jump orelse 0) == 0) break;
+            metadata.register_tripped = true;
+            log.line("speech {s} register jump={d:.2}st", .{ id, take.jump.? });
+            if (metadata.register_redrawn) break;
+            held = take;
+        }
         const now = clock.nowNs(srv.io);
-        if (!speech_redraw.fits(plan.budget_s, received, start, now)) return unused(id, k, take, "t + d exceeds the budget");
+        if (!speech_redraw.fits(plan.budget_s, received, start, now)) return unused(id, k, fallback, "t + d exceeds the budget");
         const start_by = if (plan.budget_s) |s| s - clock.seconds(now - start) else null;
         start = now;
+        if (spare.len == 0) spare.* = srv.gpa.alloc(f32, first.pcm.len) catch return unused(id, k, fallback, "out of memory");
         var result: api.SpeechResult = .{};
-        next.pcm = buffers[1 - live];
+        // Once register holds a take, subsequent silence retries must never overwrite it.
+        const preserved = if (held) |h| h.pcm.ptr else take.pcm.ptr;
+        next.pcm = if (preserved == first.pcm.ptr) spare.* else first.pcm;
         next.result = &result;
         next.seed = api.seedFor(next.prompt, srv.config.seed_salt +% @as(i64, @intCast(k)));
         var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
         defer box.deinit();
         const engine_id = srv.next_id.fetchAdd(1, .monotonic);
-        submitRedraw(srv, c, engine_id, &next, &box, received, start_by) catch |e| return unused(id, k, take, @errorName(e));
-        metadata.redraws += 1;
+        submitRedraw(srv, c, engine_id, &next, &box, received, start_by) catch |e| return unused(id, k, fallback, @errorName(e));
+        if (take.trip) metadata.redraws += 1 else metadata.register_redrawn = true;
         if (settle(srv, c, &box, engine_id, null) == null) {
             left(srv, c, id, plan.prompt.len, received);
             return null;
         }
-        if (why(&box, result.samples, next.pcm.len)) |message| return unused(id, k, take, message);
-        live = 1 - live;
-        take = .{ .pcm = buffers[live][0..result.samples], .reason = box.reason };
+        if (why(&box, result.samples, next.pcm.len)) |message| return unused(id, k, fallback, message);
+        take = .{ .pcm = next.pcm[0..result.samples], .reason = box.reason };
         log.line("speech {s} redraw {d} finish={s}", .{ id, k, @tagName(take.reason) });
-        if (take.reason != .silence) break;
     }
-    return take;
+    const sent = keep(take, held, srv.config.silence_guard);
+    if (held != null and sent.pcm.ptr == held.?.pcm.ptr)
+        return unused(id, k - 1, sent, if (take.jump == null) "unmeasured" else "it ends worse or jumps no less");
+    return sent;
+}
+
+fn keep(later: Take, held: ?Take, guard: bool) Take {
+    const first = held orelse return later;
+    if (later.pcm.ptr == first.pcm.ptr) return first;
+    const better = !later.trip and later.reason != .silence and
+        (if (later.jump) |value| value < first.jump.? else guard);
+    return if (better) later else first;
 }
 
 fn submitRedraw(srv: *Server, c: *Conn, id: api.Id, request: *const api.SpeechRequest, box: *Mailbox, received: i96, start_by: ?f64) api.SpeechSubmitError!void {
@@ -432,7 +448,7 @@ fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reaso
     var len: [24]u8 = undefined;
     try c.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{header_len + data.len}) catch unreachable);
     try c.addHeader("X-Finish-Reason", @tagName(reason));
-    try metadata.add(c);
+    try metadata.addWhole(c);
     if (c.close) try c.addHeader("Connection", "close");
     defer c.out.clearRetainingCapacity();
     if (!std.mem.eql(u8, c.version, "HTTP/0.9")) try c.out.appendSlice(c.gpa, "\r\n");
@@ -564,3 +580,7 @@ test "allowed controls filters before speech input validation" {
     try std.testing.expectError(error.Refused, prepare(&srv, &cx, sp, body));
     try std.testing.expectEqualStrings("input must be at most 4096 characters", cx.message);
 }
+
+pub const Test = if (@import("builtin").is_test) struct {
+    pub const redrawTake = redraw;
+} else struct {};

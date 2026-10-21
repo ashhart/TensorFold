@@ -1,4 +1,4 @@
-//! Opt-in redraws of whole speech replies that the silence guard ended.
+//! Opt-in redraws of whole speech replies that the silence or register guard tripped.
 const std = @import("std");
 const api = @import("engine_api");
 const clock = @import("clock.zig");
@@ -11,6 +11,8 @@ pub const Policy = struct {
     budget_s: ?f64 = null,
     /// Null keeps the input; an empty list makes it plain; nonempty lists use the delivery allowlist.
     controls: ?drama_allow.Policy = null,
+    /// The register guard's thresholds: off unless all are set.
+    register: @import("speech_register.zig").Rule = .{},
 
     pub fn count(p: Policy) u8 {
         return p.max orelse 0;
@@ -18,13 +20,14 @@ pub const Policy = struct {
 
     pub fn validate(p: Policy, silence: api.speech_guard.Config) !void {
         if (p.budget_s) |s| if (!std.math.isFinite(s) or s <= 0) return error.BadRedrawBudget;
-        if (p.count() == 0 and (p.budget_s != null or p.controls != null)) return error.MissingRedrawCount;
+        try p.register.validate();
+        if (p.count() == 0 and (p.controls != null or p.budget_s != null and !p.register.on())) return error.MissingRedrawCount;
         if (p.count() > 0 and !silence.enabled()) return error.MissingSilenceGuard;
     }
 
     pub fn refusal(p: Policy, model_type: []const u8) ?[]const u8 {
-        if (p.max != null and !std.mem.eql(u8, model_type, "fish_omni"))
-            return "--silence-redraws and its options are for Drama speech: serve without them";
+        if ((p.max != null or p.register.on()) and !std.mem.eql(u8, model_type, "fish_omni"))
+            return "--silence-redraws, the register flags and their options are for Drama speech: serve without them";
         return null;
     }
 };
@@ -43,19 +46,22 @@ pub fn fits(budget_s: ?f64, received: i96, started: i96, now: i96) bool {
     return clock.seconds(now - received) + clock.seconds(now - started) <= limit;
 }
 
-test "redraw policy is off by default and needs a count and an enabled guard" {
+test "redraw policy is off by default; redraws need the guard, a budget redraws or the register guard" {
     const guard: api.speech_guard.Config = .{ .floor_dbfs = -60, .seconds = 1 };
+    const register: @import("speech_register.zig").Rule = .{ .st = 6, .high = 50, .high_hz = 300 };
     try (Policy{}).validate(.{});
     try (Policy{ .max = 2, .budget_s = 30, .controls = .{} }).validate(guard);
+    try (Policy{ .budget_s = 30, .register = register }).validate(.{});
     try std.testing.expectError(error.MissingSilenceGuard, (Policy{ .max = 1 }).validate(.{}));
     try std.testing.expectError(error.MissingRedrawCount, (Policy{ .budget_s = 30 }).validate(guard));
     try std.testing.expectError(error.MissingRedrawCount, (Policy{ .controls = .{} }).validate(guard));
+    try std.testing.expectError(error.MissingRedrawCount, (Policy{ .controls = .{}, .register = register }).validate(guard));
     for ([_]f64{ 0, -1, std.math.nan(f64), std.math.inf(f64) }) |bad|
         try std.testing.expectError(error.BadRedrawBudget, (Policy{ .max = 1, .budget_s = bad }).validate(guard));
 }
 
-test "an explicit redraw count, even 0, is refused on text and accepted on Drama speech" {
-    for ([_]Policy{ .{ .max = 0 }, .{ .max = 2 } }) |p| {
+test "an explicit redraw count, even 0, or the register guard is refused on text and accepted on Drama speech" {
+    for ([_]Policy{ .{ .max = 0 }, .{ .max = 2 }, .{ .register = .{ .st = 6, .high = 50, .high_hz = 300 } } }) |p| {
         try std.testing.expect(p.refusal("nemotron_h") != null);
         try std.testing.expect(p.refusal("fish_omni") == null);
     }
