@@ -13,6 +13,9 @@ constexpr int GEGLU_ALL = 127;
 // tf_draft_swiglu's bf16 steps (Metal core/draft_ops.metal, gemma4's DFlash drafter): its rounding points.
 enum : int { EXP = 1, DENOM = 2, RECIP = 4, SIGMOID = 8, SILU = 16 };
 constexpr int SWIGLU_ALL = 31;
+// MLX's logit soft cap cap * tanh(x / cap) as bf16 ops (Metal gemma4/glue.metal's gemma_softcap): its rounding points.
+enum : int { CAP_DIV = 1, CAP_TANH = 2 };
+constexpr int SOFTCAP_ALL = 3;
 
 __device__ __forceinline__ float bf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
 
@@ -36,6 +39,12 @@ __device__ __forceinline__ float swiglu(float g, float up, int keep) {
     const float inv = point(__fdiv_rn(1.f, point(__fadd_rn(1.f, e), keep, DENOM)), keep, RECIP);
     const float sig = g < 0.f ? inv : point(__fsub_rn(1.f, inv), keep, SIGMOID);
     return __fmul_rn(point(__fmul_rn(g, sig), keep, SILU), up);
+}
+
+// bf16(bf16(tanh(bf16(x / cap))) * cap): the division and product correctly rounded, tanhf within its 2 ulps.
+__device__ __forceinline__ float softcap(float x, float cap, int keep) {
+    const float t = point(__fdiv_rn(x, cap), keep, CAP_DIV);
+    return __fmul_rn(point(tanhf(t), keep, CAP_TANH), cap);
 }
 
 __device__ __forceinline__ void unpack8(const uint4& u, float* f) {
@@ -90,6 +99,18 @@ __device__ __forceinline__ void rows(const __nv_bfloat16* __restrict__ gate, lon
         const float s = group_sum8(op, live);
         if (live && (c & 7) == 0) xs[r * (n / 64) + c / 8] = s;
     }
+}
+
+// out[r, i] = softcap(x[r, i]) for i < n (n % 8 == 0), rows packed n wide (out may be x); 8 values a thread.
+__device__ __forceinline__ void softcap_rows(const __nv_bfloat16* x, __nv_bfloat16* out, int n, float cap, int keep) {
+    const int64_t r = blockIdx.x;
+    const int c = blockIdx.y * blockDim.x + threadIdx.x;
+    if (8 * c >= n) return;
+    float v[8];
+    unpack8(*reinterpret_cast<const uint4*>(x + r * n + 8 * c), v);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) v[i] = softcap(v[i], cap, keep);
+    *reinterpret_cast<uint4*>(out + r * n + 8 * c) = pack8(v);
 }
 
 }  // namespace tf_act_round

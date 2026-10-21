@@ -158,3 +158,9 @@ extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows_round(const __nv
                                                                       __nv_bfloat16* out, float* xs, int n) {
     tf_act_round::rows<false>(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::SWIGLU_ALL);
 }
+
+// out = bf16(cap * tanh(x / cap)) in MLX's bf16 steps: a soft-capped head's logits (final_logit_softcapping).
+extern "C" __global__ void __launch_bounds__(NT) tf_softcap_rows(const __nv_bfloat16* x, __nv_bfloat16* out, int n,
+                                                                 float cap) {
+    tf_act_round::softcap_rows(x, out, n, cap, tf_act_round::SOFTCAP_ALL);
+}

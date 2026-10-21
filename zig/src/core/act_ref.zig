@@ -41,6 +41,21 @@ pub fn swigluRound(g: f64, up: f64, te: f64, td: f64) f64 {
     return bf.bf16(bf.bf16(g * sig) * up);
 }
 
+/// MLX's soft cap at its points: bf16(fp32(bf16(tanh(bf16(fp32(x / cap))) (1 + t)) cap)), fp32 first as the kernel.
+pub fn softcap(x: f64, cap: f64, t: f64) f64 {
+    const q = bf.bf16(@as(f32, @floatCast(x / cap)));
+    const th = bf.bf16(std.math.tanh(q) * (1 + t));
+    return bf.bf16(@as(f32, @floatCast(th * cap)));
+}
+
+/// softcap's float64 ends with tanhf within `spread` either way (monotonic in t).
+pub fn softcapRange(x: f64, cap: f64, spread: f64) [2]f64 {
+    const a = softcap(x, cap, -spread);
+    const b = softcap(x, cap, spread);
+    if (std.math.isNan(a) or std.math.isNan(b)) return @splat(std.math.nan(f64));
+    return .{ @min(a, b), @max(a, b) };
+}
+
 /// One of the two at its float64 ends: every fp32 libm value (tanh, exp) and division within `spread` either way.
 pub fn mlxRange(geglu_: bool, x: f64, up: f64, spread: f64) [2]f64 {
     var lo = std.math.inf(f64);
@@ -81,5 +96,18 @@ test "MLX's steps: rounding points against hand values, the ranges ordered, and 
             const once = if (g) 0.5 * x * (1 + std.math.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x))) * up else swiglu(x, up);
             try std.testing.expect(@abs(r[0] - once) <= 0x1p-5 * @abs(x * up) + 0x1p-10); // a step of 1 + tanh: 2^-9 of x up
         }
+    }
+}
+
+test "the soft cap: rounding points against hand values, ends ordered, within a step of cap tanh(x / cap)" {
+    try std.testing.expectEqual(@as(f64, 0), softcap(0, 30, 0));
+    try std.testing.expectEqual(@as(f64, 30), softcap(1e6, 30, 0)); // tanh rounds to 1
+    try std.testing.expectEqual(-softcap(7.25, 30, 0), softcap(-7.25, 30, 0));
+    var prng = std.Random.DefaultPrng.init(3);
+    for (0..4000) |_| {
+        const x = bf.bf16(prng.random().float(f64) * 120 - 60);
+        const r = softcapRange(x, 30, 0x1p-21);
+        try std.testing.expect(r[0] <= r[1]);
+        try std.testing.expect(@abs(r[0] - 30 * std.math.tanh(x / 30)) <= 0x1p-6 * 30);
     }
 }

@@ -30,6 +30,7 @@ const act_round_k = @import("contract_act_round.zig");
 const round_k = @import("contract_tree_round.zig");
 
 const act_k = @import("contract_act.zig");
+const softcap_k = @import("contract_softcap.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
@@ -298,6 +299,10 @@ pub fn run(gpu: check.Gpu) !void {
     for (act_round_k.entries, &act_rounds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .act = &act_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_act_round") else null };
     defer for (&act_rounds) |*x| x.deinit();
     for (&act_rounds) |*x| try kernels.append(a, x.kernel());
+    var softcaps: [softcap_k.entries.len]softcap_k.SoftCap = undefined;
+    for (softcap_k.entries, &softcaps) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .act = &act_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_softcap") else null };
+    defer for (&softcaps) |*x| x.deinit();
+    for (&softcaps) |*x| try kernels.append(a, x.kernel());
     var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
     defer gdn_prep.unload();
     var gdns: [9]gdn_k.Gdn = undefined;
