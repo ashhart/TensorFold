@@ -5,8 +5,9 @@ draws a whole `POST /v1/audio/speech` reply again when the silence guard ended i
 with `silence`, up to N times (0 to 255). Omitted or 0, it never redraws, never
 reads `X-Deadline-S`, and leaves every reply unchanged. Text models refuse
 `--silence-redraws` at startup, an explicit 0 included. `--silence-redraws` of 1
-or more needs an enabled silence guard; `--silence-redraw-budget-s` and
-`--silence-redraw-controls` need `--silence-redraws` of 1 or more.
+or more needs an enabled silence guard; `--silence-redraw-budget-s`,
+`--silence-redraw-controls` and the [short reply](#short-replies) flags need
+`--silence-redraws` of 1 or more.
 
 ## Seeds
 
@@ -30,11 +31,12 @@ budget, a busy submission keeps the previous audio rather than waiting unbounded
 ## Reply
 
 The reply is the last take that finished with audio, sent with its own
-`X-Finish-Reason`. A redraw that ends `stop` or `length` is sent. A redraw that
-ends `silence` replaces the previous take and redrawing continues. When a redraw
-does not start (budget spent, engine busy) or ends without audio, the previous
-take is sent. The server keeps a second PCM buffer, sized like the first, while a
-reply redraws. It logs each redraw's finish reason and why any redraw went unused.
+`X-Finish-Reason`. A redraw that ends `silence`, or a [short](#short-replies)
+`stop`, replaces the previous take and redrawing continues; any other finish is
+sent. When a redraw does not start (budget spent, engine busy) or ends without
+audio, the previous take is sent. The server keeps a second PCM buffer, sized
+like the first, while a reply redraws. It logs each redraw's finish reason and
+why any redraw went unused.
 
 With `--silence-redraws` above zero, every speech response carries
 `X-Silence-Redraws` as a decimal integer, including zero and error replies.
@@ -55,7 +57,39 @@ a leading `Direction:` line followed by `Line:` is removed, and Unicode
 whitespace is folded and trimmed. If no such span is found, input is unchanged.
 This empty-list setting reproduces the reference plain-controls redraw transform.
 If the filtered input cannot be spoken, for example because nothing is left,
-no redraw starts and the silenced take is sent. No control list is built in.
+no redraw starts and the first take is sent. No control list is built in.
+
+## Short replies
+
+A take can also collapse into an early `stop`: speech ends long before the text
+is spoken, with no silent tail for the guard to trip on. With
+`--short-reply-ratio R` and `--short-reply-chars-per-s CPS`, a whole take that
+ends `stop` with less than R × chars / CPS seconds of audio is redrawn as a
+silenced one is, under the same count, budget and controls. chars counts the
+code points of the text the take spoke, bracketed controls included: the input
+after any `--allowed-controls` filtering, or for a redraw, after any
+`--silence-redraw-controls` filtering. R is above 0 and below 1. Texts of fewer
+than 200 characters are never judged, since a fixed lead-in and tail dominate
+their duration, and neither are `length` finishes. Neither flag has a default;
+each needs the other, and without them no `stop` is redrawn.
+
+No rate is built in: it depends on the voice, its pace and its language.
+Calibrate both flags on the voice you serve:
+
+1. Serve it as usual, without the short reply flags.
+2. Send whole replies of 200 characters or more that represent your traffic,
+   controls included.
+3. For each reply that finished `stop` and that you heard to be complete, divide
+   its characters, counted as above, by its seconds of audio: the `samples` of
+   the server's reply log line divided by the sample rate in the WAV header.
+4. Set CPS to the median of those rates. Each complete reply's share is
+   seconds × CPS / chars; set R below the lowest share, with a margin, so that
+   no complete reply would have been redrawn.
+5. Check that the replies you heard cut short fall below R. If they overlap the
+   complete ones, the ratio cannot tell them apart on that voice: leave the
+   flags off.
+
+Calibrate again when the served voice or the kind of text changes.
 
 ## Streams
 
