@@ -12,6 +12,7 @@ const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
+const csa2 = @import("metal_csa2.zig");
 
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
@@ -233,6 +234,12 @@ pub fn main(init: std.process.Init) !u8 {
         ntiles += 1;
     };
     for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
+    var csa2_p: ?csa2.Probe = null;
+    defer if (csa2_p) |*p| p.deinit();
+    if (wanted(o, csa2.spec().name)) {
+        csa2_p = try csa2.Probe.init(a, device, queue);
+        try kernels.append(a, csa2_p.?.kernel());
+    }
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

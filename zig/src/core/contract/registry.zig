@@ -518,6 +518,7 @@ pub const metal = [_]M{
     .{ .name = "drama3 codec c_snake", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 codec c_dwconv7", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 codec c_copy", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "deepseek v4.1 sparse attention dsv41_sparse_attention", .threads = 32, .tg_memory = 256, .m1 = 768, .m2 = 768 },
 };
 /// Gate 5's planted Metal controls: a launch past M1/M2's compiled limit (#708's class), 36 KiB of threadgroup memory.
 pub const metal_controls = [_]M{

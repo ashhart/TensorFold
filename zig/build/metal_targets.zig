@@ -155,6 +155,10 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const kernels_mod = embedded(b, lib, "tensorfold.metallib");
     counters_build.targets(b, target, optimize, metal, mods.sources, test_step);
 
+    // DeepSeek V4.1: the operator qualification steps registered beside the other families'.
+    const dsv41_build = @import("deepseek_v41.zig");
+    test_step.dependOn(dsv41_build.weights(b, target, optimize, metal));
+
     // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
     const engines = b.createModule(.{
@@ -247,6 +251,11 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.getInstallStep().dependOn(&b.addInstallFile(packed_lib, "lib/nemotron_packed.metallib").step);
     sources.addImport("nemotron_packed_metallib", embedded(b, packed_lib, "nemotron_packed.metallib"));
     const engine = mods.engine;
+    {
+        const dsv41 = dsv41_build.checks(b, target, optimize, metal, sources, engine);
+        test_step.dependOn(dsv41.device);
+        test_step.dependOn(dsv41.reference);
+    }
     // FlashNext's CPU contracts, with the family module's imports so the replay graph type-checks
     const flash_host = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/flashnext_host.zig"),

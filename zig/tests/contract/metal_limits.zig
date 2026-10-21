@@ -50,6 +50,9 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
         text = @import("h3_kernels").source;
+    } else if (std.mem.startsWith(u8, d.name, "deepseek v4.1 sparse attention ")) {
+        // kv.metal owns the packed-cache decoders this source is compiled after.
+        text = try std.mem.concat(a, u8, &.{ sources.deepseek_v41_kv, sources.deepseek_v41_csa2 });
     } else if (std.mem.startsWith(u8, d.name, "glm gather ")) {
         text = tf.glm.wide.gather_source;
     } else if (std.mem.startsWith(u8, d.name, "glm ")) {
