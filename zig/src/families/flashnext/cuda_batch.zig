@@ -458,8 +458,7 @@ pub fn Pass(comptime Tri: type) type {
             const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
             if (lw.native_experts) |*native| {
                 const owned = &native.experts;
-                // one rank writes every slot (routed pairs by the down kernel, the shared one by sharedScatter), so only
-                // a rank that skips the shared slot needs the zeros its sum over ranks adds
+                // one rank writes every slot; only a rank that skips the shared one needs zeros for the sum over ranks
                 if (native.world != 1 or native.rank != 0) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
                 const pt = nvfp4_tile.size(n);
                 try self.k.router.route(self.stream, s.picks, pairs, e, pt, plan);
@@ -561,8 +560,7 @@ pub fn Pass(comptime Tri: type) type {
                 }
                 try self.writeback(0, n);
                 try self.readoutKeep(lw.attn_hc, 0, n, keep.attn_hc);
-                // one rank, nothing kept from the branch, and the zero slice intact: its native out projection's
-                // writeback reads one zero slice where it read out_sk - 1 zeroed ones (x + 0 repeated is x + 0 once)
+                // one rank, nothing kept, zero slice intact: the writeback adds one zero slice, not out_sk - 1 zeroed
                 self.zero_slices = self.s.part_zero and keep.mix_branch == 0 and self.m.collective == null and lw.out.native != null;
                 if (lw.linear) {
                     try self.gdnBlock(lw, layer, wt.linearIndex(layer), keep);

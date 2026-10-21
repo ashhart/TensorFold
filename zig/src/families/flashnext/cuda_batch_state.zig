@@ -290,8 +290,7 @@ pub const Scratch = struct {
     xsm: u64 = 0,
     proj: u64 = 0,
     part: u64 = 0,
-    /// part's second slice at a cap-row stride ([cap * dims, 2 * cap * dims) fp32) holds zeros: native lanes write only
-    /// the first, so a slice writeback can add these zeros once where it would add out_sk - 1 zeroed slices.
+    /// part's second cap-stride slice is zeros (native lanes write only the first): a writeback adds it once.
     part_zero: bool = false,
     gout: u64 = 0,
     gxs: u64 = 0,
