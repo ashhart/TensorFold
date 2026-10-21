@@ -5,6 +5,7 @@ const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
 const status = @import("lane_host_status.zig");
 const learn = @import("lane_host_learn.zig");
+const decide = @import("lane_host_decide.zig");
 const lone = @import("lane_host_lone.zig");
 const fill = @import("lane_host_fill.zig");
 const admit = @import("lane_host_admit.zig");
@@ -63,6 +64,9 @@ pub const LaneHost = struct {
     memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
+    decider: ?api.Decider = null, // the backend's decision passes, run while the engine is idle
+    decisions: std.ArrayList(*decide.Work) = .empty, // score/decide calls waiting for an idle engine, in order
+    decided: std.Io.Condition = .init, // a queued decision finished; its requester wakes
     lessons: std.ArrayList(Lesson) = .empty, // learn requests waiting for an idle engine
     lesson_open: bool = false, // the learner holds a begun job (engine thread only)
     admissions: u64 = 0, // jobs admitted so far: each job's `seq`
@@ -102,6 +106,7 @@ pub const LaneHost = struct {
         h.lessons.deinit(h.gpa);
         h.queued.deinit(h.gpa);
         h.admitted.deinit(h.gpa);
+        h.decisions.deinit(h.gpa);
         h.filling.deinit(h.gpa);
         h.cancels.deinit(h.gpa);
         h.decoded.deinit(h.gpa);
@@ -113,8 +118,22 @@ pub const LaneHost = struct {
     /// A drain's deadline: the round in flight completes on every rank, so the ranks stop at the same boundary.
     pub const halt = lane_halt.halt;
 
+    /// The host's engine; a backend that set `decider` serves score/decide, else the hooks stay absent.
     pub fn engine(h: *LaneHost) Engine {
-        return .{ .ctx = h, .vtable = &.{
+        return .{ .ctx = h, .vtable = if (h.decider != null) &.{
+            .info = infoFn,
+            .submit = submitFn,
+            .cancel = cancelFn,
+            .status = status.read,
+            .memory = memoryFn,
+            .keepalive = keepaliveFn,
+            .score = decide.score,
+            .decide = decide.decide,
+            .learn = learn.submit,
+            .recall = recalls.attach,
+            .imprint = rows_host.ask,
+            .drain = rows_host.drain,
+        } else &.{
             .info = infoFn,
             .submit = submitFn,
             .cancel = cancelFn,
@@ -507,6 +526,7 @@ pub const LaneHost = struct {
             ends.takeCancels(h);
             rows_host.answer(h);
             learn.refuse(h);
+            decide.step(h); // a queued decision takes an idle engine before new work; a stale one fails it
             while (h.admitOne()) {}
             h.fillOne();
             h.core.sweep() catch |err| {
@@ -519,6 +539,7 @@ pub const LaneHost = struct {
             if (h.closing) {
                 const left = h.queued.items.len + h.admitted.items.len;
                 h.unlock();
+                decide.failAll(h); // their requesters must not sleep past the engine thread's end
                 if (h.lesson_open) {
                     h.learner.?.abort(h.learner.?.ctx);
                     h.lesson_open = false;

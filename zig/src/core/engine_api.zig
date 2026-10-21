@@ -302,6 +302,20 @@ pub const Decision = struct {
     arena: ?std.mem.Allocator = null, // the request's, for what the engine hands back
 };
 
+/// One decision pass a host queues for its engine thread: a score's single row, or a decide's packed set.
+pub const DecisionTask = union(enum) {
+    /// `labels`' logits at the row after `prompt`; `out` takes the vocabulary logsumexp when `mass`.
+    score: struct { prompt: []const u32, labels: []const u32, logits: []f64, mass: bool, out: f64 = 0 },
+    /// The packed decision: each branch's label logits at its last row after the shared trunk.
+    decide: *Decision,
+};
+
+/// A lane-hosted backend's decision passes, run on the engine thread once no stream is live.
+pub const Decider = struct {
+    ctx: *anyopaque,
+    run: *const fn (ctx: *anyopaque, task: *DecisionTask) error{ Failed, Refused }!void,
+};
+
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct {
     engine: Engine,

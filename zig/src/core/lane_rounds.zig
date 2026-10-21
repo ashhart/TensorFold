@@ -5,6 +5,7 @@ const api = @import("engine_api.zig");
 const host = @import("lane_host.zig");
 const lane_stream = @import("lane_stream.zig");
 const learn = @import("lane_host_learn.zig");
+const decide = @import("lane_host_decide.zig");
 const status = @import("lane_host_status.zig");
 const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
@@ -265,10 +266,12 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         ends.takeCancels(h);
         rows_host.answer(h);
         learn.refuse(h);
+        decide.step(h); // a queued decision takes an idle engine before new work; a stale one fails it
         h.lock();
         if (h.closing) {
             const left = h.queued.items.len + h.admitted.items.len;
             h.unlock();
+            decide.failAll(h); // their requesters must not sleep past the engine thread's end
             if (h.lesson_open) {
                 h.learner.?.abort(h.learner.?.ctx);
                 h.lesson_open = false;
