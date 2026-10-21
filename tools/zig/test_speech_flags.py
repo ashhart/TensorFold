@@ -7,7 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 BINARY = ROOT / "zig-out/native/bin/tensorfold-native"
-MESSAGE = "--silence-floor-dbfs, --silence-seconds, --silence-onset-s and --silence-onset-voiced-s are for Drama speech: serve without them"
+MESSAGE = "--silence-floor-dbfs, --silence-seconds, --silence-onset-s, --silence-onset-voiced-s and the silence-mid flags are for Drama speech: serve without them"
 
 
 @unittest.skipUnless(BINARY.is_file(), "build native before running the CLI admission test")
@@ -18,7 +18,9 @@ class SpeechFlags(unittest.TestCase):
             for flags in (("--silence-floor-dbfs=-80",), ("--silence-seconds=0",),
                           ("--silence-floor-dbfs=-80", "--silence-seconds=1"),
                           ("--silence-floor-dbfs=-80", "--silence-seconds=2", "--silence-onset-s=1",
-                           "--silence-onset-voiced-s=0.5")):
+                           "--silence-onset-voiced-s=0.5"),
+                          ("--silence-floor-dbfs=-80", "--silence-seconds=1", "--silence-mid-s=0.5",
+                           "--silence-mid-min-voiced-s=1")):
                 with self.subTest(flags=flags):
                     result = subprocess.run(
                         [str(BINARY), "serve", folder, *flags],

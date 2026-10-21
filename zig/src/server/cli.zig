@@ -82,6 +82,8 @@ pub const flags = [_]Flag{
     .{ .name = "--silence-seconds", .native = true },
     .{ .name = "--silence-onset-s", .native = true },
     .{ .name = "--silence-onset-voiced-s", .native = true },
+    .{ .name = "--silence-mid-s", .native = true },
+    .{ .name = "--silence-mid-min-voiced-s", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
@@ -309,6 +311,11 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     }
     if (is(name, "--silence-seconds")) {
         out.silence.seconds = try float(u, a, name, v);
+        return;
+    }
+    if (is(name, "--silence-mid-s") or is(name, "--silence-mid-min-voiced-s")) {
+        const seconds = try float(u, a, name, v);
+        if (is(name, "--silence-mid-s")) out.silence.mid_seconds = seconds else out.silence.mid_min_voiced_s = seconds;
         return;
     }
     if (is(name, "--allowed-controls")) {

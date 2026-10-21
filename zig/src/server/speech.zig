@@ -184,7 +184,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     if (why(&box, samples, pcm.len)) |message| return fail(c, cx, id, .server, message);
     const data = quantizeInPlace(pcm[0..samples]) catch return fail(c, cx, id, .server, "the synthesized audio has non-finite samples");
     if (data.len > std.math.maxInt(u32) - 36) return fail(c, cx, id, .server, "the synthesized audio is too long for one reply");
-    sendAudio(c, plan.format, sp.sample_rate, data, box.reason) catch {
+    sendAudio(c, plan.format, sp.sample_rate, data, box.reason, if (srv.config.silence_mid) @intFromBool(result.silence_mid) else null) catch {
         c.close = true; // a head already started or a client gone: nothing more can be sent on this connection
         return;
     };
@@ -346,7 +346,7 @@ fn send(c: *Conn, cx: *Cx, id: []const u8) void {
 }
 
 /// The head, then the WAV header and the samples where they lie: the audio is never copied to prepend a header.
-fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reason: api.Reason) error{ Closed, OutOfMemory }!void {
+fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reason: api.Reason, silence_mid: ?u8) error{ Closed, OutOfMemory }!void {
     const header: ?[wav_header_len]u8 = if (format == .wav) wavHeader(sample_rate, @intCast(data.len)) else null;
     const header_len: usize = if (header != null) wav_header_len else 0;
     try c.startResponse(200, null);
@@ -354,6 +354,10 @@ fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reaso
     var len: [24]u8 = undefined;
     try c.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{header_len + data.len}) catch unreachable);
     try c.addHeader("X-Finish-Reason", @tagName(reason));
+    if (silence_mid) |trips| {
+        var count: [3]u8 = undefined;
+        try c.addHeader("X-Silence-Mid-Trips", std.fmt.bufPrint(&count, "{d}", .{trips}) catch unreachable);
+    }
     if (c.close) try c.addHeader("Connection", "close");
     defer c.out.clearRetainingCapacity();
     if (!std.mem.eql(u8, c.version, "HTTP/0.9")) try c.out.appendSlice(c.gpa, "\r\n");

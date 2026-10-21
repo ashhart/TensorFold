@@ -164,6 +164,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .use_drafts = !args.no_drafts,
         .vision_urls = args.vision_urls,
         .seed_salt = salt,
+        .silence_mid = args.silence.mid_seconds != null,
         .prompt_seed = args.prompt_seed,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),

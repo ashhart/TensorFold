@@ -220,3 +220,17 @@ test "runtime library: capabilities serializes found and missing dependencies wi
     try std.testing.expect(!values[1].object.get("usable").?.bool);
     try std.testing.expectEqualStrings(rows[1].problem.?, values[1].object.get("problem").?.string);
 }
+
+test "--silence-mid-s is opt-in, needs the tail guard and reaches native open options" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expectEqual(@as(?f64, null), (try parse(a, &.{"m"}, &u)).silence.mid_seconds);
+    const args = try parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "10", "--silence-mid-s", "3", "--silence-mid-min-voiced-s", "1" }, &u);
+    try std.testing.expectEqual(@as(?f64, 3), (try request(a, "m", "drama3", args)).silence.mid_seconds);
+    try std.testing.expectEqual(@as(?f64, 1), (try request(a, "m", "drama3", args)).silence.mid_min_voiced_s);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "10", "--silence-mid-s", "3" }, &u));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-mid-s", "3" }, &u));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "3", "--silence-mid-s", "3" }, &u));
+}

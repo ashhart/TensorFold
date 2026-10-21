@@ -1,5 +1,5 @@
-/// Mono PCM written before a successful speech request's finished event.
-pub const SpeechResult = struct { samples: usize = 0, reason: @import("engine_api.zig").Reason = .stop };
+/// Mono PCM written before a successful speech request's finished event; `silence_mid`: speech ended in a long silence.
+pub const SpeechResult = struct { samples: usize = 0, reason: @import("engine_api.zig").Reason = .stop, silence_mid: bool = false };
 
 /// Caller-owned until finished, even on cancellation; a streamed request's pcm[0..n] is the caller's after ``audio`` n.
 pub const SpeechRequest = struct {

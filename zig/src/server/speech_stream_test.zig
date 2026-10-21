@@ -14,6 +14,8 @@ const gpa = std.testing.allocator;
 const Script = struct {
     steps: []const usize,
     reason: api.Reason = .stop,
+    silence_mid: bool = false,
+    mid_enabled: bool = false,
     message: []const u8 = "",
     hold: usize = 0,
     inline_: bool = false,
@@ -53,6 +55,7 @@ const Script = struct {
         }
         if (e.reason == .stop or e.reason == .length or e.reason == .silence) request.result.samples = done;
         request.result.reason = e.reason;
+        request.result.silence_mid = e.silence_mid;
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = e.reason, .message = e.message } });
     }
     fn cancel(ctx: *anyopaque, _: api.Id) void {
@@ -124,7 +127,7 @@ const Served = struct {
         var pair: [2]std.c.fd_t = undefined;
         if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
         s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined, .write_ms = write_ms };
-        s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .silence_mid = script.mid_enabled }, null);
         s.srv.voices = script.voices;
         if (script.output_full) s.srv.speech_inflight.store(s.srv.info.lanes, .release);
         var head: [160]u8 = undefined;
@@ -497,4 +500,35 @@ test "silence keeps audio with a whole header or stream trailer" {
             try std.testing.expectEqualStrings("1000\r\n" ++ pcm(1) ++ "\r\n0\r\nX-Finish-Reason: silence\r\n\r\n", rest);
         } else try std.testing.expectEqualStrings(&pcm(1), rest);
     }
+}
+
+test "a whole reply whose ending fell in a long silence says so in X-Silence-Mid-Trips; a stream ends as silence" {
+    for ([_]bool{ false, true }) |mid| {
+        for ([_]bool{ false, true }) |stream| {
+            var script: Script = .{ .steps = &.{frame}, .reason = .silence, .silence_mid = mid, .mid_enabled = true, .inline_ = true };
+            var s: Served = undefined;
+            const whole = "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\"}";
+            try s.start(&script, "HTTP/1.1", if (stream) stream_body else whole, 2000);
+            defer s.deinit();
+            const head = try s.readHead();
+            if (!stream) {
+                try expectHeader(head, if (mid) "X-Silence-Mid-Trips: 1\r\n" else "X-Silence-Mid-Trips: 0\r\n");
+            } else try std.testing.expect(std.mem.indexOf(u8, head, "X-Silence-Mid-Trips") == null);
+            const rest = try s.readRest();
+            s.join(&script);
+            try std.testing.expect(std.mem.endsWith(u8, rest, if (stream) "\r\n0\r\nX-Finish-Reason: silence\r\n\r\n" else &pcm(1)));
+        }
+    }
+}
+
+test "the mid header is absent with the guard off even if the engine reports a trip" {
+    var script: Script = .{ .steps = &.{frame}, .reason = .silence, .silence_mid = true, .inline_ = true };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\"}", 2000);
+    defer s.deinit();
+    const head = try s.readHead();
+    const absent = std.mem.indexOf(u8, head, "X-Silence-Mid-Trips") == null;
+    _ = try s.readRest();
+    s.join(&script);
+    try std.testing.expect(absent);
 }
