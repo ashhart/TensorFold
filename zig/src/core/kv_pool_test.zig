@@ -263,3 +263,50 @@ test "a promise that does not fit asks the store to reclaim first, and fails onl
     p.finish(&b);
     try expect(p.idle());
 }
+
+test "a run: consecutive pages from the top, from the stream's promise, back whole; KV pages fill from the bottom" {
+    const a = std.testing.allocator;
+    var p = try Pool.init(a, 10, 1);
+    defer p.deinit();
+    const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = 4, .snap_bytes = 0, .run_bytes = 9 };
+    try expectEqual(@as(usize, 3), l.runPages());
+    try expectEqual(@as(usize, 1 + 3), l.need(1, 0, 0));
+    var x: Lease = .{};
+    try p.promise(&x, l.need(5, 0, 0)); // two KV pages and a run of three
+    try expectEqual(@as(?u32, 7), p.claimRun(&x, 3));
+    try expectEqual(@as(usize, 2), x.promised);
+    try p.cover(&x, 2, null);
+    try expectEqual(@as(u32, 0), x.ids.items[0]); // KV from the bottom
+    try expectEqual(@as(u32, 1), x.ids.items[1]);
+    try expectEqual(@as(usize, 5), p.available());
+    try expectEqual(@as(usize, 0), p.reclaimable()); // a run is never the store's
+    // a second stream: the next run below the first, the promise checked first
+    var y: Lease = .{};
+    try expectEqual(@as(?u32, null), p.claimRun(&y, 3));
+    try p.promise(&y, 4);
+    try expectEqual(@as(?u32, 4), p.claimRun(&y, 3));
+    // fragmentation: a run that is not free waits, even with pages to spare
+    var z: Lease = .{};
+    try p.promise(&z, 1);
+    try p.cover(&z, 1, null); // page 2
+    try expectEqual(@as(?u32, null), p.findRun(2)); // only page 3 is free
+    p.releaseRun(7, 3);
+    try expectEqual(@as(?u32, 7), p.findRun(3));
+    p.releaseRun(4, 3);
+    p.finish(&x);
+    p.finish(&y);
+    p.finish(&z);
+    try expect(p.idle());
+    try expectEqual(@as(usize, 10), p.available());
+}
+
+test "the plan with a run: each stream pays its run's pages beside its first page, the window bound adds them" {
+    const g: u64 = 1 << 30;
+    var l = nemotron;
+    l.run_bytes = 10 * l.pageBytes() - 1;
+    const p = try kv.plan(l, .{ .room = 40 * g, .engine = g, .lanes = 4, .window = 16384 + 16 });
+    try expectEqual(@as(usize, 3 * (33 + 10)), p.pages);
+    const small = 2 * g + 2 * (64 * mib + 11 * l.pageBytes()) + mib;
+    try expectEqual(@as(u32, 3), (try kv.plan(l, .{ .room = small, .engine = 2 * g, .lanes = 8 })).lanes);
+    try expectEqual(nemotron.need(2048, 4096, 16) + 10, l.need(2048, 4096, 16));
+}

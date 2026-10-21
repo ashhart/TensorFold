@@ -12,6 +12,8 @@ pub const Layout = struct {
     page_tokens: u32,
     /// Bytes of one kept snapshot's slot, outside the pages (0: no slots, the family's kept states are copies alone).
     snap_bytes: u64,
+    /// Bytes a running stream takes from the pages beside its keys and values, as one run of whole pages (0: none).
+    run_bytes: u64 = 0,
 
     pub fn pageBytes(l: Layout) u64 {
         return l.token_bytes * l.page_tokens;
@@ -22,9 +24,14 @@ pub const Layout = struct {
         return @intCast((tokens + l.page_tokens - 1) / l.page_tokens);
     }
 
-    /// Pages a request reserves at admission: its prompt, its reply and one last verify window.
+    /// Pages a request reserves at admission: its prompt, its reply and one last verify window, and its run.
     pub fn need(l: Layout, prompt: u64, max_tokens: u64, window: u64) usize {
-        return l.pages(prompt + max_tokens + window);
+        return l.pages(prompt + max_tokens + window) + l.runPages();
+    }
+
+    /// Consecutive pages a running stream's `run_bytes` take.
+    pub fn runPages(l: Layout) usize {
+        return @intCast((l.run_bytes + l.pageBytes() - 1) / l.pageBytes());
     }
 };
 
@@ -67,13 +74,13 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     if (b.engine + own > b.room or b.lanes == 0) return error.NoStream;
     var left = b.room - b.engine - own;
     const extra: u64 = b.lanes - 1;
-    const each = l.fixed_bytes + l.pageBytes();
+    const each = l.fixed_bytes + (1 + l.runPages()) * l.pageBytes();
     const fit = @min(extra, left / each);
     if (fit < extra and b.fixed) return error.TooMany;
     left -= fit * l.fixed_bytes;
-    const c = split(@min(b.cache, left - fit * l.pageBytes()), l.snap_bytes, b.snaps);
+    const c = split(@min(b.cache, left - fit * (1 + l.runPages()) * l.pageBytes()), l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
-    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) else std.math.maxInt(u64);
+    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() else std.math.maxInt(u64);
     return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)) };
 }
 
@@ -82,7 +89,7 @@ pub fn holds(l: Layout, b: Budget) bool {
     const own = ownPages(l, b);
     if (b.engine + own > b.room or b.lanes == 0) return false;
     const left = b.room - b.engine - own;
-    const each = l.fixed_bytes + l.pageBytes();
+    const each = l.fixed_bytes + (1 + l.runPages()) * l.pageBytes();
     return left - @min(@as(u64, b.lanes - 1), left / each) * each >= b.cache;
 }
 
@@ -270,6 +277,49 @@ pub const Pool = struct {
             p.release(id);
             l.promised += 1;
             p.promised += 1;
+        }
+    }
+
+    /// The first id of `k` consecutive free pages, highest first (the free stack hands out low ids), or null.
+    pub fn findRun(p: *const Pool, k: usize) ?u32 {
+        if (k == 0 or k > p.refs.len) return null;
+        var end = p.refs.len;
+        while (end >= k) {
+            const start = end - k;
+            const busy = for (p.refs[start..end], start..) |r, i| {
+                if (r != 0) break i;
+            } else null;
+            if (busy) |i| end = i else return @intCast(start);
+        }
+        return null;
+    }
+
+    /// `k` consecutive pages from `l`'s promise, held as one run until releaseRun; null: no such run is free now.
+    pub fn claimRun(p: *Pool, l: *Lease, k: usize) ?u32 {
+        if (l.promised < k) return null;
+        const start = p.findRun(k) orelse return null;
+        var n: usize = 0;
+        for (p.free[0..p.nfree]) |id| if (id < start or id >= start + k) {
+            p.free[n] = id;
+            n += 1;
+        };
+        std.debug.assert(n + k == p.nfree);
+        p.nfree = n;
+        @memset(p.refs[start..][0..k], 1);
+        @memset(p.leased[start..][0..k], 1); // held as a lease holds its pages: never the store's to reclaim
+        l.promised -= k;
+        p.promised -= k;
+        return start;
+    }
+
+    /// A run claimed at `start` goes back to the free pages.
+    pub fn releaseRun(p: *Pool, start: u32, k: usize) void {
+        for (start..start + k) |id| {
+            if (p.refs[id] != 1 or p.leased[id] != 1) std.debug.panic("kv pool: run page {d} released while not a run's", .{id});
+            p.refs[id] = 0;
+            p.leased[id] = 0;
+            p.free[p.nfree] = @intCast(id);
+            p.nfree += 1;
         }
     }
 
