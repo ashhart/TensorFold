@@ -250,8 +250,9 @@ pub fn snap_ready(ptr: *engine.Engine, budget: u64) !u64 {
 
 fn readySnapshots(ptr: *anyopaque, budget: u64) !void {
     const own: *Owned = @ptrCast(@alignCast(ptr));
-    try own.link.send(own.e.m.glue.put_words, .{ .kind = @backingInt(follow.Kind.snapshots), .a = budget }, &.{});
-    try snapshots.agree(own.e, budget);
+    const x: follow.Leader = .{ .e = own.e, .link = &own.link }; // its steps wake the ranks asleep on their lines
+    try x.snapshots(budget);
+    try x.idle(); // no stream yet: they sleep again until the first
 }
 
 pub fn snap_charged(ptr: *anyopaque, saved: *anyopaque) u64 {

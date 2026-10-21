@@ -185,6 +185,12 @@ pub const Leader = struct {
         try x.e.begin(c);
     }
 
+    /// Every rank's prompt cache at rank 0's budget (snapshots.agree): the others make theirs on this step.
+    pub fn snapshots(x: Leader, budget: u64) !void {
+        try x.send(.{ .kind = @backingInt(Kind.snapshots), .a = budget }, &.{});
+        try @import("cuda_snapshots.zig").agree(x.e, budget);
+    }
+
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
     pub fn images(x: Leader, v: *const images_mod.Images) !void {
         try x.flush();
