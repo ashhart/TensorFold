@@ -457,7 +457,7 @@ pub const Engine = struct {
             const cap: usize = @intCast(@max(1, @min(@min(shape.max_depth, e.cfg.head_depth), s.draftRoom() - 1)));
             const costs = plan_lanes.Costs{ .window = &e.cfg.lane_costs, .head_ms = e.cfg.mtp_step_ms, .over_ms = s.round_over orelse 0, .tree_over_ms = s.tree_over, .measured = if (e.cfg.own_prices and e.cfg.timed) &s.measured else null };
             // every eighth round one size wider than the best, so the odds of deeper lanes stay measured
-            const p = try plan_lanes.pick(e.gpa, s.odds.?, costs, e.cfg.head_lanes, cap, try e.graftProspect(s), s.rounds % 8 == 4);
+            const p = try plan_lanes.pick(e.gpa, s.odds.?, costs, e.cfg.head_lanes, cap, try win.graftProspect(e, s), s.rounds % 8 == 4);
             s.picks[p.choice] += 1;
             s.graft_room = p.grafts;
             if (plan_lanes.tablePrice(costs, p)) |ms| s.priced = .{ .choice = p.choice, .ms = ms };
@@ -489,25 +489,6 @@ pub const Engine = struct {
                 if (try tree(e.backend.ptr, r.stream, e.gpa)) |held| r.stream.next = held;
             };
         }
-    }
-
-    /// The rows the context's matches and Recall's would graft this round, and the share it keeps (null: none).
-    fn graftProspect(e: *Engine, s: *Stream) !?plan_lanes.Grafts {
-        if (e.cfg.fill_lanes == 0) return null;
-        const probe_round = s.rounds % 8 == 0;
-        const a = e.arena.allocator();
-        const room = e.cfg.fill_lanes -| 1;
-        const found = try win.candidates(e, s, room, probe_round);
-        if (found.len == 0) return null;
-        const b = try fill.graft(a, .{}, found, room);
-        // each source's recent share of grafted rows kept; every eighth round at least the floor, so grafts get retried
-        const own_hit = if (probe_round) @max(s.graft_hit, e.cfg.fill_floor) else s.graft_hit;
-        const recall_hit = if (probe_round) @max(s.recall_hit, e.cfg.fill_floor) else s.recall_hit;
-        var recalled: f64 = 0;
-        for (b.recalled) |x| recalled += @floatFromInt(@intFromBool(x));
-        const rows: f64 = @floatFromInt(b.tokens.len);
-        const hit = if (recalled == 0) own_hit else (own_hit * (rows - recalled) + recall_hit * recalled) / rows;
-        return .{ .rows = @intCast(b.tokens.len), .hit = hit };
     }
 
     /// One token, the next forward queued first; a copied continuation ahead switches to verify windows.

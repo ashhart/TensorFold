@@ -140,6 +140,25 @@ fn fillLanes(e: *Engine, s: *Stream, p: *Plan) !void {
     if (p.kind == .none) p.kind = .fill;
 }
 
+/// The rows the context's matches and Recall's would graft this round, and the share it keeps (null: none).
+pub fn graftProspect(e: *Engine, s: *Stream) !?@import("plan_lanes.zig").Grafts {
+    if (e.cfg.fill_lanes == 0) return null;
+    const probe_round = s.rounds % 8 == 0;
+    const a = e.arena.allocator();
+    const room = e.cfg.fill_lanes -| 1;
+    const found = try candidates(e, s, room, probe_round);
+    if (found.len == 0) return null;
+    const b = try fill.graft(a, .{}, found, room);
+    // each source's recent share of grafted rows kept; every eighth round at least the floor, so grafts get retried
+    const own_hit = if (probe_round) @max(s.graft_hit, e.cfg.fill_floor) else s.graft_hit;
+    const recall_hit = if (probe_round) @max(s.recall_hit, e.cfg.fill_floor) else s.recall_hit;
+    var recalled: f64 = 0;
+    for (b.recalled) |x| recalled += @floatFromInt(@intFromBool(x));
+    const rows: f64 = @floatFromInt(b.tokens.len);
+    const hit = if (recalled == 0) own_hit else (own_hit * (rows - recalled) + recall_hit * recalled) / rows;
+    return .{ .rows = @intCast(b.tokens.len), .hit = hit };
+}
+
 /// Graft candidates: the context's while its rows land, then Recall's while its do (both on a probe round); own first.
 pub fn candidates(e: *Engine, s: *Stream, room: usize, probe_round: bool) ![]const fill.Proposal {
     const a = e.arena.allocator();
