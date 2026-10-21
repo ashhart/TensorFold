@@ -8,9 +8,10 @@ const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
 const prompt_wire = @import("cuda_prompt_wire.zig");
 const dflash = @import("dflash.zig");
+const pages_mod = @import("cuda_pages.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -170,6 +171,11 @@ pub const Leader = struct {
     }
 
     pub fn begin(x: Leader, s: ?sampler.Sampling) !void {
+        return x.beginOn(s, &.{});
+    }
+
+    /// `begin` on a paged sequence: the page ids it maps (rank 0's lease) go with the step, to every rank's table.
+    pub fn beginOn(x: Leader, s: ?sampler.Sampling, pages: []const u32) !void {
         try x.flush();
         const c = sampler.check(s);
         var h: Header = .{ .kind = @backingInt(Kind.begin) };
@@ -181,7 +187,7 @@ pub const Leader = struct {
             h.min_p = v.min_p;
             h.top_k = v.top_k;
         }
-        try x.send(h, &.{});
+        try x.send(h, pages);
         try x.e.begin(c);
     }
 
@@ -189,6 +195,11 @@ pub const Leader = struct {
     pub fn snapshots(x: Leader, budget: u64) !void {
         try x.send(.{ .kind = @backingInt(Kind.snapshots), .a = budget }, &.{});
         try @import("cuda_snapshots.zig").agree(x.e, budget);
+    }
+
+    /// The other ranks make rank 0's pool: `streams` paged sequences and `pages` pages, each page's bytes checked.
+    pub fn pool(x: Leader, streams: u32, pages: usize, page_bytes: u64) !void {
+        try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes }, &.{});
     }
 
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
@@ -304,11 +315,23 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
-            .begin => try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
+            .begin => {
+                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids);
+                try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
+            },
+            .pool => {
+                if (e.pages != null) return error.BadStep;
+                const l = try pages_mod.layout(e.gpa, e, 0);
+                if (l.pageBytes() != h.seed) {
+                    std.log.err("rank {d}: a KV page is {d} bytes here and {d} on rank 0", .{ e.share.rank, l.pageBytes(), h.seed });
+                    return error.RankMismatch;
+                }
+                e.pages = try pages_mod.Pages.init(e.gpa, e, l, h.depth, @intCast(h.a), false);
+            },
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
