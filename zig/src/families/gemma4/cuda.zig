@@ -11,6 +11,7 @@ pub const snap = @import("cuda_snap.zig");
 pub const backend = @import("cuda_backend.zig");
 pub const assistant = @import("cuda_assistant.zig");
 pub const vision = @import("cuda_vision.zig");
+pub const dflash = @import("cuda_dflash.zig");
 pub const image = @import("cuda_image.zig");
 pub const native = @import("cuda_native.zig").Family("gemma4_unified");
 pub const native31 = @import("cuda_native.zig").Family("gemma4");
@@ -42,6 +43,7 @@ test {
     _ = @import("cuda_assistant.zig");
     _ = @import("cuda_assistant_weights.zig");
     _ = @import("cuda_vision.zig");
+    _ = @import("cuda_dflash.zig");
     _ = @import("cuda_image.zig");
     _ = @import("cuda_native.zig");
 }
