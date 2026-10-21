@@ -1,61 +1,111 @@
-// Shared logical KV transactions. Backends supply copies and explicit physical formats.
+//! Shared cache ownership and exact transaction snapshots; appended rows are cursor-delimited.
 const std = @import("std");
-pub const Encoding = enum { bf16, f32, cuda_fp8_584, cuda_index_fp8_132, metal_fp4_288, metal_index_fp4_68 };
-pub const Region = struct {
-    live: u64,
-    backup: u64,
-    row_bytes: usize,
-    rows: u32,
-    kind: enum { ring, carry },
-    encoding: Encoding = .bf16,
-    pub fn bytes(r: Region) usize {
-        return r.row_bytes * r.rows;
+const mtl = @import("metal");
+const View = @import("view.zig").View;
+pub const owners = [_]u32{ 2, 8, 14, 20 };
+pub const ratios = [_]u32{ 2, 2, 2, 1 };
+pub const index_sources = [_]u32{ 2, 8, 14, 20, 24, 28, 32, 36 };
+pub const main_stride = 288;
+pub const index_stride = 68;
+pub const ring_stride = 528;
+pub const window = 128;
+pub const max_context = 1048576;
+
+pub fn ownerFor(layer: u32, ratio: u32) !usize {
+    if (ratio == 0) return error.NoCompressedCache;
+    if (layer >= 40) return error.InvalidCacheLayer;
+    if (layer < 2 or ratio != (if (layer < 20) @as(u32, 2) else 1)) return error.InvalidCacheOwner;
+    var found: ?usize = null;
+    for (owners, 0..) |owner, i| {
+        if (owner <= layer and ratios[i] == ratio) found = i;
     }
-};
-pub const Copy = struct {
-    ctx: *anyopaque,
-    run: *const fn (*anyopaque, u64, u64, usize) anyerror!void,
-    pub fn copy(c: Copy, dst: u64, src: u64, bytes: usize) !void {
-        try c.run(c.ctx, dst, src, bytes);
+    return found orelse error.InvalidCacheOwner;
+}
+pub fn isIndexSource(layer: u32) bool {
+    return std.mem.indexOfScalar(u32, &index_sources, layer) != null;
+}
+pub const Source = struct { owner: u32, ratio: u32, rows: u32, main: View, index: View, partial: View };
+pub const Plan = struct {
+    capacity: u32,
+    layers: u32,
+    pub fn validate(p: Plan) !void {
+        if (p.capacity == 0 or p.capacity > max_context or p.layers != 40)
+            return error.InvalidCacheCapacity;
+    }
+    pub fn packedBytes(p: Plan) usize {
+        var bytes: usize = 0;
+        for (ratios) |r| bytes += @as(usize, p.capacity / r) * (main_stride + index_stride);
+        return bytes;
+    }
+    pub fn mutableBytes(p: Plan) usize {
+        return @as(usize, p.layers) * window * ring_stride + 7 * 2 * 512 * 4;
+    }
+    pub fn residentBytes(p: Plan) usize {
+        return p.packedBytes() + 2 * p.mutableBytes();
     }
 };
 pub const State = struct {
-    position: u64 = 0,
-    pending: ?u32 = null,
-    // A failed copy leaves the transaction active. The owner must retry or retain its buffers.
-    pub fn begin(s: *State, regions: []const Region, c: Copy, n: u32) !void {
-        if (s.pending != null) return error.CacheTransactionActive;
-        if (n == 0 or n > 64 or s.position > std.math.maxInt(u64) - @as(u64, n)) return error.BadWindow;
-        for (regions) |r| {
-            _ = std.math.mul(usize, r.row_bytes, r.rows) catch return error.BadRegion;
-            if (r.row_bytes == 0 or r.rows == 0 or (r.kind == .ring and n > r.rows)) return error.BadRegion;
-        }
-        for (regions) |r| try c.copy(r.backup, r.live, r.bytes());
-        s.pending = n;
+    plan: Plan,
+    storage: mtl.Buffer,
+    live: mtl.Buffer,
+    backup: mtl.Buffer,
+    position: u32 = 0,
+    saved_position: ?u32 = null,
+
+    pub fn init(device: mtl.Device, plan: Plan) !State {
+        try plan.validate();
+        const storage = try device.buffer(plan.packedBytes(), mtl.ResourceOptions.shared);
+        errdefer storage.deinit();
+        const live = try device.buffer(plan.mutableBytes(), mtl.ResourceOptions.shared);
+        errdefer live.deinit();
+        const backup = try device.buffer(plan.mutableBytes(), mtl.ResourceOptions.shared);
+        @memset(live.contents()[0..plan.mutableBytes()], 0);
+        return .{ .plan = plan, .storage = storage, .live = live, .backup = backup };
     }
-    // Carries are selected from the accepted projection before keep. A full rollback restores them here.
-    pub fn keep(s: *State, regions: []const Region, c: Copy, count: u32) !void {
-        const n = s.pending orelse return error.NoCacheTransaction;
-        if (count > n) return error.BadWindow;
-        for (regions) |r| {
-            if (count == 0) {
-                try c.copy(r.live, r.backup, r.bytes());
-            } else if (r.kind == .ring) {
-                // Only rejected positions were overwritten. Accepted rows stay in their physical ring slots.
-                for (count..n) |i| {
-                    const off = ((s.position + i) % r.rows) * r.row_bytes;
-                    try c.copy(r.live + off, r.backup + off, r.row_bytes);
-                }
-            }
-        }
-        s.position += count;
-        s.pending = null;
+    pub fn deinit(s: *State) void {
+        s.storage.deinit();
+        s.live.deinit();
+        s.backup.deinit();
     }
-    pub fn rollback(s: *State, regions: []const Region, c: Copy) !void {
-        try s.keep(regions, c, 0);
+    pub fn residentBytes(s: *const State) usize {
+        return s.plan.residentBytes();
+    }
+    pub fn registerResidency(s: *const State, set: mtl.ResidencySet) void {
+        set.add(s.storage);
+        set.add(s.live);
+        set.add(s.backup);
+    }
+    pub fn ring(s: *const State, layer: u32) !View {
+        if (layer >= s.plan.layers) return error.InvalidCacheLayer;
+        return .{ .buffer = s.live, .offset = @as(usize, layer) * window * ring_stride };
+    }
+    pub fn source(s: *const State, layer: u32, ratio: u32) !Source {
+        if (layer >= s.plan.layers) return error.InvalidCacheLayer;
+        if (s.position > s.plan.capacity) return error.CacheCapacityExceeded;
+        const id = try ownerFor(layer, ratio);
+        var packed_off: usize = 0;
+        var partial_off: usize = @as(usize, s.plan.layers) * window * ring_stride;
+        for (ratios[0..id]) |r| {
+            packed_off += @as(usize, s.plan.capacity / r) * (main_stride + index_stride);
+            partial_off += 2 * r * 512 * 4;
+        }
+        return .{ .owner = owners[id], .ratio = ratio, .rows = s.position / ratio, .main = .{ .buffer = s.storage, .offset = packed_off }, .index = .{ .buffer = s.storage, .offset = packed_off + @as(usize, s.plan.capacity / ratio) * main_stride }, .partial = .{ .buffer = s.live, .offset = partial_off } };
+    }
+    pub fn append(s: *State, rows: u32) !void {
+        if (s.position > s.plan.capacity or rows == 0 or rows > s.plan.capacity - s.position)
+            return error.CacheCapacityExceeded;
+        s.position += rows;
+    }
+    pub fn begin(s: *State) !void {
+        if (s.saved_position != null) return error.CacheTransactionActive;
+        s.saved_position = s.position;
+    }
+    pub fn commit(s: *State) !void {
+        if (s.saved_position == null) return error.NoCacheTransaction;
+        s.saved_position = null;
+    }
+    pub fn rollback(s: *State) !void {
+        s.position = s.saved_position orelse return error.NoCacheTransaction;
+        s.saved_position = null;
     }
 };
-
-test {
-    _ = @import("kv_state_test.zig");
-}

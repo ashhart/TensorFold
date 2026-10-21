@@ -134,8 +134,8 @@ test "Completion ownership: real Store residency totals physical snapshot alloca
 test "Completion ownership: config identity ignores inactive list storage and binds live semantic values" {
     var a: @import("config.zig").Config = .{};
     var b = a;
-    @memset(a.kv_sources.buf[a.kv_sources.len..], 1);
-    @memset(b.kv_sources.buf[b.kv_sources.len..], 2);
+    @memset(a.kv_sources.buf[a.kv_sources.items().len..], 1);
+    @memset(b.kv_sources.buf[b.kv_sources.items().len..], 2);
     @memset(&a.engram_table_dir.buf, 3);
     @memset(&b.engram_table_dir.buf, 4);
     const identity = @import("session_identity.zig");

@@ -81,7 +81,7 @@ pub const Consumer = struct {
         const scales = [_]f32{ 2, 1, 0.5 };
         const biases = [_]f32{ 1, -3, 2 };
         for (classes, 0..) |kind, i| {
-            try recorder.beginSpan(&encoder, kind);
+            try recorder.beginSpan(&encoder, kind, @intCast(i));
             const input = if (i % 2 == 0) self.a else self.b;
             const output = if (i % 2 == 0) self.b else self.a;
             encoder.setPipeline(self.pipeline);
@@ -207,11 +207,11 @@ test "bounded recorder rejects nesting, overflow, open spans and premature reuse
     try std.testing.expectError(error.CounterEncoderStillOpen, recorder.discardAfterCompletion());
     try std.testing.expectError(error.CounterRecordingInFlight, recorder.beginCommand(cb));
     try std.testing.expectError(error.NoActiveCounterSpan, recorder.endSpan(&encoder));
-    try recorder.beginSpan(&encoder, .dense);
-    try std.testing.expectError(error.NestedCounterSpan, recorder.beginSpan(&encoder, .copy));
+    try recorder.beginSpan(&encoder, .dense, 0);
+    try std.testing.expectError(error.NestedCounterSpan, recorder.beginSpan(&encoder, .copy, 0));
     try std.testing.expectError(error.UnclosedCounterSpan, recorder.finishEncoding(&encoder));
     try recorder.endSpan(&encoder);
-    try std.testing.expectError(error.CounterSpanCapacityExceeded, recorder.beginSpan(&encoder, .copy));
+    try std.testing.expectError(error.CounterSpanCapacityExceeded, recorder.beginSpan(&encoder, .copy, 0));
     try recorder.finishEncoding(&encoder);
     try std.testing.expectError(error.CounterCommandNotCompleted, recorder.readAfterCompletion());
     try recorder.cancelEncoding(&encoder);

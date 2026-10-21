@@ -1,6 +1,4 @@
-//! Builds the canonical Engram token map from the release tokenizer and typed configuration.
-
-// Algorithm: DeepSeek AI inference/engram.py, MIT; the pinned revision is retained in source below.
+// The Engram token map builder's CLI; the lane host runs the same build to write a missing map.
 const std = @import("std");
 const tok = @import("src/core/tokenizer/tokenizer.zig");
 const unicode = @import("src/core/tokenizer/unicode.zig");
@@ -10,19 +8,20 @@ const Layer = struct { layer_id: u64, rows: u64, primes: [24]u32, offsets: [24]u
 const magic = "DSENGR01";
 const source = "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/2cba9e42aa026125f3ed06c6d98c1db82f7ca027/inference/engram.py";
 
+/// The same build the lane host runs when the map is missing and the original's tokenizer sits beside the tables.
 pub fn main(init: std.process.Init) !void {
-    const a = init.gpa;
-    const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const paths = try parseArgs(args);
-    const tokenizer_path: ?[]const u8 = paths.tokenizer;
-    const config_path: ?[]const u8 = paths.config;
-    const output_path: ?[]const u8 = paths.output;
-    const tokenizer_bytes = try std.Io.Dir.cwd().readFileAlloc(io, tokenizer_path.?, a, .limited(64 << 20));
+    try build(init.gpa, init.io, paths.tokenizer.?, paths.config.?, paths.output.?);
+}
+
+/// Writes the map and its manifest for one release tokenizer and config, so the lane host can build it at open.
+pub fn build(a: std.mem.Allocator, io: std.Io, tokenizer_path: []const u8, config_path: []const u8, output_path: []const u8) !void {
+    const tokenizer_bytes = try std.Io.Dir.cwd().readFileAlloc(io, tokenizer_path, a, .limited(64 << 20));
     defer a.free(tokenizer_bytes);
-    const config_bytes = try std.Io.Dir.cwd().readFileAlloc(io, config_path.?, a, .limited(16 << 20));
+    const config_bytes = try std.Io.Dir.cwd().readFileAlloc(io, config_path, a, .limited(16 << 20));
     defer a.free(config_bytes);
-    var t = try tok.loadTokenizer(io, a, tokenizer_path.?);
+    var t = try tok.loadTokenizer(io, a, tokenizer_path);
     defer t.deinit();
 
     const config = try @import("src/families/deepseek_v41/config.zig").Config.parse(a, config_bytes);
@@ -128,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
     }
     for (lookup) |v| try appendU32(&packed_buf, a, v);
 
-    var out_file = try std.Io.Dir.cwd().createFile(io, output_path.?, .{});
+    var out_file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
     defer out_file.close(io);
     try out_file.writeStreamingAll(io, packed_buf.items);
 
@@ -137,13 +136,13 @@ pub fn main(init: std.process.Init) !void {
     std.crypto.hash.sha2.Sha256.hash(packed_buf.items, &packed_sha, .{});
     const manifest = try writeManifest(a, tokenizer_sha, config_sha, packed_sha, raw_vocab, compressed, pad, order, heads, layers);
     defer a.free(manifest);
-    const manifest_path = try std.fmt.allocPrint(a, "{s}.json", .{output_path.?});
+    const manifest_path = try std.fmt.allocPrint(a, "{s}.json", .{output_path});
     defer a.free(manifest_path);
     var m_file = try std.Io.Dir.cwd().createFile(io, manifest_path, .{});
     defer m_file.close(io);
     try m_file.writeStreamingAll(io, manifest);
 
-    std.debug.print("token map: {d} raw ids -> {d} keys, {d} layers, {d} bytes written to {s}\n", .{ raw_vocab, compressed, layer_count, packed_buf.items.len, output_path.? });
+    std.debug.print("token map: {d} raw ids -> {d} keys, {d} layers, {d} bytes written to {s}\n", .{ raw_vocab, compressed, layer_count, packed_buf.items.len, output_path });
 }
 
 fn writeManifest(a: std.mem.Allocator, tokenizer_sha: [32]u8, config_sha: [32]u8, packed_sha: [32]u8, raw_vocab: usize, compressed: usize, pad: usize, order: u64, heads: u64, layers: []const Layer) ![]u8 {

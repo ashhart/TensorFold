@@ -150,10 +150,16 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.getInstallStep().dependOn(&b.addInstallFile(fast_lib, "lib/nemotron_fastmath.metallib").step);
     b.getInstallStep().dependOn(&lib_install.step);
 
-    const mods = metalEngineModules(b, target, optimize, draft_ids);
+    // One tokenizer module for the whole binary: the V4.1 Engram token-map builder decodes the release tokenizer.
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const mods = metalEngineModules(b, target, optimize, draft_ids, tokenizer);
     const metal = mods.metal;
     const kernels_mod = embedded(b, lib, "tensorfold.metallib");
     counters_build.targets(b, target, optimize, metal, mods.sources, test_step);
+
+    // DeepSeek V4.1: the operator qualification steps registered beside the other families'.
+    const dsv41_build = @import("deepseek_v41.zig");
+    test_step.dependOn(dsv41_build.weights(b, target, optimize, metal));
 
     // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
@@ -162,7 +168,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "tokenizer", .module = tokenizer } },
     });
     @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
     @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, test_step);
@@ -247,6 +253,11 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.getInstallStep().dependOn(&b.addInstallFile(packed_lib, "lib/nemotron_packed.metallib").step);
     sources.addImport("nemotron_packed_metallib", embedded(b, packed_lib, "nemotron_packed.metallib"));
     const engine = mods.engine;
+    {
+        const dsv41 = dsv41_build.checks(b, target, optimize, metal, sources, engine);
+        test_step.dependOn(dsv41.device);
+        test_step.dependOn(dsv41.reference);
+    }
     // FlashNext's CPU contracts, with the family module's imports so the replay graph type-checks
     const flash_host = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/flashnext_host.zig"),
@@ -465,7 +476,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }
 }
 
-pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module) struct { metal: *std.Build.Module, lanes: *std.Build.Module, fabric: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, living: *std.Build.Module, qwen27: qwen27_build.Shared } {
+pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, tokenizer: *std.Build.Module) struct { metal: *std.Build.Module, lanes: *std.Build.Module, fabric: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, living: *std.Build.Module, qwen27: qwen27_build.Shared } {
     const metal = b.createModule(.{
         .root_source_file = b.path("zig/src/metal/metal.zig"),
         .target = target,
@@ -486,13 +497,13 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living } },
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living }, .{ .name = "tokenizer", .module = tokenizer } },
     });
     return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .living = living, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
 }
 
 pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, sdk: []const u8) *std.Build.Step.Compile {
-    const m = metalEngineModules(b, target, .fast, draft_ids);
+    const m = metalEngineModules(b, target, .fast, draft_ids, b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true }));
     // the release binary embeds the same prebuilt packed-kernel metallib as the development build
     const flags = [_][]const u8{ b.fmt("-std={s}", .{mlxMetalStd(b)}), "-fmetal-math-mode=safe", "-fmetal-math-fp32-functions=fast" };
     m.sources.addImport("nemotron_packed_metallib", embedded(b, metallib(b, "nemotron_packed", &nemotron_packed, &flags), "nemotron_packed.metallib"));

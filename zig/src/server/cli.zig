@@ -116,6 +116,7 @@ pub const flags = [_]Flag{
     .{ .name = "--segments", .native = cuda_build },
     // the native server's own: shared prompt states (a harness) kept on disk for later sessions and servers
     .{ .name = "--learn", .kind = .store_true, .native = true },
+    .{ .name = "--engram-table-dir", .native = true },
     .{ .name = "--learn-dir", .native = true },
     .{ .name = "--learn-gib", .native = true },
     .{ .name = "--learn-min-free-gib", .native = true },
@@ -153,6 +154,7 @@ pub const Args = struct {
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
     learn_dir: ?[]const u8 = null,
+    engram_table_dir: ?[]const u8 = null,
     learn_min_free_gib: f64 = 4,
     learn_gib: f64 = 32, // disk for learned states, every model and build together
     learn_conversations: bool = false, // every kept state on disk, not only shared cuts (implies --learn)
@@ -306,7 +308,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
+    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--engram-table-dir")) out.engram_table_dir = v else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
     } else if (is(name, "--learn-min-free-gib")) {
@@ -445,6 +447,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .speed_up = args.speed_up,
         .prompt_cache_gib = args.prompt_cache_gib,
         .prompt_cache_over_cap = args.prompt_cache_over_cap,
+        .engram_table_dir = args.engram_table_dir,
         .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else null,
         .learn_gib = args.learn_gib,
         .learn_min_free_gib = args.learn_min_free_gib,
