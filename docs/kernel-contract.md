@@ -119,7 +119,9 @@ and their merge, prompt tiles with P as bf16 or in two halves, a row's last key,
 linear cache), each output within float64's range over the spread its fp32 steps and tensor-core sums allow
 (`core/attention_range.zig`; seven controls, each one planted fault), and the activation rows in MLX's bf16 steps (GeGLU, and
 SwiGLU as DFlash drafters round it; twelve controls, each dropping one rounding point; their 64-value sums bit-equal to
-the fp32 tree).
+the fp32 tree), and the MLX affine token rows (4 bits, and 2 to 6 or 8 bits times a bf16 scale, each
+output bit-equal to float64 at its rounding points; two controls, one dropping the rounding point, one folding the scale
+into the group's scale and bias).
 
 ## CUDA records per nvcc release
 

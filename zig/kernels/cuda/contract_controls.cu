@@ -74,6 +74,16 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_act_round(const __nv_bf
     else tf_act_round::rows<false>(gate, g_ld, up, u_ld, out, xs, n, keep);
 }
 
+// Gate 3: embed_rows.cu's scaled MLX rows keeping the rounding points in `keep`; the exact check must go red.
+#include "embed_affine.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_embed_affine(const int* ids, const uint32_t* w,
+                                                                       const __nv_bfloat16* s, const __nv_bfloat16* b,
+                                                                       __nv_bfloat16* out, int d, int bits, int group,
+                                                                       float scale, int keep) {
+    tf_embed_affine::rows(ids, w, s, b, out, d, bits, group, scale, keep);
+}
+
 // Gate 5: bounded to 256 threads a block, which the registry says its launcher gives 512.
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_bounded(const float* X, float* Y) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;

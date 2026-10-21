@@ -31,6 +31,7 @@ const act_k = @import("contract_act.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
+const embed_k = @import("contract_embed.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -281,6 +282,12 @@ pub fn run(gpu: check.Gpu) !void {
     for (&wrows, wrows_k.cfgs) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns, .ctl = mods[5], .arena = .init(a) };
     defer for (&wrows) |*x| x.deinit();
     for (&wrows) |*x| try kernels.append(a, x.kernel());
+    var embed_rows = try cuda.embed_rows.EmbedRows.load(gpu.d);
+    defer embed_rows.unload();
+    var embeds: [embed_k.entries.len]embed_k.Embed = undefined;
+    for (embed_k.entries, &embeds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .e = &embed_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_embed_affine") else null };
+    defer for (&embeds) |*x| x.deinit();
+    for (&embeds) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
