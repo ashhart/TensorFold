@@ -13,7 +13,7 @@ const asst = @import("cuda_assistant.zig");
 pub fn Family(comptime name: []const u8) type {
     return struct {
         pub const model_type = name;
-        pub const formats: []const []const u8 = &.{"mlx-q4g64"};
+        pub const formats: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
         pub const default_context: i64 = 32768;
         pub const max_segments: u32 = 1;
         pub const prompt_rows: u32 = be.prompt_rows;
@@ -158,7 +158,6 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.DrafterBitsUnsupported => "--drafter-bits: the Gemma 4 assistant runs at 4 bits on CUDA",
         error.StructuresUnsupported => "structured output is not built for Gemma 4 on CUDA yet",
         error.NonFiniteLogits => "the model's logits went non-finite at this row: the request is stopped rather than answered from them",
-        error.GemmaCudaWidthNotServed => "Gemma 4 on CUDA serves MLX affine 4-bit, group 64 checkpoints so far; other widths are not built yet",
         error.CapturedKernels => "Gemma 4 runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.ParallelPastRound => std.fmt.comptimePrint("--parallel: Gemma 4 on CUDA holds at most {d} streams (a round's rows): serve --parallel {d} or fewer, or auto", .{ be.round_rows, be.round_rows }),
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Gemma 4 streams than asked (each stream's caches are allocated at load): lower --parallel or --context, serve --parallel auto, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
@@ -195,7 +194,7 @@ fn release(p: *anyopaque) void {
 }
 
 test "every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.GemmaCudaWidthNotServed, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);

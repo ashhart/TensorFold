@@ -6,7 +6,6 @@ const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
 
 const DeviceBuffer = cuda.DeviceBuffer;
-const Affine4 = cuda.qlinear.Affine4;
 const Window = cuda.window_attention.Window;
 
 /// Rows a prompt chunk takes (Metal's chunk_rows: cut where Metal cuts, so fresh and resumed passes keep their bits).
@@ -180,14 +179,26 @@ pub const Model = struct {
     }
 
     /// x [rows, k] through `l` into out [rows, n]: a prompt chunk's GEMM, or decode rows on their group sums `xs`.
-    fn project(m: *const Model, k: *const kern.Kernels, s: cuda.Stream, l: Affine4, x: u64, xs: u64, out: u64, rows: usize, prompt: bool) !void {
+    fn project(m: *const Model, k: *const kern.Kernels, s: cuda.Stream, l: wts.Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool) !void {
         _ = m;
-        if (prompt) return k.affine.prompt(s, x, l, out, rows);
-        const tile = k.affine.verifyRows();
+        if (prompt) return switch (l) {
+            .a4 => |q| k.affine.prompt(s, x, q, out, rows),
+            .an => |q| k.wide.prompt(s, x, q, out, rows),
+        };
+        const tile: usize = switch (l) {
+            .a4 => k.affine.verifyRows(),
+            .an => 16,
+        };
         var at: usize = 0;
         while (at < rows) : (at += tile) {
             const n = @min(tile, rows - at);
-            try k.affine.verify(s, x + at * l.k * 2, xs + at * (l.k / 64) * 4, l, out + at * l.n * 2, n);
+            const xa = x + at * l.k() * 2;
+            const sa = xs + at * (l.k() / 64) * 4;
+            const oa = out + at * l.n() * 2;
+            switch (l) {
+                .a4 => |q| try k.affine.verify(s, xa, sa, q, oa, n),
+                .an => |q| try k.wide.decode(s, xa, sa, q, oa, n),
+            }
         }
     }
 
@@ -240,7 +251,7 @@ pub const Model = struct {
     fn launch(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, rows: usize, prompt: bool, head0: usize, heads: usize) !void {
         const h = m.geo.hidden;
         const x = m.s;
-        try k.embed.affine(s, x.ids, m.w.embed_w, m.w.embed_s, m.w.embed_b, x.h[0], rows, h, .{ .bits = 4, .group = cfg.group, .scale = embedScale(h) });
+        try k.embed.affine(s, x.ids, m.w.embed_w, m.w.embed_s, m.w.embed_b, x.h[0], rows, h, .{ .bits = @intCast(m.w.embed_bits), .group = cfg.group, .scale = embedScale(h) });
         // layer 0's input norm alone; every later one is the previous layer's dense tail
         try k.norms.addRmsTail(s, x.h[0], null, m.w.layers[0].input_norm, x.h[1], x.n, x.xs, rows, h, cfg.eps, .{ .round = true });
         for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt);

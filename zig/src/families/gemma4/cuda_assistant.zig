@@ -271,7 +271,7 @@ pub const Drafter = struct {
         for (items, 0..) |it, r| try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(s.hin + r * hid * 2, it.lane.h.ptr, hid * 2, x.s.handle), "cuMemcpyDtoDAsync");
         for (0..steps) |step| {
             if (step > 0) try x.nextIds(step - 1, rows);
-            try x.k.embed.affine(x.s, s.ids, x.m.w.embed_w, x.m.w.embed_s, x.m.w.embed_b, s.e, rows, hid, .{ .bits = 4, .group = cfg.group, .scale = fwd.embedScale(hid) });
+            try x.k.embed.affine(x.s, s.ids, x.m.w.embed_w, x.m.w.embed_s, x.m.w.embed_b, s.e, rows, hid, .{ .bits = @intCast(x.m.w.embed_bits), .group = cfg.group, .scale = fwd.embedScale(hid) });
             try x.copy2d(s.cat, 4 * hid, s.e, 2 * hid, 2 * hid, rows);
             try x.copy2d(s.cat + 2 * hid, 4 * hid, s.hin, 2 * hid, 2 * hid, rows);
             try x.k.act.groupSums(x.s, s.cat, 2 * hid, s.xs, rows, 2 * hid);
