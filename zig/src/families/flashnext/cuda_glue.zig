@@ -28,6 +28,8 @@ const Fns = struct {
     wb_moe: cuda.Function,
     wb_slices: cuda.Function,
     normalize: cuda.Function,
+    normalize_cols: cuda.Function, // fn_hc_normalize's bits over 256-column slices (dims a multiple of 256)
+    dense_mix8: cuda.Function, // fn_hc_dense_mix's bits, a warp a 32-column group, eight a block
     dense_mix: cuda.Function,
     shared_swiglu: cuda.Function,
     shared_scatter: cuda.Function,
@@ -99,6 +101,8 @@ pub const Glue = struct {
             .wb_moe = try g.hc.function("fn_hc_writeback_moe"),
             .wb_slices = try g.hc.function("fn_hc_writeback_slices"),
             .normalize = try g.hc.function("fn_hc_normalize"),
+            .normalize_cols = try g.hc.function("fn_hc_normalize_cols"),
+            .dense_mix8 = try g.hc.function("fn_hc_dense_mix8"),
             .dense_mix = try g.hc.function("fn_hc_dense_mix"),
             .shared_swiglu = try g.hc.function("fn_shared_swiglu"),
             .shared_scatter = try g.hc.function("fn_shared_scatter"),
@@ -228,6 +232,8 @@ pub const Glue = struct {
         args.add(eps);
         args.add(int(dims));
         args.add(int(streams));
+        // a block a 256-column slice: the same stream sum in each, so fn_hc_normalize's bits with more blocks
+        if (dims % 256 == 0) return cuda.launch.launch(g.f.normalize_cols, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(streams), .z = @intCast(dims / 256) }, .block = .{ .x = 256 } }, s, &args);
         try cuda.launch.launch(g.f.normalize, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(streams) }, .block = .{ .x = 256 } }, s, &args);
     }
 
@@ -236,7 +242,8 @@ pub const Glue = struct {
         for ([_]u64{ up, norm, mixed, sums }) |v| args.add(v);
         args.add(int(dims));
         args.add(int(streams));
-        try cuda.launch.launch(g.f.dense_mix, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(dims / 32) }, .block = .{ .x = 32 } }, s, &args);
+        // eight 32-column groups a block, a warp each: fn_hc_dense_mix's bits with an eighth of its blocks
+        try cuda.launch.launch(g.f.dense_mix8, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((dims / 32 + 7) / 8) }, .block = .{ .x = 256 } }, s, &args);
     }
 
     pub fn sharedSwiGLU(g: *const Glue, s: cuda.Stream, gate: u64, up: u64, act: u64, rows: usize, width: usize) !void {
