@@ -76,12 +76,15 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     const trunk = if (seen.urls.len > 0) try std.mem.concat(cx.a, u32, &.{ head, try f.encode(try prefix(cx.a, seen.state, false)) }) else try f.encode(try prefix(cx.a, seen.state, true));
     const codes = try cx.a.alloc([]const Code, questions.len);
     const branches = try cx.a.alloc([]const u32, questions.len);
-    for (questions, codes, branches) |q, *c, *b| {
-        c.* = if (q.kind == .choice) try f.codes(q.keys) else &.{};
-        b.* = try f.encode(try suffix(cx.a, q, c.*));
-    }
     const groups = try cx.a.alloc([]const []const u32, questions.len);
-    for (questions, codes, groups) |q, c, *g| g.* = try f.readout(q, c);
+    const positions = srv.engine.info().decision_positions; // a side head reads option lines' last rows
+    for (questions, codes, branches, groups) |q, *c, *b, *g| {
+        c.* = if (q.kind == .choice) try f.codes(q.keys) else &.{};
+        var ends: std.ArrayList(usize) = .empty;
+        const rendered = try suffix(cx.a, q, c.*, positions, &ends);
+        b.* = try f.encode(rendered);
+        g.* = if (positions) try f.positions(rendered, b.*, ends.items, trunk.len) else try f.readout(q, c.*);
+    }
     const window = srv.engine.info().context_window;
     var read: usize = trunk.len;
     for (branches) |b| {
@@ -270,6 +273,21 @@ const Format = struct {
         }
     }
 
+    /// A side head's readout: one group an option, the absolute index of its line's last token (`base` the trunk's length).
+    fn positions(f: *Format, text_: []const u8, ids: []const u32, ends: []const usize, base: usize) errors.Refused![]const []const u32 {
+        const a = f.cx.a;
+        const ats = try a.alloc(u32, ends.len);
+        if (!(f.srv.text.indexAt(a, text_, ids, ends, ats) catch return error.OutOfMemory))
+            return f.cx.refuse("an option's line is not found at a token boundary in this decision's text, so this model's decision head cannot read it");
+        const groups = try a.alloc([]const u32, ends.len);
+        for (ats, groups) |p, *g| {
+            const one = try a.alloc(u32, 1);
+            one[0] = @intCast(base + p);
+            g.* = one;
+        }
+        return groups;
+    }
+
     fn forms(f: *Format, texts: []const []const u8) errors.Refused![]const u32 {
         var seen: std.ArrayList(u32) = .empty;
         for (texts) |t| if (try f.single(t)) |id| if (std.mem.indexOfScalar(u32, seen.items, id) == null) try seen.append(f.cx.a, id);
@@ -334,14 +352,16 @@ fn indented(w: *std.Io.Writer, v: Value, level: usize) std.Io.Writer.Error!void 
     }
 }
 
-fn suffix(a: Allocator, q: Question, codes: []const Code) Allocator.Error![]const u8 {
+fn suffix(a: Allocator, q: Question, codes: []const Code, positions: bool, ends: *std.ArrayList(usize)) Allocator.Error![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
-    questionText(a, &out.writer, q, codes) catch return error.OutOfMemory;
+    questionText(a, &out, q, codes, positions, ends) catch return error.OutOfMemory;
     out.writer.writeAll(im_end ++ "\n" ++ im_start ++ "assistant\n") catch return error.OutOfMemory;
     return out.toOwnedSlice();
 }
 
-fn questionText(a: Allocator, w: *std.Io.Writer, q: Question, codes: []const Code) !void {
+/// The question's text; `ends` takes each option line's end offset for a side head's positions.
+fn questionText(a: Allocator, out: *std.Io.Writer.Allocating, q: Question, codes: []const Code, positions: bool, ends: *std.ArrayList(usize)) !void {
+    const w = &out.writer;
     try w.writeAll(q.instructions);
     switch (q.kind) {
         .choice => {
@@ -351,21 +371,28 @@ fn questionText(a: Allocator, w: *std.Io.Writer, q: Question, codes: []const Cod
                 try w.print("{s} ", .{c.text});
                 // a description as written (JSON when it is not text); without one, the name
                 if (desc != null and desc.?.truthy()) try w.writeAll(try text(a, desc.?)) else for (key) |ch| try w.writeByte(if (ch == '_') ' ' else ch);
+                try ends.append(a, out.written().len);
             }
             try w.writeAll("\n\nReply with the option code only.");
         },
         .noul => {
-            // the template shows the descriptions only when one side has one, then both
+            // the template shows the descriptions only when one side has one, then both;
+            // a side head needs each option rendered: the bare answer words stand in when no text is given
             const any = q.texts.len == 2 and (q.texts[0] != null and q.texts[0].? != .null or q.texts[1] != null and q.texts[1].? != .null);
-            if (any) for ([_][]const u8{ "Yes", "No" }, q.texts) |name, t| {
-                const shown: Value = if (t != null and t.? != .null) t.? else .{ .string = "None" };
+            if (any or positions) for ([_][]const u8{ "Yes", "No" }, 0..) |name, i| {
+                const t: ?Value = if (i < q.texts.len) q.texts[i] else null;
+                const shown: Value = if (t != null and t.? != .null) t.? else .{ .string = if (any) "None" else if (i == 0) "yes" else "no" };
                 try w.print("\n{s}: {s}", .{ name, try text(a, shown) });
+                try ends.append(a, out.written().len);
             };
             try w.writeAll("\n\nReply with yes or no only.");
         },
         .score => {
             try w.writeAll("\n\n");
-            for (q.keys, 0..) |name, i| try w.print("{s}{d} {s}", .{ if (i > 0) "\n" else "", i, name });
+            for (q.keys, 0..) |name, i| {
+                try w.print("{s}{d} {s}", .{ if (i > 0) "\n" else "", i, name });
+                try ends.append(a, out.written().len);
+            }
             try w.print("\n\nReply with a single digit 0-{d} only.", .{q.keys.len - 1});
         },
     }

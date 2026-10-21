@@ -157,10 +157,11 @@ const Wording = struct {
     kind: Kind,
     names: []const []const u8,
     labels: []const []const u8,
+    lines: []const []const u8, // every rendered line, the option lines between the question and the closing
     content: []const u8,
 };
 
-fn wording(cx: *Cx, input: []const u8, question: Value) errors.Refused!Wording {
+fn wording(cx: *Cx, input: []const u8, question: Value, positions: bool) errors.Refused!Wording {
     const kind_value = question.get("type") orelse .null;
     const kind: Kind = if (kind_value == .string and std.mem.eql(u8, kind_value.string, "choice"))
         .choice
@@ -189,7 +190,10 @@ fn wording(cx: *Cx, input: []const u8, question: Value) errors.Refused!Wording {
             try rejectUnknown(cx, question.object, &score_fields);
             const listed = try scoreList(cx, question);
             try lines.append(cx.a, try questionLine(cx, question));
-            for (listed.labels, listed.details) |label, detail| try lines.append(cx.a, try std.fmt.allocPrint(cx.a, "{s}: {s}", .{ label, detail }));
+            for (listed.labels, listed.details) |label, detail| {
+                const line = try std.fmt.allocPrint(cx.a, "{s}: {s}", .{ label, detail });
+                try lines.append(cx.a, line);
+            }
             break :blk .{ listed.names, listed.labels };
         },
         .yes_no => blk: {
@@ -199,8 +203,15 @@ fn wording(cx: *Cx, input: []const u8, question: Value) errors.Refused!Wording {
             const lead = try renderText(cx, question.get("question"));
             if (reply_text.pyStrip(lead).len == 0) return cx.refuse("a question must not be blank");
             try lines.append(cx.a, try std.fmt.allocPrint(cx.a, "Is the following true? {s}", .{lead}));
-            if (yes.len > 0) try lines.append(cx.a, try std.fmt.allocPrint(cx.a, "yes: {s}", .{yes}));
-            if (no.len > 0) try lines.append(cx.a, try std.fmt.allocPrint(cx.a, "no: {s}", .{no}));
+            // a side head needs each option rendered: the bare answer words stand in when no text is given
+            if (yes.len > 0 or positions) {
+                const line = try std.fmt.allocPrint(cx.a, "yes: {s}", .{if (yes.len > 0) yes else "yes"});
+                try lines.append(cx.a, line);
+            }
+            if (no.len > 0 or positions) {
+                const line = try std.fmt.allocPrint(cx.a, "no: {s}", .{if (no.len > 0) no else "no"});
+                try lines.append(cx.a, line);
+            }
             const names = [_][]const u8{ "yes", "no" };
             break :blk .{ try cx.a.dupe([]const u8, &names), try cx.a.dupe([]const u8, &names) };
         },
@@ -211,7 +222,7 @@ fn wording(cx: *Cx, input: []const u8, question: Value) errors.Refused!Wording {
         .yes_no => "Answer with yes or no only.",
     };
     try lines.append(cx.a, closing);
-    return .{ .kind = kind, .names = names, .labels = labels, .content = try contentOf(cx.a, input, lines.items) };
+    return .{ .kind = kind, .names = names, .labels = labels, .lines = lines.items, .content = try contentOf(cx.a, input, lines.items) };
 }
 
 const Listed = struct {
@@ -291,7 +302,8 @@ fn contentOf(a: Allocator, input: []const u8, lines: []const []const u8) Allocat
 }
 
 fn prepareOne(srv: *Server, cx: *Cx, input: []const u8, question: Value) errors.Refused!Prepared {
-    const word = try wording(cx, input, question);
+    const positions = srv.engine.info().decision_positions;
+    const word = try wording(cx, input, question, positions);
     const prompt_text = try renderPrompt(srv, cx, word.content);
     const prompt_ids = try encodePrompt(srv, cx, prompt_text);
     try thinkOpen(cx, prompt_text);
@@ -301,7 +313,10 @@ fn prepareOne(srv: *Server, cx: *Cx, input: []const u8, question: Value) errors.
         .kind = word.kind,
         .names = word.names,
         .prompt_ids = prompt_ids,
-        .label_ids = try labelIds(srv, cx, prompt_text, prompt_ids, word.labels),
+        .label_ids = if (positions)
+            try optionPositions(srv, cx, prompt_text, prompt_ids, input.len, word.lines, word.content)
+        else
+            try labelIds(srv, cx, prompt_text, prompt_ids, word.labels),
     };
 }
 
@@ -352,6 +367,26 @@ fn labelIds(srv: *Server, cx: *Cx, prompt: []const u8, prompt_ids: []const u32, 
 
 fn labelRefuse(cx: *Cx, label: []const u8) errors.Refused {
     return cx.fail(.request, "the answer label {s} is not one distinct token after the chat prompt for this tokenizer, so this model is not supported", .{pyrepr.repr(cx.a, .{ .string = label }) catch label});
+}
+
+/// A side head's `labels`: each option's final-token position in `prompt`, its line's last token;
+/// the lines sit one a row between `input` and the closing inside `content` (`base` it in `prompt`).
+fn optionPositions(srv: *Server, cx: *Cx, prompt: []const u8, prompt_ids: []const u32, input_len: usize, lines: []const []const u8, content: []const u8) errors.Refused![]u32 {
+    const a = cx.a;
+    const base = std.mem.indexOf(u8, prompt, content) orelse return positionRefuse(cx, lines[0]);
+    const ats = try a.alloc(usize, lines.len - 2);
+    var at = base + input_len + 2 + lines[0].len + 1; // past the input, the question line and their rows
+    for (lines[1 .. lines.len - 1], ats) |line, *end| {
+        end.* = at + line.len;
+        at = end.* + 1;
+    }
+    const out = try a.alloc(u32, ats.len);
+    if (!(srv.text.indexAt(a, prompt, prompt_ids, ats, out) catch return error.OutOfMemory)) return positionRefuse(cx, lines[0]);
+    return out;
+}
+
+fn positionRefuse(cx: *Cx, line: []const u8) errors.Refused {
+    return cx.fail(.request, "the option line {s} is not found at a token boundary in the chat prompt for this tokenizer, so this model's decision head cannot read it", .{pyrepr.repr(cx.a, .{ .string = line }) catch line});
 }
 
 fn scoreAll(srv: *Server, cx: *Cx, prepared: []const Prepared) errors.Refused![]Scored {

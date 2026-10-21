@@ -361,6 +361,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
         }
     }
     errdefer if (h.joint) |j| j.close();
+    if (h.joint != null) h.host.info_.decision_positions = true; // score/decide labels are option-final rows
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
     return h;

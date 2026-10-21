@@ -73,6 +73,26 @@ pub const Text = struct {
         return f(t.ctx, a, id);
     }
 
+    /// `ids` are `text`'s encoding: for each of `ats` (a span's end offset, ascending) the index of
+    /// the token covering its last byte, or false when a token's own text and `text` disagree.
+    pub fn indexAt(t: Text, a: Allocator, text: []const u8, ids: []const u32, ats: []const usize, out: []u32) Allocator.Error!bool {
+        var i: usize = 0;
+        var end: usize = 0;
+        for (ats, out) |at, *o| {
+            if (at == 0 or at > text.len) return false;
+            while (end < at) {
+                if (i == ids.len) return false;
+                const piece = try t.decode(a, ids[i .. i + 1]);
+                defer a.free(piece);
+                if (piece.len == 0 or !std.mem.startsWith(u8, text[end..], piece)) return false;
+                end += piece.len;
+                i += 1;
+            }
+            o.* = @intCast(i - 1);
+        }
+        return true;
+    }
+
     pub fn eosIds(t: Text) []const u32 {
         return t.vtable.eos_ids(t.ctx);
     }

@@ -200,6 +200,8 @@ pub const Info = struct {
     prompt_cache_plan: ?PromptCachePlan = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
     decides: bool = false,
+    /// `score`/`decide` labels are option-final token positions, not token ids: a side head reads there.
+    decision_positions: bool = false,
     /// Decisions may carry pictures (`Decision.pictures`).
     pictures: bool = false,
     /// Image input (--vision); null: text only.
