@@ -6,7 +6,8 @@ const core = @import("core");
 const vl = core.qwen_vl;
 const lt = cuda.cublaslt;
 const DeviceBuffer = cuda.DeviceBuffer;
-const prefix = "vision_tower.";
+const mlx_prefix = "vision_tower.";
+const hf_prefix = "model.visual.";
 
 /// What every Qwen3.5/3.8 tower shares (vision_config); its width, heads, depth and MLP are the checkpoint's.
 pub const patch = 16;
@@ -203,6 +204,7 @@ pub const Tower = struct {
     patch_b: u64 = 0,
     pos: u64 = 0,
     blocks: [max_depth]Block = undefined,
+    prefix: []const u8 = mlx_prefix,
     merger_norm_w: u64 = 0,
     merger_norm_b: u64 = 0,
     fc1_w: u64 = 0,
@@ -228,10 +230,19 @@ pub const Tower = struct {
         t.arena = try DeviceBuffer.alloc(d, weightBytes(c) + scratchBytes(c, max_patches));
         errdefer t.arena.free();
         try t.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
-        var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, prefix);
+        var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, hf_prefix);
+        const hf = ck.has(hf_prefix ++ "patch_embed.proj.weight");
+        if (!hf) { // not HF-named: the MLX layout
+            ck.close();
+            ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, mlx_prefix);
+        }
         defer ck.close();
-        { // [hidden, T, P, P, C] as stored (MLX) to [hidden, C, T, P, P]
-            const tn = try ck.expect(prefix ++ "patch_embed.proj.weight", .bf16, &.{ hidden, temporal, patch, patch, channels });
+        t.prefix = if (hf) hf_prefix else mlx_prefix;
+        if (hf) { // HF: [hidden, C, T, P, P] already, uploaded as stored
+            const tn = try ck.expect(hf_prefix ++ "patch_embed.proj.weight", .bf16, &.{ hidden, channels, temporal, patch, patch });
+            t.patch_w = try t.put(tn.bytes);
+        } else { // [hidden, T, P, P, C] as stored (MLX) to [hidden, C, T, P, P]
+            const tn = try ck.expect(mlx_prefix ++ "patch_embed.proj.weight", .bf16, &.{ hidden, temporal, patch, patch, channels });
             const host = try gpa.alloc(u16, hidden * patch_width);
             defer gpa.free(host);
             const stored: []align(1) const u16 = std.mem.bytesAsSlice(u16, tn.bytes);
@@ -321,7 +332,7 @@ pub const Tower = struct {
 
     fn get(t: *Tower, ck: *core.Checkpoint, name: []const u8, shape: []const usize) !u64 {
         var buf: [96]u8 = undefined;
-        const tn = try ck.expect(try std.fmt.bufPrint(&buf, prefix ++ "{s}", .{name}), .bf16, shape);
+        const tn = try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}", .{ t.prefix, name }), .bf16, shape);
         return t.put(tn.bytes);
     }
 
