@@ -47,6 +47,7 @@ test {
     _ = @import("status_routes.zig");
     _ = @import("speech.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
+    _ = @import("drama_voice_tool.zig");
     _ = @import("drama_prompt.zig");
     _ = @import("health_test.zig");
     _ = @import("memory_routes.zig");
