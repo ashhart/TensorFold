@@ -8,6 +8,7 @@ pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this releas
 pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))
         return deepseek_release_message;
+    if (o.tp != 1 and o.tp != 2) return "--tp: the CUDA engine runs one or two ranks (one process a GPU): serve --tp 1 or --tp 2";
     if (o.mtp_drafts) |n| if (n > nemotron.native.max_drafts) return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
     if (o.mtp_drafts != null or o.mtp_confidence != null) {
@@ -58,6 +59,15 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     };
     try std.testing.expectStringStartsWith(family(Single, .{ .dir = "d", .model_type = "m", .tp = 2 }) orelse "", "this CUDA family has no tensor-parallel ranks");
     try std.testing.expect(family(Ranked, .{ .dir = "d", .model_type = "m", .tp = 2 }) == null);
+}
+
+test "--tp is served on CUDA for two ranks of a ranked family (Flash Next) only; 4 and 8 stay refused" {
+    const flashnext = @import("flashnext").native;
+    for ([_]u32{ 4, 8 }) |tp| try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = flashnext.model_type, .tp = tp }) orelse "", "--tp: the CUDA engine runs one or two ranks");
+    for ([_]u32{ 1, 2 }) |tp| try std.testing.expect(backend(.{ .dir = "d", .model_type = flashnext.model_type, .tp = tp }) == null);
+    try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2, .rank = 1, .drafts = false }) == null);
+    // a family without rank options (Nemotron) still refuses --tp 2 at its admission
+    try std.testing.expectStringStartsWith(family(nemotron.native, .{ .dir = "d", .model_type = nemotron.native.model_type, .tp = 2 }) orelse "", "this CUDA family has no tensor-parallel ranks");
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {

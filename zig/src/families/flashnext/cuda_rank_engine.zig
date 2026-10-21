@@ -20,6 +20,7 @@ pub const Identity = extern struct {
     head_sharded: u64 = 0,
     image_tokens: u64 = 0,
     max_images: u64 = 0,
+    pager: u64 = 0,
 };
 
 fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -41,7 +42,7 @@ pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usiz
     defer a.free(index);
     const program = try std.process.executablePathAlloc(io, a);
     defer a.free(program);
-    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()) };
+    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()), .pager = @import("cuda_exl3_kvpage.zig").configIdentity(@import("cuda_exl3_kvpage.zig").configFromEnv()) };
 }
 
 pub const Session = struct {
@@ -58,6 +59,7 @@ pub const Session = struct {
     drafting: bool = false,
     stopped: bool = false,
     available: std.atomic.Value(bool) = .init(true),
+    restoring: ?struct { sequence: u64, snapshot: u64 } = null,
 
     pub fn init(a: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, rank: usize, mine: Identity) !*Session {
         const s = try a.create(Session);
@@ -212,13 +214,18 @@ pub const Session = struct {
 
     /// Both ranks keep their own recurrent window; only the leader consumes draft scores and hidden rows.
     pub fn verify(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32) !void {
-        if (!s.drafting or ids.len == 0 or ids.len > mtp.max_rows or q.fed + ids.len > q.cap) return error.UnsupportedRankOperation;
+        return s.verifyWithTail(Tri, tri, q, d, ids, null);
+    }
+
+    pub fn verifyWithTail(session: *Session, comptime Tri: type, tri: Tri, seq: *prompt.Seq, draft_state: *mtp.Draft, ids: []const u32, tail: ?prompt.batch.Hooks.OutputTail) !void {
+        if (tail != null and session.rank != 0) return error.UnsupportedRankOperation;
+        if (!session.drafting or ids.len == 0 or ids.len > mtp.max_rows or seq.fed + ids.len > seq.cap) return error.UnsupportedRankOperation;
         try tokenIds(ids);
-        const h = try s.command(.{ .kind = .verify, .object = q.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
-        errdefer s.poison();
-        const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
-        try ops.verify(q, d, ids);
-        try s.ack(h);
+        const header = try session.command(.{ .kind = .verify, .object = seq.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
+        errdefer session.poison();
+        const ops: mtp.Ops(Tri) = .{ .e = session.engine, .tri = tri, .h = undefined };
+        try ops.verifyWithTail(seq, draft_state, ids, tail);
+        try session.ack(header);
     }
 
     pub fn keep(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, count: usize) !void {
@@ -235,26 +242,48 @@ pub const Session = struct {
         const item = try s.windows.getOrPut(s.gpa, q.rank_id);
         if (!item.found_existing) {
             errdefer _ = s.windows.remove(q.rank_id);
-            item.value_ptr.* = try mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, q.cap, 1, s.engine.chunk);
+            // rank 1 never runs the head: its window keeps the rollback buffers and a one-entry head cache, not q.cap's
+            item.value_ptr.* = try mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, 1, 1, s.engine.chunk);
         }
         return item.value_ptr;
     }
 
-    pub fn save(s: *Session, q: *prompt.Seq) !*snaps.Snap {
-        const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, null);
+    /// `d`: rank 0's head cache (a drafting stream); rank 1 keeps the sequence alone (it never runs the head).
+    pub fn save(s: *Session, q: *prompt.Seq, d: ?*mtp.Draft) !*snaps.Snap {
+        const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, d);
         errdefer snaps.drop(s.gpa, s.engine.stream.*, kept);
         kept.rank_id = s.next_object;
         s.next_object = std.math.add(u64, s.next_object, 1) catch return error.BadRankFrame;
         const h = try s.command(.{ .kind = .save, .object = q.rank_id, .arg = kept.rank_id }, &.{});
+        errdefer s.poison();
         try s.ack(h);
         return kept;
     }
 
-    pub fn restore(s: *Session, q: *prompt.Seq, kept: *const snaps.Snap) !void {
+    pub fn restore(s: *Session, q: *prompt.Seq, d: ?*mtp.Draft, kept: *const snaps.Snap) !void {
+        if (kept.paged != null) {
+            try snaps.validateRestore(q, d, kept);
+            const check = try s.command(.{ .kind = .restore_check, .object = q.rank_id, .arg = kept.rank_id }, &.{});
+            errdefer {
+                q.invalidated = true;
+                s.poison();
+            }
+            try s.ack(check);
+            s.engine.round_graph.clear();
+            const copying = try s.command(.{ .kind = .restore, .object = q.rank_id, .arg = kept.rank_id }, &.{});
+            try snaps.restoreData(s.engine.stream.*, q, d, kept);
+            try s.ack(copying);
+            const commit = try s.command(.{ .kind = .restore_commit, .object = q.rank_id, .arg = kept.rank_id }, &.{});
+            try s.ack(commit);
+            snaps.publishRestore(q, d, kept);
+            return;
+        }
         if (kept.at > q.cap) return error.SequenceTooShort;
+        // refused before rank 1 hears of it (snaps.restore's own check, made first)
+        if (d) |hd| if (!kept.head or kept.at > hd.cap) return error.NoHeadState;
         const h = try s.command(.{ .kind = .restore, .object = q.rank_id, .arg = kept.rank_id }, &.{});
         errdefer s.poison();
-        try snaps.restore(s.engine.stream.*, q, null, kept);
+        try snaps.restore(s.engine.stream.*, q, d, kept);
         try s.ack(h);
     }
 
@@ -295,6 +324,7 @@ pub const Session = struct {
 
     fn apply(s: *Session, comptime Tri: type, tri: Tri, logits: u64, h: wire.Header, payload: []const u8) !bool {
         try shape(h);
+        if (s.restoring != null and h.kind != .restore and h.kind != .restore_commit) return error.BadRankFrame;
         switch (h.kind) {
             .create => {
                 if (s.seqs.contains(h.object)) return error.BadRankFrame;
@@ -360,6 +390,7 @@ pub const Session = struct {
             .save => {
                 if (s.saved.contains(h.arg)) return error.BadRankFrame;
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                if (s.windows.getPtr(h.object)) |d| if (d.open) return error.NotAtMark;
                 const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, null);
                 errdefer snaps.drop(s.gpa, s.engine.stream.*, kept);
                 try s.saved.put(s.gpa, h.arg, kept);
@@ -367,7 +398,43 @@ pub const Session = struct {
             .restore => {
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
                 const kept = s.saved.get(h.arg) orelse return error.UnknownRankSnapshot;
-                try snaps.restore(s.engine.stream.*, q, null, kept);
+                s.engine.round_graph.clear();
+                if (kept.paged != null) {
+                    const pending = s.restoring orelse return error.BadRankFrame;
+                    if (pending.sequence != h.object or pending.snapshot != h.arg) return error.BadRankFrame;
+                    if (s.windows.getPtr(h.object)) |d| d.verify_cache.invalidate();
+                    try snaps.restoreData(s.engine.stream.*, q, null, kept);
+                } else {
+                    try snaps.restore(s.engine.stream.*, q, null, kept);
+                    // a drafting sequence's verify window starts over at the restored mark, as rank 0's head cache does
+                    if (s.windows.getPtr(h.object)) |d| {
+                        d.reset();
+                        d.len = kept.at;
+                    }
+                }
+            },
+            .restore_check => {
+                if (s.restoring != null) return error.BadRankFrame;
+                const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                const kept = s.saved.get(h.arg) orelse return error.UnknownRankSnapshot;
+                if (kept.paged == null) return error.BadRankFrame;
+                try snaps.validateRestore(q, null, kept);
+                s.restoring = .{ .sequence = h.object, .snapshot = h.arg };
+            },
+            .restore_commit => {
+                const pending = s.restoring orelse return error.BadRankFrame;
+                if (pending.sequence != h.object or pending.snapshot != h.arg) return error.BadRankFrame;
+                const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                if (!q.invalidated) return error.BadRankFrame;
+                const kept = s.saved.get(h.arg) orelse return error.UnknownRankSnapshot;
+                snaps.publishRestore(q, null, kept);
+                if (s.windows.getPtr(h.object)) |d| {
+                    d.reset();
+                    d.open = false;
+                    d.len = kept.at;
+                    d.fed0 = kept.at;
+                }
+                s.restoring = null;
             },
             .drop_snap => {
                 const entry = s.saved.fetchRemove(h.object) orelse return error.UnknownRankSnapshot;
@@ -410,7 +477,7 @@ pub fn shape(h: wire.Header) !void {
         .verify => if (h.object == 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 4 != 0 or h.bytes / 4 > mtp.max_rows) return error.BadRankFrame,
         .keep => if (h.object == 0 or h.arg == 0 or h.arg > mtp.max_rows or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .round => if (h.object != 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 32) return error.BadRankFrame,
-        .save, .restore => if (h.object == 0 or h.arg == 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
+        .save, .restore, .restore_check, .restore_commit => if (h.object == 0 or h.arg == 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .drop_seq, .drop_snap => if (h.object == 0 or h.arg != 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .stop => if (h.object != 0 or h.arg != 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         else => return error.BadRankFrame,

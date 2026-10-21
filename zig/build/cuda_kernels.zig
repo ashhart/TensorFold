@@ -106,6 +106,12 @@ pub const kernels = [_]Kernel{
     .{ .name = "drama3", .flags = &.{"-O3"} },
     .{ .name = "drama3_fp8", .flags = &.{"-O3"} },
     .{ .name = "drama3_codec", .flags = &.{"-O3"} },
+    .{ .name = "flashnext_exl3", .flags = glue }, // ours: Flash Next's EXL3 glue (an fp16 row split exactly into two bf16)
+    .{ .name = "flashnext_exl3_tp", .flags = glue }, // ours: Flash Next's EXL3 expert-parallel masks and placement
+    .{ .name = "flashnext_exl3_dplan", .flags = &.{"-O3"} }, // ours: Flash Next's EXL3 pool planned on the device (decode graphs)
+    .{ .name = "flashnext_exl3_kv", .flags = glue }, // ours: Flash Next attention over an int8 KV cache (K10 prototype)
+    .{ .name = "flashnext_exl3_kvpage", .flags = glue }, // ours: Flash Next K/V paged to host memory, a device block cache
+    .{ .name = "flashnext_exl3_prefill", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // ours: Flash Next EXL3 prefill experts, 64-member tiles any width
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.

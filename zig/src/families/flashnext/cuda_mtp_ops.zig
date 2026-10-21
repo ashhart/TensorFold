@@ -42,6 +42,90 @@ fn cint(v: usize) c_int {
     return @intCast(v);
 }
 
+test "exl3: greedy verification consumes completed records without touching the head or CUDA" {
+    var records: [max_rows * 16]u8 align(16) = undefined;
+    const values = std.mem.bytesAsSlice(f32, &records);
+    const tokens = [_]u32{ 0, 6124, 9564, @intCast(vocab - 1) };
+    for (tokens, 0..) |token, row| values[4 * row + 2] = @bitCast(@as(i32, @intCast(token)));
+    var window: Draft = undefined;
+    window.rows = tokens.len;
+    window.fed0 = 37;
+    window.verify_cache = .{};
+    window.verify_host = .{ .d = undefined, .bytes = &records };
+    const ops: Ops(struct {}) = .{ .e = undefined, .tri = .{}, .h = undefined };
+    var drawn: [tokens.len]u32 = undefined;
+    window.verify_cache.publish(window.verify_cache.generation, window.rows, window.fed0);
+    try ops.draws(&window, null, &drawn);
+    try std.testing.expectEqualSlices(u32, &tokens, &drawn);
+    try std.testing.expect(window.verify_cache.ready == null);
+    window.verify_cache.publish(window.verify_cache.generation, window.rows, window.fed0);
+    try ops.draws(&window, .{ .seed = 0, .temperature = 0 }, &drawn);
+    try std.testing.expectEqualSlices(u32, &tokens, &drawn);
+}
+
+test "exl3: verification tail enqueues the existing top-1 kernel then only its records copy" {
+    const Fake = struct {
+        var launches: usize = 0;
+        var copies: usize = 0;
+        var rows: usize = 0;
+        var copied: usize = 0;
+        var fail_copy: bool = false;
+
+        fn launch(_: cuda.abi.Function, grid: c_uint, _: c_uint, _: c_uint, block: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, params: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+            std.debug.assert(block == 1024);
+            std.debug.assert(launches == copies);
+            const scores: *const u64 = @ptrCast(@alignCast(params.?[0].?));
+            const width: *const c_int = @ptrCast(@alignCast(params.?[1].?));
+            const stride: *const c_longlong = @ptrCast(@alignCast(params.?[2].?));
+            const output: *const u64 = @ptrCast(@alignCast(params.?[3].?));
+            std.debug.assert(scores.* == 0x2000 and width.* == vocab and stride.* == vocab and output.* == 0x4000);
+            rows = grid;
+            launches += 1;
+            return 0;
+        }
+
+        fn copy(_: ?*anyopaque, src: u64, bytes: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            std.debug.assert(launches == copies + 1 and src == 0x4000);
+            copies += 1;
+            copied = bytes;
+            if (fail_copy) return cuda.abi.error_not_ready;
+            return 0;
+        }
+    };
+    Fake.launches = 0;
+    Fake.copies = 0;
+    Fake.fail_copy = false;
+    var driver: cuda.Driver = undefined;
+    driver.api.cuLaunchKernel = Fake.launch;
+    driver.api.cuMemcpyDtoHAsync_v2 = Fake.copy;
+    const stream: cuda.Stream = .{ .d = &driver, .handle = null };
+    var head: Head = undefined;
+    head.best_fn = .{ .d = &driver, .handle = null };
+    var records: [max_rows * 16]u8 align(16) = undefined;
+    var window: Draft = undefined;
+    window.logits = .{ .d = &driver, .ptr = 0x2000, .len = max_rows * vocab * 2 };
+    window.best = .{ .d = &driver, .ptr = 0x4000, .len = max_rows * 16 };
+    window.verify_host = .{ .d = &driver, .bytes = &records };
+    window.verify_cache = .{};
+    for ([_]usize{ 1, 2, 3, 4, 8, 16 }) |rows| {
+        window.rows = rows;
+        window.verify_cache.invalidate();
+        var tail: Ops(struct {}).VerifyTail = .{ .head = &head, .draft = &window };
+        try Ops(struct {}).VerifyTail.enqueue(&tail, stream);
+        try std.testing.expectEqual(rows, Fake.rows);
+        try std.testing.expectEqual(rows * 16, Fake.copied);
+        try std.testing.expect(tail.enqueued);
+        try std.testing.expectEqual(window.verify_cache.generation, tail.generation);
+        try std.testing.expect(window.verify_cache.ready == null);
+    }
+    Fake.fail_copy = true;
+    var failed: Ops(struct {}).VerifyTail = .{ .head = &head, .draft = &window };
+    try std.testing.expectError(error.NotReady, Ops(struct {}).VerifyTail.enqueue(&failed, stream));
+    try std.testing.expect(failed.enqueued);
+    try std.testing.expect(window.verify_pending != null);
+    try std.testing.expect(window.verify_cache.ready == null);
+}
+
 fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
     if (n == 0) return;
     const d = stream.d;
@@ -57,8 +141,9 @@ fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
 /// An owner can mirror main-model mutations to a peer without exposing device pointers on the control wire.
 pub const Main = struct {
     ptr: *anyopaque,
+    rank: usize,
     forward: *const fn (*anyopaque, *prompt.Seq, []const u32, batch.Hooks) anyerror!void,
-    verify: *const fn (*anyopaque, *prompt.Seq, *Draft, []const u32) anyerror!void,
+    verify: *const fn (*anyopaque, *prompt.Seq, *Draft, []const u32, ?batch.Hooks.OutputTail) anyerror!void,
     rollback: *const fn (*anyopaque, *prompt.Seq, *Draft, usize) anyerror!void,
 };
 
@@ -83,6 +168,7 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
         pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
+            d.verify_cache.invalidate();
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
@@ -90,7 +176,7 @@ pub fn Ops(comptime Tri: type) type {
             try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
-            if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
+            d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
         }
 
         /// The whole prompt a chunk of the engine's rows at a time, from an empty head cache.
@@ -106,11 +192,15 @@ pub fn Ops(comptime Tri: type) type {
 
         /// The head over `next.len` rows of streams `rows`: cache at d.len, last row in d.out, scores in d.dlogits.
         pub fn forwardHead(o: Self, d: *Draft, next: []const u32, rows: u64, scores: bool) !void {
+            d.verify_cache.invalidate();
             const e = o.e;
             const tri = o.tri;
             const h = o.h;
             if (next.len == 0) return;
             if (d.len + next.len > d.cap) return error.PromptTooLong;
+            if (try @import("cuda_exl3_prefill.zig").head(Tri, o, d, next, rows, scores)) return; // EXL3: the head expert-major over a deep chunk
+            const planned = try @import("cuda_exl3_chain.zig").enter(o.e, @min(next.len, piece_rows)); // graphs: the head's experts on the device planner
+            defer @import("cuda_exl3_chain.zig").leave(planned);
             const want = @max(@as(usize, 32), 2 * @min(next.len, piece_rows));
             const s = try e.reserve(want);
             const piece = @max(@as(usize, 1), @min(piece_rows, s.cap / 2));
@@ -175,6 +265,7 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Python draft.absorb: the chain's entries trimmed, then the kept rows (main streams `rows`, next tokens).
         pub fn absorb(o: Self, d: *Draft, next: []const u32, rows: u64, scores: bool) !void {
+            d.verify_cache.invalidate();
             if (d.drafted > 0) {
                 d.len -= d.drafted;
                 d.drafted = 0;
@@ -184,6 +275,7 @@ pub fn Ops(comptime Tri: type) type {
 
         /// The draft at `position` and its temperature-1 probability (Python Engine.sample_draft).
         pub fn pick(o: Self, d: *Draft, position: u64, sm: ?Sampling) !Pick {
+            d.verify_cache.invalidate();
             const h = o.h;
             const n = h.ids.len;
             try h.best(o.stream(), d.dlogits.ptr, n, n, 1, d.best.ptr);
@@ -208,6 +300,8 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts, the first always kept.
         pub fn draft(o: Self, d: *Draft, next: []const u32, rows: u64, position: u64, count: usize, sm: ?Sampling, confidence: f64, out: *Chain) !void {
+            d.verify_cache.invalidate();
+            if (try @import("cuda_exl3_chain.zig").draft(Tri, o, d, next, rows, position, count, sm, confidence, out)) return; // graphs: the greedy chain as one graph
             out.n = 0;
             try o.absorb(d, next, rows, count > 0);
             var j: usize = 0;
@@ -228,7 +322,45 @@ pub fn Ops(comptime Tri: type) type {
 
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
-            if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
+            return o.verifyWithTail(seq, d, ids, null);
+        }
+
+        pub fn verifySampled(ops: Self, seq: *prompt.Seq, window: *Draft, ids: []const u32, sm: ?Sampling) !void {
+            window.verify_cache.invalidate();
+            const greedy = if (sm) |sampling| sampling.temperature <= 0 else true;
+            const leader = if (ops.main) |main| main.rank == 0 else false;
+            const setting = std.c.getenv("TF_FLASHNEXT_EXL3_VERIFY_BEST") orelse return ops.verify(seq, window, ids);
+            if (!greedy or !leader or ops.e.collective == null or !@import("cuda_exl3_graph.zig").enabled() or !std.mem.eql(u8, std.mem.span(setting), "1")) return ops.verify(seq, window, ids);
+            if (window.verify_host == null) window.verify_host = try cuda.HostBuffer.alloc(ops.e.driver, max_rows * 16);
+            var tail: VerifyTail = .{ .head = ops.h, .draft = window };
+            errdefer window.verify_cache.invalidate();
+            try ops.verifyWithTail(seq, window, ids, .{ .ptr = &tail, .enqueue = VerifyTail.enqueue });
+            if (tail.enqueued) {
+                window.verify_pending = null;
+                window.verify_cache.publish(tail.generation, window.rows, window.fed0);
+            }
+        }
+
+        const VerifyTail = struct {
+            head: *Head,
+            draft: *Draft,
+            generation: u64 = 0,
+            enqueued: bool = false,
+
+            fn enqueue(ptr: *anyopaque, st: cuda.Stream) !void {
+                const tail: *VerifyTail = @ptrCast(@alignCast(ptr));
+                const window = tail.draft;
+                tail.generation = window.verify_cache.generation;
+                try tail.head.best(st, window.logits.ptr, vocab, vocab, window.rows, window.best.ptr);
+                tail.enqueued = true;
+                window.verify_pending = st;
+                try window.best.downloadAsync(0, window.verify_host.?.bytes[0 .. window.rows * 16], st.handle);
+            }
+        };
+
+        pub fn verifyWithTail(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, tail: ?batch.Hooks.OutputTail) !void {
+            d.verify_cache.invalidate();
+            if (o.main) |m| return m.verify(m.ptr, seq, d, ids, tail);
             o.e.round_graph.clear();
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
@@ -240,7 +372,7 @@ pub fn Ops(comptime Tri: type) type {
             @memcpy(d.ids[0..n], ids);
             const keeps = n > 1;
             if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
-            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr });
+            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .output_tail = tail });
             if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
             d.open = keeps;
         }
@@ -249,9 +381,14 @@ pub fn Ops(comptime Tri: type) type {
         pub fn draws(o: Self, d: *Draft, sm: ?Sampling, out: []u32) !void {
             const n = d.rows;
             const greedy = if (sm) |s| s.temperature <= 0 else true;
+            const cached = d.verify_cache.take(n, d.fed0, greedy);
             if (greedy) {
-                try o.h.best(o.stream(), d.logits.ptr, vocab, vocab, n, d.best.ptr);
-                try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
+                if (cached) {
+                    @memcpy(d.best_host[0 .. 4 * n], d.verify_host.?.slice(f32)[0 .. 4 * n]);
+                } else {
+                    try o.h.best(o.stream(), d.logits.ptr, vocab, vocab, n, d.best.ptr);
+                    try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
+                }
                 for (out[0..n], 0..) |*t, r| t.* = @intCast(@as(i32, @bitCast(d.best_host[4 * r + 2])));
                 return;
             }
@@ -262,6 +399,7 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Keep the window's first `keep` rows (Python forward.commit) from its saved rows; a repeat is a no-op.
         pub fn rollback(o: Self, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
+            d.verify_cache.invalidate();
             if (o.main) |m| return m.rollback(m.ptr, seq, d, keep);
             o.e.round_graph.clear();
             if (keep == 0 or keep > d.rows) return error.CannotRewind;

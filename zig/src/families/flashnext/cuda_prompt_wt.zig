@@ -6,6 +6,7 @@ const core = @import("core");
 const hc = @import("cuda_hc.zig");
 const qmm = @import("cuda_qmm.zig");
 const gdn = @import("cuda_gdn.zig");
+const exl3_store = @import("cuda_exl3_store.zig");
 
 pub const layers_n: usize = 48;
 pub const linear_n: usize = 36;
@@ -89,13 +90,20 @@ pub const Store = struct {
     released: [2]Held = undefined,
     nreleased: usize = 0,
     norm_offset: f32 = 0,
+    /// Dense F16 weights an EXL3 pack stores, widened to BF16 exactly (cuda_exl3_store.zig), freed at release().
+    widened: std.ArrayList([]u16) = .empty,
+    /// The EXL3 kernels and scratch this checkpoint's projections and experts share (cuda_exl3_load.zig), if any.
+    exl3_ops: ?*@import("cuda_exl3_load.zig").Ops = null,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Store {
         const index = try std.fs.path.join(gpa, &.{ dir, "model.safetensors.index.json" });
         defer gpa.free(index);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, index, gpa, .limited(1 << 26));
         defer gpa.free(text);
-        return .{ .gpa = gpa, .io = io, .dir = dir, .parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{}) };
+        var parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+        errdefer parsed.deinit();
+        try exl3_store.addPatch(io, dir, &parsed);
+        return .{ .gpa = gpa, .io = io, .dir = dir, .parsed = parsed };
     }
 
     /// Infer one checkpoint-wide convention from every decoder HC norm, never from the final mixer's outlier.
@@ -128,6 +136,7 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
+        if (self.exl3_ops) |o| o.release();
         self.release();
         self.closeReleased();
         self.closeFile();
@@ -136,6 +145,8 @@ pub const Store = struct {
 
     /// Borrowers expire here; two indexed shards cover separate weight and calibration planes.
     pub fn release(self: *Store) void {
+        for (self.widened.items) |w| self.gpa.free(w);
+        self.widened.clearAndFree(self.gpa);
         for (self.held[0..self.nheld]) |h| {
             if (self.nreleased == self.released.len) {
                 self.released[0].file.close();
@@ -162,7 +173,7 @@ pub const Store = struct {
         const key = try self.resolveKey(requested, &mapped);
         const file = try self.shard(key);
         for (self.held[0..self.nheld]) |*h| {
-            if (std.mem.eql(u8, h.rel, file)) return h.file.get(key) orelse return error.MissingTensor;
+            if (std.mem.eql(u8, h.rel, file)) return self.dense(key, h.file.get(key) orelse return error.MissingTensor);
         }
         if (self.nheld == self.held.len) return error.UnexpectedTensor;
         for (self.released[0..self.nreleased], 0..) |cached, i| {
@@ -171,7 +182,7 @@ pub const Store = struct {
                 self.nreleased -= 1;
                 if (i < self.nreleased) self.released[i] = self.released[self.nreleased];
                 self.nheld += 1;
-                return self.held[self.nheld - 1].file.get(key) orelse return error.MissingTensor;
+                return self.dense(key, self.held[self.nheld - 1].file.get(key) orelse return error.MissingTensor);
             }
         }
         const rel = try self.gpa.dupe(u8, file);
@@ -180,10 +191,10 @@ pub const Store = struct {
         defer self.gpa.free(path);
         self.held[self.nheld] = .{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) };
         self.nheld += 1;
-        return self.held[self.nheld - 1].file.get(key) orelse {
+        return self.dense(key, self.held[self.nheld - 1].file.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
             return error.MissingTensor;
-        };
+        });
     }
 
     pub fn closeFile(self: *Store) void {
@@ -234,10 +245,16 @@ pub const Store = struct {
         var mapped: [512]u8 = undefined;
         const key = try self.resolveKey(requested, &mapped);
         try self.use(key);
-        return self.file.?.get(key) orelse {
+        return self.dense(key, self.file.?.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
             return error.MissingTensor;
-        };
+        });
+    }
+
+    /// An EXL3 pack's dense F16 weight as the BF16 the loaders read (exact or refused); any other tensor as stored.
+    fn dense(self: *Store, key: []const u8, t: Tensor) !Tensor {
+        if (!exl3_store.widens(key, t)) return t;
+        return exl3_store.widen(self.gpa, key, t, &self.widened);
     }
 
     /// Check the exact or compatibility name without mapping its shard.

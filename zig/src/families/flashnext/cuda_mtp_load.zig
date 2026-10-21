@@ -8,6 +8,7 @@ pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, ids: []con
     const mode = if (std.c.getenv("TF_FLASHNEXT_DRAFT_HEAD")) |v| std.mem.span(v) else "bf16";
     const affine = std.mem.eql(u8, mode, "affine4");
     if (!affine and !std.mem.eql(u8, mode, "bf16")) return error.BadDraftHead;
+    if (try @import("cuda_exl3_mtp.zig").draft(a, d, store, ids, affine)) |q| return q;
     const tensor = try store.tensor("language_model.lm_head.weight");
     if (tensor.dtype == .bf16) {
         if (!tensor.is(.bf16, &.{ wt.vocab, wt.dims })) return error.UnexpectedTensor;

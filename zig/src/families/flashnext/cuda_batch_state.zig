@@ -47,6 +47,9 @@ pub const att_rows: usize = 256;
 pub const pocket_stride: usize = 128;
 /// Rows a pass holds at most unless asked for more.
 pub const default_chunk: usize = 1536;
+/// Rows of `head_local` (a vocabulary-split head's local logits) a scratch holds at most: every row by default; an
+/// EXL3 engine sets it to its widest logits pass (0 with a whole head, cuda_exl3_kv.zig setup, K10 lever 3).
+pub var head_local_rows: usize = std.math.maxInt(usize);
 const ratio = wt.index_ratio;
 const top = wt.index_top;
 const idw = wt.index_idw;
@@ -120,12 +123,18 @@ comptime {
 
 /// A caller's view into the pass. Without any, the pass is the server's prompt pass.
 pub const Hooks = struct {
+    pub const OutputTail = struct {
+        ptr: *anyopaque,
+        enqueue: *const fn (*anyopaque, cuda.Stream) anyerror!void,
+    };
+
     logits: Logits = .last,
     /// Device [rows, vocab] bf16 for `.all` (else the pass's own buffer for the last row).
     logits_out: u64 = 0,
     keep: ?*Keep = null,
     /// Device [rows, wide] bf16: every row's streams after the last MoE write-back (the MTP head's input); 0: none.
     streams: u64 = 0,
+    output_tail: ?OutputTail = null,
     /// A training pass's adds to each layer's MoE output, in place of the model's own (Model.pocket).
     moe_add: ?MoeAdd = null,
 };
@@ -204,6 +213,7 @@ pub const Uploads = struct {
     event: cuda.Event,
 
     pub fn copy(u: Uploads, dst: u64, bytes: []const u8) !void {
+        if (@import("cuda_exl3_graph.zig").capturing) return @import("cuda_exl3_graph.zig").pinnedCopy(u.stream, dst, bytes); // a copy node reads the pinned bytes at each replay
         try cuda.copy_source.enqueue(u.stream.d, dst, bytes, u.stream);
     }
     pub fn record(u: Uploads) !void {
@@ -247,8 +257,11 @@ pub fn Staging(comptime Q: type) type {
 }
 
 /// Device scratch for chunks of up to `cap` rows.
+pub const ScratchFormat = enum { classic, exl3 };
+
 pub const Scratch = struct {
     cap: usize,
+    format: ScratchFormat = .classic,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     ids: u64 = 0,
     pos: u64 = 0,
@@ -364,103 +377,164 @@ pub const Scratch = struct {
         return @alignCast(std.mem.bytesAsSlice(f32, s.host.?.bytes[hostAt(s.cap)[3]..][0 .. n * (dims / 32) * 4]));
     }
 
-    /// Bytes `alloc(cap)` takes on the device.
-    pub fn bytes(cap: usize) usize {
+    pub fn allocationSizes(cap: usize, format: ScratchFormat) [63]?usize {
         const pairs = cap * slots;
         const nblk = cdiv(pairs, plan_small);
         const items = cdiv(pairs, tile) + experts_n + 1;
-        var n: usize = 0;
-        n += cap * 4 + (cap + 1) * 16;
-        n += cap * wide * 2 * 2 + cap * pss_n * 4 + cap * (low + 4) * 2 + hc_sk * cap * (low + 4) * 4;
-        n += cap * wide * 2 + 8 * cap * dims * 4;
-        n += cap * low * 2 + cap * (low / 32) * 4 + cap * streams * 2 + cap * dims * 2 + cap * (dims / 32) * 4;
-        n += cap * proj_row * 2 + out_sk * cap * dims * 4 + cap * gdn.value_dim * (2 + 4 + 4) + cap * (gdn.value_dim / 32) * 4;
-        n += cap * (2 * gdn.nk * gdn.dk + 2 * gdn.nv) * 4;
-        n += cap * q_heads * head_dim * 2 + cap * index_heads * index_dim * 2;
-        n += att_rows * nch * q_heads * (head_dim + 2) * 4 + cap * out_k * 2 * 2 + cap * (out_k / 32) * 4;
-        n += att_rows * (idw + 2) * 4;
-        n += cap * (experts_n + 1) * 4 + pairs * 4 * 2 + pairs * 4 + items * 3 * 4 + 8 + pairs * 4 + nblk * (experts_n + 1) * 4;
-        n += cap * moe_w * 6 + cap * dims * 4;
-        n += pairs * moe_w * 2 + pairs * dims * 4 + cap * dims * 2;
-        n += cap * dims * 2 + cap * (dims / 32) * 4 + cap * wide * 2 + cap * dims * 2 + 4 * cap * dims * 4;
-        n += cap * wide * 2 * 2 + cap * streams * 4 + vocab * 2 + cap * vocab + half * 4 + 4096;
-        n += cap * dims * 4 + cap * pocket_stride * 4;
-        return n;
+        return .{
+            cap * 4,
+            (cap + 1) * 16,
+            cap * wide * 2,
+            cap * pss_n * 4,
+            cap * wide * 2,
+            cap * (low + 4) * 2,
+            hc_sk * cap * (low + 4) * 4,
+            cap * wide * 2,
+            8 * cap * dims * 4,
+            cap * low * 2,
+            cap * (low / 32) * 4,
+            cap * streams * 2,
+            cap * dims * 2,
+            cap * (dims / 32) * 4,
+            cap * proj_row * 2,
+            out_sk * cap * dims * 4,
+            cap * gdn.value_dim * 2,
+            cap * (gdn.value_dim / 32) * 4,
+            cap * gdn.value_dim * 4,
+            cap * gdn.nk * gdn.dk * 4,
+            cap * gdn.nk * gdn.dk * 4,
+            cap * gdn.value_dim * 4,
+            cap * gdn.nv * 2 * 4,
+            cap * q_heads * head_dim * 2,
+            cap * index_heads * index_dim * 2,
+            att_rows * nch * q_heads * head_dim * 4,
+            att_rows * nch * q_heads * 4,
+            att_rows * nch * q_heads * 4,
+            att_rows * idw * 4,
+            att_rows * 4,
+            att_rows * 4,
+            cap * out_k * 2,
+            cap * out_k * 2,
+            cap * (out_k / 32) * 4,
+            cap * (experts_n + 1) * 4,
+            pairs * 4,
+            pairs * 4,
+            if (format == .classic) pairs * 4 else null,
+            if (format == .classic) items * 3 * 4 else null,
+            if (format == .classic) 8 else null,
+            if (format == .classic) pairs * 4 else null,
+            if (format == .classic) nblk * (experts_n + 1) * 4 else null,
+            if (format == .classic) cap * moe_w * 2 else null,
+            if (format == .classic) cap * moe_w * 2 else null,
+            if (format == .classic) cap * moe_w * 2 else null,
+            if (format == .classic) cap * dims * 4 else null,
+            if (format == .classic) pairs * moe_w * 2 else null,
+            pairs * dims * 4,
+            cap * dims * 2,
+            cap * dims * 4,
+            cap * pocket_stride * 4,
+            cap * dims * 2,
+            cap * (dims / 32) * 4,
+            cap * wide * 2,
+            cap * dims * 2,
+            4 * cap * dims * 4,
+            cap * wide * 2,
+            cap * streams * 4,
+            cap * wide * 2,
+            vocab * 2,
+            @min(cap, head_local_rows) * vocab,
+            half * 4,
+            4096,
+        };
+    }
+
+    pub fn bytes(cap: usize) usize {
+        return bytesForFormat(cap, .classic);
+    }
+
+    pub fn bytesForFormat(cap: usize, format: ScratchFormat) usize {
+        var total: usize = 0;
+        for (allocationSizes(cap, format)) |optional| if (optional) |len| {
+            total += @max(len, 256);
+        };
+        return total;
     }
 
     pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize) !Scratch {
-        var s: Scratch = .{ .cap = cap };
+        return allocForFormat(gpa, d, stream, cap, .classic);
+    }
+
+    pub fn allocForFormat(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, format: ScratchFormat) !Scratch {
+        var s: Scratch = .{ .cap = cap, .format = format };
         errdefer s.free(gpa);
-        const pairs = cap * slots;
-        const nblk = cdiv(pairs, plan_small);
-        const items = cdiv(pairs, tile) + experts_n + 1;
-        s.ids = try s.add(gpa, d, cap * 4);
+        const sizes = allocationSizes(cap, format);
+        s.ids = if (sizes[0]) |len| try s.add(gpa, d, len) else 0;
         // a position every 16 bytes: one a block of att_rows rows, or one a row of a decode round
-        s.pos = try s.add(gpa, d, (cap + 1) * 16);
-        s.h = try s.add(gpa, d, cap * wide * 2);
-        s.pss = try s.add(gpa, d, cap * pss_n * 4);
-        s.norm = try s.add(gpa, d, cap * wide * 2);
-        s.dn = try s.add(gpa, d, cap * (low + 4) * 2);
-        s.hc_part = try s.add(gpa, d, hc_sk * cap * (low + 4) * 4);
-        s.hc_up = try s.add(gpa, d, cap * wide * 2);
-        s.native_part = try s.add(gpa, d, 8 * cap * dims * 4);
-        s.act = try s.add(gpa, d, cap * low * 2);
-        s.xs_act = try s.add(gpa, d, cap * (low / 32) * 4);
-        s.inj = try s.add(gpa, d, cap * streams * 2);
-        s.mixed = try s.add(gpa, d, cap * dims * 2);
-        s.xsm = try s.add(gpa, d, cap * (dims / 32) * 4);
-        s.proj = try s.add(gpa, d, cap * proj_row * 2);
-        s.part = try s.add(gpa, d, out_sk * cap * dims * 4);
-        s.gout = try s.add(gpa, d, cap * gdn.value_dim * 2);
-        s.gxs = try s.add(gpa, d, cap * (gdn.value_dim / 32) * 4);
-        s.ys = try s.add(gpa, d, cap * gdn.value_dim * 4);
-        s.gq = try s.add(gpa, d, cap * gdn.nk * gdn.dk * 4);
-        s.gk = try s.add(gpa, d, cap * gdn.nk * gdn.dk * 4);
-        s.gv = try s.add(gpa, d, cap * gdn.value_dim * 4);
-        s.ggb = try s.add(gpa, d, cap * gdn.nv * 2 * 4);
-        s.q = try s.add(gpa, d, cap * q_heads * head_dim * 2);
-        s.iq = try s.add(gpa, d, cap * index_heads * index_dim * 2);
-        s.po = try s.add(gpa, d, att_rows * nch * q_heads * head_dim * 4);
-        s.pm = try s.add(gpa, d, att_rows * nch * q_heads * 4);
-        s.pl = try s.add(gpa, d, att_rows * nch * q_heads * 4);
-        s.qids = try s.add(gpa, d, att_rows * idw * 4);
-        s.qnk = try s.add(gpa, d, att_rows * 4);
-        s.qspr = try s.add(gpa, d, att_rows * 4);
-        s.ao = try s.add(gpa, d, cap * out_k * 2);
-        s.gated = try s.add(gpa, d, cap * out_k * 2);
-        s.gxs_attn = try s.add(gpa, d, cap * (out_k / 32) * 4);
-        s.router_l = try s.add(gpa, d, cap * (experts_n + 1) * 4);
-        s.picks = try s.add(gpa, d, pairs * 4);
-        s.wts = try s.add(gpa, d, pairs * 4);
-        s.members = try s.add(gpa, d, pairs * 4);
-        s.items = try s.add(gpa, d, items * 3 * 4);
-        s.counts = try s.add(gpa, d, 8);
-        s.rank = try s.add(gpa, d, pairs * 4);
-        s.hist = try s.add(gpa, d, nblk * (experts_n + 1) * 4);
-        s.shared_gate = try s.add(gpa, d, cap * moe_w * 2);
-        s.shared_up = try s.add(gpa, d, cap * moe_w * 2);
-        s.shared_act = try s.add(gpa, d, cap * moe_w * 2);
-        s.shared_out = try s.add(gpa, d, cap * dims * 4);
-        s.moe_act = try s.add(gpa, d, pairs * moe_w * 2);
-        s.y = try s.add(gpa, d, pairs * dims * 4);
-        s.branch = try s.add(gpa, d, cap * dims * 2);
-        s.moe_f32 = try s.add(gpa, d, cap * dims * 4);
-        s.pocket_act = try s.add(gpa, d, cap * pocket_stride * 4);
-        s.ple_emb = try s.add(gpa, d, cap * dims * 2);
-        s.ple_xs = try s.add(gpa, d, cap * (dims / 32) * 4);
-        s.ple_keys = try s.add(gpa, d, cap * wide * 2);
-        s.ple_vals = try s.add(gpa, d, cap * dims * 2);
-        s.ple_part = try s.add(gpa, d, 4 * cap * dims * 4);
-        s.ple_gated = try s.add(gpa, d, cap * wide * 2);
-        s.ple_pss = try s.add(gpa, d, cap * streams * 4);
-        s.ple_nrow = try s.add(gpa, d, cap * wide * 2);
-        s.logits = try s.add(gpa, d, vocab * 2);
-        s.head_local = try s.add(gpa, d, cap * vocab);
+        s.pos = if (sizes[1]) |len| try s.add(gpa, d, len) else 0;
+        s.h = if (sizes[2]) |len| try s.add(gpa, d, len) else 0;
+        s.pss = if (sizes[3]) |len| try s.add(gpa, d, len) else 0;
+        s.norm = if (sizes[4]) |len| try s.add(gpa, d, len) else 0;
+        s.dn = if (sizes[5]) |len| try s.add(gpa, d, len) else 0;
+        s.hc_part = if (sizes[6]) |len| try s.add(gpa, d, len) else 0;
+        s.hc_up = if (sizes[7]) |len| try s.add(gpa, d, len) else 0;
+        s.native_part = if (sizes[8]) |len| try s.add(gpa, d, len) else 0;
+        s.act = if (sizes[9]) |len| try s.add(gpa, d, len) else 0;
+        s.xs_act = if (sizes[10]) |len| try s.add(gpa, d, len) else 0;
+        s.inj = if (sizes[11]) |len| try s.add(gpa, d, len) else 0;
+        s.mixed = if (sizes[12]) |len| try s.add(gpa, d, len) else 0;
+        s.xsm = if (sizes[13]) |len| try s.add(gpa, d, len) else 0;
+        s.proj = if (sizes[14]) |len| try s.add(gpa, d, len) else 0;
+        s.part = if (sizes[15]) |len| try s.add(gpa, d, len) else 0;
+        s.gout = if (sizes[16]) |len| try s.add(gpa, d, len) else 0;
+        s.gxs = if (sizes[17]) |len| try s.add(gpa, d, len) else 0;
+        s.ys = if (sizes[18]) |len| try s.add(gpa, d, len) else 0;
+        s.gq = if (sizes[19]) |len| try s.add(gpa, d, len) else 0;
+        s.gk = if (sizes[20]) |len| try s.add(gpa, d, len) else 0;
+        s.gv = if (sizes[21]) |len| try s.add(gpa, d, len) else 0;
+        s.ggb = if (sizes[22]) |len| try s.add(gpa, d, len) else 0;
+        s.q = if (sizes[23]) |len| try s.add(gpa, d, len) else 0;
+        s.iq = if (sizes[24]) |len| try s.add(gpa, d, len) else 0;
+        s.po = if (sizes[25]) |len| try s.add(gpa, d, len) else 0;
+        s.pm = if (sizes[26]) |len| try s.add(gpa, d, len) else 0;
+        s.pl = if (sizes[27]) |len| try s.add(gpa, d, len) else 0;
+        s.qids = if (sizes[28]) |len| try s.add(gpa, d, len) else 0;
+        s.qnk = if (sizes[29]) |len| try s.add(gpa, d, len) else 0;
+        s.qspr = if (sizes[30]) |len| try s.add(gpa, d, len) else 0;
+        s.ao = if (sizes[31]) |len| try s.add(gpa, d, len) else 0;
+        s.gated = if (sizes[32]) |len| try s.add(gpa, d, len) else 0;
+        s.gxs_attn = if (sizes[33]) |len| try s.add(gpa, d, len) else 0;
+        s.router_l = if (sizes[34]) |len| try s.add(gpa, d, len) else 0;
+        s.picks = if (sizes[35]) |len| try s.add(gpa, d, len) else 0;
+        s.wts = if (sizes[36]) |len| try s.add(gpa, d, len) else 0;
+        s.members = if (sizes[37]) |len| try s.add(gpa, d, len) else 0;
+        s.items = if (sizes[38]) |len| try s.add(gpa, d, len) else 0;
+        s.counts = if (sizes[39]) |len| try s.add(gpa, d, len) else 0;
+        s.rank = if (sizes[40]) |len| try s.add(gpa, d, len) else 0;
+        s.hist = if (sizes[41]) |len| try s.add(gpa, d, len) else 0;
+        s.shared_gate = if (sizes[42]) |len| try s.add(gpa, d, len) else 0;
+        s.shared_up = if (sizes[43]) |len| try s.add(gpa, d, len) else 0;
+        s.shared_act = if (sizes[44]) |len| try s.add(gpa, d, len) else 0;
+        s.shared_out = if (sizes[45]) |len| try s.add(gpa, d, len) else 0;
+        s.moe_act = if (sizes[46]) |len| try s.add(gpa, d, len) else 0;
+        s.y = if (sizes[47]) |len| try s.add(gpa, d, len) else 0;
+        s.branch = if (sizes[48]) |len| try s.add(gpa, d, len) else 0;
+        s.moe_f32 = if (sizes[49]) |len| try s.add(gpa, d, len) else 0;
+        s.pocket_act = if (sizes[50]) |len| try s.add(gpa, d, len) else 0;
+        s.ple_emb = if (sizes[51]) |len| try s.add(gpa, d, len) else 0;
+        s.ple_xs = if (sizes[52]) |len| try s.add(gpa, d, len) else 0;
+        s.ple_keys = if (sizes[53]) |len| try s.add(gpa, d, len) else 0;
+        s.ple_vals = if (sizes[54]) |len| try s.add(gpa, d, len) else 0;
+        s.ple_part = if (sizes[55]) |len| try s.add(gpa, d, len) else 0;
+        s.ple_gated = if (sizes[56]) |len| try s.add(gpa, d, len) else 0;
+        s.ple_pss = if (sizes[57]) |len| try s.add(gpa, d, len) else 0;
+        s.ple_nrow = if (sizes[58]) |len| try s.add(gpa, d, len) else 0;
+        s.logits = if (sizes[59]) |len| try s.add(gpa, d, len) else 0;
+        s.head_local = if (sizes[60]) |len| try s.add(gpa, d, len) else 0;
         var inv: [half]f32 = undefined;
         for (&inv, 0..) |*o, i| o.* = @floatCast(std.math.pow(f64, 10_000_000.0, -@as(f64, @floatFromInt(i)) / @as(f64, half)));
-        s.inv = try s.add(gpa, d, half * 4);
+        s.inv = if (sizes[61]) |len| try s.add(gpa, d, len) else 0;
         try s.bufs.items[s.bufs.items.len - 1].uploadAsync(0, std.mem.sliceAsBytes(&inv), stream.handle);
-        s.dummy = try s.add(gpa, d, 4096);
+        s.dummy = if (sizes[62]) |len| try s.add(gpa, d, len) else 0;
         try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
         try stream.synchronize();
         s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[4]);
@@ -484,6 +558,8 @@ pub const Scratch = struct {
 /// A sequence's state the pass reads and leaves as the row-by-row path would.
 pub const SeqState = struct {
     media: ?@import("cuda_media.zig").View = null,
+    /// An int8 K/V cache (kc/vc hold its codes; cuda_exl3_kv.zig); null: bf16 kc/vc.
+    kv8: ?@import("cuda_exl3_kv.zig").SeqKv8 = null,
     conv: []cuda.DeviceBuffer,
     state: []cuda.DeviceBuffer,
     kc: []cuda.DeviceBuffer,
@@ -497,6 +573,8 @@ pub const SeqState = struct {
     cap: usize,
     /// Block scores for an attention block's rows [min(rows, att_rows), scoreStride(cap)] fp32 (the engine's).
     scores: u64,
+    /// The K/V paged to host memory with a device block cache (cuda_exl3_kvpage.zig), else kc/vc hold it all.
+    paged: ?*@import("cuda_exl3_kvpage.zig").Paged = null,
 };
 
 /// The block scores' row stride for a cache of `cap` tokens: its blocks rounded up to 16 (the captured _scores').
@@ -560,4 +638,5 @@ pub const Gather = struct {
 
 test {
     _ = @import("cuda_batch_state_test.zig");
+    _ = @import("cuda_scratch_layout_test.zig");
 }

@@ -61,6 +61,7 @@ pub fn run(comptime Cuda: type, comptime open: anytype, comptime restore: anytyp
     engine.eos = 7;
     engine.chunk = 16;
     engine.round_graph = .{};
+    engine.page_config = null;
     var pair: [2]std.posix.socket_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
     defer _ = std.c.close(pair[0]);

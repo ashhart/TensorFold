@@ -47,7 +47,7 @@ pub fn decode(comptime Tri: type, o: Ops(Tri), seq: *prompt.Seq, d: *Draft, out:
         @memcpy(ids[1..][0..ch.n], ch.slice());
         const rows = 1 + ch.n;
         const tv = std.Io.Clock.awake.now(o.e.io).toNanoseconds();
-        try o.verify(seq, d, ids[0..rows]);
+        try o.verifySampled(seq, d, ids[0..rows], sm);
         try o.draws(d, sm, sampled[0..rows]);
         const td = std.Io.Clock.awake.now(o.e.io).toNanoseconds();
         st.verify_ms += @as(f64, @floatFromInt(td - tv)) / 1e6;
