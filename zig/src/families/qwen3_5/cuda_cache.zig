@@ -88,13 +88,49 @@ pub const Cache = struct {
         return fixed(gpa, e, cap, kv, paged);
     }
 
-    /// A pool lane's cache: its own state, log, tap ring and table of `pages` pages at `base`, mapped at open.
+    /// A pool lane's cache: a table of `pages` pages at `base`; its state, log and tap ring a run mapped at open.
     pub fn initPaged(gpa: std.mem.Allocator, e: *Engine, pages: usize, tokens: usize, base: u64) !Cache {
         var table = try DeviceBuffer.alloc(e.d, pages * 4);
         errdefer table.free();
         try table.fill8(0, null);
         const none = try DeviceBuffer.alloc(e.d, 0);
-        return fixed(gpa, e, 0, none, .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false });
+        return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
+    }
+
+    /// Bytes of the parts a pool lane maps from its run: state, before, log, tap ring, each 256-byte aligned.
+    pub fn runBytes(e: *const Engine) usize {
+        var n: usize = 0;
+        for (runParts(e)) |len| n += std.mem.alignForward(usize, len, 256);
+        return n;
+    }
+
+    fn runParts(e: *const Engine) [4]usize {
+        return .{ e.g.stateBytes(), e.g.stateBytes(), e.g.logBytes(engine.most_window), e.tapBytes() };
+    }
+
+    /// A pool lane's state, before, log and tap ring as views of the run at `base`, zeroed but `before`.
+    pub fn mapRun(self: *Cache, e: *const Engine, base: u64) !void {
+        var at = base;
+        var views: [4]DeviceBuffer = undefined;
+        for (runParts(e), &views) |len, *v| {
+            v.* = .{ .d = e.d, .ptr = at, .len = len, .borrowed = true };
+            at += std.mem.alignForward(usize, len, 256);
+        }
+        self.state = views[0];
+        self.before = views[1];
+        self.log = views[2];
+        self.tap = if (e.n_taps > 0) views[3] else null;
+        try self.log.fill8(0, e.stream.handle);
+        if (self.tap) |t| try t.fill8(0, e.stream.handle);
+    }
+
+    /// A closed lane's views dropped: its run went back to the pool.
+    pub fn unmapRun(self: *Cache, e: *const Engine) void {
+        const none: DeviceBuffer = .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true };
+        self.state = none;
+        self.before = none;
+        self.log = none;
+        self.tap = null;
     }
 
     /// The parts every cache holds itself beside `kv` and `paged` (the caller's to free on failure).
