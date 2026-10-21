@@ -75,6 +75,8 @@ pub const flags = [_]Flag{
     .{ .name = "--keep-warm", .native = true },
     .{ .name = "--silence-floor-dbfs", .native = true },
     .{ .name = "--silence-seconds", .native = true },
+    .{ .name = "--silence-onset-s", .native = true },
+    .{ .name = "--silence-onset-voiced-s", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
@@ -313,7 +315,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.chat_template = v;
         return;
     }
-    if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
+    if (is(name, "--silence-onset-s")) out.silence.onset_seconds = try float(u, a, name, v) else if (is(name, "--silence-onset-voiced-s")) out.silence.onset_voiced_seconds = try float(u, a, name, v) else if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
@@ -589,4 +591,8 @@ test "silence guard flags are opt-in and reach native open options" {
     try std.testing.expect(opened.silence.enabled());
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "1" }, &usage));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "nan" }, &usage));
+    const onset = try parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "2", "--silence-onset-s", "1", "--silence-onset-voiced-s", "0.5" }, &usage);
+    try std.testing.expectEqual(api.speech_guard.Config{ .floor_dbfs = -80, .seconds = 2, .onset_seconds = 1, .onset_voiced_seconds = 0.5 }, (try request(a, "m", "drama3", onset)).silence);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "2", "--silence-onset-s", "1" }, &usage));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-onset-s=0" }, &usage));
 }

@@ -4,6 +4,8 @@ const std = @import("std");
 pub const Config = struct {
     floor_dbfs: ?f64 = null,
     seconds: ?f64 = null,
+    onset_seconds: ?f64 = null,
+    onset_voiced_seconds: ?f64 = null,
 
     pub fn validate(c: Config) !void {
         if (c.seconds) |seconds| {
@@ -13,6 +15,11 @@ pub const Config = struct {
             if (!std.math.isFinite(floor) or floor > 0 or std.math.pow(f64, 10, floor / 10) == 0)
                 return error.BadSilenceFloor;
         } else if ((c.seconds orelse 0) > 0) return error.MissingSilenceFloor;
+        if (c.onset_seconds == null and c.onset_voiced_seconds == null) return;
+        const onset = c.onset_seconds orelse return error.BadSilenceOnset;
+        const voiced = c.onset_voiced_seconds orelse return error.BadSilenceOnsetVoiced;
+        if (!(onset > 0 and onset < (c.seconds orelse 0))) return error.BadSilenceOnset;
+        if (!(voiced > 0 and std.math.isFinite(voiced))) return error.BadSilenceOnsetVoiced;
     }
 
     pub fn enabled(c: Config) bool {
@@ -21,24 +28,36 @@ pub const Config = struct {
 
     pub fn refusal(c: Config, model_type: []const u8) ?[]const u8 {
         if (!std.mem.eql(u8, model_type, "fish_omni") and
-            (c.floor_dbfs != null or c.seconds != null))
-            return "--silence-floor-dbfs and --silence-seconds are for Drama speech: serve without them";
+            (c.floor_dbfs != null or c.seconds != null or c.onset_seconds != null or c.onset_voiced_seconds != null))
+            return "--silence-floor-dbfs, --silence-seconds, --silence-onset-s and --silence-onset-voiced-s are for Drama speech: serve without them";
         return null;
+    }
+
+    /// The startup sentence's rules for an enabled guard: the silent tail, then the onset rule when set.
+    pub fn format(c: Config, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("a reply ends after {d} s below {d} dBFS", .{ c.seconds.?, c.floor_dbfs.? });
+        if (c.onset_seconds) |onset| try w.print(", or after {d} s below it with under {d} s voiced", .{ onset, c.onset_voiced_seconds.? });
     }
 };
 
 pub const Guard = struct {
     floor_power: f64 = 0,
     limit: f64 = 0,
+    /// Silent samples that end a synthesis voiced for fewer than `onset_voiced` samples.
+    onset_limit: f64 = 0,
+    onset_voiced: f64 = 0,
     silent_samples: usize = 0,
     voiced_samples: usize = 0,
     tripped: bool = false,
 
     pub fn init(c: Config, sample_rate: u32) Guard {
         if (!c.enabled()) return .{};
+        const rate: f64 = @floatFromInt(sample_rate);
         return .{
             .floor_power = std.math.pow(f64, 10, c.floor_dbfs.? / 10),
-            .limit = c.seconds.? * @as(f64, @floatFromInt(sample_rate)),
+            .limit = c.seconds.? * rate,
+            .onset_limit = (c.onset_seconds orelse 0) * rate,
+            .onset_voiced = (c.onset_voiced_seconds orelse 0) * rate,
         };
     }
 
@@ -61,7 +80,8 @@ pub const Guard = struct {
                 g.silent_samples = 0;
                 g.voiced_samples += frame_length;
             }
-            if (@as(f64, @floatFromInt(g.silent_samples)) >= g.limit) {
+            const silent: f64 = @floatFromInt(g.silent_samples);
+            if (silent >= g.limit or (silent >= g.onset_limit and @as(f64, @floatFromInt(g.voiced_samples)) < g.onset_voiced)) {
                 g.tripped = true;
                 return end;
             }
@@ -95,12 +115,36 @@ test "silence configuration requires explicit finite thresholds" {
     try std.testing.expectError(error.MissingSilenceFloor, (Config{ .seconds = 1 }).validate());
     try std.testing.expectError(error.BadSilenceSeconds, (Config{ .seconds = std.math.inf(f64) }).validate());
     try std.testing.expectError(error.BadSilenceFloor, (Config{ .floor_dbfs = 1 }).validate());
+    try (Config{ .floor_dbfs = -50, .seconds = 2, .onset_seconds = 1, .onset_voiced_seconds = 0.5 }).validate();
+    for ([_]Config{
+        .{ .floor_dbfs = -50, .seconds = 2, .onset_seconds = 2, .onset_voiced_seconds = 0.5 },
+        .{ .onset_seconds = 1, .onset_voiced_seconds = 0.5 },
+        .{ .floor_dbfs = -50, .seconds = 2, .onset_voiced_seconds = 0.5 },
+        .{ .floor_dbfs = -50, .seconds = 2, .onset_seconds = 0, .onset_voiced_seconds = 0.5 },
+        .{ .onset_seconds = 0, .onset_voiced_seconds = 0 },
+    }) |c| try std.testing.expectError(error.BadSilenceOnset, c.validate());
+    for ([_]Config{
+        .{ .floor_dbfs = -50, .seconds = 2, .onset_seconds = 1 },
+        .{ .floor_dbfs = -50, .seconds = 2, .onset_seconds = 1, .onset_voiced_seconds = 0 },
+    }) |c| try std.testing.expectError(error.BadSilenceOnsetVoiced, c.validate());
 }
 
 test "silence flags are refused on text even when explicitly disabled" {
-    for ([_]Config{ .{ .floor_dbfs = -80 }, .{ .seconds = 0 }, .{ .seconds = 1 } }) |config| {
+    for ([_]Config{ .{ .floor_dbfs = -80 }, .{ .seconds = 0 }, .{ .seconds = 1 }, .{ .onset_seconds = 0 }, .{ .onset_voiced_seconds = 0 } }) |config| {
         try std.testing.expect(config.refusal("nemotron_h") != null);
         try std.testing.expect(config.refusal("fish_omni") == null);
     }
     try std.testing.expect((Config{}).refusal("nemotron_h") == null);
+}
+
+test "the startup sentence adds the onset rule only when it is set" {
+    var buf: [128]u8 = undefined;
+    const tail: Config = .{ .floor_dbfs = -60, .seconds = 8 };
+    const off = "drama3: silence guard on: a reply ends after 8 s below -60 dBFS";
+    try std.testing.expectEqualStrings(off, try std.fmt.bufPrint(&buf, "drama3: silence guard on: {f}", .{tail}));
+    var onset = tail;
+    onset.onset_seconds = 2;
+    onset.onset_voiced_seconds = 0.25;
+    const on = off ++ ", or after 2 s below it with under 0.25 s voiced";
+    try std.testing.expectEqualStrings(on, try std.fmt.bufPrint(&buf, "drama3: silence guard on: {f}", .{onset}));
 }
