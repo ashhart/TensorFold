@@ -49,6 +49,7 @@ pub const qwen35_draft: []const u8 = if (available) &Blob("fatbin_qwen35_draft")
 pub const qwen35_keep: []const u8 = if (available) &Blob("fatbin_qwen35_keep").bytes else &.{};
 pub const qwen_vision: []const u8 = if (available) &Blob("fatbin_qwen_vision").bytes else &.{};
 pub const qwen35_kv8: []const u8 = if (available) &Blob("fatbin_qwen35_kv8").bytes else &.{};
+pub const qwen35_bf16_rows: []const u8 = if (available) &Blob("fatbin_qwen35_bf16_rows").bytes else &.{};
 pub const gdn_prefill: []const u8 = if (available) &Blob("fatbin_gdn_prefill").bytes else &.{};
 pub const qmmf: []const u8 = if (available) &Blob("fatbin_qmmf").bytes else &.{};
 pub const prompt16: []const u8 = if (available) &Blob("fatbin_prompt16").bytes else &.{};
