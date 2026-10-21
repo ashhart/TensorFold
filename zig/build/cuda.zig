@@ -329,38 +329,16 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     }) }));
     step.dependOn(&qsa_contract.step);
     flash_contract.dependOn(&qsa_contract.step);
-    const wrows_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/cuda/contract_window_rows.zig"),
-        .target = host,
-        .optimize = .debug,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
-    }) }));
-    step.dependOn(&wrows_contract.step);
-    const act_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/cuda/contract_act_round.zig"),
-        .target = host,
-        .optimize = .debug,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
-    }) }));
-    step.dependOn(&act_contract.step);
-    const embed_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/cuda/contract_embed.zig"),
-        .target = host,
-        .optimize = .debug,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
-    }) }));
-    step.dependOn(&embed_contract.step);
-    const qk_round_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/cuda/contract_qk_round.zig"),
-        .target = host,
-        .optimize = .debug,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
-    }) }));
-    step.dependOn(&qk_round_contract.step);
+    // the Gemma 4 operators' contract tests (#1048): window rows, MLX activations, embed rows, qk rows
+    for ([_][]const u8{ "contract_window_rows.zig", "contract_act_round.zig", "contract_embed.zig", "contract_qk_round.zig" }) |f| {
+        step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("zig/tests/cuda/{s}", .{f})),
+            .target = host,
+            .optimize = .debug,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
+        }) })).step);
+    }
     const reference_step = b.step("test-cuda-reference", "CUDA's FP64 comparison with CPU-only readback (no GPU)");
     const projection_step = b.step("test-cuda-projection-fixture", "Projection fixture dispatch controls with CPU-only CUDA calls");
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
