@@ -38,11 +38,12 @@ fn servedBy(list: []const []const u8, name: []const u8) bool {
 /// The CUDA build's own flags and variables (the Metal build refuses them).
 const cuda_build = builtin.os.tag == .linux;
 
-/// Every Python serve flag (``cli_args.build_parser``), the ones this binary serves marked native.
+/// Python serve flags plus this binary's native-only flags; supported flags are marked native.
 pub const flags = [_]Flag{
     .{ .name = "--host", .native = true },
     .{ .name = "--allowed-host", .kind = .append, .native = true },
     .{ .name = "--allowed-origin", .kind = .append, .native = true },
+    .{ .name = "--allowed-controls", .native = true },
     .{ .name = "--port", .native = true },
     .{ .name = "--name", .native = true },
     .{ .name = "--chat-template", .native = true },
@@ -145,6 +146,7 @@ pub const Args = struct {
     api_key: []const []const u8 = &.{},
     allowed_host: []const []const u8 = &.{},
     allowed_origin: []const []const u8 = &.{},
+    allowed_controls: ?@import("drama_allow.zig").Policy = null,
     api_key_file: ?[]const u8 = null,
     metrics_open: bool = false,
     dashboard: bool = false,
@@ -297,6 +299,11 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     }
     if (is(name, "--silence-seconds")) {
         out.silence.seconds = try float(u, a, name, v);
+        return;
+    }
+    if (is(name, "--allowed-controls")) {
+        out.allowed_controls = @import("drama_allow.zig").parse(v) catch
+            return fail(u, a, "argument --allowed-controls: expected comma-separated UTF-8 names without square brackets: '{s}'", .{v});
         return;
     }
     if (is(name, "--allowed-host")) {

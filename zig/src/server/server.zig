@@ -34,6 +34,7 @@ pub const Identity = @import("identity.zig").Identity;
 
 pub const Config = struct {
     browser: request_guard.Policy = .{},
+    allowed_controls: ?@import("drama_allow.zig").Policy = null,
     sse_keepalive_s: f64 = 15,
     served_name: []const u8,
     model_dir: []const u8 = "",
