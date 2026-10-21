@@ -69,6 +69,8 @@ const Fake = struct {
             f.* = .{ .d = d, .handle = @ptrFromInt(17 + mi * 16 + i) };
         };
         for (&l.reduce, 0..) |*f, i| f.* = .{ .d = d, .handle = @ptrFromInt(90 + i) };
+        l.half = @splat(@splat(@splat(.{ .d = d, .handle = @ptrFromInt(120) })));
+        l.half_below = 0; // the released launch parameters: the 64-column tile's
         return l;
     }
     fn kernels(d: *const cuda.Driver, cluster: bool) kern.Kernels {
