@@ -42,7 +42,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Checkpoint hashing uses a bounded file pool and runtime SHA acceleration, preserving digest identities and atomic cache publication.
 
-- Qwen3.8-27B on CUDA sizes recurrent verification scratch by its live windows, retaining fp32 state and exact rollback.
+- Qwen3.8-27B on CUDA sizes recurrent verification scratch by its live windows and keeps it between rounds, freeing it when the engine goes idle or a new size would pass what its live caches budget, retaining fp32 state and exact rollback.
 
 - Qwen3.8-27B on CUDA can prefer verified context copies over neural proposals through the shared lane core. Copy rounds keep the drafter's committed target rows current and resume neural drafting after rejection.
 
@@ -60,7 +60,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on Metal checks its weights, startup scratch and requested storage against the RAM/GPU-bounded load ceiling before loading (#1039). Thanks to @hudsonwa.
 
-- Qwen on CUDA keeps DFlash and MTP proposal and live context projections on native arithmetic regardless of shared frame size. Prompt ingestion retains its historical arithmetic.
+- Qwen on CUDA keeps DFlash and MTP proposal and live context projections on native arithmetic regardless of shared frame size, so a stream's drafts do not depend on which streams share its rounds. On GB10 a shared frame's rows go through one launch of 32-, 64- or 128-row verify tiles, each row with the one-row decode's bits, and the target's wider verify frames take the same tiles. Prompt ingestion retains its historical arithmetic.
 
 - Qwen on single-GPU HIP polls cancellation inside prompt chunks, releasing cancelled work at layer boundaries (#1028). Thanks to @ThinkOffApp.
 
