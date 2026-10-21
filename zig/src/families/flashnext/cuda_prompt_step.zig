@@ -235,16 +235,16 @@ pub fn gdnStep(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Strea
     try qmm.partials(driver, stream.*, s.gout.ptr, s.gxs.ptr, out_q.w.ptr, out_q.s.ptr, out_q.b.ptr, s.dummy.ptr, s.part.ptr, 1, dims, gdn.value_dim, out_sk);
 }
 
-pub fn attnStep(comptime Tri: type, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, s: *Scratch, proj_q: Q4, out_q: Q4, q_scale: u64, k_scale: u64, i_scale: u64, kc: u64, vc: u64, ikc: u64, pos: i32) !void {
+pub fn attnStep(comptime Tri: type, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, s: *Scratch, proj_q: Q4, out_q: Q4, q_scale: u64, k_scale: u64, i_scale: u64, kc: u64, vc: u64, ikc: u64, pos: i32, pg: @import("cuda_glue.zig").Pg) !void {
     try qmm.matmul(driver, stream.*, s.mixed.ptr, s.xsm.ptr, proj_q.w.ptr, proj_q.s.ptr, proj_q.b.ptr, s.pa.ptr, 1, proj_n, dims);
     // stream-ordered (queued kernels still read s.pos), then waited for: `pos` lives on this frame
     try s.pos.uploadAsync(0, std.mem.asBytes(&pos), stream.handle);
     try stream.synchronize();
-    try tri.attnPrep(s.pa.ptr, s.pos.ptr, q_scale, k_scale, i_scale, s.inv.ptr, s.q.ptr, kc, vc, s.iq.ptr, ikc, s.dummy.ptr, s.dummy.ptr, eps, 1, 0);
+    try tri.attnPrep(s.pa.ptr, s.pos.ptr, q_scale, k_scale, i_scale, s.inv.ptr, s.q.ptr, kc, vc, s.iq.ptr, ikc, s.dummy.ptr, s.dummy.ptr, eps, 1, 0, pg);
     // attention.attention, dense: chunks of 512 keys up to the row's position (the row-by-row path stays dense)
     const keys: usize = @as(usize, @intCast(pos)) + 1;
     if (keys > wt.dense_nch * 512) return error.UnexpectedTensor;
-    try tri.attnChunks(s.q.ptr, kc, vc, s.pos.ptr, s.po.ptr, s.pm.ptr, s.pl.ptr, s.dummy.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads, (keys + 511) / 512, false);
+    try tri.attnChunks(s.q.ptr, kc, vc, s.pos.ptr, s.po.ptr, s.pm.ptr, s.pl.ptr, s.dummy.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads, (keys + 511) / 512, false, pg);
     try tri.attnMerge(s.po.ptr, s.pm.ptr, s.pl.ptr, s.pos.ptr, s.ao.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads, false);
     try tri.attnGate(s.ao.ptr, s.pa.ptr, s.gated.ptr, s.gxs_attn.ptr, 1, proj_n, q_heads, head_dim);
     try qmm.partials(driver, stream.*, s.gated.ptr, s.gxs_attn.ptr, out_q.w.ptr, out_q.s.ptr, out_q.b.ptr, s.dummy.ptr, s.part.ptr, 1, dims, out_k, out_sk);
