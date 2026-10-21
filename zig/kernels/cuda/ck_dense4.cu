@@ -89,11 +89,11 @@ extern "C" __global__ void __launch_bounds__(128)
     }
 }
 
-// A block a unit of 128 rows by 128 columns, its steps staged in shared memory; tf_ck4_dense's bits.
+// A block a 128 x 128 unit, `group` row tiles a band, steps staged in shared memory; tf_ck4_dense's bits.
 extern "C" __global__ void __launch_bounds__(256)
     tf_ck4_dense_prompt(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs,
                         const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws, float al, int M, int K, int N,
-                        __nv_bfloat16* __restrict__ out) {
+                        __nv_bfloat16* __restrict__ out, int group) {
     using namespace tf_ckd;
     __shared__ __align__(128) PromptStage st[PSTAGES];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, t = lane & 3;
@@ -102,7 +102,9 @@ extern "C" __global__ void __launch_bounds__(256)
     const int arow = tid >> 1, half = tid & 1, bt = tid >> 7, bq = tid & 127;  // loader roles
     const int lrow = (lane & 7) + ((lane >> 3) & 1) * 8, lchunk = lane >> 4;   // ldmatrix rows and chunk
     for (int unit = blockIdx.x; unit < units; unit += gridDim.x) {
-        const int mt = unit / NT, ct = unit - mt * NT, m0 = mt * PM, cnt = min(PM, M - m0);
+        // `group` row tiles a band, each band's column tiles in turn: a weight tile read once a band, not a row tile
+        const int2 at = qmm_frag::tile_of(unit, M, NT * PN, PM, PN, group);
+        const int ct = at.y / PN, m0 = at.x, cnt = min(PM, M - m0);
         const size_t xr = m0 + min(arow, cnt - 1);  // rows past M read the last row, unused
         const uint8_t* a_src = codes + xr * (K / 2) + half * 16;
         const uint8_t* sa_src = xs + xr * (K / 16);

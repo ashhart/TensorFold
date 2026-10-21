@@ -16,6 +16,12 @@ const Stream = stream_.Stream;
 /// Rows from which a call takes the staged prompt kernel (the same bits as the warp kernel at every row count).
 pub const prompt_rows = 17;
 
+/// Row tiles a band of the staged kernel: ~4 MiB of NVFP4 rows, so its weight tiles stay in L2 (GB10: 2x the TFLOPS).
+pub fn band(m: usize, k: usize) usize {
+    const rows_t = (m + 127) / 128;
+    return @max(1, @min(rows_t, (4 << 20) / (128 * k / 2)));
+}
+
 pub const Dense4 = struct {
     mod: Module,
     warp: Function,
@@ -50,6 +56,7 @@ pub const Dense4 = struct {
         a.add(ck.alpha(w.act, w.scale));
         for ([_]usize{ m, w.k, w.n }) |v| a.add(@as(i32, @intCast(v)));
         a.add(out);
+        if (staged) a.add(@as(i32, @intCast(band(m, w.k))));
         try launch_.launch(if (staged) k.prompt else k.warp, .{ .grid = .{ .x = @intCast(grid) }, .block = .{ .x = if (staged) 256 else 128 } }, s, &a);
     }
 
@@ -61,6 +68,12 @@ pub const Dense4 = struct {
 /// The lane view of an NVFP4 projection packed for the checkpoint's math (tf_ck_pack4), under its input scale.
 pub fn weight(words: u64, tiles: u64, global_scale: f32, act: f32, n: usize, k: usize) qmmf.Weight {
     return .{ .mode = .fp4, .codes = words, .scales = tiles, .scale = global_scale, .n = @intCast(n), .k = @intCast(k), .npad = @intCast(n), .act = act };
+}
+
+test "bands hold about 4 MiB of rows" {
+    try std.testing.expectEqual(@as(usize, 12), band(4096, 5120));
+    try std.testing.expectEqual(@as(usize, 3), band(4096, 17408));
+    try std.testing.expectEqual(@as(usize, 1), band(100, 5120));
 }
 
 test "the checkpoint view keeps the input scale and pads nothing" {
