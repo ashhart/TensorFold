@@ -78,7 +78,7 @@ pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
     const l: *Lanes = @ptrCast(@alignCast(p));
     if (l.page_tokens == 0) return null;
     const ring = l.ringBytes();
-    const in_run = ring + if (l.draft != null) l.e.tapBytes() else 0;
+    const in_run = ring + if (l.draft != null) l.e.tapBytes() else 0; // DFlash2 counts the target's taps as its own
     l.extra = @intCast(extra -| in_run);
     return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra);
 }
@@ -88,9 +88,10 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     const ring = l.ringBytes();
     l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, streams, pages);
-    if (l.draft) |d| if (streams > 0) {
-        d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf };
-    };
+    if (streams > 0) {
+        if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf };
+        if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf };
+    }
     l.paged_only = pages_mod.pagedOnly() and streams > 0; // checks: every stream on pages, the reserved window idle
 }
 
@@ -184,6 +185,7 @@ pub fn openMtp(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u
     try l.e.setTaps(d.taps());
     cost_adapter.identify(l, dir, .mtp);
     try l.timeWindows(d, null);
+    l.mtp = d;
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeMtp, .reserve = reserveMtp };
 }
 
@@ -267,6 +269,8 @@ const Lanes = struct {
     paged_only: bool = false,
     /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' runs.
     draft: ?*Draft = null,
+    /// The MTP drafter (qwen3_5_moe), when attached: its ring and state go into the pool lanes' runs.
+    mtp: ?*Mtp = null,
     /// A drafter's bytes a stream outside the lanes' runs (pagedLayout).
     extra: usize = 0,
     cost_context: ?*const cuda.Context = null,
@@ -346,9 +350,10 @@ const Lanes = struct {
         return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
     }
 
-    /// A drafter ring's bytes in each lane's run (0: no DFlash2 drafter).
+    /// A drafter's bytes in each lane's run: DFlash2's ring, or MTP's ring and state (0: no drafter).
     fn ringBytes(self: *const Lanes) usize {
-        return if (self.draft) |d| d.c.ringBytes() else 0;
+        if (self.draft) |d| return d.c.ringBytes();
+        return if (self.mtp) |m| m.areaBytes() else 0;
     }
 
     /// The ring in the run of the lane `stream`'s cache holds; null: its cache is a reserved window's.
