@@ -127,8 +127,16 @@ pub const Ck = struct {
 
     /// lane8 on row tile `ti` of `lane`'s order: 16, 32, 64 (whole tiles of m), 64 skipping, 128 skipping.
     pub fn lane8Tile(c: *const Ck, s: Stream, ti: usize, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64, part: u64) !void {
+        return c.lane8Slices(s, ti, x8, m, w, act, y, part, qmmf.splitK(w.n, w.k));
+    }
+
+    /// lane8 over prompt rows on the 128-row tile with K whole (no slices): a prompt's own bits, not a decode row's.
+    pub fn lane8Prompt(c: *const Ck, s: Stream, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64) !void {
+        return c.lane8Slices(s, 4, x8, m, w, act, y, 0, 1);
+    }
+
+    fn lane8Slices(c: *const Ck, s: Stream, ti: usize, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64, part: u64, sk: u32) !void {
         if (w.mode != .fp8) return error.FormatMismatch;
-        const sk = qmmf.splitK(w.n, w.k);
         const cluster = sk > 1 and sk <= 8 and c.clusters;
         if (sk > 1 and !cluster and part == 0) return error.NeedsPartials;
         const prompt = ti == 4;
@@ -167,12 +175,17 @@ pub const Ck = struct {
 
     /// bf16 rows [m, k] (`ldx` apart) to NVFP4 under input scale `act`: codes [m][k/2] then scales [m][k/16] at `out`.
     pub fn quant4(c: *const Ck, s: Stream, x: u64, ldx: usize, m: usize, k: usize, act: f32, out: u64) !void {
+        return c.quant4Global(s, x, ldx, m, k, inverse(act), out);
+    }
+
+    /// quant4 under the global scale `g` itself (a compressed-tensors input_global_scale, no reciprocal taken).
+    pub fn quant4Global(c: *const Ck, s: Stream, x: u64, ldx: usize, m: usize, k: usize, g: f32, out: u64) !void {
         var a: launch_.Args = .{};
         a.add(x);
         a.add(@as(i32, @intCast(ldx)));
         a.add(@as(i32, @intCast(m)));
         a.add(@as(i32, @intCast(k)));
-        a.add(inverse(act));
+        a.add(g);
         a.add(out);
         a.add(out + m * k / 2);
         try go(c.quant4_fn, s, .{ (m * (k / 16) + 127) / 128, 1, 1 }, 128, 0, &a);

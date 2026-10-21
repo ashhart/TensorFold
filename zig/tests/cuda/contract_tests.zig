@@ -20,6 +20,8 @@ const h3_prep = @import("contract_h3_prep.zig");
 const h3_topk_k = @import("contract_h3_topk.zig");
 const drama3_k = @import("contract_drama3.zig");
 const ck_k = @import("contract_ck.zig");
+const ckd_k = @import("contract_ck_dense.zig");
+const ck8t_k = @import("contract_ck_lane8t.zig");
 const scan_k = @import("contract_scan.zig");
 const lane8_k = @import("contract_ck_lane.zig");
 const latent_k = @import("contract_latent.zig");
@@ -48,7 +50,7 @@ const h3_image = struct {
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "ck_dense4", "ck_lane8t", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
     std.debug.print("FAIL kernel-contract: unknown image name: {s}\n", .{name});
     return error.UnknownContractImage;
@@ -157,6 +159,14 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&wide) |*m| m.deinit();
     for (&wide) |*m| try kernels.append(a, m.kernel());
+    var narrow: [wide_k.bf16_modes.len * 2 + 1]wide_k.Product = undefined; // bf16 out (the 27B's ModelOpt layers)
+    for (wide_k.bf16_modes, 0..) |mode, i| {
+        narrow[i * 2] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = mode, .clusters = true, .out_kind = .bf16 };
+        narrow[i * 2 + 1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .mode = mode, .clusters = false, .out_kind = .bf16 };
+    }
+    narrow[narrow.len - 1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = .fp8, .clusters = true, .out_kind = .bf16, .prompt = &prompt };
+    defer for (&narrow) |*m| m.deinit();
+    for (&narrow) |*m| try kernels.append(a, m.kernel());
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
@@ -226,21 +236,43 @@ pub fn run(gpu: check.Gpu) !void {
     defer packer.unload();
     const ck_kinds = comptime std.enums.values(ck_k.Kind);
     var ck_experts: [ck_kinds.len]ck_k.Experts = undefined;
-    var lanes: [2]lane8_k.Lane = undefined;
+    var lanes: [3]lane8_k.Lane = undefined;
     var nck: usize = 0;
     var nlane: usize = 0;
     defer for (ck_experts[0..nck]) |*x| x.deinit();
     defer for (lanes[0..nlane]) |*x| x.deinit();
+    var lane8t: ?cuda.ck_lane8t.Lane8t = null; // a compressed-tensors export's FP8 math (--precision checkpoint)
+    defer if (lane8t) |*x| x.unload();
+    var l8ts: [std.enums.values(ck8t_k.Kind).len]ck8t_k.Lane8t = undefined;
+    var nl8t: usize = 0;
+    defer for (l8ts[0..nl8t]) |*x| x.deinit();
+    var dense4: ?cuda.ck_dense.Dense4 = null; // the ModelOpt 27B's dense NVFP4 layers (--precision checkpoint)
+    defer if (dense4) |*x| x.unload();
+    var denses: [std.enums.values(ckd_k.Kind).len]ckd_k.Dense = undefined;
+    var ndense: usize = 0;
+    defer for (denses[0..ndense]) |*x| x.deinit();
     if (ck) |*q| {
         for (ck_kinds) |kind| {
             ck_experts[nck] = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .ck = q, .router = try cuda.grouped.Router.resolve(mods[6]), .latent = &latent };
             try kernels.append(a, ck_experts[nck].kernel());
             nck += 1;
         }
-        for ([_]lane8_k.Kind{ .cluster, .reduce }, [_]*const cuda.ck.Ck{ q, &ck_reduce.? }) |kind, by| {
+        for ([_]lane8_k.Kind{ .cluster, .reduce, .whole }, [_]*const cuda.ck.Ck{ q, &ck_reduce.?, q }) |kind, by| {
             lanes[nlane] = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .ck = by, .packer = &packer };
             try kernels.append(a, lanes[nlane].kernel());
             nlane += 1;
+        }
+        lane8t = try cuda.ck_lane8t.Lane8t.load(gpu.d);
+        for (std.enums.values(ck8t_k.Kind)) |kind| {
+            l8ts[nl8t] = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .l = &lane8t.?, .packer = &packer };
+            try kernels.append(a, l8ts[nl8t].kernel());
+            nl8t += 1;
+        }
+        dense4 = try cuda.ck_dense.Dense4.load(gpu.d, sms);
+        for (std.enums.values(ckd_k.Kind)) |kind| {
+            denses[ndense] = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .ck = q, .dense = &dense4.? };
+            try kernels.append(a, denses[ndense].kernel());
+            ndense += 1;
         }
     }
     var round_mod = try cuda.Module.load(gpu.d, kk.tree_round);

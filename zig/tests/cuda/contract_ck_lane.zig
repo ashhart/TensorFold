@@ -11,13 +11,18 @@ const Ck = cuda.ck.Ck;
 const e4m3 = core.quant.fp8.e4m3;
 
 /// Slices meeting in a cluster (tf_ck8_128c), or partials summed by tf_ck8_reduce (tf_ck8_128, GPUs without clusters).
-pub const Kind = enum { cluster, reduce };
+pub const Kind = enum { cluster, reduce, whole }; // whole: tf_ck8_128 with K in one slice (the ModelOpt 27B's prompts)
 
 const rule = "as the 64-row tile it replaces gives them: a NaN input and a NaN weight code";
 
 /// 32-input MMA steps over a slice, the products inside one, then up to 8 slices added.
 fn laneDepth(s: c.Shape) usize {
     return s.k / 32 + 32 + 8;
+}
+
+/// 32-input MMA steps over the whole of K, the products inside one.
+fn wholeDepth(s: c.Shape) usize {
+    return s.k / 32 + 32;
 }
 
 /// Super's FP8 projections at prompt rows: the Mamba out projection, the latent projection and back.
@@ -27,6 +32,8 @@ pub fn spec(kind: Kind) c.Spec {
     return switch (kind) {
         .cluster => .{ .name = "cuda ck FP8 prompt tile tf_ck8_128c (slices in a cluster)", .accum = .f32, .depth = laneDepth, .ops = 1, .out = .bf16, .replaces = "tf_ck8_64c and tf_ck8_64sc", .nan = .{ .stated = rule }, .tiles = tiles, .served = served },
         .reduce => .{ .name = "cuda ck FP8 prompt tile tf_ck8_128 (slices by tf_ck8_reduce)", .accum = .f32, .depth = laneDepth, .ops = 1, .out = .bf16, .replaces = "tf_ck8_64 and tf_ck8_64s", .nan = .{ .stated = rule }, .tiles = tiles, .served = served },
+        // the 27B's FP8 mixers at prompt rows (5120 and 6144 inputs), columns cut
+        .whole => .{ .name = "cuda ck FP8 prompt tile tf_ck8_128, K whole (lane8Prompt)", .accum = .f32, .depth = wholeDepth, .ops = 1, .out = .bf16, .tiles = tiles, .served = &.{ .{ .rows = 17, .n = 640, .k = 5120 }, .{ .rows = 129, .n = 1024, .k = 5120 }, .{ .rows = 300, .n = 512, .k = 6144 } } },
     };
 }
 
@@ -61,10 +68,17 @@ pub const Lane = struct {
     }
 
     pub fn kernel(self: *Lane) g.Kernel {
-        return .{ .spec = spec(self.kind), .ctx = self, .vt = &vt };
+        return .{ .spec = spec(self.kind), .ctx = self, .vt = if (self.kind == .whole) &vt_whole else &vt };
     }
 
     const vt = g.hooks(Lane);
+    /// K whole replaces no tile: the harness's float64 classes and bound, no check or baseline of its own.
+    const vt_whole = blk: {
+        var v = g.hooks(Lane);
+        v.check = null;
+        v.replaced = null;
+        break :blk v;
+    };
 
     /// A finite e4m3 code: every byte but the two NaNs.
     fn code(rng: std.Random) u8 {
@@ -140,7 +154,9 @@ pub const Lane = struct {
     }
 
     pub fn run(self: *Lane) !void {
-        try self.ck.lane8Tile(self.rig.s, 4, self.xd, self.shape.rows, self.weight(), 1, self.out, self.part);
+        if (self.kind == .whole) {
+            try self.ck.lane8Prompt(self.rig.s, self.xd, self.shape.rows, self.weight(), 1, self.out);
+        } else try self.ck.lane8Tile(self.rig.s, 4, self.xd, self.shape.rows, self.weight(), 1, self.out, self.part);
         try self.rig.s.synchronize();
     }
 
