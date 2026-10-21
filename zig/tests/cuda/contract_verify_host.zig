@@ -41,6 +41,47 @@ test "verify contract: the one-CTA and clustered launch remain explicitly unmeas
     try t.expectEqual(@as(usize, 2), found);
 }
 
+/// qmm_frag.cuh's LaneTile<64, rows, 64, 1, 4, stages>::SMEM: the stages' inputs, weights, scales and sums, or the
+/// parked K-slice partials when those are larger.
+fn laneTileSmem(rows: u32, stages: u32) u32 {
+    const stage = rows * 128 + 64 * 64 / 2 + 2 * 64 * 2 + rows * 4;
+    return @max(stages * stage, rows / 16 * 2 * 4 * 128 * 4);
+}
+
+test "verify contract: 64- and 128-row tiles cover the drafter's shapes and stay unmeasured until receipts" {
+    const Wide = struct { tile: usize, bits: mm.Kind, fp64: mm.Kind, symbol: []const u8, shared: u32 };
+    try t.expectEqual(laneTileSmem(32, 5), cuda.qlinear.verify_smem);
+    for ([_]Wide{
+        .{ .tile = 64, .bits = .verify64_bits, .fp64 = .verify64_fp64, .symbol = cuda.qlinear.symbols.verify64, .shared = laneTileSmem(64, 4) },
+        .{ .tile = 128, .bits = .verify128_bits, .fp64 = .verify128_fp64, .symbol = cuda.qlinear.symbols.verify128, .shared = laneTileSmem(128, 3) },
+    }) |w| {
+        for ([_]mm.Kind{ w.bits, w.fp64 }) |kind| {
+            const s = mm.spec(kind);
+            try t.expectEqual(kind == w.bits, s.replaces != null);
+            var widest: usize = 0;
+            var drafter_k = false;
+            for (s.served) |shape| {
+                widest = @max(widest, shape.rows);
+                drafter_k = drafter_k or shape.k == 5120;
+            }
+            try t.expectEqual(w.tile, widest);
+            try t.expect(drafter_k);
+            try t.expectEqual(w.tile, s.tiles[0].size);
+            try t.expectEqual(w.tile, mm.verifyTile(kind));
+        }
+        var found: usize = 0;
+        for (c.registry.all_cuda) |r| if (std.mem.eql(u8, r.launch.symbol, w.symbol)) {
+            found += 1;
+            try t.expectEqual(w.shared, r.launch.dynamic);
+            try t.expect(r.launch.opt_in);
+            for (r.usage) |u| try t.expectEqual(@as(u32, 0), u.regs);
+        };
+        try t.expectEqual(@as(usize, 2), found);
+    }
+    try t.expectEqual(laneTileSmem(64, 4), cuda.qlinear.verify64_smem);
+    try t.expectEqual(laneTileSmem(128, 3), cuda.qlinear.verify128_smem);
+}
+
 const Cpu = struct {
     bits: [2]u8 = .{ 0x80, 0x3f },
     base: [2]u8 = .{ 0x80, 0x3f },

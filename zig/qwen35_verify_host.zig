@@ -26,7 +26,7 @@ pub const Trace = struct {
             const p = @as(*const cuda.qlinear.GemvPart, @ptrCast(@alignCast(a[2].?))).*;
             out = p.out;
             sk = p.sk;
-        } else if (id == 3 or id == 5) {
+        } else if (id == 3 or id == 5 or id == 6 or id == 7) {
             const p = @as(*const cuda.qlinear.Parts, @ptrCast(@alignCast(a[2].?))).*;
             out = p.p[0].out;
             sk = p.p[0].sk;
@@ -57,6 +57,8 @@ pub fn engine(d: *cuda.Driver, gb10: bool) q.engine.Engine {
     e.affine.group_fn = function(d, 3);
     e.affine.prefill_fn = function(d, 4);
     if (@hasField(cuda.qlinear.Affine4Kernels, "verify_fn")) e.affine.verify_fn = function(d, 5);
+    if (@hasField(cuda.qlinear.Affine4Kernels, "verify64_fn")) e.affine.verify64_fn = function(d, 6);
+    if (@hasField(cuda.qlinear.Affine4Kernels, "verify128_fn")) e.affine.verify128_fn = function(d, 7);
     e.affine.gemv_blocks = 1;
     e.affine.split = null;
     e.affine.pdl = gb10;
@@ -94,15 +96,20 @@ test "verify matmuls: 17 through 32 GB10 rows share one weight pass and keep the
     }
 }
 
-test "verify matmuls: wider windows advance inputs sums and outputs by 32 rows" {
+test "verify matmuls: 33 through 128 GB10 rows share one weight pass in four or eight row tiles" {
     var d: cuda.Driver = undefined;
     var e = engine(&d, true);
-    for ([_]usize{ 33, 47, 48, 63, 64 }) |rows| {
+    for (33..129) |rows| {
         try project(&e, rows, 4096);
-        try t.expectEqual(@as(usize, 2), Trace.count);
-        try t.expectEqual(@as(u64, 0x10000 + 32 * 8192 * 2), Trace.calls[1].x);
-        try t.expectEqual(@as(u64, 0x20000 + 32 * (8192 / 64) * 4), Trace.calls[1].xs);
-        try t.expectEqual(@as(u64, 0x30000 + 32 * 4096 * 2), Trace.calls[1].out);
+        try t.expectEqual(@as(usize, 1), Trace.count);
+        const c = Trace.calls[0];
+        try t.expectEqual(@as(usize, if (rows <= 64) 6 else 7), c.id);
+        try t.expectEqual(rows, @as(usize, @intCast(c.rows)));
+        try t.expectEqual(@as(u64, 0x10000), c.x);
+        try t.expectEqual(@as(u64, 0x30000), c.out);
+        try t.expectEqual(@as(c_int, @intCast(cuda.qlinear.splitK(4096, 8192))), c.sk);
+        try t.expectEqual(@as(u32, if (rows <= 64) 43008 else 57600), c.shared);
+        try t.expectEqual(@as(u32, @intCast(64 * c.sk)), c.grid);
     }
 }
 
@@ -132,16 +139,18 @@ test "verify matmuls: other devices retain the original sixteen-row dispatch" {
 
 const Resolve = struct {
     var requested = false;
-    var shared: c_int = 0;
+    var shared: [3]c_int = @splat(0); // verify32, verify64, verify128
     fn get(out: *cuda.abi.Function, _: cuda.abi.Module, name: [*:0]const u8) callconv(.c) cuda.abi.Result {
-        if (std.mem.eql(u8, std.mem.span(name), cuda.qlinear.symbols.verify32)) {
-            requested = true;
-            out.* = @ptrFromInt(5);
-        } else out.* = @ptrFromInt(2);
+        const s = cuda.qlinear.symbols;
+        const n = std.mem.span(name);
+        const id: usize = if (std.mem.eql(u8, n, s.verify32)) 5 else if (std.mem.eql(u8, n, s.verify64)) 6 else if (std.mem.eql(u8, n, s.verify128)) 7 else 2;
+        out.* = @ptrFromInt(id);
+        requested = requested or @intFromPtr(out.*) == 5;
         return 0;
     }
     fn attribute(f: cuda.abi.Function, what: cuda.abi.FunctionAttribute, value: c_int) callconv(.c) cuda.abi.Result {
-        if (@intFromPtr(f) == 5 and what == .max_dynamic_shared_size_bytes) shared = value;
+        const id = @intFromPtr(f);
+        if (id >= 5 and id <= 7 and what == .max_dynamic_shared_size_bytes) shared[id - 5] = value;
         return 0;
     }
     fn occupancy(out: *c_int, _: cuda.abi.Function, _: c_int, _: usize) callconv(.c) cuda.abi.Result {
@@ -157,25 +166,11 @@ test "verify matmuls: real module resolution sets the new function's shared-memo
     d.api.cuOccupancyMaxActiveBlocksPerMultiprocessor = Resolve.occupancy;
     const m: cuda.Module = .{ .d = &d, .handle = null };
     Resolve.requested = false;
-    Resolve.shared = 0;
+    Resolve.shared = @splat(0);
     var a = try cuda.qlinear.Affine4Kernels.resolve(&d, m, m, m, m, 48, true);
     defer a.deinit();
     try t.expect(Resolve.requested);
-    try t.expectEqual(@as(c_int, 32640), Resolve.shared);
+    try t.expectEqual([3]c_int{ 32640, 43008, 57600 }, Resolve.shared);
     try t.expectEqual(@as(usize, 96), a.gemv_blocks);
-    try t.expectEqual(@as(usize, 32), a.verifyRows());
-}
-
-test "verify matmuls: coalesced 128-row calls keep every 32-row slice at its own buffer offset" {
-    var d: cuda.Driver = undefined;
-    var e = engine(&d, true);
-    for ([_]usize{ 65, 79, 96, 97, 127, 128 }) |rows| {
-        try project(&e, rows, 4096);
-        try t.expectEqual((rows + 31) / 32, Trace.count);
-        for (Trace.calls[0..Trace.count], 0..) |call, index| {
-            try t.expectEqual(@as(u64, 0x10000 + index * 32 * 8192 * 2), call.x);
-            try t.expectEqual(@as(u64, 0x20000 + index * 32 * (8192 / 64) * 4), call.xs);
-            try t.expectEqual(@as(u64, 0x30000 + index * 32 * 4096 * 2), call.out);
-        }
-    }
+    try t.expectEqual(@as(usize, 128), a.verifyRows());
 }

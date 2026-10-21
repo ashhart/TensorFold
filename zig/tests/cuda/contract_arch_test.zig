@@ -10,7 +10,7 @@ test "contract architecture: older SMs omit the standalone cluster kernels" {
         for (std.enums.values(mm.Kind)) |kind| {
             var m: mm.Mm = .{ .rig = undefined, .kind = kind, .sm = sm };
             const k = m.kernel();
-            try std.testing.expectEqual((kind == .qmm_group or kind == .verify32_bits or kind == .verify32_fp64), k == null);
+            try std.testing.expectEqual((kind == .qmm_group or mm.verifyTile(kind) > 0), k == null);
             if (k != null) count += 1;
         }
         try std.testing.expectEqual(@as(usize, 6), count);
@@ -24,9 +24,10 @@ test "contract architecture: SM90 and Blackwell retain every kernel and the GEMV
             var m: mm.Mm = .{ .rig = undefined, .kind = kind, .sm = sm };
             const k = m.kernel().?;
             count += 1;
-            try std.testing.expectEqual(kind == .lane_gemv or kind == .lane_gemv_split or kind == .verify32_bits, k.spec.replaces != null);
+            const bits = kind == .verify32_bits or kind == .verify64_bits or kind == .verify128_bits;
+            try std.testing.expectEqual(kind == .lane_gemv or kind == .lane_gemv_split or bits, k.spec.replaces != null);
         }
-        try std.testing.expectEqual(@as(usize, 9), count);
+        try std.testing.expectEqual(@as(usize, 13), count);
     }
 }
 

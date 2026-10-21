@@ -12,7 +12,21 @@ const Dense = contract.dense.Dense;
 const qlinear = cuda.qlinear;
 const nvfp4 = cuda.nvfp4;
 
-pub const Kind = enum { qmm_group, lane_gemv, lane_gemv_split, prompt16, prompt16_f32, lane_f32, lane_f32_reduce, verify32_bits, verify32_fp64 };
+pub const Kind = enum { qmm_group, lane_gemv, lane_gemv_split, prompt16, prompt16_f32, lane_f32, lane_f32_reduce, verify32_bits, verify32_fp64, verify64_bits, verify64_fp64, verify128_bits, verify128_fp64 };
+
+/// Rows a verify kind's launch holds, 0 for the others.
+pub fn verifyTile(kind: Kind) usize {
+    return switch (kind) {
+        .verify32_bits, .verify32_fp64 => 32,
+        .verify64_bits, .verify64_fp64 => 64,
+        .verify128_bits, .verify128_fp64 => 128,
+        else => 0,
+    };
+}
+
+fn oneRowBits(kind: Kind) bool {
+    return kind == .verify32_bits or kind == .verify64_bits or kind == .verify128_bits;
+}
 
 /// A group's 64 products, the producer's 64-input sum, two fmas a group, then the K slices.
 fn groupDepth(s: c.Shape) usize {
@@ -43,9 +57,18 @@ pub fn spec(kind: Kind) c.Spec {
     const tiles = [3]c.Tile{ .{ .size = 16 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 512, .step = 64, .min = 64 } };
     const wide = &[_]c.Shape{ .{ .rows = 16, .n = 512, .k = 5120 }, .{ .rows = 17, .n = 65, .k = 512 }, .{ .rows = 32, .n = 512, .k = 17408 }, .{ .rows = 32, .n = 17408, .k = 512 }, .{ .rows = 32, .n = 5120, .k = 5120 } };
     const wide_tiles = [3]c.Tile{ .{ .size = 32 }, .{ .size = 64, .min = 1 }, .{ .size = 512, .step = 64, .min = 64 } };
+    // the 27B's DFlash2 drafter in shared frames: q, k/v, o, the selector and fc's K, past each row-tile edge
+    const wide64 = &[_]c.Shape{ .{ .rows = 33, .n = 65, .k = 512 }, .{ .rows = 64, .n = 1024, .k = 5120 }, .{ .rows = 48, .n = 512, .k = 4096 }, .{ .rows = 64, .n = 256, .k = 5120 }, .{ .rows = 64, .n = 512, .k = 17408 } };
+    const wide128 = &[_]c.Shape{ .{ .rows = 65, .n = 65, .k = 512 }, .{ .rows = 128, .n = 1024, .k = 5120 }, .{ .rows = 120, .n = 4096, .k = 5120 }, .{ .rows = 100, .n = 512, .k = 4096 }, .{ .rows = 128, .n = 256, .k = 5120 }, .{ .rows = 112, .n = 512, .k = 25600 }, .{ .rows = 128, .n = 17408, .k = 512 } };
+    const wide64_tiles = [3]c.Tile{ .{ .size = 64 }, .{ .size = 64, .min = 1 }, .{ .size = 512, .step = 64, .min = 64 } };
+    const wide128_tiles = [3]c.Tile{ .{ .size = 128 }, .{ .size = 64, .min = 1 }, .{ .size = 512, .step = 64, .min = 64 } };
     return switch (kind) {
         .verify32_bits => .{ .name = "cuda affine4 verify32 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide_tiles, .served = wide },
         .verify32_fp64 => .{ .name = "cuda affine4 verify32 FP64", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = wide_tiles, .served = wide },
+        .verify64_bits => .{ .name = "cuda affine4 verify64 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide64_tiles, .served = wide64 },
+        .verify64_fp64 => .{ .name = "cuda affine4 verify64 FP64", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = wide64_tiles, .served = wide64 },
+        .verify128_bits => .{ .name = "cuda affine4 verify128 one-row bits", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "the original one-row affine4 decode", .tiles = wide128_tiles, .served = wide128 },
+        .verify128_fp64 => .{ .name = "cuda affine4 verify128 FP64", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = wide128_tiles, .served = wide128 },
         .qmm_group => .{ .name = "cuda qmm_group (cluster tile)", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = tiles, .served = decode },
         .lane_gemv => .{ .name = "cuda lane_gemv", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "qmm_group's cluster tile", .tiles = tiles, .served = decode },
         .lane_gemv_split => .{ .name = "cuda lane_gemv split-K", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "qmm_group's cluster tile", .tiles = tiles, .served = decode },
@@ -82,9 +105,16 @@ pub const Mm = struct {
     }
 
     pub fn kernel(self: *Mm) ?g.Kernel {
-        if (self.sm < 90 and (self.kind == .qmm_group or self.kind == .verify32_bits or self.kind == .verify32_fp64)) return null;
+        if (self.sm < 90 and (self.kind == .qmm_group or verifyTile(self.kind) > 0)) return null;
         var declared = spec(self.kind);
-        if (self.truncate_verify) declared.name = if (self.kind == .verify32_bits) "control: verify32 truncated one-row bits" else "control: verify32 truncated FP64";
+        if (self.truncate_verify) declared.name = switch (self.kind) {
+            .verify32_bits => "control: verify32 truncated one-row bits",
+            .verify64_bits => "control: verify64 truncated one-row bits",
+            .verify128_bits => "control: verify128 truncated one-row bits",
+            .verify64_fp64 => "control: verify64 truncated FP64",
+            .verify128_fp64 => "control: verify128 truncated FP64",
+            else => "control: verify32 truncated FP64",
+        };
         if (self.sm < 90) {
             declared.replaces = null;
             if (self.kind == .lane_f32) declared.name = "cuda qmmf FP4 fp32 out (slices by reduce_kernel<true>, architecture fallback)";
@@ -107,14 +137,14 @@ pub const Mm = struct {
         self.drop();
         if (shape.rows == 0 or shape.n == 0 or shape.k == 0 or shape.k % 64 != 0) return false;
         return switch (self.kind) {
-            .qmm_group, .lane_gemv, .lane_gemv_split, .verify32_bits, .verify32_fp64 => self.prepareAffine(shape, fill, seed),
+            .qmm_group, .lane_gemv, .lane_gemv_split, .verify32_bits, .verify32_fp64, .verify64_bits, .verify64_fp64, .verify128_bits, .verify128_fp64 => self.prepareAffine(shape, fill, seed),
             .prompt16, .prompt16_f32, .lane_f32, .lane_f32_reduce => self.preparePrompt(shape, fill, seed),
         };
     }
 
     fn prepareAffine(self: *Mm, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        const wide = self.kind == .verify32_bits or self.kind == .verify32_fp64;
-        if (shape.rows > (if (wide) @as(usize, 32) else 16) or (!wide and shape.n % 64 != 0)) return false;
+        const wide = verifyTile(self.kind) > 0;
+        if (shape.rows > (if (wide) verifyTile(self.kind) else 16) or (!wide and shape.n % 64 != 0)) return false;
         if (self.kind == .lane_gemv_split and qlinear.splitK(shape.n, shape.k) == 1) return false; // served only with K slices
         const a = self.rig.gpu.gpa;
         const f = try Affine.init(a, shape, 4, 64);
@@ -147,7 +177,7 @@ pub const Mm = struct {
         try self.affine4.?.pack(self.rig.s, src_w, src_s, src_b, self.q);
         try self.rig.s.synchronize();
         const out_bytes = shape.rows * shape.n * 2;
-        if (self.kind == .lane_gemv or self.kind == .lane_gemv_split or self.kind == .verify32_bits) self.base = try self.rig.scratch(out_bytes);
+        if (self.kind == .lane_gemv or self.kind == .lane_gemv_split or oneRowBits(self.kind)) self.base = try self.rig.scratch(out_bytes);
         self.out = try self.rig.output(out_bytes);
         return true;
     }
@@ -208,6 +238,10 @@ pub const Mm = struct {
                 const f = self.f.?;
                 try self.affine4.?.cluster32(s, self.x, self.xs, self.q, out, if (self.truncate_verify) @min(f.shape.rows, 16) else f.shape.rows);
             },
+            .verify64_bits, .verify64_fp64, .verify128_bits, .verify128_fp64 => {
+                const f = self.f.?;
+                try self.affine4.?.clusterRows(verifyTile(kind), s, self.x, self.xs, self.q, out, if (self.truncate_verify) @min(f.shape.rows, 16) else f.shape.rows);
+            },
             .qmm_group => {
                 const f = self.f.?;
                 try self.affine4.?.cluster(s, self.x, self.xs, self.q, out, f.shape.rows, qlinear.splitK(f.shape.n, f.shape.k));
@@ -231,7 +265,7 @@ pub const Mm = struct {
 
     /// qmm_group's cluster tile on the same inputs: the bits lane_gemv must equal.
     pub fn replaced(self: *Mm) ![]const u8 {
-        if (self.kind == .verify32_bits) {
+        if (oneRowBits(self.kind)) {
             const f = self.f.?;
             for (0..f.shape.rows) |row| try self.affine4.?.decode(self.rig.s, self.x + row * f.shape.k * 2, self.xs + row * (f.shape.k / 64) * 4, self.q, self.base + row * f.shape.n * 2, 1);
             return self.rig.bytes(self.base, self.count() * 2);

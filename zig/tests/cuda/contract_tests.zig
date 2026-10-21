@@ -157,8 +157,8 @@ pub fn run(gpu: check.Gpu) !void {
             std.debug.print("N/A  {s} replacement bits: cluster baseline needs sm_90; gate 3 uses the float64 bound\n", .{k.spec.name});
         try kernels.append(a, k);
     }
-    var verify_controls: [2]mm_k.Mm = undefined;
-    for ([_]mm_k.Kind{ .verify32_bits, .verify32_fp64 }, &verify_controls) |kind, *m| {
+    var verify_controls: [6]mm_k.Mm = undefined;
+    for ([_]mm_k.Kind{ .verify32_bits, .verify32_fp64, .verify64_bits, .verify64_fp64, .verify128_bits, .verify128_fp64 }, &verify_controls) |kind, *m| {
         m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .sm = cap, .affine4 = &affine4, .truncate_verify = true };
     }
     defer for (&verify_controls) |*m| m.deinit();
