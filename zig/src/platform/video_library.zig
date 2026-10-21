@@ -48,7 +48,8 @@ const Recorder = struct {
 };
 
 test "video library: candidates retain order, stop on success and share the loader fallback" {
-    const expected = [_][]const u8{ "/fixture/bin/../lib/libtfvideo.so", "/fixture/bin/libtfvideo.so", soname };
+    const sep = std.fs.path.sep_str; // open joins with the platform's separator
+    const expected = [_][]const u8{ "/fixture/bin" ++ sep ++ ".." ++ sep ++ "lib" ++ sep ++ soname, "/fixture/bin" ++ sep ++ soname, soname };
     for (0..4) |at| {
         Recorder.reset(if (at < 3) at else null);
         try std.testing.expectEqual(at < 3, open(std.testing.allocator, Recorder, "/fixture/bin") != null);

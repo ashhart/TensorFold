@@ -1,0 +1,2 @@
+# Text files check out with LF on every platform: tests embed fixtures and compare their bytes.
+* text=auto eol=lf

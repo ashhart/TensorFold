@@ -1,5 +1,6 @@
 //! A stop's drain over HTTP: serve.run with a real SIGTERM, a slow stub engine, bytes as tokens.
 const std = @import("std");
+const posix = @import("sys").posix; // the layer serve.zig installs its stop handlers with
 const api = @import("engine_api");
 const json = @import("json");
 const model_text = @import("model_text.zig");
@@ -256,7 +257,7 @@ test "SIGTERM drains: 503 + Retry-After and /health draining while a reply finis
         const bt = try std.Thread.spawn(.{}, Background.run, .{&bg});
         errdefer slow.release.store(true, .release);
         waitActive(io, &slow, 1);
-        try std.posix.raise(.TERM);
+        try posix.raise(.TERM);
         // the drain has begun once a new request is refused
         var refused: Reply = undefined;
         while (true) {
@@ -297,7 +298,7 @@ test "SIGTERM drains: 503 + Retry-After and /health draining while a reply finis
         const st = try std.Thread.spawn(.{}, Background.run, .{&streamed});
         const wt = try std.Thread.spawn(.{}, Background.run, .{&whole});
         waitActive(io, &slow, 2);
-        try std.posix.raise(.TERM);
+        try posix.raise(.TERM);
         st.join();
         wt.join();
         t.join();
@@ -327,7 +328,7 @@ const Gap = struct {
 
     fn hook() void {
         if (fired.swap(true, .acq_rel)) return;
-        std.posix.raise(.TERM) catch return;
+        posix.raise(.TERM) catch return;
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         // the drain has begun (it reads the count after it sets the flag): /health says so

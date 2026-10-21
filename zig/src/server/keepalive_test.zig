@@ -1,5 +1,6 @@
 //! A silent stream keeps its client: keepalives on both routes before the first token; a failed one ends the request.
 const std = @import("std");
+const posix = @import("sys").posix; // the layer serve.zig installs its stop handlers with
 const server = @import("server.zig");
 const d = @import("drain_test.zig");
 const testing = std.testing;
@@ -69,7 +70,7 @@ test "a silent engine's stream gets keepalives before its first token (chat: SSE
     while (slow.cancelled.load(.acquire) == 0 and waited < 300) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
     try testing.expect(slow.cancelled.load(.acquire) != 0);
 
-    try std.posix.raise(.TERM);
+    try posix.raise(.TERM);
     t.join();
     try testing.expectEqual(@as(u8, 0), x.code);
 }
