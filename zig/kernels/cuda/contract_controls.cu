@@ -207,3 +207,11 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_vit_norm(const __nv_bfl
                                                                    float eps, int keep) {
     tf_vit_norm::layer_norm<32>(x, w, b, y, d, eps, keep);
 }
+
+// Gate 3: tree_round.cu's picks to ids keeping the points in `keep`; the exact check must go red.
+#include "round_ids.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_pick_ids(const uint32_t* picks, int* ids, unsigned rows,
+                                                                   unsigned vocab, int fallback, int keep) {
+    tf_round_ids::pick_ids(picks, ids, rows, vocab, fallback, keep);
+}

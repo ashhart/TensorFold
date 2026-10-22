@@ -30,6 +30,7 @@ const act_round_k = @import("contract_act_round.zig");
 const round_k = @import("contract_tree_round.zig");
 
 const act_k = @import("contract_act.zig");
+const pick_ids_k = @import("contract_pick_ids.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
@@ -288,6 +289,10 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(round_k.Which), &rounds) |w, *r| r.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &round_fns };
     defer for (&rounds) |*r| r.deinit();
     for (&rounds) |*r| try kernels.append(a, r.kernel());
+    var pick_ids: [pick_ids_k.entries.len]pick_ids_k.PickIds = undefined;
+    for (pick_ids_k.entries, &pick_ids) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .round = &round_fns, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_pick_ids") else null };
+    defer for (&pick_ids) |*x| x.deinit();
+    for (&pick_ids) |*x| try kernels.append(a, x.kernel());
     var act_rows = try cuda.act_rows.ActRows.load(gpu.d);
     defer act_rows.unload();
     var acts: [std.enums.values(act_k.Which).len]act_k.Act = undefined;
