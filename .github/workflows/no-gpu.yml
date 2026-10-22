@@ -53,6 +53,9 @@ jobs:
         env:
           PYTHON: ${{ steps.nfkd-python.outputs.python-path }}
         run: cd tools/zig && "$PYTHON" -m unittest test_nfkd_tables
+      # Every build option is declared for every target, so one build script fits every OS.
+      - name: build options
+        run: python3 -m unittest discover -s tools/zig -p build_options_test.py
       # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
       - name: lean check
         env:

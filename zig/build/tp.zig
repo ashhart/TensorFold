@@ -40,7 +40,7 @@ fn kernelModule(b: *std.Build, image: ?std.Build.LazyPath) *std.Build.Module {
     return b.createModule(.{ .root_source_file = wf.add("tp_kernel.zig", "pub const mailbox: []const u8 = \"\";\n") });
 }
 
-pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) void {
+pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step, opts: @import("options.zig").Tp) void {
     const host = b.graph.host;
     const cli_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/gpu_cli.zig"), .target = host, .optimize = optimize }) }));
     const cli_step = b.step("test-tp-cli", "TP runner command validation (no GPU)");
@@ -67,8 +67,8 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     tests.step.dependOn(&object.step);
     if (host.result.os.tag == .windows) test_step.dependOn(&object.step);
     if (target.result.os.tag != .linux) return;
-    const nvcc = b.option([]const u8, "tp-nvcc", "nvcc that builds the TP mailbox kernel");
-    const prebuilt = b.option([]const u8, "tp-fatbin", "absolute path of a prebuilt tp_mailbox.fatbin to embed");
+    const nvcc = opts.nvcc;
+    const prebuilt = opts.fatbin;
     const image: ?std.Build.LazyPath = if (prebuilt) |p| b.graph.cwdRelativePath(p) else if (nvcc) |tool| mailboxFatbin(b, tool) else null;
     const cuda = runtime(b, target, optimize);
     const runner = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/gpu_main.zig"), .target = target, .optimize = optimize, .link_libc = true });

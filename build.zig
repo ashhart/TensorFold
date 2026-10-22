@@ -128,9 +128,12 @@ pub fn build(b: *std.Build) void {
     b.step("test-cost-identity", "Streamed window-cost identity matches legacy bytes with bounded memory").dependOn(&identity_run.step);
     test_step.dependOn(&identity_run.step);
     merge_build.targets(b, target, optimize); // tensorfold merge's tests and tf-merge-check, host only on every OS
+    // the backend options are declared for every target, so one build script may pass the same flags on every OS
+    const cuda_options = @import("zig/build/options.zig").cuda(b);
+    const tp_options = @import("zig/build/options.zig").tp(b);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
-        .linux, .windows => cuda_build.targets(b, target, optimize, draft_ids, build_options),
+        .linux, .windows => cuda_build.targets(b, target, optimize, draft_ids, build_options, cuda_options),
         else => {},
     }
     const gemma4_host_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
@@ -146,7 +149,7 @@ pub fn build(b: *std.Build) void {
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/sessions.zig").add(b, test_step);
-    @import("zig/build/tp.zig").add(b, target, optimize, test_step);
+    @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/gradient_host.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);

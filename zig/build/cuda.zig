@@ -56,11 +56,11 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 }
 
 /// Linux targets: fatbins (-Dnvcc builds them, -Dfatbins embeds prebuilt ones), `tensorfold` and `tf-cuda-test`.
-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options) void {
-    const nvcc = b.option([]const u8, "nvcc", "nvcc (or a wrapper) that builds the CUDA kernel fatbins");
-    const prebuilt = b.option([]const u8, "fatbins", "absolute directory of prebuilt <name>.fatbin files to embed");
-    const sms = b.option([]const u8, "sm", "SASS targets, comma separated (default 121; 80, 86, 89, 120 and 121 build)") orelse "121";
-    const strip = b.option(bool, "strip", "No debug info in the CUDA executables: no build machine paths leave with them") orelse false;
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, opts: @import("options.zig").Cuda) void {
+    const nvcc = opts.nvcc;
+    const prebuilt = opts.fatbins;
+    const sms = opts.sms;
+    const strip = opts.strip;
     // the compiler's version text is an input of every fatbin, so a new nvcc rebuilds them all
     const version: ?std.Build.LazyPath = if (prebuilt == null and nvcc != null) blk: {
         const run = b.addSystemCommand(&.{ nvcc.?, "--version" });
@@ -97,7 +97,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     const dump_options = b.addOptions();
-    dump_options.addOption(bool, "enabled", b.option(bool, "cuda-test-dump", "Compile test-only CUDA byte records") orelse false);
+    dump_options.addOption(bool, "enabled", opts.test_dump);
     runner.addOptions("cuda_dump_options", dump_options);
     runner.addImport("cuda", cuda);
     runner.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
@@ -123,16 +123,16 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // tf-tp-watch-check: the ranks' lines with no GPU or NCCL; a failing or dying rank stops every rank
     b.installArtifact(b.addExecutable(.{ .name = "tf-tp-watch-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/tp_watch_check.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{.{ .name = "cuda", .module = cuda }} }) }));
     @import("living_dense.zig").target(b, target, optimize, cuda, mods.qwen35);
-    flashnextChecks(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision);
+    flashnextChecks(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision, opts);
     b.step("compile-cuda-tests", "Compile CUDA runner without executing a GPU").dependOn(&runner_exe.step);
     const startup = b.addObject(.{ .name = "modelopt-startup", .root_module = b.createModule(.{ .root_source_file = b.path("zig/modelopt_startup_compile.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "native", .module = native.engines }} }) });
     _ = startup.getEmittedBin();
     b.step("compile-modelopt-startup", "Compile actual native startup with test-only absent GPU images").dependOn(&startup.step);
-    const controls_file = b.option([]const u8, "contract-controls", "Compile-only controls image");
+    const controls_file = opts.contract_controls;
     const controls = if (controls_file) |file| b.graph.cwdRelativePath(file) else if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
     const contract_images = @import("qwen_contract.zig").images(b, runner_exe, controls, h3_image, kernels, &images);
     contract_images.dependOn(fatbin_step);
-    @import("cuda_contract_deepseek.zig").images(b, runner_exe, contract_images, kernels, &images, prebuilt, nvcc, version, sms);
+    @import("cuda_contract_deepseek.zig").images(b, runner_exe, contract_images, kernels, &images, prebuilt, nvcc, version, sms, opts.cuobjdump);
     const server_exe = nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, true, strip);
     b.step("compile-config-server", "Compile the actual CUDA server config entry point without installing or running").dependOn(&server_exe.step);
     // tf-qwen35-cuda: the Qwen CUDA forward's rows for a reference to compare, and its tower on picture files
@@ -554,7 +554,7 @@ pub fn checkDistFatbins(b: *std.Build, dir: []const u8, privacy_tool: *std.Build
 }
 
 /// Explicit model diagnostics; these tools do not qualify a checkpoint merely by compiling.
-fn flashnextChecks(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, qwen_vision: *std.Build.Module) void {
+fn flashnextChecks(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, qwen_vision: *std.Build.Module, opts: @import("options.zig").Cuda) void {
     const flashnext = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision);
     // not installed: one embedding row through the captured _embed cubin
     const embed_check = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_embed_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -562,9 +562,9 @@ fn flashnextChecks(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     embed_check.addImport("core", core);
     embed_check.addImport("flashnext", flashnext);
     const embed_run = b.addRunArtifact(b.addExecutable(.{ .name = "flashnext-embed", .root_module = embed_check }));
-    const embed_model = b.option([]const u8, "flashnext_model", "Flash Next checkpoint directory for the embedding check");
-    const embed_kernels = b.option([]const u8, "flashnext_kernels", "captured Triton pack for the embedding check");
-    const embed_token = b.option([]const u8, "flashnext_token", "token id for the embedding check") orelse "7";
+    const embed_model = opts.flashnext_model;
+    const embed_kernels = opts.flashnext_kernels;
+    const embed_token = opts.flashnext_token;
     if (embed_model != null and embed_kernels != null) embed_run.addArgs(&.{ embed_model.?, embed_kernels.?, embed_token });
     b.step("flashnext-embed", "Upload the Flash Next embedding table and run _embed for one token").dependOn(&embed_run.step);
     const prompt_check = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_prompt_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -572,8 +572,8 @@ fn flashnextChecks(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     prompt_check.addImport("core", core);
     prompt_check.addImport("flashnext", flashnext);
     const prompt_run = b.addRunArtifact(b.addExecutable(.{ .name = "flashnext-prompt", .root_module = prompt_check }));
-    const prompt_ids = b.option([]const u8, "flashnext_ids", "file of prompt token ids for the Flash Next prompt check");
-    const prompt_count = b.option([]const u8, "flashnext_count", "greedy tokens to emit") orelse "8";
+    const prompt_ids = opts.flashnext_ids;
+    const prompt_count = opts.flashnext_count;
     if (embed_model != null and embed_kernels != null and prompt_ids != null) prompt_run.addArgs(&.{ embed_model.?, embed_kernels.?, prompt_ids.?, prompt_count });
     b.step("flashnext-prompt", "Run one Flash Next prompt on the captured CUDA kernels").dependOn(&prompt_run.step);
     // not installed: our own glue against a captured set on one loaded engine (scores of every prompt row, replies)
@@ -587,7 +587,7 @@ fn flashnextChecks(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const select_check = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_select_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     select_check.addImport("cuda", cuda);
     const select_run = b.addRunArtifact(b.addExecutable(.{ .name = "flashnext-select", .root_module = select_check }));
-    if (b.option([]const u8, "flashnext_fixtures", "capture_sparse.sh's selection fixtures folder")) |dir| select_run.addArgs(&.{dir});
+    if (opts.flashnext_fixtures) |dir| select_run.addArgs(&.{dir});
     b.step("flashnext-select", "fn_qsa_select against Triton's _select / _select_tiles lists on captured score rows").dependOn(&select_run.step);
     const learn_check = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_learn_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     learn_check.addImport("cuda", cuda);

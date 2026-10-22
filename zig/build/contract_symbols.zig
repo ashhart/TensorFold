@@ -1,9 +1,9 @@
 //! The compiler's SASS dump must contain every registered x3ld entry on every requested SM.
 const std = @import("std");
 
-pub fn check(b: *std.Build, image: std.Build.LazyPath, sms: []const u8, install: *std.Build.Step) void {
+pub fn check(b: *std.Build, image: std.Build.LazyPath, sms: []const u8, install: *std.Build.Step, cuobjdump: ?[]const u8) void {
     const step = b.step("check-dsv41-symbols", "Check the compiled x3ld image's registered entries for every SM");
-    const tool = b.option([]const u8, "cuobjdump", "CUDA cuobjdump for the compiler's x3ld symbol gate") orelse {
+    const tool = cuobjdump orelse {
         step.dependOn(&b.addFail("check-dsv41-symbols needs -Dcuobjdump=PATH and -Dnvcc=PATH or -Dfatbins=DIR").step);
         return;
     };
