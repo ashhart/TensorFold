@@ -314,8 +314,7 @@ pub const DecisionTask = union(enum) {
     decide: *Decision,
 };
 
-/// A lane-hosted backend's decision passes: an idle engine runs them; one whose ``ready`` says a
-/// slot is free runs them beside the live streams, as a new stream's prompt pass would.
+/// A lane-hosted backend's decision passes: on an idle engine, or beside the streams when ``ready`` frees a slot.
 pub const Decider = struct {
     ctx: *anyopaque,
     /// A pass on the engine thread; ``error.Busy`` leaves it queued for the next gap (its slot went).

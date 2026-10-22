@@ -1,5 +1,4 @@
-//! The 27B lane backend's decision passes: a synthetic stream's admission on a free slot, beside the
-//! live rounds as a new stream's prompt pass would, or alone on the idle engine as before.
+//! Decision passes on the 27B lane backend: a free-slot synthetic stream beside live rounds, or alone when idle.
 const std = @import("std");
 const api = @import("engine_api");
 const tf = @import("tensorfold");
@@ -14,10 +13,7 @@ pub fn ready(b: *const lb.Metal) bool {
     return b.freeSlot() != null;
 }
 
-/// A queued decision's GPU work (LaneHost runs it alone): score reads the row after its prompt; decide, each branch's last row.
-/// `head` loaded: `labels` are instead option-final token positions, each read of the pass's post-final-norm hidden rows.
-/// The pass binds a free slot as a synthetic stream — its rows join the rounds as any admitted prompt's do,
-/// it never draws a token — or stays queued (error.Busy) while the batch gives no slot.
+/// A queued decision's GPU work: a synthetic stream on a free slot beside the rounds, or `error.Busy` to wait.
 pub fn run(b: *lb.Metal, head: ?*joint.Head, window: u32, task: *api.DecisionTask) error{ Failed, Refused, Busy }!void {
     switch (task.*) {
         .score => |*s| {
@@ -43,9 +39,7 @@ fn synthetic(b: *lb.Metal, ids: []const u32) error{Failed}!lanes.Stream {
     return lanes.Stream.init(b.gpa, .{ .id = "decision", .prompt = ids, .max_new = 0, .drafts = false }) catch return error.Failed;
 }
 
-/// `s` bound to a free slot the way a new stream's admission binds one: its buffers grown where needed,
-/// the slot's held drafts dropped and its runner state reset. `b.unbind(s)` frees it (the caller's defer).
-/// error.Busy: no slot is free, or one's buffers do not fit yet — the pass stays queued for the next gap.
+/// `s` bound to a free slot as a new stream's admission binds it; `b.unbind(s)` frees it (`error.Busy` = wait).
 fn bind(b: *lb.Metal, s: *lanes.Stream) error{ Failed, Busy }!u32 {
     b.settle() catch {}; // a pending verify's rows are kept before the pass touches the shared frame
     b.dropRound();
@@ -64,8 +58,7 @@ fn bind(b: *lb.Metal, s: *lanes.Stream) error{ Failed, Busy }!u32 {
     return slot;
 }
 
-/// `labels`' logits at the row after `prompt` on `slot`: a prefill's `.last` head leaves them in logits row 0.
-/// A JointHead instead: `labels` are each option's final-token position, scored on that row's hidden state.
+/// `labels`' logits at the row after `prompt` on `slot` (`.last` → logits row 0); a JointHead scores option-final rows.
 fn score(b: *lb.Metal, head: ?*joint.Head, slot: u32, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
     const r = b.runner;
     if (prompt.len == 0 or prompt.len > r.capacity or logits.len < labels.len) return error.Failed;
@@ -92,9 +85,7 @@ fn check(window: u32, d: *api.Decision) error{ Failed, Refused }!void {
     if (d.labels.len < wanted or d.logits.len < wanted) return error.Failed;
 }
 
-/// Each branch's label logits at its last row after the shared trunk on `slot`: the trunk's state is kept once
-/// and restored a branch at a time; every branch's rows stand on the same trunk state.
-/// A JointHead instead: `labels` are option-final positions in the whole sequence (trunk's length on a branch's rows).
+/// Each branch's label logits at its last row after the shared trunk on `slot`; a `head` reads option-final positions.
 fn decide(b: *lb.Metal, head: ?*joint.Head, slot: u32, d: *api.Decision) error{Failed}!void {
     const r = b.runner;
     const session = q.session.Session{ .runner = r, .slot = slot };
@@ -116,9 +107,7 @@ fn decide(b: *lb.Metal, head: ?*joint.Head, slot: u32, d: *api.Decision) error{F
     }
 }
 
-/// `ids` prefilled in chunks (each chunk's rows alone stand in `input`): a `positions` inside the chunk
-/// is that option's final-token position, base the rows' offset in the whole sequence (0 for a prompt,
-/// the trunk's length on a branch); the JointHead's score lands in `logits`.
+/// `ids` prefilled in chunks: each `positions` entry is an option's final-token position offset by `base`.
 fn forward(h: *joint.Head, b: *lb.Metal, session: q.session.Session, base: usize, ids: []const u32, positions: []const u32, logits: []f64) error{Failed}!void {
     const r = b.runner;
     for (positions) |p| if (p < base or p - base >= ids.len) return error.Failed;

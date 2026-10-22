@@ -43,8 +43,7 @@ pub fn wait(h: *LaneHost, work: *Work) error{ Failed, Refused }!void {
     if (work.failed) |e| return e;
 }
 
-/// The oldest queued decision's pass: an idle engine runs it; a decider whose ``ready`` says a
-/// slot is free runs it beside the live streams. A stale host fails the waiters instead.
+/// The oldest queued decision's pass (idle engine, or beside the streams on a free slot); a stale host fails waiters.
 pub fn step(h: *LaneHost) void {
     h.lock();
     if (h.stale) {
@@ -68,9 +67,7 @@ pub fn step(h: *LaneHost) void {
     h.decided.broadcast(h.io);
 }
 
-/// The queue's head when a pass may run now (the caller holds the lock): always on an idle engine;
-/// beside the live streams when the decider's ``ready`` says a slot is free and no queued request
-/// the lanes would serve waits for that turn (a decision takes the same turn a new stream would).
+/// The queue's head when a pass may run now: an idle engine, or a free slot after queued requests' turns.
 fn head(h: *LaneHost) ?*Work {
     if (h.closing or h.decisions.items.len == 0) return null;
     const decider = h.decider orelse return null;
@@ -83,8 +80,7 @@ fn head(h: *LaneHost) ?*Work {
     return if (ready(decider.ctx)) h.decisions.items[0] else null;
 }
 
-/// A queued decision a free slot could start now (the caller holds the lock): the lone driver hands
-/// its stream to the lane core for it rather than hold the engine through the whole reply.
+/// A queued decision a free slot could start now: the lone driver hands its stream to the lane core.
 pub fn waiting(h: *LaneHost) bool {
     const decider = h.decider orelse return false;
     const ready = decider.ready orelse return false;
