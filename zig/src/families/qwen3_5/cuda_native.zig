@@ -254,6 +254,8 @@ const Lanes = struct {
     pool: std.ArrayList(*E.Cache) = .empty,
     warmed: warm.Seen = .{},
     calibration: ?*Draft = null,
+    /// Prompt passes going a cut at a time (prefill_step), from their first step to their last.
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, Fill) = .empty,
 
     fn deinit(self: *Lanes) void {
         var it = self.caches.valueIterator();
@@ -264,6 +266,9 @@ const Lanes = struct {
         self.seen.deinit(self.gpa);
         for (self.pool.items) |cache| self.drop(cache);
         self.pool.deinit(self.gpa);
+        var fills = self.fills.valueIterator();
+        while (fills.next()) |f| f.deinit();
+        self.fills.deinit(self.gpa);
         if (self.vision) |v| v.deinit();
         self.e.deinit();
         if (self.trace) |x| self.gpa.destroy(x);
@@ -306,7 +311,7 @@ const Lanes = struct {
     }
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Lanes {
@@ -319,6 +324,49 @@ const Lanes = struct {
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
+        var f = try self.opening(stream);
+        defer f.deinit();
+        while (!try self.chunk(stream, &f)) {}
+    }
+
+    /// One cut of the prompt pass a call (prefillFn's forwards, in order): the lane host runs rounds between them.
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream) !bool {
+        const self = cast(ptr);
+        const got = try self.fills.getOrPut(self.gpa, stream);
+        if (!got.found_existing) {
+            got.value_ptr.* = self.opening(stream) catch |err| {
+                self.fills.removeByPtr(got.key_ptr);
+                return err;
+            };
+        }
+        const f = self.fills.getPtr(stream).?;
+        const done = self.chunk(stream, f) catch |err| {
+            self.endFill(stream);
+            return err;
+        };
+        if (done) self.endFill(stream);
+        return done;
+    }
+
+    fn endFill(self: *Lanes, stream: *lanes.Stream) void {
+        if (self.fills.fetchRemove(stream)) |kv| {
+            var f = kv.value;
+            f.deinit();
+        }
+    }
+
+    /// A prompt pass under way: where its next cut starts, and an image prompt's encoded images.
+    const Fill = struct {
+        at: usize,
+        media: ?vision_prompt.Media,
+
+        fn deinit(f: *Fill) void {
+            if (f.media) |*m| m.deinit();
+        }
+    };
+
+    /// A prompt pass begins: its images encoded, a cache, a kept state restored where a cold pass cuts.
+    fn opening(self: *Lanes, stream: *lanes.Stream) !Fill {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
         // an image prompt: its images through the tower first, then every chunk at its t, h, w positions
@@ -327,8 +375,7 @@ const Lanes = struct {
             const v = self.vision orelse return error.QwenServedWithoutVision;
             media = try vision_prompt.Media.init(self.gpa, v, ids, stream.images);
         }
-        defer if (media) |*m| m.deinit();
-        const images: ?E.Images = if (media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
+        errdefer if (media) |*m| m.deinit();
         const seen = try self.seenOf(stream.images);
         self.seen.put(self.gpa, stream, seen) catch |err| {
             self.gpa.free(seen);
@@ -355,22 +402,32 @@ const Lanes = struct {
             } else stream.reuse_failed = true;
         }
         cache.untaught = stream.untaught;
-        while (at < ids.len) {
-            // Cancel between chunks and retain the last complete prefix before releasing the cache.
-            if (stream.isCancelled()) {
-                stream.keepInterruptedPrefill(@intCast(at));
-                return error.Cancelled;
-            }
-            const end = nextCut(ids.len, stream.chunks, at);
-            try self.e.forward(&.{.{ .cache = cache, .rows = end - at, .images = if (images) |*im| im else null }}, ids[at..end], .last);
-            at = end;
-            // a mark the store asked for, where this pass cut anyway: the lane host copies the state here
-            if (end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
-                if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
-            }
+        stream.fill_at.store(@intCast(at), .monotonic);
+        return .{ .at = at, .media = media };
+    }
+
+    /// The pass's next cut; true once the prompt is in.
+    fn chunk(self: *Lanes, stream: *lanes.Stream, f: *Fill) !bool {
+        const ids = stream.prompt();
+        // cancel between cuts and retain the last complete prefix before releasing the cache (#1228)
+        if (stream.isCancelled()) {
+            stream.keepInterruptedPrefill(@intCast(f.at));
+            return error.Cancelled;
         }
+        const cache = try self.cacheOf(stream);
+        var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
+        const end = nextCut(ids.len, stream.chunks, f.at);
+        try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
+        f.at = end;
+        stream.fill_at.store(@intCast(end), .monotonic);
+        // a mark the store asked for, where this pass cut anyway: the lane host copies the state here
+        if (end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
+            if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
+        }
+        if (end < ids.len) return false;
         // the reply's rows rotate past the image prompt's positions (rope_delta)
-        if (media) |m| cache.delta = m.delta;
+        if (f.media) |m| cache.delta = m.delta;
+        return true;
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -501,6 +558,7 @@ const Lanes = struct {
         const self = cast(ptr);
         if (self.caches.fetchRemove(stream)) |entry| self.give(entry.value);
         if (self.seen.fetchRemove(stream)) |entry| self.gpa.free(entry.value);
+        self.endFill(stream);
     }
 
     /// Each image's first placeholder row and identity: a kept state resumes only the same images.
