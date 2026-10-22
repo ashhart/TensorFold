@@ -7,6 +7,30 @@ const parse = cli.parse;
 const request = cli.request;
 const capabilities = cli.capabilities;
 
+test "vision image budget: explicit large budgets reach the engine, with bounded CLI inputs" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    for ([_][]const u8{ "16", "16384", "65536", "262144" }) |value| {
+        const n = try std.fmt.parseInt(u32, value, 10);
+        for ([_][]const []const u8{
+            &.{ "m", "--vision", "--vision-image-tokens", value },
+            &.{ "m", "--vision", try std.fmt.allocPrint(a, "--vision-image-tokens={s}", .{value}) },
+        }) |argv| {
+            const args = try parse(a, argv, &u);
+            const vision = (try request(a, "d", "t", args)).vision.?;
+            try std.testing.expectEqual(n, vision.image_tokens);
+            try std.testing.expect(vision.image_tokens_set);
+        }
+    }
+    const normal = (try request(a, "d", "t", try parse(a, &.{ "m", "--vision" }, &u))).vision.?;
+    try std.testing.expectEqual(@as(u32, 4096), normal.image_tokens);
+    try std.testing.expect(!normal.image_tokens_set);
+    for ([_][]const u8{ "15", "262145", "-1", "4294967296", "many" }) |bad|
+        try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision", "--vision-image-tokens", bad }, &u));
+}
+
 test "parse and capabilities share the table" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
