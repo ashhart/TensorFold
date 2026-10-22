@@ -244,7 +244,7 @@ pub const Model = struct {
                 if (p.scale) |sc| sc.apply(r.enc, t.emb, rows * D, r.serial);
                 try m.lane(t.emb, D, p.kv, "lane_qmm_bytes_grouped@ple.kv", t.kvp);
                 try r.call("q4_ple_gate@ple", &.{ t.kvp, t.h[cur], p.ks, p.qs, p.cs, t.eps }, &.{ t.gated, .{ .b = p.cin.b, .off = PLE_TAIL * WIDE * 2 } });
-                try r.call("q4_ple_conv@ple", &.{ p.cin, p.conv, t.gated, t.h[cur] }, &.{t.hout});
+                if (r.tree) |tr| try tr.pleConv(r, &.{ p.cin, p.conv, t.gated, t.h[cur] }, &.{t.hout}) else try r.call("q4_ple_conv@ple", &.{ p.cin, p.conv, t.gated, t.h[cur] }, &.{t.hout});
                 try r.call("q4_hc_norm_none#[10240]", &.{t.hout}, &.{ t.h[1 - cur], t.ssp });
             } else if (pending == .none) {
                 try r.call("q4_hc_norm_none#[10240]", &.{t.h[cur]}, &.{ t.h[1 - cur], t.ssp });
@@ -285,7 +285,9 @@ pub const Model = struct {
                 lane_w.touch(r, L.out);
                 const gins = [_]Buf{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows };
                 const gouts = [_]Buf{ t.gout, L.cs[1 - a], L.so[1 - a] };
-                if (m.keptState()) |recs| {
+                if (r.tree) |tr| {
+                    gdn_step.stepTree(r, tr.gdn, &gins, &gouts, tr.table, 0, 48);
+                } else if (m.keptState()) |recs| {
                     const li = i - i / 4;
                     gdn_step.stepKept(r, r.gdn_kept.?, &gins, gouts[0..2], recs[1 - m.rec_slot].at(li * gdn_step.RECORD), recs[m.rec_slot].at(li * gdn_step.RECORD), r.ar, 0, 48);
                 } else if (r.gdn_pipe) |pipe| gdn_step.step(r, pipe, &gins, &gouts, 0, 48) else try r.callAs("q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &gins, &gouts);
@@ -327,6 +329,8 @@ pub const Model = struct {
                     try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
                     try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ t.po, t.pm });
                     try r.shapes.put(r.arena, "IDS_shape", dense_ids);
+                } else if (r.tree) |tr| {
+                    try tr.attnParts(r, &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
                 } else try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
                 try r.call("q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
                 try m.lane(t.aout, 6144, L.out, "lane_qmm_bytes_grouped@att.o", t.branch);

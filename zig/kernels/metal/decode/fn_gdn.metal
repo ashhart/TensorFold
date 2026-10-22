@@ -9,6 +9,17 @@ constant constexpr int GDN_NK = 16, GDN_NV = 48, GDN_DK = 128, GDN_DV = 128, GDN
 constant constexpr int GDN_C = 2 * GDN_NK * GDN_DK + GDN_NV * GDN_DV, GDN_PW = GDN_C + GDN_NV * GDN_DV + 2 * GDN_NV;
 // a window's replay record a layer: k and v [rows][heads][128] (bf16), then [rows][heads] k norm, gate, beta, pad
 constant constexpr int GDN_RV = GDN_MAXR * GDN_NV * GDN_DK, GDN_RS = 2 * GDN_RV;
+// FZ_GDN_TREE 1 (plain mode only): rows follow TREE (per row: parent, depth, ancestor row by depth); 0 is the chain
+#ifndef FZ_GDN_TREE
+#define FZ_GDN_TREE 0
+#endif
+#if FZ_GDN_TREE
+#define GDN_DEPTH(r) TREE[(r) * 18 + 1]
+#define GDN_ROW(r, q) TREE[(r) * 18 + 2 + (q)]
+#else
+#define GDN_DEPTH(r) (r)
+#define GDN_ROW(r, q) (q)
+#endif
 
 [[max_total_threads_per_threadgroup(1024)]]
 [[kernel]] void fz_gdn(const device bfloat* P [[buffer(0)]], const device bfloat* CS [[buffer(1)]],
@@ -25,6 +36,9 @@ constant constexpr int GDN_RV = GDN_MAXR * GDN_NV * GDN_DK, GDN_RS = 2 * GDN_RV;
     const device int* AR [[buffer(14)]],
 #else
     device float* SO [[buffer(11)]], constant uint& H0 [[buffer(12)]],
+#if FZ_GDN_TREE
+    const device int* TREE [[buffer(13)]],
+#endif
 #endif
     uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint sg [[simdgroup_index_in_threadgroup]], uint tg [[threadgroup_position_in_grid]]) {
@@ -71,8 +85,8 @@ constant constexpr int GDN_RV = GDN_MAXR * GDN_NV * GDN_DK, GDN_RS = 2 * GDN_RV;
     const int c = j < DK ? hk * DK + j : j < 2 * DK ? NK * DK + hk * DK + j - DK : 2 * NK * DK + hv * DV + j - 2 * DK;
     float conv = 0.0f;
     for (int tap = 0; tap < TAPS; tap++) {
-      const int at = r + tap;
-      const float x = at < TAPS - 1 ? float(CS[at * C + c]) : float(P[(at - (TAPS - 1)) * PW + c]);
+      const int at = GDN_DEPTH(r) + tap;
+      const float x = at < TAPS - 1 ? float(CS[at * C + c]) : float(P[GDN_ROW(r, at - (TAPS - 1)) * PW + c]);
       conv = fma(float(CW[c * TAPS + tap]), x, conv);
     }
     const bfloat act = bfloat(bsilu(conv));
@@ -83,8 +97,8 @@ constant constexpr int GDN_RV = GDN_MAXR * GDN_NV * GDN_DK, GDN_RS = 2 * GDN_RV;
 #endif
     if (j < 2 * DK ? writes_qk : true)
       for (int q = 0; q < TAPS - 1; q++) {
-        const int at = r + 1 + q;
-        CSO[(r * (TAPS - 1) + q) * C + c] = at < TAPS - 1 ? CS[at * C + c] : P[(at - (TAPS - 1)) * PW + c];
+        const int at = GDN_DEPTH(r) + 1 + q;
+        CSO[(r * (TAPS - 1) + q) * C + c] = at < TAPS - 1 ? CS[at * C + c] : P[GDN_ROW(r, at - (TAPS - 1)) * PW + c];
       }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -131,6 +145,15 @@ constant constexpr int GDN_RV = GDN_MAXR * GDN_NV * GDN_DK, GDN_RS = 2 * GDN_RV;
   device float4* SO4 = (device float4*)SO;
 #endif
   for (int r = 0; r < R; r++) { // the four state rows' chains side by side: each element's arithmetic unchanged
+#if FZ_GDN_TREE
+    if (r > 0 && TREE[r * 18] != r - 1) { // a branch's first row starts from its parent row's stored state
+      const int pr = TREE[r * 18];
+      for (int j = 0; j < RPS; j++) {
+        const float4 v = SO4[((size_t(pr) * NV + hv) * DV + sg * RPS + j) * DK / 4 + lane];
+        state[j][0] = v.x; state[j][1] = v.y; state[j][2] = v.z; state[j][3] = v.w;
+      }
+    }
+#endif
     const float g = gates[r][0], beta = gates[r][1], iq = inv[r][0], ik = inv[r][1];
     float kk[4], qq[4], kv[RPS], out[RPS];
     for (int i = 0; i < 4; i++) { kk[i] = float(xk[r][lane * 4 + i]) * ik; qq[i] = float(xq[r][lane * 4 + i]) * iq; }

@@ -98,6 +98,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.peer_budget = 0;
     e.peer_held = 0;
     e.identity_hash = 0;
+    e.tree = null;
     e.arena_state = std.heap.ArenaAllocator.init(gpa);
     errdefer e.arena_state.deinit();
     const arena = e.arena_state.allocator();
@@ -377,6 +378,17 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         m,
         @import("index.zig").mtpRoot(index.object.get("weight_map").?.object),
     );
+    if (r.tp == null) if (platform.c.getenv("FZ_TREE")) |v| { // dev: tree rounds, the branch's guesses from FZ_FEED
+        var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
+        const a = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
+        const b = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
+        const feed: ?[]const u8 = if (platform.c.getenv("FZ_FEED")) |f| blk: {
+            const file = try r.mapFile(std.mem.span(f));
+            break :blk file.bytes[0..file.size];
+        } else null;
+        e.tree = try @import("tree.zig").init(r, a, b, feed);
+        std.log.info("flash next: tree rounds, a head chain of {d} and a branch of {d}", .{ a, b });
+    };
     return e;
 }
 

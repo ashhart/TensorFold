@@ -20,6 +20,7 @@ const Prompt = fz.Prompt;
 const DepthRule = fz.DepthRule;
 const CostDepth = @import("drafts_cost.zig").CostDepth;
 const RING = @import("engine.zig").RING;
+const tree_mod = @import("tree.zig");
 const MARGIN = @import("engine.zig").MARGIN;
 const Result = @import("engine.zig").Result;
 const Out = @import("engine.zig").Out;
@@ -170,7 +171,14 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     var last_end: f64 = 0; // the previous read round's GPU end (s): a round's time is the gap to its own
     var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
     var head_rate: f64 = 0.6;
-    const fixed = depth;
+    const long = prompt.len + max_tokens + 8 > 4 * TOP;
+    // tree rounds (FZ_TREE) for drafted greedy replies without a thinking budget, below the indexer's selection
+    const drafted = if (depth) |d| d > 0 else true;
+    const tr: ?*tree_mod.Tree = if (e.tree) |t| (if (drafted and out.sampling == null and !watch.armed and r.tp == null and !long) t else null) else null;
+    r.tree = tr;
+    defer r.tree = null;
+    if (tr) |t| t.select(prompt);
+    const fixed = if (tr) |t| t.a + t.b else depth;
     const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
     var next_depth: usize = depth0; // the rule's drafts for the next round to encode (rank 0's in speed-up mode)
     const w = e.wids.b.slice(u32, 16);
@@ -178,11 +186,11 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     if (depth0 > 0) { // the head: the last prompt row with the first token, then its chain
         m.mtp.pos = prompt.len - 1;
         w[1] = try m.mtpRun(&.{pick}, streams);
-        for (2..depth0 + 1) |j| w[j] = try m.mtpChain(w[j - 1]);
+        for (2..(if (tr) |t| t.a else depth0) + 1) |j| w[j] = try m.mtpChain(w[j - 1]);
+        if (tr) |t| t.firstDrafts(w);
     }
     const W0 = depth0 + 1;
     const T: i32 = @intCast(m.pos);
-    const long = prompt.len + max_tokens + 8 > 4 * TOP;
     if (long) { // selection on the GPU: every complete block the target and the head hold, pooled
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(.serial);
@@ -198,8 +206,9 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     hs[prompt.len] = pick;
     ar[fz.AR_HLEN] = @intCast(prompt.len + 1);
     for (0..MAXR) |i| {
-        ar[fz.AR_POS + i] = if (i < W0) T + @as(i32, @intCast(i)) else 0;
-        ar[fz.AR_NK + i] = if (i < W0) T + @as(i32, @intCast(i)) + 1 else 0;
+        const d: i32 = @intCast(if (tr != null and i < W0) tr.?.depth(i) else i); // a tree row's position is its depth
+        ar[fz.AR_POS + i] = if (i < W0) T + d else 0;
+        ar[fz.AR_NK + i] = if (i < W0) T + d + 1 else 0;
     }
     ar[fz.AR_KV], ar[fz.AR_KV + 1], ar[fz.AR_KV + 2] = .{ T, @intCast(e.m.cap), @intCast(W0) };
     watch.arm(ar, @intCast(T));
@@ -235,12 +244,17 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         m.t.mdims = e.mdims_w[wr];
         if (round > 0) {
             const wp = widths[(round - 1) % 4];
-            e.statesCopy(r.gdn_kept == null); // kept states replay the kept rows themselves
+            if (tr != null) { // the kept path's last row: the verdict leaves path[keep - 1] + 1 past the arena's own words
+                const ar0 = r.ar;
+                r.ar = .{ .b = ar0.b, .off = ar0.off + tree_mod.AR_LAST * 4 };
+                e.statesCopy(true);
+                r.ar = ar0;
+            } else e.statesCopy(r.gdn_kept == null); // kept states replay the kept rows themselves
             r.copyKept(e.cins[(round - 1) % 2], e.cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
             if (wr > 1) {
                 try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
-                for (1..wr - 1) |j| try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
-                if (e.copy) { // copied drafts replace the head's when the history repeats its last tokens
+                for (1..if (tr) |t| t.a else wr - 1) |j| try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
+                if (tr) |t| t.feedEncode(r, e.wids) else if (e.copy) { // copied drafts replace the head's when the history repeats its last tokens
                     r.enc.setPipeline(r.lookup_pipe);
                     r.enc.setBuffer(e.hist, 0, 0);
                     r.enc.setBuffer(r.ar.b, r.ar.off, 1);
@@ -255,7 +269,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         if (watch.armed) think.force(r, e.wids, e.hist, wr); // the close's tokens as the window's drafts
         m.ple.cin = e.cins[round % 2];
         m.rec_slot = round % 2;
-        m.pleIdsGpu(wr, e.wids);
+        if (tr) |t| t.pleIds(r, wr, e.wids, m.t.ple_meta, m.t.ple_ids) else m.pleIdsGpu(wr, e.wids);
         w_sum += wr;
         const ub = (@as(usize, @intCast(T)) + w_sum) / 4 + 2;
         if (r.gsel) |*g| g.nb_ub = ub;
@@ -275,12 +289,17 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             next_depth) + 1;
         widths[(round + 1) % 4] = wn;
         if (watch.armed) think.span(r, m.t.picks, wr); // and in place of the target's picks
-        const cfg = [4]u32{ @intCast(wr), @intCast(wn), @intCast(e.m.cap), 0 };
-        r.enc.setPipeline(r.accept_pipe);
-        for ([_]Buf{ e.wids, m.t.picks, r.ar, .{ .b = e.ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
-        r.enc.setBytes(std.mem.asBytes(&cfg), 5);
-        r.enc.setBuffer(e.hist, 0, 6);
-        r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+        if (tr) |t| {
+            t.acceptEncode(r, .{ e.wids, m.t.picks, r.ar, .{ .b = e.ring }, m.t.ple_meta }, e.hist, .{ @intCast(wr), @intCast(wn), @intCast(e.m.cap), @intCast(t.a) });
+            t.compact(r, &m.layers, e.m.cap, m.last, m.t.picks, e.cins[round % 2]);
+        } else {
+            const cfg = [4]u32{ @intCast(wr), @intCast(wn), @intCast(e.m.cap), 0 };
+            r.enc.setPipeline(r.accept_pipe);
+            for ([_]Buf{ e.wids, m.t.picks, r.ar, .{ .b = e.ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+            r.enc.setBytes(std.mem.asBytes(&cfg), 5);
+            r.enc.setBuffer(e.hist, 0, 6);
+            r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+        }
         r.enc.end();
         cb.signal(r.event, base + round + 1);
         cb.commit();
