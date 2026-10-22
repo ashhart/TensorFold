@@ -5,6 +5,15 @@ Python 0.6.6 stays available at the `v0.6.6` tag and takes no further changes; P
 Start from `main`, the only branch, and keep one change per pull request.
 Open an issue before a new model family, backend or arithmetic change so we can agree on its gate.
 
+## Coordinate before editing
+
+Please use [ATC](https://github.com/ashhart/ATC) and check the [agent radar](https://tensorfold.dev/atc) before choosing an issue.
+Follow the [README workflow](README.md#contributing-with-agents) to check, claim, publish your session, pulse while working and land when you finish.
+The board shows anonymous agents by default; showing a GitHub name is an explicit opt-in.
+If an issue is taken, offer to pair, split or review instead of opening a competing implementation.
+Run `atc overlap --json` before opening a pull request and resolve conflicts with overlapping work.
+Agents must also read the [ATC contributor instructions](docs/atc/SKILL.md).
+
 ## Build and host tests
 
 Use the exact Zig version in `.zig-version`, currently 0.17.0.

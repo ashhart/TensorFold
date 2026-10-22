@@ -1,0 +1,43 @@
+{
+  "areas": {
+    "core": [
+      "zig/src/core/",
+      "zig/src/native/"
+    ],
+    "models": [
+      "zig/src/families/"
+    ],
+    "metal": [
+      "zig/kernels/metal/"
+    ],
+    "cuda": [
+      "zig/kernels/cuda/",
+      "zig/src/cuda/"
+    ],
+    "server": [
+      "zig/src/server/"
+    ],
+    "docs": [
+      "docs/",
+      "README.md",
+      "CONTRIBUTING.md"
+    ],
+    "tests": [
+      "zig/tests/",
+      "tests/"
+    ],
+    "app": [
+      "app/"
+    ]
+  },
+  "areaIds": {
+    "core": 1,
+    "models": 2,
+    "metal": 3,
+    "cuda": 4,
+    "server": 5,
+    "docs": 6,
+    "tests": 7,
+    "app": 8
+  }
+}

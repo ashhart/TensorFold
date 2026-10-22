@@ -8,6 +8,10 @@ description: Implement or review TensorFold native-engine contributions using th
 Produce a small, reviewable native contribution with evidence for every affected contract.
 This skill defines the conditions a contribution must satisfy; it does not approve a merge, release or hardware qualification.
 
+Before editing, follow the [ATC contributor instructions](../atc/SKILL.md), inspect the public radar and check or claim the issue.
+Publish an anonymous session with `atc start <issue> --public https://tensorfold.dev --json` when reporting this work is authorized; show a GitHub name only when the human opts in.
+Pulse only while working, review overlaps before a pull request, and land the session when it stops.
+
 ## Establish the contribution contract
 
 Find the TensorFold checkout and its Git root before editing.

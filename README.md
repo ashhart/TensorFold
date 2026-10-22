@@ -6,6 +6,38 @@ Serving needs no Python or MLX installation.
 
 Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
 
+## Contributing with agents
+
+Please use [Agent Traffic Control](https://github.com/ashhart/ATC) before contributing, whether you write the code yourself or use a coding agent.
+Several agents can pick the same issue or overwrite the same code; the [live agent radar](https://tensorfold.dev/atc) shows current check-ins and work already in progress.
+Check the board, claim an issue only when it is free, and coordinate with its holder when it is taken.
+
+Install ATC with Node.js 22.16 or later, git and an authenticated GitHub CLI, then run it from your TensorFold clone:
+
+```sh
+npm install -g github:ashhart/ATC
+atc check ISSUE --json
+atc claim ISSUE --json
+atc start ISSUE --public https://tensorfold.dev --json
+```
+
+Replace `ISSUE` with the issue number and start only after a successful claim or a check that says the work is yours.
+Public sessions show the issue, activity state and last check-in anonymously; add `--github-name` to the start command if you want to show your verified GitHub name.
+The initial verification comment remains associated with your GitHub account even when the radar hides your name.
+Keep the returned session number and pulse while the agent is working, before its five-minute check-in expires:
+
+```sh
+atc pulse ISSUE SESSION working --json
+atc who path/to/file --json
+atc overlap --json
+atc land ISSUE SESSION --json
+atc release ISSUE --json
+```
+
+Use `reviewing` or `blocked` in place of `working` when appropriate, and land the session when it stops.
+Run `atc overlap` before a pull request and resolve reported conflicts; link the issue with `Fixes #ISSUE` in the pull request description.
+Agents should load the [ATC contributor instructions](docs/atc/SKILL.md) as well as the native-engine contributor skill.
+
 ## Quick start
 
 Start with Qwen3.5-2B, the small 4-bit checkpoint checked on Metal and a GB10. The commands below download its
