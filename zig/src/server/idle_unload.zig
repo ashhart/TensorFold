@@ -221,6 +221,18 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, problem_out: *[]const u8) er
     log.line("idle reload: the model is resident again", .{});
 }
 
+/// A request's wake: reloads the parked server; the only error is OutOfMemory, a failure returns its reason.
+pub fn wakeReload(m: *Manager, srv: *server_mod.Server) error{OutOfMemory}![]const u8 {
+    var problem: []const u8 = "";
+    reload(m, srv, &problem) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        if (problem.len == 0) problem = "the engine could not reload; send the request again";
+        log.line("idle reload failed: {s}", .{problem});
+        return problem;
+    };
+    return "";
+}
+
 /// The drain's halt for the park-closed engine: the Closer's halt would hit a closed engine, so it routes here.
 pub fn haltHeld(m: *Manager, reason: []const u8) void {
     m.mutex.lockUncancelable(m.io);
