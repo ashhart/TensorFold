@@ -48,7 +48,28 @@ pub const cfgs = [_]Cfg{
     .{ .name = "control: P32 prompt rows whose window starts a key early", .h = 16, .hk = 8, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = prompt_served },
     .{ .name = "control: P32 prompt rows ignoring an image's last key", .h = 16, .hk = 8, .prompt = true, .p32 = true, .image = true, .ctl = .last, .served = prompt_served },
     .{ .name = "control: P rounded to bf16 under the P32 range", .h = 16, .hk = 8, .prompt = true, .p32 = true, .ctl = .p16, .served = prompt_served },
+} ++ ratio(12, 4) ++ ratio(20, 4) ++ ratio(32, 4) ++ ratio(32, 2) ++ [_]Cfg{
+    .{ .name = "control: decode merge without each chunk's exp(m_c - M), 20/4 heads (GQA 5)", .h = 20, .hk = 4, .ctl = .rescale, .served = decodeAt(20) },
+    .{ .name = "control: P32 prompt rows whose window starts a key early, 20/4 heads (GQA 5)", .h = 20, .hk = 4, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = promptAt(20) },
 };
+
+fn decodeAt(comptime h: usize) []const c.Shape {
+    return &[_]c.Shape{ .{ .rows = 16, .n = h, .k = 3000 }, .{ .rows = 1, .n = h, .k = 1100 } };
+}
+
+fn promptAt(comptime h: usize) []const c.Shape {
+    return &[_]c.Shape{ .{ .rows = 512, .n = h, .k = 5000 }, .{ .rows = 96, .n = h, .k = 1300 } };
+}
+
+/// The API's other query-to-key-head ratios (3 and 5 odd, 8 and 16): decode, and prompt rows with P as bf16 and P32.
+fn ratio(comptime h: usize, comptime hk: usize) [3]Cfg {
+    const heads = std.fmt.comptimePrint("{d}/{d} heads (GQA {d}), window 1024, ring 1536", .{ h, hk, h / hk });
+    return .{
+        .{ .name = "cuda window_rows decode tf_wrows_part_256 + tf_wrows_merge_256, " ++ heads, .h = h, .hk = hk, .served = decodeAt(h) },
+        .{ .name = "cuda window_rows prompt tf_wrows_prompt_256_p32, " ++ heads, .h = h, .hk = hk, .prompt = true, .p32 = true, .served = promptAt(h) },
+        .{ .name = "cuda window_rows prompt tf_wrows_prompt_256 (P as bf16), " ++ heads, .h = h, .hk = hk, .prompt = true, .served = promptAt(h) },
+    };
+}
 
 /// The control kernel's symbol in contract_controls.cu, if it has one.
 pub fn symbol(ctl: Ctl) ?[:0]const u8 {
@@ -293,4 +314,8 @@ test "every control names a kernel of contract_controls.cu, or runs the served b
         try std.testing.expect(symbol(f.ctl) != null or f.ctl == .p16);
         try std.testing.expect(std.mem.startsWith(u8, f.name, "control: "));
     };
+}
+
+test {
+    _ = wc;
 }
