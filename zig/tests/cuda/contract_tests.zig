@@ -38,6 +38,10 @@ const vit_g4_group = @import("contract_gemma_group.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
+const glm_pages_k = @import("contract_glm_pages.zig");
+const glm_index_k = @import("contract_glm_index.zig");
+const glm_attn_k = @import("contract_glm_attn.zig");
+const glm = @import("glm_cuda");
 const embed_k = @import("contract_embed.zig");
 
 const tree_k = @import("contract_tree_attn.zig");
@@ -490,6 +494,26 @@ pub fn run(gpu: check.Gpu) !void {
     f32w_control.bf16_gamma = true;
     defer f32w_control.deinit();
     try kernels.append(a, f32w_control.kernel());
+    const glm_fns = try glm.glue.Kernels.load(glm_glue);
+    var glm_lat = glm_pages_k.LatWrite{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.lat_write };
+    defer glm_lat.deinit();
+    try kernels.append(a, glm_lat.kernel());
+    var glm_pool = glm_pages_k.PoolKeys{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.pool_keys };
+    defer glm_pool.deinit();
+    try kernels.append(a, glm_pool.kernel());
+    var glm_scores = glm_index_k.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.scores };
+    defer glm_scores.deinit();
+    try kernels.append(a, glm_scores.kernel());
+    var glm_ops = try cuda.Module.load(gpu.d, kk.glm_ops);
+    defer glm_ops.unload();
+    var glm_tokens = glm_index_k.Tokens{ .rig = .{ .gpu = gpu, .s = s }, .f = try glm_ops.function("tf_glm_dsa_tokens") };
+    defer glm_tokens.deinit();
+    try kernels.append(a, glm_tokens.kernel());
+    var glm_chunks: [4]glm_attn_k.Chunks = undefined;
+    for (&glm_chunks, [_]u32{ 16, 16, 32, 32 }, [_]bool{ false, true, false, true }) |*x, hb, sparse|
+        x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = if (hb == 16) glm_fns.chunks_16 else glm_fns.chunks_32, .merge = glm_fns.merge, .form = .{ .hb = hb, .sparse = sparse } };
+    defer for (&glm_chunks) |*x| x.deinit();
+    for (&glm_chunks) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

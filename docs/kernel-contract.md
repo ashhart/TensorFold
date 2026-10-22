@@ -111,7 +111,8 @@ A replacement kernel names the kernel it replaces and gives `replaced`, which ru
 A gate failure on a kernel already shipped is reported, not hidden. Until its fix lands, its spec can carry a
 `known` entry naming the gate and what fails. That gate must keep failing (the run prints `KNOWN`); once a fix makes
 it pass, the run fails until the entry is removed. Today: affine_mm's 4-bit form gives NaN for an infinite input where
-MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s.
+MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s. GLM-5.3-Flash's
+`tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN, as its relu is `fmaxf(x, 0)` (Triton's `tl.maximum`).
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -155,6 +156,10 @@ HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
+CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: the latent write and the pooled keys
+(`tf_glm_lat_write`, `tf_glm_pool_keys`), the index scores and the selected tokens' rows (`tf_glm_scores`,
+`tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
+sparse).
 
 ## CUDA records per nvcc release
 
