@@ -6,6 +6,7 @@ const Run = replay.Run;
 const Buf = replay.Buf;
 const Variant = replay.Variant;
 const Hc = replay.Hc;
+const down4 = @import("down4.zig");
 
 /// A recorded `constexpr int` and the value it takes.
 pub const Const = struct { name: []const u8, value: usize };
@@ -36,6 +37,7 @@ pub fn patched(r: *Run, v: *Variant, consts: []const Const) !*Variant {
     if (r.variants.get(key.items)) |hit| return hit;
     var text = try Run.variantText(r.arena, v);
     for (consts) |c| text = try constant(r.arena, text, c.name, c.value);
+    if (down4.applies(text, consts)) text = try down4.balanced(r.arena, text);
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const nv = try r.arena.create(Variant);
     nv.* = v.*;
