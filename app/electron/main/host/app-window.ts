@@ -144,6 +144,8 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
     // A failed load or a dead renderer otherwise leaves the static boot splash on screen forever.
     appWebContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame) return
+      // An aborted load is a navigation the app replaced, not a failure: Electron reports ERR_ABORTED as -3.
+      if (errorCode === -3) return
       deps.onRendererFailure?.(`The interface failed to load (${errorCode} ${errorDescription}) for ${validatedURL}.`)
     })
     appWebContents.on('render-process-gone', (_event, details) => {

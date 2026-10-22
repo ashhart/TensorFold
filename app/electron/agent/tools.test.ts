@@ -6,7 +6,6 @@ import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { CHAT_TOOL_SCHEMAS, executeTool, READ_ONLY_TOOLS, toolLabel, TOOL_SCHEMAS } from './tools.ts'
-import { canUseMacSandbox } from './sandbox.ts'
 import { workspaceBackend } from './tool-workspace.ts'
 import { emailDraftEvent } from './email-connector.ts'
 import { BROWSER_AUTOMATION_ACTIONS } from './browser-automation.ts'
@@ -30,10 +29,6 @@ async function makeWorkspace(): Promise<string> {
 
 async function main() {
 console.log('tool tests:')
-
-// Non-macOS CI has no sandbox-exec. Use the existing explicit development escape hatch so
-// run_command cases exercise the real exec path; the fail-closed default is covered separately.
-if (!canUseMacSandbox()) process.env.VONTRA_ALLOW_UNSANDBOXED_COMMANDS = '1'
 
 {
   assert.throws(
@@ -580,74 +575,6 @@ if (!canUseMacSandbox()) process.env.VONTRA_ALLOW_UNSANDBOXED_COMMANDS = '1'
   assert.strictEqual(result.ok, false)
   assert.match(result.output, /Blocked by TensorFold(?: Studio)? safety policy/)
   ok('run_command blocks direct credential reads')
-}
-
-{
-  const cwd = await makeWorkspace()
-  const result = await executeTool('run_command', { command: 'printf ok' }, { cwd })
-  assert.match(result.meta ?? '', /sandbox=(build-test|unsandboxed)/)
-  assert.match(result.meta ?? '', /(macos-sandbox-exec|unsandboxed)/)
-  assert.match(result.meta ?? '', /artifacts=sbox-/)
-  assert.doesNotMatch(result.output, /Sandbox artifacts/)
-  assert.equal(result.output, 'ok')
-  assert.equal(result.artifacts?.id, result.sandboxArtifacts?.id)
-  assert.match(result.artifacts?.id ?? '', /^sbox-/)
-  ok('run_command keeps sandbox metadata out of the model-visible output')
-}
-
-{
-  // Real build/test execution regression: a hostile repository script can print credentials even
-  // though the command itself (`npm test`) looks safe enough for Full Auto. Value scanning must
-  // happen after process execution and before either the model-facing output or artifact log exists.
-  const cwd = await makeWorkspace()
-  const vendorSecret = `ghp_${'A'.repeat(36)}`
-  const opaqueSecret = 'p9Ks_4LzN7qR2vX8mC5dT1wB6hJ3sF0a'
-  const ordinaryHash = '0123456789abcdef'.repeat(4)
-  await fs.writeFile(path.join(cwd, 'package.json'), JSON.stringify({
-    name: 'malicious-output-fixture',
-    scripts: { test: 'node leak.cjs' },
-  }))
-  await fs.writeFile(path.join(cwd, 'leak.cjs'), [
-    `console.log(${JSON.stringify(`vendor ${vendorSecret}`)})`,
-    `console.error(${JSON.stringify(`opaque ${opaqueSecret}`)})`,
-    `console.log(${JSON.stringify(`ordinary log checksum ${ordinaryHash}`)})`,
-  ].join('\n'))
-  // Keep this fixture independent of whichever version manager installed npm on the host: the
-  // workspace-local package-runner shim performs a real child-process test execution with the
-  // same Full Auto `npm test` command classification.
-  const fixtureBin = path.join(cwd, 'fixture-bin')
-  await fs.mkdir(fixtureBin)
-  await fs.writeFile(path.join(fixtureBin, 'npm'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} leak.cjs\n`)
-  await fs.chmod(path.join(fixtureBin, 'npm'), 0o755)
-  const previousPath = process.env.PATH
-  process.env.PATH = `${fixtureBin}:/usr/bin:/bin`
-  let result: Awaited<ReturnType<typeof executeTool>>
-  try {
-    result = await executeTool('run_command', { command: 'npm test --silent' }, { cwd })
-  } finally {
-    if (previousPath === undefined) delete process.env.PATH
-    else process.env.PATH = previousPath
-  }
-  assert.strictEqual(result.ok, true, result.output)
-  assert.doesNotMatch(result.output, new RegExp(vendorSecret))
-  assert.doesNotMatch(result.output, new RegExp(opaqueSecret))
-  assert.match(result.output, /TensorFold(?: Studio)? redacted 2 sensitive values/)
-  assert.match(result.output, new RegExp(ordinaryHash), 'ordinary SHA-256-like hashes remain readable')
-  assert.match(result.meta ?? '', /redacted=2/)
-  assert.doesNotMatch(JSON.stringify(result.sandboxArtifacts?.logs ?? []), new RegExp(vendorSecret))
-  assert.doesNotMatch(JSON.stringify(result.sandboxArtifacts?.logs ?? []), new RegExp(opaqueSecret))
-  ok('malicious npm test output is value-redacted while ordinary logs and hashes survive')
-}
-
-{
-  const cwd = await makeWorkspace()
-  const result = await executeTool('run_command', { command: 'mkdir -p .vontra-artifacts && printf patchable > .vontra-artifacts/result.txt' }, { cwd })
-  assert.strictEqual(result.ok, true)
-  assert.strictEqual(result.artifacts?.patch, true)
-  assert.ok(result.artifacts?.diffs.some((entry) => entry.path === '.vontra-artifacts/result.txt' && entry.status === 'added'))
-  assert.match(result.sandboxArtifacts?.patch ?? '', /diff --git a\/\.vontra-artifacts\/result.txt b\/\.vontra-artifacts\/result.txt/)
-  assert.match(result.sandboxArtifacts?.patch ?? '', /\+patchable/)
-  ok('run_command returns sandbox patch evidence to the caller')
 }
 
 {

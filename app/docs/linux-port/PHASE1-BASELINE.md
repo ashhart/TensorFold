@@ -1,21 +1,20 @@
 # Phase 1 Baseline — TensorFold desktop on Linux
 
 Date: 2026-10-18 · Machine: Debian 13 (trixie) x86-64, headless (no DISPLAY/WAYLAND)
-Pinned upstream commit: `d46d17a784758b8a8b66badde1f728f36bdc9541` (fork: github.com/eXsoR65/TensorFold, origin; upstream remote: ashhart/TensorFold)
+Pinned upstream commit: `d46d17a784758b8a8b66badde1f728f36bdc9541` (the contributor's fork of this repository; upstream remote: ashhart/TensorFold)
 
 ## Environment setup (reproducible)
 
-`env.sh` in this folder sets:
+The bring-up machine's environment was prepared by a script the operator kept outside this repository. It set:
 
 - Node **22.19.0** (a mise install under the operator's own home) — satisfies `devEngines` `>=22 <23`
-- npm **10.9.8** exactly, via wrapper `toolchain/bin/npm` → `node toolchain/node_modules/npm/bin/npm-cli.js` (mise's bundled npm is 10.9.3 and is rejected by `devEngines`; the mise install tree is read-only here)
+- npm **10.9.8** exactly, through a wrapper the operator kept outside this repository (mise's bundled npm is 10.9.3 and is rejected by `devEngines`; the mise install tree is read-only there)
 - `npm_config_cache` and `electron_config_cache` redirected into the workspace (sandbox denies `~/.npm`, `~/.cache/electron`)
 - For test runs: `HOME` and `TMPDIR` pointed at directories inside the workspace (sandbox denies `$HOME` writes; `/tmp` is a 2 GiB tmpfs which trips a 2 GiB free-space staging check)
 
 Install sequence (worked):
 
 ```sh
-source env.sh
 cd app && npm ci
 npm run deps:trusted-scripts   # Electron binary + @lydell/node-pty rebuild (gcc/g++/make present)
 cd mobile && npm ci            # required; three scripts/*.test.mjs import expo/xcode via mobile/
@@ -67,7 +66,7 @@ The headless launch used `--no-sandbox`. No comparison run established that Chro
 
 ## Phase 1 exit assessment
 
-- [x] Reproducible baseline: env.sh + steps above
+- [x] Reproducible baseline: the toolchain the repository pins and the steps above
 - [x] Bounded blocker list: items 1–3 (code), 4–6 (test portability)
 - Conclusion: **no fundamental blocker**. The core app boots and 807/817 tests pass unmodified. The critical-path work is the Linux command sandbox (bubblewrap) + shell discovery, then chrome, then packaging.
 

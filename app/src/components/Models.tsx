@@ -55,8 +55,13 @@ function NoLocalEngineModels() {
 }
 
 export function Models({ minimal = false, noLocalEngine = false }: { minimal?: boolean; noLocalEngine?: boolean } = {}) {
-  const tx = useAuthoredText()
+  // The gate sits in a component with no hooks, so the workspace below always runs the same hooks in the same order.
   if (noLocalEngine) return <NoLocalEngineModels />
+  return <ModelsWorkspace minimal={minimal} />
+}
+
+function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
+  const tx = useAuthoredText()
 
   const { snapshot } = useEngine()
   const { snapshot: learning } = useLearning()

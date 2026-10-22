@@ -42,7 +42,7 @@ imports['../../shared/hub-failure'] = hubFailure
 imports['./models/benchmark/ModelBenchmarkDrawer'] = { ModelBenchmarkDrawer: placeholders.ModelBenchmarkDrawer }
 const loaded = { exports: {} as any }
 new Function('require', 'module', 'exports', ts.transpileModule(readFileSync(path.join(__dirname, 'Models.tsx'), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText)((id: string) => { const reviewed = reviewedLanguageImport(id, imports); if (reviewed.matched) return reviewed.value;  assert.ok(id in imports, id); return imports[id] }, loaded, loaded.exports)
-function render() { cursor = 0; refCursor = 0; effectCursor = 0; const tree = loaded.exports.Models({ minimal }); const work = queued; queued = []; work.forEach((fn) => fn()); return tree }
+function render() { cursor = 0; refCursor = 0; effectCursor = 0; let tree = loaded.exports.Models({ minimal }); if (tree?.type?.name === 'ModelsWorkspace') tree = tree.type(tree.props); const work = queued; queued = []; work.forEach((fn) => fn()); return tree }
 function all(node: any, predicate: (node: any) => boolean): any[] { if (!node || typeof node !== 'object') return []; return [...(predicate(node) ? [node] : []), ...React.Children.toArray(node.props?.children).flatMap((child) => all(child, predicate))] }
 function component(node: any, name: string) { return all(node, (item) => item.type === placeholders[name])[0] }
 function button(node: any, label: string) { const items = all(node, (item) => (item.type === 'button' || item.type === Button) && renderToStaticMarkup(item).includes(label)); assert.ok(items.length, label); return items[0] }

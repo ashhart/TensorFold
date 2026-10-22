@@ -84,6 +84,28 @@ try {
   else process.env.VITE_DEV_SERVER_URL = previousDevUrl
 }
 
+// A cancelled load is not a failure: Electron reports ERR_ABORTED as -3 when the app replaces a load.
+{
+  const baseDir = '/Applications/TensorFold-Studio.app/Contents/Resources/app.asar/dist-electron'
+  const failures: string[] = []
+  const runtime = createAppWindowRuntime({
+    BrowserWindow: FakeBrowserWindow as any,
+    baseDir,
+    openExternalSafely: async () => {},
+    session: {} as any,
+    onRendererFailure: (detail: string) => { failures.push(detail) },
+  })
+  runtime.createWindow()
+  const fail = FakeBrowserWindow.latest!.webContents.handlers.get('did-fail-load')?.[0]
+  assert.ok(fail, 'the did-fail-load handler is installed')
+  fail({}, -3, 'ERR_ABORTED', 'app://index.html', true)
+  assert.deepEqual(failures, [], 'an aborted load is not a renderer failure')
+  fail({}, -6, 'ERR_FILE_NOT_FOUND', 'app://index.html', true)
+  assert.equal(failures.length, 1, 'a real load failure is reported')
+  fail({}, -6, 'ERR_FILE_NOT_FOUND', 'app://frame.html', false)
+  assert.equal(failures.length, 1, 'a child frame failure is not reported')
+}
+
 // Permission policy: getUserMedia audio is available to the exact trusted renderer and
 // nothing else. Exercise both Electron handlers because Chromium consults both.
 {
