@@ -246,3 +246,49 @@ test "register retries reenter the silence pipeline before comparison without ov
     try expectSentWith(a, &.{ flat, high, flat, lower }, &.{ .silence, .stop, .silence, .stop }, .{ .max = 2, .register = rule }, "", 3, 4, true, "X-Silence-Redraws: 2\r\nX-Register-Trip: 1\r\nX-Register-Redraws: 1\r\n");
     try expectSentWith(a, &.{ high, high }, &.{ .silence, .silence }, on, "", 1, 2, true, "X-Silence-Redraws: 1\r\nX-Register-Trip: 0\r\nX-Register-Redraws: 0\r\n");
 }
+
+test "short and register rules together: short takes go unmeasured, and a short register retry keeps the held take" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const guard: api.speech_guard.Config = .{ .floor_dbfs = -60, .seconds = 1 };
+    const both = struct {
+        fn policy(chars_per_s: f64) Policy {
+            return .{ .max = 2, .short_ratio = 0.25, .short_chars_per_s = chars_per_s, .register = rule };
+        }
+    }.policy;
+    try both(10).validate(guard);
+    try std.testing.expectError(error.MissingRedrawCount, (Policy{ .short_ratio = 0.25, .short_chars_per_s = 10, .register = rule }).validate(.{}));
+    try std.testing.expect(both(10).refusal("nemotron_h") != null and both(10).refusal("fish_omni") == null);
+    const high = try tones(a, 44100, &reply(130, 330));
+    const flat = try tones(a, 44100, &reply(130, 127));
+    const input: [200]u8 = @splat('a');
+    var bytes: harness.Bytes = .{};
+    const prompt = try drama_prompt.encode(a, bytes.text(), &input);
+    const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"input\":\"{s}\",\"response_format\":\"pcm\"}}", .{&input});
+    // a 3.3 s stop of 200 characters is short at 10 a second (under 5 s), not at 20 (under 2.5 s); a length never is
+    const Case = struct { []const []const f32, []const api.Reason, f64, usize, usize, []const u8 };
+    for ([_]Case{
+        .{ &.{ high, high, high }, &.{}, 10, 2, 3, "X-Silence-Redraws: 2\r\nX-Register-Trip: 0\r\nX-Register-Redraws: 0\r\n" },
+        .{ &.{ high, flat }, &.{}, 20, 1, 2, "X-Silence-Redraws: 0\r\nX-Register-Trip: 1\r\nX-Register-Redraws: 1\r\n" },
+        .{ &.{ high, high, flat, flat }, &.{ .stop, .length, .stop, .length }, 10, 3, 4, "X-Silence-Redraws: 2\r\nX-Register-Trip: 1\r\nX-Register-Redraws: 1\r\n" },
+        .{ &.{ high, flat, flat, flat }, &.{ .length, .stop, .stop, .stop }, 10, 0, 4, "X-Silence-Redraws: 2\r\nX-Register-Trip: 1\r\nX-Register-Redraws: 1\r\n" },
+    }) |case| {
+        const audio, const reasons, const chars_per_s, const sent, const takes, const headers = case;
+        const n = [_]usize{audio[0].len};
+        var script: harness.Script = .{ .steps = &n, .audio = audio, .reasons = reasons, .max_frames = @intCast(n[0] / harness.frame + 1), .inline_ = true };
+        var s: harness.Served = undefined;
+        try s.open(&script, .{ .served_name = "m", .model_ids = &.{"m"}, .seed_salt = salt, .redraw = both(chars_per_s), .silence_guard = true }, "", "HTTP/1.1", body, 2000);
+        defer s.deinit();
+        const got = got: {
+            defer s.join(&script);
+            _ = try s.readHead();
+            break :got try s.readRest();
+        };
+        try harness.expectHeader(s.got.items[0..s.read_at], "HTTP/1.1 200");
+        try harness.expectHeader(s.got.items[0..s.read_at], headers);
+        try std.testing.expectEqualSlices(u8, try quantizeInPlace(try a.dupe(f32, audio[sent])), got);
+        try std.testing.expectEqual(takes, script.takes);
+        for (script.seeds[0..takes], 0..) |seen, k| try std.testing.expectEqual(api.seedFor(prompt, salt + @as(i64, @intCast(k))), seen);
+    }
+}
