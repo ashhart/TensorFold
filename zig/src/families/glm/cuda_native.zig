@@ -111,6 +111,9 @@ pub fn capacity(context: usize) usize {
     return std.mem.alignForward(usize, context + fw.window_rows, 64);
 }
 
+/// A request's last verify window: the plan's window holds that many rows past the context, as `capacity` does.
+pub const window_rows: u32 = fw.window_rows;
+
 const snapshots = @import("cuda_snapshots.zig");
 
 const Owned = struct {
@@ -455,6 +458,13 @@ test "capacity keeps a verify window past the context and a multiple of 64" {
     try std.testing.expectEqual(@as(usize, 8256), capacity(8192));
     try std.testing.expectEqual(@as(usize, 330560), capacity(330529));
     try std.testing.expect(capacity(330529) % 64 == 0);
+}
+
+test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {
+    const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = @import("cuda_state.zig").page_rows, .snap_bytes = 0 };
+    for ([_]usize{ 8192, 8191, 245_760, 524_288 - 9, 524_288 - 8, 524_288 - 7, 1_048_576 }) |context| {
+        try std.testing.expectEqual(pages_mod.tableLen(capacity(context)), l.pages(context + window_rows));
+    }
 }
 
 // Enough words for every offered frame pair and image, even with a small text context.
