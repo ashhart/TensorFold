@@ -9,6 +9,7 @@ const be = @import("cuda_backend.zig");
 const snap = @import("cuda_snap.zig");
 const asst = @import("cuda_assistant.zig");
 const cv = @import("cuda_vision.zig");
+const tw = @import("cuda_tower.zig");
 const dfl = @import("cuda_dflash.zig");
 
 /// The registry's entry for one model_type: gemma4_unified (12B) or gemma4 (31B).
@@ -117,7 +118,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (o.vision) |lim| {
         const v = try gpa.create(cv.Vision);
         errdefer gpa.destroy(v);
-        v.* = .{ .gpa = gpa, .io = io, .limits = lim, .e = try cv.Embedder.init(gpa, ctx.d, &own.w.vision.?, &own.k) };
+        v.* = .{ .gpa = gpa, .io = io, .limits = lim, .e = if (own.w.tower) |*t| .{ .tower = try tw.Tower.init(gpa, ctx.d, t, &own.k) } else .{ .embedder = try cv.Embedder.init(gpa, ctx.d, &own.w.vision.?, &own.k) } };
         own.v = v;
         own.gb.vision = v;
     }
@@ -175,7 +176,6 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.AssistantForAnotherTarget => "--drafter: this assistant was trained for another Gemma 4 target (its backbone width or key heads differ)",
         error.UnsupportedAssistantGeometry, error.UnsupportedAssistantType, error.UnsupportedAssistantRotary, error.UnsupportedAssistantQuantization, error.AssistantOrderedEmbeddingsNotServed => "--drafter: this Gemma 4 assistant's layout is not the stock one this engine serves",
         error.DrafterBitsUnsupported => "--drafter-bits: the Gemma 4 assistant runs at 4 bits on CUDA",
-        error.GemmaVisionTowerNotServed => "--vision: the 31B's image tower is not built on CUDA yet (the 12B's embedder is); serve it without --vision",
         error.NoGemmaVision => "--vision: this Gemma 4 checkpoint has no image embedder (vision_embedder. and embed_vision. tensors)",
         error.GemmaVisionDenseQuantized => "--vision: this checkpoint's patch_dense is quantized, and the embedder reads it as bf16 (as the reference does): use a conversion that keeps it bf16",
         error.GemmaServedWithoutVision => "this request has images, and the server was started without --vision",
@@ -232,7 +232,7 @@ fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.gb.deinit();
     if (own.v) |v| {
-        v.e.deinit();
+        v.deinit();
         own.gpa.destroy(v);
     }
     own.m.deinit();
@@ -243,7 +243,7 @@ fn release(p: *anyopaque) void {
 }
 
 test "every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported, error.GemmaVisionTowerNotServed, error.NoGemmaVision, error.GemmaVisionDenseQuantized }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported, error.NoGemmaVision, error.GemmaVisionDenseQuantized }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);

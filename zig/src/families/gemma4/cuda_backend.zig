@@ -268,7 +268,7 @@ pub const Gemma = struct {
         errdefer buf.free();
         var at: usize = 0;
         for (s.images) |im| {
-            try v.e.encode(x.d, x.s, im.pixels, im.gh, im.gw, buf.ptr + at * width);
+            try v.encode(x.d, x.s, im.pixels, im.gh, im.gw, buf.ptr + at * width);
             at += im.tokens;
         }
         l.images = buf;
