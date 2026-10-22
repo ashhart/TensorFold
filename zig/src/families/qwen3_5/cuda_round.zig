@@ -22,6 +22,18 @@ pub const params_at = tokens_at + most_verify * 4;
 pub const src_at = params_at + 8 * 4;
 pub const mpos_at = src_at + max_rows * 4;
 pub const bytes = mpos_at + 3 * max_rows * 4;
+/// The image planes' axes a row: t, h and w.
+pub const mrope_axes = 3;
+/// The staged planes' offset of row m's axis a (the device's row_positions reads M[m * 3 + a]).
+pub fn mropeOffset(m: usize, a: usize) usize {
+    return m * mrope_axes + a;
+}
+/// An image chunk's positions staged for the device: three axes a row, interleaved.
+pub fn stageImagePos(mpos: []i32, pos: []const i32, n: usize, p0: usize, total: usize) void {
+    for (0..total) |m| {
+        for (0..mrope_axes) |a| mpos[mropeOffset(m, a)] = pos[a * n + p0 + m];
+    }
+}
 pub fn ancestors(st: []u8) []Ancestor {
     return @alignCast(std.mem.bytesAsSlice(Ancestor, st[rowanc_at..][0 .. max_rows * @sizeOf(Ancestor)]));
 }

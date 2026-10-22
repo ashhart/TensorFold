@@ -62,6 +62,12 @@ pub const Images = struct {
     pos: []const i32, // [3][prompt]: t, h and w rotary positions (get_rope_index)
 };
 
+/// An image chunk's positions staged into the tables' planes: three axes a row, as the device reads them.
+pub fn stageImagePos(st: []align(4) u8, im: Images, p0: usize, total: usize) void {
+    const mpos = std.mem.bytesAsSlice(i32, st[Round.mpos_at..][0 .. 3 * Round.max_rows * 4]);
+    Round.stageImagePos(mpos, im.pos, im.src.len, p0, total);
+}
+
 /// What a forward keeps: a prompt chunk its last row's logits, a verify window every row's draw or logits and log.
 pub const Keep = union(enum) { last, draws: []const Draw, logits, hidden };
 
@@ -494,10 +500,8 @@ pub const Engine = struct {
         if (images) |im| {
             const p0 = parts[0].cache.len;
             if (p0 + total > im.src.len or im.pos.len != 3 * im.src.len) return error.InvalidQwenImages;
-            const n = im.src.len;
             @memcpy(std.mem.bytesAsSlice(i32, st[src_at..][0 .. total * 4]), im.src[p0..][0..total]);
-            const mpos = std.mem.bytesAsSlice(i32, st[mpos_at..][0 .. 3 * max_rows * 4]);
-            for (0..3) |a| @memcpy(mpos[a * max_rows ..][0..total], im.pos[a * n + p0 ..][0..total]);
+            stageImagePos(st, im, p0, total);
         }
         try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
         var shape = Shape.init(total, parts.len, record, e.n_taps > 0, @intCast(Round.variant(slot_peak)));
