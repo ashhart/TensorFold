@@ -1,15 +1,4 @@
-"""Staged references for qwen3_5_moe: engine stage dumps against a float64 forward of the same checkpoint.
-
-Each engine directory holds what families/qwen3_5/stages.zig writes (or qwen36_mlx_stages.py): one bf16 file per
-stage (embed, lNN.mixer, lNN.block, final, logits) and index.json with every row's cache position. Two references:
-  local    float64 of one stage fed the engine's own bf16 input to it: that stage's error alone.
-  chained  float64 from the token ids: the accumulated error.
-Per stage and engine: the worst row's relative error and its worst element in bf16 steps of the row's largest value.
-At the asked teacher positions: every contender's logit in float64, chained and fed each engine's final norm.
-
-  python tools/zig/qwen36_stage_ref.py --snapshot SNAP --ids ids.json --reference ref.json \\
-      --engine metal=DIR --engine mlx=DIR --positions 24,39,44,54 --out stages.json
-"""
+"""Staged references for qwen3_5_moe: engine stage dumps against a float64 forward of the same checkpoint."""
 from __future__ import annotations
 
 import argparse
@@ -41,18 +30,27 @@ class Dump:
     def __init__(self, name, path: Path, layers, hidden, vocab, positions, logit_positions):
         self.name, self.path = name, path
         index = json.loads((path / "index.json").read_text())
+        if (index.get("version"), index.get("dtype")) != (1, "bf16"):
+            raise SystemExit(f"{name}: index version {index.get('version')} / {index.get('dtype')} is not 1 / bf16")
         if (index["layers"], index["hidden"], index["vocab"]) != (layers, hidden, vocab):
             raise SystemExit(f"{name}: shape {index['layers']}/{index['hidden']}/{index['vocab']} is not the model's")
         # Logits may cover more rows (a one-row-step engine has every row's); the teacher rows are taken from them.
         have = {p: i for i, p in enumerate(index["logit_positions"])}
+        if len(have) != len(index["logit_positions"]):
+            raise SystemExit(f"{name}: logit positions repeat")
         if index["positions"] != positions or any(p not in have for p in logit_positions):
             raise SystemExit(f"{name}: rows are not positions {positions[0]}..{positions[-1]} / logits {logit_positions[0]}..")
         self.logit_rows = np.array([have[p] for p in logit_positions])
         listed = {s["name"]: s for s in index["stages"]}
-        if sorted(listed) != sorted(stage_names(layers)):
-            raise SystemExit(f"{name}: stages differ from {len(stage_names(layers))} expected")
-        self.rows = {n: s["rows"] for n, s in listed.items()}
-        self.width = {n: s["width"] for n, s in listed.items()}
+        if len(listed) != len(index["stages"]) or sorted(listed) != sorted(stage_names(layers)):
+            raise SystemExit(f"{name}: stages differ from {len(stage_names(layers))} expected, once each")
+        # Every plane's shape from the model and the positions, never from the stage's own entry.
+        want = {n: (len(have), vocab) if n == "logits" else (len(positions), hidden) for n in listed}
+        for n, s in listed.items():
+            if (s["rows"], s["width"]) != want[n]:
+                raise SystemExit(f"{name}: {n} is {s['rows']}x{s['width']}, not {want[n][0]}x{want[n][1]}")
+        self.rows = {n: w[0] for n, w in want.items()}
+        self.width = {n: w[1] for n, w in want.items()}
         # An engine whose own pick is not its logits' first maximum (mlx_lm argmaxes its log-probabilities) lists it.
         self.picks = np.array(index["picks"]) if "picks" in index else None
 
@@ -84,8 +82,7 @@ def measure(engine, ref, rows_of_interest):
 
 
 def outliers(engine, local, gap, factor=5.0, most=8):
-    """Rows whose MLP-stage error is `factor` times the median, with the float64 router's k-th/(k+1)-th logit gap
-    on the engine's input: a small gap means the engine may have routed to the other expert."""
+    """Rows whose MLP-stage error is `factor` times the median, with the float64 router's k-th/(k+1)-th gap."""
     rel = np.linalg.norm(engine - local, axis=1) / np.linalg.norm(local, axis=1)
     rows = np.nonzero(rel > factor * np.median(rel))[0]
     rows = rows[np.argsort(-rel[rows])][:most]
@@ -93,8 +90,7 @@ def outliers(engine, local, gap, factor=5.0, most=8):
 
 
 def top1_summary(chained, picks):
-    """Every teacher position's float64 top two and margin; per engine, the positions it picks another token at,
-    with how far below float64's top its pick is (in bf16 steps at that logit)."""
+    """Every teacher position's float64 top two and margin; per engine, positions it picks another token at."""
     order = np.argsort(-chained, axis=1, kind="stable")[:, :2]
     top = np.take_along_axis(chained, order, axis=1)
     margin = top[:, 0] - top[:, 1]

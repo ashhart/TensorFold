@@ -1,5 +1,4 @@
 //! Staged references: every engine names a qwen3_5 forward's stages alike and writes their bf16 rows to one layout.
-//! Off unless a tool asks for it; tools/zig/qwen36_stage_compare.py reads the directory.
 const std = @import("std");
 
 /// The residual stream after the embedding, after each layer's mixer and its MLP, then the final norm and the head.
@@ -46,7 +45,20 @@ pub fn point(i: usize, layers: usize) !Point {
     return if (i % 2 == 1) .{ .mixer = (i - 1) / 2 } else .{ .block = (i - 2) / 2 };
 }
 
-/// A device engine's stage hook: `rows` rows of the point's width at device address `ptr`, valid once its stream drains.
+/// What an engine may record: one stream's linear chain of rows and its final norm and head; asked before the round.
+pub fn admit(streams: usize, chain: bool, head: bool) !void {
+    if (streams != 1) return error.StagesNeedOneStream;
+    if (!chain) return error.StagesNeedChain;
+    if (!head) return error.StagesNeedHead;
+}
+
+/// A window whose every row's parent is the row before it (the first's is -1): one linear sequence, no branches.
+pub fn isChain(parents: []const i32) bool {
+    for (parents, 0..) |parent, row| if (parent != @as(i32, @intCast(row)) - 1) return false;
+    return true;
+}
+
+/// A device engine's stage hook: `rows` rows of the point's width at device address `ptr`, valid once drained.
 pub const DeviceHook = struct {
     ctx: *anyopaque,
     f: *const fn (ctx: *anyopaque, at: Point, ptr: u64, rows: usize) anyerror!void,
@@ -89,8 +101,9 @@ pub const Round = struct {
         r.rows[i] = @intCast(rows);
     }
 
-    /// Hands the round in `base` to the recorder; every stream point must hold the round's rows.
+    /// Hands the round in `base` to the recorder; every stream point must hold its rows. A round ends once.
     pub fn end(r: *Round, base: []const u8, first: u32) !void {
+        defer r.rows = @splat(0);
         const n = count(r.recorder.layers);
         if (base.len < r.bytes()) return error.BadStageShape;
         const rows = r.rows[0];
@@ -132,8 +145,7 @@ pub const Recorder = struct {
         return if (p == .logits) r.vocab else r.hidden;
     }
 
-    /// One round: `rows` stream rows from cache position `first`, every stream point's rows, and `logits` rows that
-    /// end at the round's last row (0: the round had no head, 1: its last row, `rows`: all of them).
+    /// One round: `rows` stream rows from cache position `first` at every stream point, and `logits` rows to its last.
     pub fn round(r: *Recorder, first: u32, rows: u32, logits: u32, planes: []const []const u8) !void {
         if (rows == 0 or (logits != 0 and logits != 1 and logits != rows) or planes.len != count(r.layers)) return error.BadStageShape;
         for (planes, 0..) |bytes, i| {
@@ -141,9 +153,12 @@ pub const Recorder = struct {
             const n: usize = if (p == .logits) logits else rows;
             if (bytes.len != n * r.width(p) * 2) return error.BadStageShape;
         }
-        for (planes, r.planes) |bytes, *plane| try plane.appendSlice(r.allocator, bytes);
-        for (0..rows) |row| try r.positions.append(r.allocator, first + @as(u32, @intCast(row)));
-        for (rows - logits..rows) |row| try r.logit_positions.append(r.allocator, first + @as(u32, @intCast(row)));
+        for (planes, r.planes) |bytes, *plane| try plane.ensureUnusedCapacity(r.allocator, bytes.len);
+        try r.positions.ensureUnusedCapacity(r.allocator, rows);
+        try r.logit_positions.ensureUnusedCapacity(r.allocator, logits);
+        for (planes, r.planes) |bytes, *plane| plane.appendSliceAssumeCapacity(bytes);
+        for (0..rows) |row| r.positions.appendAssumeCapacity(first + @as(u32, @intCast(row)));
+        for (rows - logits..rows) |row| r.logit_positions.appendAssumeCapacity(first + @as(u32, @intCast(row)));
     }
 
     /// `dir`/<name>.bf16 per point, row-major, and index.json with the shapes and every row's cache position.
@@ -189,61 +204,127 @@ test "stage planes and names cover every point once, in forward order" {
     try std.testing.expectError(error.BadStageLayer, point(count(2), 2));
 }
 
-test "Round: every sequence of four begin, mark and end events matches the model of which rounds land" {
-    // One layer: planes embed, mixer, block, final (stream) and logits; capacity 2 rows; marks of 1-3 rows.
-    const Event = union(enum) { begin, end, mark: struct { plane: usize, rows: usize } };
-    var events: [17]Event = undefined;
-    events[0] = .begin;
-    events[1] = .end;
-    for (0..5) |p| for (1..4) |r| {
-        events[2 + p * 3 + r - 1] = .{ .mark = .{ .plane = p, .rows = r } };
+test "isChain and admit: every parent list of up to three rows, stream count and head" {
+    const choices = [_]i32{ -2, -1, 0, 1, 2 };
+    var parents: [3]i32 = undefined;
+    for (0..4) |len| for (0..std.math.pow(usize, choices.len, len)) |code| {
+        var c = code;
+        for (parents[0..len]) |*p| {
+            p.* = choices[c % choices.len];
+            c /= choices.len;
+        }
+        const chain = [_]i32{ -1, 0, 1 };
+        try std.testing.expectEqual(std.mem.eql(i32, chain[0..len], parents[0..len]), isChain(parents[0..len]));
+    };
+    for (0..3) |streams| for ([_]bool{ false, true }) |chain| for ([_]bool{ false, true }) |head| {
+        const want: ?anyerror = if (streams != 1) error.StagesNeedOneStream else if (!chain) error.StagesNeedChain else if (!head) error.StagesNeedHead else null;
+        if (want) |err| try std.testing.expectError(err, admit(streams, chain, head)) else try admit(streams, chain, head);
+    };
+}
+
+test "Round: every sequence of four round events lands exactly the rounds a model of the engine's caller lands" {
+    // One layer (planes embed, mixer, block, final, logits), one value wide, 2 rows. A fill marks each point's rows.
+    const Fill = struct { rows: u32, head: u32 };
+    const Event = union(enum) { begin, fill: Fill, partial, end, fail: usize };
+    const events = [_]Event{
+        .begin,                                 .partial,                               .end,
+        .{ .fill = .{ .rows = 1, .head = 0 } }, .{ .fill = .{ .rows = 1, .head = 1 } }, .{ .fill = .{ .rows = 1, .head = 2 } },
+        .{ .fill = .{ .rows = 2, .head = 0 } }, .{ .fill = .{ .rows = 2, .head = 1 } }, .{ .fill = .{ .rows = 2, .head = 2 } },
+        .{ .fail = 0 },                         .{ .fail = 3 },                         .{ .fail = 6 },
     };
     const a = std.testing.allocator;
-    var base: [64]u8 = @splat(0);
+    const n = events.len + 1;
     var seq: [4]usize = undefined;
-    for (0..std.math.pow(usize, events.len + 1, seq.len)) |code| {
+    var landed_rounds: usize = 0;
+    var refused_by_oom: usize = 0;
+    for (0..std.math.pow(usize, n, seq.len)) |code| {
         var c = code;
         var len: usize = 0;
-        while (len < seq.len) : (len += 1) {
-            if (c % (events.len + 1) == events.len) break;
-            seq[len] = c % (events.len + 1);
-            c /= events.len + 1;
+        while (len < seq.len and c % n != events.len) : (len += 1) {
+            seq[len] = c % n;
+            c /= n;
         }
-        var rec = try Recorder.init(a, 1, 1, 1);
+        if (len < seq.len and c / n != 0) continue; // events after the end marker would repeat a shorter sequence
+        var failing = std.testing.FailingAllocator.init(a, .{});
+        var rec = try Recorder.init(failing.allocator(), 1, 1, 1);
         defer rec.deinit();
         var round_ = try Round.init(&rec, 2, 2);
-        var marked: [5]usize = @splat(0);
-        var landed: usize = 0;
+        var base: [64]u8 = @splat(0);
+        // The model: what is marked, every plane's bytes and the positions that should have landed.
+        var marked: enum { none, partial, fill } = .none;
+        var fill: Fill = undefined;
+        var tag: u8 = 0;
+        var next: u32 = 9;
+        var want: [5]std.ArrayList(u8) = @splat(.empty);
+        defer for (&want) |*w| w.deinit(a);
+        var want_positions: std.ArrayList(u32) = .empty;
+        defer want_positions.deinit(a);
+        var want_logits: std.ArrayList(u32) = .empty;
+        defer want_logits.deinit(a);
         for (seq[0..len]) |e| switch (events[e]) {
             .begin => {
                 round_.begin();
-                marked = @splat(0);
+                marked = .none;
             },
-            .mark => |m| {
-                const want: ?anyerror = if (m.rows > 2) error.BadStageShape else if (marked[m.plane] != 0) error.DuplicateStage else null;
-                const got = round_.mark(try point(m.plane, 1), m.rows);
-                if (want) |err| try std.testing.expectError(err, got) else {
+            .partial => {
+                const got = round_.mark(.embed, 1);
+                if (marked == .none) {
                     try got;
-                    marked[m.plane] = m.rows;
+                    marked = .partial;
+                } else try std.testing.expectError(error.DuplicateStage, got);
+            },
+            .fill => |f| {
+                // The engine's order: a refused mark stops the forward, so a fill lands whole or not at all.
+                if (marked != .none) {
+                    try std.testing.expectError(error.DuplicateStage, round_.mark(.embed, f.rows));
+                    continue;
                 }
+                tag += 1;
+                for (0..5) |i| {
+                    const at = try point(i, 1);
+                    const rows = if (at == .logits) f.head else f.rows;
+                    if (rows == 0) continue;
+                    try round_.mark(at, rows);
+                    @memset(base[round_.offset(at)..][0 .. rows * 2], tag);
+                }
+                marked = .fill;
+                fill = f;
             },
-            .end => {
-                const rows = marked[0];
-                const complete = for (marked[0..4]) |x| {
-                    if (x != rows) break false;
-                } else true;
-                const logits = marked[4];
-                const want: ?anyerror = if (!complete) error.IncompleteStages else if (rows == 0 or (logits != 0 and logits != 1 and logits != rows)) error.BadStageShape else null;
-                const got = round_.end(&base, 9);
-                if (want) |err| try std.testing.expectError(err, got) else {
-                    try got;
-                    landed += rows;
+            .end, .fail => {
+                const k: ?usize = if (events[e] == .fail) events[e].fail else null;
+                if (k) |after| {
+                    failing.fail_index = failing.alloc_index + after;
+                    failing.resize_fail_index = failing.resize_index + after;
+                }
+                const got = round_.end(&base, next);
+                failing.fail_index = std.math.maxInt(usize);
+                failing.resize_fail_index = std.math.maxInt(usize);
+                const was = marked;
+                marked = .none;
+                switch (was) {
+                    .none => try std.testing.expectError(error.BadStageShape, got),
+                    .partial => try std.testing.expectError(error.IncompleteStages, got),
+                    .fill => if (fill.head == 2 and fill.rows == 1) try std.testing.expectError(error.BadStageShape, got) else {
+                        got catch |err| {
+                            try std.testing.expect(k != null and err == error.OutOfMemory);
+                            refused_by_oom += 1;
+                            continue;
+                        };
+                        landed_rounds += 1;
+                        for (&want, 0..) |*w, i| try w.appendNTimes(a, tag, 2 * if (i == 4) fill.head else fill.rows);
+                        for (0..fill.rows) |row| try want_positions.append(a, next + @as(u32, @intCast(row)));
+                        for (fill.rows - fill.head..fill.rows) |row| try want_logits.append(a, next + @as(u32, @intCast(row)));
+                        next += fill.rows;
+                    },
                 }
             },
         };
-        try std.testing.expectEqual(landed, rec.positions.items.len);
-        try std.testing.expectEqual(landed * 2, rec.planes[0].items.len);
+        for (want, rec.planes) |w, got| try std.testing.expectEqualSlices(u8, w.items, got.items);
+        try std.testing.expectEqualSlices(u32, want_positions.items, rec.positions.items);
+        try std.testing.expectEqualSlices(u32, want_logits.items, rec.logit_positions.items);
     }
+    // The enumeration reaches both a landed round and an allocation failure that leaves the recorder unchanged.
+    try std.testing.expect(landed_rounds > 0 and refused_by_oom > 0);
 }
 
 test "a round's rows land on their positions; a short plane or odd head count is refused" {
