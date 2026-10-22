@@ -45,6 +45,8 @@ pub const Runner = struct {
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
+    /// Staged references for one stream's rounds; null (the default) records nothing.
+    stages: ?*@import("stage_planes.zig").Planes = null,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
     current_round: ?*const Round = null,
@@ -245,9 +247,13 @@ pub const Runner = struct {
             r.current_placed = .{};
         }
         if (r.capture_taps) r.taps.begin();
+        if (r.stages) |planes| {
+            if (round.windows.len != 1) return error.StagesNeedOneStream;
+            planes.begin();
+        }
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .images = placed.images };
+        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .stage = if (r.stages != null) stage else null }, .head = head, .images = placed.images };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
@@ -257,6 +263,7 @@ pub const Runner = struct {
             return err;
         };
         if (r.capture_taps) try r.taps.complete();
+        if (r.stages) |planes| try planes.end(round.windows[0].start);
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);
@@ -422,6 +429,11 @@ pub const Runner = struct {
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
+    }
+
+    fn stage(ptr: *anyopaque, e: mtl.ComputeEncoder, at: forward.Point, x: @import("projection.zig").Ref, rows: u32) !void {
+        const r: *Runner = @ptrCast(@alignCast(ptr));
+        try r.stages.?.record(r.model.glue, e, at, x, rows);
     }
 };
 

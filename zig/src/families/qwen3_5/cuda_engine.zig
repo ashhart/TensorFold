@@ -75,6 +75,8 @@ pub const Engine = struct {
     dir: []const u8,
     pockets: pocket.Pockets,
     learning: ?*const hooks.Keep = null,
+    /// Staged references (tf-qwen35-cuda stages); a forward with them runs uncaptured, as with a learner.
+    stages: ?@import("stages.zig").DeviceHook = null,
     mlp: ?hooks.MlpAdd = null,
     taught: u64 = 0,
     d: *const cuda.Driver,
@@ -484,7 +486,7 @@ pub const Engine = struct {
             if (p.rows == 1) try recurrent.mark(p.cache, true);
         };
         shape.hidden = keep == .hidden;
-        if (e.learning != null or e.pockets.any()) {
+        if (e.learning != null or e.pockets.any() or e.stages != null) {
             var exact = shape;
             exact.total = @intCast(total);
             exact.nseg = @intCast(parts.len);
