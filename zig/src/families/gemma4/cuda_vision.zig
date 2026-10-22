@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
 const image = @import("cuda_image.zig");
+const tw = @import("cuda_tower.zig");
 
 const vit = cuda.vit;
 
@@ -21,13 +22,29 @@ pub const Vision = struct {
     marks: struct { open: u32, image: u32, close: u32 } = .{ .open = 255999, .image = 258880, .close = 258882 },
     mark_ids: [3]u32 = .{ 255999, 258880, 258882 },
     limits: Limits,
-    e: Embedder,
+    /// The 12B's embedder on merged 48-px patches, or the 31B's tower on 16-px ones.
+    e: union(enum) { embedder: Embedder, tower: tw.Tower },
 
     pub fn prepare(v: *const Vision, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !image.Prepared {
-        return image.prepare(v.io, a, bytes, @min(max_tokens, v.limits.image_tokens), .merged);
+        return image.prepare(v.io, a, bytes, @min(max_tokens, v.limits.image_tokens), if (v.e == .tower) .patches else .merged);
+    }
+
+    /// An image's prepared rows to `out` [tokens, hidden] bf16, queued on `s`.
+    pub fn encode(v: *Vision, d: *const cuda.Driver, s: cuda.Stream, pixels: []const f32, gh: u32, gw: u32, out: u64) !void {
+        return switch (v.e) {
+            inline else => |*e| e.encode(d, s, pixels, gh, gw, out),
+        };
+    }
+
+    pub fn deinit(v: *Vision) void {
+        switch (v.e) {
+            inline else => |*e| e.deinit(),
+        }
     }
 
     pub const explain = image.decoderProblem;
+    /// Gemma 4's templates write an image for parts of type "image" (as the Metal family offers them).
+    pub const part_type = "image";
 };
 
 /// The embedder's kernels, cuBLASLt plans and scratch for an image of up to image.max_budget rows.

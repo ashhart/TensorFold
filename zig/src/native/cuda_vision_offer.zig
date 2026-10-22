@@ -24,6 +24,7 @@ pub fn offer(v: anytype, open: ?api.VisionOpen) ?api.Vision {
     // a template that writes each image's begin and end itself: the server expands the image token alone
     const wrap: ?[2]u32 = if (@hasDecl(T, "template_wraps")) null else .{ x.marks.open, x.marks.close };
     var out: api.Vision = .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = wrap, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = T.explain };
+    if (comptime @hasDecl(T, "part_type")) out.part_type = T.part_type; // the template's name for an image part
     if (comptime T == nemotron.native.vision.Vision) {
         // video: the checkpoint's temporal projection, and a reserved token for the template's `<video>`
         if (x.cfg.video_temporal == 2 and x.marks.video != null) if (open) |o| {

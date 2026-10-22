@@ -59,6 +59,8 @@ pub const Weights = struct {
     layers: []Layer = &.{},
     /// The 12B's image embedder (--vision), null without.
     vision: ?Vision = null,
+    /// The 31B's image tower (--vision), null without.
+    tower: ?Tower = null,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
 
     pub fn deinit(w: *Weights) void {
@@ -102,6 +104,27 @@ pub const Vision = struct {
     pos_b: u64,
     proj: union(enum) { q: Proj, bf16: u64 },
 };
+
+/// The 31B's image tower on bf16 weights (q|k|v stacked), its patch rows and pooling, the projection at its width.
+pub const Tower = struct {
+    input_proj: u64, // bf16 [1152, 768]
+    table: u64, // bf16 [2, 10240, 1152]
+    std_bias: u64,
+    std_scale: u64,
+    layers: [tower_depth]TowerLayer,
+    proj: Proj,
+};
+
+pub const TowerLayer = struct { in_norm: u64, post_attn: u64, pre_ff: u64, post_ff: u64, qkv: u64, o: u64, q_norm: u64, k_norm: u64, gate: u64, up: u64, down: u64 };
+
+/// The tower's sizes: width, heads of 72, depth, MLP width, each axis's position rows, a 16-px patch's values.
+pub const tower_width = 1152;
+pub const tower_heads = 16;
+pub const tower_head_dim = 72;
+pub const tower_depth = 27;
+pub const tower_inter = 4304;
+pub const tower_table_rows = 10240;
+pub const patch_width = 768;
 
 /// The embedder's sizes: a merged 48-px patch's values, the output width, each axis's position rows.
 pub const merged_width = 6912;
@@ -203,13 +226,54 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
         l.post_feedforward = try x.tensor(try name(&buf, p, "post_feedforward_layernorm.weight"), .bf16, &.{h});
         l.scalar = try x.tensor(try name(&buf, p, "layer_scalar"), .bf16, &.{1});
     }
-    if (images) w.vision = try vision(&x, c);
+    if (images) {
+        if (c.geo.unified()) w.vision = try vision(&x, c) else w.tower = try tower(&x, c);
+    }
     return w;
+}
+
+/// The 31B's tower tensors, bf16 as the checkpoint keeps them (q, k and v stacked for one GEMM).
+fn tower(x: *Ctx, c: cfg.Config) !Tower {
+    if (!x.ck.has("vision_tower.patch_embedder.input_proj.weight")) return error.NoGemmaVision;
+    const w = tower_width;
+    const pe = "vision_tower.patch_embedder.";
+    var t: Tower = .{
+        .input_proj = try x.tensor(pe ++ "input_proj.weight", .bf16, &.{ w, patch_width }),
+        .table = try x.tensor(pe ++ "position_embedding_table", .bf16, &.{ 2, tower_table_rows, w }),
+        .std_bias = try x.tensor("vision_tower.std_bias", .bf16, &.{w}),
+        .std_scale = try x.tensor("vision_tower.std_scale", .bf16, &.{w}),
+        .layers = undefined,
+        .proj = undefined,
+    };
+    var buf: [160]u8 = undefined;
+    for (&t.layers, 0..) |*l, i| {
+        const name = struct {
+            fn of(b: []u8, layer: usize, suffix: []const u8) ![]const u8 {
+                return std.fmt.bufPrint(b, "vision_tower.encoder.layers.{d}.{s}", .{ layer, suffix });
+            }
+        }.of;
+        l.in_norm = try x.tensor(try name(&buf, i, "input_layernorm.weight"), .bf16, &.{w});
+        l.post_attn = try x.tensor(try name(&buf, i, "post_attention_layernorm.weight"), .bf16, &.{w});
+        l.pre_ff = try x.tensor(try name(&buf, i, "pre_feedforward_layernorm.weight"), .bf16, &.{w});
+        l.post_ff = try x.tensor(try name(&buf, i, "post_feedforward_layernorm.weight"), .bf16, &.{w});
+        l.q_norm = try x.tensor(try name(&buf, i, "self_attn.q_norm.weight"), .bf16, &.{tower_head_dim});
+        l.k_norm = try x.tensor(try name(&buf, i, "self_attn.k_norm.weight"), .bf16, &.{tower_head_dim});
+        l.o = try x.tensor(try name(&buf, i, "self_attn.o_proj.linear.weight"), .bf16, &.{ w, w });
+        l.gate = try x.tensor(try name(&buf, i, "mlp.gate_proj.linear.weight"), .bf16, &.{ tower_inter, w });
+        l.up = try x.tensor(try name(&buf, i, "mlp.up_proj.linear.weight"), .bf16, &.{ tower_inter, w });
+        l.down = try x.tensor(try name(&buf, i, "mlp.down_proj.linear.weight"), .bf16, &.{ w, tower_inter });
+        l.qkv = try x.w.alloc(x.d, 3 * w * w * 2);
+        for ([_][]const u8{ "self_attn.q_proj.linear.weight", "self_attn.k_proj.linear.weight", "self_attn.v_proj.linear.weight" }, 0..) |part, j| {
+            const bytes = (try x.ck.expect(try name(&buf, i, part), .bf16, &.{ w, w })).bytes;
+            try (DeviceBuffer{ .d = x.d, .ptr = l.qkv + j * w * w * 2, .len = w * w * 2, .borrowed = true }).upload(0, bytes);
+        }
+    }
+    t.proj = try x.linear("embed_vision.embedding_projection", c.geo.hidden, w, c.widths.vision.bits);
+    return t;
 }
 
 /// The image embedder's tensors; a quantized patch_dense (the bf16 GEMM's input) is refused by name.
 fn vision(x: *Ctx, c: cfg.Config) !Vision {
-    if (!c.geo.unified()) return error.GemmaVisionTowerNotServed;
     if (!x.ck.has("vision_embedder.patch_dense.weight")) return error.NoGemmaVision;
     if (x.ck.has("vision_embedder.patch_dense.scales")) return error.GemmaVisionDenseQuantized;
     const e = "vision_embedder.";
