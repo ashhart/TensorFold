@@ -110,7 +110,7 @@ __device__ __forceinline__ int seen_row(Ancestor anc, int n) {
     return __ffsll(anc.bits) - 1;
 }
 
-// A row's t, h and w: an image prompt's chunk reads them from M (three axes a row); other rows are text, shifted past images.
+// A row's t, h and w: an image chunk reads them from M (three axes a row); other rows are text.
 __device__ __forceinline__ void row_positions(const Seg& sg, Ancestor anc, size_t m, const int* M, int pos[3]) {
     const int text = sg.len + rows_seen(anc) - 1 + sg.delta;
     for (int a = 0; a < MROPE; a++) pos[a] = M != nullptr ? M[m * MROPE + a] : text;

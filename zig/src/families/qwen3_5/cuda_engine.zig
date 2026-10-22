@@ -55,18 +55,8 @@ const Kv8 = layers.Kv8;
 /// A window of one stream in a forward: `parents`, for a tree, names each row's parent row (-1: the first row).
 pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null, images: ?*const Images = null };
 
-/// An image prompt's rows for its prompt chunks: device feature rows, each prompt row's feature row, its positions.
-pub const Images = struct {
-    features: u64, // bf16 [image rows, hidden]
-    src: []const i32, // [prompt]: a feature row, or -1 for text
-    pos: []const i32, // [3][prompt]: t, h and w rotary positions (get_rope_index)
-};
-
-/// An image chunk's positions staged into the tables' planes: three axes a row, as the device reads them.
-pub fn stageImagePos(st: []align(4) u8, im: *const Images, p0: usize, total: usize) void {
-    const mpos = std.mem.bytesAsSlice(i32, st[Round.mpos_at..][0 .. 3 * Round.max_rows * 4]);
-    Round.stageImagePos(mpos, im.pos, im.src.len, p0, total);
-}
+/// An image prompt's rows for its prompt chunks: the staged tables' rows.
+pub const Images = Round.Images;
 
 /// What a forward keeps: a prompt chunk its last row's logits, a verify window every row's draw or logits and log.
 pub const Keep = union(enum) { last, draws: []const Draw, logits, hidden };
@@ -503,7 +493,7 @@ pub const Engine = struct {
             const p0 = parts[0].cache.len;
             if (p0 + total > im.src.len or im.pos.len != 3 * im.src.len) return error.InvalidQwenImages;
             @memcpy(std.mem.bytesAsSlice(i32, st[src_at..][0 .. total * 4]), im.src[p0..][0..total]);
-            stageImagePos(st, im, p0, total);
+            Round.stageImageTables(st, im, p0, total);
         }
         try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
         var shape = Shape.init(total, parts.len, record, e.n_taps > 0, @intCast(Round.variant(slot_peak)));

@@ -141,8 +141,7 @@ pub const Geometry = struct {
     }
 };
 
-/// The geometry the family's paths support: the prompt tiles take an even query/KV group and a
-/// prompt chunk's rows, the decode partials take the verify rows whatever the group.
+/// The supported geometry: the prompt tiles take an even group and a chunk's rows; the partials the verify rows.
 pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bool {
     const group = g.q_heads / g.kv_heads;
     if (prompt and group % 2 == 0) return true; // the prompt tiles: an even group, the chunk's rows

@@ -22,6 +22,13 @@ pub const params_at = tokens_at + most_verify * 4;
 pub const src_at = params_at + 8 * 4;
 pub const mpos_at = src_at + max_rows * 4;
 pub const bytes = mpos_at + 3 * max_rows * 4;
+/// An image prompt's rows for its prompt chunks: device feature rows, each prompt row's feature row, its positions.
+pub const Images = struct {
+    features: u64, // bf16 [image rows, hidden]
+    src: []const i32, // [prompt]: a feature row, or -1 for text
+    pos: []const i32, // [3][prompt]: t, h and w rotary positions (get_rope_index)
+};
+
 /// The image planes' axes a row: t, h and w.
 pub const mrope_axes = 3;
 /// The staged planes' offset of row m's axis a (the device's row_positions reads M[m * 3 + a]).
@@ -33,6 +40,12 @@ pub fn stageImagePos(mpos: []i32, pos: []const i32, n: usize, p0: usize, total: 
     for (0..total) |m| {
         for (0..mrope_axes) |a| mpos[mropeOffset(m, a)] = pos[a * n + p0 + m];
     }
+}
+
+/// An image chunk's positions staged into the tables' planes, as the device reads them.
+pub fn stageImageTables(st: []align(4) u8, im: *const Images, p0: usize, total: usize) void {
+    const mpos = std.mem.bytesAsSlice(i32, st[mpos_at..][0 .. 3 * max_rows * 4]);
+    stageImagePos(mpos, im.pos, im.src.len, p0, total);
 }
 pub fn ancestors(st: []u8) []Ancestor {
     return @alignCast(std.mem.bytesAsSlice(Ancestor, st[rowanc_at..][0 .. max_rows * @sizeOf(Ancestor)]));
