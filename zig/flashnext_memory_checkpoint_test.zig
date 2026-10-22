@@ -2,7 +2,7 @@
 const std = @import("std");
 const memory = @import("flashnext_memory");
 const checkpoint = @import("src/core/checkpoint.zig");
-test "Flash Next memory: weight stats deduplicate indexed shards and refuse nested shard names" {
+test "Flash Next memory: weight stats deduplicate indexed shards, read a folder's shard and refuse escapes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
@@ -12,8 +12,16 @@ test "Flash Next memory: weight stats deduplicate indexed shards and refuse nest
     const path = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     try std.testing.expectEqual(@as(u64, 8), try memory.weightBytes(checkpoint, std.testing.allocator, io, path));
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"part/one.safetensors\"}}" });
-    try std.testing.expectError(error.BadIndex, memory.weightBytes(checkpoint, std.testing.allocator, io, path));
+    try tmp.dir.createDirPath(io, "part");
+    try tmp.dir.writeFile(io, .{ .sub_path = "part/three.safetensors", .data = "0123456" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"one.safetensors\",\"b\":\"part/three.safetensors\"}}" });
+    try std.testing.expectEqual(@as(u64, 12), try memory.weightBytes(checkpoint, std.testing.allocator, io, path));
+    for ([_][]const u8{ "../one.safetensors", "part/../one.safetensors", "/one.safetensors" }) |name| {
+        const index = try std.fmt.allocPrint(std.testing.allocator, "{{\"weight_map\":{{\"a\":\"{s}\"}}}}", .{name});
+        defer std.testing.allocator.free(index);
+        try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index });
+        try std.testing.expectError(error.BadIndex, memory.weightBytes(checkpoint, std.testing.allocator, io, path));
+    }
     try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"one.safetensors\",\"c\":\"two.safetensors\"}}" });
     try tmp.dir.deleteFile(io, "two.safetensors");
     try std.testing.expectError(error.FileNotFound, memory.weightBytes(checkpoint, std.testing.allocator, io, path));
