@@ -1,7 +1,8 @@
-//! The complete finite scalar domain of the five Flash Next contract roles.
+//! The complete finite scalar domain of the six Flash Next contract roles.
 const window = @import("window_config.zig");
 const rotary = @import("rotary_config.zig");
-pub const Role = enum { mrope, target, mtp, pooled, absolute };
+// positioned: fz_idx_pool_pos, an image stream's indexer blocks at their first rows' three positions (any slot, M-RoPE axes)
+pub const Role = enum { mrope, target, mtp, pooled, absolute, positioned };
 pub const Mode = enum { normal, yarn };
 pub const maximum = window.maximum;
 pub const chunk_cases = 65536;
@@ -17,7 +18,7 @@ pub fn count(role: Role) u64 {
 
 pub fn point(role: Role, linear: u64) Point {
     const i: u32 = @intCast(linear % 32);
-    return .{ .position = @intCast((linear / 32) * stride(role)), .index = i, .axis = if (role != .mrope) 0 else if (i % 3 == 1 and i < 33) 1 else if (i % 3 == 2 and i < 30) 2 else 0 };
+    return .{ .position = @intCast((linear / 32) * stride(role)), .index = i, .axis = if (role != .mrope and role != .positioned) 0 else if (i % 3 == 1 and i < 33) 1 else if (i % 3 == 2 and i < 30) 2 else 0 };
 }
 
 pub fn table(mode: Mode) [rotary.words]f32 {

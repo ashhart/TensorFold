@@ -13,6 +13,7 @@ pub fn which(role: accuracy.Role) f.Which {
         .mtp => .mtp,
         .pooled => .pooled,
         .absolute => .absolute,
+        .positioned => .positioned,
     };
 }
 fn capture(a: std.mem.Allocator, width: usize, weight: f32, input: []const u16, output: []const u8) !accuracy.Norm {

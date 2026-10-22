@@ -1,4 +1,5 @@
-//! Both indexer pooling paths bind the full rotary table, with a nonzero absolute block and guarded outputs.
+//! The indexer pooling paths bind the full rotary table, with a nonzero absolute block and guarded outputs; the
+//! positioned one (fz_idx_pool_pos) pools each block at its three positions, text blocks alike on all three.
 const std = @import("std");
 const mtl = @import("metal");
 const f = @import("tensorfold").flashnext_vision_contract;
@@ -19,7 +20,9 @@ pub const Probe = struct {
     before: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque, mtl.ComputeEncoder) void } = null,
     shape: c.Shape = undefined,
     host: []u16 = &.{},
+    blocks: []i32 = &.{}, // positioned: each block's three positions, [first block + rows, 3]
     raw: rig_.Ref = undefined,
+    bpos: rig_.Ref = undefined,
     select: rig_.Ref = undefined,
     weights: rig_.Ref = undefined,
     eps: rig_.Ref = undefined,
@@ -32,11 +35,17 @@ pub const Probe = struct {
     }
     pub fn deinit(p: *Probe) void {
         p.a.free(p.host);
+        p.a.free(p.blocks);
         p.rig.deinit();
         p.pipe.deinit();
     }
     fn prefix(p: *const Probe) usize {
         return if (p.which == .absolute) p.firstBlock() * 128 * 2 else 0;
+    }
+    /// Row r's block positions: positioned's own three, else the block's first slot on all three.
+    fn posOf(p: *const Probe, r: usize) [3]i32 {
+        const b = p.firstBlock() + r;
+        return if (p.which == .positioned) p.blocks[b * 3 ..][0..3].* else @splat(@intCast(4 * b));
     }
     pub fn firstBlock(p: *const Probe) usize {
         if (p.calibration) return 0;
@@ -85,6 +94,16 @@ pub const Probe = struct {
         selection[64] = @intCast(start);
         selection[65] = @intCast(shape.rows);
         p.select = try p.rig.input(std.mem.asBytes(&selection));
+        if (p.which == .positioned) {
+            p.a.free(p.blocks);
+            p.blocks = &.{};
+            p.blocks = try p.a.alloc(i32, (start + shape.rows) * 3);
+            for (0..start + shape.rows) |b| for (0..3) |axis| {
+                const r = b -| start; // even rows a text block (one position), odd rows an image block's three
+                p.blocks[b * 3 + axis] = if (p.long_positions) @import("flashnext_positions.zig").token(r, if (r % 2 == 0) 0 else axis) else @intCast(4 * b + (if (r % 2 == 0) @as(usize, 0) else axis * 3));
+            };
+            p.bpos = try p.rig.input(std.mem.sliceAsBytes(p.blocks));
+        }
         const weights: [128]f32 = @splat(1.25);
         const eps = [_]f32{1e-5};
         const table = f.table(23.253496170043945, p.factor);
@@ -99,7 +118,9 @@ pub const Probe = struct {
         const e = pass.e;
         if (p.before) |hook| hook.call(hook.ctx, e);
         e.setPipeline(p.pipe);
-        for ([_]rig_.Ref{ p.raw, p.select, p.weights, p.eps, p.base, p.out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+        if (p.which == .positioned) {
+            for ([_]rig_.Ref{ p.raw, p.select, p.weights, p.eps, p.base, p.bpos, p.out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+        } else for ([_]rig_.Ref{ p.raw, p.select, p.weights, p.eps, p.base, p.out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
         e.dispatchGroups(mtl.Size.of(1, p.shape.rows, 1), mtl.Size.of(128, 1, 1));
         try p.rig.finish(pass);
     }
@@ -119,11 +140,16 @@ pub const Probe = struct {
         const receipt = p.accuracy orelse return error.UnrecordedRotaryCompiler;
         const rotary = f.table(23.253496170043945, p.factor);
         if (!std.mem.eql(u8, p.rig.bytes(p.base, f.table_words * 4), std.mem.asBytes(&rotary))) return error.UnrecordedRotaryTable;
-        const record = try receipt.find(if (p.which == .pooled) .pooled else .absolute, &rotary);
+        const record = try receipt.find(switch (p.which) {
+            .pooled => .pooled,
+            .absolute => .absolute,
+            .positioned => .positioned,
+            else => return error.UnrecordedRotaryFixture,
+        }, &rotary);
         const weights: [128]f32 = @splat(1.25);
         for (0..p.shape.rows) |r| {
             var row: [128]f.rotary_interval.Interval = undefined;
-            try f.rotary_interval.pooled(record, p.host[(p.firstBlock() + r) * 512 ..][0..512], @intCast(4 * (p.firstBlock() + r)), &weights, 1e-5, &rotary, &row);
+            try f.rotary_interval.pooledAt(record, p.host[(p.firstBlock() + r) * 512 ..][0..512], p.posOf(r), &weights, 1e-5, &rotary, &row);
             for (row, 0..) |x, i| {
                 low[r * 128 + i] = x.low;
                 high[r * 128 + i] = x.high;
@@ -134,7 +160,7 @@ pub const Probe = struct {
         const start = p.firstBlock();
         const weights: [128]f32 = @splat(1.25);
         const rotary = f.table(23.253496170043945, p.factor);
-        for (0..p.shape.rows) |r| try f.pooledBounds(p.host[(start + r) * 4 * 128 ..][0 .. 4 * 128], @intCast(4 * (start + r)), &weights, 1e-5, &rotary, allow[r * 128 ..][0..128]);
+        for (0..p.shape.rows) |r| try f.pooledBoundsAt(p.host[(start + r) * 4 * 128 ..][0 .. 4 * 128], p.posOf(r), &weights, 1e-5, &rotary, allow[r * 128 ..][0..128]);
     }
     pub fn simulate(p: *Probe, acc: c.Accum, order: g.Order, out: []f64) !void {
         const mag = try p.a.alloc(f64, out.len);
@@ -162,7 +188,7 @@ pub const Probe = struct {
                 h.* = c.toBf16(@floatCast(total * 0.25));
             }
             var row: [128]u16 = undefined;
-            f.normalizedRotation(&mean, @splat(@intCast(4 * (start + r))), &weights, 1e-5, &rotary, acc, order, &row, mag[r * 128 ..][0..128]);
+            f.normalizedRotation(&mean, p.posOf(r), &weights, 1e-5, &rotary, acc, order, &row, mag[r * 128 ..][0..128]);
             for (row, want[r * 128 ..][0..128]) |h, *value| value.* = c.fromBf16(h);
         }
     }
