@@ -11,7 +11,7 @@ pub fn from(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
 }
 pub fn kinds(role: Role) usize {
-    return if (role == .pooled or role == .absolute) 1 else 3;
+    return if (role == .pooled or role == .absolute or role == .positioned) 1 else 3;
 }
 pub fn make(role: Role, kind: usize, phase: usize) Fixture {
     const pool = kinds(role) == 1;

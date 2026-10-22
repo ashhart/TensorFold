@@ -160,7 +160,7 @@ pub fn main(init: std.process.Init) !u8 {
     var flash_list: [8]flash.Probe = undefined;
     var flash_made: usize = 0;
     defer for (flash_list[0..flash_made]) |*probe| probe.deinit();
-    var pool_list: [4]flash_pool.Probe = undefined;
+    var pool_list: [6]flash_pool.Probe = undefined;
     var pool_made: usize = 0;
     defer for (pool_list[0..pool_made]) |*probe| probe.deinit();
     for (std.enums.values(tf.flashnext_vision_contract.Which)) |w| for ([_]f64{ 0, 4 }) |factor| {

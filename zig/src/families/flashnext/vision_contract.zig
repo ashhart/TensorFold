@@ -10,7 +10,8 @@ fn toBf16(v: f32) u16 {
 }
 pub const normalizedBounds = @import("vision_bounds.zig").normalized;
 pub const pooledBounds = @import("vision_bounds.zig").pooled;
-pub const Which = enum { mask, mrope, target, mtp, pooled, absolute };
+pub const pooledBoundsAt = @import("vision_bounds.zig").pooledAt;
+pub const Which = enum { mask, mrope, target, mtp, pooled, absolute, positioned };
 pub const table_words = @import("rotary_config.zig").words;
 pub const maximum = @import("window_config.zig").maximum;
 pub const rotary_accuracy = @import("rotary_accuracy.zig");
@@ -21,7 +22,7 @@ pub const output_width = 24 * 256 + 2 * 256 + 4 * 128;
 const prep_symbol = "custom_kernel_q4_attn_prep_63a42a6cd8e0434a_bfloat16_t_int32_t_float_float_float_floatc_floatc_bfloat16_t_bfloat16_t_bfloat16_t";
 const pool_symbol = "custom_kernel_q4_idx_pool_6d826f5ebecec197_bfloat16_t_int32_tc_float_floatc_floatc_bfloat16_t";
 pub fn isPool(w: Which) bool {
-    return w == .pooled or w == .absolute;
+    return w == .pooled or w == .absolute or w == .positioned;
 }
 pub fn symbol(w: Which) []const u8 {
     return switch (w) {
@@ -30,6 +31,7 @@ pub fn symbol(w: Which) []const u8 {
         .target, .mtp => prep_symbol,
         .pooled => pool_symbol,
         .absolute => "fz_idx_pool_abs",
+        .positioned => "fz_idx_pool_pos",
     };
 }
 fn recorded(file: []const u8) []const u8 {
@@ -43,6 +45,7 @@ pub fn source(w: Which) []const u8 {
         .target, .mtp => recorded("q4_attn_prep_63a42a6cd8e0434a.metal"),
         .pooled => recorded("q4_idx_pool_6d826f5ebecec197.metal"),
         .absolute => @import("kernel_sources").flashnext_select,
+        .positioned => @import("kernel_sources").flashnext_pool_pos,
     };
 }
 pub fn name(w: Which, scaled: bool) []const u8 {
@@ -53,6 +56,7 @@ pub fn name(w: Which, scaled: bool) []const u8 {
         .mtp => if (scaled) "flashnext rotary mtp YaRN x4" else "flashnext rotary mtp",
         .pooled => if (scaled) "flashnext rotary pooled YaRN x4" else "flashnext rotary pooled",
         .absolute => if (scaled) "flashnext rotary absolute YaRN x4" else "flashnext rotary absolute",
+        .positioned => if (scaled) "flashnext rotary positioned YaRN x4" else "flashnext rotary positioned",
     };
 }
 pub fn table(log2base: f32, factor: f64) [table_words]f32 {

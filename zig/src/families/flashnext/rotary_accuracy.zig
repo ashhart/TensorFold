@@ -24,7 +24,7 @@ pub const Identity = struct {
     math_functions: u32,
     math: []const u8 = "safe/fast-functions/explicit-precise-rotary",
     oracle: []const u8 = @import("builtin").zig_version_string,
-    sources: [4][64]u8,
+    sources: [5][64]u8,
     oracle_sources: [64]u8,
 };
 pub const Witness = struct { linear: u64 = 0, got: u32 = 0, reference: f64 = 0 };
@@ -86,7 +86,7 @@ pub const Receipt = struct {
     rows: []const Row,
 
     pub fn validate(r: Receipt, identity: Identity) !void {
-        if (r.version != schema or !r.complete or r.rows.len != 10) return error.IncompleteRotarySweep;
+        if (r.version != schema or !r.complete or r.rows.len != 12) return error.IncompleteRotarySweep;
         inline for (.{ "compiler_service", "compiler_framework", "os_version", "os_build", "device_name", "math", "oracle" }) |key| {
             if (@field(identity, key).len == 0 or !std.mem.eql(u8, @field(identity, key), @field(r.identity, key))) return error.UnrecordedRotaryCompiler;
         }
@@ -94,17 +94,17 @@ pub const Receipt = struct {
             !std.mem.eql(u8, &r.identity.compiler_deployment, &identity.compiler_deployment) or
             !std.mem.eql(u8, &r.identity.oracle_sources, &identity.oracle_sources) or
             !std.mem.eql(u8, std.mem.asBytes(&r.identity.sources), std.mem.asBytes(&identity.sources))) return error.UnrecordedRotaryCompiler;
-        var seen: [5][2]bool = @splat(@splat(false));
+        var seen: [6][2]bool = @splat(@splat(false));
         for (r.rows) |row| {
             const slot = &seen[@backingInt(row.role)][@backingInt(row.mode)];
             if (slot.* or row.cases != domain.count(row.role)) return error.IncompleteRotarySweep;
             if (row.exp2_cases != (if (row.mode == .normal) row.cases else 0)) return error.IncompleteRotarySweep;
             slot.* = true;
-            const axes: [3]u64 = if (row.role == .mrope) .{ domain.maximum * 11, domain.maximum * 11, domain.maximum * 10 } else .{ row.cases, 0, 0 };
+            const axes: [3]u64 = if (row.role == .mrope or row.role == .positioned) .{ domain.maximum * 11, domain.maximum * 11, domain.maximum * 10 } else .{ row.cases, 0, 0 };
             if (!std.mem.eql(u64, &row.axis_cases, &axes)) return error.IncompleteRotarySweep;
             const stored = domain.table(row.mode);
             for (row.table_bits, stored) |bits, value| if (bits != @as(u32, @bitCast(value))) return error.UnrecordedRotaryTable;
-            const wanted: usize = if (domain.stride(row.role) == 4) 17 else 51;
+            const wanted: usize = @import("rotary_fixture.zig").kinds(row.role) * 17;
             if (row.normalization.len != wanted) return error.IncompleteRotarySweep;
             var norm_seen: [51]bool = @splat(false);
             for (row.normalization) |n| {

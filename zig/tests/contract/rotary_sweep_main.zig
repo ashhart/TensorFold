@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
     defer queue.deinit();
     const identity = try deployment.current(a, init.io, device);
     std.debug.print("ROTARY SWEEP compiler {s}/{s}, OS {s} ({s}), GPU generation {d}; no partial receipt\n", .{ identity.compiler_service, identity.compiler_framework, identity.os_version, identity.os_build, identity.device_generation });
-    var rows: [10]accuracy.Row = undefined;
+    var rows: [12]accuracy.Row = undefined;
     var made: usize = 0;
     var total: u64 = 0;
     for (std.enums.values(accuracy.Role)) |role| {
@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("SWEPT {t}/{t}: {d} cases, {d} normalization fixtures; cos {e} abs/{d:.3} ulp, sin {e} abs/{d:.3} ulp\n", .{ role, mode, row.cases, normalized.len, row.cosine.absolute, row.cosine.ulps, row.sine.absolute, row.sine.ulps });
         }
     }
-    if (made != rows.len or total != 234895360) return error.IncompleteRotarySweep;
+    if (made != rows.len or total != 302008320) return error.IncompleteRotarySweep;
     const receipt: accuracy.Receipt = .{ .complete = true, .identity = identity, .rows = &rows };
     try receipt.validate(identity);
     const bytes = try std.json.Stringify.valueAlloc(a, receipt, .{ .whitespace = .indent_2 });

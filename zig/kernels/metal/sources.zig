@@ -70,6 +70,8 @@ pub const flashnext_qmmw = @embedFile("prefill/qmmw_nax.metal");
 pub const flashnext_prompt = @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
 pub const flashnext_select = @embedFile("prefill/fn_select.metal");
+/// Flash Next indexer pooling at an image stream's block positions (the standard frame on the shared sessions).
+pub const flashnext_pool_pos = @embedFile("prefill/fn_pool_pos.metal");
 /// Flash Next prompt rows' block scores and sparse attention on the tensor units.
 pub const flashnext_attn = @embedFile("prefill/fn_attn.metal");
 /// Flash Next's attention prep at three positions a row, for prompt rows up to an image prompt's last image.

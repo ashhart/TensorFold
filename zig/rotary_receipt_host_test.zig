@@ -4,8 +4,8 @@ const f = @import("src/families/flashnext/vision_contract.zig");
 const a = f.rotary_accuracy;
 const fixture = @import("src/families/flashnext/rotary_fixture.zig");
 const Synthetic = struct {
-    norms: [5][51]a.Norm,
-    rows: [10]a.Row,
+    norms: [6][51]a.Norm,
+    rows: [12]a.Row,
     fn init(s: *Synthetic) void {
         for (std.enums.values(a.Role), 0..) |role, ri| {
             for (0..fixture.kinds(role)) |kind| for (0..17) |phase| {
@@ -20,7 +20,7 @@ const Synthetic = struct {
                 const row = &s.rows[ri * 2 + mi];
                 row.* = .{ .role = role, .mode = mode, .cases = a.domain.count(role), .normalization = s.norms[ri][0 .. fixture.kinds(role) * 17], .cosine = .{ .absolute = 0x1p-22, .ulps = 4 }, .sine = .{ .absolute = 0x1p-22, .ulps = 4 } };
                 row.exp2_cases = if (mode == .normal) row.cases else 0;
-                row.axis_cases = if (role == .mrope) .{ a.domain.maximum * 11, a.domain.maximum * 11, a.domain.maximum * 10 } else .{ row.cases, 0, 0 };
+                row.axis_cases = if (role == .mrope or role == .positioned) .{ a.domain.maximum * 11, a.domain.maximum * 11, a.domain.maximum * 10 } else .{ row.cases, 0, 0 };
                 const table = a.domain.table(mode);
                 for (&row.table_bits, table) |*bits, value| bits.* = @bitCast(value);
                 for (&row.frequency_bits, 0..) |*bits, i| {

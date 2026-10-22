@@ -60,7 +60,7 @@ pub fn normalized(row: *const accuracy.Row, input: []const u16, pos: [3]i32, wei
             continue;
         }
         const i = d % 32;
-        const axis = if (row.role == .mrope) accuracy.domain.point(.mrope, i).axis else 0;
+        const axis = accuracy.domain.point(row.role, i).axis;
         const position = pos[axis];
         if (position < 0 or position >= accuracy.domain.maximum or @mod(position, @as(i32, @intCast(accuracy.domain.stride(row.role)))) != 0) return error.UnrecordedRotaryPosition;
         const frequency: f32 = @bitCast(row.frequency_bits[i]);
@@ -74,6 +74,11 @@ pub fn normalized(row: *const accuracy.Row, input: []const u16, pos: [3]i32, wei
 }
 
 pub fn pooled(row: *const accuracy.Row, raw: []const u16, position: i32, weights: []const f32, eps: f32, rotary: []const f32, intervals: []Interval) !void {
+    return pooledAt(row, raw, @splat(position), weights, eps, rotary, intervals);
+}
+
+/// pooled at a block's three positions (fz_idx_pool_pos: its first row's t, h and w).
+pub fn pooledAt(row: *const accuracy.Row, raw: []const u16, pos: [3]i32, weights: []const f32, eps: f32, rotary: []const f32, intervals: []Interval) !void {
     if (raw.len != 512) return error.UnrecordedRotaryFixture;
     var mean: [128]u16 = undefined;
     for (&mean, 0..) |*h, d| {
@@ -81,5 +86,5 @@ pub fn pooled(row: *const accuracy.Row, raw: []const u16, position: i32, weights
         for (1..4) |k| total += fixture.from(raw[k * 128 + d]);
         h.* = fixture.bf(total * 0.25);
     }
-    try normalized(row, &mean, @splat(position), weights, eps, rotary, intervals);
+    try normalized(row, &mean, pos, weights, eps, rotary, intervals);
 }

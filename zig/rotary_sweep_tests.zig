@@ -13,7 +13,7 @@ test "rotary sweep: Cartesian enumeration covers every position, frequency, imag
         var linear: u64 = 0;
         var axes: [3]usize = @splat(0);
         for (0..32) |i| axes[d.point(role, i).axis] += 1;
-        if (role == .mrope) try std.testing.expectEqualSlices(usize, &.{ 11, 11, 10 }, &axes);
+        if (role == .mrope or role == .positioned) try std.testing.expectEqualSlices(usize, &.{ 11, 11, 10 }, &axes);
         while (linear < n) : (linear += 32) {
             const first = d.point(role, linear);
             const last = d.point(role, linear + 31);
@@ -25,12 +25,12 @@ test "rotary sweep: Cartesian enumeration covers every position, frequency, imag
         try std.testing.expectEqual(@as(u32, @intCast(d.maximum - d.stride(role))), d.point(role, n - 1).position);
         total += 2 * n;
     }
-    try std.testing.expectEqual(@as(u64, 234895360), total);
+    try std.testing.expectEqual(@as(u64, 302008320), total);
 }
 
 test "rotary sweep: each real function and diagnostic use the identical scalar helper" {
     const helper = @embedFile("kernels/metal/prefill/fn_rotary_scalar.metal");
-    for ([_]f.Which{ .mrope, .target, .mtp, .pooled, .absolute }) |role| {
+    for ([_]f.Which{ .mrope, .target, .mtp, .pooled, .absolute, .positioned }) |role| {
         const text = f.source(role);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, helper));
         try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "tf_rotary_scalar("));
@@ -41,11 +41,11 @@ test "rotary sweep: each real function and diagnostic use the identical scalar h
 test "rotary sweep: every helper call binds its table in the constant address space" {
     const helper = @embedFile("kernels/metal/prefill/fn_rotary_scalar.metal");
     try std.testing.expect(std.mem.containsAtLeast(u8, helper, 1, "const constant float* LOG2BASE)"));
-    for ([_]f.Which{ .mrope, .target, .mtp, .pooled, .absolute }) |role| {
+    for ([_]f.Which{ .mrope, .target, .mtp, .pooled, .absolute, .positioned }) |role| {
         const source = f.source(role);
         const start = std.mem.indexOf(u8, source, f.symbol(role)).?;
         const end = start + std.mem.indexOfScalar(u8, source[start..], '{').?;
-        const slot: []const u8 = if (role == .pooled or role == .absolute) "4" else "6";
+        const slot: []const u8 = if (f.isPool(role)) "4" else "6";
         var buffer: [80]u8 = undefined;
         const declaration = try std.fmt.bufPrint(&buffer, "const constant float* LOG2BASE [[buffer({s})]]", .{slot});
         try std.testing.expect(std.mem.containsAtLeast(u8, source[start..end], 1, declaration));

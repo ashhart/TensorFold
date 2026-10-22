@@ -114,6 +114,11 @@ pub fn normalized(p: []const u16, pos: [3]i32, weights: []const f32, eps: f32, r
 
 /// Pool fixtures are an exact FP32 four-row mean; reject inputs that would need an additional pooling interval.
 pub fn pooled(raw: []const u16, position: i32, weights: []const f32, eps: f32, rotary: []const f32, allow: []f64) !void {
+    return pooledAt(raw, @splat(position), weights, eps, rotary, allow);
+}
+
+/// pooled at a block's three positions (fz_idx_pool_pos: its first row's t, h and w).
+pub fn pooledAt(raw: []const u16, pos: [3]i32, weights: []const f32, eps: f32, rotary: []const f32, allow: []f64) !void {
     if (raw.len != 4 * 128) return error.InvalidVisionBoundInput;
     var mean: [128]u16 = undefined;
     for (&mean, 0..) |*h, d| {
@@ -128,5 +133,5 @@ pub fn pooled(raw: []const u16, position: i32, weights: []const f32, eps: f32, r
         const bits: u32 = @bitCast(@as(f32, @floatCast(bf(m))));
         h.* = @truncate(bits >> 16);
     }
-    try normalized(&mean, @splat(position), weights, eps, rotary, allow);
+    try normalized(&mean, pos, weights, eps, rotary, allow);
 }

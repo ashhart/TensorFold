@@ -52,7 +52,7 @@ pub fn current(a: std.mem.Allocator, io: std.Io, device: mtl.Device) !accuracy.I
     for ([_][]const u8{ @embedFile("rotary_deployment.zig"), @embedFile("rotary_sweep_cpu.zig"), @embedFile("rotary_sweep_gpu.zig"), @embedFile("rotary_sweep_norm.zig"), @embedFile("rotary_sweep_main.zig"), @embedFile("metal_flashnext.zig"), @embedFile("metal_flashnext_pool.zig"), @embedFile("rig.zig"), @import("kernel_sources").flashnext_rotary_sweep }) |bytes| oracle.update(bytes);
     oracle.final(&digest);
     identity.oracle_sources = std.fmt.bytesToHex(digest, .lower);
-    for ([_]f.Which{ .mrope, .target, .pooled, .absolute }, &identity.sources) |which, *pin| {
+    for ([_]f.Which{ .mrope, .target, .pooled, .absolute, .positioned }, &identity.sources) |which, *pin| {
         std.crypto.hash.sha2.Sha256.hash(f.source(which), &digest, .{});
         pin.* = std.fmt.bytesToHex(digest, .lower);
     }
