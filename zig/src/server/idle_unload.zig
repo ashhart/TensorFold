@@ -329,13 +329,13 @@ test "the wake reloads: the candidate opens, the stub is freed, and a second cyc
     var h: Harness = .{};
     defer h.deinit();
     try h.setup(1);
-    try h.waitParked(3000);
+    try h.waitUnloaded(3000);
     var problem: []const u8 = "";
     try h.reload(&problem);
     try std.testing.expectEqual(@as(u32, 1), h.opens);
     try std.testing.expectEqual(@as(u32, 1), h.replaces);
     try std.testing.expect(!h.man.?.isParked());
-    try h.waitParked(3000); // a second complete cycle
+    try h.waitUnloaded(3000); // a second complete cycle
     try h.reload(&problem);
     try std.testing.expectEqual(@as(u32, 2), h.opens);
     try std.testing.expectEqual(@as(u32, 2), h.closes);
@@ -346,7 +346,7 @@ test "concurrent wake requests produce exactly one reload; both find the engine 
     var h: Harness = .{};
     defer h.deinit();
     try h.setup(1);
-    try h.waitParked(3000);
+    try h.waitUnloaded(3000);
     var a_err: ?anyerror = null;
     var b_err: ?anyerror = null;
     const Wa = struct {
@@ -372,7 +372,7 @@ test "a failed open cleans up and leaves the server parked and retryable" {
     defer h.deinit();
     try h.setup(1);
     h.fail_open = true;
-    try h.waitParked(3000);
+    try h.waitUnloaded(3000);
     var problem: []const u8 = "";
     try std.testing.expectError(error.EngineOpenFailed, h.reload(&problem));
     try std.testing.expect(h.man.?.isParked()); // still parked: the next request retries

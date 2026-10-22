@@ -134,6 +134,16 @@ pub const Harness = struct {
         try std.testing.expect(self.man.?.isParked());
     }
 
+    /// Waits until the park fully finished (state `unloaded`): `parked` turns true while the startup
+    /// engine is still closing, and a reload called in that window answers "still unloading" without an error.
+    pub fn waitUnloaded(self: *Harness, timeout_ms: u32) !void {
+        var waited: u32 = 0;
+        while (self.man.?.state != .unloaded and waited < timeout_ms) : (waited += 10) {
+            std.Io.sleep(self.io, .fromMilliseconds(10), .awake) catch {};
+        }
+        try std.testing.expectEqual(idle_unload.State.unloaded, self.man.?.state);
+    }
+
     pub fn reload(self: *Harness, problem: *[]const u8) !void {
         try idle_unload.reload(self.man.?, self.srv.?, problem);
     }
