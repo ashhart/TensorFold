@@ -8,7 +8,7 @@ export async function persistProviderSetup<T extends ProviderSettings>(
   models: string[] | undefined,
   save: (next: T) => Promise<void>,
 ): Promise<Provider> {
-  const nextProvider = models?.length ? { ...provider, models } : provider
+  const nextProvider = models?.length ? { ...provider, models, discoveredModels: models } : provider
   const next = {
     ...draft,
     providers: draft.providers.some((item) => item.id === nextProvider.id)

@@ -426,17 +426,15 @@ export function useProviderSettings({ draft, editDraft, commit, patch, save }: S
     try {
       const models = await api.fetchModels(p)
       if (!models.length) { setConn((c) => ({ ...c, [p.id]: { state: 'error', msg: 'No models returned' } })); return }
-      // Remember the full discovered catalogue so the "Edit models" checklist can offer everything
-      // the endpoint exposes (#46) — but PRESERVE the user's enabled/disabled selection across a
-      // refresh. Keep previously-selected models that still exist, and auto-enable only genuinely-new
-      // models (not ones the user had explicitly disabled).
+      // Keep disabled models unchecked, and enable new IDs only when the previous catalogue is known.
       commitProviders(draft.providers.map((x) => {
         if (x.id !== p.id) return x
         const prevSelected = x.models ?? []
-        const prevCatalogue = x.discoveredModels ?? []
         const kept = prevSelected.filter((m) => models.includes(m))
+        // Without a saved catalogue, retain a usable selection or initialize from the endpoint's first response.
+        const prevCatalogue = x.discoveredModels ?? (kept.length ? models : [])
         const brandNew = models.filter((m) => !prevCatalogue.includes(m) && !prevSelected.includes(m))
-        const nextModels = prevSelected.length ? Array.from(new Set([...kept, ...brandNew])) : models
+        const nextModels = Array.from(new Set([...kept, ...brandNew]))
         return { ...x, models: nextModels, discoveredModels: models }
       }))
       setConn((c) => ({ ...c, [p.id]: { state: 'ok', msg: `${models.length} model${models.length > 1 ? 's' : ''}` } }))
