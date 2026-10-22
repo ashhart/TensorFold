@@ -41,6 +41,8 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const frames_run = b.addRunArtifact(b.addTest(.{ .root_module = frames, .filters = &.{"Draft frames:"} }));
     b.step("test-qwen35-draft-frames-host", "Fixed frame schedules, returned byte records and controls without devices").dependOn(&frames_run.step);
     step.dependOn(&frames_run.step);
+    const stack_symbols = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_stack_symbols_host.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "core", .module = mods.core }} });
+    b.step("test-qwen35-stack-symbols-host", "The stack's new symbols' own numerical specs without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = stack_symbols })).step);
     const images = b.createModule(.{ .root_source_file = b.path("zig/qwen35_images_host.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "qwen35", .module = mods.qwen35 }} });
     b.step("test-qwen35-images-host", "The image planes' staging ABI at the device's row offsets without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = images })).step);
     const launch_args = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_launch_args_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "qwen35", .module = mods.qwen35 }} });
