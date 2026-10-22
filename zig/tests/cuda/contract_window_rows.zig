@@ -39,6 +39,8 @@ const prompt_served = &[_]c.Shape{ .{ .rows = 512, .n = 16, .k = 0 }, .{ .rows =
 const global_decode = &[_]c.Shape{ .{ .rows = 4, .n = 16, .k = 32768 }, .{ .rows = 16, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 300 } };
 const global_prompt = &[_]c.Shape{ .{ .rows = 256, .n = 16, .k = 0 }, .{ .rows = 128, .n = 16, .k = 4096 }, .{ .rows = 32, .n = 16, .k = 1000 } };
 const global31_prompt = &[_]c.Shape{ .{ .rows = 128, .n = 32, .k = 0 }, .{ .rows = 64, .n = 32, .k = 3000 } };
+const gqa5_decode = &[_]c.Shape{ .{ .rows = 4, .n = 10, .k = 32768 }, .{ .rows = 16, .n = 10, .k = 3000 }, .{ .rows = 1, .n = 10, .k = 300 } };
+const gqa5_prompt = &[_]c.Shape{ .{ .rows = 128, .n = 10, .k = 0 }, .{ .rows = 64, .n = 10, .k = 3000 } };
 
 /// Gemma 4 12B's sliding layers (16 query heads over 8 of 256, window 1024, ring 1536); controls each plant one fault.
 pub const cfgs = [_]Cfg{
@@ -56,6 +58,11 @@ pub const cfgs = [_]Cfg{
     .{ .name = "cuda window_rows prompt tf_wrows_prompt_512_p32, 16/1 heads, no window, linear cache", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .served = global_prompt },
     .{ .name = "cuda window_rows prompt tf_wrows_prompt_512 (P as bf16), 32/4 heads, no window, linear cache", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .prompt = true, .served = global31_prompt },
     .{ .name = "control: head dim 512 merge over up to 128 chunks without exp(m_c - M)", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 1, .ctl = .rescale512, .served = global_decode },
+    // an odd ratio at 512: 10 query heads over 2 (GQA 5), so each key head's second block holds one query head
+    .{ .name = "cuda window_rows decode tf_wrows_part_512 + tf_wrows_merge_512, 10/2 heads (GQA 5), no window, linear 32768", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 32768, .streams = 1, .served = gqa5_decode },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_512_p32, 10/2 heads (GQA 5), no window, linear cache", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .served = gqa5_prompt },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_512 (P as bf16), 10/2 heads (GQA 5), no window, linear cache", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .prompt = true, .served = gqa5_prompt },
+    .{ .name = "control: head dim 512 merge without exp(m_c - M), 10/2 heads (GQA 5)", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 32768, .streams = 1, .ctl = .rescale512, .served = gqa5_decode },
 } ++ ratio(12, 4) ++ ratio(20, 4) ++ ratio(32, 4) ++ ratio(32, 2) ++ [_]Cfg{
     .{ .name = "control: decode merge without each chunk's exp(m_c - M), 20/4 heads (GQA 5)", .h = 20, .hk = 4, .ctl = .rescale, .served = decodeAt(20) },
     .{ .name = "control: P32 prompt rows whose window starts a key early, 20/4 heads (GQA 5)", .h = 20, .hk = 4, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = promptAt(20) },

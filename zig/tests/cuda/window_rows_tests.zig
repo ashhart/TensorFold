@@ -65,9 +65,16 @@ fn report(what: []const u8, st: ar.Stats) void {
 
 const DCase = struct { name: []const u8, h: usize, hk: usize, d: usize, win: usize, ring: usize, streams: usize, top: usize, rows: usize = 64 };
 
-/// Decode at 1, 3 and c.rows rows: every output in range, a row's bits at any row count and (linear) cache length.
+/// Decode at 1, 3, 17 (those under c.rows) and c.rows rows: outputs in range, a row's bits at any row count and cache.
 fn decode1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const wa.WindowAttention, rng: std.Random, c: DCase, total: *ar.Stats) !void {
-    const counts = [_]usize{ 1, 3, c.rows };
+    var list: [4]usize = undefined;
+    var nc: usize = 0;
+    for ([_]usize{ 1, 3, 17 }) |m| if (m < c.rows) {
+        list[nc] = m;
+        nc += 1;
+    };
+    list[nc] = c.rows;
+    const counts = list[0 .. nc + 1];
     const most = c.rows;
     var b: Bufs = .{ .gpu = gpu };
     defer b.deinit();
@@ -94,8 +101,9 @@ fn decode1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const wa.Wi
     const ds = try b.up(std.mem.sliceAsBytes(slot));
     const w: wa.Window = .{ .h = c.h, .hk = c.hk, .d = c.d, .win = c.win, .ring = c.ring, .scale = 1 };
     const scratch = try b.out(s, wa.WindowAttention.scratchBytes(w, most));
-    var outs: [counts.len]u64 = undefined;
-    for (counts, &outs) |m, *o| {
+    var all: [list.len]u64 = undefined;
+    const outs = all[0..counts.len];
+    for (counts, outs) |m, *o| {
         o.* = try b.out(s, m * c.h * c.d * 2);
         try g.decode(s, dq, dk, dv, o.*, dp, ds, w, scratch, m);
     }
@@ -193,6 +201,7 @@ pub const global_decode = [_]DCase{
     .{ .name = "12B global decode (16/1 heads of 512, linear cache of 262144, a row at its end)", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 262144, .streams = 1, .top = 262144, .rows = 4 },
     .{ .name = "12B global decode (16/1 heads of 512, linear cache of 20000)", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 20000, .streams = 1, .top = 20000, .rows = 17 },
     .{ .name = "31B global decode (32/4 heads of 512, linear caches of 40000, 2 streams)", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 40000, .streams = 2, .top = 40000, .rows = 17 },
+    .{ .name = "GQA 5 global decode (10/2 heads of 512, linear cache of 20000)", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 20000, .streams = 1, .top = 20000, .rows = 17 },
 };
 
 pub const global_prompt = [_]PCase{
@@ -200,6 +209,8 @@ pub const global_prompt = [_]PCase{
     .{ .name = "12B global prompt, 16 rows at 130000, P32", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .p0 = 130000, .n = 16, .p32 = true },
     .{ .name = "31B global prompt, 300 rows at 0, P32", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .p0 = 0, .n = 300, .p32 = true },
     .{ .name = "31B global prompt, 96 rows at 3000, P as bf16", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .p0 = 3000, .n = 96, .p32 = false },
+    .{ .name = "GQA 5 global prompt (10/2 heads), 96 rows at 3000, P32", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .p0 = 3000, .n = 96, .p32 = true },
+    .{ .name = "GQA 5 global prompt (10/2 heads), 80 rows at 700, P as bf16", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .p0 = 700, .n = 80, .p32 = false },
 };
 
 pub const sliding_prompt = [_]PCase{
