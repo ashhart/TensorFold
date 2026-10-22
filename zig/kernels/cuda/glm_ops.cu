@@ -3,19 +3,23 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
-// sparse.select_tokens' assembly, a block a row: the K pools' 4 tokens each, then the last pool's visible tail.
+constexpr long long PAGE = 512;  // rows a KV page holds
+
+// sparse.select_tokens' assembly, a block a row: K pools' 4 tokens, then the tail; on pages each token's row in them.
 extern "C" __global__ void tf_glm_dsa_tokens(const long long* __restrict__ pools, const int* __restrict__ pos, int K,
-                                             int* __restrict__ tokens, int* __restrict__ counts) {
+                                             int* __restrict__ tokens, int* __restrict__ counts,
+                                             const int* __restrict__ pt, long long page_rows) {
     const int r = blockIdx.x;
     const long long q = static_cast<long long>(*pos) + r;
     const long long npool = (q + 1) / 4;
     const int width = 4 * K + 3;
     int* row = tokens + static_cast<long long>(r) * width;
+    auto at = [&](long long t) { return static_cast<int>(pt ? pt[t / PAGE] * page_rows + t % PAGE : t); };
     for (int i = threadIdx.x; i < 4 * K; i += blockDim.x)
-        row[i] = static_cast<int>(pools[static_cast<long long>(r) * K + i / 4] * 4 + i % 4);
+        row[i] = at(pools[static_cast<long long>(r) * K + i / 4] * 4 + i % 4);
     if (threadIdx.x < 3) {
         const long long t = npool * 4 + threadIdx.x;
-        row[4 * K + threadIdx.x] = t <= q ? static_cast<int>(t) : -1;
+        row[4 * K + threadIdx.x] = t <= q ? at(t) : -1;
     }
     if (threadIdx.x == 0) {
         int tail = 0;

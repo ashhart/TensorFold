@@ -49,7 +49,7 @@ pub fn headScale(heads: usize) f32 {
 /// The scratch of one selectTokens: scores fp32 [min(rows, 512)][np], and with np past select_list the list rows.
 pub const Scratch = struct { scores: u64, ls: u64, li: u64, pools: u64, at: u64 };
 
-/// sparse.select_tokens: each row's tokens (i32 [rows][width], ascending, -1 padded), count 0 under the dense limit.
+/// sparse.select_tokens: rows' tokens (i32 [rows][width], ascending, -1 padded; on pages their rows); count 0 if dense.
 pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64) !void {
     return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, t, pos, host_pos, rows, heads, d, np_max_cap, s, tokens, counts, null);
 }
@@ -94,6 +94,8 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
     args.add(@as(c_int, topk_pools));
     args.add(tokens);
     args.add(counts);
+    args.add(t.pt);
+    args.add(@as(i64, @intCast(t.page_rows)));
     try cuda.launch.launch(assemble, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &args);
 }
 

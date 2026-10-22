@@ -67,9 +67,9 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
   const int64_t r = blockIdx.x, h0 = (int64_t)blockIdx.y * HB, c = blockIdx.z;
   const int64_t n = sparse ? cnt[r] : 0, limit = sparse ? 0 : (int64_t)pos[0] + r, start = c * CH;
   const bool live = sparse ? start < n : start <= limit;
-  const int64_t page_elems = pstep / 2;
-  // a tile's keys: one loop for rows in order and one through the stream's table, so each unrolls as main's
-  auto load_paged = [&](int tile, auto paged) {
+  // a dense chunk's 512 keys are one page, its rows from that page's; a sparse key's row comes as the token list has it
+  const __nv_bfloat16* keys_at = !FP8 && pt && !sparse && live ? lc + ((int64_t)pt[c] * (pstep / 2) - start * LW) : lc;
+  auto load_kv = [&](int tile) {
     __nv_bfloat16* dst = kvs + (tile & 1) * KT * LW;
     const int64_t first = start + tile * KT;
     for (int idx = t; idx < KT * (LW / 8); idx += blockDim.x) {
@@ -89,16 +89,9 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
           dst[wide(key, u) + j + 1] = __float2bfloat16_rn(__fmul_rn(v.y, row_scale));
         }
       } else {
-        const int64_t at = decltype(paged)::value ? (int64_t)pt[src / CH] * page_elems + (src % CH) * LW : src * LW;
-        cp16(dst + wide(key, u), lc + at + u * 8, ok);
+        cp16(dst + wide(key, u), keys_at + src * LW + u * 8, ok);
       }
     }
-  };
-  auto load_kv = [&](int tile) {
-    if (!FP8 && pt)  // an FP8 cache takes no pages
-      load_paged(tile, glm_pages::Paged<true>{});
-    else
-      load_paged(tile, glm_pages::Paged<false>{});
   };
   float m[MT][2], l[MT][2], o[MT][8][4];
   for (int i = 0; i < MT; ++i)

@@ -137,7 +137,7 @@ test "GLM FP8 KV: an FP8 cache takes no page table, so its writes and reads refu
     inline for (@typeInfo(glue.Kernels).@"struct".field_names) |name| @field(ks, name) = .{ .d = &d, .handle = @ptrFromInt(10) };
     const set: glue.Set = .{ .glue = &ks };
     const stream: cuda.Stream = .{ .d = &d, .handle = null };
-    const paged: latent.Table = .{ .pt = 900, .ps = 6_684_672 };
+    const paged: latent.Table = .{ .pt = 900, .ps = 6_684_672, .page_rows = 6_528 };
     const p: latent.Partials = .{ .po = 1000, .pm = 2000, .pl = 3000 };
     Launch.n = 0;
     try t.expectError(error.Fp8OnPages, latent.latentWriteFormat(set, stream, 100, 512, 200, 400, paged, 300, 3, 512));

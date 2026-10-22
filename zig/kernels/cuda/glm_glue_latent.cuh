@@ -68,12 +68,6 @@ extern "C" __global__ void __launch_bounds__(128)
 
 namespace glm_pages {
 
-// Whether a loop reads through a stream's table, known when it compiles (each form unrolls on its own).
-template <bool B>
-struct Paged {
-  static constexpr bool value = B;
-};
-
 // Row r's first element in a cache of `width`-element rows: in order (pt null), or row r % P of page pt[r / P].
 template <int P>
 __device__ __forceinline__ int64_t at(const int* pt, int64_t page_elems, int64_t r, int64_t width) {
