@@ -1,7 +1,8 @@
-//! Gemma 4's CUDA launch records (act_rows' activations and soft cap, embed_rows', qk_rows', vit's wide LayerNorm).
+//! Gemma 4's CUDA launch records: act_rows, embed_rows, qk_rows, the wide LayerNorm and picks to ids.
 const CudaRecord = @import("registry.zig").CudaRecord;
 
 pub const cuda = [_]CudaRecord{
+    .{ .launch = .{ .name = "tree_round tf_round_pick_ids", .symbol = "tf_round_pick_ids", .image = "tree_round", .threads = 256 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "vit tf_vit_layer_norm_wide", .symbol = "tf_vit_layer_norm_wide", .image = "vit", .threads = 256 }, .usage = .{ .{ .regs = 48, .static = 32, .bound = 256 }, .{ .regs = 48, .static = 32, .bound = 256 }, .{ .regs = 48, .static = 32, .bound = 256 }, .{ .regs = 80, .static = 32, .bound = 256 }, .{ .regs = 80, .static = 32, .bound = 256 } } },
     .{ .launch = .{ .name = "act_rows tf_geglu_rows 256 threads", .symbol = "tf_geglu_rows", .image = "act_rows", .threads = 256 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "act_rows tf_geglu_rows 128 threads", .symbol = "tf_geglu_rows", .image = "act_rows", .threads = 128 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 } } },
