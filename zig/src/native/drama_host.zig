@@ -457,3 +457,59 @@ test "native silence guard: a finished job publishes its reason and mid trip ali
         }
     }
 }
+
+test "native silence guard: onset and mid rules together cut and relabel as each alone, whole and stream" {
+    if (!is_cuda) return error.SkipZigTest;
+    const Fake = struct {
+        pcm: []const f32,
+        var finished: ?api.Reason = null;
+        pub fn flush(t: *@This(), from: usize, to: usize, sink: d3.tts.Sink) !void {
+            try sink.audio(sink.ctx, t.pcm[from * 2 .. to * 2]);
+        }
+        fn event(_: *anyopaque, _: api.Id, e: *const api.Event) void {
+            if (e.* == .finished) finished = e.finished.reason;
+        }
+        fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            return cuda.abi.success;
+        }
+    };
+    var e: d3.Engine = undefined;
+    e.driver.api.cuStreamSynchronize = Fake.wait;
+    e.stream = .borrowed(&e.driver, null);
+    e.stream2 = .borrowed(&e.driver, null);
+    var tts: d3.tts.Tts = undefined;
+    tts.e = &e;
+    tts.cs = .borrowed(&e.driver, null);
+    const both: api.speech_guard.Config = .{ .floor_dbfs = -20, .seconds = 1, .onset_seconds = 0.5, .onset_voiced_seconds = 0.5, .mid_seconds = 0.5, .mid_min_voiced_s = 0.25 };
+    var onset = both;
+    onset.mid_seconds = null;
+    onset.mid_min_voiced_s = null;
+    var mid = both;
+    mid.onset_seconds = null;
+    mid.onset_voiced_seconds = null;
+    const early = [_]f32{ 0.25, -0.25, 0, 0, 0, 0, 0.25, -0.25 };
+    const late = [_]f32{ 0.25, -0.25, 0.25, -0.25, 0, 0, 0, 0 };
+    const cases = [_]struct { []const f32, api.speech_guard.Config, usize, bool }{ .{ &early, onset, 6, false }, .{ &late, mid, late.len, true } };
+    for (cases) |case| {
+        const pcm, const alone, const kept, const mid_trip = case;
+        for ([_]api.speech_guard.Config{ both, alone }) |silence| {
+            for ([_]bool{ false, true }) |stream| {
+                Fake.finished = null;
+                var out: [late.len]f32 = undefined;
+                var result: api.SpeechResult = .{};
+                const r: api.SpeechRequest = .{ .prompt = &.{}, .pcm = &out, .result = &result, .seed = 0, .max_frames = 16, .stream = stream };
+                var t: Fake = .{ .pcm = pcm };
+                var h: Host = .{ .gpa = std.testing.allocator, .io = std.testing.io, .limit = undefined, .queue = try rounds.Queue.init(1), .info_ = .{}, .silence = silence };
+                h.sessions[0] = .{ .e = &e, .t = &tts };
+                const lane = try h.queue.admit();
+                h.jobs[lane] = .{ .id = 0, .request = &r, .sink = .{ .ctx = &t, .event = Fake.event }, .guard = .init(silence, 8), .frame_length = 2 };
+                for (0..pcm.len / 2) |_| if (h.jobs[lane] != null) try h.produced(lane, &t, false);
+                if (h.jobs[lane] != null) try h.produced(lane, &t, true);
+                try std.testing.expectEqual(api.Reason.silence, Fake.finished.?);
+                try std.testing.expectEqual(kept, result.samples);
+                try std.testing.expectEqual(mid_trip, result.silence_mid);
+                try std.testing.expectEqualSlices(f32, pcm[0..kept], out[0..kept]);
+            }
+        }
+    }
+}

@@ -235,3 +235,42 @@ test "mid voiced calibration has no default and must be positive and finite" {
     c.mid_seconds = null;
     try std.testing.expectError(error.MissingSilenceMidVoiced, c.validate());
 }
+
+test "onset and mid rules together: the onset cut keeps its frame and the mid relabel is unchanged" {
+    const both: Config = .{ .floor_dbfs = -20, .seconds = 1, .onset_seconds = 0.5, .onset_voiced_seconds = 0.5, .mid_seconds = 0.5, .mid_min_voiced_s = 0.25 };
+    try both.validate();
+    var bad_mid = both;
+    bad_mid.mid_seconds = 1;
+    try std.testing.expectError(error.BadSilenceMidSeconds, bad_mid.validate());
+    var bad_onset = both;
+    bad_onset.onset_seconds = 1;
+    try std.testing.expectError(error.BadSilenceOnset, bad_onset.validate());
+    var onset = both;
+    onset.mid_seconds = null;
+    onset.mid_min_voiced_s = null;
+    var mid = both;
+    mid.onset_seconds = null;
+    mid.onset_voiced_seconds = null;
+    // one voiced frame, then the onset run: cut after sample 6, never a mid trip
+    const early = [_]f32{ 0.25, -0.25, 0, 0, 0, 0, 0.25, -0.25 };
+    // two voiced frames clear the onset minimum; speech then ends in a mid run
+    const late = [_]f32{ 0.25, -0.25, 0.25, -0.25, 0, 0, 0, 0 };
+    const cases = [_]struct { []const f32, Config, usize, bool }{ .{ &early, onset, 6, false }, .{ &late, mid, late.len, true } };
+    for (cases) |case| {
+        const pcm, const alone, const kept, const mid_trip = case;
+        var together = Guard.init(both, 8);
+        var single = Guard.init(alone, 8);
+        try std.testing.expectEqual(kept, together.hear(pcm, 2));
+        try std.testing.expectEqual(kept, single.hear(pcm, 2));
+        together.endSpeech();
+        single.endSpeech();
+        try std.testing.expect(together.tripped and single.tripped);
+        try std.testing.expectEqual(mid_trip, together.mid_tripped);
+        try std.testing.expectEqual(mid_trip, single.mid_tripped);
+    }
+    var buf: [256]u8 = undefined;
+    const rules = "a reply ends after 1 s below -20 dBFS, or after 0.5 s below it with under 0.5 s voiced" ++
+        ", or as silence when it stops after 0.5 s below it with at least 0.25 s voiced";
+    try std.testing.expectEqualStrings(rules, try std.fmt.bufPrint(&buf, "{f}", .{both}));
+    try std.testing.expect(both.refusal("nemotron_h") != null and both.refusal("fish_omni") == null);
+}
