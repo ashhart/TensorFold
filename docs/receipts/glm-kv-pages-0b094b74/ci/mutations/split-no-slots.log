@@ -66,7 +66,7 @@ error: 'kv_pool_test.test.a family without snapshot slots (snap_bytes 0) keeps i
        ???:?:?: 0x76317142a1c9 in ??? (/lib/x86_64-linux-gnu/libc.so.6)
        ???:?:?: 0x76317142a28a in ??? (/lib/x86_64-linux-gnu/libc.so.6)
        <home>/.local/share/zig/0.17.0/lib/libc/glibc/sysdeps/x86_64/start.S:115: 0x1273b80 in ??? (<home>/.local/share/zig/0.17.0/lib/libc/glibc/sysdeps/x86_64/start.S)
-       	call *__libc_start_main@GOTPCREL(%rip)
+        call *__libc_start_main@GOTPCREL(%rip)
 failed command: ./.zig-cache/o/60d8dfd727b922786662e0a5baa04c7d/test --cache-dir=./.zig-cache --seed=0xe4775c52 --listen=-
 
 test-cuda-host
@@ -227,7 +227,7 @@ error: 'kv_pool_test.test.a family without snapshot slots (snap_bytes 0) keeps i
        ???:?:?: 0x7246b5a2a1c9 in ??? (/lib/x86_64-linux-gnu/libc.so.6)
        ???:?:?: 0x7246b5a2a28a in ??? (/lib/x86_64-linux-gnu/libc.so.6)
        <home>/.local/share/zig/0.17.0/lib/libc/glibc/sysdeps/x86_64/start.S:115: 0x18c4770 in ??? (<home>/.local/share/zig/0.17.0/lib/libc/glibc/sysdeps/x86_64/start.S)
-       	call *__libc_start_main@GOTPCREL(%rip)
+        call *__libc_start_main@GOTPCREL(%rip)
 failed command: ./.zig-cache/o/95e1f11febf0419dc0bbd475a795c043/test --cache-dir=./.zig-cache --seed=0xe4775c52 --listen=-
 
 test-cuda-host
@@ -255,7 +255,7 @@ error: 'cuda_kv_pool.test.kv pages: a family without snapshot slots keeps the pa
        ???:?:?: 0x73fedda2a1c9 in ??? (/lib/x86_64-linux-gnu/libc.so.6)
        ???:?:?: 0x73fedda2a28a in ??? (/lib/x86_64-linux-gnu/libc.so.6)
        <home>/.local/share/zig/0.17.0/lib/libc/glibc/sysdeps/x86_64/start.S:115: 0x1b74c90 in ??? (<home>/.local/share/zig/0.17.0/lib/libc/glibc/sysdeps/x86_64/start.S)
-       	call *__libc_start_main@GOTPCREL(%rip)
+        call *__libc_start_main@GOTPCREL(%rip)
 failed command: ./.zig-cache/o/f2f83e982948e01e227ce8de6414cdba/test --cache-dir=./.zig-cache --seed=0xe4775c52 --listen=-
 
 test-cuda-host

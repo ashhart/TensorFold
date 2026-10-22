@@ -57,7 +57,7 @@ error: 'cuda_pages_test.test.a follower refuses rank 0's pool when its KV page h
        ???:?:?: 0x7384fea2a1c9 in ??? (/lib/x86_64-linux-gnu/libc.so.6)
        ???:?:?: 0x7384fea2a28a in ??? (/lib/x86_64-linux-gnu/libc.so.6)
        <home>/.local/share/zig/0.17.0/lib/libc/glibc/sysdeps/x86_64/start.S:115: 0x15c60e0 in ??? (<home>/.local/share/zig/0.17.0/lib/libc/glibc/sysdeps/x86_64/start.S)
-       	call *__libc_start_main@GOTPCREL(%rip)
+        call *__libc_start_main@GOTPCREL(%rip)
 failed command: ./.zig-cache/o/a2dc34497a1af0129cd47dc0aa18eb6c/test --cache-dir=./.zig-cache --seed=0x6a94415d --listen=-
 
 test-cuda-host

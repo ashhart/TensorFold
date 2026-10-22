@@ -91,7 +91,8 @@ when a request failed or a reply differed). `tf-cuda-test glm-paged-check CKPT R
 
 ## Publication handling
 
-CRLF line ends made LF and trailing blanks dropped; machine names, internal addresses, home and local paths, and the
+CRLF line ends made LF, trailing blanks dropped and an indent with a space before a tab made spaces (as `git diff
+--check` asks; four lines of two mutations' stack traces); machine names, internal addresses, home and local paths, and the
 work's session, plan, records, container and image names replaced with placeholders (`redaction-report.json` counts
 them a file; host-a to host-c run TP=3's ranks 0 to 2, host-d and host-e TP=2's ranks 0 and 1); result values, token
 ids and token hashes kept. The TP=3 server logs keep NCCL's INFO lines as they were written. The reuse records keep
