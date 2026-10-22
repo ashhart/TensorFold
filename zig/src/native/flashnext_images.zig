@@ -136,8 +136,9 @@ pub fn budgetSettings(io: std.Io, dir: []const u8, vision: ?api.VisionOpen, pair
     return memory.withPlan(settings, p.memory);
 }
 
-/// The request's images through the tower, but those ending by `from` (resumed past): the prompt pass's rows and frame.
-pub fn build(v: *Vision, eng: *fx.Engine, a: Allocator, images: []const api.Image, prompt_len: usize, from: usize) !*vp.VisPrompt {
+/// The request's images through the tower, but those ending by `from` (resumed past): the prompt pass's rows and frame,
+/// the standard one with `standard` (the shared sessions': a prefix keeps its positions), else the shifted one.
+pub fn build(v: *Vision, eng: *fx.Engine, a: Allocator, images: []const api.Image, prompt_len: usize, from: usize, standard: bool) !*vp.VisPrompt {
     const merge = v.c.merge;
     var total: usize = 0;
     const spans = try a.alloc(vp.Span, images.len);
@@ -167,7 +168,8 @@ pub fn build(v: *Vision, eng: *fx.Engine, a: Allocator, images: []const api.Imag
     std.log.info("flash next vision: {d} images, {d} tokens through the tower in {d:.1} ms", .{ images.len, total, @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) / 24e3 });
     const p = try a.create(vp.VisPrompt);
     const last = spans[spans.len - 1];
-    p.* = .{ .rows = rows, .spans = spans, .pos3 = try vp.frame(a, spans), .frame_end = last.at + last.n, .prep = v.prep.prep };
+    const pos3 = if (standard) try vp.standardFrame(a, spans) else try vp.frame(a, spans);
+    p.* = .{ .rows = rows, .spans = spans, .pos3 = pos3, .frame_end = last.at + last.n, .delta = if (standard) @intCast(-vp.shiftOf(spans)) else 0, .prep = v.prep.prep };
     return p;
 }
 

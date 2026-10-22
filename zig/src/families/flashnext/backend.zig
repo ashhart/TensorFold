@@ -399,7 +399,14 @@ pub const Backend = struct {
         }
         t.rows.b.slice(i32, 1)[0] = @intCast(plan.total);
         t.mdims.b.slice(i32, 2)[0] = @intCast(plan.total);
-        @memcpy(t.pos8.b.slice(u32, fz.MAXR)[0..plan.total], plan.positions[0..plan.total]);
+        const pos8 = t.pos8.b.slice(u32, fz.MAXR);
+        @memcpy(pos8[0..plan.total], plan.positions[0..plan.total]);
+        for (windows, 0..) |w, i| { // an image stream's rows past its last image rotate at their slot plus its delta
+            const d = (try b.session(w.stream)).m.delta;
+            if (d != 0) for (pos8[plan.starts[i]..][0..w.rows()]) |*p| {
+                p.* = @intCast(@as(i64, p.*) + d);
+            };
+        }
         const cb = b.e.r.queue.commandBuffer();
         b.e.r.enc = cb.compute(.serial);
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);

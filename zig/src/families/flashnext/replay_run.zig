@@ -110,6 +110,7 @@ pub const Run = struct {
     gsel: ?GSelect = null, // the same in GPU-side rounds
     sel_meta_pipe: mtl.Pipeline = undefined,
     pool_abs_pipe: mtl.Pipeline = undefined,
+    pool_pos_pipe: mtl.Pipeline = undefined, // fz_idx_pool_pos: an image stream's blocks at their three positions (the standard frame)
     ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
 
     load_limit: u64 = 0,

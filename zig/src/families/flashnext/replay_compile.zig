@@ -119,6 +119,7 @@ pub fn compileGlue(r: *Run) !void {
     const slib = try r.ownResource(try mtl.Library.fromSource(r.device, @import("rotary_cache.zig").forRun(r, ks.flashnext_select), mtl.CompileOptions.mlx()));
     r.sel_meta_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, slib, "fz_sel_meta", false));
     r.pool_abs_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, slib, "fz_idx_pool_abs", false));
+    r.pool_pos_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, slib, "fz_idx_pool_pos", false));
     r.sink = .{ .b = try r.buffer(64) };
 }
 

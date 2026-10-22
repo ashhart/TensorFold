@@ -374,7 +374,7 @@ pub const Host = struct {
                 fin.message = "this server reads no images (start it with --vision)";
                 return;
             };
-            vis = images.build(v, h.eng, arena.allocator(), r.images, r.prompt.len, plan.from) catch |e| {
+            vis = images.build(v, h.eng, arena.allocator(), r.images, r.prompt.len, plan.from, false) catch |e| {
                 emit(job, .{ .prefilled = 0 });
                 fin.message = @errorName(e);
                 return;
