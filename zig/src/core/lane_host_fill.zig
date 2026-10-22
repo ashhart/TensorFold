@@ -1,4 +1,5 @@
 //! Prefer foreground and least remaining prefill work, with bounded waiting for every admitted fill.
+const std = @import("std");
 const LaneHost = @import("lane_host.zig").LaneHost;
 
 pub const preference_rounds = 8;
@@ -36,4 +37,57 @@ pub fn unfill(h: *LaneHost, job: anytype) void {
         _ = h.filling.orderedRemove(i);
         return;
     };
+}
+
+/// Prompt steps' share p of wall time beside decoders (TENSORFOLD_PREFILL_SHARE): a step of t owes them t (1 - p) / p.
+pub const Share = struct {
+    p: f64 = 1,
+    debt_ns: i64 = 0, // decode time owed before the next step of a long prompt
+
+    pub const short_rows = 512;
+
+    pub fn fromEnv() Share {
+        const v = std.c.getenv("TENSORFOLD_PREFILL_SHARE") orelse return .{};
+        const p = std.fmt.parseFloat(f64, std.mem.span(v)) catch return .{};
+        return .{ .p = if (p > 0 and p <= 1) p else 1 };
+    }
+
+    /// A step that took `ns` while `decoding` streams were live: the decode time it owes them.
+    pub fn stepped(s: *Share, ns: i64, decoding: bool) void {
+        if (s.p >= 1 or !decoding) return;
+        s.debt_ns += @intFromFloat(@as(f64, @floatFromInt(ns)) * (1 - s.p) / s.p);
+    }
+
+    /// A decode round of `ns` pays the debt down.
+    pub fn rounded(s: *Share, ns: i64) void {
+        s.debt_ns = @max(0, s.debt_ns - ns);
+    }
+};
+
+/// A prompt step runs now: none owed, nothing decoding, or a short prompt waiting (it goes first, least remaining).
+pub fn due(h: *LaneHost) bool {
+    if (h.filling.items.len == 0) {
+        h.share.debt_ns = 0;
+        return false;
+    }
+    if (h.share.debt_ns <= 0 or h.core.activeCount() == 0) return true;
+    for (h.filling.items) |j| if (remaining(h, j) <= Share.short_rows) return true;
+    return false;
+}
+
+test "a share of 0.5 owes the decoders a step's time; 1 owes nothing; rounds pay it down" {
+    var s: Share = .{ .p = 0.5 };
+    s.stepped(1000, true);
+    try std.testing.expectEqual(@as(i64, 1000), s.debt_ns);
+    s.stepped(1000, false);
+    try std.testing.expectEqual(@as(i64, 1000), s.debt_ns);
+    s.rounded(400);
+    s.rounded(800);
+    try std.testing.expectEqual(@as(i64, 0), s.debt_ns);
+    var one: Share = .{};
+    one.stepped(1000, true);
+    try std.testing.expectEqual(@as(i64, 0), one.debt_ns);
+    var q: Share = .{ .p = 0.25 };
+    q.stepped(1000, true);
+    try std.testing.expectEqual(@as(i64, 3000), q.debt_ns);
 }
