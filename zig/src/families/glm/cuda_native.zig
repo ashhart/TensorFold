@@ -61,16 +61,16 @@ pub const Loaded = struct {
     target: *engine.Engine, // the prompt cache keeps this engine's states (snap_*)
     peer_room: ?Peer = null, // rank 0: the server admits streams and kept states by this when it is smaller
     vision: ?*images_mod.Images = null, // rank 0's tower for the server's image offer
-    layout: ?kv.Layout = null, // the other streams' memory as one pool of KV pages (null: a window each, by TF_KV_PAGES)
+    layout: ?kv.Layout = null, // every stream's memory as one pool of KV pages (null: a window each, by TF_KV_PAGES)
+    engine_paged: bool = false, // with a layout, the engine's own sequence takes pages too: the plan sets a window aside
 };
 
-/// The pool behind the engine's own sequence: `streams` paged sequences and `pages` KV pages, on every rank.
+/// The pool behind every stream: the engine's own sequence and `streams` more on `pages` KV pages, on every rank.
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const own: *Owned = @ptrCast(@alignCast(p));
     const l = own.layout orelse return error.NoPages;
-    try own.lanes.x.pool(streams, pages, l.pageBytes());
-    own.e.pages = try pages_mod.Pages.init(own.gpa, own.e, l, streams, pages, true);
-    own.lanes.paged_only = own.paging == .all and streams > 0; // --parallel 1 has no paged stream
+    try own.lanes.x.pool(streams + 1, pages, l.pageBytes());
+    own.e.pages = try pages_mod.Pages.init(own.gpa, own.e, l, streams + 1, pages, true);
 }
 
 /// Whether a request's caches fit now (the lane host's admission, on its engine thread).
@@ -122,7 +122,6 @@ const Owned = struct {
     e: *engine.Engine,
     link: follow.Link,
     lanes: glm_lanes.Lanes,
-    paging: Paging,
     layout: ?kv.Layout,
 };
 
@@ -156,16 +155,14 @@ pub fn roceBytes(text: ?[]const u8) !usize {
     return std.math.mul(usize, n, 1024) catch return error.BadRoceCap;
 }
 
-/// TF_KV_PAGES: on pages every stream past the engine's own, off (or 0) none, all every stream (checks).
-const Paging = enum { off, on, all };
-
-/// Unset or auto pages from TP=3: two GB10s' room past the weights is under the prompt cache, funded before pages.
-fn paging(text: ?[]const u8, world: usize, kv8: bool) !Paging {
+/// TF_KV_PAGES: every sequence on pages, the engine's own too (on, all, any other value), or a window each (off, 0).
+fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
     const v = text orelse "auto";
-    if (std.mem.eql(u8, v, "auto")) return if (world >= 3 and !kv8) .on else .off; // an FP8 cache keeps its windows
-    if (std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off")) return .off;
+    // unset or auto pages from TP=3 (two GB10s' room past the weights is under the prompt cache); FP8 keeps windows
+    if (std.mem.eql(u8, v, "auto")) return world >= 3 and !kv8;
+    if (std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off")) return false;
     if (kv8) return error.Fp8OnPages;
-    return if (std.mem.eql(u8, v, "all")) .all else .on;
+    return true;
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -179,6 +176,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         return err;
     };
     set.kv8 = o.kv8;
+    set.pages = try paging(if (std.c.getenv("TF_KV_PAGES")) |v| std.mem.span(v) else null, p.world, o.kv8); // every rank
     // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
     if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
     return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes) catch |err| {
@@ -292,8 +290,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
     own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED") };
     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
-    own.paging = try paging(if (std.c.getenv("TF_KV_PAGES")) |v| std.mem.span(v) else null, p.world, o.kv8); // the others follow its pool step
-    own.layout = if (own.paging == .off) null else try pages_mod.layout(gpa, own.e, extra);
+    own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
     return .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
@@ -306,6 +303,7 @@ fn finishRank(a: OpenArgs) !Loaded {
         .peer_room = peer,
         .vision = own.e.images,
         .layout = own.layout,
+        .engine_paged = set.pages,
     };
 }
 
@@ -425,30 +423,30 @@ test "a checkpoint refused for its format, at the entry or by the loader, is exp
     for ([_]anyerror{ error.NotModelOpt, error.UnsupportedQuant, error.UnreadableFormat }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
-test "TF_KV_PAGES: auto pages from three ranks, off and 0 give windows, all pages every stream, other values page" {
+test "TF_KV_PAGES: auto pages from three ranks, off and 0 give windows, all and other values page like on" {
     for ([_]usize{ 1, 2 }) |w| {
-        try std.testing.expectEqual(Paging.off, try paging(null, w, false));
-        try std.testing.expectEqual(Paging.off, try paging("auto", w, false));
+        try std.testing.expect(!try paging(null, w, false));
+        try std.testing.expect(!try paging("auto", w, false));
     }
     for ([_]usize{ 3, 16 }) |w| {
-        try std.testing.expectEqual(Paging.on, try paging(null, w, false));
-        try std.testing.expectEqual(Paging.on, try paging("auto", w, false));
+        try std.testing.expect(try paging(null, w, false));
+        try std.testing.expect(try paging("auto", w, false));
     }
     for ([_]usize{ 1, 2, 3 }) |w| {
-        try std.testing.expectEqual(Paging.on, try paging("on", w, false));
-        try std.testing.expectEqual(Paging.on, try paging("1", w, false));
-        try std.testing.expectEqual(Paging.off, try paging("off", w, false));
-        try std.testing.expectEqual(Paging.off, try paging("0", w, false));
-        try std.testing.expectEqual(Paging.all, try paging("all", w, false));
+        try std.testing.expect(try paging("on", w, false));
+        try std.testing.expect(try paging("1", w, false));
+        try std.testing.expect(!try paging("off", w, false));
+        try std.testing.expect(!try paging("0", w, false));
+        try std.testing.expect(try paging("all", w, false));
     }
 }
 
 test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank count, on and all are refused by name" {
     for ([_]usize{ 1, 2, 3, 16 }) |w| {
-        try std.testing.expectEqual(Paging.off, try paging(null, w, true));
-        try std.testing.expectEqual(Paging.off, try paging("auto", w, true));
-        try std.testing.expectEqual(Paging.off, try paging("off", w, true));
-        try std.testing.expectEqual(Paging.off, try paging("0", w, true));
+        try std.testing.expect(!try paging(null, w, true));
+        try std.testing.expect(!try paging("auto", w, true));
+        try std.testing.expect(!try paging("off", w, true));
+        try std.testing.expect(!try paging("0", w, true));
         for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
     }
     try std.testing.expect(explain(null, error.Fp8OnPages) != null);

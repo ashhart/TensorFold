@@ -24,19 +24,38 @@ pub fn need(l: kv.Layout, prompt: usize, max_tokens: usize) usize {
     return l.need(prompt, max_tokens, fw.window_rows);
 }
 
+/// The engine's own sequence (slot 0) when it pages, bound: its fixed part and table, no rows until its pool places it.
+pub fn ownSequence(e: *Engine) !void {
+    if (e.seqs.items.len == 0) try e.seqs.append(e.gpa, null);
+    if (e.seqs.items[0] != null) return error.SlotTaken;
+    const q = try e.gpa.create(types.Seq);
+    errdefer e.gpa.destroy(q);
+    q.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, on(e, 0, state.pageBytes(&e.w))) };
+    e.seqs.items[0] = q;
+    e.cur = q;
+    e.slot = 0;
+}
+
+/// A sequence's place on the pages at `kv`: a table as long as a stream's window.
+fn on(e: *const Engine, kv_at: u64, page: u64) state.Paged {
+    return .{ .kv = kv_at, .pages = tableLen(e.capacity), .page_bytes = page };
+}
+
 pub const Pages = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
     layout: kv.Layout,
     pool: kv.Pool, // rank 0 takes and gives back pages; the other ranks map the ids it sends
     arena: ?cuda.DeviceBuffer,
-    leases: []kv.Lease, // paged slot 1 + i's: rank 0's lease, or the ids another rank mapped
+    leases: []kv.Lease, // slot i's: rank 0's lease, or the ids another rank mapped
     used: []bool,
     leader: bool,
     poison: bool, // TF_KV_POISON=1: a stream's pages start as NaN, so a row read before its write shows in the reply
 
-    /// `streams` paged sequences (slots 1..streams, beside the engine's own slot 0) and `pages` pages, all made now.
+    /// `streams` sequences from slot 0 on `pages` pages: the engine's own (`ownSequence`) placed, the others made now.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, pages: usize, leader: bool) !*Pages {
+        const own = if (e.seqs.items.len > 0) e.seqs.items[0] else null;
+        if (own == null or own.?.st.table == 0) return error.OwnNotPaged; // slot 0 holds a window, or none was made
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
         const page = l.pageBytes();
@@ -50,8 +69,8 @@ pub const Pages = struct {
         p.used = try gpa.alloc(bool, streams);
         errdefer gpa.free(p.used);
         @memset(p.used, false);
-        if (e.seqs.items.len < streams + 1) try e.seqs.appendNTimes(e.gpa, null, streams + 1 - e.seqs.items.len);
-        const seqs = e.seqs.items[1..][0..streams];
+        if (e.seqs.items.len < streams) try e.seqs.appendNTimes(e.gpa, null, streams - e.seqs.items.len);
+        const seqs = e.seqs.items[1..@max(streams, 1)];
         var made: usize = 0;
         errdefer for (seqs[0..made]) |*q| {
             q.*.?.st.deinit();
@@ -59,7 +78,7 @@ pub const Pages = struct {
             q.* = null;
         };
         errdefer cuda.completion.drain(e.d, e.stream, "GLM page construction did not drain");
-        const at: state.Paged = .{ .kv = if (p.arena) |a| a.ptr else 0, .pages = tableLen(e.capacity), .page_bytes = page };
+        const at = on(e, if (p.arena) |a| a.ptr else 0, page);
         for (seqs) |*q| {
             if (q.* != null) return error.SlotTaken; // attach comes before any stream
             const s = try e.gpa.create(types.Seq);
@@ -69,6 +88,7 @@ pub const Pages = struct {
             made += 1;
         }
         try e.stream.synchronize();
+        own.?.st.place(&e.w, at); // last: a failure before it leaves the engine's own as it was
         return p;
     }
 
@@ -102,7 +122,7 @@ pub const Pages = struct {
 
     /// Whether `slot` is one of the paged sequences.
     pub fn paged(p: *const Pages, slot: u32) bool {
-        return slot >= 1 and slot <= p.used.len;
+        return slot < p.used.len;
     }
 
     /// Whether a request's pages fit now and a paged sequence is free for it.
@@ -113,10 +133,10 @@ pub const Pages = struct {
 
     /// Rank 0: paged slot `slot` takes the pages of a prompt, its reply and a last window; LaneMemory: not yet.
     pub fn open(p: *Pages, slot: u32, prompt: usize, max_tokens: usize) ![]const u32 {
-        if (!p.paged(slot) or p.used[slot - 1]) return error.SlotTaken;
+        if (!p.paged(slot) or p.used[slot]) return error.SlotTaken;
         const n = need(p.layout, prompt, max_tokens);
         if (n > tableLen(p.e.capacity)) return error.PromptTooLong;
-        const l = &p.leases[slot - 1];
+        const l = &p.leases[slot];
         try p.pool.promise(l, n);
         errdefer p.pool.finish(l);
         var up: Upload = .{ .p = p, .slot = slot };
@@ -128,9 +148,9 @@ pub const Pages = struct {
     /// Another rank: paged slot `slot` maps rank 0's page ids (sent with the stream's begin step).
     pub fn map(p: *Pages, slot: u32, ids: []const u32) !void {
         if (!p.paged(slot) or ids.len == 0 or ids.len > tableLen(p.e.capacity)) return error.BadStep;
-        if (p.used[slot - 1]) return error.BadStep;
+        if (p.used[slot]) return error.BadStep;
         for (ids) |id| if (id >= p.pool.total()) return error.BadStep;
-        const l = &p.leases[slot - 1];
+        const l = &p.leases[slot];
         l.ids.clearRetainingCapacity();
         try l.ids.appendSlice(p.gpa, ids);
         errdefer l.ids.clearRetainingCapacity();
@@ -146,18 +166,18 @@ pub const Pages = struct {
         if (p.poison) for (ids) |id| try p.e.d.check(p.e.d.api.cuMemsetD32Async(p.arena.?.ptr + id * page, 0xFFFF_FFFF, page / 4, p.e.stream.handle), "cuMemsetD32Async");
         st.pages = ids;
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
-        p.used[slot - 1] = true;
+        p.used[slot] = true;
     }
 
     /// The stream on paged slot `slot` ended: its sequence reaches no rows, and rank 0's lease gives its pages back.
     pub fn close(p: *Pages, slot: u32) void {
-        if (!p.paged(slot) or !p.used[slot - 1]) return;
+        if (!p.paged(slot) or !p.used[slot]) return;
         const st = &p.e.seqs.items[slot].?.st;
         st.pages = &.{};
         st.capacity = 0;
-        p.used[slot - 1] = false;
-        if (!p.leader) return p.leases[slot - 1].ids.clearRetainingCapacity();
-        p.pool.finish(&p.leases[slot - 1]);
+        p.used[slot] = false;
+        if (!p.leader) return p.leases[slot].ids.clearRetainingCapacity();
+        p.pool.finish(&p.leases[slot]);
         for (p.used) |u| if (u) return;
         p.report();
     }

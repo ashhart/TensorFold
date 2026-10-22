@@ -44,7 +44,6 @@ pub const Lanes = struct {
     x: follow.Leader,
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
-    paged_only: bool = false, // TF_KV_PAGES=all: every stream on pages, the engine's own sequence left idle (checks)
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -142,9 +141,9 @@ pub const Lanes = struct {
         };
     }
 
-    /// The lowest slot no stream holds (TF_KV_PAGES=all: past the engine's own).
+    /// The lowest slot no stream holds.
     fn freeSlot(self: *const Lanes) u32 {
-        var slot: u32 = @intFromBool(self.paged_only);
+        var slot: u32 = 0;
         while (true) : (slot += 1) {
             var it = self.lanes.valueIterator();
             const taken = while (it.next()) |l| {
@@ -295,25 +294,17 @@ pub const Lanes = struct {
         return pages;
     }
 
-    /// A paged slot's pages for a prompt and its reply (none on the engine's own); LaneMemory: the pool lacks them now.
+    /// A slot's pages for a prompt and its reply (none without a pool); LaneMemory: the pool lacks them now.
     fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize) ![]const u32 {
         const p = self.x.e.pages orelse return &.{};
-        if (slot == 0 and !self.paged_only) return &.{};
         if (!p.paged(slot)) return error.LaneMemory; // every paged sequence is taken
         p.close(slot); // a stream that opens again gives its earlier pages back first
         return p.open(slot, prompt, max_new);
     }
 
-    /// The lane host's admission: the engine's own sequence is free, or a paged one and the request's pages are.
+    /// The lane host's admission: with a pool, a paged sequence and the request's pages are free.
     pub fn fits(self: *const Lanes, prompt: usize, max_tokens: usize) bool {
         const p = self.x.e.pages orelse return true;
-        if (!self.paged_only) {
-            var it = self.lanes.valueIterator();
-            const own = while (it.next()) |l| {
-                if (l.slot == 0) break false;
-            } else true;
-            if (own) return true;
-        }
         return p.fits(prompt, max_tokens);
     }
 
@@ -545,7 +536,7 @@ pub const Lanes = struct {
         return true;
     }
 
-    /// The stream left the rounds: its sequence is freed on every rank (slot 0 stays for the next stream).
+    /// The stream left the rounds: its sequence is freed, or its pages given back, on every rank (slot 0 stays).
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const self = of(ptr);
         const kv = self.lanes.fetchRemove(s) orelse return;

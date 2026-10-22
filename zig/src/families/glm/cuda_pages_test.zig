@@ -87,14 +87,20 @@ const Fake = struct {
         f.e.w.layers = &f.layers;
     }
 
-    /// The pages first, then the sequences they made, as the engine frees every slot.
-    fn deinit(f: *Fake, p: *pages_mod.Pages) void {
-        p.deinit();
+    /// The pages first (if any), then every slot's sequence, as the engine frees them.
+    fn deinit(f: *Fake, p: ?*pages_mod.Pages) void {
+        if (p) |q| q.deinit();
         for (f.e.seqs.items) |q| if (q) |s| {
             s.st.deinit();
             f.e.gpa.destroy(s);
         };
         f.e.seqs.deinit(f.e.gpa);
+    }
+
+    /// The engine's own sequence as `Engine.init` makes it when TF_KV_PAGES pages, then the pool beside it.
+    fn pool(f: *Fake, l: anytype, streams: usize, pages: usize, leader: bool) !*pages_mod.Pages {
+        try pages_mod.ownSequence(&f.e);
+        return pages_mod.Pages.init(f.e.gpa, &f.e, l, streams, pages, leader);
     }
 };
 
@@ -103,9 +109,9 @@ test "a paged stream takes its request's pages, its table holds them in row orde
     try f.init(std.testing.allocator);
     const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
     try expectEqual(@as(u64, 2 * 1088), l.token_bytes); // a DSA layer and the MTP layer: 1,024 + 64 bytes each
-    const p = try pages_mod.Pages.init(std.testing.allocator, &f.e, l, 2, 8, true);
+    const p = try f.pool(l, 3, 8, true);
     defer f.deinit(p);
-    try expect(!p.paged(0) and p.paged(1) and p.paged(2) and !p.paged(3));
+    try expect(p.paged(0) and p.paged(1) and p.paged(2) and !p.paged(3));
     try expect(p.fits(600, 100));
     try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, try p.open(1, 600, 100)); // 708 rows: 2 pages
     const st1 = &f.e.seqs.items[1].?.st;
@@ -125,11 +131,43 @@ test "a paged stream takes its request's pages, its table holds them in row orde
     try std.testing.expectError(error.PromptTooLong, p.open(1, 4096, 0)); // past the window's table
 }
 
+test "the engine's own sequence holds no rows before its pool, then sits on the pool's pages and takes them like the others" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    try pages_mod.ownSequence(&f.e);
+    const own = f.e.seqs.items[0].?;
+    try expect(f.e.cur == own and f.e.slot == 0 and own.st.table != 0 and own.st.capacity == 0); // no window made
+    const live = F.live;
+    const p = try pages_mod.Pages.init(std.testing.allocator, &f.e, l, 2, 8, true);
+    defer f.deinit(p);
+    try expect(f.e.cur == own and f.e.seqs.items[0].? == own); // the same sequence: it is placed, not made again
+    try expectEqual(live + 2, F.live); // the pages' arena and slot 1's sequence
+    try expectEqual(p.arena.?.ptr, own.st.caches[0].lc); // its DSA layer's part of page 0 starts the arena
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, try p.open(0, 600, 100));
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, F.table(own.st.table, 2));
+    try expectEqual(@as(usize, 1024), own.st.capacity);
+    p.close(0);
+    try expect(own.st.capacity == 0 and p.pool.idle() and p.pool.census().free == 8);
+}
+
+test "a pool is refused while the engine's own sequence holds a window or was never made, and nothing is made for it" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    defer f.deinit(null);
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    try std.testing.expectError(error.OwnNotPaged, pages_mod.Pages.init(std.testing.allocator, &f.e, l, 2, 8, true));
+    try f.e.bind(0); // a window, as without TF_KV_PAGES
+    try std.testing.expectError(error.OwnNotPaged, pages_mod.Pages.init(std.testing.allocator, &f.e, l, 2, 8, true));
+    try expectEqual(@as(usize, 1), F.live); // the window alone
+    try expectEqual(@as(usize, 1), f.e.seqs.items.len);
+}
+
 test "a follower maps rank 0's ids, and refuses ids past its pool or a slot that is not paged" {
     var f: Fake = undefined;
     try f.init(std.testing.allocator);
     const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
-    const p = try pages_mod.Pages.init(std.testing.allocator, &f.e, l, 2, 8, false);
+    const p = try f.pool(l, 3, 8, false);
     defer f.deinit(p);
     try p.map(2, &.{ 5, 3, 7 });
     try std.testing.expectEqualSlices(u32, &.{ 5, 3, 7 }, F.table(f.e.seqs.items[2].?.st.table, 3));
@@ -145,46 +183,67 @@ test "a follower refuses rank 0's pool when its KV page has other bytes, and mak
     var f: Fake = undefined;
     try f.init(std.testing.allocator);
     const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    try pages_mod.ownSequence(&f.e);
     const more = l.pageBytes() + 1088 * 512; // rank 0 with one more paged layer
     try std.testing.expectError(error.RankMismatch, pages_mod.Pages.follow(std.testing.allocator, &f.e, 2, 8, more));
-    try expectEqual(@as(usize, 0), F.live); // no arena, no paged sequence
+    try expectEqual(@as(usize, 1), F.live); // the engine's own sequence alone: no arena, no paged sequence
     const p = try pages_mod.Pages.follow(std.testing.allocator, &f.e, 2, 8, l.pageBytes());
     defer f.deinit(p);
     try expect(!p.leader and p.pool.total() == 8);
 }
 
-test "TF_KV_PAGES=all: a stream past the paged sequences waits for one, and its slot is never made a whole window" {
+test "TF_KV_PAGES: a stream past the paged sequences waits for one, and its slot is never made a whole window" {
     var f: Fake = undefined;
     try f.init(std.testing.allocator);
     const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
-    const p = try pages_mod.Pages.init(std.testing.allocator, &f.e, l, 2, 8, true);
+    const p = try f.pool(l, 2, 8, true);
     defer f.deinit(p);
     f.e.pages = p;
-    var ln: Lanes = .{ .x = .{ .e = &f.e, .link = undefined }, .paged_only = true };
+    var ln: Lanes = .{ .x = .{ .e = &f.e, .link = undefined } };
     defer ln.lanes.deinit(f.e.gpa);
-    var streams: [3]lanes.Stream = undefined; // as many at once as lanes: two paged sequences and the engine's own idle
+    var streams: [3]lanes.Stream = undefined; // as many at once as lanes: the engine's own sequence and one more
     try expectEqual(@as(usize, 2), (try ln.seat(&streams[0], 600, 100)).len);
+    try expectEqual(@as(u32, 0), ln.lanes.get(&streams[0]).?.slot); // the engine's own takes pages too
     try expectEqual(@as(usize, 2), (try ln.seat(&streams[1], 600, 100)).len);
     const live = F.live;
-    try std.testing.expectError(error.LaneMemory, ln.seat(&streams[2], 600, 100)); // slot 3: past the paged ones
+    try std.testing.expectError(error.LaneMemory, ln.seat(&streams[2], 600, 100)); // slot 2: past the paged ones
     try expectEqual(live, F.live); // nothing allocated for it
-    try expectEqual(@as(usize, 3), f.e.seqs.items.len);
+    try expectEqual(@as(usize, 2), f.e.seqs.items.len);
     try expectEqual(@as(usize, 2), ln.lanes.count());
     _ = ln.lanes.remove(&streams[0]); // a stream ends: the one that waited takes its paged sequence
-    p.close(1);
+    p.close(0);
     _ = try ln.seat(&streams[2], 600, 100);
-    try expectEqual(@as(u32, 1), ln.lanes.get(&streams[2]).?.slot);
-    try expectEqual(@as(u32, 1), f.e.slot);
+    try expectEqual(@as(u32, 0), ln.lanes.get(&streams[2]).?.slot);
+    try expectEqual(@as(u32, 0), f.e.slot);
+}
+
+test "TF_KV_PAGES: the lane host admits a request by the pool alone, the engine's own sequence free or not" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    const p = try f.pool(l, 2, 8, true);
+    defer f.deinit(p);
+    f.e.pages = p;
+    var ln: Lanes = .{ .x = .{ .e = &f.e, .link = undefined } };
+    defer ln.lanes.deinit(f.e.gpa);
+    try expect(ln.fits(3000, 100)); // 7 of the 8 pages
+    var streams: [2]lanes.Stream = undefined;
+    _ = try ln.seat(&streams[0], 600, 100); // slot 0: 2 pages
+    _ = try ln.seat(&streams[1], 2000, 100); // slot 1: 5 pages
+    _ = ln.lanes.remove(&streams[0]);
+    p.close(0);
+    try expect(!ln.fits(3000, 100)); // the engine's own is free, but only 3 pages are
+    try expect(ln.fits(1000, 100));
 }
 
 test "TF_KV_POISON: every page a stream takes is filled with NaN before its rows are written" {
     var f: Fake = undefined;
     try f.init(std.testing.allocator);
     const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
-    const p = try pages_mod.Pages.init(std.testing.allocator, &f.e, l, 1, 8, true);
+    const p = try f.pool(l, 1, 8, true);
     defer f.deinit(p);
     p.poison = true;
-    _ = try p.open(1, 1200, 100);
+    _ = try p.open(0, 1200, 100);
     try expectEqual(@as(usize, 3), F.fills);
 }
 
@@ -193,9 +252,15 @@ fn made(gpa: std.mem.Allocator) !void {
     try f.init(gpa);
     defer f.e.seqs.deinit(gpa);
     const l = try pages_mod.layout(gpa, &f.e, 0);
-    const p = try pages_mod.Pages.init(gpa, &f.e, l, 2, 8, true);
+    try pages_mod.ownSequence(&f.e);
+    const own = f.e.seqs.items[0].?;
+    defer { // the engine frees its own sequence, its pool made or not
+        own.st.deinit();
+        gpa.destroy(own);
+    }
+    const p = try pages_mod.Pages.init(gpa, &f.e, l, 3, 8, true);
     p.deinit();
-    for (f.e.seqs.items) |q| if (q) |s| {
+    for (f.e.seqs.items[1..]) |q| if (q) |s| {
         s.st.deinit();
         gpa.destroy(s);
     };

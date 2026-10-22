@@ -388,10 +388,15 @@ pub const State = struct {
         if (paged) |q| {
             st.table = p[14 + 4 * nd];
             st.capacity = 0; // no rows until a stream's pages are mapped
-            for (st.caches, 0..) |*x, j| onPages(x, c, q, st.table, j);
-            onPages(&st.mtp_caches, c, q, st.table, nd);
+            st.place(w, q);
         }
         return st;
+    }
+
+    /// A paged sequence's caches on the pages of `p` (the engine's own, made before its pool, placed when it is made).
+    pub fn place(st: *State, w: *const weights.Weights, p: Paged) void {
+        for (st.caches, 0..) |*x, j| onPages(x, &w.config, p, st.table, j);
+        onPages(&st.mtp_caches, &w.config, p, st.table, st.caches.len);
     }
 
     pub fn deinit(st: *State) void {
