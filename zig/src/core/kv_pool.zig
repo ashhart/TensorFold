@@ -35,7 +35,7 @@ pub const most_snaps = 64;
 pub const Budget = struct {
     /// What the device grants past the weights.
     room: u64,
-    /// The engine's own full-window sequence, counted once.
+    /// The engine's own sequence, counted once: its full window, or its fixed part when its rows are pages.
     engine: u64,
     /// Streams asked for, the engine's own among them.
     lanes: u32,
@@ -45,8 +45,10 @@ pub const Budget = struct {
     cache: u64 = 0,
     /// Snapshot slots (null: half the cache's bytes in slots); most_snaps at most.
     snaps: ?usize = null,
-    /// Rows one stream holds at most (0: no bound): pages past what every other stream holds at once stay unmade.
+    /// Rows one stream holds at most (0: no bound): pages past what the paged streams hold at once stay unmade.
     window: u64 = 0,
+    /// The engine's own rows are pages too: a window of them comes first, so one stream can still reach it.
+    engine_paged: bool = false,
 };
 
 /// The streams served, the cache's slots and copied-KV bytes, and the pages left for the streams.
@@ -61,8 +63,9 @@ pub fn split(cache: u64, snap_bytes: u64, named: ?usize) struct { snaps: usize, 
 
 /// The pool as room - engine - (lanes - 1) x fixed - snaps x snap_bytes - copied, a page a stream beside it at least.
 pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
-    if (b.engine > b.room or b.lanes == 0) return error.NoStream;
-    var left = b.room - b.engine;
+    const own = ownPages(l, b);
+    if (b.engine + own > b.room or b.lanes == 0) return error.NoStream;
+    var left = b.room - b.engine - own;
     const extra: u64 = b.lanes - 1;
     const each = l.fixed_bytes + l.pageBytes();
     const fit = @min(extra, left / each);
@@ -70,16 +73,22 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     left -= fit * l.fixed_bytes;
     const c = split(@min(b.cache, left - fit * l.pageBytes()), l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
-    const most: u64 = if (b.window > 0) fit * l.pages(b.window) else std.math.maxInt(u64);
-    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min(left / l.pageBytes(), most)) };
+    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) else std.math.maxInt(u64);
+    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)) };
 }
 
 /// Whether `b.cache` fits whole in what `plan` leaves it: the room past the engine and a fixed part and page a stream.
 pub fn holds(l: Layout, b: Budget) bool {
-    if (b.engine > b.room or b.lanes == 0) return false;
-    const left = b.room - b.engine;
+    const own = ownPages(l, b);
+    if (b.engine + own > b.room or b.lanes == 0) return false;
+    const left = b.room - b.engine - own;
     const each = l.fixed_bytes + l.pageBytes();
     return left - @min(@as(u64, b.lanes - 1), left / each) * each >= b.cache;
+}
+
+/// The bytes of the engine's own window as pages, set aside first when its rows are pages (0 when it has a window).
+fn ownPages(l: Layout, b: Budget) u64 {
+    return if (b.engine_paged) l.pages(b.window) * l.pageBytes() else 0;
 }
 
 /// A stream's reservation: pages promised but not yet taken, and the pages it holds in token order (its table).
