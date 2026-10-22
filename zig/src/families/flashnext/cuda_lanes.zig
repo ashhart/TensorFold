@@ -1,5 +1,4 @@
 //! Flash Next's lane backend on the native CUDA server: chunked prompts, MTP draft windows, and shared rounds.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -17,16 +16,13 @@ const slide_mod = @import("cuda_slide.zig");
 const train = @import("cuda_train.zig");
 const bytes = @import("cuda_lanes_bytes.zig");
 const kvl = @import("cuda_kv_lanes.zig");
-
 const be = lanes.backend;
 const ring = 1024;
 /// Streams a round takes at most (a round with more live streams takes them in turns).
 const round_streams = 32;
-
 /// The Triton entry points the pass launches and the head's two more: a captured set replaces our glue with all.
 pub const captured_entries = [_][]const u8{ "_embed", "_hc_writeback", "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_ple_gate", "_ple_conv", "_attn_prep", "_attn_gate", "_pool", "_scores", "_chunks", "_merge", "_router", "_topk_rows" };
 pub const captured_head_entries = [_][]const u8{ "_rmsnorm", "_add_streams" };
-
 /// `Tri` launches our glue, or a captured set's. `open` loads the checkpoint and serves greedy or keyed draws.
 pub fn Namespace(comptime Tri: type) type {
     return struct {
@@ -38,7 +34,6 @@ pub fn Namespace(comptime Tri: type) type {
         // a prompt runs on the batched pass in chunks of this many rows, one a prefill_step: no staggered segments
         pub const max_segments: u32 = 1;
         pub const prompt_rows: u32 = @intCast(prompt.batch.default_chunk);
-
         /// The prompt cache's copies of a stream's state (cuda_snap.zig), called with `Loaded.target`.
         pub const snap_bytes = snapBytes;
         pub const snap_save = snapSave;
@@ -54,7 +49,6 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn fits(p: *anyopaque, rows: u32, max_tokens: u32) bool {
             return of(p).kv.fits(rows, max_tokens);
         }
-
         /// The pass ignores its cuts, so states keep at any token; the MTP head reads one token on (lookahead 1).
         pub const cache_rules = struct {
             pub const lookahead: u32 = 1;
@@ -62,15 +56,11 @@ pub fn Namespace(comptime Tri: type) type {
             pub const min_gap: u32 = 256;
             pub const min_prompt: u32 = 512;
         };
-
         pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
-
         /// Living Weights' learner (--slide): lessons put neurons in each layer's pocket beside its shared expert.
         pub const slide = slide_mod.Slide(Tri);
-
         /// The first file a lesson would rewrite through a link, or null: a teaching copy may hard-link the others.
         pub const linked = slide_mod.linked;
-
         /// What a learner over the loaded engine `p` learns into; `dir` must outlive it.
         pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
             const own: *Cuda = @ptrCast(@alignCast(p));
@@ -355,16 +345,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         /// The captured set at `dir` when it holds every entry point (the head's too when drafting), else null.
         pub fn comparison(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, ctx: *const cuda.Context, dir: []const u8, drafts: bool) !?cuda.aot.Set {
-            var set = try cuda.aot.Set.load(gpa, io, driver, ctx.device, dir);
-            const holds = for (captured_entries) |name| {
-                if (!set.has(name)) break false;
-            } else for (captured_head_entries) |name| {
-                if (drafts and !set.has(name)) break false;
-            } else true;
-            if (holds) return set;
-            set.deinit();
-            std.log.info("flashnext: the captured set at {s} lacks Flash Next's kernels; its own glue runs", .{dir});
-            return null;
+            return @import("cuda_lanes_load.zig").comparison(gpa, io, driver, ctx, dir, drafts, &captured_entries, &captured_head_entries);
         }
 
         pub fn follow(ptr: *anyopaque) anyerror!void {
@@ -374,6 +355,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         pub fn release(p: *anyopaque) void {
             const own: *Cuda = @ptrCast(@alignCast(p));
+            cuda.completion.drain(own.engine.driver, own.stream, "flashnext: release did not drain");
             var it = own.lanes.valueIterator();
             while (it.next()) |l| dropLane(own, l);
             own.lanes.deinit(own.gpa);
@@ -391,6 +373,7 @@ pub fn Namespace(comptime Tri: type) type {
         }
 
         fn dropLane(self: *Cuda, l: *Lane) void {
+            cuda.completion.drain(self.engine.driver, self.stream, "flashnext: a failed or closed lane did not drain");
             if (l.draft) |*d| d.deinit();
             if (self.ranks) |r| r.drop(&l.seq) else if (!self.kv.close(l.from, &l.seq)) l.seq.deinit(self.gpa);
         }

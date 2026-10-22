@@ -78,7 +78,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     own.lanes = .empty;
     own.next = 0;
     if (o.slide) own.lay = try @import("cuda_slide.zig").layoutOf(gpa, io, dir);
-    var stream_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest());
+    const own_seq_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest());
+    var stream_bytes = own_seq_bytes;
     if (own.head) |h| {
         stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk);
     } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(window, 1, own.engine.chunk);
@@ -87,7 +88,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
         own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = own.engine.chunk } else null;
         const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk) else 0;
-        own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - prompt.seqBytes(window) - head_bytes);
+        own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
     }
     return .{
         .layout = own.kv.layout,
@@ -105,4 +106,18 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .own_glue = own.set == null,
         .follow = if (o.rank != 0) F.follow else null,
     };
+}
+
+/// A captured set must provide every launch before it can replace the owned glue.
+pub fn comparison(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, ctx: *const cuda.Context, dir: []const u8, drafts: bool, entries: []const []const u8, head_entries: []const []const u8) !?cuda.aot.Set {
+    var set = try cuda.aot.Set.load(gpa, io, driver, ctx.device, dir);
+    const holds = for (entries) |name| {
+        if (!set.has(name)) break false;
+    } else for (head_entries) |name| {
+        if (drafts and !set.has(name)) break false;
+    } else true;
+    if (holds) return set;
+    set.deinit();
+    std.log.info("flashnext: the captured set at {s} lacks Flash Next's kernels; its own glue runs", .{dir});
+    return null;
 }

@@ -106,12 +106,15 @@ pub const Pool = struct {
 
     /// `streams` lanes and `count` pages of layout `l`, made and touched now; a lane holds only its table idle.
     pub fn init(gpa: std.mem.Allocator, e: *prompt.Engine, l: kv.Layout, capacity: usize, head: ?Head, streams: usize, count: usize) !*Pool {
+        if (!pages.valid(l.page_tokens) or capacity > prompt.max_tokens or count > @as(usize, std.math.maxInt(c_int)) + 1) return error.BadFlashNextKvPages;
+        const page_bytes = try std.math.mul(usize, @intCast(l.token_bytes), l.page_tokens);
+        if (page_bytes == 0) return error.BadFlashNextKvPages;
+        _ = try std.math.add(u64, l.run_bytes, page_bytes - 1);
         const p = try gpa.create(Pool);
         errdefer gpa.destroy(p);
-        var arena = try cuda.DeviceBuffer.alloc(e.driver, count * l.pageBytes());
+        var arena = try cuda.DeviceBuffer.alloc(e.driver, try std.math.mul(usize, count, page_bytes));
         errdefer arena.free();
-        try arena.fill8(0, e.stream.handle); // committed now (the driver commits on first touch)
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .head = head, .pool = try kv.Pool.init(gpa, count, l.pageBytes()), .arena = arena, .lanes = &.{} };
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .head = head, .pool = try kv.Pool.init(gpa, count, page_bytes), .arena = arena, .lanes = &.{} };
         errdefer p.pool.deinit();
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
@@ -121,6 +124,10 @@ pub const Pool = struct {
             x.* = .{ .seq = try p.laneSeq() };
             made += 1;
         }
+        errdefer cuda.completion.drain(e.driver, e.stream.*, "flashnext: failed pool initialization did not drain");
+        try arena.fill8(0, e.stream.handle);
+        for (p.lanes) |x| try x.seq.paged.?.table.fill8(0, e.stream.handle);
+        try e.stream.synchronize();
         return p;
     }
 
@@ -130,7 +137,6 @@ pub const Pool = struct {
         const d = p.e.driver;
         var table = try cuda.DeviceBuffer.alloc(d, mostPages(p.capacity, p.layout.page_tokens) * 4);
         errdefer table.free();
-        try table.fill8(0, p.e.stream.handle);
         const paged: pages.Paged = .{ .base = p.arena.ptr, .table = table, .ids = &.{}, .tokens = p.layout.page_tokens, .own_ids = false, .layers = wt.attn_n + @intFromBool(p.head != null) };
         const conv = try gpa.alloc(cuda.DeviceBuffer, wt.linear_n);
         errdefer gpa.free(conv);
@@ -151,7 +157,7 @@ pub const Pool = struct {
     }
 
     pub fn deinit(p: *Pool) void {
-        p.e.stream.synchronize() catch std.log.warn("flashnext: the pool's stream did not drain at close", .{});
+        cuda.completion.drain(p.e.driver, p.e.stream.*, "flashnext: the pool did not drain at close");
         for (p.lanes) |*x| {
             if (x.used) {
                 p.pool.releaseRun(x.run, p.layout.runPages());
@@ -167,6 +173,7 @@ pub const Pool = struct {
 
     /// Whether a lane is free, the pool can promise a cache of `cap` rows and a run now, and a run is free.
     pub fn fits(p: *const Pool, cap: usize) bool {
+        if (cap > p.capacity + window_rows) return false;
         const k = p.layout.runPages();
         for (p.lanes) |x| if (!x.used) return p.pool.fits(p.layout.pages(cap) + k) and p.pool.findRun(k) != null;
         return false;
@@ -174,6 +181,7 @@ pub const Pool = struct {
 
     /// A free lane's cleared cache (a copy) with `cap` rows' pages and its run; LaneMemory: not now.
     pub fn open(p: *Pool, cap: usize) !prompt.Seq {
+        if (cap > p.capacity + window_rows) return error.PromptTooLong;
         const x = for (p.lanes) |*x| {
             if (!x.used) break x;
         } else return error.LaneMemory;
@@ -185,11 +193,12 @@ pub const Pool = struct {
         // the run first: pages fill from the bottom, runs from the top; a fragmented pool waits (LaneMemory)
         const run = p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
         errdefer p.pool.releaseRun(run, k);
+        errdefer cuda.completion.drain(p.e.driver, p.e.stream.*, "flashnext: a failed lane open did not drain");
         var up: Upload = .{ .p = p, .table = x.seq.paged.?.table };
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
         x.seq.paged.?.ids = x.lease.ids.items;
         x.run = run;
-        p.mapStates(&x.seq);
+        try p.mapStates(&x.seq);
         try p.e.clearSeq(&x.seq, cap);
         x.used = true;
         return x.seq;
@@ -200,7 +209,8 @@ pub const Pool = struct {
     }
 
     /// The lane's states as views of its run, laid out afresh (a kept window swaps state buffers with the head's).
-    fn mapStates(p: *Pool, seq: *prompt.Seq) void {
+    fn mapStates(p: *Pool, seq: *prompt.Seq) !void {
+        if (p.layout.runPages() * p.layout.pageBytes() < seqRunBytes()) return error.FlashNextRunTooShort;
         const x = p.laneOf(seq).?;
         var at = p.runBase(x);
         for (seq.conv) |*b| {
@@ -219,6 +229,7 @@ pub const Pool = struct {
         const h = p.head orelse return error.FlashNextRunTooShort;
         const x = p.laneOf(seq) orelse return error.UnknownStream;
         const run_len = p.layout.runPages() * p.layout.pageBytes();
+        if (run_len < seqRunBytes()) return error.FlashNextRunTooShort;
         return mtp.Draft.initIn(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.paged.?, p.runBase(x) + seqRunBytes(), run_len - seqRunBytes());
     }
 
@@ -232,8 +243,7 @@ pub const Pool = struct {
     pub fn close(p: *Pool, seq: *prompt.Seq) bool {
         const x = p.laneOf(seq) orelse return false;
         if (!x.used) return true;
-        // a page another stream takes next may still be read by queued work on the engine's stream
-        p.e.stream.synchronize() catch std.log.warn("flashnext: a closed stream's forwards did not drain; its pages go back", .{});
+        cuda.completion.drain(p.e.driver, p.e.stream.*, "flashnext: a closed stream did not drain");
         p.pool.releaseRun(x.run, p.layout.runPages());
         p.pool.finish(&x.lease);
         if (seq.media) |*m| m.deinit(); // the stream's image state, held by its copy
@@ -251,6 +261,7 @@ pub const Pool = struct {
 
         fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
             const u: *Upload = @ptrCast(@alignCast(ctx));
+            errdefer cuda.completion.drain(u.p.e.driver, u.p.e.stream.*, "flashnext: a failed table upload did not drain");
             try u.table.uploadAsync(from * 4, std.mem.sliceAsBytes(ids[from..]), u.p.e.stream.handle);
             try u.p.e.stream.synchronize(); // the ids slice may move as the lease grows
         }
@@ -265,4 +276,9 @@ test "a stream's pages: its rows and a drafted window, no more than a full windo
     try std.testing.expect(h.run_bytes >= seqRunBytes() + mtp.Draft.runBytes(32768, 1536));
     try std.testing.expectEqual(@as(usize, 161), mostPages(40960, 256));
     try std.testing.expect(l.pages(40960 + window_rows) <= mostPages(40960, 256));
+}
+
+test {
+    _ = @import("cuda_kv_init_test.zig");
+    _ = @import("cuda_kv_lifetime_test.zig");
 }

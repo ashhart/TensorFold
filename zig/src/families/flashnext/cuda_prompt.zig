@@ -1,5 +1,4 @@
 //! The loaded engine and one stream's caches: prompts and windows on the batched pass, decode rounds over streams.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const embed = @import("cuda_embed.zig");
@@ -10,7 +9,6 @@ const load = @import("cuda_prompt_load.zig");
 pub const batch = @import("cuda_batch.zig");
 const fb = @import("cuda_fn_back.zig");
 const pocket = @import("cuda_pocket.zig");
-
 const layers_n = weights.layers_n;
 const linear_n = weights.linear_n;
 const attn_n = weights.attn_n;
@@ -46,7 +44,6 @@ const loadHc = weights.loadHc;
 const stitch = weights.stitch;
 const Layer = load.Layer;
 const loadLayer = load.loadLayer;
-
 pub fn argmax(raw: []const u8) u32 {
     var best = promote(std.mem.readInt(u16, raw[0..2], .little));
     var at: usize = 0;
@@ -60,7 +57,6 @@ pub fn argmax(raw: []const u8) u32 {
     }
     return @intCast(at);
 }
-
 /// `n` zeroed buffers, the fill on the compute stream: a legacy-stream memset returns before it lands.
 fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
     const Zeroed = struct {
@@ -79,7 +75,6 @@ fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: u
     };
     return made(cuda.DeviceBuffer, gpa, n, Zeroed{ .driver = driver, .stream = stream, .len = len });
 }
-
 /// `n` buffers from `src.make`, each through `src.fill`; on a failure every buffer made so far is freed, the last too.
 fn made(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype) ![]B {
     const out = try gpa.alloc(B, n);

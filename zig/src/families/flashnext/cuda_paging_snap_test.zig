@@ -145,3 +145,53 @@ test "paged snapshots: drop requires context proof when its stream wait fails" {
     snap.drop(std.testing.allocator, stream, kept);
     try std.testing.expect(!Fake.pending and !Fake.early_free);
 }
+
+test "paged snapshots: the pooled MTP head occupies the thirteenth layer with the same logical byte order" {
+    var d = Fake.driver();
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    var f: Fixture = undefined;
+    f.ids = .{ 7, 2, 11, 0 };
+    f.init(&d);
+    var seq = f.seq(&d);
+    var p = f.paged(&d);
+    p.layers = wt.attn_n + 1;
+    seq.paged = p;
+    const Draft = @import("cuda_mtp_draft.zig").Draft;
+    var head = try Draft.initIn(std.testing.allocator, &d, 200, 8, 16, &p, 0xa000_0000, Draft.runBytes(8, 16));
+    defer head.deinit();
+    head.len = seq.fed;
+    const kept = try snap.save(std.testing.allocator, &d, stream, &seq, &head);
+    defer snap.drop(std.testing.allocator, stream, kept);
+    const saved = Fake.copies;
+    const n = Fake.n;
+    var i: usize = 2 * wt.linear_n;
+    for (std.enums.values(pages.Part)) |part| {
+        const count: usize = if (part == .pooled) 150 / 4 else 150;
+        i += wt.attn_n * ((count + pages.rows(part, 64) - 1) / pages.rows(part, 64));
+    }
+    i += 1;
+    for (std.enums.values(pages.Part)) |part| {
+        const per = pages.rows(part, 64);
+        const count: usize = if (part == .pooled) 150 / 4 else 150;
+        var row: usize = 0;
+        while (row < count) : (i += 1) {
+            const take = @min(per, count - row);
+            try std.testing.expectEqual(p.rowAt(wt.attn_n, part, row), saved[i][1]);
+            try std.testing.expectEqual(take * pages.rowBytes(part), saved[i][2]);
+            row += take;
+        }
+    }
+    try std.testing.expectEqual(n, i);
+    var off: u64 = 0;
+    for (saved[0..n]) |copy| {
+        try std.testing.expectEqual(kept.buf.ptr + off, copy[0]);
+        off += copy[2];
+    }
+    try std.testing.expectEqual(@as(u64, snap.bytes(150, true)), off);
+    Fake.n = 0;
+    seq.fed = 0;
+    try snap.restore(stream, &seq, &head, kept);
+    try std.testing.expectEqual(n, Fake.n);
+    for (saved[0..n], Fake.copies[0..n]) |a, b| try std.testing.expectEqual([3]u64{ a[1], a[0], a[2] }, b);
+    try std.testing.expectEqual(@as(usize, 150), head.len);
+}

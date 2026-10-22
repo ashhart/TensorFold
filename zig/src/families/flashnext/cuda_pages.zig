@@ -94,6 +94,7 @@ pub const Paged = struct {
     stream: ?cuda.Stream = null,
     /// Attention layers a page holds: the model's, and the MTP head's after them in a pool's pages.
     layers: usize = wt.attn_n,
+    stream: ?cuda.Stream = null,
 
     pub fn pg(p: *const Paged) Pg {
         return .{ .pt = p.table.ptr, .ps = @intCast(pageBytesOf(p.tokens, p.layers) / 2), .ptok = @intCast(p.tokens) };
