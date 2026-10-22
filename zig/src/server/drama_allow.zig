@@ -58,6 +58,11 @@ fn filterNames(a: Allocator, input: []const u8, names: []const []const u8) Alloc
             continue;
         }
         const end = (if (i < text_until) null else candidateAt(input, i, stacked)) orelse {
+            // A declined opener (attached or past the scan bound) with a matching close shields what it nests.
+            if (i >= text_until and input[i] == '[') {
+                const close = try closeOf(a, input, &closes, i);
+                if (close < input.len) text_until = close + 1;
+            }
             i += 1;
             continue;
         };
@@ -77,10 +82,7 @@ fn filterNames(a: Allocator, input: []const u8, names: []const []const u8) Alloc
             done = drop(&out, input, end);
             i = done;
         } else {
-            const close = (closes orelse made: {
-                closes = try matching(a, input);
-                break :made closes.?;
-            })[i];
+            const close = try closeOf(a, input, &closes, i);
             // A stray '[' must not shield the rest of the input.
             text_until = if (close < input.len) close + 1 else end;
             stacked = text_until;
@@ -90,6 +92,11 @@ fn filterNames(a: Allocator, input: []const u8, names: []const []const u8) Alloc
     if (done == 0) return input;
     try out.appendSlice(a, input[done..]);
     return out.items;
+}
+
+fn closeOf(a: Allocator, input: []const u8, closes: *?[]const usize, i: usize) Allocator.Error!usize {
+    if (closes.* == null) closes.* = try matching(a, input);
+    return closes.*.?[i];
 }
 
 fn matching(a: Allocator, input: []const u8) Allocator.Error![]const usize {

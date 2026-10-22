@@ -38,6 +38,8 @@ test "delivery controls match synthetic goldens" {
         .{ "<unknown>text</unknown>", "<unknown>text</unknown>" },
         .{ "[sighs [laughs] tail", "[sighs [laughs] tail" },
         .{ "[very very very very very very very very very very very very very very very very very very very very very very very very calm] text", "[very very very very very very very very very very very very very very very very very very very very very very very very calm] text" },
+        .{ "x[note [sighs] tail]", "x[note [sighs] tail]" },
+        .{ "[note note note note note note note note note note note note note note note note note note note note note note note note note note [sighs] tail] text", "[note note note note note note note note note note note note note note note note note note note note note note note note note note [sighs] tail] text" },
     };
     for (cases) |c| try std.testing.expectEqualStrings(c[1], try controls.filter(a, policy, c[0]));
 }

@@ -1,6 +1,6 @@
 # A bracket is a control only when every word is listed and at least one is a cue.
 # Words are split on spaces, commas and hyphens after normalization.
-# Sources: tags in Fish Audio's Drama 3 and Emotion Control docs (docs.fish.audio), the Drama 3 model card and the Drama 3 technical report (arXiv:2610.18010).
+# Sources: tags in Fish Audio's Drama 3 and Emotion Control docs, model card and technical report (arXiv:2610.18010).
 ## cues
 happy
 sad
