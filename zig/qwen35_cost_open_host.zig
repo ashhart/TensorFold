@@ -104,6 +104,10 @@ test "window cost open: a fresh-process hit warms valid context-64 storage and p
     _ = try open(root, lanes.cost_rule.reps, 64);
 }
 
+test "window cost open: an unsupported geometry is refused at admission" {
+    try fixture.refusal();
+}
+
 test "window cost open: production key covers the bound device and effective workload" {
     try @import("qwen35_cost_key_test.zig").check();
 }
