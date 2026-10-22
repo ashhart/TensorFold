@@ -12,8 +12,9 @@ const CAPABILITIES: { id: GoogleWorkspaceCapability; label: string; detail: stri
   { id: 'gmail.send', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Send reviewed emails") }, detail: 'Every send requires an exact-content owner review.' },
   { id: 'calendar.write', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Apply reviewed calendar changes") }, detail: 'Create, edit or cancel an event after owner review.' },
 ]
-export function GoogleAccountSetup({ snapshot, account, busy, importClient, authorize, cancel }: {
+export function GoogleAccountSetup({ snapshot, account, busy, permissionsLocked, importClient, authorize, cancel }: {
   snapshot: GoogleWorkspaceSnapshot; account?: GoogleWorkspaceAccount; busy: string;
+  permissionsLocked?: boolean;
   importClient: () => void; authorize: (capabilities: GoogleWorkspaceCapability[]) => void; cancel: () => void;
 }) {
   const tx = useAuthoredText()
@@ -51,7 +52,7 @@ export function GoogleAccountSetup({ snapshot, account, busy, importClient, auth
       </details>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">{CAPABILITIES.map((capability) => <div key={capability.id} className="flex items-start justify-between gap-3 rounded-lg border border-line p-3">
         <div><p className="text-[13px] font-medium text-ink">{capability.label}</p><p className="mt-1 text-[12px] text-ink-2">{capability.detail}</p></div>
-        <Toggle label={capability.label} disabled={!!busy || waiting} checked={capabilities.includes(capability.id)} onChange={(checked) => setCapabilities((old) => checked ? [...new Set([...old, capability.id, ...(capability.id === 'calendar.write' ? ['calendar.read' as const] : [])])] : old.filter((value) => value !== capability.id && !(capability.id === 'calendar.read' && value === 'calendar.write')))} />
+        <Toggle label={capability.label} disabled={!!busy || waiting || permissionsLocked} checked={capabilities.includes(capability.id)} onChange={(checked) => setCapabilities((old) => checked ? [...new Set([...old, capability.id, ...(capability.id === 'calendar.write' ? ['calendar.read' as const] : [])])] : old.filter((value) => value !== capability.id && !(capability.id === 'calendar.read' && value === 'calendar.write')))} />
       </div>)}</div>
       <p className="mt-3 text-[12px] leading-relaxed text-ink-2">{tx("Adding access opens Google consent again for the selected permission set; TensorFold checks the permissions Google actually grants.")}</p>
       <div className="mt-3 flex flex-wrap gap-2">

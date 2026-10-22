@@ -6,9 +6,9 @@ import { Button, Input } from '../../../ui'
 import type { GoogleWorkspaceAccount, GoogleWorkspaceMessage, GoogleWorkspacePage, GoogleWorkspaceThread } from '../../../../../shared/google-workspace'
 import { useGoogleAccountRequest } from './useGoogleAccountRequest'
 
-export function GoogleMailReader({ account }: { account: GoogleWorkspaceAccount }) {
+export function GoogleMailReader({ account, refresh }: { account: GoogleWorkspaceAccount; refresh: () => Promise<void> }) {
   const tx = useAuthoredText()
-  const requests = useGoogleAccountRequest(account)
+  const requests = useGoogleAccountRequest(account, refresh)
   const [query, setQuery] = useState('is:unread')
   const [page, setPage] = useState<GoogleWorkspacePage<GoogleWorkspaceMessage> | null>(null)
   const [reading, setReading] = useState<GoogleWorkspaceThread | null>(null)

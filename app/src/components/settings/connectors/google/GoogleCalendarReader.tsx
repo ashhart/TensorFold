@@ -11,7 +11,7 @@ import { GoogleDateTimeField } from './GoogleDateTimeField'
 
 export function GoogleCalendarReader({ account, refresh }: { account: GoogleWorkspaceAccount; refresh: () => Promise<void> }) {
   const tx = useAuthoredText()
-  const requests = useGoogleAccountRequest(account)
+  const requests = useGoogleAccountRequest(account, refresh)
   const zone = macTimeZone()
   const [calendars, setCalendars] = useState<GoogleWorkspacePage<GoogleWorkspaceCalendar>>({ items: [] })
   const [calendarId, setCalendarId] = useState('')
