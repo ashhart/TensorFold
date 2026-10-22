@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = [ROOT / "build.zig"] + sorted((ROOT / "zig" / "build").glob("*.zig"))
@@ -15,7 +16,7 @@ PLATFORM_ONLY = {"metal-std", "step5-filter"}
 # the options the acceptance test does not pass: a release version and the test hooks cannot be combined
 NOT_PASSED = {"version", "slide-test-hooks"}
 # the options whose value the build reads while it configures, with a value it accepts
-VALUES = {"hip-arch": "gfx1151", "sm": "121", "optimize": "fast"}
+VALUES = {"hip-arch": "gfx1151", "sm": "121", "optimize": "fast", "fuzz-optimize": "safe"}
 
 
 def declared() -> dict[str, list[str]]:
@@ -75,6 +76,7 @@ def compiler() -> str:
 def build_help(*args: str) -> str:
     """The output of `zig build --help` with the given extra arguments."""
     done = subprocess.run([compiler(), "build", "--help", *args], cwd=ROOT, capture_output=True, text=True)
+    done.check_returncode()
     return done.stdout + done.stderr
 
 
@@ -97,6 +99,41 @@ class BuildOptionTests(unittest.TestCase):
             if name in PLATFORM_ONLY or name in NOT_PASSED:
                 continue
             kind = listed.get(name, "string")
+            if kind == "enum":
+                self.assertIn(name, VALUES, f"enum option needs a valid acceptance value: {name}")
             args.append(f"-D{name}={VALUES.get(name, 'true' if kind == 'bool' else 'value')}")
         out = build_help(*args)
         self.assertNotIn("invalid option", out, out[:400])
+
+
+class BuildOptionHarnessTests(unittest.TestCase):
+    def test_failed_acceptance_command_is_rejected(self):
+        """A failed command without the words invalid option must still fail the acceptance test."""
+        listing = subprocess.CompletedProcess([], 0, "  -Dfuzz-optimize=[enum]\n", "")
+        failed = subprocess.CompletedProcess([], 1, "", "configuration failed")
+        gate = BuildOptionTests("test_every_declared_option_is_accepted")
+        with patch(__name__ + ".compiler", return_value="zig"), \
+                patch(__name__ + ".declared", return_value={"fuzz-optimize": []}), \
+                patch.object(subprocess, "run", side_effect=[listing, failed]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                gate.test_every_declared_option_is_accepted()
+
+    def test_acceptance_passes_valid_values_for_both_optimize_enums(self):
+        """Both OptimizeMode options receive a valid value rather than the generic string placeholder."""
+        gate = BuildOptionTests("test_every_declared_option_is_accepted")
+        options = {"optimize": "enum", "fuzz-optimize": "enum"}
+        with patch.object(gate, "listed", return_value=options), \
+                patch(__name__ + ".declared", return_value={name: [] for name in options}), \
+                patch(__name__ + ".build_help", return_value="") as help_command:
+            gate.test_every_declared_option_is_accepted()
+        self.assertEqual(("-Doptimize=fast", "-Dfuzz-optimize=safe"), help_command.call_args.args)
+
+    def test_enum_without_a_valid_value_is_rejected(self):
+        """A newly declared enum needs a valid test value before the acceptance command can run."""
+        gate = BuildOptionTests("test_every_declared_option_is_accepted")
+        with patch.object(gate, "listed", return_value={"new-mode": "enum"}), \
+                patch(__name__ + ".declared", return_value={"new-mode": []}), \
+                patch(__name__ + ".build_help", return_value="") as help_command:
+            with self.assertRaises(AssertionError):
+                gate.test_every_declared_option_is_accepted()
+            help_command.assert_not_called()
