@@ -5,6 +5,8 @@ const weights = @import("cuda_weights.zig");
 const shard = @import("cuda_shard.zig");
 const pages_mod = @import("cuda_pages.zig");
 const Engine = @import("cuda_engine.zig").Engine;
+const Lanes = @import("cuda_lanes.zig").Lanes;
+const lanes = @import("lanes");
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
@@ -77,6 +79,8 @@ const Fake = struct {
         f.e.capacity = 4096;
         f.e.seqs = .empty;
         f.e.pages = null;
+        f.e.images = null;
+        f.e.settings = .{};
         f.e.w = undefined;
         f.e.w.config = .{};
         f.e.w.share = try shard.Share.of(&f.e.w.config, 0, 2);
@@ -147,6 +151,30 @@ test "a follower refuses rank 0's pool when its KV page has other bytes, and mak
     const p = try pages_mod.Pages.follow(std.testing.allocator, &f.e, 2, 8, l.pageBytes());
     defer f.deinit(p);
     try expect(!p.leader and p.pool.total() == 8);
+}
+
+test "TF_KV_PAGES=all: a stream past the paged sequences waits for one, and its slot is never made a whole window" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    const p = try pages_mod.Pages.init(std.testing.allocator, &f.e, l, 2, 8, true);
+    defer f.deinit(p);
+    f.e.pages = p;
+    var ln: Lanes = .{ .x = .{ .e = &f.e, .link = undefined }, .paged_only = true };
+    defer ln.lanes.deinit(f.e.gpa);
+    var streams: [3]lanes.Stream = undefined; // as many at once as lanes: two paged sequences and the engine's own idle
+    try expectEqual(@as(usize, 2), (try ln.seat(&streams[0], 600, 100)).len);
+    try expectEqual(@as(usize, 2), (try ln.seat(&streams[1], 600, 100)).len);
+    const live = F.live;
+    try std.testing.expectError(error.LaneMemory, ln.seat(&streams[2], 600, 100)); // slot 3: past the paged ones
+    try expectEqual(live, F.live); // nothing allocated for it
+    try expectEqual(@as(usize, 3), f.e.seqs.items.len);
+    try expectEqual(@as(usize, 2), ln.lanes.count());
+    _ = ln.lanes.remove(&streams[0]); // a stream ends: the one that waited takes its paged sequence
+    p.close(1);
+    _ = try ln.seat(&streams[2], 600, 100);
+    try expectEqual(@as(u32, 1), ln.lanes.get(&streams[2]).?.slot);
+    try expectEqual(@as(u32, 1), f.e.slot);
 }
 
 test "TF_KV_POISON: every page a stream takes is filled with NaN before its rows are written" {

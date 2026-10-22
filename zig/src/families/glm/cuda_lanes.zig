@@ -267,21 +267,28 @@ pub const Lanes = struct {
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
+        const pages = try self.seat(s, ids.len, s.max_new);
+        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
+        try self.x.beginOn(s.sampling, pages);
+        s.cached = 0;
+        s.prompt_rows.clearRetainingCapacity();
+        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+    }
+
+    /// The stream's slot, its pages, then its sequence bound: a slot past the paged sequences (TF_KV_PAGES=all with as
+    /// many streams at once as lanes) waits for one, LaneMemory, before binding would make it a whole window.
+    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize) ![]const u32 {
         const l = try self.claim(s);
         l.pending_rows = null;
         l.held_n = 0;
         l.fill = null;
         l.first = null;
-        try self.x.bind(l.slot);
-        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
-        const pages = self.pagesFor(l.slot, ids.len, s.max_new) catch |err| {
-            _ = self.lanes.remove(s); // nothing held: a LaneMemory request waits for a stream to end
+        const pages = self.pagesFor(l.slot, prompt, max_new) catch |err| {
+            _ = self.lanes.remove(s); // nothing held or made: a LaneMemory request waits for a stream to end
             return err;
         };
-        try self.x.beginOn(s.sampling, pages);
-        s.cached = 0;
-        s.prompt_rows.clearRetainingCapacity();
-        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+        try self.x.bind(l.slot);
+        return pages;
     }
 
     /// A paged slot's pages for a prompt and its reply (none on the engine's own); LaneMemory: the pool lacks them now.
