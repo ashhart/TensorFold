@@ -178,6 +178,21 @@ test "an engine is asked for what the flags say, and the defaults of the flags n
     try std.testing.expectEqualStrings("matrix=off", gpu.policy);
 }
 
+test "silence guard flags are opt-in and reach native open options" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var usage: Usage = .{};
+    try std.testing.expect(!(try parse(a, &.{"m"}, &usage)).silence.enabled());
+    try std.testing.expect((try parse(a, &.{ "m", "--silence-seconds=0" }, &usage)).silence.refusal("nemotron_h") != null);
+    const args = try parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "0.5" }, &usage);
+    const opened = try request(a, "m", "drama3", args);
+    try std.testing.expectEqual(args.silence, opened.silence);
+    try std.testing.expect(opened.silence.enabled());
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "1" }, &usage));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "nan" }, &usage));
+}
+
 test "runtime library: capabilities serializes found and missing dependencies with escaped descriptions" {
     const libs = @import("sys").optional_libraries;
     const specs = [_]libs.Spec{ libs.spec(.nccl), libs.spec(.cublaslt) };

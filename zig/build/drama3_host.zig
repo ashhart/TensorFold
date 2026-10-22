@@ -33,6 +33,9 @@ pub fn native(b: *std.Build, step: *std.Build.Step, family: *std.Build.Module, c
 pub fn metal(b: *std.Build, core: *std.Build.Module, api: *std.Build.Module) void {
     if (b.graph.host.result.os.tag != .macos) return;
     const runtime = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
+    runtime.linkFramework("Metal", .{});
+    runtime.linkFramework("Foundation", .{});
+    runtime.linkSystemLibrary("objc", .{});
     const bytes = b.addWriteFiles().add("drama3_host_metallib.zig", "pub const bytes: []const u8 = &.{};\n");
     const family = b.createModule(.{
         .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"),
