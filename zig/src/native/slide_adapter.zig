@@ -10,6 +10,21 @@ const max_neurons = 64;
 pub fn refusal(comptime Checks: type, a: Allocator, io: std.Io, dir: []const u8, copy: []const u8) !?[]const u8 {
     if (@hasDecl(Checks, "plainShared")) if (try Checks.plainShared(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.6 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, dir });
     if (try Checks.linked(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with {s}", .{ name, dir, copy });
+    if (try folderShard(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide rewrites the model's own shards, and {s} in {s} sits in a folder, where the checks for links do not look: serve this folder without --slide", .{ name, dir });
+    return null;
+}
+
+/// The first shard the index places in a folder (shard_edit writes only the shards beside it), or null.
+fn folderShard(a: Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    const path = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
+    const index = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+    const map = if (index == .object) index.object.get("weight_map") orelse return null else return null;
+    if (map != .object) return null;
+    for (map.object.values()) |v| if (v == .string and std.mem.indexOfScalar(u8, v.string, '/') != null) return v.string;
     return null;
 }
 

@@ -54,7 +54,7 @@ pub fn bake(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
     for (edits) |r| if (r.bytes.len != numel(r.shape) * r.dtype.size() or !std.mem.endsWith(u8, r.name, ".weight")) return error.BadReplacement;
     const index_path = try std.fs.path.join(arena, &.{ dir, index_name });
     const index: ?Value = readJson(arena, io, index_path) catch |e| if (e == error.FileNotFound) null else return e;
-    if (index) |ix| _ = try index_format.weightMap(ix);
+    if (index) |ix| _ = try index_format.plainWeightMap(ix);
     var shards: std.StringArrayHashMapUnmanaged(std.ArrayList(Replacement)) = .empty;
     for (edits) |r| {
         const shard = if (index) |ix| str((try field(try field(ix, "weight_map"), r.name))) orelse return error.BadIndex else single_name;
@@ -95,7 +95,7 @@ pub fn grow(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
     for (edits) |r| if (r.bytes.len != numel(r.shape) * r.dtype.size()) return error.BadReplacement;
     const index_path = try std.fs.path.join(arena, &.{ dir, index_name });
     const index: ?Value = readJson(arena, io, index_path) catch |e| if (e == error.FileNotFound) null else return e;
-    if (index) |ix| _ = try index_format.weightMap(ix);
+    if (index) |ix| _ = try index_format.plainWeightMap(ix);
     var shards: std.StringArrayHashMapUnmanaged(std.ArrayList(Replacement)) = .empty;
     for (edits) |r| {
         const shard = if (index) |ix| str((try field(try field(ix, "weight_map"), r.name))) orelse return error.BadIndex else single_name;
@@ -167,7 +167,7 @@ pub fn overwrite(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replace
     const arena = arena_state.allocator();
     const index_path = try std.fs.path.join(arena, &.{ dir, index_name });
     const index: ?Value = readJson(arena, io, index_path) catch |e| if (e == error.FileNotFound) null else return e;
-    if (index) |ix| _ = try index_format.weightMap(ix);
+    if (index) |ix| _ = try index_format.plainWeightMap(ix);
     for (edits) |r| {
         const shard = if (index) |ix| str((try field(try field(ix, "weight_map"), r.name))) orelse return error.BadIndex else single_name;
         const path = try std.fs.path.join(arena, &.{ dir, shard });

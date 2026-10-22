@@ -1,7 +1,8 @@
-//! Initial reader progress must be visible before its first potentially long step begins.
+//! The slide adapter: initial reader progress before its first potentially long step, and --slide's startup refusals.
 const std = @import("std");
 const api = @import("engine_api");
 const Adapter = @import("slide_adapter.zig").Adapter;
+const refusal = @import("slide_adapter.zig").refusal;
 const Fixture = struct {
     pub const Example = api.Example;
     pub const Learner = struct {
@@ -43,4 +44,27 @@ test "lesson adapter: publish reading zero before the first long unit" {
     const hook = a.hook();
     try hook.begin(hook.ctx, &.{}, .{ .ctx = &seen, .event = Seen.on });
     try std.testing.expectEqual(@as(usize, 1), seen.reads);
+}
+const NoLinks = struct {
+    pub fn linked(_: std.mem.Allocator, _: std.Io, _: []const u8) !?[]const u8 {
+        return null;
+    }
+};
+test "slide refusal: a shard the index places in a folder is refused at startup, before any save" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    try std.testing.expect((try refusal(NoLinks, a, io, dir, "a copy")) == null);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"model.safetensors\"}}" });
+    try std.testing.expect((try refusal(NoLinks, a, io, dir, "a copy")) == null);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "model.safetensors.index.json",
+        .data = "{\"weight_map\":{\"a\":\"model.safetensors\",\"b\":\"sub/b.safetensors\"}}",
+    });
+    const why = (try refusal(NoLinks, a, io, dir, "a copy")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, why, "sub/b.safetensors") != null);
 }
