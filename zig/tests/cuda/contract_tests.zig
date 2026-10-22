@@ -211,8 +211,10 @@ pub fn run(gpu: check.Gpu) !void {
     defer for (&mx) |*m| m.deinit();
     for (&mx) |*m| try kernels.append(a, m.kernel());
     var half_lane = lane;
-    var halves: [3]half_k.Half = undefined;
-    for (std.enums.values(half_k.Kind), &halves) |kind, *h| h.* = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind };
+    var halves: [6]half_k.Half = undefined;
+    for (std.enums.values(half_k.Kind), 0..) |kind, i| for ([_]cuda.qmmf.Out{ .bf16, .f32 }, 0..) |format, j| {
+        halves[i * 2 + j] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind, .format = format };
+    };
     defer for (&halves) |*h| h.deinit();
     for (&halves) |*h| try kernels.append(a, h.kernel());
     var wide: [wide_k.modes.len * 2]wide_k.Product = undefined;

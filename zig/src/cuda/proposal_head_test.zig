@@ -84,6 +84,8 @@ test "proposal rows: qlinear packs exact selected BF16 bits and full view launch
     for (&lane.fns) |*set| {
         for (set, 0..) |*f, i| f.* = Trace.function(&d, i + 1);
     }
+    lane.half = @splat(@splat(@splat(Trace.function(&d, 120))));
+    lane.half_below = 0; // the released launch parameters: the 64-column tile's
     const linear: q.Linear = .{ .lane = &lane };
     const s: Stream = .{ .d = &d, .handle = null };
     for ([_]usize{ 1, 3, 16, 17, 32, 64 }) |rows| {

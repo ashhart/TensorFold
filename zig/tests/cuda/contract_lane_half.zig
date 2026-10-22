@@ -1,4 +1,4 @@
-//! The lane's half tiles (16x32, MXFP8 and BF16) under the contract: the 64-column tile's bits; control: 1.5x scale.
+//! The lane's half tiles (16x32, MXFP8 and BF16, bf16 and fp32 out): the 64-column tile's bits; control: 1.5x scale.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -20,16 +20,26 @@ const served = [_]c.Shape{
     .{ .rows = 1, .n = 324, .k = 10240 }, .{ .rows = 7, .n = 512, .k = 2560 }, .{ .rows = 3, .n = 96, .k = 512 },
 };
 
-pub fn spec(kind: Kind) c.Spec {
+pub fn spec(kind: Kind, format: cuda.qmmf.Out) c.Spec {
     return .{
-        .name = switch (kind) {
-            .mxfp8 => "cuda MXFP8 lane half tiles (32 columns, 16 rows)",
-            .bf16 => "cuda BF16 lane half tiles (32 columns, 16 rows)",
-            .control => "control: MXFP8 half tiles at a 1.5x tensor scale posing as the 64-column tile",
+        .name = switch (format) {
+            .bf16 => switch (kind) {
+                .mxfp8 => "cuda MXFP8 lane half tiles (32 columns, 16 rows)",
+                .bf16 => "cuda BF16 lane half tiles (32 columns, 16 rows)",
+                .control => "control: MXFP8 half tiles at a 1.5x tensor scale posing as the 64-column tile",
+            },
+            .f32 => switch (kind) {
+                .mxfp8 => "cuda MXFP8 lane half tiles (32 columns, 16 rows), fp32 out",
+                .bf16 => "cuda BF16 lane half tiles (32 columns, 16 rows), fp32 out",
+                .control => "control: MXFP8 fp32-out half tiles at a 1.5x tensor scale posing as the 64-column tile",
+            },
         },
         .accum = .f32,
         .depth = depth,
-        .out = .bf16,
+        .out = switch (format) {
+            .bf16 => .bf16,
+            .f32 => .f32,
+        },
         .replaces = "the 64-column 16-row tile",
         .tiles = .{ .{ .size = 16 }, .{ .size = 32, .step = 32, .min = 32 }, .{ .size = 512, .step = 64, .min = 64 } },
         .served = &served,
@@ -40,6 +50,7 @@ pub const Half = struct {
     rig: Rig,
     lane: *cuda.qmmf.Lane,
     kind: Kind,
+    format: cuda.qmmf.Out = .bf16,
     d: ?Dense = null,
     weight: cuda.qmmf.Weight = undefined,
     x: u64 = 0,
@@ -53,13 +64,17 @@ pub const Half = struct {
     }
 
     pub fn kernel(self: *Half) g.Kernel {
-        return .{ .spec = spec(self.kind), .ctx = self, .vt = &vt, .control = if (self.kind == .control) .shapes else null };
+        return .{ .spec = spec(self.kind, self.format), .ctx = self, .vt = &vt, .control = if (self.kind == .control) .shapes else null };
     }
 
     const vt = g.hooks(Half);
 
     fn mode(self: *const Half) cuda.qmmf.Mode {
         return if (self.kind == .bf16) .bf16 else .mxfp8;
+    }
+
+    fn width(self: *const Half) usize {
+        return if (self.format == .f32) 4 else 2;
     }
 
     pub fn prepare(self: *Half, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -121,8 +136,8 @@ pub const Half = struct {
         self.x = try self.rig.input(std.mem.sliceAsBytes(d.x));
         const bytes = self.lane.partBytes(shape.rows, self.weight);
         if (bytes > 0) self.part = try self.rig.scratch(bytes);
-        self.out = try self.rig.output(shape.rows * n * 2);
-        self.base = try self.rig.scratch(shape.rows * n * 2);
+        self.out = try self.rig.output(shape.rows * n * self.width());
+        self.base = try self.rig.scratch(shape.rows * n * self.width());
         return true;
     }
 
@@ -133,7 +148,7 @@ pub const Half = struct {
         self.lane.half_below = if (half) std.math.maxInt(usize) else 0;
         var w = self.weight;
         if (half and self.kind == .control) w.scale = 1.5;
-        try self.lane.matmul(self.rig.s, self.x, d.shape.k, d.shape.rows, w, out, self.part);
+        try self.lane.matmulOut(self.rig.s, self.x, d.shape.k, d.shape.rows, w, out, self.format, self.part);
         try self.rig.s.synchronize();
     }
 
@@ -143,7 +158,7 @@ pub const Half = struct {
 
     pub fn replaced(self: *Half) ![]const u8 {
         try self.launch(false, self.base);
-        return self.rig.bytes(self.base, self.count() * 2);
+        return self.rig.bytes(self.base, self.count() * self.width());
     }
 
     pub fn count(self: *Half) usize {

@@ -68,6 +68,8 @@ test "Flash Next proposal: resident default head keeps exact logical stride and 
     for (&k.native_lane.fns) |*set| for (set, 0..) |*f, i| {
         f.* = .{ .d = &d, .handle = @ptrFromInt(i + 1) };
     };
+    k.native_lane.half = @splat(@splat(@splat(.{ .d = &d, .handle = @ptrFromInt(120) })));
+    k.native_lane.half_below = 0; // the released launch parameters: the 64-column tile's
     var scratch: @typeInfo(@FieldType(Pass, "s")).pointer.child = .{ .native_part = 0x4000, .dummy = 0x5000 };
     var pass: Pass = .{ .k = &k, .s = &scratch, .stream = .{ .d = &d, .handle = null } };
     var head: family.mtp.Head = undefined;
