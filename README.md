@@ -28,7 +28,7 @@ It needs glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`. Keep
 See the [CUDA runbook](RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
 
 ```sh
-V=1.1.1
+V=1.1.2
 case "$(uname -m)" in
   aarch64|arm64) PLATFORM=linux-aarch64 ;;
   x86_64) PLATFORM=linux-x86_64 ;;
