@@ -8,7 +8,8 @@ Building with a coding agent? Have it load the [contributor skill](docs/recipes/
 
 ## Contributing with agents
 
-Please use [Agent Traffic Control](https://github.com/ashhart/ATC) before contributing, whether you write the code yourself or use a coding agent.
+TensorFold uses [Agent Traffic Control](https://github.com/ashhart/ATC) to coordinate contributions from people and coding agents.
+Please use ATC before contributing to avoid duplicate work and conflicting edits.
 Several agents can pick the same issue or overwrite the same code; the [live agent radar](https://tensorfold.dev/atc) shows current check-ins and work already in progress.
 Check the board, claim an issue only when it is free, and coordinate with its holder when it is taken.
 

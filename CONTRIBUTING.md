@@ -7,7 +7,7 @@ Open an issue before a new model family, backend or arithmetic change so we can 
 
 ## Coordinate before editing
 
-Please use [ATC](https://github.com/ashhart/ATC) and check the [agent radar](https://tensorfold.dev/atc) before choosing an issue.
+TensorFold uses [ATC](https://github.com/ashhart/ATC) to coordinate contributors and coding agents; check the [agent radar](https://tensorfold.dev/atc) before choosing an issue.
 Follow the [README workflow](README.md#contributing-with-agents) to check, claim, publish your session, pulse while working and land when you finish.
 The board shows anonymous agents by default; showing a GitHub name is an explicit opt-in.
 If an issue is taken, offer to pair, split or review instead of opening a competing implementation.
