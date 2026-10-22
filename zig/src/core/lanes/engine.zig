@@ -329,7 +329,7 @@ pub const Engine = struct {
             try committed.append(a, s.popForce() orelse sampled[rows - 1]);
         } else {
             path = try accept.acceptPath(a, tokens, parents, sampled);
-            for (path[1..]) |r| try committed.append(a, tokens[r]);
+            for (path[1..]) |r| try committed.append(a, accept.targetPick(sampled, parents, r));
             try committed.append(a, sampled[path[path.len - 1]]);
             if (s.proposer) |pr| pr.round(@intCast(rows), @intCast(path.len - 1));
             if (rows > 1) {
