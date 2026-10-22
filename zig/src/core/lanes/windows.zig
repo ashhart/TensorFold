@@ -263,7 +263,7 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         const s = plans[0].stream;
         s.prices_seeded = true;
         _ = try e.rule.rates(who(s));
-        try lone_costs.seed(e.gpa, e.lone_kept[@intFromBool(s.sampling != null)], s);
+        try lone_costs.seed(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
     }
     const own = if (live) try lone_costs.prices(e, plans[0]) else untimed;
     const costs = if (explicit) &untimed else if (live) &own else &e.cfg.shared_costs;
