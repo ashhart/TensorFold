@@ -85,8 +85,13 @@ fn open(path: []const u8) ?Loaded {
 
 /// Whether the pinned library loads here (tests skip WebP pixels without it).
 pub fn available(io: std.Io, a: Allocator) bool {
-    _ = load(io, a) catch return false;
+    check(io, a) catch return false;
     return true;
+}
+
+/// Check the decoder's symbols and exact version without reading pixels.
+pub fn check(io: std.Io, a: Allocator) !void {
+    _ = try load(io, a);
 }
 
 /// What Pillow's open read from the RIFF chunks: the VP8X animation flag and the EXIF and XMP chunks.

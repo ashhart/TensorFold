@@ -164,17 +164,26 @@ The CLI accepts explicit image budgets from 16 to 262,144 tokens; each engine st
 - PNG and JPEG are decoded to the pixels 0.6.6 decoded with Pillow 12.3 (`zig/src/core/picture/`, which d1-3B's
   pictures on CUDA use too): PNG from the PNG specification, JPEG by libjpeg-turbo 3.1.4.1's TurboJPEG library
   (`libturbojpeg`, the release Pillow 12.3 bundles) at Pillow's settings. TensorFold does not ship that library; the
-  server loads it at the first JPEG from the file `TENSORFOLD_LIBTURBOJPEG` names, else `lib/` beside the server's
+  server checks it at startup with `--vision`, or when running `capabilities --json`, from the file
+  `TENSORFOLD_LIBTURBOJPEG` names, else `lib/` beside the server's
   folder, beside the server, Homebrew's `jpeg-turbo` on macOS, then the system's library path. It checks the version
   libjpeg-turbo writes into the library and refuses JPEG images by name when the library is missing or another
-  release; PNG images still serve.
+  release; PNG images still serve. Homebrew is a search location, not a guarantee of the pinned version: a newer
+  `jpeg-turbo` package is refused too. Use a separately built libjpeg-turbo 3.1.4.1 library with the override or
+  beside the server; updating the package does not satisfy this exact pin.
 - WebP is decoded by libwebp 1.6.0's decoder library (`libwebpdecoder`, the release Pillow 13.0.0 bundles), to the
   RGB bytes Pillow 13.0.0 gives the same file (lossy and lossless, with and without alpha, EXIF-oriented:
   `zig/tests/fixtures/picture/webp.json`, from `tools/zig/picture_webp_fixtures.py`). TensorFold does not ship it
-  either; the server loads it at the first WebP from the file `TENSORFOLD_LIBWEBP` names, else `lib/` beside the
+  either; the server checks it at startup with `--vision`, or when running `capabilities --json`, from the file
+  `TENSORFOLD_LIBWEBP` names, else `lib/` beside the
   server's folder, beside the server, Homebrew's `webp` on macOS, then the system's library path, and refuses WebP
   images by name when it is missing or another release (`WebPGetDecoderVersion`). Animated WebP is refused as
   animated pictures are. Other formats are refused.
+- Startup warns about unusable JPEG and WebP decoders without refusing PNG or text requests. In
+  `capabilities --json`, optional libraries' `found` field means the loader opened a candidate. JPEG and WebP also
+  report `usable`, checked against the decoder's required exports and exact version, and a `problem` when refused.
+  For other libraries, `usable` and `problem` are null and further checks remain unchecked. No pixels are decoded
+  by these diagnostics. Restart after changing a codec library, because each process caches its decoder check.
 - The limits and the processing are 0.6.6's: EXIF and XMP orientation, alpha composited over white, the model's
   processor's sizing (GLM5-Next's, or Gemma 4's PIL processor) and Pillow's bicubic resampler. The decoder gives 0.6.6's pixels for every picture in
   `zig/tests/fixtures/lfm2/images.json` and `zig/tests/fixtures/picture/edges.json`, except where it departs on

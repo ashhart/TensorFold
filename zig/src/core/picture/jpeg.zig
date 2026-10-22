@@ -125,8 +125,13 @@ fn versionOf(bytes: []const u8) ?[]const u8 {
 
 /// Whether the pinned library loads here (tests skip JPEG pixels without it).
 pub fn available(io: std.Io, a: Allocator) bool {
-    _ = load(io, a) catch return false;
+    check(io, a) catch return false;
     return true;
+}
+
+/// Check the decoder's symbols and exact version without creating a decoder or reading pixels.
+pub fn check(io: std.Io, a: Allocator) !void {
+    _ = try load(io, a);
 }
 
 /// What Pillow's open read from the markers before the first scan, and whether the data reaches its end marker.

@@ -131,6 +131,8 @@ test "runtime library: capabilities serializes found and missing dependencies wi
     var rows: [2]libs.Status = undefined;
     for (specs, &rows, 0..) |s, *row, i| row.* = .{ .name = s.name, .feature = s.feature, .soname = s.names[0], .found = i == 0, .install = s.install };
     rows[1].install = "install the \"runtime\"";
+    rows[1].usable = false;
+    rows[1].problem = "wrong \"version\"";
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try capabilities(&out.writer, .{ .version = "test", .optional_libraries = &rows });
@@ -142,4 +144,7 @@ test "runtime library: capabilities serializes found and missing dependencies wi
     try std.testing.expect(!values[1].object.get("found").?.bool);
     try std.testing.expectEqualStrings("libnccl.so.2", values[0].object.get("soname").?.string);
     try std.testing.expectEqualStrings(rows[1].install, values[1].object.get("install").?.string);
+    try std.testing.expect(values[0].object.get("usable").? == .null);
+    try std.testing.expect(!values[1].object.get("usable").?.bool);
+    try std.testing.expectEqualStrings(rows[1].problem.?, values[1].object.get("problem").?.string);
 }

@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 pub const png = @import("png.zig");
 pub const jpeg = @import("jpeg.zig");
 pub const webp = @import("webp.zig");
+pub const runtime = @import("runtime.zig");
 pub const resample = @import("resample.zig");
 pub const tags = @import("tags.zig");
 pub const identity = @import("identity.zig");

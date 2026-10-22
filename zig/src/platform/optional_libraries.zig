@@ -80,7 +80,15 @@ pub fn rpcPaths(comptime os: std.Target.Os.Tag) []const [:0]const u8 {
     return if (os == .macos) &.{"/usr/local/lib/libmcdma-rpc.dylib"} else &.{ "/usr/local/lib/libmcdma-rpc.so", "/usr/lib/libmcdma-rpc.so" };
 }
 
-pub const Status = struct { name: []const u8, feature: []const u8, soname: []const u8, found: bool, install: []const u8 };
+pub const Status = struct {
+    name: []const u8,
+    feature: []const u8,
+    soname: []const u8,
+    found: bool,
+    install: []const u8,
+    usable: ?bool = null,
+    problem: ?[]const u8 = null,
+};
 
 /// Loader discovery only: symbols, pinned codec versions, device support and feature configuration remain unchecked.
 pub fn probe(a: std.mem.Allocator, io: std.Io, comptime Sys: type) ![]Status {

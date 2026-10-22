@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
         var out: std.Io.Writer.Allocating = .init(a);
         var caps = engines.capabilities(a);
-        caps.optional_libraries = try @import("sys").optional_libraries.probe(a, io, @import("sys"));
+        caps.optional_libraries = try @import("core").picture.runtime.probe(a, io);
         try cli.capabilities(&out.writer, caps);
         try std.Io.File.stdout().writeStreamingAll(io, out.written());
         return 0;
@@ -95,6 +95,9 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
     }
+    if (args.vision) for (@import("core").picture.runtime.warnings(io, a)) |warning| {
+        if (warning) |message| log.line("warning: {s}", .{message});
+    };
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
     // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.

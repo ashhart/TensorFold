@@ -35,4 +35,22 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     step.dependOn(&check.step);
     all.dependOn(&check.step);
     all.dependOn(&run.step);
+    const codecs = b.step("test-codec-diagnostics-host", "Pinned codec diagnostics with host libraries that abort on pixel work");
+    for ([_][]const u8{ "missing", "wrong", "symbols", "ready" }) |kind| {
+        const m = b.createModule(.{ .root_source_file = b.path("zig/picture_runtime_host_test.zig"), .target = b.graph.host, .link_libc = true });
+        const options = b.addOptions();
+        options.addOption([]const u8, "kind", kind);
+        m.addOptions("codec_fixture", options);
+        const codec_run = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"codec diagnostics:"} }));
+        if (std.mem.eql(u8, kind, "missing")) {
+            options.addOption([]const u8, "library", "/__tf_missing_runtime__/codec");
+        } else {
+            const mock = b.createModule(.{ .target = b.graph.host, .link_libc = true });
+            mock.addCSourceFile(.{ .file = b.path("zig/tests/picture_codec_mock.c"), .flags = &.{b.fmt("-DMOCK_{s}=1", .{kind})} });
+            const lib = b.addLibrary(.{ .name = b.fmt("picture-codec-{s}", .{kind}), .linkage = .dynamic, .root_module = mock });
+            options.addOptionPath("library", lib.getEmittedBin());
+        }
+        codecs.dependOn(&codec_run.step);
+        all.dependOn(&codec_run.step);
+    }
 }
