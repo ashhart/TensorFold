@@ -1,3 +1,5 @@
+import { normalizeContextLimitChoices } from '../../../shared/context-limit-choices'
+import { invalidateHostedContexts } from '../../agent/hosted-context'
 import { preserveManagedComputeProviders } from './clusters/provider'
 import { upsertTrustedHostKey } from '../../agent/ssh-connection'
 import type { TrustedSshHostKey } from '../../agent/types'
@@ -147,6 +149,7 @@ export function registerCoreIpc(deps: CoreIpcDeps) {
           await saveSettings(store.settings)
           throw new Error('Settings changed while saving. The current configuration was preserved; retry your edit.')
         }
+        invalidateHostedContexts(current.providers, next.providers)
         store.settings = next
         try {
           await afterCommit(next)
@@ -275,6 +278,7 @@ handle('settings:save', async (_e, s: Settings) => {
   try { return await commitSettingsChange(async (current) => {
     assertDedicatedWhatsAppSourceRemoval(s, current)
     const merged = mergeSettingsSecrets(s, current)
+    Object.assign(merged, normalizeContextLimitChoices(s, current))
     merged.providers = preserveManagedComputeProviders(merged.providers, current.providers)
     merged.modelHelperDefaults = normalizeStoredHelperDefaults(merged.modelHelperDefaults)
     merged.uiPreferences = normalizeStoredUiPreferences(merged.uiPreferences)

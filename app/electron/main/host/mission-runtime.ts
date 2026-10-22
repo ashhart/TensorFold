@@ -53,7 +53,7 @@ interface MissionRuntimeDeps {
   resolvePersistedJobApproval(callId: string, decision: 'allow' | 'allow_always' | 'deny', jobHandle?: JobHandle): Job | null
   markRouteErrorRecovered(thread: Thread, err: unknown, runId: string, text: string): void
   injectThreadRouteHandoff(thread: Thread, reason: string): string
-  effectiveContextLimit(provider: Provider, model: string | null): number
+  effectiveContextLimit(provider: Provider, model: string | null, accountId?: string | null): number
   workspaceMutationGuard?: Pick<WorkspaceMutationGuard, 'reserveStart'>
 }
 
@@ -363,7 +363,7 @@ async function runMission(mission: Mission): Promise<void> {
       model,
       requestedAccountId: requestedProviderAccountId,
       allowFailover: modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
-      contextLimit: effectiveContextLimit(routeBaseProvider, model),
+      contextLimit: effectiveContextLimit(routeBaseProvider, model, requestedProviderAccountId),
       reasoningEffort: store.settings.reasoningEffort,
       budget: mission.runBudgetClass ?? mission.budget.executionClass,
       source: 'mission_initial_route',
@@ -671,7 +671,7 @@ async function runMission(mission: Mission): Promise<void> {
           model: activeRoute.model,
           error: err,
           allowFailover: modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId),
-          contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model),
+          contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model, activeRoute.providerAccountId),
           reasoningEffort: store.settings.reasoningEffort,
           budget: mission.runBudgetClass ?? mission.budget.executionClass,
           source: 'mission_pass_recovery',

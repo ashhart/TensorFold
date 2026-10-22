@@ -84,7 +84,7 @@ export function RuntimeSettings({ ctx }: { ctx: SettingsSectionContext }) {
                   <Field label={tx("Cloud compaction threshold")} hint={tx("{value0}k tokens", { value0: Math.round(draft.contextLimit / 1000) })}>
                     <input
                       type="range" min={16_000} max={512_000} step={4_000} value={draft.contextLimit}
-                      onChange={(e) => patch({ contextLimit: parseInt(e.target.value, 10) })}
+                      onChange={(e) => patch({ contextLimit: parseInt(e.target.value, 10), contextLimitExplicit: true })}
                       className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-ink-5 accent-[var(--accent)]"
                     />
                     <div className="mt-1 flex justify-between text-[12px] text-ink-4"><span>{tx("16k")}</span><span>{tx("cloud cap — auto-scales down to each model’s real context window")}</span><span>{tx("512k")}</span></div>
@@ -93,7 +93,7 @@ export function RuntimeSettings({ ctx }: { ctx: SettingsSectionContext }) {
                   <Field label={tx("Local model threshold")} hint={tx("{value0}k tokens", { value0: Math.round(draft.localContextLimit / 1000) })}>
                     <input
                       type="range" min={4_000} max={256_000} step={4_000} value={draft.localContextLimit}
-                      onChange={(e) => patch({ localContextLimit: parseInt(e.target.value, 10) })}
+                      onChange={(e) => patch({ localContextLimit: parseInt(e.target.value, 10), localContextLimitExplicit: true })}
                       className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-ink-5 accent-[var(--accent)]"
                     />
                     <div className="mt-1 flex justify-between text-[12px] text-ink-4"><span>{tx("4k")}</span><span>{tx("local providers compact earlier to avoid overloaded context")}</span><span>{tx("256k")}</span></div>

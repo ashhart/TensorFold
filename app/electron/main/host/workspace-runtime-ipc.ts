@@ -988,7 +988,7 @@ async function startRoomRun(roomId: string, problem: string, attachments?: Attac
         error,
         allowFailover: modelRouteAutoFailoverEnabled(latestBaseProvider, currentAccountId),
         localOnly: roomProject.localOnly === true,
-        contextLimit: effectiveContextLimit(latestBaseProvider, seat.model),
+        contextLimit: effectiveContextLimit(latestBaseProvider, seat.model, currentAccountId),
         reasoningEffort: store.settings.reasoningEffort,
         budget: room.workerBudget?.maxActive ?? null,
         source: 'room_seat_recovery',
@@ -1051,6 +1051,8 @@ async function startRoomRun(roomId: string, problem: string, attachments?: Attac
         {
           cloudLimit: store.settings.contextLimit,
           localLimit: store.settings.localContextLimit,
+          contextLimitExplicit: store.settings.contextLimitExplicit,
+          localContextLimitExplicit: store.settings.localContextLimitExplicit,
           override: store.settings.contextLimitOverride,
           engineModelProfiles: store.settings.engineModelProfiles,
         },

@@ -5,6 +5,7 @@ import os from 'node:os'
 import ts from 'typescript'
 import { createSerialTaskQueue } from '../../agent/serial-task-queue'
 import { redactSettings } from '../../agent/security'
+import { invalidateHostedContexts } from '../../agent/hosted-context'
 import { importReviewedRecipe, reviewedRecipeExport, exportRecipePreview } from './bot-recipes'
 import { WorkspaceMutationGuard } from './workspace-mutation-guard'
 import type { Settings } from '../../agent/types'
@@ -21,7 +22,7 @@ const ast = ts.createSourceFile('core-ipc.ts', source, ts.ScriptTarget.ES2022, t
 function visit(node: ts.Node) { if (ts.isFunctionDeclaration(node) && node.name?.text === 'commitSettingsChange') declaration = node; ts.forEachChild(node, visit) }
 visit(ast);assert.ok(declaration)
 const compiled = ts.transpileModule(ts.createPrinter().printNode(ts.EmitHint.Unspecified, declaration, ast), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
-const commit = new Function('store', 'workspaceMutationGuard', 'settingsChanges', 'saveSettings', 'redactSettings', 'auditPreview', 'vontraHomeDir', `${compiled};return commitSettingsChange;`)(store, new WorkspaceMutationGuard(), serial, async (next: Settings, options: Parameters<typeof saveSettings>[1]) => { if (fail) throw new Error('Synthetic disk unavailable'); await saveSettings(next, options) }, redactSettings, (e: unknown) => String(e), vontraHomeDir)
+const commit = new Function('store', 'workspaceMutationGuard', 'settingsChanges', 'saveSettings', 'redactSettings', 'auditPreview', 'vontraHomeDir', 'invalidateHostedContexts', `${compiled};return commitSettingsChange;`)(store, new WorkspaceMutationGuard(), serial, async (next: Settings, options: Parameters<typeof saveSettings>[1]) => { if (fail) throw new Error('Synthetic disk unavailable'); await saveSettings(next, options) }, redactSettings, (e: unknown) => String(e), vontraHomeDir, invalidateHostedContexts)
 const transaction = (prepare: (current: Settings) => Promise<Settings>) => commit(prepare, async () => { effects++ })
 try {
   await saveSettings(store.settings)

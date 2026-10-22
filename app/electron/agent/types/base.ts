@@ -124,6 +124,7 @@ export interface Provider {
   discoveredModels?: string[]
   accounts?: ProviderAccountProfile[]
   defaultAccountId?: string | null
+  resolvedAccountId?: string | null // runtime account binding, populated by providerWithAccount
   spendBudget?: ModelSpendBudget | null
   secretRotations?: SecretRotationMetadata
 }

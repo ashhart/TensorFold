@@ -1,8 +1,9 @@
+import { providerWithAccount } from './provider-accounts'
 import { activeEngineModelSettings, engineProfileContextWindow, engineProfileWorkingLimit } from '../../shared/model-profiles'
 import { estimateTokens, planCompaction } from './compaction'
 import { getModelContextWindow, recommendedCompactionThreshold } from './model-context-windows'
 import { engineContextWindow } from './engine/context'
-import { hostedContextWindow } from './hosted-context'
+import { DEFAULT_HOSTED_CLOUD_LIMIT, DEFAULT_HOSTED_LOCAL_LIMIT, explicitContextCaps, hostedContextIdentity, hostedContextWindow, hostedTrigger } from './hosted-context'
 import type {
   ApiMessage,
   ContextPressureAction,
@@ -17,8 +18,6 @@ import type {
 } from './types'
 
 const KEEP_RECENT = 6
-const DEFAULT_CLOUD_CONTEXT = 128_000
-const DEFAULT_LOCAL_CONTEXT = 24_000
 
 interface KnownLocalModel {
   match: RegExp
@@ -82,7 +81,8 @@ const KNOWN_LOCAL_MODELS: KnownLocalModel[] = [
 
 export function buildContextPressureSnapshot(settings: Settings, threads: Thread[], now = Date.now()): ContextPressureSnapshot {
   const registry = buildModelContextRegistry(settings)
-  const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId) ?? null
+  const activeBase = settings.providers.find((p) => p.id === settings.activeProviderId) ?? null
+  const activeProvider = activeBase ? providerWithAccount(activeBase, settings.activeProviderAccountId ?? activeBase.defaultAccountId ?? null) : null
   const activeProfile = activeProvider && isLocalProvider(activeProvider)
     ? modelContextProfile(settings, activeProvider, settings.activeModel || activeProvider.models[0] || 'local-model')
     : null
@@ -114,7 +114,9 @@ export function buildContextPressureSnapshot(settings: Settings, threads: Thread
 export function buildModelContextRegistry(settings: Settings): ModelContextProfile[] {
   const out: ModelContextProfile[] = []
   const seen = new Set<string>()
-  for (const provider of settings.providers) {
+  for (const base of settings.providers) {
+    const accountId = base.id === settings.activeProviderId ? (settings.activeProviderAccountId ?? base.defaultAccountId) : base.defaultAccountId
+    const provider = providerWithAccount(base, accountId === undefined ? base.defaultAccountId : accountId)
     if (!isLocalProvider(provider)) continue
     const models = new Set(provider.models.length ? provider.models : ['local-model'])
     if (provider.id === settings.activeProviderId && settings.activeModel) models.add(settings.activeModel)
@@ -271,9 +273,9 @@ function modelContextProfile(settings: Settings, provider: Provider, model: stri
       note: 'Context window reported by the running TensorFold engine.',
     }
   }
-  const hosted = hostedContextWindow(provider.id, model)
+  const hosted = hostedContextWindow(hostedContextIdentity(provider), model)
   if (hosted != null) {
-    const working = recommendedCompactionThreshold(hosted)
+    const working = hostedTrigger(hosted, explicitContextCaps(settings.contextLimit, settings.localContextLimit, true, settings))
     return {
       id: `${provider.id}:${model}`,
       providerId: provider.id,
@@ -289,8 +291,8 @@ function modelContextProfile(settings: Settings, provider: Provider, model: stri
   }
   const known = KNOWN_LOCAL_MODELS.find((entry) => entry.match.test(model))
   const namedContext = getModelContextWindow(model) ?? inferContextFromModelName(model)
-  const localLimit = settings.localContextLimit || DEFAULT_LOCAL_CONTEXT
-  const cloudLimit = settings.contextLimit || DEFAULT_CLOUD_CONTEXT
+  const localLimit = settings.localContextLimit || DEFAULT_HOSTED_LOCAL_LIMIT
+  const cloudLimit = settings.contextLimit || DEFAULT_HOSTED_CLOUD_LIMIT
   const nominalContextTokens = known?.nominalContextTokens ?? namedContext ?? localLimit
   const recommendedWorkingTokens = Math.min(
     cloudLimit,
@@ -313,8 +315,8 @@ function modelContextProfile(settings: Settings, provider: Provider, model: stri
 }
 
 function cloudContextProfile(settings: Settings, provider: Provider, model: string | null): ModelContextProfile {
-  const configuredLimit = settings.contextLimit || DEFAULT_CLOUD_CONTEXT
-  const hosted = hostedContextWindow(provider.id, model)
+  const configuredLimit = settings.contextLimit || DEFAULT_HOSTED_CLOUD_LIMIT
+  const hosted = hostedContextWindow(hostedContextIdentity(provider), model)
   if (hosted != null) {
     return {
       id: `${provider.id}:${model || 'default'}`,
@@ -323,7 +325,7 @@ function cloudContextProfile(settings: Settings, provider: Provider, model: stri
       model: model || provider.models[0] || 'default',
       kind: 'cloud',
       nominalContextTokens: hosted,
-      recommendedWorkingTokens: recommendedCompactionThreshold(hosted),
+      recommendedWorkingTokens: hostedTrigger(hosted, explicitContextCaps(settings.contextLimit, undefined, false, settings)),
       kvCacheTokens: 0,
       source: 'endpoint',
       note: 'Context window the provider listed for the model (vLLM max_model_len).',
@@ -352,7 +354,13 @@ function providerForThread(settings: Settings, thread: Thread): Provider {
   const provider = settings.providers.find((p) => p.id === thread.providerId)
     ?? settings.providers.find((p) => p.id === settings.activeProviderId)
     ?? settings.providers[0]
-  return provider ?? {
+  if (provider) {
+    const accountId = thread.providerAccountId === undefined
+      ? (provider.id === settings.activeProviderId ? (settings.activeProviderAccountId ?? provider.defaultAccountId) : provider.defaultAccountId)
+      : thread.providerAccountId
+    return providerWithAccount(provider, accountId === undefined ? provider.defaultAccountId : accountId)
+  }
+  return {
     id: 'unknown',
     name: 'Unknown provider',
     baseUrl: '',

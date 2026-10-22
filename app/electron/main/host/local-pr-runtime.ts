@@ -32,7 +32,7 @@ interface LocalPrRuntimeDeps {
   finishJob(job: Job | null, outcome: 'completed' | 'failed' | 'cancelled' | 'paused', reason?: string): void
   replaceMission(next: Mission): Mission
   startThreadRun: ThreadRunStarter
-  effectiveContextLimit(provider: Provider, model: string | null): number
+  effectiveContextLimit(provider: Provider, model: string | null, accountId?: string | null): number
   workspaceMutationGuard: Pick<WorkspaceMutationGuard, 'reserveStart'>
 }
 
@@ -279,7 +279,7 @@ function resolvePrLoopProvider(project: Project | null | undefined, input: Creat
     requestedAccountId: requestedProviderAccountId,
     allowFailover: modelRouteAutoFailoverEnabled(baseProvider, requestedProviderAccountId),
     localOnly: project?.localOnly === true,
-    contextLimit: effectiveContextLimit(baseProvider, model),
+    contextLimit: effectiveContextLimit(baseProvider, model, requestedProviderAccountId),
     reasoningEffort: store.settings.reasoningEffort,
     budget: 'local_pr',
     source: 'local_pr_initial_route',

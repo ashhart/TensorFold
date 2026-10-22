@@ -86,7 +86,7 @@ interface TicketWorkerRuntimeDeps {
   activeJob(kind: Job['kind'], owner: string): Job | null
   finishJob(job: Job | null, outcome: 'completed' | 'failed' | 'cancelled' | 'paused', reason?: string): void
   markUndrainedCues(thread: Thread, meta?: string): void
-  effectiveContextLimit(provider: Provider, model: string | null): number
+  effectiveContextLimit(provider: Provider, model: string | null, accountId?: string | null): number
 }
 
 export function createTicketWorkerRuntime(deps: TicketWorkerRuntimeDeps): TicketWorkerRuntime {
@@ -165,7 +165,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     requestedAccountId: requestedProviderAccountId,
     allowFailover: modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
     localOnly: project?.localOnly === true,
-    contextLimit: effectiveContextLimit(routeBaseProvider, resolvedRoute.model),
+    contextLimit: effectiveContextLimit(routeBaseProvider, resolvedRoute.model, requestedProviderAccountId),
     reasoningEffort: store.settings.reasoningEffort,
     budget: phase,
     source: 'ticket_worker_initial_route',
@@ -336,7 +336,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
         error: err,
         allowFailover: modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || t.modelRoute?.resetPolicy === 'rotate_on_limit',
         localOnly: project?.localOnly === true,
-        contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model),
+        contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model, activeRoute.providerAccountId),
         reasoningEffort: store.settings.reasoningEffort,
         budget: phase,
         source: 'ticket_worker_recovery',

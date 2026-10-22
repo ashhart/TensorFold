@@ -170,7 +170,7 @@ interface ThreadRuntimeDeps {
   heartbeatJob(job: Job | null): Job | null
   settleThreadRunJob(job: Job | null, thread: Thread, outcome: 'completed' | 'failed' | 'cancelled' | 'paused', reason?: string): void
   renderProjectMemoryBucket(project: { id: string; name: string } | undefined, query?: string): string
-  effectiveContextLimit(provider: Provider, model: string | null): number
+  effectiveContextLimit(provider: Provider, model: string | null, accountId?: string | null): number
   // Best-effort per-turn worktree checkpoint (undo-a-turn / turn diff). Optional so
   // the chat/cues tests need not wire it; failures are swallowed by the service.
   captureCheckpoint?(threadId: string, turn: number, target: { cwd?: string | null; workspace?: WorkspaceLocation | null; kind?: Thread['kind'] }): Promise<{ ok: boolean; sha?: string }>
@@ -601,7 +601,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         requestedAccountId: requestedProviderAccountId,
         allowFailover: modelRouteAutoFailoverEnabled(baseProvider, requestedProviderAccountId),
         localOnly: true,
-        contextLimit: effectiveContextLimit(baseProvider, blockedModel),
+        contextLimit: effectiveContextLimit(baseProvider, blockedModel, requestedProviderAccountId),
         reasoningEffort: store.settings.reasoningEffort,
         budget: thread.kind,
         source: 'thread_local_only_guard',
@@ -621,7 +621,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       requestedAccountId: requestedProviderAccountId,
       allowFailover: !thread.bot && modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
       localOnly: project?.localOnly === true,
-      contextLimit: effectiveContextLimit(routeBaseProvider, model),
+      contextLimit: effectiveContextLimit(routeBaseProvider, model, requestedProviderAccountId),
       reasoningEffort: store.settings.reasoningEffort,
       budget: thread.kind,
       source: 'thread_initial_route',
@@ -1076,7 +1076,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
             error: err,
             allowFailover: thread.runRecovery?.runId === runId && thread.runRecovery.retry === 'safe' && !thread.bot && (modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || thread.modelRoute?.resetPolicy === 'rotate_on_limit'),
             localOnly: project?.localOnly === true,
-            contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model),
+            contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model, activeRoute.providerAccountId),
             reasoningEffort: store.settings.reasoningEffort,
             budget: thread.kind,
             source: 'thread_recovery',

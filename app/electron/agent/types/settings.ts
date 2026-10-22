@@ -100,6 +100,8 @@ export interface Settings {
   contextLimit: number // token threshold that triggers compaction (e.g. 128000)
   contextLimitOverride?: number // optional explicit trigger; overrides per-model scaling, still clamped to the model window (Task #41)
   localContextLimit: number // smaller token threshold used for local providers
+  contextLimitExplicit?: boolean // an intentional cloud cap, including the default-valued choice
+  localContextLimitExplicit?: boolean // an intentional local cap, including the default-valued choice
   // when true, sandboxed task shell commands may reach the network (default: deny,
   // so the sandbox blocks outbound connections — package-install is always allowed)
   allowTaskNetwork?: boolean

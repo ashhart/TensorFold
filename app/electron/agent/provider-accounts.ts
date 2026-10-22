@@ -30,7 +30,7 @@ export function selectProviderAccount(provider: Provider, accountId?: string | n
 
 export function providerWithAccount(provider: Provider, accountId?: string | null): Provider {
   const account = selectProviderAccount(provider, accountId)
-  if (!account) return provider
+  if (!account) return { ...provider, resolvedAccountId: null }
 
   const cliEnv: Record<string, string> = { ...(provider.cliEnv ?? {}), ...(account.env ?? {}) }
   const cliHome = nonEmpty(account.cliHome)
@@ -46,6 +46,7 @@ export function providerWithAccount(provider: Provider, accountId?: string | nul
   const cliProfile = nonEmpty(account.cliProfile)
   return {
     ...provider,
+    resolvedAccountId: account.id,
     apiKey: nonEmpty(account.apiKey) ?? provider.apiKey,
     models: account.models?.length ? account.models : provider.models,
     cliProfile: cliProfile && provider.transport === 'claude-cli' ? expandHome(cliProfile) : (cliProfile ?? provider.cliProfile),

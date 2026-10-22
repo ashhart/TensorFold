@@ -49,7 +49,7 @@ interface AutomationRuntimeDeps {
   heartbeatJob(job: Job | null): Job | null
   finishJob(job: Job | null, outcome: 'completed' | 'failed' | 'cancelled' | 'paused', reason?: string): void
   emitAutomation(automation: Automation): void
-  effectiveContextLimit(provider: Provider, model: string | null): number
+  effectiveContextLimit(provider: Provider, model: string | null, accountId?: string | null): number
   fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal }): unknown
   applyEventToThread(thread: Thread, event: AgentEvent): void
   timelineErrorSince(thread: Thread, timelineStart: number): TimelineItem | null
@@ -257,7 +257,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
     try {
       assertRoutineSources(definition, store.settings)
-      const context = baseProvider && definition.model ? deps.effectiveContextLimit(baseProvider, definition.model) : 0
+      const context = baseProvider && definition.model ? deps.effectiveContextLimit(baseProvider, definition.model, requestedProviderAccountId) : 0
       const reserve = Math.min(2_048, Math.floor(context / 3))
       const maxCharacters = Math.max(0, (context - reserve - 512) * 4)
       const instruction = personalRoutinePrompt(definition, store.settings, store.connectorEvents, definition.routineKind ? { maxCharacters } : undefined)
@@ -292,7 +292,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
         model,
         requestedAccountId: requestedProviderAccountId,
         allowFailover: !definition.routineKind && modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
-        contextLimit: deps.effectiveContextLimit(routeBaseProvider, model),
+        contextLimit: deps.effectiveContextLimit(routeBaseProvider, model, requestedProviderAccountId),
         reasoningEffort: store.settings.reasoningEffort,
         budget: definition.scheduleKind,
         source: 'automation_initial_route',
@@ -399,7 +399,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
           model: activeRoute.model,
           error: err,
           allowFailover: !definition.routineKind && modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId),
-          contextLimit: deps.effectiveContextLimit(latestBaseProvider, activeRoute.model),
+          contextLimit: deps.effectiveContextLimit(latestBaseProvider, activeRoute.model, activeRoute.providerAccountId),
           reasoningEffort: store.settings.reasoningEffort,
           budget: definition.scheduleKind,
           source: 'automation_recovery',

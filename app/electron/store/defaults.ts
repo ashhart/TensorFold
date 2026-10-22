@@ -48,6 +48,8 @@ export function defaultSettings(): Settings {
     allowTaskNetwork: false,
     contextLimit: 128_000,
     localContextLimit: 24_000,
+    contextLimitExplicit: false,
+    localContextLimitExplicit: false,
     autoCheckUpdates: true,
     updateFeedUrl: '',
     power: {

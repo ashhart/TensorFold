@@ -18,6 +18,7 @@ const {createSerialTaskQueue}=await import('../../agent/serial-task-queue')
 const {redactSettings}=await import('../../agent/security')
 const {requireSecurityRole,flushAuditEvents}=await import('./audit')
 const {WorkspaceMutationGuard}=await import('./workspace-mutation-guard')
+const {invalidateHostedContexts}=await import('../../agent/hosted-context')
 const profiles=await import('../../../shared/model-profiles')
 const {EngineService}=await import('../../agent/engine/service')
 const source=await fs.readFile(path.join(app,'electron/main/host/core-ipc.ts'),'utf8')
@@ -42,7 +43,7 @@ const service=new EngineService({binaryPath:'/synthetic',binary:h.binary,appHome
  else delete h.env.FAKE_SERVE_FAIL
  return value
 }})
-const injected={store,workspaceMutationGuard:new WorkspaceMutationGuard(),settingsChanges:createSerialTaskQueue(),
+const injected={store,invalidateHostedContexts,workspaceMutationGuard:new WorkspaceMutationGuard(),settingsChanges:createSerialTaskQueue(),
  saveSettings:async(next:any,options:Parameters<typeof saveSettings>[1])=>{if(diskFail)throw new Error('Synthetic disk unavailable');await saveSettings(next,options)},redactSettings,auditPreview:(value:any)=>String(value),vontraHomeDir,
  requireSecurityRole,validateEngineModelProfileSet:profiles.validateEngineModelProfileSet,assertEngineModelSamplingSupported:profiles.assertEngineModelSamplingSupported,
  updateEngineModelProfiles:profiles.updateEngineModelProfiles,engineService:()=>service,sendToRenderer:(...args:any[])=>events.push(args)}

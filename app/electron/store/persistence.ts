@@ -1,3 +1,4 @@
+import { normalizeContextLimitChoices } from '../../shared/context-limit-choices'
 import { validateDocumentSourceIds } from '../../shared/document-collections'
 import { normalizeStoredHelperDefaults } from './model-helper-defaults'
 import { normalizeStoredUiPreferences } from './ui-preferences'
@@ -60,6 +61,7 @@ export async function loadSettings(): Promise<Settings> {
   const revealed = revealSettings({
     ...def,
     ...loaded,
+    ...normalizeContextLimitChoices(loaded),
     ...loadEngineModelProfiles(loaded.engineModelProfiles),
     modelHelperDefaults: normalizeStoredHelperDefaults(loaded.modelHelperDefaults),
     uiPreferences: normalizeStoredUiPreferences(loaded.uiPreferences),
