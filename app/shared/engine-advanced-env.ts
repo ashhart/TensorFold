@@ -8,12 +8,50 @@ const KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/
 const MAX_OVERRIDES = 50
 const MAX_VALUE_LENGTH = 2048
 
-// The app or the OS owns these; overriding them from settings would fight the
-// launcher (spawn order, credentials) or the process loader (dynamic linker).
-const DENIED_KEYS = new Set(['HOME', 'PATH', 'SHELL', 'USER', 'LOGNAME', 'HF_ENDPOINT', 'TENSORFOLD_API_KEY', 'TENSORFOLD_NO_UPDATE_CHECK'])
+/**
+ * The variables the app pins for every engine process, so no saved override can replace them.
+ *
+ * `pinnedEngineEnv` writes the Hub origin and drops the Hub token; the supervisor writes the
+ * loopback API key and the update flag after the overrides are layered on. This list is that
+ * pinning in one place, so the page and the validator cannot offer a key the launcher owns.
+ */
+export const PINNED_ENGINE_ENV_KEYS = ['HF_ENDPOINT', 'TENSORFOLD_API_KEY', 'TENSORFOLD_NO_UPDATE_CHECK'] as const
+
+// Owned by the OS or the process loader rather than by the launcher; overriding them fights
+// spawn order, credentials or the dynamic linker.
+const DENIED_KEYS = new Set(['HOME', 'PATH', 'SHELL', 'USER', 'LOGNAME'])
 
 export function isDeniedEngineEnvKey(key: string): boolean {
-  return DENIED_KEYS.has(key) || /^(DYLD_|LD_|NODE_OPTIONS|ELECTRON_)/.test(key) || /(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$/.test(key)
+  return DENIED_KEYS.has(key) || (PINNED_ENGINE_ENV_KEYS as readonly string[]).includes(key) || /^(DYLD_|LD_|NODE_OPTIONS|ELECTRON_)/.test(key) || /(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$/.test(key)
+}
+
+/**
+ * Names the engine reads itself rather than through its declared environment: the native load
+ * plan applies them per family (zig/src/families/glm/load_plan.zig, zig/src/native/cache_fit.zig),
+ * so `capabilities --json` does not list them and they stay offerable all the same.
+ * Declared below `ENGINE_LOAD_LIMIT_KEYS`.
+ */
+
+/**
+ * Whether the app may set this name, given the engine's own declaration.
+ *
+ * `declared` is the `env` list from `capabilities --json` (zig/src/server/cli.zig). It is the
+ * authority on what this build honours: a hand-written list drifts, and offers names a Metal
+ * build has no use for. `null` means the engine could not be asked, and then the deny list above
+ * is the only boundary.
+ */
+export function isDeclaredEngineEnvKey(declared: readonly string[] | null, key: string): boolean {
+  if (!declared) return true
+  if ((APP_SIDE_ENGINE_ENV_KEYS as readonly string[]).includes(key)) return true
+  return declared.includes(key)
+}
+
+/** Refuse a name this engine build does not honour; `declared === null` skips the check. */
+export function assertDeclaredEngineEnv(overrides: EngineEnvOverrides, declared: readonly string[] | null): void {
+  if (!declared) return
+  for (const key of Object.keys(overrides)) {
+    if (!isDeclaredEngineEnvKey(declared, key)) throw new Error(`${key} is not an environment variable this engine build honours.`)
+  }
 }
 
 function denied(key: string): never {
@@ -56,6 +94,8 @@ export function readEngineEnvOverrides(value: unknown): EngineEnvOverrides {
 // to its own family's checkpoints, chosen by the config.json model_type, never the repository name.
 // The app-side admission floor must not veto a model the user has deliberately allowed for its family.
 export const ENGINE_LOAD_LIMIT_KEYS = ['GLM_LOAD_LIMIT_GB', 'FLASHNEXT_LOAD_LIMIT_GB'] as const
+
+export const APP_SIDE_ENGINE_ENV_KEYS = ENGINE_LOAD_LIMIT_KEYS
 
 // glm5_next is GLM-5.3-Flash on this Mac and glm_moe_dsa its expert-parallel sibling; qwen4_exp
 // is Qwen3.8 Flash Next (zig/src/cli/hub.zig family list). Checkpoints choose their loader by these
@@ -133,14 +173,17 @@ function loadLimitGb(text: string): number | null {
   return Number.isNaN(value) ? null : negative ? -value : value
 }
 
-// Known knobs offered as quick-add chips. The first two are the reported pain point;
-// the rest are the engine's own declared environment (see `capabilities --json`).
-export const ENGINE_ENV_PRESETS: Array<{ key: string; placeholder: string; desc: string }> = [
-  { key: 'GLM_LOAD_LIMIT_GB', placeholder: '100', desc: 'GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.' },
-  { key: 'FLASHNEXT_LOAD_LIMIT_GB', placeholder: '100', desc: 'GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.' },
-  { key: 'HF_HUB_OFFLINE', placeholder: '1', desc: 'Set 1 to keep the engine off the network; model downloads need the connection back on.' },
-  { key: 'HF_HOME', placeholder: '/Volumes/Models/hf', desc: 'Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.' },
-  { key: 'TENSORFOLD_REQUEST_LOG', placeholder: '/tmp/engine-requests.log', desc: 'Engine knob: append per-request records to a file for diagnostics.' },
-  { key: 'TENSORFOLD_NO_LIVE', placeholder: '1', desc: 'Set 1 to hide the engine live text display in its terminal; the served model is unchanged.' },
-  { key: 'TENSORFOLD_SEED_SALT', placeholder: 'salt', desc: 'Engine knob: mix a salt into request seeds.' },
+// Quick-add chips. Each key is either a name the engine declares in `capabilities --json`
+// (zig/src/server/cli.zig) or one of the two load-limit keys the native load plan reads
+// itself; `isDeclaredEngineEnvKey` checks a saved name against the running build's own list.
+// A chip carries no sample value: the request log in particular wants a path the user owns,
+// and a shared temporary directory is the wrong place to suggest for request bodies.
+export const ENGINE_ENV_PRESETS: Array<{ key: string; desc: string }> = [
+  { key: 'GLM_LOAD_LIMIT_GB', desc: 'GB cap for loading GLM-5.3, replacing the 70% of RAM limit. Also raises the app-side memory check.' },
+  { key: 'FLASHNEXT_LOAD_LIMIT_GB', desc: 'GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.' },
+  { key: 'HF_HUB_OFFLINE', desc: 'Set 1 to keep the engine off the network; model downloads need the connection back on.' },
+  { key: 'HF_HOME', desc: 'Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.' },
+  { key: 'TENSORFOLD_REQUEST_LOG', desc: 'Engine knob: append per-request records to a file for diagnostics.' },
+  { key: 'TENSORFOLD_NO_LIVE', desc: 'Set 1 to hide the engine live text display in its terminal; the served model is unchanged.' },
+  { key: 'TENSORFOLD_SEED_SALT', desc: 'Engine knob: mix a salt into request seeds.' },
 ]

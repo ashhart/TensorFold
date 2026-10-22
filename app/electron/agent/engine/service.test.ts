@@ -249,6 +249,11 @@ async function main() {
     assert.equal((await restarted.snapshot()).status.memoryLimitBytes, Math.floor(32 * GIB * 0.7), 'the saved policy survives the restart')
     assert.equal(restarted.supervisor.memoryLimitFor('glm5_next'), 30e9, 'the raised family floor survives the restart')
     await assert.rejects(() => service.setEnvOverrides({ GLM_LOAD_LIMIT_GB: '' }), /needs a value/, 'an empty value cannot be saved')
+    // A name this engine build does not declare is refused rather than stored and ignored.
+    await assert.rejects(() => restarted.setEnvOverrides({ TENSORFOLD_CUDA_KERNELS: '1' }), /not an environment variable this engine build honours/)
+    assert.deepEqual(restarted.envOverrides(), saved, 'the refused name is not persisted')
+    assert.deepEqual(await restarted.setEnvOverrides({ ...saved, HF_HUB_OFFLINE: '1' }), { ...saved, HF_HUB_OFFLINE: '1' }, 'a declared name still saves')
+    assert.deepEqual(await restarted.setEnvOverrides(saved), saved, 'and the declared one can be taken back')
 
     const after = await service.remove('mlx-community/Qwen3.5-2B-MLX-4bit')
     assert.deepEqual(after.map((m) => m.repo), ['Other/Kept'])

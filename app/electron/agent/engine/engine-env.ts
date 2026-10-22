@@ -1,5 +1,6 @@
 import os from 'node:os'
 import { resolveHubEndpoint } from './hub-network'
+import { PINNED_ENGINE_ENV_KEYS } from '../../../shared/engine-advanced-env'
 
 const CHILD_ENV_KEYS = ['HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'USER', 'LOGNAME', 'SHELL', 'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE', 'HF_ENDPOINT']
 
@@ -14,9 +15,12 @@ export function engineChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 // A child's view of `base`: the Hub origin that authorized its checks, and no Hub token.
+// Every pinned key is dropped first, so a value inherited from the app's own environment
+// cannot reach the engine either; the advanced page refuses these names for the same reason.
 export function pinnedEngineEnv(base: NodeJS.ProcessEnv, endpoint: string): NodeJS.ProcessEnv {
   const child = { ...base }
   delete child.HF_TOKEN
+  for (const key of PINNED_ENGINE_ENV_KEYS) delete child[key]
   child.HF_ENDPOINT = endpoint
   return Object.freeze(child)
 }

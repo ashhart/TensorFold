@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { engineLoadLimitOverride, isDeniedEngineEnvKey, normalizeEngineEnvOverrides, readEngineEnvOverrides } from '../../../shared/engine-advanced-env'
+import { assertDeclaredEngineEnv, ENGINE_ENV_PRESETS, engineLoadLimitOverride, isDeclaredEngineEnvKey, isDeniedEngineEnvKey, normalizeEngineEnvOverrides, PINNED_ENGINE_ENV_KEYS, readEngineEnvOverrides } from '../../../shared/engine-advanced-env'
+import { pinnedEngineEnv } from './engine-env'
 
 // Names are strict UPPER_SNAKE; values are plain bounded strings.
 assert.deepEqual(normalizeEngineEnvOverrides({ GLM_LOAD_LIMIT_GB: '100' }), { GLM_LOAD_LIMIT_GB: '100' })
@@ -67,3 +68,42 @@ assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '1e308' }, 'glm5_n
 assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '60' }, 'glm5_next', 0), null)
 
 console.log('engine environment tests passed')
+
+// The names the app pins for every engine process are refused here and scrubbed at the launcher,
+// from one list, so the page can never offer a key the spawn environment owns.
+for (const key of PINNED_ENGINE_ENV_KEYS) {
+  assert.equal(isDeniedEngineEnvKey(key), true, key)
+  assert.throws(() => normalizeEngineEnvOverrides({ [key]: 'x' }), /managed by TensorFold/, key)
+  assert.equal(readEngineEnvOverrides({ [key]: 'x' })[key], undefined, `${key} drops out of a hand-edited file`)
+}
+const pinned = pinnedEngineEnv({ ...process.env, HF_ENDPOINT: 'https://evil.example', TENSORFOLD_API_KEY: 'sk-x', TENSORFOLD_NO_UPDATE_CHECK: '0', HF_TOKEN: 'hf-secret', KEEP: '1' }, 'https://huggingface.co')
+assert.equal(pinned.HF_ENDPOINT, 'https://huggingface.co', 'the origin that authorized the checks wins')
+assert.equal(pinned.TENSORFOLD_API_KEY, undefined, 'an inherited key never reaches the engine')
+assert.equal(pinned.TENSORFOLD_NO_UPDATE_CHECK, undefined)
+assert.equal(pinned.HF_TOKEN, undefined, "the app's own Hub token is never handed down")
+assert.equal(pinned.KEEP, '1', 'ordinary variables are untouched')
+
+// What the engine declares it honours is the authority on a name, not a hand-written list.
+// This is the env list of a Metal build (zig/src/server/cli.zig).
+const DECLARED = ['TENSORFOLD_API_KEY', 'TENSORFOLD_NO_LIVE', 'TENSORFOLD_SEED_SALT', 'TENSORFOLD_REQUEST_LOG', 'TENSORFOLD_NO_UPDATE_CHECK', 'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE', 'BRAVE_SEARCH_API_KEY']
+for (const key of DECLARED) assert.equal(isDeclaredEngineEnvKey(DECLARED, key), true, key)
+for (const preset of ENGINE_ENV_PRESETS) assert.equal(isDeclaredEngineEnvKey(DECLARED, preset.key), true, `${preset.key} is offered but not declared`)
+assert.equal(isDeclaredEngineEnvKey(DECLARED, 'TENSORFOLD_CUDA_KERNELS'), false, 'a CUDA-only variable is not offered on a Metal build')
+assert.equal(isDeclaredEngineEnvKey(DECLARED, 'GLM_LOAD_LIMIT_GB'), true, 'the load limit is read by the native plan, not declared as an env variable')
+assert.equal(isDeclaredEngineEnvKey(null, 'ANY_NAME_AT_ALL'), true, 'an engine that could not be asked leaves the deny list as the boundary')
+assert.doesNotThrow(() => assertDeclaredEngineEnv({ HF_HUB_OFFLINE: '1', GLM_LOAD_LIMIT_GB: '100' }, DECLARED))
+assert.doesNotThrow(() => assertDeclaredEngineEnv({ TENSORFOLD_CUDA_KERNELS: '1' }, null))
+assert.throws(() => assertDeclaredEngineEnv({ HF_HUB_OFFLINE: '1', TENSORFOLD_CUDA_KERNELS: '1' }, DECLARED), /TENSORFOLD_CUDA_KERNELS is not an environment variable this engine build honours/)
+// Every declared name the app has a preset for is one it can actually set.
+for (const key of ['HF_HOME', 'HF_HUB_OFFLINE', 'HF_HUB_CACHE', 'TENSORFOLD_REQUEST_LOG', 'TENSORFOLD_NO_LIVE', 'TENSORFOLD_SEED_SALT']) {
+  assert.equal(isDeclaredEngineEnvKey(DECLARED, key), true, key)
+}
+
+// A chip carries no sample value, and no preset suggests a shared temporary directory for
+// request bodies; the engine would create the file owner-only, but /tmp is still the wrong advice.
+for (const preset of ENGINE_ENV_PRESETS) assert.deepEqual(Object.keys(preset).sort(), ['desc', 'key'], preset.key)
+for (const preset of ENGINE_ENV_PRESETS) {
+  assert.equal(/\/tmp\b|\/var\/tmp\b/.test(JSON.stringify(preset)), false, `${preset.key} names a shared temporary directory`)
+}
+assert.equal(ENGINE_ENV_PRESETS.length, 7)
+assert.deepEqual(ENGINE_ENV_PRESETS.map((preset) => preset.key), ['GLM_LOAD_LIMIT_GB', 'FLASHNEXT_LOAD_LIMIT_GB', 'HF_HUB_OFFLINE', 'HF_HOME', 'TENSORFOLD_REQUEST_LOG', 'TENSORFOLD_NO_LIVE', 'TENSORFOLD_SEED_SALT'])

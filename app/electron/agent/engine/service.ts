@@ -8,7 +8,7 @@ import { FAMILY_TITLES, SUGGESTED_MODELS, drafterFor } from './catalog'
 import { parseCapabilities, parseInfoOutput, parseModelsOutput, parseVersion, runEngineCli, type ModelInfo } from './cli'
 import { ModelHub } from './model-hub'
 import { engineLaunchEnv, pinnedEngineEnv } from './engine-env'
-import { normalizeEngineEnvOverrides, type EngineEnvOverrides } from '../../../shared/engine-advanced-env'
+import { assertDeclaredEngineEnv, normalizeEngineEnvOverrides, type EngineEnvOverrides } from '../../../shared/engine-advanced-env'
 export { engineChildEnv } from './engine-env'
 import { assertRepoId, hasCachedSnapshot, hubCacheDir, repoCacheDir, repoCachedBytes, type EngineBinary } from './paths'
 import { setEnginePerformanceRecorder, setEngineServeHook } from './provider'
@@ -255,6 +255,10 @@ export class EngineService {
 
   async setEnvOverrides(next: EngineEnvOverrides): Promise<EngineEnvOverrides> {
     const normalized = normalizeEngineEnvOverrides(next)
+    // The engine's own capabilities doc is the authority on what this build honours; a name it
+    // does not list is refused rather than stored and ignored. Null when the binary could not be
+    // asked, and then the deny list in the shared validator is the only boundary.
+    assertDeclaredEngineEnv(normalized, await this.declaredEngineEnv())
     const prior = this.preferences.get().envOverrides
     // A cache-location move must never race an operation bound to the current root.
     const cacheMoved = normalized.HF_HOME !== prior.HF_HOME || normalized.HF_HUB_CACHE !== prior.HF_HUB_CACHE
@@ -268,6 +272,16 @@ export class EngineService {
     this.emitStatus()
     await this.installed(true)
     return normalized
+  }
+
+  /** The environment this engine build declares it honours, or null when it could not be asked. */
+  async declaredEngineEnv(): Promise<string[] | null> {
+    try {
+      const caps = await this.capabilitiesDoc()
+      return Array.isArray(caps.env) ? caps.env : null
+    } catch {
+      return null
+    }
   }
 
   private changeFeature<T>(run: () => Promise<T>): Promise<T> {

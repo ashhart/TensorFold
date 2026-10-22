@@ -228,7 +228,7 @@ async function serveCommand(args) {
 
 const [command, ...rest] = argv
 if (command === '--version') console.log(`tensorfold-native ${env.FAKE_ENGINE_VERSION ?? '1.0.7'}`)
-else if (command === 'capabilities' && rest[0] === '--json') console.log(JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.7', chip: 'Apple M5 Max', backends: ['mlx'], families: { qwen3_5: ['mlx-q4g64'], nemotron_h: ['mlx-q4g64'], ...Object.fromEntries(EXTRA_FAMILIES.map(([type]) => [type, ['mlx-q4g64']])) }, serve: { flags: { ...(env.FAKE_ENGINE_CORTHEON ? { '--cortheon': {} } : {}), ...(env.FAKE_ENGINE_LEARNING ? { '--slide': {}, '--slide-graph': {} } : {}), '--host': {}, '--port': {}, '--drafter': {} } }, env: ['TENSORFOLD_API_KEY', 'HF_HOME', 'HF_HUB_CACHE'] }))
+else if (command === 'capabilities' && rest[0] === '--json') console.log(JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.7', chip: 'Apple M5 Max', backends: ['mlx'], families: { qwen3_5: ['mlx-q4g64'], nemotron_h: ['mlx-q4g64'], ...Object.fromEntries(EXTRA_FAMILIES.map(([type]) => [type, ['mlx-q4g64']])) }, serve: { flags: { ...(env.FAKE_ENGINE_CORTHEON ? { '--cortheon': {} } : {}), ...(env.FAKE_ENGINE_LEARNING ? { '--slide': {}, '--slide-graph': {} } : {}), '--host': {}, '--port': {}, '--drafter': {} } }, env: ['TENSORFOLD_API_KEY', 'TENSORFOLD_NO_LIVE', 'TENSORFOLD_SEED_SALT', 'TENSORFOLD_REQUEST_LOG', 'TENSORFOLD_NO_UPDATE_CHECK', 'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE', 'BRAVE_SEARCH_API_KEY'] }))
 else if (command === 'models') process.exitCode = modelsCommand()
 else if (command === 'info') process.exitCode = infoCommand(rest[0])
 else if (command === 'pull') process.exitCode = await pullCommand(rest[0])
