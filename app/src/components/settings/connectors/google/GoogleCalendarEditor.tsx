@@ -10,7 +10,7 @@ import { GoogleDateTimeField } from './GoogleDateTimeField'
 
 export function GoogleCalendarEditor({ account, calendar, event, refresh, close }: { account: GoogleWorkspaceAccount; calendar: GoogleWorkspaceCalendar; event?: GoogleWorkspaceEvent; refresh: () => Promise<void>; close: () => void }) {
   const tx = useAuthoredText()
-  const requests = useGoogleAccountRequest(account)
+  const requests = useGoogleAccountRequest(account, refresh)
   const initialZone = safeCalendarTimeZone(event?.timeZone || calendar.timeZone)
   const [allDay, setAllDay] = useState(!!event && /^\d{4}-\d{2}-\d{2}$/.test(event.start))
   const [title, setTitle] = useState(event?.title ?? '')
