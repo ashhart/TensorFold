@@ -141,6 +141,14 @@ pub const Geometry = struct {
     }
 };
 
+/// The geometry the family's paths support: the prompt tiles take an even query/KV group and a
+/// prompt chunk's rows, the decode partials take the verify rows whatever the group.
+pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bool {
+    const group = g.q_heads / g.kv_heads;
+    if (prompt and group % 2 == 0) return true; // the prompt tiles: an even group, the chunk's rows
+    return rows <= partial_rows; // the decode partials: the verify rows
+}
+
 /// Per-module overrides: routers at 8 bits, switch_mlp at 3 or 4 (one width throughout), others 4; groups of 64.
 fn expertBits(q: std.json.ObjectMap, layers: usize) !struct { bits: u8, count: usize } {
     var bits: ?usize = null;

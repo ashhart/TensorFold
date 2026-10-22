@@ -12,7 +12,7 @@ test "Qwen CUDA contracts: the image planes' ABI holds each row's three axes at 
     const im: q.engine.Images = .{ .features = 0, .src = &src, .pos = &pos };
     for ([_]usize{ 127, 128, 129, 4095, 4096 }) |total| {
         @memset(&st, 0);
-        q.engine.stageImagePos(&st, im, 0, total);
+        q.engine.stageImagePos(&st, &im, 0, total);
         const planes = std.mem.bytesAsSlice(i32, st[q.round.mpos_at..][0 .. 3 * rows * 4]);
         for (0..total) |m| for (0..3) |a| {
             try t.expectEqual(pos[a * rows + m], planes[q.round.mropeOffset(m, a)]);

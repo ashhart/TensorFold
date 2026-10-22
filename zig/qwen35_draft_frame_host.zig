@@ -282,6 +282,34 @@ test "Draft frames: combined target rows above capacity refuse before even settl
     try std.testing.expectError(error.InvalidQwenSegments, e.admit(&.{ .{ .cache = &caches[0], .rows = 1 }, .{ .cache = &caches[0], .rows = 1 } }, ids[0..2], .logits));
 }
 
+test "Draft frames: an unsupported prompt geometry is refused at admission" {
+    var driver: cuda.Driver = undefined;
+    driver.api.cuLaunchKernel = Record.launch;
+    var e: q.engine.Engine = undefined;
+    e.d = &driver;
+    e.stream = .{ .d = &driver, .handle = null };
+    e.verify_rows = 64;
+    e.learning = null;
+    e.n_taps = 0;
+    e.kv8 = false;
+    e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
+    e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
+    e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
+    var caches: [1]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
+    const ids: [129]u32 = @splat(1);
+    const parts = [_]q.engine.Part{.{ .cache = &caches[0], .rows = 129 }};
+    // an odd query/KV group has no prompt tiles: the chunk's rows must fit the decode partials
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&parts, &ids, .last));
+    // an even group takes the prompt tiles: the same rows are admitted
+    e.g.q_heads = 2;
+    try e.admit(&parts, &ids, .last);
+    e.g.q_heads = 1;
+    // the partials' rows: a verify window past them is refused
+    e.verify_rows = 256;
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&parts, &ids, .logits));
+}
+
 test "Draft frames: enlarged frame byte counts reject overflow" {
     try std.testing.expectError(error.Overflow, q.draft.frame.stagedBytes(std.math.maxInt(usize)));
     var d: q.draft.Draft = undefined;

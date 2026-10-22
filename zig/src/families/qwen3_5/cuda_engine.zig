@@ -63,7 +63,7 @@ pub const Images = struct {
 };
 
 /// An image chunk's positions staged into the tables' planes: three axes a row, as the device reads them.
-pub fn stageImagePos(st: []align(4) u8, im: Images, p0: usize, total: usize) void {
+pub fn stageImagePos(st: []align(4) u8, im: *const Images, p0: usize, total: usize) void {
     const mpos = std.mem.bytesAsSlice(i32, st[Round.mpos_at..][0 .. 3 * Round.max_rows * 4]);
     Round.stageImagePos(mpos, im.pos, im.src.len, p0, total);
 }
@@ -444,6 +444,7 @@ pub const Engine = struct {
             total += p.rows;
         }
         if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
+        if (!geometry.supported(g, total, keep == .last, most_verify)) return error.UnsupportedQwenGeometry;
         if (e.learning != null and total != 1) return error.BadLearningRows;
         if (keep == .hidden and e.learning == null) return error.BadLearningRows;
         const record = keep != .last;
