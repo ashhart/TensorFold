@@ -241,7 +241,6 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     b.step("native", "tensorfold-native with the CUDA engines into zig-out/native/bin").dependOn(&install.step);
     return exe;
 }
-
 /// CPU tests for the CUDA runtime, shared core, lanes and CUDA family, on any host.
 pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, all: *std.Build.Step, server_steps: bool) void {
     const step = b.step("test-cuda-host", "The CUDA side's host unit tests alone (no GPU work)");
@@ -266,6 +265,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .debug, cuda, draft_ids);
     @import("qwen_contract.zig").host(b, mods.core, step);
+    @import("qwen_vision_weights_host.zig").host(b, mods.core, step);
     @import("inc4_host.zig").round(b, cuda, mods.core);
     @import("inc4_host.zig").rows(b, cuda, mods.core);
     @import("living_dense.zig").host(b, cuda, mods.qwen35, draft_ids, runtime, family, kernels.len);

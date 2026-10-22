@@ -6,16 +6,15 @@ const core = @import("core");
 const vl = core.qwen_vl;
 const lt = cuda.cublaslt;
 const DeviceBuffer = cuda.DeviceBuffer;
-const mlx_prefix = "vision_tower.";
-const hf_prefix = "model.visual.";
+const weights = @import("qwen_cuda_weights.zig");
 
 /// What every Qwen3.5/3.8 tower shares (vision_config); its width, heads, depth and MLP are the checkpoint's.
-pub const patch = 16;
-pub const temporal = 2;
+pub const patch = weights.patch;
+pub const temporal = weights.temporal;
 pub const merge = 2;
-pub const channels = 3;
-pub const patch_width = channels * temporal * patch * patch; // 1536
-pub const grid_side = 48; // sqrt(num_position_embeddings 2304)
+pub const channels = weights.channels;
+pub const patch_width = weights.patch_width; // 1536
+pub const grid_side = weights.grid_side; // sqrt(num_position_embeddings 2304)
 pub const eps: f32 = 1e-6;
 /// Blocks a tower has at most; its heads are 64 or 72 wide (qwen_vision.cu's attention instances).
 pub const max_depth = 32;
@@ -204,7 +203,6 @@ pub const Tower = struct {
     patch_b: u64 = 0,
     pos: u64 = 0,
     blocks: [max_depth]Block = undefined,
-    prefix: []const u8 = mlx_prefix,
     merger_norm_w: u64 = 0,
     merger_norm_b: u64 = 0,
     fc1_w: u64 = 0,
@@ -213,7 +211,7 @@ pub const Tower = struct {
     fc2_b: u64 = 0,
     inv: u64 = 0,
 
-    /// The checkpoint's vision_tower tensors (bf16) on stream `s`; the patch convolution's weight as [C, T, y, x] rows.
+    /// The checkpoint's vision tensors (bf16) on stream `s`; the patch convolution's weight as [C, T, y, x] rows.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, dir: []const u8, c: Config) !*Tower {
         const t = try gpa.create(Tower);
         errdefer gpa.destroy(t);
@@ -224,57 +222,10 @@ pub const Tower = struct {
         errdefer t.mod.unload();
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(t.f, name) = try t.mod.function(if (comptime std.mem.eql(u8, name, "attention")) "tf_qv_attention72" else "tf_qv_" ++ name);
         if (c.headDim() == 64) t.f.attention = try t.mod.function("tf_qv_attention64");
-        const hidden = c.hidden;
-        const intermediate = c.intermediate;
-        const merged = c.merged();
         t.arena = try DeviceBuffer.alloc(d, weightBytes(c) + scratchBytes(c, max_patches));
         errdefer t.arena.free();
         try t.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
-        var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, hf_prefix);
-        const hf = ck.has(hf_prefix ++ "patch_embed.proj.weight");
-        if (!hf) { // not HF-named: the MLX layout
-            ck.close();
-            ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, mlx_prefix);
-        }
-        defer ck.close();
-        t.prefix = if (hf) hf_prefix else mlx_prefix;
-        if (hf) { // HF: [hidden, C, T, P, P] already, uploaded as stored
-            const tn = try ck.expect(hf_prefix ++ "patch_embed.proj.weight", .bf16, &.{ hidden, channels, temporal, patch, patch });
-            t.patch_w = try t.put(tn.bytes);
-        } else { // [hidden, T, P, P, C] as stored (MLX) to [hidden, C, T, P, P]
-            const tn = try ck.expect(mlx_prefix ++ "patch_embed.proj.weight", .bf16, &.{ hidden, temporal, patch, patch, channels });
-            const host = try gpa.alloc(u16, hidden * patch_width);
-            defer gpa.free(host);
-            const stored: []align(1) const u16 = std.mem.bytesAsSlice(u16, tn.bytes);
-            for (0..hidden) |o| for (0..channels) |ch| for (0..temporal) |tt| for (0..patch) |y| for (0..patch) |x| {
-                host[o * patch_width + ((ch * temporal + tt) * patch + y) * patch + x] = stored[(((o * temporal + tt) * patch + y) * patch + x) * channels + ch];
-            };
-            t.patch_w = try t.put(std.mem.sliceAsBytes(host));
-        }
-        t.patch_b = try t.get(&ck, "patch_embed.proj.bias", &.{hidden});
-        t.pos = try t.get(&ck, "pos_embed.weight", &.{ grid_side * grid_side, hidden });
-        for (t.blocks[0..c.depth], 0..) |*b, i| {
-            const shapes = .{
-                .{ "norm1_w", "norm1.weight", .{hidden} },                        .{ "norm1_b", "norm1.bias", .{hidden} },
-                .{ "qkv_w", "attn.qkv.weight", .{ 3 * hidden, hidden } },         .{ "qkv_b", "attn.qkv.bias", .{3 * hidden} },
-                .{ "proj_w", "attn.proj.weight", .{ hidden, hidden } },           .{ "proj_b", "attn.proj.bias", .{hidden} },
-                .{ "norm2_w", "norm2.weight", .{hidden} },                        .{ "norm2_b", "norm2.bias", .{hidden} },
-                .{ "fc1_w", "mlp.linear_fc1.weight", .{ intermediate, hidden } }, .{ "fc1_b", "mlp.linear_fc1.bias", .{intermediate} },
-                .{ "fc2_w", "mlp.linear_fc2.weight", .{ hidden, intermediate } }, .{ "fc2_b", "mlp.linear_fc2.bias", .{hidden} },
-            };
-            inline for (shapes) |sh| {
-                var nb: [96]u8 = undefined;
-                const shape: [sh[2].len]usize = sh[2];
-                @field(b, sh[0]) = try t.get(&ck, try std.fmt.bufPrint(&nb, "blocks.{d}.{s}", .{ i, sh[1] }), &shape);
-            }
-        }
-        t.merger_norm_w = try t.get(&ck, "merger.norm.weight", &.{hidden});
-        t.merger_norm_b = try t.get(&ck, "merger.norm.bias", &.{hidden});
-        t.fc1_w = try t.get(&ck, "merger.linear_fc1.weight", &.{ merged, merged });
-        t.fc1_b = try t.get(&ck, "merger.linear_fc1.bias", &.{merged});
-        t.fc2_w = try t.get(&ck, "merger.linear_fc2.weight", &.{ c.out_hidden, merged });
-        t.fc2_b = try t.get(&ck, "merger.linear_fc2.bias", &.{c.out_hidden});
-        if (ck.unused() != 0) return error.UnusedVisionTensors;
+        try weights.load(gpa, io, dir, c, t);
         var inv: [72 / 4]f32 = undefined;
         invFreq(inv[0 .. c.headDim() / 4], c.headDim());
         t.inv = try t.put(std.mem.sliceAsBytes(inv[0 .. c.headDim() / 4]));
@@ -328,12 +279,6 @@ pub const Tower = struct {
         const p = try t.take(bytes.len);
         try @import("qwen_completion.zig").upload(t.arena, p - t.arena.ptr, bytes);
         return p;
-    }
-
-    fn get(t: *Tower, ck: *core.Checkpoint, name: []const u8, shape: []const usize) !u64 {
-        var buf: [96]u8 = undefined;
-        const tn = try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}", .{ t.prefix, name }), .bf16, shape);
-        return t.put(tn.bytes);
     }
 
     fn upload(t: *Tower, dst: u64, bytes: []const u8) !void {
