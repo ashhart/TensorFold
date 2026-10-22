@@ -1,0 +1,521 @@
+From 0c3560e979834faf0da4ea49bd5a526053944aab Mon Sep 17 00:00:00 2001
+From: <author>
+Date: Fri, 16 Oct 2026 15:35:38 +0900
+Subject: [PATCH 1/2] core/heat: with TF_HEAT_CEILING a chunk also waits while
+ its expected rise would pass the ceiling; GLM reads it and marks each prompt
+ pass's start
+
+---
+ RUNBOOK.md                            |   2 +
+ zig/glm_prompt_host.zig               |   2 +-
+ zig/src/core/heat.zig                 | 143 +++++++++++++++++++++-----
+ zig/src/families/glm/cuda_engine.zig  |   8 +-
+ zig/src/families/glm/cuda_prompts.zig |   2 +-
+ zig/src/families/glm/cuda_ranks.zig   |  29 +++++-
+ 6 files changed, 154 insertions(+), 32 deletions(-)
+
+diff --git a/RUNBOOK.md b/RUNBOOK.md
+index 101faf4c3..44f6494b2 100644
+--- a/RUNBOOK.md
++++ b/RUNBOOK.md
+@@ -168,6 +168,8 @@ The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do
+ On three GB10s serving GLM-5.3-Flash NVFP4 at TP=3, a 1,035,295-token prompt without the bands kept one host's hottest
+ zone at 94 C or more for most of the prompt (97.7 C at the top); `TF_HEAT_HIGH=92` and `TF_HEAT_LOW=88` held all three
+ at 93.0 C or under, and the first token came 10% later.
++For GLM, `TF_HEAT_CEILING` (above the high band, with both) also makes a chunk wait while the hottest zone plus the
++last rise of a chunk run straight after another would pass it, until that rise fits under it and the low band holds.
+ Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
+
+ ### GB10 CPU pinning for long CUDA runs
+diff --git a/zig/glm_prompt_host.zig b/zig/glm_prompt_host.zig
+index 1c094d175..3d0709f8f 100644
+--- a/zig/glm_prompt_host.zig
++++ b/zig/glm_prompt_host.zig
+@@ -85,7 +85,7 @@ const engine = struct {
+             if (slot >= 32) return error.BadSlot;
+             e.cur = &e.seqs[slot];
+         }
+-        pub fn gate(_: *Engine, _: ?u8) !void {}
++        pub fn gate(_: *Engine, _: ?u8, _: bool) !void {}
+         pub fn exchange(_: *Engine) u8 {
+             return 0;
+         }
+diff --git a/zig/src/core/heat.zig b/zig/src/core/heat.zig
+index eec72a634..19dc487c8 100644
+--- a/zig/src/core/heat.zig
++++ b/zig/src/core/heat.zig
+@@ -1,10 +1,11 @@
+-//! Opt-in wait before a prompt chunk when the hottest thermal zone is above a band.
++//! Opt-in wait before a prompt chunk when the hottest thermal zone is above a band or would rise past a ceiling.
+ const std = @import("std");
+ const platform = @import("sys");
+
+ pub const default_root = "/sys/class/thermal";
+
+-pub const Bands = struct { high_c: f64, low_c: f64 };
++/// Degrees. `ceiling_c` also waits for a chunk's rise; a family that sets it calls `Gate.startPrompt` at each prompt.
++pub const Bands = struct { high_c: f64, low_c: f64, ceiling_c: ?f64 = null };
+
+ /// Asked after each pause: true ends the wait with error.Cancelled (the request was cancelled meanwhile).
+ pub const Stop = struct { ptr: *anyopaque, check: *const fn (*anyopaque) bool };
+@@ -15,6 +16,12 @@ pub const Gate = struct {
+     /// Set after the first unreadable zone, so later chunks skip the read and the log.
+     no_zone: bool = false,
+     root: []const u8 = default_root,
++    /// The gathered maximum the last chunk began at; null: the next chunk is a prompt's first.
++    began: ?f64 = null,
++    /// The same when that chunk began straight after another; null: after a rest (a wait, or the gap before a prompt).
++    after: ?f64 = null,
++    /// The last rise of a chunk begun straight after another, in degrees: what the ceiling expects of the next.
++    loaded: f64 = 0,
+
+     /// TF_HEAT_HIGH and TF_HEAT_LOW in degrees, both or neither (neither: no read); TF_HEAT_ROOT moves the zones.
+     pub fn fromEnv() !Gate {
+@@ -22,26 +29,55 @@ pub const Gate = struct {
+         return .{ .bands = try bandsFrom(envSpan("TF_HEAT_HIGH"), envSpan("TF_HEAT_LOW")), .root = root };
+     }
+
++    /// A prompt begins: its first chunk has no rise, and it begins after the gap before the prompt.
++    pub fn startPrompt(g: *Gate) void {
++        g.began = null;
++        g.after = null;
++    }
++
+     /// `read` returns the gathered maximum in celsius. `sleep_fn` stands in for the 2 s pause.
+     pub fn waitUntil(g: *Gate, read: *const fn (*anyopaque) anyerror!f64, sleep_fn: *const fn (*anyopaque) void, ctx: *anyopaque, stop: ?Stop) !void {
+         const bands = g.bands orelse return;
+         if (g.no_zone) return;
+-        var waiting = false;
+-        while (true) {
+-            const max_c = read(ctx) catch |err| {
+-                if (err == error.NoZone) {
+-                    g.no_zone = true;
+-                    noteNoZone(g.root);
+-                    return;
+-                }
+-                return err;
+-            };
+-            if (allow(bands, max_c, waiting)) return;
+-            waiting = true;
++        var max_c = (try g.reading(read, ctx)) orelse return;
++        const floor = g.floorFor(bands, max_c) orelse return;
++        while (max_c > floor) {
+             sleep_fn(ctx);
+             g.waited_s += 2;
+             if (stop) |s| if (s.check(s.ptr)) return error.Cancelled;
++            max_c = (try g.reading(read, ctx)) orelse return;
+         }
++        g.began = max_c; // the next chunk begins after a rest
++        g.after = null;
++    }
++
++    /// One gathered reading; null once no zone is readable (logged once, and the chunk runs).
++    fn reading(g: *Gate, read: *const fn (*anyopaque) anyerror!f64, ctx: *anyopaque) !?f64 {
++        return read(ctx) catch |err| {
++            if (err != error.NoZone) return err;
++            g.no_zone = true;
++            noteNoZone(g.root);
++            return null;
++        };
++    }
++
++    /// Before a chunk at `top`: null to run now, else the reading its wait lasts until (low, or lower to fit a rise).
++    fn floorFor(g: *Gate, b: Bands, top: f64) ?f64 {
++        const inf = std.math.inf(f64);
++        const rise: f64 = if (g.began) |at| (if (at == -inf) 0 else @max(0, top - at)) else 0;
++        if (g.after) |at| {
++            if (at != -inf and top != -inf) g.loaded = rise; // the last chunk began straight after another
++        }
++        const ahead: f64 = if (g.began == null) 0 else g.loaded;
++        const ceiling = b.ceiling_c orelse inf;
++        if (top <= b.high_c and top + ahead <= ceiling) {
++            g.after = if (g.began == null) null else top;
++            g.began = top;
++            return null;
++        }
++        const floor = @min(b.low_c, ceiling - @max(rise, ahead));
++        noteWait(b, top, ahead, floor);
++        return floor;
+     }
+
+     /// The real pause, on this process's own hottest zone (`gatheredMax` takes several readings), until `stop` says so.
+@@ -76,6 +112,16 @@ pub fn bandsFrom(high: ?[]const u8, low: ?[]const u8) !?Bands {
+     return bands;
+ }
+
++/// TF_HEAT_CEILING's text on `bands`: in degrees, above the high band, and only with the bands.
++pub fn ceilingFrom(bands: ?Bands, text: ?[]const u8) !?Bands {
++    const t = text orelse return bands;
++    var b = bands orelse return error.HeatBands;
++    const c = try degrees(t);
++    if (c <= b.high_c) return error.HeatBands;
++    b.ceiling_c = c;
++    return b;
++}
++
+ pub fn degrees(text: []const u8) !f64 {
+     return std.fmt.parseFloat(f64, std.mem.trim(u8, text, " \t\r\n"));
+ }
+@@ -86,12 +132,6 @@ pub fn zoneCelsius(text: []const u8) !f64 {
+     return @as(f64, @floatFromInt(milli)) / 1000.0;
+ }
+
+-/// Run when idle and at or under high, or when already waiting and at or under low.
+-pub fn allow(bands: Bands, max_c: f64, waiting: bool) bool {
+-    if (waiting) return max_c <= bands.low_c;
+-    return max_c <= bands.high_c;
+-}
+-
+ pub fn gatheredMax(xs: []const f64) f64 {
+     var m = xs[0];
+     for (xs[1..]) |x| m = @max(m, x);
+@@ -120,6 +160,16 @@ pub fn note(seconds_: f64) void {
+     std.log.info("heat_wait_s {d:.1}", .{seconds_});
+ }
+
++/// Why a chunk waits, at the wait's start: above the high band, or its expected rise past the ceiling.
++fn noteWait(b: Bands, top: f64, ahead: f64, floor: f64) void {
++    if (@import("builtin").is_test) return;
++    if (top > b.high_c) {
++        std.log.info("heat: hottest zone {d:.1} C above {d} C; the prefill waits for {d:.1} C", .{ top, b.high_c, floor });
++    } else {
++        std.log.info("heat: hottest zone {d:.1} C plus a chunk's {d:.1} C rise, one run straight after another, above {d} C; the prefill waits for {d:.1} C", .{ top, ahead, b.ceiling_c orelse 0, floor });
++    }
++}
++
+ /// Test builds count the warning. A real process logs it.
+ var no_zone_notes: u32 = 0;
+
+@@ -149,10 +199,9 @@ test "bands parse as degrees and a lone value is refused" {
+
+ test "the chunk runs under the high band, and a hot reading waits until the low band" {
+     const bands = Bands{ .high_c = 92, .low_c = 88 };
+-    try std.testing.expect(allow(bands, 92, false));
+-    try std.testing.expect(!allow(bands, 92.5, false));
+-    try std.testing.expect(!allow(bands, 90, true));
+-    try std.testing.expect(allow(bands, 88, true));
++    var at = Gate{ .bands = bands };
++    try std.testing.expectEqual(@as(?f64, null), at.floorFor(bands, 92)); // at the high band the chunk runs
++    try std.testing.expectEqual(@as(?f64, 88), at.floorFor(bands, 92.5)); // above it, a wait until the low band
+     try std.testing.expectEqual(@as(f64, 94), gatheredMax(&.{ 80, 94, 91 }));
+     const Script = struct {
+         temps: []const f64,
+@@ -195,6 +244,52 @@ test "the chunk runs under the high band, and a hot reading waits until the low
+     try std.testing.expectEqual(@as(u32, 1), stuck.sleeps); // a cancel ends the wait after the pause it came in
+ }
+
++/// A gate's gathered maxima, one a read (the last repeats), and the pauses taken.
++const Readings = struct {
++    temps: []const f64,
++    i: usize = 0,
++    sleeps: u32 = 0,
++    fn read(ptr: *anyopaque) !f64 {
++        const r: *Readings = @ptrCast(@alignCast(ptr));
++        const t = r.temps[r.i];
++        if (r.i + 1 < r.temps.len) r.i += 1;
++        return t;
++    }
++    fn sleep(ptr: *anyopaque) void {
++        @as(*Readings, @ptrCast(@alignCast(ptr))).sleeps += 1;
++    }
++    /// One chunk's gate over `temps`: the pauses it took.
++    fn chunk(g: *Gate, temps: []const f64) !u32 {
++        var r = Readings{ .temps = temps };
++        try g.waitUntil(read, sleep, &r, null);
++        return r.sleeps;
++    }
++};
++
++test "a ceiling comes with both bands and above the high one" {
++    const b = Bands{ .high_c = 92, .low_c = 88 };
++    try std.testing.expect((try ceilingFrom(null, null)) == null);
++    try std.testing.expectEqual(b, (try ceilingFrom(b, null)).?);
++    try std.testing.expectEqual(@as(?f64, 93), (try ceilingFrom(b, " 93\n")).?.ceiling_c);
++    try std.testing.expectError(error.HeatBands, ceilingFrom(null, "93"));
++    try std.testing.expectError(error.HeatBands, ceilingFrom(b, "92"));
++}
++
++test "with a ceiling, a chunk begun straight after another waits until the last such rise fits under it" {
++    var g = Gate{ .bands = .{ .high_c = 92, .low_c = 88, .ceiling_c = 93 } };
++    g.startPrompt();
++    try std.testing.expectEqual(@as(u32, 0), try Readings.chunk(&g, &.{70})); // a prompt's first chunk: no rise
++    try std.testing.expectEqual(@as(u32, 0), try Readings.chunk(&g, &.{80})); // chunk 1 began after the gap: not kept
++    try std.testing.expectEqual(@as(u32, 2), try Readings.chunk(&g, &.{ 90, 86, 83 })); // 90 + 10 > 93: wait to 83
++    try std.testing.expectEqual(@as(u32, 2), try Readings.chunk(&g, &.{ 91, 84, 83 })); // its own 8 C, but 10 C counts
++    try std.testing.expectEqual(@as(f64, 8), g.waited_s);
++    g.startPrompt();
++    try std.testing.expectEqual(@as(u32, 0), try Readings.chunk(&g, &.{ 90, 70 })); // a new prompt's first takes none
++    var bands = Gate{ .bands = .{ .high_c = 92, .low_c = 88 } }; // the same readings with the bands alone
++    bands.startPrompt();
++    for ([_]f64{ 70, 80, 90 }) |t| try std.testing.expectEqual(@as(u32, 0), try Readings.chunk(&bands, &.{t}));
++}
++
+ const env = if (@import("builtin").os.tag == .windows) @import("sys").c else struct {
+     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: i32) i32;
+     extern "c" fn unsetenv(name: [*:0]const u8) i32;
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+index e56b02469..a615c9b6b 100644
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -79,7 +79,7 @@ pub const Engine = struct {
+     slot: u32 = 0,
+     capacity: usize,
+     mtp: bool,
+-    heat_gate: heat.Gate, // upstream's bands (off unless set), read before each prompt chunk on the gathered maximum
++    heat_gate: heat.Gate, // upstream's bands and ceiling (off unless set), read before each prompt chunk on the gathered maximum
+     shared_buf: cuda.DeviceBuffer, // one f64 every rank all-reduces to its maximum
+     snaps: std.AutoHashMapUnmanaged(u64, Snap) = .empty, // kept prompt states by id (the same ids on every rank)
+     snap_pages: ?snapshots.pages.Pool = null,
+@@ -304,6 +304,7 @@ pub const Engine = struct {
+     /// decode.prefill: `ids` in 2,048-row chunks, then the first token from the last row; `from` restores a kept state.
+     pub fn prefill(e: *Engine, ids: []const u32, from: ?Resume, cancel: ?Cancel, marks: ?Marks) !u32 {
+         var start = try e.prefillStart(ids.len, from);
++        e.heat_gate.startPrompt(); // its chunks get no `from`: a resumed pass's first is marked here
+         while (true) : (start += fw.prefill_rows) {
+             if (try e.prefillChunk(ids[start..@min(ids.len, start + fw.prefill_rows + 1)], start, ids.len, null, cancel, marks)) |first| return first;
+         }
+@@ -341,7 +342,7 @@ pub const Engine = struct {
+             p.prompt.?.invalid = true;
+         };
+         var stamp = prof_mod.span(f.prof, e.stream, .gate);
+-        try e.gate(cancel);
++        try e.gate(cancel, start == 0 or from != null);
+         stamp.end();
+         if (f.prof) |p| p.mark(e.stream, .gate);
+         try f.run(as_i32[0..rows]);
+@@ -384,9 +385,10 @@ pub const Engine = struct {
+     }
+
+     /// The chunk gate on every rank: a kept state at the mark, the heat wait, rank 0's cancel; the id exchanged first.
+-    pub fn gate(e: *Engine, cancel: ?Cancel) !void {
++    pub fn gate(e: *Engine, cancel: ?Cancel, first: bool) !void {
+         try snapshots.gate(e);
+         if (e.heat_gate.bands != null) {
++            if (first) e.heat_gate.startPrompt(); // a pass's first chunk carries no rise in
+             var w: Wait = .{ .e = e, .cancel = cancel };
+             const before = e.heat_gate.waited_s;
+             e.heat_gate.waitUntil(Wait.read, Wait.sleep, &w, .{ .ptr = &w, .check = Wait.stop }) catch |err| return w.failed orelse err;
+diff --git a/zig/src/families/glm/cuda_prompts.zig b/zig/src/families/glm/cuda_prompts.zig
+index b66392f44..da12cc079 100644
+--- a/zig/src/families/glm/cuda_prompts.zig
++++ b/zig/src/families/glm/cuda_prompts.zig
+@@ -36,7 +36,7 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
+         @memcpy(ids[rows..][0..p.ids.len], p.ids);
+         rows += p.ids.len;
+     }
+-    try e.gate(null);
++    try e.gate(null, true); // fresh prompts at position 0: the pass carries no rise in
+     var one: [1]Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = &e.bp, .segs = segs[0..parts.len] }};
+     var f: Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = &e.pieces, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(true) else null };
+     try f.run(@ptrCast(ids[0..rows]));
+diff --git a/zig/src/families/glm/cuda_ranks.zig b/zig/src/families/glm/cuda_ranks.zig
+index 04bd50ad5..ead8f4572 100644
+--- a/zig/src/families/glm/cuda_ranks.zig
++++ b/zig/src/families/glm/cuda_ranks.zig
+@@ -14,7 +14,7 @@ pub const Settings = struct {
+     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
+     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
+     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole).
+-    heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
++    heat: ?heat.Bands = null, // TF_HEAT_HIGH, TF_HEAT_LOW (and TF_HEAT_CEILING): a prompt chunk waits on every rank's hottest zone
+     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
+     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
+     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
+@@ -77,10 +77,14 @@ pub const Settings = struct {
+                 },
+             };
+         };
+-        s.heat = heat.bandsFrom(get("TF_HEAT_HIGH"), get("TF_HEAT_LOW")) catch {
++        const bands = heat.bandsFrom(get("TF_HEAT_HIGH"), get("TF_HEAT_LOW")) catch {
+             problem.* = "TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high";
+             return error.BadSetting;
+         };
++        s.heat = heat.ceilingFrom(bands, get("TF_HEAT_CEILING")) catch {
++            problem.* = "TF_HEAT_CEILING: degrees above TF_HEAT_HIGH, with both bands";
++            return error.BadSetting;
++        };
+         if (s.prompt_fixed_k and !s.tiled) {
+             problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
+             return error.BadSetting;
+@@ -119,6 +123,7 @@ pub const Fingerprint = extern struct {
+     capacity: u64, // tokens a sequence holds
+     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
+     heat_low: f64,
++    heat_ceiling: f64, // TF_HEAT_CEILING (0: none)
+     config: [32]u8, // sha256 of config.json
+     program: [32]u8, // sha256 of this executable
+     checkpoint: [64]u8, // hex digest of the checkpoint's metadata and every shard byte, through the digest cache
+@@ -144,6 +149,7 @@ pub const Fingerprint = extern struct {
+         capacity,
+         heat_high,
+         heat_low,
++        heat_ceiling,
+         config,
+         program,
+         checkpoint,
+@@ -174,6 +180,7 @@ pub const Fingerprint = extern struct {
+             .capacity = capacity,
+             .heat_high = if (s.heat) |b| b.high_c else 0,
+             .heat_low = if (s.heat) |b| b.low_c else 0,
++            .heat_ceiling = if (s.heat) |b| b.ceiling_c orelse 0 else 0,
+             .config = config,
+             .program = program,
+             .checkpoint = std.fmt.bytesToHex(checkpoint_digest, .lower),
+@@ -208,6 +215,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
+             "capacity",
+             "heat_high",
+             "heat_low",
++            "heat_ceiling",
+             "config",
+             "program",
+             "checkpoint",
+@@ -315,6 +323,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
+         .capacity => "the sequence capacity (the context)",
+         .heat_high => "TF_HEAT_HIGH",
+         .heat_low => "TF_HEAT_LOW",
++        .heat_ceiling => "TF_HEAT_CEILING",
+         .config => "config.json",
+         .program => "the executable",
+         .checkpoint => "checkpoint metadata or shard bytes",
+@@ -326,6 +335,7 @@ fn fake(name: [:0]const u8) ?[]const u8 {
+     if (std.mem.eql(u8, name, "TF_GLM_OVERLAP_PIECES")) return "2";
+     if (std.mem.eql(u8, name, "TF_HEAT_HIGH")) return "92";
+     if (std.mem.eql(u8, name, "TF_HEAT_LOW")) return "88";
++    if (std.mem.eql(u8, name, "TF_HEAT_CEILING")) return "93";
+     if (std.mem.eql(u8, name, "TF_GLM_DENSE_BITS")) return "4";
+     if (std.mem.eql(u8, name, "TF_GLM_HEAD_BITS")) return "8";
+     return null;
+@@ -341,6 +351,11 @@ fn bad(name: [:0]const u8) ?[]const u8 {
+     return null;
+ }
+
++fn lowCeiling(name: [:0]const u8) ?[]const u8 {
++    if (std.mem.eql(u8, name, "TF_HEAT_CEILING")) return "92";
++    return fake(name);
++}
++
+ fn typo(name: [:0]const u8) ?[]const u8 {
+     if (std.mem.eql(u8, name, "TF_GLM_DENSE_BITS")) return "abc";
+     return null;
+@@ -351,8 +366,11 @@ test "settings from the environment: the defaults, the choices, and a refusal na
+     const s = try Settings.read(&fake, &problem);
+     try std.testing.expect(!s.split and s.kda_wide and s.pieces == 2 and s.heat.?.high_c == 92 and s.heat.?.low_c == 88);
+     try std.testing.expect(s.dense_bits == 4 and s.head_bits == 8);
++    try std.testing.expectEqual(@as(?f64, 93), s.heat.?.ceiling_c);
+     try std.testing.expectError(error.BadSetting, Settings.read(&bad, &problem));
+     try std.testing.expectEqualStrings("TF_GLM_PREFILL_REDUCE: split, ring or gather", problem);
++    try std.testing.expectError(error.BadSetting, Settings.read(&lowCeiling, &problem));
++    try std.testing.expectEqualStrings("TF_HEAT_CEILING: degrees above TF_HEAT_HIGH, with both bands", problem);
+     const r = try Settings.read(&ringed, &problem);
+     try std.testing.expect(r.split and r.ring);
+     try std.testing.expectEqual(@as(u32, 2), Fingerprint.of(2, 0, r, 8192, true, @splat(0), @splat(0), hashBytes("/c")).split);
+@@ -378,6 +396,11 @@ test "fingerprints: agreeing ranks pass; the first differing field and rank are
+     const heat_on: Settings = .{ .heat = .{ .high_c = 92, .low_c = 88 } };
+     all[1] = Fingerprint.of(2, 1, heat_on, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
+     try std.testing.expectEqual(Fingerprint.Field.heat_high, mismatch(&all).?.field);
++    const ceiling_on: Settings = .{ .heat = .{ .high_c = 92, .low_c = 88, .ceiling_c = 93 } };
++    all[0] = Fingerprint.of(2, 0, heat_on, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
++    all[1] = Fingerprint.of(2, 1, ceiling_on, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
++    try std.testing.expectEqual(Fingerprint.Field.heat_ceiling, mismatch(&all).?.field);
++    all[0] = Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
+     all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, hashBytes("/hub/snapshots/other"));
+     try std.testing.expectEqual(Fingerprint.Field.checkpoint, mismatch(&all).?.field);
+     all[1] = Fingerprint.of(2, 1, .{}, 8192, false, h0, h0, hashBytes("/hub/snapshots/423acf37")); // --no-drafts on rank 1 only
+@@ -501,7 +524,7 @@ test "every media limit is part of the ranks' agreement" {
+ test "every scheduling and identity field that differs stops the ranks" {
+     const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
+     const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
+-    inline for (.{ "layout", "world", "rank", "split", "kda_wide", "pieces", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "capacity", "heat_high", "heat_low" }) |name| {
++    inline for (.{ "layout", "world", "rank", "split", "kda_wide", "pieces", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "capacity", "heat_high", "heat_low", "heat_ceiling" }) |name| {
+         var all = [_]Fingerprint{ zero, one };
+         @field(all[1], name) += 1;
+         try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);
+--
+2.56.0.windows.2
+
+
+From 4c8cd52b05546e2ecca3558848323130e10d2620 Mon Sep 17 00:00:00 2001
+From: <author>
+Date: Mon, 19 Oct 2026 15:19:38 +0900
+Subject: [PATCH 2/2] glm: TF_GLM_NCCL_ID_FILE hands rank 0's NCCL id to the
+ others in a file, and NCCL_COMM_ID then names only the ranks' lines (local,
+ not for upstream: TP=3 on the ring's /32 until #636)
+
+1.1.0's tp_watch reads NCCL_COMM_ID for the ranks' lines, and NCCL's bootstrap needs an interface in that address's
+subnet, which a /32 ring has only on rank 0. With TF_GLM_NCCL_ID_FILE set, each rank logs the NCCL_COMM_ID it takes
+out of its environment after the lines are up and before NCCL's first call; rank 0 writes its unique id to the file
+as hex and the others read it there (5b6aa233's form), waiting up to 10 minutes.
+---
+ zig/src/families/glm/cuda_native.zig | 37 +++++++++++++++++++++++++---
+ 1 file changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+index e840131d5..72bb047e2 100644
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -124,6 +124,36 @@ const Owned = struct {
+ };
+
+ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
++extern "c" fn unsetenv(name: [*:0]const u8) c_int;
++
++/// Local, not for upstream (TP=3 on the ring's /32 until #636): with TF_GLM_NCCL_ID_FILE, NCCL_COMM_ID names only the
++/// ranks' lines; it leaves NCCL's environment, whose bootstrap looks for an interface in that address's subnet.
++fn commIdByFile(rank: usize) ?[]const u8 {
++    const f = std.mem.span(std.c.getenv("TF_GLM_NCCL_ID_FILE") orelse return null);
++    const was = std.mem.span(std.c.getenv("NCCL_COMM_ID") orelse "");
++    std.log.info("rank {d}: TF_GLM_NCCL_ID_FILE {s}; NCCL_COMM_ID {s} leaves NCCL's environment", .{ rank, f, was });
++    _ = unsetenv("NCCL_COMM_ID");
++    return f;
++}
++
++/// Local: rank 0 writes its unique id to `path` as hex; the others read it there, waiting up to 10 minutes.
++fn idByFile(io: std.Io, path: []const u8, rank: usize, lib: *const cuda.nccl.Library, id: *cuda.nccl.UniqueId) !void {
++    if (rank == 0) {
++        try lib.check(lib.api.ncclGetUniqueId(id), "ncclGetUniqueId");
++        const hex = std.fmt.bytesToHex(id.internal, .lower);
++        return std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = &hex });
++    }
++    var hex: [256]u8 = undefined;
++    for (0..600) |_| {
++        const got = std.Io.Dir.cwd().readFile(io, path, &hex) catch hex[0..0];
++        if (got.len == hex.len) {
++            _ = try std.fmt.hexToBytes(&id.internal, &hex);
++            return;
++        }
++        std.Io.sleep(io, .fromMilliseconds(1000), .awake) catch {};
++    }
++    return error.NoCommId;
++}
+
+ /// Every peer's send/recv connected now, before the weights fill memory (connected on first use, ibv_reg_mr can fail).
+ fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
+@@ -178,14 +208,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     set.kv8 = o.kv8;
+     // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
+     if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
+-    return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes) catch |err| {
++    const id_file = commIdByFile(p.rank); // local: after the lines read NCCL_COMM_ID, before NCCL's first call
++    return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes, id_file) catch |err| {
+         cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this rank's error
+         return err;
+     };
+ }
+
+ /// `open` once the ranks' lines are up: NCCL, the engine and the link, then a follower's loop or rank 0's lanes.
+-fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings, roce_bytes: usize) !Loaded {
++fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings, roce_bytes: usize, id_file: ?[]const u8) !Loaded {
+     const own = try gpa.create(Owned);
+     errdefer gpa.destroy(own);
+     own.gpa = gpa;
+@@ -197,7 +228,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     var lib = try cuda.nccl.Library.open();
+     errdefer lib.close();
+     var id: cuda.nccl.UniqueId = undefined;
+-    try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
++    if (id_file) |f| try idByFile(io, f, p.rank, &lib, &id) else try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
+     var comm: cuda.nccl.Comm = null;
+     try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
+     own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
+--
+2.56.0.windows.2

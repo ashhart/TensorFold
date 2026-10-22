@@ -1,0 +1,1 @@
+PASS glm-synth: 330 tensors, 2095 MiB, config 2 layers 16 experts vocabulary 8192, dc.json in <synthetic-checkpoint>

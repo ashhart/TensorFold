@@ -1,0 +1,2 @@
+info: checkpoint digest: 0.0 GiB read in 0.0 s, 1/1 cached files
+PASS shared windows at TP=1: 108 rows of 5 streams over 12 rounds (2 to 5 streams a forward, 1 to 4 rows each, greedy and sampled) equal their lone twins' logits, tokens and drafts byte for byte, and every state its twin's

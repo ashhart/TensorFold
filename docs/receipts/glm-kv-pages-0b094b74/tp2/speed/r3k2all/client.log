@@ -1,0 +1,130 @@
+server up 2026-10-23 02:52:17
+{"label": "r3k2all", "prompt": "fibonacci-raw", "temperature": 1.0, "decode_tps_median": 34.926645251640174, "decode_tps_all": [39.22, 29.77, 34.93], "ttft_s_median": 0.14689250799710862}
+{"label": "r3k2all", "prompt": "gpu-chat-no-think", "temperature": 1.0, "decode_tps_median": 28.39469894076537, "decode_tps_all": [29.16, 28.33, 28.39], "ttft_s_median": 0.2160296579822898}
+{"label": "r3k2all", "prompt": "fibonacci-raw", "temperature": 0.0, "decode_tps_median": 56.164524305161, "decode_tps_all": [56.16, 56.17, 56.13], "ttft_s_median": 0.1464053130184766}
+{"label": "r3k2all", "prompt": "gpu-chat-no-think", "temperature": 0.0, "decode_tps_median": 30.531534405617062, "decode_tps_all": [30.48, 30.63, 30.53], "ttft_s_median": 0.21564055600902066}
+{
+  "schema_version": 1,
+  "fixture_sha256": "d1b94985f074cbf53c2702f544acc71dcca6613a857667e7ba4a2753ed465ca1",
+  "requested_reply_tokens": 16,
+  "temperature": 0,
+  "seed": 1234,
+  "rows": [
+    {
+      "phase": "first",
+      "prompt_tokens": 32768,
+      "cached_tokens": 0,
+      "tokens": 16,
+      "cache_state": "cold",
+      "complete": true,
+      "token_sha": "04e3ca755337",
+      "token_sha256": "04e3ca755337ba940cd8a065c4d9dcda8c8c56cd58fa834fe243660cd5c80f41",
+      "output_sha256": "5905bbab6d1aa9083539f216b22c2baccd2004d74336183cd131799d93068bc9",
+      "ttft_s": 24.833027503016638,
+      "decode_tps": 32.63968767446163,
+      "elapsed_s": 25.29269628901966,
+      "chunk_offsets_s": [
+        24.833027503016638,
+        24.919280739006354,
+        24.993480756005738,
+        25.071124708018033,
+        25.153146892000223,
+        25.229633031995036,
+        25.29259072401328
+      ],
+      "chunk_gaps_ms": {
+        "count": 6,
+        "p50": 77.06504600355402,
+        "p95": 86.2532359897159,
+        "max": 86.2532359897159
+      }
+    },
+    {
+      "phase": "repeated",
+      "prompt_tokens": 32768,
+      "cached_tokens": 0,
+      "tokens": 16,
+      "cache_state": "cold",
+      "complete": true,
+      "token_sha": "04e3ca755337",
+      "token_sha256": "04e3ca755337ba940cd8a065c4d9dcda8c8c56cd58fa834fe243660cd5c80f41",
+      "output_sha256": "5905bbab6d1aa9083539f216b22c2baccd2004d74336183cd131799d93068bc9",
+      "ttft_s": 24.821727894013748,
+      "decode_tps": 32.68560260168039,
+      "elapsed_s": 25.280742375995032,
+      "chunk_offsets_s": [
+        24.821727894013748,
+        24.906849285005592,
+        24.981507010001224,
+        25.060088772996096,
+        25.142376981006237,
+        25.218312181008514,
+        25.2806455460086
+      ],
+      "chunk_gaps_ms": {
+        "count": 6,
+        "p50": 77.25848149857484,
+        "p95": 85.12139099184424,
+        "max": 85.12139099184424
+      },
+      "equal_first_tokens": true,
+      "equal_first_output": true
+    },
+    {
+      "phase": "concurrent",
+      "prompt_tokens": 32768,
+      "cached_tokens": 0,
+      "tokens": 16,
+      "cache_state": "cold",
+      "complete": true,
+      "token_sha": "04e3ca755337",
+      "token_sha256": "04e3ca755337ba940cd8a065c4d9dcda8c8c56cd58fa834fe243660cd5c80f41",
+      "output_sha256": "5905bbab6d1aa9083539f216b22c2baccd2004d74336183cd131799d93068bc9",
+      "ttft_s": 24.82092211500276,
+      "decode_tps": 32.7038946265334,
+      "elapsed_s": 25.279677418002393,
+      "chunk_offsets_s": [
+        24.82092211500276,
+        24.905286110995803,
+        24.980257656017784,
+        25.05746945599094,
+        25.139382802008186,
+        25.21573570999317,
+        25.279583084018668
+      ],
+      "chunk_gaps_ms": {
+        "count": 6,
+        "p50": 76.78235397906974,
+        "p95": 84.36399599304423,
+        "max": 84.36399599304423
+      },
+      "equal_first_tokens": true,
+      "equal_first_output": true
+    }
+  ],
+  "concurrent_timing": {
+    "requested_requests": 1,
+    "timed_requests": 1,
+    "makespan_s": 25.279677418002393,
+    "end_to_end_tps": 0.6329194686877585,
+    "timing_valid": true
+  },
+  "qualified": true
+}
+{"length": 1024, "rep": 0, "ttft": 0.8917491949978285, "prompt": 1023, "cached": 0}
+{"length": 2048, "rep": 0, "ttft": 1.4468637390236836, "prompt": 2048, "cached": 0}
+{"length": 2048, "rep": 1, "ttft": 1.4465952239988837, "prompt": 2048, "cached": 0}
+{"length": 2048, "rep": 2, "ttft": 1.4436066659982316, "prompt": 2047, "cached": 0}
+{"length": 8192, "rep": 0, "ttft": 6.265134815999772, "prompt": 8191, "cached": 0}
+{"length": 8192, "rep": 1, "ttft": 6.257070154999383, "prompt": 8192, "cached": 0}
+{"length": 8192, "rep": 2, "ttft": 6.2725643159938045, "prompt": 8191, "cached": 0}
+{"length": 16384, "rep": 0, "ttft": 12.404174181981944, "prompt": 16384, "cached": 0}
+{"length": 16384, "rep": 1, "ttft": 12.409659561002627, "prompt": 16384, "cached": 0}
+{"length": 16384, "rep": 2, "ttft": 12.45133188800537, "prompt": 16383, "cached": 0}
+{"length": 32768, "rep": 0, "ttft": 24.78911063299165, "prompt": 32768, "cached": 0}
+{"length": 32768, "rep": 1, "ttft": 24.836596424982417, "prompt": 32766, "cached": 0}
+{"length": 32768, "rep": 2, "ttft": 24.782353354996303, "prompt": 32766, "cached": 0}
+{"length": 65536, "rep": 0, "ttft": 50.268406660994515, "prompt": 65536, "cached": 0}
+{"length": 65536, "rep": 1, "ttft": 50.17192946700379, "prompt": 65536, "cached": 0}
+{"length": 65536, "rep": 2, "ttft": 50.18943215801846, "prompt": 65536, "cached": 0}
+=== kvp-client r3k2all rc 0

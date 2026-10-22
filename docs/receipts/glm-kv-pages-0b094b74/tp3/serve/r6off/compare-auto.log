@@ -1,0 +1,84 @@
+  0   S1 t1 drafted SAME
+  1   S1 t1 plain   SAME
+  2   S1 t2 drafted SAME
+  3   S1 t2 plain   SAME
+  4   S1 t3 drafted SAME
+  5   S1 t3 plain   SAME
+  6   S1 t4 drafted SAME
+  7   S1 t4 plain   SAME
+  8   S1 t5 drafted SAME
+  9   S1 t5 plain   SAME
+ 10   S1 t6 drafted SAME
+ 11   S1 t6 plain   SAME
+ 12   S1 t7 drafted SAME
+ 13   S1 t7 plain   SAME
+ 14   S1 t8 drafted SAME
+ 15   S1 t8 plain   SAME
+ 16   S1 t9 drafted SAME
+ 17   S1 t9 plain   SAME
+ 18    X t1 drafted SAME
+ 19    A t1 drafted SAME
+ 20    A t1 plain   SAME
+ 21    B t1 drafted SAME
+ 22    B t1 plain   SAME
+ 23    A t2 drafted SAME
+ 24    A t2 plain   SAME
+ 25    B t2 drafted SAME
+ 26    B t2 plain   SAME
+ 27    A t3 drafted SAME
+ 28    A t3 plain   SAME
+ 29    B t3 drafted SAME
+ 30    B t3 plain   SAME
+ 31    E t1 drafted SAME
+ 32    E t1 plain   SAME
+ 33    T t1 drafted SAME
+ 34    T t1 plain   SAME
+ 35    T t2 drafted SAME
+ 36    T t2 plain   SAME
+ 38    C t1 drafted SAME
+ 39    C t1 plain   SAME
+ 40    C t2 drafted SAME
+ 41    C t2 plain   SAME
+ 42    A t4 drafted SAME
+ 43    B t4 drafted SAME
+drafted == plain on the same messages: 23/23
+    S1 t1 plain   prompt   7759 cached   6144: ttft   1.01 s vs fresh   5.07 s (  5.0x)
+    S1 t2 drafted prompt  15550 cached   6144: ttft   6.13 s vs fresh  10.17 s (  1.7x)
+    S1 t2 plain   prompt  15550 cached  14336: ttft   0.83 s vs fresh  10.13 s ( 12.2x)
+    S1 t3 drafted prompt  19462 cached  14336: ttft   3.43 s vs fresh  12.75 s (  3.7x)
+    S1 t3 plain   prompt  19462 cached  18432: ttft   0.74 s vs fresh  12.74 s ( 17.3x)
+    S1 t4 drafted prompt  21892 cached  18432: ttft   2.31 s vs fresh  14.27 s (  6.2x)
+    S1 t4 plain   prompt  21892 cached  20480: ttft   0.92 s vs fresh  14.24 s ( 15.4x)
+    S1 t5 drafted prompt  24388 cached  20480: ttft   2.53 s vs fresh  15.83 s (  6.2x)
+    S1 t5 plain   prompt  24388 cached  22528: ttft   1.13 s vs fresh  15.78 s ( 14.0x)
+    S1 t6 drafted prompt  26895 cached  22528: ttft   3.09 s vs fresh  17.73 s (  5.7x)
+    S1 t6 plain   prompt  26895 cached  26624: ttft   0.39 s vs fresh  17.69 s ( 45.0x)
+    S1 t7 drafted prompt  29798 cached  26624: ttft   2.21 s vs fresh  19.50 s (  8.8x)
+    S1 t7 plain   prompt  29798 cached  28672: ttft   0.81 s vs fresh  19.47 s ( 23.9x)
+    S1 t8 drafted prompt  35434 cached  28672: ttft   4.63 s vs fresh  23.28 s (  5.0x)
+    S1 t8 plain   prompt  35434 cached  34816: ttft   0.58 s vs fresh  23.24 s ( 40.4x)
+    S1 t9 drafted prompt  38152 cached  34816: ttft   2.29 s vs fresh  24.95 s ( 10.9x)
+    S1 t9 plain   prompt  38152 cached  36864: ttft   0.89 s vs fresh  24.94 s ( 28.0x)
+     A t1 drafted prompt   7412 cached   6144: ttft   0.90 s vs fresh   4.96 s (  5.5x)
+     A t1 plain   prompt   7412 cached   6144: ttft   0.86 s vs fresh   4.92 s (  5.7x)
+     B t1 drafted prompt   7474 cached   6144: ttft   0.92 s vs fresh   4.99 s (  5.4x)
+     B t1 plain   prompt   7474 cached   6144: ttft   0.88 s vs fresh   4.94 s (  5.6x)
+     A t2 drafted prompt  12632 cached   6144: ttft   4.39 s vs fresh   8.47 s (  1.9x)
+     A t2 plain   prompt  12632 cached  12288: ttft   0.43 s vs fresh   8.45 s ( 19.8x)
+     B t2 drafted prompt  12721 cached   6144: ttft   4.43 s vs fresh   8.52 s (  1.9x)
+     B t2 plain   prompt  12721 cached  12288: ttft   0.47 s vs fresh   8.48 s ( 18.2x)
+     A t3 drafted prompt  15383 cached  12288: ttft   2.14 s vs fresh  10.12 s (  4.7x)
+     A t3 plain   prompt  15383 cached  14336: ttft   0.77 s vs fresh  10.10 s ( 13.2x)
+     B t3 drafted prompt  17330 cached  12288: ttft   3.39 s vs fresh  11.43 s (  3.4x)
+     B t3 plain   prompt  17330 cached  16384: ttft   0.73 s vs fresh  11.39 s ( 15.6x)
+     E t1 drafted prompt  40901 cached   6144: ttft  22.72 s vs fresh  26.68 s (  1.2x)
+     E t1 plain   prompt  40901 cached  38912: ttft   1.27 s vs fresh  26.62 s ( 21.0x)
+     T t2 plain   prompt   4202 cached   4096: ttft   0.27 s vs fresh   3.03 s ( 11.2x)
+     C t1 drafted prompt   9702 cached   6144: ttft   2.37 s vs fresh   6.39 s (  2.7x)
+     C t1 plain   prompt   9702 cached   8192: ttft   0.97 s vs fresh   6.35 s (  6.5x)
+     C t2 drafted prompt  15180 cached   8192: ttft   4.67 s vs fresh  10.06 s (  2.2x)
+     C t2 plain   prompt  15180 cached  14336: ttft   0.68 s vs fresh  10.02 s ( 14.8x)
+     A t4 drafted prompt  18246 cached  14336: ttft   2.52 s vs fresh  11.85 s (  4.7x)
+     B t4 drafted prompt  19808 cached  16384: ttft   4.93 s vs fresh  26.47 s (  5.4x)
+PASS: 43/43 replies equal and as cached as planned
+timing: 0 resumed replies no sooner than fresh

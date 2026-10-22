@@ -1,0 +1,14 @@
+bin-0b094b74: 0b094b74 built with Zig 0.17.0 and nvcc 13.3 (V13.3.73) for sm_121; TP=2's ranks and the checks
+d82043de5d8b1f04c36dec65e0cb9ec7af9c64ef9c4c5cc7b796f0087f1d9b1a  tensorfold-native
+d82043de5d8b1f04c36dec65e0cb9ec7af9c64ef9c4c5cc7b796f0087f1d9b1a  tensorfold-native-k2
+d3042db03485ede9be61e848483674051167fba98f368470f5622cdc6b2cab26  tf-cuda-test
+
+bin-f8d254c5: main f8d254c5 built the same way; the replay on main and the A/B's main serves
+d9181ac075f36ee5c118ef0b38513f6ebf61ab9fba312dbe592f2c434bd02a39  tensorfold-native
+
+bin-abc83c3d: b7fecb3d with tp3/ring.patch and 0b094b74's change above b7fecb3d, built the same way; TP=3's ranks and check
+62649bbd8c2ce0d47e83e54f61dcb9e4dd3efce0f4d1ad4784bf4ad7f0482e14  tensorfold-native
+2707a1813f751c12506c224e0f7b25220150c5bb27f00c212f8c664caeb58500  tf-cuda-test
+
+bin-4c8cd52b: b7fecb3d with tp3/ring.patch, built the same way; the TP=3 serve that found commit 11's bug (tp3/found-b7fecb3d/)
+00552dccd11bea1331b44081ba4dc78c745c8e22ac5ef56af8285a3747a8bd67  tensorfold-native

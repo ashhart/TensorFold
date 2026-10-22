@@ -1,0 +1,11 @@
+-- run 2026-10-23 01:19:39
+2026-10-23 01:19:40 tree abc83c3d glm cuda: a stream takes its pages before its sequence is bound, so a slot past t; changed: zig/glm_prompt_host.zig zig/glm_snapshot_host.zig zig/src/core/heat.zig zig/src/core/kv_pool.zig zig/src/core/kv_pool_test.zig zig/src/families/glm/cuda.zig zig/src/families/glm/cuda_dsa_block.zig zig/src/families/glm/cuda_engine.zig zig/src/families/glm/cuda_follow.zig zig/src/families/glm/cuda_kv8_test.zig zig/src/families/glm/cuda_lanes.zig zig/src/families/glm/cuda_latent.zig zig/src/families/glm/cuda_native.zig zig/src/families/glm/cuda_pages.zig zig/src/families/glm/cuda_pages_test.zig zig/src/families/glm/cuda_prompts.zig zig/src/families/glm/cuda_ranks.zig zig/src/families/glm/cuda_snapshot_layout.zig zig/src/families/glm/cuda_snapshot_pages.zig zig/src/families/glm/cuda_snapshots.zig zig/src/families/glm/cuda_sparse.zig zig/src/families/glm/cuda_state.zig zig/src/native/cuda_kv_pool.zig zig/tests/cuda/glm_paged_tests.zig zig/tests/cuda/glm_ref_attn.zig zig/tests/cuda/glm_ref_fp8.zig zig/tests/cuda/glm_ref_index.zig zig/tests/cuda/main.zig
+2026-10-23 01:19:40 fmt rc=0
+2026-10-23 01:19:40 -- tp3: abc83c3d glm cuda: a stream takes its pages before its sequence is bound, so a slot past t
+2026-10-23 01:24:46 build rc=0 306s:
+2026-10-23 01:27:17 native rc=0 151s:
+2026-10-23 01:28:27 host rc=0 69s: failed command: ./.zig-cache/o/5b21a6c856bcc580edb3128b41ac4e50/test --cache-dir=./.zig-cache --seed=0xaeb51753 --listen=- failed command: ./.zig-cache/o/50bc9f88b9ae4d8712463603b5238381/test --cache-dir=./.zig-cache --seed=0xaeb51753 --listen=- Build Summary: 155/155 steps succeeded; 986/986 tests
+2026-10-23 01:28:33 kvpool rc=0 6s: Build Summary: 5/5 steps succeeded; 6/6 tests passed
+2026-10-23 01:29:09 test rc=0 36s: failed command: ./.zig-cache/o/7250ba077cad6049f6c43b354768d2f0/test --cache-dir=./.zig-cache --seed=0xe551a39b --listen=- Build Summary: 276/276 steps succeeded; 916/924 tests passed (8 skipped) |     |  +- compile lib hip-mock-failed debug native success 45ms MaxRSS:63M
+2026-10-23 01:29:09 lean rc=1 0s:
+2026-10-23 01:29:09 === kvp-base tp3 done

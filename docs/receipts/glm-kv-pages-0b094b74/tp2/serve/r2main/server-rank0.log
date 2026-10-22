@@ -1,0 +1,231 @@
+[kvp-serve] 2026-10-22T15:57:44+00:00 rank 0 of 2 context 131072 parallel 4 binary tensorfold-native-m112 d9181ac075f36ee5 env TF_KV_PAGES=unset TF_GLM_MM=unset args --prompt-cache-gib 0
+host-d:18754:18754 [0] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+host-d:18754:18754 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+host-d:18754:18754 [0] NCCL INFO cudaDriverVersion 13030
+host-d:18754:18754 [0] NCCL INFO NCCL version 2.30.7+cuda13.3
+host-d:18754:18754 [0] NCCL INFO NCCL git version HEAD a5187fa2e
+host-d:18754:18754 [0] NCCL INFO ncclOsDlopen(libnccl-net.so) failed: libnccl-net.so: cannot open shared object file: No such file or directory
+host-d:18754:18754 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+host-d:18754:18754 [0] NCCL INFO Count not open libibverbs.so
+host-d:18754:18754 [0] NCCL INFO dlvsym failed on mlx5dv_get_data_direct_sysfs_path - /lib/aarch64-linux-gnu/libmlx5.so.1: undefined symbol: mlx5dv_get_data_direct_sysfs_path, version MLX5_1.25 version MLX5_1.25
+host-d:18754:18754 [0] NCCL INFO dlvsym failed on mlx5dv_reg_dmabuf_mr - /lib/aarch64-linux-gnu/libmlx5.so.1: undefined symbol: mlx5dv_reg_dmabuf_mr, version MLX5_1.25 version MLX5_1.25
+host-d:18754:18754 [0] NCCL INFO NCCL_SOCKET_IFNAME set to enp1s0f1np1
+host-d:18754:18754 [0] NCCL INFO NCCL_IB_HCA set to rocep1s0f1
+host-d:18754:18754 [0] NCCL INFO NET/IB: [1] rocep1s0f1:uverbs1:1/RoCE provider=Mlx5 speed=200000 context=0x18a9e810 pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 ar=0 oooRqSize=0
+host-d:18754:18754 [0] NCCL INFO NET/IB : Made virtual device [0] name=rocep1s0f1 speed=200000 ndevs=1 rail=-1 plane=-1
+host-d:18754:18754 [0] NCCL INFO NET/IB : Using [0]rocep1s0f1:1/RoCE [RO]; OOB enp1s0f1np1:<link-de-d><0>
+host-d:18754:18754 [0] NCCL INFO Initialized NET plugin IB
+host-d:18754:18754 [0] NCCL INFO Assigned NET plugin IB to comm
+host-d:18754:18754 [0] NCCL INFO ncclOsDlopen(libnccl-rma.so) failed: libnccl-rma.so: cannot open shared object file: No such file or directory
+host-d:18754:18754 [0] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+host-d:18754:18754 [0] NCCL INFO RMA/Plugin: Failed to load external plugin libnccl-rma.so, dlHandle: (nil), ncclRma: (nil)
+host-d:18754:18754 [0] NCCL INFO RMA/Plugin: Assigned plugin RMA_IB_PROXY to comm
+host-d:18754:18754 [0] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+host-d:18754:18754 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+host-d:18754:18754 [0] NCCL INFO GIN/Plugin: Failed to load external plugin libnccl-gin.so, dlHandle: (nil), ncclGin: (nil)
+host-d:18754:18754 [0] NCCL INFO GIN/Plugin: Assigned plugin GIN_IB_GDAKI type 3 to comm
+host-d:18754:18754 [0] NCCL INFO Using network IB
+host-d:18754:18754 [0] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+host-d:18754:18754 [0] NCCL INFO [Rank 0] ncclCommInitRank comm 0x15e6c7c0 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId f01000 commId 0x550bed879af798cb - Init START
+host-d:18754:18754 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+host-d:18754:18754 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f1'
+host-d:18754:18754 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f1'
+host-d:18754:18754 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f1'
+host-d:18754:18754 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-4,10-14).
+host-d:18754:18754 [0] NCCL INFO Rank 0: 1 Net devices
+host-d:18754:18754 [0] NCCL INFO Rank 0: 0 CollNet devices
+host-d:18754:18754 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+host-d:18754:18754 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+host-d:18754:18754 [0] NCCL INFO comm 0x15e6c7c0 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+host-d:18754:18754 [0] NCCL INFO Channel 00/04 : 0 1
+host-d:18754:18754 [0] NCCL INFO Channel 01/04 : 0 1
+host-d:18754:18754 [0] NCCL INFO Channel 02/04 : 0 1
+host-d:18754:18754 [0] NCCL INFO Channel 03/04 : 0 1
+host-d:18754:18754 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] 1/-1/-1->0->-1 [2] 1/-1/-1->0->-1 [3] 1/-1/-1->0->-1
+host-d:18754:18754 [0] NCCL INFO P2P Chunksize set to 262144
+host-d:18754:18754 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+host-d:18754:18754 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+host-d:18754:18754 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+host-d:18754:18754 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+host-d:18754:18774 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 2
+host-d:18754:18773 [0] NCCL INFO [Proxy Service] Device 0 CPU core 12
+host-d:18754:18773 [0] NCCL INFO proxy listening socket at <link-de-d><46923>
+host-d:18754:18754 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+host-d:18754:18754 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+host-d:18754:18775 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 12
+host-d:18754:18754 [0] NCCL INFO Channel 02/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+host-d:18754:18754 [0] NCCL INFO Channel 03/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+host-d:18754:18754 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0
+host-d:18754:18754 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/IB/0
+host-d:18754:18754 [0] NCCL INFO Channel 02/0 : 0[0] -> 1[0] [send] via NET/IB/0
+host-d:18754:18754 [0] NCCL INFO Channel 03/0 : 0[0] -> 1[0] [send] via NET/IB/0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfa36c4010000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfa36c4054000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfa36c409c000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1675 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 1675 mtu 3 GID 3 (0/12D290AFFFF0000) ctsFifoRkey=0x1b9c99 ctsFifoLkey=0x1b9c99
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 0 Port 1 qp_num 1675 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1676 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 1676 mtu 3 GID 3 (0/12D290AFFFF0000) ctsFifoRkey=0x1ab2af ctsFifoLkey=0x1ab2af
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 0 Port 1 qp_num 1676 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfa36c414e000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfa36c4196000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfa36c41da000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfa36c4222000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfa36c4266000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 0 Port 1 qp_num 1675 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1677 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1678 pkey=0 pd=0xfa36c4053590
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1679 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 1679 mtu 3 GID 3 (0/12D290AFFFF0000) ctsFifoRkey=0x1b8986 ctsFifoLkey=0x1b8986
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 0 Port 1 qp_num 1679 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1680 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1681 pkey=0 pd=0xfa36c4053590
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1682 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 1682 mtu 3 GID 3 (0/12D290AFFFF0000) ctsFifoRkey=0x1b6764 ctsFifoLkey=0x1b6764
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 0 Port 1 qp_num 1682 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1683 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1684 pkey=0 pd=0xfa36c4053590
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1685 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1686 pkey=0 pd=0xfa36c4053590
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 0 Port 1 qp_num 1676 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 0 Port 1 qp_num 1679 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 0 Port 1 qp_num 1682 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18754 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+host-d:18754:18754 [0] NCCL INFO Connected all trees
+host-d:18754:18754 [0] NCCL INFO Connected binomial trees
+host-d:18754:18754 [0] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+host-d:18754:18754 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+host-d:18754:18754 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+host-d:18754:18754 [0] NCCL INFO 4 coll channels, 4 collnet channels, 0 nvls channels, 4 p2p channels, 1 pinfo: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+info: RoCE all-gather: 1 HCA(s), shards up to 4096 KiB by RDMA writes
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 94.66 GiB; 4 streams at once, 1.77 GiB each at a 131072-token window, of 7.5 GiB left after a 12.2 GiB reserve; prompts in passes of up to 2048 rows, no prompt cache; own glue kernels
+[tensorfold] serving glm-tf at http://127.0.0.1:8097/v1 (sampling: temperature 1.0, top_p 0.95; drafts: on; context: 131072; loaded in 304.7s)
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-323acff5145cc161ac1fc763e6583104 prompt=7759 cached=0 thinking=True effort=high tokens=61 sha=f0f55b35a304 finish=stop rounds=28 accepted=33/46 ttft=6.005 decode=2.001 elapsed=8.006 queued=0.000 tok/s=30.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-1c176e7808ba68c59e182faff3a0b85d prompt=7759 cached=0 thinking=True effort=high tokens=61 sha=f0f55b35a304 finish=stop rounds=60 accepted=0/0 ttft=5.953 decode=3.364 elapsed=9.317 queued=0.000 tok/s=17.8
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-0ec03ee4292e03e35ed62b1f350813bb prompt=15550 cached=0 thinking=True effort=high tokens=44 sha=1a31202ffe11 finish=stop rounds=13 accepted=30/36 ttft=11.915 decode=1.060 elapsed=12.975 queued=0.000 tok/s=40.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-bc953dbd72eb17ebb1aa870563d94e25 prompt=15550 cached=0 thinking=True effort=high tokens=44 sha=1a31202ffe11 finish=stop rounds=43 accepted=0/0 ttft=11.902 decode=2.428 elapsed=14.330 queued=0.000 tok/s=17.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-b9cc592a1affad8b04b7f7bfa7dc3be2 prompt=19460 cached=0 thinking=True effort=high tokens=80 sha=bdf4933d2070 finish=stop rounds=35 accepted=45/68 ttft=14.923 decode=2.582 elapsed=17.505 queued=0.000 tok/s=30.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-7ff9862238e480a88a1f39427b1ade71 prompt=19460 cached=0 thinking=True effort=high tokens=80 sha=bdf4933d2070 finish=stop rounds=79 accepted=0/0 ttft=14.916 decode=4.414 elapsed=19.330 queued=0.000 tok/s=17.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-4fe2022e4d38090d99e02517fe34ab05 prompt=21874 cached=0 thinking=True effort=high tokens=148 sha=5ce5e0e878d6 finish=stop rounds=70 accepted=78/124 ttft=16.724 decode=5.129 elapsed=21.854 queued=0.000 tok/s=28.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-fd19189f89f12bb8f4dfb597405a92a8 prompt=21874 cached=0 thinking=True effort=high tokens=148 sha=5ce5e0e878d6 finish=stop rounds=147 accepted=0/0 ttft=16.665 decode=8.202 elapsed=24.867 queued=0.000 tok/s=17.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-0100bdc17765b607691b3272318ed239 prompt=26786 cached=0 thinking=True effort=high tokens=160 sha=140ea4edfd3e finish=length rounds=72 accepted=88/126 ttft=20.654 decode=5.267 elapsed=25.921 queued=0.000 tok/s=30.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-bd1a1e972e40e929886c428be3c1192f prompt=26786 cached=0 thinking=True effort=high tokens=160 sha=140ea4edfd3e finish=length rounds=159 accepted=0/0 ttft=20.617 decode=8.877 elapsed=29.493 queued=0.000 tok/s=17.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-83e2d984f426ca414b4870eb956de769 prompt=29293 cached=0 thinking=True effort=high tokens=160 sha=0edc09e609c4 finish=length rounds=73 accepted=86/129 ttft=22.503 decode=5.356 elapsed=27.859 queued=0.000 tok/s=29.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-acd5057767cc21531f65f9c8b1546d52 prompt=29293 cached=0 thinking=True effort=high tokens=160 sha=0edc09e609c4 finish=length rounds=159 accepted=0/0 ttft=22.482 decode=9.077 elapsed=31.559 queued=0.000 tok/s=17.5
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-215252b3817d2b5aad9be30c2ae6ed0a prompt=32216 cached=0 thinking=True effort=high tokens=160 sha=ce669709a0ff finish=length rounds=78 accepted=82/126 ttft=24.980 decode=5.721 elapsed=30.701 queued=0.000 tok/s=27.8
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-6c86d70117b8980752df91204668dfed prompt=32216 cached=0 thinking=True effort=high tokens=160 sha=ce669709a0ff finish=length rounds=159 accepted=0/0 ttft=24.861 decode=9.105 elapsed=33.967 queued=0.000 tok/s=17.5
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-cd0cd812e6b6b819a5ed238db452ab1e prompt=35142 cached=0 thinking=True effort=high tokens=160 sha=3d03b48fffef finish=length rounds=78 accepted=82/128 ttft=27.219 decode=5.539 elapsed=32.758 queued=0.000 tok/s=28.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-d5f1570f22cf16cec209a878e39989e4 prompt=35142 cached=0 thinking=True effort=high tokens=160 sha=3d03b48fffef finish=length rounds=159 accepted=0/0 ttft=26.987 decode=8.855 elapsed=35.842 queued=0.000 tok/s=18.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-3e5029a6a948e8c1588087d607b4e762 prompt=37860 cached=0 thinking=True effort=high tokens=160 sha=21b5a97be33b finish=length rounds=29 accepted=130/135 ttft=29.002 decode=2.703 elapsed=31.705 queued=0.000 tok/s=58.8
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-53d57d3021ffde72f639e977bdec8d0e prompt=37860 cached=0 thinking=True effort=high tokens=160 sha=21b5a97be33b finish=length rounds=159 accepted=0/0 ttft=28.975 decode=8.879 elapsed=37.853 queued=0.000 tok/s=17.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-82c4fc4edf541cf5c8f2b36cef63d59e prompt=2115 cached=0 thinking=True effort=high tokens=160 sha=9761cff1a208 finish=length rounds=70 accepted=89/135 ttft=1.765 decode=5.233 elapsed=6.998 queued=0.000 tok/s=30.4
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-4f87401e0230e88a10ce83777fcca2af prompt=7412 cached=0 thinking=True effort=high tokens=95 sha=ef243cba6893 finish=stop rounds=34 accepted=61/80 ttft=5.829 decode=2.682 elapsed=8.511 queued=0.000 tok/s=35.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-e7f7fe42bc66039314e99a98e20406f3 prompt=7412 cached=0 thinking=True effort=high tokens=95 sha=ef243cba6893 finish=stop rounds=94 accepted=0/0 ttft=5.785 decode=5.257 elapsed=11.042 queued=0.000 tok/s=17.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-170dfac8667ba4608f9fdbc6c2e8864f prompt=7474 cached=0 thinking=True effort=high tokens=72 sha=13c0fecc4c82 finish=stop rounds=23 accepted=49/62 ttft=5.863 decode=1.892 elapsed=7.754 queued=0.000 tok/s=37.5
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-54635d05f1b1d674cfd232cd76669783 prompt=7474 cached=0 thinking=True effort=high tokens=72 sha=13c0fecc4c82 finish=stop rounds=71 accepted=0/0 ttft=5.810 decode=3.973 elapsed=9.783 queued=0.000 tok/s=17.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-fd57199245e6829e8f1e17227a3eea29 prompt=12623 cached=0 thinking=True effort=high tokens=120 sha=e17fc375cc35 finish=stop rounds=56 accepted=64/89 ttft=9.926 decode=3.948 elapsed=13.873 queued=0.000 tok/s=30.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-20aa3b95ea86f615581d858d27ad7d17 prompt=12623 cached=0 thinking=True effort=high tokens=120 sha=e17fc375cc35 finish=stop rounds=119 accepted=0/0 ttft=9.901 decode=6.611 elapsed=16.512 queued=0.000 tok/s=18.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-de093e8b6ac602e62bc2d86ae9931089 prompt=12720 cached=0 thinking=True effort=high tokens=79 sha=1b8331ee40b2 finish=stop rounds=40 accepted=39/56 ttft=9.968 decode=2.756 elapsed=12.724 queued=0.000 tok/s=28.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-fc98ac7c5cf2a1940584a18e0e8f12d1 prompt=12720 cached=0 thinking=True effort=high tokens=79 sha=1b8331ee40b2 finish=stop rounds=78 accepted=0/0 ttft=9.932 decode=4.341 elapsed=14.273 queued=0.000 tok/s=18.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-6446ee0b1335e6abf1f3722559c708b7 prompt=18063 cached=0 thinking=True effort=high tokens=160 sha=ee9415ab2d87 finish=length rounds=78 accepted=82/123 ttft=13.799 decode=5.545 elapsed=19.344 queued=0.000 tok/s=28.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-e756cb3dbbdc5ae7a023b77a1e2969a7 prompt=18063 cached=0 thinking=True effort=high tokens=160 sha=ee9415ab2d87 finish=length rounds=159 accepted=0/0 ttft=13.735 decode=8.899 elapsed=22.634 queued=0.000 tok/s=17.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-873f135a2bd0ebc942c9d3eba7967a4d prompt=15032 cached=0 thinking=True effort=high tokens=85 sha=bc7fbb9d3106 finish=stop rounds=42 accepted=43/62 ttft=11.665 decode=2.926 elapsed=14.591 queued=0.000 tok/s=28.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-fa18b94b08783e7d7e30f290575d43c8 prompt=15032 cached=0 thinking=True effort=high tokens=85 sha=bc7fbb9d3106 finish=stop rounds=84 accepted=0/0 ttft=11.622 decode=4.700 elapsed=16.323 queued=0.000 tok/s=17.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-d814619ebf063eab9bb642ca5cbf5ca6 prompt=40609 cached=0 thinking=True effort=high tokens=160 sha=21b5a97be33b finish=length rounds=23 accepted=136/138 ttft=31.010 decode=2.362 elapsed=33.373 queued=0.000 tok/s=67.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-01c34b048cb21e15a4bf23fd02c4a8aa prompt=40609 cached=0 thinking=True effort=high tokens=160 sha=21b5a97be33b finish=length rounds=159 accepted=0/0 ttft=30.938 decode=8.952 elapsed=39.890 queued=0.000 tok/s=17.8
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-97bf9b62ba9369e45c2eb0f25b0c6c7c prompt=1520 cached=0 thinking=False effort=none tokens=156 sha=ea671d580d5c finish=stop rounds=68 accepted=88/131 ttft=1.143 decode=4.986 elapsed=6.129 queued=0.000 tok/s=31.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-8cf5bf35ae884ff99e799fd1ca875547 prompt=1520 cached=0 thinking=False effort=none tokens=156 sha=ea671d580d5c finish=stop rounds=155 accepted=0/0 ttft=1.099 decode=8.487 elapsed=9.586 queued=0.000 tok/s=18.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-05a0b4999b9fc14afe9ceca85b5f908e prompt=4208 cached=0 thinking=False effort=none tokens=12 sha=a94919711db8 finish=stop rounds=4 accepted=8/9 ttft=3.601 decode=0.306 elapsed=3.907 queued=0.000 tok/s=36.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-029d92cf3999883e988324585d8635dd prompt=4208 cached=0 thinking=False effort=none tokens=12 sha=a94919711db8 finish=stop rounds=11 accepted=0/0 ttft=3.575 decode=0.624 elapsed=4.199 queued=0.000 tok/s=17.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-125918e6482e34ec7d621b888f923ff1 prompt=9702 cached=0 thinking=True effort=high tokens=82 sha=efff792100c9 finish=stop rounds=39 accepted=43/59 ttft=7.480 decode=2.740 elapsed=10.219 queued=0.000 tok/s=29.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-feb17f80cd828bf59e7bbc78ffcaee1b prompt=9702 cached=0 thinking=True effort=high tokens=82 sha=efff792100c9 finish=stop rounds=81 accepted=0/0 ttft=7.429 decode=4.547 elapsed=11.976 queued=0.000 tok/s=17.8
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-5e2a91bafe0052ebb7ecbb3884d5a7e7 prompt=15152 cached=0 thinking=True effort=high tokens=160 sha=bb64d4be5880 finish=length rounds=71 accepted=88/117 ttft=11.757 decode=5.088 elapsed=16.845 queued=0.000 tok/s=31.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-a1ba41caa03cb879a7fb19c082efef7d prompt=15152 cached=0 thinking=True effort=high tokens=160 sha=bb64d4be5880 finish=length rounds=159 accepted=0/0 ttft=11.720 decode=8.828 elapsed=20.548 queued=0.000 tok/s=18.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-1c958c6c38dec5a3aeeb3bc5cb8ddd2d prompt=17550 cached=0 thinking=True effort=high tokens=160 sha=fe9efe1d4302 finish=length rounds=61 accepted=99/167 ttft=13.503 decode=23.261 elapsed=36.764 queued=0.000 tok/s=6.8
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-5d84d3037baebc9cba1fc34631aa5b66 prompt=20872 cached=0 thinking=True effort=high tokens=160 sha=eab19e6ff8fd finish=length rounds=54 accepted=105/161 ttft=30.675 decode=6.465 elapsed=37.140 queued=0.836 tok/s=24.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped
+2p channels per peer
+host-d:18754:18754 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 0, globalGinSupport 0, cuMemGdrSupport 0
+host-d:18754:18754 [0] NCCL INFO CC Off, workFifoBytes 1048576
+host-d:18754:18754 [0] NCCL INFO ncclCommInitRank comm 0x15e6c7c0 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId f01000 commId 0x550bed879af798cb - Init COMPLETE
+host-d:18754:18754 [0] NCCL INFO Init timings - ncclCommInitRank: rank 0 nranks 2 total 0.38 (kernels 0.24, alloc 0.03, bootstrap 0.00, allgathers 0.00, topo 0.01, graphs 0.00, connections 0.09, rest 0.00)
+host-d:18754:18754 [0] NCCL INFO Channel 02/1 : 1[0] -> 0[0] [receive] via NET/IB/0/Shared
+host-d:18754:18754 [0] NCCL INFO Channel 02/1 : 0[0] -> 1[0] [send] via NET/IB/0/Shared
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xfa36c4450000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xfa36c4491000)
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1687 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 1687 mtu 3 GID 3 (0/12D290AFFFF0000) ctsFifoRkey=0x1bbdba ctsFifoLkey=0x1bbdba
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 0 Port 1 qp_num 1687 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1688 pkey=0 pd=0xfa36c4053590 oooRq=0
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=0 devName=rocep1s0f1 ndevs=1 nmdevs=1 qp_num=1689 pkey=0 pd=0xfa36c4053590
+host-d:18754:18773 [0] NCCL INFO NET/IB: ncclIbSenderQpsToRts: Set ECE: IbDev 0 Port 1 qp_num 1687 set_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+host-d:18754:18754 [0] NCCL INFO Symmetric VA size=124GB

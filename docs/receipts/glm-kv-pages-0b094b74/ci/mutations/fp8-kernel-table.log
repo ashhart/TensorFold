@@ -1,0 +1,104 @@
+discovery verbs: retained through TLS, atexit and destructor; child exit 0
+discovery grammar: retained through TLS, atexit and destructor; child exit 0
+test-cuda-host
++- run test 11 pass, 1 fail (12 total)
+GLM_KV_BYTES context=8192 capacity=8256 main_layers=11 bf16=296101376 fp8=245772800
+GLM_KV_BYTES context=65536 capacity=65600 main_layers=11 bf16=1044784640 fp8=644887040
+GLM_KV_BYTES context=199307 capacity=199360 main_layers=11 bf16=2791155200 fp8=1575856640
+GLM_KV_BYTES context=245760 capacity=245824 main_layers=11 bf16=3397789184 fp8=1899246080
+error: 'cuda_kv8_test.test.GLM FP8 KV: an FP8 cache takes no page table, so its writes and reads refuse one before they launch' failed:
+       expected error.Fp8OnPages, found void
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:634:9: 0x12707db in expectError__func_1068 (std.zig)
+               return error.TestExpectedError;
+               ^
+       <home>/zt/kvp-mut/zig/src/families/glm/cuda_kv8_test.zig:143:5: 0x12715bb in test.GLM FP8 KV: an FP8 cache takes no page table, so its writes and reads refuse one before they launch (cuda.zig)
+           try t.expectError(error.Fp8OnPages, latent.latentWriteFormat(set, stream, 100, 512, 200, 400, paged, 300, 3, 512));
+           ^
+failed command: ./.zig-cache/o/d1aa559c5956637f0a2670ea3e6fc85a/test --cache-dir=./.zig-cache --seed=0x7819bf12 --listen=-
+
+test-cuda-host
++- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zig-cache/o/03f27579295a599769f8c15e2a5c8c7e/test --cache-dir=./.zig-cache --seed=0x7819bf12 --listen=-
+
+test-glm-snapshots-host
++- run test w
+GLM snapshot sizing rank=0 world=2 at=2048 bytes=203423744 arena=7034250752
+GLM snapshot sizing rank=0 world=2 at=34816 bytes=643825664 arena=7034250752
+GLM snapshot sizing rank=0 world=2 at=266240 bytes=3665821696 arena=7034250752
+failed command: ./.zig-cache/o/df575ee2b6723b70a74444009b245f6a/test --cache-dir=./.zig-cache --seed=0x7819bf12 --listen=-
+
+test-cuda-host
++- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zig-cache/o/4a85b2029e4b8e63dee66758ecdc52ac/test --cache-dir=./.zig-cache --seed=0x7819bf12 --listen=-
+
+test-cuda-host
++- run test 83 pass, 1 fail (84 total)
+GLM_KV_BYTES context=8192 capacity=8256 main_layers=11 bf16=296101376 fp8=245772800
+GLM_KV_BYTES context=65536 capacity=65600 main_layers=11 bf16=1044784640 fp8=644887040
+GLM_KV_BYTES context=199307 capacity=199360 main_layers=11 bf16=2791155200 fp8=1575856640
+GLM_KV_BYTES context=245760 capacity=245824 main_layers=11 bf16=3397789184 fp8=1899246080
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 0 cannot exchange with rank 2; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 1 cannot exchange with rank 3; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 2 cannot exchange with rank 0; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 3 cannot exchange with rank 1; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+error: 'cuda_kv8_test.test.GLM FP8 KV: an FP8 cache takes no page table, so its writes and reads refuse one before they launch' failed:
+       expected error.Fp8OnPages, found void
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:634:9: 0x1597a5b in expectError__func_2277 (std.zig)
+               return error.TestExpectedError;
+               ^
+       <home>/zt/kvp-mut/zig/src/families/glm/cuda_kv8_test.zig:143:5: 0x159883b in test.GLM FP8 KV: an FP8 cache takes no page table, so its writes and reads refuse one before they launch (cuda.zig)
+           try t.expectError(error.Fp8OnPages, latent.latentWriteFormat(set, stream, 100, 512, 200, 400, paged, 300, 3, 512));
+           ^
+failed command: ./.zig-cache/o/9b3ac620742f5e4666ec94e04a8811c8/test --cache-dir=./.zig-cache --seed=0x7819bf12 --listen=-
+
+Build Summary: 160/163 steps succeeded (2 failed); 252/254 tests passed (2 failed)
+test-cuda-host transitive failure
++- run test 11 pass, 1 fail (12 total)
++- run test 83 pass, 1 fail (84 total)
