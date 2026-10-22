@@ -120,8 +120,7 @@ fn completeSum(c: *flash.collective.Collective, stream: cuda.Stream, values: u64
     try c.finish(stream);
 }
 
-/// The injected 0.6 s peer delay. Windows' CRT has neither nanosleep nor a real std.c.timespec,
-/// and this test never runs there.
+/// The injected 0.6 s peer delay; this POSIX-only NCCL test never runs on Windows.
 fn sleepSixTenths() void {
     if (builtin.os.tag == .windows) return;
     const delay: std.c.timespec = .{ .sec = 0, .nsec = 600_000_000 };

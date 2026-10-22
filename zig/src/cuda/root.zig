@@ -92,6 +92,7 @@ test {
     _ = @import("experts.zig");
     _ = @import("sample.zig");
     _ = @import("roce.zig");
+    _ = @import("roce_nap.zig");
     _ = @import("rank_scatter.zig");
     _ = @import("relay_plan.zig");
     _ = launch;
