@@ -24,7 +24,6 @@ pub const Kernels = struct {
     }
 
     /// out (rows, q.n) bf16 = x (rows, q.k) bf16 through q: x quantized a 64-input group into `ws`, then the int8 mma.
-    /// The quantizer marks an exceptional group in `flag`: the caller recomputes those rows in the default precision.
     pub fn prompt(kk: Kernels, s: Stream, x: u64, q: Affine4, out: u64, rows: usize, ws: u64, flag: u64, exceptional: *u32) !void {
         const groups = q.k / 64;
         const xa = ws + rows * q.k;

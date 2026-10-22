@@ -386,14 +386,8 @@ pub const Engine = struct {
         const n_out = l.outputs();
         const k = l.inputs();
         if (prompt and e.int8.on) switch (l) {
-            .a4 => |q| {
-                // every prompt row of an int8 request takes int8, whatever the chunk's size
-                if (try @import("cuda_prompt_int8.zig").project(e, x, q, out, rows)) {
-                    if (rows <= 16 and sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
-                    return;
-                }
-                // an exceptional activation or an overflowed scale: this chunk is recomputed in the default precision
-            },
+            // every prompt row of an int8 request takes int8; an exceptional chunk returns to the default precision
+            .a4 => |q| if (try @import("cuda_prompt_int8.zig").projectRows(e, q, x, xs, out, rows, sums, params, k)) return,
             .an => {},
         };
         if (prompt and rows > 16) return switch (l) {
@@ -441,7 +435,6 @@ pub const Engine = struct {
     /// Refuse the whole frame before settling any prior window or launching work.
     pub fn admit(e: *const Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
-        // the supported geometry first: it is the engine's, and it is refused before the request's own state
         if (!geometry.supported(g, ids.len, keep == .last, most_verify)) return error.UnsupportedQwenGeometry;
         var total: usize = 0;
         if (parts.len == 0 or parts.len > max_segs) return error.InvalidQwenSegments;

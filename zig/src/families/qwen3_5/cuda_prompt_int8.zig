@@ -36,12 +36,18 @@ pub const State = struct {
     }
 };
 
-/// A prompt chunk's affine 4-bit projection (every prompt row) with int8 activations.
-/// False: the chunk holds an exceptional activation or an overflowed scale, and is recomputed in the default precision.
+/// A prompt chunk's affine 4-bit projection (every prompt row) with int8 activations; false when it is exceptional.
 pub fn project(e: anytype, x: u64, q: cuda.qlinear.Affine4, out: u64, rows: usize) !bool {
     var exceptional: u32 = 0;
     try e.int8.kernels.prompt(e.stream, x, q, out, rows, e.int8.ws, e.int8.flag.?.ptr, &exceptional);
     return exceptional == 0;
+}
+
+/// A prompt chunk's affine 4-bit projection in int8, with the group sums a short chunk needs.
+pub fn projectRows(e: anytype, q: cuda.qlinear.Affine4, x: u64, xs: u64, out: u64, rows: usize, sums: bool, params: u64, k: usize) !bool {
+    if (!try project(e, x, q, out, rows)) return false;
+    if (rows <= 16 and sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
+    return true;
 }
 
 /// The production allocation prefix, isolated so an inert driver can check ownership before startup.
