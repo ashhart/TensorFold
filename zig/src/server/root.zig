@@ -63,6 +63,7 @@ test {
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("logprobs_test.zig");
+    _ = @import("think_split_test.zig");
     _ = @import("thinking_reserve_test.zig");
     _ = @import("late_system_test.zig");
     _ = @import("compact_test.zig");

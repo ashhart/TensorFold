@@ -49,14 +49,49 @@ fn trimNewlines(s: []const u8) []const u8 {
 
 pub const Split = struct { reasoning: []const u8, answer: []const u8 };
 
+/// Where a reply's reasoning ends: the model's own close token, or the text's first spelling of the marker.
+pub const Close = union(enum) {
+    /// The close marker is not one token in this tokenizer: the first spelling of it in the text ends the reasoning.
+    spelled,
+    /// The close token's bytes begin here: the reasoning ends there, and a marker the reply quotes stays text.
+    token: usize,
+    /// The close marker is one token and the reply has not written it yet: all of the text so far is reasoning.
+    pending,
+};
+
+/// Where the reply's reasoning ends, from its tokens: the close token's bytes, the text's spelling, or all of it.
+pub fn closeWhere(a: Allocator, decode: anytype, ctx: anytype, tokens: []const u32, close_id: ?u32) !Close {
+    const id = close_id orelse return .spelled;
+    const at = std.mem.indexOfScalar(u32, tokens, id) orelse return .pending;
+    if (at == 0) return .{ .token = 0 };
+    return .{ .token = (try decode(ctx, a, tokens[0..at])).len };
+}
+
 /// (reasoning, answer) of a thinking reply; while it streams, a tail that could begin a marker is held back.
 pub fn splitThinking(a: Allocator, full: []const u8, finished: bool, m: Markers) Allocator.Error!Split {
+    return splitThinkingAt(a, full, finished, m, .spelled);
+}
+
+/// As `splitThinkingAt`, but the close is found in the reply's tokens: the close token's own bytes end the reasoning.
+pub fn splitThinkingTokens(a: Allocator, decode: anytype, ctx: anytype, full: []const u8, finished: bool, m: Markers, tokens: []const u32, close_id: ?u32) !Split {
+    return splitThinkingAt(a, full, finished, m, try closeWhere(a, decode, ctx, tokens, close_id));
+}
+
+/// As `splitThinking`, but the close marker is the model's own close token: the reasoning ends at that token's bytes.
+pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Markers, close: Close) Allocator.Error!Split {
     var text = full;
+    var at: ?usize = switch (close) {
+        .spelled, .pending => null,
+        .token => |v| v,
+    };
     if (m.open.len > 0 and !std.mem.startsWith(u8, text, m.open)) {
         if (find(text, m.open)) |start| if (start > 0) {
             var prefix = text[0..start];
             prefix = prefix[0 .. prefix.len - partialTag(prefix, m.open)]; // a stray partial opener
-            const inner = try splitThinking(a, text[start..], finished, m);
+            const inner = try splitThinkingAt(a, text[start..], finished, m, switch (close) {
+                .spelled, .pending => close,
+                .token => |v| .{ .token = if (v >= start) v - start else 0 },
+            });
             return .{ .reasoning = inner.reasoning, .answer = try std.mem.concat(a, u8, &.{ prefix, inner.answer }) };
         };
         if (!finished) {
@@ -66,23 +101,41 @@ pub fn splitThinking(a: Allocator, full: []const u8, finished: bool, m: Markers)
         }
         return .{ .reasoning = "", .answer = text };
     }
+    var shift: usize = 0;
     if (m.open.len > 0) {
-        text = trimNewlines(text[m.open.len..]);
+        const rest = text[m.open.len..];
+        const trimmed = trimNewlines(rest);
+        shift = m.open.len + (rest.len - trimmed.len);
+        text = trimmed;
     } else if (std.mem.startsWith(u8, text, think_open)) {
-        text = trimNewlines(text[think_open.len..]);
+        const rest = text[think_open.len..];
+        const trimmed = trimNewlines(rest);
+        shift = think_open.len + (rest.len - trimmed.len);
+        text = trimmed;
     } else if (!finished and std.mem.startsWith(u8, think_open, text)) {
         return .{ .reasoning = "", .answer = "" }; // held while the reply may still be writing that opener
     }
-    if (find(text, m.close)) |end| return .{ .reasoning = text[0..end], .answer = trimNewlines(text[end + m.close.len ..]) };
-    var call: ?usize = null;
-    for (calls) |c| if (find(text, c[0])) |at| {
-        if (call == null or at < call.?) call = at;
+    if (at) |v| at = if (v >= shift) v - shift else null;
+    const end: ?usize = switch (close) {
+        .spelled => find(text, m.close),
+        .pending => null,
+        .token => at,
     };
-    if (call) |at| {
+    if (end) |at_end| {
+        if (at_end + m.close.len <= text.len and std.mem.startsWith(u8, text[at_end..], m.close)) {
+            return .{ .reasoning = text[0..at_end], .answer = trimNewlines(text[at_end + m.close.len ..]) };
+        }
+        // the close token's bytes are not where the text says: the whole text is reasoning
+    }
+    var call: ?usize = null;
+    for (calls) |c| if (find(text, c[0])) |at_call| {
+        if (call == null or at_call < call.?) call = at_call;
+    };
+    if (call) |at_call| {
         // a call written before the block closes: held while the block may still close, the answer if the reply ends
-        if (!finished) return .{ .reasoning = text[0..at], .answer = "" };
-        for (calls) |c| if (std.mem.startsWith(u8, text[at..], c[0]) and find(text[at..], c[1]) != null)
-            return .{ .reasoning = text[0..at], .answer = text[at..] };
+        if (!finished) return .{ .reasoning = text[0..at_call], .answer = "" };
+        for (calls) |c| if (std.mem.startsWith(u8, text[at_call..], c[0]) and find(text[at_call..], c[1]) != null)
+            return .{ .reasoning = text[0..at_call], .answer = text[at_call..] };
         return .{ .reasoning = text, .answer = "" };
     }
     var held: usize = 0;
@@ -330,6 +383,15 @@ pub const Incremental = struct {
     text: std.ArrayList(u8) = .empty,
     prefix: usize = 0,
     read: usize = 0,
+    close: ?Close = null, // where the reasoning ends, once the close token has arrived
+
+    /// Where the reply's reasoning ends: the close token's bytes once it has arrived, or the text's spelling of it.
+    pub fn closeOf(inc: *Incremental, a: Allocator, decode: anytype, ctx: anytype, close_id: ?u32) !Close {
+        if (inc.close) |c| return c;
+        const c = try closeWhere(a, decode, ctx, inc.tokens.items, close_id);
+        if (c != .pending) inc.close = c; // a pending close is not kept: the token may still arrive
+        return c;
+    }
 
     pub fn extend(inc: *Incremental, a: Allocator, ctx: anytype, decode: anytype, more: []const u32) ![]const u8 {
         try inc.tokens.appendSlice(a, more);

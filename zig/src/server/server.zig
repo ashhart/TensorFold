@@ -94,6 +94,7 @@ pub const Server = struct {
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
     markers: reply_text.Markers = reply_text.think_markers,
+    close_id: ?u32 = null, // the close marker's own token, when the marker is one token
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
     thinking_switch: bool = false,
@@ -150,6 +151,7 @@ pub const Server = struct {
         const a = srv.arena.allocator();
         srv.eos = try a.dupe(u32, text.eosIds());
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
+        srv.close_id = text.tokenId(srv.markers.close);
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
         srv.thinking_switch = std.mem.indexOf(u8, source, "enable_thinking") != null or
