@@ -250,3 +250,29 @@ extern "C" __global__ void tf_ctl_q35_dense_half(const __nv_bfloat16 *X, const _
 }
 // The pre-template GLM BF16 operators, kept apart from the candidate math for byte equality.
 #include "contract_glm_bf16_baseline.cuh"
+// Gate 4: flashnext_hc's fn_hc_dense_mix8 with each 32-column group summed in bf16, while its spec declares fp32 sums.
+#include "glue_math.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_hc_mix8_bf16(const __nv_bfloat16* UP, const __nv_bfloat16* NORMED,
+                                                                      __nv_bfloat16* MIXED, float* XSM, int D, int SS) {
+    using tf_glue::bf;
+    using tf_glue::rbf;
+    __shared__ float row[8][32];
+    const int r = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int group = blockIdx.y * 8 + warp, d = group * 32 + lane;
+    if (group >= D / 32) return;
+    float total = 0.0f;
+    for (int stream = 0; stream < SS; ++stream) {
+        const long long at = (static_cast<long long>(r) * SS + stream) * D + d;
+        total = __fadd_rn(total, rbf(__fmul_rn(rbf(tf_glue::tf_sigmoid(bf(UP[at]))), bf(NORMED[at]))));
+    }
+    const float mixed = rbf(__fdiv_rn(total, static_cast<float>(SS)));
+    MIXED[static_cast<long long>(r) * D + d] = __float2bfloat16_rn(mixed);
+    row[warp][lane] = mixed;
+    __syncwarp();
+    if (lane == 0) {
+        float sum = 0.0f;
+        for (int i = 0; i < 32; ++i) sum = rbf(__fadd_rn(sum, row[warp][i]));
+        XSM[static_cast<long long>(r) * (D / 32) + group] = sum;
+    }
+}

@@ -244,8 +244,8 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(hcnorm_k.Kind), &hcnorms) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .cols_fn = try hc.function("fn_hc_normalize_cols"), .old_fn = try hc.function("fn_hc_normalize") };
     defer for (&hcnorms) |*x| x.deinit();
     for (&hcnorms) |*x| try kernels.append(a, x.kernel());
-    var hcmixes: [2]hcmix_k.Mix = undefined;
-    for (std.enums.values(hcmix_k.Kind), &hcmixes) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .new_fn = try hc.function("fn_hc_dense_mix8"), .old_fn = try hc.function("fn_hc_dense_mix") };
+    var hcmixes: [4]hcmix_k.Mix = undefined;
+    for (std.enums.values(hcmix_k.Kind), &hcmixes) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .new_fn = try hc.function("fn_hc_dense_mix8"), .old_fn = try hc.function("fn_hc_dense_mix"), .ctl_fn = if (kind == .sums_control) try mods[5].function("tf_ctl_hc_mix8_bf16") else null };
     defer for (&hcmixes) |*x| x.deinit();
     for (&hcmixes) |*x| try kernels.append(a, x.kernel());
     var batch = try cuda.Module.load(gpu.d, kk.flashnext_batch);
