@@ -109,7 +109,7 @@
     "tools/resume_http.py": 0,
     "tools/s5_bf16_ref.py": 1,
     "tools/s5_compare.py": 1,
-    "tools/s5_export.py": 0,
+    "tools/s5_export.py": 1,
     "tools/s5_prompt_lp.py": 1,
     "tools/video_http.py": 1,
     "tools/video_ref.py": 0,

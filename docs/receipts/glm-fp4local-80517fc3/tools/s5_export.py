@@ -1,6 +1,6 @@
 """S5's bf16 reference for hosts without torch: bf16-ref-b2.pt's columns into an .npz (numpy) and B-2's sequences into
-ids.json (lists of ints, for the engine's /v1/completions prompts). Runs where s5_bf16_ref.py ran (<host>, the <environment>
-environment).
+ids.json (lists of ints, for the engine's /v1/completions prompts). Runs where s5_bf16_ref.py ran (the host and
+Python environment with torch).
 
     python s5_export.py IDS REF OUTDIR
 """

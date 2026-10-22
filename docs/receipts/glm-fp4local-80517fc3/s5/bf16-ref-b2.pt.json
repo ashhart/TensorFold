@@ -21,7 +21,7 @@
  "nll_mean": 1.0069094541699932,
  "top1_is_next": 0.753169059753418,
  "check": {
-  "file": "<redacted-records>/eval/b2/fp4local/summary.json",
+  "file": "<records>/eval/b2/fp4local/summary.json",
   "ids_sha256": "d857818d0cd8c6d3",
   "nll_ref": 1.0069093704223633,
   "positions": 144285,
