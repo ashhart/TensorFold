@@ -523,3 +523,39 @@ test "GLM snapshots: a paged sequence's prefix keeps and resumes through its pag
         f.e.cur = window;
     }
 }
+
+test "GLM snapshots: a paged part's piece from inside a page's span keeps its offset, on the page the order names" {
+    const ids = [_]u32{ 3, 0, 2 };
+    const plan: glm.snapshots.layout.Plan = .{ .ids = &ids };
+    const part: glm.snapshots.layout.Part = .{ .live = 1 << 20, .len = 250, .span = 100, .page = 4096 };
+    // a snapshot page that ends inside a span leaves the rest of that span to the next piece
+    const a = plan.piece(part, 130);
+    try t.expectEqual(@as(u64, (1 << 20) + 30), a.live);
+    try t.expectEqual(@as(usize, 70), a.len);
+    const b = plan.piece(part, 230);
+    try t.expectEqual(@as(u64, (1 << 20) + 2 * 4096 + 30), b.live);
+    try t.expectEqual(@as(usize, 20), b.len);
+}
+
+test "GLM snapshots: while a paged stream is current, a prefix's size is the engine's own sequence's, past its pages" {
+    var d = rec.init();
+    var f: Fixture = undefined;
+    try f.init(&d, 0, 2, true);
+    defer f.deinit();
+    f.e.seqs = .empty;
+    defer f.e.seqs.deinit(t.allocator);
+    try f.e.seqs.append(t.allocator, &f.seq);
+    const c = f.e.c;
+    const page = 2 * (512 * c.kv_lora * 2 + 128 * c.i_dim * 2);
+    const ids = [_]u32{ 1, 0 };
+    var kv = try cuda.DeviceBuffer.alloc(&d, ids.len * page);
+    defer kv.free();
+    var paged = f.seq;
+    paged.st = try pagedSeq(&d, &f, kv.ptr, page, &ids);
+    defer paged.st.deinit();
+    const own = f.e.stateBytes(4096);
+    try t.expect(own < std.math.maxInt(u64));
+    f.e.cur = &paged;
+    defer f.e.cur = &f.seq;
+    try t.expectEqual(own, f.e.stateBytes(4096));
+}
