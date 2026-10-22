@@ -2,6 +2,8 @@
 const std = @import("std");
 const platform = @import("sys");
 const Allocator = std.mem.Allocator;
+const identity = @import("cost_identity.zig");
+pub const KeySeed = identity.Seed;
 
 const magic = "TFWC2\n";
 
@@ -11,17 +13,21 @@ pub fn key(a: Allocator, io: std.Io, parts: []const []const u8) ![32]u8 {
 }
 
 pub fn keyTracing(a: Allocator, io: std.Io, parts: []const []const u8, trace: bool) ![32]u8 {
+    return (try keySeed(a, io, trace)).key(parts);
+}
+
+/// One executable read can seed several head keys within the same model load.
+pub fn keySeed(a: Allocator, io: std.Io, trace: bool) !KeySeed {
     const exe = try std.process.executablePathAlloc(io, a);
     defer a.free(exe);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, exe, a, .limited(1 << 30));
-    defer a.free(bytes);
-    if (trace) {
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const file = try std.Io.Dir.cwd().openFile(io, exe, .{});
+    defer file.close(io);
+    const seed = try identity.fromFile(file, io, trace);
+    if (seed.executable_sha256) |digest| {
         const hex = std.fmt.bytesToHex(digest, .lower);
         std.log.info("window cost key part executable {s}", .{hex[0..12]});
     }
-    return buildKey(bytes, parts);
+    return seed;
 }
 
 pub fn buildKey(exe: []const u8, parts: []const []const u8) [32]u8 {
@@ -57,10 +63,7 @@ pub fn cudaReferenceKey(parts: []const []const u8) [32]u8 {
 }
 
 fn hashPart(h: *std.crypto.hash.sha2.Sha256, part: []const u8) void {
-    var len: [8]u8 = undefined;
-    std.mem.writeInt(u64, &len, part.len, .little);
-    h.update(&len);
-    h.update(part);
+    identity.hashPart(h, part);
 }
 
 fn path(a: Allocator, k: [32]u8, suffix: []const u8, root: ?[]const u8) !?[]u8 {

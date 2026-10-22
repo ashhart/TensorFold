@@ -118,6 +118,15 @@ pub fn build(b: *std.Build) void {
     const cost_run = b.addRunArtifact(cost_cases);
     b.step("test-cost-rule", "CPU scripted window and interleaved head timing").dependOn(&cost_run.step);
     test_step.dependOn(&cost_run.step);
+    const identity_cases = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/lanes/cost_identity.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    const identity_run = b.addRunArtifact(identity_cases);
+    b.step("test-cost-identity", "Streamed window-cost identity matches legacy bytes with bounded memory").dependOn(&identity_run.step);
+    test_step.dependOn(&identity_run.step);
     merge_build.targets(b, target, optimize); // tensorfold merge's tests and tf-merge-check, host only on every OS
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),

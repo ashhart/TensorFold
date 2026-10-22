@@ -59,9 +59,10 @@ pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_d
     var parts: [2][3][]const u8 = undefined;
     var keys: [2]?[32]u8 = undefined;
     var kept: [2]?core.draft_depth.Costs = @splat(null);
+    const seed = lanes.cost_cache.keySeed(gpa, io, false) catch null;
     for (heads, 0..) |v, i| {
         parts[i] = try keyParts(e, h, v, &name[i], &shape[i]);
-        keys[i] = lanes.cost_cache.key(gpa, io, &parts[i]) catch null;
+        keys[i] = if (seed) |s| s.key(&parts[i]) else null;
         if (keys[i]) |key| kept[i] = lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, key);
     }
     for (kept[0..heads.len]) |k| {
