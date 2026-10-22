@@ -407,9 +407,10 @@ fn loadWeights(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8) !Wei
         const path = try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{dir}, 0);
         const f = try mtl.MappedFile.open(path);
         defer f.deinit();
+        if (f.size > st.index.max_bytes) return error.BadIndex;
         const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, f.bytes[0..f.size], .{ .allocate = .alloc_always });
         var files: std.StringArrayHashMapUnmanaged(void) = .empty;
-        var it = doc.object.get("weight_map").?.object.iterator();
+        var it = (try st.index.weightMap(doc)).iterator();
         while (it.next()) |kv| if (std.mem.startsWith(u8, kv.key_ptr.*, "model.visual.")) try files.put(arena, kv.value_ptr.string, {});
         if (files.count() == 0) return error.NoVisionTower;
         for (files.keys()) |name| {
@@ -419,29 +420,23 @@ fn loadWeights(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8) !Wei
             defer _ = std.c.close(fd);
             var head: [8]u8 = undefined;
             try readAll(fd, &head, 0);
-            const hlen = std.mem.readInt(u64, &head, .little);
+            const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+            if (end < 8) return error.BadSafetensors;
+            const size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+            const hlen = try st.headerSize(std.mem.readInt(u64, &head, .little), size);
             const header = try arena.alloc(u8, hlen);
             try readAll(fd, header, 8);
-            const end: u64 = @intCast(std.c.lseek(fd, 0, std.c.SEEK.END));
-            // read here, not by core/safetensors.zig: the patch kernel is 5-D, past its max_rank
-            const doc2 = try std.json.parseFromSliceLeaky(std.json.Value, arena, header, .{});
-            var eit = doc2.object.iterator();
-            while (eit.next()) |kv| {
-                if (!std.mem.startsWith(u8, kv.key_ptr.*, "model.visual.")) continue;
-                const o = kv.value_ptr.object;
-                const dtype = st.DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
-                const dims = o.get("shape").?.array.items;
-                const shape = try arena.alloc(usize, dims.len);
-                var n: u64 = dtype.size();
-                for (dims, shape) |d, *s| {
-                    s.* = @intCast(d.integer);
-                    n *= s.*;
-                }
-                const offs = o.get("data_offsets").?.array.items;
-                const b: u64 = @intCast(offs[0].integer);
-                const e: u64 = @intCast(offs[1].integer);
-                if (e < b or e - b != n or 8 + hlen + e > end) return error.BadSafetensors;
-                try names.put(arena, kv.key_ptr.*, .{ .path = full, .off = 8 + hlen + b, .len = e - b, .dtype = dtype, .shape = shape });
+            const entries = try st.parseHeaderPrefix(arena, header, size - 8 - hlen, "model.visual.");
+            for (entries.keys(), entries.values()) |tensor_name, entry| {
+                const slot = try names.getOrPut(arena, tensor_name);
+                if (slot.found_existing) return error.DuplicateTensor;
+                slot.value_ptr.* = .{
+                    .path = full,
+                    .off = 8 + hlen + entry.begin,
+                    .len = entry.end - entry.begin,
+                    .dtype = entry.dtype,
+                    .shape = try arena.dupe(usize, entry.shape[0..entry.rank]),
+                };
             }
         }
     }

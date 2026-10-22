@@ -1,0 +1,2 @@
+$ zig fmt --check build.zig zig   (Zig 0.17.0, on 616d3065)
+exit=0

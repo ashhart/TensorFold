@@ -1,0 +1,57 @@
+# negative control: partial source (2026-10-19T08:56:24Z)
+# undone: fb8eaf85 part 3. The line that makes the source partial when a GPU HIP keeps is unnamed, or a GPU- entry is unresolved, is removed. Everything else is fb8eaf85.
+# tree: a scratch copy of fb8eaf85081880f686bbb0b12a5852f64b81fe26 (git archive) with only this change
+# cmd: zig build test-server-cpu -Dcpu=apple_m1 --summary all -j8 (zig 0.17.0, private caches: --cache-dir and ZIG_GLOBAL_CACHE_DIR)
+# free disk before: 52 GB
+# --- the undo, as a diff against fb8eaf85 ---
+--- a/zig/src/server/benchmark_host.zig
++++ b/zig/src/server/benchmark_host.zig
+@@ -67,8 +67,6 @@
+     }
+     const gpus = kept.items;
+     var h = summarize(cpu, memory, gpus, false);
+-    // a GPU HIP keeps that has no reportable name, or an entry no Uuid resolves, leaves the list short
+-    if (!sure and std.mem.eql(u8, h.source, "detected")) h.source = "partial";
+     if (gpus.len > 0) h.memory_type = for (gpus) |g| {
+         if (!std.mem.endsWith(u8, g.name, " Graphics")) break "dedicated";
+     } else "unified";
+# --- build output ---
+test-server-cpu
++- run test 434 pass, 2 fail (436 total)
+error: 'benchmark_facts_test.test.rocm visible-device indices count every GPU agent: selecting an unreportable agent lists no GPU, never the next' failed:
+       =: listed GPUs [AMD Radeon PRO V620] detected, want [AMD Radeon PRO V620] partial
+       HIP_VISIBLE_DEVICES=0,1: listed GPUs [AMD Radeon PRO V620] detected, want [AMD Radeon PRO V620] partial
+       expected 0, found 2
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:93:17: 0x105189c97 in expectEqualInner__func_4100 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x1051dffa7 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1-nc/zig/src/server/benchmark_facts_test.zig:436:5: 0x1051e007b in test.rocm visible-device indices count every GPU agent: selecting an unreportable agent lists no GPU, never the next (test)
+           try std.testing.expectEqual(@as(usize, 0), wrong);
+           ^
+error: 'benchmark_rocm_test.test.HIP's list: the first bad or out-of-range entry ends it, a repeat is skipped, and GPU- text matches rocminfo's Uuid' failed:
+       HIP_VISIBLE_DEVICES=1,GPU-b2b2 (rocminfo lists 2 GPUs): recorded [AMD Radeon PRO V620] detected, want [AMD Radeon PRO V620] partial
+       expected 0, found 1
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:93:17: 0x105189c97 in expectEqualInner__func_4100 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x1051d9a5b in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1-nc/zig/src/server/benchmark_rocm_test.zig:101:5: 0x1051d9b17 in test.HIP's list: the first bad or out-of-range entry ends it, a repeat is skipped, and GPU- text matches rocminfo's Uuid (test)
+           try std.testing.expectEqual(@as(usize, 0), try wrong(a, &cases));
+           ^
+failed command: ./.zc/o/278d6ad411505b921b61e782f256ffb6/test --cache-dir=./.zc --seed=0x7e02a47a --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 434/436 tests passed (2 failed)
+test-server-cpu transitive failure
++- run test 434 pass, 2 fail (436 total)
+|  +- compile test debug native success 9s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 41ms MaxRSS:31M
+
+
+# exit=1 after 56s
+# restored: benchmark_host.zig is byte-identical to fb8eaf85's again

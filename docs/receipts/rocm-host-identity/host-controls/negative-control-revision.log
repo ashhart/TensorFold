@@ -1,0 +1,66 @@
+# negative control: revision
+# undone: commit 3: the manifest's revision back to TF_CHECKPOINT_REVISION only
+# tree: 82237515afa0572705c2803b6b633e9e5cef1b02 with only this change
+# cmd: zig build test-server-cpu --summary all -j8 (zig 0.17.0)
+# started 2026-10-18T23:31:31Z
+# --- the undo, as git diff ---
+diff --git a/zig/src/server/benchmark_manifest.zig b/zig/src/server/benchmark_manifest.zig
+index 601f8fdb..389125be 100644
+--- a/zig/src/server/benchmark_manifest.zig
++++ b/zig/src/server/benchmark_manifest.zig
+@@ -189,10 +189,8 @@ fn revisionFromEnv(env: *const std.process.Environ.Map) ?[]const u8 {
+
+ /// The attested revision: the snapshot directory's name, else TF_CHECKPOINT_REVISION; a mismatch gives none.
+ pub fn attestedRevision(env: *const std.process.Environ.Map, model_dir: []const u8) ?[]const u8 {
+-    const told = revisionFromEnv(env);
+-    const loaded = (if (model_dir.len > 0) model_facts.snapshotRevision(model_dir) else null) orelse return told;
+-    if (told) |t| if (!std.mem.eql(u8, t, loaded)) return null;
+-    return loaded;
++    _ = model_dir;
++    return revisionFromEnv(env);
+ }
+
+ /// The receipt's name for an engine backend, as the board names them: HIP is ``rocm``, Metal is ``mlx``.
+# --- build output ---
+test-server-cpu
++- run test 432 pass, 2 crash (434 total)
+error: 'benchmark_facts_test.test.a server's manifest names the checkpoint a managed run records: the snapshot's revision and the same hashes' terminated with signal ABRT with stderr:
+       thread 30062092 panic: attempt to use null value
+       ~/tmp/rv1001-1/zig/src/server/benchmark_facts_test.zig:79:77: 0x102c43467 in test.a server's manifest names the checkpoint a managed run records: the snapshot's revision and the same hashes (test)
+           try std.testing.expectEqualStrings(managed.revision.?, attached.revision.?);
+                                                                                   ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/compiler/test_runner.zig:143:68: 0x10274a0d7 in mainServer (test)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/compiler/test_runner.zig:72:26: 0x10274a6e3 in main (test)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/start.zig:789:88: 0x10274862f in callMain (test)
+           if (fn_info.param_types[0].? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ???:?:?: 0x180dabe7f in start (/usr/lib/dyld)
+error: 'benchmark_facts_test.test.the attested revision: the loaded snapshot's; the environment's only where the directory names none; never a disagreeing one' terminated with signal ABRT with stderr:
+       thread 30070747 panic: attempt to use null value
+       ~/tmp/rv1001-1/zig/src/server/benchmark_facts_test.zig:117:91: 0x10150b76f in test.the attested revision: the loaded snapshot's; the environment's only where the directory names none; never a disagreeing one (test)
+           try std.testing.expectEqualStrings(revision, manifest.attestedRevision(&env, snapshot).?);
+                                                                                                 ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/compiler/test_runner.zig:143:68: 0x1010160d7 in mainServer (test)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/compiler/test_runner.zig:72:26: 0x1010166e3 in main (test)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/start.zig:789:88: 0x10101462f in callMain (test)
+           if (fn_info.param_types[0].? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ???:?:?: 0x180dabe7f in start (/usr/lib/dyld)
+failed command: ./.zc/o/26d97a7f501ff9c8681ae72bdc02dabf/test --cache-dir=./.zc --seed=0x667de105 --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 432/434 tests passed (2 crashed)
+test-server-cpu transitive failure
++- run test 432 pass, 2 crash (434 total)
+|  +- compile test debug native success 16s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 16s MaxRSS:31M
+
+# exit=1 after 74s

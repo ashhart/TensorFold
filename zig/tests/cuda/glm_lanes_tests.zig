@@ -44,6 +44,7 @@ pub fn coverCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
     };
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = dc.capacity, .mtp = true, .settings = set });
     defer e.deinit();
+    try e.prepareSnapshots(2 * e.stateBytes(4096));
     var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity);
     defer link.deinit();
     if (rank != 0) {
@@ -116,6 +117,10 @@ pub fn coverCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
             const got = try c.run(.{ .prompt = copy_prompt, .max_new = 64, .reuse = .{ .saved = kept, .at = at } });
             try c.expect(got.cached == at, "the pass resumed at {d} ({d} restored)", .{ at, got.cached });
             try c.same(try std.fmt.allocPrint(a, "resumed at {d}, against the fresh pass", .{at}), got, fresh.ids, .length);
+            const plain = try c.run(.{ .prompt = copy_prompt, .max_new = 64, .drafts = false, .reuse = .{ .saved = kept, .at = at } });
+            try c.same("cached drafted against cached plain", got, plain.ids, .length);
+            const cached = try c.together(&.{ .{ .p = 0, .reuse = .{ .saved = kept, .at = at } }, .{ .p = 0, .reuse = .{ .saved = kept, .at = at } } }, &.{copy_prompt}, &.{.{ .seed = 1234 }}, 64);
+            for (cached.ids) |ids| try c.expect(std.mem.eql(u32, ids, fresh.ids), "cached concurrent equals fresh solo at {d}", .{at});
         }
         const other = try std.mem.concat(a, u32, &.{ copy_prompt[0..4096], p[0..300] });
         const other_fresh = try c.run(.{ .prompt = other, .max_new = 64 });
@@ -319,7 +324,7 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
 }
 
 /// A concurrent case's stream: prompt `p` joining at round `at`; `filled`: its prompt a chunk at a time between rounds.
-const Join = struct { p: usize, at: u32 = 0, sampled: bool = false, discard_at: ?u32 = null, filled: bool = false };
+const Join = struct { p: usize, at: u32 = 0, sampled: bool = false, discard_at: ?u32 = null, filled: bool = false, reuse: lanes.stream.Reuse = .{} };
 
 /// A mark hook that keeps the state as the lane host's prompt cache does (cuda_native's snap_save).
 const Keeper = struct {
@@ -396,7 +401,7 @@ const Cover = struct {
         var began = false;
         while (true) : (round += 1) {
             for (joins, ss, made) |j, *s, *m| if (!m.* and j.at <= round) {
-                s.* = try lanes.Stream.init(c.gpa, .{ .id = "joined", .prompt = ps[j.p], .max_new = max_new, .sampling = if (j.sampled) seeds[j.p % seeds.len] else null });
+                s.* = try lanes.Stream.init(c.gpa, .{ .id = "joined", .prompt = ps[j.p], .max_new = max_new, .reuse = j.reuse, .sampling = if (j.sampled) seeds[j.p % seeds.len] else null });
                 m.* = true;
                 if (j.filled) try filling.append(c.gpa, s) else try c.le.addStream(s);
             };

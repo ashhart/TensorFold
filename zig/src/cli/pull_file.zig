@@ -10,6 +10,7 @@ const attempts = 5;
 
 /// The blob's cache name, as huggingface_hub names it: the LFS sha256, else the git blob sha1, else the path.
 pub fn blobName(a: Allocator, e: Entry) ![]const u8 {
+    if (!snapshotPathOk(e.path)) return error.SnapshotPath;
     if (e.sha256) |digest| return try std.fmt.allocPrint(a, "{s}", .{std.fmt.bytesToHex(digest, .lower)});
     if (e.git_sha1) |digest| return try std.fmt.allocPrint(a, "{s}", .{std.fmt.bytesToHex(digest, .lower)});
     const safe = try a.dupe(u8, e.path);
@@ -101,6 +102,7 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     while (true) {
         const n = r.readSliceShort(&chunk) catch return error.ReadFailed;
         if (n == 0) break;
+        if (n > e.size - offset) return error.SizeMismatch;
         hash.update(chunk[0..n]);
         if (check_git) git.update(chunk[0..n]);
         try file.writePositionalAll(io, chunk[0..n], offset);
@@ -130,8 +132,10 @@ pub fn fileStat(io: std.Io, path: []const u8) !u64 {
 /// A snapshot's path a hub tree names: relative, and no traversal segments.
 fn snapshotPathOk(path: []const u8) bool {
     if (path.len == 0 or path[0] == '/') return false;
-    var it = std.mem.tokenizeScalar(u8, path, '/');
+    if (std.mem.indexOfAny(u8, path, "\\:\x00") != null) return false;
+    var it = std.mem.splitScalar(u8, path, '/');
     while (it.next()) |c| {
+        if (c.len == 0 or c[c.len - 1] == '.' or c[c.len - 1] == ' ') return false;
         if (std.mem.eql(u8, c, ".") or std.mem.eql(u8, c, "..")) return false;
     }
     return true;
@@ -140,11 +144,15 @@ fn snapshotPathOk(path: []const u8) bool {
 /// The snapshot's path points at the blob, the way huggingface_hub's cache links them.
 pub fn linkIntoSnapshot(a: Allocator, io: std.Io, snapshot_dir: []const u8, path: []const u8, blob_name: []const u8) !void {
     if (!snapshotPathOk(path)) return error.SnapshotPath;
+    if (!snapshotPathOk(blob_name) or std.mem.indexOfScalar(u8, blob_name, '/') != null) return error.SnapshotPath;
     const link_path = try std.fs.path.join(a, &.{ snapshot_dir, path });
     if (std.fs.path.dirname(link_path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
     std.Io.Dir.cwd().deleteFile(io, link_path) catch {};
-    const target = try std.fs.path.join(a, &.{ "..", "..", "blobs", blob_name });
-    std.Io.Dir.cwd().symLink(io, target, link_path, .{}) catch |err| {
+    var target: std.ArrayList(u8) = .empty;
+    for (0..2 + std.mem.count(u8, path, "/")) |_| try target.appendSlice(a, "../");
+    try target.appendSlice(a, "blobs/");
+    try target.appendSlice(a, blob_name);
+    std.Io.Dir.cwd().symLink(io, target.items, link_path, .{}) catch |err| {
         // Windows grants symlinks only with Developer Mode or elevation: a hard link to the blob costs no space
         if (@import("builtin").os.tag != .windows) {
             std.log.err("cannot link {s} to its blob: {t}", .{ link_path, err });
@@ -164,4 +172,42 @@ pub fn linkIntoSnapshot(a: Allocator, io: std.Io, snapshot_dir: []const u8, path
 test "a hub tree path stays inside the snapshot: relative, without . or .. segments" {
     for ([_][]const u8{ "config.json", "deep/nested/model.1-of-2.safetensors", "a..b/c" }) |p| try std.testing.expect(snapshotPathOk(p));
     for ([_][]const u8{ "", "/etc/passwd", "../outside", "a/../b", "./a", "a/." }) |p| try std.testing.expect(!snapshotPathOk(p));
+}
+
+test "security: remote snapshot paths are portable and cannot escape on Windows" {
+    for ([_][]const u8{
+        "..\\outside",        "deep\\..\\outside", "C:/outside",       "C:outside",       "\\\\host\\share\\file",
+        "config.json:stream", "a\x00b",            "deep/.. /outside", "deep/../outside", "deep//weights",
+        "deep/weights/",
+    }) |path| {
+        try std.testing.expect(!snapshotPathOk(path));
+    }
+}
+
+test "security: unsafe paths are refused before creating a blob name" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "..\\outside", "C:/outside", "config.json:stream" }) |path| {
+        if (blobName(a, .{ .path = path, .size = 0 })) |name| {
+            a.free(name);
+            return error.UnsafeBlobNameAccepted;
+        } else |err| try std.testing.expectEqual(error.SnapshotPath, err);
+    }
+}
+
+test "security: nested snapshot links resolve to the verified blob" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "repo/blobs");
+    try tmp.dir.createDirPath(io, "repo/snapshots/revision");
+    try tmp.dir.writeFile(io, .{ .sub_path = "repo/blobs/verified", .data = "verified content" });
+    const snapshot = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/repo/snapshots/revision", .{tmp.sub_path});
+    for ([_][]const u8{ "config.json", "deep/tokenizer.json", "deep/nested/weights.safetensors" }) |path| {
+        try linkIntoSnapshot(a, io, snapshot, path, "verified");
+        const read = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ snapshot, path }), a, .limited(64));
+        try std.testing.expectEqualStrings("verified content", read);
+    }
 }

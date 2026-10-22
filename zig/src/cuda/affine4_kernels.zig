@@ -29,6 +29,8 @@ pub const Affine4Kernels = struct {
     group_fn: Function,
     gemv_fn: Function,
     verify_fn: Function, // two m16 row tiles share each weight panel on the GB10 verify path
+    verify64_fn: Function, // four, for wider shared frames
+    verify128_fn: Function, // eight
     split_fn: Function,
     prefill_fn: Function,
     words_fn: Function, // affine4_pack.cu: MLX words into the tiles
@@ -42,6 +44,8 @@ pub const Affine4Kernels = struct {
         var a: Affine4Kernels = undefined;
         a.group_fn = try group_mod.function(symbols.group);
         a.verify_fn = try group_mod.function(symbols.verify32);
+        a.verify64_fn = try group_mod.function(symbols.verify64);
+        a.verify128_fn = try group_mod.function(symbols.verify128);
         a.prefill_fn = try prefill_mod.function(symbols.prefill);
         a.gemv_fn = try gemv_mod.function(symbols.gemv);
         a.split_fn = try gemv_mod.function(symbols.gemv_split);
@@ -49,6 +53,8 @@ pub const Affine4Kernels = struct {
         a.scales_fn = try pack_mod.function(symbols.pack_scales);
         try a.group_fn.allowDynamicShared(group_smem);
         try a.verify_fn.allowDynamicShared(linear.verify_smem);
+        try a.verify64_fn.allowDynamicShared(linear.verify64_smem);
+        try a.verify128_fn.allowDynamicShared(linear.verify128_smem);
         try a.gemv_fn.allowDynamicShared(group_smem);
         try a.split_fn.allowDynamicShared(split_smem);
         try a.prefill_fn.allowDynamicShared(prefill_smem);
@@ -90,20 +96,37 @@ pub const Affine4Kernels = struct {
         return if (sk > 1) a.gemv(s, x, xs, q, out, rows, sk) else a.cluster(s, x, xs, q, out, rows, sk);
     }
 
-    /// Keep legacy devices at 16 rows; GB10 verify shares one weight panel across two m16 row tiles.
+    /// Keep legacy devices at 16 rows; GB10 verify shares one weight panel across up to eight m16 row tiles.
     pub fn verifyRows(a: *const Affine4Kernels) usize {
-        return if (a.pdl) 32 else max_rows;
+        return if (a.pdl) 128 else max_rows;
     }
 
+    /// decode()'s bits a row, the fewest m16 row tiles that hold `rows` sharing each weight panel.
     pub fn verify(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, weight: Affine4, out: u64, rows: usize) !void {
         if (rows == 0 or rows > a.verifyRows()) return error.WindowTooWide;
         if (rows <= max_rows) return a.decode(s, x, xs, weight, out, rows);
-        return a.cluster32(s, x, xs, weight, out, rows);
+        if (rows <= 32) return a.cluster32(s, x, xs, weight, out, rows);
+        if (rows <= 64) return a.wide(a.verify64_fn, linear.verify64_smem, 64, s, x, xs, weight, out, rows);
+        return a.wide(a.verify128_fn, linear.verify128_smem, 128, s, x, xs, weight, out, rows);
     }
 
     /// The same ordered group and K-slice chains as decode(), with both row tiles reusing the loaded weights.
     pub fn cluster32(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, weight: Affine4, out: u64, rows: usize) !void {
-        if (rows == 0 or rows > 32) return error.WindowTooWide;
+        return a.wide(a.verify_fn, linear.verify_smem, 32, s, x, xs, weight, out, rows);
+    }
+
+    /// cluster32 with four (64) or eight (128) m16 row tiles a weight panel.
+    pub fn clusterRows(a: *const Affine4Kernels, tile: usize, s: Stream, x: u64, xs: u64, weight: Affine4, out: u64, rows: usize) !void {
+        return switch (tile) {
+            64 => a.wide(a.verify64_fn, linear.verify64_smem, 64, s, x, xs, weight, out, rows),
+            128 => a.wide(a.verify128_fn, linear.verify128_smem, 128, s, x, xs, weight, out, rows),
+            else => error.WindowTooWide,
+        };
+    }
+
+    /// One CTA a column tile (a cluster of its K slices), all of `rows` in its m16 row tiles over each loaded panel.
+    fn wide(a: *const Affine4Kernels, f: Function, shared: u32, most: usize, s: Stream, x: u64, xs: u64, weight: Affine4, out: u64, rows: usize) !void {
+        if (rows == 0 or rows > most) return error.WindowTooWide;
         const tiles = (weight.n + 63) / 64;
         const sk = splitK(weight.n, weight.k);
         var parts: Parts = std.mem.zeroes(Parts);
@@ -114,7 +137,7 @@ pub const Affine4Kernels = struct {
         g.add(xs);
         g.add(parts);
         for ([_]usize{ rows, weight.k, weight.k, 1, sk }) |v| g.add(int(v));
-        try launch_.launch(a.verify_fn, .{ .grid = .{ .x = u(tiles * sk) }, .block = .{ .x = 128 }, .shared = linear.verify_smem, .cluster = if (sk > 1) .{ .x = u(sk) } else null, .pdl = a.pdl }, s, &g);
+        try launch_.launch(f, .{ .grid = .{ .x = u(tiles * sk) }, .block = .{ .x = 128 }, .shared = shared, .cluster = if (sk > 1) .{ .x = u(sk) } else null, .pdl = a.pdl }, s, &g);
     }
 
     /// Each CTA writes one K slice's partial from zero; the tile's last CTA sums them in slice order.

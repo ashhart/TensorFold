@@ -13,6 +13,9 @@ pub const modelopt_experts = @import("cuda_modelopt_experts.zig");
 pub const hc = @import("cuda_hc.zig");
 pub const draft_affine = @import("cuda_draft_affine.zig");
 pub const qmm = @import("cuda_qmm.zig");
+/// The batched pass's and its prompt tiles' symbols and launch sizes, which the contract's tests launch.
+pub const batch_state = @import("cuda_batch_state.zig");
+pub const tile_kernels = @import("cuda_tile_kernels.zig");
 pub const gdn = @import("cuda_gdn.zig");
 pub const mlp = @import("cuda_mlp.zig");
 pub const moe = @import("cuda_moe.zig");
@@ -77,6 +80,16 @@ pub const Tri = struct {
         if (t.set == null) return t.own.?;
         const g = t.own orelse return null;
         return if (g.mixed & glue_.entryBit(name) != 0) g else null;
+    }
+
+    /// The read-out tiles replace down, reduction and upmix together; mixed operation ownership stays on its route.
+    pub fn readoutTilesOwned(t: Tri) bool {
+        return t.glue("_qmm_hcdown") != null and t.glue("_hc_reduce_act") != null and t.glue("_qmm_upmix") != null;
+    }
+
+    /// Fusing chunks and merge requires both operations to belong to our glue.
+    pub fn fusedAttentionOwned(t: Tri) bool {
+        return t.glue("_chunks") != null and t.glue("_merge") != null;
     }
 
     /// glue.embed: ids (R,) int32 into (R, copies * dims) bf16, MLX 4-bit group 32.
@@ -237,6 +250,17 @@ pub const Tri = struct {
         }, &.{ ci("SK", sk), ci("S", streams), ci("LOW", low), ci("LOWP", rmsBlock(low)), ci("HAS_INJ", has_inj), ci("NDN", ndn) });
     }
 
+    /// The read-out's 1 / rms rows, ours only.
+    pub fn hcRinv(t: Tri, pss: u64, rinv: u64, eps: f32, rows: usize, dims: usize, nc: usize, streams: usize) !void {
+        const g = t.glue("_qmm_hcdown") orelse return error.NoGlue;
+        return g.hcRinv(t.s, pss, rinv, eps, rows, dims, nc, streams);
+    }
+
+    pub fn hcMixH(t: Tri, up: u64, h: u64, rinv: u64, scale: u64, mixed: u64, xsm: u64, rows: usize, dims: usize, streams: usize) !void {
+        const g = t.glue("_qmm_upmix") orelse return error.NoGlue;
+        return g.hcMixH(t.s, up, h, rinv, scale, mixed, xsm, rows, dims, streams);
+    }
+
     /// qmm.hc_upmix: the up projection and the stream mix. N is the wide row, K is the low rank. M folds when it is 1.
     pub fn hcUpmix(t: Tri, act: u64, xs: u64, weight: u64, scales: u64, biases: u64, normed: u64, mixed: u64, xs_mixed: u64, rows: usize, n: usize, k: usize, dims: usize, streams: usize) !void {
         if (t.glue("_qmm_upmix")) |g| return g.hcUpmix(t.s, act, xs, weight, scales, biases, normed, mixed, xs_mixed, rows, n, k, dims, streams);
@@ -257,6 +281,12 @@ pub const Tri = struct {
     pub fn hcUpmixUp(t: Tri, act: u64, xs: u64, weight: u64, scales: u64, biases: u64, normed: u64, mixed: u64, xs_mixed: u64, up: u64, rows: usize, n: usize, k: usize, dims: usize, streams: usize) !void {
         const g = t.glue("_qmm_upmix") orelse return error.TrainingOnCapturedGlue;
         return g.hcUpmixUp(t.s, act, xs, weight, scales, biases, normed, mixed, xs_mixed, up, rows, n, k, dims, streams);
+    }
+
+    /// Prompt rows' attention, chunks merged in the program, ours only.
+    pub fn attnFused(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+        const g = t.glue("_chunks") orelse return error.NoGlue;
+        return g.attnFused(t.s, q, kc, vc, pos, out, ids, nk, sparse, rows, kv);
     }
 
     /// qmm.hc_down for one decode row. N=324 is the layer down stacked with inject. M folds when it is 1.
@@ -415,4 +445,26 @@ pub const fn_back = @import("cuda_fn_back.zig");
 pub const gradient_gate = @import("cuda_gradient_gate.zig");
 test {
     _ = gradient_gate;
+}
+
+test "prompt tiles retain per-operation ownership" {
+    var set: aot.Set = undefined;
+    var own: Glue = undefined;
+    var t: Tri = .{ .own = &own, .s = undefined };
+    try std.testing.expect(t.readoutTilesOwned());
+    try std.testing.expect(t.fusedAttentionOwned());
+    t.set = &set;
+    t.own = null;
+    try std.testing.expect(!t.readoutTilesOwned());
+    try std.testing.expect(!t.fusedAttentionOwned());
+    t.own = &own;
+    const entries_ = .{ "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_chunks", "_merge" };
+    for (0..32) |mask| {
+        own.mixed = 0;
+        inline for (entries_, 0..) |name, i| {
+            if (mask & (@as(usize, 1) << i) != 0) own.mixed |= glue_.entryBit(name);
+        }
+        try std.testing.expectEqual(mask & 7 == 7, t.readoutTilesOwned());
+        try std.testing.expectEqual(mask & 24 == 24, t.fusedAttentionOwned());
+    }
 }

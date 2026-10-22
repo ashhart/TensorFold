@@ -277,32 +277,45 @@ fn aroundOne(a: Allocator, t: *const Tables, layers: usize) !bool {
 }
 
 /// The draft head's rows: the family's draft vocabulary (ascending ids) of the output head.
-pub const draft_ids = @embedFile("../draft_vocab_default.txt");
+pub const draft_ids = @import("../proposal_table.zig").text;
 
 fn draftSpans(a: Allocator) ![]Span {
+    const logical = try draftIds(a);
+    defer a.free(logical);
     var list: std.ArrayList(Span) = .empty;
-    var it = std.mem.tokenizeAny(u8, draft_ids, "\n\r ");
-    while (it.next()) |word| {
-        const id = try std.fmt.parseInt(usize, word, 10);
+    errdefer list.deinit(a);
+    for (logical) |id| {
         if (list.items.len > 0 and list.items[list.items.len - 1].to == id) {
             list.items[list.items.len - 1].to += 1;
         } else try list.append(a, .{ .from = id, .to = id + 1 });
     }
-    return list.items;
+    return list.toOwnedSlice(a);
 }
 
 /// The draft vocabulary as token ids.
 pub fn draftIds(a: Allocator) ![]u32 {
-    var list: std.ArrayList(u32) = .empty;
-    var it = std.mem.tokenizeAny(u8, draft_ids, "\n\r ");
-    while (it.next()) |word| try list.append(a, try std.fmt.parseInt(u32, word, 10));
-    return list.toOwnedSlice(a);
+    return core.proposal_vocab.legacy.ids(a, draft_ids, .{ .vocab = 248320 });
 }
 
 test "the draft ids are one allocation of the vocabulary's length" {
     const ids = try draftIds(std.testing.allocator);
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqual(@as(usize, 79591), ids.len);
+}
+
+test "Flash Next proposal: HIP IDs and contiguous stored-row spans retain the original table" {
+    const a = std.testing.allocator;
+    const ids = try draftIds(a);
+    defer a.free(ids);
+    try std.testing.expectEqualStrings("998317c397023e24afeb9b6839ba54d8611bd3a4dddab4f7288344fd191b6ed8", &core.proposal_vocab.idsHash(ids));
+    const spans = try draftSpans(a);
+    defer a.free(spans);
+    var at: usize = 0;
+    for (spans) |span| for (span.from..span.to) |id| {
+        try std.testing.expectEqual(@as(u32, @intCast(id)), ids[at]);
+        at += 1;
+    };
+    try std.testing.expectEqual(ids.len, at);
 }
 
 /// One rank's weights (`rank` null: the whole model) from the mapped checkpoint `ck`; rank 0 also holds the MTP head.

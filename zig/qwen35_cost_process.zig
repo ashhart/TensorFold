@@ -65,7 +65,7 @@ fn probe(init: std.process.Init, root: []const u8, kind: []const u8, release: []
     e.window_rows = 64;
     e.n_taps = if (eight) 8 else 2;
     e.taps[0..8].* = .{ 10, 20, 21, 22, 23, 24, 25, 26 };
-    const noise = if (@import("builtin").os.tag == .windows) std.os.windows.kernel32.GetCurrentProcessId() else @as(u32, @intCast(std.c.getpid()));
+    const noise = if (@import("builtin").os.tag == .windows) std.os.windows.GetCurrentProcessId() else @as(u32, @intCast(std.c.getpid()));
     // The inactive tail has no tensor or kernel consumer, even when old stack bytes differ between processes.
     for (e.g.linear[e.g.layers..]) |*v| v.* = noise & 1 == 1;
     for (e.g.bits.proj[e.g.layers..]) |*row| @memset(row, @intCast(2 + noise % 7));

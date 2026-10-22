@@ -3,7 +3,9 @@ import { writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { buildComputerHelper, helperPaths, parseSelfTest, privateBuildPath, sourceDigest, swiftcArgs } from './build-computer-helper.mjs'
+import { buildComputerHelper as buildHelper, helperPaths, parseSelfTest, privateBuildPath, sourceDigest, swiftcArgs } from './build-computer-helper.mjs'
+
+const buildComputerHelper = (options) => buildHelper({ platform: 'darwin', ...options })
 
 // A stand-in for xcrun and the built binary: records every call and writes the -o output itself.
 function toolchain({ swiftcMissing = false, compileFails = false, selfTest = '{"ok":true,"checks":7}\n', binaryText = 'fake helper binary' } = {}) {

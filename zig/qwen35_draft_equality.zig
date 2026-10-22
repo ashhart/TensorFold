@@ -42,6 +42,7 @@ const Head = struct {
     const Lane = struct { ctx: q.draft.Ctx, history: std.ArrayList(u32) = .empty };
     fn init(h: *Head) !void {
         h.d.frame_streams = 128;
+        h.d.projection_role = .proposal;
         h.d.scratch_one = 0;
         h.d.target_taps = 0;
         h.d.c = @import("qwen35_draft_frame_host.zig").config();
@@ -174,6 +175,8 @@ fn features(p: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, coun
     const target: *lanes.fake.Fake = @ptrCast(@alignCast(p));
     return target.backend().vtable.features.?(p, s, taps, start, count);
 }
+var accepted: [8]u64 = @splat(0);
+var proposed: [8]u64 = @splat(0);
 fn run(count: usize, depth: u32, restored: u32, seed: ?u64, salt: usize) ![8][32]u32 {
     snapshots = @splat(.{});
     var target: lanes.fake.Fake = .{ .gpa = a };
@@ -228,7 +231,9 @@ fn run(count: usize, depth: u32, restored: u32, seed: ?u64, salt: usize) ![8][32
     }
     while (engine.activeCount() > 0) try engine.step();
     var replies: [8][32]u32 = undefined;
-    for (streams[0..count], replies[0..count]) |*s, *out| {
+    for (streams[0..count], replies[0..count], 0..) |*s, *out, i| {
+        accepted[i] = s.accepted;
+        proposed[i] = s.drafted;
         @memcpy(out, s.emitted());
         try std.testing.expectEqual(restored, s.cached);
     }
@@ -280,4 +285,21 @@ test "Qwen CUDA contracts: grammar-pruned own trees preserve greedy and sampled 
             }
         }
     }
+}
+
+test "Draft frames: acceptance per stream equals its solo hold across shared frames" {
+    for ([_]?u64{ null, 17 }) |seed| for ([_]u32{ 1, 3, 7 }) |depth| {
+        for ([_]usize{ 1, 2, 4 }) |count| {
+            const together = try run(count, depth, 0, seed, 0);
+            const kept = accepted;
+            const offered = proposed;
+            for (0..count) |i| {
+                const solo = try run(1, depth, 0, seed, i);
+                try std.testing.expectEqualSlices(u32, &together[i], &solo[0]);
+                try std.testing.expectEqual(kept[i], accepted[0]);
+                try std.testing.expectEqual(offered[i], proposed[0]);
+                try std.testing.expect(accepted[0] > 0);
+            }
+        }
+    };
 }

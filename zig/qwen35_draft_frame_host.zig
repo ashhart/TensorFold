@@ -10,6 +10,7 @@ pub fn config() q.draft.Config {
 
 test "Draft frames: the actual drafter advertises batched holds" {
     var d: q.draft.Draft = undefined;
+    d.projection_role = .proposal;
     d.frame_streams = 128;
     d.scratch_one = 0;
     d.target_taps = 0;
@@ -60,6 +61,7 @@ const Record = struct {
     var waits: usize = 0;
     var fail: bool = false;
     var last_norm_input: u64 = 0;
+    var block: usize = 8;
     fn launch(f: cuda.abi.Function, x: c_uint, _: c_uint, z: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         const id = @intFromPtr(f);
         if (id < counts.len) counts[id] += 1;
@@ -81,8 +83,8 @@ const Record = struct {
         if (downloads == 0) {
             const words = std.mem.bytesAsSlice(u32, data);
             for (0..words.len / 43) |row| {
-                words[row * 43 + 2] = @intCast(17 + row / 7);
-                words[row * 43 + 3] = @intCast(128 + row / 7);
+                words[row * 43 + 2] = @intCast(17 + row / (block - 1));
+                words[row * 43 + 3] = @intCast(128 + row / (block - 1));
                 words[row * 43 + 22] = @bitCast(@as(f32, 1));
                 words[row * 43 + 23] = @bitCast(@as(f32, 0));
             }
@@ -103,6 +105,10 @@ fn weight() cuda.qlinear.Affine4 {
 }
 
 test "Draft frames: the real hold adapter emits one frame for every stream and invalidates drafts on failure" {
+    for ([_]usize{ 8, 16 }) |block| try actualFrame(block);
+}
+fn actualFrame(block: usize) !void {
+    Record.block = block;
     const F = q.draft.frame;
     var driver: cuda.Driver = undefined;
     driver.api.cuLaunchKernel = Record.launch;
@@ -128,6 +134,7 @@ test "Draft frames: the real hold adapter emits one frame for every stream and i
     e.draws.topk_slices_fn = function(&driver, 9);
     e.draws.topk_merge_fn = function(&driver, 12);
     var d: q.draft.Draft = undefined;
+    d.projection_role = .proposal;
     d.frame_streams = 128;
     d.scratch_one = 0;
     d.target_taps = 0;
@@ -135,6 +142,7 @@ test "Draft frames: the real hold adapter emits one frame for every stream and i
     d.io = std.testing.io;
     d.e = &e;
     d.c = config();
+    d.c.block = block;
     d.streams = .empty;
     defer d.streams.deinit(a);
     d.selection_base = 0;
@@ -183,7 +191,8 @@ test "Draft frames: the real hold adapter emits one frame for every stream and i
         Record.waits = 0;
         Record.fail = false;
         try d.drafter().hold(holds[0..count]);
-        try std.testing.expectEqual(@as(u32, @intCast(count * 8)), Record.max_rows);
+        try std.testing.expectEqual(@as(usize, 0), Record.counts[11]);
+        try std.testing.expectEqual(@as(u32, @intCast(count * block)), Record.max_rows);
         for ([_]usize{ 1, 5, 6, 9, 12 }) |id| try std.testing.expectEqual(@as(usize, 1), Record.counts[id]);
         try std.testing.expectEqual(@as(usize, if (count == 1) 0 else 1), Record.counts[4]);
         try std.testing.expectEqual(if (count == 1) d.h + d.c.hidden * 2 else d.h2, Record.last_norm_input);
@@ -194,7 +203,12 @@ test "Draft frames: the real hold adapter emits one frame for every stream and i
         try std.testing.expectEqual(@as(usize, 1), Record.waits);
         for (contexts[0..count], holds[0..count], 0..) |ctx, it, i| {
             try std.testing.expectEqual(@as(usize, if (it.lanes != null) 7 else it.depth), ctx.held_n);
-            for (ctx.held[0..ctx.held_n], 0..) |token, row| try std.testing.expectEqual(@as(u32, @intCast(if (it.lanes != null and shape.ranks[row] == 1) 128 + i else 17 + i)), token);
+            for (ctx.held[0..ctx.held_n], 0..) |token, row| {
+                if (it.lanes == null and ctx.grown > 0) {
+                    try std.testing.expect(token == 17 + i or token == 128 + i);
+                    try std.testing.expect(ctx.parents[row] >= -1 and ctx.parents[row] < @as(i32, @intCast(row)));
+                } else try std.testing.expectEqual(@as(u32, @intCast(if (it.lanes != null and shape.ranks[row] == 1) 128 + i else 17 + i)), token);
+            }
         }
     }
     Record.fail = true;
@@ -242,6 +256,7 @@ test "Draft frames: combined target rows above capacity refuse before even settl
 test "Draft frames: enlarged frame byte counts reject overflow" {
     try std.testing.expectError(error.Overflow, q.draft.frame.stagedBytes(std.math.maxInt(usize)));
     var d: q.draft.Draft = undefined;
+    d.projection_role = .proposal;
     d.frame_streams = 128;
     d.scratch_one = 0;
     d.target_taps = 0;

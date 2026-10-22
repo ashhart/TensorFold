@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
+const dump = @import("byte_dump.zig");
 
 const D = 128;
 
@@ -62,7 +63,9 @@ fn call(b: *Bufs, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.block_att
     const sc: f32 = @floatCast(1 / @sqrt(@as(f64, D)));
     try g.run(s, try b.up(std.mem.sliceAsBytes(pq)), try b.up(std.mem.sliceAsBytes(pk)), try b.up(std.mem.sliceAsBytes(pv)), try b.up(std.mem.sliceAsBytes(table)), try b.up(std.mem.sliceAsBytes(ls)), o, .{ .h = h, .hk = hk, .rows = rows, .block = L, .window = window, .scale = sc, .causal = causal });
     try s.synchronize();
-    return b.back(a, o, rows * h * D);
+    const got = try b.back(a, o, rows * h * D);
+    try dump.output(a, "block", "attention", "rows", &.{ rows, h, D }, .bf16, .{ .hk = hk, .block = L, .window = window, .causal = causal, .streams = which }, std.mem.sliceAsBytes(got));
+    return got;
 }
 
 fn case(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.block_attention.BlockAttention, rng: std.Random, L: usize, causal: bool, worst: *f64) !void {

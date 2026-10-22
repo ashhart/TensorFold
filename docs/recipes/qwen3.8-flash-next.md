@@ -1,9 +1,16 @@
 # Qwen3.8 Flash Next
 
 The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connections and hashed n-gram
-embeddings. The native engine's supported Metal checkpoint uses MLX affine 6-bit weights in groups of 32
-and includes an MTP head. On a Mac the native engine refuses the 4-bit/group-32 checkpoint at load; on CUDA it serves
-that one ([Flash Next on CUDA](flash-next-cuda.md)).
+embeddings. Native Metal serves supported MLX affine checkpoints, including the 4-bit/group-32 MTP checkpoint.
+Startup checks separate load and cold pack-construction budgets against the RAM/GPU-bounded ceiling.
+A validated cached pack or a supplied pack skips construction pricing; supplied packs retain their existing source check.
+The load plan counts retained raw/packed weights, both prompt planes, selectors, KV/state, configured vision and
+requested storage, with the shared runtime reserve. Unused source-file padding is not retained model storage.
+`info` prints the base text load and cold pack budgets separately; these are conservative plans, not measured fit results.
+A 128 GB Mac may not hold the complete load even when the weight files fit.
+Use a smaller quantization or raise the OS wired limit where supported; fewer streams or a shorter context reduce
+additional session storage. Native Metal does not implement `--ple-on-ssd` yet. CUDA also serves the 4-bit checkpoint
+([Flash Next on CUDA](flash-next-cuda.md)).
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP
@@ -90,8 +97,8 @@ An explicit count that does not fit is refused, as below. Explicit `--parallel 1
 
 The ceiling is 70% of RAM, or `FLASHNEXT_LOAD_LIMIT_GB` (GB, up to the GPU's recommended working set). It covers the
 server's whole footprint: the model, the sessions and the prompt cache. Left out, `--prompt-cache-gib` takes what the
-sessions leave under it; a given budget must fit under the same ceiling, and only `--prompt-cache-over-cap` lets it
-pass.
+sessions leave under it; a given budget must fit under the same ceiling. `--prompt-cache-over-cap` does not bypass model startup
+admission or the runtime reserve.
 
 Additional slots allocate caches for the selected context. Startup reserves their metadata and the prompt-cache
 budget, then checks the physical footprint before accepting requests. A fixed slot count that does not fit is

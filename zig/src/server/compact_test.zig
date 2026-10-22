@@ -105,7 +105,7 @@ const Text = struct {
         return &.{};
     }
 
-    fn render(_: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(_: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         var buf: std.ArrayList(u8) = .empty;
         if (messages == .array) for (messages.array) |m| {
             const role = m.get("role") orelse Value{ .string = "" };
@@ -116,7 +116,7 @@ const Text = struct {
             try buf.append(a, '\n');
         };
         if (options.add_generation_prompt) try buf.append(a, '>');
-        return buf.items;
+        return .{ .text = (buf.items) };
     }
 
     fn templateSource(_: *anyopaque) []const u8 {

@@ -193,7 +193,12 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "metal", .module = metal }},
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = b.createModule(.{
+            .root_source_file = b.path("zig/src/families/kimi_k3/core_safetensors.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "core", .module = mods.engine }},
+        }) } },
     });
     const kimi_bytes = embedded(b, kimi_lib, "kimi.metallib");
     const kimi_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
@@ -233,7 +238,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } },
+        .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "core", .module = mods.engine } },
     });
     // The engine: kernel sources compiled at run time (MLX's options), the families, the lane core.
     const sources = mods.sources;
@@ -312,6 +317,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
         .{ .name = "tf-mm-bench", .path = "zig/tests/mm_bench.zig", .about = "Prompt matmul kernels from .metal files: chained speed at one shape, bits against the first, error against fp64" },
+        .{ .name = "tf-sq-bench", .path = "zig/tests/sq_bench.zig", .about = "Row-exact 4-bit prompt tiles before the M5: chained speed at one shape, every output's bits against the first" },
         .{ .name = "tf-gemma4-kernels", .path = "zig/tests/gemma4/kernels.zig", .about = "Gemma 4 dense decode kernels against the reference's dumped fixtures, bit for bit by window width" },
         .{ .name = "tf-gemma4-glue", .path = "zig/tests/gemma4/glue.zig", .about = "Gemma 4 dense glue kernels against the reference's dumped fixtures: embed, norm, q/k/v, attention, tails, softcap" },
         .{ .name = "tf-gemma4-run", .path = "zig/tests/gemma4/run.zig", .about = "Gemma 4 dense greedy decode, tokens and top-two margins for the oracle's check" },

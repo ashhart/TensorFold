@@ -1,0 +1,47 @@
+# negative control: w-slash
+# undone: commit 2: AMD's "w/" kept as is in CPU names
+# tree: 82237515afa0572705c2803b6b633e9e5cef1b02 with only this change
+# cmd: zig build test-server-cpu --summary all -j8 (zig 0.17.0)
+# started 2026-10-18T23:33:57Z
+# --- the undo, as git diff ---
+diff --git a/zig/src/server/benchmark_host.zig b/zig/src/server/benchmark_host.zig
+index 9d2e8529..09aec809 100644
+--- a/zig/src/server/benchmark_host.zig
++++ b/zig/src/server/benchmark_host.zig
+@@ -146,7 +146,7 @@ pub fn modelName(a: Allocator, text: []const u8) ?[]const u8 {
+     while (it.next()) |w| {
+         if (words.items.len > 0) words.append(a, ' ') catch return null;
+         // AMD's "w/" (Ryzen AI MAX+ 395 w/ Radeon 8060S) becomes "with", inside the board's name pattern
+-        words.appendSlice(a, if (std.mem.eql(u8, w, "w/")) "with" else w) catch return null;
++        words.appendSlice(a, w) catch return null;
+     }
+     const name = dropClock(words.items);
+     if (name.len > 120 or std.mem.eql(u8, name, "NVIDIA NPU")) return null;
+# --- build output ---
+test-server-cpu
++- run test 433 pass, 1 crash (434 total)
+error: 'benchmark_facts_test.test.a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no driver, and passes the save rules' terminated with signal ABRT with stderr:
+       thread 30108405 panic: attempt to use null value
+       ~/tmp/rv1001-1/zig/src/server/benchmark_facts_test.zig:308:86: 0x102dea09b in test.a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no driver, and passes the save rules (test)
+           try std.testing.expectEqualStrings("AMD RYZEN AI MAX+ 395 with Radeon 8060S", cpu.?);
+                                                                                            ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/compiler/test_runner.zig:143:68: 0x1028fe0d7 in mainServer (test)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/compiler/test_runner.zig:72:26: 0x1028fe6e3 in main (test)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/start.zig:789:88: 0x1028fc62f in callMain (test)
+           if (fn_info.param_types[0].? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ???:?:?: 0x180dabe7f in start (/usr/lib/dyld)
+failed command: ./.zc/o/97e58ce43cc8cbe0ebf27027c2418313/test --cache-dir=./.zc --seed=0xd1a67e2b --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 433/434 tests passed (1 crashed)
+test-server-cpu transitive failure
++- run test 433 pass, 1 crash (434 total)
+|  +- compile test debug native success 14s MaxRSS:1G
++- run test cached
+   +- compile test debug native cached 60ms MaxRSS:32M
+
+# exit=1 after 69s

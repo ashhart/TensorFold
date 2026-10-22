@@ -32,8 +32,13 @@ pub const engine = @import("cuda_engine.zig");
 pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
 pub const native = @import("cuda_native.zig");
+pub const snapshots = @import("cuda_snapshots.zig");
 
 test {
+    _ = @import("cuda_tile.zig");
+    _ = @import("cuda_kv8_test.zig");
+    _ = kv8_ref;
+    _ = @import("cuda_prof.zig");
     _ = @import("cuda_load_owner.zig");
     _ = @import("cuda_images_interleave_test.zig");
     _ = experts;
@@ -76,3 +81,5 @@ pub const prompts = @import("cuda_prompts.zig");
 pub const prompt_hold = @import("cuda_prompt_hold.zig");
 pub const prompt_wire = @import("cuda_prompt_wire.zig");
 pub const structured = @import("cuda_structured.zig");
+
+pub const kv8_ref = @import("cuda_kv8_ref.zig");

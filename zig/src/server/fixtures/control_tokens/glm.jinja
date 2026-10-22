@@ -1,0 +1,2 @@
+{% if tools %}{{ tools | tojson }}{% endif %}{% for message in messages %}[gMASK]<sop><|user|>{{ message['role'] }}
+{{ message['content'] | default('') }}{% if message['reasoning_content'] %}{{ message['reasoning_content'] }}{% endif %}{% if message['tool_calls'] %}{{ message['tool_calls'] | tojson }}{% endif %}<|im_end|>{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}

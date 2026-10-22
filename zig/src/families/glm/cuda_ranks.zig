@@ -7,6 +7,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
+    kv8: bool = false, // --kv-cache fp8, supplied by the native options rather than an environment override
     prompt_fixed_k: bool = false, // TF_GLM_PROMPT_K: one (default) or shape (experimental fixed K slices)
     tiled: bool = true, // TF_GLM_MM: 1 (the bf16 linears on glm_mm, tiled at load) or 0
     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
@@ -98,9 +99,10 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 10, // this struct's version
+    layout: u32 = 11, // this struct's version
     world: u32,
     rank: u32,
+    kv8: u32 = 0,
     prompt_fixed_k: u32,
     tiled: u32,
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
@@ -125,6 +127,7 @@ pub const Fingerprint = extern struct {
         layout,
         rank,
         world,
+        kv8,
         prompt_fixed_k,
         tiled,
         split,
@@ -157,6 +160,7 @@ pub const Fingerprint = extern struct {
         checkpoint_digest: [32]u8,
     ) Fingerprint {
         const f: Fingerprint = .{
+            .kv8 = @intFromBool(s.kv8),
             .world = @intCast(world),
             .rank = @intCast(rank),
             .prompt_fixed_k = @intFromBool(s.prompt_fixed_k),
@@ -186,6 +190,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
         if (f.layout != all[0].layout) return .{ .field = .layout, .rank = r };
         if (f.rank != r) return .{ .field = .rank, .rank = r };
         const fields = .{
+            "kv8",
             "prompt_fixed_k",
             "world",
             "tiled",
@@ -293,6 +298,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .layout => "a different build of this check",
         .rank => "a rank number given twice or out of order",
         .world => "the ranks were started with different world sizes",
+        .kv8 => "--kv-cache fp8",
         .prompt_fixed_k => "TF_GLM_PROMPT_K",
         .tiled => "TF_GLM_MM",
         .split => "TF_GLM_PREFILL_REDUCE",

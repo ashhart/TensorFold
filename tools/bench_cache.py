@@ -5,11 +5,13 @@ import json
 import sys
 
 import bench_concurrent as bench
+import bench_timing
 from bench_evidence import token_equal
 
 
 FIELDS = ("prompt_tokens", "cached_tokens", "tokens", "cache_state", "complete", "token_sha", "token_sha256",
-          "output_sha256", "ttft_s", "decode_tps", "error", "unmeasured")
+          "output_sha256", "ttft_s", "decode_tps", "error", "unmeasured", "elapsed_s",
+          "chunk_offsets_s", "chunk_gaps_ms")
 
 
 def receipt(run, phase, reference=None):
@@ -72,6 +74,7 @@ def main(argv=None):
     rows.extend(receipt(r, "concurrent", first) for r in runs)
     report = {"schema_version": 1, "fixture_sha256": hashlib.sha256(json.dumps(prompt).encode()).hexdigest(),
               "requested_reply_tokens": args.tokens, "temperature": 0, "seed": 1234, "rows": rows,
+              "concurrent_timing": bench_timing.workload(runs),
               "qualified": qualify(rows, args.expected_prompt_tokens, args.require_cold, args.require_reuse)}
     encoded = json.dumps(report, indent=2) + "\n"
     if args.output:

@@ -12,6 +12,8 @@ const access = @import("access.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{ TemplateFailed, OutOfMemory };
+pub const Str = v.Str;
+pub const Span = v.Span;
 
 /// Why rendering failed; `raised` marks the template's own raise_exception message.
 pub const Diag = struct { msg: []const u8 = "", raised: bool = false };
@@ -100,22 +102,40 @@ pub fn compile(gpa: Allocator, source: []const u8, diag: ?*Diag) Error!Compiled 
 
 /// Renders with Hugging Face's variables: messages, tools (none when absent), documents, add_generation_prompt, then `context`.
 pub fn render(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, add_generation_prompt: bool, diag: ?*Diag) Error![]u8 {
+    const result = try renderProvenance(gpa, t, messages, tools, context, add_generation_prompt, diag);
+    gpa.free(result.spans);
+    return @constCast(result.s);
+}
+
+/// Renders the actual request text and its byte provenance; the caller owns both slices.
+pub fn renderProvenance(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, add_generation_prompt: bool, diag: ?*Diag) Error!Str {
+    return renderProvenanceGlobals(gpa, t, messages, tools, context, .null, add_generation_prompt, diag);
+}
+
+/// Checkpoint-owned globals are template data; request context overrides them and retains its provenance.
+pub fn renderProvenanceGlobals(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, diag: ?*Diag) Error!Str {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var out: std.ArrayList(u8) = .empty;
+    var out: v.Buffer = .{};
     var vars: v.Map = .empty;
     var c = eval.Ctx{ .rt = .{ .a = a }, .vars = &vars, .out = &out };
-    run(&c, &vars, t, messages, tools, context, add_generation_prompt) catch |err| {
+    run(&c, &vars, t, messages, tools, context, template_globals, add_generation_prompt) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         if (diag) |d| d.raised = c.rt.raised;
         return report(gpa, diag, "{s}", .{c.rt.msg});
     };
-    return gpa.dupe(u8, out.items);
+    const text = try gpa.dupe(u8, out.text.items);
+    errdefer gpa.free(text);
+    return .{ .s = text, .spans = try gpa.dupe(Span, out.spans.items) };
 }
 
-fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, add_generation_prompt: bool) v.Error!void {
+fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool) v.Error!void {
     const a = c.rt.a;
+    if (template_globals == .object) {
+        var it = template_globals.object.iterator();
+        while (it.next()) |e| try vars.put(a, e.key_ptr.*, try pyjson.fromJsonDerived(&c.rt, e.value_ptr.*, false));
+    }
     try vars.put(a, "messages", try pyjson.fromJson(&c.rt, messages));
     try vars.put(a, "tools", try pyjson.fromJson(&c.rt, tools));
     try vars.put(a, "documents", .none);
@@ -142,4 +162,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("unicode.zig");
     _ = @import("value.zig");
+    _ = @import("provenance_test.zig");
 }

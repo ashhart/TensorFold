@@ -49,6 +49,7 @@ pub fn fakeDriver() cuda.Driver {
 
 /// Exercise the actual lane open and explicit snapshot entry points with a CPU control peer.
 pub fn run(comptime Cuda: type, comptime open: anytype, comptime restore: anytype, comptime drop: anytype, explicit: bool, drafting: bool) !void {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the peer rank is a Unix socket pair
     const a = std.testing.allocator;
     Device.next = 0x100000;
     Device.copies = 0;

@@ -39,8 +39,9 @@ try {
   try {
     touched.length = 0
     await scanEmailMessages({ ...settings, detectOutlook: true })
-    assert.ok(touched.some((p) => p.startsWith(fakeHome) && p.includes(path.join('Group Containers', 'UBF8T346G9.Office'))), 'opting in looks for Outlook')
-    ok('detectOutlook opts in to the Outlook probe')
+    const probed = touched.some((p) => p.startsWith(fakeHome) && p.includes(path.join('Group Containers', 'UBF8T346G9.Office')))
+    assert.equal(probed, process.platform === 'darwin', 'Outlook detection probes only on its supported platform')
+    ok('detectOutlook respects the platform gate')
   } finally {
     process.env.HOME = realHome
     await fs.rm(fakeHome, { recursive: true, force: true })

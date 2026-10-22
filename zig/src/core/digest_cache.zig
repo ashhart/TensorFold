@@ -4,12 +4,12 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const descriptor = @import("digest_key.zig");
+const locks = @import("digest_lock.zig");
 pub const Key = descriptor.Key;
 pub const max_entries = 1024;
 pub const record_size = 128;
 pub const max_bytes = 12 + max_entries * record_size + 32;
 const magic = "TFDG0001";
-var mutex: if (descriptor.persistent) std.c.pthread_mutex_t else u8 = if (descriptor.persistent) .{} else 0;
 
 pub const Value = struct { sha256: [32]u8, shared: ?[32]u8 = null };
 pub const Record = struct { key: Key, value: Value };
@@ -33,26 +33,29 @@ pub const Cache = struct {
             if (need_shared and result.value.shared == null) return error.DigestProjectionMissing;
             return result;
         }
-        _ = std.c.pthread_mutex_lock(&mutex);
-        defer _ = std.c.pthread_mutex_unlock(&mutex);
-        try Io.Dir.cwd().createDirPath(io, c.root.?);
-        var dir = try Io.Dir.cwd().openDir(io, c.root.?, .{});
-        defer dir.close(io);
-        const lock = dir.createFile(io, "index.lock", .{ .truncate = false }) catch |err| switch (err) {
-            error.FileNotFound => try dir.openFile(io, "index.lock", .{ .mode = .read_write }),
-            else => return err,
-        };
-        defer lock.close(io);
-        try lock.lock(io, .exclusive);
-        try validate(io, path, file, before);
-        var records = try load(a, io, dir);
-        defer records.deinit(a);
-        for (records.items) |e| if (e.key.equal(before) and (!need_shared or e.value.shared != null)) {
+        var work_lock = try locks.Guard.open(io, c.root.?, locks.stripe(before));
+        defer work_lock.close(io);
+        {
+            var index = try locks.Guard.open(io, c.root.?, null);
+            defer index.close(io);
             try validate(io, path, file, before);
-            return .{ .key = before, .value = e.value, .hit = true };
-        };
-        const result = try compute(io, path, file, before, loader);
+            var records = try load(a, io, index.dir);
+            defer records.deinit(a);
+            for (records.items) |e| if (e.key.equal(before) and (!need_shared or e.value.shared != null)) {
+                try validate(io, path, file, before);
+                return .{ .key = before, .value = e.value, .hit = true };
+            };
+        }
+        var result = try compute(io, path, file, before, loader);
         if (need_shared and result.value.shared == null) return error.DigestProjectionMissing;
+        var index = try locks.Guard.open(io, c.root.?, null);
+        defer index.close(io);
+        try validate(io, path, file, before);
+        var records = try load(a, io, index.dir);
+        defer records.deinit(a);
+        for (records.items) |e| if (e.key.equal(before) and result.value.shared == null) {
+            result.value.shared = e.value.shared;
+        };
         var i: usize = 0;
         while (i < records.items.len) {
             const k = records.items[i].key;
@@ -62,7 +65,7 @@ pub const Cache = struct {
         }
         while (records.items.len >= c.limit) _ = records.orderedRemove(0);
         try records.append(a, .{ .key = before, .value = result.value });
-        try publish(a, io, dir, records.items);
+        try publish(a, io, index.dir, records.items);
         try validate(io, path, file, before);
         return result;
     }

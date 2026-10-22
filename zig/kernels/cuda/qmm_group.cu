@@ -343,3 +343,9 @@ template __global__ void tf_qmm_group::group_kernel<64, 16, 64, 1, 4, 8, false, 
 // Two independent m16 accumulators reuse each weight panel; K groups, fmas and slice sums keep the narrow order.
 template __global__ void tf_qmm_group::group_kernel<64, 32, 64, 1, 4, 5, false, false, false, false>(
     const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+
+// Four and eight m16 accumulators a weight panel for wide shared frames, in the same order a row.
+template __global__ void tf_qmm_group::group_kernel<64, 64, 64, 1, 4, 4, false, false, false, false>(
+    const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+template __global__ void tf_qmm_group::group_kernel<64, 128, 64, 1, 4, 3, false, false, false, false>(
+    const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);

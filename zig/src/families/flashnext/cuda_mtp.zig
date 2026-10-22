@@ -44,7 +44,8 @@ pub const pss_n = (dims / 256) * streams;
 pub const conv_bytes = (gdn.taps - 1) * gdn.conv_dim * 2;
 pub const proj_bytes = gdn.proj_width * 2;
 
-const vocab_text = @embedFile("draft_vocab_default.txt");
+const core = @import("core");
+const proposal = core.proposal_vocab;
 
 fn cint(v: usize) c_int {
     return @intCast(v);
@@ -52,23 +53,7 @@ fn cint(v: usize) c_int {
 
 /// The draft vocabulary's ids, sorted (Python draft_token_ids("default")): column j of the draft head is ids[j].
 pub fn draftIds(gpa: std.mem.Allocator) ![]u32 {
-    var out: std.ArrayList(u32) = .empty;
-    errdefer out.deinit(gpa);
-    var it = std.mem.tokenizeAny(u8, vocab_text, " \t\r\n,");
-    while (it.next()) |part| {
-        const id = try std.fmt.parseInt(u32, part, 10);
-        if (id >= vocab) continue;
-        try out.append(gpa, id);
-    }
-    std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
-    var n: usize = 0;
-    for (out.items, 0..) |id, i| {
-        if (i > 0 and id == out.items[n - 1]) continue;
-        out.items[n] = id;
-        n += 1;
-    }
-    out.shrinkRetainingCapacity(n);
-    return out.toOwnedSlice(gpa);
+    return proposal.legacy.ids(gpa, @import("proposal_table.zig").text, .{ .vocab = vocab, .skip_past_vocab = true, .delimiters = " \t\r\n," });
 }
 
 // ---- sampling ------------------------------------------------------------------------------------------------------
@@ -89,6 +74,13 @@ pub fn argmaxRow(row: []const u16) usize {
         }
     }
     return at;
+}
+
+/// Structured output: every token whose bit is clear in `bits` (token i in word i / 32) scores bf16 -inf.
+pub fn maskRow(row: []u16, bits: []const u32) void {
+    for (row, 0..) |*v, i| {
+        if (i / 32 >= bits.len or (bits[i / 32] >> @intCast(i % 32)) & 1 == 0) v.* = 0xFF80;
+    }
 }
 
 /// The keyed draw over one bf16 score row, column j being token ids[j] (or j), as lanes.sampling.choose draws.
@@ -150,7 +142,9 @@ pub const Head = struct {
     mixer: HcW,
     /// lm_head's rows at `ids`, in their order.
     draft: Q4,
-    ids: []u32,
+    ids: []const u32,
+    artifact: proposal.Artifact,
+    service: lanes.proposal_head.Service,
     module: cuda.Module,
     best_fn: cuda.Function,
 
@@ -185,9 +179,16 @@ pub const Head = struct {
             h.layer = try load.loadLayerAt(gpa, driver, stream, &store, pack_fn, "language_model.mtp.layers.0", false, false);
         }
         errdefer h.layer.free(gpa);
-        h.ids = try draftIds(gpa);
-        errdefer gpa.free(h.ids);
-        h.draft = try @import("cuda_mtp_load.zig").draft(gpa, driver, &store, h.ids);
+        const ids = try draftIds(gpa);
+        defer gpa.free(ids);
+        const head_load = @import("cuda_mtp_load.zig");
+        const role = try head_load.mode();
+        const dtype = (try store.tensor("language_model.lm_head.weight")).dtype;
+        h.artifact = try proposal.legacy.artifact(gpa, ids, .{ .vocab = vocab, .hidden = dims, .format = if (dtype == .bf16) "bf16" else "affine4", .group = if (dtype == .bf16) 0 else 32, .scale_recipe = if (dtype == .bf16) @tagName(role) else "stored affine4 group32" });
+        errdefer h.artifact.deinit();
+        h.ids = h.artifact.ids();
+        h.service = try lanes.proposal_head.Service.legacy(gpa, &h.artifact);
+        h.draft = try head_load.draft(gpa, driver, &store, &h.artifact, role);
         errdefer h.draft.free();
         h.module = try cuda.Module.load(driver, cuda.kernels.flashnext_mtp);
         errdefer h.module.unload();
@@ -203,7 +204,7 @@ pub const Head = struct {
     pub fn deinit(h: *Head) void {
         h.module.unload();
         h.draft.free();
-        h.gpa.free(h.ids);
+        h.artifact.deinit();
         h.layer.free(h.gpa);
         h.mixer.free();
         h.fc_h.free();
@@ -211,6 +212,20 @@ pub const Head = struct {
         h.norm_h.free();
         h.norm_e.free();
         h.gpa.destroy(h);
+    }
+
+    pub fn view(h: *const Head) core.proposal_rows.Scores {
+        const map = h.service.compact.map.?;
+        return .{ .vocab = vocab, .logical = @intCast(map.ids.len), .stride = @intCast(map.ids.len), .ids = map.ids };
+    }
+
+    /// The BF16 legacy lane is the same qlinear owner; group-32 affine keeps its existing unqualified callback.
+    pub fn project(h: *const Head, pass: anytype, input: u64, sums: u64, out: u64, rows: usize) !void {
+        if (h.draft.native) |weight| {
+            const view_: cuda.qlinear.proposal.Head = .{ .weight = .{ .bf16 = weight }, .role = .decode, .vocab = vocab, .logical = @intCast(h.ids.len), .stride = @intCast(h.ids.len), .ids = h.ids, .generation = h.artifact.fingerprint };
+            return view_.project(.{ .lane = &pass.k.native_lane }, pass.stream, .{ .x = input, .sums = sums, .part = pass.s.native_part }, out, rows);
+        }
+        _ = try pass.lane(input, sums, h.draft, out, pass.s.dummy, rows, 1);
     }
 
     /// fn_row_best over `rows` rows of `v` scores `ld` apart: [rows, 4] fp32 at `out` (best, log-sum-exp, id bits).
@@ -268,6 +283,27 @@ test "a keyed draw over the top-k columns is the draw over every column" {
         try std.testing.expectEqual(try all(gpa, &row, position, s), try drawRow(gpa, &row, null, position, s));
     }
     try std.testing.expectEqual(@as(u32, @intCast(argmaxRow(&row))), try drawRow(gpa, &row, null, 0, null));
+}
+
+test "a masked row draws only allowed tokens, greedy the best of them" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(5);
+    for (0..64) |position| {
+        var row: [300]u16 = undefined;
+        for (&row) |*v| v.* = @as(u16, 0x3f00) + prng.random().int(u8);
+        var bits: [10]u32 = @splat(0); // tokens 0..319: three allowed, the vocabulary's best usually not among them
+        const allowed = [_]u32{ 7, @intCast(64 + position), 299 };
+        for (allowed) |t| bits[t / 32] |= @as(u32, 1) << @intCast(t % 32);
+        var best: u32 = allowed[0];
+        for (allowed) |t| if (promote(row[t]) > promote(row[best]) or (promote(row[t]) == promote(row[best]) and t < best)) {
+            best = t;
+        };
+        maskRow(&row, &bits);
+        try std.testing.expectEqual(best, try drawRow(gpa, &row, null, position, null));
+        const s: Sampling = .{ .seed = 11, .temperature = 1.0, .top_k = 20, .top_p = 0.95 };
+        const t = try drawRow(gpa, &row, null, position, s);
+        try std.testing.expect(std.mem.indexOfScalar(u32, &allowed, t) != null);
+    }
 }
 
 test "draft chains fit one verify window while the default stays six" {

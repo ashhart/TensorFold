@@ -14,16 +14,20 @@ pub const module = "backbone.layers.0.mixer.in_proj";
 
 pub const Scratch = struct {
     arena: std.heap.ArenaAllocator,
+    tmp: std.testing.TmpDir,
     root: []const u8,
 
     pub fn init() !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        const root = try std.fmt.allocPrint(arena.allocator(), ".tf-merge-test-{d}", .{Io.Clock.awake.now(io).toNanoseconds()});
-        return .{ .arena = arena, .root = root };
+        errdefer arena.deinit();
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", arena.allocator());
+        return .{ .arena = arena, .tmp = tmp, .root = root };
     }
 
     pub fn deinit(s: *Scratch) void {
-        Io.Dir.cwd().deleteTree(io, s.root) catch {};
+        s.tmp.cleanup();
         s.arena.deinit();
     }
 

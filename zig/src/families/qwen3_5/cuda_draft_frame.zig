@@ -101,7 +101,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         masked = d.h2;
     }
     try d.norm(masked, d.w.final_norm, d.x, rows);
-    try e.projSums(e.head, d.x, d.xs, d.logits, rows, rows > 16, 0);
+    try draft.precision.project(e, e.head, d.x, d.xs, d.logits, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
     try e.draws.topkRows(e.stream, d.logits, c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");

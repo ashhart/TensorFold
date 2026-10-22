@@ -14,10 +14,12 @@ constexpr int KC = 256;   // inputs a shared-memory chunk holds
 
 }  // namespace
 
-// OUT[r][e] = fp32 x[r] . w[e] over D in index order (one fma chain a pair); grid (rows / 16, E / 16), block 256.
+// OUT[r][e] = fp32 x[r] . w[e] in index order (an fma chain a pair), grid (R / 16, E / 16); skips rows >= P[2].
 extern "C" __global__ void __launch_bounds__(256) tf_moe_router(const __nv_bfloat16* __restrict__ X, int x_stride,
                                                                   const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
-                                                                  int R, int D, int E) {
+                                                                  int R, int D, int E, const int* __restrict__ P) {
+    if (P != nullptr) R = min(R, P[2]);
+    if (static_cast<int>(blockIdx.x) * TILE >= R) return;
     __shared__ __nv_bfloat16 xs[TILE][KC + 2];
     __shared__ __nv_bfloat16 ws[TILE][KC + 2];
     const int row0 = blockIdx.x * TILE, e0 = blockIdx.y * TILE;
@@ -47,10 +49,12 @@ __device__ __forceinline__ bool beats(float v, int i, float bv, int bi) { return
 
 }  // namespace
 
-// Row r by a warp: TOPK experts by logit (ties to the lower id), weights bf16(exp(l - top) / sum), the shared slot.
+// Row r by a warp: TOPK experts by logit (ties to lower id), bf16(exp(l - top) / sum), shared slot; r < P[2].
 extern "C" __global__ void __launch_bounds__(32) tf_moe_topk(const float* __restrict__ L, int* __restrict__ PICK,
-                                                              float* __restrict__ WT, int NE, int TOPK) {
+                                                              float* __restrict__ WT, int NE, int TOPK,
+                                                              const int* __restrict__ P) {
     const int64_t r = blockIdx.x;
+    if (P != nullptr && r >= P[2]) return;
     const int lane = threadIdx.x;
     const int NL = NE + 1, SLOTS = TOPK + 1;  // L[r][NE], the shared gate's logit, weighs slot TOPK by bf16(sigmoid(bf16(it)))
     float v[MAXC];
@@ -97,10 +101,12 @@ extern "C" __global__ void __launch_bounds__(32) tf_moe_topk(const float* __rest
     }
 }
 
-// OUT[r][d] = bf16(sum over slots in order of fma(w[r][s], y[r][s][d])); y fp32 (decode) or bf16 (prompt rows).
+// OUT[r][d] = bf16(sum over slots in order of fma(w[r][s], y[r][s][d])), y fp32 or bf16; rows >= P[2] skipped.
 extern "C" __global__ void __launch_bounds__(256) tf_moe_combine(const void* __restrict__ Y, int y_f32, const float* __restrict__ WT,
-                                                                   __nv_bfloat16* __restrict__ OUT, int S, int D) {
+                                                                   __nv_bfloat16* __restrict__ OUT, int S, int D,
+                                                                   const int* __restrict__ P) {
     const int64_t r = blockIdx.x;
+    if (P != nullptr && r >= P[2]) return;
     for (int d = blockIdx.y * 256 + threadIdx.x; d < D; d += gridDim.y * 256) {
         float acc = 0.0f;
         for (int s = 0; s < S; ++s) {

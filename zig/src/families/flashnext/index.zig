@@ -142,7 +142,7 @@ fn admitWith(comptime Runtime: type, gpa: std.mem.Allocator, bytes: []const u8, 
     var it = map.object.iterator();
     while (it.next()) |item| {
         const file = item.value_ptr.*;
-        if (file != .string or file.string.len == 0 or file.string[0] == '.' or std.mem.indexOfAny(u8, file.string, "/\\") != null or !std.mem.endsWith(u8, file.string, ".safetensors")) return error.UnsafeFlashShard;
+        if (file != .string or file.string.len == 0 or file.string[0] == '.' or std.mem.indexOfAny(u8, file.string, "/\\:\x00") != null or !std.mem.endsWith(u8, file.string, ".safetensors")) return error.UnsafeFlashShard;
         try files.put(gpa, file.string, {});
     }
     var c = Check(Runtime){ .map = map.object, .runtime = runtime, .refusal = refusal };

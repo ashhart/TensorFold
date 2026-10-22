@@ -1,0 +1,274 @@
+{
+  "base": "76aafcf274e60a5e31a59ce145b2f71f7b366e9d",
+  "stages": {
+    "checkpoint": {
+      "files": 17,
+      "all_match": true,
+      "revision": "70ae7fac63274ff2eac54152031433374cb80f2f"
+    },
+    "source": {
+      "archive_sha256": "e4d6bac9b8a63e5be69935d87feebd56f130c4afc6e0442c3568a89089c95d8f",
+      "patch_sha256": "b0be49e083f035b39843eac0030b405d5293e2528d1e66cb7c03501fb70f7cbf"
+    },
+    "base-build": {
+      "command": [
+        "<ZIG_DIR>/zig",
+        "build",
+        "native-hip",
+        "-Dhip-arch=gfx1151",
+        "-Dhipcc=/usr/bin/hipcc",
+        "-Dhip-include=/usr/include",
+        "-Dhip-device-lib=/usr/lib/llvm-21/lib/clang/21/amdgcn/bitcode",
+        "-Doptimize=ReleaseFast",
+        "-j4"
+      ],
+      "returncode": 0
+    },
+    "base-binary": {
+      "sha256": "344860890ecdf2c3123bfc9c1fe7f6e99d6b6203a7f629dc491246f8b3175a57"
+    },
+    "base-ready": {
+      "command": [
+        "<CHECKOUT>/zig-out/native-hip/bin/tensorfold-native",
+        "serve",
+        "<MODEL>",
+        "--backend",
+        "rocm",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8092",
+        "--name",
+        "amd-cancel-27b",
+        "--context",
+        "16384",
+        "--parallel",
+        "4",
+        "--prompt-cache-gib",
+        "1",
+        "--no-thinking",
+        "--metrics-open"
+      ]
+    },
+    "base-uncancelled": {
+      "native_token_sha256": "677caeac8d5e87f26c67e37ff1551667fc3217c4690d7a276204d22c2504f0a1",
+      "prefill_seconds": 79.020621268,
+      "seconds": 81.79120905703166,
+      "prompt_tokens": 14975
+    },
+    "base-cancel": {
+      "command": [
+        "python3",
+        "<RUN_DIR>/serve_cancel_release.py",
+        "http://127.0.0.1:8092",
+        "amd-cancel-27b",
+        "--runs",
+        "3",
+        "--server-log",
+        "<RUN_DIR>/receipts/base-server.log",
+        "--record",
+        "<RUN_DIR>/receipts/base-http.jsonl",
+        "--baseline-27b"
+      ],
+      "returncode": 1
+    },
+    "base-summary": {
+      "model": "amd-cancel-27b",
+      "words": 2200,
+      "drop_after_s": 0.4,
+      "alone_s": 1.899,
+      "slack_s": 0.5,
+      "release_max_s": 0.5,
+      "trials": [
+        {
+          "release_s": 4.73,
+          "after_short_s": 6.548,
+          "running_at_drop": true,
+          "same_text": true,
+          "same_native_tokens": true,
+          "ok": false
+        },
+        {
+          "release_s": 4.744,
+          "after_short_s": 6.532,
+          "running_at_drop": true,
+          "same_text": true,
+          "same_native_tokens": true,
+          "ok": false
+        },
+        {
+          "release_s": 4.72,
+          "after_short_s": 6.543,
+          "running_at_drop": true,
+          "same_text": true,
+          "same_native_tokens": true,
+          "ok": false
+        }
+      ],
+      "baseline_native_token_sha256": "ad11ca37c7fcabaf13c8fc1142956890438c4ca49c58d6f579c3eef5485b77d5",
+      "lifetime_s": [
+        5.13,
+        5.1,
+        5.14,
+        5.08,
+        5.12,
+        5.08
+      ],
+      "failed": 3,
+      "receipt_27b": {
+        "after_short_s": [
+          6.49,
+          6.51
+        ],
+        "alone_s": 1.9,
+        "lifetime_s": [
+          5.04,
+          5.07
+        ]
+      }
+    },
+    "base-stopped": true,
+    "apply-fix": {
+      "command": [
+        "patch",
+        "-p1",
+        "--batch",
+        "-i",
+        "<RUN_DIR>/fix.patch"
+      ],
+      "returncode": 0
+    },
+    "fixed-build": {
+      "command": [
+        "<ZIG_DIR>/zig",
+        "build",
+        "native-hip",
+        "-Dhip-arch=gfx1151",
+        "-Dhipcc=/usr/bin/hipcc",
+        "-Dhip-include=/usr/include",
+        "-Dhip-device-lib=/usr/lib/llvm-21/lib/clang/21/amdgcn/bitcode",
+        "-Doptimize=ReleaseFast",
+        "-j4"
+      ],
+      "returncode": 0
+    },
+    "fixed-binary": {
+      "sha256": "308727be0ba3f6e1ff66bd0c356ee269d018d446dd2a34136fff243ca01badff"
+    },
+    "fixed-ready": {
+      "command": [
+        "<CHECKOUT>/zig-out/native-hip/bin/tensorfold-native",
+        "serve",
+        "<MODEL>",
+        "--backend",
+        "rocm",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8092",
+        "--name",
+        "amd-cancel-27b",
+        "--context",
+        "16384",
+        "--parallel",
+        "4",
+        "--prompt-cache-gib",
+        "1",
+        "--no-thinking",
+        "--metrics-open"
+      ]
+    },
+    "fixed-uncancelled": {
+      "native_token_sha256": "677caeac8d5e87f26c67e37ff1551667fc3217c4690d7a276204d22c2504f0a1",
+      "prefill_seconds": 78.867264713,
+      "seconds": 81.64264226600062,
+      "prompt_tokens": 14975
+    },
+    "fixed-cancel": {
+      "command": [
+        "python3",
+        "<RUN_DIR>/serve_cancel_release.py",
+        "http://127.0.0.1:8092",
+        "amd-cancel-27b",
+        "--runs",
+        "3",
+        "--server-log",
+        "<RUN_DIR>/receipts/fixed-server.log",
+        "--record",
+        "<RUN_DIR>/receipts/fixed-http.jsonl",
+        "--baseline-27b"
+      ],
+      "returncode": 0
+    },
+    "fixed-summary": {
+      "model": "amd-cancel-27b",
+      "words": 2200,
+      "drop_after_s": 0.4,
+      "alone_s": 1.913,
+      "slack_s": 0.5,
+      "release_max_s": 0.5,
+      "trials": [
+        {
+          "release_s": 0.042,
+          "after_short_s": 1.907,
+          "running_at_drop": true,
+          "same_text": true,
+          "same_native_tokens": true,
+          "ok": true
+        },
+        {
+          "release_s": 0.032,
+          "after_short_s": 1.906,
+          "running_at_drop": true,
+          "same_text": true,
+          "same_native_tokens": true,
+          "ok": true
+        },
+        {
+          "release_s": 0.039,
+          "after_short_s": 1.902,
+          "running_at_drop": true,
+          "same_text": true,
+          "same_native_tokens": true,
+          "ok": true
+        }
+      ],
+      "baseline_native_token_sha256": "ad11ca37c7fcabaf13c8fc1142956890438c4ca49c58d6f579c3eef5485b77d5",
+      "lifetime_s": [
+        0.44,
+        0.43,
+        0.43,
+        0.44,
+        0.44,
+        0.44
+      ],
+      "failed": 0,
+      "receipt_27b": {
+        "after_short_s": [
+          6.49,
+          6.51
+        ],
+        "alone_s": 1.9,
+        "lifetime_s": [
+          5.04,
+          5.07
+        ]
+      }
+    },
+    "fixed-serve-check": {
+      "command": [
+        "python3",
+        "<CHECKOUT>/zig/tests/qwen35/serve_check.py",
+        "http://127.0.0.1:8092",
+        "amd-cancel-27b",
+        "64"
+      ],
+      "returncode": 0
+    },
+    "fixed-stopped": true,
+    "complete": {
+      "same_long_native_tokens": true,
+      "prefill_ratio": 0.998059284367306
+    }
+  }
+}

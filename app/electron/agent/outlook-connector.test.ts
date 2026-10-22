@@ -17,6 +17,8 @@ import {
   isOutlookSource,
   makeOutlookSource,
   outlookProfileGlobRoot,
+  outlookDbPath,
+  outlookAccessState,
   rowToOutlookEmail,
   scanOutlookMessages,
   withDetectedOutlookSource,
@@ -54,6 +56,15 @@ async function buildFixtureDb(file: string, rows: Array<Record<string, unknown>>
   await execFileP('sqlite3', [file, `${ddl}\n${inserts}`])
 }
 
+async function sqliteFixtureAvailable(): Promise<boolean> {
+  if (process.platform === 'darwin') return true
+  try { await execFileP('sqlite3', ['--version']); return true }
+  catch (error: any) {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  }
+}
+
 async function main() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vontra-outlook-'))
   const dbPath = path.join(root, 'Outlook.sqlite')
@@ -62,55 +73,57 @@ async function main() {
     enabled: true, createdAt: 1, updatedAt: 1, lastSyncAt: null, lastError: null,
   }
 
-  // 1641038400 = 2022-01-01T12:00:00Z (unix seconds). Newest first after sort.
-  await buildFixtureDb(dbPath, [
-    { id: 1, subject: 'Renewal question', sender: 'Maya <maya@example.test>', recipient: 'user@example.test', preview: 'Can you confirm pricing and rollout dates?', date: 1641038400, folder: 'Inbox', read: 0, messageId: '<one@example.test>' },
-    { id: 2, subject: 'Re: Renewal question', sender: 'user@example.test', recipient: 'Maya <maya@example.test>', preview: 'I will send the details today.', date: 1641038460, folder: 'Inbox', read: 1, messageId: '<two@example.test>' },
-    // A row with no subject + no preview must still parse (defensive fallbacks), never throw.
-    { id: 3, subject: null, sender: 'noreply@example.test', recipient: null, preview: null, date: 1641038500, folder: 'Junk', read: 1, messageId: null },
-  ])
+  if (await sqliteFixtureAvailable()) {
+    // 1641038400 = 2022-01-01T12:00:00Z (unix seconds). Newest first after sort.
+    await buildFixtureDb(dbPath, [
+      { id: 1, subject: 'Renewal question', sender: 'Maya <maya@example.test>', recipient: 'user@example.test', preview: 'Can you confirm pricing and rollout dates?', date: 1641038400, folder: 'Inbox', read: 0, messageId: '<one@example.test>' },
+      { id: 2, subject: 'Re: Renewal question', sender: 'user@example.test', recipient: 'Maya <maya@example.test>', preview: 'I will send the details today.', date: 1641038460, folder: 'Inbox', read: 1, messageId: '<two@example.test>' },
+      // A row with no subject + no preview must still parse (defensive fallbacks), never throw.
+      { id: 3, subject: null, sender: 'noreply@example.test', recipient: null, preview: null, date: 1641038500, folder: 'Junk', read: 1, messageId: null },
+    ])
 
-  {
-    // FIXTURE ROUND-TRIP: rows map into the EmailMessage shape the email feed already uses.
-    const messages = await scanOutlookMessages(source, { limit: 50 })
-    assert.equal(messages.length, 3)
-    // Sorted newest-first by date (id 3 has the latest timestamp).
-    assert.deepEqual(messages.map((m) => m.id), ['olk:3', 'olk:2', 'olk:1'])
-    const renewal = messages.find((m) => m.subject === 'Renewal question')
-    assert.ok(renewal, 'parsed the subject')
-    assert.equal(renewal.sourceId, 'olk')
-    assert.equal(renewal.sourceLabel, 'Outlook (local)')
-    assert.equal(renewal.from, 'Maya <maya@example.test>')
-    assert.equal(renewal.to, 'user@example.test')
-    assert.equal(renewal.snippet, 'Can you confirm pricing and rollout dates?')
-    assert.equal(renewal.unread, true, 'read=0 -> unread')
-    assert.equal(renewal.messageId, '<one@example.test>')
-    // Date column is unix SECONDS -> milliseconds epoch.
-    assert.equal(renewal.date, 1641038400 * 1000)
-    // path points at the local store (provenance), not an imap:// URL.
-    assert.equal(renewal.path, dbPath)
+    {
+      // FIXTURE ROUND-TRIP: rows map into the EmailMessage shape the email feed already uses.
+      const messages = await scanOutlookMessages(source, { limit: 50 })
+      assert.equal(messages.length, 3)
+      // Sorted newest-first by date (id 3 has the latest timestamp).
+      assert.deepEqual(messages.map((m) => m.id), ['olk:3', 'olk:2', 'olk:1'])
+      const renewal = messages.find((m) => m.subject === 'Renewal question')
+      assert.ok(renewal, 'parsed the subject')
+      assert.equal(renewal.sourceId, 'olk')
+      assert.equal(renewal.sourceLabel, 'Outlook (local)')
+      assert.equal(renewal.from, 'Maya <maya@example.test>')
+      assert.equal(renewal.to, 'user@example.test')
+      assert.equal(renewal.snippet, 'Can you confirm pricing and rollout dates?')
+      assert.equal(renewal.unread, true, 'read=0 -> unread')
+      assert.equal(renewal.messageId, '<one@example.test>')
+      // Date column is unix SECONDS -> milliseconds epoch.
+      assert.equal(renewal.date, 1641038400 * 1000)
+      // path points at the local store (provenance), not an imap:// URL.
+      assert.equal(renewal.path, dbPath)
 
-    const read = messages.find((m) => m.id === 'olk:2')
-    assert.ok(read)
-    assert.equal(read.unread, false, 'read=1 -> read')
+      const read = messages.find((m) => m.id === 'olk:2')
+      assert.ok(read)
+      assert.equal(read.unread, false, 'read=1 -> read')
 
-    // Defensive row: missing subject + preview fall back to safe defaults, still emitted.
-    const bare = messages.find((m) => m.id === 'olk:3')
-    assert.ok(bare, 'a row with null subject/preview still parses')
-    assert.equal(typeof bare.subject, 'string')
-    assert.equal(typeof bare.snippet, 'string')
-    assert.equal(bare.from, 'noreply@example.test')
-    ok('scanOutlookMessages parses fixture rows into the EmailMessage shape (newest-first, unread flag, ms date)')
-  }
+      // Defensive row: missing subject + preview fall back to safe defaults, still emitted.
+      const bare = messages.find((m) => m.id === 'olk:3')
+      assert.ok(bare, 'a row with null subject/preview still parses')
+      assert.equal(typeof bare.subject, 'string')
+      assert.equal(typeof bare.snippet, 'string')
+      assert.equal(bare.from, 'noreply@example.test')
+      ok('scanOutlookMessages parses fixture rows into the EmailMessage shape (newest-first, unread flag, ms date)')
+    }
 
-  {
-    // unreadOnly + query are honoured by the SAME options the file/IMAP paths take, so the
-    // shared scanEmailMessages filters apply uniformly. (The connector's own limit is enough
-    // here; we just prove the scanner returns plain EmailMessages the caller can filter.)
-    const unread = (await scanOutlookMessages(source, { limit: 50 })).filter((m) => m.unread)
-    assert.equal(unread.length, 1)
-    assert.equal(unread[0].subject, 'Renewal question')
-    ok('scanned messages expose `unread` so the shared unreadOnly filter works')
+    {
+      // Shared email filters consume the scanner's ordinary unread field.
+      const unread = (await scanOutlookMessages(source, { limit: 50 })).filter((m) => m.unread)
+      assert.equal(unread.length, 1)
+      assert.equal(unread[0].subject, 'Renewal question')
+      ok('scanned messages expose `unread` so the shared unreadOnly filter works')
+    }
+  } else {
+    console.log('SKIP Outlook SQLite round-trip and unread fixtures: sqlite3 is unavailable on this non-macOS host')
   }
 
   {
@@ -132,7 +145,7 @@ async function main() {
     assert.equal(await findOutlookDbPath(fakeProfiles), null)
     // Drop a DB in and it is discovered regardless of the (arbitrary) profile name.
     const realDb = path.join(profileData, 'Outlook.sqlite')
-    await buildFixtureDb(realDb, [{ id: 9, subject: 'Hi', sender: 'a@example.test', recipient: 'c@example.test', preview: 'x', date: 1641038400, folder: 'Inbox', read: 1, messageId: '<x@example.test>' }])
+    await fs.writeFile(realDb, 'Synthetic profile database entry')
     assert.equal(await findOutlookDbPath(fakeProfiles), realDb)
     // A non-existent profiles root just yields null (never throws) — the off-when-absent gate.
     assert.equal(await findOutlookDbPath(path.join(root, 'no-such-root')), null)
@@ -196,6 +209,19 @@ async function main() {
     assert.equal(respected.length, 1, 'existing outlook_local source is respected, not duplicated')
     assert.equal(respected[0].id, 'user_olk')
     ok('withDetectedOutlookSource: gated auto-pickup (off without DB, on with DB, respects a user source)')
+  } else {
+    const fixtureHome = path.join(root, 'unsupported-home')
+    const dataDir = path.join(outlookProfileGlobRoot(fixtureHome), 'Synthetic Profile', 'Data')
+    await fs.mkdir(dataDir, { recursive: true })
+    const fixtureDb = path.join(dataDir, 'Outlook.sqlite')
+    await fs.writeFile(fixtureDb, 'Synthetic profile database entry')
+    assert.equal(await findOutlookDbPath(outlookProfileGlobRoot(fixtureHome)), fixtureDb)
+    assert.equal(await outlookDbPath(fixtureHome), null)
+    assert.equal(await makeOutlookSource(Date.now(), fixtureHome), null)
+    assert.deepEqual(await withDetectedOutlookSource([], Date.now(), fixtureHome), [])
+    assert.equal((await outlookAccessState(fixtureHome)).state, 'no_macos')
+    ok('non-macOS Outlook detection stays off even when a synthetic profile database exists')
+    console.log('SKIP native Outlook auto-pickup and scan: supported only on macOS')
   }
 
   await fs.rm(root, { recursive: true, force: true })

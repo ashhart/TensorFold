@@ -415,6 +415,6 @@ fn spellingOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const u8 {
     const path = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26));
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
-    const map = doc.object.get("weight_map") orelse return error.InvalidFlashIndex;
-    return index.ngramSpelling(map.object);
+    const map = try core.safetensors.index.weightMap(doc);
+    return index.ngramSpelling(map);
 }

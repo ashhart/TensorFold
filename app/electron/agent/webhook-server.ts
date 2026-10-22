@@ -133,7 +133,8 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
     for (const [k, exp] of seen) if (exp <= now) seen.delete(k)
     const dedupeKey = `${endpoint.id}:${createHmac('sha256', 'vontra-dedupe').update(`${opts.timestamp}.`).update(opts.rawBody).digest('hex')}`
     if (seen.has(dedupeKey)) return { code: 200, body: { ok: true, deduped: true } }
-    seen.set(dedupeKey, now + normalizeWebhookReplayWindowSeconds(endpoint.replayWindowSeconds) * 1000)
+    const lastAcceptedAt = (Number(opts.timestamp) + normalizeWebhookReplayWindowSeconds(endpoint.replayWindowSeconds)) * 1000
+    seen.set(dedupeKey, Math.ceil(lastAcceptedAt) + 1)
     let parsed: unknown
     try { parsed = JSON.parse(opts.rawBody.toString('utf8')) } catch { return { code: 400, body: { error: 'invalid_json' } } }
     // The ONE safe path: connector-spine redacts sensitive keys + caps + classifies.

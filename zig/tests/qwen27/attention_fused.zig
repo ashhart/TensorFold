@@ -394,7 +394,7 @@ pub fn main(init: std.process.Init) !void {
     const text = try a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt);
     const library = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer library.deinit();
-    var op = try attn.Attention.init(device, library, true);
+    var op = try attn.Attention.init(device, library);
     defer op.deinit();
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--bench")) {
         var brng = Rng{ .s = 0x1234567 };

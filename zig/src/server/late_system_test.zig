@@ -55,9 +55,9 @@ const DropLate = struct {
         return &.{};
     }
 
-    fn render(_: *anyopaque, a: std.mem.Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(_: *anyopaque, a: std.mem.Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         var out: std.ArrayList(u8) = .empty;
-        if (messages != .array) return out.items;
+        if (messages != .array) return .{ .text = (out.items) };
         var first = true;
         for (messages.array) |m| {
             const role = textOf(m, "role");
@@ -70,7 +70,7 @@ const DropLate = struct {
                 try out.append(a, '\n');
             }
         }
-        return out.items;
+        return .{ .text = (out.items) };
     }
 
     fn templateSource(_: *anyopaque) []const u8 {

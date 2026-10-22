@@ -1,0 +1,67 @@
+# negative control: ROCR_VISIBLE_DEVICES applied twice (2026-10-19T08:54:29Z)
+# undone: fb8eaf85 part 1. rocmVisible() is put back as it was in 82237515 (HIP_VISIBLE_DEVICES, else ROCR_VISIBLE_DEVICES, taken as given; CUDA_VISIBLE_DEVICES not read). Everything else is fb8eaf85.
+# tree: a scratch copy of fb8eaf85081880f686bbb0b12a5852f64b81fe26 (git archive) with only this change
+# cmd: zig build test-server-cpu -Dcpu=apple_m1 --summary all -j8 (zig 0.17.0, private caches: --cache-dir and ZIG_GLOBAL_CACHE_DIR)
+# free disk before: 52 GB
+# --- the undo, as a diff against fb8eaf85 ---
+--- a/zig/src/server/benchmark_host.zig
++++ b/zig/src/server/benchmark_host.zig
+@@ -34,12 +34,9 @@
+     return &.{ "nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits" };
+ }
+
+-/// HIP's device list as clr reads it (rocdevice.cpp): HIP_VISIBLE_DEVICES, else CUDA_VISIBLE_DEVICES; null for none.
++/// The visible-device list the rocm probe applies: HIP_VISIBLE_DEVICES, else ROCR_VISIBLE_DEVICES.
+ pub fn rocmVisible(env: *const std.process.Environ.Map) ?[]const u8 {
+-    // ROCR_VISIBLE_DEVICES is not read: ROCr applies it inside rocminfo, which lists only those GPUs, in its order
+-    const hip = clrString(env.get("HIP_VISIBLE_DEVICES"));
+-    const list = if (hip.len > 0) hip else clrString(env.get("CUDA_VISIBLE_DEVICES"));
+-    return if (list.len > 0) list else null;
++    return env.get("HIP_VISIBLE_DEVICES") orelse env.get("ROCR_VISIBLE_DEVICES");
+ }
+
+ /// A string variable as clr's flags.cpp reads it: unset is "", set but empty is " ", and one pair of quotes is dropped.
+# --- build output ---
+test-server-cpu
++- run test 434 pass, 2 fail (436 total)
+error: 'benchmark_facts_test.test.rocm visible-device indices count every GPU agent: selecting an unreportable agent lists no GPU, never the next' failed:
+       CUDA_VISIBLE_DEVICES=1: listed GPUs [AMD Radeon PRO V620] partial, want [AMD Radeon PRO V620] detected
+       CUDA_VISIBLE_DEVICES=0: listed GPUs [AMD Radeon PRO V620] partial, want [] partial
+       expected 0, found 2
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:93:17: 0x100e45c97 in expectEqualInner__func_4100 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x100e9bc97 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1-nc/zig/src/server/benchmark_facts_test.zig:436:5: 0x100e9bd6b in test.rocm visible-device indices count every GPU agent: selecting an unreportable agent lists no GPU, never the next (test)
+           try std.testing.expectEqual(@as(usize, 0), wrong);
+           ^
+error: 'benchmark_rocm_test.test.rocminfo lists only the GPUs ROCR_VISIBLE_DEVICES leaves, renumbered; the probe applies HIP's list on top, once' failed:
+       ROCR_VISIBLE_DEVICES=1 (rocminfo lists 1 GPUs): recorded [] partial, want [AMD Radeon PRO V620] detected
+       ROCR_VISIBLE_DEVICES=1,2 (rocminfo lists 2 GPUs): recorded [AMD Instinct MI210] detected, want [AMD Radeon PRO V620, AMD Instinct MI210] detected
+       CUDA_VISIBLE_DEVICES=1 (rocminfo lists 3 GPUs): recorded [AMD Radeon PRO W7800, AMD Radeon PRO V620, AMD Instinct MI210] detected, want [AMD Radeon PRO V620] detected
+       HIP_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES=1 (rocminfo lists 3 GPUs): recorded [AMD Radeon PRO W7800, AMD Radeon PRO V620, AMD Instinct MI210] detected, want [] partial
+       HIP_VISIBLE_DEVICES="1" (rocminfo lists 3 GPUs): recorded [] partial, want [AMD Radeon PRO V620] detected
+       expected 0, found 5
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:93:17: 0x100e45c97 in expectEqualInner__func_4100 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       ~/zig/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x100e9ad07 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       ~/tmp/rv1001-1-nc/zig/src/server/benchmark_rocm_test.zig:74:5: 0x100e9adc3 in test.rocminfo lists only the GPUs ROCR_VISIBLE_DEVICES leaves, renumbered; the probe applies HIP's list on top, once (test)
+           try std.testing.expectEqual(@as(usize, 0), try wrong(a, &cases));
+           ^
+failed command: ./.zc/o/5a6b9981cfb84793a98bf037f1e23fd0/test --cache-dir=./.zc --seed=0xf37f3f6f --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 439/441 tests passed (2 failed)
+test-server-cpu transitive failure
++- run test 434 pass, 2 fail (436 total)
+|  +- compile test debug native success 9s MaxRSS:1G
++- run test 5 pass (5 total) 4ms MaxRSS:3M
+   +- compile test debug native success 1s MaxRSS:284M
+
+
+# exit=1 after 58s
+# restored: benchmark_host.zig is byte-identical to fb8eaf85's again

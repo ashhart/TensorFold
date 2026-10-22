@@ -14,10 +14,12 @@ import collections
 import glob
 import json
 
-from tokenizers import Tokenizer
+import sys
 
 
-def main() -> None:
+def text_main() -> None:
+    from tokenizers import Tokenizer
+
     p = argparse.ArgumentParser()
     p.add_argument("tokenizer")
     p.add_argument("out")
@@ -70,6 +72,14 @@ def main() -> None:
         handle.write("\n".join(str(i) for i in ids) + "\n")
     print(json.dumps({"files": used, "tokens": total, "size": len(ids), "coverage": round(covered / max(1, total), 4),
                       "from_counts": sum(1 for t, c in counts.items() if c >= args.min_count and t in keep)}))
+
+
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "responses":
+        from draft_vocab_responses import main as response_main
+        response_main(sys.argv[2:])
+    else:
+        text_main()
 
 
 if __name__ == "__main__":

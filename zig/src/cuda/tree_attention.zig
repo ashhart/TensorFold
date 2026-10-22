@@ -109,6 +109,7 @@ pub const TreeAttention = struct {
         c.add(scale);
         c.add(@as(i32, @intCast(ng)));
         c.add(@as(i32, @intCast(n)));
+        c.add(kn); // the replay of a NaN or infinite partial weighs a row's path keys too
         const per: usize = if (one) slices else 1;
         const block: u32 = if (one) 32 else 128;
         // three stages where the one-warp grid fits one wave of the SMs (a block each), else two (two blocks an SM)

@@ -1,0 +1,24 @@
+{
+  "cancelled_prompt_tokens": {
+    "base": [
+      14994,
+      14994,
+      14994,
+      14994,
+      14994,
+      14994
+    ],
+    "fixed": [
+      14994,
+      14994,
+      14994,
+      14994,
+      14994,
+      14994
+    ]
+  },
+  "cancelled_prompts_fit_context": true,
+  "short_http_responses": 14,
+  "identical_short_native_hashes": true,
+  "identical_long_native_hashes": true
+}

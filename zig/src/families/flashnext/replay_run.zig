@@ -2,6 +2,7 @@
 const fz = @import("replay.zig");
 const std = @import("std");
 const platform = @import("sys");
+const safetensors = @import("../../core/safetensors.zig");
 const mtl = @import("metal");
 const split = fz.split;
 const dense = fz.dense;
@@ -36,6 +37,9 @@ pub const Run = struct {
     fused_xsum: bool = false,
     serial: bool = false,
     enc: mtl.ComputeEncoder = undefined,
+    rotary_pipe: ?mtl.Pipeline = null,
+    rotary_enabled: bool = false,
+    rotary_buffer: ?mtl.Buffer = null,
     kv_pipe: mtl.Pipeline = undefined,
     argmax_pipe: mtl.Pipeline = undefined,
     add_pipe: mtl.Pipeline = undefined,
@@ -108,9 +112,46 @@ pub const Run = struct {
     pool_abs_pipe: mtl.Pipeline = undefined,
     ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
 
+    load_limit: u64 = 0,
+    objects: @import("owned.zig").Owner(mtl) = .{},
+    files: std.ArrayList(c_int) = .empty,
+    maps: std.ArrayList(mtl.MappedFile) = .empty,
+    rows_cleanup: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
+    closed: bool = false,
+
+    pub const deinit = @import("run_cleanup.zig").drop;
+
+    pub fn ownResource(r: *Run, value: anytype) !@TypeOf(value) {
+        return r.objects.keep(r.arena, value);
+    }
+
+    pub fn mapFile(r: *Run, path: [:0]const u8) !mtl.MappedFile {
+        const file = try mtl.MappedFile.open(path);
+        errdefer file.deinit();
+        try r.maps.append(r.arena, file);
+        return file;
+    }
+
+    pub fn allocate(r: *Run, n: usize) !mtl.Buffer {
+        return r.allocateOptions(n, opts);
+    }
+
+    pub fn checkGrowth(r: *const Run, n: usize) !void {
+        if (r.load_limit != 0 and !@import("flashnext_memory").growingFits(r.device.allocated(), n, r.load_limit)) {
+            std.log.warn("flash next: {d} more buffer bytes would cross the load ceiling and runtime reserve", .{n});
+            return error.FlashNextMemoryShortfall;
+        }
+    }
+
+    pub fn allocateOptions(r: *Run, n: usize, options: usize) !mtl.Buffer {
+        try r.checkGrowth(n);
+        return r.device.buffer(n, options);
+    }
+
     pub fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
-        const b = try r.device.buffer(n, opts);
+        const b = try r.allocate(n);
+        errdefer b.deinit();
         @memset(b.contents()[0..n], 0);
         try r.keep(b);
         return b;
@@ -136,19 +177,22 @@ pub const Run = struct {
     pub fn indexFile(r: *Run, path: [:0]const u8) !void {
         const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) return error.OpenFailed;
+        r.files.append(r.arena, fd) catch |err| {
+            _ = platform.c.close(fd);
+            return err;
+        };
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
-        const n = std.mem.readInt(u64, &head, .little);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
+        if (end < 8) return error.BadSafetensors;
+        const size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+        const n = try safetensors.headerSize(std.mem.readInt(u64, &head, .little), size);
         const text = try r.arena.alloc(u8, n);
         try readAll(fd, text, 8);
-        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, r.arena, text, .{});
-        var it = parsed.object.iterator();
-        while (it.next()) |kv| {
-            if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
-            const offs = kv.value_ptr.object.get("data_offsets").?.array.items;
-            const lo: usize = @intCast(offs[0].integer);
-            const hi: usize = @intCast(offs[1].integer);
-            try r.index.put(r.arena, kv.key_ptr.*, .{ .fd = fd, .at = 8 + n + lo, .len = hi - lo });
+        const entries = try safetensors.parseHeader(r.arena, text, size - 8 - n);
+        try r.index.ensureUnusedCapacity(r.arena, @intCast(entries.count()));
+        for (entries.keys(), entries.values()) |name, tensor| {
+            r.index.putAssumeCapacity(name, .{ .fd = fd, .at = 8 + n + tensor.begin, .len = tensor.end - tensor.begin });
         }
     }
 
@@ -161,7 +205,7 @@ pub const Run = struct {
 
     pub fn load(r: *Run, name: []const u8) !Buf {
         const e = try r.entry(name);
-        const b = try r.device.buffer(@max(e.len, 64), opts);
+        const b = try r.allocate(@max(e.len, 64));
         errdefer b.deinit();
         try readAll(e.fd, b.contents()[0..e.len], e.at);
         r.loaded += e.len;
@@ -180,7 +224,7 @@ pub const Run = struct {
         var name: [160]u8 = undefined;
         const fmt = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.{s}{d}.{s}";
         for (first..first + count) |s| total += (try r.entry(try std.fmt.bufPrint(&name, fmt, .{ r.ngram, s, suffix }))).len;
-        const b = try r.device.buffer(total, opts);
+        const b = try r.allocate(total);
         errdefer b.deinit();
         var at: usize = 0;
         for (first..first + count) |s| {

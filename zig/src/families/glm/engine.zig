@@ -89,11 +89,11 @@ pub const Engine = struct {
     sampling: ?lanes.Sampling = null, // the standalone path's keyed rules (GLM_SAMPLING; the server never sets it)
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
-    residency: ?mtl.ResidencySet = null,
+    residency: ?residency.Resident = null,
+    residency_enabled: bool = true,
     vision: ?*vision_mod.Vision = null, // --vision: the image tower
     vision_rows: Ref = undefined, // bf16 [image tokens, hidden]: a prompt's image rows (vision only)
     vision_limits: vision_mod.Limits = .{},
-    keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
     keepalive_target: mtl.keepalive.Target = undefined, // the engine's queue, set at load for the server's ticker
     load_seconds: f64 = 0,
     limit: load_plan.Limit = undefined, // the one-Mac load limit, read once at load (stream admission and the cache budget read it)
@@ -103,12 +103,13 @@ pub const Engine = struct {
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
-    pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null);
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32) !*Engine {
+        return loadWith(gpa, io, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null, false);
     }
 
     /// `load` with expert parallel over `ep_path`'s link (one Mac when null) and `vision`'s image tower and rows.
-    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits) !*Engine {
+    pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits, defer_residency: bool) !*Engine {
+        const keep_resident = try residency.policy.flag(platform.getenv("GLM_RESIDENCY"));
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
         const pool = mtl.objc.Pool.push();
@@ -117,6 +118,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.ev = 0;
         e.residency = null;
+        e.residency_enabled = keep_resident;
         e.vision = null;
         e.gpu = .{ 0, 0 };
         e.fused_route = if (platform.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
@@ -138,6 +140,7 @@ pub const Engine = struct {
         errdefer e.device.deinit();
         e.queue = try e.device.queue();
         errdefer e.queue.deinit();
+        e.keepalive_target = .{ .queue = e.queue };
         e.event = try e.device.sharedEvent();
         errdefer e.event.deinit();
         const path = try std.fmt.allocPrintSentinel(gpa, "{s}/config.json", .{dir}, 0);
@@ -232,7 +235,6 @@ pub const Engine = struct {
         }
         if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
         errdefer if (e.vision) |v| v.deinit();
-        residency.wire(e); // GLM_RESIDENCY's opt-in set, then the idle keepalive's target
         // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step (GLM_NO_WARMUP: skip)
         if (e.pr != null and cap >= 128 and platform.c.getenv("GLM_NO_WARMUP") == null) {
             var ids: [64]u32 = undefined;
@@ -241,6 +243,7 @@ pub const Engine = struct {
             _ = try e.generate(&ids, 2, &.{}, 0, .{ .ctx = &quiet, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled });
         }
         e.load_seconds = @as(f64, @floatFromInt(platform.c.mach_absolute_time() - t0)) / 24e6;
+        if (!defer_residency) residency.wire(e, io);
         return e;
     }
 
@@ -269,10 +272,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         const gpa = e.gpa;
-        if (e.residency) |set| {
-            e.queue.removeResidencySet(set);
-            set.deinit();
-        }
+        residency.drop(e);
         if (e.ep) |ep| ep.deinit(gpa);
         if (e.vision) |v| v.deinit();
         e.ep_arena.deinit();

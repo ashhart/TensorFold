@@ -45,9 +45,13 @@ fn load() ?Fns {
     if (lib) |l| return l;
     if (lib_failed) return null;
     lib_failed = true;
-    var dl = for (names) |name| {
+    var dl = (if (builtin.os.tag == .linux) linux: {
+        const paths = @import("sys").optional_libraries.video_library;
+        var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        break :linux paths.open(std.heap.page_allocator, @import("sys"), paths.executableDir(&buffer));
+    } else for (names) |name| {
         break @import("sys").DynLib.open(name) catch continue;
-    } else {
+    } else null) orelse {
         @import("sys").optional_libraries.warn(.video);
         return null;
     };

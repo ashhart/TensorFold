@@ -42,6 +42,46 @@ pub fn open(gpa: Allocator, io: std.Io, eng: *fx.Engine, dir: []const u8, o: api
         why.* = "--vision: images are not read across a Flash Next pair yet; serve on one Mac, or leave --vision out";
         return error.VisionOnPair;
     }
+    const c = try configuration(io, dir, a, why);
+    const v = try gpa.create(Vision);
+    errdefer gpa.destroy(v);
+    const videos = c.video_token != null;
+    v.* = .{ .gpa = gpa, .c = c, .tower = undefined, .prep = undefined, .capacity = try std.math.add(u32, o.image_tokens, if (videos) o.video_tokens else 0), .max_images = o.max_images, .markers = .{ c.vision_start, c.image_token, c.vision_end }, .video_markers = .{ c.vision_start, c.video_token orelse 0, c.vision_end }, .video = o };
+    const planned = try plan(a, c, o);
+    const Factory = struct {
+        run: *tf.flashnext_replay.Run,
+        pub fn buffer(f: @This(), n: usize, options: usize) !mtl.Buffer {
+            return f.run.allocateOptions(n, options);
+        }
+    };
+    const Build = struct {
+        gpa: Allocator,
+        io: std.Io,
+        eng: *fx.Engine,
+        dir: []const u8,
+        c: vl.Config,
+        largest: u32,
+        fn load(it: @This()) !*Tower {
+            return Tower.loadWith(it.gpa, it.io, it.eng.r.device, it.dir, it.c, it.largest, Factory{ .run = it.eng.r });
+        }
+    };
+    v.tower = try memory.loadTower(*Tower, eng.r, try planned.memory.tower(), Build{
+        .gpa = gpa,
+        .io = io,
+        .eng = eng,
+        .dir = dir,
+        .c = c,
+        .largest = planned.largest,
+    }, Build.load);
+    errdefer v.tower.deinit();
+    v.prep = try vp.Prep.initCached(eng.r.device, gpa, eng.r.rotary_pipe != null);
+    std.log.info("flash next: image tower loaded ({d:.2} GiB with scratch for {d} tokens a pass; {d} image and {d} video tokens a request)", .{ @as(f64, @floatFromInt(v.tower.bytes)) / (1 << 30), planned.largest, o.image_tokens, if (videos) o.video_tokens else 0 });
+    return v;
+}
+
+const memory = tf.flashnext_replay.vision_memory;
+
+fn configuration(io: std.Io, dir: []const u8, a: Allocator, why: *[]const u8) !vl.Config {
     const read = struct {
         fn f(al: Allocator, i: std.Io, d: []const u8, name: []const u8) ?[]const u8 {
             const path = std.fs.path.join(al, &.{ d, name }) catch return null;
@@ -61,20 +101,39 @@ pub fn open(gpa: Allocator, io: std.Io, eng: *fx.Engine, dir: []const u8, o: api
         why.* = "--vision: the image tower's output width or the text's M-RoPE sections do not match Flash Next's";
         return error.VisionShape;
     }
-    const v = try gpa.create(Vision);
-    errdefer gpa.destroy(v);
+    return c;
+}
+
+const Planned = struct { memory: memory.Plan, largest: u32 };
+
+fn plan(a: Allocator, c: vl.Config, o: api.VisionOpen) !Planned {
     const videos = c.video_token != null;
-    v.* = .{ .gpa = gpa, .c = c, .tower = undefined, .prep = undefined, .capacity = o.image_tokens + if (videos) o.video_tokens else 0, .max_images = o.max_images, .markers = .{ c.vision_start, c.image_token, c.vision_end }, .video_markers = .{ c.vision_start, c.video_token orelse 0, c.vision_end }, .video = o };
-    // one image a pass: the scratch holds the largest image or video pair the processors make under the budgets
     const per = @as(u64, c.factor()) * c.factor();
     const image_most = @min(@as(u64, o.image_tokens), c.max_pixels / per);
     const pair_most = if (videos) @min(@as(u64, o.video_tokens), c.max_pixels / (vl.video.min_frames * per)) else 0;
     const largest: u32 = @intCast(@max(image_most, pair_most));
-    v.tower = try Tower.load(gpa, io, eng.r.device, dir, c, largest);
-    errdefer v.tower.deinit();
-    v.prep = try vp.Prep.init(eng.r.device);
-    std.log.info("flash next: image tower loaded ({d:.2} GiB with scratch for {d} tokens a pass; {d} image and {d} video tokens a request)", .{ @as(f64, @floatFromInt(v.tower.bytes)) / (1 << 30), largest, o.image_tokens, if (videos) o.video_tokens else 0 });
-    return v;
+    if (largest == 0) return error.ImageTooLarge;
+    const tower = try tf.qwen_vl_tower.tower.memoryPlan(a, c, largest);
+    const total = try std.math.add(u64, o.image_tokens, if (videos) o.video_tokens else 0);
+    const row = tf.flashnext_replay.D * 2;
+    return .{ .largest = largest, .memory = .{
+        .source = tower.source,
+        .weights = tower.weights,
+        .scratch = tower.scratch,
+        .rows = try std.math.mul(u64, total, 4 * row),
+        .temporary = try std.math.mul(u64, largest, row),
+    } };
+}
+
+pub fn budgetSettings(io: std.Io, dir: []const u8, vision: ?api.VisionOpen, paired: bool, a: Allocator, why: *[]const u8, settings: anytype) !@TypeOf(settings) {
+    const o = vision orelse return settings;
+    if (paired) {
+        why.* = "--vision: images are not read across a Flash Next pair yet; serve on one Mac, or leave --vision out";
+        return error.VisionOnPair;
+    }
+    const c = try configuration(io, dir, a, why);
+    const p = try plan(a, c, o);
+    return memory.withPlan(settings, p.memory);
 }
 
 /// The request's images through the tower, but those ending by `from` (resumed past): the prompt pass's rows and frame.
@@ -90,11 +149,12 @@ pub fn build(v: *Vision, eng: *fx.Engine, a: Allocator, images: []const api.Imag
     }
     if (total > v.capacity) return error.ImageTooLarge;
     const row = tf.flashnext_replay.D * 2;
-    const rows = try eng.r.device.buffer(total * 4 * row, mtl.ResourceOptions.shared);
-    errdefer rows.deinit();
     var most: usize = 0;
     for (spans) |s| most = @max(most, s.n);
-    const out = try eng.r.device.buffer(most * row, mtl.ResourceOptions.shared);
+    const storage = try memory.outputs(mtl.Buffer, eng.r, total, most, row, mtl.ResourceOptions.shared);
+    const rows = storage.rows;
+    errdefer rows.deinit();
+    const out = storage.temporary;
     defer out.deinit();
     const t0 = std.c.mach_absolute_time();
     for (images, spans) |img, s| { // one image a pass: the tower's host-written tables are one image's

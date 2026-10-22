@@ -49,8 +49,9 @@ fn matrixRefused(policy: hip.Policy, caps: hip.Caps) ?[]const u8 {
     };
 }
 
-/// The tensor-parallel flags as the Python ROCm server checks them.
+/// The tensor-parallel flags as the Python ROCm server checks them, and the flags this engine cannot take.
 fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
+    if (o.drafter != null) return refuse(a, problem, "--drafter: the HIP engine runs no DFlash2 drafter yet; serve without --drafter", .{});
     if (o.tp != 1 and o.tp != 2 and o.tp != 4 and o.tp != 8) return refuse(a, problem, "--tp {d} is not a supported ROCm world size; choose 1, 2, 4 or 8", .{o.tp});
     if (o.tp > 1 and o.master.len == 0) return refuse(a, problem, "--tp > 1 needs --master: rank 0's address on the link between the machines", .{});
     // the two-Mac engines take their ranks from --speed-up's settings file; this engine takes them from --tp
@@ -302,6 +303,21 @@ test "the group flags: one rank source, a supported world, a master past one ran
     var outside = two;
     outside.rank = 2;
     try std.testing.expectError(error.Refused, checkGroup(a, outside, &problem));
+}
+
+test "--drafter is refused before any load, on every rank, until the HIP engine runs DFlash2" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    const drafted: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .drafter = "/models/drafter" };
+    try std.testing.expectError(error.Refused, checkGroup(a, drafted, &problem));
+    try std.testing.expectStringStartsWith(problem, "--drafter: the HIP engine runs no DFlash2 drafter yet");
+    var follower = drafted;
+    follower.tp = 2;
+    follower.rank = 1;
+    follower.master = "node0";
+    try std.testing.expectError(error.Refused, checkGroup(a, follower, &problem));
 }
 
 test "matrix=on runs only where the matrix-core tiles exist; auto runs everywhere" {

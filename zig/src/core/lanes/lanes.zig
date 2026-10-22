@@ -1,6 +1,8 @@
 //! The lane engine's host core (Python lane_engine.py); backends run forwards and draws behind `backend.Backend`.
 const std = @import("std");
 
+pub const proposal_score = @import("proposal_score.zig");
+pub const proposal_head = @import("proposal_head.zig");
 pub const table = @import("table.zig");
 pub const allocate = @import("allocate.zig");
 pub const accept = @import("accept.zig");
@@ -21,6 +23,7 @@ pub const trim = @import("trim.zig");
 pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");
 pub const backend = @import("backend.zig");
+pub const embedding = @import("embedding.zig");
 pub const events = @import("events.zig");
 pub const windows = @import("windows.zig");
 pub const trail = @import("trail.zig");
@@ -44,18 +47,24 @@ pub const Trim = trim.Trim;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
+    _ = @import("long_loop.zig");
+    _ = @import("long_loop_test.zig");
     _ = @import("handover_test.zig");
     _ = @import("open_first_test.zig");
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("root_copy_test.zig");
     _ = @import("drafted_grammar_test.zig");
     _ = @import("windows_grammar_test.zig");
     _ = @import("pricing_test.zig");
+    _ = @import("depth_probe_test.zig");
+    _ = @import("proposal_external_test.zig");
     _ = @import("lone_costs_test.zig");
     _ = @import("lone_backoff_test.zig");
     _ = @import("fill_test.zig");
     _ = @import("fill_trim_test.zig");
+    _ = @import("fair_turns_test.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");

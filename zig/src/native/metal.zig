@@ -140,7 +140,7 @@ const Host = struct {
         if (h.learned) |*m| m.deinit();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
-        if (h.resident) |*r| r.deinit();
+        nemotron.residency.drop(h);
         h.metal.deinit();
         h.m.deinit();
         h.gpa.destroy(h);
@@ -265,15 +265,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer if (h.learned) |*im| im.deinit();
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
-    {
-        var list: std.ArrayList(mtl.Buffer) = .empty; // the shards and the weights in the kernels' layouts
-        defer list.deinit(gpa);
-        for (h.m.checkpoint.shards.items) |sh| try list.append(gpa, sh.buffer);
-        try list.appendSlice(gpa, h.m.weights.owned.items);
-        h.resident = try Resident.hold(gpa, io, h.m.device, h.m.queue, list.items, "nemotron");
-    }
-    errdefer if (h.resident) |*r| r.deinit();
-    h.warm = if (h.resident) |*r| r.target() else .{ .queue = h.m.queue };
+    try nemotron.residency.hold(h, io);
+    errdefer nemotron.residency.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.slide = null;
     if (o.slide) {
@@ -446,7 +439,7 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     }
     const learn: ?glm.Learn = if (o.learn) |root| .{ .root = root, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .conversations = o.learn_conversations } else null;
     const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, learn, o.vision) catch |e| {
-        if (e == error.LearnConversationsOnPair) problem.* = "--learn-conversations keeps states on one Mac only: serve GLM-5.3-Flash without --speed-up, or without the flag" else if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+        if (e == error.BadResidency) problem.* = mtl.residency_policy.invalid_flag else if (e == error.LearnConversationsOnPair) problem.* = "--learn-conversations keeps states on one Mac only: serve GLM-5.3-Flash without --speed-up, or without the flag" else if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };

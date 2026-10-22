@@ -16,6 +16,7 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 
 /// MLX affine 4-bit tiled for qmm: packed words, (kg, npad) scales and biases, n outputs from k inputs.
+pub const proposal = @import("proposal_head.zig");
 pub const Affine4 = struct {
     w: u64,
     s: u64,
@@ -225,6 +226,8 @@ pub const Linear = struct {
 pub const symbols = struct {
     pub const group = "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi4ELi8ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
     pub const verify32 = "_ZN12tf_qmm_group12group_kernelILi64ELi32ELi64ELi1ELi4ELi5ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
+    pub const verify64 = "_ZN12tf_qmm_group12group_kernelILi64ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
+    pub const verify128 = "_ZN12tf_qmm_group12group_kernelILi64ELi128ELi64ELi1ELi4ELi3ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
     pub const prefill = "_ZN14tf_qmm_prefill14prefill_kernelILi64ELi128ELi128ELi2ELi4ELi3ELb0EEEvPK13__nv_bfloat16PKjS3_S3_Pviiiiii";
     pub const gemv = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
     pub const gemv_split = "tf_lane_gemv_split";
@@ -245,6 +248,8 @@ comptime {
 
 pub const group_smem: u32 = 35328; // LaneTile<64, 16, 64, 1, 4, 8>::SMEM
 pub const verify_smem: u32 = 32640; // LaneTile<64, 32, 64, 1, 4, 5>::SMEM
+pub const verify64_smem: u32 = 43008; // LaneTile<64, 64, 64, 1, 4, 4>::SMEM
+pub const verify128_smem: u32 = 57600; // LaneTile<64, 128, 64, 1, 4, 3>::SMEM
 pub const split_smem: u32 = 17664; // LaneTile<64, 16, 64, 1, 4, 4>::SMEM: four stages, so more split CTAs fit an SM
 pub const prefill_smem: u32 = 62976; // Tile<64, 128, 128, 2, 4, 3>::SMEM
 

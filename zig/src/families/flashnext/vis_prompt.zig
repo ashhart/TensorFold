@@ -39,7 +39,14 @@ pub const Prep = struct {
     prep: mtl.Pipeline,
 
     pub fn init(device: mtl.Device) !Prep {
-        const lib = try mtl.Library.fromSource(device, ks.flashnext_mrope, mtl.CompileOptions.mlx());
+        return initCached(device, std.heap.page_allocator, false);
+    }
+
+    pub fn initCached(device: mtl.Device, a: std.mem.Allocator, enabled: bool) !Prep {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const source = try @import("rotary_cache.zig").source(arena.allocator(), ks.flashnext_mrope, enabled);
+        const lib = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
         errdefer lib.deinit();
         return .{ .lib = lib, .prep = try mtl.Pipeline.init(device, lib, "fn_attn_prep_mrope", false) };
     }

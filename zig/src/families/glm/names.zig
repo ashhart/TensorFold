@@ -39,9 +39,10 @@ pub fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, dir: []const u8, m
     const path = try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{dir}, 0);
     const f = try mtl.MappedFile.open(path);
     defer f.deinit();
+    if (f.size > st.index.max_bytes) return error.BadIndex;
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, f.bytes[0..f.size], .{ .allocate = .alloc_always });
     var files: std.StringArrayHashMapUnmanaged(void) = .empty;
-    var it = doc.object.get("weight_map").?.object.iterator();
+    var it = (try st.index.weightMap(doc)).iterator();
     while (it.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
     for (files.keys(), 0..) |name, si| {
         const full = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ dir, name }, 0);
@@ -51,33 +52,30 @@ pub fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, dir: []const u8, m
         defer _ = platform.c.close(fd);
         var head: [8]u8 = undefined;
         try load_fix.readAll(fd, &head, 0);
-        const hlen = std.mem.readInt(u64, &head, .little);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
+        if (end < 8) return error.BadSafetensors;
+        const size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+        const hlen = try st.headerSize(std.mem.readInt(u64, &head, .little), size);
         const header = try arena.alloc(u8, hlen);
         try load_fix.readAll(fd, header, 8);
-        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         const data = 8 + hlen;
-        const doc2 = try std.json.parseFromSliceLeaky(std.json.Value, arena, header, .{});
-        var eit = doc2.object.iterator();
-        while (eit.next()) |kv| {
+        const entries = try st.parseHeaderPrefixes(arena, header, size - data, &.{ lm, "language_model.", "lm_head." });
+        for (entries.keys(), entries.values()) |name_in_file, entry| {
             var buf: [240]u8 = undefined;
-            // the language model's tensors only: the vision tower's (5-D patch kernels among them) are never read
-            const tensor = (try original(&buf, kv.key_ptr.*, mtp_layer)) orelse continue;
-            const o = kv.value_ptr.object;
-            const dtype = st.DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
-            const dims = o.get("shape").?.array.items;
-            if (dims.len > st.max_rank) return error.RankTooHigh;
-            var shape: [st.max_rank]usize = @splat(1);
-            for (dims, 0..) |d, j| shape[j] = @intCast(d.integer);
-            const offs = o.get("data_offsets").?.array.items;
-            const b: u64 = @intCast(offs[0].integer);
-            const e2: u64 = @intCast(offs[1].integer);
-            if (e2 < b or data + e2 > @as(u64, @intCast(end))) return error.BadSafetensors;
+            const tensor = (try original(&buf, name_in_file, mtp_layer)) orelse continue;
             const got = try names.getOrPut(arena, try arena.dupe(u8, tensor));
             if (got.found_existing) { // one tensor stored under both layouts' names, or twice
                 @import("quant.zig").say("glm: {s} is stored twice in the checkpoint", .{tensor});
                 return error.BadSafetensors;
             }
-            got.value_ptr.* = .{ .shard = @intCast(si), .off = data + b, .len = e2 - b, .dtype = dtype, .shape = shape, .rank = @intCast(dims.len) };
+            got.value_ptr.* = .{
+                .shard = @intCast(si),
+                .off = data + entry.begin,
+                .len = entry.end - entry.begin,
+                .dtype = entry.dtype,
+                .shape = entry.shape,
+                .rank = entry.rank,
+            };
         }
     }
 }

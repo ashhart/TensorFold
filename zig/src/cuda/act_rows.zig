@@ -1,4 +1,4 @@
-//! act_rows.cu's activation rows for every CUDA family: SwiGLU, sigmoid output gates and 64-value group sums.
+//! act_rows.cu's activation rows for every CUDA family: SwiGLU, GeGLU, sigmoid output gates and 64-value group sums.
 const std = @import("std");
 const kernels = @import("kernels.zig");
 const module = @import("module.zig");
@@ -28,12 +28,14 @@ pub const ActRows = struct {
     gate_fn: Function,
     sums_fn: Function,
     dconv_fn: Function,
+    geglu_fn: Function,
+    swiglu_round_fn: Function,
 
     pub fn load(d: *const Driver) !ActRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.act_rows);
         errdefer mod.unload();
-        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows") };
+        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round") };
     }
 
     pub fn unload(g: *ActRows) void {
@@ -42,6 +44,20 @@ pub const ActRows = struct {
 
     /// out [rows, n] = bf16(silu(gate) * up), rows at strides g_ld, u_ld; xs (or null): out's 64-value sums.
     pub fn swiglu(g: *const ActRows, s: Stream, gate: u64, g_ld: usize, up: u64, u_ld: usize, out: u64, xs: ?u64, rows: usize, n: usize) !void {
+        return g.glu(g.swiglu_fn, s, gate, g_ld, up, u_ld, out, xs, rows, n);
+    }
+
+    /// swiglu in MLX's bf16 steps (tf_draft_swiglu's: exp, 1 + e, its reciprocal, the sigmoid, silu, each rounded).
+    pub fn swigluRound(g: *const ActRows, s: Stream, gate: u64, g_ld: usize, up: u64, u_ld: usize, out: u64, xs: ?u64, rows: usize, n: usize) !void {
+        return g.glu(g.swiglu_round_fn, s, gate, g_ld, up, u_ld, out, xs, rows, n);
+    }
+
+    /// out = bf16(gelu_tanh(gate) * up) as mlx_lm's geglu in MLX's bf16 ops, rows as swiglu's; xs (or null): sums.
+    pub fn geglu(g: *const ActRows, s: Stream, gate: u64, g_ld: usize, up: u64, u_ld: usize, out: u64, xs: ?u64, rows: usize, n: usize) !void {
+        return g.glu(g.geglu_fn, s, gate, g_ld, up, u_ld, out, xs, rows, n);
+    }
+
+    fn glu(_: *const ActRows, f: Function, s: Stream, gate: u64, g_ld: usize, up: u64, u_ld: usize, out: u64, xs: ?u64, rows: usize, n: usize) !void {
         if (n % 64 != 0 or !aligned(&.{ gate, up, out }, &.{ g_ld, u_ld })) return error.RowShape;
         if (rows == 0) return;
         var a: launch_.Args = .{};
@@ -53,7 +69,7 @@ pub const ActRows = struct {
         a.add(xs orelse 0);
         a.add(@as(i32, @intCast(n)));
         const t = launch_.rowThreads(rows, threads, 128);
-        try launch_.launch(g.swiglu_fn, .{ .grid = grid(rows, n, t), .block = .{ .x = t } }, s, &a);
+        try launch_.launch(f, .{ .grid = grid(rows, n, t), .block = .{ .x = t } }, s, &a);
     }
 
     /// out = bf16(o * sigmoid(gate)), head h's gate at r * g_ld + h * g_hs ([q | gate]: q + d, 2 d); xs: sums.

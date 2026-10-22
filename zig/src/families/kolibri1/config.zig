@@ -1,5 +1,6 @@
 //! Kolibri-1's dimensions from config.json, and the layouts this engine refuses (FP8 128 x 128, sigmoid routing).
 const std = @import("std");
+const eos_ids = @import("core").tokenizer.eos;
 
 pub const max_layers = 64;
 pub const max_eos = 4;
@@ -58,7 +59,10 @@ pub const Config = struct {
     pub fn addEos(self: *Config, allocator: std.mem.Allocator, generation: []const u8) !void {
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, generation, .{});
         defer parsed.deinit();
-        if (parsed.value.object.get("eos_token_id")) |v| try eosFrom(self, v);
+        if (parsed.value != .object) return error.BadEos;
+        const ids = try eos_ids.merge(allocator, self.eos[0..self.eos_count], parsed.value, self.vocab);
+        defer allocator.free(ids);
+        try setEos(self, ids);
     }
 
     /// `dir`/config.json, checked for the kernels' shapes, and generation_config.json's end tokens when it is there.
@@ -108,21 +112,11 @@ fn number(v: std.json.Value) !f64 {
     };
 }
 
-/// One end token, or a list of them; null entries are skipped and a token already listed is kept once.
-fn eosFrom(c: *Config, v: std.json.Value) !void {
-    const items: []const std.json.Value = switch (v) {
-        .integer => &.{v},
-        .array => |a| a.items,
-        else => return,
-    };
-    for (items) |x| {
-        if (x != .integer) continue;
-        const t: u32 = @intCast(x.integer);
-        if (c.isEos(t)) continue;
-        if (c.eos_count == max_eos) return error.TooManyEos;
-        c.eos[c.eos_count] = t;
-        c.eos_count += 1;
-    }
+/// Publish validated ids only when the family's fixed storage can hold the complete set.
+fn setEos(c: *Config, ids: []const u32) !void {
+    if (ids.len > max_eos) return error.TooManyEos;
+    @memcpy(c.eos[0..ids.len], ids);
+    c.eos_count = ids.len;
 }
 
 /// config.json's text; a refusal's reason goes to `why`.
@@ -193,7 +187,9 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
             return error.UnsupportedLayer;
         }
     }
-    if (o.get("eos_token_id")) |v| try eosFrom(&c, v);
+    const ids = try eos_ids.resolve(allocator, parsed.value, .null, c.vocab);
+    defer allocator.free(ids);
+    try setEos(&c, ids);
     return c;
 }
 
@@ -302,4 +298,18 @@ test "rope_parameters' theta wins, and other shapes are refused before any kerne
     var wide = c;
     wide.shared_width = 1024;
     try std.testing.expectError(error.UnsupportedShapes, checkShapes(wide, &why));
+}
+
+test "EOS policy: family EOS uses shared validation and failed merges leave the prior set intact" {
+    var why: Why = .{};
+    var c = try parse(std.testing.allocator, pinned, &why);
+    for ([_][]const u8{ "{\"eos_token_id\":-1}", "{\"eos_token_id\":128000}", "{\"eos_token_id\":[127906,true]}", "null" }) |bad| {
+        try std.testing.expectError(error.BadEos, c.addEos(std.testing.allocator, bad));
+        try std.testing.expectEqual(@as(usize, 1), c.eos_count);
+        try std.testing.expect(c.isEos(127906) and !c.isEos(127901));
+    }
+    try c.addEos(std.testing.allocator, "{\"eos_token_id\":[127906,null,127901]}");
+    try std.testing.expectEqualSlices(u32, &.{ 127906, 127901 }, c.eos[0..c.eos_count]);
+    try std.testing.expectError(error.TooManyEos, c.addEos(std.testing.allocator, "{\"eos_token_id\":[1,2,3,4,5]}"));
+    try std.testing.expectEqualSlices(u32, &.{ 127906, 127901 }, c.eos[0..c.eos_count]);
 }

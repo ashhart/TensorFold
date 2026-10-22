@@ -38,6 +38,7 @@ pub const Slot = struct {
 const Pass = struct { ids: mtl.Buffer, rows: mtl.Buffer, picks: mtl.Buffer, idx: mtl.Buffer };
 
 pub const Engine = struct {
+    resident: ?mtl.resident.Resident = null,
     gpa: std.mem.Allocator,
     io: std.Io,
     device: mtl.Device,
@@ -82,6 +83,7 @@ pub const Engine = struct {
         e.xs = try buf(e.device, (2 * R + @as(usize, streams)) * e.m.c.hidden * 4);
         e.words = .empty;
         e.snaps = .empty;
+        e.resident = null;
         try e.pair.ready();
         e.load_seconds = @as(f64, @floatFromInt(t0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds)) / 1e9;
         return e;
@@ -92,8 +94,9 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
-        e.pair.deinit();
         snap.deinit(e);
+        @import("residency.zig").drop(e);
+        e.pair.deinit();
         for (e.slots) |*s| s.prompt.deinit(e.gpa);
         e.m.deinit();
         e.s.deinit();

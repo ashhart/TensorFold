@@ -67,19 +67,33 @@ fn count(shape: []const usize) usize {
 }
 
 /// The buffer's bytes: every tensor in bf16, each 256-aligned.
-pub fn bytes(gpa: std.mem.Allocator, c: Config) !usize {
+pub const Memory = struct { source: usize, device: usize };
+
+pub fn plan(gpa: std.mem.Allocator, c: Config) !Memory {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var w: Weights = .{ .buf = undefined, .blocks = try arena.allocator().alloc(Block, c.depth) };
-    var total: usize = 0;
-    for ((try wanted(arena.allocator(), c, &w)).items) |want| total = std.mem.alignForward(usize, total, 256) + 2 * count(want.shape);
-    return total;
+    var out: Memory = .{ .source = 0, .device = 0 };
+    for ((try wanted(arena.allocator(), c, &w)).items) |want| {
+        const size = try std.math.mul(usize, 2, count(want.shape));
+        out.source = try std.math.add(usize, out.source, size);
+        out.device = try std.math.add(usize, std.mem.alignForward(usize, out.device, 256), size);
+    }
+    return out;
+}
+
+pub fn bytes(gpa: std.mem.Allocator, c: Config) !usize {
+    return (try plan(gpa, c)).device;
 }
 
 const Src = struct { path: [:0]const u8, off: u64, e: st.Entry };
 
 /// The tower's tensors from `dir` into one shared buffer; MLX's patch kernel [O, T, Y, X, C] turned to [O, C, T, Y, X].
 pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: Config) !Weights {
+    return loadWith(gpa, io, device, dir, c);
+}
+
+pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, factory: anytype, dir: []const u8, c: Config) !Weights {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -106,7 +120,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const
         }
         total = std.mem.alignForward(usize, total, 256) + (s.e.end - s.e.begin);
     }
-    w.buf = try device.buffer(total, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    w.buf = try factory.buffer(total, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     errdefer w.buf.deinit();
     var at: usize = 0;
     for (wants, srcs) |want, s| {

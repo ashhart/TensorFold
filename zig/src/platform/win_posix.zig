@@ -284,6 +284,15 @@ fn consoleEvent(kind: u32) callconv(.winapi) c_int {
     return 1;
 }
 
+/// POSIX raise for SIGINT and SIGTERM: runs the handler a Ctrl+C or a console close would, on this thread.
+pub fn raise(sig: SIG) error{Unexpected}!void {
+    _ = consoleEvent(switch (sig) {
+        .INT => 0,
+        .TERM => 2,
+        else => return error.Unexpected,
+    });
+}
+
 /// SIGINT and SIGTERM through console events; Windows has no SIGHUP or SIGPIPE (a closed socket fails the send).
 pub fn sigaction(sig: SIG, act: ?*const Sigaction, old: ?*Sigaction) void {
     if (old) |o| o.* = .{ .handler = .{ .handler = SIG.DFL }, .mask = 0, .flags = 0 };

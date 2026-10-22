@@ -88,8 +88,11 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family })).step);
+    const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
+    test_step.dependOn(&family_host.step);
+    b.step("test-qwen35-hip-host", "Qwen HIP family CPU tests with inert kernels").dependOn(&family_host.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
+    b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);
     // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
@@ -126,7 +129,7 @@ fn checksExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/npy.zig"), .target = target, .optimize = optimize }) } },
+        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/npy_from_core.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = e.hip.import_table.get("core").? }} }) } },
     }) });
 }
 

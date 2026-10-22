@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const fwd = @import("forward.zig");
 const kern = @import("kernels.zig");
 const snap = @import("snap.zig");
+const limits = @import("context.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -14,7 +15,7 @@ pub const prompt_rows = fwd.prompt_rows;
 /// Window rows a round takes over every stream.
 pub const round_rows = fwd.round_rows;
 /// The widest window a stream verifies: one-row steps and every wider window give a row the same bits.
-pub const max_window = 16;
+pub const max_window = limits.reserve;
 /// Drawn tokens a handle names (a ring; read before the round loop could wrap it).
 const ring = 1024;
 
@@ -162,7 +163,7 @@ pub const Kolibri = struct {
     fn opening(x: *Kolibri, s: *Stream) !*Lane {
         const p = s.prompt();
         if (p.len == 0) return error.EmptyPrompt;
-        if (p.len + @as(usize, s.max_new) + max_window > x.m.context) return error.PastContext;
+        if (!limits.fits(x.m.context, p.len, @as(usize, s.max_new))) return error.PastContext;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (!got.found_existing) {
             const slot = x.freeSlot() orelse {

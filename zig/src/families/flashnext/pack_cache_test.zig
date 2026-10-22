@@ -320,3 +320,39 @@ test "packs cached or left in the model folder under the format-less identity ar
     try std.testing.expectEqual(@as(usize, 1), builder.calls);
     try std.testing.expect(!std.mem.eql(u8, old_dir, dir) and !std.mem.eql(u8, legacy, dir));
 }
+
+test "Flash Next memory: metadata route lookup is read-only, validates identities and skips existing pack construction" {
+    const route = @import("pack_route.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const paths = try Paths.init(tmp);
+    defer paths.deinit();
+    const identity = try pio.sourceIdentity(a, io, paths.model);
+    defer a.free(identity);
+    const home = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(home);
+    const cold = try route.plan(a, io, paths.model, null, home);
+    defer cold.deinit(a);
+    try std.testing.expect(cold.needs_build and cold.dir == null);
+    try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().openDir(io, cold.root.?, .{}));
+    const legacy = try std.fs.path.join(a, &.{ paths.model, "zig-pack" });
+    defer a.free(legacy);
+    try Io.Dir.cwd().createDirPath(io, legacy);
+    var builder: Builder = .{ .identity = identity };
+    try builder.build(a, io, paths.model, legacy, "unused");
+    const hit = try route.plan(a, io, paths.model, null, home);
+    defer hit.deinit(a);
+    try std.testing.expect(!hit.needs_build);
+    try std.testing.expectEqualStrings(legacy, hit.dir.?);
+    const supplied = try route.plan(a, io, paths.model, legacy, "ignored");
+    defer supplied.deinit(a);
+    try std.testing.expect(!supplied.needs_build and supplied.root == null);
+    const config_path = try std.fs.path.join(a, &.{ paths.model, "config.json" });
+    defer a.free(config_path);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = "{\"changed\":true}" });
+    try std.testing.expectError(error.PackSourceMismatch, route.plan(a, io, paths.model, legacy, home));
+    const changed = try route.plan(a, io, paths.model, null, home);
+    defer changed.deinit(a);
+    try std.testing.expect(changed.needs_build);
+    try std.testing.expectEqual(@as(usize, 1), builder.calls);
+}

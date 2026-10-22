@@ -83,9 +83,7 @@ pub const LaneHost = struct {
     pub const Job = @import("lane_job.zig").Job;
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
-        var enforced = info_;
-        enforced.loop_guard = true;
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = info_.ofLanes() };
     }
 
     pub fn start(h: *LaneHost) !void {
@@ -143,6 +141,9 @@ pub const LaneHost = struct {
 
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
+        if ((request.embedding != null) != (h.info_.embeddings != null)) return error.InvalidRequest;
+        if (request.embedding != null and (h.rounds != null or h.core.backend.vtable.prefill_step == null or
+            h.core.backend.vtable.embedding == null)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
         h.mutex.lockUncancelable(h.io);
@@ -318,20 +319,22 @@ pub const LaneHost = struct {
 
     /// Whether a set-up job starts outside a shared prompt pass: a warm pass, or the lone driver's.
     pub fn startsAlone(h: *LaneHost, job: *Job) bool {
+        if (job.request.embedding != null) return false;
         return (job.request.max_tokens == 0 and h.info_.warm_turns) or lone.fits(h, job);
     }
 
     /// A set-up job into the engine: a warm pass, the lone driver, the fill queue, or its own prompt pass.
     pub fn launch(h: *LaneHost, job: *Job, began: i96) bool {
         const r = job.request;
-        if (r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
-        if (lone.fits(h, job)) return lone.run(h, job, began, false);
+        if (r.embedding == null and r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
+        if (r.embedding == null and lone.fits(h, job)) return lone.run(h, job, began, false);
         if (h.core.fills()) {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
             return true;
         }
         h.core.addStreamCommitted(&job.stream, .{ .ptr = job, .call = firstCommitted }) catch |e| return h.failedPass(job, e);
         h.prefilled(job, began);
+        if (r.embedding != null) return @import("lane_embeddings.zig").complete(h, job);
         _ = h.deliver(job);
         return true;
     }
@@ -366,6 +369,10 @@ pub const LaneHost = struct {
         if (!done) return;
         _ = h.filling.orderedRemove(at);
         h.prefilled(job, job.began);
+        if (job.request.embedding != null) {
+            _ = @import("lane_embeddings.zig").complete(h, job);
+            return;
+        }
         _ = h.deliver(job);
     }
 

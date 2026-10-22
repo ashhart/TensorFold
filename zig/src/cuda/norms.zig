@@ -33,6 +33,16 @@ fn vectorOk(width: usize, ptrs: []const u64) bool {
     return vectorWidth(width) and aligned(ptrs);
 }
 
+/// addRmsTail's options: b = norm(x) wb (or x), h = bf16(r + b) [* scalar], y = bf16(norm(h) w), xs y's 64-value sums.
+pub const Tail = struct {
+    /// Each norm as MLX's bf16 steps, bf16(w * bf16(v * inv)), where false gives bf16(v * inv * w).
+    round: bool = false,
+    /// A norm on x before the add (a sandwich norm): its bf16 weight; null adds x as it is.
+    branch: ?u64 = null,
+    /// One bf16 the sum is multiplied by, after the sum is rounded, before the output's norm; null: none.
+    scalar: ?u64 = null,
+};
+
 pub const Norms = struct {
     mod: Module,
     rms_fn: Function,
@@ -43,6 +53,7 @@ pub const Norms = struct {
     add_rms_h_f32w_fn: Function,
     gated_fns: [3]Function, // head dim 64, 128, 256
     rms_sums_fn: Function,
+    tail_fns: [2]Function, // each norm rounded once, MLX's bf16 steps
 
     pub fn load(d: *const Driver) !Norms {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -58,6 +69,7 @@ pub const Norms = struct {
             .add_rms_h_f32w_fn = try mod.function("tf_add_rms_rows_bf16h_f32w"),
             .gated_fns = .{ try mod.function("tf_gated_rms_rows_64"), try mod.function("tf_gated_rms_rows_128"), try mod.function("tf_gated_rms_rows_256") },
             .rms_sums_fn = try mod.function("tf_rms_rows_sums"),
+            .tail_fns = .{ try mod.function("tf_add_rms_rows_bf16h_tail"), try mod.function("tf_add_rms_rows_bf16h_tail_round") },
         };
     }
 
@@ -140,6 +152,19 @@ pub const Norms = struct {
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
         const f = if (w_kind == .bf16) n.add_rms_h_fn else n.add_rms_h_f32w_fn;
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+    }
+
+    /// addRmsH with bf16 weights and a tail's options; with none set it is addRmsH itself, the same kernel and bits.
+    pub fn addRmsTail(n: *const Norms, s: Stream, x: u64, r: ?u64, w: u64, h: u64, y: u64, xs: ?u64, rows: usize, width: usize, eps: f32, t: Tail) !void {
+        if (!t.round and t.branch == null and t.scalar == null) return n.addRmsH(s, x, r, w, .bf16, h, y, xs, rows, width, eps);
+        if (width % 64 != 0 or !vectorOk(width, &.{ x, r orelse 0, t.branch orelse 0, w, h, y }) or (t.scalar orelse 0) % 2 != 0) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        for ([_]u64{ x, r orelse 0, t.branch orelse 0, t.scalar orelse 0, w, h, y, xs orelse 0 }) |v| a.add(v);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        const f = n.tail_fns[@intFromBool(t.round)];
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 

@@ -2,7 +2,9 @@
 
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
 `zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
-the drafter; without it the model decodes plain. It has no CUDA backend yet.
+the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
+4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
+`--kv-cache fp8`; it reads no NVFP4 or EXL3 checkpoint yet.
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
@@ -49,6 +51,11 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 
 DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
 `--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
+The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
+loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
+checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
+head, so on HIP it drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts` turns
+both off and decodes plain.
 The target verifies every proposed token against its own serial sample.
 
 ## MLX
@@ -82,6 +89,10 @@ Lower weight precision does not guarantee faster decode or a fitting context. Re
 quality comparisons are TBD [release-0.3.5].
 
 ## CUDA
+
+This section is the Python engine's (0.6.6). The native CUDA engine reads only MLX affine checkpoints so far: the
+NVFP4 and EXL3 readers below have not been ported to it (1.1.0 carries the shared EXL3 module of #832, which the
+27B does not read through yet).
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks

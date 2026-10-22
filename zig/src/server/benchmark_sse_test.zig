@@ -59,6 +59,22 @@ test "CRLF data lines of one event and a keepalive comment make one event" {
     try std.testing.expectEqual(@as(u32, 1), s.deliveries);
 }
 
+test "the finishing chunk's speculative counters reach the sample only when all three are counts and accepted fits drafted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const counted = "data: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"length\"}], \"speculative\": {\"rounds\": 14, \"drafted\": 13, \"accepted\": 10, \"acceptance_rate\": 0.769}}\n\n";
+    const got = try play(a, try joined(a, &.{ text1, text2, counted, usage4, done }), &stamps, 4);
+    try std.testing.expectEqual(suite.Status.ok, got.status);
+    try std.testing.expectEqual(suite.Drafts{ .rounds = 14, .drafted = 13, .accepted = 10 }, got.drafts.?);
+    try std.testing.expect((try play(a, try joined(a, &.{ text1, text2, final, usage4, done }), &stamps, 4)).drafts == null);
+    for ([_][]const u8{ "{\"rounds\": 1, \"drafted\": 1, \"accepted\": 2}", "{\"rounds\": 1, \"drafted\": 2}", "{\"rounds\": -1, \"drafted\": 2, \"accepted\": 1}", "{\"rounds\": 1.5, \"drafted\": 2, \"accepted\": 1}", "[1, 2, 3]" }) |odd| {
+        const chunk = try std.fmt.allocPrint(a, "data: {{\"choices\": [{{\"index\": 0, \"delta\": {{}}, \"finish_reason\": \"length\"}}], \"speculative\": {s}}}\n\n", .{odd});
+        const s = try play(a, try joined(a, &.{ text1, text2, chunk, usage4, done }), &stamps, 4);
+        try std.testing.expect(s.drafts == null and s.status == .ok);
+    }
+}
+
 test "one stamp is unmeasured, two are ok, and missing telemetry stays null" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

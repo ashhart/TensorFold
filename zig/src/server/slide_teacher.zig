@@ -205,9 +205,10 @@ pub fn turnEnd(srv: *Server, cx: *Cx, teacher: *Teacher) ![]const u32 {
     const exchange = try a.dupe(Value, &.{ try message(a, "user", "Hello."), try message(a, "assistant", marker) });
     var problem: []const u8 = "";
     const text = srv.text.render(a, .{ .array = exchange }, .{ .add_generation_prompt = false }, &problem) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the chat template cannot render an exchange");
-    const at = std.mem.lastIndexOf(u8, text, marker) orelse return cx.refuse("the chat template drops the assistant's words");
-    const tail = std.mem.trimEnd(u8, text[at + marker.len ..], " \t\r\n");
-    const ids = srv.text.encode(teacher.arena.allocator(), tail, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode the turn's end");
+    const at = std.mem.lastIndexOf(u8, text.text, marker) orelse return cx.refuse("the chat template drops the assistant's words");
+    const tail = std.mem.trimEnd(u8, text.text[at + marker.len ..], " \t\r\n");
+    const tail_rendered = try text.slice(a, at + marker.len, at + marker.len + tail.len);
+    const ids = tail_rendered.encode(srv.text, teacher.arena.allocator(), &problem) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode the turn's end");
     teacher.turn_end = ids;
     return ids;
 }

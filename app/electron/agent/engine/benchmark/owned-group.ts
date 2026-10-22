@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { realpath } from 'node:fs/promises'
+import { readlink, realpath } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
@@ -15,11 +15,14 @@ async function members(group: OwnedBenchmarkGroup): Promise<{ pid: number; comma
   if (selected.length > 32 || selected.some(id => !/^[1-9]\d{0,9}$/.test(id))) throw new Error('Unexpected owned process group inventory.')
   if (!selected.length) return []
   const output = (await exec('/bin/ps', ['-ww', '-o', 'pid=,pgid=,lstart=,stat=,comm=', '-p', selected.join(',')], { timeout: 2000, maxBuffer: 128 * 1024, env })).stdout
-  return output.trim().split('\n').filter(Boolean).map(line => {
+  return Promise.all(output.trim().split('\n').filter(Boolean).map(async line => {
     const match = /^\s*(\d+)\s+(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+)$/.exec(line)
     if (!match || Number(match[2]) !== group.pid) throw new Error('Owned process group identity changed.')
-    return { pid: Number(match[1]), command: match[5].trim(), startedAt: Date.parse(match[3]), zombie: match[4].startsWith('Z') }
-  })
+    const pid = Number(match[1])
+    const zombie = match[4].startsWith('Z')
+    const command = process.platform === 'linux' && !zombie ? await readlink(`/proc/${pid}/exe`) : match[5].trim()
+    return { pid, command, startedAt: Date.parse(match[3]), zombie }
+  }))
 }
 export async function cleanupOwnedBenchmarkGroup(group: OwnedBenchmarkGroup): Promise<boolean> {
   if (!Number.isSafeInteger(group.pid) || group.pid <= 1) return false

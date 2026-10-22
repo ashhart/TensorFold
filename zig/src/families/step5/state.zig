@@ -41,6 +41,13 @@ pub const Cache = struct {
     index_at: [cfg.max_layers]usize = @splat(0),
     capacity: usize,
     len: usize = 0,
+    follow: ?mtl.ResidencySet.Follow = null,
+
+    pub fn setResident(self: *Cache, hook: ?mtl.ResidencySet.Follow) void {
+        if (self.follow) |f| mtl.resident.fields.apply(self, f, false);
+        self.follow = hook;
+        if (hook) |f| mtl.resident.fields.apply(self, f, true);
+    }
 
     pub fn init(device: mtl.Device, c: *const cfg.Config, capacity: usize) !Cache {
         var out = Cache{ .kv = undefined, .index = undefined, .logits = undefined, .hidden = undefined, .capacity = capacity };
@@ -96,6 +103,7 @@ pub const Cache = struct {
     }
 
     pub fn deinit(self: *Cache) void {
+        self.setResident(null);
         self.kv.deinit();
         self.index.deinit();
         self.logits.deinit();

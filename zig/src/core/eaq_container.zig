@@ -265,7 +265,7 @@ pub fn codebookSha(cb: exl3_format.Codebook, out: *[32]u8) void {
 
 fn shardOf(a: std.mem.Allocator, v: std.json.Value) !Shard {
     const file = str(obj(v, "file")) orelse return error.BadManifest;
-    if (!std.mem.eql(u8, std.fs.path.basename(file), file) or !std.mem.endsWith(u8, file, ".safetensors")) return error.BadManifest;
+    if (!safetensors.index.plainName(file) or !std.mem.endsWith(u8, file, ".safetensors")) return error.BadManifest;
     const bytes = intOf(obj(v, "bytes")) orelse return error.BadManifest;
     var s: Shard = .{ .file = try a.dupe(u8, file), .bytes = bytes, .sha256 = undefined };
     const hex = str(obj(v, "sha256")) orelse return error.BadManifest;

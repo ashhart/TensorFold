@@ -6,12 +6,14 @@ const builtin = @import("builtin");
 pub const windows = builtin.os.tag == .windows;
 
 pub const c = if (windows) @import("win_c.zig") else std.c;
+pub const atomic_file = @import("atomic_file.zig");
 
 /// std.posix, or its sockets, signals and limits over Winsock and console events.
 pub const posix = if (windows) @import("win_posix.zig") else std.posix;
 
 pub const DynLib = if (windows) WinDynLib else std.DynLib;
 pub const experimental = @import("experimental.zig");
+pub const memory_policy = @import("memory_policy.zig");
 pub const optional_libraries = @import("optional_libraries.zig");
 
 /// An environment variable's value, through libc (std.process.Environ.getPosix does not build on Windows).

@@ -1,34 +1,42 @@
-//! GLM_RESIDENCY's opt-in residency set (weights, arena and image tower, within the load bound) and the keepalive.
+//! GLM's bounded shared residency set, with real keepalive work and later arena ownership.
 const std = @import("std");
 const mtl = @import("metal");
 const Engine = @import("engine.zig").Engine;
+pub const policy = mtl.residency_policy;
+pub const Resident = mtl.resident.Resident;
 
-/// The set when GLM_RESIDENCY asks for one and its bytes fit the bound, then the idle keepalive's target either way.
-pub fn wire(e: *Engine) void {
-    // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
-    const cap: ?u64 = if (e.limit.asked) e.limit.bytes else null;
-    const want = std.c.getenv("GLM_RESIDENCY") != null and mtl.ResidencySet.withinUnder("glm", 0, bytes(e), cap);
-    if (!want) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len + if (e.vision) |v| v.buffers().len else 0)) |set| {
-        for (e.w.buffers.items) |b| set.add(b);
-        for (e.arena.buffers.items) |b| set.add(b);
-        if (e.vision) |v| for (v.buffers()) |b| set.add(b);
-        set.commit();
-        set.requestResidency();
-        e.queue.addResidencySet(set);
-        e.residency = set;
-    } else |_| {}
-    // every Metal engine offers its queue to the idle keepalive; the sets list only when the model is resident
-    if (e.residency) |set| e.keepalive_sets[0] = set;
-    e.keepalive_target = .{ .queue = e.queue, .sets = if (e.residency != null) &e.keepalive_sets else &.{} };
+pub fn wire(e: *Engine, io: std.Io) void {
+    e.keepalive_target = .{ .queue = e.queue };
+    if (!e.residency_enabled) {
+        std.log.info("glm: residency skipped by GLM_RESIDENCY=0", .{});
+        return;
+    }
+    var list: std.ArrayList(mtl.Buffer) = .empty;
+    defer list.deinit(e.gpa);
+    append(e, &list) catch |err| return skipped(err);
+    e.residency = Resident.holdUnder(e.gpa, io, e.device, e.queue, list.items, "glm", if (e.limit.asked) e.limit.bytes else null) catch |err| {
+        skipped(err);
+        return;
+    };
+    if (e.residency) |*r| {
+        e.arena.follow = r.follow();
+        e.keepalive_target = r.target();
+    }
 }
 
-/// What the set would wire: every weight and arena buffer, and the image tower's when it is loaded.
-fn bytes(e: *const Engine) u64 {
-    var n: u64 = 0;
-    for (e.w.buffers.items) |b| n += b.length();
-    for (e.arena.buffers.items) |b| n += b.length();
-    if (e.vision) |v| {
-        for (v.buffers()) |b| n += b.length();
-    }
-    return n;
+pub fn append(e: anytype, list: *std.ArrayList(mtl.Buffer)) !void {
+    try list.appendSlice(e.gpa, e.w.buffers.items);
+    try list.appendSlice(e.gpa, e.arena.buffers.items);
+    if (e.vision) |v| try list.appendSlice(e.gpa, &v.buffers());
+}
+
+fn skipped(err: anyerror) void {
+    std.log.warn("glm: residency skipped ({s}); buffers can be unwired during idle", .{@errorName(err)});
+}
+
+pub fn drop(e: *Engine) void {
+    e.arena.follow = null;
+    if (e.residency) |*r| r.deinit();
+    e.residency = null;
+    e.keepalive_target = .{ .queue = e.queue };
 }

@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
+const dump = @import("byte_dump.zig");
 
 const counts = [_]usize{ 1, 3, 17, 64 };
 const most = counts[counts.len - 1];
@@ -65,6 +66,7 @@ fn run1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.win
     try s.synchronize();
     const wide = try a.alloc(u16, qn);
     try outs[counts.len - 1].download(0, std.mem.sliceAsBytes(wide));
+    try dump.output(a, "window", "decode", "rows", &.{ most, c.h, c.d }, .bf16, c, std.mem.sliceAsBytes(wide));
     // per (row, key head): the window's keys gathered from the ring into dense rows, then each query head
     const kd = try a.alloc(f64, c.top * c.d);
     const vd = try a.alloc(f64, c.top * c.d);
@@ -99,6 +101,7 @@ fn run1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.win
     for (counts[0 .. counts.len - 1], outs[0 .. counts.len - 1]) |m, o| {
         const got = try a.alloc(u16, m * c.h * c.d);
         try o.download(0, std.mem.sliceAsBytes(got));
+        try dump.output(a, "window", "decode", "rows", &.{ m, c.h, c.d }, .bf16, c, std.mem.sliceAsBytes(got));
         try check.sameBytes("window decode: a row count's bits equal the widest call's", std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(wide[0 .. m * c.h * c.d]));
     }
 }
@@ -152,6 +155,7 @@ fn prompt1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.
     const got = try a.alloc(u16, qn);
     const fb: cuda.DeviceBuffer = .{ .d = gpu.d, .ptr = full, .len = qn * 2 };
     try fb.download(0, std.mem.sliceAsBytes(got));
+    try dump.output(a, "window", "prompt", "full", &.{ c.n, c.h, d }, .bf16, c, std.mem.sliceAsBytes(got));
     const gq = c.h / c.hk;
     const top = c.p0 + c.n;
     const kd = try a.alloc(f64, @min(top, c.win + 0) * d + top * d);
@@ -189,10 +193,12 @@ fn prompt1(gpu: check.Gpu, a: std.mem.Allocator, s: cuda.Stream, g: *const cuda.
     const pb: cuda.DeviceBuffer = .{ .d = gpu.d, .ptr = pre, .len = pre_n * c.h * d * 2 };
     const pg = try a.alloc(u16, pre_n * c.h * d);
     try pb.download(0, std.mem.sliceAsBytes(pg));
+    try dump.output(a, "window", "prompt", "prefix", &.{ pre_n, c.h, d }, .bf16, c, std.mem.sliceAsBytes(pg));
     try check.sameBytes("window prompt: a shorter call's rows", std.mem.sliceAsBytes(pg), std.mem.sliceAsBytes(got[0 .. pre_n * c.h * d]));
     const lb: cuda.DeviceBuffer = .{ .d = gpu.d, .ptr = late, .len = (c.n - half) * c.h * d * 2 };
     const lg = try a.alloc(u16, (c.n - half) * c.h * d);
     try lb.download(0, std.mem.sliceAsBytes(lg));
+    try dump.output(a, "window", "prompt", "suffix", &.{ c.n - half, c.h, d }, .bf16, c, std.mem.sliceAsBytes(lg));
     try check.sameBytes("window prompt: a later chunk's rows", std.mem.sliceAsBytes(lg), std.mem.sliceAsBytes(got[half * c.h * d ..]));
 }
 

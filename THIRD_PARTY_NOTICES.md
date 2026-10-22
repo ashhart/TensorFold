@@ -189,6 +189,10 @@ the one-shot all-gather protocol of [b12x](https://github.com/local-inference-la
 sequence parity and a timeout that fails the transport. Copyright 2026 Luke Alonso and the b12x contributors,
 Apache License 2.0 (see [the license text](LICENSES/Apache-2.0.txt)); b12x ships no NOTICE file.
 
+The Zig tensor-parallel fabric's RoCE path (`zig/src/fabric/tp/mailbox.cu`, `roce.zig`, `roce_verbs.zig`) adapts
+the same one-shot all-gather protocol of b12x's RoCEnante (`b12x/comm/roce/`, PRs #295 and #315) for any family that
+runs tensor parallelism over it, under the same copyright and Apache License 2.0 terms.
+
 ## Vendored code and weights
 
 In the Python engine, frozen at 0.6.6, `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified
@@ -341,8 +345,6 @@ the original TensorFold Python-kernel blob receipts. Generic EXL3 variants exten
 common EXL3 operators and their per-slot epilogues; tile decoding is shared.
 The ExLlamaV3 MIT attribution, Copyright (c) 2025 Turboderp, applies as described above.
 No external reference, captured cubin, model shard or CUDA compiler is bundled by this patch.
-
-The tensor-parallel fabric also uses the RoCE design described above (`zig/src/fabric/tp/mailbox.cu`, `roce.zig`, `roce_verbs.zig`).
 
 ## Shared EXL3 resolver setup
 

@@ -24,33 +24,8 @@ fn fail(f: *Failure, text: []const u8) Error {
     return error.Media;
 }
 
-/// Python ipaddress is_global, less multicast, reserved, 192.0.0.0/24, 168.63.129.16 and IPv6 embedding an IPv4 one.
-pub fn publicIp(a: net.IpAddress) bool {
-    switch (a) {
-        .ip4 => |v| {
-            const x = std.mem.readInt(u32, &v.bytes, .big);
-            const blocked = [_]struct { [4]u8, u5 }{
-                .{ .{ 0, 0, 0, 0 }, 8 },      .{ .{ 10, 0, 0, 0 }, 8 },    .{ .{ 100, 64, 0, 0 }, 10 },   .{ .{ 127, 0, 0, 0 }, 8 },
-                .{ .{ 169, 254, 0, 0 }, 16 }, .{ .{ 172, 16, 0, 0 }, 12 }, .{ .{ 192, 0, 0, 0 }, 24 },    .{ .{ 192, 0, 2, 0 }, 24 },
-                .{ .{ 192, 168, 0, 0 }, 16 }, .{ .{ 198, 18, 0, 0 }, 15 }, .{ .{ 198, 51, 100, 0 }, 24 }, .{ .{ 203, 0, 113, 0 }, 24 },
-                .{ .{ 224, 0, 0, 0 }, 4 },    .{ .{ 240, 0, 0, 0 }, 4 },
-            };
-            for (blocked) |blk| {
-                const mask = ~@as(u32, 0) << @intCast(32 - @as(u6, blk[1]));
-                if (x & mask == std.mem.readInt(u32, &blk[0], .big) & mask) return false;
-            }
-            return !std.mem.eql(u8, &v.bytes, &.{ 168, 63, 129, 16 });
-        },
-        .ip6 => |v| {
-            const b = v.bytes;
-            // global unicast 2000::/3 less documentation, the 2001::/23 IETF block (Teredo among it) and 6to4
-            if (b[0] & 0xe0 != 0x20) return false;
-            if (b[0] == 0x20 and b[1] == 0x01 and b[2] == 0x0d and b[3] == 0xb8) return false;
-            if (b[0] == 0x20 and b[1] == 0x01 and b[2] < 0x02) return false;
-            return !(b[0] == 0x20 and b[1] == 0x02);
-        },
-    }
-}
+const address_policy = @import("public_address.zig");
+pub const publicIp = address_policy.publicIp;
 
 /// A URL as a request takes it: the lowercased host and the percent-quoted path and query.
 pub const Url = struct { host: []const u8, target: []const u8 };
@@ -75,8 +50,7 @@ pub fn parseUrl(a: std.mem.Allocator, value: []const u8, f: *Failure) Error!Url 
     if (host.len == 0 or std.mem.indexOfScalar(u8, host, '%') != null) return fail(f, bad);
     for (host) |c| if (c >= 128) return fail(f, bad);
     const lower = try std.ascii.allocLowerString(a, host);
-    const name = std.mem.trimEnd(u8, lower, ".");
-    for ([_][]const u8{ "localhost", "metadata.google.internal", "instance-data" }) |n| if (std.mem.eql(u8, name, n)) return fail(f, "image URLs must use public internet hosts");
+    if (!address_policy.publicHost(lower)) return fail(f, "image URLs must use public internet hosts");
     // the path and query, percent-quoted as urllib.parse.quote(safe=...) leaves them
     var t: std.ArrayList(u8) = .empty;
     const tail = rest[end..];

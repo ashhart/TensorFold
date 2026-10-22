@@ -119,7 +119,7 @@ test "edge pictures (zig/tests/fixtures/picture/edges.json) get 0.6.6's outcome,
 /// WebP cases need the pinned libwebp: required when TENSORFOLD_LIBWEBP names one, skipped when none loads.
 fn webpReady(a: std.mem.Allocator) !bool {
     if (picture.webp.available(std.testing.io, a)) return true;
-    if (std.testing.environ.getPosix(picture.webp.env) != null) return error.PinnedLibraryDidNotLoad;
+    if (@import("sys").getenv(picture.webp.env) != null) return error.PinnedLibraryDidNotLoad;
     std.debug.print("libwebp {s} not found: WebP pixel cases skipped\n", .{picture.webp.pinned});
     return false;
 }

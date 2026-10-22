@@ -135,7 +135,7 @@ pub const Engine = struct {
     batch_s: ?batch.Scratch = null,
     /// Block scores for the sparse rows of an attention block, grown to the longest sequence's need.
     scores: ?cuda.DeviceBuffer = null,
-    /// Rows a batched chunk takes at most (TF_FLASHNEXT_CHUNK; batch.default_chunk by default).
+    /// Rows a batched chunk takes at most (chunkRows).
     chunk: usize,
     round_graph: round_graph.Cache = .{},
     image_factory: ?*@import("cuda_images.zig").Vision = null,
@@ -152,6 +152,8 @@ pub const Engine = struct {
     pub fn initRank(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8, world: usize, rank: usize) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
+        // refused before anything loads: a bad TF_FLASHNEXT_CHUNK leaves no module or buffer behind
+        const chunk = try chunkRows();
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -222,9 +224,7 @@ pub const Engine = struct {
         e.batch_k = try batch.Kernels.load(driver);
         e.batch_s = null;
         e.scores = null;
-        e.chunk = batch.default_chunk;
-        if (std.c.getenv("TF_FLASHNEXT_CHUNK")) |v| e.chunk = std.fmt.parseInt(usize, std.mem.span(v), 10) catch batch.default_chunk;
-        if (e.chunk == 0) e.chunk = batch.default_chunk;
+        e.chunk = chunk;
         return e;
     }
 
@@ -539,4 +539,23 @@ test "a failed fill frees the buffer it was filling and every one before it" {
     const all = try made(Fake, std.testing.allocator, 3, Src{ .live = &live, .fills = &fills, .fail_at = 0 });
     defer std.testing.allocator.free(all);
     try std.testing.expectEqual(@as(usize, 3), live);
+}
+
+/// TF_FLASHNEXT_CHUNK's rows a pass: unset, the default; otherwise 1 to batch.max_chunk, anything else refused.
+pub fn parseChunk(v: ?[]const u8) !usize {
+    const s = v orelse return batch.default_chunk;
+    const n = std.fmt.parseInt(usize, s, 10) catch return error.BadChunk;
+    if (n == 0 or n > batch.max_chunk) return error.BadChunk;
+    return n;
+}
+
+pub fn chunkRows() !usize {
+    return parseChunk(if (std.c.getenv("TF_FLASHNEXT_CHUNK")) |v| std.mem.span(v) else null);
+}
+
+test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the rest" {
+    try std.testing.expectEqual(batch.default_chunk, try parseChunk(null));
+    try std.testing.expectEqual(@as(usize, 4096), try parseChunk("4096"));
+    try std.testing.expectEqual(batch.max_chunk, try parseChunk("16384"));
+    for ([_][]const u8{ "0", "16385", "-1", "4k", "" }) |bad| try std.testing.expectError(error.BadChunk, parseChunk(bad));
 }

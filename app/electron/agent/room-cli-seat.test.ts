@@ -3,11 +3,12 @@
 // child process group, a hung CLI seat is skipped on the per-turn timeout, and HTTP seats
 // still route to streamChat.
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { isCliSeatProvider, runCliSeatTurn } from './room-cli-seat.ts'
 import { runRoom } from './rooms.ts'
+import { planningSandboxAvailable } from './planning-sandbox.ts'
 
 const ok = (msg: string) => console.log(`ok - ${msg}`)
 
@@ -96,7 +97,7 @@ async function run() {
   // permission mode, no tools, no --resume, system prompt kept out of argv, room context on
   // stdin, run from a planning folder. It can't write beside itself (the seatbelt), so it
   // reports what it saw inside its reply.
-  {
+  if (planningSandboxAvailable()) {
     const dir = mkdtempSync(path.join(tmpdir(), 'vontra-room-cli-seat-'))
     const fakeBin = path.join(dir, 'claude')
     writeFileSync(fakeBin, `#!/usr/bin/env node
@@ -143,6 +144,21 @@ process.stdin.on('end', () => {
     assert.ok(stdin.includes('Alpha, your turn'), 'the room context reaches the CLI prompt')
     assert.ok(!stdin.includes('PRIMER_SECRET'), 'the system primer goes through the prompt file, not stdin')
     ok('claude dispatch is a confined one-shot (plan mode, no resume, primer via file)')
+  } else {
+    const dir = mkdtempSync(path.join(tmpdir(), 'vontra-room-cli-refusal-'))
+    const marker = path.join(dir, 'started')
+    const fakeBin = path.join(dir, 'claude')
+    try {
+      writeFileSync(fakeBin, `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')\n`)
+      chmodSync(fakeBin, 0o755)
+      await assert.rejects(() => runCliSeatTurn({
+        provider: provider('pC', { transport: 'claude-cli', cliPath: fakeBin }),
+        model: 'claude-code-default', messages: [], signal: new AbortController().signal,
+      }, () => {}), /needs the macOS sandbox.*not available.*nothing was sent/)
+      assert.equal(existsSync(marker), false, 'unsupported planning mode must not launch the CLI')
+      ok('CLI planning refuses execution when the native sandbox is unavailable')
+      console.log('SKIP native CLI confinement execution: macOS sandbox-exec is unavailable')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   }
 
   // 4) ROUTING — a CLI seat runs through cliSeatTurn (with the room primer and ACTION
@@ -209,7 +225,7 @@ process.stdin.on('end', () => {
 
   // 6) ABORT — aborting the room mid CLI turn kills the whole child process group
   // (leader plus descendants), not just the CLI leader.
-  {
+  if (planningSandboxAvailable()) {
     const dir = mkdtempSync(path.join(tmpdir(), 'vontra-room-cli-abort-'))
     const binDir = path.join(dir, 'bin')
     mkdirSync(binDir)
@@ -244,6 +260,8 @@ exec sleep 60
     assert.equal(room.state, 'stopped', 'the room stops on abort')
     assert.ok(await waitFor(() => !pidAlive(childPid)), 'abort killed the CLI process group (descendant is gone)')
     ok('room abort kills the CLI child process group')
+  } else {
+    console.log('SKIP native CLI process-group abort: macOS sandbox-exec is unavailable')
   }
 
   console.log('room-cli-seat tests passed')

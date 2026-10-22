@@ -1,0 +1,2 @@
+{% if tools %}{{ tools | tojson }}{% endif %}{% for message in messages %}<｜begin▁of▁sentence｜><｜User｜>{{ message['role'] }}
+{{ message['content'] | default('') }}{% if message['reasoning_content'] %}{{ message['reasoning_content'] }}{% endif %}{% if message['tool_calls'] %}{{ message['tool_calls'] | tojson }}{% endif %}<｜end▁of▁sentence｜>{% endfor %}{% if add_generation_prompt %}<｜Assistant｜>{% endif %}

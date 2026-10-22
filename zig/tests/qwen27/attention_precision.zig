@@ -1,7 +1,6 @@
-//! Decode attention rows against a float64 softmax of the same bf16 inputs: this build's max and mean absolute error.
+//! Attention rows against a float64 softmax of the same bf16 inputs; --prompt: 128-row chunks on both paths.
 const std = @import("std");
 const mtl = @import("metal");
-const source = @import("qwen_runtime_sources");
 const q = @import("qwen27");
 const attn = q.attention;
 
@@ -10,7 +9,7 @@ const kv_heads = 4;
 const dim = 256;
 const group = heads / kv_heads;
 const capacity: u32 = 12288;
-const most_rows = 16;
+const most_rows = 128;
 /// Where a row's key chunk changes in 1.0.13 (128 keys below it, 512 from it); rows from it compare across builds.
 const split_at: u32 = 8192;
 
@@ -44,6 +43,8 @@ const cases = [_]Case{
     .{ .start = 8193, .rows = 1 },  .{ .start = 8703, .rows = 1 },  .{ .start = 8704, .rows = 1 },  .{ .start = 10000, .rows = 1 },
     .{ .start = 12000, .rows = 1 }, .{ .start = 9000, .rows = 16 },
 };
+/// Prompt chunks: from the first key, ending inside a 32-key step, across 8192, and ending at the cache's last key.
+const prompt_cases = [_]Case{ .{ .start = 0, .rows = 128 }, .{ .start = 1000, .rows = 128 }, .{ .start = 4000, .rows = 128 }, .{ .start = 8100, .rows = 128 }, .{ .start = 11000, .rows = 128 }, .{ .start = 12160, .rows = 128 } };
 
 /// Every compared value on one side of `split_at`: how many, the largest and summed errors, the output's bytes.
 const Tally = struct {
@@ -100,12 +101,13 @@ pub fn main(init: std.process.Init) !void {
     defer device.deinit();
     const queue = try device.queue();
     const units = device.tensorUnits();
+    const args = try init.minimal.args.toSlice(a);
+    const prompt = args.len > 1 and std.mem.eql(u8, args[1], "--prompt");
     // the engine's own build of the kernels: before M5 the tail kernel's results read in the simdgroup layout
     if (!units) try q.simd_attention.check(device, queue);
-    const text = if (units) try a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt) else try q.simd_attention.rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
-    const library = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+    const library = try mtl.Library.fromSource(device, try q.simd_attention.library(a, units, true), mtl.CompileOptions.mlx());
     defer library.deinit();
-    var op = try attn.Attention.init(device, library, units);
+    var op = try attn.Attention.init(device, library);
     defer op.deinit();
     const limits = attn.Limits{ .rows = most_rows, .streams = 1, .keys = capacity, .shared_prefix = units };
     var scratch = try attn.Scratch.init(device, limits);
@@ -123,10 +125,10 @@ pub fn main(init: std.process.Init) !void {
     defer for ([_]mtl.Buffer{ keys, values, query, key, val, out }) |b| b.deinit();
     const caches = [1]attn.Cache{.{ .keys = .{ .buffer = keys }, .values = .{ .buffer = values }, .capacity = capacity }};
     const scores = try a.alloc(f64, capacity);
-    var want: [dim]f64 = undefined;
+    const wants = try a.alloc([dim]f64, most_rows * heads); // a case's reference, kept for its second pass
     var parents: [most_rows]i32 = undefined;
     for (&parents, 0..) |*p, r| p.* = @as(i32, @intCast(r)) - 1;
-    std.debug.print("attention_precision on {s}, tensor units {s}: decode rows against float64 softmax of the same bf16 rows\n", .{ std.mem.span(device.name()), if (units) "yes" else "no" });
+    std.debug.print("attention_precision on {s}, tensor units {s}: {s} rows against float64 softmax of the same bf16 rows\n", .{ std.mem.span(device.name()), if (units) "yes" else "no", if (prompt) "prompt" else "decode" });
     // queries of width 1 give mild softmaxes, width 4 peaked ones whose small probabilities test the chunks' rounding
     for ([_]f32{ 1, 4 }) |width| {
         var rng = Rng{ .s = 0x9e3779b97f4a7c15 };
@@ -136,8 +138,12 @@ pub fn main(init: std.process.Init) !void {
         }
         var below: Tally = .{};
         var from: Tally = .{};
-        for (cases) |c| {
-            for (query.slice(u16, c.rows * heads * dim)) |*x| x.* = rng.bf16(width);
+        var kernel: Tally = .{};
+        var tree: Tally = .{};
+        for (if (prompt) &prompt_cases else &cases) |c| for (0..@as(usize, if (prompt) 2 else 1)) |pass| {
+            if (pass == 0) {
+                for (query.slice(u16, c.rows * heads * dim)) |*x| x.* = rng.bf16(width);
+            }
             // the window's own key and value are the cache's rows at its positions, so appending them changes nothing
             for (0..c.rows) |r| for (0..kv_heads) |g| {
                 const at = (g * capacity + c.start + r) * dim;
@@ -151,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
             try binding.upload(plan, &caches);
             const cb = queue.commandBuffer();
             const e = cb.compute(.concurrent);
-            try op.encode(e, &scratch, &binding, plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = val }, .{ .buffer = out }, &caches, null, false);
+            try op.encode(e, &scratch, &binding, plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = val }, .{ .buffer = out }, &caches, null, prompt and pass == 0);
             e.end();
             cb.commit();
             cb.wait();
@@ -162,17 +168,23 @@ pub fn main(init: std.process.Init) !void {
             const got = out.slice(u16, c.rows * heads * dim);
             for (0..c.rows) |r| {
                 const position = c.start + @as(u32, @intCast(r));
-                const t = if (position < split_at) &below else &from;
+                const t = if (prompt) (if (pass == 0) &kernel else &tree) else if (position < split_at) &below else &from;
                 t.bytes.update(std.mem.sliceAsBytes(got[r * heads * dim ..][0 .. heads * dim]));
                 for (0..heads) |h| {
-                    reference(keys.slice(u16, cache_bytes / 2), values.slice(u16, cache_bytes / 2), query.slice(u16, c.rows * heads * dim)[r * heads * dim ..], position, h, scores, &want);
+                    const want = &wants[r * heads + h];
+                    if (pass == 0) reference(keys.slice(u16, cache_bytes / 2), values.slice(u16, cache_bytes / 2), query.slice(u16, c.rows * heads * dim)[r * heads * dim ..], position, h, scores, want);
                     for (got[(r * heads + h) * dim ..][0..dim], want) |x, y| t.add(x, y);
                 }
             }
-        }
+        };
         std.debug.print("queries in [-{d}, {d}):\n", .{ width, width });
-        below.print("rows below 8192");
-        from.print("rows from 8192");
-        if (below.bad + from.bad > 0) return error.NotFinite;
+        if (prompt) {
+            kernel.print("prompt kernel");
+            tree.print("decode path");
+        } else {
+            below.print("rows below 8192");
+            from.print("rows from 8192");
+        }
+        if (below.bad + from.bad + kernel.bad + tree.bad > 0) return error.NotFinite;
     }
 }

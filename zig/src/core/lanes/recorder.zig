@@ -238,8 +238,8 @@ pub const Recorded = struct {
 
     pub fn backend(x: *Recorded) be.Backend {
         const v = x.inner.vtable;
-        x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .prefill_many = if (v.prefill_many != null) prefillMany else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
-        return .{ .ptr = x, .vtable = &x.table, .first_before_draft = x.inner.first_before_draft };
+        x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .prefill_many = if (v.prefill_many != null) prefillMany else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .proposal_draft = if (v.proposal_draft != null) plannedDraft else null, .clear_proposals = if (v.clear_proposals != null) clearProposals else null, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
+        return .{ .proposal_head = x.inner.proposal_head, .ptr = x, .round_observer = x.inner.round_observer, .vtable = &x.table, .first_before_draft = x.inner.first_before_draft };
     }
 
     fn of(p: *anyopaque) *Recorded {
@@ -283,6 +283,14 @@ pub const Recorded = struct {
     }
     fn draft(p: *anyopaque, r: []const be.DraftRequest) anyerror!void {
         return of(p).inner.draft(r);
+    }
+    fn plannedDraft(p: *anyopaque, r: []const be.DraftRequest) anyerror!void {
+        const inner = of(p).inner;
+        return inner.vtable.proposal_draft.?(inner.ptr, r);
+    }
+    fn clearProposals(p: *anyopaque, s: *Stream) void {
+        const inner = of(p).inner;
+        inner.vtable.clear_proposals.?(inner.ptr, s);
     }
     fn unspeculate(p: *anyopaque, s: *Stream) anyerror!void {
         const i = of(p).inner;

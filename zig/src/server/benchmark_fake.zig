@@ -244,9 +244,15 @@ pub fn tmpPath(a: Allocator, tmp: *std.testing.TmpDir) ![]const u8 {
 
 /// A completion stream of two text deliveries ``gap_ms`` apart, a finish, usage and DONE.
 pub fn reply(a: Allocator, chat: bool, completion: u64, gap_ms: u32) ![]const Write {
+    return drafted(a, chat, completion, gap_ms, "");
+}
+
+/// ``reply`` whose finishing chunk carries ``speculative`` members (such as ``"rounds": 3``) when not empty.
+pub fn drafted(a: Allocator, chat: bool, completion: u64, gap_ms: u32, speculative: []const u8) ![]const Write {
     const first = if (chat) "{\"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"synthetic\"}}]}" else "{\"choices\": [{\"index\": 0, \"text\": \"synthetic\"}]}";
     const second = if (chat) "{\"choices\": [{\"index\": 0, \"delta\": {\"content\": \" output\"}}]}" else "{\"choices\": [{\"index\": 0, \"text\": \" output\"}]}";
-    const final = "{\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"length\"}], \"tensorfold\": {\"tokens_per_second\": 42.0, \"prefill_seconds\": 0.03, \"seconds\": 0.2, \"token_sha\": \"0123456789ab\"}}";
+    const plain = "{\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"length\"}], \"tensorfold\": {\"tokens_per_second\": 42.0, \"prefill_seconds\": 0.03, \"seconds\": 0.2, \"token_sha\": \"0123456789ab\"}";
+    const final = if (speculative.len > 0) try std.mem.concat(a, u8, &.{ plain, ", \"speculative\": {", speculative, "}}" }) else plain ++ "}";
     const usage = try std.fmt.allocPrint(a, "{{\"choices\": [], \"usage\": {{\"prompt_tokens\": 24, \"completion_tokens\": {d}, \"prompt_tokens_details\": {{\"cached_tokens\": 0}}}}}}", .{completion});
     const w = try a.alloc(Write, 3);
     w[0] = .{ .bytes = try std.mem.concat(a, u8, &.{ try headOf(a, "200 OK", "text/event-stream"), ": keepalive\n\n", try event(a, first) }), .pause_ms = gap_ms };

@@ -172,7 +172,8 @@ pub const Engine = struct {
         for (order) |i| {
             const s = live[i];
             const need: u64 = if (s.drafts) @min(@min(e.cfg.base_width, e.cfg.batch_rows), 1 + s.force.items.len) else 1;
-            if (chosen.items.len == e.cfg.batch_streams or (chosen.items.len > 0 and rows + need > e.cfg.batch_rows)) break;
+            if (chosen.items.len == e.cfg.batch_streams) break;
+            if (chosen.items.len > 0 and rows + need > e.cfg.batch_rows) continue;
             try chosen.append(a, i);
             rows += need;
         }
@@ -239,6 +240,7 @@ pub const Engine = struct {
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(1)), f("rows", int(rows)), f("ms", ev.bits(ms)) });
             try e.rule.observeOverhead(1, rows, ms, s.sampling != null, 0.0);
         }
+        if (e.backend.round_observer != null) e.backend.observed(&.{o.path});
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
 
@@ -291,6 +293,11 @@ pub const Engine = struct {
         } else {
             for (heads.items, budgets) |i, d| try e.draftLate(plans[i].stream, plans[i].position, outcomes[i].follow, outcomes[i].path, d);
         }
+        if (e.cfg.root_copies) for (heads.items, budgets) |i, *d| {
+            if (plans[i].stream.next) |held| if (held.count == 0) {
+                d.* = 0;
+            };
+        };
         try e.backend.keep(windows, paths);
         if (e.cfg.timed) {
             // the drafts budgets priced past each stream's first are no part of the round's overhead
@@ -300,6 +307,7 @@ pub const Engine = struct {
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
             try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
         }
+        if (e.backend.round_observer != null) e.backend.observed(paths);
     }
 
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.
@@ -376,6 +384,7 @@ pub const Engine = struct {
             const chain = parents.len == 0 or accept.isChain(parents);
             try t.commit(.{ .stream = s, .drafted = p.kind == .head, .rows = @intCast(rows), .parents = if (chain) null else parents, .path = path, .bonus = sampled[path[path.len - 1]] });
         };
+        if (e.cfg.root_copies) s.root_copy_miss = p.kind == .copy and path.len < rows;
         const budget_cut = s.thinkCut(committed.items);
         const loop_cut = sm.loopCut(s, committed.items);
         const loop_wins = if (loop_cut) |c| budget_cut == null or c < budget_cut.? else false;
@@ -421,7 +430,12 @@ pub const Engine = struct {
         try e.askDrafts(&.{.{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = d }});
     }
 
-    fn askDrafts(e: *Engine, requests: []const be.DraftRequest) !void {
+    pub const testing = if (@import("builtin").is_test) struct {
+        pub const askDrafts = Engine.askDrafts;
+    } else struct {};
+
+    fn askDrafts(e: *Engine, original: []const be.DraftRequest) !void {
+        const requests = try @import("root_copy.zig").prepare(e, original);
         for (requests) |r| try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(r.stream.id)), f("depth", int(r.depth)), f("position", int(r.position)), f("follow", .{ .u32s = r.follow }), f("rows", if (r.rows) |x| .{ .u32s = x } else .null) });
         // a lone stream's lanes: the head tree or chain + grafts with the most expected tokens a round time
         var lone: ?shape.Shape = null;
@@ -451,17 +465,20 @@ pub const Engine = struct {
             }
             asked = &one;
         } else if (requests.len == 1) requests[0].stream.held_levels = requests[0].depth;
-        try e.backend.draft(asked);
+        try e.backend.draftIn(e.arena.allocator(), asked);
         for (asked) |r| {
             r.stream.dropHeld(e.gpa);
-            r.stream.next = .{ .count = r.depth };
-            if (lone) |l| {
+            r.stream.next = .{ .count = r.heldDepth(e.backend) };
+            if (r.heldDepth(e.backend) == 0 and e.backend.proposals()) {
+                if (lone) |l| l.deinit(e.gpa);
+                lone = null;
+            } else if (lone) |l| {
                 if (r.lanes != null) r.stream.next = .{ .count = @intCast(l.parents.len), .parents = try e.gpa.dupe(i32, l.parents) };
                 r.stream.lanes = l;
                 lone = null;
-            } else if (e.backend.vtable.tree) |tree| {
+            } else if (r.heldDepth(e.backend) > 0) if (e.backend.vtable.tree) |tree| {
                 if (try tree(e.backend.ptr, r.stream, e.gpa)) |held| r.stream.next = held;
-            }
+            };
         }
     }
 
@@ -520,6 +537,7 @@ pub const Engine = struct {
         const landed = try s.commit(e.gpa, &.{token}, &.{});
         s.pending = token;
         if (s.recall) |r| r.noteHead(1); // a step lands one token: the bar a copy must beat
+        if (e.cfg.root_copies) s.root_copy_miss = false;
         const piping = e.cfg.family_width >= 2 and (s.mode orelse .pipe) == .pipe and !s.finished and s.drafts;
         if (piping and (try win.copyProposal(e, s)).tokens.len > 0)
             s.mode = .drain; // a copy window is ahead: land the queued step

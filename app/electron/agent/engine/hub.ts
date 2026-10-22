@@ -82,34 +82,58 @@ export async function searchHub(query: string, deps: HubDeps, limit = 30): Promi
   return parseSearchResults(await getJson(deps, `${origin(deps)}/api/models?${params}`, 'Hugging Face search'))
 }
 
-function nextLink(header: string | null, deps: HubDeps): string | null {
-  const match = /<([^>]+)>;\s*rel="next"/.exec(header ?? '')
-  if (!match) return null
-  const url = new URL(match[1], origin(deps))
-  if (url.origin !== origin(deps) || url.username || url.password) throw hubError('policy', 'The Hub file list points outside the configured HTTPS endpoint.')
-  return url.toString()
+function nextLink(header: string | null, expected: URL): string | null {
+  if (!header) return null
+  let next: string | null = null
+  for (const entry of header.split(/,(?=\s*<)/)) {
+    const match = /^\s*<([^>]+)>\s*;(.*)$/.exec(entry)
+    if (!match) throw hubError('http', 'The Hub returned malformed file-list pagination.')
+    const relation = /(?:^|;)\s*rel\s*=\s*(?:"([^"]*)"|([^\s;]+))/i.exec(match[2])
+    if (!(relation?.[1] ?? relation?.[2] ?? '').split(/\s+/).includes('next')) continue
+    const url = new URL(match[1], expected)
+    if (next || url.origin !== expected.origin || url.pathname !== expected.pathname || url.username || url.password || url.hash) {
+      throw hubError('policy', 'The Hub file list next link points outside the configured HTTPS endpoint or model revision.')
+    }
+    const recursive = url.searchParams.getAll('recursive')
+    if (recursive.length > 1 || (recursive.length === 1 && recursive[0] !== 'true')) {
+      throw hubError('policy', 'The Hub file list next link changed recursive pagination.')
+    }
+    url.searchParams.set('recursive', 'true')
+    next = url.toString()
+  }
+  return next
 }
 
-// Sum file sizes at one revision, following pagination only on the configured Hub origin.
+// Sum file sizes at one revision, following pagination only on the configured Hub origin and revision.
 export async function treeTotal(deps: HubDeps, repo: string, revision: string): Promise<{ bytes: number; files: number }> {
-  let url: string | null = `${origin(deps)}/api/models/${assertRepoId(repo)}/tree/${encodeURIComponent(revision)}?recursive=true`
+  const expected = new URL(`${origin(deps)}/api/models/${assertRepoId(repo)}/tree/${encodeURIComponent(revision)}?recursive=true`)
+  let url: string | null = expected.href
   let bytes = 0
   let files = 0
+  const visited = new Set<string>()
   for (let page = 0; url && page < 20; page++) {
+    if (visited.has(url)) throw hubError('http', `${repo}: the Hub file-list pagination repeated a page.`)
+    visited.add(url)
     const res: Response = await request(deps, url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(TIMEOUT_MS), redirect: 'manual' })
     if (!res.ok) { await discardResponseBody(res); throw hubError('http', `${repo}: the file list is unavailable (HTTP ${res.status}).`) }
     let next: string | null
-    try { next = nextLink(res.headers.get('link'), deps) } catch (cause) { await discardResponseBody(res); throw cause }
+    try { next = nextLink(res.headers.get('link'), expected) } catch (cause) { await discardResponseBody(res); throw cause }
     const body = await readBoundedJsonResponse(res, `${repo} file list`, 8 * 1024 * 1024)
     if (!Array.isArray(body)) throw new Error(`${repo}: the file list has an unexpected shape.`)
     for (const entry of body) {
-      if (entry?.type !== 'file') continue
+      if (entry?.type === 'directory') continue
+      if (entry?.type !== 'file') throw new Error(`${repo}: the file list contains an invalid entry.`)
+      const size: unknown = entry.lfs?.size ?? entry.size
+      if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(bytes + size)) {
+        throw new Error(`${repo}: the file list contains an invalid or unsafe file size.`)
+      }
       files++
-      bytes += Math.max(0, Number(entry.lfs?.size ?? entry.size) || 0)
+      bytes += size
     }
     url = next
   }
-  if (url) throw hubError('http', `${repo}: the Hub file list exceeded the pagination limit.`)
+  if (url) throw hubError('http', `${repo}: the Hub file list exceeded the pagination limit; its total is incomplete.`)
+  if (!files || !bytes) throw new Error(`${repo}: the file list contains no non-empty model files.`)
   return { bytes, files }
 }
 

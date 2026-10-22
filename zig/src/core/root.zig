@@ -1,6 +1,7 @@
 //! Backend-neutral engine parts: checkpoint files, the CUDA draft-depth rule, the copy index, the tokenizer.
 
 pub const safetensors = @import("safetensors.zig");
+pub const npy = @import("npy.zig");
 pub const exl3_format = @import("exl3_format.zig");
 pub const exlr8 = @import("exlr8.zig");
 pub const eaq_container = @import("eaq_container.zig");
@@ -12,7 +13,10 @@ pub const direct_io = @import("direct_io.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
 pub const draft_depth = @import("draft_depth.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
+pub const recurrent_workspace = @import("recurrent_workspace.zig");
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
+pub const proposal_rows = @import("proposal_rows.zig");
+pub const proposal_vocab = @import("proposal_vocab.zig");
 pub const ids_json = @import("ids_json.zig");
 pub const affine4_host = @import("affine4_host.zig");
 pub const affine4_fold = @import("affine4_fold.zig");
@@ -27,6 +31,8 @@ pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
+pub const bf16_round = @import("bf16_round.zig");
+pub const embed_ref = @import("embed_ref.zig");
 /// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
 pub const contract = @import("contract.zig");
 pub const nvfp4 = @import("nvfp4.zig");
@@ -64,6 +70,8 @@ test {
     _ = tuning;
     _ = norms_ref;
     _ = act_ref;
+    _ = bf16_round;
+    _ = embed_ref;
     _ = contract;
     _ = tree_round;
     _ = attention_ref;
@@ -84,6 +92,8 @@ test {
     _ = draft_depth;
     _ = @import("copy_index.zig");
     _ = ids_json;
+    _ = proposal_vocab;
+    _ = proposal_rows;
     _ = nvfp4;
     _ = nvfp4_csf32;
     _ = modelopt;

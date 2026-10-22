@@ -29,7 +29,7 @@ fn project(ptr: *anyopaque, epoch: u64, x: op.View, w: ck.Tensor, mode: op.Mode)
         const input = try b.frame.ref(x);
         const output = try b.frame.ref(y);
         const s = @import("core").row_projection.simd;
-        s.encode(e, try s.call(&b.simd.?, t.n, t.k, x.rows, false), t.matrix(), input.buf, input.off, output.buf, output.off);
+        s.encode(e, try s.call(&b.simd.?, t.n, t.k, x.rows, false, false), t.matrix(), input.buf, input.off, output.buf, output.off);
     } else {
         const adapter = b.prepared.get(@intFromPtr(w.bytes.ptr)) orelse return error.DraftPreparationUnqualified;
         const input = try b.frame.ref(x);

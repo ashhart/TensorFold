@@ -13,6 +13,7 @@ pub const cubin = @import("contract/cubin.zig");
 test {
     _ = @import("contract/qwen_served_records.zig");
     _ = @import("contract/delta_slots_records.zig");
+    _ = @import("contract/simd_pairs_records.zig");
     _ = spec;
     _ = gates;
     _ = rows;

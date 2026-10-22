@@ -338,7 +338,7 @@ pub const Engine = struct {
     /// The pass over `len` rows polling the cancel after each layer; null where it cannot stop (a short prompt, or tp).
     fn poll(e: *Engine, cancel: ?Cancel, len: usize, p: *Poll) ?fwd.Trace {
         const c = cancel orelse return null;
-        if (e.o.world > 1 or len < fwd.SPAN) return null;
+        if (!prefix.pollsLayers(e.o.world, len)) return null;
         p.* = .{ .stream = e.stream, .cancel = c };
         return .{ .ctx = p, .layer = Poll.layer };
     }

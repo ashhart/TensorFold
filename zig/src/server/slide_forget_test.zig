@@ -46,12 +46,12 @@ pub const ByteText = struct {
         return &.{};
     }
 
-    fn render(_: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(_: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         var last: []const u8 = "";
         for (messages.items() orelse &.{}) |m| if (std.mem.eql(u8, m.strField("role") orelse "", "user")) {
             last = m.strField("content") orelse "";
         };
-        return std.fmt.allocPrint(a, "Q:{s}\nA:", .{last});
+        return .{ .text = try (std.fmt.allocPrint(a, "Q:{s}\nA:", .{last})) };
     }
 
     fn templateSource(_: *anyopaque) []const u8 {

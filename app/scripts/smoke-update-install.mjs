@@ -7,7 +7,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
-import { createIsolatedSmokeProfile, removeExactSmokeProfile, selectUnusedLoopbackPort } from './smoke-packaged-mac.mjs'
+import { createIsolatedSmokeProfile, releaseSmokeProfile, removeExactSmokeProfile, selectUnusedLoopbackPort } from './smoke-packaged-mac.mjs'
 import { qualificationEnvironment } from './qualify-packaged-memory.mjs'
 import { assertCocoaPreferencesUnchanged, assertNativeUpdateNamespaceClear, captureCocoaPreferences, captureNativeUpdateNamespace } from './squirrel-smoke-namespace.mjs'
 
@@ -224,6 +224,7 @@ export async function smokeUpdateInstall(options) {
       const hasNativeFootprint = Object.entries(nativeNamespaceAfterStop).some(([key, value]) => key === 'studioProcesses' ? value.length > 0 : !!value)
       if (smokeCompleted && !hasNativeFootprint) await removeExactSmokeProfile(profile)
       const retained = !smokeCompleted || hasNativeFootprint
+      if (retained) await releaseSmokeProfile(profile)
       await writeFile(path.join(options.out, smokeCompleted ? 'native-update-footprint.json' : 'native-update-incomplete.json'), `${JSON.stringify({ profileRetained: retained ? profile.root : null, profileIdentity: { device: String(profile.identity.dev), inode: String(profile.identity.ino), uid: String(profile.identity.uid) }, reason: retained ? 'Retain the exact private target and descriptor until newly created native state and job references receive ownership-checked review.' : 'No native global footprint remains after the completed update.', nativeNamespaceAfterStop, nativeCacheResetOrDeleted: false }, null, 2)}\n`, { mode: 0o600 })
     }
   }

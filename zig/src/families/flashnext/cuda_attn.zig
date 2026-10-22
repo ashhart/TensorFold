@@ -115,8 +115,9 @@ fn shardPath(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![]u8 {
     defer gpa.free(text);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
     defer parsed.deinit();
-    const file = parsed.value.object.get("weight_map").?.object.get(prefix ++ "q_proj.weight").?.string;
-    return std.fs.path.join(gpa, &.{ dir, file });
+    const map = try core.safetensors.index.weightMap(parsed.value);
+    const file = map.get(prefix ++ "q_proj.weight") orelse return error.MissingTensor;
+    return std.fs.path.join(gpa, &.{ dir, file.string });
 }
 
 const Triple = struct { w: core.safetensors.Tensor, s: core.safetensors.Tensor, b: core.safetensors.Tensor };

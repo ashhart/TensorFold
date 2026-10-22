@@ -223,14 +223,19 @@ pub const Rows = struct {
     /// The disk state reaching furthest into `prompt` past `longer_than`: its tokens a prefix, spans and starts equal.
     pub fn best(r: *const Rows, prompt: []const u32, starts: []const u32, spans: []const Span, longer_than: u32) ?usize {
         var out: ?usize = null;
-        for (r.states.items, 0..) |s, i| {
-            if (s.at <= longer_than or s.tokens.len > prompt.len or s.at >= prompt.len) continue;
+        for (r.states.items, 0..) |*s, i| {
+            if (s.at <= longer_than) continue;
             if (out != null and s.at <= r.states.items[out.?].at) continue;
-            if (!std.mem.eql(u32, prompt[0..s.tokens.len], s.tokens) or !modes.equal(s.spans, spans, s.at)) continue;
-            if (r.keying.planned and !sameBelow(starts, s.starts, s.at)) continue;
+            if (!r.matches(s, prompt, starts, spans)) continue;
             out = i;
         }
         return out;
+    }
+
+    pub fn matches(r: *const Rows, s: *const State, prompt: []const u32, starts: []const u32, spans: []const Span) bool {
+        if (s.tokens.len > prompt.len or s.at >= prompt.len) return false;
+        if (!std.mem.eql(u32, prompt[0..s.tokens.len], s.tokens) or !modes.equal(s.spans, spans, s.at)) return false;
+        return !r.keying.planned or sameBelow(starts, s.starts, s.at);
     }
 
     /// State `i` was used now: the newest for eviction.
@@ -508,4 +513,7 @@ test {
     _ = chain;
     _ = file;
     _ = @import("rows_test.zig");
+    _ = @import("rows_select_test.zig");
+    _ = @import("rows_recall_select_test.zig");
+    _ = @import("rows_pool_select_test.zig");
 }

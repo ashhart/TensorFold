@@ -220,10 +220,8 @@ pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
 }
 
 pub fn tmpPath(a: std.mem.Allocator, tmp: std.testing.TmpDir, comptime name: []const u8) ![]u8 {
-    // std.testing.tmpDir parents the dir at <cwd>/.zig-cache/tmp
-    const cwd = try std.process.currentPathAlloc(io, a);
-    defer a.free(cwd);
-    return std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}/{s}", .{ cwd, tmp.sub_path, name });
+    // std.testing.tmpDir puts the dir under <cwd>/.zig-cache/tmp: a relative path is the same length in every checkout.
+    return std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
 }
 
 fn tensorBytes(file: *st.File, name: []const u8) []const u8 {
