@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { promises as fs } from 'node:fs'
+import { promises as fs, type Dirent } from 'node:fs'
 import path from 'node:path'
 import type { DocumentConnectorSettings, DocumentReadResult, DocumentSourceConfig } from '../agent/types'
 import type { DocumentFileOutcome, DocumentScanSummary } from '../../shared/document-library'
@@ -117,7 +117,14 @@ export async function collectCandidates(source: DocumentSourceConfig, now: numbe
     let directory
     try { directory = await fs.opendir(dir) }
     catch (error) { add(dir, 'failed', `Folder could not be read: ${message(error)}`); return }
+    const entries: Dirent[] = []
     for await (const entry of directory) {
+      if (visited + entries.length >= workLimit) { truncated = true; break }
+      entries.push(entry)
+    }
+    // Name order, so every filesystem walks a folder in the same sequence.
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    for (const entry of entries) {
       visited++
       if (!available() || visited > workLimit) { truncated = true; break }
       const full = path.join(dir, entry.name)
