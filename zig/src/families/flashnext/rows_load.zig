@@ -137,6 +137,10 @@ fn dense(r: *Run, sh: *rows_w.Shared, members: []rows_w.Member, k: usize) !*cons
     }
     const d = try r.arena.create(rows_w.Dense);
     d.* = .{ .members = members, .n = n, .k = k, .shared = sh };
+    if (rows_w.merge(members)) |p| { // one launch for the parts, which a small M3 launch costs most of
+        d.members = try r.arena.alloc(rows_w.Member, 1);
+        d.members[0] = .{ .p = p, .col = 0 };
+    }
     return d;
 }
 

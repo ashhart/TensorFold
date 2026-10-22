@@ -242,6 +242,45 @@ pub const Shared = struct {
 /// A fused projection on the row kernels: members in output order, n columns over k inputs.
 pub const Dense = struct { members: []Member, n: usize, k: usize, shared: *Shared };
 
+/// Members stored back to back at one width as one product: one launch, every output row's kernel and bits unchanged.
+pub fn merge(members: []const Member) ?Product {
+    if (members.len < 2) return null;
+    const p0 = members[0].p;
+    const kg = p0.k / p0.group;
+    var n: usize = 0;
+    for (members) |mb| {
+        const p = mb.p;
+        if (p.bits != p0.bits or p.group != p0.group or p.k != p0.k or mb.col != n) return null;
+        if (p.w.b.id != p0.w.b.id or p.s.b.id != p0.s.b.id or p.b.b.id != p0.b.b.id) return null;
+        if (p.w.off != p0.w.off + n * p.k * p.bits / 8 or p.s.off != p0.s.off + n * kg * 2 or p.b.off != p0.b.off + n * kg * 2) return null;
+        n += p.n;
+    }
+    return .{ .w = p0.w, .s = p0.s, .b = p0.b, .n = n, .k = p0.k, .bits = p0.bits, .group = p0.group };
+}
+
+test "members back to back at one width merge into one product; a gap, a width or a buffer apart keeps them" {
+    const one: mtl.Buffer = .{ .id = @ptrFromInt(0x1000) };
+    const two: mtl.Buffer = .{ .id = @ptrFromInt(0x2000) };
+    const k = 2560;
+    const kg = k / 32;
+    var ms = [_]Member{
+        .{ .p = .{ .w = .{ .b = one, .off = 64 }, .s = .{ .b = one, .off = 8 }, .b = .{ .b = two }, .n = 8, .k = k, .bits = 4, .group = 32 }, .col = 0 },
+        .{ .p = .{ .w = .{ .b = one, .off = 64 + 8 * k / 2 }, .s = .{ .b = one, .off = 8 + 8 * kg * 2 }, .b = .{ .b = two, .off = 8 * kg * 2 }, .n = 4, .k = k, .bits = 4, .group = 32 }, .col = 8 },
+    };
+    const m = merge(&ms).?;
+    try std.testing.expectEqual(@as(usize, 12), m.n);
+    try std.testing.expectEqual(@as(usize, 64), m.w.off);
+    try std.testing.expectEqual(@as(?Product, null), merge(ms[0..1]));
+    ms[1].p.w.off += 4;
+    try std.testing.expectEqual(@as(?Product, null), merge(&ms));
+    ms[1].p.w.off -= 4;
+    ms[1].p.bits = 6;
+    try std.testing.expectEqual(@as(?Product, null), merge(&ms));
+    ms[1].p.bits = 4;
+    ms[1].p.b.b = one;
+    try std.testing.expectEqual(@as(?Product, null), merge(&ms));
+}
+
 fn slot(bits: u8) usize {
     return if (vpt(bits) == 8) 0 else 1;
 }
