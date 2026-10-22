@@ -227,7 +227,11 @@ fn actualFrame(block: usize) !void {
         try std.testing.expectEqual(@as(usize, 2), Record.downloads);
         try std.testing.expectEqual(@as(usize, 1), Record.waits);
         for (contexts[0..count], holds[0..count], 0..) |ctx, it, i| {
-            try std.testing.expectEqual(@as(usize, if (it.lanes != null) 7 else it.depth), ctx.held_n);
+            // the production adapter: a grown tree holds the budget it grew, a chain the requested depth
+            const limit = if (block == 16) q.draft.tree.nodes() else 0;
+            const held: usize = if (it.lanes != null) 7 else if (limit > 0) ctx.grown else @min(it.depth, block - 1);
+            try std.testing.expectEqual(held, ctx.held_n);
+            if (limit > 0 and it.lanes == null and it.depth > 0) try std.testing.expect(ctx.grown > 0);
             for (ctx.held[0..ctx.held_n], 0..) |token, row| {
                 if (it.lanes == null and ctx.grown > 0) {
                     try std.testing.expect(token == 17 + i or token == 128 + i);
