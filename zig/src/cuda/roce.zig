@@ -449,11 +449,24 @@ pub const Gather = struct {
         for (0..g.n_hca) |h| try g.drain(h);
     }
 
+    /// A 20 us nap; where std.c has no timespec (Windows) the nap is simply absent.
+    fn napTimespec() ?std.c.timespec {
+        const T = @TypeOf(std.c.timespec);
+        if (T == void) return null;
+        switch (@typeInfo(T)) {
+            .@"struct" => {},
+            else => return null,
+        }
+        const v: std.c.timespec = .{ .sec = 0, .nsec = 20_000 };
+        return v;
+    }
+
     /// The proxy: spins on the doorbell and posts each sequence in order (a missed one from its slot's size).
     fn proxy(g: *Gather) void {
         const c = g.ctrl();
         var idle: u64 = 0;
-        const nap: std.c.timespec = .{ .sec = 0, .nsec = 20_000 };
+        // std.c.timespec is void on Windows (no CRT nanosleep), so the nap is built only where it exists.
+        const nap: ?std.c.timespec = napTimespec();
         while (g.running.load(.monotonic)) {
             const seq = @atomicLoad(u32, &c[c_seq], .acquire);
             if (seq == g.last_seq) {
@@ -462,7 +475,11 @@ pub const Gather = struct {
                     g.failed.store(true, .release);
                     return;
                 };
-                if (idle >= idle_spins) _ = std.c.nanosleep(&nap, null);
+                if (idle >= idle_spins) {
+                    if (nap) |*t| {
+                        if (@TypeOf(std.c.nanosleep) != void) _ = std.c.nanosleep(t, null);
+                    }
+                }
                 continue;
             }
             idle = 0;

@@ -1,5 +1,6 @@
 //! EXL3 tensor parallel: each rank's shard of real RED-SNOW projections and experts vs the engine's, all-gathered.
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -336,6 +337,8 @@ fn bf16r(v: f32) u16 {
 
 /// Rank 0 binds host:port and sends its unique id to the one peer (70 s for rank 1's retries).
 fn serve(addr_text: []const u8, bytes: []const u8) !void {
+    // Windows hands socket() back as SOCKET (usize), so the fd-shaped cast below cannot compile there.
+    if (builtin.os.tag == .windows) return error.SocketFailed;
     const a = try parseAddr(addr_text);
     var storage: std.Io.Threaded.PosixAddress = undefined;
     const len = try posixLen(a.host, a.port, &storage);
@@ -375,6 +378,8 @@ fn serve(addr_text: []const u8, bytes: []const u8) !void {
 
 /// Rank 1 connects to host:port, retrying for 60 s (rank 0 may not have bound yet), and reads the id.
 fn receive(gpu: Gpu, addr_text: []const u8, bytes: []u8) !void {
+    // Windows hands socket() back as SOCKET (usize), so the fd-shaped cast below cannot compile there.
+    if (builtin.os.tag == .windows) return error.SocketFailed;
     const a = try parseAddr(addr_text);
     const ip = try std.Io.net.IpAddress.parseIp4(a.host, a.port);
     var fd: posix.socket_t = -1;
