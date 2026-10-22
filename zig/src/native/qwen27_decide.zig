@@ -5,7 +5,7 @@ const tf = @import("tensorfold");
 const q = tf.qwen27;
 const lb = @import("qwen27_lanes.zig");
 
-/// A queued decision's GPU work (LaneHost runs it alone): score reads the row after its prompt; decide, each branch's last row.
+/// A queued decision's GPU work on the idle host: score the row after its prompt; decide, each branch's last row.
 pub fn run(b: *lb.Metal, window: u32, task: *api.DecisionTask) error{ Failed, Refused }!void {
     switch (task.*) {
         .score => |*s| s.out = try score(b, s.prompt, s.labels, s.logits, s.mass),
@@ -23,8 +23,7 @@ fn score(b: *lb.Metal, prompt: []const u32, labels: []const u32, logits: []f64, 
     return read(row0(r), labels, logits, mass);
 }
 
-/// Each branch's label logits at its last row after the shared trunk: the trunk's state is kept once
-/// and restored a branch at a time; every branch's rows stand on the same trunk state.
+/// Each branch's label logits at its last row after the shared trunk; the trunk state kept, restored per branch.
 fn decide(b: *lb.Metal, window: u32, d: *api.Decision) error{ Failed, Refused }!void {
     const r = b.runner;
     if (d.pictures.len > 0) return refuse(d, "decisions with pictures are not served by this engine yet");
