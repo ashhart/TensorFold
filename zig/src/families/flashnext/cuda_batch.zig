@@ -11,6 +11,7 @@ const parts = @import("cuda_batch_state.zig");
 const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
+const nvfp4_tile = @import("cuda_nvfp4_tile.zig");
 
 const layers_n = wt.layers_n;
 const linear_n = wt.linear_n;
@@ -88,16 +89,6 @@ fn profile() bool {
     const v = std.c.getenv("TF_FLASHNEXT_PROFILE") orelse return false;
     return std.mem.eql(u8, std.mem.span(v), "1");
 }
-
-/// Rows from which NVFP4 experts take the prompt tiles (TF_FLASHNEXT_FACT_ROWS, 0 never): same bits, only speed.
-fn factRows() usize {
-    if (fact_rows == null) {
-        const r = if (std.c.getenv("TF_FLASHNEXT_FACT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 64 else 64;
-        fact_rows = if (r == 0) std.math.maxInt(usize) else r;
-    }
-    return fact_rows.?;
-}
-var fact_rows: ?usize = null;
 
 pub fn Pass(comptime Tri: type) type {
     return struct {
@@ -460,13 +451,11 @@ pub fn Pass(comptime Tri: type) type {
             if (lw.native_experts) |*native| {
                 const owned = &native.experts;
                 try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
-                // from factRows() rows the prompt tiles: the decode form's bits, an expert's weights read once an item
-                const pt: usize = if (n >= factRows()) cuda.experts.promptTile(.nvfp4) else 16;
+                const pt = nvfp4_tile.size(n);
                 try self.k.router.route(self.stream, s.picks, pairs, e, pt, plan);
                 const items = cuda.grouped.maxItems(pairs, e, pt);
-                const run = if (pt == 16) &cuda.experts.Nvfp4Experts.run else &cuda.experts.Nvfp4Experts.runFact;
-                try run(&self.k.nvfp4, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
-                try run(&self.k.nvfp4, self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, experts_n);
+                try nvfp4_tile.run(pt)(&self.k.nvfp4, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
+                try nvfp4_tile.run(pt)(&self.k.nvfp4, self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, experts_n);
                 if (native.rank == 0) {
                     const glue = self.tri.own orelse return error.NativeGlueRequired;
                     try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part);
