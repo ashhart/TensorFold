@@ -112,7 +112,8 @@ A gate failure on a kernel already shipped is reported, not hidden. Until its fi
 `known` entry naming the gate and what fails. That gate must keep failing (the run prints `KNOWN`); once a fix makes
 it pass, the run fails until the entry is removed. Today: affine_mm's 4-bit form gives NaN for an infinite input where
 MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s. GLM-5.3-Flash's
-`tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN, as its relu is `fmaxf(x, 0)` (Triton's `tl.maximum`).
+`tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `fmaxf(x, 0)`, as `tl.maximum` is in the
+Python family's Triton glue it was ported from.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -170,7 +171,8 @@ and its split-K form, prompt16's FP8 tile, qmmf's FP4 32-row cluster tile, five 
 and FP32-output paths, FP8G's 32-row cluster tile with FP32 output, the common EXL3 prompt products, Super's
 decode-sized latent top-k and NVFP4 up experts, the Mamba scan and Super's NVFP4 prompt down kernels, three of
 GLM-5.3-Flash's packed matmuls and three of its DFlash2 launches, and the training launches it compiles differently,
-and nvcc 13.3 keeps 13.2's and changes `tf_nemo_topk` on sm_120 and sm_121. `kernel-contract` and
+and nvcc 13.3 keeps 13.2's and changes `tf_nemo_topk` on sm_120 and sm_121 and four of GLM-5.3-Flash's KV page
+launches. `kernel-contract` and
 `kernel-contract-limits` read the release from each image's `.note.nv.tkinfo`, check the image against the newest set
 at or below that release (13.0's when an image names none), and print which set they used. A release with no set of
 its own is checked against the one below it, so its differences show as stale records: re-derive them with

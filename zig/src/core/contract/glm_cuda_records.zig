@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's packed matmul, DFlash2 and float32 norm weight launches, by kernel-contract-limits from every SM.
+//! GLM-5.3-Flash's packed matmul, DFlash2, float32 norm weights and KV pages, with every SM's compile records.
 const registry = @import("registry.zig");
 
 /// nvcc 13.0's usage, the compiler of the release fatbins.
@@ -38,6 +38,12 @@ pub const cuda = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "df_gsum", .symbol = "df_gsum", .image = "glm_dflash", .threads = 128, .min_sm = 80 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "glm_glue tf_glm_rmsnorm_4096_f32w", .symbol = "tf_glm_rmsnorm_4096_f32w", .image = "glm_glue", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 44, .static = 32, .bound = 256 }, .{ .regs = 44, .static = 32, .bound = 256 }, .{ .regs = 44, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 } } },
     .{ .launch = .{ .name = "glm_glue tf_glm_hc_finish_f32w", .symbol = "tf_glm_hc_finish_f32w", .image = "glm_glue", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 80, .static = 48, .bound = 256 }, .{ .regs = 78, .static = 48, .bound = 256 }, .{ .regs = 78, .static = 48, .bound = 256 }, .{ .regs = 80, .static = 48, .bound = 256 }, .{ .regs = 80, .static = 48, .bound = 256 } } },
+    .{ .launch = .{ .name = "glm_glue tf_glm_lat_write", .symbol = "tf_glm_lat_write", .image = "glm_glue", .threads = 128, .min_sm = 80 }, .usage = .{ .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 } } },
+    .{ .launch = .{ .name = "glm_glue tf_glm_pool_keys", .symbol = "tf_glm_pool_keys", .image = "glm_glue", .threads = 32, .min_sm = 80 }, .usage = .{ .{ .regs = 25, .static = 0, .bound = 32 }, .{ .regs = 26, .static = 0, .bound = 32 }, .{ .regs = 26, .static = 0, .bound = 32 }, .{ .regs = 24, .static = 0, .bound = 32 }, .{ .regs = 24, .static = 0, .bound = 32 } } },
+    .{ .launch = .{ .name = "glm_glue tf_glm_scores", .symbol = "tf_glm_scores", .image = "glm_glue", .threads = 128, .min_sm = 80 }, .usage = .{ .{ .regs = 126, .static = 32768, .bound = 128 }, .{ .regs = 131, .static = 32768, .bound = 128 }, .{ .regs = 131, .static = 32768, .bound = 128 }, .{ .regs = 155, .static = 32768, .bound = 128 }, .{ .regs = 155, .static = 32768, .bound = 128 } } },
+    .{ .launch = .{ .name = "glm_glue tf_glm_chunks_16", .symbol = "tf_glm_chunks_16", .image = "glm_glue", .threads = 256, .dynamic = 83328, .opt_in = true, .min_sm = 80 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 123, .static = 0, .bound = 256 }, .{ .regs = 123, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "glm_glue tf_glm_chunks_32", .symbol = "tf_glm_chunks_32", .image = "glm_glue", .threads = 256, .dynamic = 101120, .opt_in = true, .min_sm = 80 }, .usage = .{ .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 130, .static = 0, .bound = 256 }, .{ .regs = 130, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "glm_ops tf_glm_dsa_tokens", .symbol = "tf_glm_dsa_tokens", .image = "glm_ops", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 } } },
 };
 
 /// nvcc 13.2's usage where it differs from 13.0's.
@@ -48,4 +54,12 @@ pub const cuda_132 = [_]registry.Override{
     .{ .name = "df_block_qkv", .usage = .{ .{ .regs = 32, .static = 8, .bound = 0 }, .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 32, .static = 8, .bound = 0 }, .{ .regs = 32, .static = 8, .bound = 0 } } },
     .{ .name = "df_ctx_kv", .usage = .{ .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 28, .static = 8, .bound = 0 }, .{ .regs = 28, .static = 8, .bound = 0 } } },
     .{ .name = "df_top16_merge", .usage = .{ .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 28, .static = 8416, .bound = 256 }, .{ .regs = 28, .static = 8416, .bound = 256 } } },
+};
+
+/// nvcc 13.3's usage where it differs from 13.0's.
+pub const cuda_133 = [_]registry.Override{
+    .{ .name = "glm_glue tf_glm_lat_write", .usage = .{ .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 } } },
+    .{ .name = "glm_glue tf_glm_scores", .usage = .{ .{ .regs = 122, .static = 32768, .bound = 128 }, .{ .regs = 129, .static = 32768, .bound = 128 }, .{ .regs = 129, .static = 32768, .bound = 128 }, .{ .regs = 157, .static = 32768, .bound = 128 }, .{ .regs = 157, .static = 32768, .bound = 128 } } },
+    .{ .name = "glm_glue tf_glm_chunks_32", .usage = .{ .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 } } },
+    .{ .name = "glm_ops tf_glm_dsa_tokens", .usage = .{ .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 22, .static = 0, .bound = 0 }, .{ .regs = 22, .static = 0, .bound = 0 } } },
 };
