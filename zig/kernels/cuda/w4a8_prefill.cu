@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "qmm_frag.cuh"
+#include "w4a8_normalize.h"
 
 namespace tf_w4a8 {
 using namespace qmm_frag;
@@ -13,7 +14,7 @@ __host__ __device__ __forceinline__ int slot_input(int s) {
     return (s & 16) + 2 * q + (i & 1) + 8 * (i >> 1);
 }
 
-// Rows of x as int8 in slot order, a scale (amax / 127) and exact sum a 64-input group: a warp a group.
+// Rows of x as int8 in slot order, a scale (amax / 127) and fp32 sum a 64-input group: a warp a group.
 __device__ __forceinline__ void quantize_rows_body(const __nv_bfloat16* __restrict__ x, uint8_t* __restrict__ xq,
                                                      float* __restrict__ xa, float* __restrict__ xs, int K, int ldx) {
     const int row = blockIdx.x, lane = threadIdx.x & 31, g = blockIdx.y * 4 + (threadIdx.x >> 5);
@@ -29,7 +30,7 @@ __device__ __forceinline__ void quantize_rows_body(const __nv_bfloat16* __restri
         sum += __shfl_xor_sync(0xffffffffu, sum, o);
     }
     const float a = amax > 0.0f ? amax / 127.0f : 1.0f, inv = amax > 0.0f ? 127.0f / amax : 1.0f;
-    const int q0 = __float2int_rn(v0 * inv), q1 = __float2int_rn(v1 * inv);
+    const int q0 = __float2int_rn(tf_w4a8_normalized(v0, amax, inv)), q1 = __float2int_rn(tf_w4a8_normalized(v1, amax, inv));
     const uint16_t q = (uint16_t)((q0 & 0xFF) | ((q1 & 0xFF) << 8));
     reinterpret_cast<uint16_t*>(xq + (size_t)row * K + g * 64)[lane] = q;
     if (lane == 0) {

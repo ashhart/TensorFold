@@ -151,6 +151,10 @@ const Host = struct {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (o.prompt_int8) {
+        problem.* = prompt_int8_refusal;
+        return null;
+    }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
@@ -286,6 +290,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 
+const prompt_int8_refusal = "--prompt-precision int8 is the CUDA Qwen3.5 engine's; the Metal engines prompt in bf16: serve without it";
+
 /// --slide writes 4-bit codes into the shards: a checkpoint with any other width is refused by its first such matrix.
 fn slideWidths(a: Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
     const c = nemotron.config.Config.read(a, io, dir) catch return null; // the load names a config.json it cannot read
@@ -303,7 +309,7 @@ const recall_refusal = "--recall drafts from a record in the lane engine's round
 fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const t = o.model_type;
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
-    if (o.prompt_int8) return "--prompt-precision int8 is the CUDA Qwen3.5 engine's; the Metal engines prompt in bf16: serve without it";
+    if (o.prompt_int8) return prompt_int8_refusal;
     if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
     const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
@@ -547,5 +553,14 @@ test "--slide is refused by every family but Nemotron, which learns into its wei
     for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next", "qwen3_5" }) |t| {
         const why = (try refusal(a, .{ .dir = "d", .model_type = t, .slide = true }, true)) orelse return error.TestExpectedRefusal;
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t}), why);
+    }
+}
+
+test "prompt precision: Metal refuses int8 before any model or family-specific load" {
+    for ([_][]const u8{ "qwen3_5", "fish_omni", "nemotron_h", "gemma4", "unknown" }) |model| {
+        var why: []const u8 = "";
+        const opened = try open(std.testing.allocator, std.testing.allocator, std.testing.io, .{ .dir = "missing-prompt-int8-model", .model_type = model, .prompt_int8 = true }, &why);
+        try std.testing.expect(opened == null);
+        try std.testing.expectEqualStrings(prompt_int8_refusal, why);
     }
 }

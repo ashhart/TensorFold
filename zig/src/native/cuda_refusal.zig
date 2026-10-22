@@ -149,3 +149,16 @@ test "policy options are refused by families that do not implement them" {
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h", .policy = "kv=fp8" }) != null);
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "lfm2_vl", .policy = "kv=fp8" }) != null);
 }
+
+test "prompt precision: int8 is refused unless a CUDA family consumes the option" {
+    const Bf16 = struct {
+        pub const Options = struct {};
+    };
+    const Int8 = struct {
+        pub const Options = struct { prompt_int8: bool = false };
+    };
+    const request: api.Open = .{ .dir = "d", .model_type = "m", .prompt_int8 = true };
+    try std.testing.expectStringStartsWith(family(Bf16, request) orelse "", "--prompt-precision int8:");
+    try std.testing.expect(family(Int8, request) == null);
+    try std.testing.expect(family(Bf16, .{ .dir = "d", .model_type = "m" }) == null);
+}

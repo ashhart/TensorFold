@@ -72,7 +72,7 @@ fn reference(r: *Rig, x: []const u16, rows: usize, m: Matrix) !struct { want: []
         const inv: f32 = if (amax > 0) 127.0 / amax else 1.0;
         for (0..64) |j| {
             const v: f32 = @floatCast(bf(x[row * m.k + g * 64 + j]));
-            xq[row * m.k + g * 64 + j] = nearestEven(v * inv);
+            xq[row * m.k + g * 64 + j] = nearestEven(if (std.math.isFinite(inv)) v * inv else (v / amax) * 127.0);
         }
         xa[row * groups + g] = a;
         xs[row * groups + g] = sum;

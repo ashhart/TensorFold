@@ -22,3 +22,21 @@ test "compiler receipts: measured 13.2 pending rows never promote 13.0 or unseen
     unseen.launch.name = "an unmeasured future launch";
     try std.testing.expectEqualDeep(registry.none, registry.usageFor(unseen, .{ .major = 13, .minor = 2 }));
 }
+
+test "prompt int8: changed kernels stay unmeasured and decode receipts belong to exactly 13.3" {
+    for ([_][]const u8{ "w4a8_prefill tf_w4a8_quantize", "w4a8_prefill tf_w4a8_prefill" }) |name| {
+        const row = for (registry.all_cuda) |r| {
+            if (std.mem.eql(u8, r.launch.name, name)) break r;
+        } else return error.MissingInt8Record;
+        for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
+            try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
+    }
+    for (@import("measurements/qwen_lanes_133.zig").records) |receipt| {
+        const row = for (registry.all_cuda) |r| {
+            if (std.mem.eql(u8, r.launch.name, receipt.name)) break r;
+        } else return error.MissingDecodeRecord;
+        for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 4 }, .{ .major = 14, .minor = 0 } }) |version|
+            try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
+        try std.testing.expectEqualDeep(receipt.usage, registry.usageFor(row, .{ .major = 13, .minor = 3 }));
+    }
+}

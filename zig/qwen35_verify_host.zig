@@ -61,12 +61,15 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     d.api.cuLaunchKernel = Trace.launch;
     d.api.cuLaunchKernelEx = Trace.launchEx;
     var e: q.engine.Engine = undefined;
+    e.int8 = .{};
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.fns.sums = function(d, 1);
     e.affine.gemv_fn = function(d, 2);
     e.affine.group_fn = function(d, 3);
     e.affine.prefill_fn = function(d, 4);
+    e.affine.prefill22_fn = function(d, 4);
+    e.affine.half_prompt = false;
     if (@hasField(cuda.qlinear.Affine4Kernels, "verify_fn")) e.affine.verify_fn = function(d, 5);
     if (@hasField(cuda.qlinear.Affine4Kernels, "verify64_fn")) e.affine.verify64_fn = function(d, 6);
     if (@hasField(cuda.qlinear.Affine4Kernels, "verify128_fn")) e.affine.verify128_fn = function(d, 7);

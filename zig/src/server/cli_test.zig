@@ -358,3 +358,17 @@ test "--silence-mid-s is opt-in, needs the tail guard and reaches native open op
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-mid-s", "3" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "3", "--silence-mid-s", "3" }, &u));
 }
+
+test "prompt precision: parsing and request forwarding cover defaults, explicit modes and refusals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var usage: Usage = .{};
+    for ([_][]const []const u8{ &.{"m"}, &.{ "m", "--prompt-precision", "bf16" }, &.{ "m", "--prompt-precision", "int8" } }, 0..) |argv, i| {
+        const args = try parse(a, argv, &usage);
+        try std.testing.expectEqualStrings(if (i == 2) "int8" else "bf16", args.prompt_precision);
+        try std.testing.expectEqual(i == 2, (try request(a, "d", "t", args)).prompt_int8);
+    }
+    for ([_][]const []const u8{ &.{ "m", "--prompt-precision" }, &.{ "m", "--prompt-precision", "unknown" }, &.{ "m", "--prompt-precision", "fp4" } }) |argv|
+        try std.testing.expectError(error.Usage, parse(a, argv, &usage));
+}

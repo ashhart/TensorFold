@@ -24,6 +24,15 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const prompt_moe = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"prompt MoE precision:"} }));
     b.step("test-qwen35-prompt-moe-host", "Prompt expert arithmetic stays separate from verify capacity without devices").dependOn(&prompt_moe.step);
     step.dependOn(&prompt_moe.step);
+    const int8_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_w4a8_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    int8_contract.addCSourceFile(.{ .file = b.path("zig/tests/cuda/w4a8_normalize_host.c"), .flags = &.{ "-std=c11", "-ffp-contract=off" } });
+    const int8_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = int8_contract, .filters = &.{"w4a8 host:"} }));
+    b.step("test-w4a8-contract-host", "Finite normalization, independent W4A8 references and numerical controls without CUDA").dependOn(&int8_contract_run.step);
+    step.dependOn(&int8_contract_run.step);
+    const int8_prompt = b.createModule(.{ .root_source_file = b.path("zig/qwen35_prompt_int8_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 } } });
+    const int8_run = b.addRunArtifact(b.addTest(.{ .root_module = int8_prompt, .filters = &.{"prompt int8:"} }));
+    b.step("test-qwen35-prompt-int8-host", "Prompt int8 allocation and actual projection recording without devices").dependOn(&int8_run.step);
+    step.dependOn(&int8_run.step);
     const precision = b.createModule(.{ .root_source_file = b.path("zig/qwen35_draft_precision_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "lanes", .module = mods.lanes } } });
     const precision_run = b.addRunArtifact(b.addTest(.{ .root_module = precision, .filters = &.{"Draft precision:"} }));
     b.step("test-qwen35-draft-precision-host", "Draft arithmetic roles and canonical native launches without devices").dependOn(&precision_run.step);

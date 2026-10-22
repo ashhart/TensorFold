@@ -168,9 +168,9 @@ pub const Engine = struct {
         const started = profile.now(io);
         const g = try Geometry.read(gpa, io, dir);
         const d = ctx.d;
-        const e = try gpa.create(Engine);
+        const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
-        e.* = undefined;
+        errdefer e.int8.deinit();
         e.gpa = gpa;
         e.dir = try gpa.dupe(u8, dir);
         errdefer gpa.free(e.dir);
@@ -385,8 +385,19 @@ pub const Engine = struct {
     pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
         const n_out = l.outputs();
         const k = l.inputs();
+        if (prompt and e.int8.on) switch (l) {
+            .a4 => |q| {
+                // every prompt row of an int8 request takes int8, whatever the chunk's size
+                if (try @import("cuda_prompt_int8.zig").project(e, x, q, out, rows)) {
+                    if (rows <= 16 and sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
+                    return;
+                }
+                // an exceptional activation or an overflowed scale: this chunk is recomputed in the default precision
+            },
+            .an => {},
+        };
         if (prompt and rows > 16) return switch (l) {
-            .a4 => |q| if (e.int8.on) @import("cuda_prompt_int8.zig").project(e, x, q, out, rows) else e.affine.prompt(e.stream, x, q, out, rows),
+            .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
             .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
         };
         if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });

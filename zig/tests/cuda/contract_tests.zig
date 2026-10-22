@@ -27,6 +27,8 @@ const latent_k = @import("contract_latent.zig");
 const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
 
+const w4a8_k = @import("contract_w4a8.zig");
+
 const round_k = @import("contract_tree_round.zig");
 
 const act_k = @import("contract_act.zig");
@@ -123,6 +125,20 @@ pub fn run(gpu: check.Gpu) !void {
     var wrong_vit: vit_k.Glue = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &vit, .act = .none, .residual = true, .in_place = false, .wrong_bias_round = true, .ctl = try mods[5].function("tf_ctl_vit_unrounded_bias") };
     defer wrong_vit.deinit();
     try kernels.append(a, wrong_vit.kernel());
+    var w4a8_mod = try cuda.Module.load(gpu.d, kk.w4a8_prefill);
+    defer w4a8_mod.unload();
+    const w4a8_fns = try cuda.w4a8.Kernels.resolve(w4a8_mod);
+    const w4a8_configs = [_]struct { kind: w4a8_k.Kind, fault: w4a8_k.Fault }{
+        .{ .kind = .quantize, .fault = .none },       .{ .kind = .prefill, .fault = .none },
+        .{ .kind = .quantize, .fault = .guard },      .{ .kind = .prefill, .fault = .guard },
+        .{ .kind = .quantize, .fault = .wrong_code }, .{ .kind = .quantize, .fault = .wrong_scale },
+        .{ .kind = .quantize, .fault = .wrong_sum },  .{ .kind = .quantize, .fault = .narrow_sum },
+        .{ .kind = .prefill, .fault = .wrong_code },  .{ .kind = .prefill, .fault = .narrow_epilogue },
+    };
+    var w4a8_cases: [w4a8_configs.len]w4a8_k.Case = undefined;
+    for (&w4a8_cases, w4a8_configs) |*case, cfg| case.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = cfg.kind, .fault = cfg.fault, .kernels = w4a8_fns, .arena = .init(a) };
+    defer for (&w4a8_cases) |*case| case.deinit();
+    for (&w4a8_cases) |*case| try kernels.append(a, case.kernel());
     var row_list: [7]rows_k.Row = undefined;
     var nrows: usize = 0;
     defer for (row_list[0..nrows]) |*r| r.deinit();
