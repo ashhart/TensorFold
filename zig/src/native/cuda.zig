@@ -349,7 +349,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const layout = kv_pages.layout(loaded);
     var paged: ?kv_pages.Plan = null;
     const streams = if (layout) |l| blk: {
-        paged = try kv_pages.plan(F, a, l, room, o, @intCast(window), problem, host_cache) orelse return null;
+        paged = try kv_pages.plan(F, a, l, room, o, @intCast(window), problem, host_cache, kv_pages.enginePaged(loaded)) orelse return null;
         break :blk paged.?.lanes;
     } else budget.admit(grow, served.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
@@ -385,7 +385,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const kept = kv_pages.kept(F, loaded, paged, o, room, held, host_budget, host_cache);
     const cache = kept.copied;
     const cache_capacity = kv_pages.capacity(F, loaded, kept, @intCast(window));
-    const shown = try kv_pages.text(F, a, served.stream_bytes, layout, paged, @intCast(window), kept, o.kv8);
+    const shown = try kv_pages.text(F, a, served.stream_bytes, layout, paged, kv_pages.enginePaged(loaded), @intCast(window), kept, o.kv8);
     h.startup = try std.fmt.allocPrint(gpa, @import("cuda_startup.zig").format, .{
         capability, device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learn_bytes)}) else "", streams, if (streams == 1) "" else "s", shown[0], toGib(room), toGib(after.reserve), @import("cuda_startup.zig").rows(F, loaded), if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
         shown[1],   if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
