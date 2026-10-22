@@ -166,6 +166,8 @@ GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 an
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.
 Controls dispatch real source mutations that couple rows or select the wrong expert; host tests validate their witnesses.
+CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair kernel it replaces (two controls,
+one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 
 ## CUDA records per nvcc release
 

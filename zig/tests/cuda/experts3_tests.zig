@@ -21,7 +21,7 @@ fn randBf16(r: std.Random, scale: f32) u16 {
 }
 
 /// `count` experts of n by k as codes (one a byte, below 2^bits), scales and biases a group of 64.
-const Codes = struct {
+pub const Codes = struct {
     q: []u8,
     scales: []u16,
     biases: []u16,
@@ -66,7 +66,7 @@ fn upload(gpu: Gpu, bytes: []const u8) !cuda.DeviceBuffer {
     return cuda.DeviceBuffer.fromHost(gpu.d, bytes);
 }
 
-const Kernels = struct { a3: A3, a4: A4, router: cuda.grouped.Router };
+pub const Kernels = struct { a3: A3, a4: A4, router: cuda.grouped.Router };
 
 /// Pack `routed` (3-bit codes) and `shared` (4-bit) both ways: one 4-bit table, or a 3-bit table and a 4-bit one.
 const Tables = struct {
@@ -81,7 +81,7 @@ const Tables = struct {
     }
 };
 
-fn packTable(gpu: Gpu, k: Kernels, s: cuda.Stream, c: Codes, bits: usize, out: u64, m: usize, mi: usize, at: usize) !void {
+pub fn packTable(gpu: Gpu, k: Kernels, s: cuda.Stream, c: Codes, bits: usize, out: u64, m: usize, mi: usize, at: usize) !void {
     const a = gpu.gpa;
     const w = try c.words(a, bits);
     defer a.free(w);

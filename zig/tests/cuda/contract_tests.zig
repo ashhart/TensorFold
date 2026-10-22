@@ -22,6 +22,7 @@ const h3_topk_k = @import("contract_h3_topk.zig");
 const drama3_k = @import("contract_drama3.zig");
 const ck_k = @import("contract_ck.zig");
 const q35_bf16_k = @import("contract_qwen_bf16.zig");
+const e3_k = @import("contract_experts3.zig");
 const scan_k = @import("contract_scan.zig");
 const lane8_k = @import("contract_ck_lane.zig");
 const latent_k = @import("contract_latent.zig");
@@ -306,6 +307,12 @@ pub fn run(gpu: check.Gpu) !void {
             nlane += 1;
         }
     }
+    var e3_mods = try e3_k.Loaded.init(gpu);
+    defer e3_mods.deinit();
+    var e3_splits: [std.enums.values(e3_k.Fault).len]e3_k.Split = undefined;
+    for (std.enums.values(e3_k.Fault), &e3_splits) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &e3_mods.k, .fault = f };
+    defer for (&e3_splits) |*x| x.deinit();
+    for (&e3_splits) |*x| try kernels.append(a, x.kernel());
     var round_mod = try cuda.Module.load(gpu.d, kk.tree_round);
     defer round_mod.unload();
     const round_fns = try cuda.tree_round.Kernels.resolve(round_mod);
