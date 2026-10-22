@@ -1,14 +1,4 @@
-"""Against `tensorfold serve --vision` of GLM-5.3-Flash on CUDA: one image request (IMAGE as a data URL, a question
-about it, thinking off, greedy, ignore_eos, 128 tokens, seed 1234) through upstream's bench_concurrent stream:
-  - first, with drafts (a cold prompt)
-  - repeated with drafts: the server's cached_tokens says whether it resumed; its ids equal the first's (resumed = fresh)
-  - with "draft": false: its ids equal the first's (drafted = plain)
-  - three at once with drafts: each one's ids equal the first's (concurrent = solo)
-Every row's counters and hashes to OUT; one line a request, then "exit 0|1" (1 when any ids differ or a row is
-unverified). Run beside upstream's tools/bench_concurrent.py and bench_evidence.py.
-
-    python3 media_http.py BASE MODEL IMAGE OUT
-"""
+"""Compare image-request token hashes across fresh, repeated, plain and simultaneous native HTTP requests."""
 import base64
 import json
 import sys

@@ -41,6 +41,7 @@ const sumIn = pages.sumIn;
 pub const Scores = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    wrong_table: bool = false,
     shape: c.Shape = undefined,
     q: []u16 = &.{},
     w: []u16 = &.{},
@@ -71,7 +72,9 @@ pub const Scores = struct {
     }
 
     pub fn kernel(self: *Scores) g.Kernel {
-        return .{ .spec = spec(.scores), .ctx = self, .vt = &vt };
+        var declared = spec(.scores);
+        if (self.wrong_table) declared.name = "control: GLM paged scores use a swapped table";
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
     const vt = g.hooks(Scores);
@@ -120,7 +123,7 @@ pub const Scores = struct {
         self.in[1] = try self.rig.input(std.mem.sliceAsBytes(self.w));
         self.in[2] = try self.rig.input(arena) + pk;
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try self.rig.input(std.mem.sliceAsBytes(self.ids));
+        self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
         self.out = try self.rig.output(shape.rows * shape.n * 4);
         return true;
     }
@@ -179,6 +182,7 @@ pub const Scores = struct {
 pub const Tokens = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    wrong_table: bool = false,
     shape: c.Shape = undefined,
     pools: []i64 = &.{},
     ids: []i32 = &.{},
@@ -206,7 +210,9 @@ pub const Tokens = struct {
     }
 
     pub fn kernel(self: *Tokens) g.Kernel {
-        return .{ .spec = spec(.tokens), .ctx = self, .vt = &vt };
+        var declared = spec(.tokens);
+        if (self.wrong_table) declared.name = "control: GLM paged token assembly uses a swapped table";
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
     const vt = g.hooks(Tokens);
@@ -234,7 +240,7 @@ pub const Tokens = struct {
         const p: i32 = @intCast(self.at);
         self.in = try self.rig.input(std.mem.sliceAsBytes(self.pools));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try self.rig.input(std.mem.sliceAsBytes(self.ids));
+        self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
         self.tokens = try self.rig.output(shape.rows * self.width() * 4);
         self.counts = try self.rig.output(shape.rows * 4);
         return true;

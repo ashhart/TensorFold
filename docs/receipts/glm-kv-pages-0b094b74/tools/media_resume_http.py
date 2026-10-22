@@ -1,16 +1,4 @@
-"""Against `tensorfold serve --vision` of GLM-5.3-Flash on CUDA: a prompt resumed from a state after an image equals a
-fresh one. media_http.py's request is one message, so nothing before it is kept and its repeat is cold; here the image
-sits in the first of three messages (resume_http.py's form: the image as a data URL first, as media_http.py sends it,
-then a nonce and about 5,000 tokens of notes, a fixed assistant reply, a follow-up question), thinking off, greedy,
-ignore_eos, 64 tokens:
-  - first: cold (cached_tokens 0)
-  - repeated: resumed from the state the first kept (cached_tokens above 0, past the image), the same ids
-  - "draft": false: the same ids
-  - two at once: each the same ids
-Every reply's counters and hashes to OUT; one line a request, then "exit 0|1". Standard library only.
-
-    python3 media_resume_http.py PORT IMAGE OUT
-"""
+"""Compare native HTTP image-request replies across resumed, fresh, plain and simultaneous requests."""
 import base64
 import json
 import sys

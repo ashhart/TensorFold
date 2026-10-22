@@ -28,6 +28,15 @@ pub fn shuffled(a: std.mem.Allocator, rng: std.Random, n: usize) ![]i32 {
     return a.dupe(i32, all[0..n]);
 }
 
+/// A planted launch uses different physical pages while its host reference keeps the original table.
+pub fn uploadTable(r: *rig_.Rig, ids: []const i32, wrong: bool) !u64 {
+    if (!wrong) return r.input(std.mem.sliceAsBytes(ids));
+    const bad = try r.gpu.gpa.dupe(i32, ids);
+    defer r.gpu.gpa.free(bad);
+    for (bad) |*id| id.* = @intCast((@as(usize, @intCast(id.*)) + 1) % (ids.len + 3));
+    return r.input(std.mem.sliceAsBytes(bad));
+}
+
 /// The first row a call writes: a decode window across a page edge, a prompt chunk across four.
 pub fn firstRow(rows: usize) usize {
     return if (rows <= 64) 2 * rows_a_page - rows / 2 else 300;
@@ -68,6 +77,7 @@ fn plant(x: []u16, rows: usize, w: usize) void {
 pub const LatWrite = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    wrong_table: bool = false,
     shape: c.Shape = undefined,
     lat: []u16 = &.{},
     ids: []i32 = &.{},
@@ -92,7 +102,9 @@ pub const LatWrite = struct {
     }
 
     pub fn kernel(self: *LatWrite) g.Kernel {
-        return .{ .spec = spec(.lat_write), .ctx = self, .vt = &vt };
+        var declared = spec(.lat_write);
+        if (self.wrong_table) declared.name = "control: GLM paged latent write uses a swapped table";
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
     const vt = g.hooks(LatWrite);
@@ -114,7 +126,7 @@ pub const LatWrite = struct {
         const p: i32 = @intCast(self.at);
         self.in = try self.rig.input(std.mem.sliceAsBytes(self.lat));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try self.rig.input(std.mem.sliceAsBytes(self.ids));
+        self.pt = try uploadTable(&self.rig, self.ids, self.wrong_table);
         self.arena = try self.rig.scratch((pages + 3) * page_bytes);
         self.out = try self.rig.output(shape.rows * lw * 2);
         return true;
@@ -194,6 +206,7 @@ fn sum4(acc: c.Accum, order: g.Order, t: [4]f64) f64 {
 pub const PoolKeys = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    wrong_table: bool = false,
     shape: c.Shape = undefined,
     ik: []u16 = &.{},
     ig: []u16 = &.{},
@@ -224,7 +237,9 @@ pub const PoolKeys = struct {
     }
 
     pub fn kernel(self: *PoolKeys) g.Kernel {
-        return .{ .spec = spec(.pool_keys), .ctx = self, .vt = &vt };
+        var declared = spec(.pool_keys);
+        if (self.wrong_table) declared.name = "control: GLM paged pooled keys use a swapped table";
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
     const vt = g.hooks(PoolKeys);
@@ -260,7 +275,7 @@ pub const PoolKeys = struct {
         const p: i32 = @intCast(self.at);
         inline for (.{ self.ik, self.ig, self.ape }, 0..) |x, i| self.in[i] = try self.rig.input(std.mem.sliceAsBytes(x));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try self.rig.input(std.mem.sliceAsBytes(self.ids));
+        self.pt = try uploadTable(&self.rig, self.ids, self.wrong_table);
         self.arena = try self.rig.scratch((pages + 3) * page_bytes);
         self.out = try self.rig.output(self.pools * dk * 2);
         return true;

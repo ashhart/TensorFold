@@ -58,6 +58,7 @@ pub const Pages = struct {
             e.gpa.destroy(q.*.?);
             q.* = null;
         };
+        errdefer cuda.completion.drain(e.d, e.stream, "GLM page construction did not drain");
         const at: state.Paged = .{ .kv = if (p.arena) |a| a.ptr else 0, .pages = tableLen(e.capacity), .page_bytes = page };
         for (seqs) |*q| {
             if (q.* != null) return error.SlotTaken; // attach comes before any stream
@@ -88,7 +89,7 @@ pub const Pages = struct {
 
     /// The pool and the pages' arena; the paged sequences are the engine's (it frees every slot).
     pub fn deinit(p: *Pages) void {
-        p.e.stream.synchronize() catch {};
+        cuda.completion.drain(p.e.d, p.e.stream, "GLM page ownership did not drain");
         for (p.leases, p.used) |*l, u| {
             if (p.leader and u) p.pool.finish(l) else l.ids.deinit(p.gpa);
         }
@@ -127,10 +128,12 @@ pub const Pages = struct {
     /// Another rank: paged slot `slot` maps rank 0's page ids (sent with the stream's begin step).
     pub fn map(p: *Pages, slot: u32, ids: []const u32) !void {
         if (!p.paged(slot) or ids.len == 0 or ids.len > tableLen(p.e.capacity)) return error.BadStep;
+        if (p.used[slot - 1]) return error.BadStep;
         for (ids) |id| if (id >= p.pool.total()) return error.BadStep;
         const l = &p.leases[slot - 1];
         l.ids.clearRetainingCapacity();
         try l.ids.appendSlice(p.gpa, ids);
+        errdefer l.ids.clearRetainingCapacity();
         var up: Upload = .{ .p = p, .slot = slot };
         try Upload.write(&up, l.ids.items, 0);
         try p.mapped(slot, l.ids.items);

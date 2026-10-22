@@ -514,6 +514,9 @@ pub fn run(gpu: check.Gpu) !void {
         x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = if (hb == 16) glm_fns.chunks_16 else glm_fns.chunks_32, .merge = glm_fns.merge, .form = .{ .hb = hb, .sparse = sparse } };
     defer for (&glm_chunks) |*x| x.deinit();
     for (&glm_chunks) |*x| try kernels.append(a, x.kernel());
+    var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f);
+    defer glm_controls.deinit();
+    try glm_controls.append(a, &kernels);
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

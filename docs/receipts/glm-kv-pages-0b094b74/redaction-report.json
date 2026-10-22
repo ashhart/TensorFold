@@ -158,5 +158,13 @@
     "tp3/serve/r6off/server-rank1.log": 5054,
     "tp3/serve/r6off/server-rank2.log": 1047
   },
-  "undecodable_bytes_replaced_by_file": {}
+  "undecodable_bytes_replaced_by_file": {},
+  "maintainer_redactions_by_file": {
+    "tp3/chain.log": 2,
+    "single/reg/summary.log": 1,
+    "single/reg/synth.log": 1,
+    "tp3/serve/r6all/server-rank2.log": 1,
+    "tp3/serve/r6auto/server-rank2.log": 1
+  },
+  "maintainer_redaction_policy": "Remaining local numbered hosts and a named synthetic-checkpoint directory replaced by role placeholders. Two interleaved NCCL numeric host fragments replaced without assigning them to a rank. Original contributor replacement counts above retained; measured values, tokens and hashes unchanged."
 }

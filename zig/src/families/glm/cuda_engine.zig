@@ -249,7 +249,17 @@ pub const Engine = struct {
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
     pub fn bind(e: *Engine, slot: u32) !void {
         if (slot >= e.seqs.items.len) try e.seqs.appendNTimes(e.gpa, null, slot + 1 - e.seqs.items.len);
-        if (e.seqs.items[slot] == null) {
+        const made = e.seqs.items[slot] == null;
+        const previous = if (e.images != null) e.cur else null;
+        const previous_slot = if (e.images != null) e.slot else 0;
+        errdefer {
+            if (made) e.free(slot);
+            if (previous) |q| {
+                e.cur = q;
+                e.slot = previous_slot;
+            }
+        }
+        if (made) {
             const q = try e.gpa.create(Seq);
             errdefer e.gpa.destroy(q);
             q.* = .{ .st = try fw.State.initFormat(e.gpa, e.d, &e.w, e.capacity, e.settings.kv8) };
@@ -271,7 +281,7 @@ pub const Engine = struct {
 
     fn free(e: *Engine, slot: usize) void {
         const q = e.seqs.items[slot] orelse return;
-        e.stream.synchronize() catch {};
+        cuda.completion.drain(e.d, e.stream, "GLM sequence release did not drain");
         q.st.deinit();
         e.gpa.destroy(q);
         e.seqs.items[slot] = null;

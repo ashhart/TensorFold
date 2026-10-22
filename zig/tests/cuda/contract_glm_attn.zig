@@ -36,6 +36,7 @@ pub fn spec(comptime f: Form) c.Spec {
 pub const Chunks = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    wrong_table: bool = false,
     merge: cuda.Function,
     form: Form,
     shape: c.Shape = undefined,
@@ -72,10 +73,15 @@ pub const Chunks = struct {
     }
 
     pub fn kernel(self: *Chunks) g.Kernel {
-        return .{ .spec = switch (self.form.hb) {
+        var declared = switch (self.form.hb) {
             16 => if (self.form.sparse) spec(.{ .hb = 16, .sparse = true }) else spec(.{ .hb = 16, .sparse = false }),
             else => if (self.form.sparse) spec(.{ .hb = 32, .sparse = true }) else spec(.{ .hb = 32, .sparse = false }),
-        }, .ctx = self, .vt = &vt };
+        };
+        if (self.wrong_table) declared.name = switch (self.form.hb) {
+            16 => if (self.form.sparse) "control: GLM chunks16 sparse uses swapped page rows" else "control: GLM chunks16 dense uses a swapped table",
+            else => if (self.form.sparse) "control: GLM chunks32 sparse uses swapped page rows" else "control: GLM chunks32 dense uses a swapped table",
+        };
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
     const vt = g.hooks(Chunks);
@@ -135,13 +141,17 @@ pub const Chunks = struct {
         if (self.form.sparse) for (tok, self.keys) |*v, t| { // as the token lists hold them: a token's row in the pages
             v.* = @intCast(@as(usize, @intCast(self.ids[t / pages.rows_a_page])) * page_rows + t % pages.rows_a_page);
         };
+        if (self.wrong_table and self.form.sparse) for (tok) |*v| {
+            const row: usize = @intCast(v.*);
+            v.* = @intCast(((row / page_rows + 1) % (n_pages + 3)) * page_rows + row % page_rows);
+        };
         const p: i32 = @intCast(self.at);
         self.in[0] = try self.rig.input(std.mem.sliceAsBytes(self.q));
         self.in[1] = try self.rig.input(arena) + pages.part_bytes;
         self.in[2] = try self.rig.input(std.mem.sliceAsBytes(tok));
         self.in[3] = try self.rig.input(std.mem.sliceAsBytes(cnt));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try self.rig.input(std.mem.sliceAsBytes(self.ids));
+        self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
         const n = self.nch * shape.rows * heads;
         self.parts = .{ try self.rig.scratch(n * lw * 4), try self.rig.scratch(n * 4), try self.rig.scratch(n * 4) };
         self.out = try self.rig.output(shape.rows * heads * lw * 2);

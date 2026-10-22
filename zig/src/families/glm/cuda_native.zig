@@ -215,6 +215,36 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
             return error.NoVisionTower;
         };
     }
+    return @import("cuda_open_owner.zig").finish(own.e, OpenArgs{
+        .own = own,
+        .io = io,
+        .ctx = ctx,
+        .o = o,
+        .p = p,
+        .cap = cap,
+        .roce_bytes = roce_bytes,
+    }, finishRank);
+}
+
+const OpenArgs = struct {
+    own: *Owned,
+    io: std.Io,
+    ctx: *const cuda.Context,
+    o: Options,
+    p: Place,
+    cap: usize,
+    roce_bytes: usize,
+};
+
+fn finishRank(a: OpenArgs) !Loaded {
+    const own = a.own;
+    const gpa = own.gpa;
+    const io = a.io;
+    const ctx = a.ctx;
+    const o = a.o;
+    const p = a.p;
+    const cap = a.cap;
+    const roce_bytes = a.roce_bytes;
     if (o.drafter) |dd| { // before the rooms: its weights and scratch count against every rank's
         if (!o.drafts) return error.DrafterNeedsDrafts;
         own.e.drafter = try dflash_load.load(gpa, io, own.e, dd, p.rank, p.world, o.drafter_bits);

@@ -99,3 +99,7 @@ ids and token hashes kept. The TP=3 server logs keep NCCL's INFO lines as they w
 their rows without the request bodies (3 MB a record): each row has its body's sha256 and size, and
 `records-sha256.txt` the originals'. The speed runs' prompt files are not included: `reuse_served.py cold` and `ids`
 make them again. SHA256SUMS pins every published file except itself.
+
+A maintainer pass also replaces residual numbered host references, two interleaved host fragments and a local synthetic-checkpoint directory with role placeholders. The additional counts are in `redaction-report.json`; numerical results, token ids and token hashes are unchanged.
+
+Archived helper docstrings are normalized to one line for publication; their executable AST and CLI behavior are unchanged.

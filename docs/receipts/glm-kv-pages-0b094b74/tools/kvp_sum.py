@@ -1,13 +1,11 @@
-"""KV_PAGES receipts in one line each: bench_concurrent's alone/serial counts, a record's planned count, two records' bodies,
-and R3's speed (each serve's decode, 32k cold and 2k-64k cold, with the regression rule)."""
+"""Summarize KV-page token equality, cache records and paired decode or cold-prompt timings."""
 import json
 import statistics
 import sys
 
 
 def conc(path):
-    """Cells, and the alone and serial (draft: false) equal / compared counts over every cell; false when a request
-    failed or a reply differed (bench_concurrent.py ends 0 even then, so a chain reads this instead)."""
+    """Return false when any concurrent or plain comparison differs or any request fails."""
     rows = json.load(open(path))["cells"]
     a = [sum(r.get("alone", {}).get(k, 0) for r in rows) for k in ("equal", "unequal", "failed")]
     s = [sum(r.get("serial", {}).get(k, 0) for r in rows) for k in ("equal", "unequal", "failed")]
@@ -27,8 +25,7 @@ def bodies(a_path, b_path):
 
 
 def measures(d, label):
-    """A serve's times (lower is better): greedy decode s/token per prompt, the 32k cold TTFT (median of its three
-    requests) and the cold TTFT per length (median of the reps); sampled decode apart, as each run decodes its own text."""
+    """Collect greedy token timings and cold-prompt TTFT; keep sampled decode timings separate."""
     t, own, shas = {}, {}, {}
     for r in json.load(open(f"{d}/{label}-decode.json")):
         key = f"decode {r['prompt']}"
@@ -49,9 +46,7 @@ def measures(d, label):
 
 
 def speed(d, *groups):
-    """groups: main=L1,L2 head=L3,L4 [all=L5]. Slower is a time over 1.02 times the other's: a regression when both
-    head serves are slower than both main serves on one measure, or the all serve slower than both main serves. Greedy
-    tokens that differ between serves are a mismatch, a stop before any speed."""
+    """Compare main and candidate timings, printing differing greedy hashes and regressions above 1.02."""
     g = {k: v.split(",") for k, v in (x.split("=") for x in groups)}
     m = {label: measures(d, label) for v in g.values() for label in v}
     labels = [label for v in g.values() for label in v]

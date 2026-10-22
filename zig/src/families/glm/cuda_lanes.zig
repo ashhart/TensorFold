@@ -268,6 +268,10 @@ pub const Lanes = struct {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
         const pages = try self.seat(s, ids.len, s.max_new);
+        errdefer {
+            self.x.e.release(self.lanes.get(s).?.slot);
+            _ = self.lanes.remove(s);
+        }
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.beginOn(s.sampling, pages);
         s.cached = 0;
@@ -282,10 +286,11 @@ pub const Lanes = struct {
         l.held_n = 0;
         l.fill = null;
         l.first = null;
-        const pages = self.pagesFor(l.slot, prompt, max_new) catch |err| {
-            _ = self.lanes.remove(s); // nothing held or made: a LaneMemory request waits for a stream to end
-            return err;
-        };
+        errdefer {
+            if (self.x.e.pages) |p| p.close(l.slot);
+            _ = self.lanes.remove(s);
+        }
+        const pages = try self.pagesFor(l.slot, prompt, max_new);
         try self.x.bind(l.slot);
         return pages;
     }

@@ -1,13 +1,4 @@
-"""Admission on pages: each prompt alone, then all at once (an optional long one first), from a cold-prompt file.
-
-Usage: kvp_admit.py BASE MODEL PROMPTS.json OUT.json (--length L | --fit LOG) --n N [--long LONG] [--tokens T] [--tools DIR]
-PROMPTS.json is reuse_served.py cold's file. The N prompts of length L run alone, one after another, then all at once;
-with --fit, L is the longest length of which one request fits the pool rank 0's LOG reports and two do not;
-with --long, the first prompt of length LONG starts first and the N follow once its stream is admitted. Each reply is
-T tokens (ignore_eos), seeded and sampled. The report: every request's wait (sent to first token) and end, which
-requests started only after another ended (the pool held too few pages for them), and each together reply's token SHA
-against its alone run. Exit 0 only when every reply equals its alone run.
-"""
+"""Compare simultaneous KV-page requests with their solo token hashes through the native HTTP server."""
 import argparse
 import json
 import re
