@@ -73,13 +73,28 @@ export interface EngineLoadLimitOverride {
   capped: boolean
 }
 
-// Mirrors the native parse (std.fmt.parseFloat over a space/tab trim): decimal GB, above zero,
-// finite. parseFloat accepts decimal exponents and underscore digit separators, but not hex
-// (0x64 needs a p-exponent) or trailing junk ("12GB"); empty or whitespace-only text means
-// "unset" and keeps the 70% default. Native measures GB as decimal 1e9 and caps the request at
-// min(RAM, GPU working set); capBytes carries the app-visible RAM bound, so a value like 1e308
-// cannot overflow the byte result.
-const LOAD_LIMIT_TEXT = /^[+-]?(?:\d[\d_]*(?:\.[\d_]*)?|\.[\d_]+)(?:[eE][+-]?\d+)?$/
+// Mirrors the native parse (std.fmt.parseFloat over a space/tab trim, verified against Zig 0.17):
+// decimal GB, above zero, finite. parseFloat reads decimal exponents and underscore digit
+// separators, hex floats (0x64 is 100; the exponent after p is decimal digits), and the
+// case-insensitive inf/infinity/nan specials, but not trailing junk ("12GB") — the specials
+// and junk both fall out as invalid or non-finite below. An underscore is only valid between
+// two digits of the same digit run, so "1_", "1_.5" and "100__0" are refused; empty or
+// whitespace-only text means "unset" and keeps the 70% default. Native measures GB as decimal
+// 1e9 and caps the request at min(RAM, GPU working set); capBytes carries the app-visible RAM
+// bound, so a value like 1e308 cannot overflow the byte result.
+const DIGITS = String.raw`\d+(?:_\d+)*`
+const HEX_DIGITS = String.raw`[0-9a-fA-F]+(?:_[0-9a-fA-F]+)*`
+const LOAD_LIMIT_TEXT = new RegExp(
+  `^[+-]?(?:` +
+  // Decimal float: digits with optional fraction and an e/E exponent.
+  String.raw`(?:${DIGITS}(?:\.(?:${DIGITS})?)?|\.${DIGITS})(?:[eE][+-]?${DIGITS})?|` +
+  // Hex float: 0x mantissa (hex digits), optional fraction, optional p/P exponent (decimal digits —
+  // parseScientific scans base 10 even in hex, so 0x1p1e is refused while 0x1e2 reads as hex 482).
+  String.raw`0[xX](?:${HEX_DIGITS}(?:\.(?:${HEX_DIGITS})?)?|\.${HEX_DIGITS})(?:[pP][+-]?${DIGITS})?|` +
+  // Specials, case-insensitive.
+  String.raw`[iI][nN][fF](?:[iI][nN][iI][tT][yY])?|[nN][aA][nN]` +
+  `)$`,
+)
 
 export function engineLoadLimitOverride(env: Record<string, string | undefined>, modelType: string | null, capBytes: number): EngineLoadLimitOverride | null {
   const key = modelType ? ENGINE_LOAD_LIMIT_KEYS.find((candidate) => LOAD_LIMIT_FAMILIES[candidate].includes(modelType)) : undefined
@@ -90,11 +105,32 @@ export function engineLoadLimitOverride(env: Record<string, string | undefined>,
   const text = raw.replace(/^[ \t]+|[ \t]+$/g, '')
   if (!text.length) return null
   if (!LOAD_LIMIT_TEXT.test(text)) return null
-  const gb = Number(text.replaceAll('_', ''))
-  if (!Number.isFinite(gb) || gb <= 0 || !(capBytes > 0)) return null
+  const gb = loadLimitGb(text)
+  if (gb == null || !Number.isFinite(gb) || gb <= 0 || !(capBytes > 0)) return null
   const requested = gb * 1e9
   const capped = !Number.isFinite(requested) || requested >= capBytes
   return { key, gb, bytes: Math.min(Math.floor(requested), capBytes), capped }
+}
+
+// The numeric value the native parser would read. Decimal text goes through Number; hex text
+// cannot (Number('0x1p6') is NaN, and stripping underscores first would misread 0x1_0 as 10),
+// so its mantissa digits are read in base 16 — underscores dropped positionally — and the
+// optional p/P exponent scales by a power of two, exactly as std.fmt.parseFloat's hex path does.
+function loadLimitGb(text: string): number | null {
+  const negative = text.startsWith('-')
+  const body = text.replace(/^[+-]/, '')
+  if (/^0[xX]/.test(body)) {
+    const digits = body.slice(2).replace(/_/g, '')
+    const [mantissaText, exponentText = ''] = digits.split(/[pP]/, 2)
+    const [integerPart, fractionPart = ''] = mantissaText.split('.', 2)
+    let mantissa = parseInt(integerPart || '0', 16)
+    if (fractionPart) mantissa += parseInt(fractionPart, 16) / 16 ** fractionPart.length
+    const exponent = exponentText.length ? parseInt(exponentText.replace(/_/g, ''), 10) : 0
+    const value = mantissa * 2 ** exponent
+    return negative ? -value : value
+  }
+  const value = Number(body.replaceAll('_', ''))
+  return Number.isNaN(value) ? null : negative ? -value : value
 }
 
 // Known knobs offered as quick-add chips. The first two are the reported pain point;

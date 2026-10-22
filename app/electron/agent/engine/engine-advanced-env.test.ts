@@ -36,8 +36,9 @@ assert.equal(Object.keys(readEngineEnvOverrides(Object.fromEntries(Array.from({ 
 assert.deepEqual(readEngineEnvOverrides({ GOOD: '1', CRASHED: 'one\ntwo' }), { GOOD: '1' })
 
 // Native load-limit semantics (families/glm/load_plan.zig, native/cache_fit.zig, native/flashnext_batch_host.zig):
-// decimal GB (1e9), std.fmt.parseFloat-compatible text, family isolation by checkpoint model_type,
-// and a byte result capped at the machine ceiling instead of overflowing.
+// decimal GB (1e9), text accepted exactly by Zig 0.17's std.fmt.parseFloat (decimal and hex
+// floats, underscore separators only between two digits), family isolation by checkpoint
+// model_type, and a byte result capped at the machine ceiling instead of overflowing.
 const RAM = 64 * 1024 ** 3
 assert.equal(engineLoadLimitOverride({}, 'glm5_next', RAM), null)
 assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '100' }, 'glm5_next', 256 * 1024 ** 3), { key: 'GLM_LOAD_LIMIT_GB', gb: 100, bytes: 100e9, capped: false }, 'decimal GB, never 1024**3')
@@ -52,7 +53,13 @@ assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '60.5' }, 'glm5_ne
 assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '.5e2' }, 'glm5_next', RAM)?.bytes, 50e9, 'the forms std.fmt.parseFloat reads still work')
 assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '1_000' }, 'glm5_next', 2048 * 1024 ** 3)?.bytes, 1000e9, 'underscore digit separators match parseFloat')
 assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '1_0x0' }, 'glm5_next', RAM), null, 'an underscore outside digits is junk')
-for (const bad of ['0', '-5', 'lots', '', '0x64', 'Infinity', 'NaN', ' ', '+-1', '12GB']) {
+// Hex floats and the underscore rules agree with the native parser (verified against Zig 0.17):
+assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '0x64' }, 'glm5_next', 256 * 1024 ** 3)?.bytes, 100e9, 'hex floats parse exactly like the native parseFloat: 0x64 is 100')
+assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '0x1p6' }, 'glm5_next', RAM)?.bytes, 64e9, 'a hex mantissa with a p-exponent parses as the native one does')
+assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '100__0' }, 'glm5_next', RAM), null, 'double underscores are refused, as the native parser refuses them')
+assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '1_' }, 'glm5_next', RAM), null, 'a trailing underscore is refused, as the native parser refuses it')
+assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '1_.5' }, 'glm5_next', RAM), null, 'an underscore beside the point is refused, as the native parser refuses it')
+for (const bad of ['0', '-5', 'lots', '', 'Infinity', 'NaN', ' ', '+-1', '12GB']) {
   assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: bad }, 'glm5_next', RAM), null, bad)
 }
 assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '60' }, 'glm5_next', 60e9)?.capped, true, 'reaching the ceiling is reported, not silently uncapped')
