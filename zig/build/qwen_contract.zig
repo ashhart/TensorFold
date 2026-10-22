@@ -9,6 +9,14 @@ pub fn host(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void {
     }) }));
     b.step("test-qwen-served-contract-host", "FP64 Qwen contract references and corruption controls without GPU code").dependOn(&run.step);
     all.dependOn(&run.step);
+    const page_math = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/contract_qwen_pages_numerical.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "core", .module = core }},
+    }) }));
+    b.step("test-qwen-pages-contract-host", "Paged Qwen FP32 stress and non-finite references without GPU code").dependOn(&page_math.step);
+    all.dependOn(&page_math.step);
     imageTests(b, core, all);
 }
 

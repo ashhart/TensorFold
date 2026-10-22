@@ -14,7 +14,13 @@ pub const window_rows: u32 = engine.max_rows;
 /// TF_QWEN_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset or 0: a window each).
 pub fn paging() !usize {
     const v = std.c.getenv("TF_QWEN_KV_PAGES") orelse return 0;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch error.BadQwenKvPages;
+    return parsePaging(std.mem.span(v));
+}
+
+pub fn parsePaging(v: []const u8) !usize {
+    const n = std.fmt.parseInt(usize, v, 10) catch return error.BadQwenKvPages;
+    if (n != 0 and !caches.validPageTokens(n)) return error.BadQwenKvPages;
+    return n;
 }
 
 /// TF_QWEN_KV_PAGES_ALL=1: every stream on pages, the first stream's reserved window left idle (checks).
@@ -49,12 +55,16 @@ pub const Pages = struct {
     /// `streams` lanes and `pages` pages of layout `l`, made and touched now; each run holds a `ring`-byte ring.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, capacity: usize, ring: usize, streams: usize, pages: usize) !*Pages {
         const tokens: usize = l.page_tokens;
+        if (!caches.validPageTokens(tokens) or capacity > std.math.maxInt(c_int) - window_rows) return error.BadQwenKvPages;
+        if (pages > @as(usize, std.math.maxInt(c_int)) + 1) return error.BadQwenKvPages;
+        const page_bytes = try std.math.mul(usize, @intCast(l.token_bytes), tokens);
+        if (page_bytes == 0) return error.BadQwenKvPages;
+        _ = try std.math.add(u64, l.run_bytes, page_bytes - 1);
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
-        var arena = try cuda.DeviceBuffer.alloc(e.d, pages * l.pageBytes());
+        var arena = try cuda.DeviceBuffer.alloc(e.d, try std.math.mul(usize, pages, page_bytes));
         errdefer arena.free();
-        try arena.fill8(0, null); // committed now (the driver commits on first touch)
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, l.pageBytes()), .arena = arena, .lanes = &.{} };
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, page_bytes), .arena = arena, .lanes = &.{} };
         errdefer p.pool.deinit();
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
@@ -70,11 +80,15 @@ pub const Pages = struct {
             x.* = .{ .cache = c };
             made += 1;
         }
+        errdefer cuda.completion.drain(e.d, e.stream, "qwen3_5: a failed pool initialization did not drain");
+        try arena.fill8(0, e.stream.handle);
+        for (p.lanes) |x| try x.cache.paged.?.table.fill8(0, e.stream.handle);
+        try e.stream.synchronize();
         return p;
     }
 
     pub fn deinit(p: *Pages) void {
-        p.e.stream.synchronize() catch std.log.warn("qwen3_5: the pool's stream did not drain at close", .{});
+        cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: the pool did not drain at close");
         for (p.lanes) |*x| {
             if (x.used) {
                 p.pool.releaseRun(x.run, p.layout.runPages());
@@ -95,23 +109,26 @@ pub const Pages = struct {
 
     /// Whether a lane is free, the pool can promise a request's pages now and a run of them is free.
     pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
+        if (prompt > p.capacity or max_tokens > p.capacity - prompt) return false;
         for (p.lanes) |x| if (!x.used) return p.pool.fits(p.need(prompt, max_tokens)) and p.pool.findRun(p.layout.runPages()) != null;
         return false;
     }
 
     /// A free lane's cache, reset, holding the pages of `prompt` + `max_tokens` rows and a window; LaneMemory: not now.
     pub fn open(p: *Pages, prompt: usize, max_tokens: usize) !*Cache {
+        if (prompt > p.capacity or max_tokens > p.capacity - prompt) return error.InvalidQwenPrompt;
         const x = for (p.lanes) |*x| {
             if (!x.used) break x;
         } else return error.LaneMemory;
         const k = p.layout.runPages();
         const n = p.need(prompt, max_tokens) - k; // keys and values
-        if (n > mostPages(p.capacity, p.layout.page_tokens)) return error.InvalidQwenPrompt;
+        if (n > mostPages(p.capacity, p.layout.page_tokens) or n * p.layout.page_tokens > std.math.maxInt(c_int)) return error.InvalidQwenPrompt;
         try p.pool.promise(&x.lease, n + k);
         errdefer p.pool.finish(&x.lease);
         // the run first: KV pages fill from the bottom, runs from the top; a fragmented pool waits (LaneMemory)
         const run = p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
         errdefer p.pool.releaseRun(run, k);
+        errdefer cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: a failed lane open did not drain");
         var up: Upload = .{ .p = p, .cache = x.cache };
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
         try x.cache.mapRun(p.e, p.arena.ptr + run * p.layout.pageBytes(), k * p.layout.pageBytes(), p.ring);
@@ -129,8 +146,7 @@ pub const Pages = struct {
             if (x.cache == cache) break x;
         } else return false;
         if (!x.used) return true;
-        // a page another stream takes next may still be read by queued work on the engine's stream
-        p.e.stream.synchronize() catch std.log.warn("qwen3_5: a closed stream's forwards did not drain; its pages go back", .{});
+        cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: a closed stream did not drain");
         p.pool.releaseRun(x.run, p.layout.runPages());
         p.pool.finish(&x.lease);
         cache.unmapRun(p.e);
@@ -154,6 +170,7 @@ pub const Pages = struct {
         fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
             const u: *Upload = @ptrCast(@alignCast(ctx));
             const t = u.cache.paged.?.table;
+            errdefer cuda.completion.drain(u.p.e.d, u.p.e.stream, "qwen3_5: a failed table upload did not drain");
             try t.uploadAsync(from * 4, std.mem.sliceAsBytes(ids[from..]), u.p.e.stream.handle);
             try u.p.e.stream.synchronize(); // the ids slice may move as the lease grows
         }
@@ -166,4 +183,11 @@ test "a stream's pages: its prompt, reply and one more forward, no more than a f
     try std.testing.expectEqual(@as(usize, 2), l.need(100, 29, window_rows));
     try std.testing.expectEqual(@as(usize, 129), mostPages(32768, 256));
     try std.testing.expect(l.need(32768 - 1, 1, window_rows) <= mostPages(32768, 256));
+}
+
+test "KV page dimensions: pool rows fit the signed kernel argument and zero disables paging" {
+    try std.testing.expectEqual(@as(usize, 0), try parsePaging("0"));
+    try std.testing.expectEqual(@as(usize, 48), try parsePaging("48"));
+    try std.testing.expectError(error.BadQwenKvPages, parsePaging("2147483648"));
+    try std.testing.expectError(error.BadQwenKvPages, parsePaging("18446744073709551615"));
 }

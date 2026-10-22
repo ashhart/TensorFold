@@ -14,6 +14,7 @@ const vision_prompt = @import("cuda_vision_prompt.zig");
 const reuse = @import("cuda_reuse.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
 const pages_mod = @import("cuda_pages.zig");
+const cache_mod = @import("cuda_cache.zig");
 const kv_pool = @import("core").kv_pool;
 const be = lanes.backend;
 pub const round_timing = @import("cuda_round_timing.zig");
@@ -67,6 +68,10 @@ pub const Loaded = struct {
     layout: ?kv_pool.Layout = null,
 };
 
+fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
+    return std.math.add(usize, e.streamBytes(cap), try cache_mod.pageExtra(e.g, cap, test_tokens, e.kv8));
+}
+
 /// The pool's layout with a drafter (`extra` bytes a stream): DFlash2's ring and taps in the run, the rest fixed.
 pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
     const l: *Lanes = @ptrCast(@alignCast(p));
@@ -100,6 +105,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();
+    const page_test = try cache_mod.pageTest();
+    _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
     errdefer e.deinit();
@@ -113,7 +120,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .page_test = page_test, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .learns = if (o.slide) e else null,
@@ -125,7 +132,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
             break :blk facts;
         },
         .rows = @intCast(e.window_rows),
-        .stream_bytes = e.streamBytes(o.context),
+        .stream_bytes = try cacheBytes(e, o.context, page_test),
         .ctx = l,
         .deinit = release,
         .reserve = reserve,
@@ -162,7 +169,7 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     cost_adapter.identify(l, dir, .dflash);
     l.calibration = d;
     l.draft = d;
-    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter, .prepare = .{ .ctx = l, .run = calibrateDrafter, .bytes = if (l.capacity < l.e.window_rows) l.e.streamBytes(l.e.window_rows) else 0 } };
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter, .prepare = .{ .ctx = l, .run = calibrateDrafter, .bytes = if (l.capacity < l.e.window_rows) try cacheBytes(l.e, l.e.window_rows, l.page_test) else 0 } };
 }
 
 /// The MTP layer beside the checkpoint in `dir` as the drafter over engine `p` (qwen3_5_moe), its ring the window.
@@ -283,6 +290,7 @@ const Lanes = struct {
     capacity: usize,
     /// TF_QWEN_KV_PAGES's positions a page (0: no pool) and the pool `attach` made.
     page_tokens: usize = 0,
+    page_test: usize = 0,
     pages: ?*pages_mod.Pages = null,
     paged_only: bool = false,
     /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' runs.

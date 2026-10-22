@@ -4,12 +4,13 @@ const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
+const numerical = @import("contract_qwen_pages_numerical.zig");
 
-const hd = 256;
+pub const hd = 256;
 const max_chunks = 64;
 const attentions = 2; // the fixture's attention layers: the kernels run layer 1, so a page's layer offset counts
-const q_heads = 24; // the 27B's heads
-const kv_heads = 4;
+pub const q_heads = 24; // the 27B's heads
+pub const kv_heads = 4;
 const e4m3 = core.quant.fp8.e4m3;
 
 // qwen35.cuh's Geo, Seg, Ancestor and Path (src/families/qwen3_5/cuda_cache.zig mirrors them for the engine)
@@ -19,10 +20,10 @@ const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
 const Path = extern struct { n: c_int, rows: [64]c_int };
 
 /// bf16 rows (qwen35.cu), or e4m3 rows with an fp32 scale each (qwen35_kv8.cu, --kv-cache fp8).
-const Format = enum { bf16, fp8 };
+pub const Format = enum { bf16, fp8 };
 
 /// Two streams' cached positions, the window rows each adds, positions a page.
-const Case = struct { lens: [2]usize, rows: usize, ptok: usize };
+pub const Case = struct { lens: [2]usize, rows: usize, ptok: usize, mode: numerical.Mode = .random };
 const cases = [_]Case{
     .{ .lens = .{ 0, 3 }, .rows = 1, .ptok = 16 },
     .{ .lens = .{ 127, 128 }, .rows = 4, .ptok = 16 },
@@ -30,6 +31,10 @@ const cases = [_]Case{
     .{ .lens = .{ 700, 33 }, .rows = 2, .ptok = 48 }, // a page no chunk width divides
     .{ .lens = .{ 4095, 5000 }, .rows = 16, .ptok = 256 },
     .{ .lens = .{ 9000, 300 }, .rows = 3, .ptok = 512 },
+    .{ .lens = .{ 31, 128 }, .rows = 128, .ptok = 48 },
+    .{ .lens = .{ 32767, 32768 }, .rows = 1, .ptok = 256 },
+    .{ .lens = .{ 4096, 8192 }, .rows = 1, .ptok = 48, .mode = .stress },
+    .{ .lens = .{ 8, 16 }, .rows = 5, .ptok = 16, .mode = .nonfinite },
 };
 
 const Span = struct { off: usize, len: usize };
@@ -50,7 +55,7 @@ fn spans(f: Format, n: usize, a: usize, s: usize, h: usize, pos: usize) [2]Span 
 }
 
 /// One case's host data: the logical caches (cap rows a head), the window's projections, the page tables.
-const Fixture = struct {
+pub const Fixture = struct {
     c: Case,
     format: Format,
     cap: usize,
@@ -69,7 +74,7 @@ const Fixture = struct {
         return blockBytes(f.format, f.c.ptok, attentions);
     }
 
-    fn logical(f: Fixture, a: usize, s: usize, h: usize, pos: usize) [2]Span {
+    pub fn logical(f: Fixture, a: usize, s: usize, h: usize, pos: usize) [2]Span {
         return spans(f.format, f.cap, a, s, h, pos);
     }
 
@@ -142,7 +147,7 @@ const Fixture = struct {
     }
 
     /// Logical value d of (a, s, h, pos) in stream cache `cache`.
-    fn value(f: Fixture, cache: []const u8, a: usize, s: usize, h: usize, pos: usize, d: usize) f64 {
+    pub fn value(f: Fixture, cache: []const u8, a: usize, s: usize, h: usize, pos: usize, d: usize) f64 {
         const sp = f.logical(a, s, h, pos);
         return switch (f.format) {
             .bf16 => bf(std.mem.readInt(u16, cache[sp[0].off + 2 * d ..][0..2], .little)),
@@ -163,7 +168,7 @@ fn bf(x: u16) f64 {
 }
 
 /// One layout's results: the rotated queries, the attention rows, each stream's cache after rope and after keep.
-const Result = struct { q: []u8, out: []u8, after_rope: [2][]u8, after_keep: [2][]u8 };
+pub const Result = struct { q: []u8, out: []u8, after_rope: [2][]u8, after_keep: [2][]u8 };
 
 const Fns = struct { rope: cuda.Function, partial: cuda.Function, merge: cuda.Function, compact: cuda.Function };
 
@@ -294,6 +299,10 @@ fn agrees(a: std.mem.Allocator, f: Fixture, r: Result) !bool {
     return true;
 }
 
+fn checked(a: std.mem.Allocator, f: Fixture, r: Result) !bool {
+    return if (f.c.mode == .random) agrees(a, f, r) else numerical.agrees(a, f, r, f.c.mode);
+}
+
 fn eqCaches(x: [2][]u8, y: [2][]u8) bool {
     return std.mem.eql(u8, x[0], y[0]) and std.mem.eql(u8, x[1], y[1]);
 }
@@ -319,11 +328,14 @@ pub fn run(gpu: check.Gpu) !void {
             var arena = std.heap.ArenaAllocator.init(gpu.gpa);
             defer arena.deinit();
             const a = arena.allocator();
-            const f = try Fixture.make(a, c, format, 0x9a6e + i);
+            var f = try Fixture.make(a, c, format, 0x9a6e + i);
+            try numerical.fill(&f, c.mode);
             const flat = try launch(gpu, s, fns, f, null, null, a, 1);
-            try check.expect(try agrees(a, f, flat), "qwen35 pages {t}: contiguous attention off float64 at lens {any}, rows {d}", .{ format, c.lens, c.rows });
-            for (0..3) |rep| {
-                const pg = try launch(gpu, s, fns, f, .{ f.ids[0], f.ids[1] }, null, a, 2 + rep);
+            try check.expect(try checked(a, f, flat), "qwen35 pages {t}: contiguous attention off float64 at lens {any}, rows {d}", .{ format, c.lens, c.rows });
+            for (0..5) |rep| {
+                var repeated = std.heap.ArenaAllocator.init(gpu.gpa);
+                defer repeated.deinit();
+                const pg = try launch(gpu, s, fns, f, .{ f.ids[0], f.ids[1] }, null, repeated.allocator(), 2 + rep);
                 try check.sameBytes("qwen35 pages: rotated queries", pg.q, flat.q);
                 try check.sameBytes("qwen35 pages: attention rows, paged against contiguous", pg.out, flat.out);
                 try check.expect(eqCaches(pg.after_rope, flat.after_rope), "qwen35 pages {t}: rope's stores differ at lens {any}, page {d}", .{ format, c.lens, c.ptok });
@@ -343,10 +355,10 @@ pub fn run(gpu: check.Gpu) !void {
             std.mem.writeInt(u16, o[2 * (q_heads * hd + 5) ..][0..2], 0x4040, .little); // 3.0 where |o| <= 1
             var bad_r = flat;
             bad_r.out = o;
-            const caught = !(try agrees(a, f, bad_r));
+            const caught = !(try checked(a, f, bad_r));
             red_bound = red_bound or caught;
             try check.expect(caught, "qwen35 pages {t}: a planted attention row passed float64 (control missed)", .{format});
-            std.debug.print("PASS qwen35 pages {t}: lens {any}, {d} rows a stream, {d}-position pages: paged == contiguous (queries, rows, stores, keep), three repeats, float64 bound, guards\n", .{ format, c.lens, c.rows, c.ptok });
+            std.debug.print("PASS qwen35 pages {t}: lens {any}, {d} rows a stream, {d}-position pages: paged == contiguous (queries, rows, stores, keep), five repeats, float64 bound, guards\n", .{ format, c.lens, c.rows, c.ptok });
         }
         try check.expect(red_table and red_bound, "qwen35 pages {t}: a control never fired", .{format});
         std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row)\n", .{format});

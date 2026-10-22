@@ -36,9 +36,35 @@ pub const Paged = struct {
 /// TF_QWEN_KV_PAGE_TEST=n: each cache's own buffer read through a table of n-position pages in reverse order (checks).
 pub fn pageTest() !usize {
     const v = std.c.getenv("TF_QWEN_KV_PAGE_TEST") orelse return 0;
-    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadQwenPageTest;
-    if (n == 0) return error.BadQwenPageTest;
+    return parsePageTest(std.mem.span(v));
+}
+
+pub fn parsePageTest(v: []const u8) !usize {
+    const n = std.fmt.parseInt(usize, v, 10) catch return error.BadQwenPageTest;
+    if (!validPageTokens(n)) return error.BadQwenPageTest;
     return n;
+}
+
+pub fn validPageTokens(n: usize) bool {
+    return n > 0 and n <= std.math.maxInt(c_int);
+}
+
+/// Logical capacity rounded to whole pages, still representable by Seg.cap.
+pub fn cacheRows(cap: usize, tokens: usize) !usize {
+    if (cap > std.math.maxInt(c_int) or (tokens != 0 and !validPageTokens(tokens))) return error.BadQwenPageTest;
+    if (tokens == 0) return cap;
+    const rounded = try std.math.add(usize, cap, tokens - 1);
+    const rows = rounded / tokens * tokens;
+    if (rows > std.math.maxInt(c_int)) return error.BadQwenPageTest;
+    return rows;
+}
+
+/// Diagnostic paging adds padded cache rows and a device page table to a contiguous cache's budget.
+pub fn pageExtra(g: geometry.Geometry, cap: usize, tokens: usize, kv8: bool) !usize {
+    if (tokens == 0) return 0;
+    const rows = try cacheRows(cap, tokens);
+    const padding = try std.math.mul(usize, rows - cap, g.kvBytes(1, kv8));
+    return std.math.add(usize, padding, try std.math.mul(usize, rows / tokens, 4));
 }
 
 pub const Cache = struct {
@@ -71,12 +97,14 @@ pub const Cache = struct {
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, cap: usize) !Cache {
         const test_pages = try pageTest();
-        const rows = if (test_pages > 0) (cap + test_pages - 1) / test_pages * test_pages else cap;
-        var kv = try DeviceBuffer.alloc(e.d, e.g.kvBytes(rows, e.kv8));
-        errdefer kv.free();
-        try kv.fill8(0, null); // touched now, not as the first request's keys land (the driver commits on first touch)
+        const rows = try cacheRows(cap, test_pages);
+        var kv = try DeviceBuffer.alloc(e.d, try std.math.mul(usize, e.g.kvBytes(1, e.kv8), rows));
+        var own = true;
+        errdefer if (own) kv.free();
         var paged: ?Paged = null;
-        errdefer if (paged) |*p| freePaged(gpa, p);
+        errdefer if (own) {
+            if (paged) |*p| freePaged(gpa, p);
+        };
         if (test_pages > 0) {
             const n = rows / test_pages;
             const ids = try gpa.alloc(u32, n);
@@ -84,17 +112,22 @@ pub const Cache = struct {
             for (ids, 0..) |*id, i| id.* = @intCast(n - 1 - i); // a table no contiguous layout matches
             var table = try DeviceBuffer.alloc(e.d, n * 4);
             errdefer table.free();
-            try table.upload(0, std.mem.sliceAsBytes(ids));
             paged = .{ .base = kv.ptr, .table = table, .ids = ids, .tokens = test_pages };
         }
-        return fixed(gpa, e, cap, kv, paged);
+        var out = try fixed(gpa, e, cap, kv, paged);
+        own = false;
+        errdefer out.deinit(gpa);
+        errdefer cuda.completion.drain(e.d, e.stream, "qwen3_5: failed cache initialization did not drain");
+        try kv.fill8(0, e.stream.handle);
+        if (paged) |p| try p.table.uploadAsync(0, std.mem.sliceAsBytes(p.ids), e.stream.handle);
+        try e.stream.synchronize();
+        return out;
     }
 
     /// A pool lane's cache: a table of `pages` pages at `base`; its state, log and tap ring a run mapped at open.
     pub fn initPaged(gpa: std.mem.Allocator, e: *Engine, pages: usize, tokens: usize, base: u64) !Cache {
         var table = try DeviceBuffer.alloc(e.d, pages * 4);
         errdefer table.free();
-        try table.fill8(0, null);
         const none = try DeviceBuffer.alloc(e.d, 0);
         return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
     }
@@ -141,7 +174,6 @@ pub const Cache = struct {
     fn fixed(gpa: std.mem.Allocator, e: *Engine, cap: usize, kv: DeviceBuffer, paged: ?Paged) !Cache {
         var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
         errdefer state.free();
-        try state.fill8(0, null);
         const adaptive = recurrent.enabled(e);
         var before: ?DeviceBuffer = null;
         errdefer if (before) |*b| b.free();
@@ -149,14 +181,18 @@ pub const Cache = struct {
         var log: DeviceBuffer = .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true };
         if (!adaptive) log = try DeviceBuffer.alloc(e.d, e.g.logBytes(engine.most_window));
         errdefer log.free();
-        if (!adaptive) try log.fill8(0, null);
         var tap: ?DeviceBuffer = null;
         errdefer if (tap) |*t| t.free();
         if (e.n_taps > 0) {
             tap = try DeviceBuffer.alloc(e.d, e.tapBytes());
-            try tap.?.fill8(0, null);
         }
         const logits = try gpa.alloc(u16, e.g.vocab);
+        errdefer gpa.free(logits);
+        errdefer cuda.completion.drain(e.d, e.stream, "qwen3_5: failed cache state initialization did not drain");
+        try state.fill8(0, e.stream.handle);
+        if (!adaptive) try log.fill8(0, e.stream.handle);
+        if (tap) |t| try t.fill8(0, e.stream.handle);
+        try e.stream.synchronize();
         const scratch = if (adaptive) recurrent.bound(e) else 0;
         e.rec_scratch.cap += scratch;
         return .{ .owner = if (adaptive) &e.rec_scratch else null, .scratch = scratch, .state = state, .before = before, .kv = kv, .paged = paged, .tap = tap, .log = log, .cap = cap, .logits = logits };
@@ -252,4 +288,19 @@ pub const Cache = struct {
 fn freePaged(gpa: std.mem.Allocator, p: *Paged) void {
     p.table.free();
     if (p.own_ids) gpa.free(p.ids);
+}
+
+test "KV page dimensions: diagnostic rows fit the signed kernel argument" {
+    try std.testing.expectEqual(@as(usize, 48), try parsePageTest("48"));
+    try std.testing.expectError(error.BadQwenPageTest, parsePageTest("0"));
+    try std.testing.expectError(error.BadQwenPageTest, parsePageTest("2147483648"));
+    try std.testing.expectError(error.BadQwenPageTest, parsePageTest("18446744073709551615"));
+}
+
+test "KV page dimensions: diagnostic admission includes its padded rows and device table" {
+    const g: geometry.Geometry = .{ .hidden = 256, .intermediate = 256, .layers = 2, .vocab = 8, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 64, .linear = @splat(false) };
+    try std.testing.expectEqual(@as(usize, 96), try cacheRows(65, 48));
+    for ([_]bool{ false, true }) |fp8| try std.testing.expectEqual(31 * g.kvBytes(1, fp8) + 8, try pageExtra(g, 65, 48, fp8));
+    try std.testing.expectError(error.BadQwenPageTest, cacheRows(2147483647, 48));
+    try std.testing.expectError(error.BadQwenPageTest, cacheRows(std.math.maxInt(usize), 48));
 }
