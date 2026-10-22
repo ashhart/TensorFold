@@ -1,5 +1,5 @@
 2026-10-20 02:29:27 bin-bf07ac07 bf07ac07 bui /hub/models--nvidia--GLM-5.3-Flash-FP4-Local/snapshots/76348ddb2be2e35e39ecfc00e75dc07703f4f3d5 parallel 4 context 40960  env TF_GLM_MM=0; drop cache: host-a advised 53635 files; Cached 3.7 GiB / host-b advised 361 files; Cached 3.7 GiB / host-c advised 34477 files; Cached 2.3 GiB
-2026-10-20 02:29:36 NCCL id copied to peer-b and peer-c after 6 s
+2026-10-20 02:29:36 NCCL id copied to host-b and host-c after 6 s
 2026-10-20 02:34:01 health 200 after 271 s
 host-a used 69 available 52 GiB
 host-b used 69 available 52 GiB

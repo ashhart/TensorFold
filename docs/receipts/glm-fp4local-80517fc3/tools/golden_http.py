@@ -4,7 +4,7 @@ are named by the server's tensorfold.token_sha256 (sha256 of the decimal ids joi
   - drafts and "draft": false give the same ids (drafted = plain): a gate
   - --golden FILE: the ids equal an earlier run's file (F2 against upstream 1.1.0, case B against case A): a gate
   - --z0 TOKENIZER_DIR: where the text leaves Z0's (2.x's ids, decoded), recorded only: the Zig engine leaves them at
-    three close starts of thinking (<redacted-plan>'s E5, the same on two TP=2 host pairs)
+    three close starts of thinking (<plan>'s E5, the same on two TP=2 host pairs)
 The ids go to OUT. One line a request, then "exit 0|1".
 
     python3 golden_http.py PORT DC_JSON OUT [--golden FILE] [--z0 TOKENIZER_DIR]
