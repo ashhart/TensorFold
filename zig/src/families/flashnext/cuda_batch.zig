@@ -12,6 +12,8 @@ const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
 const nvfp4_tile = @import("cuda_nvfp4_tile.zig");
+const zs = @import("cuda_zero_slice.zig");
+const ops = @import("cuda_batch_ops.zig");
 
 const layers_n = wt.layers_n;
 const linear_n = wt.linear_n;
@@ -121,46 +123,21 @@ pub fn Pass(comptime Tri: type) type {
 
         /// qmm.cu's arithmetic over m rows into out (bf16) or part (fp32 K slices); returns the slices (1 when folded).
         pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !usize {
-            if (part == self.s.part and sk > 1 and (w.native == null or m * w.n > self.s.cap * dims)) self.s.part_zero = false;
-            // the writeback adds part's cap-stride zero slice in place of the sk - 1 cleared ones (zero_slices)
-            if (part == self.s.part and sk > 1 and self.zero_slices and w.native != null) {
-                try self.k.native_lane.matmulF32(self.stream, x, w.k, m, w.native.?, part, self.s.native_part);
-                return 1;
-            }
+            if (try zs.lane(self.k, self.stream, self.s, self.zero_slices, x, w, part, m, sk)) |one| return one;
             return tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
         }
 
         pub fn sumSlices(self: *Self, part: u64, out: u64, bf16: bool, n: usize, sk: usize) !void {
-            var a: cuda.Args = .{};
-            a.add(part);
-            a.add(out);
-            a.add(@as(c_int, @intFromBool(bf16)));
-            a.add(@as(c_longlong, @intCast(n)));
-            a.add(cint(sk));
-            try cuda.launch.launch(self.k.sum, .{ .grid = .{ .x = @intCast(cdiv(n, 256)) }, .block = .{ .x = 256 } }, self.stream, &a);
+            return ops.sumSlices(self.k, self.stream, part, out, bf16, n, sk);
         }
 
         pub fn shiftWindow(self: *Self, win: u64, rows_ptr: u64, stride: usize, n: usize, taps: usize, c: usize) !void {
-            var a: cuda.Args = .{};
-            a.add(win);
-            a.add(rows_ptr);
-            a.add(@as(c_longlong, @intCast(stride)));
-            a.add(cint(n));
-            a.add(cint(taps));
-            a.add(cint(c));
-            try cuda.launch.launch(self.k.shift, .{ .grid = .{ .x = @intCast(cdiv(c, 256)) }, .block = .{ .x = 256 } }, self.stream, &a);
+            return ops.shiftWindow(self.k, self.stream, win, rows_ptr, stride, n, taps, c);
         }
 
         /// rows x width 16-bit columns from src (src_pitch values a row) to dst (dst_pitch); dst 0: none.
         pub fn copyCols(self: *Self, src: u64, src_pitch: usize, dst: u64, dst_pitch: usize, width: usize, rows: usize) !void {
-            if (dst == 0 or rows == 0) return;
-            var a: cuda.Args = .{};
-            a.add(src);
-            a.add(@as(c_longlong, @intCast(src_pitch)));
-            a.add(dst);
-            a.add(@as(c_longlong, @intCast(dst_pitch)));
-            a.add(cint(width));
-            try cuda.launch.launch(self.k.copy_cols, .{ .grid = .{ .x = @intCast(cdiv(width, 256)), .y = @intCast(rows) }, .block = .{ .x = 256 } }, self.stream, &a);
+            return ops.copyCols(self.k, self.stream, src, src_pitch, dst, dst_pitch, width, rows);
         }
 
         /// The adds to layer `l`'s MoE output: a training pass's, else the model's pockets; null: none there.
@@ -458,8 +435,7 @@ pub fn Pass(comptime Tri: type) type {
             const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
             if (lw.native_experts) |*native| {
                 const owned = &native.experts;
-                // one rank writes every slot; only a rank that skips the shared one needs zeros for the sum over ranks
-                if (native.world != 1 or native.rank != 0) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
+                if (zs.clearsY(native.world, native.rank)) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
                 const pt = nvfp4_tile.size(n);
                 try self.k.router.route(self.stream, s.picks, pairs, e, pt, plan);
                 const items = cuda.grouped.maxItems(pairs, e, pt);
@@ -560,18 +536,16 @@ pub fn Pass(comptime Tri: type) type {
                 }
                 try self.writeback(0, n);
                 try self.readoutKeep(lw.attn_hc, 0, n, keep.attn_hc);
-                // one rank, nothing kept, zero slice intact: the writeback adds one zero slice, not out_sk - 1 zeroed
-                self.zero_slices = self.s.part_zero and keep.mix_branch == 0 and self.m.collective == null and lw.out.native != null;
+                self.zero_slices = zs.usable(self.s.part_zero, keep.mix_branch, self.m.collective != null, lw.out.native != null);
                 if (lw.linear) {
                     try self.gdnBlock(lw, layer, wt.linearIndex(layer), keep);
                 } else {
                     try self.attnBlockKeep(lw, wt.attnIndex(layer), keep);
                 }
                 if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, self.out_slices);
-                if (self.zero_slices) {
-                    try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", s.cap * dims, n, dims, streams, 4, 1, 1, 2);
-                } else try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", n * dims, n, dims, streams, 4, 1, 1, self.out_slices);
+                const sl = zs.slices(self.zero_slices, s.cap, n, self.out_slices);
                 self.zero_slices = false;
+                try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", sl.stride, n, dims, streams, 4, 1, 1, sl.count);
                 try self.readoutKeep(lw.mlp_hc, 0, n, keep.mlp_hc);
                 try self.moeBlockKeep(lw, keep);
                 try self.moeAdds(layer, keep);
