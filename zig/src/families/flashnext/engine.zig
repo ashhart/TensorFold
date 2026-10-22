@@ -153,6 +153,11 @@ pub const Engine = struct {
         return @import("engine_rounds.zig").rounds(e);
     }
 
+    /// One DeltaNet state a layer in the engine's own rounds, kept rows replayed (engine_rounds.zig).
+    pub fn keepStates(e: *Engine) !void {
+        return @import("engine_rounds.zig").keepStates(e);
+    }
+
     /// Host-driven calls (prompt chunks, the head's first drafts) read the host's metadata buffers.
     pub fn hostMode(e: *Engine) void {
         const m = e.m;

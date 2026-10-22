@@ -55,3 +55,13 @@ pub fn rounds(e: *Engine) !void {
         e.gpu_slots[j].kvmeta = .{ .b = r.ar.b, .off = b + 32 * 4 };
     }
 }
+
+/// fz_gdn keeping one state a layer, kept rows replayed (the recorded bits): without tensor units and shared rounds only.
+pub fn keepStates(e: *Engine) !void {
+    const r = e.r;
+    if (r.gdn_kept != null or r.tp != null or r.device.tensorUnits()) return;
+    r.gdn_pipe = r.gdn_pipe orelse try fz.gdn_step.compile(r, false);
+    r.gdn_kept = try fz.gdn_step.compile(r, true);
+    const n_lin: usize = 36;
+    e.m.recs = .{ .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) }, .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) } };
+}
