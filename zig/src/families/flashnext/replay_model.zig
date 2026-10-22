@@ -53,9 +53,15 @@ pub const Model = struct {
     rec_slot: usize = 0, // the record this window writes (the other holds the previous window's)
     marks: ?Marks = null, // DeltaNet states at marks inside a prompt chunk, as a chunk ending there would leave them
     vis: ?*const vis_prompt.VisPrompt = null, // an image prompt's rows and positions while its prompt pass runs
+    // A shared session's image stream in the standard frame (vis_prompt): each indexer block's three positions
+    // [cap / 4 + 1, 3] (int32) for fz_idx_pool_pos, and the rows past its last image rotate at their slot plus `delta`.
+    bpos: ?Buf = null,
+    delta: i32 = 0,
 
     pub fn reset(m: *Model) void {
         m.pos = 0;
+        m.bpos = null;
+        m.delta = 0;
         m.state = 0;
         m.state_row = 0;
         for (&m.layers) |*L| if (L.linear) {

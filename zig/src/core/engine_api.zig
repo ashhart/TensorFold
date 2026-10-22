@@ -470,6 +470,7 @@ pub const Lone = struct {
     sampled: bool = false, // it drives sampled streams too
     logprobs: bool = false, // it gives each token its logprob row too
     structures: bool = false, // it masks each window's rows by the stream's grammar too
+    images: bool = true, // it takes image requests too (false: they stay in the lane core)
     // thinking budgets above this and loop guards: it hands the stream over before a forced close (0: never)
     min_budget: u32 = 0,
     resumes: bool = false, // it takes the lane core's stream back between rounds (LoneHooks.resumed); else only opens

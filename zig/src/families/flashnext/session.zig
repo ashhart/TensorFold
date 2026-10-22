@@ -13,6 +13,7 @@ pub const Session = struct {
     draft_select: [fz.MAXR]?fz.Select = @splat(null),
     draft_ids: Buf = undefined,
     shape: mtl.Buffer = undefined,
+    blocks: Buf = undefined, // an image stream's indexer block positions [cap / 4 + 1, 3] (int32), the standard frame's (m.bpos)
     last: Buf = undefined,
     held: [fz.MAXR]u32 = @splat(0),
     held_n: usize = 0,
@@ -48,6 +49,7 @@ pub const Session = struct {
         s.m.t.kvmeta = try s.words(gpa, e, &.{ 0, @intCast(s.m.cap), 1 });
         s.m.t.ple_ids = try s.buffer(gpa, e, fz.MAXR * 16 * 4);
         s.shape = (try s.words(gpa, e, &.{ 1, 2, @intCast(s.m.cap), 256 })).b;
+        s.blocks = try s.buffer(gpa, e, blockCount(s.m.cap) * 3 * 4);
         s.last = try s.buffer(gpa, e, fz.WIDE * 2);
         for (&s.select) |*sel| {
             sel.* = try s.selector(gpa, e);
@@ -66,6 +68,18 @@ pub const Session = struct {
             .n_add = try s.buffer(gpa, e, 4),
         };
         return s;
+    }
+
+    fn blockCount(cap: usize) usize {
+        return cap / 4 + 1;
+    }
+
+    /// An image stream in the standard frame: every indexer block's three positions (its first row's: the frame's below
+    /// the last image's end, else the slot plus `v.delta`) into `blocks`; the rounds then pool and rotate by them.
+    pub fn imageBlocks(s: *Session, v: *const fz.vis_prompt.VisPrompt) void {
+        v.blockPositions(s.blocks.b.slice(i32, blockCount(s.m.cap) * 3), 0, blockCount(s.m.cap));
+        s.m.bpos = s.blocks;
+        s.m.delta = v.delta;
     }
 
     pub fn buffer(s: *Session, gpa: std.mem.Allocator, e: *Engine, size: usize) !Buf {
@@ -175,6 +189,14 @@ pub const Session = struct {
         d.ple.hist = m.ple.hist;
         d.mtp.pos = m.mtp.pos;
         d.mtp.drafted = m.mtp.drafted;
+        d.delta = m.delta;
+        d.bpos = null;
+        if (m.bpos != null) { // the block positions it has, then the blocks past them at their slot plus delta
+            const out = dst.blocks.b.slice(i32, blockCount(d.cap) * 3);
+            @memcpy(out[0 .. blockCount(m.cap) * 3], s.blocks.b.slice(i32, blockCount(m.cap) * 3));
+            for (blockCount(m.cap)..blockCount(d.cap)) |b| @memcpy(out[b * 3 ..][0..3], &@as([3]i32, @splat(@as(i32, @intCast(4 * b)) + m.delta)));
+            d.bpos = dst.blocks;
+        }
         dst.held = s.held;
         dst.held_n = s.held_n;
         dst.first = s.first;
@@ -278,6 +300,6 @@ pub const Session = struct {
     /// Metadata and selectors are owned even when the original engine supplies this slot's caches.
     pub fn overhead(capacity: usize) u64 {
         return fz.CATCH * (fz.MAXR * ((capacity + 3) / 4) * 4 + fz.MAXR * fz.KW * 4 + 4096) +
-            fz.MAXR * 17 * 64 + 64 + (2 << 20);
+            fz.MAXR * 17 * 64 + 64 + @max(blockCount(capacity) * 3 * 4, 64) + (2 << 20);
     }
 };

@@ -133,21 +133,40 @@ pub const Select = struct {
 
     /// One layer's catch-up, its first block in slot k (the GPU reads it when it runs the dispatch).
     pub fn catchLayer(s: *Select, r: *Run, L: anytype, eps: Buf, log2base: Buf, upto: usize, k: usize) !void {
+        return s.catchLayerAt(r, L, eps, log2base, upto, k, null);
+    }
+
+    /// catchLayer with an image stream's block positions (`bpos`, the standard frame; null: each block at 4 b).
+    pub fn catchLayerAt(s: *Select, r: *Run, L: anytype, eps: Buf, log2base: Buf, upto: usize, k: usize, bpos: ?Buf) !void {
         if (upto <= L.pooled_n) return;
         const at = catchSlot(s.starts.b.slice(i32, CATCH * 64), k, L.pooled_n);
-        try r.bindV(s.pool, &.{ L.raw, .{ .b = s.starts.b, .off = at }, L.pool, eps, log2base }, &.{.{ .b = L.pooled.b, .off = L.pooled.off + L.pooled_n * 128 * 2 }});
-        r.enc.dispatchThreads(mtl.Size.of(128, upto - L.pooled_n, 1), mtl.Size.of(128, 1, 1));
+        try s.poolBlocks(r, L, .{ .b = s.starts.b, .off = at }, eps, log2base, upto - L.pooled_n, bpos);
         if (!r.serial) r.enc.barrier();
         L.pooled_n = upto;
     }
 
+    /// Blocks [L.pooled_n, + count) pooled: q4_idx_pool at 4 b, or fz_idx_pool_pos at an image stream's block positions
+    /// (`bpos`, the standard frame); `start` holds the first block for the GPU.
+    fn poolBlocks(s: *Select, r: *Run, L: anytype, start: Buf, eps: Buf, log2base: Buf, count: usize, bpos: ?Buf) !void {
+        const out: Buf = .{ .b = L.pooled.b, .off = L.pooled.off + L.pooled_n * 128 * 2 };
+        if (bpos) |bp| {
+            r.enc.setPipeline(r.pool_pos_pipe);
+            for ([_]Buf{ L.raw, start, L.pool, eps, log2base, bp, out }, 0..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
+        } else try r.bindV(s.pool, &.{ L.raw, start, L.pool, eps, log2base }, &.{out});
+        r.enc.dispatchThreads(mtl.Size.of(128, count, 1), mtl.Size.of(128, 1, 1));
+    }
+
     /// Pool the blocks the window completes, score every complete block for each row, select each row's keys.
     pub fn encode(s: *Select, r: *Run, L: anytype, iq: Buf, eps: Buf, log2base: Buf, pos: usize, rows: usize) !void {
+        return s.encodeAt(r, L, iq, eps, log2base, pos, rows, null);
+    }
+
+    /// encode with an image stream's block positions (`bpos`, the standard frame; null: each block at 4 b).
+    pub fn encodeAt(s: *Select, r: *Run, L: anytype, iq: Buf, eps: Buf, log2base: Buf, pos: usize, rows: usize, bpos: ?Buf) !void {
         const last = (pos + rows) / 4;
         if (last > L.pooled_n) {
             s.start.b.slice(i32, 1)[0] = @intCast(L.pooled_n); // read at run time: one window a command buffer
-            try r.bindV(s.pool, &.{ L.raw, s.start, L.pool, eps, log2base }, &.{.{ .b = L.pooled.b, .off = L.pooled.off + L.pooled_n * 128 * 2 }});
-            r.enc.dispatchThreads(mtl.Size.of(128, last - L.pooled_n, 1), mtl.Size.of(128, 1, 1));
+            try s.poolBlocks(r, L, s.start, eps, log2base, last - L.pooled_n, bpos);
             if (!r.serial) r.enc.barrier();
             L.pooled_n = last;
         }

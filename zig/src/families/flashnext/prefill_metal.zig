@@ -51,6 +51,7 @@ pub fn begin(b: anytype, stream: *lanes.Stream, preferred: ?usize) !fill.State {
         errdefer owned.arena.deinit();
         owned.vis = try images.build(images.ctx, owned.arena.allocator(), stream.images, prompt.len, s.m.pos);
         owner = owned;
+        s.imageBlocks(owned.vis); // the standard frame: its blocks' positions and the slot offset past its last image
     }
     const at: u32 = @intCast(s.m.pos);
     stream.fill_at.store(at, .monotonic);

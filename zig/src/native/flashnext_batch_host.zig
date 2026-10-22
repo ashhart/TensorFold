@@ -138,11 +138,10 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     eng.snap_pool.max = plan.budget_bytes;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     // FLASHNEXT_NO_LONE=1 keeps even lone requests on shared rounds.
-    if (eng.r.gdn_kept == null and std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun };
-    if (vis) |v| {
-        h.host.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
-        h.host.frame_key = tf.flashnext_replay.vis_prompt.frameKey; // the shifted frame: an image moves the rows before it
-    }
+    // An image stream stays on the shared rounds: the engine's own rounds rotate every row at its slot (the shifted frame).
+    if (eng.r.gdn_kept == null and std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun, .images = false };
+    // The standard frame (buildImages): an image moves no row before it, so the cache keys carry no frame.
+    if (vis) |v| h.host.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
     h.cache = null;
     if (plan.budget_bytes > 0) {
         h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = Backend.snapBytes, .save = Backend.snapSave, .restore = Backend.snapRestore, .drop = Backend.snapDrop, .charged = Backend.snapCharged, .spare = Backend.snapSpare, .trim = Backend.snapTrim, .reuses = Backend.snapReuses } }, .{ .lookahead = 1, .planned = true, .warm = .on }, plan.budget_bytes);
@@ -173,7 +172,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
 
 fn buildImages(ctx: *anyopaque, a: std.mem.Allocator, imgs: []const lanes.stream.Image, prompt_len: usize, from: usize) anyerror!*VisPrompt {
     const h: *Host = @ptrCast(@alignCast(ctx));
-    return images.build(h.vis.?, h.eng, a, imgs, prompt_len, from);
+    return images.build(h.vis.?, h.eng, a, imgs, prompt_len, from, true); // the standard frame
 }
 
 fn releaseImages(_: *anyopaque, p: *VisPrompt) void {

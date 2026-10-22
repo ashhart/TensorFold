@@ -176,7 +176,7 @@ pub fn segMixer(s: *Seg, m: *Model, i: usize) !void {
             if (sparse) {
                 sl.nax_scores = p.scores_nax;
                 defer sl.nax_scores = null;
-                try sl.encode(r, L, b.iq, t.eps, t.log2base, s.pos, rows);
+                try sl.encodeAt(r, L, b.iq, t.eps, t.log2base, s.pos, rows, m.bpos);
             }
             p.bind(p.sattn, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, b.p, t.scale });
             const cap: i32 = @intCast(m.cap);
@@ -186,7 +186,7 @@ pub fn segMixer(s: *Seg, m: *Model, i: usize) !void {
             p.barrier();
         } else if (sparse) {
             var sl = &p.sel.?;
-            try sl.encode(r, L, b.iq, t.eps, t.log2base, s.pos, rows);
+            try sl.encodeAt(r, L, b.iq, t.eps, t.log2base, s.pos, rows, m.bpos);
             try p.partials();
             const dense_ids = r.shapes.get("IDS_shape").?;
             try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
