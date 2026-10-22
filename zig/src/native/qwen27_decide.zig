@@ -6,8 +6,7 @@ const q = tf.qwen27;
 const lb = @import("qwen27_lanes.zig");
 const joint = @import("qwen27_joint.zig");
 
-/// A queued decision's GPU work (LaneHost runs it alone): score reads the row after its prompt; decide, each branch's last row.
-/// `head` loaded: `labels` are instead option-final token positions, each read of the pass's post-final-norm hidden rows.
+/// A queued decision's GPU work on the idle host: score the row after its prompt; decide, each branch's last row.
 pub fn run(b: *lb.Metal, head: ?*joint.Head, window: u32, task: *api.DecisionTask) error{ Failed, Refused }!void {
     switch (task.*) {
         .score => |*s| s.out = try score(b, head, s.prompt, s.labels, s.logits, s.mass),
@@ -15,8 +14,7 @@ pub fn run(b: *lb.Metal, head: ?*joint.Head, window: u32, task: *api.DecisionTas
     }
 }
 
-/// `labels`' logits at the row after `prompt`: a prefill's `.last` head leaves them in logits row 0.
-/// A JointHead instead: `labels` are each option's final-token position, scored on that row's hidden state.
+/// `labels`' logits at the row after `prompt` (`.last` head, logits row 0); a JointHead scores option-final rows.
 fn score(b: *lb.Metal, head: ?*joint.Head, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
     const r = b.runner;
     if (prompt.len == 0 or prompt.len > r.capacity or logits.len < labels.len) return error.Failed;
@@ -30,9 +28,7 @@ fn score(b: *lb.Metal, head: ?*joint.Head, prompt: []const u32, labels: []const 
     return read(row0(r), labels, logits, mass);
 }
 
-/// Each branch's label logits at its last row after the shared trunk: the trunk's state is kept once
-/// and restored a branch at a time; every branch's rows stand on the same trunk state.
-/// A JointHead instead: `labels` are option-final positions in the whole sequence (trunk's length on a branch's rows).
+/// Each branch's label logits at its last row after the shared trunk; a `head` reads option-final positions.
 fn decide(b: *lb.Metal, head: ?*joint.Head, window: u32, d: *api.Decision) error{ Failed, Refused }!void {
     const r = b.runner;
     if (d.pictures.len > 0) return refuse(d, "decisions with pictures are not served by this engine yet");
@@ -66,9 +62,7 @@ fn decide(b: *lb.Metal, head: ?*joint.Head, window: u32, d: *api.Decision) error
     reset(b) catch {}; // slot 0 stands empty for the next stream, whatever its prompt was
 }
 
-/// `ids` prefilled in chunks (each chunk's rows alone stand in `input`): a `positions` inside the chunk
-/// is that option's final-token position, base the rows' offset in the whole sequence (0 for a prompt,
-/// the trunk's length on a branch); the JointHead's score lands in `logits`.
+/// `ids` prefilled in chunks: each `positions` entry is an option's final-token position offset by `base`.
 fn forward(h: *joint.Head, b: *lb.Metal, session: q.session.Session, base: usize, ids: []const u32, positions: []const u32, logits: []f64) error{Failed}!void {
     const r = b.runner;
     for (positions) |p| if (p < base or p - base >= ids.len) return error.Failed;

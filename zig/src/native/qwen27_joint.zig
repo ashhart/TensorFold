@@ -1,4 +1,4 @@
-//! A JointHead beside the 27B's trunk: post-final-norm hidden rows at option-final token positions in, one score an option out.
+//! A JointHead beside the 27B's trunk: option-final hidden rows in, one score an option out.
 const std = @import("std");
 const tf = @import("tensorfold");
 const st = tf.safetensors;
@@ -11,7 +11,7 @@ pub const Config = struct {
     layers: usize, // Linear→GELU residual blocks
 };
 
-/// The head: `proj` (dim→width), `layers` of Linear→GELU + residual, `out` (width→1); bf16 words copied out of the file.
+/// The head: `proj` (dim→width), Linear→GELU residual layers, `out` (width→1); bf16 words read from the file.
 pub const Head = struct {
     gpa: Allocator,
     io: std.Io,

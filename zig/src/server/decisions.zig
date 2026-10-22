@@ -369,8 +369,7 @@ fn labelRefuse(cx: *Cx, label: []const u8) errors.Refused {
     return cx.fail(.request, "the answer label {s} is not one distinct token after the chat prompt for this tokenizer, so this model is not supported", .{pyrepr.repr(cx.a, .{ .string = label }) catch label});
 }
 
-/// A side head's `labels`: each option's final-token position in `prompt`, its line's last token;
-/// the lines sit one a row between `input` and the closing inside `content` (`base` it in `prompt`).
+/// A side head's `labels`: each option's final-token position in `prompt` (its line's last token, `base`d).
 fn optionPositions(srv: *Server, cx: *Cx, prompt: []const u8, prompt_ids: []const u32, input_len: usize, lines: []const []const u8, content: []const u8) errors.Refused![]u32 {
     const a = cx.a;
     const base = std.mem.indexOf(u8, prompt, content) orelse return positionRefuse(cx, lines[0]);

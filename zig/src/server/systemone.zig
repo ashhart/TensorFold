@@ -273,7 +273,7 @@ const Format = struct {
         }
     }
 
-    /// A side head's readout: one group an option, the absolute index of its line's last token (`base` the trunk's length).
+    /// A side head's readout: one group an option, its line's last token's index (`base` the trunk's length).
     fn positions(f: *Format, text_: []const u8, ids: []const u32, ends: []const usize, base: usize) errors.Refused![]const []const u32 {
         const a = f.cx.a;
         const ats = try a.alloc(u32, ends.len);
@@ -376,8 +376,7 @@ fn questionText(a: Allocator, out: *std.Io.Writer.Allocating, q: Question, codes
             try w.writeAll("\n\nReply with the option code only.");
         },
         .noul => {
-            // the template shows the descriptions only when one side has one, then both;
-            // a side head needs each option rendered: the bare answer words stand in when no text is given
+            // the template shows descriptions when both sides carry one; a side head renders text or bare words
             const any = q.texts.len == 2 and (q.texts[0] != null and q.texts[0].? != .null or q.texts[1] != null and q.texts[1].? != .null);
             if (any or positions) for ([_][]const u8{ "Yes", "No" }, 0..) |name, i| {
                 const t: ?Value = if (i < q.texts.len) q.texts[i] else null;

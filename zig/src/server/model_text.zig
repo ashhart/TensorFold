@@ -73,8 +73,7 @@ pub const Text = struct {
         return f(t.ctx, a, id);
     }
 
-    /// `ids` are `text`'s encoding: for each of `ats` (a span's end offset, ascending) the index of
-    /// the token covering its last byte, or false when a token's own text and `text` disagree.
+    /// `ids` are `text`'s encoding: for each of `ats` (ascending ends) the covering token's index, or false.
     pub fn indexAt(t: Text, a: Allocator, text: []const u8, ids: []const u32, ats: []const usize, out: []u32) Allocator.Error!bool {
         var i: usize = 0;
         var end: usize = 0;

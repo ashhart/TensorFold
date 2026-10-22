@@ -125,7 +125,7 @@ pub const flags = [_]Flag{
     .{ .name = "--recall-dir", .native = true },
     .{ .name = "--recall-gib", .native = true },
     .{ .name = "--recall-read-only", .kind = .store_true, .native = true },
-    // the native server's own: a decision side-head (joint_head_config.json + bf16 safetensors) scoring option-final rows
+    // the native server's own: a side head (joint_head_config.json + bf16 safetensors) on option-final rows
     .{ .name = "--joint-head", .native = true },
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
