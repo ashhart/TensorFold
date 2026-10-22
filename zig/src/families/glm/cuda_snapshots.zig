@@ -26,10 +26,9 @@ pub fn agree(e: anytype, budget: u64) !void {
 
 pub fn bytes(e: anytype, at: usize) u64 {
     const head: ?usize = if (e.mtp) @min(e.capacity, std.math.add(usize, at, @import("cuda_state.zig").window_rows) catch return std.math.maxInt(u64)) else null;
-    // a paged sequence holds its request's rows; the engine's own holds every position, in the same bytes a prefix
-    const st = if (e.cur.st.table == 0) &e.cur.st else &e.seqs.items[0].?.st;
-    const p = layout.Plan.init(st, &e.c, at, head) catch return std.math.maxInt(u64);
-    return pages.rounded(p.len) catch std.math.maxInt(u64);
+    // a paged sequence holds its request's rows: its prefix is counted to the capacity, in a window's bytes
+    const n = layout.Plan.size(&e.cur.st, &e.c, e.capacity, at, head) catch return std.math.maxInt(u64);
+    return pages.rounded(n) catch std.math.maxInt(u64);
 }
 
 pub fn keep(e: anytype) !u64 {

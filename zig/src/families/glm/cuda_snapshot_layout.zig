@@ -13,11 +13,23 @@ pub const Plan = struct {
     count: usize = 0,
     len: usize = 0,
     ids: []const u32 = &.{}, // a paged sequence's pages in row order
+    sizing: bool = false, // `size`: the rows counted, not read, so no page need be mapped
 
     pub fn init(st: *const State, c: *const Config, at: usize, head: ?usize) !Plan {
+        return make(st, c, at, head, false);
+    }
+
+    /// A prefix's bytes at `at`, rows to `capacity` counted held or not (a paged sequence holds its request's alone).
+    pub fn size(st: *const State, c: *const Config, capacity: usize, at: usize, head: ?usize) !usize {
+        var whole = st.*;
+        whole.capacity = capacity;
+        return (try make(&whole, c, at, head, true)).len;
+    }
+
+    fn make(st: *const State, c: *const Config, at: usize, head: ?usize, sizing: bool) !Plan {
         if (at > st.capacity or st.caches.len > @import("config.zig").max_layers) return error.SnapshotShape;
         if (st.rings.len != 2 * (st.caches.len + 1)) return error.SnapshotShape;
-        var p: Plan = .{ .ids = st.pages };
+        var p: Plan = .{ .ids = st.pages, .sizing = sizing };
         // a paged sequence's caches are its pages: its fields up to them end at its first ring
         const first = if (st.table != 0) st.rings[0] else if (st.caches.len > 0) st.caches[0].lc else st.mtp_caches.lc;
         if (first < st.arena.buf.ptr) return error.SnapshotShape;
@@ -50,7 +62,7 @@ pub const Plan = struct {
     fn addCache(p: *Plan, st: *const State, x: cache.Caches, live: u64, len: usize, span: usize) !void {
         if (x.pt == 0) return p.add(st, live, len);
         if (len == 0) return;
-        if ((len - 1) / span >= p.ids.len or p.count == p.parts.len) return error.SnapshotShape;
+        if ((!p.sizing and (len - 1) / span >= p.ids.len) or p.count == p.parts.len) return error.SnapshotShape;
         p.len = try std.math.add(usize, p.len, len);
         p.parts[p.count] = .{ .live = live, .len = len, .span = span, .page = x.ps };
         p.count += 1;

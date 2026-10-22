@@ -559,3 +559,32 @@ test "GLM snapshots: while a paged stream is current, a prefix's size is the eng
     defer f.e.cur = &f.seq;
     try t.expectEqual(own, f.e.stateBytes(4096));
 }
+
+test "GLM snapshots: with the engine's own sequence on pages too, a prefix's size past a stream's pages is a window's" {
+    var d = rec.init();
+    var f: Fixture = undefined;
+    try f.init(&d, 0, 2, true);
+    defer f.deinit();
+    const ats = [_]usize{ 511, 4096, 16000 };
+    var sizes: [ats.len]u64 = undefined;
+    for (ats, &sizes) |at, *s| s.* = f.e.stateBytes(at); // the fixture's sequence holds a whole window
+    const c = f.e.c;
+    const page = 2 * (512 * c.kv_lora * 2 + 128 * c.i_dim * 2);
+    const ids = [_]u32{ 1, 0 };
+    var kv = try cuda.DeviceBuffer.alloc(&d, ids.len * page);
+    defer kv.free();
+    var paged = f.seq;
+    paged.st = try pagedSeq(&d, &f, kv.ptr, page, &ids);
+    defer paged.st.deinit();
+    var own = f.seq; // the engine's own, on pages and holding none: no whole window anywhere
+    own.st = try pagedSeq(&d, &f, kv.ptr, page, &.{});
+    defer own.st.deinit();
+    f.e.seqs = .empty;
+    defer f.e.seqs.deinit(t.allocator);
+    try f.e.seqs.append(t.allocator, &own);
+    defer f.e.cur = &f.seq;
+    for ([_]*@TypeOf(f.seq){ &paged, &own }) |cur| {
+        f.e.cur = cur;
+        for (ats, sizes) |at, s| try t.expectEqual(s, f.e.stateBytes(at));
+    }
+}
