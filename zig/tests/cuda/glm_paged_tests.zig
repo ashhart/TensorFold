@@ -9,8 +9,9 @@ const Gpu = check.Gpu;
 const lengths = [_]usize{ 511, 512, 513, 2047, 2048, 2049, 5000 };
 /// A window of 8,192 and a verify window, as cuda_native.capacity makes it.
 const capacity = 8256;
-const paged_slot = 1;
-const twin_slot = 3; // past the paged sequences: a whole window, as before the pool
+const paged_slot = 0; // the engine's own sequence, on pages from its init
+const shuffled = 1; // takes and gives back pages between prompts, so slot 0's come out of the free list's order
+const twin_slot = 3; // past the paged sequences: a whole window, as without TF_KV_PAGES
 
 /// `glm-paged-check`: pages taken out of order and NaN-filled; prompt, windows across page edges, keeps and drafts.
 pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, id_path: []const u8) !void {
@@ -23,10 +24,11 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
     const comm = try lanes_tests.openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
-    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
+    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
         std.debug.print("REFUSE {s}\n", .{problem});
         return err;
     };
+    set.pages = true; // every rank's engine makes its own sequence on pages, as TF_KV_PAGES does
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = capacity, .mtp = true, .settings = set });
     defer e.deinit();
     var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, capacity);
@@ -52,11 +54,10 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
     var unordered: usize = 0;
     var compared: usize = 0;
     for (lengths, 0..) |len, k| {
-        // slot 2 takes and gives back pages between prompts, so slot 1's come out of the free list's order
         if (k % 2 == 0) {
-            try x.bind(2);
-            _ = try pages.open(2, (k + 1) * 512 - 100, 0);
-        } else x.release(2) catch {};
+            try x.bind(shuffled);
+            _ = try pages.open(shuffled, (k + 1) * 512 - 100, 0);
+        } else x.release(shuffled) catch {};
         const ids = try a.alloc(u32, len);
         for (ids, 0..) |*u, i| u.* = @intCast(100 + (i * 7919 + k * 31) % 5000);
         const held = try pages.open(paged_slot, len, 64);
@@ -96,7 +97,7 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
         try x.release(paged_slot);
         try x.release(twin_slot);
     }
-    x.release(2) catch {};
+    x.release(shuffled) catch {};
     const c = pages.pool.census();
     if (!pages.pool.idle() or c.free != c.total) {
         std.debug.print("FAIL paged: the pool is not idle after every stream ended (free {d} of {d}, promised {d})\n", .{ c.free, c.total, c.promised });
@@ -107,5 +108,5 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
         failed = true;
     }
     if (failed) return error.TestFailed;
-    check.pass("pages at TP={d}: {d} prompts at the pages' edges (511 to 5,000 tokens) and {d} window rows equal their twins' logits, tokens and drafts byte for byte, pages out of order ({d} jumps) and NaN before use; the pool idle after", .{ world, lengths.len, compared, unordered });
+    check.pass("pages at TP={d}: on the engine's own sequence, {d} prompts at the pages' edges (511 to 5,000 tokens) and {d} window rows equal their twins' logits, tokens and drafts byte for byte, pages out of order ({d} jumps) and NaN before use; the pool idle after", .{ world, lengths.len, compared, unordered });
 }
