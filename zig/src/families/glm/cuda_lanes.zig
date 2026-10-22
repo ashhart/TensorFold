@@ -275,8 +275,7 @@ pub const Lanes = struct {
         return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
     }
 
-    /// The stream's slot, its pages, then its sequence bound: a slot past the paged sequences (TF_KV_PAGES=all with as
-    /// many streams at once as lanes) waits for one, LaneMemory, before binding would make it a whole window.
+    /// The stream's slot, its pages, then its sequence: a slot past the paged ones waits before binding makes a window.
     pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize) ![]const u32 {
         const l = try self.claim(s);
         l.pending_rows = null;
