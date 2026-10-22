@@ -1,5 +1,6 @@
 //! Real two-process/two-device NCCL sums and bounded disconnect/timeout behavior over the framed control link.
 const std = @import("std");
+const builtin = @import("builtin");
 const cuda = @import("cuda");
 const flash = @import("flashnext");
 const check = @import("check.zig");
@@ -45,8 +46,7 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
             if (std.mem.eql(u8, mode, "eof")) {
                 _ = std.c.shutdown(link.fd, std.posix.SHUT.RDWR);
             } else {
-                const delay: std.c.timespec = .{ .sec = 0, .nsec = 600_000_000 };
-                _ = std.c.nanosleep(&delay, null);
+                sleepSixTenths();
             }
             check.pass("rank 1: injected {s}", .{mode});
             return;
@@ -118,4 +118,12 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
 fn completeSum(c: *flash.collective.Collective, stream: cuda.Stream, values: u64, count: usize) !void {
     try c.sum(stream, values, count);
     try c.finish(stream);
+}
+
+/// The injected 0.6 s peer delay. Windows' CRT has neither nanosleep nor a real std.c.timespec,
+/// and this test never runs there.
+fn sleepSixTenths() void {
+    if (builtin.os.tag == .windows) return;
+    const delay: std.c.timespec = .{ .sec = 0, .nsec = 600_000_000 };
+    _ = std.c.nanosleep(&delay, null);
 }
