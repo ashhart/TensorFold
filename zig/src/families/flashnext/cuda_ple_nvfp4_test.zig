@@ -109,3 +109,35 @@ test "NVFP4 PLE requires its global table scale" {
     defer a.free(path);
     try std.testing.expectError(error.MissingTensor, ple.Ngram.init(a, io, path));
 }
+
+test "PLE gather: NVFP4 pool and caller preserve every output byte at partition edges" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try fixture(tmp.dir, true);
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    var g = try ple.Ngram.init(a, io, path);
+    defer g.deinit();
+    var tokens: [513]u32 = undefined;
+    for (&tokens, 0..) |*v, i| v.* = @intCast((i * 11 + 3) % 100);
+    var expected: [513 * 32]u16 = undefined;
+    var actual: [513 * 32]u16 = undefined;
+    var want_xs: [513]f32 = undefined;
+    var got_xs: [513]f32 = undefined;
+    for ([_]usize{ 0, 1, 3, 4, 5, 16, 17, 63, 64, 129, 513 }) |n| {
+        var want_history = [_]i64{99};
+        var got_history = want_history;
+        {
+            const parked = g.pool;
+            g.pool = null;
+            defer g.pool = parked;
+            try g.rows(&want_history, tokens[0..n], expected[0 .. n * 32], want_xs[0..n]);
+        }
+        @memset(&actual, 0xdead);
+        try g.rows(&got_history, tokens[0..n], actual[0 .. n * 32], got_xs[0..n]);
+        try std.testing.expectEqualSlices(u16, expected[0 .. n * 32], actual[0 .. n * 32]);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want_xs[0..n]), std.mem.sliceAsBytes(got_xs[0..n]));
+        try std.testing.expectEqualSlices(i64, &want_history, &got_history);
+        for (actual[n * 32 ..]) |v| try std.testing.expectEqual(@as(u16, 0xdead), v);
+    }
+}

@@ -44,13 +44,23 @@ pub const Pool = struct {
 
     /// Runs parts 0..parts-1 of `task` and returns when all are done: the first failed part's error, in part order.
     pub fn run(p: *Pool, parts: usize, task: Task) !void {
+        return p.runWith(parts, task, Spawn{});
+    }
+
+    const Spawn = struct {
+        fn start(_: @This(), p: *Pool, w: usize) !std.Thread {
+            return std.Thread.spawn(.{}, work, .{ p, w });
+        }
+    };
+
+    fn runWith(p: *Pool, parts: usize, task: Task, spawner: anytype) !void {
         if (parts == 0) return;
         if (parts > max_parts) return error.TooManyParts;
         p.mutex.lockUncancelable(p.io);
         defer p.mutex.unlock(p.io);
         while (p.spawned < parts - 1) {
             p.go[p.spawned] = .init(0);
-            p.threads[p.spawned] = try std.Thread.spawn(.{}, work, .{ p, p.spawned });
+            p.threads[p.spawned] = try spawner.start(p, p.spawned);
             p.spawned += 1;
         }
         p.task = task;
@@ -136,4 +146,162 @@ test "parts run once each across calls of changing size, and the first failed pa
     try std.testing.expectError(error.First, p.run(64, task));
     try p.run(5, task);
     try std.testing.expectError(error.TooManyParts, p.run(max_parts + 1, task));
+}
+
+const t = std.testing;
+
+fn waitFlag(flag: *const std.atomic.Value(bool)) !void {
+    const before = std.Io.Clock.awake.now(t.io).toNanoseconds();
+    while (!flag.load(.acquire)) {
+        if (std.Io.Clock.awake.now(t.io).toNanoseconds() - before > 5 * std.time.ns_per_s)
+            return error.TestWorkerTimeout;
+        std.Thread.yield() catch {};
+    }
+}
+
+test "PLE pool: partial spawn failure leaves an idle owner reusable and destroyable" {
+    const Fail = struct {
+        calls: usize = 0,
+        most: usize,
+
+        fn start(f: *@This(), p: *Pool, w: usize) !std.Thread {
+            f.calls += 1;
+            if (w == f.most) return error.PlantedThreadFailure;
+            return Pool.Spawn.start(.{}, p, w);
+        }
+    };
+    const Job = struct {
+        hits: std.atomic.Value(u32) = .init(0),
+
+        fn run(ctx: *const anyopaque, _: usize) !void {
+            const j: *@This() = @ptrCast(@alignCast(@constCast(ctx)));
+            _ = j.hits.fetchAdd(1, .monotonic);
+        }
+    };
+    const p = try Pool.create(t.allocator, t.io);
+    defer p.destroy();
+    var job: Job = .{};
+    const task: Task = .{ .ctx = &job, .run = Job.run };
+    var fail: Fail = .{ .most = 1 };
+    try t.expectError(error.PlantedThreadFailure, p.runWith(4, task, &fail));
+    try t.expectEqual(@as(usize, 1), p.spawned);
+    try t.expectEqual(@as(usize, 2), fail.calls);
+    try t.expectEqual(@as(u32, 0), job.hits.load(.acquire));
+    try p.run(2, task);
+    try t.expectEqual(@as(u32, 2), job.hits.load(.acquire));
+    fail.most = 3;
+    try t.expectError(error.PlantedThreadFailure, p.runWith(8, task, &fail));
+    try t.expectEqual(@as(usize, 3), p.spawned);
+    try t.expectEqual(@as(u32, 2), job.hits.load(.acquire));
+    try p.run(4, task);
+    try t.expectEqual(@as(u32, 6), job.hits.load(.acquire));
+}
+
+test "PLE pool: overlapping callers serialize publication and drain before returning" {
+    const Job = struct {
+        p: *Pool,
+        first: bool,
+        release: *std.atomic.Value(bool),
+        entered: *std.atomic.Value(bool),
+        first_live: *std.atomic.Value(bool),
+        attempted: std.atomic.Value(bool) = .init(false),
+        crossed: std.atomic.Value(bool) = .init(false),
+        hits: [8]std.atomic.Value(u32) = @splat(.init(0)),
+        failure: ?anyerror = null,
+
+        fn part(ctx: *const anyopaque, i: usize) !void {
+            const j: *@This() = @ptrCast(@alignCast(@constCast(ctx)));
+            if (j.first and i == 0) {
+                j.first_live.store(true, .release);
+                defer j.first_live.store(false, .release);
+                j.entered.store(true, .release);
+                try waitFlag(j.release);
+            } else if (!j.first and j.first_live.load(.acquire)) {
+                j.crossed.store(true, .release);
+            }
+            _ = j.hits[i].fetchAdd(1, .monotonic);
+        }
+
+        fn call(j: *@This()) void {
+            j.attempted.store(true, .release);
+            j.p.run(8, .{ .ctx = j, .run = part }) catch |err| {
+                j.failure = err;
+            };
+        }
+    };
+    const p = try Pool.create(t.allocator, t.io);
+    defer p.destroy();
+    var release: std.atomic.Value(bool) = .init(false);
+    var entered: std.atomic.Value(bool) = .init(false);
+    var first_live: std.atomic.Value(bool) = .init(false);
+    var first: Job = .{ .p = p, .first = true, .release = &release, .entered = &entered, .first_live = &first_live };
+    var second: Job = .{ .p = p, .first = false, .release = &release, .entered = &entered, .first_live = &first_live };
+    var one: ?std.Thread = try std.Thread.spawn(.{}, Job.call, .{&first});
+    var two: ?std.Thread = null;
+    defer {
+        release.store(true, .release);
+        if (one) |th| th.join();
+        if (two) |th| th.join();
+    }
+    try waitFlag(&entered);
+    two = try std.Thread.spawn(.{}, Job.call, .{&second});
+    try waitFlag(&second.attempted);
+    for (&second.hits) |*h| try t.expectEqual(@as(u32, 0), h.load(.acquire));
+    release.store(true, .release);
+    one.?.join();
+    one = null;
+    two.?.join();
+    two = null;
+    try t.expectEqual(@as(?anyerror, null), first.failure);
+    try t.expectEqual(@as(?anyerror, null), second.failure);
+    try t.expect(!second.crossed.load(.acquire));
+    for (&first.hits, &second.hits) |*a, *b| {
+        try t.expectEqual(@as(u32, 1), a.load(.acquire));
+        try t.expectEqual(@as(u32, 1), b.load(.acquire));
+    }
+}
+
+test "PLE pool: every failed part finishes and delayed part zero keeps error precedence" {
+    const Job = struct {
+        last: std.atomic.Value(bool) = .init(false),
+        hits: [4]std.atomic.Value(u32) = @splat(.init(0)),
+        fail: bool = true,
+
+        fn run(ctx: *const anyopaque, i: usize) !void {
+            const j: *@This() = @ptrCast(@alignCast(@constCast(ctx)));
+            if (j.fail and i == 0) try waitFlag(&j.last);
+            _ = j.hits[i].fetchAdd(1, .monotonic);
+            if (j.fail) {
+                if (i == 3) j.last.store(true, .release);
+                return if (i == 0) error.FirstPart else error.LaterPart;
+            }
+        }
+    };
+    const p = try Pool.create(t.allocator, t.io);
+    defer p.destroy();
+    var job: Job = .{};
+    const task: Task = .{ .ctx = &job, .run = Job.run };
+    try t.expectError(error.FirstPart, p.run(4, task));
+    for (&job.hits) |*h| try t.expectEqual(@as(u32, 1), h.load(.acquire));
+    job.fail = false;
+    try p.run(4, task);
+    for (&job.hits) |*h| try t.expectEqual(@as(u32, 2), h.load(.acquire));
+}
+
+test "PLE pool: empty oversized and allocation-failed calls leave no worker ownership" {
+    var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
+    try t.expectError(error.OutOfMemory, Pool.create(failing.allocator(), t.io));
+    const p = try Pool.create(t.allocator, t.io);
+    defer p.destroy();
+    const Unused = struct {
+        fn run(_: *const anyopaque, _: usize) !void {
+            return error.TaskMustNotRun;
+        }
+    };
+    const byte: u8 = 0;
+    const task: Task = .{ .ctx = &byte, .run = Unused.run };
+    try p.run(0, task);
+    try t.expectError(error.TooManyParts, p.run(max_parts + 1, task));
+    try t.expectEqual(@as(usize, 0), p.spawned);
+    try t.expectEqual(@as(u64, 0), p.state.load(.acquire));
 }
