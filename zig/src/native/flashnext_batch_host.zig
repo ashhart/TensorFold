@@ -137,8 +137,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     plan.over_cap = final.over_cap;
     eng.snap_pool.max = plan.budget_bytes;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
-    // FLASHNEXT_NO_LONE=1 keeps even lone requests on shared rounds.
-    // An image stream stays on the shared rounds: the engine's own rounds rotate every row at its slot (the shifted frame).
+    // FLASHNEXT_NO_LONE=1 keeps lone requests on shared rounds; image streams always (engine rounds: slot positions).
     if (eng.r.gdn_kept == null and std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun, .images = false };
     // The standard frame (buildImages): an image moves no row before it, so the cache keys carry no frame.
     if (vis) |v| h.host.info_.vision = images.offer(v, h, prepareImage, prepareVideo);

@@ -145,8 +145,7 @@ pub const Select = struct {
         L.pooled_n = upto;
     }
 
-    /// Blocks [L.pooled_n, + count) pooled: q4_idx_pool at 4 b, or fz_idx_pool_pos at an image stream's block positions
-    /// (`bpos`, the standard frame); `start` holds the first block for the GPU.
+    /// Pools blocks [L.pooled_n, + count): q4_idx_pool at 4 b, or fz_idx_pool_pos at an image stream's `bpos`.
     fn poolBlocks(s: *Select, r: *Run, L: anytype, start: Buf, eps: Buf, log2base: Buf, count: usize, bpos: ?Buf) !void {
         const out: Buf = .{ .b = L.pooled.b, .off = L.pooled.off + L.pooled_n * 128 * 2 };
         if (bpos) |bp| {

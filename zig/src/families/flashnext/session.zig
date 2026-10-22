@@ -74,8 +74,7 @@ pub const Session = struct {
         return cap / 4 + 1;
     }
 
-    /// An image stream in the standard frame: every indexer block's three positions (its first row's: the frame's below
-    /// the last image's end, else the slot plus `v.delta`) into `blocks`; the rounds then pool and rotate by them.
+    /// An image stream's indexer block positions (the standard frame) into `blocks`: the rounds pool by them.
     pub fn imageBlocks(s: *Session, v: *const fz.vis_prompt.VisPrompt) void {
         v.blockPositions(s.blocks.b.slice(i32, blockCount(s.m.cap) * 3), 0, blockCount(s.m.cap));
         s.m.bpos = s.blocks;

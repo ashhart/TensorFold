@@ -136,8 +136,7 @@ pub fn budgetSettings(io: std.Io, dir: []const u8, vision: ?api.VisionOpen, pair
     return memory.withPlan(settings, p.memory);
 }
 
-/// The request's images through the tower, but those ending by `from` (resumed past): the prompt pass's rows and frame,
-/// the standard one with `standard` (the shared sessions': a prefix keeps its positions), else the shifted one.
+/// The request's images through the tower (not those ending by `from`), framed standard (`standard`) or shifted.
 pub fn build(v: *Vision, eng: *fx.Engine, a: Allocator, images: []const api.Image, prompt_len: usize, from: usize, standard: bool) !*vp.VisPrompt {
     const merge = v.c.merge;
     var total: usize = 0;

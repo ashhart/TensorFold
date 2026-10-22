@@ -1,7 +1,7 @@
 //! The complete finite scalar domain of the six Flash Next contract roles.
 const window = @import("window_config.zig");
 const rotary = @import("rotary_config.zig");
-// positioned: fz_idx_pool_pos, an image stream's indexer blocks at their first rows' three positions (any slot, M-RoPE axes)
+// positioned: fz_idx_pool_pos, image streams' indexer blocks at their first rows' three positions (M-RoPE axes)
 pub const Role = enum { mrope, target, mtp, pooled, absolute, positioned };
 pub const Mode = enum { normal, yarn };
 pub const maximum = window.maximum;

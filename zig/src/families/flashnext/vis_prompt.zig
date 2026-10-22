@@ -1,8 +1,4 @@
-//! An image prompt in the replay engine: the tower's rows for its images, where they sit, and the frame they rotate in.
-//! Two frames: the shifted one (`frame`) moves every row below the last image's end by the images' shift, so the rows
-//! past it rotate at their slot; the standard one (`standardFrame`, the shared sessions') keeps get_rope_index's own
-//! positions, so a prefix's rows sit where any longer prompt puts them and its state resumes as text does, and the rows
-//! past the last image rotate at their slot plus `delta` (at most 0).
+//! An image prompt in the replay engine: its tower rows, where they sit, and its frame (shifted, or the standard one).
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -33,8 +29,7 @@ pub const VisPrompt = struct {
         }
     }
 
-    /// The indexer's blocks [from, to): each block's three positions (its first row's) at `out[b * 3 ..]`, as fz_idx_pool_pos
-    /// reads them (a text block's three alike, so it keeps q4_idx_pool's bits at that position).
+    /// Blocks [from, to): each block's first row's three positions at `out[b * 3 ..]`, as fz_idx_pool_pos reads them.
     pub fn blockPositions(v: *const VisPrompt, out: []i32, from: usize, to: usize) void {
         for (from..to) |b| @memcpy(out[b * 3 ..][0..3], &v.at(4 * b));
     }
@@ -96,8 +91,7 @@ pub fn frame(gpa: std.mem.Allocator, spans: []const Span) ![]i32 {
     return frameBy(gpa, spans, shiftOf(spans));
 }
 
-/// get_rope_index's own positions below the last image's end (the standard frame): a row's depend only on the images
-/// before it; the rows past the last image rotate at their slot minus shiftOf(spans) (VisPrompt.delta).
+/// get_rope_index's own positions (the standard frame): a prefix keeps them as images follow; later rows take `delta`.
 pub fn standardFrame(gpa: std.mem.Allocator, spans: []const Span) ![]i32 {
     return frameBy(gpa, spans, 0);
 }
@@ -181,7 +175,7 @@ test "the standard frame: a prefix's positions whatever images follow, rows past
     for (9..12) |slot| try std.testing.expectEqual(v1.at(slot), v2.at(slot));
     try std.testing.expectEqual([3]i32{ 6, 6, 6 }, v1.at(9));
     try std.testing.expectEqual([3]i32{ 11, 11, 11 }, v2.at(16)); // 16 - 5
-    // block positions: a block's first row's (rows 0, 4, 8, 12, 16: text, image 1's tokens 1 and 5, image 2's first, past)
+    // block positions, each its first row's: text, image 1's tokens 1 and 5, image 2's first, past the frame
     var bp: [5 * 3]i32 = undefined;
     v2.blockPositions(&bp, 0, 5);
     try std.testing.expectEqualSlices(i32, &.{ 0, 0, 0, 3, 3, 4, 3, 4, 5, 9, 9, 9, 11, 11, 11 }, &bp);
