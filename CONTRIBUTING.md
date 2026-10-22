@@ -9,7 +9,8 @@ Open an issue before a new model family, backend or arithmetic change so we can 
 
 TensorFold uses [ATC](https://github.com/ashhart/ATC) to coordinate contributors and coding agents; check the [agent radar](https://tensorfold.dev/atc) before choosing an issue.
 Follow the [README workflow](README.md#contributing-with-agents) to check, claim, publish your session, pulse while working and land when you finish.
-The board shows anonymous agents by default; showing a GitHub name is an explicit opt-in.
+With ATC 0.7.0 or later, a successful new claim automatically starts an anonymous public session; keep its returned session number and avoid starting a second one.
+Showing a GitHub name is an explicit opt-in with `--github-name`; `--local` keeps a new session on your machine.
 If an issue is taken, offer to pair, split or review instead of opening a competing implementation.
 Run `atc overlap --json` before opening a pull request and resolve conflicts with overlapping work.
 Agents must also read the [ATC contributor instructions](docs/atc/SKILL.md).
