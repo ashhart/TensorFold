@@ -25,6 +25,9 @@ pub const Kernels = struct {
     mod: module.Module,
     layer_norm_fn: module.Function,
     layer_norm_wide_fn: module.Function,
+    g4_qkv_fn: module.Function,
+    g4_gelu_fn: module.Function,
+    g4_pool_fn: module.Function,
     pointwise_fn: module.Function,
     bias_fn: module.Function,
     bias_act_fn: module.Function,
@@ -40,6 +43,9 @@ pub const Kernels = struct {
             .mod = mod,
             .layer_norm_fn = try mod.function("tf_vit_layer_norm"),
             .layer_norm_wide_fn = try mod.function("tf_vit_layer_norm_wide"),
+            .g4_qkv_fn = try mod.function("tf_vit_g4_qkv"),
+            .g4_gelu_fn = try mod.function("tf_vit_g4_gelu_mul"),
+            .g4_pool_fn = try mod.function("tf_vit_g4_pool"),
             .pointwise_fn = try mod.function("tf_vit_pointwise"),
             .bias_fn = try mod.function("tf_vit_bias"),
             .bias_act_fn = try mod.function("tf_vit_bias_act"),
@@ -71,6 +77,36 @@ pub const Kernels = struct {
         a.add(int(width));
         a.add(eps);
         try go(k.layer_norm_wide_fn, s, rows, 1, &a);
+    }
+
+    /// Gemma 4's tower: qkv [P, 3 H D] in place, q and k RMSNorm and 2D RoPE (cos, sin [P, D]), v weightless; D <= 96.
+    pub fn g4Qkv(k: *const Kernels, s: Stream, qkv: u64, qw: u64, kw: u64, cs: u64, sn: u64, rows: usize, heads: usize, dim: usize, eps: f32) !void {
+        if (dim > 96 or dim % 4 != 0) return error.RowShape;
+        if (rows == 0) return;
+        var a: Args = .{};
+        for ([_]u64{ qkv, qw, kw, cs, sn }) |p| a.add(p);
+        for ([_]usize{ rows, heads, dim }) |n| a.add(int(n));
+        a.add(eps);
+        try launch_.launch(k.g4_qkv_fn, .{ .grid = .{ .x = @intCast(rows * heads * 3), .y = 1, .z = 1 }, .block = .{ .x = 32 } }, s, &a);
+    }
+
+    /// out [count] = bf16(bf16(gelu_tanh(gate)) up), torch's GeGLU on bf16 rows.
+    pub fn g4GeluMul(k: *const Kernels, s: Stream, gate: u64, up: u64, out: u64, count: usize) !void {
+        var a: Args = .{};
+        for ([_]u64{ gate, up, out }) |p| a.add(p);
+        a.add(@as(i64, @intCast(count)));
+        try go(k.g4_gelu_fn, s, blocks(count, threads), 1, &a);
+    }
+
+    /// out [gh gw / 9, C]: x [gh, gw, C]'s 3 x 3 block means, times sqrt(C), standardized by bias and scale.
+    pub fn g4Pool(k: *const Kernels, s: Stream, x: u64, b: u64, scale: u64, out: u64, gh: usize, gw: usize, c: usize) !void {
+        if (gh % 3 != 0 or gw % 3 != 0) return error.RowShape;
+        var a: Args = .{};
+        for ([_]u64{ x, b, scale, out }) |p| a.add(p);
+        a.add(int(gw));
+        a.add(int(c));
+        a.add(@as(f32, @floatCast(@sqrt(@as(f64, @floatFromInt(c))))));
+        try go(k.g4_pool_fn, s, gh * gw / 9, 1, &a);
     }
 
     /// o [count] = x (a Linear's bf16 output) through `act`, then plus r when given; x or r may be o.

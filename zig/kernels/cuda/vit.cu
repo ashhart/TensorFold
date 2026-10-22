@@ -6,6 +6,7 @@
 
 #include "glue_math.cuh"
 #include "vit_norm.cuh"
+#include "vit_gemma.cuh"
 
 using namespace tf_glue;
 
@@ -132,4 +133,22 @@ extern "C" __global__ void __launch_bounds__(NT) tf_vit_position_add(const __nv_
         const float p = __fadd_rn(__fmul_rn(bf(t00[c]), w00), __fadd_rn(__fmul_rn(bf(t01[c]), w01), far));
         O[at + c] = __float2bfloat16_rn(__fadd_rn(rbf(p), bf(X[at + c])));
     }
+}
+
+// Gemma 4 31B's tower glue (vit_gemma.cuh): q, k, v norms and the 2D RoPE in place, torch's GeGLU, pooling.
+extern "C" __global__ void __launch_bounds__(32) tf_vit_g4_qkv(__nv_bfloat16* qkv, const __nv_bfloat16* qw, const __nv_bfloat16* kw,
+                                                            const __nv_bfloat16* cs, const __nv_bfloat16* sn, int P, int H, int D,
+                                                            float eps) {
+    tf_vit_g4::qkv_norm_rope(qkv, qw, kw, cs, sn, P, H, D, eps, tf_vit_g4::QKV_ALL);
+}
+
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_g4_gelu_mul(const __nv_bfloat16* gate, const __nv_bfloat16* up,
+                                                                    __nv_bfloat16* out, long long count) {
+    tf_vit_g4::gelu_mul(gate, up, out, count, tf_vit_g4::GELU_ALL);
+}
+
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_g4_pool(const __nv_bfloat16* x, const __nv_bfloat16* bias,
+                                                                const __nv_bfloat16* scale, __nv_bfloat16* out, int gw, int C,
+                                                                float root) {
+    tf_vit_g4::pool_std(x, bias, scale, out, gw, C, root, tf_vit_g4::POOL_ALL);
 }

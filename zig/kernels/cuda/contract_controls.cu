@@ -215,3 +215,23 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_pick_ids(const uint32_t
                                                                    unsigned vocab, int fallback, int keep) {
     tf_round_ids::pick_ids(picks, ids, rows, vocab, fallback, keep);
 }
+
+// Gate 3: vit.cu's Gemma 4 tower glue keeping the points in `keep`; the shapes gate must go red.
+#include "vit_gemma.cuh"
+
+extern "C" __global__ void __launch_bounds__(32) tf_ctl_vit_g4_qkv(__nv_bfloat16* qkv, const __nv_bfloat16* qw, const __nv_bfloat16* kw,
+                                                                const __nv_bfloat16* cs, const __nv_bfloat16* sn, int P, int H, int D,
+                                                                float eps, int keep) {
+    tf_vit_g4::qkv_norm_rope(qkv, qw, kw, cs, sn, P, H, D, eps, keep);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_vit_g4_gelu_mul(const __nv_bfloat16* gate, const __nv_bfloat16* up,
+                                                                        __nv_bfloat16* out, long long count, int keep) {
+    tf_vit_g4::gelu_mul(gate, up, out, count, keep);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_vit_g4_pool(const __nv_bfloat16* x, const __nv_bfloat16* bias,
+                                                                    const __nv_bfloat16* scale, __nv_bfloat16* out, int gw, int C,
+                                                                    float root, int keep) {
+    tf_vit_g4::pool_std(x, bias, scale, out, gw, C, root, keep);
+}
