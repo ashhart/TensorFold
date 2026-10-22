@@ -10,6 +10,7 @@ const usage =
     \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out> [fp8]
     \\       tf-qwen35-cuda <model dir> probe <ids> <layer>: a routed model's routing and rows at that layer
     \\       tf-qwen35-cuda <model dir> mtp <ids> <out>: the MTP drafter's tree regressions after a prompt
+    \\       tf-qwen35-cuda <model dir> stages <ids> <out dir>: step's rows with every stage's (families/qwen3_5/stages.zig)
     \\       tf-qwen35-cuda <model dir> vision <out dir> <tokens> [--bound MEAN WORST] <picture or NAME.f32@HxW>...
     \\vision prepares each picture with core/qwen_vl under a <tokens> budget and runs the CUDA tower twice: <out dir>
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
@@ -79,6 +80,22 @@ pub fn main(init: std.process.Init) !u8 {
     var out: std.ArrayList(u8) = .empty;
     const fixed = try envCount("TF_Q35_WINDOW");
     if (fixed > e.window_rows) return error.InvalidQwenWindow;
+    if (std.mem.eql(u8, args[2], "stages")) {
+        var recorder = try q.stages.Recorder.init(init.gpa, e.layers.len, e.g.hidden, e.g.vocab);
+        defer recorder.deinit();
+        var capture = try q.cuda_stages.Capture.init(init.gpa, e.d, e.stream, &recorder, 1, 1);
+        defer capture.deinit(init.gpa);
+        e.stages = capture.hook();
+        defer e.stages = null;
+        for (ids.items) |id| {
+            const first: u32 = @intCast(cache.len);
+            capture.begin();
+            try f.run(.{ .cache = &cache, .rows = 1 }, &.{id});
+            try capture.end(first);
+        }
+        try recorder.write(init.io, args[4]);
+        return 0;
+    }
     if (std.mem.eql(u8, args[2], "step")) {
         var first: i64 = 0;
         var rest: i64 = 0;
