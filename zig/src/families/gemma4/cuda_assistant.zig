@@ -51,6 +51,8 @@ pub const Drafter = struct {
     sources: [2]usize,
     tap: [1]u32,
     step_ms: f64 = 0,
+    /// A hold's steps as CUDA graphs, by rows and steps ([rows - 1][steps - 1]; null: not yet, or graphs off).
+    graphs: [max_items][depth]?cuda.graph.Exec = @splat(@splat(null)),
     /// The target's forward ms by window width (1 to 16), timed at load: the depth rule prices drafts by them.
     costs: [be.max_window]lanes.config.Cost = undefined,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
@@ -126,6 +128,7 @@ pub const Drafter = struct {
 
     pub fn deinit(x: *Drafter) void {
         x.s.synchronize() catch {};
+        for (&x.graphs) |*row| for (row) |*g| if (g.*) |*e| e.deinit();
         var it = x.lanes.valueIterator();
         while (it.next()) |l| dropLane(x, l.*);
         x.lanes.deinit(x.gpa);
@@ -269,6 +272,32 @@ pub const Drafter = struct {
         }
         for ([_]u64{ s.ids, s.pos, s.slot }, 0..) |dst, j| try x.d.check(x.d.api.cuMemcpyHtoDAsync_v2(dst, &host[j * max_items], rows * 4, x.s.handle), "cuMemcpyHtoDAsync");
         for (items, 0..) |it, r| try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(s.hin + r * hid * 2, it.lane.h.ptr, hid * 2, x.s.handle), "cuMemcpyDtoDAsync");
+        if (!x.m.graphed) return x.run(rows, steps);
+        // the steps read only the staged rows and fixed scratch: one graph a (rows, steps), captured at its first use
+        const g = &x.graphs[rows - 1][steps - 1];
+        if (g.* == null) g.* = try x.capture(rows, steps);
+        try g.*.?.launchOn(x.s);
+    }
+
+    fn capture(x: *Drafter, rows: usize, steps: u32) !cuda.graph.Exec {
+        try x.s.synchronize();
+        try cuda.graph.beginCapture(x.s, .thread_local);
+        x.run(rows, steps) catch |e| {
+            if (cuda.graph.endCapture(x.s)) |g| {
+                var gg = g;
+                gg.deinit();
+            } else |_| {}
+            return e;
+        };
+        var g = try cuda.graph.endCapture(x.s);
+        defer g.deinit();
+        return g.instantiate();
+    }
+
+    /// The chain's steps over the staged ids, positions, slots and rows: no host work between them.
+    fn run(x: *Drafter, rows: usize, steps: u32) !void {
+        const s = x.x;
+        const hid = x.m.geo.hidden;
         for (0..steps) |step| {
             if (step > 0) try x.nextIds(step - 1, rows);
             try x.k.embed.affine(x.s, s.ids, x.m.w.embed_w, x.m.w.embed_s, x.m.w.embed_b, s.e, rows, hid, .{ .bits = @intCast(x.m.w.embed_bits), .group = cfg.group, .scale = fwd.embedScale(hid) });
@@ -288,13 +317,9 @@ pub const Drafter = struct {
         }
     }
 
-    /// Step `step`'s picks as the next step's ids, read on the host first: a row with no finite logit stops the hold.
+    /// Step `step`'s picks as the next ids on the device: none embeds token 0, its flag stops the hold at its end.
     fn nextIds(x: *Drafter, step: usize, rows: usize) !void {
-        var picks: [max_items]Pick = undefined;
-        try x.s.synchronize();
-        try x.d.check(x.d.api.cuMemcpyDtoH_v2(&picks, x.x.picks + step * max_items * @sizeOf(Pick), rows * @sizeOf(Pick)), "cuMemcpyDtoH");
-        for (picks[0..rows]) |p| if (p.token >= cfg.vocab) return error.DraftNonfinite;
-        try x.copy2d(x.x.ids, 4, x.x.picks + step * max_items * @sizeOf(Pick), @sizeOf(Pick), 4, rows);
+        try x.k.round.pickIds(x.s, x.x.picks + step * max_items * @sizeOf(Pick), x.x.ids, rows, cfg.vocab, 0);
     }
 
     /// Each stream's chain of `depth` drafts after `pending`, all streams' rows through each step together.
