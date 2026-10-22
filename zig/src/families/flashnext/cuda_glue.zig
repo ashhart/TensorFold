@@ -26,8 +26,8 @@ fn cdiv(a: usize, b: usize) usize {
     return (a + b - 1) / b;
 }
 
-/// flashnext_attn.cu's Pg: an int table a page, elements and positions a page (pt 0: contiguous rows).
-pub const Pg = extern struct { pt: u64 = 0, ps: i64 = 0, ptok: c_int = 0, pad: c_int = 0 };
+/// flashnext_attn.cu's Pg, each cache launch's `pg`: its table, elements and positions a page (pt 0: contiguous).
+pub const Pg = extern struct { pt: u64 = 0, ps: i64 = 0, ptok: c_int = 0 };
 
 /// The native kernels, by their extern "C" names.
 const Fns = struct {
@@ -61,6 +61,15 @@ const Fns = struct {
     chunks_one: cuda.Function,
     fused: cuda.Function,
     merge: cuda.Function,
+    /// The cache entries through a page table (TF_FLASHNEXT_KV_PAGES).
+    prep_paged: cuda.Function,
+    prep_media_paged: cuda.Function,
+    pool_paged: cuda.Function,
+    pool_media_paged: cuda.Function,
+    scores_paged: cuda.Function,
+    chunks_ahead_paged: cuda.Function,
+    chunks_one_paged: cuda.Function,
+    fused_paged: cuda.Function,
 };
 
 /// The captured entry points our glue replaces, by Triton name (TF_FLASHNEXT_OWNED lists them).
@@ -139,11 +148,22 @@ pub const Glue = struct {
             .chunks_one = try g.attn.function("fn_attn_chunks_one"),
             .fused = try g.attn.function("fn_attn_fused"),
             .merge = try g.attn.function("fn_attn_merge"),
+            .prep_paged = try g.attn.function("fn_attn_prep_paged"),
+            .prep_media_paged = try g.attn.function("fn_attn_prep_media_paged"),
+            .pool_paged = try g.attn.function("fn_qsa_pool_paged"),
+            .pool_media_paged = try g.attn.function("fn_qsa_pool_media_paged"),
+            .scores_paged = try g.attn.function("fn_qsa_scores_paged"),
+            .chunks_ahead_paged = try g.attn.function("fn_attn_chunks_ahead_paged"),
+            .chunks_one_paged = try g.attn.function("fn_attn_chunks_one_paged"),
+            .fused_paged = try g.attn.function("fn_attn_fused_paged"),
         };
         try g.f.chunks.allowDynamicShared(chunkSmem(1));
         try g.f.chunks_ahead.allowDynamicShared(chunkSmem(2));
         try g.f.chunks_one.allowDynamicShared(oneSmem());
         try g.f.fused.allowDynamicShared(oneSmem());
+        try g.f.chunks_ahead_paged.allowDynamicShared(chunkSmem(2));
+        try g.f.chunks_one_paged.allowDynamicShared(oneSmem());
+        try g.f.fused_paged.allowDynamicShared(oneSmem());
         return g;
     }
 
@@ -206,8 +226,9 @@ pub const Glue = struct {
         ptrs(&a, &.{ proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc });
         a.add(eps);
         ints(&a, &.{ wt.proj_n, wt.q_heads, wt.kv_heads, wt.index_heads, wt.index_dim, wt.half });
-        a.add(pg);
-        try go(g.f.prep, s, .{ rows, wt.q_heads + wt.kv_heads + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
+        if (pg.pt != 0) a.add(pg);
+        const f = if (pg.pt != 0) g.f.prep_paged else g.f.prep;
+        try go(f, s, .{ rows, wt.q_heads + wt.kv_heads + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
     }
 
     /// Attention over 512-key chunks; `qsa` the sparse form (NCH 5, rows' key lists), else dense (NCH 3).
@@ -219,13 +240,15 @@ pub const Glue = struct {
         ints(&a, &.{ wt.q_heads, kv, group, 512, if (qsa) wt.nch else wt.dense_nch });
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, @intFromBool(qsa) });
-        a.add(pg);
+        if (pg.pt != 0) a.add(pg);
         const ahead = rows <= ahead_rows;
-        try go(if (ahead) g.f.chunks_ahead else g.f.chunks_one, s, .{ rows, kv, chunks }, 128, if (ahead) chunkSmem(2) else oneSmem(), &a);
+        const f = if (ahead) g.f.chunks_ahead else g.f.chunks_one;
+        const paged = if (ahead) g.f.chunks_ahead_paged else g.f.chunks_one_paged;
+        try go(if (pg.pt != 0) paged else f, s, .{ rows, kv, chunks }, 128, if (ahead) chunkSmem(2) else oneSmem(), &a);
     }
 
     /// Prompt rows' attention with every chunk merged in the program (fn_attn_fused): out bf16, attnChunks then
-    pub fn attnFused(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+    pub fn attnFused(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, pg: Pg) !void {
         const group = wt.q_heads / kv;
         if (group > tile_heads) return error.RowShape;
         var a: cuda.Args = .{};
@@ -233,7 +256,8 @@ pub const Glue = struct {
         ints(&a, &.{ wt.q_heads, kv, group, 512 });
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, 1 });
-        try go(g.f.fused, s, .{ rows, kv, 1 }, 128, oneSmem(), &a);
+        if (pg.pt != 0) a.add(pg);
+        try go(if (pg.pt != 0) g.f.fused_paged else g.f.fused, s, .{ rows, kv, 1 }, 128, oneSmem(), &a);
     }
 
     pub fn attnMerge(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize, qsa: bool) !void {
@@ -248,8 +272,9 @@ pub const Glue = struct {
         ptrs(&a, &.{ ikc, pooled, pos, k_scale, inv });
         a.add(eps);
         ints(&a, &.{ rows, wt.index_dim, wt.half, wt.index_ratio });
-        a.add(pg);
-        try go(g.f.pool, s, .{ rows / wt.index_ratio + 2, 1, 1 }, wt.index_dim, 0, &a);
+        if (pg.pt != 0) a.add(pg);
+        const f = if (pg.pt != 0) g.f.pool_paged else g.f.pool;
+        try go(f, s, .{ rows / wt.index_ratio + 2, 1, 1 }, wt.index_dim, 0, &a);
     }
 
     pub fn qsaScores(g: *const Glue, s: cuda.Stream, iq: u64, pooled: u64, pos: u64, sc: u64, nb: usize, rows: usize, blocks: usize, pg: Pg) !void {
@@ -259,10 +284,12 @@ pub const Glue = struct {
         if (wt.index_heads == 4) {
             // 8 rows and 256 blocks a CTA, every head, fn_qsa_scores' sums in its order (its bits)
             ints(&a, &.{ nb, wt.index_ratio, wt.index_top, rows });
-            return go(g.f.scores_tile, s, .{ cdiv(rows, 8), cdiv(blocks, 256), 1 }, 256, 0, &a);
+            if (pg.pt != 0) a.add(pg);
+            const f = if (pg.pt != 0) g.f.scores_paged else g.f.scores_tile;
+            return go(f, s, .{ cdiv(rows, 8), cdiv(blocks, 256), 1 }, 256, 0, &a);
         }
+        if (pg.pt != 0) return error.RowShape; // pages hold the tiles' four indexer heads only
         ints(&a, &.{ nb, wt.index_heads, wt.index_ratio, wt.index_top });
-        a.add(pg);
         try go(g.f.scores, s, .{ rows, cdiv(blocks, 64), 1 }, 256, 0, &a);
     }
 
@@ -422,4 +449,14 @@ test "every entry point has its own bit" {
 
 test "the attention tiles hold the model's heads" {
     try std.testing.expect(wt.head_dim == tile_head_dim and wt.q_heads / wt.kv_heads <= tile_heads);
+}
+
+test "Pg lays out as flashnext_attn.cu's: the table, elements a page at 8, positions a page at 16, 24 bytes" {
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(Pg));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(Pg, "ps"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(Pg, "ptok"));
+}
+
+test {
+    _ = @import("cuda_paging_launch_test.zig");
 }

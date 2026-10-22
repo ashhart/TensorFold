@@ -54,7 +54,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     errdefer own.engine.deinit();
     if (o.vision) |limits| {
         if (own.set != null) return error.VisionCapturedSetUnsupported;
-        own.vision = try images.Vision.load(gpa, io, driver, own.stream, dir, limits, o.rank, own.glue.f.prep_media, own.glue.f.pool_media);
+        own.vision = try images.Vision.load(gpa, io, driver, own.stream, dir, limits, o.rank, own.glue.f.prep_media, own.glue.f.pool_media, own.glue.f.prep_media_paged, own.glue.f.pool_media_paged);
         own.engine.image_factory = own.vision;
     }
     errdefer if (own.vision) |v| v.deinit();
@@ -76,7 +76,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     own.lanes = .empty;
     own.next = 0;
     if (o.slide) own.lay = try @import("cuda_slide.zig").layoutOf(gpa, io, dir);
-    var stream_bytes = prompt.seqBytes(window);
+    var stream_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest());
     if (own.head) |h| {
         stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk);
     } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(window, 1, own.engine.chunk);

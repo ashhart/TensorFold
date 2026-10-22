@@ -47,7 +47,7 @@ pub fn offset(tokens: usize, layer: usize, part: Part) usize {
 
 /// A page size the kernels take: whole blocks of the indexer's ratio.
 pub fn valid(tokens: usize) bool {
-    return tokens > 0 and tokens % ratio == 0;
+    return tokens > 0 and tokens <= wt.window and tokens <= std.math.maxInt(c_int) and tokens % ratio == 0;
 }
 
 /// TF_FLASHNEXT_KV_PAGE_TEST=n: each stream's caches read through reversed n-position pages (checks); 0 when unset.
@@ -56,6 +56,21 @@ pub fn pageTest() !usize {
     const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadFlashNextPageTest;
     if (!valid(n)) return error.BadFlashNextPageTest;
     return n;
+}
+
+/// A bounded diagnostic allocation: the padded arena, table, and their combined device charge.
+pub const Layout = struct { pages: usize, arena: usize, table: usize, total: usize };
+
+pub fn checkedLayout(cap: usize, tokens: usize) !Layout {
+    if (cap == 0 or cap > wt.window or !valid(tokens)) return error.BadFlashNextPageTest;
+    const n = cap / tokens + @intFromBool(cap % tokens != 0);
+    if (n > std.math.maxInt(c_int)) return error.BadFlashNextPageTest;
+    const stride = std.math.mul(usize, tokens, wt.attn_n * (2 * kv_row + index_row + index_row / ratio)) catch return error.BadFlashNextPageTest;
+    const arena = std.math.mul(usize, n, stride) catch return error.BadFlashNextPageTest;
+    const table = std.math.mul(usize, n, @sizeOf(u32)) catch return error.BadFlashNextPageTest;
+    if (arena / 2 > std.math.maxInt(i64)) return error.BadFlashNextPageTest;
+    const total = std.math.add(usize, arena, table) catch return error.BadFlashNextPageTest;
+    return .{ .pages = n, .arena = arena, .table = table, .total = total };
 }
 
 /// One stream's pages: page i of its positions at `base` + ids[i] pages.
@@ -71,6 +86,7 @@ pub const Paged = struct {
     own_ids: bool = true,
     /// The page test's own arena.
     arena: ?cuda.DeviceBuffer = null,
+    stream: ?cuda.Stream = null,
 
     pub fn pg(p: *const Paged) Pg {
         return .{ .pt = p.table.ptr, .ps = @intCast(pageBytes(p.tokens) / 2), .ptok = @intCast(p.tokens) };
@@ -95,6 +111,7 @@ pub const Paged = struct {
     }
 
     pub fn deinit(p: *Paged, gpa: std.mem.Allocator) void {
+        if (p.stream) |stream| cuda.completion.drain(p.table.d, stream, "diagnostic pages did not drain");
         p.table.free();
         if (p.own_ids) gpa.free(p.ids);
         if (p.arena) |*a| a.free();
@@ -103,17 +120,20 @@ pub const Paged = struct {
 
 /// The page test's zeroed pages for `cap` positions in one buffer, in reverse order (no contiguous layout matches).
 pub fn testPages(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, tokens: usize) !Paged {
-    const n = (cap + tokens - 1) / tokens;
-    var arena = try cuda.DeviceBuffer.alloc(d, n * pageBytes(tokens));
+    const layout = try checkedLayout(cap, tokens);
+    const n = layout.pages;
+    var arena = try cuda.DeviceBuffer.alloc(d, layout.arena);
     errdefer arena.free();
-    try arena.fill8(0, stream.handle);
     const ids = try gpa.alloc(u32, n);
     errdefer gpa.free(ids);
     for (ids, 0..) |*id, i| id.* = @intCast(n - 1 - i);
-    var table = try cuda.DeviceBuffer.alloc(d, n * 4);
+    var table = try cuda.DeviceBuffer.alloc(d, layout.table);
     errdefer table.free();
-    try table.upload(0, std.mem.sliceAsBytes(ids));
-    return .{ .base = arena.ptr, .table = table, .ids = ids, .tokens = tokens, .arena = arena };
+    errdefer cuda.completion.drain(d, stream, "diagnostic page construction did not drain");
+    try arena.fill8(0, stream.handle);
+    try d.check(d.api.cuMemcpyHtoDAsync_v2(table.ptr, ids.ptr, layout.table, stream.handle), "cuMemcpyHtoDAsync");
+    try stream.synchronize();
+    return .{ .base = arena.ptr, .table = table, .ids = ids, .tokens = tokens, .arena = arena, .stream = stream };
 }
 
 test "a page's parts tile it in order and pooled rows follow their positions' page" {
@@ -124,9 +144,13 @@ test "a page's parts tile it in order and pooled rows follow their positions' pa
     try std.testing.expectEqual(pageBytes(t), offset(t, wt.attn_n - 1, .pooled) + t / ratio * index_row);
     try std.testing.expect(!valid(6) and valid(8) and !valid(0));
     var ids = [_]u32{ 2, 0, 1 };
-    const p: Paged = .{ .base = 1 << 20, .table = undefined, .ids = &ids, .tokens = t };
+    const p: Paged = .{ .base = 1 << 20, .table = .{ .d = undefined, .ptr = 0, .len = 0, .borrowed = true }, .ids = &ids, .tokens = t };
     // position 17 is page 1 (id 0) row 1; block 5 (positions 20..23) is page 1 row 1 of the pooled rows
     try std.testing.expectEqual(p.base + offset(t, 3, .value) + kv_row, p.rowAt(3, .value, 17));
     try std.testing.expectEqual(p.base + offset(t, 3, .pooled) + index_row, p.rowAt(3, .pooled, 5));
     try std.testing.expectEqual(p.base + 2 * pageBytes(t) + offset(t, 0, .index), p.rowAt(0, .index, 0));
+}
+
+test {
+    _ = @import("cuda_page_test_safety.zig");
 }

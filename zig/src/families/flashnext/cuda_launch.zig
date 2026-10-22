@@ -37,8 +37,9 @@ pub const score = @import("cuda_score.zig");
 pub const native = @import("cuda_lanes.zig").Namespace(Tri);
 /// Our own glue kernels, which every launch takes when no captured set is loaded
 pub const Glue = glue_.Glue;
-const glue_ = @import("cuda_glue.zig");
+/// A stream's caches through a page table, as the cache launches take them (TF_FLASHNEXT_KV_PAGES)
 pub const Pg = glue_.Pg;
+const glue_ = @import("cuda_glue.zig");
 
 const p = aot.ptr;
 
@@ -149,7 +150,7 @@ pub const Tri = struct {
     /// glue.attn_prep for text positions, bf16 KV (BITS 0, the scale pointers unread); `length` unused at MODE 0.
     pub fn attnPrep(t: Tri, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, rope: u64, delta: u64, eps: f32, rows: usize, length: usize, pg: Pg) !void {
         if (t.glue("_attn_prep")) |g| return g.attnPrep(t.s, proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc, eps, rows, pg);
-        if (pg.pt != 0) return error.PagedKvNeedsGlue;
+        if (pg.pt != 0) return error.PagedCapturedGlue; // a captured entry reads whole windows
         try t.run("_attn_prep", .{ u(rows), u(24 + 2 + 4 + 1), 1 }, &.{
             p("P", "*bf16", proj),
             p("POS0", "*i32", pos),
@@ -174,7 +175,7 @@ pub const Tri = struct {
     /// attention._chunks over 512-key chunks, bf16 KV; `qsa` the sparse form (NCH 5, QSA 1), else dense (NCH 3, QSA 0).
     pub fn attnChunks(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize, qsa: bool, pg: Pg) !void {
         if (t.glue("_chunks")) |g| return g.attnChunks(t.s, q, kc, vc, pos, po, pm, pl, ids, nk, sparse, rows, kv, chunks, qsa, pg);
-        if (pg.pt != 0) return error.PagedKvNeedsGlue;
+        if (pg.pt != 0) return error.PagedCapturedGlue;
         try t.run("_chunks", .{ u(rows), u(kv), u(chunks) }, &.{
             p("Q", "*bf16", q),
             p("KC", "*bf16", kc),
@@ -208,7 +209,7 @@ pub const Tri = struct {
     /// attention.qsa_pool for text rows (MODE 0): every complete block of 4 indexer keys pooled, normed and roped.
     pub fn qsaPool(t: Tri, ikc: u64, pooled: u64, pos: u64, k_scale: u64, inv: u64, eps: f32, rows: usize, pg: Pg) !void {
         if (t.glue("_pool")) |g| return g.qsaPool(t.s, ikc, pooled, pos, k_scale, inv, eps, rows, pg);
-        if (pg.pt != 0) return error.PagedKvNeedsGlue;
+        if (pg.pt != 0) return error.PagedCapturedGlue;
         try t.run("_pool", .{ u(rows / 4 + 2), 1, 1 }, &.{
             p("IKC", "*bf16", ikc),
             p("POOLED", "*bf16", pooled),
@@ -224,7 +225,7 @@ pub const Tri = struct {
     /// attention._scores: rows' complete blocks scored; `nb` is the row stride (a multiple of 16), `blocks` the grid.
     pub fn qsaScores(t: Tri, iq: u64, pooled: u64, pos: u64, sc: u64, nb: usize, rows: usize, blocks: usize, pg: Pg) !void {
         if (t.glue("_scores")) |g| return g.qsaScores(t.s, iq, pooled, pos, sc, nb, rows, blocks, pg);
-        if (pg.pt != 0) return error.PagedKvNeedsGlue;
+        if (pg.pt != 0) return error.PagedCapturedGlue;
         try t.run("_scores", .{ u(rows), cdiv(blocks, 64), 1 }, &.{
             p("IQ", "*bf16", iq),
             p("POOLED", "*bf16", pooled),
@@ -291,9 +292,14 @@ pub const Tri = struct {
     }
 
     /// Prompt rows' attention, chunks merged in the program, ours only.
-    pub fn attnFused(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+    pub fn attnFused(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, pg: Pg) !void {
         const g = t.glue("_chunks") orelse return error.NoGlue;
-        return g.attnFused(t.s, q, kc, vc, pos, out, ids, nk, sparse, rows, kv);
+        return g.attnFused(t.s, q, kc, vc, pos, out, ids, nk, sparse, rows, kv, pg);
+    }
+
+    /// Whether every launch that reads or writes the caches is ours, so a stream's caches may be paged.
+    pub fn pagesOwned(t: Tri) bool {
+        return t.glue("_attn_prep") != null and t.glue("_pool") != null and t.glue("_scores") != null and t.glue("_chunks") != null;
     }
 
     /// qmm.hc_down for one decode row. N=324 is the layer down stacked with inject. M folds when it is 1.
@@ -421,7 +427,6 @@ test {
     _ = mtp;
     _ = native;
     _ = @import("cuda_snap.zig");
-    _ = @import("cuda_pages.zig");
     _ = @import("cuda_config.zig");
     _ = @import("cuda_projection_load.zig");
     _ = @import("cuda_rank_engine.zig");
@@ -461,10 +466,12 @@ test "prompt tiles retain per-operation ownership" {
     var t: Tri = .{ .own = &own, .s = undefined };
     try std.testing.expect(t.readoutTilesOwned());
     try std.testing.expect(t.fusedAttentionOwned());
+    try std.testing.expect(t.pagesOwned());
     t.set = &set;
     t.own = null;
     try std.testing.expect(!t.readoutTilesOwned());
     try std.testing.expect(!t.fusedAttentionOwned());
+    try std.testing.expect(!t.pagesOwned());
     t.own = &own;
     const entries_ = .{ "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_chunks", "_merge" };
     for (0..32) |mask| {
@@ -475,6 +482,26 @@ test "prompt tiles retain per-operation ownership" {
         try std.testing.expectEqual(mask & 7 == 7, t.readoutTilesOwned());
         try std.testing.expectEqual(mask & 24 == 24, t.fusedAttentionOwned());
     }
+    // pages need every cache launch ours: prep, pooling, scores and chunks (the merge reads no cache)
+    const cache = .{ "_attn_prep", "_pool", "_scores", "_chunks" };
+    for (0..16) |mask| {
+        own.mixed = 0;
+        inline for (cache, 0..) |name, i| {
+            if (mask & (@as(usize, 1) << i) != 0) own.mixed |= glue_.entryBit(name);
+        }
+        try std.testing.expectEqual(mask == 15, t.pagesOwned());
+    }
+}
+
+test "a paged launch never reaches a captured entry" {
+    var set: aot.Set = undefined;
+    const t: Tri = .{ .set = &set, .s = undefined };
+    const pg: Pg = .{ .pt = 64, .ps = 1, .ptok = 32 };
+    try std.testing.expectError(error.PagedCapturedGlue, t.attnPrep(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1e-6, 1, 0, pg));
+    try std.testing.expectError(error.PagedCapturedGlue, t.qsaPool(0, 0, 0, 0, 0, 1e-6, 1, pg));
+    try std.testing.expectError(error.PagedCapturedGlue, t.qsaScores(0, 0, 0, 0, 16, 1, 1, pg));
+    try std.testing.expectError(error.PagedCapturedGlue, t.attnChunks(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, true, pg));
+    try std.testing.expectError(error.NoGlue, t.attnFused(0, 0, 0, 0, 0, 0, 0, 0, 1, 2, pg));
 }
 
 test {

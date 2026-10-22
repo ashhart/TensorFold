@@ -413,7 +413,7 @@ pub fn Pass(comptime Tri: type) type {
                         try self.tri.attnMerge(s.po, s.pm, s.pl, pos, at.ao + r0 * out_k * 2, s.qnk, s.qspr, m, kv_heads, true);
                     }
                 }
-                if (fused) try self.tri.attnFused(at.q + g0 * q_heads * head_dim * 2, kc, vc, at.pos + (g0 / att_rows) * 16, at.ao + g0 * out_k * 2, s.qids, s.qnk, s.qspr, gm, kv_heads);
+                if (fused) try self.tri.attnFused(at.q + g0 * q_heads * head_dim * 2, kc, vc, at.pos + (g0 / att_rows) * 16, at.ao + g0 * out_k * 2, s.qids, s.qnk, s.qspr, gm, kv_heads, pg);
             }
         }
 
@@ -577,6 +577,7 @@ pub fn Pass(comptime Tri: type) type {
 }
 
 test "a pass's scratch at the dense cap stays near a gigabyte and a half" {
+    _ = @import("cuda_paging_batch_test.zig");
     try std.testing.expect(Scratch.bytes(default_chunk) < 2 << 30);
     try std.testing.expect(Scratch.bytes(1) < Scratch.bytes(2));
 }

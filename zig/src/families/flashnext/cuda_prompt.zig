@@ -111,6 +111,15 @@ pub fn seqBytes(cap: usize) usize {
     return linear + attn + ple_tail_n * wide * 2;
 }
 
+/// Contiguous storage or the page diagnostic's rounded arena and table, with every live allocation priced.
+pub fn seqBytesPaged(cap: usize, tokens: usize) !usize {
+    if (cap == 0 or cap > max_tokens) return error.BadFlashNextPageTest;
+    if (tokens == 0) return seqBytes(cap);
+    const p = try pages.checkedLayout(cap, tokens);
+    const attention = attn_n * (cap * (2 * kv_row_bytes + index_dim * 2) + pooledBytes(cap));
+    return std.math.add(usize, seqBytes(cap) - attention, p.total) catch error.BadFlashNextPageTest;
+}
+
 /// One attention layer's pooled indexer keys for a cache of `cap` tokens: a bf16 row of 128 a block of 4.
 pub fn pooledBytes(cap: usize) usize {
     return (cap + weights.index_ratio - 1) / weights.index_ratio * index_dim * 2;
@@ -293,7 +302,9 @@ pub const Engine = struct {
     /// A fresh cache. `cap` is how many tokens it can hold, prompt plus generated.
     pub fn newSeq(e: *Engine, cap: usize) !Seq {
         e.round_graph.clear();
-        if (cap == 0) return error.UnexpectedTensor;
+        if (cap == 0 or cap > max_tokens) return error.UnexpectedTensor;
+        const test_pages = try pages.pageTest();
+        _ = try seqBytesPaged(cap, test_pages);
         var seq: Seq = .{
             .stream = e.stream.*,
             .conv = &.{},
@@ -313,7 +324,6 @@ pub const Engine = struct {
         seq.logits = try e.gpa.alloc(u8, vocab * 2);
         seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
         seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, state_n * 4);
-        const test_pages = try pages.pageTest();
         seq.paged = if (test_pages > 0) try pages.testPages(e.gpa, e.driver, e.stream.*, cap, test_pages) else null;
         seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);

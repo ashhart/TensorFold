@@ -597,3 +597,5 @@ pub const Gather = struct {
 test {
     _ = @import("cuda_batch_state_test.zig");
 }
+
+pub const Pg = @import("cuda_glue.zig").Pg;

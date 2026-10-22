@@ -109,7 +109,7 @@ pub const cuda = @import("flashnext_cuda_records.zig").cuda ++ [_]CudaRecord{
     .{ .launch = .{ .name = "qwen_vision tf_qv_bias_cast", .symbol = "tf_qv_bias_cast", .image = "qwen_vision", .threads = 256 }, .usage = .{ .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 18, .static = 0, .bound = 256 }, .{ .regs = 18, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "qwen_vision tf_qv_splice", .symbol = "tf_qv_splice", .image = "qwen_vision", .threads = 256 }, .usage = .{ .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 14, .static = 0, .bound = 0 }, .{ .regs = 14, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "flashnext_attn fn_attn_prep_media", .symbol = "fn_attn_prep_media", .image = "flashnext_attn", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 34, .static = 128, .bound = 256 }, .{ .regs = 34, .static = 128, .bound = 256 }, .{ .regs = 30, .static = 128, .bound = 256 }, .{ .regs = 30, .static = 128, .bound = 256 } } },
-    .{ .launch = .{ .name = "flashnext_attn fn_qsa_pool_media", .symbol = "fn_qsa_pool_media", .image = "flashnext_attn", .threads = 128 }, .usage = .{ .{ .regs = 32, .static = 1152, .bound = 128 }, .{ .regs = 40, .static = 1152, .bound = 128 }, .{ .regs = 40, .static = 1152, .bound = 128 }, .{ .regs = 40, .static = 1152, .bound = 128 }, .{ .regs = 40, .static = 1152, .bound = 128 } } },
+    .{ .launch = .{ .name = "flashnext_attn fn_qsa_pool_media", .symbol = "fn_qsa_pool_media", .image = "flashnext_attn", .threads = 128 }, .usage = .{ .{ .regs = 32, .static = 1152, .bound = 128 }, .{ .regs = 40, .static = 1152, .bound = 128 }, .{ .regs = 40, .static = 1152, .bound = 128 }, .{ .regs = 39, .static = 1152, .bound = 128 }, .{ .regs = 39, .static = 1152, .bound = 128 } } },
     // EXL3: the linear's instantiations at their most rows' shared bytes, the routed experts, Dense's tile candidate
     .{ .launch = .{ .name = "exl3_linear tf_exl3_rot_in", .symbol = "tf_exl3_rot_in", .image = "exl3_linear", .threads = 128 }, .usage = .{ .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 22, .static = 0, .bound = 128 }, .{ .regs = 22, .static = 0, .bound = 128 }, .{ .regs = 22, .static = 0, .bound = 128 }, .{ .regs = 22, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "exl3_linear tf_exl3_linear_2_2_4", .symbol = "tf_exl3_linear_2_2_4", .image = "exl3_linear", .threads = 128, .dynamic = 16384 }, .usage = .{ .{ .regs = 168, .static = 16, .bound = 128 }, .{ .regs = 168, .static = 16, .bound = 128 }, .{ .regs = 168, .static = 16, .bound = 128 }, .{ .regs = 152, .static = 16, .bound = 128 }, .{ .regs = 152, .static = 16, .bound = 128 } } },
@@ -566,7 +566,7 @@ const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
 pub const glm_pending = @import("glm_sampling_pending.zig");
-pub const landed_cuda = cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling ++ @import("glm_kv_pending.zig").records ++ @import("proposal_sampling_records.zig").records ++ @import("glm_f32w_pending.zig").records;
+pub const landed_cuda = cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling ++ @import("glm_kv_pending.zig").records ++ @import("proposal_sampling_records.zig").records ++ @import("flashnext_pages_pending.zig").records ++ @import("glm_f32w_pending.zig").records;
 test {
     _ = learning;
 }
@@ -576,6 +576,7 @@ test {
     _ = @import("glm_kv_pending.zig");
     _ = @import("glm_f32w_pending.zig");
     _ = @import("registry_pending_test.zig");
+    _ = @import("flashnext_pages_pending.zig");
 }
 test "unmeasured CUDA records cannot pass a compiled resource check" {
     for (cuda_pending) |r| {

@@ -50,6 +50,8 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, draf
     v.limits = .{};
     v.prep = f;
     v.pool = f;
+    v.prep_paged = f;
+    v.pool_paged = f;
     v.encoder = .{ .ctx = &v, .driver = &driver, .stream = stream, .splice = f, .encode = Fake.encode, .config = .{ .hidden = 1024, .heads = 16, .depth = 24, .intermediate = 4096, .out_hidden = 2560, .image_token = 50, .video_token = 51, .vision_start = 52, .vision_end = 53 } };
     var self: Cuda = undefined;
     self.gpa = a;

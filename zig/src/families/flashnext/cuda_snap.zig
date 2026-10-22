@@ -94,6 +94,7 @@ pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Str
     errdefer gpa.destroy(snap);
     snap.* = .{ .buf = try cuda.DeviceBuffer.alloc(driver, bytes(at, d != null)), .at = at, .history = seq.history, .head = d != null };
     errdefer snap.buf.free();
+    errdefer cuda.completion.drain(driver, stream, "a failed snapshot save did not drain");
     try move(stream, seq, d, snap.buf.ptr, at, .save);
     try stream.synchronize();
     return snap;
@@ -115,7 +116,7 @@ pub fn restore(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, snap: *const S
 }
 
 pub fn drop(gpa: std.mem.Allocator, stream: cuda.Stream, snap: *Snap) void {
-    stream.synchronize() catch {};
+    cuda.completion.drain(stream.d, stream, "a snapshot drop did not drain");
     snap.buf.free();
     gpa.destroy(snap);
 }
@@ -127,4 +128,8 @@ test "a state's bytes: about 110 MiB of DeltaNet states and the n-gram tail, the
     // the head's cache is one more attention layer's rows
     try std.testing.expectEqual(@as(usize, 13 * (2 * 2 * 256 * 2 + 128 * 2)), bytes(1, true) - bytes(0, true));
     try std.testing.expect(bytes(0, false) > 100 << 20 and bytes(0, false) < 120 << 20);
+}
+
+test {
+    _ = @import("cuda_paging_snap_test.zig");
 }
