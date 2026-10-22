@@ -20,6 +20,8 @@ const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
 const slide_forget = @import("slide_forget.zig");
 const Server = @import("server.zig").Server;
+const idle_unload = @import("idle_unload.zig");
+const log = @import("log.zig");
 const Conn = http_conn.Conn;
 const Allocator = std.mem.Allocator;
 
@@ -128,6 +130,20 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         discardBody(conn, a);
         conn.sendJson(400, "{\"error\":{\"message\":\"this model produces embeddings; use POST /v1/embeddings\",\"type\":\"invalid_request_error\"}}");
         return;
+    }
+    // The wake for every engine-using route: a parked server reloads under the `active` count this begin raised.
+    if (srv.idle_manager) |m| {
+        if (idle_unload.wakeReload(m, srv)) |wake_problem| {
+            if (wake_problem.len > 0) {
+                discardBody(conn, a);
+                log.line("idle reload failed: {s}", .{wake_problem});
+                return draining(conn, is_anthropic); // the model is loading: 503 + Retry-After, the client retries
+            }
+        } else |e| {
+            discardBody(conn, a);
+            log.line("idle reload failed: {s}", .{@errorName(e)});
+            return draining(conn, is_anthropic);
+        }
     }
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (is_embedding) return embeddings.post(srv, conn, a);

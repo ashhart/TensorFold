@@ -199,14 +199,13 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     defer srv.deinit();
     srv.recall = s.recall;
     if (s.reopen) |re| {
+        // The manager lives until this function returns: the stop below runs after the drain, at every exit.
         srv.idle_manager = idle_unload.start(gpa, io, args, re, s.model_dir, s.model_type);
-        if (srv.idle_manager) |m| {
-            m.srv = srv;
-            defer if (srv.idle_manager) |mm| idle_unload.stop(mm); // after the drain: in-flight work must end first
-        } else std.debug.print("tensorfold: out of memory: --idle-unload stays off\n", .{});
+        if (srv.idle_manager) |m| m.srv = srv else std.debug.print("tensorfold: out of memory: --idle-unload stays off\n", .{});
     } else if (args.idle_unload > 0) {
         log.line("idle unload off: this server has no reopen path, so --idle-unload would leave it unable to serve", .{});
     }
+    defer if (srv.idle_manager) |mm| idle_unload.stop(mm); // after the drain: in-flight work must end first
     if (args.loop_guard and !srv.info.loop_guard) {
         std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});
         return 2;
@@ -281,8 +280,10 @@ fn drain(srv: *server_mod.Server, io: std.Io, stop: ?EngineStop, drain_s: f64) v
     const cut = if (stop_count.load(.acquire) != signals) "a second stop signal" else "the drain deadline (TF_DRAIN_S)";
     log.line("shutting down: {s}: {d} request(s) still in progress end \"{s}\" at the next round boundary", .{ cut, left, routes.restarting });
     if (stop) |st| if (st.halt) |h| {
-        // a halt goes only to a resident engine: the idle unload's park closed the startup one
-        if (srv.idle_manager) |m| idle_unload.haltHeld(m, routes.restarting) else h(st.ctx, routes.restarting);
+        // a halt goes only to a resident engine: the park closed the startup one, a reload's Closer owns the rest
+        if (srv.idle_manager) |m| {
+            if (idle_unload.haltsStartupEngine(m)) idle_unload.haltHeld(m, routes.restarting) else h(st.ctx, routes.restarting);
+        } else h(st.ctx, routes.restarting);
     };
     var waited: u32 = 0;
     while (srv.generating.load(.seq_cst) > 0 and waited < 100) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
@@ -331,10 +332,7 @@ fn shownSampling(a: Allocator, sampling: ?json.Value) []const u8 {
 /// The live ticker's status reader: the CURRENT engine (the idle unload swaps engines; a captured handle would dangle).
 fn readCurrentStatus(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     const srv: *server_mod.Server = @ptrCast(@alignCast(ctx));
-    if (srv.idle_manager) |m| if (m.isParked()) {
-        out.* = .{ .healthy = false }; // no engine is resident: the dashboard's unavailable state, no closed-engine read
-        return;
-    };
+    if (srv.idle_manager) |m| return m.readStatus(srv, out, stream_tokens); // the manager lock guards the closed-engine race
     srv.engine.status(out, stream_tokens);
 }
 

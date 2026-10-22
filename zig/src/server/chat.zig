@@ -13,7 +13,6 @@ const ids = @import("ids.zig");
 const clock = @import("clock.zig");
 const Server = @import("server.zig").Server;
 const chunk_plan = @import("chunk_plan.zig");
-const idle_unload = @import("idle_unload.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -221,10 +220,6 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (stops_opt.strings.len > 0) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
     defer box.deinit();
-    if (srv.idle_manager) |m| { // the wake: a parked server reloads under the manager's lifetime lock before submitting
-        const problem = try idle_unload.wakeReload(m, srv);
-        if (problem.len > 0) return cx.fail(.server, "the idle-unloaded model could not reload ({s}); send the request again", .{problem});
-    }
     const id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();

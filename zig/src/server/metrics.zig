@@ -106,7 +106,7 @@ pub const Metrics = struct {
         defer m.gpa.free(requests);
         if (requests.len > 0) {
             try family(w, "requests_total", "counter", "HTTP replies by API key label and status.");
-            for (requests) |r| try w.print("{s}requests_total{{key=\\\"{s}\\\",status=\\\"{d}\\\"}} {d}\\n", .{ prefix, r.key, r.status, r.count });
+            for (requests) |r| try w.print("{s}requests_total{{key=\"{s}\",status=\"{d}\"}} {d}\n", .{ prefix, r.key, r.status, r.count });
         }
         try gauge(w, "requests_running", "gauge", "Requests in prefill or decode.", 0);
         try gauge(w, "requests_waiting", "gauge", "Requests queued or held until a lane is free.", 0);
@@ -131,10 +131,7 @@ pub const Metrics = struct {
     }
 
     /// The scrape body, ending in a newline.
-    pub fn render(m: *Metrics, io: std.Io, w: *std.Io.Writer, engine: api.Engine, window: u32) !void {
-        var status: api.Status = .{};
-        var streams: [512]u32 = undefined;
-        engine.status(&status, &streams);
+    pub fn render(m: *Metrics, io: std.Io, w: *std.Io.Writer, status: api.Status, streams: []const u32, info: api.Info, memory: ?api.Memory, window: u32) !void {
         var snap: Metrics = undefined;
         const requests = blk: {
             m.mutex.lockUncancelable(io);
@@ -157,7 +154,7 @@ pub const Metrics = struct {
         try gauge(w, "requests_waiting", "gauge", "Requests queued or held until a lane is free.", status.waiting);
         try gauge(w, "generation_tokens_running", "gauge", "Generated tokens held by live streams.", status.generation_tokens);
         try gauge(w, "prompt_tokens_total", "counter", "Prompt tokens of finished requests.", snap.prompt);
-        const keeps = engine.info().prompt_cache;
+        const keeps = info.prompt_cache;
         if (keeps) try gauge(w, "prompt_tokens_cached_total", "counter", "Prompt tokens of finished requests restored from kept prompt states.", snap.cached);
         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
         const live = streams[0..@min(status.streams, streams.len)];
@@ -172,7 +169,7 @@ pub const Metrics = struct {
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
         try processGauges(w, process.read());
-        if (engine.memory(false)) |mem| {
+        if (memory) |mem| {
             try gauge(w, "device_memory_bytes", "gauge", "Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).", mem.active);
             try gauge(w, "device_memory_peak_bytes", "gauge", "The most device memory the engine has held since start or the last /health?reset_peak=1.", mem.peak);
             try gauge(w, "pinned_memory_bytes", "gauge", "Pinned host memory the engine holds now: staging buffers and windows; only where the backend counts it (CUDA).", mem.pinned);
@@ -278,29 +275,9 @@ test "metrics record rounds prefill and per-token timing" {
 }
 
 const RenderStub = struct {
-    pub fn info(ctx: *anyopaque) api.Info {
-        const s: *@This() = @ptrCast(@alignCast(ctx));
-        return s.info_value;
-    }
-    pub fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
-        unreachable;
-    }
-    pub fn cancel(_: *anyopaque, _: api.Id) void {}
-    pub fn status(ctx: *anyopaque, out: *api.Status, _: []u32) void {
-        const s: *@This() = @ptrCast(@alignCast(ctx));
-        out.* = s.status_value;
-    }
-    pub fn memory(ctx: *anyopaque, _: bool) ?api.Memory {
-        const s: *@This() = @ptrCast(@alignCast(ctx));
-        return s.memory_value;
-    }
     info_value: api.Info = .{},
     status_value: api.Status = .{ .running = 1, .waiting = 2, .generation_tokens = 3 },
     memory_value: ?api.Memory = null,
-
-    pub fn engine(s: *@This()) api.Engine {
-        return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
-    }
 };
 
 test "render exposes live counters, rounds, prefill and TPOT without cache family" {
@@ -310,7 +287,7 @@ test "render exposes live counters, rounds, prefill and TPOT without cache famil
     var stub: RenderStub = .{};
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try m.render(std.testing.io, &out.writer, stub.engine(), 4096);
+    try m.render(std.testing.io, &out.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
     const body = out.written();
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:generation_tokens_running 3") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:decode_rounds_total 2") != null);
@@ -323,7 +300,7 @@ test "render exposes live counters, rounds, prefill and TPOT without cache famil
     stub.memory_value = .{ .active = 7 << 30, .peak = 8 << 30, .pinned = 1 << 30 };
     var known: std.Io.Writer.Allocating = .init(gpa);
     defer known.deinit();
-    try m.render(std.testing.io, &known.writer, stub.engine(), 4096);
+    try m.render(std.testing.io, &known.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
     try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:device_memory_bytes 7516192768\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:device_memory_peak_bytes 8589934592\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:pinned_memory_bytes 1073741824\n") != null);
@@ -334,10 +311,10 @@ test "render counts restored prompt tokens where the engine keeps prompt states"
     var m: Metrics = .{ .gpa = gpa };
     m.note(std.testing.io, 100, 0, 3, 0, 0, 2, 1.0, null, null, null, null);
     m.note(std.testing.io, 120, 96, 3, 0, 0, 2, 1.0, null, null, null, null);
-    var stub: RenderStub = .{ .info_value = .{ .prompt_cache = true } };
+    const stub: RenderStub = .{ .info_value = .{ .prompt_cache = true } };
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try m.render(std.testing.io, &out.writer, stub.engine(), 4096);
+    try m.render(std.testing.io, &out.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
     const body = out.written();
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_tokens_total 220\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_tokens_cached_total 96\n") != null);
@@ -353,11 +330,11 @@ test "metrics snapshot allocation failure releases the mutex" {
     defer m.deinit();
     m.httpRequest(io, "client", 200);
     try std.testing.expectEqual(@as(usize, 1), m.requests.items.len);
-    var stub: RenderStub = .{};
+    const stub: RenderStub = .{};
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(error.OutOfMemory, m.render(io, &out.writer, stub.engine(), 4096));
+    try std.testing.expectError(error.OutOfMemory, m.render(io, &out.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096));
     const available = m.mutex.tryLock();
     // No other thread uses m: either tryLock acquired it, or render retained it.
     // Release before asserting so the unfixed regression terminates without blocking.
@@ -367,7 +344,7 @@ test "metrics snapshot allocation failure releases the mutex" {
     failing.fail_index = std.math.maxInt(usize);
     m.httpRequest(io, "client", 200);
     m.note(io, 10, 0, 3, 0, 0, 2, 1.0, null, null, 0.25, null);
-    try m.render(io, &out.writer, stub.engine(), 4096);
+    try m.render(io, &out.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "requests_total{key=\"client\",status=\"200\"} 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "prompt_tokens_total 10") != null);
 }

@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer up.text.deinit();
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
-    var closer: Closer = .{ .opened = up.engine };
+    var closer: Closer = .{ .opened = up.engine, .startup = up.engine };
     defer closer.closeOnce();
     const served = hub.servedName(args.name, args.model, dir);
     problem = "";
@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !u8 {
         .recall = record,
         .model_dir = dir,
         .model_type = model_type,
-        .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .replace = Reopen.replace },
+        .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Reopen.haltHeld, .replace = Reopen.replace },
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,
         .started = started,
@@ -172,6 +172,12 @@ const Reopen = struct {
         if (!c.closed) {
             c.closed = true;
             c.opened.close(c.opened.ctx); // the startup engine's weights leave the machine here
+        }
+    }
+    fn haltHeld(ctx: *anyopaque, reason: []const u8) void {
+        const c: *Closer = @ptrCast(@alignCast(ctx));
+        if (comptime @hasField(api.Opened, "halt")) {
+            if (c.startup.halt) |f| f(c.startup.ctx, reason); // the startup engine, not the reload's `opened`
         }
     }
     fn replace(ctx: *anyopaque, opened: api.Opened) void {
@@ -230,6 +236,7 @@ fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !
 
 const Closer = struct {
     opened: api.Opened,
+    startup: api.Opened, // the engine the process started with; the idle park closes it, the drain's halt still names it
     closed: bool = false,
     fn closeOnce(c: *Closer) void {
         if (c.closed) return;
