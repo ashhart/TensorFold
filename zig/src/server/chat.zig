@@ -221,14 +221,9 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (stops_opt.strings.len > 0) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
     defer box.deinit();
-    // the idle unload's wake: a parked server reloads here, under the manager's lifetime lock, before submitting
-    if (srv.idle_manager) |m| {
-        var problem: []const u8 = "";
-        idle_unload.reload(m, srv, &problem) catch |e| {
-            log.line("idle reload failed: {s}", .{problem});
-            if (e == error.OutOfMemory) return error.OutOfMemory;
-            return cx.fail(.server, "the idle-unloaded model could not reload ({s}); send the request again", .{problem});
-        };
+    if (srv.idle_manager) |m| { // the wake: a parked server reloads under the manager's lifetime lock before submitting
+        const problem = try idle_unload.wakeReload(m, srv);
+        if (problem.len > 0) return cx.fail(.server, "the idle-unloaded model could not reload ({s}); send the request again", .{problem});
     }
     const id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
@@ -356,7 +351,7 @@ const Generation = struct {
             }
             try fresh.append(g.a, t);
         }
-        const all = try g.visible.extend(g.a, g.srv.text, decodeText, fresh.items);
+        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
         const text = g.stops.visible(all, true);
         if (g.visible.pending()) return; // a character still split across tokens
         var answer = text;
@@ -597,10 +592,6 @@ const StopHook = struct {
         return false;
     }
 };
-
-fn decodeText(t: anytype, a: Allocator, tokens: []const u32) ![]u8 {
-    return t.decode(a, tokens);
-}
 
 /// ``{key: text}``: a streamed delta (role, content or reasoning_content).
 pub fn deltaOf(a: Allocator, key: []const u8, text: []const u8) Allocator.Error!Value {

@@ -417,6 +417,11 @@ pub const Incremental = struct {
     }
 };
 
+/// The decode callback `Incremental.extend` takes: any tokenizer's text decode, as `decode(ctx, a, tokens)`.
+pub fn decodeText(t: anytype, a: Allocator, tokens: []const u32) ![]u8 {
+    return t.decode(a, tokens);
+}
+
 test "splits and holds" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
