@@ -70,7 +70,6 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
                     try @import("cuda_prompt.zig").run(e, @intCast(ai), total);
                 } else {
-                    if (total > E.most_verify) return error.InvalidQwenSegments; // the partials hold verify rows only
                     // rows fastest: a window's rows read each chunk's keys and values from L2, not once a row from DRAM
                     try e.run(if (e.kv8) e.fp8.attn_partial else e.fns.attn_partial, .{ total, g.kv_heads, max_chunks }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, t_anc, ai, t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
                     try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });

@@ -310,6 +310,33 @@ test "Draft frames: an unsupported prompt geometry is refused at admission" {
     try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&parts, &ids, .logits));
 }
 
+test "Draft frames: the geometry refusal precedes the request's own state" {
+    var driver: cuda.Driver = undefined;
+    driver.api.cuLaunchKernel = Record.launch;
+    var e: q.engine.Engine = undefined;
+    e.d = &driver;
+    e.stream = .{ .d = &driver, .handle = null };
+    e.verify_rows = 64;
+    e.learning = null;
+    e.n_taps = 0;
+    e.kv8 = false;
+    e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
+    e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
+    e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
+    var caches: [1]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
+    caches[0].last = .{ .start = 0, .rows = 2 };
+    const ids: [129]u32 = @splat(1);
+    const parts = [_]q.engine.Part{.{ .cache = &caches[0], .rows = 129 }};
+    // the cache is full: the geometry is refused before the request's own state is read
+    caches[0].cap = 1;
+    Record.counts = @splat(0);
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&parts, &ids, .last));
+    // nothing was queued and the earlier round was not settled
+    try std.testing.expectEqual(@as(usize, 0), Record.counts[10]);
+    try std.testing.expect(caches[0].last != null);
+}
+
 test "Draft frames: enlarged frame byte counts reject overflow" {
     try std.testing.expectError(error.Overflow, q.draft.frame.stagedBytes(std.math.maxInt(usize)));
     var d: q.draft.Draft = undefined;

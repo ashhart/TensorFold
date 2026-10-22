@@ -435,6 +435,8 @@ pub const Engine = struct {
     /// Refuse the whole frame before settling any prior window or launching work.
     pub fn admit(e: *const Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
+        // the supported geometry first: it is the engine's, and it is refused before the request's own state
+        if (!geometry.supported(g, ids.len, keep == .last, most_verify)) return error.UnsupportedQwenGeometry;
         var total: usize = 0;
         if (parts.len == 0 or parts.len > max_segs) return error.InvalidQwenSegments;
         for (parts, 0..) |p, index| {
@@ -444,7 +446,6 @@ pub const Engine = struct {
             total += p.rows;
         }
         if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
-        if (!geometry.supported(g, total, keep == .last, most_verify)) return error.UnsupportedQwenGeometry;
         if (e.learning != null and total != 1) return error.BadLearningRows;
         if (keep == .hidden and e.learning == null) return error.BadLearningRows;
         const record = keep != .last;
