@@ -76,6 +76,7 @@ pub const LaneHost = struct {
     /// opt-in: a family round planner (prompt pieces, decode rows in one pass); null: whole or `prefill_step` prompts
     rounds: ?Rounds = null,
     pieces: std.ArrayList(Rounds.Piece) = .empty,
+    share: fill.Share = .{}, // prompt work's share of wall time beside decoding streams (lane_host_fill.zig)
     finals: std.ArrayList(usize) = .empty,
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
@@ -85,7 +86,7 @@ pub const LaneHost = struct {
     pub const Job = @import("lane_job.zig").Job;
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = info_.ofLanes() };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = info_.ofLanes(), .share = .fromEnv() };
     }
 
     pub fn start(h: *LaneHost) !void {
@@ -529,7 +530,12 @@ pub const LaneHost = struct {
             scoring.answer(h);
             learn.refuse(h);
             while (h.admitOne()) {}
-            h.fillOne();
+            if (fill.due(h)) {
+                const decoding = h.core.activeCount() > 0;
+                const t0 = std.Io.Clock.awake.now(h.io);
+                h.fillOne();
+                h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);
+            }
             h.core.sweep() catch |err| {
                 ends.failAll(h, @errorName(err));
                 continue;
@@ -565,10 +571,12 @@ pub const LaneHost = struct {
                 continue;
             }
             h.unlock();
+            const r0 = std.Io.Clock.awake.now(h.io);
             h.core.step() catch |e| {
                 ends.failAll(h, @errorName(e));
                 continue;
             };
+            h.share.rounded(@intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()));
             h.deliverPending();
             lone.reclaim(h);
         }
