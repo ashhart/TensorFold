@@ -181,10 +181,10 @@ fn left(srv: *Server, c: *Conn, id: []const u8, prompt_len: usize, received: i96
     log.line("{s}", .{log.ended(&buf, id, null, prompt_len, 0, clock.seconds(clock.nowNs(srv.io) - received))});
 }
 
-/// Why a finished synthesis has no complete audio, or null; clipped audio (length) is sent with X-Finish-Reason.
+/// Why a finished synthesis has no complete audio, or null; an empty reply is not a fault, and length is a clip.
 fn why(box: *const Mailbox, samples: usize, capacity: usize) ?[]const u8 {
     return switch (box.reason) {
-        .stop, .length => if (samples == 0 or samples > capacity) "the engine finished without complete audio" else null,
+        .stop, .length => if (samples > capacity) "the engine wrote more audio than the reply holds" else null,
         .cancelled => "speech synthesis was cancelled",
         .failed => if (box.message.len > 0) box.message else "speech synthesis failed",
     };
@@ -195,7 +195,21 @@ fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechIn
     const sent = streamAudio(srv, c, sp, box, engine_id, pcm) orelse return left(srv, c, id, plan.prompt.len, received);
     const mismatch: ?[]const u8 = if (result.samples != sent.samples) "the finished synthesis does not match the audio it published" else null;
     const problem = why(box, result.samples, pcm.len) orelse mismatch;
-    if (sent.samples == 0) return fail(c, cx, id, .server, problem orelse "the engine finished without publishing audio");
+    if (sent.samples == 0) {
+        if (problem) |message| return fail(c, cx, id, .server, message);
+        // the model closed without a frame: an empty stream, not a fault
+        startStream(c, sp.sample_rate) catch {
+            c.close = true;
+            return;
+        };
+        c.writeAll(if (box.reason == .length) length_chunk else last_chunk) catch {
+            c.close = true;
+            return;
+        };
+        c.response_complete = true;
+        log.line("speech {s} prompt={d} samples=0 format=pcm stream=true finish={s} seconds={d:.2}", .{ id, plan.prompt.len, @tagName(box.reason), clock.seconds(clock.nowNs(srv.io) - received) });
+        return;
+    }
     if (problem) |message| {
         c.close = true; // no terminating chunk: the client's HTTP/1.1 parser reports an incomplete body
         log.line("speech {s} stream ended incomplete after samples={d}: {s}", .{ id, sent.samples, message });

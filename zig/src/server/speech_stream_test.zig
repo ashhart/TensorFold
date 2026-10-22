@@ -338,6 +338,32 @@ test "a failure before any audio is an error reply" {
     try std.testing.expect(std.mem.indexOf(u8, try s.readRest(), "the model ended speech before its first audio frame") != null);
 }
 
+test "a reply with no frames is an empty audio reply, not a fault" {
+    var script: Script = .{ .steps = &.{}, .reason = .stop };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\"}", 2000);
+    defer s.deinit();
+    const head = try s.readHead();
+    try expectHeader(head, "HTTP/1.1 200");
+    try expectHeader(head, "X-Finish-Reason: stop\r\n");
+    s.join(&script);
+    try std.testing.expectEqualStrings("", try s.readRest());
+}
+
+test "a stream with no frames is an empty stream, not a fault" {
+    var script: Script = .{ .steps = &.{}, .reason = .stop };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", stream_body, 2000);
+    defer s.deinit();
+    try expectHeader(try s.readHead(), "HTTP/1.1 200");
+    s.join(&script);
+    var terminated = false;
+    const body = try s.payload(&terminated);
+    defer gpa.free(body);
+    try std.testing.expectEqualStrings("", body);
+    try std.testing.expect(terminated);
+}
+
 test "a client that leaves after the first chunk cancels the synthesis, which is waited out" {
     var script: Script = .{ .steps = &.{ frame, 3 * frame }, .hold = 1 };
     var s: Served = undefined;
