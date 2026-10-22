@@ -332,7 +332,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&qsa_contract.step);
     flash_contract.dependOn(&qsa_contract.step);
     // the Gemma 4 operators' contract tests (#1048): window rows, MLX activations and soft cap, embed rows, qk rows
-    for ([_][]const u8{ "contract_window_rows.zig", "contract_act_round.zig", "contract_softcap.zig", "contract_layer_norm.zig", "contract_pick_ids.zig", "contract_embed.zig", "contract_qk_round.zig" }) |f| {
+    for ([_][]const u8{ "contract_window_rows.zig", "contract_act_round.zig", "contract_softcap.zig", "contract_layer_norm.zig", "contract_pick_ids.zig", "contract_vit_gemma.zig", "contract_embed.zig", "contract_qk_round.zig" }) |f| {
         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("zig/tests/cuda/{s}", .{f})),
             .target = host,

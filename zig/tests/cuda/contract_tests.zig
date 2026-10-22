@@ -32,6 +32,7 @@ const act_k = @import("contract_act.zig");
 const softcap_k = @import("contract_softcap.zig");
 const layer_norm_k = @import("contract_layer_norm.zig");
 const pick_ids_k = @import("contract_pick_ids.zig");
+const vit_g4_k = @import("contract_vit_gemma.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
@@ -288,6 +289,14 @@ pub fn run(gpu: check.Gpu) !void {
     for (layer_norm_k.entries, &norms_ln) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .vit = &vit, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_vit_norm") else null };
     defer for (&norms_ln) |*x| x.deinit();
     for (&norms_ln) |*x| try kernels.append(a, x.kernel());
+    var vit_g4: [vit_g4_k.entries.len]vit_g4_k.Glue = undefined;
+    for (vit_g4_k.entries, &vit_g4) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .vit = &vit, .ctl = if (e.keep == null) null else try mods[5].function(switch (e.kind) {
+        .qkv => "tf_ctl_vit_g4_qkv",
+        .gelu => "tf_ctl_vit_g4_gelu_mul",
+        .pool => "tf_ctl_vit_g4_pool",
+    }) };
+    defer for (&vit_g4) |*x| x.deinit();
+    for (&vit_g4) |*x| try kernels.append(a, x.kernel());
     var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
     defer gdn_prep.unload();
     var gdns: [9]gdn_k.Gdn = undefined;
