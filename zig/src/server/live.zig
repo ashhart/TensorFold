@@ -14,9 +14,7 @@ fn round1(x: f64) f64 {
 }
 
 /// /health's ``live``: open requests, how many wait, decode and prefill tokens a second.
-pub fn snapshot(a: Allocator, engine: api.Engine) Allocator.Error!json.Value {
-    var status: api.Status = .{};
-    engine.status(&status, &.{});
+pub fn snapshot(a: Allocator, status: api.Status) Allocator.Error!json.Value {
     const o = try json.newObject(a);
     try o.put(a, "connections", try json.intValue(a, status.running + status.waiting));
     try o.put(a, "waiting", try json.intValue(a, status.waiting));

@@ -15,6 +15,8 @@ pub const Reopen = struct {
     open: *const fn (ctx: *anyopaque, a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) anyerror!?api.Opened,
     /// Closes the engine the process started with, freeing its weights; once.
     close_held: *const fn (ctx: *anyopaque) void,
+    /// Halts the engine the process started with (not the reload's); the drain's deadline routes here.
+    halt_held: *const fn (ctx: *anyopaque, reason: []const u8) void,
     /// Adopts `opened` as the engine the process closes at shutdown.
     replace: *const fn (ctx: *anyopaque, opened: api.Opened) void,
 };
@@ -42,14 +44,12 @@ pub const Manager = struct {
     /// The manager's timer thread, waiting out idle windows forever until `stop`.
     thread: ?std.Thread = null,
     stopped: bool = false,
-    /// The engine the process started with, still unclosed; closed by the first park, freed of the role after.
-    held: ?api.Opened = null,
+    /// True once a reload published a reopened engine: the drain's halt then belongs to the Closer, not the startup.
+    reloaded: bool = false,
     /// The parked stand-in the server holds while no engine is resident; destroyed at the reload's swap.
     stub: ?*Stub = null,
     /// True while the server's engine is the stub; the reload's swap clears it.
     parked: bool = false,
-    /// The startup keepalive was stopped at the first park; the reload's fresh engine arms a new one.
-    keepalive_stopped: bool = false,
     /// The timer's last note of engine-using work, and the reload's re-arm, on the awake clock.
     last_activity_ns: i64 = 0,
     /// The server whose engine the manager swaps; set by `serve.run` before the timer's first window.
@@ -61,6 +61,7 @@ pub const Manager = struct {
         defer m.mutex.unlock(m.io);
         m.active += 1;
         m.last_activity_ns = now(m.io);
+        m.cond.broadcast(m.io); // a timer waiting out its window re-evaluates at once instead of at the old deadline
     }
 
     /// The request ended, any outcome: drops `active` and restarts the idle window.
@@ -77,6 +78,32 @@ pub const Manager = struct {
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         return m.parked;
+    }
+
+    /// The resident engine's status read under the manager's lock, so the park cannot close it mid-read; parked: stub.
+    pub fn readStatus(m: *Manager, srv: *server_mod.Server, out: *api.Status, stream_tokens: []u32) void {
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        if (m.parked) {
+            out.* = .{ .healthy = false }; // the parked stub's answer, no closed-engine read
+            return;
+        }
+        srv.engine.status(out, stream_tokens);
+    }
+
+    /// The resident engine's memory read under the manager's lock; parked: null (the stub holds no weights).
+    pub fn readMemory(m: *Manager, srv: *server_mod.Server, reset_peak: bool) ?api.Memory {
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        if (m.parked) return null;
+        return srv.engine.memory(reset_peak);
+    }
+
+    /// The resident engine's info under the manager's lock; the reload swaps `srv.info` under the same lock.
+    pub fn readInfo(m: *Manager, srv: *server_mod.Server) api.Info {
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        return srv.info;
     }
 };
 
@@ -104,6 +131,7 @@ fn timer(m: *Manager) void {
         if (m.stopped) return m.mutex.unlock(m.io);
         // `idle_s` is seconds: nanoseconds, clamped so a huge setting cannot overflow the window math
         const window_ns = std.math.mul(i64, m.idle_s, std.time.ns_per_s) catch std.math.maxInt(i64);
+        // Bounded waits out the window: `end`, `begin` and `stop` broadcast, so activity re-evaluates at once.
         while (!m.stopped and m.state == .resident and m.active == 0) {
             const elapsed = now(m.io) -% m.last_activity_ns;
             if (elapsed >= window_ns) break;
@@ -139,10 +167,10 @@ fn park(m: *Manager) void {
         m.parked = true;
     }
     srv.engine = m.stub.?.engine();
-    if (!m.keepalive_stopped) {
-        srv.stopKeepalive(); // its target was the closed engine's queue: a tick would hit freed memory
-        m.keepalive_stopped = true;
-    }
+    srv.stopKeepalive(); // its target was the closed engine's queue: a tick would hit freed memory; every park stops the current one
+    // Requests that began before the swap still read the real engine: they end before the weights leave.
+    while (m.active > 0 and m.state == .unloading) m.cond.waitUncancelable(m.io, &m.mutex);
+    if (m.state != .unloading) return m.mutex.unlock(m.io); // a request began and restarted the window: stay resident
     m.mutex.unlock(m.io);
     m.re.close_held(m.re.ctx); // the weights leave here, outside the lock: the reload opens with them gone
     m.mutex.lockUncancelable(m.io);
@@ -209,6 +237,7 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, problem_out: *[]const u8) er
     m.stub = null;
     m.parked = false; // the swap publishes the resident engine: the stub reads end here
     m.state = .resident;
+    m.reloaded = true; // the drain's halt now belongs to the Closer's current engine, not the startup one
     m.last_activity_ns = now(m.io);
     // swap everything the request paths read while every reader holds this lock or waits on `cond`
     srv.engine = opened.engine;
@@ -233,11 +262,18 @@ pub fn wakeReload(m: *Manager, srv: *server_mod.Server) error{OutOfMemory}![]con
     return "";
 }
 
-/// The drain's halt for the park-closed engine: the Closer's halt would hit a closed engine, so it routes here.
+/// The drain's halt while the startup engine is resident: the Closer's halt would hit the park-closed engine.
 pub fn haltHeld(m: *Manager, reason: []const u8) void {
     m.mutex.lockUncancelable(m.io);
     defer m.mutex.unlock(m.io);
-    if (m.held) |h| if (h.halt) |f| f(h.ctx, reason);
+    if (!m.reloaded) m.re.halt_held(m.re.ctx, reason);
+}
+
+/// Whether the drain's deadline halt belongs to the manager (the startup engine is still resident).
+pub fn haltsStartupEngine(m: *Manager) bool {
+    m.mutex.lockUncancelable(m.io);
+    defer m.mutex.unlock(m.io);
+    return !m.reloaded;
 }
 
 /// Stops the timer and frees the manager; the server's own shutdown path closes the resident engine.
@@ -293,7 +329,7 @@ const Stub = struct {
 test "the manager stays off for 0 and negative idle seconds" {
     var args: cli.Args = .{};
     args.idle_unload = 0;
-    const re: Reopen = .{ .ctx = undefined, .open = undefined, .close_held = undefined, .replace = undefined };
+    const re: Reopen = .{ .ctx = undefined, .open = undefined, .close_held = undefined, .halt_held = undefined, .replace = undefined };
     const m = start(std.testing.allocator, std.testing.io, args, re, "d", "t");
     try std.testing.expect(m == null);
     args.idle_unload = -5;
