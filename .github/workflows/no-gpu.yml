@@ -38,8 +38,8 @@ jobs:
       - name: Served Flash Next gate regressions
         run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
       # The generated Engram tables: committing a table that its generator no longer reproduces is a silent drift.
-      # The generator refuses an interpreter whose unicodedata is not the pinned 16.0.0, which 3.14 carries and 3.12/3.13 do not.
-      - uses: actions/setup-python@v5
+      # The generator refuses any unicodedata but the pinned 16.0.0, which 3.14 carries and 3.12/3.13 do not.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         id: nfkd-python
         with:
           python-version: "3.14"

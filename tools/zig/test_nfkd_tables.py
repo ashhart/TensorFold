@@ -8,6 +8,8 @@ import nfkd_tables as tables
 
 class GeneratorTests(unittest.TestCase):
     def test_the_committed_table_is_what_the_generator_renders(self):
+        if tables.unicodedata.unidata_version != tables.VERSION:
+            self.skipTest("this interpreter has Unicode %s" % tables.unicodedata.unidata_version)
         rendered = tables.formatted(tables.render(), tables.ZIG)
         self.assertEqual(tables.OUT.read_text(), rendered,
                          "nfkd_data.zig is stale; rerun tools/zig/nfkd_tables.py --zig zig")
