@@ -13,6 +13,7 @@ const profile = @import("cuda_startup_profile.zig");
 const modelopt = @import("cuda_modelopt.zig");
 const x3w = @import("cuda_exl3_weights.zig");
 pub const recurrent = @import("cuda_recurrent.zig");
+const staged = @import("stages.zig");
 
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
@@ -74,7 +75,7 @@ pub const Engine = struct {
     pockets: pocket.Pockets,
     learning: ?*const hooks.Keep = null,
     /// Staged references (tf-qwen35-cuda stages); a forward with them runs uncaptured, as with a learner.
-    stages: ?@import("stages.zig").DeviceHook = null,
+    stages: ?staged.DeviceHook = null,
     mlp: ?hooks.MlpAdd = null,
     taught: u64 = 0,
     d: *const cuda.Driver,
@@ -428,6 +429,10 @@ pub const Engine = struct {
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         try e.admit(parts, ids, keep);
+        if (e.stages != null) {
+            const chain = if (parts[0].parents) |p| staged.isChain(p) else true;
+            try staged.admit(parts.len, chain, keep != .hidden);
+        }
         const g = e.g;
         const total = ids.len;
         const record = keep != .last;

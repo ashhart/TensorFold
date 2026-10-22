@@ -63,20 +63,21 @@ class ReferenceOpsTest(unittest.TestCase):
         np.testing.assert_allclose(rms(x, np.array([2.0, 1.0]), 0.0), [[3 / np.sqrt(12.5) * 2, 4 / np.sqrt(12.5)]])
 
 
-def write_dump(path: Path, layers, hidden, vocab, rows, logits, positions=None, names=None):
-    """Logits row i holds bf16(i) everywhere, so a selection of rows can be read back."""
+def write_dump(path: Path, layers, hidden, vocab, rows, logits, positions=None, names=None, shapes=None,
+               logit_positions=None, version=1):
+    """Logits row i holds bf16(i) everywhere, so a selection of rows reads back; `shapes` overrides a stage's shape."""
     path.mkdir(parents=True, exist_ok=True)
     stages = []
     for n in names or stage_names(layers):
-        width, count = (vocab, logits) if n == "logits" else (hidden, rows)
+        count, width = (shapes or {}).get(n, (logits, vocab) if n == "logits" else (rows, hidden))
         data = np.zeros((count, width), np.uint16)
         if n == "logits":
             data[:] = (np.arange(count, dtype=np.float32).view(np.uint32) >> 16).astype(np.uint16)[:, None]
         data.tofile(path / f"{n}.bf16")
         stages.append({"name": n, "width": width, "rows": count})
-    index = {"layers": layers, "hidden": hidden, "vocab": vocab, "stages": stages,
-             "positions": positions if positions is not None else list(range(rows)),
-             "logit_positions": list(range(rows - logits, rows))}
+    index = {"version": version, "dtype": "bf16", "layers": layers, "hidden": hidden, "vocab": vocab,
+             "stages": stages, "positions": positions if positions is not None else list(range(rows)),
+             "logit_positions": logit_positions if logit_positions is not None else list(range(rows - logits, rows))}
     (path / "index.json").write_text(json.dumps(index))
 
 
@@ -87,10 +88,16 @@ class ComparerTest(unittest.TestCase):
             write_dump(good, 2, 4, 6, 5, 2)
             args = (2, 4, 6, list(range(5)), [3, 4])
             self.assertEqual(Dump("e", good, *args).get("l01.block").shape, (5, 4))
+            # Each case's files agree with its own index, so only the check against the model can refuse it.
             cases = {
                 "layers": dict(layers=3), "positions": dict(positions=[0, 1, 2, 4, 5]),
-                "names": dict(names=stage_names(2)[:-1]),
+                "names": dict(names=stage_names(2)[:-1]), "repeated": dict(names=stage_names(2) + ["final"]),
+                "version": dict(version=2), "repeated logits": dict(logit_positions=[3, 3]),
             }
+            for n in ("embed", "l00.mixer", "l01.block", "final", "logits"):
+                rows, width = (2, 6) if n == "logits" else (5, 4)
+                for bad in ((rows, 1), (rows + 1, width), (rows - 1, width), (rows, width * 2)):
+                    cases[f"{n} {bad}"] = dict(shapes={n: bad})
             for label, change in cases.items():
                 path = Path(tmp) / label
                 kw = dict(layers=2, hidden=4, vocab=6, rows=5, logits=2) | change

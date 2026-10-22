@@ -1,11 +1,4 @@
-"""mlx_lm's staged references for qwen3_5_moe, in the layout families/qwen3_5/stages.zig writes.
-
-The rows follow mlx_lm's generate_step: the prompt but its last token in one call, then one-row steps feeding the
-last prompt token and every teacher token but the last; logits are each step's row. The decoder layer runs its own
-ops unchanged and records the stream after the mixer and after the MLP.
-
-  python tools/zig/qwen36_mlx_stages.py --snapshot SNAP --ids ids.json --reference ref.json --out DIR
-"""
+"""mlx_lm's staged references for qwen3_5_moe, in the layout families/qwen3_5/stages.zig writes."""
 from __future__ import annotations
 
 import argparse

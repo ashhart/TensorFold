@@ -16,6 +16,7 @@ const Round = @import("round_plan.zig").Round;
 const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
+const staged = @import("core").qwen35_stages;
 
 /// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
 pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
@@ -222,10 +223,8 @@ pub const Runner = struct {
         @memset(paths, &.{});
         var accepted_rows: [@import("gpu_frame.zig").max_rows]u32 = undefined;
         if (accepted) for (round.windows, round.firsts, paths) |window, first, *path| {
-            for (window.parents, 0..) |parent, row| {
-                if (parent != (if (row == 0) @as(i32, -1) else @as(i32, @intCast(row - 1)))) return error.NotAcceptedChain;
-                accepted_rows[first + row] = @intCast(row);
-            }
+            if (!staged.isChain(window.parents)) return error.NotAcceptedChain;
+            for (0..window.parents.len) |row| accepted_rows[first + row] = @intCast(row);
             path.* = accepted_rows[first..][0..window.parents.len];
         };
         r.accepted_chain = accepted;
@@ -253,10 +252,7 @@ pub const Runner = struct {
             r.current_placed = .{};
         }
         if (r.capture_taps) r.taps.begin();
-        if (r.stages) |planes| {
-            if (round.windows.len != 1) return error.StagesNeedOneStream;
-            planes.begin();
-        }
+        if (r.stages) |planes| planes.begin();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .stage = if (r.stages != null) stage else null }, .head = head, .images = placed.images };
@@ -269,7 +265,11 @@ pub const Runner = struct {
             return err;
         };
         if (r.capture_taps) try r.taps.complete();
-        if (r.stages) |planes| try planes.end(round.windows[0].start);
+        // The GPU has committed this round's state: a round the recorder cannot take ends the runner, never a retry.
+        if (r.stages) |planes| planes.end(round.windows[0].start) catch |err| {
+            r.failed = true;
+            return err;
+        };
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);

@@ -1,9 +1,4 @@
-"""A qwen3_5_moe forward in float64 from an MLX affine checkpoint: the reference staged dumps are measured against.
-
-Weights are dequantized exactly (q * scale + bias in float64); nothing is rounded between stages. The math follows
-mlx_lm 0.31's qwen3_5/qwen3_next modules: gated delta net, gated attention with partial rope, top-k experts with
-renormalized softmax weights and a sigmoid-gated shared expert.
-"""
+"""A qwen3_5_moe forward in float64 from an MLX affine checkpoint: the reference the staged dumps measure against."""
 from __future__ import annotations
 
 import json
@@ -183,7 +178,7 @@ class Model:
         return out
 
     def route(self, logits):
-        """Top-k experts per row (ties to the lower id), their renormalized softmax weights, and the k-th/(k+1)-th gap."""
+        """Top-k experts per row (ties to the lower id), renormalized softmax weights, and the k-th/(k+1)-th gap."""
         order = np.argsort(-logits, axis=-1, kind="stable")
         picks = order[:, :self.top_k]
         top = np.take_along_axis(logits, picks, axis=-1)

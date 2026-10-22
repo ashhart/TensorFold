@@ -49,6 +49,7 @@ test {
     _ = @import("core").qwen35_experts;
     _ = @import("core").qwen35_stages;
     _ = stage_planes;
+    _ = decode_round;
     _ = @import("moe_test.zig");
     _ = dflash;
     _ = disk;
