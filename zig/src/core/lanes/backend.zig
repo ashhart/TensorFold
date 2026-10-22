@@ -117,6 +117,8 @@ pub const Backend = struct {
         prompt_rows: bool = false,
         /// The backend stores `Stream.fill_at` as its pass runs: the status reader may count its fill totals.
         reports_fill: bool = false,
+        /// The backend adds each forward pass's GPU-busy seconds to `Stream.gpu_seconds` for the reply's stats.
+        gpu_seconds: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
         /// A prompt in pieces between rounds (`Rounds`) instead of `prefill`: begin, pieces, finish; null: whole only.

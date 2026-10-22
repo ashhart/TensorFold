@@ -31,6 +31,7 @@ pub const Frame = struct {
     parts: [8]mtl.CommandBuffer = undefined,
     part_count: usize = 0,
     ops: u32 = 0,
+    profiler: ?*@import("core").gpu_profile.Trace = null, // each pass's buffers' seconds join its `drafter` class
     pub fn deinit(f: *Frame) void {
         f.release();
         if (f.fence) |fence| mtl.objc.release(fence);
@@ -76,6 +77,11 @@ pub const Frame = struct {
             if (failed(cb)) return error.DraftGpuFailure;
         }
         if (failed(f.cb)) return error.DraftGpuFailure;
+        if (f.profiler) |t| {
+            var seconds = f.cb.gpuSeconds();
+            for (f.parts[0..f.part_count]) |cb| seconds += cb.gpuSeconds();
+            t.record(.drafter, seconds);
+        }
     }
     pub fn release(f: *Frame) void {
         if (f.active and !f.completed) {

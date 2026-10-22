@@ -37,6 +37,7 @@ pub const Host = struct {
     model: *q.model.Model,
     owns_model: bool,
     runner: q.decode_round.Runner,
+    trace: ?tf.gpu_profile.Trace = null, // TF_Q27_PROFILE: the class totals go to the log every `report_every` rounds
     draft: ?*lb.Draft = null,
     back: *lb.Metal,
     cfg: lanes.Config,
@@ -317,8 +318,19 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
+    h.trace = null;
     h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + lb.max_rows, 1);
     errdefer h.runner.deinit();
+    // TF_Q27_PROFILE: production rounds' classes are timed; every Nth round's totals go to the log (0: off)
+    if (platform.c.getenv("TF_Q27_PROFILE")) |v| {
+        const value = std.mem.span(v);
+        const every = std.fmt.parseInt(u64, value, 10) catch 0;
+        if (!std.mem.eql(u8, value, "0")) {
+            h.trace = .{ .queue = model.queue };
+            if (every > 1) h.trace.?.report_every = every;
+            h.runner.profile(if (h.trace) |*t| t else null);
+        }
+    }
     if (drafter) |d| h.draft = try lb.Draft.attach(gpa, &h.runner, d, false) else if (o.drafter) |d| h.draft = lb.Draft.open(gpa, io, model, &h.runner, d, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ d, @errorName(err) });
         return error.DrafterLoad;
@@ -367,6 +379,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     }
     errdefer if (h.joint) |j| j.close();
     if (h.joint != null) h.host.info_.decision_positions = true; // score/decide labels are option-final rows
+    if (h.trace) |*t| t.enabled = true; // measure() priced its windows without the splits; serving counts from here
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
     return h;
@@ -424,6 +437,7 @@ pub fn close(ptr: *anyopaque) void {
     h.back.deinit();
     if (h.joint) |j| j.close();
     if (h.draft) |d| d.deinit();
+    if (h.trace) |*t| if (t.rounds > 0 and t.rounds % t.report_every != 0) t.report();
     h.runner.deinit();
     if (h.vision) |v| v.deinit();
     if (h.owns_model) h.model.deinit();

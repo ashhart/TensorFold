@@ -37,6 +37,7 @@ pub const Draft = struct {
             return err;
         };
         d.* = .{ .gpa = gpa, .runner = runner, .model = model, .owns_model = owns_model, .generation = generation, .previous_capture = previous_capture, .previous_taps = previous_taps, .previous_count = previous_count };
+        model.backend.profile(runner.trace);
         return d;
     }
     pub fn reset(d: *Draft) !void {

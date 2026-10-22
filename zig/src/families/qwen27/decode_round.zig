@@ -46,6 +46,8 @@ pub const Runner = struct {
     capture_taps: bool = false,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
+    gpu_seconds: f64 = 0, // every verify's GPU-busy time since init: the lanes hand a share to each reply's stream
+    trace: ?*@import("core").gpu_profile.Trace = null,
     current_round: ?*const Round = null,
     current_gdn: ?*const GdnPlan = null,
     current_attention: ?*const attn.Plan = null,
@@ -169,6 +171,7 @@ pub const Runner = struct {
     }
 
     pub fn profile(r: *Runner, trace: ?*@import("core").gpu_profile.Trace) void {
+        r.trace = trace;
         r.model.kernels.profiler = trace;
         r.model.glue.profiler = trace;
         r.gdn.profiler = trace;
@@ -232,6 +235,8 @@ pub const Runner = struct {
             r.failed = true;
             return err;
         };
+        r.gpu_seconds += r.last_gpu_seconds;
+        if (r.trace) |t| t.round();
         if (r.model.ane) |share| share.drain() catch |err| {
             r.failed = true;
             return err;

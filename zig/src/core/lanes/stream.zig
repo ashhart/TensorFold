@@ -204,6 +204,7 @@ pub const Stream = struct {
     measured: [plan_lanes.sizes.len + 1]plan_lanes.Measured = @splat(.{}), // each pick's round times past its table price
     priced: ?struct { choice: usize, ms: f64 } = null, // the pick that shaped the held window, at its table price
     min_rows: u32 = 0,
+    gpu_seconds: f64 = 0, // the backend's forward passes' GPU-busy seconds run on this stream's behalf
     paused: bool = false,
     depth: ?State = null,
     mode: ?Mode = null,

@@ -413,13 +413,16 @@ TensorFold also reports generation statistics such as decode rate, time to first
 
 Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enable_thinking`,
 `reasoning_effort`, `tokens_per_second`, `seconds`, `time_to_first_token`, `prefill_seconds`,
-`prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and the draft counters
+`prefill_widths`, `prefill_raised`, `gpu_seconds`, `sampling`, `drafts`, `token_sha`, and the draft counters
 `rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A loop-guarded reply adds
 `runtime.loop.period`; these fields describe the native reply and are absent
 from Python replies that do not provide them.
 In the native block, `seconds` is the reply's decode time, from the end of its prompt pass to its last token, and
 `tokens_per_second` divides the reply's tokens after the first by it. `prefill_seconds` is the prompt pass, and
 `time_to_first_token` counts from the request's arrival, so a queued or long prompt shows there, not in `seconds`.
+`gpu_seconds` is the GPU-busy time of the forward passes the reply's tokens ran in, on native Metal; a shared
+round counts in each reply that shared it, and the field is absent where a backend does not time its passes. `TF_Q27_PROFILE=N` makes the Qwen3.8-27B server log a per-class GPU-time breakdown every N
+rounds (`1` means 64); profiling is diagnostic-only, and a profiled round runs slower while its spans are timed.
 The Python 0.6 server's `seconds` is the whole request, prompt included.
 
 The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,

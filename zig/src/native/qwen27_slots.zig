@@ -63,6 +63,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
         }
         const part = ids[at..end];
         const last = end == ids.len;
+        const before = b.runner.gpu_seconds;
         if (d) |x| {
             if (decoded) try x.decodeChunk(part, last) else try x.promptChunk(part, last);
         } else {
@@ -70,6 +71,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
             if (decoded) try session.decodeChunk(part, last) else try session.promptChunk(part, last);
             if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
         }
+        s.gpu_seconds += b.runner.gpu_seconds - before;
         at = end;
         s.fill_at.store(@intCast(at), .monotonic); // a prompt chunk waits: `at` is landed progress
         if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
@@ -254,7 +256,9 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         }
         const room: u32 = @intCast(s.max_new - s.emitted().len);
         copies.history = s.context.items;
+        const before = b.runner.gpu_seconds;
         const result = try g.runRound(room, b.nodes, s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
+        s.gpu_seconds += b.runner.gpu_seconds - before;
         defer b.gpa.free(result.tokens);
         if (result.extended > 0) {
             try copies.lookup.observe(result.extended, result.extension_landed);

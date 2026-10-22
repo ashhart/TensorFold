@@ -119,7 +119,7 @@ pub const Metal = struct {
     const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true, .gpu_seconds = true } };
     }
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
@@ -452,10 +452,12 @@ pub const Metal = struct {
         const slot = try b.slotFor(s);
         try b.settle();
         const token = try b.value(feed);
+        const before = b.runner.gpu_seconds;
         if (b.drafter(slot)) |d| try d.advance(token) else {
             try (q.session.Session{ .runner = b.runner, .slot = slot }).step(token);
             if (b.ringOf(slot)) |g| try b.ringChunk(g, 1);
         }
+        s.gpu_seconds += b.runner.gpu_seconds - before;
         var next: [1]u32 = undefined;
         try b.draw(s, 0, 1, &.{position}, &next, &.{});
         return b.push(next[0]);
@@ -504,7 +506,9 @@ pub const Metal = struct {
         b.round = try Round.init(b.gpa, inputs[0..windows.len], @intCast(r.model.config.conv_kernel), r.slots, @intCast(r.model.config.vocab));
         b.count = windows.len;
         errdefer b.dropRound();
+        const before = r.gpu_seconds;
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
+        for (windows) |w| w.stream.gpu_seconds += r.gpu_seconds - before;
         b.advanced = plain;
         b.rows = total;
         // every greedy window's rows from one argmax over the round; a sampled window draws on the host

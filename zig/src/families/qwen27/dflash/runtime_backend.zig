@@ -176,6 +176,10 @@ pub const Backend = struct {
         if (b.frame.ops == first_part_ops or b.frame.ops % part_ops == 0) try b.frame.part();
         return b.frame.encoder;
     }
+    /// The frame's GPU seconds join `trace`'s `drafter` class once a pass's buffers complete.
+    pub fn profile(b: *Backend, trace: ?*core.gpu_profile.Trace) void {
+        b.frame.profiler = trace;
+    }
     pub fn copy(b: *Backend, e: mtl.ComputeEncoder, x: Ref, y: Ref, rows: u32, width: u32) !void {
         try b.target.glue.unstack(e, .{ .buffer = x.buf, .offset = x.off }, .{ .buffer = y.buf, .offset = y.off }, .{ .rows = rows, .width = width, .stride = width, .offset = 0 });
         e.barrier();
