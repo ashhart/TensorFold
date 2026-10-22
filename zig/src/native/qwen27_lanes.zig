@@ -162,7 +162,7 @@ pub const Metal = struct {
         const r = b.runner;
         if (b.owners[0] != null or r.active != null) return error.StreamBusy;
         var shape: [128]u8 = undefined;
-        const parts = [_][]const u8{ "qwen27-lanes", std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, max_rows, b.draft != null) };
+        const parts = [_][]const u8{ "qwen27-lanes", std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, max_rows, b.draft != null), "varied-drafts" };
         const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
         if (k) |key| if (lanes.cost_cache.load([max_rows]lanes.config.Cost, b.gpa, io, key)) |kept| {
             b.costs = kept;
@@ -206,12 +206,16 @@ pub const Metal = struct {
     fn timeWindow(b: *Metal, s: *lanes.Stream, rows: usize) !f64 {
         const t0 = mtl.clock.seconds();
         const positions: [max_rows]u64 = @splat(0);
-        const drafts: [max_rows]u32 = @splat(1);
+        // one seed a width: every run draws the same varied tokens, so expert rereads are priced, not L2-cached
+        var prng = std.Random.DefaultPrng.init(rows);
+        const random = prng.random();
+        var drafts: [max_rows]u32 = undefined;
+        for (drafts[0 .. rows - 1]) |*t| t.* = random.uintLessThan(u32, @intCast(b.runner.model.config.vocab));
         var sampled: [max_rows]u32 = undefined;
         var echoed: [max_rows]u32 = undefined;
         b.owners[0] = s;
         defer b.owners[0] = null;
-        const w = be.Window{ .stream = s, .pending = 0, .held = 0, .tokens = drafts[0 .. rows - 1], .parents = null, .positions = positions[0..rows] };
+        const w = be.Window{ .stream = s, .pending = random.uintLessThan(u32, @intCast(b.runner.model.config.vocab)), .held = 0, .tokens = drafts[0 .. rows - 1], .parents = null, .positions = positions[0..rows] };
         var out = [_]be.Verified{.{ .sampled = sampled[0..rows], .drafts = echoed[0 .. rows - 1] }};
         try verifyFn(b, &.{w}, &out);
         var path = [_]u32{0};
