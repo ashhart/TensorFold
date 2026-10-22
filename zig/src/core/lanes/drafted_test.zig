@@ -255,7 +255,7 @@ pub const Strict = struct {
 };
 
 pub const Mode = enum { plain, wrapped, wrapped_early };
-const Case = struct { root_copies: bool = false, prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
+pub const Case = struct { root_copies: bool = false, prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
 pub const Out = struct {
     tokens: [][]u32,
     drafted: u64 = 0,
@@ -267,7 +267,7 @@ pub const Out = struct {
 
 var costs: [16]Cost = undefined;
 
-fn base() Model {
+pub fn base() Model {
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
     return .{ .exact_width = 16, .gpu_tokens = true, .window_costs = &costs, .hidden_rows = true, .batch_rows = 32, .max_streams = 8 };
 }
@@ -593,4 +593,5 @@ test "the drafter wrapper sees the committed callback before its first hold" {
 
 test {
     _ = @import("drafted_role_test.zig");
+    _ = @import("drafted_step_test.zig");
 }

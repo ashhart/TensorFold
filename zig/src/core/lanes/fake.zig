@@ -293,7 +293,10 @@ pub const Fake = struct {
         if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, l.filled);
         if (s.isCancelled()) return error.Cancelled;
         l.filled += 1;
-        s.fill_at.store(@intCast(s.prompt_len * l.filled / @max(1, x.prefill_chunks)), .monotonic);
+        const at = s.prompt_len * l.filled / @max(1, x.prefill_chunks);
+        s.fill_at.store(@intCast(at), .monotonic);
+        // a cold pass's rows are held (features) as each step makes them; a restored one's at its end
+        if (s.reuse.saved == null) try x.grow(l, s, at);
         if (l.filled < @max(1, x.prefill_chunks)) return false;
         l.filling = false;
         try x.fillPrompt(l, s);
@@ -320,7 +323,13 @@ pub const Fake = struct {
             try h.appendSlice(x.gpa, kept.items);
             s.cached = s.reuse.at;
         }
-        for (s.prompt()[h.items.len..], h.items.len + 1..) |t, at| {
+        try x.grow(l, s, s.prompt().len);
+    }
+
+    /// The prompt's tokens into the lane's history up to `to`, a mark's hook at each one passed.
+    fn grow(x: *Fake, l: *Lane, s: *Stream, to: usize) !void {
+        const h = &l.history;
+        for (s.prompt()[h.items.len..to], h.items.len + 1..) |t, at| {
             try h.append(x.gpa, t);
             if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
         }
