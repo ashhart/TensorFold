@@ -185,6 +185,7 @@ pub const Engine = struct {
         errdefer e.pockets.deinit();
         e.learning = null;
         e.mlp = null;
+        e.stages = null;
         e.taught = 0;
         e.kit = null;
         e.d = d;

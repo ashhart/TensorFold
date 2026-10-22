@@ -89,11 +89,10 @@ pub const Runner = struct {
         const units = m.device.tensorUnits();
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
-        const geometry = try attn.planning.Geometry.fromConfig(m.config, units);
         try geometry.check();
         var defines: [64]u8 = undefined;
         const head = try geometry.defines(&defines);
-        const body = if (units) try a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt) else try @import("simd_attention.zig").rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
+        const body = try @import("simd_attention.zig").library(a, units, true);
         defer a.free(body);
         const text = try std.mem.concat(a, u8, &.{ head, body });
         defer a.free(text);
@@ -108,7 +107,6 @@ pub const Runner = struct {
         defer library.deinit();
         var attention = try attn.Attention.init(m.device, library);
         errdefer attention.deinit();
-        attention.geometry = geometry;
         const limits = attn.Limits{ .rows = m.frame.capacity, .streams = slots, .keys = capacity, .shared_prefix = geometry.shared_prefix, .geometry = geometry };
         var scratch = try attn.Scratch.init(m.device, limits);
         errdefer scratch.deinit();
