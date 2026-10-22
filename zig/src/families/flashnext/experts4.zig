@@ -1,4 +1,4 @@
-//! The recorded expert down at 4 bits in groups of 32 with its second input chunk spread over every lane (same bits).
+//! Exact patches of the recorded expert kernels at 4 bits in groups of 32: half-nibble codes and the balanced down.
 const std = @import("std");
 const Const = @import("variants.zig").Const;
 
@@ -38,6 +38,50 @@ const helper =
     \\
 ;
 
+/// lane_codes' first loop lines: the half-nibble branch goes in before them.
+const codes_loop = "  for (int i = 0; i < VPT; i++) {\n    const int bit = BITS * i, j = bit / 16, s = bit % 16;";
+
+/// The half-nibble branch's own comment: a text that has it is patched already.
+const half_mark = "half nibbles: the same 16 values";
+
+/// lane_codes at 4 bits as fn_rows' FZ_NIB 1 makes nibbles (two a half2 op): the same 16 values in the same order.
+const half_codes =
+    \\  if (BITS == 4 && VPT == 16) { // half nibbles: the same 16 values
+    \\    for (int j = 0; j < 4; j += 2) {
+    \\      const uint w = uint(u[j]) | (uint(u[j + 1]) << 16);
+    \\      const half2 a = as_type<half2>(0x64006400u | (w & 0x000F000Fu)) - half2(1024.0h);
+    \\      const half2 b = as_type<half2>(0x64006400u | ((w >> 4) & 0x000F000Fu)) - half2(1024.0h);
+    \\      const half2 c = as_type<half2>(0x64006400u | ((w >> 8) & 0x000F000Fu)) - half2(1024.0h);
+    \\      const half2 d = as_type<half2>(0x64006400u | ((w >> 12) & 0x000F000Fu)) - half2(1024.0h);
+    \\      thread float* o = q + 4 * j;
+    \\      o[0] = float(a.x); o[1] = float(b.x); o[2] = float(c.x); o[3] = float(d.x);
+    \\      o[4] = float(a.y); o[5] = float(b.y); o[6] = float(c.y); o[7] = float(d.y);
+    \\    }
+    \\    return;
+    \\  }
+    \\
+;
+
+/// Every expert width in `consts` (WB, WG, SWB, SWG) is 4 bits in groups of 32.
+fn q4(consts: []const Const) bool {
+    if (consts.len != 4) return false;
+    for (consts) |c| {
+        const want: usize = if (std.mem.endsWith(u8, c.name, "WB")) 4 else if (std.mem.endsWith(u8, c.name, "WG")) 32 else return false;
+        if (c.value != want) return false;
+    }
+    return true;
+}
+
+/// Whether `text` at `consts` is a recorded expert kernel whose lane_codes can take half nibbles.
+pub fn halfApplies(text: []const u8, consts: []const Const) bool {
+    return q4(consts) and std.mem.count(u8, text, codes_loop) == 1 and std.mem.indexOf(u8, text, half_mark) == null;
+}
+
+/// `text` with the half-nibble branch at the top of lane_codes' loop (`halfApplies` holds).
+pub fn half(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    return std.mem.replaceOwned(u8, a, text, codes_loop, half_codes ++ codes_loop);
+}
+
 const calls = [2][2][]const u8{
     .{ "down_rows<SWB, SWG, NI>(SDW, SDS, SDB, size_t(d0), x, lane, out)", "down_rows_bal(SDW, SDS, SDB, size_t(d0), x, lane, out)" },
     .{ "down_rows<WB, WG, NI>(DW, DS, DB, size_t(PICK[r * TOPK + k]) * D + d0, x, lane, out)", "down_rows_bal(DW, DS, DB, size_t(PICK[r * TOPK + k]) * D + d0, x, lane, out)" },
@@ -45,11 +89,7 @@ const calls = [2][2][]const u8{
 
 /// Whether `text` patched at `consts` is the recorded expert down with every width 4/32 over 640 inputs.
 pub fn applies(text: []const u8, consts: []const Const) bool {
-    if (consts.len != 4) return false;
-    for (consts) |c| {
-        const want: usize = if (std.mem.endsWith(u8, c.name, "WB")) 4 else if (std.mem.endsWith(u8, c.name, "WG")) 32 else return false;
-        if (c.value != want) return false;
-    }
+    if (!q4(consts)) return false;
     if (std.mem.count(u8, text, "constexpr int NI = 640;") != 1) return false;
     for (calls) |c| if (std.mem.count(u8, text, c[0]) != 1) return false;
     return std.mem.count(u8, text, "[[kernel]]") == 1;
@@ -83,4 +123,24 @@ test "the recorded expert down takes the balanced rows only at 4/32 everywhere" 
         try std.testing.expect(!applies(src.text, at4[0..2]));
     }
     try std.testing.expectEqual(@as(usize, 1), seen);
+}
+
+test "both recorded expert kernels take half nibbles at 4/32 only, once" {
+    const ks = @import("kernel_sources");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const at4 = [_]Const{ .{ .name = "WB", .value = 4 }, .{ .name = "WG", .value = 32 }, .{ .name = "SWB", .value = 4 }, .{ .name = "SWG", .value = 32 } };
+    var six = at4;
+    six[0].value = 6;
+    var seen: usize = 0;
+    for (ks.flashnext_gen.sources) |src| {
+        if (std.mem.indexOf(u8, src.name, "qa_expert_") == null) continue;
+        seen += 1;
+        try std.testing.expect(halfApplies(src.text, &at4));
+        try std.testing.expect(!halfApplies(src.text, &six));
+        const out = try half(arena.allocator(), src.text);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, half_mark));
+        try std.testing.expect(!halfApplies(out, &at4)); // never twice
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
 }
