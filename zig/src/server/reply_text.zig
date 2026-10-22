@@ -64,7 +64,12 @@ pub fn closeWhere(a: Allocator, decode: anytype, ctx: anytype, tokens: []const u
     const id = close_id orelse return .spelled;
     const at = std.mem.indexOfScalar(u32, tokens, id) orelse return .pending;
     if (at == 0) return .{ .token = 0 };
-    return .{ .token = (try decode(ctx, a, tokens[0..at])).len };
+    const through = try decode(ctx, a, tokens[0 .. at + 1]);
+    defer a.free(through);
+    const marker = try decode(ctx, a, tokens[at .. at + 1]);
+    defer a.free(marker);
+    // Include separators the decoder inserts before the selected token, without searching for a quoted spelling.
+    return .{ .token = through.len -| marker.len };
 }
 
 /// (reasoning, answer) of a thinking reply; while it streams, a tail that could begin a marker is held back.

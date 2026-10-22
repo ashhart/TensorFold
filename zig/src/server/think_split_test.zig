@@ -20,6 +20,7 @@ const all_bytes = blk: {
 
 /// Bytes as tokens, `</think>` as token 300 and an end token 301; every prompt renders as "prompt".
 const Text = struct {
+    real: ?*@import("tokenizer").Tokenizer = null,
     close_token: bool = true, // false: the close marker is not a token, so the text's spelling is what closes
 
     fn text(t: *@This()) model_text.Text {
@@ -42,24 +43,29 @@ const Text = struct {
         return ids;
     }
 
-    fn decode(_: *anyopaque, a: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
+    fn decode(ctx: *anyopaque, a: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
+        const t: *Text = @ptrCast(@alignCast(ctx));
+        if (t.real) |tok| return tok.decode(a, ids, false) catch return error.OutOfMemory;
         var out: std.ArrayList(u8) = .empty;
         for (ids) |id| try out.appendSlice(a, piece(id));
         return out.items;
     }
 
-    fn tokenBytes(_: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error!?[]u8 {
+    fn tokenBytes(ctx: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error!?[]u8 {
+        const t: *Text = @ptrCast(@alignCast(ctx));
+        if (t.real != null) return null;
         return try a.dupe(u8, piece(id));
     }
 
     fn tokenId(ctx: *anyopaque, p: []const u8) ?u32 {
         const t: *Text = @ptrCast(@alignCast(ctx));
+        if (t.real) |tok| return tok.specialTokenId(p);
         if (!t.close_token) return null;
         return if (std.mem.eql(u8, p, "</think>")) think_end else null;
     }
 
-    fn tokenString(_: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error![]u8 {
-        return a.dupe(u8, piece(id));
+    fn tokenString(ctx: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error![]u8 {
+        return decode(ctx, a, &.{id});
     }
 
     fn vocabSize(_: *anyopaque) u32 {
@@ -79,9 +85,10 @@ const Text = struct {
     }
 };
 
-/// Answers `reply` in two rounds, the first half then the rest.
+/// Answers `reply` in fixed token chunks.
 const Script = struct {
     reply: []const u32,
+    stride: ?usize = null,
 
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -94,9 +101,12 @@ const Script = struct {
     fn submit(ctx: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e: *Script = @ptrCast(@alignCast(ctx));
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
-        const half = e.reply.len / 2;
-        for ([_][2]usize{ .{ 0, half }, .{ half, e.reply.len } }) |part| {
-            sink.event(sink.ctx, id, &.{ .tokens = e.reply[part[0]..part[1]] });
+        const width = e.stride orelse @max(e.reply.len / 2, 1);
+        var start: usize = 0;
+        while (start < e.reply.len) {
+            const end = @min(start + width, e.reply.len);
+            sink.event(sink.ctx, id, &.{ .tokens = e.reply[start..end] });
+            start = end;
         }
         const ended = e.reply.len > 0 and e.reply[e.reply.len - 1] == eos;
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = if (ended) .stop else .length } });
@@ -154,8 +164,12 @@ fn send(reply: []const u32, thinking: bool, body: []const u8) !Got {
 }
 
 fn sendWith(reply: []const u32, thinking: bool, body: []const u8, close_token: bool) !Got {
-    var text: Text = .{ .close_token = close_token };
-    var backend: Script = .{ .reply = reply };
+    return sendText(reply, thinking, body, .{ .close_token = close_token }, null);
+}
+
+fn sendText(reply: []const u32, thinking: bool, body: []const u8, settings: Text, stride: ?usize) !Got {
+    var text = settings;
+    var backend: Script = .{ .reply = reply, .stride = stride };
     var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
         .served_name = "test-model",
         .model_ids = &.{"test-model"},
@@ -231,4 +245,53 @@ test "the stream's reasoning and content end at the close token too" {
     }
     try std.testing.expectEqualStrings("I will </think> say it", reasoning.items);
     try std.testing.expectEqualStrings(" done", content.items);
+}
+
+const wordpiece_json =
+    \\{"model":{"type":"WordPiece","vocab":{"Plan":0,"</think>":1,"Answer":2,"[UNK]":3,"</":4,"##think":5,"##>":6,"still":7},"unk_token":"[UNK]","continuing_subword_prefix":"##","max_input_chars_per_word":100},"decoder":{"type":"WordPiece","prefix":"##","cleanup":false}}
+;
+const wordpiece_cases = [_]struct { ids: []const u32, reasoning: []const u8 }{
+    .{ .ids = &.{ 0, 1, 2, eos }, .reasoning = "Plan" },
+    .{ .ids = &.{ 0, 4, 5, 6, 7, 1, 2, eos }, .reasoning = "Plan </think> still" },
+};
+
+test "WordPiece whole replies keep the answer after a decoder inserts space before the close token" {
+    var tok = try @import("tokenizer").parse(std.testing.allocator, wordpiece_json);
+    defer tok.deinit();
+    for (wordpiece_cases) |case| {
+        var got = try sendText(case.ids, true, ask ++ "}", .{ .real = &tok }, null);
+        defer got.deinit();
+        const parsed = try message(&got);
+        defer parsed.deinit();
+        const m = parsed.value.object.get("choices").?.array.items[0].object.get("message").?.object;
+        try std.testing.expectEqualStrings(case.reasoning, m.get("reasoning_content").?.string);
+        try std.testing.expectEqualStrings(" Answer", m.get("content").?.string);
+    }
+}
+
+test "WordPiece streams keep the answer after a decoder inserts space before the close token" {
+    const a = std.testing.allocator;
+    var tok = try @import("tokenizer").parse(a, wordpiece_json);
+    defer tok.deinit();
+    for (wordpiece_cases) |case| {
+        for ([_]usize{ 1, 2, 256 }) |stride| {
+            var got = try sendText(case.ids, true, ask ++ ",\"stream\":true}", .{ .real = &tok }, stride);
+            defer got.deinit();
+            var reasoning: std.ArrayList(u8) = .empty;
+            defer reasoning.deinit(a);
+            var content: std.ArrayList(u8) = .empty;
+            defer content.deinit(a);
+            for (got.events.items) |e| {
+                const chunk = try std.json.parseFromSlice(std.json.Value, a, e, .{});
+                defer chunk.deinit();
+                const choices = chunk.value.object.get("choices") orelse continue;
+                if (choices.array.items.len == 0) continue;
+                const delta = choices.array.items[0].object.get("delta").?.object;
+                if (delta.get("reasoning_content")) |v| try reasoning.appendSlice(a, v.string);
+                if (delta.get("content")) |v| try content.appendSlice(a, v.string);
+            }
+            try std.testing.expectEqualStrings(case.reasoning, std.mem.trimEnd(u8, reasoning.items, " "));
+            try std.testing.expectEqualStrings(" Answer", content.items);
+        }
+    }
 }
