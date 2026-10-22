@@ -145,7 +145,8 @@ pub const Geometry = struct {
 pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bool {
     const group = g.q_heads / g.kv_heads;
     if (prompt and group % 2 == 0) return true; // the prompt tiles: an even group, the chunk's rows
-    return rows <= partial_rows; // the decode partials: the verify rows
+    if (group < 2 or group > 16) return false; // the decode partials' groups
+    return rows <= partial_rows; // and the rows they hold
 }
 
 /// Per-module overrides: routers at 8 bits, switch_mlp at 3 or 4 (one width throughout), others 4; groups of 64.

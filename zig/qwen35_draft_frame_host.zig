@@ -265,7 +265,7 @@ test "Draft frames: combined target rows above capacity refuse before even settl
     e.learning = null;
     e.n_taps = 0;
     e.kv8 = false;
-    e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
+    e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 2, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
     e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
     const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
@@ -308,6 +308,15 @@ test "Draft frames: an unsupported prompt geometry is refused at admission" {
     // the partials' rows: a verify window past them is refused
     e.verify_rows = 256;
     try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&parts, &ids, .logits));
+    // the partials' groups: a group outside 2 to 16 is refused, whatever the rows
+    const few: [64]u32 = @splat(1);
+    const few_parts = [_]q.engine.Part{.{ .cache = &caches[0], .rows = 64 }};
+    e.g.q_heads = 1;
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&few_parts, &few, .logits));
+    e.g.q_heads = 32;
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&few_parts, &few, .logits));
+    e.g.q_heads = 2;
+    try e.admit(&few_parts, &few, .logits);
 }
 
 test "Draft frames: the geometry refusal precedes the request's own state" {
