@@ -10,10 +10,7 @@ inline TF_RotaryScalar tf_rotary_scalar(int i, int position, const constant floa
   return {freq, angle, co, si, co * ys, si * ys};
 }
 
-// q4_idx_pool's arithmetic at an image stream's block positions (the standard frame): block START[0] + j's three
-// rotary positions BPOS[b * 3 ..] (its first row's: t, h, w; a text block's three alike, so it keeps q4_idx_pool's
-// bits at that position), frequency i on Qwen's interleaved axis as fn_attn_prep_mrope takes it. Writes block j at
-// POOLED + j * DI, as q4_idx_pool does from its bound offset.
+// q4_idx_pool's arithmetic at block START[0] + j's positions BPOS[b * 3 ..] on fn_attn_prep_mrope's axes, out at j.
 [[kernel]] void fz_idx_pool_pos(const device bfloat* RAW [[buffer(0)]], const constant int* START [[buffer(1)]],
     const device float* Wn [[buffer(2)]], const constant float* eps [[buffer(3)]], const constant float* LOG2BASE [[buffer(4)]],
     const device int* BPOS [[buffer(5)]], device bfloat* POOLED [[buffer(6)]], uint sgi [[simdgroup_index_in_threadgroup]],

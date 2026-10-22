@@ -1,5 +1,4 @@
-//! The indexer pooling paths bind the full rotary table, with a nonzero absolute block and guarded outputs; the
-//! positioned one (fz_idx_pool_pos) pools each block at its three positions, text blocks alike on all three.
+//! Indexer pooling binds the full rotary table: absolute at a nonzero block, positioned at each block's positions.
 const std = @import("std");
 const mtl = @import("metal");
 const f = @import("tensorfold").flashnext_vision_contract;
