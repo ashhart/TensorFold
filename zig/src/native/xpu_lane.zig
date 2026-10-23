@@ -109,6 +109,7 @@ pub fn Xpu(comptime S: type) type {
                 .keep = keepFn,
                 .draft = draftFn,
                 .release = releaseFn,
+                .score = if (@hasDecl(S.Engine, "score")) scoreFn else null,
             } };
         }
 
@@ -357,6 +358,11 @@ pub fn Xpu(comptime S: type) type {
             if (w.rows() != 1 or w.parents != null) return error.WindowTooWide;
             if (w.positions[0] != self.e.m.pos + 1) return error.PositionMismatch;
             out[0].sampled[0] = try self.step(w.pending, w.stream.sampling, w.positions[0]);
+        }
+
+        /// A decision, on the engine thread between two rounds: the engine scores it on its own sequence.
+        fn scoreFn(ptr: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 {
+            return of(ptr).e.score(prompt, labels, logits, mass);
         }
 
         /// Every stream's window in turn, each on its own sequence (a stream's bits never depend on the others').
