@@ -71,6 +71,60 @@ fn teacher(r: *fwd.Runner, ref_dir: []const u8, out_dir: []const u8, only: ?[]co
     }
 }
 
+/// Windows of 1, 2, 4, 8, 16 rows, then the 16-row cut four more times: the next-token logits must be the same bits.
+fn windows(r: *fwd.Runner, ids: []const u32) !void {
+    var first: ?u64 = null;
+    var all_equal = true;
+    for ([_]u32{ 1, 2, 4, 8, 16, 16, 16, 16, 16 }) |w| {
+        r.reset();
+        r.window = w;
+        try r.feed(ids, true);
+        const raw = try alloc.alloc(u8, cfg.vocab * 2);
+        defer alloc.free(raw);
+        try r.d.read(raw, r.a.logits);
+        const h = std.hash.Wyhash.hash(0, raw);
+        if (first == null) first = h;
+        all_equal = all_equal and h == first.?;
+        std.debug.print("window {d:2}: next token {d}, logits hash {x:0>16}{s}\n", .{ w, r.last, h, if (h == first.?) "" else "  DIFFERENT" });
+    }
+    std.debug.print("{s}\n", .{if (all_equal) "windows == rows: identical logits, 9 of 9" else "windows differ"});
+}
+
+/// The card's top-64 of each step's logits against the host's, over a prompt and 24 greedy steps; and its time.
+fn topkTest(r: *fwd.Runner, ids: []const u32) !void {
+    r.reset();
+    try r.feed(ids, true);
+    var bad: usize = 0;
+    var t_card: f64 = 0;
+    var t_host: f64 = 0;
+    for (0..24) |_| {
+        var v: [64]f32 = undefined;
+        var id: [64]u32 = undefined;
+        const a = now();
+        try r.topK(0, 64, &v, &id);
+        t_card += now() - a;
+        const b = now();
+        const row = try r.logits(0);
+        // host: 64 largest, ties to the lower id
+        var hv: [64]f32 = @splat(-std.math.inf(f32));
+        var hid: [64]u32 = @splat(0);
+        for (row, 0..) |x, i| {
+            if (!(x > hv[63])) continue;
+            var j: usize = 63;
+            while (j > 0 and x > hv[j - 1]) : (j -= 1) {
+                hv[j] = hv[j - 1];
+                hid[j] = hid[j - 1];
+            }
+            hv[j] = x;
+            hid[j] = @intCast(i);
+        }
+        t_host += now() - b;
+        if (!std.mem.eql(u32, &id, &hid)) bad += 1;
+        try r.feed(&.{id[0]}, true);
+    }
+    std.debug.print("top-64 on the card equals the host's in {d} of 24 steps; card {d:.2} ms a step (with the copy), host scan {d:.2} ms\n", .{ 24 - bad, t_card / 24 * 1e3, t_host / 24 * 1e3 });
+}
+
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     if (argv.len < 3) {
@@ -82,6 +136,8 @@ pub fn main(init: std.process.Init) !void {
     const r = try fwd.Runner.init(argv[1], ctx);
     defer r.deinit();
     std.debug.print("loaded in {d:.1} s, {d:.2} GB on the card\n", .{ now() - t_load, @as(f64, @floatFromInt(r.d.allocated)) / 1e9 });
+    if (std.mem.eql(u8, argv[2], "--topk-test")) return topkTest(r, try readIds(argv[3]));
+    if (std.mem.eql(u8, argv[2], "--windows")) return windows(r, try readIds(argv[3]));
     if (std.mem.eql(u8, argv[2], "--gemm-test")) return gemm_test.gemmTest(r);
     if (std.mem.eql(u8, argv[2], "--teacher")) {
         if (argv.len < 5) return error.Usage;

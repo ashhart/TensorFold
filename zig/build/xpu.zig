@@ -21,7 +21,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .{ "gemm128", "zig/kernels/xpu/qwen27/gemm.cl", " -DGSZ=128" },
         .{ "gdn", "zig/kernels/xpu/qwen27/gdn_chunk.cl", "" },
         .{ "drafter", "zig/kernels/xpu/qwen27/drafter.cl", "" },
-        .{ "glue_g4", "zig/kernels/xpu/gemma4/glue_g4.cl", "" },
+        .{ "glue_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", "" },
+        .{ "glue_g4g", "zig/kernels/xpu/gemma4/glue_g4.cl", " -DHD=512" },
     }) |k| {
         const c = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
         c.addFileArg(b.path(k[1]));
@@ -74,7 +75,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     ) });
     // Gemma 4 E4B: its glue, and the Qwen GEMMs (same files, same bits)
     const embedded_g4 = b.createModule(.{ .root_source_file = files.add("xpu_gemma4_kernels.zig",
-        \\pub const glue align(8) = @embedFile("glue_g4.bin").*;
+        \\pub const glue align(8) = @embedFile("glue_g4s.bin").*; // head 256: the sliding layers
+        \\pub const glue_g align(8) = @embedFile("glue_g4g.bin").*; // head 512: the global layers
         \\pub const gemm align(8) = @embedFile("gemm.bin").*;
         \\pub const ngen_wide align(8) = @embedFile("ngen_wide.zebin").*;
         \\pub const ngen_narrow align(8) = @embedFile("ngen_narrow.zebin").*;
