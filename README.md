@@ -301,7 +301,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--register-redraw-st ST` | Drama speech only: draw a whole reply once more when a phrase after the first opens ST semitones above the other phrases' median opening; needs the two flags below. Unset by default: off, with no default for any of the three. See [speech redraws](docs/speech-redraws.md#register). |
 | `--register-redraw-high PERCENT` | The share of that phrase's voiced frames that must lie above `--register-high-hz`. |
 | `--register-high-hz HZ` | The pitch line, 75 to 600 Hz, that marks a high register; calibrate it on your own voice. |
-| `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
+| `--parallel N\|auto` | Cap active requests at N and queue the rest. Default `auto` asks for up to 8 as memory and the engine allow; an explicit count that cannot fit is refused. Read the accepted count at startup. |
 | `--prompt-cache-gib GIB` | Retained-prefix budget, 16 GiB by default or less where memory is short; 0 disables it. |
 | `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
 | `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
