@@ -104,6 +104,7 @@ const Owned = struct {
 };
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 /// Every peer's send/recv connected now, before the weights fill memory (connected on first use, ibv_reg_mr can fail).
 fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
@@ -162,10 +163,15 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     // NCCL's cuMem host buffers wore out GB10's driver pool under load (NV_ERR_NO_MEMORY; next ranks failed to start)
     if (std.c.getenv("NCCL_CUMEM_HOST_ENABLE") == null) _ = setenv("NCCL_CUMEM_HOST_ENABLE", "0", 0);
     if (std.c.getenv("NCCL_CUMEM_ENABLE") == null) _ = setenv("NCCL_CUMEM_ENABLE", "0", 0);
+    // NCCL_COMM_ID holds NCCL's bootstrap to its subnet past NCCL_SOCKET_IFNAME: a follower naming one lets it pick
+    if (p.rank > 0 and std.c.getenv("NCCL_SOCKET_IFNAME") != null) _ = unsetenv("NCCL_COMM_ID");
     var lib = try cuda.nccl.Library.open();
     errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
-    try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
+    if (p.rank == 0) {
+        try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // the root at NCCL_COMM_ID
+        cuda.tp_watch.sendId(&id.internal);
+    } else id.internal = try cuda.tp_watch.takeId(io); // rank 0's, over this rank's line
     var comm: cuda.nccl.Comm = null;
     try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
     own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
