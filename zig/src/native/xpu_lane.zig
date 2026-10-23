@@ -68,7 +68,7 @@ pub fn Xpu(comptime S: type) type {
         mtp_ms: f64 = 0,
         row_logits: []f32 = &.{},
         /// Context tokens a copy draft must match (copy-only engines).
-        copy_match: i64 = 8,
+        copy_match: i64 = 4,
 
         /// The engine family has drafted rounds (an MTP head) and it loaded one.
         fn drafting(self: *const Self) bool {

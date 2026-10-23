@@ -142,7 +142,7 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.backend.started = chainStopHandlers;
     try h.backend.measure();
     if (@hasDecl(S.Engine, "copy_only")) {
-        if (getenv("XPU_COPY_MATCH")) |v| h.backend.copy_match = std.fmt.parseInt(i64, v, 10) catch 8;
+        if (getenv("XPU_COPY_MATCH")) |v| h.backend.copy_match = std.fmt.parseInt(i64, v, 10) catch 4;
     } else if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
     const facts = h.backend.facts();
     h.cfg = try lanes.Config.init(gpa, facts, facts.exact_width, facts.exact_width - 1);

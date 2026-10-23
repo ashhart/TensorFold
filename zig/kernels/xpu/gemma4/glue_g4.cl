@@ -188,6 +188,35 @@ KERNEL(256) void g4_attn_prep(global const half *P, int ldp, global const ushort
   for (int i = 0; i < n; i++) dst[i * 16 + lane] = f2bf(v[i]);
 }
 
+
+// The tile's values: this subgroup's keys k0 + sg, +8, ... in order, UNR at a time so their loads overlap; each accumulator still
+// takes the keys one after the other, so the bits are those of a plain loop.
+#if HD == 512
+#define UNR 2
+#else
+#define UNR 4
+#endif
+#define PV_LOOP(ACC)                                                                                                       \
+  {                                                                                                                        \
+    int k = k0 + sg;                                                                                                       \
+    for (; k + 8 * (UNR - 1) <= k1; k += 8 * UNR) {                                                                        \
+      float vv[UNR][HD / 16];                                                                                              \
+      for (int u = 0; u < UNR; u++) {                                                                                      \
+        global const ushort *vr = VC + ((ring ? (ts + k + 8 * u) % ring : (ts + k + 8 * u)) * 2L + kvh) * hd;             \
+        for (int j = 0; j < nd; j++) vv[u][j] = bf2f(vr[j * 16 + lane]);                                                   \
+      }                                                                                                                    \
+      for (int u = 0; u < UNR; u++) {                                                                                      \
+        const float pk = sc[k + 8 * u];                                                                                    \
+        for (int j = 0; j < nd; j++) ACC[j] = fma(pk, vv[u][j], ACC[j]);                                                   \
+      }                                                                                                                    \
+    }                                                                                                                      \
+    for (; k <= k1; k += 8) {                                                                                              \
+      const float pk = sc[k];                                                                                              \
+      global const ushort *vr = VC + ((ring ? (ts + k) % ring : (ts + k)) * 2L + kvh) * hd;                                \
+      for (int j = 0; j < nd; j++) ACC[j] = fma(pk, bf2f(vr[j * 16 + lane]), ACC[j]);                                      \
+    }                                                                                                                      \
+  }
+
 // Attention over one tile of 128 keys (absolute positions 128j .. 128j + 127) for one (row, head): m, l and the unnormalized
 // o of the tile in fp32, scores = q·k (scale 1), keys limited to [pos - window + 1, pos]. Grid (tiles, 8, T); tile index
 // counted from the row's first tile. The cache of the source layer: ring slots pos % ring, or positions.
@@ -212,8 +241,15 @@ KERNEL(128) void g4_attn_part(global const ushort *Q, global const ushort *KC, g
     global const ushort *kr = KC + ((ring ? kk % ring : kk) * 2L + kvh) * hd;
     float a = 0.0f;
     for (int d = 0; d < hd; d += 8) {
-      const ushort8 kv = vload8(0, kr + d);
-      for (int j = 0; j < 8; j++) a = fma(ql[d + j], bf2f(kv[j]), a);
+      const float8 kf = as_float8(convert_uint8(vload8(0, kr + d)) << 16), qf = vload8(0, ql + d);
+      a = fma(qf.s0, kf.s0, a);
+      a = fma(qf.s1, kf.s1, a);
+      a = fma(qf.s2, kf.s2, a);
+      a = fma(qf.s3, kf.s3, a);
+      a = fma(qf.s4, kf.s4, a);
+      a = fma(qf.s5, kf.s5, a);
+      a = fma(qf.s6, kf.s6, a);
+      a = fma(qf.s7, kf.s7, a);
     }
     s = a;
   }
@@ -239,11 +275,7 @@ KERNEL(128) void g4_attn_part(global const ushort *Q, global const ushort *KC, g
   const int nd = HD / 16;
   float acc[HD / 16];
   for (int j = 0; j < nd; j++) acc[j] = 0.0f;
-  for (int k = k0 + sg; k <= k1; k += 8) {
-    const float pk = sc[k];
-    global const ushort *vr = VC + ((ring ? (ts + k) % ring : (ts + k)) * 2L + kvh) * hd;
-    for (int j = 0; j < nd; j++) acc[j] = fma(pk, bf2f(vr[j * 16 + lane]), acc[j]);
-  }
+  PV_LOOP(acc)
   for (int j = 0; j < nd; j++) part[sg * HD + j * 16 + lane] = acc[j];
   barrier(CLK_LOCAL_MEM_FENCE);
   for (int d = lid; d < hd; d += KEYS) {
@@ -416,8 +448,15 @@ KERNEL(128) void g4_attn_rows(global const ushort *Q, global const ushort *KC, g
       global const ushort *kr = KC + ((ring ? kk % ring : kk) * 2L + kvh) * hd;
       float a = 0.0f;
       for (int d = 0; d < hd; d += 8) {
-        const ushort8 kv = vload8(0, kr + d);
-        for (int j = 0; j < 8; j++) a = fma(ql[d + j], bf2f(kv[j]), a);
+        const float8 kf = as_float8(convert_uint8(vload8(0, kr + d)) << 16), qf = vload8(0, ql + d);
+        a = fma(qf.s0, kf.s0, a);
+        a = fma(qf.s1, kf.s1, a);
+        a = fma(qf.s2, kf.s2, a);
+        a = fma(qf.s3, kf.s3, a);
+        a = fma(qf.s4, kf.s4, a);
+        a = fma(qf.s5, kf.s5, a);
+        a = fma(qf.s6, kf.s6, a);
+        a = fma(qf.s7, kf.s7, a);
       }
       s = a;
     }
@@ -437,11 +476,7 @@ KERNEL(128) void g4_attn_rows(global const ushort *Q, global const ushort *KC, g
     const int k0 = max(lo - ts, 0), k1 = min(pos - ts, KEYS - 1);
     float pv[HD / 16];
     for (int j = 0; j < nd; j++) pv[j] = 0.0f;
-    for (int k = k0 + sg; k <= k1; k += 8) {
-      const float pk = sc[k];
-      global const ushort *vr = VC + ((ring ? (ts + k) % ring : (ts + k)) * 2L + kvh) * hd;
-      for (int j = 0; j < nd; j++) pv[j] = fma(pk, bf2f(vr[j * 16 + lane]), pv[j]);
-    }
+    PV_LOOP(pv)
     for (int j = 0; j < nd; j++) part[sg * HD + j * 16 + lane] = pv[j];
     barrier(CLK_LOCAL_MEM_FENCE);
     if (tl == 0) {
