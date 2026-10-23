@@ -21,12 +21,13 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .{ "gemm128", "zig/kernels/xpu/qwen27/gemm.cl", " -DGSZ=128" },
         .{ "gdn", "zig/kernels/xpu/qwen27/gdn_chunk.cl", "" },
         .{ "drafter", "zig/kernels/xpu/qwen27/drafter.cl", "" },
+        .{ "glue_g4", "zig/kernels/xpu/gemma4/glue_g4.cl", "" },
     }) |k| {
         const c = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
         c.addFileArg(b.path(k[1]));
         c.addArgs(&.{ "-device", device, "-options", b.fmt("{s}{s} -I zig/kernels/xpu/qwen27", .{ opts, k[2] }), "-output_no_suffix", "-output", k[0], "-out_dir" });
         c.setCwd(b.path("."));
-        for ([_][]const u8{ "glue_attn.cl", "glue_quant.cl" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
+        for ([_][]const u8{ "glue.cl", "glue_attn.cl", "glue_quant.cl" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
         const dir = c.addOutputDirectoryArg(b.fmt("ocloc-{s}", .{k[0]}));
         _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{k[0]})), b.fmt("{s}.bin", .{k[0]}));
     }
@@ -71,7 +72,23 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         \\pub const ngen_a4 align(8) = @embedFile("ngen_a4.zebin").*;
         \\
     ) });
+    // Gemma 4 E4B: its glue, and the Qwen GEMMs (same files, same bits)
+    const embedded_g4 = b.createModule(.{ .root_source_file = files.add("xpu_gemma4_kernels.zig",
+        \\pub const glue align(8) = @embedFile("glue_g4.bin").*;
+        \\pub const gemm align(8) = @embedFile("gemm.bin").*;
+        \\pub const ngen_wide align(8) = @embedFile("ngen_wide.zebin").*;
+        \\pub const ngen_narrow align(8) = @embedFile("ngen_narrow.zebin").*;
+        \\
+    ) });
     const ze_mod = zeModule(b, target, optimize);
+    {
+        const g4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        g4.addImport("xpu_gemma4_kernels", embedded_g4);
+        g4.addImport("ze", ze_mod);
+        g4.addImport("safetensors", b.createModule(.{ .root_source_file = b.path("zig/src/xpu/safetensors.zig"), .target = target, .optimize = optimize, .link_libc = true }));
+        const g4_exe = b.addExecutable(.{ .name = "xpu-gemma4", .root_module = g4 });
+        b.step("xpu-gemma4", "Build the Gemma 4 E4B XPU runner (needs ocloc, a C++17 compiler and nGEN headers)").dependOn(&b.addInstallArtifact(g4_exe, .{}).step);
+    }
     const module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     module.addImport("xpu_qwen27_kernels", embedded);
     // the FP64 references of the weight formats (core/quant), for XPU_FP64_REF and XPU_FIDELITY
