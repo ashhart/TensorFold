@@ -506,3 +506,55 @@ test "a failing parent check still closes the line, kills and reaps the watcher'
     var status: c_int = 0;
     try std.testing.expectEqual(@as(c_int, -1), std.c.waitpid(ProcessTest.last_pid, &status, 1));
 }
+
+const id_test = @import("tp_watch_id_test.zig");
+
+test "tp id coverage: rank zero fans all 128 bytes to every TP2 TP3 TP4 and TP8 follower" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const was_count = line_count;
+    const was_rank = my_rank;
+    var saved: [max_lines]posix.socket_t = undefined;
+    @memcpy(saved[0..was_count], lines[0..was_count]);
+    defer {
+        @memcpy(lines[0..was_count], saved[0..was_count]);
+        line_count = was_count;
+        my_rank = was_rank;
+    }
+    for ([_]usize{ 2, 3, 4, 8 }) |world| {
+        var pairs: [7][2]c_int = undefined;
+        var opened: usize = 0;
+        defer for (pairs[0..opened]) |pair| {
+            _ = posix.system.close(pair[0]);
+            _ = posix.system.close(pair[1]);
+        };
+        for (0..world - 1) |i| {
+            if (ProcessTest.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pairs[i]) != 0) return error.SocketFailed;
+            opened += 1;
+            lines[i] = pairs[i][0];
+        }
+        line_count = world - 1;
+        my_rank = 0;
+        const id = IdTest.bytes(@intCast(world));
+        sendId(&id);
+        for (pairs[0..opened]) |pair| {
+            var records: [3]Record = undefined;
+            try id_test.receive(pair[1], &records);
+            try id_test.verify(&records, &id);
+        }
+    }
+}
+
+test "tp id coverage: the wire oracle rejects missing parts and changed ID bytes" {
+    const was_rank = my_rank;
+    defer my_rank = was_rank;
+    my_rank = 0;
+    const id = IdTest.bytes(71);
+    var records = [_]Record{ idRecord(&id, 0), idRecord(&id, 1), idRecord(&id, 2) };
+    try id_test.verify(&records, &id);
+    try std.testing.expectError(error.IdPartsMissing, id_test.verify(records[0..2], &id));
+    records[1].text[8] ^= 1;
+    try std.testing.expectError(error.BadIdBytes, id_test.verify(&records, &id));
+    records[1].text[8] ^= 1;
+    records[2].text[0] = 1;
+    try std.testing.expectError(error.BadIdPart, id_test.verify(&records, &id));
+}
