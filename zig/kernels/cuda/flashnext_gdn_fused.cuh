@@ -1,7 +1,4 @@
-// One kernel a value head for Flash Next's prompt GDN: fn_gdn_front's rows, fn_gdn_chain_tpr's chain and fn_gdn_norm's gated
-// norm, each with its own op sequence (so its bits), the fp32 rows never leaving shared memory.
-// 256 chain threads (TPR 2: two a state row) + 128 producer threads (4 warps): the producers make batch i+1's q, k, v, g and
-// beta into the stage the chain reads next, and the gated norm of batch i-1 from the readouts the chain left in shared memory.
+// Flash Next prompt GDN in one kernel a value head: front, chain and gated norm, rows kept in shared memory.
 namespace gdn_fused {
 using namespace fn_gdn;
 constexpr int STEPS = 16, TPR = 2, CH = 256, PR = 128, THREADS = CH + PR;
@@ -32,7 +29,7 @@ __device__ __forceinline__ void conv_rows(const __nv_bfloat16* __restrict__ P, c
     }
 }
 
-// producers: rows r0 .. r0 + n - 1's q, k (normed as fn_gdn_front's warps 0/1), v, g, beta into the stage; x a [STEPS][2][DK]
+// producers: rows r0 .. r0 + n - 1's q, k (normed as fn_gdn_front), v, g, beta into the stage
 __device__ __forceinline__ void front_batch(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
                                             const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log,
                                             const float* __restrict__ dt_bias, int r0, int n, int hk, int hv, int p,
