@@ -138,7 +138,9 @@ __global__ void __launch_bounds__(WARPS * 32)
 }  // namespace tf_experts_rows
 
 // Groups of 32, two row tiles (32 rows) a warp: SwiGLU gate and up together (epilogue 2), down to fp32 (epilogue 0).
-template __global__ void tf_experts_rows::expert_rows<32, 2, 2, 2, 4>(const __nv_bfloat16*, int, int, const uint4*,
-    int, int, const int*, const int*, const int*, void*, int, float);
-template __global__ void tf_experts_rows::expert_rows<32, 1, 0, 2, 4>(const __nv_bfloat16*, int, int, const uint4*,
-    int, int, const int*, const int*, const int*, void*, int, float);
+template __global__ void tf_experts_rows::expert_rows<32, 2, 2, 2, 4>(const __nv_bfloat16* __restrict__, int, int,
+    const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__,
+    void* __restrict__, int, float);
+template __global__ void tf_experts_rows::expert_rows<32, 1, 0, 2, 4>(const __nv_bfloat16* __restrict__, int, int,
+    const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__,
+    void* __restrict__, int, float);

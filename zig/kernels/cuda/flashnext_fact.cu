@@ -256,8 +256,12 @@ __global__ void __launch_bounds__(WM * WN * 32, MINB) fact_kernel(
 }  // namespace fact
 
 // The prompt form the batched pass launches from 64 rows: 64 x 128 on 2 x 4 warps, bf16 out (one slice) or fp32 slices.
-template __global__ void fact::fact_kernel<64, 128, 2, 4, 3, 2, false, 2, false, true, false>(const __nv_bfloat16*,
-    const float*, const uint32_t*, const __nv_bfloat16*, const __nv_bfloat16*, void*, float*, int, int, int, int, int, int, int);
+template __global__ void fact::fact_kernel<64, 128, 2, 4, 3, 2, false, 2, false, true, false>(
+    const __nv_bfloat16* __restrict__, const float* __restrict__, const uint32_t* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, void* __restrict__, float* __restrict__, int,
+    int, int, int, int, int, int);
 // The folded form from 64 rows: every K slice in the CTA, their totals added in slice order (one fp32 slice).
-template __global__ void fact::fact_kernel<64, 128, 2, 4, 3, 2, false, 2, true, true, true>(const __nv_bfloat16*,
-    const float*, const uint32_t*, const __nv_bfloat16*, const __nv_bfloat16*, void*, float*, int, int, int, int, int, int, int);
+template __global__ void fact::fact_kernel<64, 128, 2, 4, 3, 2, false, 2, true, true, true>(
+    const __nv_bfloat16* __restrict__, const float* __restrict__, const uint32_t* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, void* __restrict__, float* __restrict__, int,
+    int, int, int, int, int, int);

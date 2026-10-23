@@ -226,5 +226,6 @@ __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__
 
 // Decode lane: groups of 32, 16 rows, 64 columns, one by four warps, four stages, bf16 out.
 template __global__ void tf_qmm::qmm_kernel<32, 16, 64, 1, 4, 4, false, false, false>(
-    const __nv_bfloat16*, const float*, const uint32_t*, const __nv_bfloat16*, const __nv_bfloat16*,
-    void*, float*, int, int, int, int, int, int, int);
+    const __nv_bfloat16* __restrict__, const float* __restrict__, const uint32_t* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, void* __restrict__, float* __restrict__, int,
+    int, int, int, int, int, int);

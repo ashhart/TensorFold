@@ -236,10 +236,12 @@ __global__ void __launch_bounds__(WM * WN * 32, MINB) hcf_kernel(
 }  // namespace hcf
 
 // HC down: 32 x 192 tiles, the streams normed in shared memory, the 32 K slices folded in slice order (fp32 out).
-template __global__ void hcf::hcf_kernel<32, 192, 2, 4, 4, 2, true, true, false, 2>(const __nv_bfloat16*, const float*,
-    const uint4*, const __nv_bfloat16*, const __nv_bfloat16*, void*, int, int, int, int, int, int, const float*, const float*,
-    float, int, int, int);
+template __global__ void hcf::hcf_kernel<32, 192, 2, 4, 4, 2, true, true, false, 2>(const __nv_bfloat16* __restrict__,
+    const float* __restrict__, const uint4* __restrict__, const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, void* __restrict__, int, int, int, int, int, int, const float* __restrict__,
+    const float* __restrict__, float, int, int, int);
 // HC up: 64 x 128 tiles, bf16 out (the up rows fn_hc_upmix mixes).
-template __global__ void hcf::hcf_kernel<64, 128, 2, 4, 3, 2, false, false, true, 2>(const __nv_bfloat16*, const float*,
-    const uint4*, const __nv_bfloat16*, const __nv_bfloat16*, void*, int, int, int, int, int, int, const float*, const float*,
-    float, int, int, int);
+template __global__ void hcf::hcf_kernel<64, 128, 2, 4, 3, 2, false, false, true, 2>(const __nv_bfloat16* __restrict__,
+    const float* __restrict__, const uint4* __restrict__, const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, void* __restrict__, int, int, int, int, int, int, const float* __restrict__,
+    const float* __restrict__, float, int, int, int);

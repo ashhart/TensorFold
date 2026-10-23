@@ -461,17 +461,18 @@ DSV41_X3GM_DN(10, GM_DN1)
 DSV41_X3GM_DN(10, GM_DN2)
 DSV41_X3GM_DN(10, GM_DN3)
 DSV41_X3GM_DN(10, GM_DN4)
-#define DSV41_X3GM_ROT(T, M) template __global__ void dsv41_x3gm::rot_kernel<T, M>(const T*, int, const int*, const half*, \
-    const half*, half*, half*, int, int, int);
+#define DSV41_X3GM_ROT(T, M) template __global__ void dsv41_x3gm::rot_kernel<T, M>(const T* __restrict__, int, \
+    const int* __restrict__, const half* __restrict__, const half* __restrict__, half* __restrict__, \
+    half* __restrict__, int, int, int);
 DSV41_X3GM_ROT(__nv_bfloat16, 1)
 DSV41_X3GM_ROT(__nv_bfloat16, 2)
 DSV41_X3GM_ROT(half, 1)
 DSV41_X3GM_ROT(half, 2)
-template __global__ void dsv41_x3gm::dequant_kernel<3>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<4>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<5>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<6>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<7>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<8>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<10>(const uint32_t*, half*, int);
+template __global__ void dsv41_x3gm::dequant_kernel<3>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<4>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<5>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<6>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<7>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<8>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<10>(const uint32_t* __restrict__, half* __restrict__, int);
 #endif  // DSV41_X3GM_NO_INSTANCES

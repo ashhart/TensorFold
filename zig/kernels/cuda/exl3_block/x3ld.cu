@@ -249,8 +249,9 @@ __global__ void __launch_bounds__(W * 32, 3) ld_kernel<2, 8, 1, 8, 8, 0>(
 
 // The instantiations dsv41_x3ld_grouped_cuda dispatches: mul1, (nt, pd) x probe x the (lo, hi) ranges.
 #define DSV41_X3LD_INST(NT, PD, LO, HI, PROBE) template __global__ void dsv41_x3ld::ld_kernel<2, NT, PD, LO, HI, PROBE>( \
-    const half*, const half*, const int64_t*, const int64_t*, const int*, const int*, const int*, const int*, \
-    const int*, float*, int, int, int, int, int, int);
+    const half* __restrict__, const half* __restrict__, const int64_t* __restrict__, const int64_t* __restrict__, \
+    const int* __restrict__, const int* __restrict__, const int* __restrict__, const int* __restrict__, \
+    const int* __restrict__, float* __restrict__, int, int, int, int, int, int);
 DSV41_X3LD_INST(8, 1, 2, 10, 0)
 DSV41_X3LD_INST(8, 1, 2, 12, 0)
 DSV41_X3LD_INST(8, 2, 8, 8, 0)

@@ -187,8 +187,9 @@ __global__ void __launch_bounds__(W * 32) pf_kernel(
 
 // The instantiations dsv41_x3pf_grouped_cuda dispatches: mul1, (nt, mtl) x the (lo, hi) ranges.
 #define DSV41_X3PF_INST(NT, MTL, LO, HI) template __global__ void dsv41_x3pf::pf_kernel<2, NT, MTL, LO, HI>( \
-    const half*, const half*, const int64_t*, const int64_t*, const int*, const int*, const int*, const int*, \
-    const int*, float*, int, int, int, int, int, int);
+    const half* __restrict__, const half* __restrict__, const int64_t* __restrict__, const int64_t* __restrict__, \
+    const int* __restrict__, const int* __restrict__, const int* __restrict__, const int* __restrict__, \
+    const int* __restrict__, float* __restrict__, int, int, int, int, int, int);
 DSV41_X3PF_INST(4, 4, 8, 8)
 DSV41_X3PF_INST(4, 4, 2, 10)
 DSV41_X3PF_INST(4, 4, 2, 12)

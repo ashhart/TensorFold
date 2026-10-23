@@ -531,7 +531,9 @@ extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
 } // namespace tf_window_prompt
 
 // Head dim 128, eight warps, four or eight query heads a block, eight staging slots.
-template __global__ void tf_window_prompt::wattn_kernel<128, 8, 4, 8>(const __nv_bfloat16*, const __nv_bfloat16*,
-    const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float, int, int);
-template __global__ void tf_window_prompt::wattn_kernel<128, 8, 8, 8>(const __nv_bfloat16*, const __nv_bfloat16*,
-    const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float, int, int);
+template __global__ void tf_window_prompt::wattn_kernel<128, 8, 4, 8>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
+    int, int, float, int, int);
+template __global__ void tf_window_prompt::wattn_kernel<128, 8, 8, 8>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
+    int, int, float, int, int);

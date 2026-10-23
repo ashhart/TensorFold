@@ -8,10 +8,12 @@
 #define DSV41_PFD_K2 12
 #define DSV41_PFD_LN false
 DSV41_PFD_CFGS(DSV41_PFD_INST)
-template __global__ void dsv41_pfd::pfd_dequant_kernel<12, false>(const uint32_t*, long long, long long, half*, int);
+template __global__ void dsv41_pfd::pfd_dequant_kernel<12, false>(const uint32_t* __restrict__, long long, long long,
+    half* __restrict__, int);
 #undef DSV41_PFD_LN
 #define DSV41_PFD_LN true
 DSV41_PFD_CFGS(DSV41_PFD_INST)
-template __global__ void dsv41_pfd::pfd_dequant_kernel<12, true>(const uint32_t*, long long, long long, half*, int);
+template __global__ void dsv41_pfd::pfd_dequant_kernel<12, true>(const uint32_t* __restrict__, long long, long long,
+    half* __restrict__, int);
 
 DSV41_PFD_WIDTH(12)
