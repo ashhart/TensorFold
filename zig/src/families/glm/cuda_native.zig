@@ -155,15 +155,8 @@ pub fn roceBytes(text: ?[]const u8) !usize {
     return std.math.mul(usize, n, 1024) catch return error.BadRoceCap;
 }
 
-/// TF_KV_PAGES: every sequence on pages, the engine's own too (on, all, any other value), or a window each (off, 0).
-fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
-    const v = text orelse "auto";
-    // unset or auto pages from TP=3 (two GB10s' room past the weights is under the prompt cache); FP8 keeps windows
-    if (std.mem.eql(u8, v, "auto")) return world >= 3 and !kv8;
-    if (std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off")) return false;
-    if (kv8) return error.Fp8OnPages;
-    return true;
-}
+const startup = @import("cuda_start.zig");
+const paging = startup.paging;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
@@ -176,17 +169,28 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         return err;
     };
     set.kv8 = o.kv8;
-    set.pages = try paging(if (std.c.getenv("TF_KV_PAGES")) |v| std.mem.span(v) else null, p.world, o.kv8); // every rank
-    // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
-    if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
-    return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes) catch |err| {
-        cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this rank's error
-        return err;
-    };
+    return startup.open(io, p, if (std.c.getenv("TF_KV_PAGES")) |v| std.mem.span(v) else null, set, cuda.tp_watch, StartArgs{ .gpa = gpa, .io = io, .ctx = ctx, .dir = dir, .o = o, .p = p, .roce_bytes = roce_bytes }, openRank);
 }
 
-/// `open` once the ranks' lines are up: NCCL, the engine and the link, then a follower's loop or rank 0's lanes.
-fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings, roce_bytes: usize) !Loaded {
+const StartArgs = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    ctx: *const cuda.Context,
+    dir: []const u8,
+    o: Options,
+    p: Place,
+    roce_bytes: usize,
+};
+
+/// After liveness and page settings: NCCL, the engine and the link, then a follower's loop or rank zero's lanes.
+fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
+    const gpa = a.gpa;
+    const io = a.io;
+    const ctx = a.ctx;
+    const dir = a.dir;
+    const o = a.o;
+    const p = a.p;
+    const roce_bytes = a.roce_bytes;
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);

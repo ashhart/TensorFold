@@ -3,6 +3,10 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const startup = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/cuda_start_test.zig"), .target = host, .optimize = .debug });
+    const startup_run = b.addRunArtifact(b.addTest(.{ .root_module = startup }));
+    b.step("test-glm-startup-host", "Page refusals propagate through rank liveness before engine construction").dependOn(&startup_run.step);
+    step.dependOn(&startup_run.step);
     b.step("test-glm-tp3-host", "Uneven KDA head shares through actual projection and load planning, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM TP3:"} })).step);
     const kv8_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM FP8 KV:"} }));
     b.step("test-glm-fp8-kv-host", "GLM latent cache layout, mode agreement and recorded CUDA launches without devices").dependOn(&kv8_run.step);
