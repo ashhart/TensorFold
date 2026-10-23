@@ -99,6 +99,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.peer_held = 0;
     e.identity_hash = 0;
     e.tree = null;
+    e.gate = null;
     e.arena_state = std.heap.ArenaAllocator.init(gpa);
     errdefer e.arena_state.deinit();
     const arena = e.arena_state.allocator();
@@ -378,6 +379,11 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         m,
         @import("index.zig").mtpRoot(index.object.get("weight_map").?.object),
     );
+    if (r.tp == null) if (platform.c.getenv("FZ_GATE")) |v| { // dev: GPU-gated lanes at this probability product
+        const tau = try std.fmt.parseFloat(f32, std.mem.span(v));
+        e.gate = try @import("gate.zig").init(r, tau, m.mtp.ids_n);
+        std.log.info("flash next: gated lanes, up to {d} rows while the drafts' probability stays >= {d}", .{ @import("gate.zig").WMAX, tau });
+    };
     if (r.tp == null) if (platform.c.getenv("FZ_TREE")) |v| { // dev: tree rounds, the branch's guesses from FZ_FEED
         var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
         const a = try std.fmt.parseInt(usize, it.next() orelse "0", 10);

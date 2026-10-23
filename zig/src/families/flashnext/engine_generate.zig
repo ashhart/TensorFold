@@ -21,6 +21,7 @@ const DepthRule = fz.DepthRule;
 const CostDepth = @import("drafts_cost.zig").CostDepth;
 const RING = @import("engine.zig").RING;
 const tree_mod = @import("tree.zig");
+const gate_mod = @import("gate.zig");
 const MARGIN = @import("engine.zig").MARGIN;
 const Result = @import("engine.zig").Result;
 const Out = @import("engine.zig").Out;
@@ -178,7 +179,9 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     r.tree = tr;
     defer r.tree = null;
     if (tr) |t| t.select(prompt);
-    const fixed = if (tr) |t| t.a + t.b else depth;
+    // gated lanes (FZ_GATE) for the same replies: the head's confidence sets each round's width on the GPU
+    const gt: ?*gate_mod.Gate = if (e.gate) |g| (if (tr == null and drafted and out.sampling == null and !watch.armed and r.tp == null and !long) g else null) else null;
+    const fixed = if (tr) |t| t.a + t.b else if (gt != null) gate_mod.WMAX - 1 else depth;
     const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
     var next_depth: usize = depth0; // the rule's drafts for the next round to encode (rank 0's in speed-up mode)
     const w = e.wids.b.slice(u32, 16);
@@ -219,6 +222,14 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         pm[7 + k] = m.ple.sizes[k];
         pm[23 + k] = m.ple.offsets[k];
     }
+    const slot1 = e.gpu_slots[1];
+    defer e.gpu_slots[1] = slot1;
+    if (gt) |g| { // the gated chain step reads its row counts from the gate
+        g.open();
+        e.gpu_slots[1].rows = g.run();
+        e.gpu_slots[1].md = g.md();
+        e.gpu_slots[1].md4 = g.md4();
+    }
     e.gpuMode();
     if (long) {
         r.gsel = e.tsel;
@@ -240,7 +251,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         const cb = r.queue.commandBuffer();
         if (round > 0) cb.waitFor(r.event, base + round);
         r.enc = cb.compute(.serial);
-        m.t.rows = e.rows_w[wr];
+        m.t.rows = if (gt) |g| g.rows() else e.rows_w[wr];
         m.t.mdims = e.mdims_w[wr];
         if (round > 0) {
             const wp = widths[(round - 1) % 4];
@@ -253,8 +264,14 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             r.copyKept(e.cins[(round - 1) % 2], e.cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
             if (wr > 1) {
                 try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
-                for (1..if (tr) |t| t.a else wr - 1) |j| try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
-                if (tr) |t| t.feedEncode(r, e.wids) else if (e.copy) { // copied drafts replace the head's when the history repeats its last tokens
+                if (gt) |g| g.encode(r, m.mtp.logits, 0);
+                for (1..if (tr) |t| t.a else wr - 1) |j| {
+                    r.head_md1 = if (gt) |g| g.md1() else null; // the gated chain step runs only when the gate opened it
+                    defer r.head_md1 = null;
+                    try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
+                    if (gt) |g| g.encode(r, m.mtp.logits, @intCast(j));
+                }
+                if (tr) |t| t.feedEncode(r, e.wids) else if (e.copy and gt == null) { // copied drafts replace the head's when the history repeats its last tokens
                     r.enc.setPipeline(r.lookup_pipe);
                     r.enc.setBuffer(e.hist, 0, 0);
                     r.enc.setBuffer(r.ar.b, r.ar.off, 1);
@@ -274,7 +291,9 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         const ub = (@as(usize, @intCast(T)) + w_sum) / 4 + 2;
         if (r.gsel) |*g| g.nb_ub = ub;
         if (m.mtp.gsel) |*g| g.nb_ub = ub;
+        r.limit = if (gt) |g| g.rows() else null;
         try m.windowEncode(wr, e.wids);
+        r.limit = null;
         if (out.sampling) |p| { // the window's picks redrawn from its logits, in place of the head's argmax
             sample.positions(r.enc, r.positions_pipe, r.ar, e.draw_at, wr);
             if (!r.serial) r.enc.barrier();
@@ -298,6 +317,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             for ([_]Buf{ e.wids, m.t.picks, r.ar, .{ .b = e.ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
             r.enc.setBytes(std.mem.asBytes(&cfg), 5);
             r.enc.setBuffer(e.hist, 0, 6);
+            const verified = if (gt) |g| g.rows() else e.rows_w[MAXR]; // the rows the verdict reads
+            r.enc.setBuffer(verified.b, verified.off, 7);
             r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
         }
         r.enc.end();
@@ -320,7 +341,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         };
         const slot = (done % RING) * fz.RING_WORDS;
         const keep = rg[slot];
-        const wd = widths[done % 4];
+        const wd: usize = if (gt != null) rg[slot + 19] else widths[done % 4]; // a gated round's width is the GPU's
         if (by_cost) |*c| if (last_end > 0) c.time(wd - 1, (prev.gpuEnd() - last_end) * 1e3);
         last_end = prev.gpuEnd();
         const got = rg[slot + 3 .. slot + 3 + keep];

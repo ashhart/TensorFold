@@ -12,9 +12,10 @@ pub const source =
     \\// token history (prompt, then every emitted token; its length in ar[800]), gets this round's.
     \\kernel void fz_accept(device uint* wids [[buffer(0)]], device const uint* picks [[buffer(1)]],
     \\    device int* ar [[buffer(2)]], device uint* ring [[buffer(3)]], device long* pm [[buffer(4)]],
-    \\    constant uint4& cfg [[buffer(5)]], device uint* H [[buffer(6)]], uint tid [[thread_position_in_grid]]) {
+    \\    constant uint4& cfg [[buffer(5)]], device uint* H [[buffer(6)]], const device int* G [[buffer(7)]],
+    \\    uint tid [[thread_position_in_grid]]) {
     \\  if (tid != 0) return;
-    \\  const int W = int(cfg.x), Wn = int(cfg.y), cap = int(cfg.z);
+    \\  const int W = min(int(cfg.x), G[0]), Wn = int(cfg.y), cap = int(cfg.z); // G: a GPU-gated window's verified rows
     \\  int keep = 1;
     \\  while (keep < W && wids[keep] == picks[keep - 1]) keep++;
     \\  const int round = ar[2], slot = (round & 511) * 20;
@@ -22,6 +23,7 @@ pub const source =
     \\  ring[slot + 1] = uint(ar[801]);
     \\  ring[slot + 2] = uint(ar[802]);
     \\  for (int i = 0; i < keep; i++) ring[slot + 3 + i] = picks[i];
+    \\  ring[slot + 19] = uint(W);
     \\  const int hl = ar[800];
     \\  for (int i = 0; i < keep; i++) H[hl + i] = picks[i];
     \\  ar[800] = hl + keep;

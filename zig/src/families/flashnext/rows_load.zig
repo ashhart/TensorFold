@@ -21,6 +21,7 @@ pub fn on(device: mtl.Device) bool {
 /// `d` on the run's encoder at `rows` rows, unless the role is knocked out.
 pub fn launch(r: *Run, d: *const rows_w.Dense, role: []const u8, x: Buf, rows: usize, y: Buf) !void {
     if (r.skip & Run.class(role) != 0) return;
+    d.shared.limit = r.limit orelse d.shared.no_limit;
     try rows_w.encodeDense(r.enc, d, x, rows, y, .auto, !r.serial);
     if (!r.serial) r.enc.barrier();
 }
@@ -283,7 +284,12 @@ pub fn attach(p: *const Prompt, m: *Model, mtp_root: []const u8) !void {
         .a = r.arena,
         .device = r.device,
         .sums = .{ .{ .b = try r.buffer(sums) }, .{ .b = try r.buffer(sums) } },
+        .no_limit = undefined,
+        .limit = undefined,
     };
+    sh.no_limit = .{ .b = try r.buffer(16) };
+    sh.no_limit.b.slice(i32, 1)[0] = 1 << 20;
+    sh.limit = sh.no_limit;
     r.rows_cleanup = .{ .ctx = sh, .call = rows_w.Shared.deinit };
     for (&m.layers, 0..) |*L, i| {
         const kind = if (L.linear) "gdn" else "att";

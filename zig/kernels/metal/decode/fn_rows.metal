@@ -89,16 +89,18 @@ inline void lane_codes(const device uint8_t* row, int v0, thread float* q) {
   }
 }
 
-// 4-bit group 32: simdgroup r runs MLX's one-row qmv_fast loop for input row r over outputs RPS b ..
+// 4-bit group 32: simdgroup r runs MLX's one-row qmv_fast loop for input row r over outputs RPS b .., rows from
+// LIM[0] on left alone (a GPU-gated window's unverified rows)
 [[max_total_threads_per_threadgroup(1024)]]
 [[kernel]] void q4_qmv_rows(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
     const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]], device bfloat* OUT [[buffer(4)]],
-    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
+    const constant int* LIM [[buffer(5)]], uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
     uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
     uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
   constexpr int K = FZ_K, LD = FZ_LD, RPS = FZ_RPS;
   const uint lane = thread_index_in_simdgroup;
   const int r = int(simdgroup_index_in_threadgroup);
+  if (r >= LIM[0]) return;
   const int row0 = int(threadgroup_position_in_grid.y) * RPS;
   constexpr int KB = K / 2;
   constexpr int KG = K / 32;

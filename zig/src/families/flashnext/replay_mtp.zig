@@ -134,17 +134,18 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
         if (!r.serial) r.enc.barrier();
     }
     r.rows = 1;
-    if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, h.md1 }, &.{t.xs});
-    try m.mtpLane(h.out, "mtp:lane_qmm_bytes_grouped@mtp.att.o", t.aout, h.md1, 1, 6144, t.branch);
+    const md1 = r.head_md1 orelse h.md1; // a gated chain step's (gate.zig)
+    if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, md1 }, &.{t.xs});
+    try m.mtpLane(h.out, "mtp:lane_qmm_bytes_grouped@mtp.att.o", t.aout, md1, 1, 6144, t.branch);
     try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
-    try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, h.md1);
-    try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, h.md1, t.lg, 1);
-    if (h.xw) |w| try variants.experts(r, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, h.md1, t.ydown, w) else try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, h.md1, t.ydown);
+    try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, md1);
+    try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, md1, t.lg, 1);
+    if (h.xw) |w| try variants.experts(r, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown, w) else try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown);
     try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
     h.last = h.h[1];
-    try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, h.md1);
+    try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, md1);
     const x = t.mixed;
-    if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
+    if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, md1 }, &.{t.xs});
     // TP: this Mac's half of the draft vocabulary's tiles, then one exact argmax swap
     if (r.tp != null and r.dense and h.draft.w == null) {
         const tp = r.tp.?;
@@ -161,7 +162,7 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
         tp.mapIds(r.enc, h.ids, out);
         return;
     }
-    try m.mtpLane(h.draft, "mtp:lane_qmm_bytes_grouped@mtp.draft", x, h.md1, 1, D, h.logits);
+    try m.mtpLane(h.draft, "mtp:lane_qmm_bytes_grouped@mtp.draft", x, md1, 1, D, h.logits);
     r.enc.setPipeline(r.argids_pipe);
     for ([_]Buf{ h.logits, out, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
     r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
@@ -169,7 +170,12 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
 }
 
 pub fn mtpLane(m: *Model, l: Lane, role: []const u8, x: Buf, md: Buf, rows: usize, k: usize, y: Buf) !void {
-    if (l.rows) |d| if (m.r.tp == null) return rows_load.launch(m.r, d, role, x, rows, y);
+    if (l.rows) |d| if (m.r.tp == null) { // a gated head step's rows are its dims' count
+        const saved = m.r.limit;
+        if (m.r.head_md1 != null) m.r.limit = md;
+        defer m.r.limit = saved;
+        return rows_load.launch(m.r, d, role, x, rows, y);
+    };
     if (l.w) |w| return lane_w.launch(m.r, w, role, x, md, rows, y);
     const six = try l.recorded();
     if (m.r.dense) return m.r.denseRows(x, k, six, rows, y);

@@ -104,6 +104,8 @@ pub const Run = struct {
     gdn_pipe: ?mtl.Pipeline = null, // the DeltaNet window step on fz_gdn (gdn.zig) when set
     gdn_kept: ?mtl.Pipeline = null, // GPU-side rounds: fz_gdn keeping one state a layer, kept rows replayed (gdn.zig)
     tree: ?*@import("tree.zig").Tree = null, // the tree window decode is running, if any (tree.zig)
+    limit: ?Buf = null, // a GPU-gated window's or head step's row count for the 4-bit row kernels (gate.zig)
+    head_md1: ?Buf = null, // a gated head step's one-row dims, in place of the head's own
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)

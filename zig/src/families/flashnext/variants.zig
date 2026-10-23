@@ -40,6 +40,7 @@ pub fn patched(r: *Run, v: *Variant, consts: []const Const) !*Variant {
     for (consts) |c| text = try constant(r.arena, text, c.name, c.value);
     if (experts4.halfApplies(text, consts) and rows_w.nib(r.device.generation(), 2) == 1) text = try experts4.half(r.arena, text);
     if (experts4.applies(text, consts)) text = try experts4.balanced(r.arena, text);
+    if (experts4.gateApplies(text, consts)) text = try experts4.gated(r.arena, text);
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const nv = try r.arena.create(Variant);
     nv.* = v.*;
@@ -91,6 +92,7 @@ pub fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: 
     if (r.skip & (1 << 2) != 0) return;
     var cg: [4]Const = undefined;
     var cd: [4]Const = undefined;
+    r.enc.setBuffer(rows_buf.b, rows_buf.off, 17); // the 4/32 gate/up's row count (experts4.gated)
     try callAs(r, gu_role, r.rows, &.{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ act, pick, wts }, four(&cg, w.gu));
     try callAs(r, down_role, r.rows, &.{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf }, &.{y}, four(&cd, w.down));
 }

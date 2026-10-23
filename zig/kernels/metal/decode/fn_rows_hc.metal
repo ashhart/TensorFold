@@ -107,6 +107,7 @@ inline float qchunk_dot(const device uint* chunk, float scale, float bias, const
   const int o = int(threadgroup_position_in_grid.x) * 8 + int(g);
   const int k = int(threadgroup_position_in_grid.y);
   const int r = int(threadgroup_position_in_grid.z);
+  if (r >= R) return; // a gated window's unverified rows
   const int c0 = k * 32 * 32;
   threadgroup float xs[32 * 33];                      // group j at 33 j: a lane's reads hit distinct banks
   threadgroup float rinv[S];
@@ -146,6 +147,7 @@ inline float qchunk_dot(const device uint* chunk, float scale, float bias, const
   const uint t = thread_position_in_threadgroup.x;
   const int R = rows[0];
   const int r = int(threadgroup_position_in_grid.y);
+  if (r >= R) return; // a gated window's unverified rows
   constexpr int W = S * D;
   constexpr int GPR = LOW / 32;
   constexpr int ROWS = S * 8;

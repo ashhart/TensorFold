@@ -138,6 +138,7 @@ fn encodeProduct(
     y: Buf,
     sums: ?Buf,
     how: How,
+    limit: Buf,
 ) !void {
     if (how == .twin) {
         enc.setPipeline(pp.mma orelse return error.RowsNoTwin);
@@ -154,6 +155,7 @@ fn encodeProduct(
     }
     enc.setPipeline(if (how == .four) pp.four orelse return error.RowsNoFour else pp.rows);
     for ([_]Buf{ p.w, p.s, p.b }, 1..) |b, j| enc.setBuffer(b.b, b.off, j);
+    if (how == .loop) enc.setBuffer(limit.b, limit.off, 5);
     const per: usize = if (how == .four) 4 else 1; // rows a simdgroup
     var lo: usize = 0;
     while (lo < rows) : (lo += rows_a_call * per) {
@@ -201,6 +203,7 @@ pub fn encode(
     sums: ?Buf,
     mode: Mode,
     concurrent: bool,
+    limit: Buf,
 ) !void {
     try check(p);
     const s = specOf(p, device.generation(), rows, ld);
@@ -210,7 +213,7 @@ pub fn encode(
         encodeSums(enc, pp, p, x, rows, sums orelse return error.RowsNoScratch);
         if (concurrent) enc.barrier();
     }
-    try encodeProduct(enc, pp, p, s, x, rows, y, sums, how);
+    try encodeProduct(enc, pp, p, s, x, rows, y, sums, how, limit);
 }
 
 /// A member of a fused projection: its matrix, its first fused column, and whether its twin and four-row kernels run.
@@ -224,6 +227,8 @@ pub const Shared = struct {
     hc: @import("rows_hc.zig").Cache = .empty,
     hc_tiles: bool = true, // 4/32 hyper-connections take their 8-row tiles (off when the load check finds them inexact)
     sums: [2]Buf,
+    no_limit: Buf, // a row count no window reaches
+    limit: Buf, // the 4-bit row kernels' row count: no_limit, or a GPU-gated window's or head step's
 
     pub fn deinit(ctx: *anyopaque) void {
         const sh: *Shared = @ptrCast(@alignCast(ctx));
@@ -313,6 +318,6 @@ pub fn encodeDense(
             .four => if (mb.four) .four else .loop,
             .loop => .loop,
         };
-        try encodeProduct(enc, pp, mb.p, s, x, rows, y.at(mb.col * 2), sh.sums[slot(mb.p.bits)], kept);
+        try encodeProduct(enc, pp, mb.p, s, x, rows, y.at(mb.col * 2), sh.sums[slot(mb.p.bits)], kept, sh.limit);
     }
 }

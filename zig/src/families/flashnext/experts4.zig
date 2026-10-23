@@ -82,6 +82,23 @@ pub fn half(a: std.mem.Allocator, text: []const u8) ![]const u8 {
     return std.mem.replaceOwned(u8, a, text, codes_loop, half_codes ++ codes_loop);
 }
 
+/// The gate/up kernel's last parameter and its row line: a row count from buffer 17 goes in after each.
+const gate_param = "  device float* WTS [[buffer(16)]],\n";
+const gate_row = "  const int r = p / SLOTS, slot = p % SLOTS;\n";
+const gate_mark = "GROWS";
+
+/// Whether `text` at `consts` is the recorded 4/32 expert gate/up, not yet taking a row count.
+pub fn gateApplies(text: []const u8, consts: []const Const) bool {
+    return q4(consts) and std.mem.count(u8, text, gate_param) == 1 and std.mem.count(u8, text, gate_row) == 1 and
+        std.mem.indexOf(u8, text, gate_mark) == null;
+}
+
+/// `text` reading its row count from buffer 17: pairs of rows from the count on (a GPU-gated window's) do nothing.
+pub fn gated(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const p = try std.mem.replaceOwned(u8, a, text, gate_param, gate_param ++ "  const constant int32_t* GROWS [[buffer(17)]],\n");
+    return std.mem.replaceOwned(u8, a, p, gate_row, gate_row ++ "  if (r >= GROWS[0]) return;\n");
+}
+
 const calls = [2][2][]const u8{
     .{ "down_rows<SWB, SWG, NI>(SDW, SDS, SDB, size_t(d0), x, lane, out)", "down_rows_bal(SDW, SDS, SDB, size_t(d0), x, lane, out)" },
     .{ "down_rows<WB, WG, NI>(DW, DS, DB, size_t(PICK[r * TOPK + k]) * D + d0, x, lane, out)", "down_rows_bal(DW, DS, DB, size_t(PICK[r * TOPK + k]) * D + d0, x, lane, out)" },
@@ -143,4 +160,23 @@ test "both recorded expert kernels take half nibbles at 4/32 only, once" {
         try std.testing.expect(!halfApplies(out, &at4)); // never twice
     }
     try std.testing.expectEqual(@as(usize, 2), seen);
+}
+
+test "the recorded 4/32 expert gate/up takes a row count from buffer 17, once; the down is left alone" {
+    const ks = @import("kernel_sources");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const at4 = [_]Const{ .{ .name = "WB", .value = 4 }, .{ .name = "WG", .value = 32 }, .{ .name = "SWB", .value = 4 }, .{ .name = "SWG", .value = 32 } };
+    var seen: usize = 0;
+    for (ks.flashnext_gen.sources) |src| {
+        if (std.mem.indexOf(u8, src.name, "qa_expert_down_y") != null) try std.testing.expect(!gateApplies(src.text, &at4));
+        if (std.mem.indexOf(u8, src.name, "qa_expert_gateup") == null) continue;
+        seen += 1;
+        try std.testing.expect(gateApplies(src.text, &at4));
+        const out = try gated(arena.allocator(), src.text);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "[[buffer(17)]]"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "if (r >= GROWS[0]) return;"));
+        try std.testing.expect(!gateApplies(out, &at4));
+    }
+    try std.testing.expectEqual(@as(usize, 1), seen);
 }
