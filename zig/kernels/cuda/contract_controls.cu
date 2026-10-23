@@ -235,3 +235,16 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_vit_g4_pool(const __nv_
                                                                     float root, int keep) {
     tf_vit_g4::pool_std(x, bias, scale, out, gw, C, root, keep);
 }
+
+// Gate 4: deliberately sum the BF16 dense projection in fp16 instead of its required fp32 accumulator.
+extern "C" __global__ void tf_ctl_q35_dense_half(const __nv_bfloat16 *X, const __nv_bfloat16 *W, __nv_bfloat16 *Y,
+                                                 int N, int K) {
+    if (threadIdx.x != 0)
+        return;
+    const int64_t row = blockIdx.y, col = blockIdx.x;
+    __half sum = __float2half_rn(0.0f);
+    for (int i = 0; i < K; ++i)
+        sum = __hadd(sum, __hmul(__float2half_rn(__bfloat162float(X[row * K + i])),
+                                 __float2half_rn(__bfloat162float(W[col * K + i]))));
+    Y[row * N + col] = __float2bfloat16_rn(__half2float(sum));
+}

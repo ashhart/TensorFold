@@ -290,6 +290,7 @@ test "a state resumes only a request with the same images before its position" {
 
 test "a restore refuses another cache format, another length, a position past the cache and other images" {
     var e: Engine = undefined;
+    e.kit = null;
     e.g = testGeometry(8, 4, 4);
     if (comptime @hasField(Engine, "kv8")) e.kv8 = false;
     var cache: Cache = undefined;
@@ -345,6 +346,7 @@ test "a failed restore's host copy stays through a drop until a wait, the restor
     api.cuMemFreeHost = RestoreFake.freeHost;
     const d: cuda.Driver = .{ .lib = undefined, .api = api };
     var e: Engine = undefined;
+    e.kit = null;
     e.gpa = std.testing.allocator;
     e.d = &d;
     e.g = testGeometry(8, 4, 4);

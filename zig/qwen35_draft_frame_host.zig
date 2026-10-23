@@ -140,6 +140,7 @@ fn actualFrame(block: usize) !void {
     driver.api.cuMemcpyDtoHAsync_v2 = Record.download;
     driver.api.cuStreamSynchronize = Record.wait;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = &driver;
     e.g.hidden = 256;
     e.stream = .{ .d = &driver, .handle = null };
@@ -259,6 +260,7 @@ test "Draft frames: combined target rows above capacity refuse before even settl
     var driver: cuda.Driver = undefined;
     driver.api.cuLaunchKernel = Record.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = &driver;
     e.stream = .{ .d = &driver, .handle = null };
     e.verify_rows = 64;

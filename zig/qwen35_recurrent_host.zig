@@ -105,6 +105,7 @@ test "Shared verification: recurrent scratch is absent from an idle real 27B cac
     Driver.reset();
     var d: cuda.Driver = undefined;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     engine(&e, &d);
     var c = try q.engine.Cache.init(a, &e, 1);
     defer finish(&e, &c);
@@ -118,6 +119,7 @@ test "Shared verification: all window transitions keep log capacity within the o
     Driver.reset();
     var d: cuda.Driver = undefined;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     engine(&e, &d);
     var c = try q.engine.Cache.init(a, &e, 128);
     defer finish(&e, &c);
@@ -150,6 +152,7 @@ test "Shared verification: a real empty keep retains its snapshot until the queu
     Driver.reset();
     var d: cuda.Driver = undefined;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     engine(&e, &d);
     var c = try q.engine.Cache.init(a, &e, 128);
     defer finish(&e, &c);
@@ -175,10 +178,12 @@ test "Shared verification: allocation refusal retains a queued keep's old log ow
     Driver.reset();
     var d: cuda.Driver = undefined;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     engine(&e, &d);
     var c = try q.engine.Cache.init(a, &e, 128);
     defer finish(&e, &c);
     var foreign: q.engine.Engine = undefined;
+    foreign.kit = null;
     var other_driver: cuda.Driver = undefined;
     engine(&foreign, &other_driver);
     defer rec.shutdown(&foreign);
@@ -205,6 +210,7 @@ test "Shared verification: streams cycling window widths reuse their scratch ins
     Driver.reset();
     var d: cuda.Driver = undefined;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     engine(&e, &d);
     var c = try q.engine.Cache.init(a, &e, 1024);
     var o = try q.engine.Cache.init(a, &e, 1024);

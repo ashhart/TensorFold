@@ -57,6 +57,7 @@ test "selected live shape reaches real tiled projections and DeltaNet scan dispa
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Trace.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = &d;
     e.stream = .{ .d = &d, .handle = null };
     e.fns.sums = function(&d, 1);

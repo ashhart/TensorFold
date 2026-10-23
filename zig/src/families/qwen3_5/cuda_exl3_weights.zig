@@ -122,30 +122,13 @@ fn f32vec(s: *Sink, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytyp
     return s.put(std.mem.sliceAsBytes(words));
 }
 
-/// One EXL3 group's tensors, checked: trellis [k/16][n/16][16 * bits] i16, the mul1 marker, fp16 suh [k] and svh [n].
-const Group = struct { trellis: core.checkpoint.Tensor, suh: core.checkpoint.Tensor, svh: core.checkpoint.Tensor, halves: u32 };
-
-fn group(ck: *core.Checkpoint, base: []const u8, n: usize, k: usize) !Group {
-    var buf: [240]u8 = undefined;
-    const t = try ck.get(try name(&buf, "{s}.trellis", .{base}));
-    if (t.dtype != .i16 or t.rank != 3 or t.dim(0) != k / 16 or t.dim(1) != n / 16 or t.dim(2) % 8 != 0) {
-        std.log.err("{s}: unexpected trellis {any}", .{ base, t.shape[0..t.rank] });
-        return error.UnexpectedTensor;
-    }
-    const marker = try ck.get(try name(&buf, "{s}.mul1", .{base}));
-    if (marker.bytes.len != 4 or std.mem.readInt(u32, marker.bytes[0..4], .little) != mul1_magic) return error.UnsupportedQwenQuantization;
-    return .{
-        .trellis = t,
-        .suh = try ck.expect(try name(&buf, "{s}.suh", .{base}), .f16, &.{k}),
-        .svh = try ck.expect(try name(&buf, "{s}.svh", .{base}), .f16, &.{n}),
-        .halves = @intCast(t.dim(2) / 8),
-    };
-}
+const admit = @import("cuda_exl3_admit.zig");
+const group = admit.group;
 
 /// An n-by-k EXL3 projection, its trellis kept as stored (Dense reads the stored layout).
 fn dense(s: *Sink, kit: ?*Kit, ck: *core.Checkpoint, prefix: []const u8, mod: []const u8, n: usize, k: usize) !Proj {
     var buf: [200]u8 = undefined;
-    const gr = try group(ck, try name(&buf, "{s}{s}", .{ prefix, mod }), n, k);
+    const gr = try admit.denseGroup(ck, try name(&buf, "{s}{s}", .{ prefix, mod }), n, k);
     const st = cuda.exl3.strides(k, n, gr.halves, false);
     const w: cuda.exl3.Weight = .{
         .trellis = try s.put(gr.trellis.bytes),

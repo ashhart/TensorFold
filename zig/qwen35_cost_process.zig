@@ -55,6 +55,7 @@ fn probe(init: std.process.Init, root: []const u8, kind: []const u8, release: []
     const draft = try std.fs.path.join(a, &.{ root, if (eight) "draft8" else "draft" });
     var context: Context = .{ .d = .{ .release = try std.fmt.parseInt(i32, release, 10) } };
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.dir = target;
     e.learning = null;
     e.features = 0;

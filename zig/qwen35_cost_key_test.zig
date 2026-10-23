@@ -50,6 +50,7 @@ pub fn check() !void {
     try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &bytes });
     var context: Context = .{};
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.dir = root;
     e.learning = null;
     e.features = 0;

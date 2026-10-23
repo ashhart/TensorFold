@@ -62,6 +62,7 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     d.api.cuLaunchKernelEx = Trace.launchEx;
     var e: q.engine.Engine = undefined;
     e.int8 = .{};
+    e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.fns.sums = function(d, 1);

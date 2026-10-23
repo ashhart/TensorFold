@@ -152,6 +152,7 @@ fn head(d: anytype, rows: usize) !?u64 {
     const q = switch (e.head) {
         .a4 => |q| q,
         .an, .ql => return full(d, rows),
+        .x3, .bf => return full(d, rows),
     };
     if (q.n != spans[1][1] or q.k % 64 != 0) return full(d, rows);
     const first: cuda.qlinear.Affine4 = .{ .w = q.w, .s = q.s, .b = q.b, .n = spans[0][1], .k = q.k, .npad = q.npad };

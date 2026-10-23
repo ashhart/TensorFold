@@ -7,6 +7,14 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const ct_run = b.addRunArtifact(b.addTest(.{ .root_module = ct_admit }));
     b.step("test-qwen35-modelopt-admission-host", "Synthetic stored-format admission and full-precision loading without devices").dependOn(&ct_run.step);
     step.dependOn(&ct_run.step);
+    const admission = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_exl3_loader_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    const admission_run = b.addRunArtifact(b.addTest(.{ .root_module = admission, .filters = &.{"EXL3 admission:"} }));
+    b.step("test-qwen35-exl3-admission-host", "Synthetic EXL3 tensors and dry-run refusals before upload").dependOn(&admission_run.step);
+    step.dependOn(&admission_run.step);
+    const late = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_engine_tail_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
+    const late_run = b.addRunArtifact(b.addTest(.{ .root_module = late, .filters = &.{"EXL3 late init:"} }));
+    b.step("test-qwen35-exl3-owner-host", "Real EXL3 owners survive no late allocation or warm failure").dependOn(&late_run.step);
+    step.dependOn(&late_run.step);
     const proposal = b.createModule(.{ .root_source_file = b.path("zig/proposal_router_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
     b.step("test-proposal-router-host", "Optional common proposal routing, legacy parity and lifecycle").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = proposal, .filters = &.{"proposal router:"} })).step);
 

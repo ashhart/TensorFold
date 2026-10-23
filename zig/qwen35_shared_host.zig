@@ -43,6 +43,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     d.api.cuMemcpyDtoDAsync_v2 = Driver.copyAsync;
     d.api.cuLaunchKernel = Driver.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 32, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };

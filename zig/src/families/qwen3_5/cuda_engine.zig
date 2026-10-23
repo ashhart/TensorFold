@@ -250,19 +250,15 @@ pub const Engine = struct {
             try weights.load(e, &ck, &stage);
         }
         if (e.mo) |*m| try m.reserveParts(e);
-        _ = try e.scratch(.allocate);
-        e.tables = try DeviceBuffer.alloc(d, tables_len);
-        errdefer e.tables.free();
-        e.staged = try cuda.HostBuffer.alloc(d, tables_len);
-        errdefer e.staged.free();
-        e.host_logits = try cuda.HostBuffer.alloc(d, most_verify * g.vocab * 2);
-        errdefer e.host_logits.free();
-        try e.stream.synchronize();
+        try @import("cuda_engine_tail.zig").finish(e, io, started);
+        return e;
+    }
+
+    pub fn finishWarm(e: *Engine, io: std.Io, started: i96) !void {
         const warm_start = profile.now(io);
         e.startup = .{ .load = warm_start - started };
         errdefer recurrent.shutdown(e);
-        e.startup.add(try profile.withCache(gpa, io, e, Cache));
-        return e;
+        e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
     }
 
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
@@ -328,7 +324,7 @@ pub const Engine = struct {
     }
 
     /// The scratch rows' bytes (`measure`: summed, nothing taken), or the rows themselves from the arena.
-    fn scratch(e: *Engine, mode: enum { measure, allocate }) !usize {
+    pub fn scratch(e: *Engine, mode: enum { measure, allocate }) !usize {
         var total: usize = 0;
         const Take = struct {
             e: *Engine,
