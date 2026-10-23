@@ -22,16 +22,16 @@ test "Flash Next contracts: finite masked draws stay allowed and greedy ties cho
     }
 }
 
-test "Flash Next contracts: both vision launches are registered pending measured limits" {
+test "Flash Next contracts: both vision launches carry their measured M1 and M2 limits" {
     const records = if (@hasDecl(registry, "all_metal")) registry.all_metal else registry.metal;
     for ([_][]const u8{ "flashnext vision fz_mask_rows", "flashnext vision fn_attn_prep_mrope" }) |name| {
         var found = false;
         for (records) |r| if (std.mem.eql(u8, name, r.name)) {
             found = true;
             try t.expectEqual(@as(u32, 256), r.threads);
-            try t.expectEqual(@as(u32, 0), r.m1);
-            try t.expectEqual(@as(u32, 0), r.m2);
-            try t.expect(try registry.checkMetal(t.allocator, &.{r}, true) > 0);
+            try t.expectEqual(@as(u32, 1024), r.m1);
+            try t.expectEqual(@as(u32, 1024), r.m2);
+            try t.expectEqual(@as(usize, 0), try registry.checkMetal(t.allocator, &.{r}, true));
         };
         try t.expect(found);
     }
