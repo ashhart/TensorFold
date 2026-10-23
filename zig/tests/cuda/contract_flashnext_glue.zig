@@ -163,8 +163,8 @@ pub const Glue = struct {
                 try self.in(2, std.mem.sliceAsBytes(v));
                 try self.in(3, std.mem.sliceAsBytes(gb));
                 try self.in(4, std.mem.sliceAsBytes(st));
-                try self.out(m * nv * dv * 4);
-                try self.out(nv * dv * dk * 4);
+                _ = try self.out(m * nv * dv * 4);
+                _ = try self.out(nv * dv * dk * 4);
             },
             .scores => {
                 if (shape.k != di or shape.n < 2 or shape.n > 4096) return false;
@@ -186,7 +186,7 @@ pub const Glue = struct {
                 try self.in(0, std.mem.sliceAsBytes(iq));
                 try self.in(1, std.mem.sliceAsBytes(pooled));
                 try self.in(2, std.mem.sliceAsBytes(&pos));
-                try self.out(m * nb * 4);
+                _ = try self.out(m * nb * 4);
             },
             .readout => {
                 if (shape.n != dims or shape.k != wide) return false;
@@ -221,10 +221,10 @@ pub const Glue = struct {
                 try self.in(4, std.mem.sliceAsBytes(dt));
                 try self.in(5, std.mem.sliceAsBytes(st)); // the replaced kernels' state in: our launch never writes it
                 try self.in(6, std.mem.sliceAsBytes(nw));
-                try self.out(m * nv * dv * 2); // gated-norm rows (bf16)
-                try self.out(m * (nv * dv / 32) * 4); // their 32-wide sums
+                _ = try self.out(m * nv * dv * 2); // gated-norm rows (bf16)
+                _ = try self.out(m * (nv * dv / 32) * 4); // their 32-wide sums
                 self.state = try self.out(nv * dv * dk * 4); // the state after the pass: read and written where it lies
-                try self.out(m * nv * dv * 4); // the chain's readouts
+                _ = try self.out(m * nv * dv * 4); // the chain's readouts
                 // the fused block reads and writes the state where it lies: every launch starts from these bytes
                 self.fresh = try a.dupe(u8, std.mem.sliceAsBytes(st));
             },
@@ -278,11 +278,11 @@ pub const Glue = struct {
             try self.in(5 + wi * 3, tb);
         }
         // act, xs, inj (the reduce's), then mixed and xsm (the mix's)
-        try self.out(m * low * 2);
-        try self.out(m * (low / 32) * 4);
-        try self.out(m * streams * 2);
-        try self.out(m * dims * 2);
-        try self.out(m * (dims / 32) * 4);
+        _ = try self.out(m * low * 2);
+        _ = try self.out(m * (low / 32) * 4);
+        _ = try self.out(m * streams * 2);
+        _ = try self.out(m * dims * 2);
+        _ = try self.out(m * (dims / 32) * 4);
     }
 
     fn sweepOf(m: usize, bm: usize, k: usize) usize {
