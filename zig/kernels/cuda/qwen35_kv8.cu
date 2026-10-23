@@ -56,9 +56,9 @@ extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __
     constexpr int DPL = HD / 32;
     const int QH = geo.qh, KVH = geo.kvh;
     const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
-    const int c = blockIdx.x, h = blockIdx.y;
-    if (c >= MAXCH || past_rows(P, blockIdx.z)) return;
-    const size_t m = blockIdx.z;
+    const int c = blockIdx.z, h = blockIdx.y;
+    if (c >= MAXCH || past_rows(P, blockIdx.x)) return;
+    const size_t m = blockIdx.x;
     const int qh = h * (QH / KVH) + g;
     const Seg sg = segs[rowseg[m]];
     const Ancestor anc = rowanc[m];
