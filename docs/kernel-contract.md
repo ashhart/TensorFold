@@ -162,6 +162,11 @@ CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: t
 `tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
 sparse).
 
+GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 and 8 bits, plus both gathered paths.
+Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
+The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.
+Controls dispatch real source mutations that couple rows or select the wrong expert; host tests validate their witnesses.
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.

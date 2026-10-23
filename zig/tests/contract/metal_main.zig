@@ -12,6 +12,7 @@ const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
+const glm_rows_k = @import("metal_glm_rows.zig");
 
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
@@ -233,6 +234,9 @@ pub fn main(init: std.process.Init) !u8 {
         ntiles += 1;
     };
     for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
+    var glm_windows: glm_rows_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer glm_windows.deinit();
+    try glm_windows.collect(o.only);
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
