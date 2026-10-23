@@ -73,10 +73,13 @@ pub fn fillWidth(a: std.mem.Allocator, hc: bool, width: usize, rows: usize, mode
     for (part, 0..) |*p, i| p.* = if (i % 32 == 24) // stress logits under 30, where fp32's exp keeps every entry
         (if (stress) @floatFromInt(1024 + rng.uintLessThan(u32, 1024)) else 200 + rng.float(f32) * 200)
     else if (stress) @as(f32, @floatFromInt(rng.uintLessThan(u32, 5))) - 2 else rng.float(f32) * 2 - 1;
-    if (exact or (hc and stress)) { // signed permutations of one row; eps 1 - mean square; hc's c = stream 0 / 2
+    // Each exact stress group sums to 511: fp16 is exact and bf16 must miss by at least one in every order.
+    if (exact or (hc and stress)) { // eps 1 - mean square; hc's c = stream 0 / 2
         const row = try a.alloc(f64, width);
         defer a.free(row);
-        for (row, 0..) |*v, i| v.* = if (stress)
+        for (row, 0..) |*v, i| v.* = if (exact and stress)
+            (if (i % 64 == 0) @as(f64, 7) else 8)
+        else if (stress)
             @as(f64, @floatFromInt(rng.uintLessThan(u32, 64))) - 31
         else
             bf((rng.float(f64) * 2 - 1) * (if (i % 64 == 7) @as(f64, 20) else 1));
@@ -96,9 +99,10 @@ pub fn fillWidth(a: std.mem.Allocator, hc: bool, width: usize, rows: usize, mode
         defer a.free(order);
         for (0..rows) |r| {
             for (order, 0..) |*o, i| o.* = i;
-            rng.shuffle(usize, order);
+            if (!(exact and stress)) rng.shuffle(usize, order);
             for (0..width) |i| {
-                const v = row[order[i]] * @as(f64, if (rng.boolean()) -1 else 1);
+                const sign: f64 = if (exact and stress) 1 else if (rng.boolean()) -1 else 1;
+                const v = row[order[i]] * sign;
                 if (hc) {
                     x[(r * s) * width + i] = c.toBf16(@floatCast(2 * v));
                     for (1..s) |k| x[(r * s + k) * width + i] = 0;

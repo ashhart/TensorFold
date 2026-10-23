@@ -24,6 +24,42 @@ fn count(which: impl.Which, width: usize) usize {
     };
 }
 
+test "GLM 64-sums stress separates BF16 at every registered width independently of seed" {
+    const seeds = [_]u64{ 0, 1, 7, 0x6b63, 0x9e37 * 125, 0x9e37 * 134, std.math.maxInt(u64) };
+    for (impl.bf16_entries) |entry| {
+        if (entry.which != .norm_sums and entry.which != .hc_sums) continue;
+        const spec = impl.specWidth(entry.which, entry.width);
+        for (seeds) |seed| {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const in = try ref.fillWidth(a, entry.which == .hc_sums, entry.width, 4, .stress, seed, true);
+            const n = 4 * entry.width / 64;
+            const want = try a.alloc(f64, n);
+            const got = try a.alloc(f64, n);
+            const mag = try a.alloc(f64, n);
+            try ref.sums(a, in, .{}, want, mag);
+            for (want) |v| try std.testing.expectEqual(@as(f64, 511), v);
+            var least: f64 = std.math.inf(f64);
+            for ([_]g.Order{ .sequential, .pairwise, .strided }) |order| {
+                for ([_]c.Accum{ .f32, .f16, .bf16 }) |acc| {
+                    try ref.sums(a, in, .{ .acc = acc, .order = order }, got, mag);
+                    for (got, want) |v, target| {
+                        const ratio = @abs(v - target) / c.boundExact(spec, target);
+                        if (acc == .bf16) {
+                            try std.testing.expect(ratio >= spec.sums.bf16);
+                            least = @min(least, ratio);
+                        } else try std.testing.expectEqual(target, v);
+                    }
+                }
+            }
+            if (seed == 0) std.debug.print("GLM 64-sums width={d} hc={} BF16 minimum={d}x\n", .{
+                entry.width, entry.which == .hc_sums, least,
+            });
+        }
+    }
+}
+
 test "GLM norm nonfinite fixture includes both infinity signs together and leaves a finite row" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
