@@ -161,7 +161,8 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api_mod })).step);
     }
     poolChecks(b, b.graph.host, test_step);
-    hip_build.steps(b, target, optimize, build_options, test_step);
+    const with_hip = b.option(bool, "hip", "Enable the opt-in HIP backend and its host/device targets") orelse false;
+    if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step);
     exlr8_build.hostTests(b, target, test_step);
     xpu_build.steps(b, target, optimize, build_options);
     video_build.steps(b, target, test_step);

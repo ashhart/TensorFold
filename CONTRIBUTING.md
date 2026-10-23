@@ -40,6 +40,17 @@ zig build test-cuda-host
 
 This subset does not replace the complete `test` suite.
 
+HIP is an explicit build opt-in. Add `-Dhip=true` to enable its host tests and named HIP targets:
+
+```sh
+zig build test -Dhip=true
+zig build native-hip -Dhip=true -Dhipcc=/opt/rocm/bin/hipcc -Dhip-arch=gfx1100
+```
+
+The default graph omits HIP. Enabling it does not select another backend or change CUDA, Metal or XPU runtime options.
+The HIP backend uses the same shared core and serving contracts. Device qualification remains specific to its
+checkpoint, compiler, runtime and architecture; a host build does not establish those receipts.
+
 Linux release builds use the CUDA backend and qualified GPU kernel assets.
 [Packaging](packaging/README.md) lists the flat fatbin set and optional captured CUDA files required by `dist`.
 Compile success alone does not qualify a GPU or checkpoint.
