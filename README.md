@@ -293,7 +293,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--silence-onset-voiced-s SECONDS` | Drama speech only: the voiced seconds below which `--silence-onset-s` applies; required with it, with no default. Calibrate on public or built-in speech. |
 | `--silence-mid-s SECONDS` | Drama speech only: with the silence guard on, finish as `silence` when end of speech falls in a run this long below the floor, after the explicit voiced minimum. Whole replies carry the decimal `X-Silence-Mid-Trips` count, including zero. Must be below `--silence-seconds` and paired with `--silence-mid-min-voiced-s`. Unset by default: off. |
 | `--silence-mid-min-voiced-s SECONDS` | Required with `--silence-mid-s`: positive finite cumulative voiced duration before the mid rule applies, including equality. No default; calibrate with the other silence thresholds. |
-| `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
+| `--parallel N\|auto` | Cap active requests at N and queue the rest. Default `auto` asks for up to 8 as memory and the engine allow; an explicit count that cannot fit is refused. Read the accepted count at startup. |
 | `--prompt-cache-gib GIB` | Retained-prefix budget, 16 GiB by default or less where memory is short; 0 disables it. |
 | `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
 | `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
