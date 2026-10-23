@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const gdn = @import("cuda_gdn.zig");
+const gdn_fused = @import("cuda_gdn_fused.zig");
 const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
@@ -268,7 +269,13 @@ pub fn Pass(comptime Tri: type) type {
             try self.copy(keep.proj, s.proj, n * gdn.proj_width * 2);
             try self.copy(keep.hist, self.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
             // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
-            if (self.lanes.len == 0) {
+            const fused = self.lanes.len == 0 and n >= 64 and gdn_fused.on();
+            if (fused) {
+                // the three in one kernel a value head: the same per-row op sequences, no fp32 rows through memory
+                const st = self.seq.state[li].ptr;
+                const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr };
+                try gdn_fused.launch(self.k.gdn_fused, self.stream, in, n, s.gout, s.gxs);
+            } else if (self.lanes.len == 0) {
                 try self.gdnFront(lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
                 try self.gdnChain(s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
             } else for (self.lanes, 0..) |l, r| {
@@ -279,14 +286,7 @@ pub fn Pass(comptime Tri: type) type {
                 try self.gdnFront(lw, s.proj + r * gdn.proj_width * 2, l.seq.conv[li].ptr, 1, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb);
                 try self.gdnChain(s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, 0, 1, s.ys + v);
             }
-            var b: cuda.Args = .{};
-            b.add(s.ys);
-            b.add(s.proj);
-            b.add(lw.norm.ptr);
-            b.add(eps);
-            b.add(s.gout);
-            b.add(s.gxs);
-            try cuda.launch.launch(self.k.gnorm, .{ .grid = .{ .x = @intCast(n), .y = gdn.nv }, .block = .{ .x = gdn.dv } }, self.stream, &b);
+            if (!fused) try gdn_fused.norm(self.k.gnorm, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n);
             if (self.lanes.len == 0) {
                 try self.shiftWindow(self.seq.conv[li].ptr, s.proj, gdn.proj_width, n, gdn.taps - 1, gdn.conv_dim);
             } else for (self.lanes, 0..) |l, r| {
