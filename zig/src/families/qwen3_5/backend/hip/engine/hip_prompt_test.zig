@@ -1,4 +1,4 @@
-//! CPU records through the production prompt route: the shared serving vtable the lane host calls, no HIP driver loaded.
+//! CPU records through the production prompt route: the shared serving vtable, no HIP driver loaded.
 const std = @import("std");
 const hip = @import("hip");
 const abi = @import("hip").abi;
@@ -72,8 +72,7 @@ const inert = struct {
     var runtime: hip.runtime.Runtime = .{ .lib = undefined, .api = undefined };
 };
 
-/// The backend the seam drives, recording what it is handed. Same surface as `Hip`, so the route under test is
-/// the production one and only the engine underneath is inert.
+/// The backend the seam drives, recording what it is handed: same surface as `Hip`, only the engine is inert.
 const Fake = struct {
     gpa: std.mem.Allocator,
     e: struct { ctx: hip.Context },
