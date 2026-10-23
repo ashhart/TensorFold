@@ -455,6 +455,7 @@ pub fn openConfigured(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]cons
         why.* = "--learn is not kept across a Flash Next pair yet: leave it out, or serve on one Mac";
         return error.LearnOnPair;
     }
+    try eng.keepStates(); // a lone reply is never handed to shared rounds, and its cached states come from prompt passes
     eng.warm() catch |err| {
         std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});
         return err;

@@ -537,6 +537,7 @@ pub const text =
     \\  const device bfloat* w = GW + size_t(e) * D;
     \\  const device bfloat* xr = X + r * D;
     \\  float a = 0.0f;
+    \\  _Pragma("clang loop unroll(full)") // the steps' loads go out together; the fma order is unchanged
     \\  for (int c = 8 * int(lane); c < D; c += 256) {
     \\    float wv[8];
     \\    for (int j = 0; j < 8; j++) wv[j] = float(w[c + j]);
