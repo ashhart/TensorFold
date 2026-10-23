@@ -340,8 +340,8 @@ pub fn one(a: std.mem.Allocator, which: Gate, k: Kernel, seed: u64) !Verdict {
 
 /// Gates 1-4 on each kernel, and each control at its own gate (which must fail).
 pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tally) !void {
-    for (kernels, 0..) |k, i| {
-        const s = seed +% 0x9e37 *% i;
+    for (kernels) |k| {
+        const s = std.hash.Wyhash.hash(seed, k.spec.name);
         if (k.control) |g| {
             t.controls += 1;
             const v = one(a, g, k, s) catch |err| blk: {

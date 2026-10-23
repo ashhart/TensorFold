@@ -256,6 +256,11 @@ pub const Mtp = struct {
         return precision.routed(d.e, router, experts, x, out, rows, d.projection_role);
     }
 
+    /// The layer's actual grouped Q/K/V dispatch, sharing only the input sums.
+    pub fn projQkv(d: *Mtp, rows: usize) !void {
+        try d.e.projManySums(&.{ d.w.q, d.w.k, d.w.v }, d.x, d.xs, &.{ d.qraw, d.kraw, d.vb }, rows, precision.prompt(d.projection_role, rows, precision.mtp_projection_prompt_cutoff), 0);
+    }
+
     /// out = norm(h + r) with w; h takes the sum (r 0: no residual).
     fn norm(d: *Mtp, h: u64, r: u64, w: u64, out: u64, rows: usize) !void {
         const e = d.e;
@@ -278,7 +283,7 @@ pub const Mtp = struct {
         try d.proj(.{ .a4 = w.fc_e }, d.en, d.h, rows);
         try d.proj(.{ .a4 = w.fc_h }, d.hn, d.r, rows);
         try d.norm(d.h, d.r, w.input_norm, d.x, rows);
-        try d.e.projManySums(&.{ w.q, w.k, w.v }, d.x, d.xs, &.{ d.qraw, d.kraw, d.vb }, rows, 0);
+        try d.projQkv(rows);
         try e.run(d.fns.norm_rope, .{ rows * g.q_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.qraw, w.q_norm, d.q, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), p0, step, g.eps, geometry.theta });
         try e.run(d.fns.norm_rope, .{ rows * g.kv_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.kraw, w.k_norm, d.kb, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(kw)), @as(c_int, head_dim), p0, step, g.eps, geometry.theta });
         const heads: c_int = @intCast(g.q_heads);

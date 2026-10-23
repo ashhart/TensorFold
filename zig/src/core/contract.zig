@@ -28,3 +28,7 @@ test {
     _ = hip_records;
     _ = @import("contract/fakes.zig");
 }
+
+test {
+    _ = @import("contract/seed_test.zig");
+}

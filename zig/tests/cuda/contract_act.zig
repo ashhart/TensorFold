@@ -176,7 +176,7 @@ pub const Act = struct {
                 self.x = try self.bfs(r * (w + 64), rng, 2);
                 if (fill == .nonfinite) plant(self.x, r, w + 64, true);
                 if (fill == .nonfinite) plant(self.x, r, w + 64, false);
-                if (fill == .stress) for (0..r) |i| mirrored(rng, self.x[i * (w + 64) ..][0..w], 1, 255);
+                if (fill == .stress) stressGroupRows(rng, self.x, r, w, w + 64);
                 self.in[0] = try self.rig.input(std.mem.sliceAsBytes(self.x));
                 self.xs = try self.rig.output(r * w / 64 * 4);
             },
@@ -350,3 +350,13 @@ pub const Act = struct {
         return null;
     }
 };
+
+/// Gate 4's production group-sum stress fill, shared with its host sensitivity test.
+pub fn stressGroupRows(rng: std.Random, x: []u16, rows_: usize, width: usize, stride: usize) void {
+    _ = rng;
+    // Every fp32 order is exactly 32; fp16 loses at least 16 and bf16 loses all 32, without overflow.
+    for (0..rows_) |r| for (0..width / 64) |j| for (0..64) |i| {
+        const value: f32 = if (i < 16) 2048 else if (i < 48) 1 else -2048;
+        x[r * stride + j * 64 + i] = word(value);
+    };
+}

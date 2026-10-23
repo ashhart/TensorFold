@@ -22,6 +22,14 @@ pub const Trace = struct {
         var out: u64 = 0;
         var sk: c_int = 0;
         var tiles: c_int = 1;
+        if (id == 8) {
+            const segs = @as(*const cuda.qlinear.Segs, @ptrCast(@alignCast(a[2].?))).*;
+            for (segs.s[0..@intCast(segs.count)]) |seg| {
+                calls[count] = .{ .id = id, .x = x, .xs = xs, .out = seg.p.out, .rows = rows, .sk = seg.p.sk, .row_tiles = 1, .grid = gx, .shared = shared };
+                count += 1;
+            }
+            return 0;
+        }
         if (id == 2) {
             const p = @as(*const cuda.qlinear.GemvPart, @ptrCast(@alignCast(a[2].?))).*;
             out = p.out;

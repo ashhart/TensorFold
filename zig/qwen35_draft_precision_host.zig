@@ -124,3 +124,43 @@ test "Draft precision: valid affine code witness distinguishes the forbidden ext
 test {
     _ = @import("qwen35_draft_absorb_host.zig");
 }
+
+test "Draft precision: the actual grouped MTP QKV keeps live and proposal roles at 17 32 and 128 rows" {
+    for (0..3) |mode| {
+        const gb10 = mode == 2;
+        var driver: cuda.Driver = undefined;
+        var e = fixture.engine(&driver, gb10);
+        if (mode == 1) {
+            e.affine.seg_fn = .{ .d = &driver, .handle = @ptrFromInt(8) };
+            e.affine.split = .{ .work = .{ .d = &driver, .ptr = 0x9000000, .len = 1 << 25 }, .tickets = .{ .d = &driver, .ptr = 0xa000000, .len = 4096 } };
+        }
+        var d: q.mtp.Mtp = undefined;
+        d.e = &e;
+        d.x = x;
+        d.xs = xs;
+        d.qraw = out;
+        d.kraw = out + 0x1000000;
+        d.vb = out + 0x2000000;
+        d.w.q = .{ .a4 = weight };
+        d.w.k = .{ .a4 = weight };
+        d.w.v = .{ .a4 = weight };
+        for ([_]P.Role{ .live, .proposal, .prompt }) |role| {
+            d.projection_role = role;
+            for ([_]usize{ 17, 32, 128 }) |m| {
+                reset();
+                try d.projQkv(m);
+                const prompt = role == .prompt;
+                const per = (m + e.affine.verifyRows() - 1) / e.affine.verifyRows();
+                try T.expectEqual(@as(usize, if (prompt) 3 else 0), Trace.prompts);
+                try T.expectEqual(if (prompt) @as(usize, 0) else 3 * per, Trace.count);
+                for (Trace.calls[0..Trace.count], 0..) |call, i| {
+                    const at = (if (mode == 1) i / 3 else i % per) * e.affine.verifyRows();
+                    const projection = if (mode == 1) i % 3 else i / per;
+                    try T.expectEqual(@as(u64, x + at * k * 2), call.x);
+                    try T.expectEqual(@as(u64, xs + at * (k / 64) * 4), call.xs);
+                    try T.expectEqual(@as(u64, out + projection * 0x1000000 + at * n * 2), call.out);
+                }
+            }
+        }
+    }
+}
