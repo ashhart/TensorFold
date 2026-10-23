@@ -51,6 +51,7 @@ pub const Frame = struct {
         f.completed = false;
         f.part_count = 0;
         f.ops = 0;
+        if (f.profiler) |t| t.holds += 1; // spans keep this encoder while the frame is open; release() drops the hold
         return f.epoch;
     }
     /// Commits the work so far and opens the next buffer behind a fence, so the GPU starts early; between ops only.
@@ -84,9 +85,12 @@ pub const Frame = struct {
         }
     }
     pub fn release(f: *Frame) void {
-        if (f.active and !f.completed) {
-            f.encoder.end();
-            for (f.parts[0..f.part_count]) |cb| cb.wait(); // committed parts still use the pool
+        if (f.active) {
+            if (f.profiler) |t| t.holds -|= 1;
+            if (!f.completed) {
+                f.encoder.end();
+                for (f.parts[0..f.part_count]) |cb| cb.wait(); // committed parts still use the pool
+            }
         }
         f.active = false;
         f.external = null;

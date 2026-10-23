@@ -13,8 +13,11 @@ pub const Trace = struct {
     seconds: [@typeInfo(Class).@"enum".field_names.len]f64 = @splat(0),
     rounds: u64 = 0,
     report_every: u64 = 64,
+    /// An open draft frame keeps spans from splitting: its ops sit on a long-lived encoder a private
+    /// buffer would overtake, so borrowed kernels must keep the frame's encoder. Balanced by the frame.
+    holds: u32 = 0,
     pub fn begin(t: *Trace, e: mtl.ComputeEncoder, kind: Class) Scope {
-        if (!t.enabled) return .{ .encoder = e };
+        if (!t.enabled or t.holds != 0) return .{ .encoder = e };
         const cb = t.queue.commandBuffer();
         return .{ .encoder = cb.compute(.serial), .buffer = cb, .trace = t, .kind = kind };
     }
