@@ -187,3 +187,49 @@ test "a request the backend has no memory for with nothing else running fails in
     try e.submit(2, &small, .{ .ctx = &b, .event = Box.event });
     try std.testing.expectEqual(@as(?Reason, .length), b.waitFor(2000)); // the host still serves
 }
+
+test "a prompt requeued after memory exhaustion can be cancelled before it fills" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .memory_lanes = 1, .prefill_chunks = 12 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    const Watch = struct {
+        engine: api.Engine,
+        saw_waiter: bool = false,
+
+        fn chunk(ctx: *anyopaque, _: *lanes.Stream, _: usize) void {
+            const w: *@This() = @ptrCast(@alignCast(ctx));
+            var status: api.Status = .{};
+            w.engine.status(&status, &.{});
+            if (status.waiting != 1 or status.fill_prompt_tokens != @as(?u32, short_prompt.len) or w.saw_waiter) return;
+            w.saw_waiter = true;
+            w.engine.cancel(2);
+        }
+    };
+    const e = host.engine();
+    var watch: Watch = .{ .engine = e };
+    target.prefill_hook = Watch.chunk;
+    target.prefill_hook_ctx = &watch;
+    const requests = [_]Request{
+        .{ .prompt = &short_prompt, .max_tokens = 4, .drafts = false },
+        .{ .prompt = &long_prompt, .max_tokens = 4, .drafts = false },
+    };
+    var boxes: [2]Box = .{ .{}, .{} };
+    for (&requests, &boxes, 1..) |*request, *box, id|
+        try e.submit(id, request, .{ .ctx = box, .event = Box.event });
+    try host.start();
+    var stopped = false;
+    defer if (!stopped) host.stop();
+    try std.testing.expectEqual(@as(?Reason, .length), boxes[0].waitFor(2000));
+    try std.testing.expectEqual(@as(?Reason, .cancelled), boxes[1].waitFor(2000));
+    host.stop();
+    stopped = true;
+    try std.testing.expect(watch.saw_waiter);
+    try std.testing.expectEqual(@as(usize, 0), boxes[1].state()[0]);
+    try std.testing.expectEqual(@as(u32, 0), target.lanes.count());
+}
