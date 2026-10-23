@@ -35,6 +35,7 @@ pub const Kernels = struct {
     dec_wide64: ze.H,
     dec_narrow: ze.H,
     gemv256: ze.H,
+    dense: ze.H,
     dec_wide16: ze.H,
     attn_rows: [2]ze.H,
     ngen_wide: ze.H,
@@ -128,6 +129,7 @@ pub const Runner = struct {
             .dec_wide64 = try d.kernel(mm, "w4k1_d64", 64),
             .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
             .gemv256 = try d.kernel(mg, "g4_gemv256", 64),
+            .dense = try d.kernel(mg, "g4_dense", 128),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
             .attn_rows = .{ try d.kernel(mg, "g4_attn_rows", 128), try d.kernel(mgg, "g4_attn_rows", 128) },
             .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
@@ -239,6 +241,10 @@ pub const Runner = struct {
         const G: i32 = @intCast(w.k / 64);
         const mp: i32 = @intCast((m + 7) / 8 * 8);
         const k = r.k;
+        if (w.dense) { // a bf16 weight
+            try r.d.launch(k.dense, .{ .x = w.n / 8, .y = (m + 15) / 16 }, .{ h, w.w, out, M, N, K });
+            return;
+        }
         if (m > ROWS and w.k != 256) { // prompt rows: the nGEN GEMMs, the decode kernels' arithmetic
             const tiles = (m + 63) / 64;
             const groups: ze.GroupCount = .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 };

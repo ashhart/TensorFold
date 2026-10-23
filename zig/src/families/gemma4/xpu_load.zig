@@ -8,7 +8,7 @@ const Checkpoint = dev.Checkpoint;
 const alloc = dev.alloc;
 
 /// An int4 projection in the GEMM layout (words [K/8, N], fp16 scales and biases [K/64, N]); `wide`: no K slices.
-pub const Proj = struct { w: *anyopaque, s: *anyopaque, bg: *anyopaque, n: u32, k: u32, wide: bool };
+pub const Proj = struct { w: *anyopaque, s: *anyopaque, bg: *anyopaque, n: u32, k: u32, wide: bool, dense: bool = false };
 
 pub const Layer = struct {
     in_norm: *anyopaque,
@@ -57,6 +57,13 @@ fn named(comptime fmt: []const u8, args: anytype) []const u8 {
 pub fn projection(d: *Dev, repack: ze.H, c: *const Checkpoint, prefix: []const u8, parts: []const []const u8, wide: bool, stage: *anyopaque) !Proj {
     var n_total: u32 = 0;
     var k: u32 = 0;
+    if (parts.len == 1) { // a bf16 weight (not quantized): kept as stored, read by the dense kernel
+        const w = try c.get(named("{s}{s}.weight", .{ prefix, parts[0] }));
+        if (std.mem.eql(u8, w.dtype, "BF16")) {
+            const p = try d.upload(w.bytes);
+            return .{ .w = p, .s = p, .bg = p, .n = @intCast(w.shape[0]), .k = @intCast(w.shape[1]), .wide = true, .dense = true };
+        }
+    }
     for (parts) |p| {
         const w = try c.get(named("{s}{s}.weight", .{ prefix, p }));
         n_total += @intCast(w.shape[0]);
