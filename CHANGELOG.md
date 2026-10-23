@@ -6,38 +6,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Drama3 CUDA replay waits for poison fills to finish before reset, prefill or decode reuses the buffers.
 
-## 1.1.3
-
-- Flash Next image chats that add another image resume from their cached prompt instead of processing it again: image streams sit in the standard frame, and positioned pooling reads the image's three position axes. Malformed image spans are refused before anything is allocated (#1200). Thanks to @sethforprivacy.
-
-- With `parallel_tool_calls: false`, a call to a tool the request did not offer, or a malformed call, comes back as text in `content` instead of being dropped, and it does not use up the one allowed call (#1207). Thanks to @tpischke.
-
-- The reasoning split ends at the model's own close token, so a `</think>` that the reply quotes as text no longer ends `reasoning_content` early (#1180). Thanks to @ahinore.
-
-- A checkpoint index may name shards in a folder inside the model folder, as nvidia/Qwen3.8-Flash-Next-FP4-Local does; `..` and absolute names are still refused (#1179, #1187). Thanks to @Bizuayeu and @jschmied.
-
-- The tokenizer reads possessive quantifiers in pre-tokenizer patterns, as Ling's pattern uses them (#1132). Thanks to @chaog992.
-
-- Nemotron's CUDA vision path encodes each image in a request once (#1104). Thanks to @plotarmordev.
-
-- A halt during a single stream's prompt pass fails that request with its reason (#1133). Thanks to @chaog992.
-
-- Tensor parallelism parses the runner's command before it takes any resource, and keeps RDMA verbs load failures in its HCA diagnostics (#1126, #1127). Thanks to @jayleaton and @cwschroeder.
-
-- `--vision-image-tokens` accepts explicit image budgets up to 262,144 tokens again (#1198). The server checks its JPEG and WebP decoders against the pinned versions, warns at startup and reports the problem in its diagnostics when one is unusable, such as a newer Homebrew jpeg-turbo, and still serves PNG and text (#1199). Thanks to @sethforprivacy.
-
-- A speech request that produces no audio gets an empty reply instead of HTTP 500 (#1167), and `-Dnvcc` and the tensor-parallel build options are declared for every target, so a macOS build accepts them (#1165). Thanks to @BobClawblaw.
-
-- Greedy and top-k sampling no longer sort the whole vocabulary: greedy takes one pass, and a top-k of up to half the row uses a bounded heap that picks the same tokens as the full sort.
-
-- The Windows target builds from source again (timespec, sockets and the idle nap) (#1193). Thanks to @cshintov.
-
-- The Engram NFKD table's generator is committed beside the table, and CI checks the table on the pinned Unicode version (#1148). Thanks to @akol1.
-
-- Structured output on servers built from source: `zig build grammar` installs libtfgrammar beside the native server on every OS (on Linux it went to `lib/`, where the server does not look), and a server without it says so once at startup, naming the fix. Docs: what `--parallel` caps, the startup line that reports how many streams the engine took, and `/health`'s live counts.
-
-- Docs: what a run past two ranks reports (#1201, thanks to @flashosophy), the 27B recipe's native CUDA backend and the formats it reads (#1146, thanks to @jschmied), a GPU clock cap for GB10s in the runbook (#1110, thanks to @Bizuayeu), and the tensor-parallel fabric's RoCE attribution (#1128, thanks to @jayleaton).
-
 ## 1.1.2
 
 - Chat prompts keep request text out of the added vocabulary: a control-token spelling in a message, tool definition, tool result, reasoning field or decision label is encoded as ordinary text, while chat templates still see the real text. A request whose text would still encode to an added-token id is refused instead, explicit `--vision` refuses to start when an image marker is not an added token, and LFM2's automatic image input turns off with a warning rather than failing the load (#1117). Thanks to @Acermax.
