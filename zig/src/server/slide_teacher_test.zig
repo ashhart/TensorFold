@@ -30,3 +30,18 @@ test "a given-up lesson leaves the next kept lesson's checks as if it never ran"
     // and the checks do turn with kept lessons (the held-back prompts differ from the first lesson's)
     try testing.expect(!std.mem.eql(bool, &first, &third));
 }
+
+test "lesson accounting: repeated failures retain all original successful rotations" {
+    var t = Teacher.init(testing.allocator);
+    defer t.deinit();
+    for (1..33) |accepted| {
+        for (0..3) |_| t.ended(false);
+        try testing.expectEqual(accepted, t.nth());
+        const actual = checksOf(t.nth());
+        const original = checksOf(accepted);
+        try testing.expectEqualSlices(bool, &original, &actual);
+        try testing.expectEqual(@as(usize, 3), std.mem.count(bool, &actual, &.{true}));
+        t.ended(true);
+        try testing.expectEqual(accepted, t.lessons);
+    }
+}
