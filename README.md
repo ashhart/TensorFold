@@ -95,7 +95,8 @@ You can also serve a complete local checkpoint directory or an existing Hugging 
 ## Mac app
 
 The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
-Download the Apple-silicon [beta 8 DMG](https://github.com/ashhart/TensorFold/releases/tag/v1.0.0-beta.8), or build from [`app/`](app/README.md).
+Download the Apple-silicon [beta 9 DMG](https://github.com/ashhart/TensorFold/releases/tag/v1.0.0-beta.9), or build from [`app/`](app/README.md).
+The desktop app launches the bundled `tensorfold-native` executable directly.
 Mobile clients in `app/mobile/` remain preview software.
 
 ## Living Weights (experimental)

@@ -1,4 +1,4 @@
-//! The parity tests' engine: a request replays the script its prompt names, as script_scheduler.py does.
+//! The native server tests' engine: a request replays the script its prompt names.
 const std = @import("std");
 const api = @import("engine_api");
 const model_text = @import("server").model_text;

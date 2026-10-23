@@ -1,4 +1,4 @@
-"""The parity tests' tokenizer and template for the Python server, byte for byte as fake_text.zig."""
+"""The native golden corpus's tokenizer and template, byte for byte as fake_text.zig."""
 
 from __future__ import annotations
 
