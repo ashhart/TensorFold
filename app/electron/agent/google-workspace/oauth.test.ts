@@ -94,6 +94,36 @@ assert.ok(!extraFailure.message.includes('synthetic-code'), 'the message carries
 assert.ok(!extraFailure.message.includes(extraParameter.verifier), 'the message carries no verifier')
 assert.deepEqual(logged, [], 'a failed callback writes no log line')
 
+// A parameter name that is not short and plain is described without it.
+const longName = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const longUrl = new URL(longName.redirectUri)
+longUrl.searchParams.set('state', new URL(longName.authorizationUrl).searchParams.get('state')!)
+longUrl.searchParams.set('code', 'synthetic-code')
+longUrl.searchParams.set('x'.repeat(300), 'synthetic-value')
+assert.equal((await fetch(longUrl)).status, 400)
+const longFailure = await failure(longName.completion)
+assert.match(longFailure.message, /an unexpected parameter/)
+assert.ok(!longFailure.message.includes('x'.repeat(300)), 'a long parameter name is not shown')
+assert.ok(!/x{20,}/.test(longFailure.message), 'a long parameter name leaves no trace in the message')
+
+// A name with a control character is described without it too.
+const controlName = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const controlState = new URL(controlName.authorizationUrl).searchParams.get('state')!
+assert.equal((await fetch(`${controlName.redirectUri}?state=${controlState}&code=synthetic-code&bad%0Aname=synthetic-value`)).status, 400)
+const controlFailure = await failure(controlName.completion)
+assert.match(controlFailure.message, /an unexpected parameter/)
+assert.ok(!controlFailure.message.includes('bad'), 'a control character in the name is not shown')
+assert.ok(!/[\u0000-\u001f\u007f]/.test(controlFailure.message), 'no control character reaches the message')
+
+// The repeated parameter's name is bounded the same way.
+const repeatedControl = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const repeatedControlState = new URL(repeatedControl.authorizationUrl).searchParams.get('state')!
+assert.equal((await fetch(`${repeatedControl.redirectUri}?state=${repeatedControlState}&state=${repeatedControlState}&bad%00name=synthetic-value`)).status, 400)
+const repeatedControlFailure = await failure(repeatedControl.completion)
+assert.match(repeatedControlFailure.message, /an unexpected parameter/)
+assert.ok(!repeatedControlFailure.message.includes('bad'), 'a control character in a repeated name is not shown')
+assert.ok(!/[\u0000-\u001f\u007f]/.test(repeatedControlFailure.message), 'no control character reaches the repeated-parameter message')
+
 // A repeated parameter is malformed too.
 const repeated = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
 const repeatedState = new URL(repeated.authorizationUrl).searchParams.get('state')!

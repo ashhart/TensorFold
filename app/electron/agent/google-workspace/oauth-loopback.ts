@@ -11,6 +11,12 @@ export interface GoogleOAuthLoopback {
   completion: Promise<string>
   cancel(): void
 }
+// A parameter's name reaches the status snapshot and the panel, so only a short plain one
+// is shown; any other name is described without it.
+const PLAIN_PARAMETER_NAME = /^[A-Za-z0-9_.-]{1,40}$/
+function plainParameterName(name: string): string | undefined {
+  return PLAIN_PARAMETER_NAME.test(name) ? name : undefined
+}
 export async function createGoogleOAuthLoopback(client: GoogleDesktopClient, scopes: string[], timeoutMs = 180_000): Promise<GoogleOAuthLoopback> {
   const state = randomBytes(32).toString('base64url')
   const verifier = randomBytes(48).toString('base64url')
@@ -44,9 +50,15 @@ export async function createGoogleOAuthLoopback(client: GoogleDesktopClient, sco
     const allowed = new Set(['state', 'code', 'error', 'error_description', 'error_uri', 'scope', 'authuser', 'prompt', 'hd', 'iss'])
     const names = [...url.searchParams.keys()]
     const unexpected = names.find(name => !allowed.has(name))
-    if (unexpected) return refuse(`Google sign-in failed: the callback carried an unexpected parameter (${unexpected}).`)
+    if (unexpected) {
+      const named = plainParameterName(unexpected)
+      return refuse(named ? `Google sign-in failed: the callback carried an unexpected parameter (${named}).` : 'Google sign-in failed: the callback carried an unexpected parameter.')
+    }
     const repeated = names.find(name => url.searchParams.getAll(name).length !== 1)
-    if (repeated) return refuse(`Google sign-in failed: the callback repeated the parameter ${repeated}.`)
+    if (repeated) {
+      const named = plainParameterName(repeated)
+      return refuse(named ? `Google sign-in failed: the callback repeated the parameter ${named}.` : 'Google sign-in failed: the callback repeated an unexpected parameter.')
+    }
     // RFC 9207: an issuer that is present must be Google's exactly; its absence is still fine.
     const issuer = url.searchParams.get('iss')
     if (issuer !== null && issuer !== GOOGLE_ISS) return refuse(`Google sign-in failed: the callback's issuer was not ${GOOGLE_ISS}, so it was not accepted.`)
