@@ -1,8 +1,8 @@
 # Google and messaging connections
 
 Open Settings, Assistant, Connectors and choose the service to configure.
-This implementation is private source work pending real-account qualification;
-it is not included in the published beta.7 installer.
+The Google connector ships in the beta.9 installer and later; it is still
+pending qualification against a real account.
 
 ## Gmail and Google Calendar
 
@@ -23,6 +23,29 @@ requirements, which depend on the project's audience and requested scopes.
 See Google's [native app OAuth documentation](https://developers.google.com/identity/protocols/oauth2/native-app)
 and [Gmail scope classifications](https://developers.google.com/workspace/gmail/api/auth/scopes).
 Do not share client JSON, app passwords or account tokens in a chat or repository.
+
+### Troubleshooting Google sign-in
+
+- **The client must be a Desktop app client.** A web client or a service-account
+  key cannot sign in; Google rejects it and the import step says so.
+- **A project in Testing needs test users.** Add the Google account you are
+  signing in with to the project's test users, or Google refuses the sign-in
+  with "access denied" even though you approved the permissions.
+- **The Gmail and Calendar APIs must be enabled.** This is not checked at
+  sign-in: the sign-in succeeds and the failure appears later, when the app
+  exchanges the authorization code for a token or calls the API.
+- **What the browser says.** "Google sign-in received. Return to TensorFold to
+  check the connection; you can close this tab." means the sign-in reached the
+  app. "Sign-in was not completed. You can close this tab and return to
+  TensorFold." means Google refused it, and the app shows what to check.
+  "Sign-in was not completed. Return to TensorFold for details." means the
+  callback reached the app but could not be used, and the app names the
+  problem. "Invalid sign-in callback. Return to TensorFold and try again." is
+  not your callback at all — a favicon, another address or a request without
+  our sign-in token — and nothing was signed in.
+- **Retrying.** A failed or declined sign-in clears the waiting state at once.
+  The sign-in button is available again without restarting the app, and each
+  attempt is a new sign-in with a new one-time token.
 
 Read Gmail and Read Calendar are selected initially; sends and Calendar writes
 need separate permission choices.
