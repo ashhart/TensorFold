@@ -183,3 +183,12 @@ extern "C" __global__ void __launch_bounds__(tf_wrows::NT) tf_ctl_wrows_merge_re
                                                                                          int win, long long ring, float scale) {
     tf_wrows::merge<512, tf_wrows::RESCALE>(po, pm, pl, out, h, hk, chunks, q, kc, vc, pos, slot, win, ring, scale);
 }
+
+// Gate 3: deliberately omit the bias output's BF16 round before adding the residual (RADIO act=none).
+extern "C" __global__ void tf_ctl_vit_unrounded_bias(const float* ACC, const __nv_bfloat16* BIAS,
+                                                   const __nv_bfloat16* R, __nv_bfloat16* O, int N) {
+    const int c = blockIdx.y * blockDim.x + threadIdx.x;
+    if (c >= N) return;
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * N + c;
+    O[at] = __float2bfloat16_rn(__fadd_rn(__fadd_rn(ACC[at], __bfloat162float(BIAS[c])), __bfloat162float(R[at])));
+}

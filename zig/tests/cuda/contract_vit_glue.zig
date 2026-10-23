@@ -40,6 +40,8 @@ pub const Glue = struct {
     act: cuda.vit.Act,
     residual: bool,
     in_place: bool,
+    wrong_bias_round: bool = false,
+    ctl: ?cuda.Function = null,
     shape: c.Shape = undefined,
     acc: u64 = 0,
     bias: u64 = 0,
@@ -56,7 +58,9 @@ pub const Glue = struct {
     const vt = g.hooks(Glue);
 
     pub fn kernel(self: *Glue) g.Kernel {
-        return .{ .spec = spec(self.act, self.residual, self.in_place), .ctx = self, .vt = &vt };
+        var declared = spec(self.act, self.residual, self.in_place);
+        if (self.wrong_bias_round) declared.name = "control: RADIO omitted bias BF16 round";
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_bias_round) .shapes else null };
     }
 
     pub fn prepare(self: *Glue, sh: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -97,6 +101,12 @@ pub const Glue = struct {
             @memset(bias, c.toBf16(0.25));
             @memset(residual, c.toBf16(-8));
         }
+        // The same finite tie in the real variants and control proves the intermediate round matters.
+        if (fill == .random and self.act == .none and self.residual and acc.len > 0) {
+            acc[0] = 1.00390625;
+            bias[0] = 0;
+            residual[0] = c.toBf16(-1);
+        }
         self.acc = try self.rig.input(std.mem.sliceAsBytes(acc));
         self.bias = try self.rig.input(std.mem.sliceAsBytes(bias));
         self.r = try self.rig.input(std.mem.sliceAsBytes(residual));
@@ -113,7 +123,12 @@ pub const Glue = struct {
     pub fn run(self: *Glue) !void {
         if (self.in_place) try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = self.out, .len = self.count() * 2 }).copyFrom(0, self.r, self.count() * 2, self.rig.s.handle);
         const residual: ?u64 = if (self.in_place) self.out else if (self.residual) self.r else null;
-        try self.k.biasAct(self.rig.s, self.acc, self.bias, residual, self.out, self.shape.rows, self.shape.n, self.act);
+        if (self.ctl) |f| {
+            var args: cuda.Args = .{};
+            for ([_]u64{ self.acc, self.bias, residual orelse 0, self.out }) |v| args.add(v);
+            args.add(@as(c_int, @intCast(self.shape.n)));
+            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast((self.shape.n + 255) / 256) }, .block = .{ .x = 256 } }, self.rig.s, &args);
+        } else try self.k.biasAct(self.rig.s, self.acc, self.bias, residual, self.out, self.shape.rows, self.shape.n, self.act);
         try self.rig.s.synchronize();
     }
 

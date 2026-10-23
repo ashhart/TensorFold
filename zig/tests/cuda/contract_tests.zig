@@ -119,6 +119,9 @@ pub fn run(gpu: check.Gpu) !void {
     };
     defer for (&glue) |*item| item.deinit();
     for (&glue) |*item| try kernels.append(a, item.kernel());
+    var wrong_vit: vit_k.Glue = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &vit, .act = .none, .residual = true, .in_place = false, .wrong_bias_round = true, .ctl = try mods[5].function("tf_ctl_vit_unrounded_bias") };
+    defer wrong_vit.deinit();
+    try kernels.append(a, wrong_vit.kernel());
     var row_list: [7]rows_k.Row = undefined;
     var nrows: usize = 0;
     defer for (row_list[0..nrows]) |*r| r.deinit();
