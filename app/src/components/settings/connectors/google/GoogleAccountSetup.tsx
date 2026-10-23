@@ -60,7 +60,7 @@ export function GoogleAccountSetup({ snapshot, account, busy, permissionsLocked,
         {waiting && <Button size="sm" onClick={cancel}>{tx("Cancel sign-in")}</Button>}
       </div>
     </>}
-    {snapshot.authorization?.status === 'failed' && <p role="alert" className="mt-3 text-[13px] text-danger">{tx("Google sign-in failed; retry or check your Desktop client configuration, enabled APIs and test-user access.")}</p>}
+    {snapshot.authorization?.status === 'failed' && <p role="alert" className="mt-3 text-[13px] text-danger">{tx(snapshot.authorization.error ?? 'Google sign-in failed; retry or check your Desktop client configuration, enabled APIs and test-user access.')}</p>}
     {snapshot.authorization?.status === 'cancelled' && <p role="status" className="mt-3 text-[13px] text-ink-2">{tx("Sign-in cancelled; existing account permissions are unchanged.")}</p>}
     {linkError && <p role="alert" className="mt-3 text-[13px] text-danger">{linkError}</p>}
   </div>

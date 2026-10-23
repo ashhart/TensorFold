@@ -89,6 +89,16 @@ assert.equal(find(setupNode, (item) => item.type === Toggle && item.props.label 
 button(setupNode, 'Sign in with Google').props.onClick()
 assert.deepEqual(signIns[0], ['gmail.read', 'calendar.read'])
 setup.close()
+// A failed sign-in shows why it failed and leaves the next attempt available at once.
+const failed = harness('GoogleAccountSetup.tsx', { openExternal: async () => {} })
+const failedNode = failed.render('GoogleAccountSetup', { ...setupProps, snapshot: { ...setupProps.snapshot, authorization: { id: 'authorization-a', status: 'failed', capabilities: ['gmail.read'], expiresAt: 0, error: 'Google sign-in failed: the callback carried an unexpected parameter (target).' } } })
+const failure = find(failedNode, (item) => item.props?.role === 'alert')
+assert.ok(failure, 'a failed sign-in is announced')
+assert.ok(visibleText(failure.props.children).includes('unexpected parameter'), 'a failed sign-in shows the reason it failed')
+const retry = button(failedNode, 'Sign in with Google')
+assert.ok(retry, 'a failed sign-in leaves the sign-in control')
+assert.equal(retry.props.disabled, false, 'a failed sign-in can be retried at once')
+failed.close()
 const imports: string[] = []
 for (const profile of [
   { accounts: [], busy: '', waiting: false, allowed: true },
