@@ -103,7 +103,9 @@ const Owned = struct {
     lanes: glm_lanes.Lanes,
 };
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+const env = if (@import("builtin").os.tag == .windows) @import("sys").c else struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+};
 
 /// Every peer's send/recv connected now, before the weights fill memory (connected on first use, ibv_reg_mr can fail).
 fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
@@ -158,10 +160,10 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer gpa.destroy(own);
     own.gpa = gpa;
     // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
-    if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = setenv("NCCL_RUNTIME_CONNECT", "0", 0);
+    if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
     // NCCL's cuMem host buffers wore out GB10's driver pool under load (NV_ERR_NO_MEMORY; next ranks failed to start)
-    if (std.c.getenv("NCCL_CUMEM_HOST_ENABLE") == null) _ = setenv("NCCL_CUMEM_HOST_ENABLE", "0", 0);
-    if (std.c.getenv("NCCL_CUMEM_ENABLE") == null) _ = setenv("NCCL_CUMEM_ENABLE", "0", 0);
+    if (std.c.getenv("NCCL_CUMEM_HOST_ENABLE") == null) _ = env.setenv("NCCL_CUMEM_HOST_ENABLE", "0", 0);
+    if (std.c.getenv("NCCL_CUMEM_ENABLE") == null) _ = env.setenv("NCCL_CUMEM_ENABLE", "0", 0);
     var lib = try cuda.nccl.Library.open();
     errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
