@@ -10,7 +10,8 @@ const Proj = load_mod.Proj;
 const alloc = dev.alloc;
 const off = dev.off;
 
-pub const ROWS = 16;
+pub const ROWS = 16; // rows of a decode or verification window
+pub const MAXT = 256; // rows of a prompt forward at most
 pub const KEYS = 128;
 pub const MAXK = 64; // candidates the device keeps of a row of logits (top_k above it: the host draws from all)
 const EPS: f32 = cfg.eps;
@@ -35,6 +36,9 @@ pub const Kernels = struct {
     dec_narrow: ze.H,
     gemv256: ze.H,
     dec_wide16: ze.H,
+    attn_rows: [2]ze.H,
+    ngen_wide: ze.H,
+    ngen_narrow: ze.H,
     topk_part: ze.H,
     topk_merge: ze.H,
 };
@@ -57,6 +61,7 @@ pub const Acts = struct {
     pv: *anyopaque,
     pi: *anyopaque,
     out: *anyopaque, // i32 [ROWS]
+    pscr: *anyopaque, // fp32 [MAXT, 2560]: slice totals of the narrow prompt GEMM
     tkv: *anyopaque, // top-k stage 1: f32 [ROWS, 256, 64], i32
     tki: *anyopaque,
     tov: *anyopaque, // top-k result: f32 [ROWS, 64], i32
@@ -80,7 +85,7 @@ pub const Runner = struct {
     host_logits: []f32,
     dump_dir: ?[]const u8 = null,
     tag: []const u8 = "",
-    window: u32 = ROWS, // rows per forward of `feed` (tests cut a prompt differently)
+    window: u32 = MAXT, // rows per forward of `feed` (tests cut a prompt differently)
 
     pub fn init(dir: []const u8, context: u32) !*Runner {
         const cfg_path = try std.fmt.allocPrint(alloc, "{s}/config.json", .{dir});
@@ -98,10 +103,12 @@ pub const Runner = struct {
         r.context = context;
         r.pos = 0;
         r.last = 0;
-        r.window = ROWS;
+        r.window = MAXT;
         r.dump_dir = if (std.c.getenv("XPU_DUMP")) |v| std.mem.span(v) else null;
         const mg = try d.g.module(&kb.glue);
         const mgg = try d.g.module(&kb.glue_g);
+        const mw = try d.g.module(&kb.ngen_wide);
+        const mn = try d.g.module(&kb.ngen_narrow);
         const mm = try d.g.module(&kb.gemm);
         r.k = .{
             .repack = try d.kernel(mg, "repack", 16),
@@ -122,6 +129,9 @@ pub const Runner = struct {
             .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
             .gemv256 = try d.kernel(mg, "g4_gemv256", 64),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
+            .attn_rows = .{ try d.kernel(mg, "g4_attn_rows", 128), try d.kernel(mgg, "g4_attn_rows", 128) },
+            .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
+            .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
             .topk_part = try d.kernel(mg, "g4_topk_part", 256),
             .topk_merge = try d.kernel(mg, "g4_topk_merge", 256),
         };
@@ -133,19 +143,20 @@ pub const Runner = struct {
         r.ntl_max = (context + KEYS - 1) / KEYS + 1;
         const nt: usize = r.ntl_max;
         r.a = .{
-            .ids = try d.alloc_(ROWS * 4),
-            .x = try d.alloc_(ROWS * cfg.hidden * 4),
-            .h = try d.alloc_(ROWS * cfg.ff * 2),
-            .ahi = try d.alloc_(ROWS * (cfg.ff / 64) * 2),
-            .alo = try d.alloc_(ROWS * (cfg.ff / 64) * 2),
-            .p = try d.alloc_(ROWS * 2 * cfg.ff * 2),
-            .r = try d.alloc_(ROWS * cfg.hidden * 2),
-            .q = try d.alloc_(ROWS * cfg.heads * cfg.dim_g * 2),
+            .ids = try d.alloc_(MAXT * 4),
+            .x = try d.alloc_(MAXT * cfg.hidden * 4),
+            .h = try d.alloc_(MAXT * cfg.ff * 2),
+            .ahi = try d.alloc_(MAXT * (cfg.ff / 64) * 2),
+            .alo = try d.alloc_(MAXT * (cfg.ff / 64) * 2),
+            .p = try d.alloc_(MAXT * 2 * cfg.ff * 2),
+            .r = try d.alloc_(MAXT * cfg.hidden * 2),
+            .q = try d.alloc_(MAXT * cfg.heads * cfg.dim_g * 2),
             .pm = try d.alloc_(ROWS * cfg.heads * nt * 4),
             .pl = try d.alloc_(ROWS * cfg.heads * nt * 4),
             .po = try d.alloc_(ROWS * cfg.heads * nt * cfg.dim_g * 4),
-            .tok = try d.alloc_(ROWS * cfg.ple_all * 2),
-            .pli = try d.alloc_(ROWS * cfg.ple_all * 2),
+            .tok = try d.alloc_(MAXT * cfg.ple_all * 2),
+            .pli = try d.alloc_(MAXT * cfg.ple_all * 2),
+            .pscr = try d.alloc_(MAXT * cfg.hidden * 4),
             .logits = try d.alloc_(ROWS * cfg.vocab * 2),
             .pv = try d.alloc_(ROWS * 256 * 4),
             .pi = try d.alloc_(ROWS * 256 * 4),
@@ -181,7 +192,7 @@ pub const Runner = struct {
         while (at < ids.len) {
             const end = @min(ids.len, at + r.window);
             if (r.pos + (end - at) > r.context) return error.ContextFull;
-            var win: [ROWS]i32 = undefined;
+            var win: [MAXT]i32 = undefined;
             for (ids[at..end], 0..) |t, j| win[j] = @intCast(t);
             const w: Want = if (want and end == ids.len) .last else .none;
             if (try r.forward(win[0 .. end - at], r.pos, w)) |t| r.last = @intCast(t);
@@ -228,6 +239,15 @@ pub const Runner = struct {
         const G: i32 = @intCast(w.k / 64);
         const mp: i32 = @intCast((m + 7) / 8 * 8);
         const k = r.k;
+        if (m > ROWS and w.k != 256) { // prompt rows: the nGEN GEMMs, the decode kernels' arithmetic
+            const tiles = (m + 63) / 64;
+            const groups: ze.GroupCount = .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 };
+            if (w.wide)
+                try r.d.launch(k.ngen_wide, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+            else
+                try r.d.launch(k.ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, r.a.pscr });
+            return;
+        }
         if (w.k == 256) { // K = 256: the GEMM families' group-sum planes are too narrow for a 2D block (per-layer projection)
             try r.d.launch(k.gemv256, .{ .x = w.n / 64, .y = m }, .{ h, w.w, w.s, w.bg, out, M, N });
             return;
@@ -270,7 +290,7 @@ pub const Runner = struct {
         const m = &r.m;
         const k = r.k;
         const T: u32 = @intCast(ids.len);
-        if (T == 0 or T > ROWS) return error.BadWindow;
+        if (T == 0 or T > MAXT or (T > ROWS and want == .rows)) return error.BadWindow;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle(); // the queued copy reads the caller's ids
         // the embeddings, and the per-layer inputs they give
@@ -294,8 +314,12 @@ pub const Runner = struct {
             const ntl: u32 = if (glob) (p0 + T - 1) / KEYS + 1 else 5;
             const window: i32 = if (glob) 0 else cfg.window;
             const ring: i32 = if (glob) 0 else cfg.ring;
+            if (T > ROWS) {
+                try d.launch(k.attn_rows[@intFromBool(glob)], .{ .x = 8, .y = T }, .{ a.q, r.kc[src], r.vc[src], @as(i32, @intCast(p0)), window, ring, a.h, a.ahi, a.alo });
+            } else {
             try d.launch(k.attn_part[@intFromBool(glob)], .{ .x = ntl, .y = 8, .z = T }, .{ a.q, r.kc[src], r.vc[src], a.pm, a.pl, a.po, @as(i32, @intCast(p0)), window, ring, @as(i32, @intCast(ntl)) });
             try d.launch(k.attn_merge[@intFromBool(glob)], .{ .x = 8, .y = T }, .{ a.pm, a.pl, a.po, @as(i32, @intCast(p0)), window, @as(i32, @intCast(ntl)), a.h, a.ahi, a.alo });
+            }
             if (r.dump_dir != null and p0 == 0 and i == 0) {
                 try r.dumpBuf("q0", a.q, T * 8 * hd * 2);
                 try r.dumpBuf("k0", r.kc[0], T * 2 * hd * 2);

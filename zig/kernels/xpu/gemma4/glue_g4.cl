@@ -388,3 +388,96 @@ KERNEL(256) void g4_topk_merge(global const float *PV, global const int *PI, int
     }
   }
 }
+
+// Attention of a prompt row: g4_attn_part over every tile of the row in order, each tile's (m, l, o) folded into the running
+// state at once, then g4_attn_merge's output. The same arithmetic as part + merge, so the same bits, without the partials in
+// memory. Grid (8, T).
+KERNEL(128) void g4_attn_rows(global const ushort *Q, global const ushort *KC, global const ushort *VC, int p0, int window, int ring,
+                              global half *H, global half *AHI, global half *ALO) {
+  const int hd = HD;
+  local float ql[HD], sc[KEYS], red[8], part[8 * HD];
+  local half hl[HD];
+  const int head = get_group_id(0), t = get_group_id(1), lid = get_local_id(0);
+  const int sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  const int pos = p0 + t, lo = window ? max(0, pos - window + 1) : 0;
+  const int first = lo / KEYS, nt = pos / KEYS - first + 1;
+  const int kvh = head / 4, nd = HD / 16;
+  for (int d = lid; d < hd; d += KEYS) ql[d] = bf2f(Q[((long)t * 8 + head) * hd + d]);
+  barrier(CLK_LOCAL_MEM_FENCE);
+  float acc[HD / 128];
+  for (int j = 0; j < HD / 128; j++) acc[j] = 0.0f;
+  float mrun = 0.0f, lrun = 0.0f;
+  for (int tl = 0; tl < nt; tl++) {
+    const int ts = (first + tl) * KEYS;
+    const int kk = ts + lid;
+    const bool valid = kk >= lo && kk <= pos;
+    float s = -INFINITY;
+    if (valid) {
+      global const ushort *kr = KC + ((ring ? kk % ring : kk) * 2L + kvh) * hd;
+      float a = 0.0f;
+      for (int d = 0; d < hd; d += 8) {
+        const ushort8 kv = vload8(0, kr + d);
+        for (int j = 0; j < 8; j++) a = fma(ql[d + j], bf2f(kv[j]), a);
+      }
+      s = a;
+    }
+    float m = sub_group_reduce_max(s);
+    if (lane == 0) red[sg] = m;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    m = red[0];
+    for (int i = 1; i < 8; i++) m = fmax(m, red[i]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+    const float p = valid ? exp(s - m) : 0.0f;
+    sc[lid] = p;
+    float l = sub_group_reduce_add(p);
+    if (lane == 0) red[sg] = l;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    l = 0.0f;
+    for (int i = 0; i < 8; i++) l += red[i];
+    const int k0 = max(lo - ts, 0), k1 = min(pos - ts, KEYS - 1);
+    float pv[HD / 16];
+    for (int j = 0; j < nd; j++) pv[j] = 0.0f;
+    for (int k = k0 + sg; k <= k1; k += 8) {
+      const float pk = sc[k];
+      global const ushort *vr = VC + ((ring ? (ts + k) % ring : (ts + k)) * 2L + kvh) * hd;
+      for (int j = 0; j < nd; j++) pv[j] = fma(pk, bf2f(vr[j * 16 + lane]), pv[j]);
+    }
+    for (int j = 0; j < nd; j++) part[sg * HD + j * 16 + lane] = pv[j];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tl == 0) {
+      mrun = m;
+      lrun = l;
+      for (int j = 0; j < HD / 128; j++) {
+        float o = 0.0f;
+        for (int i = 0; i < 8; i++) o += part[i * HD + lid + j * KEYS];
+        acc[j] = o;
+      }
+    } else {
+      const float mm = fmax(mrun, m), a = exp(mrun - mm), b = exp(m - mm);
+      lrun = lrun * a + l * b;
+      for (int j = 0; j < HD / 128; j++) {
+        float o = 0.0f;
+        for (int i = 0; i < 8; i++) o += part[i * HD + lid + j * KEYS];
+        acc[j] = acc[j] * a + o * b;
+      }
+      mrun = mm;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  for (int j = 0; j < HD / 128; j++) {
+    const half v = convert_half_rte(rbf(acc[j] / lrun));
+    hl[lid + j * KEYS] = v;
+    H[(long)t * 8 * hd + head * hd + lid + j * KEYS] = v;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int g = sg; g < hd / 64; g += 8) {
+    float s = 0.0f;
+    for (int k = 0; k < 4; k++) s += (float)hl[g * 64 + lane * 4 + k];
+    s = sub_group_reduce_add(s) * (1.0f / 64);
+    if (lane == 0) {
+      const half hi = convert_half_rte(s * ASC);
+      AHI[(long)t * (8 * hd / 64) + head * (hd / 64) + g] = hi;
+      ALO[(long)t * (8 * hd / 64) + head * (hd / 64) + g] = convert_half_rte(s * ASC - (float)hi);
+    }
+  }
+}
