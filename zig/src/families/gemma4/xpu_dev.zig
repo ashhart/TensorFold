@@ -122,7 +122,9 @@ pub const Dev = struct {
     events: [4096]ze.H = @splat(null),
     used: usize = 0,
     ev_kernel: [4096]ze.H = @splat(null),
-    total: std.AutoHashMapUnmanaged(usize, struct { s: f64, n: u64 }) = .empty,
+    ev_tag: [4096][]const u8 = @splat(""),
+    tag: []const u8 = "", // XPU_PROFILE: a launch with a tag is timed under it, else under its kernel's name
+    total: std.StringArrayHashMapUnmanaged(struct { s: f64, n: u64 }) = .empty,
 
     pub fn open(device_id: u32) !*Dev {
         const d = try alloc.create(Dev);
@@ -203,6 +205,7 @@ pub const Dev = struct {
             if (d.used == d.events.len) try d.sync();
             ev = d.events[d.used];
             d.ev_kernel[d.used] = k;
+            d.ev_tag[d.used] = d.tag;
             d.used += 1;
         }
         try ze.check(d.g.api.zeCommandListAppendLaunchKernel(d.list, k, &groups, ev, 0, null));
@@ -211,10 +214,15 @@ pub const Dev = struct {
     pub fn sync(d: *Dev) !void {
         d.settle();
         if (d.prof_on) {
-            for (d.events[0..d.used], d.ev_kernel[0..d.used]) |e, k| {
+            for (d.events[0..d.used], d.ev_kernel[0..d.used], d.ev_tag[0..d.used]) |e, k, tag| {
                 const t = try d.g.seconds(e);
                 try ze.check(d.g.api.zeEventHostReset(e));
-                const slot = try d.total.getOrPut(alloc, @intFromPtr(k));
+                var label = tag;
+                if (label.len == 0) for (d.names.items) |n| if (n.k == k) {
+                    label = n.name;
+                    break;
+                };
+                const slot = try d.total.getOrPut(alloc, label);
                 if (!slot.found_existing) slot.value_ptr.* = .{ .s = 0, .n = 0 };
                 slot.value_ptr.s += t;
                 slot.value_ptr.n += 1;
@@ -231,11 +239,10 @@ pub const Dev = struct {
     pub fn profReport(d: *Dev, label: []const u8) void {
         if (!d.prof_on) return;
         var sum: f64 = 0;
-        var it = d.total.valueIterator();
-        while (it.next()) |v| sum += v.s;
+        for (d.total.values()) |v| sum += v.s;
         std.debug.print("GPU time, {s}: {d:.1} ms\n", .{ label, sum * 1e3 });
-        for (d.names.items) |n| if (d.total.get(@intFromPtr(n.k))) |v| if (v.s > 0)
-            std.debug.print("  {s:<18} {d:8.2} ms {d:5.1} %  {d:6} launches {d:7.1} us each\n", .{ n.name, v.s * 1e3, v.s / sum * 100, v.n, v.s / @as(f64, @floatFromInt(v.n)) * 1e6 });
+        for (d.total.keys(), d.total.values()) |name, v| if (v.s > 0)
+            std.debug.print("  {s:<18} {d:8.2} ms {d:5.1} %  {d:6} launches {d:7.1} us each\n", .{ name, v.s * 1e3, v.s / sum * 100, v.n, v.s / @as(f64, @floatFromInt(v.n)) * 1e6 });
         d.total.clearRetainingCapacity();
     }
 };

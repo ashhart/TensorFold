@@ -10,6 +10,9 @@
 #define PLE_ALL 10752
 #define SQ_2560 50.5f
 #define KEYS 128
+#ifndef HD
+#define HD 256   // head size of the attention kernels in this build: 256 (sliding layers) or 512 (global)
+#endif
 
 static inline float gelu_tanh(float x) { return 0.5f * x * (1.0f + tanh(0.7978845608028654f * (x + 0.044715f * x * x * x))); }
 
@@ -157,12 +160,12 @@ KERNEL(64) void g4_ple_mid(global const half *GO, global const ushort *PLI, int 
 
 // Attention front end: P fp16 [T, ldp] = q|k|v (8, 2, 2 heads of hd); RMS, RoPE on q, k; K, V to the cache slot.
 KERNEL(256) void g4_attn_prep(global const half *P, int ldp, global const ushort *QN, global const ushort *KN, global const float *INVF,
-                              global ushort *Q, global ushort *KC, global ushort *VC, int p0, float eps, int hd, int ring, int own) {
+                              global ushort *Q, global ushort *KC, global ushort *VC, int p0, float eps, int ring, int own) {
   const int t = get_group_id(0), sg = get_sub_group_id(), lane = get_sub_group_local_id();
   if (sg >= (own ? 12 : 8)) return;
-  const int n = hd / 16;
+  const int hd = HD, n = HD / 16;
   const float pos = (float)(p0 + t);
-  float v[32], ss = 0.0f;
+  float v[HD / 16], ss = 0.0f;
   for (int i = 0; i < n; i++) {
     v[i] = rbf((float)P[(long)t * ldp + sg * hd + i * 16 + lane]);
     ss += v[i] * v[i];
@@ -188,10 +191,14 @@ KERNEL(256) void g4_attn_prep(global const half *P, int ldp, global const ushort
 // Attention over one tile of 128 keys (absolute positions 128j .. 128j + 127) for one (row, head): m, l and the unnormalized
 // o of the tile in fp32, scores = q·k (scale 1), keys limited to [pos - window + 1, pos]. Grid (tiles, 8, T); tile index
 // counted from the row's first tile. The cache of the source layer: ring slots pos % ring, or positions.
+// Scores: one key a work-item. Values: the 8 subgroups each take 16 keys in order and every lane hd / 16 dimensions;
+// the 8 partial sums are added in subgroup order.
 KERNEL(128) void g4_attn_part(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM, global float *PL,
-                              global float *PO, int p0, int hd, int window, int ring, int ntl) {
-  local float ql[512], sc[KEYS], red[8];
+                              global float *PO, int p0, int window, int ring, int ntl) {
+  const int hd = HD;
+  local float ql[HD], sc[KEYS], red[8], part[8 * HD];
   const int tl = get_group_id(0), head = get_group_id(1), t = get_group_id(2), lid = get_local_id(0);
+  const int sg = get_sub_group_id(), lane = get_sub_group_local_id();
   const int pos = p0 + t, lo = window ? max(0, pos - window + 1) : 0;
   const int tile = lo / KEYS + tl, ts = tile * KEYS;
   if (ts > pos) return;
@@ -210,9 +217,8 @@ KERNEL(128) void g4_attn_part(global const ushort *Q, global const ushort *KC, g
     }
     s = a;
   }
-  // max
   float m = sub_group_reduce_max(s);
-  if (get_sub_group_local_id() == 0) red[get_sub_group_id()] = m;
+  if (lane == 0) red[sg] = m;
   barrier(CLK_LOCAL_MEM_FENCE);
   m = red[0];
   for (int i = 1; i < 8; i++) m = fmax(m, red[i]);
@@ -220,7 +226,7 @@ KERNEL(128) void g4_attn_part(global const ushort *Q, global const ushort *KC, g
   const float p = valid ? exp(s - m) : 0.0f;
   sc[lid] = p;
   float l = sub_group_reduce_add(p);
-  if (get_sub_group_local_id() == 0) red[get_sub_group_id()] = l;
+  if (lane == 0) red[sg] = l;
   barrier(CLK_LOCAL_MEM_FENCE);
   l = 0.0f;
   for (int i = 0; i < 8; i++) l += red[i];
@@ -230,21 +236,33 @@ KERNEL(128) void g4_attn_part(global const ushort *Q, global const ushort *KC, g
     PL[idx] = l;
   }
   const int k0 = max(lo - ts, 0), k1 = min(pos - ts, KEYS - 1);
+  const int nd = HD / 16;
+  float acc[HD / 16];
+  for (int j = 0; j < nd; j++) acc[j] = 0.0f;
+  for (int k = k0 + sg; k <= k1; k += 8) {
+    const float pk = sc[k];
+    global const ushort *vr = VC + ((ring ? (ts + k) % ring : (ts + k)) * 2L + kvh) * hd;
+    for (int j = 0; j < nd; j++) acc[j] = fma(pk, bf2f(vr[j * 16 + lane]), acc[j]);
+  }
+  for (int j = 0; j < nd; j++) part[sg * HD + j * 16 + lane] = acc[j];
+  barrier(CLK_LOCAL_MEM_FENCE);
   for (int d = lid; d < hd; d += KEYS) {
-    float acc = 0.0f;
-    for (int k = k0; k <= k1; k++) acc = fma(sc[k], bf2f(VC[((ring ? (ts + k) % ring : (ts + k)) * 2L + kvh) * hd + d]), acc);
-    PO[idx * hd + d] = acc;
+    float o = 0.0f;
+    for (int i = 0; i < 8; i++) o += part[i * HD + d];
+    PO[idx * hd + d] = o;
   }
 }
 
 // Folds a row's tile partials in order (m, l, o) and writes the head's output fp16(bf16(o / l)) [T, 8 hd] with group sums.
-KERNEL(128) void g4_attn_merge(global const float *PM, global const float *PL, global const float *PO, int p0, int hd, int window, int ntl,
+KERNEL(128) void g4_attn_merge(global const float *PM, global const float *PL, global const float *PO, int p0, int window, int ntl,
                                global half *H, global half *AHI, global half *ALO) {
-  local half hl[512];
+  const int hd = HD;
+  local half hl[HD];
   const int head = get_group_id(0), t = get_group_id(1), lid = get_local_id(0);
   const int pos = p0 + t, lo = window ? max(0, pos - window + 1) : 0;
   const int nt = pos / KEYS - lo / KEYS + 1;
-  float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float acc[HD / 128];
+  for (int j = 0; j < HD / 128; j++) acc[j] = 0.0f;
   float m = 0.0f, l = 0.0f;
   for (int i = 0; i < nt; i++) {
     const long idx = ((long)t * 8 + head) * ntl + i;
@@ -295,4 +313,78 @@ kernel void g4_gemv256(global const half *A, global const uint *W, global const 
     }
   }
   OUT[(long)m * N + n] = convert_half_rte(acc);
+}
+
+// Top-K of fp16 logits rows [R, 262144] (K <= 64), exact, ties to lower id: stage 1, grid (256, R), stage 2 (R) merges.
+static int better(float v, int i, float bv, int bi) { return v > bv || (v == bv && i < bi); }
+
+// group-wide maximum of (v, i) by (value, lower id), the winner to all work-items; red: local float[16] and int[16]
+static void wg_best(float *v, int *i, local float *rv, local int *ri) {
+  float bv = sub_group_reduce_max(*v);
+  int bi = sub_group_reduce_min(*v == bv ? *i : 0x7fffffff);
+  if (get_sub_group_local_id() == 0) {
+    rv[get_sub_group_id()] = bv;
+    ri[get_sub_group_id()] = bi;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  bv = rv[0];
+  bi = ri[0];
+  for (int s = 1; s < 16; s++)
+    if (better(rv[s], ri[s], bv, bi)) {
+      bv = rv[s];
+      bi = ri[s];
+    }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  *v = bv;
+  *i = bi;
+}
+
+KERNEL(256) void g4_topk_part(global const half *L, int V, int K, global float *PV, global int *PI) {
+  local float rv[16];
+  local int ri[16];
+  const int lid = get_local_id(0), seg = get_group_id(0), row = get_group_id(1);
+  const int per = V / 256;
+  float v[4];
+  int id[4];
+  for (int j = 0; j < 4; j++) {
+    id[j] = seg * per + lid + 256 * j;
+    v[j] = (float)L[(long)row * V + id[j]];
+  }
+  for (int k = 0; k < K; k++) {
+    float mv = v[0];
+    int mi = id[0], mj = 0;
+    for (int j = 1; j < 4; j++)
+      if (better(v[j], id[j], mv, mi)) {
+        mv = v[j];
+        mi = id[j];
+        mj = j;
+      }
+    float bv = mv;
+    int bi = mi;
+    wg_best(&bv, &bi, rv, ri);
+    if (mi == bi) v[mj] = -INFINITY;
+    if (lid == 0) {
+      PV[((long)row * 256 + seg) * K + k] = bv;
+      PI[((long)row * 256 + seg) * K + k] = bi;
+    }
+  }
+}
+
+KERNEL(256) void g4_topk_merge(global const float *PV, global const int *PI, int K, global float *OV, global int *OI) {
+  local float rv[16];
+  local int ri[16];
+  const int lid = get_local_id(0), row = get_group_id(0);
+  int ptr = 0;
+  for (int k = 0; k < K; k++) {
+    float v = ptr < K ? PV[((long)row * 256 + lid) * K + ptr] : -INFINITY;
+    int i = ptr < K ? PI[((long)row * 256 + lid) * K + ptr] : 0x7fffffff;
+    float bv = v;
+    int bi = i;
+    wg_best(&bv, &bi, rv, ri);
+    if (i == bi && v == bv) ptr++;
+    if (lid == 0) {
+      OV[row * K + k] = bv;
+      OI[row * K + k] = bi;
+    }
+  }
 }
