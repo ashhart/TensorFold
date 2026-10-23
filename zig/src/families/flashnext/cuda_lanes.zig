@@ -15,6 +15,7 @@ const Glue = @import("cuda_glue.zig").Glue;
 const living = @import("living");
 const slide_mod = @import("cuda_slide.zig");
 const train = @import("cuda_train.zig");
+const bytes = @import("cuda_lanes_bytes.zig");
 
 const be = lanes.backend;
 const ring = 1024;
@@ -93,28 +94,16 @@ pub fn Namespace(comptime Tri: type) type {
 
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
         pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
-            const main = weights.deviceBytes(gpa, io, dir) catch return 0;
-            return main + mtp.headBytes();
+            return bytes.deviceWeightBytes(gpa, io, dir);
         }
 
         pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
-            if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
-            const mode = try config.mode(gpa, io, dir);
-            if (mode == .modelopt) {
-                const main = try @import("cuda_rank_memory.zig").estimate(gpa, io, dir, world, rank);
-                // Dense draft projections and vocabulary rows exceed the affine head's estimate.
-                return main + if (drafts and rank == 0) mtp.headBytes() + (1 << 30) else @as(u64, 0);
-            }
-            if (world != 1) return error.UnsupportedQuantization;
-            const main = try weights.deviceBytes(gpa, io, dir);
-            return main + if (drafts) mtp.headBytes() else @as(u64, 0);
+            return bytes.placementWeightBytes(gpa, io, dir, world, rank, drafts);
         }
 
         /// The tower's weights and one call's scratch, which rank zero holds beside the text weights with --vision.
         pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
-            const v = @import("qwen_vision");
-            const c = ((try v.Settings.read(a, io, dir)) orelse return error.NoVisionTower).tower;
-            return v.Tower.weightBytes(c) + v.Tower.scratchBytes(c, v.max_patches);
+            return bytes.visionBytes(a, io, dir);
         }
 
         pub fn healthy(ptr: *anyopaque) bool {
@@ -129,17 +118,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         /// A request or load this engine refuses, in words; null: none of its own.
         pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
-            return switch (err) {
-                error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
-                error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
-                error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
-                error.TensorRankDraftSnapshotUnavailable => "tensor-rank MTP snapshots are unavailable: disable the prompt cache for this configuration",
-                error.RankDisconnected, error.RankTimeout, error.RemoteRank, error.BadRankFrame => "a tensor-parallel rank failed; restart both ranks from the same checkpoint before retrying",
-                else => @import("cuda_images.zig").Vision.explain(err),
-                error.PocketOfAnotherSize => "a lesson's pocket is wider than the layer's loaded one: restart the server on the folder",
-                error.UnsupportedLearningFormat => "--slide requires the affine 4-bit group-32 single-rank Flash Next checkpoint",
-                error.TrainingOnCapturedGlue => "--slide trains on Flash Next's own glue: serve it without TENSORFOLD_CUDA_KERNELS",
-            };
+            return @import("cuda_lanes_explain.zig").explain(err);
         }
 
         /// A stream's caches; with the head, its cache, a window's buffers and the drafts it holds for the next round.

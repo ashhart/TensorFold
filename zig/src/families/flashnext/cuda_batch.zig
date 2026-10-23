@@ -8,6 +8,7 @@ const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
+const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
 
@@ -58,7 +59,7 @@ const cubin_qmm: [:0]const u8 = "_ZN6tf_qmm10qmm_kernelILi32ELi16ELi64ELi1ELi4EL
 const rows_tile: usize = cuda.experts.RowsExperts.tile;
 const plan_small: usize = cuda.grouped.small;
 
-fn cint(v: usize) c_int {
+pub fn cint(v: usize) c_int {
     return @intCast(v);
 }
 
@@ -511,7 +512,7 @@ pub fn Pass(comptime Tri: type) type {
             if (self.lanes.len > 0) {
                 // shared rounds read every row's scores; a lane keeps its own rollback and hidden rows, nothing else
                 if (self.hooks.logits != .all or self.hooks.keep != null or self.hooks.streams != 0 or self.hooks.moe_add != null) return error.UnexpectedTensor;
-                try parts.checkLanes(self.lanes, n);
+                try batch_lanes.checkLanes(self.lanes, n);
             } else if (pos0 + n > self.seq.cap) return error.UnexpectedTensor;
             self.rows = n;
             self.pos0 = pos0;
@@ -568,33 +569,12 @@ pub fn Pass(comptime Tri: type) type {
 
         /// Column tiles keep their own reduction order; each gathered row restores global vocabulary order.
         pub fn projectHead(self: *Self, out: u64, n: usize) !void {
-            const s = self.s;
-            if (self.m.head.n == vocab) {
-                _ = try self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
-                return;
-            }
-            if (self.m.head.n != vocab / 2 or n > s.cap) return error.UnexpectedTensor;
-            const c = self.m.collective orelse return error.TensorParallelUnavailable;
-            _ = try self.lane(s.mixed, s.xsm, self.m.head, s.head_local, s.dummy, n, 1);
-            for (0..n) |r| try c.gather(self.stream, s.head_local + r * vocab, out + r * vocab * 2, vocab / 2);
+            return @import("cuda_batch_head.zig").projectHead(self, out, n);
         }
 
         /// After a layer's experts, when something adds to or keeps its output: the slots' fp32 sum, adds, kept branch.
         pub fn moeAdds(self: *Self, layer: usize, keep: LayerKeep) !void {
-            const add = self.addAt(layer);
-            if (add == null and keep.moe_branch == 0) return;
-            const s = self.s;
-            const n = self.rows;
-            var a: cuda.Args = .{};
-            a.add(s.y);
-            a.add(s.wts);
-            a.add(s.moe_f32);
-            a.add(cint(dims));
-            a.add(cint(slots));
-            try cuda.launch.launch(self.k.moe_sum, .{ .grid = .{ .x = @intCast(n), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
-            if (add) |m| try m.add(m.ctx, layer, s.mixed, s.picks, s.wts, s.moe_f32, n);
-            if (keep.moe_branch != 0) try self.sumSlices(s.moe_f32, keep.moe_branch, true, n * dims, 1);
-            self.pending_f32 = true;
+            return @import("cuda_batch_moe.zig").moeAdds(self, layer, keep);
         }
 
         pub fn head(self: *Self, logits_host: ?[]u8) !void {

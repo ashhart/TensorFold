@@ -73,3 +73,16 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
         },
     }
 }
+
+/// Column tiles keep their own reduction order; each gathered row restores global vocabulary order.
+pub fn projectHead(self: anytype, out: u64, n: usize) !void {
+    const s = self.s;
+    if (self.m.head.n == vocab) {
+        _ = try self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
+        return;
+    }
+    if (self.m.head.n != vocab / 2 or n > s.cap) return error.UnexpectedTensor;
+    const c = self.m.collective orelse return error.TensorParallelUnavailable;
+    _ = try self.lane(s.mixed, s.xsm, self.m.head, s.head_local, s.dummy, n, 1);
+    for (0..n) |r| try c.gather(self.stream, s.head_local + r * vocab, out + r * vocab * 2, vocab / 2);
+}

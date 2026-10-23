@@ -537,30 +537,6 @@ pub fn scoreBytes(cap: usize, rows: usize) usize {
 /// One stream's rows in a shared pass from `pos` on its own caches, and its window's rollback, hidden rows and scores.
 pub const Lane = struct { seq: SeqState, pos: usize, rows: usize = 1, keep: ?*const Keep = null, streams: u64 = 0, logits: u64 = 0 };
 
-/// Lanes whose rows add up to `n`, each window within its cache and the attention block, keeping a rollback at most.
-pub fn checkLanes(lanes: []const Lane, n: usize) error{UnexpectedTensor}!void {
-    var total: usize = 0;
-    for (lanes) |l| {
-        if (l.rows == 0 or l.rows > att_rows or l.pos + l.rows > l.seq.cap) return error.UnexpectedTensor;
-        if (l.keep) |kp| if (!rollbackOnly(kp)) return error.UnexpectedTensor;
-        total += l.rows;
-    }
-    if (total != n) return error.UnexpectedTensor;
-}
-
-/// A drafted window's rollback (the DeltaNet rows, history and end states alone), not a training pass's tensors.
-pub fn rollbackOnly(k: *const Keep) bool {
-    if (!std.meta.eql(k.mixer, HcKeep{})) return false;
-    for (k.layers) |lk| {
-        var rest = lk;
-        rest.proj = 0;
-        rest.hist = 0;
-        rest.state_out = 0;
-        if (!std.meta.eql(rest, LayerKeep{})) return false;
-    }
-    return true;
-}
-
 /// The engine's resident weights the pass reads.
 pub const Model = struct {
     collective: ?*@import("cuda_collective.zig").Collective = null,
