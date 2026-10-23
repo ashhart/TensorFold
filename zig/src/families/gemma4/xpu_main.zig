@@ -75,7 +75,7 @@ fn teacher(r: *fwd.Runner, ref_dir: []const u8, out_dir: []const u8, only: ?[]co
 fn windows(r: *fwd.Runner, ids: []const u32) !void {
     var first: ?u64 = null;
     var all_equal = true;
-    for ([_]u32{ 1, 2, 4, 8, 16, 16, 16, 16, 16 }) |w| {
+    for ([_]u32{ 1, 2, 4, 8, 16, 17, 64, 100, 128, 256, 16, 16 }) |w| {
         r.reset();
         r.window = w;
         try r.feed(ids, true);
@@ -87,7 +87,7 @@ fn windows(r: *fwd.Runner, ids: []const u32) !void {
         all_equal = all_equal and h == first.?;
         std.debug.print("window {d:2}: next token {d}, logits hash {x:0>16}{s}\n", .{ w, r.last, h, if (h == first.?) "" else "  DIFFERENT" });
     }
-    std.debug.print("{s}\n", .{if (all_equal) "windows == rows: identical logits, 9 of 9" else "windows differ"});
+    std.debug.print("{s}\n", .{if (all_equal) "windows == rows: identical logits" else "windows differ"});
 }
 
 /// The card's top-64 of each step's logits against the host's, over a prompt and 24 greedy steps; and its time.
