@@ -196,7 +196,7 @@ pub fn final(s: *Seg) !void {
     try s.siteTriton(x, x, try gathered(e, ""), prev, prev[0], null, part, c, null, 2, false);
     try s.finish(null, prev, try e.weight("norm", .{}, .f32, &.{D}), part, c, 0);
     // the head: the decode path's linear (prefill_mm.fast off), upstream's 128 rows a launch
-    const V: i64 = e.cfg.vocab / e.o.world;
+    const V: i64 = (try @import("partition.zig").share(e.cfg.vocab, e.o.rank, e.o.world)).len;
     var a: i64 = 0;
     while (a < n) : (a += 128) {
         const m = @min(n - a, 128);

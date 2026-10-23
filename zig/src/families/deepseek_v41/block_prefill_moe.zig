@@ -55,7 +55,7 @@ pub fn moeRows(s: *Seg, L: u32, n: i64, x: Arg, comptime bias: []const u8, part:
     const topk: i64 = ex.topk;
     const slots: i64 = topk + 1;
     const Et: i64 = ex.count;
-    const I: i64 = e.cfg.expert_width / e.o.world;
+    const I: i64 = (try @import("partition.zig").share(e.cfg.expert_width, e.o.rank, e.o.world)).len;
     const P = n * topk;
     const pick = try e.buf("L.pick", .{}, .i32, &.{ n, slots });
     const wts = try e.buf("L.wts", .{}, .f32, &.{ n, slots });
@@ -99,8 +99,9 @@ pub fn moeRows(s: *Seg, L: u32, n: i64, x: Arg, comptime bias: []const u8, part:
     const widths = e.w.gm.get(L);
     const rows: i64 = e.o.expert_rows;
     const zb = rows * (topk + 1) * @max(4 * 2 * I, D); // the scratch z's floats (block_moe)
-    // past the 1,024-row scratch rows halve; under TF_DSV41_PF_4K the block is the whole segment
-    if (!e.o.pf4k and (P * D > zb or P * I > rows * (topk + 1) * D)) return error.Unsupported;
+    // Whole segments past two ranks let the buffer plan charge the actual expert views.
+    const whole_block = e.o.pf4k or e.o.world > 2;
+    if (!whole_block and (P * D > zb or P * I > rows * (topk + 1) * D)) return error.Unsupported;
     const pre = try e.fmt("L{d}.moe", .{L});
     const xg = try e.view(.{ .buf = "s.ex.z" }, .f16, &.{ P, D }, &.{ D, 1 }, 0);
     const xu = try e.view(.{ .buf = "s.ex.z" }, .f16, &.{ P, D }, &.{ D, 1 }, P * D * 2);

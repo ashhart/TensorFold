@@ -164,6 +164,12 @@ pub fn optionsOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) !block.Optio
     const meta = try std.json.parseFromSliceLeaky(Value, a, text, .{});
     var o: block.Options = .{};
     const env = meta.object.get("env") orelse return o;
+    if (env.object.get("TF_TP_WORLD")) |v| if (v == .string) {
+        o.world = try std.fmt.parseInt(u32, v.string, 10);
+    };
+    if (env.object.get("TF_TP_RANK")) |v| if (v == .string) {
+        o.rank = try std.fmt.parseInt(u32, v.string, 10);
+    };
     const on = struct {
         fn f(e: Value, k: []const u8) bool {
             const v = e.object.get(k) orelse return false;

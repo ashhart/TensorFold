@@ -7,9 +7,44 @@ const json = @import("json");
 const serve = @import("dsv41_serve");
 const pipe = @import("sampling_pipe.zig");
 
+test "world four: uneven candidate and whole-row sampling match one rank" {
+    const vocab = 1280;
+    const n = 4;
+    const a = testing.allocator;
+    const logits = try a.alloc(f32, n * vocab);
+    defer a.free(logits);
+    var random = std.Random.DefaultPrng.init(1202);
+    for (logits) |*v| v.* = random.random().float(f32) * 4 - 2;
+    const peaks = [_]u32{ 383, 384, 1023, 1279 };
+    for (peaks, 0..) |id, row| logits[row * vocab + id] = 8;
+    const positions = [_]u64{ 7, 8, 9, 10 };
+    for ([_]pipe.Sampling{
+        .{ .seed = 1202, .temperature = 0.9, .top_k = 1, .top_p = 1 },
+        .{ .seed = 1202, .temperature = 0.9, .top_k = 23, .top_p = 0.9 },
+        .{ .seed = 1202, .temperature = 0.9, .top_k = 400, .top_p = 1 },
+        .{ .seed = 1202, .temperature = 0.9, .top_k = 0, .top_p = 1 },
+        .{ .seed = 1202, .temperature = 0.9, .top_k = 0, .top_p = 0.9 },
+    }) |sampling| {
+        var expected: [n]u32 = undefined;
+        var expected_whole: [1]usize = undefined;
+        var one: Case = .{ .logits = logits, .world = 1, .uneven = true, .rows = n, .sampling = sampling, .nucleus = 64, .positions = &positions, .got = &expected, .whole = &expected_whole };
+        try run(&one);
+        for ([_]u32{ 2, 4 }) |world| {
+            var got: [n]u32 = undefined;
+            var whole: [1]usize = undefined;
+            var split: Case = .{ .logits = logits, .world = world, .uneven = true, .rows = n, .sampling = sampling, .nucleus = 64, .positions = &positions, .got = &got, .whole = &whole };
+            try run(&split);
+            try testing.expectEqualSlices(u32, &expected, &got);
+            if (sampling.top_k == 1) try testing.expectEqualSlices(u32, &peaks, &got);
+            if (world == 4 and sampling.top_k == 400) try testing.expectEqual(@as(usize, n), whole[0]);
+        }
+    }
+}
+
 const Case = struct {
     logits: []const f32,
     world: u32,
+    uneven: bool = false,
     rows: usize,
     sampling: pipe.Sampling,
     positions: []const u64,
@@ -42,13 +77,14 @@ const Mirror = struct {
 fn rankBody(comm: tp.collective.Collective, me: u32, c: *Case) anyerror!void {
     const a = testing.allocator;
     const vocab = c.logits.len / c.rows;
-    const V = vocab / c.world;
+    const part = if (c.uneven) try @import("partition.zig").share(@intCast(vocab), me, c.world) else @import("partition.zig").Share{ .lo = @intCast(me * (vocab / c.world)), .len = @intCast(vocab / c.world) };
+    const V = part.len;
     const mine = try a.alloc(f32, c.rows * V);
     defer a.free(mine);
-    for (0..c.rows) |r| @memcpy(mine[r * V ..][0..V], c.logits[r * vocab + me * V ..][0..V]);
+    for (0..c.rows) |r| @memcpy(mine[r * V ..][0..V], c.logits[r * vocab + part.lo ..][0..V]);
     var dev: pipe.HostDevice = .{ .gpa = a };
     defer dev.deinit();
-    var p = try pipe.Pipe.init(a, comm, @intCast(V), c.nucleus);
+    var p = if (c.uneven) try pipe.Pipe.initVocab(a, comm, @intCast(vocab), c.nucleus) else try pipe.Pipe.init(a, comm, @intCast(V), c.nucleus);
     defer p.deinit();
     var mh: Mirror = .{ .c = c };
     if (me == 0 and c.mirror != null) p.after_gather = .{ .ctx = &mh, .run = Mirror.run };
@@ -230,10 +266,36 @@ test "vs_choose's mirror == the pipeline's picks over top_k x top_p x min_p x te
 
 const SegSpec = struct { row0: u32, n: u32, s: pipe.Sampling, positions: []const u64 };
 
+test "world four: batched uneven sampling keeps segment offsets and global ids" {
+    const vocab = 1280;
+    const rows = 4;
+    const a = testing.allocator;
+    const logits = try a.alloc(f32, rows * vocab);
+    defer a.free(logits);
+    var random = std.Random.DefaultPrng.init(12024);
+    for (logits) |*v| v.* = random.random().float(f32) * 4;
+    const segs = [_]SegSpec{
+        .{ .row0 = 0, .n = 2, .s = .{ .seed = 7, .temperature = 0.7, .top_k = 7, .top_p = 0.9 }, .positions = &.{ 40, 41 } },
+        .{ .row0 = 2, .n = 2, .s = .{ .seed = 9, .temperature = 1.1, .top_k = 11, .top_p = 0.8 }, .positions = &.{ 900, 901 } },
+    };
+    var expected: [rows]u32 = undefined;
+    var one: Multi = .{ .logits = logits, .world = 1, .uneven = true, .rows = rows, .segs = &segs, .batched = false, .got = &expected };
+    try tp.host.run(1, &one, multiBody);
+    for ([_]u32{ 2, 4 }) |world| {
+        var got: [rows]u32 = undefined;
+        var mirror: [rows]i64 = @splat(-2);
+        var split: Multi = .{ .logits = logits, .world = world, .uneven = true, .rows = rows, .segs = &segs, .batched = true, .got = &got, .mirror = &mirror };
+        try tp.host.run(world, &split, multiBody);
+        try testing.expectEqualSlices(u32, &expected, &got);
+        for (got, mirror) |id, mirrored| try testing.expectEqual(@as(i64, id), mirrored);
+    }
+}
+
 /// Several segments of one forward's rows (rows not in a segment are another window's, never picked).
 const Multi = struct {
     logits: []const f32,
     world: u32,
+    uneven: bool = false,
     rows: usize,
     segs: []const SegSpec,
     batched: bool,
@@ -273,13 +335,14 @@ const SegMirror = struct {
 fn multiBody(comm: tp.collective.Collective, me: u32, c: *Multi) anyerror!void {
     const a = testing.allocator;
     const vocab = c.logits.len / c.rows;
-    const V = vocab / c.world;
+    const part = if (c.uneven) try @import("partition.zig").share(@intCast(vocab), me, c.world) else @import("partition.zig").Share{ .lo = @intCast(me * (vocab / c.world)), .len = @intCast(vocab / c.world) };
+    const V = part.len;
     const mine = try a.alloc(f32, c.rows * V);
     defer a.free(mine);
-    for (0..c.rows) |r| @memcpy(mine[r * V ..][0..V], c.logits[r * vocab + me * V ..][0..V]);
+    for (0..c.rows) |r| @memcpy(mine[r * V ..][0..V], c.logits[r * vocab + part.lo ..][0..V]);
     var dev: pipe.HostDevice = .{ .gpa = a };
     defer dev.deinit();
-    var p = try pipe.Pipe.init(a, comm, @intCast(V), serve.sampling.nucleus_count);
+    var p = if (c.uneven) try pipe.Pipe.initVocab(a, comm, @intCast(vocab), serve.sampling.nucleus_count) else try pipe.Pipe.init(a, comm, @intCast(V), serve.sampling.nucleus_count);
     defer p.deinit();
     const lg: u64 = @intFromPtr(mine.ptr);
     const out = try a.alloc(u32, c.rows);

@@ -150,7 +150,7 @@ pub const GpuPass = struct {
             } else {
                 // every buffer a graphed pass bakes in, at its largest: the embedding's and exchanges' send
                 _ = try x.device(&x.send, 2 * @as(usize, @intCast(n)) * cfg.hidden);
-                x.dev = try dsd.Dev.init(gpa, r.d, f.comm, r.stream, mode, k, cfg.hidden, @intCast(n), conf != null, @intCast(8 * st.len64() + 4 * st.len32()), 1);
+                x.dev = try dsd.Dev.init(gpa, r.d, f.comm, r.stream, mode, k, cfg.hidden, @intCast(n), conf != null, @intCast(8 * st.len64() + 4 * st.len32()), 1, (try @import("partition.zig").share(cfg.vocab, f.opts.rank, world)).lo);
                 // the speculative pass from the device pick (needs TF_DSV41_GREEDY_GPU's pick and ds_stage)
                 if (r.kernels.others(r.stream).f.ds_stage != null) {
                     publish_pick = true;

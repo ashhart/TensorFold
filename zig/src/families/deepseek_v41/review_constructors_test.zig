@@ -54,7 +54,7 @@ test "Completion ownership: failed DSpark event construction unwinds its precedi
     vt.world = world;
     const comm: @import("tp").collective.Collective = .{ .ptr = &d, .vtable = &vt };
     mock.fail_event = true;
-    try t.expectError(error.NotReady, @import("dspark_dev.zig").Dev.init(t.allocator, &d, comm, .{ .d = &d, .handle = null }, .device, 1, 8, 1, false, 16, 1));
+    try t.expectError(error.NotReady, @import("dspark_dev.zig").Dev.init(t.allocator, &d, comm, .{ .d = &d, .handle = null }, .device, 1, 8, 1, false, 16, 1, 0));
     try t.expectEqual(mock.allocated, mock.freed);
     try t.expect(mock.pinned == null);
 }
@@ -90,7 +90,7 @@ test "Completion ownership: SlotPass host-array allocation sweep leaves callback
         const a = fail.allocator();
         var vt: @import("tp").collective.Collective.VTable = undefined;
         vt.world = world;
-        var cfg: @import("config.zig").Config = .{ .vocab = 8, .hidden = 16, .window = 2, .dspark_block = 1 };
+        var cfg: @import("config.zig").Config = .{ .vocab = 128, .hidden = 16, .window = 2, .dspark_block = 1 };
         var widths: @import("block.zig").Widths = .{};
         var runner: run.Runner = .{ .gpa = a, .d = &d, .stream = .{ .d = &d, .handle = null }, .kernels = undefined, .triton = undefined, .weights = undefined };
         var f = fwd.Forward.init(a, &cfg, &widths, .{}, &runner, .{ .ptr = &d, .vtable = &vt });

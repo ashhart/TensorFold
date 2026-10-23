@@ -40,10 +40,9 @@ pub const GpuSampler = struct {
     pub fn init(gpa: std.mem.Allocator, f: *fwd.Forward) !*GpuSampler {
         const x = try gpa.create(GpuSampler);
         errdefer gpa.destroy(x);
-        const W = f.comm.world();
         x.* = .{ .gpa = gpa, .f = f, .gpu = try Gpu.init(f.runner.d, f.runner.stream, f.runner.kernels), .p = undefined };
         errdefer x.gpu.deinit();
-        x.p = try pipe.Pipe.init(gpa, f.comm, f.cfg.vocab / W, try pipe.nucleusEnv());
+        x.p = try pipe.Pipe.initVocabAt(gpa, f.comm, f.opts.rank, f.cfg.vocab, try pipe.nucleusEnv());
         f.sampler = .{ .ptr = x, .follow = follow };
         x.p.after_gather = .{ .ctx = x, .run = afterGather };
         x.batch = try batchEnv();
@@ -168,7 +167,7 @@ pub const GpuSampler = struct {
     fn note(x: *GpuSampler, s: Sampling, batched: bool) void {
         if (x.f.comm.rank() != 0) return;
         const V: usize = x.p.V;
-        const count = pipe.countOf(s, @intCast(V * x.f.comm.world()), x.p.nucleus);
+        const count = pipe.countOf(s, x.p.vocab, x.p.nucleus);
         const kind: u3 = if (@min(count, V) > pipe.max_k or V > pipe.max_cols) 0 else if (isNucleusRow(s)) 1 else 2;
         const bit = @as(u8, 1) << (kind + @as(u3, if (batched) 3 else 0));
         if (x.seen & bit != 0) return;
@@ -208,7 +207,7 @@ pub const GpuSampler = struct {
 
     fn run(x: *GpuSampler, row0: u32, n: u32, s: Sampling, draws: ?[]const u64, out: []u32, pos0: ?u64) !void {
         const f = x.f;
-        const V: u64 = f.cfg.vocab / f.comm.world();
+        const V: u64 = x.p.V;
         const lg = (f.runner.addressOf("w.logits") orelse return error.Unbound) + 4 * V * row0;
         if (f.grammar) |g| try g.apply(g.ptr, row0, n);
         x.cur = .{ .row0 = row0, .s = s, .pos0 = pos0 };

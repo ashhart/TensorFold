@@ -1,4 +1,4 @@
-//! `tf-dsv41 decode-tp PACK REF OUT` (a process a rank): the decode TP check, our TP=2 greedy decode vs REF's tokens.
+//! `tf-dsv41 decode-tp PACK REF OUT`: one process per rank, against that world's reference tokens and digests.
 
 const std = @import("std");
 const pf = @import("forward_prefill.zig");
@@ -40,6 +40,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     const cwd = std.Io.Dir.cwd();
     const tcfg = try tp.Config.fromEnv();
     const rank = tcfg.rank;
+    const world = tcfg.world;
     try cwd.createDirPath(io, out_dir);
     const meta = try std.json.parseFromSliceLeaky(Value, a, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ ref, "ref.json" }), a, .limited(1 << 28)), .{});
     var lo: u32 = 0;
@@ -86,14 +87,14 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
         var ds: [8]u32 = undefined;
         break :blk try std.mem.concat(a, u32, &.{ layers, dspark_emit.blocks(&cfg, &ds) });
     } else layers;
-    var pl = try plan.build(gpa, &cfg, &pack, .{ .rank = rank, .world = 2, .blocks = blocks, .top = true, .dspark = lanes_mode == 3 });
+    var pl = try plan.build(gpa, &cfg, &pack, .{ .rank = rank, .world = world, .blocks = blocks, .top = true, .dspark = lanes_mode == 3 });
     defer pl.deinit();
     var w: load.Weights = .{ .gpa = gpa };
     defer @import("close_or_exit.zig").finish(&w);
     for (pl.layers) |*l| {
         var b: named.Builder = .{ .gpa = gpa, .io = io, .pack = &pack };
         defer b.deinit();
-        try b.layer(l, cfg.o_groups, rank, 2);
+        try b.layer(l, cfg.o_groups, rank, world);
         try w.upload(&driver, &b);
     }
     {
@@ -119,7 +120,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
         const v = env.object.get("TF_DSV41_MHC_DEFER") orelse break :blk false;
         break :blk v == .string and std.mem.eql(u8, v.string, "1");
     };
-    var f = fwd.Forward.init(gpa, &cfg, &wd, .{ .expert_topp = topp, .r1 = r1 }, &runner, comm);
+    var f = fwd.Forward.init(gpa, &cfg, &wd, .{ .world = world, .rank = rank, .expert_topp = topp, .r1 = r1 }, &runner, comm);
     defer @import("close_or_exit.zig").finish(&f);
     try @import("engine_hooks.zig").open(&f);
     f.layers = layers;
@@ -255,7 +256,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     // greedy decoding against the reference's tokens
     const mine = meta.object.get("ranks").?.array.items[rank].object;
     const want_logits = mine.get("logits_sha256").?.array.items;
-    const V: usize = cfg.vocab / 2;
+    const V: usize = (try @import("partition.zig").share(cfg.vocab, rank, world)).len;
     const host_logits = try a.alloc(u8, 4 * V);
     var trace: std.AutoArrayHashMapUnmanaged(u32, [64]u8) = .empty;
     defer trace.deinit(gpa);

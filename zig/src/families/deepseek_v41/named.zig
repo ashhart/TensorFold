@@ -153,10 +153,12 @@ pub const Builder = struct {
     /// The rank's slice of a native tensor, as stored.
     fn raw(b: *Builder, v: plan.NativePlan, rank: u32, world: u32) ![]u8 {
         const whole = v.slice == .whole;
-        const len = if (whole) v.info.nbytes else v.info.nbytes / world;
+        const s = if (v.slice == .vocab_rows) try @import("partition.zig").share(@intCast(v.info.shape[0]), rank, world) else null;
+        const len = if (s) |part| v.info.nbytes / v.info.shape[0] * part.len else if (whole) v.info.nbytes else v.info.nbytes / world;
+        const offset = if (s) |part| v.info.nbytes / v.info.shape[0] * part.lo else if (whole) 0 else rank * len;
         const bytes = try b.gpa.alloc(u8, @intCast(len));
         errdefer b.gpa.free(bytes);
-        try b.pack.read(b.io, v.info, .{ .offset = if (whole) 0 else rank * len, .len = len }, bytes);
+        try b.pack.read(b.io, v.info, .{ .offset = offset, .len = len }, bytes);
         return bytes;
     }
 
@@ -165,7 +167,7 @@ pub const Builder = struct {
         var shape: [4]usize = @splat(1);
         const dims = v.info.dims();
         @memcpy(shape[0..dims.len], dims);
-        if (v.slice != .whole) shape[0] /= world;
+        if (v.slice == .vocab_rows) shape[0] = (try @import("partition.zig").share(@intCast(shape[0]), rank, world)).len else if (v.slice != .whole) shape[0] /= world;
         if (v.info.dtype != .f32 and v.info.dtype != .bf16 and v.info.dtype != .f16) return error.UnexpectedTensor;
         if (b.metadata_only) {
             if (rule.out == .qk and std.mem.endsWith(u8, v.name, "q_weight")) return;

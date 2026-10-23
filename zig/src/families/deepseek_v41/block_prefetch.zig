@@ -36,7 +36,7 @@ pub fn l2pfSources(e: *Emitter, L: u32, site: L2Site) ![]const L2Src {
         },
         .f => {
             const D: i64 = e.cfg.hidden;
-            const I: i64 = e.cfg.expert_width / e.o.world;
+            const I: i64 = (try @import("partition.zig").share(e.cfg.expert_width, e.o.rank, e.o.world)).len;
             const ex = e.cfg.expertsOf(L);
             const sh = try e.fmt("L{d}.moe.shared.0.w1", .{L});
             const k2: u64 = try e.w.k2(sh);

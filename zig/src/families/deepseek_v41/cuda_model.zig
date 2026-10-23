@@ -188,6 +188,7 @@ pub const Model = struct {
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
         m.cfg = try Config.read(gpa, io, pack_dir);
+        if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);
         const backbone = if (o.layers) |ls| try a.dupe(u32, ls) else blk: {
             const all = try a.alloc(u32, m.cfg.layers);
@@ -264,7 +265,7 @@ pub const Model = struct {
         const topp: ?f64 = if (std.c.getenv("TF_DSV41_EXPERT_TOPP")) |v| try std.fmt.parseFloat(f64, std.mem.span(v)) else null;
         // TF_DSV41_R1=1, or the eight separate R1 knobs (the knob reader's r1)
         const r1 = @import("serve_knobs.zig").r1(&@import("serve_knobs.zig").env);
-        m.f = fwd.Forward.init(gpa, &m.cfg, &m.widths, .{ .world = world, .expert_topp = topp, .r1 = r1, .taps = o.drafts }, &m.runner, comm);
+        m.f = fwd.Forward.init(gpa, &m.cfg, &m.widths, .{ .world = world, .rank = m.tcfg.rank, .expert_topp = topp, .r1 = r1, .taps = o.drafts }, &m.runner, comm);
         try @import("engine_hooks.zig").open(&m.f); // the forward's later-layer hooks and prefill state
         m.f.layers = backbone;
         // the rope tables cover the limit + a prefill segment (the assets' rope.bin)

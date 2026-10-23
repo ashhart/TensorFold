@@ -136,7 +136,7 @@ fn onePrompt(gpa: std.mem.Allocator, io: std.Io, a: std.mem.Allocator, m: *model
     };
     // the decode steps (park: a RAM round trip a third in, an NVMe one two thirds in)
     const steps = want_tokens.len - 1;
-    const V: usize = m.cfg.vocab / f.comm.world();
+    const V: usize = (try @import("partition.zig").share(m.cfg.vocab, f.comm.rank(), f.comm.world())).len;
     const host_logits = try gpa.alloc(u8, 4 * V);
     defer gpa.free(host_logits);
     var tok: u32 = @intCast(want_tokens[0].integer);

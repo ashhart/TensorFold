@@ -445,10 +445,11 @@ pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!vo
     const Wd: usize = comm.world();
     if (std.mem.eql(u8, step, "ds_embed")) {
         const n: usize = numel(c.args[2].arg.t);
-        const V: usize = x.f.cfg.vocab / Wd;
+        const vocab_part = try @import("partition.zig").share(x.f.cfg.vocab, comm.rank(), Wd);
+        const V: usize = vocab_part.len;
         const embed = r.weights.get("embed") orelse return error.MissingWeight;
         const rws = try x.device(&x.send, 2 * n * D);
-        try k.embedSend(try r.tensorAddr(c.args[2].arg.t), n, embed.ptr, @intCast(comm.rank() * V), V, D, rws);
+        try k.embedSend(try r.tensorAddr(c.args[2].arg.t), n, embed.ptr, @intCast(vocab_part.lo), V, D, rws);
         const recv = try r.tensorAddr(c.args[1].arg.t);
         try comm.allGather(rws, recv, n * D, .bf16, s);
         return k.embedSum(recv, Wd, n, D, try r.tensorAddr(c.args[0].arg.t));
@@ -490,7 +491,7 @@ pub fn hostStep(x: *SlotPass, r: *run.Runner, logits_t: calls.Tensor, hid_t: cal
     try cuda.DeviceBuffer.download(.{ .d = r.d, .ptr = try r.tensorAddr(hid_t), .len = 2 * hid16.len }, 0, std.mem.sliceAsBytes(hid16));
     for (hid16, x.hid[0 .. R * D]) |b, *h| h.* = dspark.bf16(b);
     const packed_ = x.packed_[0 .. R * 2 * k];
-    const id0: u32 = @intCast(comm.rank() * V);
+    const id0: u32 = (try @import("partition.zig").share(x.f.cfg.vocab, comm.rank(), Wd)).lo;
     for (0..R) |i| {
         const row = packed_[i * 2 * k ..][0 .. 2 * k];
         try dspark.candidates(x.gpa, logits[i * V ..][0..V], id0, x.ids, row[0..k]);

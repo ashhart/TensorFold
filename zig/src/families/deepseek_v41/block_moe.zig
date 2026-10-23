@@ -142,7 +142,7 @@ pub fn moe(e: *E, L: u32) !void {
     const ex = e.cfg.expertsOf(L);
     const slots: i64 = ex.topk + 1;
     const Et: i64 = ex.count + 1;
-    const I: i64 = e.cfg.expert_width / e.o.world;
+    const I: i64 = (try @import("partition.zig").share(e.cfg.expert_width, e.o.rank, e.o.world)).len;
     const P = n * slots;
     const rows: i64 = if (backbone) e.o.expert_rows else e.o.dspark_rows;
     const sc: []const u8 = if (backbone) "s.ex" else "s.dx";
@@ -312,7 +312,7 @@ pub fn engram(e: *E, L: u32) !void {
 pub fn finish(e: *E) !void {
     try mhc(e, null, "", .final);
     const D: i64 = e.cfg.hidden;
-    const V: i64 = e.cfg.vocab / e.o.world;
+    const V: i64 = (try @import("partition.zig").share(e.cfg.vocab, e.o.rank, e.o.world)).len;
     const logits = try e.buf("w.logits", .{}, .f32, &.{ e.n, V });
     try e.upstream("head", try e.buf("w.out", .{}, .bf16, &.{ e.n, D }), D, V, logits);
     try e.glue("kit_logits", &.{logits});

@@ -80,9 +80,10 @@ pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!vo
         // graphed: the ids staged before the launch; no host step inside the window
         const n: usize = p.n;
         const embed = r.weights.get("embed") orelse return error.MissingWeight;
-        const V: usize = f.cfg.vocab / W;
+        const vocab_part = try @import("partition.zig").share(f.cfg.vocab, f.comm.rank(), W);
+        const V: usize = vocab_part.len;
         const rows = try f.sendBuffer(r, 2 * n * D);
-        try k.embedSend(g.?.statics.idsDev(), n, embed.ptr, @intCast(f.comm.rank() * V), V, D, rows);
+        try k.embedSend(g.?.statics.idsDev(), n, embed.ptr, @intCast(vocab_part.lo), V, D, rows);
         const recv = try r.tensorAddr(c.args[1].arg.t);
         try f.comm.allGather(rows, recv, n * D, .bf16, s);
         return k.embedSum(recv, W, n, D, try r.tensorAddr(c.args[0].arg.t));
@@ -101,9 +102,10 @@ pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!vo
         for (f.ids, 0..) |id, i| std.mem.writeInt(i64, h[8 * i ..][0..8], id, .little);
         try f.ids_stage.copyTo(f.dev_ids.?, 0, r.stream);
         const embed = r.weights.get("embed") orelse return error.MissingWeight;
-        const V: usize = f.cfg.vocab / W;
+        const vocab_part = try @import("partition.zig").share(f.cfg.vocab, f.comm.rank(), W);
+        const V: usize = vocab_part.len;
         const rows = try f.sendBuffer(r, 2 * n * D);
-        try k.embedSend(f.dev_ids.?.ptr, n, embed.ptr, @intCast(f.comm.rank() * V), V, D, rows);
+        try k.embedSend(f.dev_ids.?.ptr, n, embed.ptr, @intCast(vocab_part.lo), V, D, rows);
         if (f.vision) |vr| try hooks.set.vision.?.fill(vr, r.stream, f.ids, rows, D); // rank 0: the image positions' rows (vision.fill)
         const recv = try r.tensorAddr(c.args[1].arg.t);
         try f.comm.allGather(rows, recv, n * D, .bf16, s);

@@ -55,9 +55,10 @@ pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!vo
     }
     if (std.mem.eql(u8, step, "embed")) {
         const embed = r.weights.get("embed") orelse return error.MissingWeight;
-        const V: usize = f.cfg.vocab / W;
+        const vocab_part = try @import("partition.zig").share(f.cfg.vocab, f.comm.rank(), W);
+        const V: usize = vocab_part.len;
         const rows = try f.sendBuffer(r, 2 * R * D);
-        try k.embedSend(b.tab.dev.ptr + rowtab.colOffset(.ids, b.cap), R, embed.ptr, @intCast(f.comm.rank() * V), V, D, rows);
+        try k.embedSend(b.tab.dev.ptr + rowtab.colOffset(.ids, b.cap), R, embed.ptr, @intCast(vocab_part.lo), V, D, rows);
         const recv = try r.tensorAddr(c.args[1].arg.t);
         try f.comm.allGather(rows, recv, R * D, .bf16, s);
         return k.embedSum(recv, W, R, D, try r.tensorAddr(c.args[0].arg.t));

@@ -33,8 +33,9 @@ pub const Options = struct {
     image_keep: bool = false,
     /// TF_DSV41_BIAS_VL: the segment's image rows (MoE call apart, gate.bias_vl); 0: none; < 0: the buffer plan's
     image_rows: i64 = 0,
-    /// TP ranks (a boot constant): every per-rank width below is the model's / world; the plan checked divisibility
+    /// TP world and local rank; expert and vocabulary slices keep whole 128-column blocks.
     world: u32 = 2,
+    rank: u32 = 0,
     /// KV positions a slot holds (pool rows = limit / ratio + 1)
     limit: i64 = 4096,
     /// rope table rows (cos / sin pairs of 32)

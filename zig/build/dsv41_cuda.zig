@@ -37,6 +37,9 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8,
 pub fn steps(b: *std.Build) void {
     _ = @import("dsv41_images.zig").images(b, b.option([]const u8, "dsv41-nvcc", "Optional family nvcc compiler"), b.option([]const u8, "dsv41-fatbins", "Optional complete family prebuilt image directory"));
     _ = @import("dsv41_images.zig").module(b, b.graph.host, .Debug, runtime(b, b.graph.host, false), null);
+    const check_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
+    const heads_check = b.addExecutable(.{ .name = "tf-dsv41-prefill-heads", .root_module = module(b, check_target, "prefill_heads_check.zig", false) });
+    b.step("dsv41-prefill-heads", "Build the AOT-only padded attention comparison for Linux, never run").dependOn(&b.addInstallArtifact(heads_check, .{}).step);
     const planner = module(b, b.graph.host, "cuda_test.zig", false);
     b.step("test-dsv41-bounds-host", "DeepSeek resource bounds and real wrapper controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = planner, .filters = &.{"DeepSeek bounds:"} })).step);
     const binding_tests = b.addRunArtifact(b.addTest(.{ .root_module = planner.import_table.get("dsv41_kernels").? }));

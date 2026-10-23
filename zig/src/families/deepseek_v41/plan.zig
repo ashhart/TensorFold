@@ -8,6 +8,7 @@ const exl3 = @import("core").exl3_layout;
 const names = @import("names.zig");
 const Pack = @import("pack.zig").Pack;
 const Info = @import("pack.zig").Info;
+const partition = @import("partition.zig");
 
 /// One EXL3 group of the rank: its stored name and the rank's part.
 pub const GroupPlan = struct {
@@ -147,7 +148,7 @@ const Builder = struct {
         inline for (.{ "trellis", "suh", "svh" }) |part| try b.mark(try std.fmt.bufPrint(&b.buf, "{s}." ++ part, .{prefix}));
         const marker = try b.pack.marker(prefix, &b.buf);
         if (marker) |m| try b.mark(m);
-        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try g.part(split, b.o.rank, b.o.world), .marker = if (marker) |m| try b.dupe(m) else null };
+        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try partition.group(g, split, b.o.rank, b.o.world), .marker = if (marker) |m| try b.dupe(m) else null };
     }
 
     fn native(b: *Builder, name: []const u8, spec: names.NativeSpec) !NativePlan {
@@ -164,7 +165,8 @@ const Builder = struct {
         try b.mark(name);
         const bytes = switch (spec.slice) {
             .whole => info.nbytes,
-            .heads, .vocab_rows => blk: {
+            .vocab_rows => info.nbytes / info.shape[0] * (try partition.share(@intCast(info.shape[0]), b.o.rank, b.o.world)).len,
+            .heads => blk: {
                 if (info.shape[0] % b.o.world != 0) return error.SplitNotEven;
                 break :blk info.nbytes / b.o.world;
             },
@@ -265,9 +267,11 @@ const Builder = struct {
     }
 };
 
-/// The rank's plan; heads, groups and the vocabulary must split over `world` (blocks of 128).
+/// Heads and groups split evenly; expert and vocabulary slices retain whole 128-column blocks.
 pub fn build(gpa: std.mem.Allocator, c: *const Config, pack: *const Pack, o: Options) !Plan {
-    if (o.world == 0 or o.rank >= o.world or c.heads % o.world != 0 or c.o_groups % o.world != 0 or c.vocab % (128 * o.world) != 0) return error.BadWorld;
+    if (o.world == 0 or o.rank >= o.world or c.heads % o.world != 0 or c.o_groups % o.world != 0) return error.BadWorld;
+    _ = partition.share(c.vocab, o.rank, o.world) catch return error.BadWorld;
+    _ = partition.share(c.expert_width, o.rank, o.world) catch return error.BadWorld;
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     var b: Builder = .{ .a = arena.allocator(), .c = c, .pack = pack, .o = o };

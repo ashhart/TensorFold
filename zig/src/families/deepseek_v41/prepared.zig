@@ -20,7 +20,7 @@ pub const Key = struct {
 };
 
 /// The builders' source, so a change to how images are made never reads an old folder.
-const sources = [_][]const u8{ @embedFile("named.zig"), @embedFile("plan.zig"), @embedFile("stage.zig"), @embedFile("pack.zig"), @embedFile("projection.zig"), @embedFile("names.zig"), @import("core").exl3_layout.source_bytes, @import("prepare.zig").source_bytes };
+const sources = [_][]const u8{ @embedFile("named.zig"), @embedFile("plan.zig"), @embedFile("partition.zig"), @embedFile("stage.zig"), @embedFile("pack.zig"), @embedFile("projection.zig"), @embedFile("names.zig"), @import("core").exl3_layout.source_bytes, @import("prepare.zig").source_bytes };
 
 pub const Stats = struct { hits: u32 = 0, misses: u32 = 0, written: u32 = 0, read_bytes: u64 = 0, read_ns: u64 = 0, write_ns: u64 = 0 };
 

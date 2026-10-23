@@ -41,7 +41,7 @@ test "the release config.json: topology, routing and rope" {
 }
 
 /// Header JSON of a pack for `c`, named as the release packs are (their index, pattern by pattern), header only.
-fn tinyPack(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip: []const u8) ![]u8 {
+pub fn tinyPack(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip: []const u8) ![]u8 {
     var n: u64 = 0;
     return tinyPackLen(a, c, extra, skip, &n);
 }
