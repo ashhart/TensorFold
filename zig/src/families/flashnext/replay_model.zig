@@ -8,6 +8,7 @@ const dense = fz.dense;
 const lane_w = fz.lane_w;
 const rows_load = fz.rows_load;
 const variants = fz.variants;
+const gx_mod = @import("gx.zig");
 const gdn_step = fz.gdn_step;
 const vis_prompt = fz.vis_prompt;
 const D = fz.D;
@@ -341,7 +342,8 @@ pub const Model = struct {
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
             try r.router("q4_router_float@moe", t.mixed, L.router, t.rows, t.lg, rows);
             r.tp_layer = true;
-            if (L.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+            const by_expert = if (r.gx) |g| rows >= g.min_rows and r.tp == null and L.xw != null and gx_mod.applies(L.xw.?) else false;
+            if (by_expert) r.gx.?.encode(r, t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, rows) else if (L.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             r.tp_layer = false;
             if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);

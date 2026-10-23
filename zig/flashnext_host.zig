@@ -7,6 +7,7 @@ test {
     _ = @import("src/families/flashnext/experts4.zig");
     _ = @import("src/families/flashnext/tree.zig");
     _ = @import("src/families/flashnext/gate.zig");
+    _ = @import("src/families/flashnext/gx.zig");
     _ = @import("src/families/flashnext/engine_widths.zig");
     _ = @import("src/families/flashnext/prompt_w.zig");
     _ = @import("src/families/flashnext/host_sample.zig");

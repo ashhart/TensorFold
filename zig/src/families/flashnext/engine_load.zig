@@ -379,6 +379,10 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         m,
         @import("index.zig").mtpRoot(index.object.get("weight_map").?.object),
     );
+    if (r.tp == null) if (platform.c.getenv("FZ_GX")) |v| { // dev: windows from this many rows on the grouped experts
+        r.gx = try @import("gx.zig").init(r, try std.fmt.parseInt(usize, std.mem.span(v), 10));
+        std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
+    };
     if (r.tp == null) if (platform.c.getenv("FZ_GATE")) |v| { // dev: GPU-gated lanes at this probability product
         const tau = try std.fmt.parseFloat(f32, std.mem.span(v));
         e.gate = try @import("gate.zig").init(r, tau, m.mtp.ids_n);
