@@ -87,18 +87,16 @@ inline float qchunk_dot(const device uint* chunk, float scale, float bias, const
   return fma(scale, dq, bias * dx);
 }
 
-// split-K matvec of one row's normed streams: simdgroup o of threadgroup (i, k, r) over input groups 32 k .. 32 k + 31
+// split-K matvec of normed streams, simdgroup o of group (i, k, r) on groups 32 k ..: a lane normalises its own 32
 [[kernel]] void qa_hc_down_split(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
     const device float* NW [[buffer(2)]], const device uint32_t* QW [[buffer(3)]],
     const device bfloat* QS [[buffer(4)]],
     const device bfloat* QB [[buffer(5)]], const constant float* eps [[buffer(6)]],
     const constant int* rows [[buffer(7)]],
-    device float* PART [[buffer(8)]], uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
-    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
+    device float* PART [[buffer(8)]], uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
     uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
     uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
   constexpr int S = FZ_S, D = FZ_D, ND = FZ_ND, BITS = FZ_DB, GS = FZ_DG;
-  const uint t = thread_position_in_threadgroup.x;
   const uint lane = thread_index_in_simdgroup;
   const uint g = simdgroup_index_in_threadgroup;
   const int R = rows[0];
@@ -107,31 +105,19 @@ inline float qchunk_dot(const device uint* chunk, float scale, float bias, const
   const int o = int(threadgroup_position_in_grid.x) * 8 + int(g);
   const int k = int(threadgroup_position_in_grid.y);
   const int r = int(threadgroup_position_in_grid.z);
-  if (r >= R) return; // a gated window's unverified rows
-  const int c0 = k * 32 * 32;
-  threadgroup float xs[32 * 33];                      // group j at 33 j: a lane's reads hit distinct banks
-  threadgroup float rinv[S];
-  if (t < S) rinv[t] = stream_rinv(SSP, r, int(t), D / 256, S, D, eps[0]);
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (int i = int(t); i < 32 * 32; i += 256) {
-    const int e = c0 + i;
-    xs[(i / 32) * 33 + i % 32] = float(bfloat((float(HN[r * W + e]) * rinv[e / D]) * NW[e]));
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (o < ND) {
-    const int grp = k * 32 + int(lane);
-    float x[32];
-    for (int n = 0; n < 32; n++) x[n] = xs[lane * 33 + n];
+  if (r >= R || o >= ND) return; // a gated window's unverified rows, the outputs past the matrix
+  const int grp = k * 32 + int(lane), e0 = grp * 32;
+  const float rv = stream_rinv(SSP, r, e0 / D, D / 256, S, D, eps[0]);
+  float x[32];
+  for (int n = 0; n < 32; n++) x[n] = float(bfloat((float(HN[r * W + e0 + n]) * rv) * NW[e0 + n]));
 #if FZ_Q4
-    float acc = FZ_QGROUP(QW + (size_t(o) * GROUPS + grp) * 4, float(QS[o * GROUPS + grp]),
-                          float(QB[o * GROUPS + grp]), x);
+  float acc = FZ_QGROUP(QW + (size_t(o) * GROUPS + grp) * 4, float(QS[o * GROUPS + grp]), float(QB[o * GROUPS + grp]), x);
 #else
-    float acc = qchunk_dot<BITS>(QW + size_t(o) * (W * BITS / 32) + grp * BITS, float(QS[o * (W / GS) + grp * 32 / GS]),
-                                 float(QB[o * (W / GS) + grp * 32 / GS]), x);
+  float acc = qchunk_dot<BITS>(QW + size_t(o) * (W * BITS / 32) + grp * BITS, float(QS[o * (W / GS) + grp * 32 / GS]),
+                               float(QB[o * (W / GS) + grp * 32 / GS]), x);
 #endif
-    acc = simd_sum(acc);
-    if (lane == 0) PART[(k * R + r) * ND + o] = acc;
-  }
+  acc = simd_sum(acc);
+  if (lane == 0) PART[(k * R + r) * ND + o] = acc;
 }
 
 // one row's up projection for 8 dims of every stream: thread 10 i + q takes group q of up row i
