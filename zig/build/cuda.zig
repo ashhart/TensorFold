@@ -358,6 +358,11 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const rounds_compile = b.addObject(.{ .name = "qwen35-rounds-checker-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_rounds_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "tool", .module = rounds_tool }} }) });
     _ = rounds_compile.getEmittedBin();
     b.step("compile-qwen35-rounds-host", "Compile the real CUDA 64-row checker for Linux, no images or execution").dependOn(&rounds_compile.step);
+    const flashnext_parity = flashnextModule(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.qwen_vision);
+    const parity_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/flashnext_mtp_parity_main.zig"), .target = cuda_target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = check_cuda }, .{ .name = "flashnext", .module = flashnext_parity } } });
+    const parity_compile = b.addObject(.{ .name = "flashnext-mtp-parity-compile", .root_module = parity_tool });
+    _ = parity_compile.getEmittedBin();
+    b.step("compile-flashnext-mtp-parity-host", "Compile the real Flash Next MTP parity checker for Linux, no images or execution").dependOn(&parity_compile.step);
     const compile_bolt = b.addObject(.{ .name = "bolt_host_compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/bolt_compile.zig"),
         .target = cuda_target,
