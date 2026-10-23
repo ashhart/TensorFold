@@ -43,22 +43,24 @@ const Calls = struct {
     }
 };
 
-test "every call on two and three in-process ranks equals the reference" {
+test "every call on two, three and four in-process ranks equals the reference" {
     try host.run(2, {}, Calls.go);
     try host.run(3, {}, Calls.go);
+    try host.run(4, {}, Calls.go);
 }
 
 const Pairwise = struct {
     fn go(c: Collective, rank: u32, _: void) !void {
         var mine: [64]u8 = @splat(@intCast(rank + 1));
         var got: [64]u8 = undefined;
-        const peer = 1 - rank;
+        // pairs (0, 1), (2, 3), ...: two ranks trade, as the GPU checks pair them at any even world
+        const peer = rank ^ 1;
         try c.exchange(addr(&mine), addr(&got), 64, .u8, peer, null);
         try std.testing.expectEqualSlices(u8, &@as([64]u8, @splat(@intCast(peer + 1))), &got);
-        // send / recv, ordered so neither waits forever
+        // send / recv between ranks 0 and 1, ordered so neither waits forever
         if (rank == 0) {
             try c.send(addr(&mine), 16, .f32, 1, null);
-        } else {
+        } else if (rank == 1) {
             var buf: [64]u8 = undefined;
             try c.recv(addr(&buf), 16, .f32, 0, null);
             try std.testing.expectEqualSlices(u8, &@as([64]u8, @splat(1)), &buf);
@@ -67,8 +69,9 @@ const Pairwise = struct {
     }
 };
 
-test "exchange, send and recv between two ranks" {
+test "exchange, send and recv between two ranks, and in pairs of four" {
     try host.run(2, {}, Pairwise.go);
+    try host.run(4, {}, Pairwise.go);
 }
 
 const Desync = struct {

@@ -1,4 +1,4 @@
-//! Small exchanges through the mailbox (one host) or RoCE (two hosts), the rest through NCCL; ranks always agree.
+//! Small exchanges through the mailbox (one host) or RoCE (2 to 16 hosts), the rest through NCCL; ranks always agree.
 const std = @import("std");
 const collective = @import("collective.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
@@ -35,6 +35,14 @@ pub const Small = union(enum) {
     fn exchange(s: Small, src: DevicePtr, dst: DevicePtr, n: usize, stream: collective.Stream) Error!void {
         return switch (s) {
             inline else => |p| p.exchangeBytes(src, dst, n, stream),
+        };
+    }
+
+    /// The small path's exchange is the two-rank one (the mailbox is two ranks; RoCE above two sends to every peer).
+    fn exchanges(s: Small) bool {
+        return switch (s) {
+            .mailbox => true,
+            .roce => |p| p.exchanges(),
         };
     }
 
@@ -153,7 +161,7 @@ pub const Hybrid = struct {
     fn exchange(ptr: *anyopaque, s: DevicePtr, r: DevicePtr, count: usize, t: DType, peer: u32, stream: collective.Stream) Error!void {
         const h = self_(ptr);
         try collective.checkPeer(h.nccl.me, h.nccl.size, peer);
-        if (h.routed(count * t.size())) return h.small.exchange(s, r, count * t.size(), stream);
+        if (h.small.exchanges() and h.routed(count * t.size())) return h.small.exchange(s, r, count * t.size(), stream);
         return Nccl.exchange(h.nccl, s, r, count, t, peer, stream);
     }
 

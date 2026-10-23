@@ -324,6 +324,52 @@ test "plans arrive whole and in order; a closed rank 0 ends the follower" {
     try std.testing.expectError(error.PeerClosed, follow.recv(&buf));
 }
 
+test "four ranks (TP=4): every follower gets every plan whole and in order, spinning (rdma) or blocking (tcp)" {
+    const bootstrap = @import("bootstrap.zig");
+    const l = try bootstrap.testListener();
+    defer sock.close(l.fd);
+    const deadline = sock.nowNs() + 5 * std.time.ns_per_s;
+    var lead_fds: [max_ranks]sock.Fd = @splat(-1);
+    var follows: [3]PlanLink = undefined;
+    for (0..3) |i| {
+        const a = try sock.connect("localhost", l.port, deadline);
+        lead_fds[i + 1] = try sock.accept(l.fd, deadline);
+        var f: [max_ranks]sock.Fd = @splat(-1);
+        f[0] = a;
+        follows[i] = PlanLink.init(@intCast(i + 1), 4, f);
+        follows[i].spin_ns = if (i == 1) 0 else 2 * std.time.ns_per_ms; // rank 2 blocks at once (tcp), 1 and 3 spin
+    }
+    var lead = PlanLink.init(0, 4, lead_fds);
+    defer lead.close();
+    defer for (&follows) |*f| f.close();
+    const Follower = struct {
+        /// Plans k = 0, 1, ... until the stop plan (-1); `next` ends at the first k out of order.
+        fn run(f: *PlanLink, next: *i64) void {
+            var buf: [8]i64 = undefined;
+            while (true) {
+                const plan = f.recv(&buf) catch return;
+                if (plan.len != 2 or plan[0] != 0x504C414E) return;
+                if (plan[1] == -1) return;
+                if (plan[1] != next.*) return;
+                next.* += 1;
+            }
+        }
+    };
+    var nexts: [3]i64 = @splat(0);
+    var threads: [3]std.Thread = undefined;
+    for (0..3) |i| threads[i] = try std.Thread.spawn(.{}, Follower.run, .{ &follows[i], &nexts[i] });
+    // one send a plan, three receivers (fds[1..world])
+    for (0..500) |k| {
+        const step: i64 = @intCast(k);
+        try lead.send(&.{ 0x504C414E, step });
+    }
+    try lead.send(&.{ 0x504C414E, -1 });
+    for (threads) |t| t.join();
+    try std.testing.expectEqual([3]i64{ 500, 500, 500 }, nexts);
+    try std.testing.expectEqual(@as(u64, 501), lead.sent);
+    for (follows) |f| try std.testing.expectEqual(@as(u64, 501), f.received);
+}
+
 test "an admission-sized plan (1.2M words) arrives whole through the growable path" {
     const bootstrap = @import("bootstrap.zig");
     const l = try bootstrap.testListener();

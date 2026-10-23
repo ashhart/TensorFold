@@ -2,12 +2,13 @@
 const std = @import("std");
 const fake = @import("roce_fake.zig");
 const Roce = @import("roce.zig").Roce;
+const rv = @import("roce_verbs.zig");
 const Config = @import("config.zig").Config;
 const Fake = fake.Fake;
 
 test "a post past its slot is refused before any verb; a full slot posts inside the region" {
     const small: u64 = 64 << 10;
-    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(small));
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(2, small));
     defer std.testing.allocator.free(region);
     Fake.region = region;
     Fake.slot_bytes = small;
@@ -25,7 +26,7 @@ test "a post past its slot is refused before any verb; a full slot posts inside 
 
 test "no RDMA write past 1 MiB, whatever the slot: a 9.57 MB and a 1 MiB + 16 post refused in a 10 MiB slot" {
     const big: u64 = 10 << 20;
-    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(big));
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(2, big));
     defer std.testing.allocator.free(region);
     Fake.region = region;
     Fake.slot_bytes = big;
@@ -62,7 +63,7 @@ test "boot refuses a RoCE slot past 1 MiB (TF_TP_MAILBOX_MAX_KB), never clamping
 }
 
 test "chunked strides posted back to back: at most 2 MiB in flight over both HCAs and no write past 1 MiB" {
-    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(fake.slot));
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(2, fake.slot));
     defer std.testing.allocator.free(region);
     Fake.region = region;
     Fake.slot_bytes = fake.slot;
@@ -103,8 +104,25 @@ test "chunked strides posted back to back: at most 2 MiB in flight over both HCA
     }
 }
 
+test "a world-4 post checks the in-flight cap before every peer's stripe, so 3 MiB is never posted at once" {
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(4, fake.slot));
+    defer std.testing.allocator.free(region);
+    Fake.region = region;
+    Fake.slot_bytes = fake.slot;
+    defer Fake.slot_bytes = fake.slot;
+    Fake.reset(1);
+    var hw: fake.Hw = .{};
+    const w = hw.wireN(region, 4, 0);
+    var wire = w;
+    try wire.post(1, 1, fake.slot);
+    // three peers get the slot; the gate used to run once before the loop and let all 3 MiB out at once
+    try std.testing.expectEqual(@as(u64, 3 * fake.slot), Fake.bytes);
+    try std.testing.expect(Fake.max_inflight <= rv.max_inflight);
+    while (wire.inflight() > 0) try wire.reap();
+}
+
 test "Roce.abort (the fail-fast hook) moves both QPs to error: no send goes out and no peer write lands" {
-    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(fake.slot));
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(2, fake.slot));
     defer std.testing.allocator.free(region);
     @memset(region, 0);
     Fake.region = region;
@@ -114,7 +132,7 @@ test "Roce.abort (the fail-fast hook) moves both QPs to error: no send goes out 
     var hw: fake.Hw = .{};
     var w = hw.wire(region);
     fake.Halts.install(&hw, &w);
-    var r: Roce = .{ .me = 0, .slot_bytes = fake.slot, .timeout_ns = 1, .region = region, .mapping = region, .wire = .{ .verbs = w }, .cpu = null };
+    var r: Roce = .{ .me = 0, .world = 2, .layout = rv.Layout.of(2, fake.slot), .slot_bytes = fake.slot, .timeout_ns = 1, .region = region, .mapping = region, .wire = .{ .verbs = w }, .cpu = null };
     r.abort();
     try std.testing.expect(fake.Halts.halted[0] and fake.Halts.halted[1]);
 }
