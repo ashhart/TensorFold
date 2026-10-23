@@ -35,11 +35,38 @@ def robot(name: str, user: list[dict]) -> dict:
     return {"name": name, "messages": [{"role": "system", "content": SYSTEM}] + user, "tools": TOOLS}
 
 
+def french() -> list[dict]:
+    """Robot scenarios in French: same system prefix and tools, French user turns, some with several turns."""
+    ok = lambda i: {"role": "tool", "tool_call_id": f"c{i}", "content": "ok"}
+    return [
+        robot("fr_porte_assis", [{"role": "user", "content": "Va jusqu'à la porte puis assieds-toi. " + frame(21, False)}]),
+        robot("fr_tete_bruit", [{"role": "user", "content": "Tourne la tête vers le bruit. " + frame(22, False)}]),
+        robot("fr_cancane", [{"role": "user", "content": "Cancane deux fois. " + frame(23, False)}]),
+        robot("fr_avance_mur", [{"role": "user", "content": "Avance doucement. " + frame(24, True)}]),
+        robot("fr_bonjour", [{"role": "user", "content": "Dis bonjour à la dame qui arrive. " + frame(25, False)}]),
+        robot("fr_recule", [{"role": "user", "content": "Recule un peu. " + frame(26, False)}]),
+        robot("fr_gauche_tour2", [{"role": "user", "content": frame(27, False)}, call("robot_move", {"vx": 0.3, "vy": 0.0, "vyaw": 0.0, "seconds": 1.0}, 1), ok(1), {"role": "user", "content": "Maintenant tourne à gauche. " + frame(28, False)}]),
+        robot("fr_roulade", [{"role": "user", "content": "Fais une roulade ! " + frame(29, False)}]),
+        robot("fr_balle", [{"role": "user", "content": "Regarde le ballon rouge à ta droite, à environ deux mètres. " + frame(30, False)}]),
+        robot("fr_stop", [{"role": "user", "content": "Arrête-toi tout de suite ! " + frame(31, False)}]),
+        robot("fr_trois_tours", [{"role": "user", "content": "Va à la porte. " + frame(32, False)}, call("robot_move", {"vx": 0.3, "vy": 0.0, "vyaw": 0.0, "seconds": 2.0}, 1), ok(1), {"role": "user", "content": frame(33, True)}, call("robot_stop", {}, 2), ok(2), {"role": "user", "content": "Tu es arrivé ? Assieds-toi. " + frame(34, True)}]),
+        robot("fr_qui_es_tu", [{"role": "user", "content": "Qui es-tu ? " + frame(35, False)}]),
+        robot("fr_danse", [{"role": "user", "content": "Fais la fête : joue un son joyeux puis avance un peu. " + frame(36, False)}]),
+        robot("fr_obstacle_gauche", [{"role": "user", "content": "Contourne l'obstacle par la gauche. " + frame(37, True)}]),
+    ]
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path, help="the checkpoint directory (its README.md supplies the long documents)")
     p.add_argument("output", type=Path)
+    p.add_argument("--french", action="store_true", help="write the French robot scenarios instead")
     args = p.parse_args()
+    if args.french:
+        prompts = french()
+        args.output.write_text(json.dumps(prompts, indent=1, ensure_ascii=False) + "\n")
+        print(f"{len(prompts)} prompts -> {args.output}")
+        return
     card = (args.model / "README.md").read_text()
     prompts = [
         {"name": "chat_short", "messages": [{"role": "user", "content": "In two sentences, why is the sky blue?"}]},

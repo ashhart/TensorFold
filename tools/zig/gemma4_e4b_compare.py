@@ -28,7 +28,7 @@ def main() -> None:
     print(f"{'prompt':16s} {'pos':>4s} {'top1':>7s} {'dlp mean':>9s} {'dlp p95':>8s} {'dlp max':>8s} {'KL mean':>9s} {'KL max':>8s}")
     for f in sorted(args.ref.glob("*.json")):
         meta = json.loads(f.read_text())
-        if not isinstance(meta, dict):
+        if not isinstance(meta, dict) or "name" not in meta:
             continue
         name = meta["name"]
         if "prompt_ids" not in meta or (only and name not in only) or not (args.test / f"{name}.logits.npy").exists():
