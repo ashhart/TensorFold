@@ -41,10 +41,12 @@ pub fn sizes(parts: []const Share) error{BadFp8Share}!struct { n: usize, k: usiz
         const inside = s.lo < s.hi and s.hi <= s.p.n and s.klo < s.khi and s.khi <= s.p.k;
         // the lane's 64-input groups and 64-row tiles: a cut off them would mix two groups' scales or rows
         if (!inside or s.khi - s.klo != k or s.klo % fp8.group != 0 or k % fp8.group != 0 or (s.hi - s.lo) % 64 != 0) return error.BadFp8Share;
-        n += s.hi - s.lo;
+        n = std.math.add(usize, n, s.hi - s.lo) catch return error.BadFp8Share;
     }
-    const npad = fp8.padded(n);
-    return .{ .n = n, .k = k, .codes = npad * k, .scales = npad * (k / fp8.group) };
+    const npad = (std.math.add(usize, n, 127) catch return error.BadFp8Share) / 128 * 128;
+    if (n > std.math.maxInt(c_int) or k > std.math.maxInt(c_int) or npad > std.math.maxInt(c_int)) return error.BadFp8Share;
+    const codes = std.math.mul(usize, npad, k) catch return error.BadFp8Share;
+    return .{ .n = n, .k = k, .codes = codes, .scales = codes / fp8.group };
 }
 
 /// `parts` packed one after another in 64-row tiles as the lane's one weight (cuda.fp8's order); padding 0 and 1.
@@ -214,4 +216,16 @@ test "a share off the lane's 64-input groups or 64-row tiles, or past its tensor
     var small: [8]u8 = undefined;
     var tiles: [2]f32 = undefined;
     try testing.expectError(error.BadFp8Share, pack(testing.allocator, &.{.{ .p = &p, .lo = 0, .hi = 64, .klo = 0, .khi = 128 }}, &small, &tiles));
+}
+
+test "block FP8 shares reject overflowing stacked or padded geometry before packing" {
+    const max = std.math.maxInt(usize);
+    var no_scales: [0]f32 = .{};
+    const p = fp8pbOf(&.{}, &no_scales, max, 64);
+    try testing.expectError(error.BadFp8Share, sizes(&.{.{ .p = &p, .lo = 128, .hi = 64, .klo = 0, .khi = 64 }}));
+    const many = max / 2 / 64 * 64;
+    const part: Share = .{ .p = &p, .lo = 0, .hi = many, .klo = 0, .khi = 64 };
+    try testing.expectError(error.BadFp8Share, sizes(&.{ part, part, part }));
+    try testing.expectError(error.BadFp8Share, sizes(&.{.{ .p = &p, .lo = 0, .hi = max / 64 * 64, .klo = 0, .khi = 64 }}));
+    try testing.expectError(error.BadFp8Share, sizes(&.{.{ .p = &p, .lo = 0, .hi = max / 128 * 128, .klo = 0, .khi = 64 }}));
 }

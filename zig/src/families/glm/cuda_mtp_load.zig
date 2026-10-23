@@ -23,6 +23,12 @@ pub fn load(L: anytype, head_ck: *core.Checkpoint) !weights.Mtp {
         try L.whole(try L.get("layers.{d}.{s}", .{ i, name }), .bf16);
         p.* = try L.put("mtp.{s}", .{what});
     }
+    return .{ .enorm = out[0], .hnorm = out[1], .eh = out[2], .norm = out[3], .layer = layer_w, .draft = try draft(L, head_ck) };
+}
+
+/// The draft head's temporary quantizer inputs stay owned until packing completes or its stream drains on error.
+pub fn draft(L: anytype, head_ck: *core.Checkpoint) !q4.Q4 {
+    const c = &L.w.config;
     // the draft head: quantize4 of the head's bf16 rows (an MXFP8 head's widened exactly), then make_q4's tiling
     const qk = L.tools.quant orelse return error.NoQuantizer;
     const tk = L.tools.q4 orelse return error.NoQuantizer;
@@ -37,6 +43,7 @@ pub fn load(L: anytype, head_ck: *core.Checkpoint) !weights.Mtp {
     }
     var wide: ?cuda.DeviceBuffer = null;
     defer if (wide) |*b| b.free();
+    errdefer cuda.completion.drain(L.d, L.stream, "a GLM draft head load did not drain");
     const rows: u64 = switch (L.w.head) {
         .bf16 => |p| p,
         .mxfp8 => r: {
@@ -48,13 +55,14 @@ pub fn load(L: anytype, head_ck: *core.Checkpoint) !weights.Mtp {
     try quant.q4(qk, L.stream, rows, n, k, raw[0].ptr, raw[1].ptr, raw[2].ptr);
     var tiled: [3]u64 = undefined;
     for (&tiled, q4.bytes(n, k), [_][]const u8{ "words", "scales", "biases" }) |*p, size, what| {
-        const b = try cuda.DeviceBuffer.alloc(L.d, size);
-        try L.w.buffers.append(L.gpa, b);
-        try L.w.named.append(L.gpa, .{ .name = try std.fmt.allocPrint(L.gpa, "draft_head.{s}", .{what}), .ptr = b.ptr, .len = b.len });
-        p.* = b.ptr;
+        p.* = try @import("cuda_upload_owner.zig").keep(L, try cuda.DeviceBuffer.alloc(L.d, size), "draft_head.{s}", .{what});
     }
-    const draft: q4.Q4 = .{ .w = tiled[0], .s = tiled[1], .b = tiled[2], .n = n, .k = k, .npad = q4.npadOf(n) };
-    try q4.pack(tk, L.stream, raw[0].ptr, raw[1].ptr, raw[2].ptr, draft);
+    const quantized: q4.Q4 = .{ .w = tiled[0], .s = tiled[1], .b = tiled[2], .n = n, .k = k, .npad = q4.npadOf(n) };
+    try q4.pack(tk, L.stream, raw[0].ptr, raw[1].ptr, raw[2].ptr, quantized);
     try L.stream.synchronize();
-    return .{ .enorm = out[0], .hnorm = out[1], .eh = out[2], .norm = out[3], .layer = layer_w, .draft = draft };
+    return quantized;
+}
+
+test {
+    _ = @import("cuda_mtp_load_test.zig");
 }

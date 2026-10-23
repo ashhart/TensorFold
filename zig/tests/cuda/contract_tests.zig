@@ -478,6 +478,14 @@ pub fn run(gpu: check.Gpu) !void {
     }));
     defer for (&f32ws) |*x| x.deinit();
     for (&f32ws) |*x| try kernels.append(a, x.kernel());
+    var bf16s: [f32w_k.bf16_entries.len]f32w_k.F32w = undefined;
+    for (f32w_k.bf16_entries, &bf16s) |e, *x| {
+        x.* = .init(.{ .gpu = gpu, .s = s }, e.which, try glm_glue.function(e.symbol));
+        x.width = e.width;
+        x.baseline = try mods[5].function(e.old);
+    }
+    defer for (&bf16s) |*x| x.deinit();
+    for (&bf16s) |*x| try kernels.append(a, x.kernel());
     var f32w_control: f32w_k.F32w = .init(.{ .gpu = gpu, .s = s }, .norm_y, try glm_glue.function("tf_glm_rmsnorm_4096_f32w"));
     f32w_control.bf16_gamma = true;
     defer f32w_control.deinit();

@@ -1,5 +1,5 @@
 {
-  "policy": "Machine names, internal addresses, home paths, working-session names and the tools' local document, records, container and image names replaced with placeholders (host-a, host-b and host-c run ranks 0, 1 and 2; <link-..>, <ring-..> name the direct links' and the ring's addresses); result values, token ids and token hashes kept. The memory wrapper's receipts are raw for TP=2 ex-fl only; memory/summary.json summarizes every receipt with its original's sha256.",
+  "policy": "Machine names, internal addresses, home paths, working-session names and the tools' local document, records, container and image names replaced with placeholders (host-a, host-b and host-c run ranks 0, 1 and 2; <link-..>, <ring-..> name the direct links' and the ring's addresses); result values, token ids and token hashes kept. The memory wrapper's receipts are raw for TP=2 ex-fl only; memory/summary.json summarizes every receipt with its original's sha256. Maintainer: absolute workspace paths use <workspace>; historical private labels use neutral placeholders until the contributor replaces them. No contributor file is omitted. Historical results do not qualify this prepared carry.",
   "replacements_by_file": {
     "README.md": 0,
     "binaries.txt": 0,
@@ -384,5 +384,110 @@
     "video/ref-fp4local.json": 0,
     "video/ref-nvfp4.json": 0
   },
-  "undecodable_bytes_replaced_by_file": {}
+  "undecodable_bytes_replaced_by_file": {},
+  "maintainer_redactions_by_file": {
+    "tp2/serve/vd-111/check-video.log": {
+      "absolute_workspace_paths": 3
+    },
+    "tp2/serve/vd-fl/check-video.log": {
+      "absolute_workspace_paths": 3
+    },
+    "tp2/serve/vd-nv/check-video.log": {
+      "absolute_workspace_paths": 3
+    },
+    "tp2/serve/vl-fl/serve.txt": {
+      "absolute_workspace_paths": 1
+    },
+    "tp2/serve/vl-nv/serve.txt": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/ex3-fl/serve.txt": {
+      "absolute_workspace_paths": 3
+    },
+    "tp3/serve/ex3-fl/server-rank0.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/ex3-fl/server-rank1.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/ex3-fl/server-rank2.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/ex3-nv/serve.txt": {
+      "absolute_workspace_paths": 3
+    },
+    "tp3/serve/ex3-nv/server-rank0.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/ex3-nv/server-rank1.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/ex3-nv/server-rank2.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/md3-fl/serve.txt": {
+      "absolute_workspace_paths": 3
+    },
+    "tp3/serve/md3-fl/server-rank0.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/md3-fl/server-rank1.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/md3-fl/server-rank2.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/smoke3-mm1/check-golden.log": {
+      "absolute_workspace_paths": 3
+    },
+    "tp3/serve/smoke3-mm1/serve.txt": {
+      "absolute_workspace_paths": 3
+    },
+    "tp3/serve/smoke3-mm1/server-rank0.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/smoke3-mm1/server-rank1.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/smoke3-mm1/server-rank2.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/smoke3/serve.txt": {
+      "absolute_workspace_paths": 3
+    },
+    "tp3/serve/smoke3/server-rank0.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/smoke3/server-rank1.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/smoke3/server-rank2.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/sp3-fl/serve.txt": {
+      "absolute_workspace_paths": 3
+    },
+    "tp3/serve/sp3-fl/server-rank0.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/sp3-fl/server-rank1.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/sp3-fl/server-rank2.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/sp3-nv/serve.txt": {
+      "absolute_workspace_paths": 3
+    },
+    "tp3/serve/sp3-nv/server-rank0.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/sp3-nv/server-rank1.log": {
+      "absolute_workspace_paths": 1
+    },
+    "tp3/serve/sp3-nv/server-rank2.log": {
+      "absolute_workspace_paths": 1
+    }
+  },
+  "maintainer_history_policy": "Earlier private document, records, host and container labels use distinct neutral placeholders, preserving every original record and touched path. Digests are recomputed in each snapshot."
 }

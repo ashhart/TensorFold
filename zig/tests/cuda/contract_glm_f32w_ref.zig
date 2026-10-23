@@ -17,6 +17,7 @@ pub const scale = [3]f32{ 0.7, 0.9, 1.1 };
 /// What a call reads: x bf16 [rows][d] (norm) or [rows][s][d] (hc), the float32 weight, hc's partials and logits' base.
 pub const In = struct {
     hc: bool,
+    width: usize = d,
     rows: usize,
     x: []u16,
     gamma: []f32,
@@ -54,12 +55,18 @@ fn sigmoid(v: f64) f64 {
 
 /// Inputs for a fill (stress: integer terms); `exact`: rows whose norm is x itself, so the 64-sums' reference is exact.
 pub fn fill(a: std.mem.Allocator, hc: bool, rows: usize, mode: Fill, seed: u64, exact: bool) !In {
+    return fillWidth(a, hc, d, rows, mode, seed, exact);
+}
+
+/// BF16 template replacements use the same fixture at their fixed 512, 1536 and 4096 widths.
+pub fn fillWidth(a: std.mem.Allocator, hc: bool, width: usize, rows: usize, mode: Fill, seed: u64, exact: bool) !In {
+    if (width != 512 and width != 1536 and width != d or hc and width != d) return error.UnsupportedWidth;
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
-    const x = try a.alloc(u16, rows * d * @as(usize, if (hc) s else 1));
-    const gamma = try a.alloc(f32, d);
+    const x = try a.alloc(u16, rows * width * @as(usize, if (hc) s else 1));
+    const gamma = try a.alloc(f32, width);
     const part = try a.alloc(f32, if (hc) rows * nb * 32 else 0);
-    var in: In = .{ .hc = hc, .rows = rows, .x = x, .gamma = gamma, .part = part, .base = undefined, .eps = 1e-6, .hc_eps = 1e-6 };
+    var in: In = .{ .hc = hc, .width = width, .rows = rows, .x = x, .gamma = gamma, .part = part, .base = undefined, .eps = 1e-6, .hc_eps = 1e-6 };
     const stress = mode == .stress;
     for (gamma) |*g| g.* = if (exact) 1 else 0.5 + rng.float(f32);
     for (&in.base) |*b| b.* = (rng.float(f32) * 2 - 1) * 0.5;
@@ -67,7 +74,7 @@ pub fn fill(a: std.mem.Allocator, hc: bool, rows: usize, mode: Fill, seed: u64, 
         (if (stress) @floatFromInt(1024 + rng.uintLessThan(u32, 1024)) else 200 + rng.float(f32) * 200)
     else if (stress) @as(f32, @floatFromInt(rng.uintLessThan(u32, 5))) - 2 else rng.float(f32) * 2 - 1;
     if (exact or (hc and stress)) { // signed permutations of one row; eps 1 - mean square; hc's c = stream 0 / 2
-        const row = try a.alloc(f64, d);
+        const row = try a.alloc(f64, width);
         defer a.free(row);
         for (row, 0..) |*v, i| v.* = if (stress)
             @as(f64, @floatFromInt(rng.uintLessThan(u32, 64))) - 31
@@ -75,27 +82,27 @@ pub fn fill(a: std.mem.Allocator, hc: bool, rows: usize, mode: Fill, seed: u64, 
             bf((rng.float(f64) * 2 - 1) * (if (i % 64 == 7) @as(f64, 20) else 1));
         var ss: f64 = 0;
         for (row) |v| ss += v * v;
-        if (exact) in.eps = @floatCast(1 - ss / d);
+        if (exact) in.eps = @floatCast(1 - ss / @as(f64, @floatFromInt(width)));
         if (hc) { // pre 0.5: zero dots, base and hc_eps; squares that keep the logits' rms finite under that eps
             in.hc_eps = 0;
             for (in.base[0..4]) |*b| b.* = 0;
-            const sq: f32 = @ceil((@abs(in.eps) + 1) * s * d / nb);
+            const sq: f32 = @ceil((@abs(in.eps) + 1) * @as(f32, @floatFromInt(s * width)) / nb);
             for (0..rows) |r| for (0..nb) |b| {
                 for (0..4) |k| part[(r * nb + b) * 32 + k] = 0;
                 if (exact) part[(r * nb + b) * 32 + 24] = sq;
             };
         }
-        const order = try a.alloc(usize, d);
+        const order = try a.alloc(usize, width);
         defer a.free(order);
         for (0..rows) |r| {
             for (order, 0..) |*o, i| o.* = i;
             rng.shuffle(usize, order);
-            for (0..d) |i| {
+            for (0..width) |i| {
                 const v = row[order[i]] * @as(f64, if (rng.boolean()) -1 else 1);
                 if (hc) {
-                    x[(r * s) * d + i] = c.toBf16(@floatCast(2 * v));
-                    for (1..s) |k| x[(r * s + k) * d + i] = 0;
-                } else x[r * d + i] = c.toBf16(@floatCast(v));
+                    x[(r * s) * width + i] = c.toBf16(@floatCast(2 * v));
+                    for (1..s) |k| x[(r * s + k) * width + i] = 0;
+                } else x[r * width + i] = c.toBf16(@floatCast(v));
             }
         }
     } else for (x, 0..) |*v, i| {
@@ -105,17 +112,25 @@ pub fn fill(a: std.mem.Allocator, hc: bool, rows: usize, mode: Fill, seed: u64, 
     return in;
 }
 
+/// Three BF16 roundings exceed the two-rounding bound when the float32 gamma is narrowed before the multiply.
+pub fn narrowControl(in: *In) void {
+    for (in.x, 0..) |*v, i| v.* = if (i % 2 == 0) 0x3e83 else 0x3f21;
+    @memset(in.gamma, @as(f32, @bitCast(@as(u32, 0x3f077fff))));
+}
+
 /// NaN and both infinities in rows 0 to 3: x (the norms' outputs), and hc's dots for post (4, 5) and comb (8, 9).
 fn plant(in: *In) void {
+    const width = in.width;
     const nan = c.toBf16(std.math.nan(f32));
     const inf = c.toBf16(std.math.inf(f32));
     const ninf = c.toBf16(-std.math.inf(f32));
-    const w: usize = if (in.hc) s * d else d;
-    const at = [_][2]usize{ .{ 0, d / 3 }, .{ 1, d / 2 }, .{ 2, d - 1 }, .{ 3, 0 } };
+    const w: usize = if (in.hc) s * width else width;
+    const at = [_][2]usize{ .{ 0, width / 3 }, .{ 1, width / 2 }, .{ 2, width - 1 }, .{ 3, 0 } };
     const put = [_]u16{ nan, inf, ninf, inf };
     for (at, put) |p, v| if (p[0] < in.rows) {
         in.x[p[0] * w + p[1]] = v;
     };
+    if (in.rows > 3) in.x[3 * w + 1] = ninf;
     if (!in.hc) return;
     const dots = [_][3]usize{ .{ 0, 3, 4 }, .{ 1, 5, 5 }, .{ 2, 0, 8 }, .{ 3, 15, 9 } };
     const vals = [_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32) };
@@ -146,11 +161,12 @@ fn mixRow(in: In, r: usize, m: Sum, mixn: *[24]f64, mass: *[24]f64) void {
 
 /// rmsnorm_4096_f32w's outputs [rows][d] or hc_finish_f32w's normed rows, unrounded; `mag` each one's sums' terms.
 pub fn normed(a: std.mem.Allocator, in: In, m: Sum, want: []f64, mag: []f64) !void {
-    const cv = try a.alloc(f64, d);
+    const width = in.width;
+    const cv = try a.alloc(f64, width);
     defer a.free(cv);
-    const cm = try a.alloc(f64, d); // the |terms| of each c: hc's collapse and its logits' sums
+    const cm = try a.alloc(f64, width); // the |terms| of each c: hc's collapse and its logits' sums
     defer a.free(cm);
-    const sq = try a.alloc(f64, d);
+    const sq = try a.alloc(f64, width);
     defer a.free(sq);
     for (0..in.rows) |r| {
         if (in.hc) {
@@ -167,19 +183,19 @@ pub fn normed(a: std.mem.Allocator, in: In, m: Sum, want: []f64, mag: []f64) !vo
                 var t: [s]f64 = undefined;
                 om.* = 0;
                 for (0..s) |k| {
-                    const xk = xv(in, (r * s + k) * d + i);
+                    const xk = xv(in, (r * s + k) * width + i);
                     t[k] = pre[k] * xk;
                     om.* += @abs(t[k]) + @abs(xk) * dpre[k];
                 }
                 o.* = m.of(&t);
             }
         } else for (cv, cm, 0..) |*o, *om, i| {
-            o.* = xv(in, r * d + i);
+            o.* = xv(in, r * width + i);
             om.* = 0;
         }
         for (sq, cv) |*q, v| q.* = v * v;
-        const rinv = 1 / @sqrt(in.eps + m.of(sq) / d);
-        for (want[r * d ..][0..d], mag[r * d ..][0..d], cv, cm, in.gamma) |*w, *g, v, om, gm| {
+        const rinv = 1 / @sqrt(in.eps + m.of(sq) / @as(f64, @floatFromInt(width)));
+        for (want[r * width ..][0..width], mag[r * width ..][0..width], cv, cm, in.gamma) |*w, *g, v, om, gm| {
             w.* = gm * rinv * v;
             g.* = gm * rinv * om + @abs(w.*) / 2; // y ~ ss^-1/2
         }
@@ -188,22 +204,23 @@ pub fn normed(a: std.mem.Allocator, in: In, m: Sum, want: []f64, mag: []f64) !vo
 
 /// Each 64 outputs' sum, the outputs rounded as the kernel does, bf16(gamma bf16(rinv c)), from `fill`'s exact rows.
 pub fn sums(a: std.mem.Allocator, in: In, m: Sum, want: []f64, mag: []f64) !void {
-    const row = try a.alloc(f64, d);
+    const width = in.width;
+    const row = try a.alloc(f64, width);
     defer a.free(row);
     for (0..in.rows) |r| {
         var sq: f64 = 0;
         for (row, 0..) |*v, i| {
-            v.* = if (in.hc) bf(0.5 * xv(in, (r * s) * d + i)) else xv(in, r * d + i);
+            v.* = if (in.hc) bf(0.5 * xv(in, (r * s) * width + i)) else xv(in, r * width + i);
             sq += v.* * v.*;
         }
-        const rinv = 1 / @sqrt(in.eps + sq / d);
+        const rinv = 1 / @sqrt(in.eps + sq / @as(f64, @floatFromInt(width)));
         for (row, in.gamma) |*o, gm| o.* = bf(gm * bf(rinv * o.*));
-        for (0..d / 64) |g| {
+        for (0..width / 64) |g| {
             const t = row[g * 64 ..][0..64];
             var abs: f64 = 0;
             for (t) |v| abs += @abs(v);
-            want[r * (d / 64) + g] = m.of(t);
-            mag[r * (d / 64) + g] = abs;
+            want[r * (width / 64) + g] = m.of(t);
+            mag[r * (width / 64) + g] = abs;
         }
     }
 }

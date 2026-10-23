@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const glm = @import("glm_cuda");
 const check = @import("check.zig");
+const control = @import("glm_loader_control.zig");
 
 const DType = core.checkpoint.DType;
 const Tensor = core.checkpoint.Tensor;
@@ -471,7 +472,11 @@ fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *cons
         const b: cuda.DeviceBuffer = .{ .d = gpu.d, .ptr = n.ptr, .len = n.len, .borrowed = true };
         try b.download(0, got);
         if (tamper.name) |t| if (eql(t, n.name)) {
-            got[got.len / 2] ^= 1;
+            control.plant(got, want) catch |e| {
+                std.debug.print("FAIL TP={d} rank {d} {s}: {t} before the planted change\n", .{ world, rank, n.name, e });
+                bad += 1;
+                continue;
+            };
             tamper.done += 1;
         };
         var label: [160]u8 = undefined;

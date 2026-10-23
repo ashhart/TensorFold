@@ -25,6 +25,7 @@ pub const Recipe = enum {
 pub const Recipes = struct {
     arena: std.heap.ArenaAllocator,
     modules: std.StringHashMapUnmanaged(Recipe) = .empty,
+    mixed: bool = false,
 
     /// The recipe of `name`, a module or one of its tensors: the longest declared module it is or lies under.
     pub fn of(self: *const Recipes, name: []const u8) ?Recipe {
@@ -84,6 +85,7 @@ pub fn admitRecipes(gpa: std.mem.Allocator, config_json: []const u8, why: *Why) 
         try nvfp4(q, why);
         return r;
     }
+    r.mixed = true;
     const layers = object(q.get("quantized_layers")) orelse {
         why.set("ModelOpt MIXED_PRECISION without quantized_layers", .{});
         return error.UnsupportedQuant;
@@ -320,4 +322,17 @@ test "recipes this engine does not read are refused by module" {
     defer mixed.deinit();
     try std.testing.expectEqual(@as(?Recipe, .fp8), mixed.of("m.out_proj.weight_scale"));
     try std.testing.expectEqual(@as(?Recipe, .nvfp4), mixed.of("m.mlp.up_proj"));
+}
+
+test "empty MIXED_PRECISION recipes retain their identity beside single-format NVFP4" {
+    var why: Why = .{};
+    var mixed = try admitRecipes(std.testing.allocator,
+        \\{"quantization_config":{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{}}}
+    , &why);
+    defer mixed.deinit();
+    try std.testing.expect(mixed.mixed);
+    try std.testing.expectEqual(@as(u32, 0), mixed.modules.count());
+    var nv = try admitRecipes(std.testing.allocator, @embedFile("fixtures/glm53_flash_nvfp4/config.json"), &why);
+    defer nv.deinit();
+    try std.testing.expect(!nv.mixed);
 }

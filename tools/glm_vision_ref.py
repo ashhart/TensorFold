@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """GLM-5.3-Flash's vision tower as mlx-vlm's glm5_next (vision.py, processing.py) defines it, in torch on the CPU
-(fp32 math on the checkpoint's weights: bf16, or FP4-Local's MXFP8 and NVFP4 projections as the values their codes and
-scales hold): the reference the native tower is checked against.
+(fp32 math on the checkpoint's bf16 weights): the reference the native tower is checked against.
 
 usage: glm_vision_ref.py [--bf16] <model dir> <out dir> <image or video frames dir>...
   --bf16: the same tower in bfloat16 (tf-cuda-test glm-vision bounds the native tower's error by this run's)
@@ -91,21 +90,6 @@ def frames_to_patches(frames, min_tokens, max_tokens):
     return np.ascontiguousarray(p.reshape(gt * gh * gw, 3 * TEMPORAL * PATCH * PATCH)), [gt, gh, gw]
 
 
-DTYPES = {"BF16": torch.bfloat16, "F32": torch.float32, "U8": torch.uint8, "F8_E4M3": torch.uint8}
-E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0])
-
-
-def dequant(w, scale, scale2):
-    """An MXFP8 (e4m3, UE8M0 a 32) or NVFP4 (e2m1 low nibble first, e4m3 a 16, global) projection as float32 values."""
-    if scale2 is None:
-        n, k = w.shape
-        return (w.view(torch.float8_e4m3fn).float().reshape(n, k // 32, 32) * torch.exp2(scale.float() - 127)[..., None]).reshape(n, k)
-    n, half = w.shape
-    codes = torch.stack([w & 15, w >> 4], -1).reshape(n, 2 * half).long()
-    s = scale.view(torch.float8_e4m3fn).float()
-    return (E2M1[codes].reshape(n, -1, 16) * s[..., None]).reshape(n, 2 * half) * scale2.float()
-
-
 def load_visual(model_dir):
     idx = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
     files = sorted({f for k, f in idx.items() if k.startswith("model.visual.")})
@@ -118,13 +102,10 @@ def load_visual(model_dir):
             if not k.startswith("model.visual."):
                 continue
             a, b = v["data_offsets"]
-            t = torch.frombuffer(bytearray(raw[8 + n + a:8 + n + b]), dtype=DTYPES[v["dtype"]]).reshape(v["shape"])
-            out[k[len("model.visual."):]] = t
-    for k in [k for k in out if k.endswith(".weight_scale")]:  # FP4-Local's MXFP8 and W4A16_NVFP4 projections
-        m = k[: -len(".weight_scale")]
-        out[m + ".weight"] = dequant(out[m + ".weight"], out.pop(k), out.pop(m + ".weight_scale_2", None))
-        out.pop(m + ".input_scale", None)
-    return {k: v.float() for k, v in out.items()}
+            assert v["dtype"] == "BF16", (k, v["dtype"])
+            t = torch.frombuffer(bytearray(raw[8 + n + a:8 + n + b]), dtype=torch.bfloat16).reshape(v["shape"])
+            out[k[len("model.visual."):]] = t.float()
+    return out
 
 
 def rms(x, w, eps=1e-5):

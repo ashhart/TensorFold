@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const formats = @import("cuda_formats.zig");
+const projection = @import("cuda_proj.zig");
 
 const H: i64 = 1024; // hidden
 const HEADS: i64 = 16;
@@ -53,6 +54,9 @@ fn plan(ck: *core.Checkpoint, q: Quant) !Plan {
     const got = formats.of(declared, stored) catch |e| return refuse(q.module, declared, stored, e);
     const n = w.shape[0];
     const k_in = if (got == .nvfp4) 2 * w.shape[1] else w.shape[1];
+    if (n > std.math.maxInt(c_int) - 127 or k_in > std.math.maxInt(c_int)) return error.BadVisionShape;
+    const padded = (n + 127) / 128 * 128;
+    _ = std.math.mul(usize, padded, k_in) catch return error.BadVisionShape;
     if (k_in % 64 != 0) return refuse(q.module, declared, stored, error.BadVisionShape); // the packers' 64-input tiles
     switch (got) {
         .mxfp8 => {
@@ -69,6 +73,14 @@ fn plan(ck: *core.Checkpoint, q: Quant) !Plan {
         },
         else => return refuse(q.module, declared, stored, error.FormatMismatch),
     }
+}
+
+/// The tower holds no lane slice partials: each stored projection must run before any of its bytes upload.
+fn fits(ql: cuda.qlinear.Linear, p: Plan) !void {
+    if (p.format == .mxfp8) {
+        const lane = ql.lane orelse return error.FormatNotLoaded;
+        try projection.fits(lane, cuda.mxfp8.weight(0, 0, p.n, p.k));
+    } else if (ql.nvfp4_prompt == null) return error.FormatNotLoaded;
 }
 
 /// The refusal, by the module's name: what it declares, what it stores and why the tower cannot read it.
@@ -147,6 +159,7 @@ pub const Tower = struct {
             if (quantOf(&recipes, name)) |q| {
                 if (!std.mem.endsWith(u8, name, ".weight")) continue; // its scales are packed with its weight
                 const p = try plan(&ck, q);
+                try fits(ql, p);
                 try plans.append(gpa, p);
                 total += std.mem.alignForward(u64, p.codes, 256) + std.mem.alignForward(u64, p.scales, 256);
             } else total += std.mem.alignForward(u64, (try ck.get(name)).bytes.len, 256);
@@ -276,7 +289,7 @@ pub const Tower = struct {
         switch (w) {
             .bf16 => |p| return t.linear(ru, x, p, d, m, n, kk, f32_out),
             .q => |q| {
-                if (q.outputs() != n) return error.BadVisionShape;
+                if (q.outputs() != n or q.inputs() != kk) return error.BadVisionShape;
                 const in: cuda.qlinear.Rows = .{ .x = x, .ldx = @intCast(kk) };
                 const rows: usize = @intCast(m);
                 return if (f32_out) t.ql.promptF32(ru.stream, q, in, d, rows) else t.ql.prompt(ru.stream, q, in, d, rows);
@@ -549,4 +562,36 @@ test "a projection its recipe quantizes is packed with its scales; biases, norms
     try std.testing.expect(quantOf(&r, "model.visual.patch_embed.proj.weight") == null);
     const none: ?core.modelopt.Recipes = null;
     try std.testing.expect(quantOf(&none, "model.visual.blocks.0.attn.qkv.weight") == null);
+}
+
+test "vision quantized projections reject either mismatched axis before a launch" {
+    const Fake = struct {
+        fn launch(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+            return cuda.abi.success;
+        }
+    };
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Fake.launch;
+    const f: cuda.Function = .{ .d = &d, .handle = null };
+    var lane: cuda.qmmf.Lane = undefined;
+    lane.clusters = true;
+    for (&lane.f32_fns) |*set| for (set) |*function| {
+        function.* = f;
+    };
+    var tower: Tower = undefined;
+    tower.ql = .{ .lane = &lane };
+    const run: Run = .{ .stream = .{ .d = &d, .handle = null }, .f = undefined };
+    const w: Lin = .{ .q = .{ .mxfp8 = cuda.mxfp8.weight(0, 0, 64, 128) } };
+    try std.testing.expectError(error.BadVisionShape, tower.project(&run, 0, w, 0, 1, 64, 64, true));
+    try std.testing.expectError(error.BadVisionShape, tower.project(&run, 0, w, 0, 1, 128, 128, true));
+}
+
+test "vision MXFP8 refuses a lane requiring unowned slice partials before upload" {
+    var lane: cuda.qmmf.Lane = undefined;
+    lane.clusters = false;
+    const p: Plan = .{ .module = "model.visual.blocks.0.attn.qkv", .format = .mxfp8, .n = 3072, .k = 1024, .codes = 0, .scales = 0 };
+    try std.testing.expectError(error.SlicePartialsNotHeld, fits(.{ .lane = &lane }, p));
+    lane.clusters = true;
+    try fits(.{ .lane = &lane }, p);
+    try std.testing.expectError(error.FormatNotLoaded, fits(.{}, p));
 }

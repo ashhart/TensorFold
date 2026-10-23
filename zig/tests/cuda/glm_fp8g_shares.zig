@@ -54,7 +54,10 @@ fn share(r: *Rig, lane: *const cuda.qmmf.Lane, label: []const u8, parts: []const
         col += 1;
     };
     var out = try cuda.DeviceBuffer.alloc(r.gpu.d, m * z.n * 4);
-    defer out.free();
+    defer {
+        cuda.completion.drain(r.gpu.d, r.s, "GLM FP8 share output released before completion");
+        out.free();
+    }
     try out.fill8(0xff, r.s.handle);
     if (lane.partBytes(m, w) != 0) return error.SlicePartialsNotHeld;
     try lane.matmulOut(r.s, dx, z.k, m, w, out.ptr, .f32, 0);
@@ -69,6 +72,7 @@ pub fn run(gpu: check.Gpu) !void {
     var prng = std.Random.DefaultPrng.init(0xf8_5ba7e);
     var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = s, .rng = prng.random() };
     defer {
+        cuda.completion.drain(gpu.d, s, "GLM FP8 share inputs released before completion");
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);
     }

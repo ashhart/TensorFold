@@ -248,3 +248,5 @@ extern "C" __global__ void tf_ctl_q35_dense_half(const __nv_bfloat16 *X, const _
                                  __float2half_rn(__bfloat162float(W[col * K + i]))));
     Y[row * N + col] = __float2bfloat16_rn(__half2float(sum));
 }
+// The pre-template GLM BF16 operators, kept apart from the candidate math for byte equality.
+#include "contract_glm_bf16_baseline.cuh"

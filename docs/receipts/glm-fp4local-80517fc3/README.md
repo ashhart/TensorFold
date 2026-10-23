@@ -15,6 +15,13 @@ Checkpoints: `nvidia/GLM-5.3-Flash-FP4-Local` at `76348ddb2be2e35e39ecfc00e75dc0
 `nvidia/GLM-5.3-Flash-NVFP4` at `423acf37583782c51c142d145aef733d72943d93`.
 Grammar: `lib/libtfgrammar.so` from the v1.1.1 release archive (a source build makes no `lib/`); lib/ has its sha256.
 
+## Prepared carry
+
+This full packet is historical contributor evidence. Its results are not rerun qualification of the current main or
+this prepared carry. All original files and helper sources are retained; no helper is installed or used by inference.
+The independent Python references require their own environment. Current CUDA device gates remain unchecked.
+The redaction report accounts for maintainer substitutions; SHA256SUMS covers every packet file except itself.
+
 ## Scope
 
 This qualifies FP4-Local loaded as stored and served at TP=2 and TP=3: the loader gate on every layer, the lane

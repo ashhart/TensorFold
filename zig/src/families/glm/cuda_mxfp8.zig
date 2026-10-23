@@ -34,12 +34,15 @@ pub fn sizes(parts: []const Share) error{BadMxfp8Share}!struct { n: usize, k: us
     for (parts, 1..) |s, j| {
         const inside = s.lo < s.hi and s.hi <= s.p.n and s.klo < s.khi and s.khi <= s.p.k;
         // a cut splits no scale byte's 32 inputs, 64-input stage or 64-row tile; the last part may end inside its tile
+        if (!inside) return error.BadMxfp8Share;
         const tiled = (s.hi - s.lo) % 64 == 0 or j == parts.len;
-        if (!inside or s.khi - s.klo != k or s.klo % mx.group != 0 or k % 64 != 0 or !tiled) return error.BadMxfp8Share;
-        n += s.hi - s.lo;
+        if (s.khi - s.klo != k or s.klo % mx.group != 0 or k % 64 != 0 or !tiled) return error.BadMxfp8Share;
+        n = std.math.add(usize, n, s.hi - s.lo) catch return error.BadMxfp8Share;
     }
-    const npad = mx.padded(n);
-    return .{ .n = n, .k = k, .codes = npad * k, .scales = npad * (k / mx.group) };
+    const npad = (std.math.add(usize, n, 127) catch return error.BadMxfp8Share) / 128 * 128;
+    if (n > std.math.maxInt(c_int) or k > std.math.maxInt(c_int) or npad > std.math.maxInt(c_int)) return error.BadMxfp8Share;
+    const codes = std.math.mul(usize, npad, k) catch return error.BadMxfp8Share;
+    return .{ .n = n, .k = k, .codes = codes, .scales = codes / mx.group };
 }
 
 /// `parts` packed one after another in 64-row tiles as the lane's one weight (cuda.mxfp8's order); padding 0 and 127.
@@ -75,9 +78,17 @@ pub fn pack(gpa: std.mem.Allocator, parts: []const Share, codes: []u8, scales: [
     }
 }
 
+/// The checked extent of rows widened to bf16, before allocation or indexing.
+fn wideCount(p: Mxfp8, lo: usize, hi: usize) error{BadMxfp8Share}!usize {
+    if (lo > hi or hi > p.n or p.k == 0 or p.k % mx.group != 0) return error.BadMxfp8Share;
+    const count = std.math.mul(usize, hi - lo, p.k) catch return error.BadMxfp8Share;
+    _ = std.math.mul(usize, count, @sizeOf(u16)) catch return error.BadMxfp8Share;
+    return count;
+}
+
 /// Rows [lo, hi) of `p` as bf16, each value e4m3 times its power of two; error.NotExact when one is not a bf16.
 pub fn bf16Rows(p: Mxfp8, lo: usize, hi: usize, out: []u16) error{ NotExact, BadMxfp8Share }!void {
-    if (lo > hi or hi > p.n or out.len != (hi - lo) * p.k) return error.BadMxfp8Share;
+    if (out.len != try wideCount(p, lo, hi)) return error.BadMxfp8Share;
     const sg = p.k / mx.group;
     for (lo..hi) |r| for (0..p.k) |c| {
         const e = p.scales[r * sg + c / mx.group];
@@ -91,7 +102,7 @@ pub fn bf16Rows(p: Mxfp8, lo: usize, hi: usize, out: []u16) error{ NotExact, Bad
 
 /// Rows [lo, hi) of `p` widened to bf16 onto the loader's host bytes (an MTP kv_b); inexact: refused by `module`.
 pub fn appendWide(L: anytype, p: Mxfp8, module: []const u8, lo: usize, hi: usize) !void {
-    const out = try L.gpa.alloc(u16, (hi -| lo) * p.k);
+    const out = try L.gpa.alloc(u16, try wideCount(p, lo, hi));
     defer L.gpa.free(out);
     bf16Rows(p, lo, hi, out) catch |e| {
         std.log.err("{s}: its MXFP8 rows hold a value no bf16 does ({t}); the absorbed attention reads bf16", .{ module, e });
@@ -103,7 +114,7 @@ pub fn appendWide(L: anytype, p: Mxfp8, module: []const u8, lo: usize, hi: usize
 /// Rows [lo, hi) of MXFP8 `module` widened to bf16 on the device, for a draft head's quantizer; inexact: refused.
 pub fn wideRows(d: *const cuda.Driver, gpa: std.mem.Allocator, ck: *core.Checkpoint, module: []const u8, lo: usize, hi: usize) !cuda.DeviceBuffer {
     const p = try Mxfp8.read(ck, module);
-    const out = try gpa.alloc(u16, (hi -| lo) * p.k);
+    const out = try gpa.alloc(u16, try wideCount(p, lo, hi));
     defer gpa.free(out);
     bf16Rows(p, lo, hi, out) catch |e| {
         std.log.err("{s}: its MXFP8 rows hold a value no bf16 does ({t}); the draft head quantizes bf16 rows", .{ module, e });
@@ -292,4 +303,23 @@ test "MXFP8 rows widen to bf16 exactly, and a value bf16 cannot hold is refused"
     try testing.expectError(error.NotExact, bf16Rows(p, 0, 1, &out));
     sc[0] = 0xff;
     try testing.expectError(error.NotExact, bf16Rows(p, 0, 1, &out));
+}
+
+test "MXFP8 shares reject reversed bounds and overflowing stacked or padded geometry before packing" {
+    const max = std.math.maxInt(usize);
+    const p: Mxfp8 = .{ .n = max, .k = 64, .codes = &.{}, .scales = &.{} };
+    try testing.expectError(error.BadMxfp8Share, sizes(&.{.{ .p = &p, .lo = 128, .hi = 64, .klo = 0, .khi = 64 }}));
+    try testing.expectError(error.BadMxfp8Share, sizes(&.{.{ .p = &p, .lo = 0, .hi = max, .klo = 0, .khi = 64 }}));
+    const many = max / 2 / 64 * 64;
+    const part: Share = .{ .p = &p, .lo = 0, .hi = many, .klo = 0, .khi = 64 };
+    try testing.expectError(error.BadMxfp8Share, sizes(&.{ part, part, part }));
+    try testing.expectError(error.BadMxfp8Share, sizes(&.{.{ .p = &p, .lo = 0, .hi = max / 128 * 128, .klo = 0, .khi = 64 }}));
+}
+
+test "MXFP8 widening validates row bounds and byte extents before allocation" {
+    const p: Mxfp8 = .{ .n = std.math.maxInt(usize), .k = 64, .codes = &.{}, .scales = &.{} };
+    try testing.expectError(error.BadMxfp8Share, wideCount(p, 2, 1));
+    try testing.expectError(error.BadMxfp8Share, wideCount(p, 0, std.math.maxInt(usize) / 64));
+    var none: [0]u16 = .{};
+    try testing.expectError(error.BadMxfp8Share, bf16Rows(p, 2, 1, &none));
 }

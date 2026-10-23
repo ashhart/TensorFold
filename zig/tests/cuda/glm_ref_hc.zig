@@ -1,5 +1,6 @@
 //! GLM's hyper-connection dots (hcPre: 24 dots + squares a 1,024 block) vs float64; hc_partial8, _f32w: same bytes.
 const std = @import("std");
+const cuda = @import("cuda");
 const check = @import("check.zig");
 const qr = @import("quant_ref_tests.zig");
 const ref = @import("glm_ref_tests.zig");
@@ -31,6 +32,7 @@ fn mixWeights(r: *Rig) ![3]u64 {
 
 /// A float32 norm weight (FP4-Local's) holding bf16 values: the _f32w kernels give the bf16 weight's bytes.
 pub fn gammas(r: *Rig, set: glue.Set) !void {
+    errdefer cuda.completion.drain(r.gpu.d, r.s, "GLM norm parity fixture left work pending");
     const rows = 70;
     const w = try mixWeights(r);
     const streams = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * wide, 1.0)));

@@ -17,16 +17,13 @@ const mm_mod = @import("cuda_mm.zig");
 pub const formats = @import("cuda_formats.zig");
 const projection = @import("cuda_proj.zig");
 const glue = @import("cuda_glue.zig");
-
 const Tensor = core.checkpoint.Tensor;
 const prefix = "model.language_model.";
-
 /// A hyper-connection site: fn bf16 [s (s + 2)][s d], base and scale widened to fp32.
 pub const Hc = struct { fn_w: u64, base: u64, scale: u64 };
 
 pub const Mixer = union(cfg.Kind) { kda: kda_block.Layer, mla: dsa_block.Layer };
 pub const Ffn = union(enum) { dense: mlp.Layer, moe: moe.Layer };
-
 pub const Layer = struct { index: u32, attn_hc: Hc, ffn_hc: Hc, in_norm: glue.Norm, post_norm: glue.Norm, mixer: Mixer, ffn: Ffn };
 
 /// The MTP head (weights.MTPW): norms, eh_proj, a DSA + MoE layer (NVFP4 experts), shared_head.norm, 4-bit draft head.
@@ -37,7 +34,6 @@ pub const Tools = struct { pack_dense: cuda.Function, lane: *const cuda.qmmf.Lan
 
 /// A loaded tensor by the Python family's attribute path, for digests against its weights.
 pub const Named = struct { name: []u8, ptr: u64, len: usize };
-
 pub const Weights = struct {
     gpa: std.mem.Allocator,
     config: cfg.Config,
@@ -66,7 +62,6 @@ pub const Weights = struct {
         return null;
     }
 };
-
 /// Host bf16 from fp32: round to nearest even (torch's float -> bfloat16), NaN kept quiet.
 fn toBf16(v: f32) u16 {
     const b: u32 = @bitCast(v);
@@ -149,11 +144,9 @@ const Loader = struct {
 
     /// The host bytes gathered so far uploaded as one tensor named `fmt`.
     pub fn put(L: *Loader, comptime fmt: []const u8, args: anytype) !u64 {
-        const b = try cuda.DeviceBuffer.fromHost(L.d, L.host.items);
-        try L.w.buffers.append(L.gpa, b);
-        try L.w.named.append(L.gpa, .{ .name = try std.fmt.allocPrint(L.gpa, fmt, args), .ptr = b.ptr, .len = b.len });
+        const ptr = try @import("cuda_upload_owner.zig").keep(L, try cuda.DeviceBuffer.fromHost(L.d, L.host.items), fmt, args);
         L.host.clearRetainingCapacity();
-        return b.ptr;
+        return ptr;
     }
 
     /// Elements [lo, hi) of `t` flat as `to` (bf16 or fp32 from a bf16 or fp32 tensor; other dtypes only as stored).
@@ -542,6 +535,10 @@ const Loader = struct {
     }
 };
 
+fn recipeTable(r: *const core.modelopt.Recipes) ?*const core.modelopt.Recipes {
+    return if (r.mixed) r else null;
+}
+
 /// weights.load without the MTP head: embedding, layers, final norm, the rank's head rows (bf16, MXFP8); `pack_dense`.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, tools: Tools, dir: []const u8, c: cfg.Config, share: shard.Share, layers: []const u32, with_mtp: bool) !Weights {
     var w: Weights = .{ .gpa = gpa, .config = c, .share = share };
@@ -554,7 +551,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     defer L.host.deinit(gpa);
     var recipes = try formats.readRecipes(gpa, io, dir);
     defer if (recipes) |*r| r.deinit();
-    if (recipes) |*r| L.recipes = if (r.modules.count() > 0) r else null;
+    if (recipes) |*r| L.recipes = recipeTable(r);
     w.layers = try gpa.alloc(Layer, layers.len);
     for (layers, w.layers) |i, *l| {
         if (i >= c.layers) return error.BadLayer;
@@ -588,4 +585,15 @@ test {
     _ = @import("cuda_proj.zig");
     _ = @import("cuda_fp8pb.zig");
     _ = @import("cuda_mxfp8.zig");
+}
+
+test "an empty mixed recipe table cannot make an undeclared NVFP4 projection look declared" {
+    var recipes: core.modelopt.Recipes = .{ .arena = .init(std.testing.allocator), .mixed = true };
+    defer recipes.deinit();
+    var l: Loader = undefined;
+    l.recipes = recipeTable(&recipes);
+    const stored: formats.Stored = .{ .weight = .{ .dtype = .u8, .shape = &.{ 64, 32 } }, .scale = .{ .dtype = .f8_e4m3, .shape = &.{ 64, 4 } } };
+    try std.testing.expectError(error.FormatMismatch, formats.of(l.declaredAs("m"), stored));
+    l.recipes = null;
+    try std.testing.expectEqual(formats.Format.nvfp4, try formats.of(l.declaredAs("m"), stored));
 }
