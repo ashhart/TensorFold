@@ -296,6 +296,7 @@ pub const Engine = struct {
 
     /// A fresh cache. `cap` is how many tokens it can hold, prompt plus generated.
     pub fn newSeq(e: *Engine, cap: usize) !Seq {
+        if (cap == 0 or cap > max_tokens) return error.UnexpectedTensor;
         const test_pages = try pages.pageTest();
         return e.newSeqOn(cap, if (test_pages > 0) try pages.testPages(e.gpa, e.driver, e.stream.*, cap, test_pages) else null);
     }
@@ -306,7 +307,7 @@ pub const Engine = struct {
         errdefer if (paged) |*p| p.deinit(e.gpa);
         e.round_graph.clear();
         if (cap == 0 or cap > max_tokens) return error.UnexpectedTensor;
-        _ = try seqBytesPaged(cap, if (paged) |p| p.page_tokens else 0);
+        _ = try seqBytesPaged(cap, if (paged) |p| p.tokens else 0);
         var seq: Seq = .{
             .stream = e.stream.*,
             .paged = paged,
@@ -322,12 +323,12 @@ pub const Engine = struct {
             .logits = &.{},
             .cap = cap,
         };
+        paged = null; // seq owns the pages from here
         // One rollback owns every published array, and drains before releasing any destination.
         errdefer seq.deinit(e.gpa);
         seq.logits = try e.gpa.alloc(u8, vocab * 2);
         seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
         seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, state_n * 4);
-        paged = null; // seq owns the pages from here
         seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         seq.ikc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .index) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * index_dim * 2);

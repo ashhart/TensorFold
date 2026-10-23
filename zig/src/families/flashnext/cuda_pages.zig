@@ -91,7 +91,6 @@ pub const Paged = struct {
     own_ids: bool = true,
     /// The page test's own arena.
     arena: ?cuda.DeviceBuffer = null,
-    stream: ?cuda.Stream = null,
     /// Attention layers a page holds: the model's, and the MTP head's after them in a pool's pages.
     layers: usize = wt.attn_n,
     stream: ?cuda.Stream = null,

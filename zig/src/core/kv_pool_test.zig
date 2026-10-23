@@ -310,3 +310,34 @@ test "the plan with a run: each stream pays its run's pages beside its first pag
     try expectEqual(@as(u32, 3), (try kv.plan(l, .{ .room = small, .engine = 2 * g, .lanes = 8 })).lanes);
     try expectEqual(nemotron.need(2048, 4096, 16) + 10, l.need(2048, 4096, 16));
 }
+
+test "combined page plan: the engine window comes before extra streams and their recurrent runs" {
+    const l: kv.Layout = .{ .fixed_bytes = 10, .token_bytes = 3, .page_tokens = 4, .snap_bytes = 0, .run_bytes = 13 };
+    const b: kv.Budget = .{ .room = 152, .engine = 5, .lanes = 3, .fixed = true, .cache = 19, .window = 9, .engine_paged = true };
+    const p = try kv.plan(l, b);
+    try expectEqual(@as(u32, 3), p.lanes);
+    try expectEqual(@as(usize, 9), p.pages);
+    try expectEqual(@as(u64, 19), p.copied);
+    try expect(kv.holds(l, b));
+    var tight = b;
+    tight.room -= 1;
+    try expectEqual(@as(u64, 18), (try kv.plan(l, tight)).copied);
+    try expect(!kv.holds(l, tight));
+    tight.room = 132;
+    try std.testing.expectError(error.TooMany, kv.plan(l, tight));
+    tight.room = 40;
+    try std.testing.expectError(error.NoStream, kv.plan(l, tight));
+    try expect(!kv.holds(l, tight));
+}
+
+test "combined page cap: all three windows and only the two extra streams' recurrent runs" {
+    const l: kv.Layout = .{ .fixed_bytes = 10, .token_bytes = 3, .page_tokens = 4, .snap_bytes = 0, .run_bytes = 13 };
+    var b: kv.Budget = .{ .room = 1000, .engine = 5, .lanes = 3, .window = 9, .engine_paged = true };
+    // Three windows of three pages and two recurrent runs of two pages; the engine's states are already loaded.
+    try expectEqual(@as(usize, 13), (try kv.plan(l, b)).pages);
+    b.lanes = 1;
+    try expectEqual(@as(usize, 3), (try kv.plan(l, b)).pages);
+    b.lanes = 3;
+    b.engine_paged = false;
+    try expectEqual(@as(usize, 10), (try kv.plan(l, b)).pages);
+}
