@@ -21,6 +21,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .{ "gemm128", "zig/kernels/xpu/qwen27/gemm.cl", " -DGSZ=128" },
         .{ "gdn", "zig/kernels/xpu/qwen27/gdn_chunk.cl", "" },
         .{ "drafter", "zig/kernels/xpu/qwen27/drafter.cl", "" },
+        .{ "gemm_g4", "zig/kernels/xpu/gemma4/gemm_g4.cl", " -DGSZ=64" },
         .{ "glue_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", "" },
         .{ "glue_g4g", "zig/kernels/xpu/gemma4/glue_g4.cl", " -DHD=512" },
     }) |k| {
@@ -28,7 +29,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         c.addFileArg(b.path(k[1]));
         c.addArgs(&.{ "-device", device, "-options", b.fmt("{s}{s} -I zig/kernels/xpu/qwen27", .{ opts, k[2] }), "-output_no_suffix", "-output", k[0], "-out_dir" });
         c.setCwd(b.path("."));
-        for ([_][]const u8{ "glue.cl", "glue_attn.cl", "glue_quant.cl" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
+        for ([_][]const u8{ "glue.cl", "glue_attn.cl", "glue_quant.cl", "gemm.cl" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
         const dir = c.addOutputDirectoryArg(b.fmt("ocloc-{s}", .{k[0]}));
         _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{k[0]})), b.fmt("{s}.bin", .{k[0]}));
     }
@@ -78,6 +79,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         \\pub const glue align(8) = @embedFile("glue_g4s.bin").*; // head 256: the sliding layers
         \\pub const glue_g align(8) = @embedFile("glue_g4g.bin").*; // head 512: the global layers
         \\pub const gemm align(8) = @embedFile("gemm.bin").*;
+        \\pub const gemm_g4 align(8) = @embedFile("gemm_g4.bin").*;
         \\pub const ngen_wide align(8) = @embedFile("ngen_wide.zebin").*;
         \\pub const ngen_narrow align(8) = @embedFile("ngen_narrow.zebin").*;
         \\

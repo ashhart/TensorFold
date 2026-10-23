@@ -2,6 +2,7 @@
 const std = @import("std");
 const fwd = @import("xpu_forward.zig");
 const cfg = @import("xpu_config.zig");
+const dev = @import("xpu_dev.zig");
 
 pub const Runner = fwd.Runner;
 pub const config = cfg;
@@ -22,8 +23,16 @@ fn rowsKept(layer: usize, at: u32) u64 {
     return if (cfg.isGlobal(layer)) at else @min(at, cfg.ring);
 }
 
+/// The lane core drafts by copying the context (no head): windows of up to 16 rows are verified, bit for bit the steps.
+const OneSeq = struct {};
+
 pub const Engine = struct {
     pub const Snapshot = Snap;
+    pub const Sequence = OneSeq;
+    /// The lane core drafts by copying the context (no head): windows of up to 16 rows, bit for bit the steps.
+    pub const copy_only = true;
+    own: OneSeq = .{},
+    head: ?u8 = null,
     r: *fwd.Runner,
     /// The lane backend reads the position here (the runner's, kept in step).
     m: struct { pos: u32 = 0 } = .{},
@@ -164,5 +173,66 @@ pub const Engine = struct {
         for (row) |x| sum += @exp(@as(f64, x) - peak);
         for (labels, logits) |t, *o| o.* = row[t];
         return peak + @log(sum);
+    }
+
+    // -- windows for the lane core's copy drafts --------------------------------------------------------------------
+
+    pub fn newSeq(_: *Engine) !*OneSeq {
+        return error.OneStream;
+    }
+
+    pub fn freeSeq(_: *Engine, _: *OneSeq) void {}
+
+    pub fn bind(_: *Engine, _: *OneSeq) void {}
+
+    /// One token in, committed; the next one's logits kept.
+    pub fn stepRow(e: *Engine, token: u32) !void {
+        try e.feed(token, true);
+    }
+
+    /// A window at the position, not committed: every row's greedy token and logits are kept.
+    pub fn verifyRows(e: *Engine, ids: []const u32) !void {
+        try e.r.verify(ids);
+    }
+
+    pub fn rowTokens(e: *Engine, out: []i32) !void {
+        try e.r.rowTokens(out);
+    }
+
+    /// The `k` largest logits of the last window's row `row` (card, softcapped, descending, ties to the lower id).
+    pub fn rowCandidates(e: *Engine, row: u32, k: u32, vals: []f32, ids: []u32) !void {
+        try e.r.topK(row, k, vals, ids);
+    }
+
+    pub fn rowLogits(e: *Engine, out: []f32) !void {
+        try e.r.rowLogits(out);
+    }
+
+    /// Commit the first `c` rows of the last window.
+    pub fn keepRows(e: *Engine, c: u32) !void {
+        e.r.pos += c;
+        e.m.pos = e.r.pos;
+    }
+
+    pub fn draftKept(_: *Engine, _: []const u32, _: u32, _: u32, _: []u32) !usize {
+        return error.NoDraftHead;
+    }
+
+    pub fn draftFirst(_: *Engine, _: u32, _: u32, _: []u32) !usize {
+        return error.NoDraftHead;
+    }
+
+    /// Forward ms of windows of 1 to 16 rows (the core prices copy drafts with them); returns the head step (none: 0).
+    pub fn timeRounds(e: *Engine, ms: []f64) !f64 {
+        const start = e.r.pos;
+        defer e.r.pos = start;
+        var ids: [16]u32 = @splat(100);
+        for (ms, 1..) |*m, w| {
+            try e.r.verify(ids[0..w]);
+            const t0 = dev.now();
+            for (0..8) |_| try e.r.verify(ids[0..w]);
+            m.* = (dev.now() - t0) / 8.0 * 1e3;
+        }
+        return 0;
     }
 };

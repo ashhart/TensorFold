@@ -37,6 +37,7 @@ pub const Kernels = struct {
     gemv256: ze.H,
     dense: ze.H,
     dec_narrow16: ze.H,
+    exp: [6]ze.H, // prefetch experiments
     dec_wide16: ze.H,
     attn_rows: [2]ze.H,
     ngen_wide: ze.H,
@@ -89,6 +90,7 @@ pub const Runner = struct {
     tag: []const u8 = "",
     t_enqueue: f64 = 0, // seconds the host spent queueing forwards, XPU_TIMING
     t_forward: f64 = 0,
+    rows_last: u32 = 0,
     window: u32 = MAXT, // rows per forward of `feed` (tests cut a prompt differently)
 
     pub fn init(dir: []const u8, context: u32) !*Runner {
@@ -133,6 +135,13 @@ pub const Runner = struct {
             .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
             .gemv256 = try d.kernel(mg, "g4_gemv256", 64),
             .dense = try d.kernel(mg, "g4_dense", 256),
+            .exp = blk: {
+                const mx = try d.g.module(&kb.gemm_g4);
+                const names = [_][:0]const u8{ "g4_d16_pf3", "g4_d16_pf4", "g4_d16_pf6", "g4_d16_pf8", "g4_d32_pf4", "g4_d32_pf8" };
+                var out: [6]ze.H = undefined;
+                for (names, &out) |n, *o| o.* = try d.kernel(mx, n, 64);
+                break :blk out;
+            },
             .dec_narrow16 = try d.kernel(mm, "w4k_s16x16", 64),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
             .attn_rows = .{ try d.kernel(mg, "g4_attn_rows", 128), try d.kernel(mgg, "g4_attn_rows", 128) },
@@ -250,6 +259,30 @@ pub const Runner = struct {
         }
     }
 
+    /// A window of up to 16 rows at the position, not committed: every row's greedy token (`rowTokens`) and logits.
+    pub fn verify(r: *Runner, ids: []const u32) !void {
+        if (ids.len == 0 or ids.len > ROWS) return error.BadWindow;
+        if (r.pos + ids.len > r.context) return error.ContextFull;
+        var win: [ROWS]i32 = undefined;
+        for (ids, 0..) |t, j| win[j] = @intCast(t);
+        _ = try r.forward(win[0..ids.len], r.pos, .rows);
+        r.rows_last = @intCast(ids.len);
+    }
+
+    /// The greedy tokens of the last window's rows.
+    pub fn rowTokens(r: *Runner, out: []i32) !void {
+        try r.d.read(std.mem.sliceAsBytes(out), r.a.out);
+    }
+
+    /// The last window's logits after the softcap, fp32 [rows, vocab] on the host.
+    pub fn rowLogits(r: *Runner, out: []f32) !void {
+        const rows = out.len / cfg.vocab;
+        const raw = try alloc.alloc(f16, rows * cfg.vocab);
+        defer alloc.free(raw);
+        try r.d.read(std.mem.sliceAsBytes(raw), r.a.logits);
+        for (out, raw) |*o, v| o.* = cfg.softcap * std.math.tanh(@as(f32, v) / cfg.softcap);
+    }
+
     /// The last forward's row `row` of logits after the softcap, fp32 on the host.
     pub fn logits(r: *Runner, row: u32) ![]const f32 {
         const raw = try alloc.alloc(f16, cfg.vocab);
@@ -286,7 +319,12 @@ pub const Runner = struct {
             return;
         }
         if (w.wide) {
-            if (w.n <= 6144) // 64 columns a group: twice the groups of the 128-column kernel on these narrow-N shapes
+            if (w.n <= 6144 and std.c.getenv("XPU_EXP") != null) {
+                const v = std.c.getenv("XPU_EXP").?;
+                const i = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0;
+                const cols: u32 = if (i >= 4) 128 else 64;
+                try r.d.launch(k.exp[i], .{ .x = 1, .y = w.n / (cols) }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
+            } else if (w.n <= 6144) // 64 columns a group: twice the groups of the 128-column kernel on these narrow-N shapes
                 try r.d.launch(k.dec_wide16, .{ .x = 1, .y = w.n / 64 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
             else if (w.n >= 30000)
                 try r.d.launch(k.dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
