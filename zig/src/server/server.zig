@@ -32,6 +32,9 @@ pub const CompactAt = union(enum) { auto, fraction: f64 };
 
 pub const Identity = @import("identity.zig").Identity;
 
+/// The most a kept-alive connection's arena keeps between requests; a longer request's memory goes back.
+pub const connection_arena_limit: usize = 1 << 20;
+
 pub const Config = struct {
     browser: request_guard.Policy = .{},
     sse_keepalive_s: f64 = 15,
@@ -334,7 +337,7 @@ pub const Server = struct {
         defer arena.deinit();
         var first = true;
         while (true) {
-            _ = arena.reset(.retain_capacity);
+            _ = arena.reset(.{ .retain_with_limit = connection_arena_limit });
             const a = arena.allocator();
             const outcome = conn.readRequest(a, !first) catch break;
             first = false;
