@@ -278,8 +278,8 @@ pub fn Ops(comptime Tri: type) type {
                 try tri.embed(s.ids, e.table.w.ptr, e.table.s.ptr, e.table.b.ptr, s.ple_keys, dims, streams, total);
             }
             try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, total, dims, dims);
-            try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, total, fc_sk);
-            try p.sumSlices(s.part, s.branch, true, total * dims, fc_sk);
+            const esk = try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, total, fc_sk);
+            try p.sumSlices(s.part, s.branch, true, total * dims, esk);
             // each lane's rows of main-model streams, side by side (the head reads them as one block of rows)
             at = 0;
             for (rows, nexts) |r, nx| {
@@ -287,13 +287,13 @@ pub fn Ops(comptime Tri: type) type {
                 at += nx.len;
             }
             try tri.rmsnorm(s.ple_nrow, h.norm_h.ptr, s.norm, s.gq, eps, wide, total, wide, wide);
-            try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * total, fc_sk);
-            try p.sumSlices(s.part, s.ple_gated, true, streams * total * dims, fc_sk);
+            const hsk = try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * total, fc_sk);
+            try p.sumSlices(s.part, s.ple_gated, true, streams * total * dims, hsk);
             try tri.addStreams(s.branch, s.ple_gated, s.h, total, dims, streams);
             try p.writeback(0, total);
             try p.readout(h.layer.attn_hc, 0, total);
             try p.attnBlock(&h.layer, 0);
-            try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", total * dims, total, dims, streams, 4, 1, 1, out_sk);
+            try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", total * dims, total, dims, streams, 4, 1, 1, p.out_slices);
             try p.readout(h.layer.mlp_hc, 0, total);
             try p.moeBlock(&h.layer);
             p.pending = 0;
@@ -313,7 +313,7 @@ pub fn Ops(comptime Tri: type) type {
             if (!scores) return;
             try p.readout(h.mixer, 0, n_l);
             const n_ids = h.ids.len;
-            try p.lane(s.mixed, s.xsm, h.draft, s.head_local, s.dummy, n_l, 1);
+            _ = try p.lane(s.mixed, s.xsm, h.draft, s.head_local, s.dummy, n_l, 1);
             for (ds, 0..) |d, i| try p.copy(d.dlogits.ptr, s.head_local + i * n_ids * 2, n_ids * 2);
         }
 
