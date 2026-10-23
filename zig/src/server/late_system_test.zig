@@ -488,3 +488,60 @@ test "GET and DELETE /v1/recall: 404 without a record, its state, emptied, and 4
     try std.testing.expectEqual(@as(u16, 409), refused.status);
     try std.testing.expect(std.mem.indexOf(u8, refused.body, "reads the record only") != null);
 }
+
+fn unofferedVisible(streaming: bool) !void {
+    const raw_call = "<tool_call>{\"name\":\"not_offered\",\"arguments\":{}}</tool_call>";
+    var text: DropLate = .{};
+    var backend: Capture = .{ .reply = raw_call };
+    defer std.testing.allocator.free(backend.prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = try std.mem.concat(a, u8, &.{ prose_chat, if (streaming) ",\"parallel_tool_calls\":false,\"stream\":true}" else ",\"parallel_tool_calls\":false,\"stream\":false}" });
+    const got = try exchange(srv, "/v1/chat/completions", body);
+    defer std.testing.allocator.free(got.body);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    if (!streaming) {
+        const choice = (try json.parse(a, got.body)).ok.get("choices").?.array[0];
+        const message = choice.get("message").?;
+        try std.testing.expectEqualStrings(raw_call, message.get("content").?.string);
+        try std.testing.expect(message.get("tool_calls") == null);
+        try std.testing.expectEqualStrings("stop", choice.get("finish_reason").?.string);
+        return;
+    }
+    var content: std.ArrayList(u8) = .empty;
+    var finished = false;
+    var lines = std.mem.splitScalar(u8, got.body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data: ")) continue;
+        const data = std.mem.trim(u8, line[6..], "\r");
+        if (std.mem.eql(u8, data, "[DONE]")) continue;
+        const payload = (try json.parse(a, data)).ok;
+        for (payload.get("choices").?.array) |choice| {
+            const delta = choice.get("delta").?;
+            if (delta.get("content")) |part| try content.appendSlice(a, part.string);
+            try std.testing.expect(delta.get("tool_calls") == null);
+            if (choice.get("finish_reason")) |reason| if (reason == .string) {
+                try std.testing.expectEqualStrings("stop", reason.string);
+                finished = true;
+            };
+        }
+    }
+    try std.testing.expectEqualStrings(raw_call, content.items);
+    try std.testing.expect(finished);
+}
+
+test "tool visibility HTTP: whole replies retain an unoffered call" {
+    try unofferedVisible(false);
+}
+
+test "tool visibility HTTP: streamed replies retain an unoffered call" {
+    try unofferedVisible(true);
+}

@@ -332,6 +332,7 @@ const Run = struct {
         const tools = r.plan.input.tools;
         if (tools.len == 0) return null;
         const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
+        if (parsed.rejected_envelopes > 0) log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});
         const calls = (if (r.turn != null) cortheon.clientCalls(parsed.calls) else parsed.calls) orelse {
             if (r.plan.policy.single or parsed.calls != null) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
             return null;

@@ -25,3 +25,13 @@ pub fn addTo(
     if (m.import_table.get("living") == null) m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     return j;
 }
+
+/// Tool parsing and actual chat visibility checks share the aggregate's real modules.
+pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = parser }));
+    all.dependOn(&run.step);
+    b.step("test-tool-parse-host", "Tool parser visibility, schemas and single-call limits without devices").dependOn(&run.step);
+    const http = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool visibility HTTP:"} }));
+    http.has_side_effects = true;
+    b.step("test-tool-visibility-http-host", "Rejected tool envelopes survive actual chat JSON and SSE replies").dependOn(&http.step);
+}

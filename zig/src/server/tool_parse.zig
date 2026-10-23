@@ -19,7 +19,7 @@ const Error = error{ Invalid, OutOfMemory };
 const Call = struct { name: []const u8, arguments: Value };
 const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
 
-pub const Parsed = struct { content: []const u8, calls: ?[]Value };
+pub const Parsed = struct { content: []const u8, calls: ?[]Value, rejected_envelopes: usize = 0 };
 
 const dsml_open = "<\u{ff5c}DSML\u{ff5c}tool_calls>";
 const dsml_close = "</\u{ff5c}DSML\u{ff5c}tool_calls>";
@@ -118,6 +118,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
     var calls: std.ArrayList(Value) = .empty;
     var residue: std.ArrayList(u8) = .empty;
     var cursor: usize = 0;
+    var rejected: usize = 0;
     for (envs) |env| {
         try residue.appendSlice(a, text[cursor..env.start]);
         cursor = env.end;
@@ -149,8 +150,8 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             if ((try callName(a, c, &known)) == null) break false;
         } else true else false;
         if (!good) {
-            // a malformed or unoffered call stays text when calls are unlimited, and drops out of a one-call reply
-            if (max_calls == null) try residue.appendSlice(a, text[env.start..env.end]);
+            try residue.appendSlice(a, text[env.start..env.end]);
+            rejected += 1;
             continue;
         }
         for (parsed.?) |c| {
@@ -158,7 +159,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
         }
     }
     try residue.appendSlice(a, text[cursor..]);
-    return .{ .content = strip(residue.items), .calls = if (calls.items.len > 0) calls.items else null };
+    return .{ .content = strip(residue.items), .calls = if (calls.items.len > 0) calls.items else null, .rejected_envelopes = rejected };
 }
 
 /// What closes the call ``text`` ends inside (the model's end token came before its ``
