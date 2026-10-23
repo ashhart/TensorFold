@@ -398,11 +398,15 @@ pub fn run(gpu: check.Gpu) !void {
         .scores = try attn.function("fn_qsa_scores"),
         .hcf_down = try hcf_mod.function(ftk.cubin_hcf_down),
         .hcf_up = try hcf_mod.function(ftk.cubin_hcf_up),
+        .front = try batch.function("fn_gdn_front"),
+        .norm = try batch.function("fn_gdn_norm"),
+        .fused = try batch.function("fn_gdn_fused"),
     };
+    try glue_fns.fused.allowDynamicShared(fparts.gdn_fused_smem);
     try glue_fns.tpr.allowDynamicShared(fparts.chain_tpr_smem);
     try glue_fns.hcf_down.allowDynamicShared(ftk.hcf_down_smem);
     try glue_fns.hcf_up.allowDynamicShared(ftk.hcf_up_smem);
-    var glues: [3]glue_k.Glue = undefined;
+    var glues: [4]glue_k.Glue = undefined;
     for (std.enums.values(glue_k.Kind), &glues) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = &glue_fns, .glue = &fglue };
     defer for (&glues) |*m| m.deinit();
     for (&glues) |*m| try kernels.append(a, m.kernel());

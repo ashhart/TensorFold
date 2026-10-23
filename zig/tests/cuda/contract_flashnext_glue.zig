@@ -11,7 +11,7 @@ const g = contract.gates;
 const parts = flash.batch_state;
 const tk = flash.tile_kernels;
 
-pub const Kind = enum { chain, scores, readout };
+pub const Kind = enum { chain, scores, readout, fused };
 
 const nk = 16;
 const nv = 48;
@@ -29,6 +29,9 @@ const n_down = low + streams;
 const hc_sk = 32;
 const nc = dims / 256;
 const eps: f32 = 1e-6;
+const taps = 4;
+const conv_c = 2 * nk * dk + nv * dv; // a projection row's conv channels (q, k, v)
+const proj_w = conv_c + nv * dv + 2 * nv; // a projection row: conv channels, z, b, a
 
 fn noSums(_: c.Shape) usize {
     return 0;
@@ -39,11 +42,12 @@ pub fn spec(kind: Kind) c.Spec {
     return switch (kind) {
         .chain => .{ .name = "cuda flashnext DeltaNet prompt chain fn_gdn_chain_tpr", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "ys and the state bit-equal to fn_gdn_rows_to's, non-finite inputs included" }, .replaces = "fn_gdn_rows_to", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = nv * dv, .k = dk }, .{ .rows = 300, .n = nv * dv, .k = dk } } },
         .scores => .{ .name = "cuda flashnext indexer scores qsa_tile::scores<8, 4>", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "every score byte equal to fn_qsa_scores', non-finite inputs included" }, .replaces = "fn_qsa_scores", .tiles = .{ .{ .size = 8 }, .{ .size = 256, .step = 1, .min = 1 }, .{} }, .served = &.{ .{ .rows = 64, .n = 600, .k = di }, .{ .rows = 300, .n = 2100, .k = di } } },
+        .fused => .{ .name = "cuda flashnext DeltaNet prompt block fn_gdn_fused (front, chain, gated norm)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "gated-norm rows, xs, the state and the readouts bit-equal to fn_gdn_front -> fn_gdn_rows_to -> fn_gdn_norm, non-finite inputs included" }, .replaces = "fn_gdn_front, fn_gdn_chain_tpr and fn_gdn_norm", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = nv * dv, .k = dk }, .{ .rows = 300, .n = nv * dv, .k = dk } } },
         .readout => .{ .name = "cuda flashnext hyper-connection read-out on prompt tiles (hcf down, reduce, hcf up, rinv, mix_h)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "act, xs, inj, mixed and xsm bit-equal to #952's chain, non-finite inputs included" }, .replaces = "fn_hc_down, fn_hc_reduce_act and fn_hc_upmix", .tiles = .{ .{ .size = 64 }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = dims, .k = wide }, .{ .rows = 130, .n = dims, .k = wide } } },
     };
 }
 
-pub const Fns = struct { tpr: cuda.Function, rows_to: cuda.Function, tile: cuda.Function, scores: cuda.Function, hcf_down: cuda.Function, hcf_up: cuda.Function };
+pub const Fns = struct { tpr: cuda.Function, rows_to: cuda.Function, tile: cuda.Function, scores: cuda.Function, hcf_down: cuda.Function, hcf_up: cuda.Function, front: cuda.Function, norm: cuda.Function, fused: cuda.Function };
 
 pub const Glue = struct {
     rig: rig_.Rig,
@@ -160,6 +164,40 @@ pub const Glue = struct {
                 if (shape.n != dims or shape.k != wide) return false;
                 try self.readoutInputs(shape.rows, r, bad);
             },
+            .fused => {
+                if (shape.n != nv * dv or shape.k != dk) return false;
+                const m = shape.rows;
+                const proj = try self.bfs(m * proj_w, r, -1, 1);
+                defer a.free(proj);
+                const cs = try self.bfs((taps - 1) * conv_c, r, -1, 1);
+                defer a.free(cs);
+                const cw = try self.bfs(conv_c * taps, r, -0.5, 0.5);
+                defer a.free(cw);
+                const a_log = try self.f32s(nv, r, -1, 1);
+                defer a.free(a_log);
+                const dt = try self.f32s(nv, r, -1, 1);
+                defer a.free(dt);
+                const st = try self.f32s(nv * dv * dk, r, -0.5, 0.5);
+                defer a.free(st);
+                const nw = try self.bfs(dv, r, 0.5, 1.5);
+                defer a.free(nw);
+                if (bad) {
+                    proj[3] = c.toBf16(std.math.nan(f32));
+                    proj[(m / 2) * proj_w + conv_c + 7] = c.toBf16(std.math.inf(f32));
+                    st[dv * dk + 7] = -std.math.inf(f32);
+                }
+                try self.in(0, std.mem.sliceAsBytes(proj));
+                try self.in(1, std.mem.sliceAsBytes(cs));
+                try self.in(2, std.mem.sliceAsBytes(cw));
+                try self.in(3, std.mem.sliceAsBytes(a_log));
+                try self.in(4, std.mem.sliceAsBytes(dt));
+                try self.in(5, std.mem.sliceAsBytes(st));
+                try self.in(6, std.mem.sliceAsBytes(nw));
+                try self.out(m * nv * dv * 2); // gated-norm rows (bf16)
+                try self.out(m * (nv * dv / 32) * 4); // their 32-wide sums
+                try self.out(nv * dv * dk * 4); // the state after the pass
+                try self.out(m * nv * dv * 4); // the chain's readouts
+            },
         }
         self.base = 0;
         var total: usize = 0;
@@ -239,6 +277,15 @@ pub const Glue = struct {
                 for ([_]usize{ self.shape.n, ratio, top, m }) |v| a.add(@as(c_int, @intCast(v)));
                 try cuda.launch.launch(self.f.tile, .{ .grid = .{ .x = @intCast((m + 7) / 8), .y = @intCast((self.shape.n + 255) / 256) }, .block = .{ .x = 256 } }, s, &a);
             },
+            .fused => {
+                var a: cuda.Args = .{};
+                for ([_]u64{ self.ins[0], self.ins[1], self.ins[2], self.ins[3], self.ins[4], self.ins[5], o[2] }) |v| a.add(v);
+                a.add(@as(c_int, @intCast(m)));
+                a.add(self.ins[6]);
+                a.add(eps);
+                for ([_]u64{ o[0], o[1], o[3] }) |v| a.add(v);
+                try cuda.launch.launch(self.f.fused, .{ .grid = .{ .x = nv }, .block = .{ .x = parts.gdn_fused_threads }, .shared = parts.gdn_fused_smem }, s, &a);
+            },
             .readout => {
                 const part = try self.rig.scratch(m * n_down * 4);
                 const rinv = try self.rig.scratch(m * streams * 4);
@@ -283,6 +330,26 @@ pub const Glue = struct {
                 for ([_]u64{ self.ins[0], self.ins[1], self.ins[2], o[0] }) |v| a.add(v);
                 for ([_]usize{ self.shape.n, heads, ratio, top }) |v| a.add(@as(c_int, @intCast(v)));
                 try cuda.launch.launch(self.f.scores, .{ .grid = .{ .x = @intCast(m), .y = @intCast((self.shape.n + 63) / 64) }, .block = .{ .x = 256 } }, s, &a);
+            },
+            .fused => {
+                const gq = try self.rig.scratch(m * nk * dk * 4);
+                const gk = try self.rig.scratch(m * nk * dk * 4);
+                const gv = try self.rig.scratch(m * nv * dv * 4);
+                const ggb = try self.rig.scratch(m * nv * 2 * 4);
+                var f: cuda.Args = .{};
+                for ([_]u64{ self.ins[0], self.ins[1], self.ins[2], self.ins[3], self.ins[4], gq, gk, gv, ggb }) |v| f.add(v);
+                try cuda.launch.launch(self.f.front, .{ .grid = .{ .x = @intCast(m), .y = nk + nv }, .block = .{ .x = 256 } }, s, &f);
+                var a: cuda.Args = .{};
+                for ([_]u64{ gq, gk, gv, ggb, self.ins[5], o[2] }) |v| a.add(v);
+                a.add(@as(c_int, @intCast(m)));
+                a.add(o[3]);
+                try cuda.launch.launch(self.f.rows_to, .{ .grid = .{ .x = nv, .y = dv / 16 }, .block = .{ .x = 128 } }, s, &a);
+                var b: cuda.Args = .{};
+                for ([_]u64{ o[3], self.ins[0], self.ins[6] }) |v| b.add(v);
+                b.add(eps);
+                b.add(o[0]);
+                b.add(o[1]);
+                try cuda.launch.launch(self.f.norm, .{ .grid = .{ .x = @intCast(m), .y = nv }, .block = .{ .x = dv } }, s, &b);
             },
             .readout => {
                 const normed = try self.rig.scratch(m * wide * 2);

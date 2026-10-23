@@ -59,6 +59,10 @@ pub const cubin_qmm: [:0]const u8 = "_ZN6tf_qmm10qmm_kernelILi32ELi16ELi64ELi1EL
 pub const qmm_smem: u32 = 9472;
 /// fn_gdn_chain_tpr's staged rows: 2 x 16 steps of q, k, v (128 fp32 each) and g, beta.
 pub const chain_tpr_smem: u32 = 2 * 16 * (3 * 128 * 4 + 16);
+/// fn_gdn_fused's shared memory (its SMEM): two chain stages, two readout batches, the conv rows and 16 norm scales.
+pub const gdn_fused_smem: u32 = chain_tpr_smem + 2 * 16 * 128 * 4 + 16 * 2 * 128 * 4 + 16 * 4;
+/// fn_gdn_fused's block: 256 chain threads and 128 producer threads.
+pub const gdn_fused_threads: u32 = 384;
 /// Pairs an expert item takes: the core rows kernel's tile.
 const rows_tile: usize = cuda.experts.RowsExperts.tile;
 const plan_small: usize = cuda.grouped.small;
@@ -155,6 +159,8 @@ pub const Kernels = struct {
     chain: cuda.Function,
     chain_to: cuda.Function,
     chain_tpr: cuda.Function,
+    /// front + chain + gated norm in one kernel a value head (prompt passes of 64 rows or more).
+    gdn_fused: cuda.Function,
     gnorm: cuda.Function,
     sum: cuda.Function,
     moe_sum: cuda.Function,
@@ -198,6 +204,8 @@ pub const Kernels = struct {
         k.chain_to = try k.batch.function("fn_gdn_rows_to");
         k.chain_tpr = try k.batch.function("fn_gdn_chain_tpr");
         try k.chain_tpr.allowDynamicShared(chain_tpr_smem);
+        k.gdn_fused = try k.batch.function("fn_gdn_fused");
+        try k.gdn_fused.allowDynamicShared(gdn_fused_smem);
         k.gnorm = try k.batch.function("fn_gdn_norm");
         return k;
     }

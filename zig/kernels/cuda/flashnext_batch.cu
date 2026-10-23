@@ -341,3 +341,6 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr(const float* 
                                                                  int rows, float* ys_out) {
     gdn_tpr::chain<2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
 }
+
+// The prompt GDN block in one kernel a value head (front, chain, gated norm; their bits), no fp32 rows through memory.
+#include "flashnext_gdn_fused.cuh"
