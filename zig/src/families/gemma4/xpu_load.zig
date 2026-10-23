@@ -60,7 +60,12 @@ pub fn projection(d: *Dev, repack: ze.H, c: *const Checkpoint, prefix: []const u
     if (parts.len == 1) { // a bf16 weight (not quantized): kept as stored, read by the dense kernel
         const w = try c.get(named("{s}{s}.weight", .{ prefix, parts[0] }));
         if (std.mem.eql(u8, w.dtype, "BF16")) {
-            const p = try d.upload(w.bytes);
+            // bf16 to fp16 (round to nearest even; these weights are far inside fp16's range)
+            const n = w.bytes.len / 2;
+            const half = try alloc.alloc(f16, n);
+            defer alloc.free(half);
+            for (half, 0..) |*o, i| o.* = @floatCast(@as(f32, @bitCast(@as(u32, std.mem.readInt(u16, w.bytes[2 * i ..][0..2], .little)) << 16)));
+            const p = try d.upload(std.mem.sliceAsBytes(half));
             return .{ .w = p, .s = p, .bg = p, .n = @intCast(w.shape[0]), .k = @intCast(w.shape[1]), .wide = true, .dense = true };
         }
     }
