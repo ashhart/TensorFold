@@ -269,10 +269,19 @@ pub fn Pass(comptime Tri: type) type {
             const s = self.s;
             const n = self.rows;
             _ = try self.lane(s.mixed, s.xsm, lw.proj, s.proj, s.dummy, n, 1);
-            // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
+            // a lone pass keeps its projection and conv window; a shared pass keeps each lane's own
             if (self.lanes.len == 0) {
                 try self.copy(keep.proj, s.proj, n * gdn.proj_width * 2);
                 try self.copy(keep.hist, self.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
+            }
+            // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
+            const fused = self.lanes.len == 0 and n >= 64 and gdn_fused.on();
+            if (fused) {
+                // the three in one kernel a value head: the same per-row op sequences, no fp32 rows through memory
+                const st = self.seq.state[li].ptr;
+                const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr };
+                try gdn_fused.launch(self.k.gdn_fused, self.stream, in, n, s.gout, s.gxs);
+            } else if (self.lanes.len == 0) {
                 try self.gdnFront(lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
                 try self.gdnChain(s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
             } else {
@@ -293,14 +302,7 @@ pub fn Pass(comptime Tri: type) type {
                     row0 += l.rows;
                 }
             }
-            var b: cuda.Args = .{};
-            b.add(s.ys);
-            b.add(s.proj);
-            b.add(lw.norm.ptr);
-            b.add(eps);
-            b.add(s.gout);
-            b.add(s.gxs);
-            try cuda.launch.launch(self.k.gnorm, .{ .grid = .{ .x = @intCast(n), .y = gdn.nv }, .block = .{ .x = gdn.dv } }, self.stream, &b);
+            if (!fused) try gdn_fused.norm(self.k.gnorm, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n);
             if (self.lanes.len == 0) try self.shiftWindow(self.seq.conv[li].ptr, s.proj, gdn.proj_width, n, gdn.taps - 1, gdn.conv_dim);
             self.out_slices = try self.lane(s.gout, s.gxs, lw.out, s.dummy, s.part, n, out_sk);
         }
