@@ -284,80 +284,124 @@ __global__ void __launch_bounds__(32) unpack_kernel(const uint32_t* __restrict__
 }  // namespace tf_exl3_linear
 
 // Launched at mul1 (TF_EXL3_WIDTHS(X, 2) + K2 3, 5, 7): linear_kernel<K2, 2, WK> at WK 2 / 4 / 8, unpack_kernel<K2, 2>.
-template __global__ void tf_exl3_linear::linear_kernel<2, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<2, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<2, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<2, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<3, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<3, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<3, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<3, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<4, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<4, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<4, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<4, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<5, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<5, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<5, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<5, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<6, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<6, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<6, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<6, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<7, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<7, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<7, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<7, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<8, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<8, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<8, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<8, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<10, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<10, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<10, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<10, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<12, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<12, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<12, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<12, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<14, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<14, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<14, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<14, 2>(const uint32_t*, half*, int, int64_t, int64_t);
-template __global__ void tf_exl3_linear::linear_kernel<16, 2, 2>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<16, 2, 4>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::linear_kernel<16, 2, 8>(const half*, const uint32_t*, long long, long long, \
-    const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
-template __global__ void tf_exl3_linear::unpack_kernel<16, 2>(const uint32_t*, half*, int, int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<2, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<2, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<2, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<2, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<3, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<3, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<3, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<3, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<4, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<4, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<4, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<4, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<5, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<5, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<5, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<5, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<6, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<6, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<6, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<6, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<7, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<7, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<7, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<7, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<8, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<8, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<8, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<8, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<10, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<10, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<10, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<10, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<12, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<12, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<12, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<12, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<14, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<14, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<14, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<14, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
+template __global__ void tf_exl3_linear::linear_kernel<16, 2, 2>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<16, 2, 4>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::linear_kernel<16, 2, 8>(const half* __restrict__, \
+    const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+    void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
+template __global__ void tf_exl3_linear::unpack_kernel<16, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);

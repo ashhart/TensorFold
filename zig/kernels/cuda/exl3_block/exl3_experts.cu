@@ -245,8 +245,9 @@ __global__ void down_combine_kernel(const float* __restrict__ Z, const int* __re
 
 // upstream grouped_kernel at mul1 for every (nt, warps, pf) x TF_RANGES, and dequant_kernel<2, K2> (tests)
 #define TF_EXL3X_INST(NT, W, PF, LO, HI) template __global__ void tf_exl3x::grouped_kernel<2, NT, W, PF, LO, HI>( \
-    const half*, const half*, const int64_t*, const int64_t*, const int*, const int*, const int*, const int*, \
-    const int*, float*, int, int, int, int, int, int);
+    const half* __restrict__, const half* __restrict__, const int64_t* __restrict__, const int64_t* __restrict__, \
+    const int* __restrict__, const int* __restrict__, const int* __restrict__, const int* __restrict__, \
+    const int* __restrict__, float* __restrict__, int, int, int, int, int, int);
 TF_EXL3X_INST(8, 4, 1, 8, 8)
 TF_EXL3X_INST(8, 4, 1, 2, 10)
 TF_EXL3X_INST(8, 4, 1, 2, 16)
@@ -256,28 +257,31 @@ TF_EXL3X_INST(8, 4, 2, 2, 16)
 TF_EXL3X_INST(4, 4, 2, 8, 8)
 TF_EXL3X_INST(4, 4, 2, 2, 10)
 TF_EXL3X_INST(4, 4, 2, 2, 16)
-template __global__ void tf_exl3x::dequant_kernel<2, 2>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 3>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 4>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 5>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 6>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 7>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 8>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 9>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 10>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 11>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 12>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 13>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 14>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 15>(const uint32_t*, half*, int, int);
-template __global__ void tf_exl3x::dequant_kernel<2, 16>(const uint32_t*, half*, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 2>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 3>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 4>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 5>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 6>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 7>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 8>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 9>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 10>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 11>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 12>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 13>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 14>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 15>(const uint32_t* __restrict__, half* __restrict__, int, int);
+template __global__ void tf_exl3x::dequant_kernel<2, 16>(const uint32_t* __restrict__, half* __restrict__, int, int);
 // down_combine_kernel at both outputs the binding takes (fp32, bf16: TF_DSV41_MOE_BF16)
-template __global__ void tf_exl3_experts::down_combine_kernel<float>(const float*, const int*, const half*, float*, \
-    const float*, float*, int, int, int, int, int);
-template __global__ void tf_exl3_experts::down_combine_kernel<__nv_bfloat16>(const float*, const int*, const half*, float*, \
-    const float*, __nv_bfloat16*, int, int, int, int, int);
+template __global__ void tf_exl3_experts::down_combine_kernel<float>(const float* __restrict__, \
+    const int* __restrict__, const half* __restrict__, float* __restrict__, const float* __restrict__, \
+    float* __restrict__, int, int, int, int, int);
+template __global__ void tf_exl3_experts::down_combine_kernel<__nv_bfloat16>(const float* __restrict__, \
+    const int* __restrict__, const half* __restrict__, float* __restrict__, const float* __restrict__, \
+    __nv_bfloat16* __restrict__, int, int, int, int, int);
 // rot_in_kernel for both inputs the binding takes
-template __global__ void tf_exl3_experts::rot_in_kernel<__nv_bfloat16>(const __nv_bfloat16*, int, const int*, const half*, const half*, half*, \
-    half*, int, int, int);
-template __global__ void tf_exl3_experts::rot_in_kernel<half>(const half*, int, const int*, const half*, const half*, half*, \
-    half*, int, int, int);
+template __global__ void tf_exl3_experts::rot_in_kernel<__nv_bfloat16>(const __nv_bfloat16* __restrict__, int, \
+    const int* __restrict__, const half* __restrict__, const half* __restrict__, half* __restrict__, \
+    half* __restrict__, int, int, int);
+template __global__ void tf_exl3_experts::rot_in_kernel<half>(const half* __restrict__, int, const int* __restrict__, \
+    const half* __restrict__, const half* __restrict__, half* __restrict__, half* __restrict__, int, int, int);

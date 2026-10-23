@@ -379,24 +379,29 @@ template __global__ void dsv41_dense3::lanes_linear_kernel<4, 2, 4, 3>(const dsv
 template __global__ void dsv41_dense3::lanes_linear_kernel<4, 2, 4, 4>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<4, 2, 8, 1>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<4, 2, 8, 2>(const dsv41_x3seg::LinTable, int, int);
-template __global__ void dsv41_dense3::lanes_unpack_kernel<4, 2>(const uint32_t*, half*, int, int64_t, int64_t);
+template __global__ void dsv41_dense3::lanes_unpack_kernel<4, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
 template __global__ void dsv41_dense3::lanes_linear_kernel<6, 2, 4, 3>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<6, 2, 4, 4>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<6, 2, 8, 1>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<6, 2, 8, 2>(const dsv41_x3seg::LinTable, int, int);
-template __global__ void dsv41_dense3::lanes_unpack_kernel<6, 2>(const uint32_t*, half*, int, int64_t, int64_t);
+template __global__ void dsv41_dense3::lanes_unpack_kernel<6, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
 template __global__ void dsv41_dense3::lanes_linear_kernel<8, 2, 4, 3>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<8, 2, 4, 4>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<8, 2, 8, 1>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<8, 2, 8, 2>(const dsv41_x3seg::LinTable, int, int);
-template __global__ void dsv41_dense3::lanes_unpack_kernel<8, 2>(const uint32_t*, half*, int, int64_t, int64_t);
+template __global__ void dsv41_dense3::lanes_unpack_kernel<8, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
 template __global__ void dsv41_dense3::lanes_linear_kernel<10, 2, 4, 3>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<10, 2, 4, 4>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<10, 2, 8, 1>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<10, 2, 8, 2>(const dsv41_x3seg::LinTable, int, int);
-template __global__ void dsv41_dense3::lanes_unpack_kernel<10, 2>(const uint32_t*, half*, int, int64_t, int64_t);
+template __global__ void dsv41_dense3::lanes_unpack_kernel<10, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);
 template __global__ void dsv41_dense3::lanes_linear_kernel<12, 2, 4, 3>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<12, 2, 4, 4>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<12, 2, 8, 1>(const dsv41_x3seg::LinTable, int, int);
 template __global__ void dsv41_dense3::lanes_linear_kernel<12, 2, 8, 2>(const dsv41_x3seg::LinTable, int, int);
-template __global__ void dsv41_dense3::lanes_unpack_kernel<12, 2>(const uint32_t*, half*, int, int64_t, int64_t);
+template __global__ void dsv41_dense3::lanes_unpack_kernel<12, 2>(const uint32_t* __restrict__, half* __restrict__, int,
+    int64_t, int64_t);

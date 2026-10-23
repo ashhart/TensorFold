@@ -8,7 +8,8 @@
 #define DSV41_PFD_K2 16
 #define DSV41_PFD_LN false
 DSV41_PFD_CFGS(DSV41_PFD_INST)
-template __global__ void dsv41_pfd::pfd_dequant_kernel<16, false>(const uint32_t*, long long, long long, half*, int);
+template __global__ void dsv41_pfd::pfd_dequant_kernel<16, false>(const uint32_t* __restrict__, long long, long long,
+    half* __restrict__, int);
 
 
 DSV41_PFD_WIDTH_STRIPS(16)

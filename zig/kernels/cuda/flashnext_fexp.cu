@@ -198,7 +198,9 @@ __global__ void __launch_bounds__(WM * WN * 32)
 }  // namespace tf_fact_experts
 
 // gate and up with SwiGLU (bf16 out) and down to fp32, 64-pair tiles on 8 warps, 3 stages (2 CTAs an SM).
-template __global__ void tf_fact_experts::fact_kernel<2, 2, 1, 4, 2, 3>(const __nv_bfloat16*, int, int, const uint4*, int,
-    int, const int*, const int*, const int*, void*, int, float);
-template __global__ void tf_fact_experts::fact_kernel<1, 0, 2, 2, 4, 3>(const __nv_bfloat16*, int, int, const uint4*, int,
-    int, const int*, const int*, const int*, void*, int, float);
+template __global__ void tf_fact_experts::fact_kernel<2, 2, 1, 4, 2, 3>(const __nv_bfloat16* __restrict__, int, int,
+    const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__,
+    void* __restrict__, int, float);
+template __global__ void tf_fact_experts::fact_kernel<1, 0, 2, 2, 4, 3>(const __nv_bfloat16* __restrict__, int, int,
+    const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__,
+    void* __restrict__, int, float);

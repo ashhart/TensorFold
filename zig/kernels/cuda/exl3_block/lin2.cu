@@ -467,10 +467,12 @@ __global__ void __launch_bounds__(WK * 32, MINB) lanesc_kernel(const dsv41_x3seg
     template __global__ void dsv41_lin2::lanes2_kernel<K2, 2, 8, 1>(const dsv41_x3seg::LinTable, int, int);
 LIN2_LANES(4) LIN2_LANES(6) LIN2_LANES(8) LIN2_LANES(10) LIN2_LANES(12)
 #define LIN2_LINEAR(K2, WK)                                                                                         \
-    template __global__ void dsv41_lin2::linear2_kernel<K2, 2, WK, true>(const half*, const uint32_t*, long long, \
-        long long, const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);          \
-    template __global__ void dsv41_lin2::linear2_kernel<K2, 2, WK, false>(const half*, const uint32_t*, long long, \
-        long long, const half*, const half*, void*, int, float*, int*, int, int, int, int, const int*);
+    template __global__ void dsv41_lin2::linear2_kernel<K2, 2, WK, true>(const half* __restrict__, \
+        const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+        void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__); \
+    template __global__ void dsv41_lin2::linear2_kernel<K2, 2, WK, false>(const half* __restrict__, \
+        const uint32_t* __restrict__, long long, long long, const half* __restrict__, const half* __restrict__, \
+        void* __restrict__, int, float* __restrict__, int* __restrict__, int, int, int, int, const int* __restrict__);
 #define LIN2_LINEAR_W(K2) LIN2_LINEAR(K2, 2) LIN2_LINEAR(K2, 4) LIN2_LINEAR(K2, 8)
 LIN2_LINEAR_W(2) LIN2_LINEAR_W(3) LIN2_LINEAR_W(4) LIN2_LINEAR_W(5) LIN2_LINEAR_W(6) LIN2_LINEAR_W(7)
 LIN2_LINEAR_W(8) LIN2_LINEAR_W(10) LIN2_LINEAR_W(12) LIN2_LINEAR_W(14) LIN2_LINEAR_W(16)
