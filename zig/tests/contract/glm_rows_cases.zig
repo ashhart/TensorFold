@@ -72,10 +72,14 @@ pub fn served(kind: Kind) [23]c.Shape {
 }
 pub fn spec(v: Entry, text: []const u8, shapes: []const c.Shape) c.Spec {
     const gather = v.kind == .down or v.kind == .glu;
+    const final_glu = v.kind == .glu and v.mode == .replacement;
     return .{
         .name = text,
         .accum = .f32,
         .depth = depth,
+        // Two six-step BF16 scalar paths can straddle a rounding midpoint after a one-ULP FP32 exp change.
+        .ops = if (final_glu) 12 else 0,
+        .mids = if (final_glu) 12 else 0,
         .out = .bf16,
         .replaces = if (v.mode == .replacement or v.mode == .control) "the frozen pre-1130 GLM kernel" else null,
         .nan = if (v.nonlinear()) .{ .stated = "unchanged clipped BF16 SwiGLU has the predecessor's nonfinite classes" } else .propagate,

@@ -372,3 +372,92 @@ test "GLM window contract: final nonlinear stress stays normal across widths, gr
         }
     };
 }
+
+fn scalarNeighbor(value: f32, direction: i8) f32 {
+    return if (direction == 0) value else std.math.nextAfter(f32, value, if (direction < 0) 0 else std.math.inf(f32));
+}
+fn scalarGluRounding(gate: f64, value: f64, exp_direction: i8, reciprocal_direction: i8) f64 {
+    @setFloatMode(.strict);
+    const x = metalScalarBf(@min(metalScalarBf(@floatCast(gate)), 10));
+    const up = metalScalarBf(std.math.clamp(metalScalarBf(@floatCast(value)), -10, 10));
+    const exp32: f32 = @floatCast(@exp(@as(f64, @abs(x))));
+    const e = metalScalarBf(scalarNeighbor(exp32, exp_direction));
+    const y = metalScalarBf(scalarNeighbor(1 / metalScalarBf(1 + e), reciprocal_direction));
+    return metalScalarBf(metalScalarBf(x * (if (x < 0) y else metalScalarBf(1 - y))) * up);
+}
+test "GLM window contract: a normal q8 scalar exp midpoint cannot falsely reject exact FP32 dots" {
+    const shape: c.Shape = .{ .rows = 4, .n = 4, .k = 4096 };
+    const v: cases.Entry = .{ .kind = .glu, .bits = 8, .mode = .replacement };
+    const f = try Fixture.init(a, v, shape, .stress, 0x6b63);
+    defer f.deinit();
+    const deltas = [_]u8{ 54, 54, 55, 55, 55, 55, 55, 55 };
+    for ([_]contract.affine.Affine{ f.f, f.up.? }) |q| {
+        const half: u8 = @as(u8, 1) << @intCast(q.bits - 1);
+        for (0..q.shape.n) |j| for (0..q.shape.k / 2) |i| {
+            const delta: u8 = if (q.bits == 8 and i < deltas.len) deltas[i] else 1;
+            q.codes[j * q.shape.k + i] = half + delta;
+            q.codes[j * q.shape.k + q.shape.k / 2 + i] = half - delta;
+        };
+    }
+    const at = f.coordinates(0);
+    const gate = f.f.one(at.row, at.col)[0];
+    const up = f.up.?.one(at.row, at.col)[0];
+    try std.testing.expectEqual(@as(f64, -6.84375), gate);
+    try std.testing.expectEqual(@as(f64, -8), up);
+    const exp32: f32 = @floatCast(@exp(@as(f64, 6.84375)));
+    try std.testing.expectEqual(@as(u32, 0x8001), @as(u32, @bitCast(exp32)) & 0xffff);
+    try std.testing.expect(c.toBf16(exp32) != c.toBf16(scalarNeighbor(exp32, -1)));
+    var want: [16]f64 = undefined;
+    var mag: [16]f64 = undefined;
+    f.reference(&want, &mag);
+    const got = scalarGluRounding(gate, up, -1, 0);
+    try std.testing.expectEqual(@as(f64, 0.05810546875), want[0]);
+    try std.testing.expectEqual(@as(f64, 0.05859375), got);
+    const spec = cases.spec(v, "scalar midpoint", &.{shape});
+    var without_postops = spec;
+    without_postops.ops = 0;
+    without_postops.mids = 0;
+    const old_ratio = @abs(got - want[0]) / c.bound(without_postops, shape, want[0], mag[0]);
+    try std.testing.expect(old_ratio > 2.14 and old_ratio < 2.15);
+    try std.testing.expect(@abs(got - want[0]) <= c.bound(spec, shape, want[0], mag[0]));
+}
+test "GLM window contract: only final GLU budgets the two staged scalar paths" {
+    const u: f64 = 0x1p-8;
+    const f32_u: f64 = 0x1p-24;
+    var spread: f64 = 1;
+    for (0..6) |_| spread *= ((1 + u) / (1 - u)) * ((1 + f32_u) / (1 - f32_u));
+    for (cases.entries) |v| {
+        const shapes = cases.served(v.kind);
+        const spec = cases.spec(v, "scalar rounding budget", &shapes);
+        if (v.kind == .glu and v.mode == .replacement) {
+            try std.testing.expect(c.boundExact(spec, 1) >= spread - 1);
+            try std.testing.expect(c.boundExact(spec, 1) < 0.0625);
+        } else {
+            try std.testing.expectEqual(@as(f64, 0), spec.ops);
+            try std.testing.expectEqual(@as(f64, 0), spec.mids);
+        }
+    }
+}
+test "GLM window contract: every nonlinear stress residual covers scalar FP32 rounding neighbors" {
+    const shape: c.Shape = .{ .rows = 4, .n = 4, .k = 4096 };
+    for (cases.bits, 0..) |bits, index| {
+        const up_bits = cases.bits[(index + 1) % cases.bits.len];
+        const scale = std.math.ldexp(@as(f64, 1), 2 - @as(i32, bits));
+        const up_scale = std.math.ldexp(@as(f64, 1), 2 - @as(i32, up_bits));
+        const gate_max = 8 * ((@as(usize, 1) << @intCast(bits - 1)) - 1);
+        const up_max = 8 * ((@as(usize, 1) << @intCast(up_bits - 1)) - 1);
+        const spec = cases.spec(.{ .kind = .glu, .bits = bits, .mode = .replacement }, "all scalar residuals", &.{shape});
+        for (8..gate_max + 1) |n| for (8..up_max + 1) |m| {
+            const gate = -@as(f64, @floatFromInt(n)) * scale;
+            const up = -@as(f64, @floatFromInt(m)) * up_scale;
+            const want = scalarGluRounding(gate, up, 0, 0);
+            try std.testing.expect(want >= 0x1p-126);
+            const limit = c.bound(spec, shape, want, @abs(want));
+            try std.testing.expect(limit < want);
+            for ([_]i8{ -1, 0, 1 }) |e| for ([_]i8{ -1, 0, 1 }) |r| {
+                const got = scalarGluRounding(gate, up, e, r);
+                try std.testing.expect(@abs(got - want) <= limit);
+            };
+        };
+    }
+}
