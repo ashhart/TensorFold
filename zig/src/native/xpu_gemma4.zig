@@ -10,6 +10,9 @@ pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const name = "xpu-gemma4";
 pub const Engine = gemma.Engine;
 
+/// Windows cut at any row give the same bits (16-row forwards): states are kept and resumed anywhere, short ones too.
+pub const cache_rules: api.prompt_cache.Rules = .{ .min_prompt = 0, .min_gap = 64 };
+
 /// Rows of one prompt window handed to the engine (it cuts them in forwards of 16 rows).
 const prompt_rows: u32 = 512;
 

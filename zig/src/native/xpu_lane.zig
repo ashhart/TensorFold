@@ -47,6 +47,8 @@ pub fn Xpu(comptime S: type) type {
         const Self = @This();
         /// The family's engine has drafted rounds (Nemotron: verifyRows, keepRows, draftKept, draftFirst).
         const has_head = @hasDecl(S.Engine, "verifyRows");
+        /// A one-stream engine that keeps and restores prompt states (Gemma 4): the prompt pass uses the cache.
+        const cached = !has_head and @hasDecl(S.Engine, "snapSave");
         /// A stream's sequence, its held drafts, its last window's unkept rows and where that window started.
         const Lane = struct { seq: *Seq, held: [max_rows]u32 = undefined, held_n: usize = 0, pending: ?u32 = null, start: u32 = 0 };
         const Seq = if (has_head) S.Engine.Sequence else void;
@@ -188,6 +190,11 @@ pub fn Xpu(comptime S: type) type {
         /// Feeds `token` and draws the next one at `position`: the device argmax when greedy, else the keyed host draw.
         fn step(self: *Self, token: u32, sampling: ?lanes.Sampling, position: u64) !u32 {
             try self.e.feed(token, true);
+            return self.drawKept(sampling, position);
+        }
+
+        /// The kept row's draw: the device argmax when greedy, else the keyed draw over the top_k (card) or all (host).
+        fn drawKept(self: *Self, sampling: ?lanes.Sampling, position: u64) !u32 {
             const s = sampling orelse return self.e.argmax();
             if (s.temperature <= 0) return self.e.argmax();
             if (comptime @hasDecl(S.Engine, "candidates")) if (s.top_k > 0 and s.top_k <= 64) { // the card keeps the top_k largest
@@ -234,6 +241,12 @@ pub fn Xpu(comptime S: type) type {
                 _ = self.take(first[0]);
                 return;
             };
+            if (comptime cached) {
+                try self.prefillPlanned(s, ids);
+                if (s.isCancelled()) return error.Cancelled;
+                _ = self.take(try self.drawKept(s.sampling, ids.len));
+                return;
+            }
             try e.reset();
             const head = ids[0 .. ids.len - 1];
             if (head.len > 16) {
@@ -254,7 +267,7 @@ pub fn Xpu(comptime S: type) type {
 
         /// A bound sequence's prompt pass: from a kept state if the cache has one, planned chunks, the cache's marks.
         fn prefillPlanned(self: *Self, s: *lanes.Stream, ids: []const u32) !void {
-            if (comptime !has_head) unreachable;
+            if (comptime !(has_head or cached)) unreachable;
             const e = self.e;
             const rows = S.promptRows(e);
             s.cached = 0;
@@ -274,7 +287,11 @@ pub fn Xpu(comptime S: type) type {
                 if (self.stopped()) return error.ShuttingDown;
                 while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
                 const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(ids.len);
-                const n = @min(end - at, rows);
+                var n = @min(end - at, rows);
+                if (comptime cached) for (s.reuse.marks) |m| if (m > at and m < at + n) {
+                    n = m - at; // an unplanned family cuts where the cache keeps a state
+                    break;
+                };
                 try e.prefillSpan(ids, at, at + n, rows);
                 at += n;
                 if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
@@ -288,27 +305,29 @@ pub fn Xpu(comptime S: type) type {
         }
 
         fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-            if (comptime !has_head) return 0;
+            if (comptime !(has_head or cached)) return 0;
             return of(ptr).e.snapBytes(at);
         }
 
         fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
-            if (comptime !has_head) return error.NoSnapshots;
+            if (comptime !(has_head or cached)) return error.NoSnapshots;
             const self = of(ptr);
+            if (comptime cached) return try self.e.snapSave(at);
             const l = try self.bound(@ptrCast(@alignCast(owner orelse return error.NoStream)));
             if (l.pending != null) return error.SnapshotOutOfStep;
             return try self.e.snapSave(at);
         }
 
         fn snapRestore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
-            if (comptime !has_head) return error.NoSnapshots;
+            if (comptime !(has_head or cached)) return error.NoSnapshots;
             const self = of(ptr);
+            if (comptime cached) return try self.e.snapRestore(@ptrCast(@alignCast(saved)));
             _ = try self.bound(@ptrCast(@alignCast(owner orelse return error.NoStream)));
             try self.e.snapRestore(@ptrCast(@alignCast(saved)));
         }
 
         fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
-            if (comptime !has_head) return;
+            if (comptime !(has_head or cached)) return;
             of(ptr).e.snapDrop(@ptrCast(@alignCast(saved)));
         }
 
