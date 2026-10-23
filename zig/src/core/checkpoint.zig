@@ -345,3 +345,26 @@ test "Save recovery: an unresolved partial save refuses actual checkpoint reopen
         return error.UncertainCheckpointReopened;
     } else |err| try std.testing.expectEqual(error.CheckpointSaveUncertain, err);
 }
+
+test "a checkpoint whose index names shards in a folder opens and reads them" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // NVIDIA's own export writes `tensors/model-00001-of-00001.safetensors`.
+    try tmp.dir.createDirPath(io, "tensors");
+    const image = try testImage(gpa, "a", 4);
+    defer gpa.free(image);
+    try tmp.dir.writeFile(io, .{ .sub_path = "tensors/model-00001-of-00001.safetensors", .data = image });
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"tensors/model-00001-of-00001.safetensors\"}}" });
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const listed = try shardFiles(gpa, io, dir);
+    defer freeShardFiles(gpa, listed);
+    try std.testing.expectEqual(@as(usize, 1), listed.len);
+    try std.testing.expectEqualStrings("tensors/model-00001-of-00001.safetensors", listed[0][dir.len + 1 ..]);
+    var ck = try Checkpoint.openModel(gpa, io, dir);
+    defer ck.close();
+    _ = try ck.get("a");
+    try std.testing.expectEqual(@as(usize, 0), ck.unused());
+}

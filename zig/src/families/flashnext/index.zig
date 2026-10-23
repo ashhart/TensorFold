@@ -1,6 +1,28 @@
-//! Public index admission proves required tensor names and safe shard basenames before payload headers are available.
+//! Public index admission proves required tensor names and safe shard names before payload headers are available.
+//! A shard may sit in a folder inside the model folder (`tensors/model-…safetensors`); names that leave it are refused.
 const std = @import("std");
 const Config = @import("config.zig").Config;
+
+/// A weight map's shard, as core/checkpoint_index.zig's `shardName` takes it (kept here so this file imports no core):
+/// plain names joined by `/`, no part hidden or reserved, and the file must be a safetensors one.
+pub fn shardName(name: []const u8) bool {
+    if (!std.mem.endsWith(u8, name, ".safetensors")) return false;
+    var parts = std.mem.splitScalar(u8, name, '/');
+    while (parts.next()) |part| if (!plainPart(part)) return false;
+    return true;
+}
+
+fn plainPart(part: []const u8) bool {
+    if (part.len == 0 or part[0] == '.' or part[part.len - 1] == '.' or part[part.len - 1] == ' ') return false;
+    for (part) |c| if (c < 0x20 or c == 0x7f) return false;
+    if (std.mem.indexOfAny(u8, part, "\\:<>\"|?*") != null) return false;
+    const stem = part[0 .. std.mem.indexOfScalar(u8, part, '.') orelse part.len];
+    for ([_][]const u8{ "CON", "PRN", "AUX", "NUL" }) |reserved|
+        if (std.ascii.eqlIgnoreCase(stem, reserved)) return false;
+    if (stem.len == 4 and stem[3] >= '1' and stem[3] <= '9' and
+        (std.ascii.eqlIgnoreCase(stem[0..3], "COM") or std.ascii.eqlIgnoreCase(stem[0..3], "LPT"))) return false;
+    return true;
+}
 
 /// A declared width, the fields of core/quant's mlx.Width, so this file imports no core.
 pub const Width = struct { bits: u8, group: u16 };
@@ -142,7 +164,7 @@ fn admitWith(comptime Runtime: type, gpa: std.mem.Allocator, bytes: []const u8, 
     var it = map.object.iterator();
     while (it.next()) |item| {
         const file = item.value_ptr.*;
-        if (file != .string or file.string.len == 0 or file.string[0] == '.' or std.mem.indexOfAny(u8, file.string, "/\\:\x00") != null or !std.mem.endsWith(u8, file.string, ".safetensors")) return error.UnsafeFlashShard;
+        if (file != .string or !shardName(file.string)) return error.UnsafeFlashShard;
         try files.put(gpa, file.string, {});
     }
     var c = Check(Runtime){ .map = map.object, .runtime = runtime, .refusal = refusal };
@@ -168,4 +190,43 @@ fn admitWith(comptime Runtime: type, gpa: std.mem.Allocator, bytes: []const u8, 
         for (0..config.mtp.layers) |i| try c.layer(try std.fmt.bufPrint(&stem, "{s}.layers.{d}", .{ root, i }), config.mtp.kinds[i]);
     }
     return .{ .tensor_names = map.object.count(), .required_names = c.names, .shards = files.count() };
+}
+
+test "admission takes NVIDIA's tensors/ shard folder and keeps the escape refusal" {
+    const a = std.testing.allocator;
+    var c = try @import("config.zig").parse(a, @embedFile("fixtures/config.json"));
+    defer c.deinit();
+    const bytes = @embedFile("fixtures/index.json");
+    const flat = try admit(a, bytes, &c);
+    try std.testing.expect(flat.shards > 1);
+    // The publisher's own export maps every tensor to `tensors/model-000NN-of-00021.safetensors`.
+    const nested = try std.mem.replaceOwned(u8, a, bytes, "\":\"model-", "\":\"tensors/model-");
+    defer a.free(nested);
+    try std.testing.expectEqual(flat, try admit(a, nested, &c));
+    const escaped = try std.mem.replaceOwned(u8, a, bytes, "\":\"model-", "\":\"../model-");
+    defer a.free(escaped);
+    try std.testing.expectError(error.UnsafeFlashShard, admit(a, escaped, &c));
+}
+
+test "a shard may sit in a folder inside the model folder; escapes keep their refusal" {
+    // NVIDIA's own export writes `tensors/model-000NN-of-00021.safetensors`.
+    for ([_][]const u8{
+        "model-00001-of-00021.safetensors",
+        "tensors/model-00001-of-00021.safetensors",
+        "a/b/c.safetensors",
+    }) |name| try std.testing.expect(shardName(name));
+    for ([_][]const u8{
+        "", // nothing to open
+        "model.bin", // not a safetensors file
+        "/model.safetensors", // absolute
+        "../model.safetensors", // leaves the folder
+        "tensors/../model.safetensors", // leaves it through a subfolder
+        "tensors//model.safetensors", // an empty part
+        ".cache/model.safetensors", // hidden folder
+        "tensors/.hidden.safetensors", // hidden file
+        "C:/model.safetensors", // a drive name
+        "tensors\\model.safetensors", // a Windows separator
+        "tensors/nul.safetensors", // a reserved device stem
+        "tensors/model.safetensors ", // trailing space
+    }) |name| try std.testing.expect(!shardName(name));
 }

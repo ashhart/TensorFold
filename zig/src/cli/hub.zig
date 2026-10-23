@@ -197,7 +197,8 @@ test "security: negative quantization metadata is refused without a cast trap" {
 test "family detection matches the registry and refuses unknown types" {
     try std.testing.expectEqualStrings("Nemotron 3.5 Lightning", family("nemotron_h").?.title);
     try std.testing.expectEqualStrings("Qwen3.8 Flash Next", family("qwen4_exp").?.title);
-    try std.testing.expectEqualStrings("Gemma 4 12B", family("gemma4_unified").?.title);
+    // Every family the linked registry serves resolves; the titles are display names, so only their presence is fixed.
+    for (engines.families) |f| try std.testing.expect(family(f.model_type) != null);
     try std.testing.expect(family("gemma3n") == null);
     try std.testing.expect(family("unknown") == null);
 }
@@ -235,4 +236,18 @@ test "cache layout helpers read a synthetic cache" {
     try std.testing.expect(try cachedSnapshot(a, io, hub, "Org/Bad") == null); // a ref that is not a sha is never joined
     const missing = try cachedSnapshot(a, io, hub, "Org/Other");
     try std.testing.expect(missing == null);
+}
+
+test "a checkpoint's size counts shards in a folder inside it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The publisher's export keeps every shard in `tensors/`, so a walk that stopped at the top level undercounted it.
+    try tmp.dir.createDirPath(io, "tensors");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tensors/model-00001-of-00001.safetensors", .data = "xxxxxxx" });
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectEqual(@as(u64, 9), try sizeOf(gpa, io, dir));
 }

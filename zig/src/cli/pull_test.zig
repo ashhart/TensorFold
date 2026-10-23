@@ -16,15 +16,21 @@ const FakeHub = struct {
     range_starts: std.atomic.Value(u64) = .init(0),
     weights: []const u8,
     config: []const u8,
+    nested: []const u8,
     weights_sha_hex: []const u8,
+    nested_sha_hex: []const u8,
     config_git_hex: [40]u8,
     flaky_git_hex: [40]u8,
     port: u16,
 
     const weights_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/weights.safetensors";
     const config_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/config.json";
+    const nested_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/tensors/model-00001-of-00001.safetensors";
     const flaky_body = "{\"chat_template\": \"{{ messages }}\"}";
     const drafter_config = "{\"model_type\": \"qwen3\", \"architectures\": [\"DFlash2DraftModel\"], \"dflash_config\": {\"block_size\": 8}}";
+
+    var nested_body_storage: [1234]u8 = @splat(0x5A);
+    const nested_body: []const u8 = &nested_body_storage;
 
     fn open() !FakeHub {
         const posix = std.posix;
@@ -45,11 +51,17 @@ const FakeHub = struct {
         hash.update(weights_body);
         var digest: [32]u8 = undefined;
         hash.final(&digest);
+        var nested_hash = std.crypto.hash.sha2.Sha256.init(.{});
+        nested_hash.update(nested_body);
+        var nested_digest: [32]u8 = undefined;
+        nested_hash.final(&nested_digest);
         return .{
             .server_fd = fd,
             .weights = weights_body,
             .config = config_body,
+            .nested = nested_body,
             .weights_sha_hex = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{std.fmt.bytesToHex(digest, .lower)}),
+            .nested_sha_hex = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{std.fmt.bytesToHex(nested_digest, .lower)}),
             .config_git_hex = gitHex(config_body),
             .flaky_git_hex = gitHex(flaky_body),
             .port = port,
@@ -162,7 +174,7 @@ const FakeHub = struct {
             respond(fd, drafter_config);
         } else if (std.mem.eql(u8, path, "/api/models/Org/Flash/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1") or std.mem.eql(u8, path, "/api/models/Org/Whole/tree/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2")) {
             // The hub's tree sends LFS oids as bare hex.
-            const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"1111111111111111111111111111111111111111\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}, {{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"flaky.json\", \"size\": {d}}}]", .{ &fake.config_git_hex, fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len, &fake.flaky_git_hex, flaky_body.len }) catch return false;
+            const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"1111111111111111111111111111111111111111\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}, {{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"flaky.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"3333333333333333333333333333333333333333\", \"path\": \"tensors/model-00001-of-00001.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}]", .{ &fake.config_git_hex, fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len, &fake.flaky_git_hex, flaky_body.len, fake.nested.len, fake.nested_sha_hex, fake.nested.len }) catch return false;
             defer std.testing.allocator.free(tree);
             respond(fd, tree);
         } else if (std.mem.eql(u8, path, config_path) or std.mem.eql(u8, path, "/Org/Whole/resolve/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2/config.json")) {
@@ -179,6 +191,8 @@ const FakeHub = struct {
         } else if (std.mem.eql(u8, path, "/Org/Whole/resolve/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2/weights.safetensors")) {
             _ = fake.weight_requests.fetchAdd(1, .monotonic);
             whole(fd, fake.weights);
+        } else if (std.mem.eql(u8, path, nested_path) or std.mem.eql(u8, path, "/Org/Whole/resolve/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2/tensors/model-00001-of-00001.safetensors")) {
+            whole(fd, fake.nested);
         } else if (std.mem.eql(u8, path, weights_path)) {
             _ = fake.weight_requests.fetchAdd(1, .monotonic);
             const from = range_start orelse {
@@ -238,6 +252,7 @@ const FakeHub = struct {
         if (fake.thread) |t| t.join();
         _ = std.posix.system.close(fake.server_fd);
         std.testing.allocator.free(fake.weights_sha_hex);
+        std.testing.allocator.free(fake.nested_sha_hex);
     }
 };
 
@@ -271,6 +286,11 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     try std.testing.expectEqualStrings(FakeHub.config_body, config_read);
     const weights_read = try std.Io.Dir.cwd().readFileAlloc(io, weights_link, a, .limited(1 << 20));
     try std.testing.expectEqualSlices(u8, FakeHub.weights_body, weights_read);
+    // A shard in a folder inside the model folder lands as a real subfolder in the snapshot, still a blob link.
+    const nested_link = try std.fs.path.join(a, &.{ snapshot, "tensors/model-00001-of-00001.safetensors" });
+    const nested_read = try std.Io.Dir.cwd().readFileAlloc(io, nested_link, a, .limited(1 << 20));
+    try std.testing.expectEqualSlices(u8, FakeHub.nested_body, nested_read);
+    try std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ root, "models--Org--Flash/blobs", fake_hub.nested_sha_hex }), .{});
     const ref = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ root, "models--Org--Flash/refs/main" }), a, .limited(64));
     try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", std.mem.trim(u8, ref, " \r\n"));
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "weights.safetensors") != null);
@@ -288,6 +308,7 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out2.writer, &err_out.writer, &env, root, "Org/Flash"));
     try std.testing.expectEqual(@as(u32, 1), fake_hub.weight_requests.load(.monotonic));
     try std.testing.expect(std.mem.indexOf(u8, out2.written(), "weights.safetensors: cached") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "tensors/model-00001-of-00001.safetensors: cached") != null);
     try std.testing.expect(std.mem.indexOf(u8, out2.written(), "flaky.json: cached") != null);
     try std.testing.expectEqual(@as(u32, 2), fake_hub.flaky_requests.load(.monotonic));
 
@@ -447,4 +468,26 @@ test "security: a hub response cannot write beyond the manifest file size" {
         else => return err,
     };
     try std.testing.expect(written <= 8);
+}
+
+test "security: a shard in a folder inside the model folder lands inside the snapshot" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake_hub = FakeHub.open() catch return error.SkipZigTest;
+    fake_hub.start();
+    defer fake_hub.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-nested-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const env = try testEnv(a, try fake_hub.endpoint(a));
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+    const snapshot = try std.fs.path.join(a, &.{ root, "models--Org--Flash/snapshots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1" });
+    // NVIDIA's own export puts every shard in `tensors/`; the snapshot keeps that folder and still links the blob.
+    const link = try std.fs.path.join(a, &.{ snapshot, "tensors/model-00001-of-00001.safetensors" });
+    const body = try std.Io.Dir.cwd().readFileAlloc(io, link, a, .limited(1 << 20));
+    try std.testing.expectEqualSlices(u8, FakeHub.nested_body, body);
+    try std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ root, "models--Org--Flash/blobs", fake_hub.nested_sha_hex }), .{});
 }
