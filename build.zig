@@ -189,6 +189,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&warning_run.step);
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
     grammar_build.steps(b, target, xgrammar);
+    grammar_build.hostTests(b, test_step);
     contract_build.hostTests(b, gemma4_contract_host);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
