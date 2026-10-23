@@ -157,6 +157,8 @@ python tools/zig/flashnext_batch_serve.py zig-out/native/bin/tensorfold-native \
   --parallel 1,4 --context 16384 --require-shared-rounds
 ```
 
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 The served gate starts one server at a time on loopback port 52417. `default` omits `--parallel`; `auto` passes
 it explicitly. Each block uses the same context and requests, including thinking on and off. It compares response
 bodies, token counts and native token fingerprints with the serial reference and records wall time and peak

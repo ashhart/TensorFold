@@ -136,6 +136,8 @@ When API authentication is enabled, `/health` returns only status.
 
 ## Linux and CUDA
 
+For source builds with `zig build native` (including `--prefix` installs): Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
 The archives require glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`.
 CUDA serves Nemotron 3.5 Lightning, qualified on GB10 (`linux-aarch64`, greedy and sampled) and on Ampere cards with

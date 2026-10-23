@@ -172,6 +172,8 @@ zig build native -Dcpu=apple_m1
 zig build kernel-contract -Dcpu=apple_m1
 ```
 
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 The second command runs GPU gates and requires the test device to be available.
 For compile-limit records use the Metal contract's `--offline DIR` workflow from the kernel-contract guide.
 On an authorized CUDA test machine, with the qualified compiler path adjusted if necessary:

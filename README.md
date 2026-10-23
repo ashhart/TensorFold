@@ -335,6 +335,8 @@ zig build native -Dcpu=apple_m1
 zig build test test-golden -Dcpu=apple_m1
 ```
 
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 On macOS, `test` also runs available Metal device checks. See [CONTRIBUTING.md](CONTRIBUTING.md) for the host-test subset.
 
 The server is `zig-out/native/bin/tensorfold-native`.

@@ -15,6 +15,8 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/qwen35-2b" \
   --name bench --port 8090 --parallel 8 --context 70000 --no-thinking
 ```
 
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 An existing download at that revision can be used directly. The native binary serves
 `http://127.0.0.1:8090/v1`; decoding and tokenization run in Zig. This preview recipe invokes the native
 binary directly. It does not add a release gate for Python's automatic engine selection.

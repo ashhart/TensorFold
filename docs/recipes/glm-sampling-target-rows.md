@@ -16,6 +16,8 @@ zig fmt --check build.zig zig
 python3 tools/zig/lean_check.py
 ```
 
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 The lean baseline is main `c7137bb3`: 527 findings. Compare identities with `tools/zig/lean_new.py`;
 a nonzero checker result is not a clean run. Every new finding must be fixed.
 The synthetic gate uses the actual shared `tf_sample_full` and production dispatch, including mixed and solo rows.
