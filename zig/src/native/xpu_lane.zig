@@ -190,6 +190,19 @@ pub fn Xpu(comptime S: type) type {
             try self.e.feed(token, true);
             const s = sampling orelse return self.e.argmax();
             if (s.temperature <= 0) return self.e.argmax();
+            if (comptime @hasDecl(S.Engine, "candidates")) if (s.top_k > 0 and s.top_k <= 64) { // the card keeps the top_k largest
+                var v32: [64]f32 = undefined;
+                var ids: [64]u32 = undefined;
+                var v: [64]f64 = undefined;
+                var id: [64]u64 = undefined;
+                try self.e.candidates(s.top_k, &v32, &ids);
+                for (0..s.top_k) |i| {
+                    if (!std.math.isFinite(v32[i])) return error.NonfiniteLogits;
+                    v[i] = v32[i];
+                    id[i] = ids[i];
+                }
+                return @intCast(try lanes.sampling.choose(self.gpa, v[0..s.top_k], id[0..s.top_k], position, s));
+            };
             try self.e.fetchLogits(self.logits);
             return draw(self.gpa, self.logits, s, position);
         }

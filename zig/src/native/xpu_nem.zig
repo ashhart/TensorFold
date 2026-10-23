@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 /// The families this host serves, each a file with its table row, loader and prompt window.
 const specs = .{
     @import("xpu_nemotron.zig"),
+    @import("xpu_gemma4.zig"),
 };
 
 /// Prompt plus reply tokens when --context names none (and the model's window is larger).
