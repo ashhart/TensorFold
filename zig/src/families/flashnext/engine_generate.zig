@@ -249,7 +249,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     while (true) {
         const wr = widths[round % 4];
         const cb = r.queue.commandBuffer();
-        if (round > 0) cb.waitFor(r.event, base + round);
+        if (round > 0) cb.waitForEvent(r.event, base + round);
         r.enc = cb.compute(.serial);
         m.t.rows = if (gt) |g| g.rows() else e.rows_w[wr];
         m.t.mdims = e.mdims_w[wr];
@@ -326,7 +326,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
         }
         r.enc.end();
-        cb.signal(r.event, base + round + 1);
+        cb.signalEvent(r.event, base + round + 1);
         cb.commit();
         cbs[round % 4] = cb;
         round += 1;

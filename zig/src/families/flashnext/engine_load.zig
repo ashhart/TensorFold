@@ -134,7 +134,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     r.xnew = true;
     r.dense = true;
     r.hc_up = true;
-    r.event = try r.ownResource(try device.sharedEvent());
+    r.event = try r.ownResource(try device.event());
     if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
     r.sel = try Select.init(r, MAXR);
     r.lane_new = platform.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
