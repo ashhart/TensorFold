@@ -19,6 +19,16 @@ assert.throws(() => parseGoogleDesktopClient(JSON.stringify({ installed: { clien
 assert.throws(() => parseGoogleDesktopClient({ clientId: client.clientId } as any), /JSON/)
 assert.throws(() => parseGoogleTokens({ token_type: 'Bearer', access_token: 'synthetic', expires_in: 3600 }, 0), /permissions/)
 
+// A sign-in that never settles is a failure: the waiting state must clear on every path.
+async function failure(promise: Promise<unknown>, timeoutMs = 2_000): Promise<Error> {
+  const settled = await Promise.race([
+    promise.then(() => null, (error: unknown) => (error instanceof Error ? error : new Error(String(error)))),
+    new Promise<null>(resolve => setTimeout(() => resolve(null), timeoutMs)),
+  ])
+  assert.ok(settled, 'the sign-in settled as failed instead of waiting')
+  return settled
+}
+
 const loop = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
 const url = new URL(loop.authorizationUrl)
 assert.equal(url.origin, 'https://accounts.google.com')
@@ -28,26 +38,105 @@ assert.equal(url.searchParams.has('include_granted_scopes'), false)
 assert.equal(url.searchParams.has('client_secret'), false)
 assert.equal(new URL(loop.redirectUri).hostname, '127.0.0.1')
 assert.notEqual(new URL(loop.redirectUri).port, '0')
+// A request that cannot be ours is answered and forgotten: it never settles the sign-in.
 assert.equal((await fetch(`${loop.redirectUri}?state=wrong&code=synthetic-code`)).status, 400)
 assert.equal((await fetch(`${loop.redirectUri}?state=${'é'.repeat(43)}&code=synthetic-code`)).status, 400, 'Unicode state cannot throw in timingSafeEqual')
 const state = url.searchParams.get('state')!
-assert.equal((await fetch(`${loop.redirectUri}?state=${state}&state=${state}&code=synthetic-code`)).status, 400)
-assert.equal((await fetch(`${loop.redirectUri}?state=${state}&code=synthetic-code&error=`)).status, 400)
 assert.equal((await fetch(`${loop.redirectUri}?state=${state}&code=synthetic-code`, { method: 'POST' })).status, 400)
 const spoofedHostStatus = await new Promise<number | undefined>((resolve, reject) => {
   const request = httpRequest(`${loop.redirectUri}?state=${state}&code=synthetic-code`, { headers: { Host: 'attacker.example.com' } }, response => { response.resume(); resolve(response.statusCode) })
   request.on('error', reject); request.end()
 })
 assert.equal(spoofedHostStatus, 400)
-assert.equal((await fetch(`${loop.redirectUri}?state=${state}&code=synthetic-code&target=https://evil.example.com`)).status, 400)
 assert.equal((await fetch(`${loop.redirectUri}?state=${state}&code=synthetic-code`)).status, 200)
 assert.equal(await loop.completion, 'synthetic-code')
 await assert.rejects(fetch(`${loop.redirectUri}?state=${state}&code=synthetic-code`), /fetch failed/)
+
+// Google's own redirect carries iss (RFC 9207): the discovery document declares
+// authorization_response_iss_parameter_supported, so the parameter rides along.
+const google = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const googleState = new URL(google.authorizationUrl).searchParams.get('state')!
+const googleCallback = new URL(google.redirectUri)
+googleCallback.searchParams.set('code', 'synthetic-code')
+googleCallback.searchParams.set('state', googleState)
+googleCallback.searchParams.set('iss', 'https://accounts.google.com')
+googleCallback.searchParams.set('scope', 'https://www.googleapis.com/auth/gmail.readonly')
+assert.equal((await fetch(googleCallback)).status, 200)
+assert.equal(await google.completion, 'synthetic-code')
+
+// An issuer that is present must be Google's exactly.
+const wrongIssuer = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const wrongIssuerUrl = new URL(wrongIssuer.redirectUri)
+wrongIssuerUrl.searchParams.set('code', 'synthetic-code')
+wrongIssuerUrl.searchParams.set('state', new URL(wrongIssuer.authorizationUrl).searchParams.get('state')!)
+wrongIssuerUrl.searchParams.set('iss', 'https://accounts.example.com')
+assert.equal((await fetch(wrongIssuerUrl)).status, 400)
+assert.match((await failure(wrongIssuer.completion)).message, /issuer/)
+
+// A malformed callback of ours settles as failed and names the problem, never a value.
+const extraParameter = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const extraUrl = new URL(extraParameter.redirectUri)
+extraUrl.searchParams.set('code', 'synthetic-code')
+extraUrl.searchParams.set('state', new URL(extraParameter.authorizationUrl).searchParams.get('state')!)
+extraUrl.searchParams.set('target', 'https://evil.example.com')
+const logged: string[] = []
+const originalLog = console.log
+const originalError = console.error
+console.log = (...parts: unknown[]) => { logged.push(parts.map(String).join(' ')) }
+console.error = (...parts: unknown[]) => { logged.push(parts.map(String).join(' ')) }
+assert.equal((await fetch(extraUrl)).status, 400)
+console.log = originalLog
+console.error = originalError
+const extraFailure = await failure(extraParameter.completion)
+assert.match(extraFailure.message, /target/)
+assert.ok(!extraFailure.message.includes('evil.example.com'), 'the message names the parameter, never its value')
+assert.ok(!extraFailure.message.includes('synthetic-code'), 'the message carries no authorization code')
+assert.ok(!extraFailure.message.includes(extraParameter.verifier), 'the message carries no verifier')
+assert.deepEqual(logged, [], 'a failed callback writes no log line')
+
+// A repeated parameter is malformed too.
+const repeated = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const repeatedState = new URL(repeated.authorizationUrl).searchParams.get('state')!
+assert.equal((await fetch(`${repeated.redirectUri}?state=${repeatedState}&state=${repeatedState}&code=synthetic-code`)).status, 400)
+assert.match((await failure(repeated.completion)).message, /state/)
+
+// A callback with both a code and an error is malformed.
+const both = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const bothUrl = new URL(both.redirectUri)
+bothUrl.searchParams.set('state', new URL(both.authorizationUrl).searchParams.get('state')!)
+bothUrl.searchParams.set('code', 'synthetic-code')
+bothUrl.searchParams.set('error', '')
+assert.equal((await fetch(bothUrl)).status, 400)
+assert.match((await failure(both.completion)).message, /neither a usable authorization code nor an error/)
+
+// A decline says what to check.
+const declined = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const declinedUrl = new URL(declined.redirectUri)
+declinedUrl.searchParams.set('state', new URL(declined.authorizationUrl).searchParams.get('state')!)
+declinedUrl.searchParams.set('error', 'access_denied')
+declinedUrl.searchParams.set('error_description', 'Access blocked by the administrator')
+assert.equal((await fetch(declinedUrl)).status, 200)
+const declinedFailure = await failure(declined.completion)
+assert.match(declinedFailure.message, /declined/)
+assert.match(declinedFailure.message, /test user/)
+
+// A stranger's request never settles our sign-in.
+const stranger = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
+const strangerState = new URL(stranger.authorizationUrl).searchParams.get('state')!
+assert.equal((await fetch(`${stranger.redirectUri}?code=synthetic-code`)).status, 400, 'a callback without a state is not ours')
+assert.equal((await fetch(`${stranger.redirectUri}/other?state=${strangerState}&code=synthetic-code`)).status, 400, 'another path is not ours')
+let strangerSettled = false
+void stranger.completion.then(() => { strangerSettled = true }, () => { strangerSettled = true })
+await new Promise(resolve => setTimeout(resolve, 50))
+assert.equal(strangerSettled, false, 'a stranger never settles the sign-in')
+stranger.cancel()
+await assert.rejects(stranger.completion, /cancelled/)
+
 const cancelled = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 5_000)
 cancelled.cancel()
-await assert.rejects(cancelled.completion, /cancelled/)
+assert.match((await failure(cancelled.completion)).message, /cancelled/)
 const timeout = await createGoogleOAuthLoopback(client, requestedScopes(['gmail.read']), 20)
-await assert.rejects(timeout.completion, /timed out/)
+assert.match((await failure(timeout.completion)).message, /timed out/)
 
 function memory(initial: GoogleWorkspacePrivateState): GoogleWorkspaceStore {
   let value = structuredClone(initial)
@@ -103,5 +192,32 @@ await new Promise(resolve => setTimeout(resolve, 15))
 assert.equal((await racing.snapshot()).accounts[0].status, 'disconnected')
 assert.equal((await store.read())!.accounts[0].tokens, undefined)
 assert.equal((await racing.snapshot()).authorization?.status, 'cancelled')
+// A callback that cannot be ours settles the sign-in as failed, says why, and never leaks a secret.
+const failing = new GoogleWorkspaceService({ store: memory(baseline), lookup, now: () => now, openExternal: async url => { opened = url }, fetchImpl: synthetic })
+await failing.configureClient(clientJson)
+const failingAuth = await failing.startAuthorization({ capabilities: ['gmail.read'] })
+const failingBrowser = new URL(opened)
+const failingState = failingBrowser.searchParams.get('state')!
+const failingRedirect = failingBrowser.searchParams.get('redirect_uri')!
+await fetch(`${failingRedirect}?state=${failingState}&code=synthetic-code&iss=https://accounts.example.com`)
+for (let i = 0; i < 100 && (await failing.snapshot()).authorization?.status === 'waiting'; i++) await new Promise(resolve => setTimeout(resolve, 5))
+const failed = await failing.snapshot()
+assert.equal(failed.authorization?.id, failingAuth.id)
+assert.equal(failed.authorization?.status, 'failed', 'a callback that cannot be ours ends the waiting state')
+assert.match(failed.authorization?.error ?? '', /issuer/)
+for (const secret of ['synthetic-code', 'synthetic-secret', 'synthetic-access', 'synthetic-refresh']) {
+  assert.ok(!(failed.authorization?.error ?? '').includes(secret), 'a failed sign-in names no secret')
+  assert.ok(!JSON.stringify(failed).includes(secret), 'a failed sign-in snapshot carries no secret')
+}
+// A retry after a failure starts a new sign-in and succeeds.
+const retryAuth = await failing.startAuthorization({ capabilities: ['gmail.read'] })
+assert.notEqual(retryAuth.id, failingAuth.id)
+const retryBrowser = new URL(opened)
+await fetch(`${retryBrowser.searchParams.get('redirect_uri')}?state=${retryBrowser.searchParams.get('state')}&code=synthetic-code&iss=https://accounts.google.com`)
+for (let i = 0; i < 100 && (await failing.snapshot()).authorization?.status === 'waiting'; i++) await new Promise(resolve => setTimeout(resolve, 5))
+const retried = await failing.snapshot()
+assert.equal(retried.authorization?.id, retryAuth.id)
+assert.equal(retried.authorization?.status, 'complete', 'a retry after a failure signs in again')
+failing.dispose()
 racing.dispose(); service.dispose()
 console.log('Google desktop OAuth PKCE/state/loopback/configuration/scope and disconnect race tests passed')

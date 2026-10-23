@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { GOOGLE_AUTH_URL } from './client-config'
+import { GOOGLE_AUTH_URL, GOOGLE_ISS } from './client-config'
+import { googleOAuthErrorMessage } from './oauth-errors'
 import type { GoogleDesktopClient } from './private-state'
 
 export interface GoogleOAuthLoopback {
@@ -31,16 +32,30 @@ export async function createGoogleOAuthLoopback(client: GoogleDesktopClient, sco
     let url: URL
     try { url = new URL(request.url, redirectUri) } catch { return fail() }
     if (url.origin !== `http://127.0.0.1:${port}` || url.pathname !== callbackPath || url.hash) return fail()
-    const allowed = new Set(['state', 'code', 'error', 'error_description', 'error_uri', 'scope', 'authuser', 'prompt', 'hd'])
-    if ([...url.searchParams.keys()].some(key => !allowed.has(key) || url.searchParams.getAll(key).length !== 1)) return fail()
+    // The state is what proves the callback is ours. A stranger's request keeps the sign-in open.
     const actualState = url.searchParams.get('state') ?? ''
     if (!/^[A-Za-z0-9_-]{43}$/.test(actualState) || actualState.length !== state.length || !timingSafeEqual(Buffer.from(actualState), Buffer.from(state))) return fail()
+    // The callback is ours, so it settles the sign-in either way: a malformed one names the problem.
+    const refuse = (reason: string) => {
+      response.writeHead(400)
+      response.end('Sign-in was not completed. Return to TensorFold for details.')
+      finish(new Error(reason))
+    }
+    const allowed = new Set(['state', 'code', 'error', 'error_description', 'error_uri', 'scope', 'authuser', 'prompt', 'hd', 'iss'])
+    const names = [...url.searchParams.keys()]
+    const unexpected = names.find(name => !allowed.has(name))
+    if (unexpected) return refuse(`Google sign-in failed: the callback carried an unexpected parameter (${unexpected}).`)
+    const repeated = names.find(name => url.searchParams.getAll(name).length !== 1)
+    if (repeated) return refuse(`Google sign-in failed: the callback repeated the parameter ${repeated}.`)
+    // RFC 9207: an issuer that is present must be Google's exactly; its absence is still fine.
+    const issuer = url.searchParams.get('iss')
+    if (issuer !== null && issuer !== GOOGLE_ISS) return refuse(`Google sign-in failed: the callback's issuer was not ${GOOGLE_ISS}, so it was not accepted.`)
     const code = url.searchParams.get('code')
     const error = url.searchParams.get('error')
-    if (url.searchParams.has('code') === url.searchParams.has('error') || !code && !error || code && (code.length > 4096 || /[\s\0]/.test(code))) return fail()
+    if (url.searchParams.has('code') === url.searchParams.has('error') || !code && !error || code && (code.length > 4096 || /[\s\0]/.test(code))) return refuse('Google sign-in failed: the callback carried neither a usable authorization code nor an error.')
     response.writeHead(200)
     response.end(error ? 'Sign-in was not completed. You can close this tab and return to TensorFold.' : 'Google sign-in received. Return to TensorFold to check the connection; you can close this tab.')
-    finish(error ? new Error('Google sign-in was declined or could not be completed.') : undefined, code ?? undefined)
+    finish(error ? new Error(googleOAuthErrorMessage(error, url.searchParams.get('error_description'))) : undefined, code ?? undefined)
   })
   server.requestTimeout = 5_000
   server.headersTimeout = 5_000
