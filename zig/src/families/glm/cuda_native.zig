@@ -239,6 +239,7 @@ const OpenArgs = struct {
 
 fn finishRank(a: OpenArgs) !Loaded {
     const own = a.own;
+    const set = own.e.settings;
     const gpa = own.gpa;
     const io = a.io;
     const ctx = a.ctx;

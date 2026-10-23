@@ -89,10 +89,11 @@ const Fixture = struct {
         f.layers[0].mixer = .{ .mla = undefined };
         f.layers[1].mixer = .{ .kda = undefined };
         f.e.w.layers = &f.layers;
+        try glm.pages.ownSequence(&f.e);
     }
     fn make(f: *Fixture, streams: usize) !*glm.pages.Pages {
         const layout = try glm.pages.layout(t.allocator, &f.e, 0);
-        const p = try glm.pages.Pages.init(t.allocator, &f.e, layout, streams, 8, true);
+        const p = try glm.pages.Pages.init(t.allocator, &f.e, layout, @max(streams, 1), 8, true);
         p.poison = false;
         return p;
     }
@@ -129,15 +130,15 @@ fn overflow(capped: bool) !void {
     var f: Fixture = undefined;
     try f.init(2);
     defer f.deinit();
-    var back: glm.lanes.Lanes = .{ .x = .{ .e = &f.e, .link = undefined }, .paged_only = true };
+    var back: glm.lanes.Lanes = .{ .x = .{ .e = &f.e, .link = undefined } };
     defer back.deinit();
     var ss: [3]lanes.Stream = undefined;
     for (&ss) |*s| s.* = try lanes.Stream.init(t.allocator, .{ .id = "page-test", .prompt = &.{100}, .max_new = 8 });
     defer for (&ss) |*s| s.deinit(t.allocator);
-    try t.expectEqual(@as(u32, 1), (try back.claim(&ss[0])).slot);
-    try t.expectEqual(@as(u32, 2), (try back.claim(&ss[1])).slot);
+    try t.expectEqual(@as(u32, 0), (try back.claim(&ss[0])).slot);
+    try t.expectEqual(@as(u32, 1), (try back.claim(&ss[1])).slot);
+    _ = try f.p.open(0, 1, 8);
     _ = try f.p.open(1, 1, 8);
-    _ = try f.p.open(2, 1, 8);
     try t.expect(!back.fits(1, 8));
     const before = F.allocs;
     const prior = if (capped) try cuda.memory.setAllocationLimit(cuda.memory.usage(false).device + cuda.memory.usage(false).host) else null;
@@ -173,8 +174,10 @@ test "GLM pages: a failed final constructor wait drains before freeing every par
     F.fail_wait = false;
     try t.expectEqual(@as(usize, 1), F.context_waits);
     try t.expectEqual(@as(usize, 0), F.unsafe_frees);
-    try t.expectEqual(F.allocs, F.frees);
-    for (f.e.seqs.items) |q| try t.expect(q == null);
+    try t.expectEqual(F.allocs - 1, F.frees);
+    try t.expect(f.e.seqs.items[0] != null);
+    try t.expectEqual(@as(usize, 0), f.e.seqs.items[0].?.st.capacity);
+    for (f.e.seqs.items[1..]) |q| try t.expect(q == null);
     f.p = try f.make(2);
     f.p.deinit();
 }
@@ -184,15 +187,15 @@ test "GLM pages: table refusal cancels the leader lease and retry returns every 
     try f.init(2);
     defer f.deinit();
     F.fail_put = true;
-    try t.expectError(error.NotReady, f.p.open(1, 600, 100));
+    try t.expectError(error.NotReady, f.p.open(0, 600, 100));
     try t.expect(!f.p.used[0]);
     try t.expect(f.p.pool.idle());
     try t.expectEqual(@as(usize, 0), f.p.leases[0].ids.items.len);
     F.fail_put = false;
-    _ = try f.p.open(1, 600, 100);
+    _ = try f.p.open(0, 600, 100);
     const c = f.p.pool.census();
     try t.expectEqual(c.total, c.free + c.promised + c.kept + c.leased);
-    f.p.close(1);
+    f.p.close(0);
     try t.expectEqual(@as(usize, 8), f.p.pool.census().free);
 }
 
@@ -202,16 +205,16 @@ test "GLM pages: a follower refuses a duplicate owner and rolls back a failed ta
     defer f.deinit();
     f.p.leader = false;
     F.fail_put = true;
-    try t.expectError(error.NotReady, f.p.map(1, &.{ 3, 2 }));
+    try t.expectError(error.NotReady, f.p.map(0, &.{ 3, 2 }));
     try t.expectEqual(@as(usize, 0), f.p.leases[0].ids.items.len);
     try t.expect(!f.p.used[0]);
     F.fail_put = false;
-    try f.p.map(1, &.{ 3, 2 });
-    try t.expectError(error.BadStep, f.p.map(1, &.{ 1, 0 }));
-    try t.expectEqualSlices(u32, &.{ 3, 2 }, f.e.seqs.items[1].?.st.pages);
-    f.p.close(1);
-    try f.p.map(1, &.{ 1, 0 });
-    f.p.close(1);
+    try f.p.map(0, &.{ 3, 2 });
+    try t.expectError(error.BadStep, f.p.map(0, &.{ 1, 0 }));
+    try t.expectEqualSlices(u32, &.{ 3, 2 }, f.e.seqs.items[0].?.st.pages);
+    f.p.close(0);
+    try f.p.map(0, &.{ 1, 0 });
+    f.p.close(0);
     try t.expect(f.p.pool.idle());
 }
 
@@ -225,7 +228,7 @@ test "GLM pages: a failed begin packet cancels its lease and lane before a retry
     var link: glm.follow.Link = undefined;
     link.ids = &.{};
     link.asleep = false;
-    var back: glm.lanes.Lanes = .{ .x = .{ .e = &f.e, .link = &link }, .paged_only = true };
+    var back: glm.lanes.Lanes = .{ .x = .{ .e = &f.e, .link = &link } };
     defer back.deinit();
     var stream = try lanes.Stream.init(t.allocator, .{ .id = "page-test", .prompt = &.{100}, .max_new = 8 });
     defer stream.deinit(t.allocator);
@@ -245,9 +248,10 @@ test "GLM pages: a failed seat binding returns its pages and lane before retry" 
     var f: Fixture = undefined;
     try f.init(2);
     defer f.deinit();
-    try f.e.bind(0);
+    try f.e.bind(1);
     f.d.api.cuModuleUnload = F.unload;
     const v = try imageOwner(&f);
+    v.slot = 1;
     var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
     v.gpa = failing.allocator();
     f.e.images = v;
@@ -256,7 +260,7 @@ test "GLM pages: a failed seat binding returns its pages and lane before retry" 
         v.deinit();
         f.e.images = null;
     }
-    var back: glm.lanes.Lanes = .{ .x = .{ .e = &f.e, .link = undefined }, .paged_only = true };
+    var back: glm.lanes.Lanes = .{ .x = .{ .e = &f.e, .link = undefined } };
     defer back.deinit();
     var stream = try lanes.Stream.init(t.allocator, .{ .id = "page-test", .prompt = &.{100}, .max_new = 8 });
     defer stream.deinit(t.allocator);
@@ -264,12 +268,12 @@ test "GLM pages: a failed seat binding returns its pages and lane before retry" 
     try t.expectEqual(@as(usize, 0), back.lanes.count());
     try t.expect(f.p.pool.idle());
     try t.expectEqual(@as(usize, 8), f.p.pool.census().free);
-    try t.expectEqual(@as(u32, 0), f.e.slot);
+    try t.expectEqual(@as(u32, 1), f.e.slot);
     v.gpa = t.allocator;
     try t.expectEqual(@as(usize, 1), (try back.seat(&stream, 1, 8)).len);
     try t.expectEqual(@as(usize, 1), back.lanes.count());
-    try t.expectEqual(@as(u32, 1), f.e.slot);
-    f.e.release(1);
+    try t.expectEqual(@as(u32, 0), f.e.slot);
+    f.e.release(0);
     try t.expect(f.p.pool.idle());
 }
 
@@ -341,6 +345,7 @@ test "GLM pages: every post-image startup refusal drains and frees the actual im
     for (0..4) |phase| {
         var f: Fixture = undefined;
         try f.prepare();
+        defer f.freeSequences();
         f.d.api.cuModuleUnload = F.unload;
         f.e.images = try imageOwner(&f);
         defer if (f.e.images) |v| v.deinit();
@@ -360,7 +365,7 @@ test "GLM pages: every post-image startup refusal drains and frees the actual im
         try glm.open_owner.finish(&f.e, {}, Open.after);
         f.e.images.?.deinit();
         f.e.images = null;
-        try t.expectEqual(F.allocs, F.frees);
+        try t.expectEqual(F.allocs - 1, F.frees);
         try t.expectEqual(@as(usize, 2), F.unloads);
     }
 }
