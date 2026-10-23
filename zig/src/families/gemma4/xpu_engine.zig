@@ -6,7 +6,24 @@ const cfg = @import("xpu_config.zig");
 pub const Runner = fwd.Runner;
 pub const config = cfg;
 
+/// A kept prompt state: the global layers' K/V rows [0, at) and the sliding layers' ring slots (first `min(at, 1536)`).
+pub const Snap = struct {
+    at: u32,
+    k: [24]*anyopaque,
+    v: [24]*anyopaque,
+    bytes: u64,
+};
+
+fn rowBytes(layer: usize) u64 {
+    return if (cfg.isGlobal(layer)) cfg.kv_heads * cfg.dim_g * 2 else cfg.kv_heads * cfg.dim_s * 2;
+}
+
+fn rowsKept(layer: usize, at: u32) u64 {
+    return if (cfg.isGlobal(layer)) at else @min(at, cfg.ring);
+}
+
 pub const Engine = struct {
+    pub const Snapshot = Snap;
     r: *fwd.Runner,
     /// The lane backend reads the position here (the runner's, kept in step).
     m: struct { pos: u32 = 0 } = .{},
@@ -66,5 +83,57 @@ pub const Engine = struct {
         try e.r.feed(ids, false);
         e.m.pos = e.r.pos;
         try e.r.d.sync();
+    }
+
+    /// Prompt tokens [from, to) at the position `from`; the last row's logits are kept when `to` ends the prompt.
+    pub fn prefillSpan(e: *Engine, ids: []const u32, from: usize, to: usize, _: usize) !void {
+        if (e.m.pos != from) return error.PositionMismatch;
+        try e.r.feed(ids[from..to], to == ids.len);
+        e.m.pos = e.r.pos;
+    }
+
+    pub fn snapBytes(_: *const Engine, at: u32) u64 {
+        var n: u64 = 0;
+        for (0..24) |l| n += 2 * rowsKept(l, at) * rowBytes(l);
+        return n;
+    }
+
+    pub fn snapSave(e: *Engine, at: u32) !*Snap {
+        if (e.m.pos != at) return error.SnapshotOutOfStep;
+        const d = e.r.d;
+        const s = try std.heap.page_allocator.create(Snap);
+        errdefer std.heap.page_allocator.destroy(s);
+        s.at = at;
+        s.bytes = 0;
+        for (0..24) |l| {
+            const n = rowsKept(l, at) * rowBytes(l);
+            s.k[l] = try d.alloc_(n);
+            s.v[l] = try d.alloc_(n);
+            try d.copy(s.k[l], e.r.kc[l], n);
+            try d.copy(s.v[l], e.r.vc[l], n);
+            s.bytes += 2 * n;
+        }
+        return s;
+    }
+
+    /// The runner's state becomes the snapshot's: K/V rows and ring slots copied back, the position `at`.
+    pub fn snapRestore(e: *Engine, s: *const Snap) !void {
+        const d = e.r.d;
+        for (0..24) |l| {
+            const n = rowsKept(l, s.at) * rowBytes(l);
+            try d.copy(e.r.kc[l], s.k[l], n);
+            try d.copy(e.r.vc[l], s.v[l], n);
+        }
+        e.r.pos = s.at;
+        e.m.pos = s.at;
+    }
+
+    pub fn snapDrop(e: *Engine, s: *Snap) void {
+        e.r.d.settle();
+        for (0..24) |l| {
+            e.r.d.g.free(s.k[l]);
+            e.r.d.g.free(s.v[l]);
+        }
+        std.heap.page_allocator.destroy(s);
     }
 };

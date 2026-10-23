@@ -155,9 +155,13 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     const free = freeMemory(&h.ctx);
     const budget: u64 = if (free > 2 << 30) @min(want, free - (2 << 30)) else 0;
     h.cache = null;
-    if (drafted and budget > 0) {
-        h.cache = api.prompt_cache.Store.init(gpa, h.backend.snapshots(), .{ .lookahead = 1, .planned = true }, budget);
+    std.log.info("xpu: prompt cache budget {d} MiB (free {d} MiB, asked {d} MiB)", .{ budget >> 20, free >> 20, want >> 20 });
+    const kept = @hasDecl(S.Engine, "snapSave");
+    if ((drafted or kept) and budget > 0) {
+        const rules: api.prompt_cache.Rules = if (@hasDecl(S, "cache_rules")) S.cache_rules else .{ .lookahead = 1, .planned = true };
+        h.cache = api.prompt_cache.Store.init(gpa, h.backend.snapshots(), rules, budget);
         h.host.cache = &h.cache.?;
+        h.host.info_.prompt_cache = true;
     }
     h.host.memory = .{ .read = readMemory };
     h.host.explain = .{ .text = lane.explain };
