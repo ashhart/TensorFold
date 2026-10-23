@@ -30,6 +30,9 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const rotary_cache = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"rotary cache:"} }));
     b.step("test-rotary-cache-host", "Rotary source fallback and same-command cache dispatch without shaders").dependOn(&rotary_cache.step);
     all.dependOn(&rotary_cache.step);
+    const standard = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{ "Flash Next standard frame:", "the standard frame:" } }));
+    b.step("test-flashnext-standard-frame-host", "Standard image positions, decode windows and session growth without shaders").dependOn(&standard.step);
+    all.dependOn(&standard.step);
     const tests_ = b.addTest(.{ .root_module = root, .filters = &.{"batch widths:"} });
     const run = b.addRunArtifact(tests_);
     run.has_side_effects = true;

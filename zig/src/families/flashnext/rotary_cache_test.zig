@@ -5,8 +5,8 @@ const f = @import("vision_contract.zig");
 const ks = @import("kernel_sources");
 const a = std.testing.allocator;
 
-test "rotary cache: all four consumers retain the precise fallback and constant address space" {
-    for ([_]f.Which{ .target, .pooled, .absolute, .mrope }) |which| {
+test "rotary cache: all six consumers retain the precise fallback and constant address space" {
+    for ([_]f.Which{ .target, .mtp, .pooled, .absolute, .mrope, .positioned }) |which| {
         const original = f.source(which);
         const changed = try cache.source(a, original, true);
         defer a.free(changed);

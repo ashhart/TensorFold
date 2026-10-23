@@ -192,8 +192,7 @@ pub const Session = struct {
         d.bpos = null;
         if (m.bpos != null) { // the block positions it has, then the blocks past them at their slot plus delta
             const out = dst.blocks.b.slice(i32, blockCount(d.cap) * 3);
-            @memcpy(out[0 .. blockCount(m.cap) * 3], s.blocks.b.slice(i32, blockCount(m.cap) * 3));
-            for (blockCount(m.cap)..blockCount(d.cap)) |b| @memcpy(out[b * 3 ..][0..3], &@as([3]i32, @splat(@as(i32, @intCast(4 * b)) + m.delta)));
+            fz.vis_prompt.moveBlocks(out, s.blocks.b.slice(i32, blockCount(m.cap) * 3), m.delta);
             d.bpos = dst.blocks;
         }
         dst.held = s.held;

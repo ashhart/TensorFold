@@ -403,9 +403,7 @@ pub const Backend = struct {
         @memcpy(pos8[0..plan.total], plan.positions[0..plan.total]);
         for (windows, 0..) |w, i| { // an image stream's rows past its last image rotate at their slot plus its delta
             const d = (try b.session(w.stream)).m.delta;
-            if (d != 0) for (pos8[plan.starts[i]..][0..w.rows()]) |*p| {
-                p.* = @intCast(@as(i64, p.*) + d);
-            };
+            fz.vis_prompt.decodePositions(pos8[plan.starts[i]..][0..w.rows()], d);
         }
         const cb = b.e.r.queue.commandBuffer();
         b.e.r.enc = cb.compute(.serial);

@@ -50,3 +50,7 @@ test {
 test {
     _ = @import("src/families/flashnext/load_weights_test.zig");
 }
+
+test {
+    _ = @import("src/families/flashnext/vis_prompt.zig");
+}

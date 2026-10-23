@@ -98,14 +98,18 @@ pub fn standardFrame(gpa: std.mem.Allocator, spans: []const Span) ![]i32 {
 
 fn frameBy(gpa: std.mem.Allocator, spans: []const Span, shift: i64) ![]i32 {
     if (spans.len == 0) return &.{};
-    const last = spans[spans.len - 1];
-    const end: usize = @as(usize, last.at) + last.n;
+    var end: usize = 0;
+    for (spans) |s| {
+        if (s.mh == 0 or s.mw == 0 or s.n == 0 or @as(u64, s.n) != @as(u64, s.mh) * s.mw or s.at < end)
+            return error.BadImageSpans;
+        end = @as(usize, s.at) + s.n;
+        if (end > std.math.maxInt(i32)) return error.BadImageSpans;
+    }
     const out = try gpa.alloc(i32, end * 3);
     errdefer gpa.free(out);
     var cur: i64 = 0; // transformers' current_pos
     var slot: usize = 0;
     for (spans) |s| {
-        if (s.at < slot or s.n != s.mh * s.mw) return error.BadImageSpans;
         while (slot < s.at) : (slot += 1) {
             @memset(out[slot * 3 ..][0..3], @intCast(cur + shift));
             cur += 1;
@@ -194,4 +198,100 @@ test "the rows of a span a chunk holds" {
     try std.testing.expectEqual(@as(?[3]usize, null), VisPrompt.overlap(s, 0, 10));
     try std.testing.expectEqual(@as(?[3]usize, .{ 5, 7, 5 }), VisPrompt.overlap(s, 5, 10));
     try std.testing.expectEqual(@as(?[3]usize, .{ 0, 12, 15 }), VisPrompt.overlap(s, 15, 100));
+}
+
+/// Decode rows past the final image use the standard frame's offset; cache and sampling slots stay unchanged.
+pub fn decodePositions(out: []u32, delta: i32) void {
+    if (delta != 0) for (out) |*p| {
+        p.* = @intCast(@as(i64, p.*) + delta);
+    };
+}
+
+/// A larger session retains every old block position; extra decode blocks follow the last image's offset.
+pub fn moveBlocks(out: []i32, old: []const i32, delta: i32) void {
+    @memcpy(out[0..old.len], old);
+    for (old.len / 3..out.len / 3) |b| @memcpy(out[b * 3 ..][0..3], &@as([3]i32, @splat(@as(i32, @intCast(4 * b)) + delta)));
+}
+
+test "Flash Next standard frame: malformed spans refuse before allocation or position writes" {
+    const a = std.testing.allocator;
+    for ([_]Span{
+        .{ .at = 0, .n = 0, .mh = 0, .mw = 0, .row = 0 },
+        .{ .at = 0, .n = 1, .mh = 0, .mw = 1, .row = 0 },
+        .{ .at = 0, .n = 1, .mh = 65536, .mw = 65536, .row = 0 },
+        .{ .at = std.math.maxInt(u32), .n = 1, .mh = 1, .mw = 1, .row = 0 },
+    }) |s| {
+        try std.testing.expectError(error.BadImageSpans, standardFrame(a, &.{s}));
+        try std.testing.expectError(error.BadImageSpans, frame(a, &.{s}));
+    }
+    const out_of_order = [_]Span{
+        .{ .at = 4, .n = 4, .mh = 2, .mw = 2, .row = 0 },
+        .{ .at = 1, .n = 1, .mh = 1, .mw = 1, .row = 4 },
+    };
+    try std.testing.expectError(error.BadImageSpans, standardFrame(a, &out_of_order));
+    try std.testing.expectEqual(@as(usize, 0), (try standardFrame(a, &.{})).len);
+}
+
+test "Flash Next standard frame: chunked and resumed positions equal a fresh image append" {
+    const a = std.testing.allocator;
+    const spans = [_]Span{
+        .{ .at = 3, .n = 6, .mh = 2, .mw = 3, .row = 0 },
+        .{ .at = 12, .n = 4, .mh = 2, .mw = 2, .row = 6 },
+    };
+    const first = try standardFrame(a, spans[0..1]);
+    defer a.free(first);
+    const both = try standardFrame(a, &spans);
+    defer a.free(both);
+    const old: VisPrompt = .{ .rows = undefined, .spans = spans[0..1], .pos3 = first, .frame_end = 9, .delta = -3, .prep = undefined };
+    const fresh: VisPrompt = .{ .rows = undefined, .spans = &spans, .pos3 = both, .frame_end = 16, .delta = -5, .prep = undefined };
+    var whole: [24]i32 = undefined;
+    var whole3: [72]i32 = undefined;
+    fresh.positions(0, 24, &whole, &whole3);
+    for ([_]usize{ 1, 2, 4, 7, 16 }) |chunk| {
+        var resumed: [24]i32 = undefined;
+        var resumed3: [72]i32 = undefined;
+        old.positions(0, 12, resumed[0..12], resumed3[0..36]);
+        var at: usize = 12;
+        while (at < 24) {
+            const n = @min(chunk, 24 - at);
+            fresh.positions(at, n, resumed[at..][0..n], resumed3[at * 3 ..][0 .. n * 3]);
+            at += n;
+        }
+        try std.testing.expectEqualSlices(i32, &whole, &resumed);
+        try std.testing.expectEqualSlices(i32, &whole3, &resumed3);
+    }
+    try std.testing.expectEqual([3]i32{ 6, 6, 6 }, fresh.at(9));
+    try std.testing.expectEqual([3]i32{ 9, 9, 9 }, fresh.at(12));
+    try std.testing.expectEqual([3]i32{ 19, 19, 19 }, fresh.at(24));
+}
+
+test "Flash Next standard frame: mixed decode windows keep independent offsets and sampling slots" {
+    const meta = @import("batch_meta.zig");
+    const windows = [_]meta.Window{ .{ .slot = 0, .pos = 16, .rows = 3 }, .{ .slot = 1, .pos = 27, .rows = 2 } };
+    const plan = try meta.Plan.init(&windows, 64);
+    var positions = plan.positions;
+    decodePositions(positions[plan.starts[0]..][0..windows[0].rows], -5);
+    decodePositions(positions[plan.starts[1]..][0..windows[1].rows], 0);
+    try std.testing.expectEqualSlices(u32, &.{ 11, 12, 13, 27, 28 }, positions[0..plan.total]);
+    try std.testing.expectEqualSlices(u32, &.{ 17, 18, 19, 28, 29 }, plan.keys[0..plan.total]);
+    var solo = [_]u32{ 16, 17, 18 };
+    decodePositions(&solo, -5);
+    try std.testing.expectEqualSlices(u32, &solo, positions[0..3]);
+}
+
+test "Flash Next standard frame: session growth preserves image axes and extends only decode blocks" {
+    const a = std.testing.allocator;
+    const spans = [_]Span{.{ .at = 3, .n = 6, .mh = 2, .mw = 3, .row = 0 }};
+    const pos = try standardFrame(a, &spans);
+    defer a.free(pos);
+    const vis: VisPrompt = .{ .rows = undefined, .spans = &spans, .pos3 = pos, .frame_end = 9, .delta = -3, .prep = undefined };
+    var old: [12]i32 = undefined;
+    vis.blockPositions(&old, 0, 4);
+    var moved: [24]i32 = undefined;
+    moveBlocks(&moved, &old, -3);
+    var fresh: [24]i32 = undefined;
+    vis.blockPositions(&fresh, 0, 8);
+    try std.testing.expectEqualSlices(i32, &fresh, &moved);
+    try std.testing.expectEqualSlices(i32, &.{ 0, 0, 0, 3, 3, 4, 3, 4, 5, 9, 9, 9 }, moved[0..12]);
+    try std.testing.expectEqualSlices(i32, &.{ 13, 13, 13, 17, 17, 17, 21, 21, 21, 25, 25, 25 }, moved[12..24]);
 }

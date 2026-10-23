@@ -68,7 +68,13 @@ const Lone = struct {
     }
 };
 
-fn serve(request: *const Request, resumes: bool) !struct { opened: u32, resumed: u32 } {
+const Runs = struct { opened: u32, resumed: u32 };
+
+fn serve(request: *const Request, resumes: bool) !Runs {
+    return serveImages(request, resumes, true);
+}
+
+fn serveImages(request: *const Request, resumes: bool, images: bool) !Runs {
     // a drafted family's windowed rounds, as the lone driver's backends run them (lanes/engine_test.zig's model)
     var costs: [16]lanes.config.Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
@@ -81,7 +87,7 @@ fn serve(request: *const Request, resumes: bool) !struct { opened: u32, resumed:
     defer core.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     var lone: Lone = .{ .be = target.backend() };
-    host.lone = .{ .ctx = &lone, .run = Lone.run, .resumes = resumes };
+    host.lone = .{ .ctx = &lone, .run = Lone.run, .resumes = resumes, .images = images };
     try host.start();
     defer host.stop();
     var box: Box = .{};
@@ -173,4 +179,18 @@ test "halt fails a request in the lone driver's prompt pass with the reason" {
     try std.testing.expectEqual(@as(usize, 0), box.tokens.items.len);
     try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
     try std.testing.expectEqual(@as(u32, 1), releases.n);
+}
+
+test "the lone driver's image opt-out keeps both opening and reclaim on the lane core" {
+    const images = [_]api.Image{.{ .pixels = &.{}, .gh = 1, .gw = 1, .at = 1, .tokens = 1 }};
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 24, .images = &images };
+    const denied = try serveImages(&request, true, false);
+    try std.testing.expectEqual(@as(u32, 0), denied.opened);
+    try std.testing.expectEqual(@as(u32, 0), denied.resumed);
+    const allowed = try serve(&request, true);
+    try std.testing.expectEqual(@as(u32, 1), allowed.opened);
+    try std.testing.expectEqual(@as(u32, 1), allowed.resumed);
+    const text = try serveImages(&.{ .prompt = &prompt, .max_tokens = 24 }, true, false);
+    try std.testing.expectEqual(@as(u32, 1), text.opened);
+    try std.testing.expectEqual(@as(u32, 1), text.resumed);
 }
