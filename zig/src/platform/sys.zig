@@ -6,6 +6,11 @@ const builtin = @import("builtin");
 pub const windows = builtin.os.tag == .windows;
 
 pub const c = if (windows) @import("win_c.zig") else std.c;
+/// The environment setters, on every platform: Windows through win_c.zig's wrappers, elsewhere through libc.
+pub const env = if (windows) @import("win_c.zig") else struct {
+    pub extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    pub extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
 pub const atomic_file = @import("atomic_file.zig");
 
 /// std.posix, or its sockets, signals and limits over Winsock and console events.

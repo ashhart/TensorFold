@@ -3,15 +3,14 @@ const std = @import("std");
 const runtime = @import("src/core/picture/runtime.zig");
 const libs = @import("sys").optional_libraries;
 const fixture = @import("codec_fixture");
-extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
-extern "c" fn _putenv_s([*:0]const u8, [*:0]const u8) c_int;
+const env = @import("sys").env;
 
 test "codec diagnostics: loadable, missing, wrong and incomplete libraries reflect actual decoder admission" {
     const a = std.testing.allocator;
     const path = try a.dupeSentinel(u8, fixture.library, 0);
     defer a.free(path);
     for ([_][:0]const u8{ "TENSORFOLD_LIBTURBOJPEG", "TENSORFOLD_LIBWEBP" }) |name| {
-        const rc = if (comptime @import("builtin").os.tag == .windows) _putenv_s(name, path) else setenv(name, path, 1);
+        const rc = env.setenv(name, path, 1);
         try std.testing.expectEqual(@as(c_int, 0), rc);
     }
     const rows = try runtime.probe(a, std.testing.io);

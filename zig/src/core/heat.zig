@@ -195,10 +195,7 @@ test "the chunk runs under the high band, and a hot reading waits until the low 
     try std.testing.expectEqual(@as(u32, 1), stuck.sleeps); // a cancel ends the wait after the pause it came in
 }
 
-const env = if (@import("builtin").os.tag == .windows) @import("sys").c else struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: i32) i32;
-    extern "c" fn unsetenv(name: [*:0]const u8) i32;
-};
+const env = @import("sys").env;
 
 fn putEnv(name: [*:0]const u8, value: ?[*:0]const u8) void {
     if (value) |v| {

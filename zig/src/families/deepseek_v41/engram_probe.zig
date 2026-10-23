@@ -81,7 +81,7 @@ fn spinner(s: Spin) void {
 
 var seed_calls: u64 = 0;
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+const env = @import("sys").env;
 
 fn pool(gpa: std.mem.Allocator, rows: *er.Rows, shards: []const Shard, batch: usize, trials: usize, mode: []const u8, label: []const u8, w: *std.Io.Writer) !void {
     // fresh rows each measurement: a batch size's second run must not re-read its first's (cached) rows
@@ -126,9 +126,9 @@ pub fn main(gpa: std.mem.Allocator, dir: []const u8, rank: u32, world: u32, w: *
     const n = @max(1, (std.Thread.getCpuCount() catch 4) -| 2);
     for ([_][]const u8{ "threads", "aio", "aio-poll", "io_uring" }) |mode| {
         const aio = std.mem.startsWith(u8, mode, "aio");
-        _ = setenv("TF_DSV41_ENGRAM_URING", if (std.mem.eql(u8, mode, "io_uring")) "1" else "0", 1);
-        _ = setenv("TF_DSV41_ENGRAM_AIO", if (aio) "1" else "0", 1);
-        _ = setenv("TF_DSV41_ENGRAM_POLL", if (std.mem.eql(u8, mode, "aio-poll")) "1" else "0", 1);
+        _ = env.setenv("TF_DSV41_ENGRAM_URING", if (std.mem.eql(u8, mode, "io_uring")) "1" else "0", 1);
+        _ = env.setenv("TF_DSV41_ENGRAM_AIO", if (aio) "1" else "0", 1);
+        _ = env.setenv("TF_DSV41_ENGRAM_POLL", if (std.mem.eql(u8, mode, "aio-poll")) "1" else "0", 1);
         const rows = try er.Rows.open(gpa, dir, rank, world, &layers, 65536);
         defer rows.close();
         const got: []const u8 = if (rows.ring != null) "io_uring" else if (rows.aio) |x| (if (x.poll) "aio-poll" else "aio") else if (rows.pool) |_| "threads" else "serial";

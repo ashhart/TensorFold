@@ -3,10 +3,7 @@ const std = @import("std");
 const flash = @import("flashnext");
 const nemo = @import("nemotron").native;
 const startup = @import("cuda_startup.zig");
-const env = if (@import("builtin").os.tag == .windows) @import("sys").c else struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const env = @import("sys").env;
 const variable = "TF_FLASHNEXT_CHUNK";
 
 const Saved = struct {

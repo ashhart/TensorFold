@@ -10,8 +10,7 @@ const kvs = @import("cuda_kv.zig");
 
 const testing = std.testing;
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+const env = @import("sys").env;
 
 test "aot-needs: the pool is the serve path's (kv_state.optionsFromEnv, model.zig's rule), TF_DSV41_NEEDS_POOL aside" {
     const Case = struct { tokens: ?[:0]const u8, split: ?[:0]const u8, force: ?[:0]const u8, pool: bool };
@@ -24,12 +23,12 @@ test "aot-needs: the pool is the serve path's (kv_state.optionsFromEnv, model.zi
         .{ .tokens = "3000000", .split = "1", .force = "0", .pool = false },
     };
     defer for ([_][:0]const u8{ "TF_DSV41_POOL_TOKENS", "TF_DSV41_KV_SPLIT", "TF_DSV41_NEEDS_POOL" }) |k| {
-        _ = unsetenv(k);
+        _ = env.unsetenv(k);
     };
     const limit: i64 = 1 << 20;
     for (cases) |c| {
         inline for (.{ .{ "TF_DSV41_POOL_TOKENS", "tokens" }, .{ "TF_DSV41_KV_SPLIT", "split" }, .{ "TF_DSV41_NEEDS_POOL", "force" } }) |kv| {
-            if (@field(c, kv[1])) |v| _ = setenv(kv[0], v, 1) else _ = unsetenv(kv[0]);
+            if (@field(c, kv[1])) |v| _ = env.setenv(kv[0], v, 1) else _ = env.unsetenv(kv[0]);
         }
         const got = try aot_needs.poolFromEnv(limit, 2);
         try testing.expectEqual(c.pool, got != null);

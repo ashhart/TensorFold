@@ -103,9 +103,7 @@ const Owned = struct {
     lanes: glm_lanes.Lanes,
 };
 
-const env = if (@import("builtin").os.tag == .windows) @import("sys").c else struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-};
+const env = @import("sys").env;
 
 /// Every peer's send/recv connected now, before the weights fill memory (connected on first use, ibv_reg_mr can fail).
 fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {

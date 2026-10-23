@@ -542,10 +542,7 @@ pub fn Namespace(comptime Tri: type) type {
         }
 
         test "a bad TF_FLASHNEXT_CHUNK is refused at load before the loader takes a stream, a module or a buffer" {
-            const env = if (@import("builtin").os.tag == .windows) @import("sys").c else struct {
-                extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: i32) i32;
-                extern "c" fn unsetenv(name: [*:0]const u8) i32;
-            };
+            const env = @import("sys").env;
             defer _ = env.unsetenv("TF_FLASHNEXT_CHUNK");
             // every driver entry point undefined: the refusal must come before the first call
             var driver: cuda.Driver = undefined;

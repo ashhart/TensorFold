@@ -10,7 +10,7 @@ pub const alignment = 16384;
 pub const max_ranks = 64;
 pub const Error = abi.Error || std.mem.Allocator.Error || error{ InvalidConfig, OpenFailed, ConnectFailed, UnsupportedLink, WindowMismatch, ThreadFailed, NeedNLinkLibrary };
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+const env = @import("sys").env;
 
 pub const Link = struct { peer: u32, device: [:0]const u8, via: [:0]const u8, port: u16, peer_port: u16 = 0, name: [:0]const u8, gid: c_int = 1, ports: []const u16 = &.{}, peer_ports: []const u16 = &.{} };
 pub const Config = struct { rank: u32, ranks: u32, window_bytes: usize, staging_bytes: usize, links: []const Link, timeout_ns: u64 = 10 * std.time.ns_per_s, connect_timeout_ns: u64 = 300 * std.time.ns_per_s };
@@ -88,7 +88,7 @@ pub const Endpoint = struct {
         const stage = std.math.mul(usize, config.ranks, config.staging_bytes) catch return error.InvalidConfig;
         const bytes = std.math.add(usize, config.window_bytes, stage) catch return error.InvalidConfig;
         // the library places each arriving message on a CPU thread: user-interactive unless MCDMA_FABRIC_QOS is set
-        _ = setenv("MCDMA_FABRIC_QOS", "1", 0);
+        _ = env.setenv("MCDMA_FABRIC_QOS", "1", 0);
         const self = try gpa.create(Endpoint);
         errdefer gpa.destroy(self);
         self.* = .{ .gpa = gpa, .library = try abi.Library.open(library_path), .config = config, .memory = undefined, .ports = undefined };
@@ -359,14 +359,12 @@ pub const Endpoint = struct {
 
 pub const Region = Endpoint;
 
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-
 test "an endpoint gives the library's placing thread user-interactive QoS unless MCDMA_FABRIC_QOS is set" {
     const link: Link = .{ .peer = 1, .device = "rdma_en4", .via = "en4/192.0.2.2", .port = 7490, .name = "pair" };
     const config: Config = .{ .rank = 0, .ranks = 2, .window_bytes = alignment, .staging_bytes = alignment, .links = &.{link} };
-    defer _ = unsetenv("MCDMA_FABRIC_QOS");
+    defer _ = env.unsetenv("MCDMA_FABRIC_QOS");
     for ([_]?[*:0]const u8{ null, "0", "1" }) |set| {
-        _ = if (set) |v| setenv("MCDMA_FABRIC_QOS", v, 1) else unsetenv("MCDMA_FABRIC_QOS");
+        _ = if (set) |v| env.setenv("MCDMA_FABRIC_QOS", v, 1) else env.unsetenv("MCDMA_FABRIC_QOS");
         try std.testing.expectError(error.McdmaFabricUnavailable, Endpoint.create(std.testing.allocator, "/nonexistent/libmcdma-fabric.dylib", config));
         try std.testing.expectEqualStrings(if (set) |v| std.mem.span(v) else "1", if (platform.c.getenv("MCDMA_FABRIC_QOS")) |v| std.mem.span(v) else "(unset)");
     }
