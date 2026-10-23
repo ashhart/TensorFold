@@ -253,7 +253,7 @@ pub const Runner = struct {
             return;
         }
         if (w.wide) {
-            if (w.n <= 6144 and std.c.getenv("XPU_D16") != null)
+            if (w.n <= 6144) // 64 columns a group: twice the groups of the 128-column kernel on these narrow-N shapes
                 try r.d.launch(k.dec_wide16, .{ .x = 1, .y = w.n / 64 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
             else if (w.n >= 30000)
                 try r.d.launch(k.dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
