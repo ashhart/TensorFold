@@ -1,4 +1,4 @@
-import { isManagedComputeProvider, isLoopbackUrl } from '../../shared/provider-trust'
+import { isDonationProvider, isManagedComputeProvider, isLoopbackUrl } from '../../shared/provider-trust'
 import type { Provider, SecurityRole } from './types'
 import { resolvePinnedHost, type PinnedHost, type PinnedHostResolver } from './pinned-fetch'
 import { ipv4MappedToDotted, isLoopbackHost, isPrivateHost, isPrivateIp, isKnownMetadataIp, isGloballyRoutableIp, isLoopbackIp, isAlwaysForbiddenConnectorIp, isLinkLocalOrMetadataHost } from './security-addresses'
@@ -72,7 +72,7 @@ export function assertProviderEndpoint(provider: Provider): void {
   if (provider.transport === 'codex-cli' || provider.transport === 'claude-cli' || provider.transport === 'opencode' || provider.transport === 'kilo' || provider.transport === 'pi-cli' || provider.transport === 'cursor-cli' || provider.transport === 'gemini-cli') return
   const url = new URL(provider.baseUrl)
   if (url.username || url.password) throw new Error('Provider URLs must not include embedded credentials.')
-  if (isManagedComputeProvider(provider)) {
+  if (isManagedComputeProvider(provider) || isDonationProvider(provider)) {
     if (url.protocol !== 'https:' && !isLoopbackUrl(url.toString())) throw new Error('Managed compute endpoints require HTTPS or a verified loopback forward.')
     if (isLinkLocalOrMetadataHost(url.hostname)) throw new Error('Managed compute endpoints cannot use metadata or link-local destinations.')
     return
@@ -94,7 +94,7 @@ export async function assertProviderEndpointResolved(provider: Provider): Promis
     if (isAlwaysForbiddenConnectorIp(address)) {
       throw new Error(`Provider host resolves to a link-local, metadata, or unspecified address (${address}); refusing to send credentials.`)
     }
-    if (isManagedComputeProvider(provider)) { assertRemoteOrchestratorAddress(new URL(provider.baseUrl), address); return }
+    if (isManagedComputeProvider(provider) || isDonationProvider(provider)) { assertRemoteOrchestratorAddress(new URL(provider.baseUrl), address); return }
     if (provider.kind === 'local') {
       if (!isPrivateIp(address)) throw new Error(`Local provider host resolves to a public address (${address}); mark public endpoints as cloud providers.`)
       return

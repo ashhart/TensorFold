@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "デバイスを更新して電話を選び、現在のチャットに操作を許可してください。",
   "Refresh file states": "ファイルの状態を更新",
   "Refresh models": "モデルを更新",
-  "Refresh phone devices": "電話デバイスを更新"
+  "Refresh phone devices": "電話デバイスを更新",
+  "Lend or borrow": "貸す・借りる",
+  "Lend or borrow compute": "計算資源を貸す・借りる",
+  "Community": "コミュニティ"
 }

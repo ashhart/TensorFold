@@ -5,6 +5,8 @@ import { upsertTrustedHostKey } from '../../agent/ssh-connection'
 import type { TrustedSshHostKey } from '../../agent/types'
 import path from 'node:path'
 import { registerClusterRuntime } from './cluster-runtime'
+import { registerDonationRuntime } from './donation-runtime'
+import { registerDonationHost } from './donation-host'
 import type { SshManager } from './ssh'
 import { normalizeStoredHelperDefaults } from '../../store/model-helper-defaults'
 import { normalizeStoredUiPreferences } from '../../store/ui-preferences'
@@ -168,6 +170,8 @@ export function registerCoreIpc(deps: CoreIpcDeps) {
   registerRemoteControlIpc({ remoteServer, confirmSensitiveAction, ensureRemoteControlToken })
   registerSshIpc({ sshManager, profileRoot: vontraHomeDir, reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['settings:configuration'] }), serializeSettings: operation => settingsChanges.run('settings', operation) })
   if (sshManager?.resolveHost && sshManager.sessionForHost) registerClusterRuntime({ sshManager: { resolveHost: id => sshManager.resolveHost!(id), sessionForHost: id => sshManager.sessionForHost!(id) }, workspaceMutationGuard, serializeSettings: operation => settingsChanges.run('settings', operation), bundlePath: () => path.join(__dirname, 'cluster-node.js') })
+  registerDonationRuntime({ serializeSettings: operation => settingsChanges.run('settings', operation) })
+  registerDonationHost()
   registerWorkspaceIpc({
     remoteServer,
     spine,

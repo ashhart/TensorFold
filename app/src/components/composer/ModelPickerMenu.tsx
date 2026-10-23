@@ -10,6 +10,7 @@ import { isExternalProvider } from '../../../shared/provider-trust'
 import { api } from '../../lib/ipc'
 import { Menu } from '../ui'
 import type { Provider, Project, TokenUsageSnapshot } from '../../lib/types'
+import type { DonationCardView } from '../../../shared/donation'
 import type { RecentModel } from '../../lib/recent-models'
 import { accountLabel, modelDisplayName } from '../../lib/provider-accounts'
 import { modelUsageLabel } from '../../lib/provider-usage'
@@ -58,7 +59,8 @@ function ModelPickerBody({ close, ...props }: ModelPickerMenuProps & { close: ()
   const { snapshot: learning } = useLearning()
   const setView = useStore((s) => s.setView)
   const [query, setQuery] = useState('')
-  const [scope, setScope] = useState<'all' | 'local' | 'external'>('all')
+  const [scope, setScope] = useState<'all' | 'local' | 'external' | 'community'>('all')
+  const [community, setCommunity] = useState<DonationCardView[] | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [pending, setPending] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -70,7 +72,7 @@ function ModelPickerBody({ close, ...props }: ModelPickerMenuProps & { close: ()
   const route = (choice: ModelPickerChoice) => ({ providerId: choice.provider.id, accountId: choice.accountId, model: choice.model })
   const choices = modelPickerChoices(props.pickerProviders, snapshot, { requirements: props.requirements, qualifications: props.qualifications }).filter((choice) => !props.localOnly || choice.local).map((choice) => learningBusy(learning) && (choice.provider.source === 'tensorfold' || choice.provider.id === 'tensorfold') && choice.model !== learning?.model
     ? { ...choice, disabledReason: 'Finish the current lesson before changing its local model.' } : choice)
-  const shown = orderFavoritesFirst(filterModelChoices(choices, query, scope), favorites.favorites, route)
+  const shown = orderFavoritesFirst(filterModelChoices(choices, query, scope === 'community' ? 'all' : scope), favorites.favorites, route)
   const activeKey = modelChoiceKey(props.provider.id, props.model ?? '', props.providerAccountId)
   const starred = !query.trim() ? favoriteModelChoices(shown, favorites.favorites, route) : []
   const starredKeys = new Set(starred.map((choice) => choice.key))
@@ -79,6 +81,11 @@ function ModelPickerBody({ close, ...props }: ModelPickerMenuProps & { close: ()
   const groups = [...new Set(grouped.map((choice) => choice.groupId))]
   const builtIn = props.pickerProviders.some((p) => p.source === 'tensorfold')
   useEffect(() => { input.current?.focus() }, [])
+  useEffect(() => {
+    let live = true
+    api.donationList().then((value) => { if (live) setCommunity(value.cards.filter((card) => card.phase !== 'after')) }, () => { if (live) setCommunity([]) })
+    return () => { live = false }
+  }, [])
   const pick = async (choice: ModelPickerChoice) => {
     if (choice.disabledReason || pickLock.current) return
     pickLock.current = true; setPending(choice.key); setError('')
@@ -88,6 +95,13 @@ function ModelPickerBody({ close, ...props }: ModelPickerMenuProps & { close: ()
     } catch (failure) {
       setError(String((failure as Error)?.message ?? failure).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''))
     } finally { pickLock.current = false; setPending(null) }
+  }
+  const pickCommunity = async (provider: Provider, card: DonationCardView) => {
+    if (pickLock.current) return
+    pickLock.current = true; setPending(`donation:${card.id}`); setError('')
+    try { await props.onPickModel(provider, card.model, null); close() }
+    catch (failure) { setError(String((failure as Error)?.message ?? failure).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '')) }
+    finally { pickLock.current = false; setPending(null) }
   }
   const navigate = (event: React.KeyboardEvent) => {
     if (event.nativeEvent.isComposing) return
@@ -130,21 +144,42 @@ function ModelPickerBody({ close, ...props }: ModelPickerMenuProps & { close: ()
   }
   return <div role="dialog" aria-label={tx("Choose a model")} onKeyDown={navigate} className="flex max-h-[min(560px,70vh)] min-h-0 flex-col">
     <div className="shrink-0 px-3 pb-2 pt-2">
-      <div className="mb-3 flex items-center justify-between gap-3"><h2 className="text-[14px] font-semibold text-ink">{tx("Choose a model")}</h2><span className="text-[12px] text-ink-2">{props.localOnly ? tx("Local only") : tx("{value0} models", { value0: choices.length })}</span></div>
+      <div className="mb-3 flex items-center justify-between gap-3"><h2 className="text-[14px] font-semibold text-ink">{tx("Choose a model")}</h2><span className="text-[12px] text-ink-2">{props.localOnly ? tx("Local only") : scope === 'community' ? tx("{value0} models", { value0: community?.length ?? 0 }) : tx("{value0} models", { value0: choices.length })}</span></div>
       <div className="flex items-center gap-2 rounded-lg border border-line bg-surface px-2.5 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/10"><Icon name="search" size={15} className="shrink-0 text-ink-3" /><input ref={input} value={query} onChange={(e) => setQuery(e.target.value)} aria-label={tx("Search models")} aria-controls={`${id}-models`} placeholder={tx("Search models or providers")} className="h-9 min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3" />{query && <button type="button" aria-label={tx("Clear model search")} onClick={() => { setQuery(''); input.current?.focus() }} className="rounded p-1 text-ink-2 hover:bg-ink-5"><Icon name="x" size={12} /></button>}</div>
-      {!props.localOnly && <div className="mt-2 flex gap-1" aria-label={tx("Model location")}>{([['all', tx('All')], ['local', api.platform === 'darwin' ? tx('On this Mac') : tx('Local')], ['external', tx('External')]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={scope === value} onClick={() => setScope(value)} className={clsx('rounded-md px-2.5 py-1.5 text-[12px] transition-colors', scope === value ? 'bg-ink-5 font-medium text-ink' : 'text-ink-2 hover:bg-ink-5')}>{label}</button>)}</div>}
+      {!props.localOnly && <div className="mt-2 flex gap-1" aria-label={tx("Model location")}>{([['all', tx('All')], ['local', api.platform === 'darwin' ? tx('On this Mac') : tx('Local')], ['external', tx('External')], ['community', tx('Community')]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={scope === value} onClick={() => setScope(value)} className={clsx('rounded-md px-2.5 py-1.5 text-[12px] transition-colors', scope === value ? 'bg-ink-5 font-medium text-ink' : 'text-ink-2 hover:bg-ink-5')}>{label}</button>)}</div>}
       {(props.requirements?.images || props.requirements?.tools || props.requirements?.reasoning) && <p className="mt-2 text-[12px] text-ink-2">{tx("This task requires ")}{[props.requirements.images && 'images', props.requirements.tools && 'tools', props.requirements.reasoning && 'reasoning'].filter(Boolean).join(', ')}{tx("; unknown capabilities have not been qualified.")}</p>}
       {props.localOnly && <p className="mt-2 text-[12px] text-ink-2">{props.policyProject?.name ?? tx("This conversation")} {tx("keeps work on this Mac.")}</p>}
     </div>
     <div ref={list} id={`${id}-models`} className="scroll-thin min-h-0 flex-1 overflow-y-auto border-t border-line px-1 py-1">
-      {starred.length > 0 && <div className="mb-1"><p className="px-3 pb-1 pt-2 text-[12px] font-medium text-ink-2">{tx("Favourites")}</p>{starred.map((choice) => row(choice))}</div>}
-      {recents.length > 0 && <div className="mb-1"><p className="px-3 pb-1 pt-2 text-[12px] font-medium text-ink-2">{tx("Recently used")}</p>{recents.map((choice) => row(choice, true))}</div>}
-      {groups.map((groupId) => {
+      {scope === 'community' && <div className="mb-1">
+        <div className="flex items-center justify-between gap-2 px-3 pb-1 pt-2"><span className="truncate text-[12px] font-medium text-ink-2">TensorFold Community</span>{<PlanningOnlyBadge />}</div>
+        {community === null ? <p role="status" className="px-3 py-4 text-[12px] text-ink-2">Reading community machines…</p>
+          : community.length === 0 ? <div role="status" className="px-4 py-7 text-center"><p className="text-[13px] font-medium text-ink">No community machines yet</p><p className="mt-1 text-[12px] leading-5 text-ink-2">Lend one from Models → Lend or borrow, or paste a card somebody handed you.</p></div>
+          : community.filter((card) => !query.trim() || `${card.model} ${card.label}`.toLowerCase().includes(query.trim().toLowerCase())).map((card) => {
+            const provider = props.pickerProviders.find((row) => row.id === `donation:${card.id}`)
+            const key = `donation:${card.id}`
+            const open = card.phase === 'open'
+            const spec = card.spec
+            const detail = [card.label, spec?.hardware, spec?.quantization, spec?.contextTokens ? `${spec.contextTokens.toLocaleString()} ctx` : null, spec?.tokensPerSecond ? `${spec.tokensPerSecond} tok/s` : null].filter(Boolean).join(' · ')
+            return <button key={key} type="button" data-model-choice={key} disabled={!provider || pending != null} onClick={() => { if (!provider) return; void pickCommunity(provider, card) }}
+              className="group flex w-full min-w-0 items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-ink-5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-55">
+              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-line bg-card-2 text-ink-2"><Icon name="cpu" size={15} /></span>
+              <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-center gap-2"><span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{card.model}</span><span className={open ? 'shrink-0 rounded-full bg-accent/10 px-1.5 py-px text-[11px] text-accent' : 'shrink-0 rounded-full border border-line px-1.5 py-px text-[11px] text-ink-3'}>{open ? 'open' : 'opens later'}</span></span>
+                <span className="mt-0.5 block truncate text-[12px] leading-5 text-ink-2">{detail || card.endpoint}</span>
+                <span className="mt-1 flex flex-wrap gap-x-2 text-[12px] leading-5 text-ink-3">{provider ? <span>up to {card.caps.maxConcurrent} at a time · {card.caps.maxTokensPerRequest} tokens</span> : <span className="text-warn">This card has no provider in the workspace; import it again.</span>}</span>
+              </span>
+            </button>
+          })}
+      </div>}
+      {scope !== 'community' && starred.length > 0 && <div className="mb-1"><p className="px-3 pb-1 pt-2 text-[12px] font-medium text-ink-2">{tx("Favourites")}</p>{starred.map((choice) => row(choice))}</div>}
+      {scope !== 'community' && recents.length > 0 && <div className="mb-1"><p className="px-3 pb-1 pt-2 text-[12px] font-medium text-ink-2">{tx("Recently used")}</p>{recents.map((choice) => row(choice, true))}</div>}
+      {scope !== 'community' && groups.map((groupId) => {
         const entries = grouped.filter((choice) => choice.groupId === groupId)
         const first = entries[0]
         return <div key={groupId} className="mb-1"><div className="flex items-center justify-between gap-2 px-3 pb-1 pt-2"><span className="truncate text-[12px] font-medium text-ink-2">{first.groupLabel}</span>{!first.local && <PlanningOnlyBadge />}</div>{entries.map((choice) => row(choice))}</div>
       })}
-      {!shown.length && <div role="status" className="px-4 py-7 text-center"><p className="text-[13px] font-medium text-ink">{query ? tx("No matching models") : scope === 'local' ? tx("No local models yet") : tx("No models available")}</p><p className="mt-1 text-[12px] leading-5 text-ink-2">{query ? tx("Try a model name, provider or account.") : props.localOnly || scope === 'local' ? (api.platform === 'darwin' ? tx("Download a model that fits this Mac to get started.") : tx("Download a local model or connect a provider to get started.")) : tx("Download a local model or connect a provider to get started.")}</p>{query && <button type="button" onClick={() => { setQuery(''); setScope('all'); input.current?.focus() }} className="mt-3 rounded-md px-3 py-1.5 text-[12px] font-medium text-accent hover:bg-accent/8">{tx("Clear search")}</button>}</div>}
+      {scope !== 'community' && !shown.length && <div role="status" className="px-4 py-7 text-center"><p className="text-[13px] font-medium text-ink">{query ? tx("No matching models") : scope === 'local' ? tx("No local models yet") : tx("No models available")}</p><p className="mt-1 text-[12px] leading-5 text-ink-2">{query ? tx("Try a model name, provider or account.") : props.localOnly || scope === 'local' ? (api.platform === 'darwin' ? tx("Download a model that fits this Mac to get started.") : tx("Download a local model or connect a provider to get started.")) : tx("Download a local model or connect a provider to get started.")}</p>{query && <button type="button" onClick={() => { setQuery(''); setScope('all'); input.current?.focus() }} className="mt-3 rounded-md px-3 py-1.5 text-[12px] font-medium text-accent hover:bg-accent/8">{tx("Clear search")}</button>}</div>}
     </div>
     <div className="shrink-0 border-t border-line px-2 pb-1 pt-1">
       {error && <p role="alert" className="px-2 py-2 text-[12px] leading-5 text-danger">{tx("Could not switch models: ")}{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</p>}

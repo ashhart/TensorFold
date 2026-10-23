@@ -43,7 +43,7 @@ const useStore = Object.assign((selector: any) => selector({ settings, saveSetti
 const onboardingComponents = load('src/components/Onboarding.tsx', {
   '../lib/preferences/useFlowText': hook, '../lib/store': { useStore, requestSettingsSection() {} }, '../lib/ipc': { api: {} }, '../lib/icons': { Icon: () => null }, '../lib/brand': { BrandIcon: () => null, providerBrand: () => 'fixture' }, './ui': { Button, Input: (props: any) => React.createElement('input', props) },
   './settings/shared': { CLOUD_PROVIDER_PRESETS: [], LOCAL_RUNTIME_PRESETS: [], newProviderId: () => 'synthetic', providerPresetNeedsApiKey: () => true }, './onboarding-model': onboarding,
-  './models/EngineChoice': { EngineChoice: engine }, './BrandMark': { BrandMark: () => null }, '../lib/engine': { ENGINE_PROVIDER_ID: 'tensorfold', formatBytes: () => '100 B', useEngine: () => ({ snapshot: null }) },
+  './models/EngineChoice': { EngineChoice: engine }, './compute/CommunityModels': { CommunityModels: () => null }, './BrandMark': { BrandMark: () => null }, '../lib/engine': { ENGINE_PROVIDER_ID: 'tensorfold', formatBytes: () => '100 B', useEngine: () => ({ snapshot: null }) },
   '../lib/full-workspace-layout': { savedFullWorkspaceLayout: () => 'chat', fullLayoutPreferenceReadable: () => true }, '../lib/onboarding-landing': { finishOnboardingLanding() {} },
   './onboarding/first-answer/FirstAnswerStep': { FirstAnswerStep: first }, './onboarding/first-answer/MinimalSetupGuide': { MinimalSetupGuide: () => null }, './onboarding/first-answer/model': firstModel,
   './onboarding/first-answer/transition': { openFirstAnswerDraft() {} }, '../lib/conversation-drafts': { conversationDraftsFor() {} }, '../lib/desktop-drafts': { desktopDraftPort: null },

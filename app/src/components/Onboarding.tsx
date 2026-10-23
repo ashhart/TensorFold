@@ -25,12 +25,14 @@ import {
   onboardingStepIndex,
   previousOnboardingStep,
   onboardingProviderVisible,
+  completeOnboarding,
   type OnboardingStepId,
   type OnboardingDesktopMode,
 } from './onboarding-model'
 export { ONBOARDED_KEY, ONBOARDING_STEPS, nextOnboardingStep, onboardingStepIndex, previousOnboardingStep, shouldShowOnboarding } from './onboarding-model'
 import type { Provider, ProviderDiscoveryKind, Readiness } from '../lib/types'
 import { EngineChoice } from './models/EngineChoice'
+import { CommunityModels } from './compute/CommunityModels'
 import { BrandMark } from './BrandMark'
 import { ENGINE_PROVIDER_ID, formatBytes, useEngine } from '../lib/engine'
 import { fullLayoutPreferenceReadable, savedFullWorkspaceLayout } from '../lib/full-workspace-layout'
@@ -510,6 +512,7 @@ function ConnectStep({
         </div>
       )}
       <EngineChoice minimal={desktopMode === 'minimal'} onOpenModels={onOpenEngineModels} onUse={onUseEngineModel} />
+      {desktopMode === 'full' && <CommunityModels heading="Or use a model someone hosts" intro="TensorFold Community: models other people run through the app. Each card lists the hardware, model, context and measured speed the host reports; the host enforces its window and caps. POC — free, with no proof of computation." onPicked={() => completeOnboarding()} />}
       {desktopMode === 'full' && <details className="rounded-xl border border-line p-4"><summary className="cursor-pointer text-[13px] font-medium text-ink focus-visible:outline-2 focus-visible:outline-accent">{t("setup.otherProvider")}</summary><div className="mt-3 grid gap-3 sm:grid-cols-2">
         <ChoiceCard
           testId="onboarding-provider-cloud"

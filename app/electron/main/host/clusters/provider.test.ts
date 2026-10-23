@@ -23,5 +23,12 @@ assert.deepEqual(preserveManagedComputeProviders([{...provider,name:'Renamed'}],
 assert.deepEqual(preserveManagedComputeProviders([],[provider]),[],'Explicit removal remains available')
 for(const patch of [{baseUrl:'http://127.0.0.1:19001/v1'},{apiKey:'replacement'},{models:['Other/Model']},{remoteCompute:undefined},{kind:'local'},{id:'other-provider'}])assert.throws(()=>preserveManagedComputeProviders([{...provider,...patch}],[provider]),/managed|Compute|connection|verified/)
 assert.throws(()=>preserveManagedComputeProviders([provider],[]),/verified/)
+const donated:any={...provider,id:'donation:synthetic-card',name:'Lent machine'}
+assert.deepEqual(preserveManagedComputeProviders([{...donated,name:'Renamed'}],[donated])[0],{...donated,name:'Renamed'},'A donation provider may be renamed like a cluster endpoint')
+assert.throws(()=>preserveManagedComputeProviders([{...donated,baseUrl:'http://127.0.0.1:19002/v1'}],[donated]),/Reconcile/,'A donation endpoint cannot be rewritten through a settings save')
+assert.throws(()=>preserveManagedComputeProviders([{...donated,remoteCompute:undefined}],[]),/verified/,'A donation provider cannot be added by a settings save')
+const reordered:any={source:provider.source,kind:provider.kind,remoteCompute:provider.remoteCompute,models:[...provider.models],apiKey:provider.apiKey,baseUrl:provider.baseUrl,auth:provider.auth,transport:provider.transport,id:provider.id,name:'Renamed'}
+assert.deepEqual(preserveManagedComputeProviders([reordered],[provider])[0],{...provider,name:'Renamed'},'A settings round-trip may reorder fields and still be the same connection')
+assert.deepEqual(preserveManagedComputeProviders([{...provider,name:'Renamed',spendBudget:null}],[provider])[0],{...provider,name:'Renamed'},'Unrelated metadata on the incoming row does not block a save')
 active=false;await assert.rejects(()=>promote(value),/scope changed/)
 console.log('Actual endpoint promotion callback and managed-provider policies: durable settings, remote trust through loopback, transport reachability, metadata/userinfo denial, renderer route/credential protection and rename/removal passed')

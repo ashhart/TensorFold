@@ -29,7 +29,7 @@
     "deps:trusted-scripts": "node node_modules/electron/install.js && npm rebuild --ignore-scripts=false @lydell/node-pty",
     "dev": "npm run install:check && vite",
     "dev:web": "npm run install:check && VONTRA_NO_ELECTRON=1 vite",
-    "build": "npm run install:check && node scripts/clean-build-output.mjs && vite build && node scripts/build-cluster-node.mjs",
+    "build": "npm run install:check && node scripts/clean-build-output.mjs && vite build && node scripts/build-cluster-node.mjs && node scripts/build-donation-node.mjs",
     "engine:fetch": "node scripts/fetch-engine.mjs",
     "pack:linux:dev": "npm run build && node scripts/package-linux.mjs --dir",
     "dist:linux": "npm run build && node scripts/package-linux.mjs --appimage",

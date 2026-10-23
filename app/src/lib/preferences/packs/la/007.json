@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "Machinas renova, telephonum elige et huic colloquio moderationem permitte.",
   "Refresh file states": "Status tabularum renova",
   "Refresh models": "Exemplaria renova",
-  "Refresh phone devices": "Machinas telephonicas renova"
+  "Refresh phone devices": "Machinas telephonicas renova",
+  "Lend or borrow": "Commota aut mutuare",
+  "Lend or borrow compute": "Commota aut mutuare computationem",
+  "Community": "Communitas"
 }

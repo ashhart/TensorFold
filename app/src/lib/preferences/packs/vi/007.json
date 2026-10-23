@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "Làm mới, chọn điện thoại rồi cấp quyền điều khiển cho trò chuyện hiện tại.",
   "Refresh file states": "Làm mới trạng thái tệp",
   "Refresh models": "Làm mới mô hình",
-  "Refresh phone devices": "Làm mới điện thoại"
+  "Refresh phone devices": "Làm mới điện thoại",
+  "Lend or borrow": "Cho mượn hoặc mượn",
+  "Lend or borrow compute": "Cho mượn hoặc mượn sức tính toán",
+  "Community": "Cộng đồng"
 }

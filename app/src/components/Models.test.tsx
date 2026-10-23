@@ -38,6 +38,8 @@ const imports: any = {
 }
 for (const name of Object.keys(placeholders)) if (!['HubRow', 'InstalledRow', 'ModelBenchmarkDrawer', 'ClusterWorkspace'].includes(name)) imports[`./${name === 'ModelFoldersSettings' ? 'settings' : 'models'}/${name}`] = { [name]: placeholders[name] }
 imports['./clusters/ClusterWorkspace'] = { ClusterWorkspace: placeholders.ClusterWorkspace }
+imports['./compute/DonationPanel'] = { DonationPanel: () => null }
+imports['./compute/CommunityModels'] = { CommunityModels: () => null }
 imports['../../shared/hub-failure'] = hubFailure
 imports['./models/benchmark/ModelBenchmarkDrawer'] = { ModelBenchmarkDrawer: placeholders.ModelBenchmarkDrawer }
 const loaded = { exports: {} as any }

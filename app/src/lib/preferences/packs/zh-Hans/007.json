@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "刷新设备，选择手机，再允许当前聊天控制它。",
   "Refresh file states": "刷新文件状态",
   "Refresh models": "刷新模型",
-  "Refresh phone devices": "刷新手机设备"
+  "Refresh phone devices": "刷新手机设备",
+  "Lend or borrow": "出借或借用",
+  "Lend or borrow compute": "出借或借用算力",
+  "Community": "社区"
 }

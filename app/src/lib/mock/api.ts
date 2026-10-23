@@ -1,4 +1,5 @@
 import { createMockClusterApi } from './clusters'
+import { createMockDonationApi } from './donation'
 import { validateDocumentSourceIds } from '../../../shared/document-collections'
 import { createMockModelQualificationApi } from './model-qualification'
 import { createMockWorkspaceBackupApi } from './workspace-backup'
@@ -1568,6 +1569,7 @@ export function createMockApi(): TensorFoldStudioApi {
     ...createMockReadableExportApi(),
     ...createMockWorkspaceBackupApi(),
     ...createMockClusterApi(),
+    ...createMockDonationApi(),
     ...createMockModelQualificationApi(),
     ...createMockConversationSearchApi(() => mockState.threads),
     ...createMockDocumentLibraryApi(() => mockState.settings),

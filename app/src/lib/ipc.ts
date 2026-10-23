@@ -11,7 +11,7 @@ import { pairedToken } from './remote-pairing'
 // Every other method is a user-initiated action — surface its failure so nothing
 // fails silently. App.tsx listens for `vontra:ipc-error` and shows a notice toast.
 // Engine reads and Hub checks report their errors inline on the Models page.
-const QUIET_IPC = /^(cluster|modelHelper|modelQualification|conversationSearch|documentLibrary|readableExport|workspaceBackup|get|list|fetch|discover|check|gitStatus|gitDiff|engine(?:Snapshot|Refresh|Search|Preflight))/
+const QUIET_IPC = /^(cluster|donationList|donationProbe|modelHelper|modelQualification|conversationSearch|documentLibrary|readableExport|workspaceBackup|get|list|fetch|discover|check|gitStatus|gitDiff|engine(?:Snapshot|Refresh|Search|Preflight))/
 
 function reportIpcError(channel: string, e: unknown): void {
   const raw = String((e as { message?: string })?.message ?? e)

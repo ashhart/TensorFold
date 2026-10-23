@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "डिवाइस रिफ़्रेश करें, फ़ोन चुनें और वर्तमान चैट को नियंत्रण दें।",
   "Refresh file states": "फ़ाइल स्थितियाँ रिफ़्रेश करें",
   "Refresh models": "मॉडल रिफ़्रेश करें",
-  "Refresh phone devices": "फ़ोन डिवाइस रिफ़्रेश करें"
+  "Refresh phone devices": "फ़ोन डिवाइस रिफ़्रेश करें",
+  "Lend or borrow": "उधार दें या लें",
+  "Lend or borrow compute": "कंप्यूट उधार दें या लें",
+  "Community": "समुदाय"
 }
