@@ -81,7 +81,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     const dims = [2]i32{ @intCast(t.virtual), st.replay_rows };
     const ra = f.round;
 
-    e.pipe(f.k.get("tf_tree_conv"));
+    e.pipe(if (c.bolt) f.k.get("tf_tree_conv_bolt") else f.k.get("tf_tree_conv"));
     e.buf(s.proj, 0, 0);
     e.buf(f.pool.conv[index], 0, 1);
     e.buf(m.conv_w, 0, 2);
@@ -99,7 +99,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     e.buf(f.pool.conv[index], 0, 10);
     e.run(.{ c.convDim(), if (ra) |r| r.virtual else t.virtual, 1 }, .{ 256, 1, 1 });
 
-    e.pipe(f.k.get("tf_tree_scan"));
+    e.pipe(if (c.bolt) f.k.get("tf_tree_scan_bolt") else f.k.get("tf_tree_scan"));
     e.buf(s.proj, 0, 0);
     e.buf(s.xbc, 0, 1);
     e.buf(f.pool.ssm[index], 0, 2);
@@ -138,16 +138,9 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
 }
 
 fn groupNorm(f: Forward, rows: usize) mtl.Pipeline {
-    return switch (Forward.mp(rows)) {
-        16 => f.k.get("group_norm_xs_16"),
-        32 => f.k.get("group_norm_xs_32"),
-        48 => f.k.get("group_norm_xs_48"),
-        64 => f.k.get("group_norm_xs_64"),
-        80 => f.k.get("group_norm_xs_80"),
-        96 => f.k.get("group_norm_xs_96"),
-        112 => f.k.get("group_norm_xs_112"),
-        else => f.k.get("group_norm_xs_128"),
-    };
+    const mp = Forward.mp(rows);
+    inline for (.{ 16, 32, 48, 64, 80, 96, 112 }) |n| if (mp == n) return if (f.c.bolt) f.k.get(std.fmt.comptimePrint("group_norm_xs_bolt_{d}", .{n})) else f.k.get(std.fmt.comptimePrint("group_norm_xs_{d}", .{n}));
+    return if (f.c.bolt) f.k.get("group_norm_xs_bolt_128") else f.k.get("group_norm_xs_128");
 }
 
 pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32) void {
@@ -405,7 +398,7 @@ fn expertGeo(f: Forward, j: usize, g: usize) mtl.Pipeline {
 }
 
 /// The shared expert's up projection + relu2 + the down projection's input sums (lane_fused.up_relu2).
-fn upRelu2(f: Forward, e: *Enc, lin: wts.Linear, rows: usize) void {
+pub fn upRelu2(f: Forward, e: *Enc, lin: wts.Linear, rows: usize) void {
     const s = f.s;
     if (f.rowCall(e, lin, s.x, 0, s.sh_act, 0, rows, true)) return;
     const sk = fwd.splitK(lin.n, lin.k);

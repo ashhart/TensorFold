@@ -40,10 +40,16 @@ pub const Model = struct {
         m.dir = try allocator.dupeSentinel(u8, dir, 0);
         errdefer allocator.free(m.dir);
         m.device = try mtl.Device.init();
+        errdefer m.device.deinit();
         m.queue = try m.device.queue();
+        errdefer m.queue.deinit();
 
         m.config = try cfg.Config.read(allocator, io, dir);
         try cfg.checkShapes(m.config);
+        cfg.checkDevice(m.config, m.device.tensorUnits()) catch |e| {
+            std.log.err("Nemotron 3.5 Bolt runs on Apple GPUs without tensor units (M1 to M4); its M5 lane kernels are not built yet", .{});
+            return e;
+        };
         if (m.config.dt_min != 0 or !std.math.isInf(m.config.dt_max)) return error.UnsupportedTimeStepLimit;
 
         // compile the kernels while the weights load
@@ -172,4 +178,23 @@ test "a load that fails after its kernels compile releases them" {
     var path: [64]u8 = undefined;
     const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     try std.testing.expectError(error.ShortRead, Model.load(std.testing.allocator, io, dir, false));
+}
+
+test "a config refused after the device opens releases the device and its queue" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    // the queue holds its device, so the device's count covers both
+    const held = mtl.objc.msg(usize, device.id, "retainCount", .{});
+    // refused by its time-step clamp, next after the tensor-unit check and under the same release
+    const dt = try std.mem.replaceOwned(u8, a, cfg.lightning, "\"layer_norm_epsilon\"", "\"time_step_limit\": [0.001, 0.1], \"layer_norm_epsilon\"");
+    defer a.free(dt);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = dt });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectError(error.UnsupportedTimeStepLimit, Model.load(a, io, dir, false));
+    try std.testing.expectEqual(held, mtl.objc.msg(usize, device.id, "retainCount", .{}));
 }

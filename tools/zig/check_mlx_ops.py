@@ -340,17 +340,18 @@ def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import mlx_op_cases as cases
     import mtp_op_cases
+    import bolt_op_cases
 
-    builders = {**cases.BUILDERS, **mtp_op_cases.BUILDERS}
+    builders = {**cases.BUILDERS, **mtp_op_cases.BUILDERS, **bolt_op_cases.BUILDERS}
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ops", default=",".join(builders))
+    parser.add_argument("--ops", default=",".join(op for op in builders if op not in bolt_op_cases.BUILDERS))
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--no-time", action="store_true")
     parser.add_argument("--json", default="")
     args = parser.parse_args()
     mx.set_cache_limit(4 << 30)
-    ck = cases.Checkpoint(cases.MODEL)
+    ck = None if all(op in bolt_op_cases.BUILDERS for op in args.ops.split(",")) else cases.Checkpoint(cases.MODEL)
     for op in args.ops.split(","):
         for k, group in enumerate(builders[op](ck, args.quick)):
             check(group, f"{op}{k}", not args.no_time)

@@ -166,3 +166,141 @@ test "8-bit matrices read in place for the row kernels: no tiles, routed experts
         try std.testing.expectEqual(@as(u8, 8), w.embed_width.bits);
     }
 }
+
+/// A two-layer 8-bit nemotron_h_puzzle (Bolt) model: hidden 128, latent 64, experts 4 and 8, widths 64 and 128.
+fn tinyBolt() cfg.Config {
+    var c = cfg.Config{ .hidden = 128, .vocab = 128, .layers = 2, .mamba_heads = 2, .mamba_head_dim = 32, .groups = 1, .state = 16, .conv_kernel = 4, .heads = 2, .kv_heads = 1, .head_dim = 32, .experts = 8, .top_k = 2, .expert_width = 128, .shared_width = 64, .routed_scaling = 5.0, .eps = 1e-5 };
+    c.bolt = true;
+    c.latent = 64;
+    c.kinds[0] = .moe;
+    c.kinds[1] = .moe;
+    c.moe[0] = .{ .experts = 4, .width = 64 };
+    c.moe[1] = .{ .experts = 8, .width = 128 };
+    for (0..2) |i| c.widths[i] = .{ .{ .bits = 8 }, .{ .bits = 8 }, .{ .bits = 8 }, .{ .bits = 8 } };
+    c.embed_width = .{ .bits = 8 };
+    c.head_width = .{ .bits = 8 };
+    return c;
+}
+
+test "a nemotron_h_puzzle block loads per layer: its own expert count and width, experts in the latent, two bf16 latent projections" {
+    const a = std.testing.allocator;
+    var ck = try fakeCheckpoint(a, &bolt_tensors);
+    defer ck.deinit();
+    const c = tinyBolt();
+    var w = Weights{ .allocator = a, .embed = undefined, .norm_f = undefined, .head = undefined };
+    defer w.deinit();
+    var b = Builder{ .allocator = a, .device = undefined, .ck = &ck, .c = &c, .w = &w };
+    defer b.jobs.deinit(a);
+    try b.fill(null);
+    try std.testing.expectEqual(@as(usize, 0), b.jobs.items.len); // 8-bit everywhere: nothing tiled, no device needed
+    const m0 = w.layers[0].moe;
+    const m1 = w.layers[1].moe;
+    // both blocks carry the two bf16 latent projections, hidden <-> latent
+    try std.testing.expectEqual(@as(usize, 64), m0.into.?.n); // hidden 128 -> latent 64
+    try std.testing.expectEqual(@as(usize, 128), m0.into.?.k);
+    try std.testing.expectEqual(@as(usize, 128), m0.out.?.n); // latent 64 -> hidden 128
+    try std.testing.expectEqual(@as(usize, 64), m0.out.?.k);
+    try std.testing.expect(m1.into != null and m1.out != null);
+    // each layer keeps its OWN expert count and width; the routed experts read the 64-wide latent
+    try std.testing.expectEqual(@as(usize, 4), m0.routed.?[0].experts);
+    try std.testing.expectEqual(@as(usize, 64), m0.routed.?[0].one.n); // layer 0 expert width
+    try std.testing.expectEqual(@as(usize, 64), m0.routed.?[0].one.k); // experts read the latent, not hidden
+    try std.testing.expectEqual(@as(usize, 8), m1.routed.?[0].experts);
+    try std.testing.expectEqual(@as(usize, 128), m1.routed.?[0].one.n); // layer 1 expert width
+    try std.testing.expectEqual(@as(usize, 64), m1.routed.?[0].one.k);
+    try std.testing.expectEqual(@as(usize, 128), m1.routed.?[1].one.k); // fc2 reads layer 1's own width back down
+}
+
+/// tinyBolt's checkpoint: 8-bit matrices (row kernels, no tiles) and the two bf16 latent projections per block.
+const bolt_tensors = [_]Fake{
+    .{ .name = "backbone.norm_f.weight", .shape = &.{128} },
+    .{ .name = "backbone.embeddings.weight", .dtype = "U32", .shape = &.{ 128, 32 } },
+    .{ .name = "backbone.embeddings.scales", .shape = &.{ 128, 2 } },
+    .{ .name = "backbone.embeddings.biases", .shape = &.{ 128, 2 } },
+    .{ .name = "lm_head.weight", .dtype = "U32", .shape = &.{ 128, 32 } },
+    .{ .name = "lm_head.scales", .shape = &.{ 128, 2 } },
+    .{ .name = "lm_head.biases", .shape = &.{ 128, 2 } },
+    // layer 0: 4 experts of width 64
+    .{ .name = "backbone.layers.0.norm.weight", .shape = &.{128} },
+    .{ .name = "backbone.layers.0.mixer.gate.weight", .shape = &.{ 4, 128 } },
+    .{ .name = "backbone.layers.0.mixer.gate.e_score_correction_bias", .dtype = "F32", .shape = &.{4} },
+    .{ .name = "backbone.layers.0.mixer.fc1_latent_proj.weight", .shape = &.{ 64, 128 } },
+    .{ .name = "backbone.layers.0.mixer.fc2_latent_proj.weight", .shape = &.{ 128, 64 } },
+    .{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.weight", .dtype = "U32", .shape = &.{ 4, 64, 16 } },
+    .{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.scales", .shape = &.{ 4, 64, 1 } },
+    .{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.biases", .shape = &.{ 4, 64, 1 } },
+    .{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.weight", .dtype = "U32", .shape = &.{ 4, 64, 16 } },
+    .{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.scales", .shape = &.{ 4, 64, 1 } },
+    .{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.biases", .shape = &.{ 4, 64, 1 } },
+    .{ .name = "backbone.layers.0.mixer.shared_experts.up_proj.weight", .dtype = "U32", .shape = &.{ 64, 32 } },
+    .{ .name = "backbone.layers.0.mixer.shared_experts.up_proj.scales", .shape = &.{ 64, 2 } },
+    .{ .name = "backbone.layers.0.mixer.shared_experts.up_proj.biases", .shape = &.{ 64, 2 } },
+    .{ .name = "backbone.layers.0.mixer.shared_experts.down_proj.weight", .dtype = "U32", .shape = &.{ 128, 16 } },
+    .{ .name = "backbone.layers.0.mixer.shared_experts.down_proj.scales", .shape = &.{ 128, 1 } },
+    .{ .name = "backbone.layers.0.mixer.shared_experts.down_proj.biases", .shape = &.{ 128, 1 } },
+    // layer 1: 8 experts of width 128
+    .{ .name = "backbone.layers.1.norm.weight", .shape = &.{128} },
+    .{ .name = "backbone.layers.1.mixer.gate.weight", .shape = &.{ 8, 128 } },
+    .{ .name = "backbone.layers.1.mixer.gate.e_score_correction_bias", .dtype = "F32", .shape = &.{8} },
+    .{ .name = "backbone.layers.1.mixer.fc1_latent_proj.weight", .shape = &.{ 64, 128 } },
+    .{ .name = "backbone.layers.1.mixer.fc2_latent_proj.weight", .shape = &.{ 128, 64 } },
+    .{ .name = "backbone.layers.1.mixer.switch_mlp.fc1.weight", .dtype = "U32", .shape = &.{ 8, 128, 16 } },
+    .{ .name = "backbone.layers.1.mixer.switch_mlp.fc1.scales", .shape = &.{ 8, 128, 1 } },
+    .{ .name = "backbone.layers.1.mixer.switch_mlp.fc1.biases", .shape = &.{ 8, 128, 1 } },
+    .{ .name = "backbone.layers.1.mixer.switch_mlp.fc2.weight", .dtype = "U32", .shape = &.{ 8, 64, 32 } },
+    .{ .name = "backbone.layers.1.mixer.switch_mlp.fc2.scales", .shape = &.{ 8, 64, 2 } },
+    .{ .name = "backbone.layers.1.mixer.switch_mlp.fc2.biases", .shape = &.{ 8, 64, 2 } },
+    .{ .name = "backbone.layers.1.mixer.shared_experts.up_proj.weight", .dtype = "U32", .shape = &.{ 64, 32 } },
+    .{ .name = "backbone.layers.1.mixer.shared_experts.up_proj.scales", .shape = &.{ 64, 2 } },
+    .{ .name = "backbone.layers.1.mixer.shared_experts.up_proj.biases", .shape = &.{ 64, 2 } },
+    .{ .name = "backbone.layers.1.mixer.shared_experts.down_proj.weight", .dtype = "U32", .shape = &.{ 128, 16 } },
+    .{ .name = "backbone.layers.1.mixer.shared_experts.down_proj.scales", .shape = &.{ 128, 1 } },
+    .{ .name = "backbone.layers.1.mixer.shared_experts.down_proj.biases", .shape = &.{ 128, 1 } },
+};
+
+/// fill() on tinyBolt with `swaps` (and without `drop`) must fail with `err`, its reason naming every one of `words`.
+fn expectBoltRefused(swaps: []const Fake, drop: []const u8, err: anyerror, words: []const []const u8) !void {
+    const a = std.testing.allocator;
+    var buf: [bolt_tensors.len + 4]Fake = undefined;
+    var n: usize = 0;
+    for (bolt_tensors) |t| if (!std.mem.eql(u8, t.name, drop)) {
+        buf[n] = t;
+        n += 1;
+    };
+    for (swaps) |swap| {
+        const at = for (buf[0..n], 0..) |t, i| {
+            if (std.mem.eql(u8, t.name, swap.name)) break i;
+        } else blk: {
+            n += 1;
+            break :blk n - 1;
+        };
+        buf[at] = swap;
+    }
+    var ck = try fakeCheckpoint(a, buf[0..n]);
+    defer ck.deinit();
+    const c = tinyBolt();
+    var w = Weights{ .allocator = a, .embed = undefined, .norm_f = undefined, .head = undefined };
+    defer w.deinit();
+    var b = Builder{ .allocator = a, .device = undefined, .ck = &ck, .c = &c, .w = &w };
+    defer b.jobs.deinit(a);
+    try std.testing.expectError(err, b.fill(null));
+    for (words) |word| if (std.mem.indexOf(u8, b.why.text(), word) == null) {
+        std.debug.print("refusal \"{s}\" does not name \"{s}\"\n", .{ b.why.text(), word });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "the Metal loader refuses a puzzle block's latent tensors when missing, transposed, quantized or not bf16" {
+    const p = "backbone.layers.0.mixer.";
+    try expectBoltRefused(&.{}, p ++ "fc1_latent_proj.weight", error.MissingTensor, &.{ "no " ++ p ++ "fc1_latent_proj.weight", "[64, 128]" });
+    try expectBoltRefused(&.{}, p ++ "fc2_latent_proj.weight", error.MissingTensor, &.{"fc2_latent_proj.weight"});
+    try expectBoltRefused(&.{.{ .name = p ++ "fc2_latent_proj.weight", .shape = &.{ 64, 128 } }}, "", error.UnexpectedTensor, &.{ "fc2_latent_proj", "{ 128, 64 }" });
+    try expectBoltRefused(&.{.{ .name = p ++ "fc1_latent_proj.weight", .dtype = "F16", .shape = &.{ 64, 128 } }}, "", error.UnexpectedTensor, &.{ "fc1_latent_proj", "f16" });
+    try expectBoltRefused(&.{
+        .{ .name = p ++ "fc1_latent_proj.weight", .dtype = "U32", .shape = &.{ 64, 32 } },
+        .{ .name = p ++ "fc1_latent_proj.scales", .shape = &.{ 64, 2 } },
+        .{ .name = p ++ "fc1_latent_proj.biases", .shape = &.{ 64, 2 } },
+    }, "", error.UnsupportedQuantization, &.{ "fc1_latent_proj", "quantized" });
+    // routed experts stored over hidden (128) rather than the 64-wide latent
+    try expectBoltRefused(&.{.{ .name = p ++ "switch_mlp.fc1.weight", .dtype = "U32", .shape = &.{ 4, 64, 32 } }}, "", error.UnexpectedTensor, &.{"switch_mlp.fc1"});
+}

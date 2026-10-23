@@ -98,6 +98,7 @@ pub const prefill = [_]File{
     .{ .name = "elementwise", .text = @embedFile("ops/elementwise.metal") },
     .{ .name = "route", .text = @embedFile("ops/route.metal") },
     .{ .name = "qmv", .text = @embedFile("ops/qmv.metal") },
+    .{ .name = "gemv_ops", .text = @embedFile("ops/gemv.metal") },
 };
 
 /// Flash Next decode: the DeltaNet window step with every row's independent work at once.

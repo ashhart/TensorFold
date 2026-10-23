@@ -1,5 +1,6 @@
 //! Nemotron-H dimensions from config.json, one Config for every backend, checked against the shapes our kernels serve.
 const std = @import("std");
+const bolt_checks = @import("config_bolt.zig");
 
 pub const Kind = enum { mamba, moe, attention };
 
@@ -538,6 +539,10 @@ fn puzzle(c: *Config, blocks: []const std.json.Value, why: *Why) !void {
             why.set("layer {d} routes to a different number of experts than the others; the engine reads one top-k", .{i});
             return error.BadConfig;
         }
+        if (k < 1 or k > m.experts) {
+            why.set("layer {d} picks {d} of its {d} experts; top-k must be 1 to the layer's own expert count", .{ i, k, m.experts });
+            return error.BadConfig;
+        }
         c.moe[i] = m;
         c.experts = @max(c.experts, m.experts);
         c.expert_width = @max(c.expert_width, m.width);
@@ -546,18 +551,21 @@ fn puzzle(c: *Config, blocks: []const std.json.Value, why: *Why) !void {
 }
 
 pub fn checkShapes(c: Config) !void {
-    const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
-        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
-        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (c.format == .modelopt) {
         std.log.err("this is a ModelOpt (FP8 and NVFP4) checkpoint: the CUDA engine serves it; Metal reads MLX checkpoints", .{});
         return error.UnsupportedQuantization;
     }
+    if (c.bolt) return bolt_checks.shapes(c);
+    const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
+        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
+        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (!ok) {
         std.log.err("this Nemotron-H's shapes differ from the kernels built for Nemotron 3.5 Lightning 30B-A3B", .{});
         return error.UnsupportedShapes;
     }
 }
+
+pub const checkDevice = bolt_checks.device;
 
 pub const lightning =
     \\{"model_type": "nemotron_h", "hidden_size": 2688, "vocab_size": 131072, "mamba_num_heads": 64,

@@ -35,6 +35,7 @@ const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g
 pub const families: []const api.Family = &.{
     .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} },
     .{ .model_type = "nemotron_h", .formats = affine_widths },
+    .{ .model_type = "nemotron_h_puzzle", .formats = affine_widths },
     .{ .model_type = "qwen4_exp", .formats = affine_widths },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = affine_widths },
@@ -174,7 +175,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "step5_vl")) return @import("step5.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
-    if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
+    if (!std.mem.eql(u8, o.model_type, "nemotron_h") and !std.mem.eql(u8, o.model_type, "nemotron_h_puzzle")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
     }
