@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const mac = builtin.os.tag == .macos;
 const win = builtin.os.tag == .windows;
 pub const video_library = @import("video_library.zig");
+const grammar_library = @import("grammar_library.zig");
 
 pub const Id = enum { cublaslt, cublas, nccl, verbs, video, jpeg, webp, grammar, rccl, mcdma_rpc, mcdma_fabric };
 pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
@@ -33,7 +34,7 @@ pub const all = [_]Spec{
     item(.video, "TensorFold video", if (mac) &.{"libtfvideo.dylib"} else if (win) &.{"tfvideo.dll"} else &.{video_library.soname}, "video inputs (--vision)", "build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md", error.VideoLibraryUnavailable, null, true),
     item(.jpeg, "libjpeg-turbo", if (mac) &.{"libturbojpeg.0.dylib"} else if (win) &.{"turbojpeg.dll"} else &.{"libturbojpeg.so.0"}, "JPEG inputs (--vision)", "install libjpeg-turbo 3.1.4.1 and set TENSORFOLD_LIBTURBOJPEG to its file, or put it on the documented loader path", error.JpegLibraryUnavailable, "TENSORFOLD_LIBTURBOJPEG", true),
     item(.webp, "libwebp", if (mac) &.{"libwebpdecoder.3.dylib"} else &.{"libwebpdecoder.so.3"}, "WebP inputs (--vision)", "install libwebp 1.6.0 and set TENSORFOLD_LIBWEBP to its decoder file, or put it on the documented loader path", error.WebpLibraryUnavailable, "TENSORFOLD_LIBWEBP", true),
-    item(.grammar, "TensorFold grammar", if (mac) &.{"libtfgrammar.dylib"} else &.{"libtfgrammar.so"}, "structured output and required tool calls", "restore the matching release archive's lib directory or build zig build grammar", error.GrammarLibraryUnavailable, null, true),
+    item(.grammar, "TensorFold grammar", if (mac) &.{"libtfgrammar.dylib"} else &.{"libtfgrammar.so"}, "structured output and required tool calls (HTTP 400 when missing)", "restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with " ++ grammar_library.clone, error.GrammarLibraryUnavailable, null, true),
     item(.rccl, "RCCL", &.{ "librccl.so.1", "librccl.so", "/opt/rocm/lib/librccl.so.1" }, "HIP tensor-parallel ranks", "install the RCCL runtime matching the ROCm installation; " ++ loader_path ++ "", error.RcclUnavailable, null, false),
     item(.mcdma_rpc, "MCDMA RPC", if (mac) &.{"libmcdma-rpc.dylib"} else &.{"libmcdma-rpc.so"}, "MCDMA mailbox and Metal speed-up communication", "build and install MCDMA's RPC helper and set MCDMA_RPC_LIBRARY to its file", error.McdmaRpcUnavailable, "MCDMA_RPC_LIBRARY", false),
     item(.mcdma_fabric, "MCDMA fabric", if (mac) &.{"libmcdma-fabric.dylib"} else &.{"libmcdma-fabric.so"}, "MCDMA peer fabric", "build MCDMA's fabric helper and name its inspected absolute path in the peer settings", error.McdmaFabricUnavailable, null, false),
@@ -73,6 +74,13 @@ pub fn atBoundary() Boundary {
 pub fn warn(id: Id) void {
     if (boundary_reports) return;
     std.log.warn("{s}", .{spec(id).message});
+}
+
+/// Report one missing startup dependency using the same candidates and warning as its runtime refusal.
+pub fn warnMissing(id: Id, a: std.mem.Allocator, io: std.Io, comptime Sys: type) void {
+    const exe = std.process.executableDirPathAlloc(io, a) catch null;
+    defer if (exe) |p| a.free(p);
+    if (!found(spec(id), a, Sys, exe)) warn(id);
 }
 
 /// The RPC runtime and discovery share these absolute defaults, after a nonempty MCDMA_RPC_LIBRARY.

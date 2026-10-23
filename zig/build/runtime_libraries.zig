@@ -35,6 +35,14 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     step.dependOn(&check.step);
     all.dependOn(&check.step);
     all.dependOn(&run.step);
+    const grammar_warnings = b.createModule(.{ .root_source_file = b.path("zig/grammar_warning_check.zig"), .target = b.graph.host, .link_libc = true });
+    const grammar_pin = b.addOptions();
+    grammar_pin.addOption([]const u8, "clone", @import("grammar.zig").clone);
+    grammar_warnings.addOptions("grammar_pin", grammar_pin);
+    const grammar_check = b.addRunArtifact(b.addExecutable(.{ .name = "grammar-warning-check", .root_module = grammar_warnings }));
+    b.step("test-grammar-warning-host", "Missing grammar startup warning and successful discovery without real libraries").dependOn(&grammar_check.step);
+    step.dependOn(&grammar_check.step);
+    all.dependOn(&grammar_check.step);
     const codecs = b.step("test-codec-diagnostics-host", "Pinned codec diagnostics with host libraries that abort on pixel work");
     for ([_][]const u8{ "missing", "wrong", "symbols", "ready" }) |kind| {
         const m = b.createModule(.{ .root_source_file = b.path("zig/picture_runtime_host_test.zig"), .target = b.graph.host, .link_libc = true });
