@@ -13,20 +13,27 @@ const KS = W / 32 / 32; // the down projection's input splits
 /// One compiled library: down rows and up inputs, both widths, and how 4-bit dots make nibbles.
 pub const Spec = struct { nd: usize, low: usize, down: [2]usize, up: [2]usize, nib: u8 };
 
-/// The per-row kernels, and for 4-bit group 32 their 8-row matrix-unit tiles (0.6.6's hc_tiles, the same bits).
+/// The per-row kernels, the act pair (down with the split sums and gates, then up), and 4/32's 8-row tiles.
 pub const Pipes = struct {
     down: mtl.Pipeline,
     up: mtl.Pipeline,
+    act: [2]mtl.Pipeline,
     tiles: ?[2]mtl.Pipeline = null,
     pub fn deinit(p: Pipes) void {
         p.down.deinit();
         p.up.deinit();
+        for (p.act) |v| v.deinit();
         if (p.tiles) |ts| for (ts) |v| v.deinit();
     }
 };
 
-/// Rows from which a 4/32 pair takes the tiles (HC_MMA_FROM).
+/// Rows from which a 4/32 pair takes the tiles (HC_MMA_FROM) when the act pair is off.
 pub const tiles_from = 8;
+/// Rows from which the act pair runs: its threads grow with the rows, not its critical path (2 rows: 2.24 -> 1.76 ms).
+pub const act_from = 2;
+/// Outputs a qa_hc_down_act threadgroup and threads a qa_hc_up_act threadgroup.
+const act_outs = 2;
+const act_up_threads = 64;
 
 pub const Cache = std.AutoHashMapUnmanaged(Spec, Pipes);
 
@@ -79,7 +86,11 @@ pub fn pipes(a: std.mem.Allocator, device: mtl.Device, cache: *Cache, s: Spec) !
     errdefer down.deinit();
     const up = try mtl.Pipeline.init(device, lib, "qa_hc_up2", false);
     errdefer up.deinit();
-    var p: Pipes = .{ .down = down, .up = up };
+    const da = try mtl.Pipeline.init(device, lib, "qa_hc_down_act", false);
+    errdefer da.deinit();
+    const ua = try mtl.Pipeline.init(device, lib, "qa_hc_up_act", false);
+    errdefer ua.deinit();
+    var p: Pipes = .{ .down = down, .up = up, .act = .{ da, ua } };
     if (q4(s)) {
         const td = try mtl.Pipeline.init(device, lib, "q4_hc_down_tiles", false);
         errdefer td.deinit();
@@ -94,7 +105,7 @@ pub fn pipes(a: std.mem.Allocator, device: mtl.Device, cache: *Cache, s: Spec) !
 /// The weights a hyper-connection reads: norm scale, down and up words, scales, biases.
 pub const Weights = struct { scale: Buf, dw: Buf, ds: Buf, db: Buf, uw: Buf, us: Buf, ub: Buf, w: ?[2][2]usize };
 
-/// Mixed rows and inject gates from normed streams `hn`; `part` takes the down's fp32 split partials [KS, rows, nd].
+/// Mixed rows and inject gates from normed streams `hn`; `part` holds split sums [KS, rows, nd] or act's [rows, low].
 pub fn encode(
     enc: mtl.ComputeEncoder,
     a: std.mem.Allocator,
@@ -111,9 +122,20 @@ pub fn encode(
     inj: Buf,
     concurrent: bool,
     tiles: bool,
+    act: bool,
 ) !void {
     const s = try specOf(h.dw, h.uw, h.w, device.generation(), rows);
     const p = try pipes(a, device, cache, s);
+    if (act and rows >= act_from) {
+        enc.setPipeline(p.act[0]);
+        for ([_]Buf{ hn, ssp, h.scale, h.dw, h.ds, h.db, eps, rows_buf, part, inj }, 0..) |b, j| enc.setBuffer(b.b, b.off, j);
+        enc.dispatchGroups(mtl.Size.of((s.nd + act_outs - 1) / act_outs, rows, 1), mtl.Size.of(KS * 32, 1, 1));
+        if (concurrent) enc.barrier();
+        enc.setPipeline(p.act[1]);
+        for ([_]Buf{ hn, ssp, h.scale, part, h.uw, h.us, h.ub, eps, rows_buf, mixed }, 0..) |b, j| enc.setBuffer(b.b, b.off, j);
+        enc.dispatchGroups(mtl.Size.of(W / act_up_threads, rows, 1), mtl.Size.of(act_up_threads, 1, 1));
+        return;
+    }
     if (tiles and rows >= tiles_from) if (p.tiles) |tp| { // `tiles`: a 4/32 pair from 8 rows takes the tiles
         enc.setPipeline(tp[0]);
         for (

@@ -226,6 +226,7 @@ pub const Shared = struct {
     cache: Cache = .empty,
     hc: @import("rows_hc.zig").Cache = .empty,
     hc_tiles: bool = true, // 4/32 hyper-connections take their 8-row tiles (off when the load check finds them inexact)
+    hc_act: bool = true, // hyper-connections from 2 rows take the act pair (off when the load check finds it inexact)
     sums: [2]Buf,
     no_limit: Buf, // a row count no window reaches
     limit: Buf, // the 4-bit row kernels' row count: no_limit, or a GPU-gated window's or head step's

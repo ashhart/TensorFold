@@ -325,3 +325,95 @@ inline int tile_fn(int l) { return ((l / 4) & 2) * 2 + (l % 2) * 2; }
     if (r < nr) MIXED[size_t(rb + r) * D + d0 + d] = bfloat(total / float(S));
   }
 }
+
+// qa_hc_down_split with qa_hc_up2's split sums and gates: threadgroup (b, r) on outputs 2 b and 2 b + 1, split k
+[[kernel]] void qa_hc_down_act(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
+    const device float* NW [[buffer(2)]], const device uint32_t* QW [[buffer(3)]],
+    const device bfloat* QS [[buffer(4)]],
+    const device bfloat* QB [[buffer(5)]], const constant float* eps [[buffer(6)]],
+    const constant int* rows [[buffer(7)]],
+    device float* ACT [[buffer(8)]], device bfloat* INJOUT [[buffer(9)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
+    uint thread_index_in_threadgroup [[thread_index_in_threadgroup]],
+    uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+    uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
+  constexpr int S = FZ_S, D = FZ_D, ND = FZ_ND, LOW = FZ_LOW, KS = FZ_KS, BITS = FZ_DB, GS = FZ_DG, OPS = 2;
+  const uint lane = thread_index_in_simdgroup;
+  const int k = int(simdgroup_index_in_threadgroup);
+  const int R = rows[0];
+  constexpr int W = S * D;
+  constexpr int GROUPS = W / 32;
+  const int b = int(threadgroup_position_in_grid.x), r = int(threadgroup_position_in_grid.y);
+  if (r >= R) return; // a gated window's unverified rows, the whole threadgroup
+  threadgroup float P[KS][OPS];
+  const int grp = k * 32 + int(lane), e0 = grp * 32; // split k's groups 32 k .., a lane normalises its own 32 once
+  const float rv = stream_rinv(SSP, r, e0 / D, D / 256, S, D, eps[0]);
+  float x[32];
+  for (int n = 0; n < 32; n++) x[n] = float(bfloat((float(HN[r * W + e0 + n]) * rv) * NW[e0 + n]));
+  for (int j = 0; j < OPS; j++) {
+    const int o = b * OPS + j;
+    if (o >= ND) break;
+#if FZ_Q4
+    float acc = FZ_QGROUP(QW + (size_t(o) * GROUPS + grp) * 4, float(QS[o * GROUPS + grp]), float(QB[o * GROUPS + grp]), x);
+#else
+    float acc = qchunk_dot<BITS>(QW + size_t(o) * (W * BITS / 32) + grp * BITS, float(QS[o * (W / GS) + grp * 32 / GS]),
+                                 float(QB[o * (W / GS) + grp * 32 / GS]), x);
+#endif
+    acc = simd_sum(acc);
+    if (lane == 0) P[k][j] = acc;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const int t = int(thread_index_in_threadgroup), o = b * OPS + t;
+  if (t >= OPS || o >= ND) return;
+  float v = 0.0f; // the splits in order, then qa_hc_up2's activation or inject gate
+  for (int kk = 0; kk < KS; kk++) v += P[kk][t];
+  const float v4 = float(bfloat(float(bfloat(v)) / float(S)));
+  if (o < LOW) ACT[r * LOW + o] = bsilu(v4);
+  else INJOUT[r * S + (o - LOW)] = bfloat(2.0f * bsig(v4));
+}
+
+// qa_hc_up2 from qa_hc_down_act's ACT [rows, LOW], no staging: lane 4 j + s of simdgroup g on up row s D + 8 g + j
+[[kernel]] void qa_hc_up_act(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
+    const device float* NW [[buffer(2)]], const device float* ACT [[buffer(3)]],
+    const device uint32_t* QW [[buffer(4)]],
+    const device bfloat* QS [[buffer(5)]], const device bfloat* QB [[buffer(6)]],
+    const constant float* eps [[buffer(7)]],
+    const constant int* rows [[buffer(8)]], device bfloat* MIXED [[buffer(9)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
+    uint3 threads_per_threadgroup [[threads_per_threadgroup]],
+    uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+    uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
+  constexpr int S = FZ_S, D = FZ_D, LOW = FZ_LOW, BITS = FZ_UB, GS = FZ_UG;
+  constexpr int W = S * D;
+  constexpr int GPR = LOW / 32;
+  const int R = rows[0];
+  const int r = int(threadgroup_position_in_grid.y);
+  if (r >= R) return; // a gated window's unverified rows
+  const uint lane = thread_index_in_simdgroup;
+  const int g = int(threadgroup_position_in_grid.x * (threads_per_threadgroup.x / 32) + simdgroup_index_in_threadgroup);
+  const int s = int(lane) % 4, d = g * 8 + int(lane) / 4;
+  const int row = s * D + d;
+  const device float* act = ACT + r * LOW;
+  float u = 0.0f; // the row's group dots summed in order
+  for (int q = 0; q < GPR; q++) {
+    float x[32];
+    for (int n = 0; n < 32; n++) x[n] = act[q * 32 + n];
+#if FZ_Q4
+    u += FZ_QGROUP(QW + (size_t(row) * GPR + q) * 4, float(QS[row * GPR + q]), float(QB[row * GPR + q]), x);
+#else
+    u += qchunk_dot<BITS>(QW + size_t(row) * (LOW * BITS / 32) + q * BITS, float(QS[row * (LOW / GS) + q * 32 / GS]),
+                          float(QB[row * (LOW / GS) + q * 32 / GS]), x);
+#endif
+  }
+  const float rv = stream_rinv(SSP, r, s, D / 256, S, D, eps[0]);
+  const float normed = float(bfloat((float(HN[r * W + row]) * rv) * NW[row]));
+  const float prod = float(bfloat(bsig(float(bfloat(u))) * normed));
+  const float p1 = simd_shuffle_down(prod, 1), p2 = simd_shuffle_down(prod, 2), p3 = simd_shuffle_down(prod, 3);
+  if (s != 0) return;
+  float total = 0.0f; // dim d's four streams in order
+  total += prod;
+  total += p1;
+  total += p2;
+  total += p3;
+  MIXED[r * D + d] = bfloat(total / float(S));
+}

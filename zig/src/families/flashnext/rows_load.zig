@@ -58,6 +58,7 @@ pub fn hc(
         inj,
         !r.serial,
         sh.hc_tiles and r.limit == null, // a gated window's rows: the per-row kernels leave the unverified ones alone
+        sh.hc_act,
     );
     if (!r.serial) r.enc.barrier();
 }
@@ -66,7 +67,7 @@ fn weightsOf(h: replay.Hc) rows_hc.Weights {
     return .{ .scale = h.scale, .dw = h.dw, .ds = h.ds, .db = h.db, .uw = h.uw, .us = h.us, .ub = h.ub, .w = h.w };
 }
 
-/// A hyper-connection on the per-row kernels; a 4/32 pair's tiles checked on 12 rows (_hc_mma_exact), else off.
+/// A hyper-connection on the per-row kernels; the tiles and the act pair checked on 12 rows (_hc_mma_exact), else off.
 fn hcOn(r: *Run, sh: *rows_w.Shared, h: *replay.Hc) !void {
     for ([_]usize{ 1, 2 }) |rows| _ = try rows_hc.pipes(
         sh.a,
@@ -75,9 +76,9 @@ fn hcOn(r: *Run, sh: *rows_w.Shared, h: *replay.Hc) !void {
         try rows_hc.specOf(h.dw, h.uw, h.w, sh.device.generation(), rows),
     );
     h.rows = sh;
-    const s = try rows_hc.specOf(h.dw, h.uw, h.w, sh.device.generation(), 12);
-    if (!sh.hc_tiles or !rows_hc.q4(s)) return;
+    if (!sh.hc_tiles and !sh.hc_act) return;
     const rows = 12;
+    const s = try rows_hc.specOf(h.dw, h.uw, h.w, sh.device.generation(), rows);
     const wide = 4 * D;
     var prng = std.Random.DefaultPrng.init(0x7e58);
     const hn = try r.buffer(rows * wide * 2);
@@ -88,12 +89,13 @@ fn hcOn(r: *Run, sh: *rows_w.Shared, h: *replay.Hc) !void {
     small.slice(f32, 1)[0] = 1e-6;
     small.slice(i32, 4)[1] = rows;
     const part = try r.buffer(10 * rows * s.nd * 4);
-    var outs: [2][2]mtl.Buffer = undefined;
+    var outs: [3][2]mtl.Buffer = undefined; // the per-row kernels, the tiles, the act pair
     for (&outs) |*o| o.* = .{ try r.buffer(rows * D * 2), try r.buffer(rows * 4 * 2) };
-    defer for ([_]mtl.Buffer{ hn, ssp, small, part, outs[0][0], outs[0][1], outs[1][0], outs[1][1] }) |b| r.release(b);
+    defer for ([_]mtl.Buffer{ hn, ssp, small, part }) |b| r.release(b);
+    defer for (outs) |o| for (o) |b| r.release(b);
     const cb = r.queue.commandBuffer();
     const e = cb.compute(.serial);
-    for (outs, [_]bool{ false, true }) |o, tiles| {
+    for (outs, [_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true } }) |o, how| {
         try rows_hc.encode(
             e,
             sh.a,
@@ -109,24 +111,20 @@ fn hcOn(r: *Run, sh: *rows_w.Shared, h: *replay.Hc) !void {
             .{ .b = o[0] },
             .{ .b = o[1] },
             false,
-            tiles,
+            how[0],
+            how[1],
         );
     }
     e.end();
     cb.commit();
     cb.wait();
     if (cb.failure() != null) return error.GpuFailed;
-    for (0..2) |j| if (!std.mem.eql(
-        u8,
-        outs[0][j].contents()[0..outs[0][j].length()],
-        outs[1][j].contents()[0..outs[1][j].length()],
-    )) {
-        std.log.warn(
-            "rows: the 4/32 hyper-connection tiles differ from the per-row kernels here; per-row kernels kept",
-            .{},
-        );
-        sh.hc_tiles = false;
-    };
+    for (outs[1..], [_]*bool{ &sh.hc_tiles, &sh.hc_act }, [_][]const u8{ "tiles", "act pair" }) |o, kept, name| {
+        for (0..2) |j| if (kept.* and !std.mem.eql(u8, outs[0][j].contents()[0..o[j].length()], o[j].contents()[0..o[j].length()])) {
+            std.log.warn("rows: the hyper-connection {s} differ from the per-row kernels here; per-row kernels kept", .{name});
+            kept.* = false;
+        };
+    }
 }
 
 fn dense(r: *Run, sh: *rows_w.Shared, members: []rows_w.Member, k: usize) !*const rows_w.Dense {
