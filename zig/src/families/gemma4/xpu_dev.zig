@@ -1,7 +1,6 @@
 //! Device plumbing of the Gemma 4 E4B XPU runner: safetensors shards (mmap), Level Zero device, launches, GPU time.
 const std = @import("std");
 const ze = @import("ze");
-const safetensors = @import("safetensors");
 
 pub const alloc = std.heap.c_allocator;
 
@@ -20,7 +19,39 @@ pub fn now() f64 {
     return @as(f64, @floatFromInt(ts[0])) + @as(f64, @floatFromInt(ts[1])) * 1e-9;
 }
 
-pub const Tensor = safetensors.Tensor;
+pub const Tensor = struct { name: []const u8, dtype: []const u8, shape: [8]u64, rank: usize, bytes: []const u8 };
+
+/// Appends a safetensors file's tensors (offsets checked against the file); names and dtypes live in the header
+fn parseShard(gpa: std.mem.Allocator, file: []const u8, out: *std.ArrayList(Tensor)) !std.json.Parsed(std.json.Value) {
+    if (file.len < 8) return error.BadSafetensors;
+    const n = std.mem.readInt(u64, file[0..8], .little);
+    if (n > file.len - 8) return error.BadSafetensors;
+    const data = file[8 + n ..];
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, file[8 .. 8 + n], .{}) catch return error.BadSafetensors;
+    errdefer parsed.deinit();
+    if (parsed.value != .object) return error.BadSafetensors;
+    var it = parsed.value.object.iterator();
+    while (it.next()) |e| {
+        if (std.mem.eql(u8, e.key_ptr.*, "__metadata__")) continue;
+        if (e.value_ptr.* != .object) return error.BadSafetensors;
+        const o = e.value_ptr.object;
+        const dtype = o.get("dtype") orelse return error.BadSafetensors;
+        const shape = o.get("shape") orelse return error.BadSafetensors;
+        const span = o.get("data_offsets") orelse return error.BadSafetensors;
+        if (dtype != .string or shape != .array or span != .array or span.array.items.len != 2 or shape.array.items.len > 8) return error.BadSafetensors;
+        var t: Tensor = .{ .name = e.key_ptr.*, .dtype = dtype.string, .shape = @splat(1), .rank = shape.array.items.len, .bytes = &.{} };
+        for (shape.array.items, 0..) |x, i| {
+            if (x != .integer or x.integer < 0) return error.BadSafetensors;
+            t.shape[i] = @intCast(x.integer);
+        }
+        const a = span.array.items[0];
+        const b = span.array.items[1];
+        if (a != .integer or b != .integer or a.integer < 0 or b.integer < a.integer or @as(usize, @intCast(b.integer)) > data.len) return error.BadSafetensors;
+        t.bytes = data[@intCast(a.integer)..@intCast(b.integer)];
+        try out.append(gpa, t);
+    }
+    return parsed;
+}
 
 /// A whole file mapped read-only (the caller never unmaps it: the process is short-lived).
 pub fn mapFile(path: []const u8) ![]const u8 {
@@ -62,7 +93,7 @@ pub const Checkpoint = struct {
         const bytes = try mapFile(path);
         try c.maps.ensureUnusedCapacity(alloc, 1);
         try c.headers.ensureUnusedCapacity(alloc, 1);
-        c.headers.appendAssumeCapacity(try safetensors.parse(alloc, bytes, &c.tensors));
+        c.headers.appendAssumeCapacity(try parseShard(alloc, bytes, &c.tensors));
         c.maps.appendAssumeCapacity(bytes);
     }
 
