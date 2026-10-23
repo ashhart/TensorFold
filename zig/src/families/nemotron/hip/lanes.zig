@@ -311,9 +311,9 @@ pub const Hip = struct {
         return l;
     }
 
-    /// The prompt's rows [from, to) through the model (the head absorbing them): the last row's logits at the end.
     pub const chunk = @import("prompt.zig").chunk;
 
+    /// The arithmetic behind the shared chunk; host records exercise the same adapter without launching kernels.
     pub fn runPrompt(h: *Hip, o: hip.ops.Ops, ctx: forward.Ctx, ids: u64, rows: usize, pos: usize) !Tensor {
         return forward.run(o, h.e.model_(), h.e.place[0..h.e.cfg.layers], ctx, ids, rows, pos);
     }

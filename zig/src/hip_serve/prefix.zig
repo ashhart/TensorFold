@@ -8,8 +8,10 @@ const snapshots = @import("snapshots.zig");
 const protocol = @import("protocol.zig");
 const Allocator = std.mem.Allocator;
 
-pub const poll_rows: usize = 512;
+/// Rows from which a single rank synchronizes and polls cancellation after each prompt layer.
+pub const poll_rows = 512;
 
+/// TP ranks stop together between chunks; only a long single-rank chunk polls its layer edges.
 pub fn pollsLayers(world: usize, rows: usize) bool {
     return world == 1 and rows >= poll_rows;
 }

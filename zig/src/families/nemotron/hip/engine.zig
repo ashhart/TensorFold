@@ -12,6 +12,7 @@ const forward = @import("forward.zig");
 const prefix = @import("prefix.zig");
 const rounds = @import("round.zig");
 const graphs = @import("graphs.zig");
+const prefix = @import("prefix.zig");
 
 /// Prompt rows a forward takes at most: the routed experts see enough rows a tile, within the scratch admit counts.
 pub const prompt_rows: usize = 2048;

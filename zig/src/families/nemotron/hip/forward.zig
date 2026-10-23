@@ -12,13 +12,14 @@ const Tensor = hip.ops.Tensor;
 const Kind = hip.ops.Kind;
 const pops = hip.plan_ops;
 
+pub const Error = hip.reduce.Error || mamba.Error || moe.Error || error{Cancelled};
+
+/// A layer trace preserves cancellation; other trace failures keep the forward's existing BadShape refusal.
 pub fn traceLayer(trace: ?Trace, index: usize, x: Tensor, rows: usize) Error!void {
     if (trace) |t| t.layer(t.ctx, index, x, rows) catch |err| {
         return if (err == error.Cancelled) error.Cancelled else error.BadShape;
     };
 }
-
-pub const Error = hip.reduce.Error || mamba.Error || moe.Error || error{Cancelled};
 
 /// A device buffer of `n` values of `kind` from the arena.
 pub fn take(o: Ops, kind: Kind, n: usize) Error!Tensor {

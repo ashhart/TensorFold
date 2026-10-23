@@ -1,10 +1,11 @@
-//! One Nemotron prompt chunk, shared by serving and follower adapters.
+//! One Nemotron prompt chunk, shared by the serving hooks and the TP follower.
 const hip = @import("hip");
 const forward = @import("forward.zig");
 const Engine = @import("engine.zig").Engine;
 const Lane = @import("lanes.zig").Lane;
 const Tensor = hip.ops.Tensor;
 
+/// The prompt's rows [from, to) through the model (the head absorbing them): the last row's logits at the end.
 pub fn chunk(h: anytype, l: *Lane, prompt: []const u32, from: usize, to: usize, cancel: ?Engine.Cancel) !?Tensor {
     const e = h.e;
     const m = e.model_();
@@ -22,7 +23,13 @@ pub fn chunk(h: anytype, l: *Lane, prompt: []const u32, from: usize, to: usize, 
     }
     const dev = try e.ids(o, prompt[from..to]);
     var poll: Engine.Poll = undefined;
-    const hidden = try h.runPrompt(o, .{ .pool = &e.pool, .stream = &l.s, .trace = e.poll(cancel, n, &poll) }, dev, n, from);
+    const hidden = try h.runPrompt(
+        o,
+        .{ .pool = &e.pool, .stream = &l.s, .trace = e.poll(cancel, n, &poll) },
+        dev,
+        n,
+        from,
+    );
     l.s.len = to;
     // the head absorbs each row with the token after it; the last row waits for the first drawn token
     const last = to == prompt.len;

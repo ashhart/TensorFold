@@ -24,6 +24,7 @@ pub const worker = @import("hip/worker.zig");
 pub const native = @import("hip/native.zig");
 
 test {
+    _ = @import("hip/prompt_test.zig");
     _ = config;
     _ = tensors;
     _ = plan;
