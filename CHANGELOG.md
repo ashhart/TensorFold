@@ -34,6 +34,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - The Engram NFKD table's generator is committed beside the table, and CI checks the table on the pinned Unicode version (#1148). Thanks to @akol1.
 
+- Structured output on servers built from source: `zig build grammar` installs libtfgrammar beside the native server on every OS (on Linux it went to `lib/`, where the server does not look), and a server without it says so once at startup, naming the fix. Docs: what `--parallel` caps, the startup line that reports how many streams the engine took, and `/health`'s live counts.
+
 - Docs: what a run past two ranks reports (#1201, thanks to @flashosophy), the 27B recipe's native CUDA backend and the formats it reads (#1146, thanks to @jschmied), a GPU clock cap for GB10s in the runbook (#1110, thanks to @Bizuayeu), and the tensor-parallel fabric's RoCE attribution (#1128, thanks to @jayleaton).
 
 ## 1.1.2
