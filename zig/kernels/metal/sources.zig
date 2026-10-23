@@ -156,6 +156,10 @@ pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
 /// Step-5's glue at StepFun's rounding points: embed, norms, q/k rotation, gate, SwiGLU, residual adds.
 pub const step5_glue = @embedFile("step5/glue.metal");
+/// Flint's glue at the reference's rounding points: embed, norms, q/k rotation, SwiGLU, residual and MoE adds.
+pub const flint_glue = @embedFile("flint/glue.metal");
+/// Flint's attention on the tensor units: prompt tiles, decode partials and their merge, with sinks.
+pub const flint_attention_nax = @embedFile("flint/attention_nax.metal");
 /// Step-5's sparse indexer (summaries, scores, top-k) and its sliding, sparse and dense attention.
 pub const step5_sparse = @embedFile("step5/sparse.metal");
 /// Step-5's prompt attention on the tensor units (a KV group's 16 heads one operand; nax.h inlined at load).
