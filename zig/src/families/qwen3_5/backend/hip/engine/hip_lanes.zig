@@ -272,13 +272,19 @@ pub const Hip = struct {
         return prefix.chunkEnd(at, limit, if (h.decoding()) h.e.o.policy.fill_rows else prefix.chunk);
     }
 
-    pub fn advance(h: *Hip, lane: *Lane, prompt: []const u32, from: usize, to: usize) !void {
-        try h.e.advance(&lane.caches, prompt, from, to, null);
+    /// The chunk's layer-cancel hook, the engine's own shape; null leaves polling between chunks only.
+    pub fn cancelOf(_: *Hip, s: *lanes.Stream) ?Engine.Cancel {
+        const c = s.cancel_check orelse return null;
+        return .{ .ctx = c.ptr, .check = c.check };
+    }
+
+    pub fn advance(h: *Hip, lane: *Lane, prompt: []const u32, from: usize, to: usize, cancel: ?Engine.Cancel) !void {
+        try h.e.advance(&lane.caches, prompt, from, to, cancel);
     }
 
     /// The prompt's last chunk, its final row kept for the head: the first token.
-    pub fn finish(h: *Hip, lane: *Lane, prompt: []const u32, from: usize, req: draw.Request) !u32 {
-        return h.e.prefill(&lane.caches, prompt, from, lane.hidden, req, null);
+    pub fn finish(h: *Hip, lane: *Lane, prompt: []const u32, from: usize, req: draw.Request, cancel: ?Engine.Cancel) !u32 {
+        return h.e.prefill(&lane.caches, prompt, from, lane.hidden, req, cancel);
     }
 
     pub fn keepCut(h: *Hip, lane: *Lane, prompt: []const u32, at: usize) !void {

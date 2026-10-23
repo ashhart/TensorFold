@@ -230,6 +230,8 @@ pub fn Backend(comptime F: type) type {
             const f = &lane.fill.?;
             const to = try h.reach(lane, f.at, f.limit(prompt.len));
             try h.tp.fill(lane.id, to);
+            // The hook reaches the engine, so a cancel arriving inside a long chunk stops between its layers.
+            const cancel = h.cancelOf(s);
             if (to == prompt.len) {
                 // a structured reply keeps the prompt's last row: its first token is drawn again under the grammar
                 if (s.grammar != null and lane.first_row == null) lane.first_row = try h.gpa.alloc(
@@ -242,11 +244,12 @@ pub fn Backend(comptime F: type) type {
                     prompt,
                     f.at,
                     .{ .sampling = sampling(s), .position = prompt.len, .keep = keep },
+                    cancel,
                 ));
                 lane.fill = null;
                 return true;
             }
-            try h.advance(lane, prompt, f.at, to);
+            try h.advance(lane, prompt, f.at, to, cancel);
             f.at = to;
             if (f.cut(to)) h.keepCut(lane, prompt, to) catch |err| std.log.warn(
                 "prefix not kept: {s}",

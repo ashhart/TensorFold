@@ -54,4 +54,6 @@ test {
     @import("std").testing.refAllDecls(hip_lanes.Hip);
     @import("std").testing.refAllDecls(worker.Worker);
     @import("std").testing.refAllDecls(engine.Engine);
+    // the prompt route the lane host actually calls, recorded on the host
+    _ = @import("backend/hip/engine/hip_prompt_test.zig");
 }

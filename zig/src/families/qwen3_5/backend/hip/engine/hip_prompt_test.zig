@@ -1,101 +1,160 @@
-//! CPU records through the production prompt dispatcher; no HIP driver is loaded.
+//! CPU records through the production prompt route: the shared serving vtable the lane host calls, no HIP driver loaded.
 const std = @import("std");
+const hip = @import("hip");
+const abi = @import("hip").abi;
 const lanes = @import("lanes");
+const serve = @import("hip_serve");
 const source = @import("hip_lanes.zig");
-const Engine = @import("engine.zig").Engine;
 const prefix = @import("prefix.zig");
 const T = std.testing;
 
+/// The engine's own cancel shape, which the seam forwards without ever naming the type.
+const Cancel = struct {
+    ctx: *anyopaque,
+    check: *const fn (ctx: *anyopaque) bool,
+};
+
 const Flag = struct {
     on: bool = false,
+
     fn check(ptr: *anyopaque) bool {
         const flag: *Flag = @ptrCast(@alignCast(ptr));
         return flag.on;
     }
 };
 
+/// The engine the route forwards to, recorded instead of run: it applies the same poll policy `Engine.poll` does.
 const Record = struct {
-    flag: *Flag,
     world: usize = 1,
     cancel_inside: bool = false,
+    flag: *Flag,
     advance_calls: usize = 0,
     prefill_calls: usize = 0,
-    forwarded: ?Engine.Cancel = null,
+    forwarded: ?Cancel = null,
     rows: usize = 0,
-    o: struct { policy: struct { fill_rows: usize = 512 } = .{} } = .{},
-    drawer: struct { vocab: usize = 8 } = .{},
 
-    fn capture(e: *Record, rows: usize, cancel: ?Engine.Cancel) !void {
+    fn capture(e: *Record, rows: usize, cancel: ?Cancel) !void {
         e.forwarded = cancel;
         e.rows = rows;
         if (e.cancel_inside) e.flag.on = true;
+        // The engine polls after each layer only for a single rank and a long enough chunk.
         if (prefix.pollsLayers(e.world, rows)) {
             if (cancel) |c| if (c.check(c.ctx)) return error.Cancelled;
         }
     }
-
-    pub fn advance(e: *Record, caches: anytype, prompt: []const u32, at: usize, to: usize, c: ?Engine.Cancel) !void {
-        _ = caches;
-        _ = prompt;
-        e.advance_calls += 1;
-        try e.capture(to - at, c);
-    }
-
-    pub fn prefill(e: *Record, caches: anytype, prompt: []const u32, at: usize, hidden: anytype, options: anytype, c: ?Engine.Cancel) !u32 {
-        _ = caches;
-        _ = hidden;
-        _ = options;
-        e.prefill_calls += 1;
-        try e.capture(prompt.len - at, c);
-        return 7;
-    }
 };
 
-const Lookup = struct {
-    lane: *source.Lane,
-    pub fn get(l: Lookup, s: *lanes.Stream) ?*source.Lane {
-        _ = s;
-        return l.lane;
-    }
+/// The lane the seam holds per stream: the pass in progress, the kept row a grammar draws from, the held drafts.
+const Lane = struct {
+    id: u32 = 0,
+    fill: ?serve.backend.Fill = null,
+    first_row: ?[]u16 = null,
+    pending: ?struct { rows: usize } = null,
+    held: [16]u32 = @splat(0),
+    held_n: usize = 0,
+    len: usize = 0,
 };
 
-const Prefix = struct {
-    kept: usize = 0,
-    pub fn keep(p: *Prefix, owner: anytype, prompt: []const u32, to: usize) !void {
-        _ = owner;
-        _ = prompt;
-        _ = to;
-        p.kept += 1;
-    }
-};
+const Drawer = struct {
+    vocab: usize = 8,
 
-const Host = struct {
-    gpa: std.mem.Allocator = T.allocator,
-    e: *Record,
-    lanes: Lookup,
-    prefix: *Prefix,
-    link: ?u32 = null,
-    taken: usize = 0,
-    pub fn begin(h: *Host, s: *lanes.Stream) !*source.Lane {
-        _ = h;
-        _ = s;
-        return error.UnexpectedBegin;
-    }
-    pub fn decoding(h: *Host) bool {
-        _ = h;
-        return true;
-    }
-    pub fn send(h: *Host, words: []const u32) !void {
-        _ = h;
-        _ = words;
-        return error.UnexpectedSend;
-    }
-    pub fn take(h: *Host, token: u32) u64 {
-        std.debug.assert(token == 7);
-        h.taken += 1;
+    pub fn drawHost(_: *Drawer, _: []const u16, _: anytype) !u32 {
         return 0;
     }
 };
+
+fn setCurrent(_: abi.Context) callconv(.c) abi.Result {
+    return 0;
+}
+
+/// A runtime whose only answer is the current-context call the seam's `of` makes before a chunk.
+const inert = struct {
+    var runtime: hip.runtime.Runtime = .{ .lib = undefined, .api = undefined };
+};
+
+/// The backend the seam drives, recording what it is handed. Same surface as `Hip`, so the route under test is
+/// the production one and only the engine underneath is inert.
+const Fake = struct {
+    gpa: std.mem.Allocator,
+    e: struct { ctx: hip.Context },
+    streams: serve.backend.Streams(Lane),
+    tp: serve.protocol.Sender,
+    rec: *Record,
+    lane: *Lane = undefined,
+    drawer_state: Drawer = .{},
+    fill_rows: usize = 512,
+    kept: usize = 0,
+    rows_kept: usize = 0,
+    drafting: usize = 0,
+    verifying: usize = 0,
+    flushed: usize = 0,
+    released: usize = 0,
+
+    pub fn drawer(h: *Fake) *Drawer {
+        return &h.drawer_state;
+    }
+
+    pub fn cancelOf(_: *Fake, s: *lanes.Stream) ?Cancel {
+        const c = s.cancel_check orelse return null;
+        return .{ .ctx = c.ptr, .check = c.check };
+    }
+
+    pub fn begin(h: *Fake, s: *lanes.Stream) !*Lane {
+        h.lane.fill = serve.backend.Fill.init(0, &.{@intCast(h.fill_rows)});
+        h.lane.len = s.prompt_len;
+        const id = try h.streams.idOf(s);
+        h.lane.id = id;
+        try h.streams.map.put(h.gpa, s, h.lane);
+        return h.lane;
+    }
+
+    pub fn reach(h: *Fake, _: *Lane, at: usize, limit: usize) !usize {
+        return prefix.chunkEnd(at, limit, h.fill_rows);
+    }
+
+    pub fn advance(h: *Fake, lane: *Lane, prompt: []const u32, from: usize, to: usize, cancel: ?Cancel) !void {
+        _ = lane;
+        _ = prompt;
+        h.rec.advance_calls += 1;
+        try h.rec.capture(to - from, cancel);
+    }
+
+    pub fn finish(h: *Fake, _: *Lane, prompt: []const u32, from: usize, _: anytype, cancel: ?Cancel) !u32 {
+        h.rec.prefill_calls += 1;
+        try h.rec.capture(prompt.len - from, cancel);
+        return 7;
+    }
+
+    pub fn keepCut(h: *Fake, _: *Lane, _: []const u32, _: usize) !void {
+        h.kept += 1;
+    }
+
+    pub fn keepRows(h: *Fake, _: *Lane, rows: usize) !void {
+        h.rows_kept += rows;
+    }
+
+    pub fn flush(h: *Fake) !void {
+        h.flushed += 1;
+    }
+
+    pub fn verify(h: *Fake, _: []const lanes.backend.Window, _: []lanes.backend.Verified) !void {
+        h.verifying += 1;
+    }
+
+    pub fn draft(h: *Fake, _: []const lanes.backend.DraftRequest) !void {
+        h.drafting += 1;
+    }
+
+    pub fn release(h: *Fake, _: *Lane) void {
+        h.released += 1;
+    }
+
+    fn decoded() bool {
+        return true;
+    }
+};
+
+const Shared = serve.backend.Backend(Fake);
 
 fn run(final: bool, rows: usize, world: usize, hook: bool, cancel_inside: bool) !void {
     var tokens: [2048]u32 = @splat(1);
@@ -107,43 +166,57 @@ fn run(final: bool, rows: usize, world: usize, hook: bool, cancel_inside: bool) 
         .cancel_check = if (hook) .{ .ptr = &flag, .check = Flag.check } else null,
     });
     defer s.deinit(T.allocator);
-    var lane: source.Lane = undefined;
-    lane.fill = .{ .at = 0, .stops = @splat(@intCast(rows)), .count = if (final) 0 else 1, .next = 0 };
-    lane.first_row = null;
-    lane.id = 0;
-    var e: Record = .{ .flag = &flag, .world = world, .cancel_inside = cancel_inside };
-    e.o.policy.fill_rows = rows;
-    var cache: Prefix = .{};
-    var h: Host = .{ .e = &e, .lanes = .{ .lane = &lane }, .prefix = &cache };
+
+    var lane: Lane = .{};
+    var rec: Record = .{ .flag = &flag, .world = world, .cancel_inside = cancel_inside };
+    inert.runtime.api.hipCtxSetCurrent = setCurrent;
+    var fake: Fake = .{
+        .gpa = T.allocator,
+        .e = .{ .ctx = .{ .r = &inert.runtime, .device = 0, .handle = null } },
+        .streams = serve.backend.Streams(Lane).init(T.allocator),
+        .tp = .{ .gpa = T.allocator },
+        .rec = &rec,
+        .lane = &lane,
+        .fill_rows = rows,
+    };
+    defer fake.streams.deinit();
+
+    const route = Shared.backend(&fake);
+    const step = route.vtable.prefill_step.?;
+
+    // The engine polls only for one rank and a chunk of at least 512 rows, so only that combination stops.
     const stops = hook and cancel_inside and world == 1 and rows >= 512;
     if (stops) {
-        try T.expectError(error.Cancelled, source.Hip.promptStep(&h, &s));
+        try T.expectError(error.Cancelled, step(fake_ptr(&fake), &s));
         try T.expectEqual(@as(usize, 0), lane.fill.?.at);
         try T.expectEqual(@as(usize, 0), lane.fill.?.next);
-        try T.expectEqual(@as(usize, 0), cache.kept);
-        try T.expectEqual(@as(usize, 0), h.taken);
+        try T.expectEqual(@as(usize, 0), fake.kept);
     } else {
-        try T.expectEqual(final, try source.Hip.promptStep(&h, &s));
-        try T.expectEqual(@as(usize, @intFromBool(final)), h.taken);
+        try T.expectEqual(final, try step(fake_ptr(&fake), &s));
         if (final) {
             try T.expect(lane.fill == null);
         } else {
             try T.expectEqual(rows, lane.fill.?.at);
             try T.expectEqual(@as(usize, 1), lane.fill.?.next);
-            try T.expectEqual(@as(usize, 1), cache.kept);
+            try T.expectEqual(@as(usize, 1), fake.kept);
         }
     }
-    try T.expectEqual(rows, e.rows);
-    try T.expectEqual(@as(usize, @intFromBool(!final)), e.advance_calls);
-    try T.expectEqual(@as(usize, @intFromBool(final)), e.prefill_calls);
+    try T.expectEqual(rows, rec.rows);
+    try T.expectEqual(@as(usize, @intFromBool(!final)), rec.advance_calls);
+    try T.expectEqual(@as(usize, @intFromBool(final)), rec.prefill_calls);
+    // The route hands the engine the stream's own hook on both the intermediate and the final chunk.
     if (hook) {
-        const c = e.forwarded orelse return error.CancelHookNotForwarded;
+        const c = rec.forwarded orelse return error.CancelHookNotForwarded;
         try T.expect(c.ctx == @as(*anyopaque, &flag));
         try T.expect(c.check == Flag.check);
-    } else try T.expect(e.forwarded == null);
+    } else try T.expect(rec.forwarded == null);
 }
 
-test "intermediate prompt forwards the request hook before publishing progress" {
+fn fake_ptr(f: *Fake) *anyopaque {
+    return @ptrCast(f);
+}
+
+test "the shared route forwards the request hook to the engine on an intermediate chunk" {
     for ([_]usize{ 511, 512, 1024 }) |rows| {
         for ([_]usize{ 1, 2 }) |world| {
             try run(false, rows, world, true, true);
@@ -153,7 +226,7 @@ test "intermediate prompt forwards the request hook before publishing progress" 
     }
 }
 
-test "final prompt forwards the request hook before publishing its first token" {
+test "the shared route forwards the request hook on the final chunk, before the first token" {
     for ([_]usize{ 511, 512, 1024 }) |rows| {
         for ([_]usize{ 1, 2 }) |world| {
             try run(true, rows, world, true, true);
@@ -161,4 +234,20 @@ test "final prompt forwards the request hook before publishing its first token" 
             try run(true, rows, world, false, true);
         }
     }
+}
+
+test "the production hook is the stream's own cancel check" {
+    var flag: Flag = .{};
+    var four: [4]u32 = @splat(1);
+    var with = try lanes.Stream.init(T.allocator, .{ .id = "p", .prompt = &four, .max_new = 4, .cancel_check = .{ .ptr = &flag, .check = Flag.check } });
+    defer with.deinit(T.allocator);
+    var without = try lanes.Stream.init(T.allocator, .{ .id = "q", .prompt = &four, .max_new = 4 });
+    defer without.deinit(T.allocator);
+    var engine: source.Hip = undefined;
+    // cancelOf reads the stream only, so the receiver is never touched.
+    const c = source.Hip.cancelOf(&engine, &with);
+    try T.expect(c != null);
+    try T.expectEqual(@as(*anyopaque, &flag), c.?.ctx);
+    try T.expect(c.?.check == Flag.check);
+    try T.expect(source.Hip.cancelOf(&engine, &without) == null);
 }
