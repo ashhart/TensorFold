@@ -7,6 +7,58 @@ const mac = @import("builtin").os.tag == .macos;
 const fill = @import("prefill.zig");
 const a = std.testing.allocator;
 const Stream = lanes.Stream;
+
+test "glm prefill: exhausted pool releases the waiting owner and preserves permanent refusals" {
+    if (comptime !mac) return error.SkipZigTest;
+    const pool = @import("pool.zig");
+    const slots = @import("slots.zig");
+    var engine: @import("engine.zig").Engine = undefined;
+    engine.ep = null;
+    engine.c = .{};
+    engine.c.layers = 0;
+    engine.c.mtp = 0;
+    var storage: [2]slots.Slot = undefined;
+    for (&storage) |*s| s.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl: slots.Slots = .{
+        .gpa = a,
+        .e = &engine,
+        .slots = &storage,
+        .rows = undefined,
+        .ids = undefined,
+        .lasts = undefined,
+        .picks = undefined,
+        .ring = undefined,
+        .pool = .{ .base = undefined, .blocks = 2, .kpool = 4 },
+    };
+    defer sl.snaps.deinit(a);
+    var backend: Backend = .{ .gpa = a, .sl = &sl };
+    defer backend.deinit();
+    const prompt: [100]u32 = @splat(7);
+    var waiting = try Stream.init(a, .{ .id = "waiting", .prompt = &prompt, .max_new = 200 });
+    defer waiting.deinit(a);
+    var oversized = try Stream.init(a, .{ .id = "oversized", .prompt = &prompt, .max_new = 400 });
+    defer oversized.deinit(a);
+
+    try std.testing.expect(Backend.fits(&backend, 100, 200));
+    try pool.reserve(&sl, 0, 317, null);
+    storage[0].used = true;
+    const occupied = storage[0].region.?;
+    try std.testing.expect(!Backend.fits(&backend, 100, 200));
+    try std.testing.expectError(error.LaneMemory, fill.step(&backend, &waiting));
+    try std.testing.expectEqual(@as(u32, 0), backend.by.count());
+    try std.testing.expectEqual(@as(u32, 0), backend.filling.count());
+    try std.testing.expect(storage[1].region == null and !storage[1].used);
+    try std.testing.expectEqual(occupied, storage[0].region.?);
+
+    try std.testing.expectError(error.ContextFull, fill.step(&backend, &oversized));
+    sl.release(0);
+    try std.testing.expect(Backend.fits(&backend, 100, 200));
+    try std.testing.expectError(error.ContextFull, fill.step(&backend, &oversized));
+    try pool.reserve(&sl, 1, 317, null);
+    sl.release(1);
+    for (storage) |s| try std.testing.expect(s.region == null and !s.used);
+}
+
 const Fake = struct {
     gpa: std.mem.Allocator = a,
     target: lanes.fake.Fake = .{ .gpa = a },

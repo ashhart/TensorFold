@@ -110,7 +110,11 @@ pub const Backend = struct {
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
         errdefer release(b, s);
-        try pool.reserve(b.sl, i, need(prompt.len, s.max_new), reuse); // pooled: its share (admission checked it fits)
+        // Admission can precede other fills' reservations; temporary exhaustion waits for a lane to finish.
+        pool.reserve(b.sl, i, need(prompt.len, s.max_new), reuse) catch |err| return switch (err) {
+            error.PoolFull => error.LaneMemory,
+            else => err,
+        };
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
         try b.words.appendSlice(b.gpa, prompt);
