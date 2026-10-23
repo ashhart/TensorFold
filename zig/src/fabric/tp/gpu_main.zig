@@ -1,4 +1,4 @@
-//! `tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel`: one rank of TP=2..16.
+//! `tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel`: one rank.
 const std = @import("std");
 const cuda = @import("cuda");
 const tp = @import("tp");

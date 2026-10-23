@@ -392,9 +392,7 @@ pub const VerbsWire = struct {
         return r;
     }
 
-    /// The peer HCA for each of ours: the one peer HCA on the same IPv4 /24; if several or none do, position
-    /// for several and `error.BadRecord` for none (the ranks then take the NCCL fallback). One-to-one or
-    /// `error.BadRecord`.
+    /// Each HCA's peer on its IPv4 /24 (by position if several share it); none or a non-1:1 map is `error.BadRecord`.
     pub fn pairing(mine: Record, peer: Record) ![max_hcas]u32 {
         if (peer.magic != record_magic or mine.magic != record_magic) return error.BadRecord;
         if (peer.n_hca != mine.n_hca or mine.n_hca == 0 or mine.n_hca > max_hcas) return error.BadRecord;
@@ -464,8 +462,7 @@ pub const VerbsWire = struct {
         var seq_copy = seq;
         var plan: [max_hcas]guard.Stripe = undefined;
         for (0..l.world - 1) |k| {
-            // the cap before each peer's stripe: a post is at most max_inflight + its own `padded` in flight,
-            // not (world - 1) x padded as it would be if the gate ran once before the loop
+            // the cap before each peer's stripe, so a post adds one `padded` past it, not (world - 1) of them
             while (w.inflight() + padded > max_inflight) try w.reapWait();
             const p = peerAt(w.me, l.world, @intCast(k));
             try guard.stripes(l, w.me, p, w.n_hca, slot, padded, &plan);

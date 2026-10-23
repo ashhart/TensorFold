@@ -136,8 +136,7 @@ pub const Hw = struct {
         return hw.wireN(region, 2, 0);
     }
 
-    /// The same fake HCAs for a wire of `world` ranks at `me`: the streams only count bytes here, so every
-    /// peer shares this HCA's fake queue pair (the per-peer QP mapping is the real connect's job).
+    /// The fake HCAs for `world` ranks at `me`: every peer shares one fake QP (the streams only count bytes).
     pub fn wireN(hw: *Hw, region: []u8, world: u32, me: u32) rv.VerbsWire {
         const s = Fake.slot_bytes;
         const layout = rv.Layout.of(world, s);
