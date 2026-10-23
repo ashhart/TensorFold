@@ -115,16 +115,16 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
         if (!r.serial) r.enc.barrier();
         const dense_ids = r.shapes.get("IDS_shape").?;
         try r.shapes.put(r.arena, "IDS_shape", g.ids_shape[rows]);
-        try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, g.keys, g.view(2 * MAXR), g.view(3 * MAXR), t.scale }, &.{ t.po, t.pm });
+        try r.attnParts("mtp:q4_attn_parts#[24, 256]", r.attn2_mtp, &.{ t.q, h.keys, h.vals, g.keys, g.view(2 * MAXR), g.view(3 * MAXR), t.scale }, &.{ t.po, t.pm });
         try r.shapes.put(r.arena, "IDS_shape", dense_ids);
     } else if (r.sel != null and !r.gpu_round and r.sel.?.meta(h.pos, rows)) { // one call a command buffer
         var ss = &r.sel.?;
         try ss.encode(r, h, t.iq, t.eps, t.log2base, h.pos, rows);
         const dense_ids = r.shapes.get("IDS_shape").?;
         try r.shapes.put(r.arena, "IDS_shape", ss.ids_shape);
-        try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, ss.keys, ss.counts, ss.sparse, t.scale }, &.{ t.po, t.pm });
+        try r.attnParts("mtp:q4_attn_parts#[24, 256]", r.attn2_mtp, &.{ t.q, h.keys, h.vals, ss.keys, ss.counts, ss.sparse, t.scale }, &.{ t.po, t.pm });
         try r.shapes.put(r.arena, "IDS_shape", dense_ids);
-    } else try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, t.ids81, sl.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
+    } else try r.attnParts("mtp:q4_attn_parts#[24, 256]", r.attn2_mtp, &.{ t.q, h.keys, h.vals, t.ids81, sl.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
     try r.call("mtp:q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
     if (rows > 1) { // only the kept row goes on: the host's last row, or the row the GPU's verdict kept, into row 0
         const keep: Buf = if (r.gpu_round) r.ar else sl.rows;

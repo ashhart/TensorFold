@@ -321,18 +321,18 @@ pub const Model = struct {
                     if (!r.serial) r.enc.barrier();
                     const dense_ids = r.shapes.get("IDS_shape").?;
                     try r.shapes.put(r.arena, "IDS_shape", g.ids_shape[rows]);
-                    try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, g.keys, g.view(2 * MAXR), g.view(3 * MAXR), t.scale }, &.{ t.po, t.pm });
+                    try r.attnParts("q4_attn_parts#[24, 256]", r.attn2, &.{ t.q, L.keys, L.vals, g.keys, g.view(2 * MAXR), g.view(3 * MAXR), t.scale }, &.{ t.po, t.pm });
                     try r.shapes.put(r.arena, "IDS_shape", dense_ids);
                 } else if (r.sel != null and !r.gpu_round and r.sel.?.meta(m.pos, rows)) {
                     var sl = &r.sel.?;
                     try sl.encode(r, L, t.iq, t.eps, t.log2base, m.pos, rows);
                     const dense_ids = r.shapes.get("IDS_shape").?;
                     try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
-                    try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ t.po, t.pm });
+                    try r.attnParts("q4_attn_parts#[24, 256]", r.attn2, &.{ t.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ t.po, t.pm });
                     try r.shapes.put(r.arena, "IDS_shape", dense_ids);
                 } else if (r.tree) |tr| {
                     try tr.attnParts(r, &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
-                } else try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
+                } else try r.attnParts("q4_attn_parts#[24, 256]", r.attn2, &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
                 try r.call("q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
                 try m.lane(t.aout, 6144, L.out, "lane_qmm_bytes_grouped@att.o", t.branch);
             }

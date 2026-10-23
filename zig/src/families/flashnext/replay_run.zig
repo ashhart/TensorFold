@@ -47,6 +47,8 @@ pub const Run = struct {
     argpart_pipe: mtl.Pipeline = undefined, // the round's argmaxes in two launches (fz_argmax_part, fz_argmax_join)
     argjoin_pipe: mtl.Pipeline = undefined,
     arg_parts: Buf = undefined, // their winners: rows x parts x (value bits, index)
+    attn2: ?*Variant = null, // attention parts at two heads a threadgroup (attn2.zig), main layers and the head
+    attn2_mtp: ?*Variant = null,
     pleids_pipe: mtl.Pipeline = undefined,
     copy_pipe: mtl.Pipeline = undefined,
     accept_pipe: mtl.Pipeline = undefined,
@@ -282,6 +284,12 @@ pub const Run = struct {
         r.enc.setBuffer(r.sink.b, 0, 1);
         r.enc.setBytes(std.mem.asBytes(&n), 2);
         r.enc.dispatchThreads(mtl.Size.of(256 * 64, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// The attention parts launch: two heads a threadgroup when its load check passed (`two`), else as recorded.
+    pub fn attnParts(r: *Run, role: []const u8, two: ?*Variant, ins: []const Buf, outs: []const Buf) !void {
+        if (two) |v| return @import("attn2.zig").call(r, role, v, ins, outs);
+        return r.call(role, ins, outs);
     }
 
     /// Each of `rows` rows' first largest of `n` logits into `out[row]` (ids[pick] with `ids`): fz_argmax's pick.

@@ -137,6 +137,10 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     r.event = try r.ownResource(try device.event());
     if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
     r.sel = try Select.init(r, MAXR);
+    if (r.tp == null and !std.mem.eql(u8, std.mem.span(platform.c.getenv("FZ_ATTN2") orelse @as([*:0]const u8, "on")), "off")) { // two heads a threadgroup, checked
+        r.attn2 = try @import("attn2.zig").init(r, "q4_attn_parts#[24, 256]");
+        r.attn2_mtp = try @import("attn2.zig").init(r, "mtp:q4_attn_parts#[24, 256]");
+    }
     r.lane_new = platform.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
     if (platform.c.getenv("FZ_GDN")) |v| {
         r.gdn_pipe = try fz.gdn_step.compile(r, false);
