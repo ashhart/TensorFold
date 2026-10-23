@@ -158,6 +158,7 @@ pub fn main(init: std.process.Init) !void {
     const t2 = now();
     r.d.profReport("decode");
     std.debug.print("prompt: {d} tokens in {d:.3} s ({d:.0} tok/s)\n", .{ ids.len, t1 - t0, @as(f64, @floatFromInt(ids.len)) / (t1 - t0) });
+    if (std.c.getenv("XPU_TIMING") != null) std.debug.print("host: {d:.2} ms a token queueing a forward, {d:.2} ms a token in forwards\n", .{ r.t_enqueue / @as(f64, @floatFromInt(steps + 1)) * 1e3, r.t_forward / @as(f64, @floatFromInt(steps + 1)) * 1e3 });
     std.debug.print("decode: {d} tokens in {d:.3} s ({d:.1} tok/s)\n", .{ steps - 1, t2 - t1, @as(f64, @floatFromInt(steps - 1)) / (t2 - t1) });
     std.debug.print("tokens:", .{});
     for (out.items) |t| std.debug.print(" {d}", .{t});

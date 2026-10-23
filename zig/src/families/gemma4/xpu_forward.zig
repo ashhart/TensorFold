@@ -36,6 +36,7 @@ pub const Kernels = struct {
     dec_narrow: ze.H,
     gemv256: ze.H,
     dense: ze.H,
+    dec_narrow16: ze.H,
     dec_wide16: ze.H,
     attn_rows: [2]ze.H,
     ngen_wide: ze.H,
@@ -62,7 +63,7 @@ pub const Acts = struct {
     pv: *anyopaque,
     pi: *anyopaque,
     out: *anyopaque, // i32 [ROWS]
-    pscr: *anyopaque, // fp32 [MAXT, 2560]: slice totals of the narrow prompt GEMM
+    pscr: *anyopaque, // fp32 [MAXT, 6144]: slice totals of the narrow prompt GEMM
     tkv: *anyopaque, // top-k stage 1: f32 [ROWS, 256, 64], i32
     tki: *anyopaque,
     tov: *anyopaque, // top-k result: f32 [ROWS, 64], i32
@@ -86,6 +87,8 @@ pub const Runner = struct {
     host_logits: []f32,
     dump_dir: ?[]const u8 = null,
     tag: []const u8 = "",
+    t_enqueue: f64 = 0, // seconds the host spent queueing forwards, XPU_TIMING
+    t_forward: f64 = 0,
     window: u32 = MAXT, // rows per forward of `feed` (tests cut a prompt differently)
 
     pub fn init(dir: []const u8, context: u32) !*Runner {
@@ -129,7 +132,8 @@ pub const Runner = struct {
             .dec_wide64 = try d.kernel(mm, "w4k1_d64", 64),
             .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
             .gemv256 = try d.kernel(mg, "g4_gemv256", 64),
-            .dense = try d.kernel(mg, "g4_dense", 128),
+            .dense = try d.kernel(mg, "g4_dense", 256),
+            .dec_narrow16 = try d.kernel(mm, "w4k_s16x16", 64),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
             .attn_rows = .{ try d.kernel(mg, "g4_attn_rows", 128), try d.kernel(mgg, "g4_attn_rows", 128) },
             .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
@@ -165,7 +169,7 @@ pub const Runner = struct {
             .po = try d.alloc_(ROWS * cfg.heads * nt * cfg.dim_g * 4),
             .tok = try d.alloc_(MAXT * cfg.ple_all * 2),
             .pli = try d.alloc_(MAXT * cfg.ple_all * 2),
-            .pscr = try d.alloc_(MAXT * cfg.hidden * 4),
+            .pscr = try d.alloc_(MAXT * 6144 * 4),
             .logits = try d.alloc_(ROWS * cfg.vocab * 2),
             .pv = try d.alloc_(ROWS * 256 * 4),
             .pi = try d.alloc_(ROWS * 256 * 4),
@@ -265,7 +269,7 @@ pub const Runner = struct {
         const mp: i32 = @intCast((m + 7) / 8 * 8);
         const k = r.k;
         if (w.dense) { // a bf16 weight
-            try r.d.launch(k.dense, .{ .x = w.n / 8, .y = (m + 15) / 16 }, .{ h, w.w, out, M, N, K });
+            try r.d.launch(k.dense, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, out, M, N, K });
             return;
         }
         if (m > ROWS and w.k != 256) { // prompt rows: the nGEN GEMMs, the decode kernels' arithmetic
@@ -288,7 +292,7 @@ pub const Runner = struct {
                 try r.d.launch(k.dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
             else
                 try r.d.launch(k.dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
-        } else try r.d.launch(k.dec_narrow, .{ .x = 1, .y = w.n / 32 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
+        } else try r.d.launch(k.dec_narrow16, .{ .x = 1, .y = w.n / 16 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G }); // K in 4 slices, 16 columns a group
     }
 
     fn dump(r: *Runner, name: []const u8, p0: u32, rows: u32) !void {
@@ -322,6 +326,8 @@ pub const Runner = struct {
         if (T == 0 or T > MAXT or (T > ROWS and want == .rows)) return error.BadWindow;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle(); // the queued copy reads the caller's ids
+        const t_start = dev.now();
+        defer r.t_forward += dev.now() - t_start;
         // the embeddings, and the per-layer inputs they give
         try d.launch(k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x });
         try r.dump("embed", p0, T);
@@ -392,6 +398,7 @@ pub const Runner = struct {
         try d.launch(k.argmax, .{ .x = rows }, .{ a.pv, a.pi, a.out });
         var toks: [ROWS]i32 = undefined;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &toks, a.out, rows * 4, null, 0, null));
+        r.t_enqueue += dev.now() - t_start;
         try d.sync();
         return toks[rows - 1];
     }

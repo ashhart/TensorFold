@@ -482,29 +482,29 @@ KERNEL(128) void g4_attn_rows(global const ushort *Q, global const ushort *KC, g
   }
 }
 
-// Dense projection (a bf16 weight kept as stored): OUT = A · Wᵀ in fp16. A fp16 [M, K], W bf16 [N, K], K a multiple of 128.
-// One subgroup a column, 8 columns a group; grid (N / 8, rows / 16): a chunk of 16 rows reads the column once. Each row's sum is
-// the lanes' partial sums added by the subgroup, in an order that does not depend on the other rows.
-KERNEL(128) void g4_dense(global const half *A, global const ushort *W, global half *OUT, int M, int N, int K) {
-  const int n = get_group_id(0) * 8 + get_sub_group_id(), m0 = get_group_id(1) * 16, lane = get_sub_group_local_id();
-  float acc[16];
-  for (int m = 0; m < 16; m++) acc[m] = 0.0f;
-  global const ushort *w = W + (long)n * K;
-  for (int k = lane * 8; k < K; k += 128) {
-    const ushort8 wv = vload8(0, w + k);
-    float wf[8];
-    for (int j = 0; j < 8; j++) wf[j] = bf2f(wv[j]);
-    for (int m = 0; m < 16; m++) {
-      if (m0 + m >= M) break;
-      const half8 av = vload8(0, A + (long)(m0 + m) * K + k);
-      float a = acc[m];
-      for (int j = 0; j < 8; j++) a = fma(wf[j], (float)av[j], a);
-      acc[m] = a;
-    }
+// Dense projection by DPAS (a bf16 weight converted to fp16 at load: exact for these weights): OUT = A · Wᵀ in fp16, fp32 sums.
+// A fp16 [M, K], W fp16 [N, K], K a multiple of 256. Group (rows / 16, N / 16) of 16 subgroups, each summing a slice of K / 16 in
+// order; the 16 slices are added in order, so a row's bits depend on neither the other rows nor the tile it sits in.
+KERNEL(256) void g4_dense(global const half *A, global const half *W, global half *OUT, int M, int N, int K) {
+  local float red[16 * 16 * 16];
+  const int KS = K / 16;
+  const int m0 = get_group_id(0) * 16, n0 = get_group_id(1) * 16, sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  float8 acc0 = 0.0f, acc1 = 0.0f;
+  global const uint *wr = (global const uint *)(W + (long)(n0 + lane) * K);
+  for (int k = sg * KS; k < (sg + 1) * KS; k += 16) {
+    short8 a0, a1;
+    intel_sub_group_2d_block_read_16b_8r16x1c((global void *)A, K * 2, M, K * 2, (int2)(k, m0), (private ushort *)&a0);
+    intel_sub_group_2d_block_read_16b_8r16x1c((global void *)A, K * 2, M, K * 2, (int2)(k, m0 + 8), (private ushort *)&a1);
+    const int8 bb = as_int8(vload8(0, wr + k / 2));
+    acc0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, bb, acc0);
+    acc1 = intel_sub_group_f16_f16_matrix_mad_k16(a1, bb, acc1);
   }
-  for (int m = 0; m < 16; m++) {
-    if (m0 + m >= M) break;
-    const float s = sub_group_reduce_add(acc[m]);
-    if (lane == 0) OUT[(long)(m0 + m) * N + n] = convert_half_rte(s);
+  for (int r = 0; r < 8; r++) {
+    red[(sg * 16 + r) * 16 + lane] = acc0[r];
+    red[(sg * 16 + 8 + r) * 16 + lane] = acc1[r];
   }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  float v = 0.0f;
+  for (int s = 0; s < 16; s++) v += red[(s * 16 + sg) * 16 + lane];
+  if (m0 + sg < M) OUT[(long)(m0 + sg) * N + n0 + lane] = convert_half_rte(v);
 }
