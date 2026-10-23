@@ -1,0 +1,42 @@
+[
+ {
+  "id": "wasserman",
+  "name": "Wasserman",
+  "folder": "00-wasserman"
+ },
+ {
+  "id": "camera",
+  "name": "01 Camera & Viewpoint",
+  "folder": "01-camera-viewpoint"
+ },
+ {
+  "id": "transform",
+  "name": "02 Transformation & Morphing",
+  "folder": "02-transformation-morphing"
+ },
+ {
+  "id": "character",
+  "name": "03 Character Editing",
+  "folder": "03-character-editing"
+ },
+ {
+  "id": "motion",
+  "name": "04 Motion & Action",
+  "folder": "04-motion-action"
+ },
+ {
+  "id": "style",
+  "name": "05 Art Style",
+  "folder": "05-art-style"
+ },
+ {
+  "id": "finish",
+  "name": "06 Support & Finishing",
+  "folder": "06-support-finishing"
+ },
+ {
+  "id": "fun",
+  "name": "07 Fun",
+  "folder": "07-fun"
+ }
+]
