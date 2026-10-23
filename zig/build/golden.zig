@@ -2,8 +2,8 @@
 
 const std = @import("std");
 
-/// `zig build test-golden` over the server tests' module and the imports it was built with.
-pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.Module, api: *std.Build.Module, tokenizer: *std.Build.Module, template: *std.Build.Module) void {
+/// `zig build test-golden` over the server tests' module; `engines` is the platform registry `cli/hub.zig` reads.
+pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.Module, api: *std.Build.Module, tokenizer: *std.Build.Module, template: *std.Build.Module, engines: *std.Build.Module) void {
     const fake_serve = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/server/fake_serve.zig"),
         .target = target,
@@ -45,6 +45,7 @@ pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.
             .target = target,
             .optimize = .Debug,
             .link_libc = true,
+            .imports = &.{.{ .name = "native_engines", .module = engines }},
         }), .filters = &.{"security:"} });
         const run = b.addRunArtifact(checks);
         run.setCwd(b.path("."));

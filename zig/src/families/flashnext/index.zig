@@ -1,10 +1,8 @@
-//! Public index admission proves required tensor names and safe shard names before payload headers are available.
-//! A shard may sit in a folder inside the model folder (`tensors/model-…safetensors`); names that leave it are refused.
+//! Public index admission proves required tensor names and safe shard names before any payload header is read.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 
-/// A weight map's shard, as core/checkpoint_index.zig's `shardName` takes it (kept here so this file imports no core):
-/// plain names joined by `/`, no part hidden or reserved, and the file must be a safetensors one.
+/// A weight map's shard, as core's `shardName` takes it: plain names joined by `/`, none hidden, `.safetensors`.
 pub fn shardName(name: []const u8) bool {
     if (!std.mem.endsWith(u8, name, ".safetensors")) return false;
     var parts = std.mem.splitScalar(u8, name, '/');

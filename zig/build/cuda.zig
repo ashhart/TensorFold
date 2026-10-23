@@ -418,7 +418,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const h3_checkpoint = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/checkpoint.zig"), .target = host, .optimize = .debug, .link_libc = true });
     // the checkpoint maps its file with mmap: not Windows
     if (host.result.os.tag != .windows) step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_checkpoint })).step);
-
+    @import("pull_tests.zig").add(b, host, .debug, native_modules.engines, mods.core, step);
     b.step("test-save-reopen-host", "Unresolved save through actual checkpoint admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"Save recovery:"} })).step);
     b.step("test-trainer-close-host", "Actual native close and real Flash Next trainer ownership sentinels").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"Save recovery:"} })).step);
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
@@ -479,7 +479,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     }
     // the server goldens and Cortheon's fuzz step here when the target is not macOS, whose Metal build defines them
     if (server_steps) {
-        golden_build.step(b, host, server_tests, native_modules.api, mods.tokenizer, template);
+        golden_build.step(b, host, server_tests, native_modules.api, mods.tokenizer, template, native_modules.engines);
         @import("cortheon_fuzz.zig").add(b, host, native_modules.api, mods.tokenizer, template);
     }
     // the tokenizer's own tests (memo, steps, regex, unicode) run here: no other test binary reaches them
@@ -522,17 +522,6 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     memory_cli.root_source_file = b.path("zig/src/cli/tests.zig");
     b.step("test-cli-memory-host", "Actual checkpoint info memory tests without device or shader producers").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory_cli, .filters = &.{ "info prints family", "issue 934:" } })).step);
     b.step("test-info-config", "Info shares the checkpoint config reader and diagnostics").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli, .filters = &.{"issue 934:"} })).step);
-    // `pull`'s tests need the engine registry (`hub.family`) and EXLR8's import; nothing else pulls them in whole.
-    const pull_tests = b.createModule(.{
-        .root_source_file = b.path("zig/src/cli/pull_test.zig"),
-        .target = host,
-        .optimize = .debug,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "native_engines", .module = native_modules.engines }, exlr8_build.cliImport(b, host, .debug, mods.core) },
-    });
-    const pull_run = b.addRunArtifact(b.addTest(.{ .root_module = pull_tests }));
-    b.step("test-pull-host", "Checkpoint download paths: a nested shard folder, retries, resume and the whole-file fallback").dependOn(&pull_run.step);
-    step.dependOn(&pull_run.step);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli })).step);
 }
 
