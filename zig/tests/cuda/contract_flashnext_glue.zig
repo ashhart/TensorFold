@@ -37,14 +37,32 @@ fn noSums(_: c.Shape) usize {
     return 0;
 }
 
+/// The DeltaNet prompt pass's rows: the fused dispatch seam, the default chunk and the most a chunk may ask for.
+const prompt_served = [_]c.Shape{
+    .{ .rows = 64, .n = nv * dv, .k = dk },
+    .{ .rows = parts.default_chunk, .n = nv * dv, .k = dk },
+    .{ .rows = parts.max_chunk, .n = nv * dv, .k = dk },
+};
+
 /// rows = token rows; n = outputs a row (value heads x width, pooled blocks, or the read-out's mixed dims).
 pub fn spec(kind: Kind) c.Spec {
     return switch (kind) {
-        .chain => .{ .name = "cuda flashnext DeltaNet prompt chain fn_gdn_chain_tpr", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "ys and the state bit-equal to fn_gdn_rows_to's, non-finite inputs included" }, .replaces = "fn_gdn_rows_to", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = nv * dv, .k = dk }, .{ .rows = 300, .n = nv * dv, .k = dk } } },
+        .chain => .{ .name = "cuda flashnext DeltaNet prompt chain fn_gdn_chain_tpr", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "ys and the state bit-equal to fn_gdn_rows_to's, non-finite inputs included" }, .replaces = "fn_gdn_rows_to", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .served = &prompt_served },
         .scores => .{ .name = "cuda flashnext indexer scores qsa_tile::scores<8, 4>", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "every score byte equal to fn_qsa_scores', non-finite inputs included" }, .replaces = "fn_qsa_scores", .tiles = .{ .{ .size = 8 }, .{ .size = 256, .step = 1, .min = 1 }, .{} }, .served = &.{ .{ .rows = 64, .n = 600, .k = di }, .{ .rows = 300, .n = 2100, .k = di } } },
-        .fused => .{ .name = "cuda flashnext DeltaNet prompt block fn_gdn_fused (front, chain, gated norm)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "gated-norm rows, xs, the state and the readouts bit-equal to fn_gdn_front -> fn_gdn_rows_to -> fn_gdn_norm, non-finite inputs included" }, .replaces = "fn_gdn_front, fn_gdn_chain_tpr and fn_gdn_norm", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = nv * dv, .k = dk }, .{ .rows = 300, .n = nv * dv, .k = dk } } },
+        .fused => .{ .name = "cuda flashnext DeltaNet prompt block fn_gdn_fused (front, chain, gated norm)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "gated-norm rows, xs, the state and the readouts bit-equal to fn_gdn_front -> fn_gdn_rows_to -> fn_gdn_norm, non-finite inputs included" }, .replaces = "fn_gdn_front, fn_gdn_chain_tpr and fn_gdn_norm", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .in_place = true, .served = &prompt_served },
         .readout => .{ .name = "cuda flashnext hyper-connection read-out on prompt tiles (hcf down, reduce, hcf up, rinv, mix_h)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "act, xs, inj, mixed and xsm bit-equal to #952's chain, non-finite inputs included" }, .replaces = "fn_hc_down, fn_hc_reduce_act and fn_hc_upmix", .tiles = .{ .{ .size = 64 }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = dims, .k = wide }, .{ .rows = 130, .n = dims, .k = wide } } },
     };
+}
+
+/// The fused block's arguments: the state is read and written where it lies, as production binds it.
+pub fn fusedArgs(ins: []const u64, o: []const u64, rows: usize, norm: u64) cuda.Args {
+    var a: cuda.Args = .{};
+    for ([_]u64{ ins[0], ins[1], ins[2], ins[3], ins[4], o[2], o[2] }) |v| a.add(v);
+    a.add(@as(c_int, @intCast(rows)));
+    a.add(norm);
+    a.add(eps);
+    for ([_]u64{ o[0], o[1], o[3] }) |v| a.add(v);
+    return a;
 }
 
 pub const Fns = struct { tpr: cuda.Function, rows_to: cuda.Function, tile: cuda.Function, scores: cuda.Function, hcf_down: cuda.Function, hcf_up: cuda.Function, front: cuda.Function, norm: cuda.Function, fused: cuda.Function };
@@ -61,10 +79,15 @@ pub const Glue = struct {
     nout: usize = 0,
     base: u64 = 0,
     pos0: usize = 0,
+    /// The mutable state the fused block reads and writes where it lies; 0: the kind has none.
+    state: u64 = 0,
+    /// The state's starting bytes: every launch restores them, so the repeats compare the same pass.
+    fresh: ?[]u8 = null,
     seen: std.ArrayList(u8) = .empty,
     msg: [160]u8 = undefined,
 
     pub fn deinit(self: *Glue) void {
+        if (self.fresh) |f| self.rig.gpu.gpa.free(f);
         self.seen.deinit(self.rig.gpu.gpa);
         self.rig.deinit();
     }
@@ -95,14 +118,19 @@ pub const Glue = struct {
         self.ins[i] = try self.rig.input(bytes);
     }
 
-    fn out(self: *Glue, len: usize) !void {
-        self.outs[self.nout] = try self.rig.output(len);
+    fn out(self: *Glue, len: usize) !u64 {
+        const p = try self.rig.output(len);
+        self.outs[self.nout] = p;
         self.lens[self.nout] = len;
         self.nout += 1;
+        return p;
     }
 
     pub fn prepare(self: *Glue, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         self.rig.reset();
+        if (self.fresh) |f| self.rig.gpu.gpa.free(f);
+        self.fresh = null;
+        self.state = 0;
         self.nout = 0;
         self.shape = shape;
         if (shape.rows == 0) return false;
@@ -191,12 +219,14 @@ pub const Glue = struct {
                 try self.in(2, std.mem.sliceAsBytes(cw));
                 try self.in(3, std.mem.sliceAsBytes(a_log));
                 try self.in(4, std.mem.sliceAsBytes(dt));
-                try self.in(5, std.mem.sliceAsBytes(st));
+                try self.in(5, std.mem.sliceAsBytes(st)); // the replaced kernels' state in: our launch never writes it
                 try self.in(6, std.mem.sliceAsBytes(nw));
                 try self.out(m * nv * dv * 2); // gated-norm rows (bf16)
                 try self.out(m * (nv * dv / 32) * 4); // their 32-wide sums
-                try self.out(nv * dv * dk * 4); // the state after the pass
+                self.state = try self.out(nv * dv * dk * 4); // the state after the pass: read and written where it lies
                 try self.out(m * nv * dv * 4); // the chain's readouts
+                // the fused block reads and writes the state where it lies: every launch starts from these bytes
+                self.fresh = try a.dupe(u8, std.mem.sliceAsBytes(st));
             },
         }
         self.base = 0;
@@ -278,12 +308,7 @@ pub const Glue = struct {
                 try cuda.launch.launch(self.f.tile, .{ .grid = .{ .x = @intCast((m + 7) / 8), .y = @intCast((self.shape.n + 255) / 256) }, .block = .{ .x = 256 } }, s, &a);
             },
             .fused => {
-                var a: cuda.Args = .{};
-                for ([_]u64{ self.ins[0], self.ins[1], self.ins[2], self.ins[3], self.ins[4], self.ins[5], o[2] }) |v| a.add(v);
-                a.add(@as(c_int, @intCast(m)));
-                a.add(self.ins[6]);
-                a.add(eps);
-                for ([_]u64{ o[0], o[1], o[3] }) |v| a.add(v);
+                var a = fusedArgs(self.ins[0..], o, m, self.ins[6]);
                 try cuda.launch.launch(self.f.fused, .{ .grid = .{ .x = nv }, .block = .{ .x = parts.gdn_fused_threads }, .shared = parts.gdn_fused_smem }, s, &a);
             },
             .readout => {
@@ -362,7 +387,15 @@ pub const Glue = struct {
         }
     }
 
+    /// The fused block reads and writes the state where it lies: every launch starts from the same state.
+    fn restoreState(self: *Glue) !void {
+        const f = self.fresh orelse return;
+        const b: cuda.DeviceBuffer = .{ .d = self.rig.gpu.d, .ptr = self.state, .len = f.len };
+        try b.upload(0, f);
+    }
+
     pub fn run(self: *Glue) !void {
+        try self.restoreState();
         try self.ours(self.outs[0..self.nout]);
         try self.rig.s.synchronize();
     }
