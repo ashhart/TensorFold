@@ -107,6 +107,13 @@ bin/tensorfold-native serve "$HOME/models/nemotron-lightning" \
   --name local-model --parallel 1 --context 8192 --temperature 0 --no-thinking
 ```
 
+This example's `--parallel 1` caps serving at one active request; extra requests wait for a free slot.
+Omit `--parallel` to use `auto`, which asks for up to eight streams as memory and the engine allow.
+Use `--parallel N` for an explicit cap; the engine refuses a count it cannot fit.
+Read the startup capacity line, such as `8 streams at once` on CUDA, for the accepted count.
+For example, `--parallel 4` keeps at most four requests active while the fifth and later requests wait.
+Completing or cancelling an active request frees its slot; cancelling a waiting request removes it from the queue.
+
 Leave the server running and check it from another terminal:
 
 ```sh
@@ -121,6 +128,11 @@ Use `http://127.0.0.1:8080/v1` as the OpenAI client base URL.
 For streaming, add `"stream": true` to the request.
 The native server also has `/v1/responses` and Anthropic `/v1/messages` routes.
 Serve flags and request overrides are described in [README.md](README.md#serve-flags).
+
+With API authentication off, `/health` includes `live.connections`, the total active plus waiting requests,
+and `live.waiting`, the queued requests. Subtract waiting from connections to get the active count.
+For example, 8 connections with 4 waiting means 4 active and 4 queued.
+When API authentication is enabled, `/health` returns only status.
 
 ## Linux and CUDA
 

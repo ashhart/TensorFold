@@ -16,6 +16,8 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/gemma-4-31b" --port 888
   --drafter "$HOME/models/gemma-4-31b-dflash"
 ```
 
+`--parallel 4` caps this example at four active requests; additional requests wait for a free slot.
+
 Without `--drafter` the model decodes plain, at about 51 tokens a second for one stream at short context (mlx-lm 46)
 and 40 at 32k. With z-lab's DFlash drafter
 a stream decodes at 150-190 tokens a second (6-7 accepted tokens a round on chat and code, 10 on copying replies,

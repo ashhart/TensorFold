@@ -19,6 +19,8 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/gemma-4-12b" --port 888
   --drafter "$HOME/models/gemma-4-12b-assistant" --vision
 ```
 
+`--parallel 4` caps this example at four active requests; additional requests wait for a free slot.
+
 `gemma4_12b_convert.py` quantizes the language model's tensors with mlx-lm's converter to affine 4-bit in groups of
 64 (6.3 GB, 4.5 bits a weight with the scales), writes the image embedder's ten tensors as stored (bf16, 100 MB) to
 `model-vision.safetensors`, drops the audio input's, and writes the checkpoint's own `gemma4_unified` config back with

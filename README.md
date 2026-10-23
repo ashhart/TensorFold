@@ -92,6 +92,14 @@ On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WIND
 Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
 You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
 
+`--parallel N` caps active requests at N; extra requests wait for a free slot.
+Omitting the flag uses `--parallel auto`, which asks for up to eight streams as memory and the engine allow.
+An explicit number is refused if the engine cannot fit that many streams.
+Read the engine's startup capacity line, such as `8 streams at once` on CUDA, for the count it accepted.
+With API authentication off, `/health` reports `live.connections` as active plus waiting requests and
+`live.waiting` as the queued count. For example, 8 connections with 4 waiting means 4 active requests.
+Completing or cancelling an active request frees its slot; cancelling a waiting request removes it from the queue.
+
 ## Mac app
 
 The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
@@ -278,7 +286,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--drafter-bits 0\|4` | Drafter weight precision where the model offers a choice: 4 bits (the default), or 0 to keep bf16. Qwen3.8-27B on CUDA takes 4 only. |
 | `--record DIR` | Write each stream's committed tokens, positions and tapped rows under DIR, for drafter training. CUDA Nemotron only; a single stream runs through the lane rounds, and recording stops below 25 GiB free disk. |
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
-| `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
+| `--parallel N\|auto` | Cap active requests at N and queue the rest. Default `auto` asks for up to 8 as memory and the engine allow; an explicit count that cannot fit is refused. Read the accepted count at startup. |
 | `--prompt-cache-gib GIB` | Retained-prefix budget, 16 GiB by default or less where memory is short; 0 disables it. |
 | `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
 | `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
