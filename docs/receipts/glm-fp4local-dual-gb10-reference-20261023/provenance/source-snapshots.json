@@ -1,0 +1,22 @@
+{
+  "v5": {
+    "archive_sha256": "1cf4f6d3d4afeb3a374f0e967790638ef06619146165da6a4f8746663ad2f1a3",
+    "source_files": 3371
+  },
+  "v6": {
+    "archive_sha256": "50eb82ee08aaebda77a73ef78c840b3e8c108d69b7a058d8a5268e233bd62080",
+    "source_files": 3376
+  },
+  "v7": {
+    "archive_sha256": "1706077d70b5d6bf15c9d0aa9d84d87c0307ecb2c5c379ad4bd4c52b6ead736f",
+    "source_files": 3380
+  },
+  "v8": {
+    "archive_sha256": "544cb456af93eae7c588605cab724a871fa9150e75b4bb87df014191919e4bb7",
+    "source_files": 3382
+  },
+  "v9": {
+    "archive_sha256": "46962cb5ae6daee37d593dd20f6cf6565641a010f5e1959281848856c3b2599f",
+    "source_files": 3383
+  }
+}

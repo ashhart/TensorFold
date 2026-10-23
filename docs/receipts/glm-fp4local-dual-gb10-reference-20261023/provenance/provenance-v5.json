@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-22",
+  "status": "experimental; consult OPTIMIZATION.md for exact test scope and selected configuration",
+  "inherits": "provenance-v4.json",
+  "image": "local-reference/tensorfold-fp4local:exp-v5-20261022",
+  "image_id": "sha256:77a6204988f5012919aca93198a267f5cc8faafb0f49ee9848d5479a13d0fb20",
+  "native_binary_sha256": "4c75b2b6182560bdbee9eef8267218bfaa975541464761a7ad0476c8fec2e0ad",
+  "source_archive": "source-v5.tar.gz",
+  "source_archive_sha256": "1cf4f6d3d4afeb3a374f0e967790638ef06619146165da6a4f8746663ad2f1a3",
+  "changes": [
+    "Optional GLM A4 N128 tile, reusing the same compact weights and per-element accumulation order",
+    "DFlash2 startup confidence validation and explicit experimental cost override; legacy defaults bit-preserved",
+    "Focused A4 contract and independent frozen-baseline, FP64 and decode-warp tests"
+  ],
+  "runtime_knobs": ["TF_NVFP4_DECODE_WARPS", "TF_GLM_A4_N_TILE", "TF_GLM_DRAFT_CONFIDENCE"],
+  "cost_override_deployed": false,
+  "selected_tuning": "prefill",
+  "selected_env": {"TF_GLM_A4_N_TILE": "128", "TF_NVFP4_DECODE_WARPS": "4", "TF_GLM_DRAFT_CONFIDENCE": "0.7"},
+  "controller": "tfctl-v5",
+  "controller_sha256": "a3ef96ce6979bca131693607a4eeb16f8bf0501934014e47b236d74f2b7aebba",
+  "rollback_controller": "tfctl-v4",
+  "served_regression": "passed; scope and untested gates recorded in IMPLEMENTATION.md and OPTIMIZATION.md",
+  "profile_probes_default": false,
+  "build_steps_succeeded": 254,
+  "build_steps_total": 254,
+  "executed_tests_passed": 1057,
+  "executed_tests_skipped": 4,
+  "original_service_port_unchanged": 8888,
+  "experimental_port": 8890
+}

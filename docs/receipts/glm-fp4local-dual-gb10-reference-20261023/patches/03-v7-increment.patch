@@ -1,0 +1,1049 @@
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -10,6 +10,9 @@
+     const profile_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prompt profile:"} }));
+     b.step("test-glm-prompt-profile-host", "Paired prompt-stage event timing, overlap, failure and disabled controls without devices").dependOn(&profile_run.step);
+     step.dependOn(&profile_run.step);
++    const route_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "GLM route", "GLM profile interval" } }));
++    b.step("test-glm-route-profile-host", "Bounded asynchronous route snapshots and exact host histograms without devices").dependOn(&route_run.step);
++    step.dependOn(&route_run.step);
+     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
+     const admission = b.createModule(.{ .root_source_file = b.path("zig/glm_admission_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "engine_api", .module = api } } });
+     const admission_run = b.addRunArtifact(b.addTest(.{ .root_module = admission, .filters = &.{"GLM CUDA admission:"} }));
+diff --git a/zig/src/core/lanes/backend.zig b/zig/src/core/lanes/backend.zig
+--- a/zig/src/core/lanes/backend.zig
++++ b/zig/src/core/lanes/backend.zig
+@@ -70,7 +70,11 @@
+ };
+ 
+ pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
+-pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
++pub const RoundObserver = struct {
++    ptr: *anyopaque,
++    done: *const fn (*anyopaque, []const []const u32) void,
++    begin: ?*const fn (*anyopaque) void = null,
++};
+ 
+ pub const Backend = struct {
+     proposal_head: ?*const @import("proposal_head.zig").Service = null,
+@@ -173,6 +177,9 @@
+     pub fn observed(b: Backend, paths: []const []const u32) void {
+         if (b.round_observer) |observer| observer.done(observer.ptr, paths);
+     }
++    pub fn observing(b: Backend) void {
++        if (b.round_observer) |observer| if (observer.begin) |begin| begin(observer.ptr);
++    }
+     pub fn proposals(b: Backend) bool {
+         return if (b.proposal_head) |service| service.mode != .legacy else false;
+     }
+diff --git a/zig/src/core/lanes/engine.zig b/zig/src/core/lanes/engine.zig
+--- a/zig/src/core/lanes/engine.zig
++++ b/zig/src/core/lanes/engine.zig
+@@ -191,6 +191,7 @@
+     /// One stream's round: verify pending and drafted tokens together, keep drafts to the first mismatch.
+     fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
+         e.clock.start();
++        e.backend.observing();
+         const priced = s.priced;
+         s.priced = null;
+         const a = e.arena.allocator();
+@@ -247,6 +248,7 @@
+     /// The stream windows of a shared round in one forward, then each verified, committed and drafted on its own.
+     fn roundStreams(e: *Engine, entries: []*Stream) !void {
+         e.clock.start();
++        e.backend.observing();
+         const a = e.arena.allocator();
+         const plans = try a.alloc(Plan, entries.len);
+         for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
+diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
+--- a/zig/src/core/lanes/lanes.zig
++++ b/zig/src/core/lanes/lanes.zig
+@@ -47,6 +47,7 @@
+ test {
+     std.testing.refAllDecls(@This());
+     _ = @import("engine_test.zig");
++    _ = @import("observer_test.zig");
+     _ = @import("long_loop.zig");
+     _ = @import("long_loop_test.zig");
+     _ = @import("handover_test.zig");
+diff --git a/zig/src/core/lanes/observer_test.zig b/zig/src/core/lanes/observer_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/core/lanes/observer_test.zig
+@@ -0,0 +1,79 @@
++//! Optional round begin/end hooks do not change generated tokens or the legacy done-only observer.
++const std = @import("std");
++const be = @import("backend.zig");
++const Engine = @import("engine.zig").Engine;
++const Stream = @import("stream.zig").Stream;
++const fake = @import("fake.zig");
++const tests = @import("engine_test.zig");
++const a = std.testing.allocator;
++
++const Seen = struct {
++    starts: usize = 0,
++    ends: usize = 0,
++    open: bool = false,
++    bad: bool = false,
++    fn begin(ptr: *anyopaque) void {
++        const s: *Seen = @ptrCast(@alignCast(ptr));
++        s.bad = s.bad or s.open;
++        s.open = true;
++        s.starts += 1;
++    }
++    fn done(ptr: *anyopaque, _: []const []const u32) void {
++        const s: *Seen = @ptrCast(@alignCast(ptr));
++        s.bad = s.bad or !s.open;
++        s.open = false;
++        s.ends += 1;
++    }
++};
++
++test "optional round begin observes complete solo and shared rounds without changing tokens" {
++    for ([_]usize{ 1, 2 }) |n| {
++        var expected: [2][40]u32 = undefined;
++        var expected_len: [2]usize = undefined;
++        for ([_]bool{ false, true }) |enabled| {
++            var cfg = try tests.model();
++            defer cfg.deinit(a);
++            var target: fake.Fake = .{ .gpa = a };
++            defer target.deinit();
++            var clock: fake.FixedClock = .{};
++            var seen: Seen = .{};
++            var backend = target.backend();
++            if (enabled) backend.round_observer = .{ .ptr = &seen, .done = Seen.done, .begin = Seen.begin };
++            var engine = Engine.init(a, &cfg, backend, clock.clock());
++            defer engine.deinit();
++            var streams: [2]Stream = undefined;
++            var made: usize = 0;
++            defer for (streams[0..made]) |*s| s.deinit(a);
++            for (streams[0..n], 0..) |*s, i| {
++                s.* = try Stream.init(a, .{ .id = if (i == 0) "a" else "b", .prompt = if (i == 0) &tests.p1 else &tests.p2,
++                    .max_new = 40, .eos = &.{96}, .drafts = true });
++                made += 1;
++                try engine.addStream(s);
++            }
++            while (engine.activeCount() > 0) try engine.step();
++            for (streams[0..n], 0..) |*s, i| {
++                const out = s.emitted();
++                if (enabled) {
++                    try std.testing.expectEqualSlices(u32, expected[i][0..expected_len[i]], out);
++                } else {
++                    expected_len[i] = out.len;
++                    @memcpy(expected[i][0..out.len], out);
++                }
++            }
++            try std.testing.expect(!seen.bad and !seen.open);
++            try std.testing.expectEqual(seen.starts, seen.ends);
++            try std.testing.expect(if (enabled) seen.starts > 0 else seen.starts == 0);
++        }
++    }
++}
++
++test "legacy done-only observer has a default-null begin callback" {
++    var seen: Seen = .{ .open = true };
++    const backend: be.Backend = .{ .ptr = undefined, .vtable = undefined,
++        .round_observer = .{ .ptr = &seen, .done = Seen.done } };
++    backend.observing();
++    backend.observed(&.{&.{0}});
++    try std.testing.expectEqual(@as(usize, 0), seen.starts);
++    try std.testing.expectEqual(@as(usize, 1), seen.ends);
++    try std.testing.expect(!seen.bad);
++}
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -60,6 +60,7 @@
+     drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
+     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
+     shared_prof: ?*prof_mod.Prof = null,
++    round_trace: ?*@import("cuda_round_trace.zig").Trace = null,
+     profiling_prompt: ?*prof_mod.Prof = null,
+     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
+     checkpoint_digest: [32]u8,
+@@ -204,7 +205,7 @@
+         if (prof_mod.Prof.wanted()) e.shared_prof = try prof_mod.Prof.init(d, io);
+         if (prof_mod.Prof.wanted()) for (&e.prompt_profs) |*p| {
+             p.* = try prof_mod.Prof.init(d, io);
+-            p.*.?.every = 4;
++            p.*.?.every = try prof_mod.Prof.reportEvery(4);
+         };
+         e.prompt_out = try prompt_lp.Output.init(d);
+         errdefer e.prompt_out.free();
+@@ -473,7 +474,9 @@
+         try f.run(@ptrCast(ids));
+         if (e.drafter) |dr| try dr.noteVerify(e.slot, 0, ids.len, at, true);
+         e.cur.rows_at = e.bd.fnormed;
++        const draw_began = if (e.round_trace) |t| t.now() else 0;
+         try e.draw(e.bd.logits, ids.len, at + 1, bits, out);
++        if (e.round_trace) |t| t.add(.draw_call, draw_began);
+         if (f.prof) |p| {
+             p.mark(e.stream, .draw);
+             p.end();
+@@ -505,11 +508,13 @@
+         errdefer if (f.prof) |p| p.abort();
+         try f.run(@ptrCast(ids[0..rows]));
+         if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
++        const draw_began = if (e.round_trace) |t| t.now() else 0;
+         for (parts, segs[0..parts.len]) |p, g| {
+             try e.bind(p.slot);
+             e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
+             try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
+         }
++        if (e.round_trace) |t| t.add(.draw_call, draw_began);
+         if (f.prof) |p| {
+             p.mark(e.stream, .draw);
+             p.end();
+@@ -528,6 +533,8 @@
+ 
+     /// forward.commit of the last window's first `n` rows (the KDA replay when fewer than it ran).
+     pub fn keep(e: *Engine, n: usize) !void {
++        const began = if (e.round_trace) |t| t.now() else 0;
++        defer if (e.round_trace) |t| t.add(.commit_call, began);
+         var one: [1]fw.Rank = undefined;
+         const f = e.view(&e.bd, &one);
+         try f.commit(n);
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -276,7 +276,17 @@
+                 if (out) |o| try mlp.fill(f.mlpKernels(), f.stream, m, b.dense, 0, rows, b.prefill, o);
+             },
+             .moe => |m| {
+-                try moe.body(f.moeKernels(), f.stream, m, b.moe, b.normed, c.hidden, rows, b.prefill);
++                var k = f.moeKernels();
++                if (f.prof) |p| if (p.routes != null) {
++                    var lo = if (r.segs.len > 0) r.segs[0].st.pos else r.st.pos;
++                    var hi = lo;
++                    for (r.segs) |g| {
++                        lo = @min(lo, g.st.pos);
++                        hi = @max(hi, g.st.pos);
++                    }
++                    k.route_meta = .{ .rank = r.w.share.rank, .layer = l.index, .context_min = lo, .context_max = hi, .streams = @max(1, r.segs.len) };
++                };
++                try moe.body(k, f.stream, m, b.moe, b.normed, c.hidden, rows, b.prefill);
+                 if (out) |o| try moe.fill(f.moeKernels(), f.stream, m, b.moe, b.normed, c.hidden, 0, rows, b.prefill, o);
+             },
+         }
+@@ -390,6 +400,16 @@
+     /// forward.forward of `ids`: logits in b.logits; a prompt chunk's KDA layers committed, a window's at `commit`.
+     pub fn run(f: *const Forward, ids: []const i32) !void {
+         const R = ids.len;
++        if (f.prof) |p| {
++            const r = f.ranks[0];
++            var lo = if (r.segs.len > 0) r.segs[0].st.pos else r.st.pos;
++            var hi = lo;
++            for (r.segs) |g| {
++                lo = @min(lo, g.st.pos);
++                hi = @max(hi, g.st.pos);
++            }
++            p.setContext(r.w.share.rank, R, lo, hi);
++        }
+         for (f.ranks) |r| {
+             if (R == 0 or R > r.b.rows) return error.BadWindow;
+             if (r.segs.len == 0) {
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -9,6 +9,7 @@
+ const prompt_lp = @import("cuda_prompt_logprobs.zig");
+ const cuda = @import("cuda");
+ const dflash_policy = @import("cuda_dflash_policy.zig");
++const round_trace = @import("cuda_round_trace.zig");
+ 
+ const be = lanes.backend;
+ 
+@@ -44,8 +45,14 @@
+     bits: ?cuda.HostBuffer = null, // structured output's grammar words (shared_rows rows), device-read, at first use
+     bits_dev: u64 = 0,
+     draft_policy: DraftPolicy = .{},
++    trace: ?*round_trace.Trace = null,
+ 
+     pub fn deinit(self: *Lanes) void {
++        if (self.trace) |t| {
++            t.flush();
++            self.x.e.round_trace = null;
++            self.x.e.gpa.destroy(t);
++        }
+         if (self.bits) |*b| b.free();
+         self.lanes.deinit(self.x.e.gpa);
+     }
+@@ -66,7 +73,21 @@
+     }
+ 
+     pub fn backend(self: *Lanes) be.Backend {
+-        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else &steps_vt };
++        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else &steps_vt,
++            .round_observer = if (self.trace != null) .{ .ptr = self, .done = roundDone, .begin = roundBegin } else null };
++    }
++
++    pub fn initTrace(self: *Lanes) !void {
++        self.trace = try round_trace.Trace.create(self.x.e.gpa, self.x.e.io, round_trace.wanted());
++        self.x.e.round_trace = self.trace;
++    }
++
++    fn roundBegin(ptr: *anyopaque) void {
++        if (of(ptr).trace) |t| t.begin();
++    }
++
++    fn roundDone(ptr: *anyopaque, paths: []const []const u32) void {
++        if (of(ptr).trace) |t| t.finish(paths);
+     }
+ 
+     const whole_vt: be.Backend.VTable = .{
+@@ -329,6 +350,17 @@
+     /// Each window in its own forward on its stream's sequence (the core sends one when no forward is shared).
+     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
+         const self = of(ptr);
++        const began = if (self.trace) |t| t.now() else 0;
++        defer if (self.trace) |t| t.add(.verify_call, began);
++        if (self.trace) |t| {
++            t.meta.streams = windows.len;
++            for (windows) |w| {
++                t.meta.rows += w.rows();
++                t.meta.context_min = @min(t.meta.context_min, w.stream.cache_len);
++                t.meta.context_max = @max(t.meta.context_max, w.stream.cache_len);
++                t.meta.initial = t.meta.initial or w.stream.rounds == 0;
++            }
++        }
+         if (windows.len > 1) return self.verifyShared(windows, out);
+         for (windows, out) |w, *o| {
+             if (w.parents != null) return error.TreesNotBuilt;
+@@ -393,6 +425,8 @@
+ 
+     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
+         const self = of(ptr);
++        const began = if (self.trace) |t| t.now() else 0;
++        defer if (self.trace) |t| t.add(.keep_call, began);
+         for (windows, paths) |w, path| {
+             if (path.len == 0) return error.EmptyPath;
+             for (path, 0..) |r, i| if (r != i) return error.TreesNotBuilt;
+@@ -402,6 +436,11 @@
+ 
+     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
+         const self = of(ptr);
++        const began = if (self.trace) |t| t.now() else 0;
++        defer if (self.trace) |t| t.add(.draft_call, began);
++        if (self.trace) |t| if (t.active) {
++            for (requests) |r| t.next_drafts += r.depth;
++        };
+         if (self.x.e.drafter != null) return self.draftBlock(requests);
+         if (!self.x.e.mtp) return error.NoDraftHead;
+         for (requests) |r| {
+@@ -473,6 +512,7 @@
+         const kv = self.lanes.fetchRemove(s) orelse return;
+         self.x.release(kv.value.slot) catch |err| std.log.err("releasing slot {d}: {s}", .{ kv.value.slot, @errorName(err) });
+         if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});
++        if (self.lanes.count() == 0) if (self.trace) |t| t.flush();
+     }
+ };
+ 
+diff --git a/zig/src/families/glm/cuda_moe.zig b/zig/src/families/glm/cuda_moe.zig
+--- a/zig/src/families/glm/cuda_moe.zig
++++ b/zig/src/families/glm/cuda_moe.zig
+@@ -7,6 +7,7 @@
+ const exl3 = @import("cuda_exl3.zig");
+ const prof_mod = @import("cuda_prof.zig");
+ const projection = @import("cuda_proj.zig");
++const route_prof = @import("cuda_route_prof.zig");
+ 
+ /// One MoE layer on a rank: router (bf16 [count][dims]) and fp32 bias, routed experts, shared [gate | up] and down.
+ pub const Layer = struct {
+@@ -41,7 +42,7 @@
+ };
+ 
+ /// The kernels the block runs: the captured Triton set, the grouped NVFP4 experts, the plan, and glm_ops.
+-pub const Kernels = struct { set: glue.Set, experts: *const experts.Kernels, exl3: *const exl3.Kernels, put_slot: cuda.Function, fused_tail: bool = false, prof: ?*prof_mod.Prof = null };
++pub const Kernels = struct { set: glue.Set, experts: *const experts.Kernels, exl3: *const exl3.Kernels, put_slot: cuda.Function, fused_tail: bool = false, prof: ?*prof_mod.Prof = null, route_meta: ?route_prof.Meta = null };
+ 
+ /// forward.moe_block: out [rows][dims] fp32 partial; `prompt`: 64-pair items, the prompt kernels, bf16 slot rows.
+ pub fn block(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, prompt: bool, out: u64) !void {
+@@ -57,6 +58,9 @@
+     var stamp = prof_mod.span(k.prof, stream, .router);
+     try glue.router(k.set, stream, x, x_stride, l.router, s.mlog, s.router_part, rows, d, l.count);
+     try glue.select(k.set, stream, s.mlog, l.bias, s.pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm);
++    if (!prompt) if (k.route_meta) |meta| if (k.prof) |p| if (p.routes) |tr| {
++        try tr.record(stream, meta, .{ .rows = rows, .slots = slots, .experts = l.count }, s.pick);
++    };
+     stamp.end();
+     stamp = prof_mod.span(k.prof, stream, .experts);
+     defer stamp.end();
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -229,6 +229,7 @@
+     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
+     own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED") };
+     own.lanes.draft_policy = draft_policy;
++    try own.lanes.initTrace();
+     return .{
+         .backend = own.lanes.backend(),
+         .facts = own.lanes.facts(),
+diff --git a/zig/src/families/glm/cuda_prof.zig b/zig/src/families/glm/cuda_prof.zig
+--- a/zig/src/families/glm/cuda_prof.zig
++++ b/zig/src/families/glm/cuda_prof.zig
+@@ -3,6 +3,7 @@
+ const cuda = @import("cuda");
+ pub const prompt_trace = @import("cuda_prompt_trace.zig");
+ const detail = @import("cuda_decode_detail.zig");
++const route = @import("cuda_route_prof.zig");
+ 
+ pub const Section = enum { gate, embed, kda, mla, gather_a, dense, router, routed, shared, gather_b, head, draw, mtp, commit };
+ const names = [_][]const u8{ "gate", "embed", "kda", "mla", "gather_a", "dense", "router", "routed", "shared", "gather_b", "head", "draw", "mtp", "commit" };
+@@ -23,6 +24,12 @@
+     label: []const u8 = "",
+     prompt: ?*prompt_trace.Trace = null,
+     decode_detail: ?*detail.Trace = null,
++    routes: ?*route.Trace = null,
++    rank: usize = 0,
++    rows: usize = 0,
++    context_min: usize = 0,
++    context_max: usize = 0,
++    sequence: u64 = 0,
+     every: u64 = 64, // calls a report sums
+ 
+     pub fn init(d: *const cuda.Driver, io: std.Io) !*Prof {
+@@ -32,17 +39,19 @@
+     pub fn initWith(d: *const cuda.Driver, io: std.Io, comptime create: anytype) !*Prof {
+         const p = try std.heap.page_allocator.create(Prof);
+         errdefer std.heap.page_allocator.destroy(p);
+-        p.* = .{ .d = d, .events = undefined, .io = io };
++        p.* = .{ .d = d, .events = undefined, .io = io, .every = try reportEvery(64) };
+         var made: usize = 0;
+         errdefer for (p.events[0..made]) |*event| event.deinit();
+         for (&p.events) |*e| {
+             e.* = try create(d, true);
+             made += 1;
+         }
++        if (route.wanted()) p.routes = try route.Trace.init(d);
+         return p;
+     }
+ 
+     pub fn deinit(p: *Prof) void {
++        if (p.routes) |v| v.deinit();
+         if (p.decode_detail) |t| t.deinit();
+         if (p.prompt) |t| t.deinit();
+         for (&p.events) |*e| e.deinit();
+@@ -51,8 +60,21 @@
+ 
+     /// TF_GLM_PROF=1 asks for it.
+     pub fn wanted() bool {
++        if (route.wanted()) return true; // route snapshots share this profiler's existing completion wait
+         const v = std.c.getenv("TF_GLM_PROF") orelse return false;
+         return std.mem.eql(u8, std.mem.span(v), "1");
++    }
++
++    pub fn reportEvery(fallback: u64) !u64 {
++        const v = std.c.getenv("TF_GLM_PROF_EVERY") orelse return fallback;
++        return parseEvery(std.mem.span(v));
++    }
++
++    pub fn setContext(p: *Prof, rank: usize, rows: usize, lo: usize, hi: usize) void {
++        p.rank = rank;
++        p.rows = rows;
++        p.context_min = lo;
++        p.context_max = hi;
+     }
+ 
+     pub fn beginPrompt(p: *Prof, s: cuda.Stream, label: []const u8, meta: prompt_trace.Meta, layers: usize, pieces: usize) !void {
+@@ -68,16 +90,19 @@
+         if (p.decode_detail == null and detail.wanted()) p.decode_detail = try detail.Trace.init(p.d);
+         p.n = 0;
+         p.label = label;
++        p.sequence +%= 1;
+         p.t0 = std.Io.Clock.awake.now(p.io).toNanoseconds();
+         try p.events[0].record(s);
+         p.open = true;
+         if (p.decode_detail) |t| t.begin();
++        if (p.routes) |t| t.begin();
+     }
+ 
+     /// Errors/cancellation discard the unfinished decode receipt; no extra stream wait is introduced.
+     pub fn abort(p: *Prof) void {
+         p.open = false;
+         if (p.decode_detail) |t| t.abort();
++        if (p.routes) |t| t.abort();
+     }
+ 
+     /// The work queued on `s` since the last mark belongs to `section`.
+@@ -96,12 +121,15 @@
+         const wall: f64 = @as(f64, @floatFromInt(std.Io.Clock.awake.now(p.io).toNanoseconds() - p.t0)) / 1e6;
+         if (p.n == 0) {
+             if (p.decode_detail) |t| t.abort();
++            if (p.routes) |t| t.abort();
+             return;
+         }
+         p.events[p.n].synchronize() catch {
+             if (p.decode_detail) |t| t.abort();
++            if (p.routes) |t| t.abort();
+             return;
+         };
++        if (p.routes) |t| t.finish(p.label);
+         if (p.decode_detail) |t| t.finish(p.label, p.every);
+         if (p.prompt) |t| t.finish();
+         for (0..p.n) |i| p.sections[@backingInt(p.ends[i])] += cuda.Event.elapsedMs(p.events[i], p.events[i + 1]) catch 0;
+@@ -110,9 +138,9 @@
+         p.calls += 1;
+         if (p.calls % p.every != 0) return;
+         const k: f64 = @floatFromInt(p.calls);
+-        var buf: [512]u8 = undefined;
++        var buf: [768]u8 = undefined;
+         var w: std.Io.Writer = .fixed(&buf);
+-        w.print("glm prof {s} ({d} calls): wall {d:.2} ms, gpu {d:.2} ms a call;", .{ p.label, p.calls, p.wall_ms / k, p.gpu_ms / k }) catch {};
++        w.print("glm prof {s} ({d} calls): rank {d}, seq {d}, rows {d}, context {d}..{d}; wall {d:.2} ms, gpu {d:.2} ms a call;", .{ p.label, p.calls, p.rank, p.sequence, p.rows, p.context_min, p.context_max, p.wall_ms / k, p.gpu_ms / k }) catch {};
+         for (names, p.sections) |nm, ms| if (ms > 0) w.print(" {s} {d:.2}", .{ nm, ms / k }) catch {};
+         std.log.info("{s}", .{w.buffered()});
+         p.sections = @splat(0);
+@@ -121,6 +149,22 @@
+         p.calls = 0;
+     }
+ };
++
++fn parseEvery(v: []const u8) !u64 {
++    if (v.len == 0) return error.InvalidProfileEvery;
++    for (v) |ch| if (ch < '0' or ch > '9') return error.InvalidProfileEvery;
++    const n = std.fmt.parseInt(u64, v, 10) catch return error.InvalidProfileEvery;
++    if (n < 1 or n > 4096) return error.InvalidProfileEvery;
++    return n;
++}
++
++test "GLM profile interval accepts only bounded positive decimal integers" {
++    try std.testing.expectEqual(@as(u64, 1), try parseEvery("1"));
++    try std.testing.expectEqual(@as(u64, 4096), try parseEvery("4096"));
++    for ([_][]const u8{ "", "0", "4097", "-1", "+1", "1.5", " 1", "18446744073709551616" }) |v| {
++        try std.testing.expectError(error.InvalidProfileEvery, parseEvery(v));
++    }
++}
+ 
+ const Counted = struct {
+     var calls: usize = 0;
+diff --git a/zig/src/families/glm/cuda_round_trace.zig b/zig/src/families/glm/cuda_round_trace.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_round_trace.zig
+@@ -0,0 +1,187 @@
++//! Opt-in host call timing; no CUDA API, device readback or extra synchronization is used here.
++const std = @import("std");
++
++pub const Phase = enum { verify_call, draw_call, draft_call, keep_call, commit_call };
++const phases = @typeInfo(Phase).@"enum".field_names.len;
++const max_buckets = 128;
++
++pub const Meta = struct {
++    streams: usize = 0,
++    rows: usize = 0,
++    context_min: u64 = std.math.maxInt(u64),
++    context_max: u64 = 0,
++    initial: bool = false,
++};
++
++const Bucket = struct {
++    streams: usize = 0,
++    rows: usize = 0,
++    band: u8 = 0,
++    initial: bool = false,
++    calls: u64 = 0,
++    kept: u64 = 0,
++    next_drafts: u64 = 0,
++    context_min: u64 = std.math.maxInt(u64),
++    context_max: u64 = 0,
++    wall_ns: i96 = 0,
++    min_ns: i96 = std.math.maxInt(i96),
++    max_ns: i96 = 0,
++    phase_ns: [phases]i96 = @splat(0),
++};
++
++pub fn wanted() bool {
++    const value = std.c.getenv("TF_GLM_ROUND_TRACE") orelse return false;
++    return std.mem.eql(u8, std.mem.span(value), "1");
++}
++
++fn band(context: u64) u8 {
++    return if (context <= 16384) 0 else if (context <= 65536) 1 else if (context <= 262144) 2 else 3;
++}
++
++fn millis(ns: i96, count: u64) f64 {
++    return @as(f64, @floatFromInt(ns)) / (1e6 * @as(f64, @floatFromInt(count)));
++}
++
++pub const Trace = struct {
++    io: std.Io,
++    active: bool = false,
++    since: i96 = 0,
++    meta: Meta = .{},
++    phase_ns: [phases]i96 = @splat(0),
++    next_drafts: u64 = 0,
++    buckets: [max_buckets]Bucket = @splat(.{}),
++    used: usize = 0,
++    dropped: u64 = 0,
++    aborted: u64 = 0,
++
++    pub fn create(a: std.mem.Allocator, io: std.Io, enabled: bool) !?*Trace {
++        if (!enabled) return null;
++        const t = try a.create(Trace);
++        t.* = .{ .io = io };
++        return t;
++    }
++
++    pub fn now(t: *const Trace) i96 {
++        return std.Io.Clock.awake.now(t.io).toNanoseconds();
++    }
++
++    pub fn begin(t: *Trace) void {
++        t.beginAt(t.now());
++    }
++
++    pub fn beginAt(t: *Trace, ns: i96) void {
++        if (t.active) t.aborted += 1;
++        t.active = true;
++        t.since = ns;
++        t.meta = .{};
++        t.phase_ns = @splat(0);
++        t.next_drafts = 0;
++    }
++
++    pub fn add(t: *Trace, phase: Phase, since: i96) void {
++        t.addAt(phase, since, t.now());
++    }
++
++    pub fn addAt(t: *Trace, phase: Phase, since: i96, until: i96) void {
++        if (t.active and until >= since) t.phase_ns[@backingInt(phase)] += until - since;
++    }
++
++    pub fn finish(t: *Trace, paths: []const []const u32) void {
++        var kept: u64 = 0;
++        for (paths) |path| kept += path.len;
++        t.finishAt(t.now(), kept);
++    }
++
++    pub fn finishAt(t: *Trace, ns: i96, kept: u64) void {
++        if (!t.active) return;
++        t.active = false;
++        if (ns < t.since or t.meta.rows == 0 or t.meta.streams == 0) {
++            t.aborted += 1;
++            return;
++        }
++        const m = t.meta;
++        var found: ?*Bucket = null;
++        for (t.buckets[0..t.used]) |*b| {
++            if (b.streams == m.streams and b.rows == m.rows and b.band == band(m.context_max) and
++                b.initial == m.initial)
++            {
++                found = b;
++                break;
++            }
++        }
++        const b = found orelse new: {
++            if (t.used == max_buckets) {
++                t.dropped += 1;
++                return;
++            }
++            const b = &t.buckets[t.used];
++            t.used += 1;
++            b.* = .{ .streams = m.streams, .rows = m.rows, .band = band(m.context_max), .initial = m.initial };
++            break :new b;
++        };
++        const elapsed = ns - t.since;
++        b.calls += 1;
++        b.kept += kept;
++        b.next_drafts += t.next_drafts;
++        b.wall_ns += elapsed;
++        b.min_ns = @min(b.min_ns, elapsed);
++        b.max_ns = @max(b.max_ns, elapsed);
++        b.context_min = @min(b.context_min, m.context_min);
++        b.context_max = @max(b.context_max, m.context_max);
++        for (&b.phase_ns, t.phase_ns) |*out, value| out.* += value;
++    }
++
++    /// Flush only after streams release, outside measured rounds; nested call spans are labelled explicitly.
++    pub fn flush(t: *Trace) void {
++        if (t.active) {
++            t.aborted += 1;
++            t.active = false;
++        }
++        for (t.buckets[0..t.used]) |b| {
++            const p = b.phase_ns;
++            const other = b.wall_ns - p[@backingInt(Phase.verify_call)] -
++                p[@backingInt(Phase.draft_call)] - p[@backingInt(Phase.keep_call)];
++            std.log.info("glm round host: streams={d} rows={d} context={d}..{d} initial={} calls={d} kept={d} next_drafts={d} wall_ms={d:.4} min_ms={d:.4} max_ms={d:.4} verify_call_ms={d:.4} draw_nested_ms={d:.4} draft_call_ms={d:.4} keep_call_ms={d:.4} commit_nested_ms={d:.4} other_ms={d:.4}", .{
++                b.streams, b.rows, b.context_min, b.context_max, b.initial, b.calls, b.kept, b.next_drafts,
++                millis(b.wall_ns, b.calls), millis(b.min_ns, 1), millis(b.max_ns, 1),
++                millis(p[0], b.calls), millis(p[1], b.calls), millis(p[2], b.calls),
++                millis(p[3], b.calls), millis(p[4], b.calls), millis(other, b.calls),
++            });
++        }
++        if (t.used > 0 or t.dropped > 0 or t.aborted > 0)
++            std.log.info("glm round host end: buckets={d} dropped={d} aborted={d}; host calls include async waits, nested spans are not additive GPU times", .{ t.used, t.dropped, t.aborted });
++        t.used = 0;
++        t.dropped = 0;
++        t.aborted = 0;
++    }
++};
++
++test "GLM round host: disabled trace allocates nothing" {
++    var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
++    try std.testing.expect((try Trace.create(fail.allocator(), std.testing.io, false)) == null);
++    try std.testing.expectEqual(@as(usize, 0), fail.alloc_index);
++}
++
++test "GLM round host: widths and startup remain separate with nested accounting" {
++    var t: Trace = .{ .io = std.testing.io };
++    for (0..3) |i| {
++        t.beginAt(100);
++        t.meta = .{ .streams = 1, .rows = if (i == 2) 3 else 2,
++            .context_min = 8192, .context_max = 8192, .initial = i == 0 };
++        t.addAt(.verify_call, 110, 160);
++        t.addAt(.draw_call, 140, 160);
++        t.addAt(.draft_call, 170, 190);
++        t.next_drafts = 7;
++        t.finishAt(200, 2);
++    }
++    try std.testing.expectEqual(@as(usize, 3), t.used);
++    try std.testing.expectEqual(@as(i96, 100), t.buckets[0].wall_ns);
++    try std.testing.expectEqual(@as(i96, 50), t.buckets[0].phase_ns[0]);
++    try std.testing.expectEqual(@as(i96, 20), t.buckets[0].phase_ns[1]);
++    try std.testing.expectEqual(@as(u64, 2), t.buckets[0].kept);
++    t.beginAt(300);
++    t.beginAt(400);
++    try std.testing.expectEqual(@as(u64, 1), t.aborted);
++    t.finishAt(500, 1);
++    try std.testing.expectEqual(@as(u64, 2), t.aborted);
++}
+diff --git a/zig/src/families/glm/cuda_route_prof.zig b/zig/src/families/glm/cuda_route_prof.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_route_prof.zig
+@@ -0,0 +1,166 @@
++//! Opt-in decode routing receipts: bounded device snapshots, read only after the forward's existing completion wait.
++const std = @import("std");
++const cuda = @import("cuda");
++
++pub const max_layers = 64;
++pub const max_rows = 32;
++pub const max_slots = 17;
++pub const max_experts = 1024;
++const capacity = max_layers * max_rows * max_slots;
++
++pub const Meta = struct {
++    rank: usize,
++    layer: usize,
++    context_min: usize,
++    context_max: usize,
++    streams: usize = 1,
++};
++
++pub const Shape = struct { rows: usize, slots: usize, experts: usize };
++pub const Stats = struct {
++    unique: usize = 0,
++    pairs: usize = 0,
++    // hist[n] counts experts selected by n rows, excluding the shared expert and unselected experts.
++    hist: [max_rows + 1]usize = @splat(0),
++};
++
++fn valid(s: Shape) bool {
++    return s.rows > 0 and s.rows <= max_rows and s.slots >= 2 and s.slots <= max_slots and
++        s.experts > 0 and s.experts <= max_experts and s.slots - 1 <= s.experts;
++}
++
++/// A host reference over the untouched router's picks; duplicates and malformed shared slots invalidate the receipt.
++pub fn summarize(s: Shape, picks: []const i32) error{BadRouteReceipt}!Stats {
++    if (!valid(s) or picks.len != s.rows * s.slots) return error.BadRouteReceipt;
++    var counts: [max_experts]u8 = @splat(0);
++    const expert_count: i32 = @intCast(s.experts);
++    var out: Stats = .{ .pairs = s.rows * (s.slots - 1) };
++    for (0..s.rows) |r| {
++        const row = picks[r * s.slots ..][0..s.slots];
++        if (row[s.slots - 1] != expert_count) return error.BadRouteReceipt;
++        for (row[0 .. s.slots - 1], 0..) |id, j| {
++            if (id < 0 or id >= expert_count) return error.BadRouteReceipt;
++            for (row[0..j]) |old| if (old == id) return error.BadRouteReceipt;
++            counts[@intCast(id)] += 1;
++        }
++    }
++    for (counts[0..s.experts]) |n| if (n > 0) {
++        out.unique += 1;
++        out.hist[n] += 1;
++    };
++    return out;
++}
++
++const Record = struct { meta: Meta, shape: Shape, offset: usize };
++
++pub const Trace = struct {
++    device: cuda.DeviceBuffer,
++    host: [capacity]i32 = undefined,
++    records: [max_layers]Record = undefined,
++    results: [max_layers]Stats = undefined,
++    n: usize = 0,
++    used: usize = 0,
++    epoch: u64 = 0,
++    completed: u64 = 0,
++    dropped: u64 = 0,
++    active: bool = false,
++    invalid: bool = false,
++    emit: bool = true,
++
++    pub fn init(d: *const cuda.Driver) !*Trace {
++        const v = try std.heap.page_allocator.create(Trace);
++        errdefer std.heap.page_allocator.destroy(v);
++        v.* = .{ .device = try cuda.DeviceBuffer.alloc(d, capacity * @sizeOf(i32)) };
++        return v;
++    }
++
++    /// The owner has drained its stream before releasing any profiler or model buffers.
++    pub fn deinit(v: *Trace) void {
++        v.device.free();
++        std.heap.page_allocator.destroy(v);
++    }
++
++    pub fn begin(v: *Trace) void {
++        v.abort();
++        v.epoch +%= 1;
++        v.n = 0;
++        v.used = 0;
++        v.invalid = false;
++        v.active = true;
++    }
++
++    pub fn abort(v: *Trace) void {
++        if (v.active and v.n > 0) v.dropped += 1;
++        v.active = false;
++        v.invalid = true;
++    }
++
++    /// One asynchronous copy on the producing stream; no allocation, host transfer, event, or wait per layer.
++    pub fn record(v: *Trace, stream: cuda.Stream, meta: Meta, shape: Shape, picks: u64) !void {
++        if (!v.active or v.invalid) return;
++        if (!valid(shape) or v.n == max_layers or meta.context_min > meta.context_max or meta.streams == 0) {
++            v.invalid = true;
++            return;
++        }
++        for (v.records[0..v.n]) |r| if (r.meta.rank == meta.rank and r.meta.layer == meta.layer) {
++            v.invalid = true;
++            return;
++        };
++        const count = shape.rows * shape.slots;
++        if (count > capacity - v.used) {
++            v.invalid = true;
++            return;
++        }
++        v.device.copyFrom(v.used * 4, picks, count * 4, stream.handle) catch |err| {
++            v.invalid = true;
++            return err;
++        };
++        v.records[v.n] = .{ .meta = meta, .shape = shape, .offset = v.used };
++        v.n += 1;
++        v.used += count;
++    }
++
++    /// Call only after the forward's existing successful completion wait; a single D2H reads every layer's snapshot.
++    pub fn finish(v: *Trace, label: []const u8) void {
++        if (!v.active) return;
++        v.active = false;
++        if (v.n == 0 and !v.invalid) return;
++        if (v.invalid) return v.discard("invalid_or_overflow");
++        v.device.download(0, std.mem.sliceAsBytes(v.host[0..v.used])) catch return v.discard("readback_failed");
++        // Validate the entire call before emitting any layer, so a partial receipt cannot look complete.
++        for (v.records[0..v.n], v.results[0..v.n]) |r, *out| {
++            out.* = summarize(r.shape, v.host[r.offset..][0 .. r.shape.rows * r.shape.slots]) catch
++                return v.discard("malformed_picks");
++        }
++        v.completed += 1;
++        if (!v.emit) return;
++        for (v.records[0..v.n], v.results[0..v.n]) |r, out| {
++            var buf: [1024]u8 = undefined;
++            var w: std.Io.Writer = .fixed(&buf);
++            w.print("glm route {{\"call\":{d},\"label\":\"{s}\",\"rank\":{d},\"layer\":{d},", .{
++                v.epoch, label, r.meta.rank, r.meta.layer,
++            }) catch continue;
++            w.print("\"rows\":{d},\"streams\":{d},\"context_min\":{d},\"context_max\":{d},", .{
++                r.shape.rows, r.meta.streams, r.meta.context_min, r.meta.context_max,
++            }) catch continue;
++            w.print("\"unique\":{d},\"pairs\":{d},\"pair_hist\":[", .{ out.unique, out.pairs }) catch continue;
++            for (out.hist, 0..) |n, i| w.print("{s}{d}", .{ if (i == 0) "" else ",", n }) catch break;
++            w.writeAll("]}") catch continue;
++            std.log.info("{s}", .{w.buffered()});
++        }
++    }
++
++    fn discard(v: *Trace, reason: []const u8) void {
++        v.dropped += 1;
++        if (v.emit) std.log.warn("glm route discarded call={d} reason={s}", .{ v.epoch, reason });
++    }
++};
++
++pub fn wanted() bool {
++    const v = std.c.getenv("TF_GLM_ROUTE_PROF") orelse return false;
++    return std.mem.eql(u8, std.mem.span(v), "1");
++}
++
++test {
++    _ = @import("cuda_route_prof_test.zig");
++}
+diff --git a/zig/src/families/glm/cuda_route_prof_test.zig b/zig/src/families/glm/cuda_route_prof_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_route_prof_test.zig
+@@ -0,0 +1,161 @@
++//! Host routing references and virtual device copies: bounded snapshots never wait or read back per layer.
++const std = @import("std");
++const cuda = @import("cuda");
++const route = @import("cuda_route_prof.zig");
++const t = std.testing;
++
++test "GLM route receipt excludes shared slots and counts cross-row expert reuse" {
++    const s: route.Shape = .{ .rows = 3, .slots = 3, .experts = 5 };
++    const v = try route.summarize(s, &.{ 0, 1, 5, 1, 2, 5, 1, 4, 5 });
++    try t.expectEqual(@as(usize, 4), v.unique);
++    try t.expectEqual(@as(usize, 6), v.pairs);
++    try t.expectEqual(@as(usize, 3), v.hist[1]);
++    try t.expectEqual(@as(usize, 1), v.hist[3]);
++    var pairs: usize = 0;
++    for (v.hist, 0..) |n, i| pairs += n * i;
++    try t.expectEqual(v.pairs, pairs);
++}
++
++test "GLM route receipt covers all admitted row counts and disjoint versus fully reused experts" {
++    var picks: [route.max_rows * 9]i32 = undefined;
++    for (1..route.max_rows + 1) |rows| for ([_]bool{ false, true }) |reuse| {
++        for (0..rows) |r| {
++            for (0..8) |k| picks[r * 9 + k] = @intCast(if (reuse) k else r * 8 + k);
++            picks[r * 9 + 8] = 288;
++        }
++        const v = try route.summarize(.{ .rows = rows, .slots = 9, .experts = 288 }, picks[0 .. rows * 9]);
++        try t.expectEqual(@as(usize, if (reuse) 8 else rows * 8), v.unique);
++        try t.expectEqual(rows * 8, v.pairs);
++        try t.expectEqual(v.unique, v.hist[if (reuse) rows else 1]);
++    };
++}
++
++test "GLM route receipt rejects duplicate out-of-range and malformed shared picks" {
++    const s: route.Shape = .{ .rows = 1, .slots = 3, .experts = 3 };
++    for ([_][3]i32{ .{ 0, 0, 3 }, .{ -1, 1, 3 }, .{ 0, 3, 3 }, .{ 0, 1, 2 } }) |p| {
++        try t.expectError(error.BadRouteReceipt, route.summarize(s, &p));
++    }
++    try t.expectError(error.BadRouteReceipt, route.summarize(s, &.{ 0, 1 }));
++    try t.expectError(error.BadRouteReceipt, route.summarize(.{ .rows = 0, .slots = 3, .experts = 3 }, &.{}));
++    try t.expectError(error.BadRouteReceipt, route.summarize(.{ .rows = 33, .slots = 3, .experts = 3 }, &.{}));
++}
++
++const Fake = struct {
++    var memory: [route.max_layers * route.max_rows * route.max_slots * 4]u8 align(256) = undefined;
++    var live: usize = 0;
++    var copies: usize = 0;
++    var reads: usize = 0;
++    var fail_alloc: bool = false;
++    var fail_copy: bool = false;
++    var fail_read: bool = false;
++
++    fn driver() cuda.Driver {
++        live = 0;
++        copies = 0;
++        reads = 0;
++        fail_alloc = false;
++        fail_copy = false;
++        fail_read = false;
++        var d: cuda.Driver = undefined;
++        d.api.cuMemAlloc_v2 = alloc;
++        d.api.cuMemFree_v2 = free;
++        d.api.cuMemcpyDtoDAsync_v2 = copy;
++        d.api.cuMemcpyDtoH_v2 = read;
++        return d;
++    }
++    fn alloc(p: *u64, n: usize) callconv(.c) c_int {
++        if (fail_alloc or n > memory.len) return cuda.abi.error_not_ready;
++        live += 1;
++        p.* = @intFromPtr(&memory);
++        return 0;
++    }
++    fn free(_: u64) callconv(.c) c_int {
++        live -= 1;
++        return 0;
++    }
++    fn copy(dst: u64, src: u64, n: usize, _: cuda.abi.Stream) callconv(.c) c_int {
++        if (fail_copy) return cuda.abi.error_not_ready;
++        copies += 1;
++        @memcpy(@as([*]u8, @ptrFromInt(dst))[0..n], @as([*]const u8, @ptrFromInt(src))[0..n]);
++        return 0;
++    }
++    fn read(dst: ?*anyopaque, src: u64, n: usize) callconv(.c) c_int {
++        reads += 1;
++        if (fail_read) return cuda.abi.error_not_ready;
++        @memcpy(@as([*]u8, @ptrCast(dst.?))[0..n], @as([*]const u8, @ptrFromInt(src))[0..n]);
++        return 0;
++    }
++};
++
++const meta: route.Meta = .{ .rank = 1, .layer = 3, .context_min = 32768, .context_max = 32768 };
++const shape: route.Shape = .{ .rows = 2, .slots = 3, .experts = 4 };
++
++test "GLM route trace snapshots scratch before reuse and performs one readback after all layers" {
++    var d = Fake.driver();
++    const v = try route.Trace.init(&d);
++    defer v.deinit();
++    v.emit = false;
++    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
++    var p = [_]i32{ 0, 1, 4, 1, 2, 4 };
++    v.begin();
++    try v.record(stream, meta, shape, @intFromPtr(&p));
++    p = .{ 0, 1, 4, 2, 3, 4 };
++    var next = meta;
++    next.layer = 4;
++    try v.record(stream, next, shape, @intFromPtr(&p));
++    try t.expectEqual(@as(usize, 2), Fake.copies);
++    try t.expectEqual(@as(usize, 0), Fake.reads);
++    @memset(&p, -1);
++    v.finish("verify 2 rows");
++    try t.expectEqual(@as(usize, 1), Fake.reads);
++    try t.expectEqual(@as(usize, 3), v.results[0].unique);
++    try t.expectEqual(@as(usize, 4), v.results[1].unique);
++    try t.expectEqual(@as(u64, 1), v.completed);
++    v.finish("verify 2 rows");
++    try t.expectEqual(@as(usize, 1), Fake.reads);
++}
++
++test "GLM route trace abort duplicate overflow and copy failures discard the complete call" {
++    var d = Fake.driver();
++    const v = try route.Trace.init(&d);
++    defer v.deinit();
++    v.emit = false;
++    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
++    const p = [_]i32{ 0, 1, 4, 1, 2, 4 };
++    for (0..5) |kind| {
++        v.begin();
++        Fake.fail_copy = false;
++        Fake.fail_read = false;
++        try v.record(stream, meta, shape, @intFromPtr(&p));
++        switch (kind) {
++            0 => v.abort(),
++            1 => try v.record(stream, meta, shape, @intFromPtr(&p)),
++            2 => v.n = route.max_layers,
++            3 => Fake.fail_copy = true,
++            else => Fake.fail_read = true,
++        }
++        if (kind == 2 or kind == 3) {
++            var next = meta;
++            next.layer = 4;
++            if (kind == 3) {
++                try t.expectError(error.NotReady, v.record(stream, next, shape, @intFromPtr(&p)));
++            } else try v.record(stream, next, shape, @intFromPtr(&p));
++        }
++        v.finish("host fixture");
++        try t.expectEqual(@as(u64, 0), v.completed);
++    }
++    try t.expectEqual(@as(u64, 5), v.dropped);
++    try t.expectEqual(@as(usize, 1), Fake.reads);
++}
++
++test "GLM route trace frees its only device allocation and unwinds a failed allocation" {
++    var d = Fake.driver();
++    Fake.fail_alloc = true;
++    try t.expectError(error.NotReady, route.Trace.init(&d));
++    try t.expectEqual(@as(usize, 0), Fake.live);
++    Fake.fail_alloc = false;
++    const v = try route.Trace.init(&d);
++    try t.expectEqual(@as(usize, 1), Fake.live);
++    v.deinit();
++    try t.expectEqual(@as(usize, 0), Fake.live);
++}

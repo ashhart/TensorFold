@@ -1,0 +1,378 @@
+diff --git a/zig/kernels/cuda/qmmf.cu b/zig/kernels/cuda/qmmf.cu
+--- a/zig/kernels/cuda/qmmf.cu
++++ b/zig/kernels/cuda/qmmf.cu
+@@ -294,6 +294,7 @@
+     qmmf_body<MODE, BM, BN, WM, WN, STAGES, F32, CLUSTER, FUSE>(
+         x, w, bs, scale, out, part, M, N, K, SK, npad, ldx, group, N);
+ }
++
+ 
+ // GLM's split KDA input: the same single-slice MXFP8 sums, written directly into a wider bf16 row.
+ #define QMMF_MXFP8_STRIDED(BM)                                                                                         \
+diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
+--- a/zig/src/families/glm/cuda_kda_block.zig
++++ b/zig/src/families/glm/cuda_kda_block.zig
+@@ -57,7 +57,24 @@
+     const stamp = prof.detailSpan(profile, stream, .kda_output);
+     defer stamp.end();
+     const n = l.heads * kda.dk;
++    if (usesSplitOutput(set, l, hi - lo)) {
++        var lane = set.linear.lane.?.*;
++        lane.clusters = false;
++        return lane.matmulF32(stream, s.saves.out + lo * n * 2, n, hi - lo, l.o.mxfp8, out, s.mm_part);
++    }
+     try projection.matmul(set, stream, l.o, s.saves.out + lo * n * 2, n, out, s.mm_part, hi - lo, l.dims, n, true);
++}
++
++/// KDA O only: keep SK=4 and its ordered FP32 sum; use existing scratch instead of a cluster exchange.
++pub fn usesSplitOutput(set: glue.Set, l: Layer, rows: usize) bool {
++    if (set.prompt or rows == 0 or rows > 16 or set.mm == null or !set.mm.?.kda_o_split or
++        set.linear.lane == null or !set.linear.lane.?.clusters or l.dims != 4096 or l.heads * kda.dk != 4096)
++        return false;
++    return switch (l.o) {
++        .mxfp8 => |w| w.mode == .mxfp8 and w.n == 4096 and w.k == 4096 and w.npad == 4096 and
++            cuda.qmmf.splitK(w.n, w.k) == 4,
++        else => false,
++    };
+ }
+ 
+ /// The block up to its out_proj: the projections, the chain, and a prompt chunk's conv window commit.
+@@ -138,4 +155,5 @@
+ 
+ test {
+     _ = @import("cuda_kda_tp3_test.zig");
++    _ = @import("cuda_kda_o_split_test.zig");
+ }
+diff --git a/zig/src/families/glm/cuda_kda_o_split_test.zig b/zig/src/families/glm/cuda_kda_o_split_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_kda_o_split_test.zig
+@@ -0,0 +1,176 @@
++//! KDA O transport dispatch: record the real launch path without a GPU or changing any projection arithmetic.
++const std = @import("std");
++const cuda = @import("cuda");
++const kda = @import("cuda_kda_block.zig");
++const glue = @import("cuda_glue.zig");
++const mm = @import("cuda_mm.zig");
++
++const Capture = struct {
++    const Call = struct {
++        id: usize, gx: u32, gz: u32, threads: u32, shared: u32, cluster: u32,
++        x: u64 = 0, out: u64 = 0, part: u64 = 0, rows: u64 = 0, n: u64 = 0,
++        k: u64 = 0, sk: u64 = 0, ldx: u64 = 0, total: u64 = 0, scale_bits: u32 = 0,
++    };
++    var calls: [4]Call = undefined;
++    var count: usize = 0;
++
++    fn arg(args: ?[*]?*anyopaque, i: usize, wide: bool) u64 {
++        const p: [*]const u8 = @ptrCast(args.?[i].?);
++        return if (wide) std.mem.readInt(u64, p[0..8], .little) else std.mem.readInt(u32, p[0..4], .little);
++    }
++
++    fn record(f: cuda.abi.Function, gx: u32, gz: u32, threads: u32, shared: u32, cluster: u32, args: ?[*]?*anyopaque) void {
++        var c: Call = .{ .id = @intFromPtr(f), .gx = gx, .gz = gz, .threads = threads,
++            .shared = shared, .cluster = cluster };
++        if (c.id == 29 or c.id == 30) {
++            c.part = arg(args, 0, true);
++            c.out = arg(args, 1, true);
++            c.total = arg(args, 2, true);
++            c.sk = arg(args, 3, false);
++            c.scale_bits = @intCast(arg(args, 4, false));
++        } else {
++            c.x = arg(args, 0, true);
++            c.scale_bits = @intCast(arg(args, 3, false));
++            c.out = arg(args, 4, true);
++            c.part = arg(args, 5, true);
++            c.rows = arg(args, 6, false);
++            c.n = arg(args, 7, false);
++            c.k = arg(args, 8, false);
++            c.sk = arg(args, 9, false);
++            c.ldx = arg(args, 11, false);
++        }
++        calls[count] = c;
++        count += 1;
++    }
++
++    fn launch(f: cuda.abi.Function, gx: c_uint, _: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint,
++        shared: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
++        record(f, gx, gz, bx, shared, 0, args);
++        return cuda.abi.success;
++    }
++
++    fn extended(c: *const cuda.abi.LaunchConfig, f: cuda.abi.Function, args: ?[*]?*anyopaque,
++        _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
++        var cluster: u32 = 0;
++        for (0..c.num_attrs) |i| if (c.attrs.?[i].id == .cluster_dimension) {
++            cluster = c.attrs.?[i].value.cluster_dim.z;
++        };
++        record(f, c.grid_x, c.grid_z, c.block_x, c.shared_bytes, cluster, args);
++        return cuda.abi.success;
++    }
++};
++
++fn function(d: *const cuda.Driver, id: usize) cuda.Function {
++    return .{ .d = d, .handle = @ptrFromInt(id) };
++}
++
++fn layer() kda.Layer {
++    return .{ .proj = .{ .bf16 = 0 }, .fb = 0, .gb = 0,
++        .o = .{ .mxfp8 = cuda.mxfp8.weight(0x200000000, 0x300000000, 4096, 4096) },
++        .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5,
++        .heads = 32, .dims = 4096 };
++}
++
++test "KDA O split uses original four slices and FP32 reduce, only for decode MXFP8 O rows 1-16" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Capture.launch;
++    d.api.cuLaunchKernelEx = Capture.extended;
++    const stream: cuda.Stream = .{ .d = &d, .handle = null };
++    var lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = undefined,
++        .f32_fns = @splat(@splat(function(&d, 21))), .mxfp8_strided = undefined,
++        .reduce = .{ function(&d, 29), function(&d, 30) }, .clusters = true };
++    lane.f32_fns[2][0] = function(&d, 20);
++    var kernels: mm.Kernels = .{ .by_rows = undefined, .prompt = undefined, .reduce = undefined,
++        .reduce_strided = undefined, .pdl = false, .packed_rows = undefined, .tile = undefined,
++        .tile_packed = undefined, .kda_o_split = true };
++    var set: glue.Set = .{ .glue = undefined, .mm = &kernels, .linear = .{ .lane = &lane } };
++    var scratch: kda.Scratch = .{ .p = 0, .ka = 0, .kg = 0, .mm_part = 0x800000000,
++        .saves = undefined, .wide = undefined };
++    scratch.saves.out = 0x500000000;
++    var l = layer();
++    l.o.mxfp8.scale = 0.75;
++    const scale_bits: u32 = @bitCast(l.o.mxfp8.scale);
++    const dest: u64 = 0x900000000;
++    for (1..17) |rows| {
++        Capture.count = 0;
++        try kda.fill(set, stream, l, scratch, 3, 3 + rows, dest);
++        try std.testing.expectEqual(@as(usize, 2), Capture.count);
++        const a = Capture.calls[0];
++        const b = Capture.calls[1];
++        try std.testing.expectEqual(@as(usize, 20), a.id);
++        try std.testing.expectEqual(@as(u32, 0), a.cluster);
++        try std.testing.expectEqual(@as(u32, 64), a.gx);
++        try std.testing.expectEqual(@as(u32, 4), a.gz);
++        try std.testing.expectEqual(@as(u32, 128), a.threads);
++        try std.testing.expectEqual(@as(u32, 25088), a.shared);
++        try std.testing.expectEqual(scratch.saves.out + 3 * 4096 * 2, a.x);
++        try std.testing.expectEqual(scratch.mm_part, a.part);
++        try std.testing.expectEqual(dest, a.out);
++        try std.testing.expectEqual(@as(u64, rows), a.rows);
++        try std.testing.expectEqual(@as(u64, 4096), a.n);
++        try std.testing.expectEqual(@as(u64, 4096), a.k);
++        try std.testing.expectEqual(@as(u64, 4096), a.ldx);
++        try std.testing.expectEqual(@as(u64, 4), a.sk);
++        try std.testing.expectEqual(scale_bits, a.scale_bits);
++        try std.testing.expectEqual(@as(usize, 30), b.id);
++        try std.testing.expectEqual(scratch.mm_part, b.part);
++        try std.testing.expectEqual(dest, b.out);
++        try std.testing.expectEqual(@as(u64, rows * 4096), b.total);
++        try std.testing.expectEqual(@as(u64, 4), b.sk);
++        try std.testing.expectEqual(scale_bits, b.scale_bits);
++        try std.testing.expect(lane.clusters);
++    }
++    for ([_]usize{ 1, 8, 16, 17 }) |rows| for ([_]bool{ false, true }) |prompt| {
++        set.prompt = prompt;
++        for ([_]bool{ false, true }) |enabled| {
++            kernels.kda_o_split = enabled;
++            Capture.count = 0;
++            try kda.fill(set, stream, l, scratch, 0, rows, dest);
++            const selected = enabled and !prompt and rows <= 16;
++            try std.testing.expectEqual(@as(usize, if (selected) 2 else 1), Capture.count);
++            try std.testing.expectEqual(@as(u32, if (selected) 0 else 4), Capture.calls[0].cluster);
++            try std.testing.expectEqual(scale_bits, Capture.calls[0].scale_bits);
++            if (selected) {
++                try std.testing.expectEqual(@as(usize, 30), Capture.calls[1].id);
++                try std.testing.expectEqual(scale_bits, Capture.calls[1].scale_bits);
++            }
++        }
++    };
++    set.prompt = false;
++    kernels.kda_o_split = true;
++    try std.testing.expect(!kda.usesSplitOutput(set, l, 0));
++    set.mm = null;
++    try std.testing.expect(!kda.usesSplitOutput(set, l, 1));
++    set.mm = &kernels;
++    set.linear.lane = null;
++    try std.testing.expect(!kda.usesSplitOutput(set, l, 1));
++    set.linear.lane = &lane;
++    lane.clusters = false;
++    try std.testing.expect(!kda.usesSplitOutput(set, l, 1));
++    lane.clusters = true;
++    var other = l;
++    other.o = .{ .bf16 = 0 };
++    try std.testing.expect(!kda.usesSplitOutput(set, other, 1));
++    other.o = .{ .fp8g = cuda.fp8.weight(0, 0, 4096, 4096) };
++    try std.testing.expect(!kda.usesSplitOutput(set, other, 1));
++    other = l;
++    other.o.mxfp8.npad += 128;
++    try std.testing.expect(!kda.usesSplitOutput(set, other, 1));
++    other = l;
++    other.o.mxfp8.n = 8192;
++    try std.testing.expect(!kda.usesSplitOutput(set, other, 1));
++    other = l;
++    other.o.mxfp8.k = 8192;
++    try std.testing.expect(!kda.usesSplitOutput(set, other, 1));
++    other = l;
++    other.o.mxfp8.mode = .fp8;
++    try std.testing.expect(!kda.usesSplitOutput(set, other, 1));
++    other = l;
++    other.heads = 31;
++    try std.testing.expect(!kda.usesSplitOutput(set, other, 1));
++    other = l;
++    other.dims = 8192;
++    try std.testing.expect(!kda.usesSplitOutput(set, other, 1));
++    scratch.mm_part = 0;
++    try std.testing.expectError(error.MissingLanePart, kda.fill(set, stream, l, scratch, 0, 1, dest));
++}
+diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
+--- a/zig/src/families/glm/cuda_mm.zig
++++ b/zig/src/families/glm/cuda_mm.zig
+@@ -47,6 +47,7 @@
+     tile_packed: [3]cuda.Function, // glm_mm_tile4/6/8: packed rows and their scales into the tiles
+     prompt_fixed_k: bool = false, // opt-in prompt experiment; never selected from the number of batched rows
+     kda_direct_out: bool = false, // opt-in decode-only KDA row-copy elimination
++    kda_o_split: bool = false, // opt-in KDA O: the same K slices through FP32 scratch and ordered reduction
+     pdl: bool, // dependent launches: a matmul's weights stream in while the kernel before it finishes
+ 
+     pub fn load(m: cuda.Module) !Kernels {
+@@ -69,9 +70,35 @@
+             if (!std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "1")) return error.InvalidKdaDirectOut;
+             k.kda_direct_out = std.mem.eql(u8, value, "1");
+         }
++        k.kda_o_split = try kdaOSplit(if (std.c.getenv("TF_GLM_KDA_O_SPLIT")) |v| std.mem.span(v) else null);
++        if (k.kda_o_split) {
++            var device: cuda.abi.Device = 0;
++            var major: c_int = 0;
++            var minor: c_int = 0;
++            try m.d.check(m.d.api.cuCtxGetDevice(&device), "cuCtxGetDevice");
++            try m.d.check(m.d.api.cuDeviceGetAttribute(&major, .compute_capability_major, device), "cuDeviceGetAttribute");
++            try m.d.check(m.d.api.cuDeviceGetAttribute(&minor, .compute_capability_minor, device), "cuDeviceGetAttribute");
++            if (major != 12 or minor != 1) return error.KdaOSplitRequiresSm121;
++        }
+         return k;
+     }
+ };
++
++/// This local decode experiment is off unless explicitly selected; malformed values refuse startup.
++pub fn kdaOSplit(value: ?[]const u8) error{InvalidKdaOSplit}!bool {
++    const v = value orelse return false;
++    if (std.mem.eql(u8, v, "0")) return false;
++    if (std.mem.eql(u8, v, "1")) return true;
++    return error.InvalidKdaOSplit;
++}
++
++test "KDA O split transport defaults off and accepts only literal 0 or 1" {
++    try std.testing.expect(!try kdaOSplit(null));
++    try std.testing.expect(!try kdaOSplit("0"));
++    try std.testing.expect(try kdaOSplit("1"));
++    for ([_][]const u8{ "", "true", "false", "2", " 1", "1 " }) |v|
++        try std.testing.expectError(error.InvalidKdaOSplit, kdaOSplit(v));
++}
+ 
+ const split_target = 192; // column tiles times K slices a launch aims at (the GB10's SMs, a few blocks each)
+ 
+diff --git a/zig/src/families/glm/cuda_ranks.zig b/zig/src/families/glm/cuda_ranks.zig
+--- a/zig/src/families/glm/cuda_ranks.zig
++++ b/zig/src/families/glm/cuda_ranks.zig
+@@ -15,6 +15,7 @@
+     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
+     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
+     kda_direct_out: bool = false, // TF_GLM_KDA_DIRECT_OUT: direct strided split-input writes
++    kda_o_split: bool = false, // TF_GLM_KDA_O_SPLIT: same O slices, FP32 scratch and ordered reduce
+     fused_moe_tail: bool = false, // TF_GLM_FUSED_MOE_TAIL: no intermediate shared-slot copy
+     sample_gather: bool = false, // TF_GLM_SAMPLE_GATHER: changes the sampled-draw collective sequence
+     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole).
+@@ -26,7 +27,7 @@
+     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
+     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
+         var s: Settings = .{};
+-        inline for (.{ .{ "TF_GLM_KDA_DIRECT_OUT", "kda_direct_out" }, .{ "TF_GLM_FUSED_MOE_TAIL", "fused_moe_tail" }, .{ "TF_GLM_SAMPLE_GATHER", "sample_gather" } }) |entry| if (get(entry[0])) |v| {
++        inline for (.{ .{ "TF_GLM_KDA_DIRECT_OUT", "kda_direct_out" }, .{ "TF_GLM_KDA_O_SPLIT", "kda_o_split" }, .{ "TF_GLM_FUSED_MOE_TAIL", "fused_moe_tail" }, .{ "TF_GLM_SAMPLE_GATHER", "sample_gather" } }) |entry| if (get(entry[0])) |v| {
+             if (std.mem.eql(u8, v, "1")) @field(s, entry[1]) = true else if (!std.mem.eql(u8, v, "0")) {
+                 problem.* = entry[0] ++ ": 0 or 1";
+                 return error.BadSetting;
+@@ -115,7 +116,7 @@
+ 
+ /// What every rank must agree on, as bytes the communicator carries.
+ pub const Fingerprint = extern struct {
+-    layout: u32 = 13, // includes decode flags, especially the sampled-draw collective sequence
++    layout: u32 = 14, // includes the opt-in KDA O split transport
+     world: u32,
+     rank: u32,
+     kv8: u32 = 0,
+@@ -125,6 +126,7 @@
+     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
+     kda_wide: u32,
+     kda_direct_out: u32 = 0,
++    kda_o_split: u32 = 0,
+     fused_moe_tail: u32 = 0,
+     sample_gather: u32 = 0,
+     pieces: u32,
+@@ -154,6 +156,7 @@
+         split,
+         kda_wide,
+         kda_direct_out,
++        kda_o_split,
+         fused_moe_tail,
+         sample_gather,
+         pieces,
+@@ -193,6 +196,7 @@
+             .split = if (!s.split) 0 else if (s.ring) 2 else 1,
+             .kda_wide = @intFromBool(s.kda_wide),
+             .kda_direct_out = @intFromBool(s.kda_direct_out),
++            .kda_o_split = @intFromBool(s.kda_o_split),
+             .fused_moe_tail = @intFromBool(s.fused_moe_tail),
+             .sample_gather = @intFromBool(s.sample_gather),
+             .pieces = s.pieces,
+@@ -232,6 +236,7 @@
+             "split",
+             "kda_wide",
+             "kda_direct_out",
++            "kda_o_split",
+             "fused_moe_tail",
+             "sample_gather",
+             "pieces",
+@@ -343,6 +348,7 @@
+         .split => "TF_GLM_PREFILL_REDUCE",
+         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
+         .kda_direct_out => "TF_GLM_KDA_DIRECT_OUT",
++        .kda_o_split => "TF_GLM_KDA_O_SPLIT",
+         .fused_moe_tail => "TF_GLM_FUSED_MOE_TAIL",
+         .sample_gather => "TF_GLM_SAMPLE_GATHER (allGather vs row broadcasts)",
+         .pieces => "TF_GLM_OVERLAP_PIECES",
+@@ -640,7 +646,7 @@
+             return if (std.mem.eql(u8, name, key)) value else null;
+         }
+     };
+-    inline for (.{ .{ "TF_GLM_KDA_DIRECT_OUT", "kda_direct_out" }, .{ "TF_GLM_FUSED_MOE_TAIL", "fused_moe_tail" }, .{ "TF_GLM_SAMPLE_GATHER", "sample_gather" } }) |entry| {
++    inline for (.{ .{ "TF_GLM_KDA_DIRECT_OUT", "kda_direct_out" }, .{ "TF_GLM_KDA_O_SPLIT", "kda_o_split" }, .{ "TF_GLM_FUSED_MOE_TAIL", "fused_moe_tail" }, .{ "TF_GLM_SAMPLE_GATHER", "sample_gather" } }) |entry| {
+         Reader.key = entry[0];
+         var problem: []const u8 = "";
+         Reader.value = null;
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -76,6 +76,23 @@
+             var planned: usize = 4;
+             for (shapes) |shape| planned = @max(planned, b16.partBytes(@min(rows, b16.rows_from - 1), shape[0], shape[1]));
+             for (shapes[0..2]) |shape| try std.testing.expect(b16.partBytes(rows, shape[0], shape[1]) <= planned);
++        }
++    }
++}
++
++test "GLM TP2: existing shared mm scratch covers the KDA O four-slice FP32 result" {
++    const c = @import("config.zig").Config{};
++    const Share = @import("cuda_shard.zig").Share;
++    for (0..2) |rank| {
++        const w: weights.Weights = .{ .gpa = std.testing.allocator, .config = c, .share = try Share.of(&c, rank, 2) };
++        const shapes = b16Shapes(&w);
++        try std.testing.expectEqual([2]usize{ 4096, 4096 }, shapes[2]);
++        for (1..17) |rows| {
++            var planned: usize = 4;
++            for (shapes) |shape| planned = @max(planned, b16.partBytes(rows, shape[0], shape[1]));
++            const needed = @as(usize, cuda.qmmf.splitK(4096, 4096)) * rows * 4096 * 4;
++            try std.testing.expectEqual(@as(usize, 4 * rows * 4096 * 4), needed);
++            try std.testing.expect(needed <= planned);
+         }
+     }
+ }

@@ -1,0 +1,333 @@
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -13,6 +13,10 @@
+     const route_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "GLM route", "GLM profile interval" } }));
+     b.step("test-glm-route-profile-host", "Bounded asynchronous route snapshots and exact host histograms without devices").dependOn(&route_run.step);
+     step.dependOn(&route_run.step);
++    const low8_host = b.createModule(.{ .root_source_file = b.path("zig/glm_low8_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "glm", .module = glm } } });
++    const low8_run = b.addRunArtifact(b.addTest(.{ .root_module = low8_host, .filters = &.{"GLM low8:"} }));
++    b.step("test-glm-low8-host", "Actual opt-in narrow expert dispatch, symbols and launch ABI without devices").dependOn(&low8_run.step);
++    step.dependOn(&low8_run.step);
+     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
+     const admission = b.createModule(.{ .root_source_file = b.path("zig/glm_admission_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "engine_api", .module = api } } });
+     const admission_run = b.addRunArtifact(b.addTest(.{ .root_module = admission, .filters = &.{"GLM CUDA admission:"} }));
+diff --git a/zig/glm_low8_host.zig b/zig/glm_low8_host.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/glm_low8_host.zig
+@@ -0,0 +1,149 @@
++//! Actual narrow expert dispatch and launch ABI, recorded on the CPU; no device arithmetic is simulated.
++const std = @import("std");
++const cuda = @import("cuda");
++const glm = @import("glm");
++const t = std.testing;
++const Low8 = cuda.experts.Nvfp4Experts.Low8;
++
++const Mock = struct {
++    var lookups: usize = 0;
++    var occupancies: usize = 0;
++    var launches: usize = 0;
++    var fail_occupancy: usize = 0;
++    var fail_launch: bool = false;
++    var tag: usize = 0;
++    var cfg: [7]u32 = undefined;
++    var args: [14]u64 = undefined;
++
++    fn reset() void {
++        lookups = 0;
++        occupancies = 0;
++        launches = 0;
++        fail_occupancy = 0;
++        fail_launch = false;
++    }
++    fn function(out: *cuda.abi.Function, _: cuda.abi.Module, name: [*:0]const u8) callconv(.c) cuda.abi.Result {
++        for (Low8.symbols, 0..) |symbol, i| if (std.mem.eql(u8, std.mem.span(name), symbol)) {
++            lookups += 1;
++            out.* = @ptrFromInt(i + 1);
++            return 0;
++        };
++        unreachable; // a typo in the production symbol list must not silently pass this recorder
++    }
++    fn occupancy(out: *c_int, function_: cuda.abi.Function, threads: c_int, shared: usize) callconv(.c) cuda.abi.Result {
++        std.debug.assert(threads == 128 and shared == 0);
++        occupancies += 1;
++        if (fail_occupancy == occupancies) return cuda.abi.error_not_ready;
++        out.* = @intCast(@intFromPtr(function_) + 1);
++        return 0;
++    }
++    fn read(comptime T: type, values: ?[*]?*anyopaque, i: usize) T {
++        return @as(*const T, @ptrCast(@alignCast(values.?[i].?))).*;
++    }
++    fn launch(function_: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint,
++        bx: c_uint, by: c_uint, bz: c_uint, shared: c_uint, stream: cuda.abi.Stream,
++        values: ?[*]?*anyopaque, extra: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result
++    {
++        std.debug.assert(stream == null and extra == null);
++        launches += 1;
++        tag = @intFromPtr(function_);
++        cfg = .{ gx, gy, gz, bx, by, bz, shared };
++        for (0..14) |i| args[i] = switch (i) {
++            0, 3, 4, 7, 8, 9, 10 => read(u64, values, i),
++            else => read(u32, values, i),
++        };
++        return if (fail_launch) cuda.abi.error_not_ready else 0;
++    }
++    fn driver() cuda.Driver {
++        var d: cuda.Driver = undefined;
++        d.api.cuModuleGetFunction = function;
++        d.api.cuOccupancyMaxActiveBlocksPerMultiprocessor = occupancy;
++        d.api.cuLaunchKernel = launch;
++        return d;
++    }
++};
++
++fn layer() cuda.experts.Layer {
++    return .{ .format = .nvfp4, .up = 100, .down = 200, .up_scale = 300, .down_scale = 400,
++        .width = 1024, .dims = 4096, .experts = 289, .limit = 10 };
++}
++const plan: cuda.grouped.Plan = .{ .items = 500, .counts = 600, .members = 700, .rank = 800, .hist = 900 };
++
++test "GLM low8: flag defaults off, validates values and confines the served width" {
++    try t.expect(!try glm.experts.low8Flag(null));
++    try t.expect(!try glm.experts.low8Flag("0"));
++    try t.expect(try glm.experts.low8Flag("1"));
++    for ([_][]const u8{ "", "true", "2", "-1", " 1" }) |v|
++        try t.expectError(error.BadExpertLow8, glm.experts.low8Flag(v));
++    for (0..34) |rows| {
++        try t.expect(!glm.experts.useLow8(false, false, rows));
++        try t.expect(!glm.experts.useLow8(true, true, rows));
++        try t.expectEqual(rows > 0 and rows <= 8, glm.experts.useLow8(true, false, rows));
++    }
++}
++
++test "GLM low8: independent symbols and occupancy require four-warps geometry" {
++    Mock.reset();
++    var d = Mock.driver();
++    const mod: cuda.Module = .{ .d = &d, .handle = null };
++    try t.expectError(error.Low8RequiresFourWarps, Low8.resolve(mod, 48, 1));
++    try t.expectEqual(@as(usize, 0), Mock.lookups);
++    const low = try Low8.resolve(mod, 48, 4);
++    try t.expectEqual(@as(usize, 4), Mock.lookups);
++    try t.expectEqual(@as(usize, 4), Mock.occupancies);
++    try t.expectEqualSlices(usize, &.{ 96, 144, 192, 240 }, &low.resident);
++    try t.expectEqualStrings("_ZN16tf_nvfp4_experts24nvfp4_expert_low8_kernelILi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi", Low8.symbols[0]);
++    Mock.reset();
++    Mock.fail_occupancy = 2;
++    try t.expectError(error.NotReady, Low8.resolve(mod, 48, 4));
++    try t.expectEqual(@as(usize, 2), Mock.lookups);
++    try t.expectEqual(@as(usize, 0), Mock.launches);
++}
++
++test "GLM low8: launch ABI preserves input, scales, skip, clamp and independent grid" {
++    Mock.reset();
++    var d = Mock.driver();
++    const low = try Low8.resolve(.{ .d = &d, .handle = null }, 48, 4);
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    const in: cuda.experts.Rows = .{ .x = 1000, .stride = 4096, .slots = 9 };
++    for ([_]cuda.experts.Epi{ .up, .down_f32, .down_bf16 }, 0..) |epi, i| {
++        try low.run(s, epi, in, layer(), plan, 1100, 100, 288);
++        try t.expectEqual(i + 1, Mock.tag);
++        try t.expectEqual([7]u32{ @intCast(low.resident[i]), 1, 1, 128, 1, 1, 0 }, Mock.cfg);
++        try t.expectEqualSlices(u64, &.{ 1000, 4096, if (i == 0) 9 else 0,
++            if (i == 0) 100 else 200, if (i == 0) 300 else 400,
++            if (i == 0) 128 else 32, if (i == 0) 32 else 128,
++            500, 600, 700, 1100, if (i == 0) 1024 else 4096,
++            if (i == 0) @as(u32, @bitCast(@as(f32, 10))) else 0, 288 }, &Mock.args);
++    }
++    const before = Mock.launches;
++    try low.run(s, @as(cuda.experts.Epi, .up), in, layer(), plan, 1100, 0, -1);
++    try t.expectEqual(before, Mock.launches);
++    Mock.fail_launch = true;
++    try t.expectError(error.NotReady, low.run(s, @as(cuda.experts.Epi, .up), in, layer(), plan, 1100, 1, -1));
++    try t.expectEqual([7]u32{ 8, 1, 1, 128, 1, 1, 0 }, Mock.cfg);
++    try t.expectEqual(@as(u64, 0xffffffff), Mock.args[13]);
++}
++
++test "GLM low8: actual family selects narrow only when loaded and leaves prompts and wide rows old" {
++    Mock.reset();
++    var d = Mock.driver();
++    var ks: glm.experts.Kernels = undefined;
++    ks.nvfp4 = .{ .mod = .{ .d = &d, .handle = null }, .fns = undefined, .resident = @splat(333),
++        .prompt_fns = undefined, .warps = 4 };
++    for (&ks.nvfp4.fns, 0..) |*fn_, i| fn_.* = .{ .d = &d, .handle = @ptrFromInt(10 + i) };
++    for (&ks.nvfp4.prompt_fns, 0..) |*fn_, i| fn_.* = .{ .d = &d, .handle = @ptrFromInt(20 + i) };
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    var p: glm.experts.Plan = .{ .route = plan, .slots = 9, .experts = 289, .prompt = false };
++    try glm.experts.run(&ks, s, .gate_up, layer(), p, 1000, 4096, 2, 1100, 288);
++    try t.expectEqual(@as(usize, 10), Mock.tag);
++    ks.nvfp4.low8 = try Low8.resolve(ks.nvfp4.mod, 48, 4);
++    for ([_]usize{ 1, 2, 8, 9, 16, 32 }) |rows| {
++        try glm.experts.run(&ks, s, .gate_up, layer(), p, 1000, 4096, rows, 1100, 288);
++        try t.expectEqual(@as(usize, if (rows <= 8) 1 else 10), Mock.tag);
++        p.prompt = true;
++        try glm.experts.run(&ks, s, .gate_up, layer(), p, 1000, 4096, rows, 1100, 288);
++        try t.expectEqual(@as(usize, 21), Mock.tag);
++        p.prompt = false;
++    }
++}
+diff --git a/zig/kernels/cuda/nvfp4_experts.cu b/zig/kernels/cuda/nvfp4_experts.cu
+--- a/zig/kernels/cuda/nvfp4_experts.cu
++++ b/zig/kernels/cuda/nvfp4_experts.cu
+@@ -311,6 +311,51 @@
+ #undef TF_TILES
+ }
+ 
++// Opt-in narrow decode: reuse the original K loop and epilogue, but never keep the high eight rows live.
++// Advancing by eight also covers unusual cnt > 8 plans; no member is silently omitted.
++template <int M, int EPI, int WARPS>
++__global__ void __launch_bounds__(WARPS * 32)
++    nvfp4_expert_low8_kernel(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
++                             const uint4* __restrict__ W, const float* __restrict__ scale, int KG, int NB,
++                             const int* __restrict__ items, const int* __restrict__ counts,
++                             const int* __restrict__ members, void* __restrict__ out, int N, float limit, int skip) {
++  static_assert(WARPS == 4, "low8 is qualified only with four warps per CTA");
++  const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
++  const int units = __ldg(counts) * NB;
++  for (int unit = blockIdx.x * WARPS + (threadIdx.x >> 5); unit < units; unit += gridDim.x * WARPS) {
++    const int it = unit / NB, cb = unit - it * NB;
++    const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
++    if (e == skip) continue;
++    const uint4* blk = W + ((size_t)e * NB + cb) * (size_t)KG * (M * BLOCK4);
++    for (int r0 = 0; r0 < cnt; r0 += 8) {
++      const bool v0 = r0 + gq < cnt;
++      const int pr0 = v0 ? __ldg(members + first + r0 + gq) : 0;
++      const int x0r = slots ? pr0 / slots : pr0;
++      const __nv_bfloat16* x0 = X + (size_t)x0r * x_stride;
++      float acc[M][1][NTW][4];
++#pragma unroll
++      for (int m = 0; m < M; ++m)
++#pragma unroll
++        for (int j = 0; j < NTW; ++j) acc[m][0][j][0] = acc[m][0][j][1] = acc[m][0][j][2] = acc[m][0][j][3] = 0.f;
++      k_loop<M>(acc, blk, KG, lane, t, x0, x0, v0, false);
++#pragma unroll
++      for (int m = 0; m < M; ++m) {
++        const float g = __ldg(scale + e * M + m);
++#pragma unroll
++        for (int j = 0; j < NTW; ++j)
++#pragma unroll
++          for (int q = 0; q < 2; ++q) acc[m][0][j][q] *= g;
++      }
++      epilogue<EPI, M, 1>(acc, 0, out, N, cb * COLS + 2 * t, pr0, 0, v0, false, limit);
++    }
++  }
++}
++
++template __global__ void nvfp4_expert_low8_kernel<2, 2, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
++template __global__ void nvfp4_expert_low8_kernel<1, 0, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
++template __global__ void nvfp4_expert_low8_kernel<1, 3, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
++template __global__ void nvfp4_expert_low8_kernel<1, 1, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
++
+ // The instances: SwiGLU gate-up, fp32 and bf16 down, and relu^2 up for experts without a gate (Nemotron).
+ template __global__ void nvfp4_expert_kernel<2, 2, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+ template __global__ void nvfp4_expert_kernel<1, 0, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+diff --git a/zig/src/cuda/experts.zig b/zig/src/cuda/experts.zig
+--- a/zig/src/cuda/experts.zig
++++ b/zig/src/cuda/experts.zig
+@@ -335,6 +335,8 @@
+ 
+ /// NVFP4 experts (nvfp4_experts.cu): decode rows 16 pairs at a time; prompt rows staged, 64 pairs a CTA.
+ pub const Nvfp4Experts = struct {
++    pub const Low8 = @import("nvfp4_low8.zig").Low8;
++    low8: ?Low8 = null,
+     mod: Module,
+     fns: [4]Function, // by Epi, then relu^2 up
+     resident: [4]usize, // blocks the grid may hold: per SM times SMs
+diff --git a/zig/src/cuda/nvfp4_low8.zig b/zig/src/cuda/nvfp4_low8.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/cuda/nvfp4_low8.zig
+@@ -0,0 +1,57 @@
++//! Independent opt-in narrow NVFP4 expert entries; the original sixteen-row dispatch remains untouched.
++const module = @import("module.zig");
++const launch = @import("launch.zig");
++const Stream = @import("stream.zig").Stream;
++
++pub const Low8 = struct {
++    fns: [4]module.Function,
++    resident: [4]usize,
++
++    const prefix = "_ZN16tf_nvfp4_experts24nvfp4_expert_low8_kernelILi";
++    const suffix = "ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
++    pub const symbols = [4][:0]const u8{
++        prefix ++ "2ELi2" ++ suffix,
++        prefix ++ "1ELi0" ++ suffix,
++        prefix ++ "1ELi3" ++ suffix,
++        prefix ++ "1ELi1" ++ suffix,
++    };
++
++    /// Own function resources: a narrower register footprint must not inherit the old kernel's residency cap.
++    pub fn resolve(mod: module.Module, sms: usize, warps: usize) !Low8 {
++        if (warps != 4) return error.Low8RequiresFourWarps;
++        var out: Low8 = undefined;
++        for (symbols, &out.fns, &out.resident) |symbol, *function, *resident| {
++            function.* = try mod.function(symbol);
++            resident.* = @max(1, try function.occupancy(128, 0)) * sms;
++        }
++        return out;
++    }
++
++    /// Same ABI, grid ownership and per-output arithmetic; item counts may exceed eight without truncation.
++    pub fn run(e: *const Low8, s: Stream, epi: anytype, in: anytype, l: anytype, p: anytype,
++        out: u64, items: usize, skip: i32) !void
++    {
++        const gate = epi == .up;
++        const kg = (if (gate) l.dims else l.width) / 32;
++        const nb = (if (gate) l.width else l.dims) / 32;
++        const ei: usize = if (gate and l.relu2) 3 else @backingInt(epi);
++        const grid = @min((items * nb + 3) / 4, e.resident[ei]);
++        if (grid < 1) return;
++        var a: launch.Args = .{};
++        a.add(in.x);
++        a.add(@as(i32, @intCast(in.stride)));
++        a.add(@as(i32, @intCast(if (gate) in.slots else 0)));
++        a.add(if (gate) l.up else l.down);
++        a.add(if (gate) l.up_scale else l.down_scale);
++        a.add(@as(i32, @intCast(kg)));
++        a.add(@as(i32, @intCast(nb)));
++        for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
++        a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
++        a.add(if (gate) l.limit else @as(f32, 0.0));
++        a.add(skip);
++        try launch.launch(e.fns[ei], .{
++            .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 },
++            .block = .{ .x = 128, .y = 1, .z = 1 },
++        }, s, &a);
++    }
++};
+diff --git a/zig/src/families/glm/cuda_experts.zig b/zig/src/families/glm/cuda_experts.zig
+--- a/zig/src/families/glm/cuda_experts.zig
++++ b/zig/src/families/glm/cuda_experts.zig
+@@ -18,8 +18,11 @@
+ 
+     /// `plans`: the loaded experts module (its plan kernels).
+     pub fn load(d: *const cuda.Driver, plans: cuda.Module, sms: u32) !Kernels {
++        const value = if (std.c.getenv("TF_GLM_EXPERT_LOW8")) |v| std.mem.span(v) else null;
++        const low8 = try low8Flag(value);
+         var nvfp4 = try cuda.experts.Nvfp4Experts.load(d, sms);
+         errdefer nvfp4.unload();
++        if (low8) nvfp4.low8 = try cuda.experts.Nvfp4Experts.Low8.resolve(nvfp4.mod, sms, nvfp4.warps);
+         return .{ .nvfp4 = nvfp4, .router = try cuda.grouped.Router.resolve(plans) };
+     }
+ 
+@@ -47,7 +50,20 @@
+     const in: cuda.experts.Rows = .{ .x = x, .stride = x_stride, .slots = plan.slots };
+     const pairs = rows * plan.slots;
+     if (plan.prompt) return g.prompt(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), skip);
++    if (useLow8(ks.nvfp4.low8 != null, plan.prompt, rows))
++        return ks.nvfp4.low8.?.run(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), skip);
+     return g.decode(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), skip);
++}
++
++pub fn low8Flag(value: ?[]const u8) !bool {
++    const v = value orelse return false;
++    if (std.mem.eql(u8, v, "0")) return false;
++    if (std.mem.eql(u8, v, "1")) return true;
++    return error.BadExpertLow8;
++}
++
++pub fn useLow8(enabled: bool, prompt: bool, rows: usize) bool {
++    return enabled and !prompt and rows > 0 and rows <= 8;
+ }
+ 
+ test "plan sizes as the Python family's" {

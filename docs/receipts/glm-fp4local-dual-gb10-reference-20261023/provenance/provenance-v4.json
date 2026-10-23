@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-22",
+  "status": "experimental; see IMPLEMENTATION.md for passed and pending gates",
+  "inherits": "provenance-v3.json",
+  "change_from_v3": "Move unchanged BF16 host rounding/narrowing functions and tests into cuda_bf16.zig; no inference arithmetic or kernel changes",
+  "patch": "fp4local-v4-from-main.patch",
+  "patch_sha256": "ce834617ab531459709dc23de3d5e8dda064a3b7efbd1c1224ab1f5728e4f0f6",
+  "image": "local-reference/tensorfold-fp4local:exp-v4-20261022",
+  "image_id": "sha256:4d58e657bbfaca7656fa2d598f3a09b1f57f50099a06cdb920fc805946381bc5",
+  "native_binary_sha256": "49047a2ca11147a7c22e363baa8c05a81ad6dea6d6da0e4b810b9cd4e5a422d6",
+  "profile_probes_default": false,
+  "build_steps_succeeded": 254,
+  "build_steps_total": 254,
+  "incremental_executed_tests_passed": 574,
+  "incremental_executed_tests_skipped": 2
+}

@@ -1,0 +1,2050 @@
+diff --git a/zig/kernels/cuda/glm_glue_rows.cuh b/zig/kernels/cuda/glm_glue_rows.cuh
+--- a/zig/kernels/cuda/glm_glue_rows.cuh
++++ b/zig/kernels/cuda/glm_glue_rows.cuh
+@@ -135,6 +135,26 @@
+   *reinterpret_cast<float4*>(o + 4) = make_float4(a[4], a[5], a[6], a[7]);
+ }
+ 
++// Decode-only replacement for put_slot(fp32) + combine: last slot comes directly from the shared expert.
++// Keep every FMA (including shared * weight), its initial +0 and slot order; never inspect the stale shared slot.
++extern "C" __global__ void tf_glm_combine_shared(
++        const float* y, const float* shared, const float* wts, float* out, int64_t d, int slots) {
++  const int64_t c = glm_glue::col8();
++  if (c >= d) return;
++  const int64_t r = blockIdx.x;
++  float a[8] = {};
++  for (int k = 0; k < slots; ++k) {
++    float v[8];
++    const float* src = k == slots - 1 ? shared + r * d + c : y + (r * slots + k) * d + c;
++    glm_glue::ld8(src, v);
++    const float w = wts[r * slots + k];
++    for (int j = 0; j < 8; ++j) a[j] = __fmaf_rn(v[j], w, a[j]);
++  }
++  float* o = out + r * d + c;
++  *reinterpret_cast<float4*>(o) = make_float4(a[0], a[1], a[2], a[3]);
++  *reinterpret_cast<float4*>(o + 4) = make_float4(a[4], a[5], a[6], a[7]);
++}
++
+ // glue._router_sum and qmm._reduce: ks slices of `total` fp32 added in order (fp32 or bf16 out), 8 values a thread.
+ extern "C" __global__ void tf_glm_slice_sum(const float* part, void* out, int64_t total, int ks, int f32) {
+   const int64_t i0 = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * 8;
+diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
+--- a/zig/kernels/cuda/glm_mm.cu
++++ b/zig/kernels/cuda/glm_mm.cu
+@@ -227,6 +227,17 @@
+     for (int sl = 1; sl < SK; ++sl) acc = acc + part[sl * total + i];
+     if (f32) reinterpret_cast<float*>(out)[i] = acc;
+     else reinterpret_cast<__nv_bfloat16*>(out)[i] = __float2bfloat16_rn(acc);
++}
++
++// The same slice order and one bf16 rounding, with only the final output address changed.
++extern "C" __global__ void glm_mm_reduce_stride(const float* __restrict__ part, __nv_bfloat16* __restrict__ out,
++                                               long long total, int SK, int N, int ldy) {
++    qmm_frag::grid_launch();
++    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= total) return;
++    float acc = part[i];
++    for (int sl = 1; sl < SK; ++sl) acc = acc + part[sl * total + i];
++    out[(i / N) * ldy + i % N] = __float2bfloat16_rn(acc);
+ }
+ 
+ // one instance a (bits, row bucket): (16, 1 warp row), (32, 1), (64, 2), (128, 2); three stages
+diff --git a/zig/kernels/cuda/qmmf.cu b/zig/kernels/cuda/qmmf.cu
+--- a/zig/kernels/cuda/qmmf.cu
++++ b/zig/kernels/cuda/qmmf.cu
+@@ -59,10 +59,10 @@
+ };
+ 
+ template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool FUSE = false>
+-__global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
++__device__ __forceinline__ void qmmf_body(
+         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
+         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
+-        int group) {
++        int group, int ldy) {
+     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
+     static_assert(BN == 64, "a block reads one 64-column tile of words and scales");
+     extern __shared__ __align__(128) unsigned char buf[];
+@@ -270,11 +270,11 @@
+                 }
+                 const float v0 = acc[i][j][2 * h] * scale, v1 = acc[i][j][2 * h + 1] * scale;
+                 if (F32) {
+-                    float* dst = reinterpret_cast<float*>(out) + static_cast<size_t>(row) * N + col;
++                    float* dst = reinterpret_cast<float*>(out) + static_cast<size_t>(row) * ldy + col;
+                     if (col < N) dst[0] = v0;
+                     if (col + 1 < N) dst[1] = v1;
+                 } else {
+-                    __nv_bfloat16* dst = reinterpret_cast<__nv_bfloat16*>(out) + static_cast<size_t>(row) * N + col;
++                    __nv_bfloat16* dst = reinterpret_cast<__nv_bfloat16*>(out) + static_cast<size_t>(row) * ldy + col;
+                     if (col + 1 < N && (N & 1) == 0)
+                         *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);
+                     else {
+@@ -285,6 +285,27 @@
+             }
+         }
+ }
++
++template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool FUSE = false>
++__global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
++        const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
++        float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
++        int group) {
++    qmmf_body<MODE, BM, BN, WM, WN, STAGES, F32, CLUSTER, FUSE>(
++        x, w, bs, scale, out, part, M, N, K, SK, npad, ldx, group, N);
++}
++
++// GLM's split KDA input: the same single-slice MXFP8 sums, written directly into a wider bf16 row.
++#define QMMF_MXFP8_STRIDED(BM)                                                                                         \
++    extern "C" __global__ void __launch_bounds__(128) qmmf_mxfp8_stride##BM(                                            \
++        const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,         \
++        float scale, void* __restrict__ out, int M, int N, int K, int npad, int ldx, int group, int ldy) {              \
++        qmmf_body<MXFP8, BM, 64, 1, 4, 4, false, false, false>(                                                        \
++            x, w, bs, scale, out, nullptr, M, N, K, 1, npad, ldx, group, ldy);                                         \
++    }
++QMMF_MXFP8_STRIDED(16)
++QMMF_MXFP8_STRIDED(32)
++#undef QMMF_MXFP8_STRIDED
+ 
+ template <bool F32>
+ __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__ out, long long total, int SK,
+diff --git a/zig/src/core/contract/glm_cuda_records.zig b/zig/src/core/contract/glm_cuda_records.zig
+--- a/zig/src/core/contract/glm_cuda_records.zig
++++ b/zig/src/core/contract/glm_cuda_records.zig
+@@ -10,6 +10,11 @@
+ 
+ /// nvcc 13.0's usage, the compiler of the release fatbins.
+ pub const cuda = [_]registry.CudaRecord{
++    // Local decode additions: CUDA 13.0.88, actual driver attributes on SM121.
++    .{ .launch = .{ .name = "glm_glue tf_glm_combine_shared", .symbol = "tf_glm_combine_shared", .image = "glm_glue", .threads = 128, .min_sm = 121 }, .usage = a4Usage(44, 0, 0) },
++    .{ .launch = .{ .name = "glm_mm_reduce_stride", .symbol = "glm_mm_reduce_stride", .image = "glm_mm", .threads = 256, .min_sm = 121 }, .usage = a4Usage(40, 0, 0) },
++    .{ .launch = .{ .name = "qmmf_mxfp8_stride16", .symbol = "qmmf_mxfp8_stride16", .image = "qmmf", .threads = 128, .dynamic = 25088, .opt_in = true, .min_sm = 121 }, .usage = a4Usage(54, 0, 128) },
++    .{ .launch = .{ .name = "qmmf_mxfp8_stride32", .symbol = "qmmf_mxfp8_stride32", .image = "qmmf", .threads = 128, .dynamic = 33280, .opt_in = true, .min_sm = 121 }, .usage = a4Usage(69, 0, 128) },
+     .{ .launch = .{ .name = "glm_a4 tf_glm_a4_prompt_up", .symbol = "tf_glm_a4_prompt_up", .image = "nvfp4_experts", .threads = 128, .min_sm = 121 }, .usage = a4Usage(128, 4608, 128) },
+     .{ .launch = .{ .name = "glm_a4 tf_glm_a4_prompt_down", .symbol = "tf_glm_a4_prompt_down", .image = "nvfp4_experts", .threads = 128, .min_sm = 121 }, .usage = a4Usage(80, 2304, 128) },
+     .{ .launch = .{ .name = "glm_a4 tf_glm_a4_prompt_up_n128", .symbol = "tf_glm_a4_prompt_up_n128", .image = "nvfp4_experts", .threads = 256, .min_sm = 121 }, .usage = a4Usage(128, 4608, 256) },
+diff --git a/zig/src/cuda/qmmf.zig b/zig/src/cuda/qmmf.zig
+--- a/zig/src/cuda/qmmf.zig
++++ b/zig/src/cuda/qmmf.zig
+@@ -104,6 +104,7 @@
+     mod: Module,
+     fns: [modes.len][7]Function, // per mode: lane16, lane16c, lane32, lane32c, lane64, lane64c, fused
+     f32_fns: [modes.len][7]Function,
++    mxfp8_strided: [2]Function, // bf16 output, single-slice 16/32-row tiles into a wider row
+     reduce: [2]Function, // by Out
+     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
+ 
+@@ -115,6 +116,7 @@
+             .mod = mod,
+             .fns = undefined,
+             .f32_fns = undefined,
++            .mxfp8_strided = undefined,
+             .reduce = undefined,
+             .clusters = capability_major >= 9,
+         };
+@@ -123,6 +125,10 @@
+             l.f32_fns[mi] = try loadTiles(mod, mode, true);
+         }
+         for (&l.reduce, reduce_symbols) |*f, name| f.* = try mod.function(name);
++        inline for (.{ 16, 32 }, 0..) |bm, i| {
++            l.mxfp8_strided[i] = try mod.function(std.fmt.comptimePrint("qmmf_mxfp8_stride{d}", .{bm}));
++            try l.mxfp8_strided[i].allowDynamicShared(sharedBytes(.mxfp8, bm));
++        }
+         return l;
+     }
+ 
+@@ -144,6 +150,25 @@
+     /// Preserve FP32 outputs for a later residual or tensor-rank sum.
+     pub fn matmulF32(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, part: u64) !void {
+         return l.matmulOut(s, x, ldx, m, w, y, .f32, part);
++    }
++
++    /// The single-slice MXFP8 decode sums into bf16 rows `ldy` apart; all other plans keep matmulOut.
++    pub fn matmulMxfp8Strided(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, ldy: usize) !void {
++        if (w.mode != .mxfp8 or m == 0 or m > 32 or splitK(w.n, w.k) != 1) return error.UnsupportedStridePlan;
++        if (w.k == 0 or w.n == 0 or w.k % group != 0 or w.n % 8 != 0 or ldy < w.n or ldy % 8 != 0 or y % 16 != 0 or
++            x % 16 != 0 or ldx < w.k or ldx % 8 != 0) return error.BadShape;
++        const bm = bucket(m);
++        const rows_t = (m + bm - 1) / bm;
++        const band = @max(1, @min(rows_t, (12 << 20) / (@as(usize, bm) * w.k * 2)));
++        var a: launch_.Args = .{};
++        inline for (.{ x, w.codes, w.scales, w.scale, y }) |v| a.add(v);
++        inline for (.{ m, @as(usize, w.n), @as(usize, w.k), @as(usize, w.npad), if (m == 1) w.k else ldx, band, ldy }) |v|
++            a.add(@as(i32, @intCast(v)));
++        try launch_.launch(l.mxfp8_strided[@intFromBool(bm == 32)], .{
++            .grid = .{ .x = @intCast(rows_t * ((w.n + bn - 1) / bn)) },
++            .block = .{ .x = threads },
++            .shared = sharedBytes(.mxfp8, bm),
++        }, s, &a);
+     }
+ 
+     /// matmul() writing y as `out` says: bf16, or fp32.
+diff --git a/zig/src/families/glm/cuda_b16.zig b/zig/src/families/glm/cuda_b16.zig
+--- a/zig/src/families/glm/cuda_b16.zig
++++ b/zig/src/families/glm/cuda_b16.zig
+@@ -95,6 +95,19 @@
+     if (sk > 1) try glue.sliceSum(set, stream, part, out, m * n, sk, wide);
+ }
+ 
++/// Tiled BF16 decode's split-K sums into rows `out_stride` apart; no prompt or untiled arithmetic is changed.
++pub fn matmulStrided(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, out_stride: usize, part: u64, m: usize, n: usize, k: usize) !void {
++    const mk = set.mm orelse return error.FormatNotLoaded;
++    const t: mm.Tiled = if (set.packs) |p| p.tiled(w, n, k) else .{ .w = w, .n = n, .k = k };
++    return mm.matmulStrided(mk, stream, x, x_stride, t, out, out_stride, part, m);
++}
++
++/// The direct-output path keeps packed 4/6/8-bit or unsliced rest projections on their existing dispatch.
++pub fn supportsStrided(set: glue.Set, w: u64, n: usize, k: usize) bool {
++    if (set.mm == null or n == 0 or k == 0 or n % 8 != 0 or k % 64 != 0 or mm.splitK(n, k) == 1) return false;
++    return if (set.packs) |p| p.tiled(w, n, k).bits == 16 else true;
++}
++
+ /// qmm.group_sums: (m, k) bf16 rows (stride `x_stride`) -> (m, k / 64) fp32 sums of each 64 inputs.
+ pub fn groupSums(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, xs: u64, m: usize, k: usize) !void {
+     var a: cuda.Args = .{};
+@@ -109,3 +122,17 @@
+     try std.testing.expectEqual(@as(usize, 1), splitK(4096, 128)); // two steps: no slice keeps four
+     try std.testing.expectEqual(@as(usize, 0), partBytes(200, 4096, 4096));
+ }
++
++test "KDA direct output refuses packed rest projections without changing their dispatch" {
++    var kernels: mm.Kernels = undefined;
++    var packs: mm.Packed = .{ .ptrs = &.{0x1000}, .bits = &.{4} };
++    const set: glue.Set = .{ .glue = undefined, .mm = &kernels, .packs = &packs };
++    try std.testing.expect(!supportsStrided(set, 0x1000, 288, 4096));
++    packs.bits = &.{6};
++    try std.testing.expect(!supportsStrided(set, 0x1000, 288, 4096));
++    packs.bits = &.{8};
++    try std.testing.expect(!supportsStrided(set, 0x1000, 288, 4096));
++    try std.testing.expect(supportsStrided(set, 0x2000, 288, 4096));
++    try std.testing.expect(!supportsStrided(set, 0x2000, 288, 128));
++    try std.testing.expect(!supportsStrided(set, 0x2000, 277, 4096));
++}
+diff --git a/zig/src/families/glm/cuda_decode_detail.zig b/zig/src/families/glm/cuda_decode_detail.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_decode_detail.zig
+@@ -0,0 +1,112 @@
++//! Optional nested decode intervals. Labels overlap; they are not a partition.
++const std = @import("std");
++const cuda = @import("cuda");
++pub const Stage = enum { kda_project, kda_copy, kda_chain, kda_output, moe_slot, moe_combine, sample_gather, sample_draw };
++const count = std.enums.values(Stage).len;
++const capacity = 512;
++
++pub const Trace = struct {
++    events: [capacity * 2]cuda.Event,
++    stages: [capacity]Stage = undefined,
++    closed: [capacity]bool = @splat(false),
++    n: usize = 0,
++    overflow: bool = false,
++    active: bool = false,
++    invalid: bool = false,
++    epoch: u64 = 0,
++    totals: [count]f64 = @splat(0),
++    calls: usize = 0,
++
++    pub fn init(d: *const cuda.Driver) !*Trace {
++        const t = try std.heap.page_allocator.create(Trace);
++        errdefer std.heap.page_allocator.destroy(t);
++        t.* = .{ .events = undefined };
++        var made: usize = 0;
++        errdefer for (t.events[0..made]) |*e| e.deinit();
++        for (&t.events) |*e| {
++            e.* = try cuda.Event.init(d, true);
++            made += 1;
++        }
++        return t;
++    }
++    pub fn deinit(t: *Trace) void {
++        for (&t.events) |*e| e.deinit();
++        std.heap.page_allocator.destroy(t);
++    }
++    pub fn begin(t: *Trace) void {
++        t.epoch +%= 1;
++        t.n = 0;
++        t.active = true;
++        t.invalid = false;
++        t.overflow = false;
++        t.closed = @splat(false);
++    }
++    pub fn span(t: *Trace, s: cuda.Stream, stage: Stage) Scope {
++        if (!t.active or t.invalid) return .{};
++        if (t.n == capacity) {
++            t.overflow = true;
++            t.invalid = true;
++            return .{};
++        }
++        const i = t.n;
++        t.events[i * 2].record(s) catch {
++            t.invalid = true;
++            return .{};
++        };
++        t.stages[i] = stage;
++        t.n += 1;
++        return .{ .trace = t, .index = i, .stream = s, .epoch = t.epoch };
++    }
++
++    /// Discard a failed call, preserving only earlier complete calls' aggregate. Late scopes cannot reopen it.
++    pub fn abort(t: *Trace) void {
++        t.active = false;
++        t.invalid = true;
++    }
++    /// Caller has already synchronized its final coarse event on this stream.
++    pub fn finish(t: *Trace, label: []const u8, every: u64) void {
++        if (!t.active) return;
++        t.active = false;
++        if (t.n == 0) return;
++        if (t.invalid or t.overflow) return;
++        var call: [count]f64 = @splat(0);
++        for (0..t.n) |i| {
++            if (!t.closed[i]) return;
++            const ms = cuda.Event.elapsedMs(t.events[i * 2], t.events[i * 2 + 1]) catch return;
++            if (!std.math.isFinite(ms) or ms < 0) return;
++            call[@intFromEnum(t.stages[i])] += ms;
++        }
++        for (&t.totals, call) |*total, ms| total.* += ms;
++        t.calls += 1;
++        if (t.calls < every) return;
++        var buf: [640]u8 = undefined;
++        var w: std.Io.Writer = .fixed(&buf);
++        w.print("glm detail {s} ({d} calls, nested ms/call):", .{ label, t.calls }) catch {};
++        inline for (std.enums.values(Stage)) |stage| {
++            const ms = t.totals[@intFromEnum(stage)];
++            if (ms > 0) w.print(" {s} {d:.3}", .{ @tagName(stage), ms / @as(f64, @floatFromInt(t.calls)) }) catch {};
++        }
++        std.log.info("{s}", .{w.buffered()});
++        t.totals = @splat(0);
++        t.calls = 0;
++    }
++};
++pub const Scope = struct {
++    trace: ?*Trace = null,
++    index: usize = 0,
++    stream: cuda.Stream = undefined,
++    epoch: u64 = 0,
++    pub fn end(v: Scope) void {
++        const t = v.trace orelse return;
++        if (!t.active or t.epoch != v.epoch or t.closed[v.index]) return;
++        t.events[v.index * 2 + 1].record(v.stream) catch {
++            t.invalid = true;
++            return;
++        };
++        t.closed[v.index] = true;
++    }
++};
++pub fn wanted() bool {
++    const v = std.c.getenv("TF_GLM_DETAIL_PROF") orelse return false;
++    return std.mem.eql(u8, std.mem.span(v), "1");
++}
+diff --git a/zig/src/families/glm/cuda_decode_detail_test.zig b/zig/src/families/glm/cuda_decode_detail_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_decode_detail_test.zig
+@@ -0,0 +1,217 @@
++//! Host-only virtual event clocks: complete-call accounting, failure unwind and stale-scope protection.
++const std = @import("std");
++const cuda = @import("cuda");
++const detail = @import("cuda_decode_detail.zig");
++const prof = @import("cuda_prof.zig");
++const t = std.testing;
++
++const Fake = struct {
++    var made: usize = 0;
++    var live: usize = 0;
++    var fail_create: usize = std.math.maxInt(usize);
++    var records: usize = 0;
++    var fail_record: usize = std.math.maxInt(usize);
++    var syncs: usize = 0;
++    var elapsed_calls: usize = 0;
++    var times: [4096]f32 = undefined;
++    var clock: f32 = 0;
++    var bad: enum { none, not_ready, nan, negative } = .none;
++
++    fn reset() void {
++        made = 0;
++        live = 0;
++        fail_create = std.math.maxInt(usize);
++        records = 0;
++        fail_record = std.math.maxInt(usize);
++        syncs = 0;
++        elapsed_calls = 0;
++        clock = 0;
++        bad = .none;
++    }
++    fn driver() cuda.Driver {
++        var d: cuda.Driver = undefined;
++        d.api.cuEventCreate = create;
++        d.api.cuEventDestroy_v2 = destroy;
++        d.api.cuEventRecord = record;
++        d.api.cuEventElapsedTime = elapsed;
++        d.api.cuEventSynchronize = sync;
++        return d;
++    }
++    fn create(out: *cuda.abi.Event, _: c_uint) callconv(.c) c_int {
++        // NOT_READY avoids test-runner error logs while exercising the same failed-create unwind.
++        if (made == fail_create) return cuda.abi.error_not_ready;
++        made += 1;
++        live += 1;
++        out.* = @ptrFromInt(made);
++        return 0;
++    }
++    fn destroy(_: cuda.abi.Event) callconv(.c) c_int {
++        live -= 1;
++        return 0;
++    }
++    fn record(e: cuda.abi.Event, _: cuda.abi.Stream) callconv(.c) c_int {
++        const at = records;
++        records += 1;
++        if (at == fail_record) return cuda.abi.error_not_ready;
++        times[@intFromPtr(e)] = clock;
++        return 0;
++    }
++    fn elapsed(out: *f32, a: cuda.abi.Event, b: cuda.abi.Event) callconv(.c) c_int {
++        elapsed_calls += 1;
++        if (bad == .not_ready) return cuda.abi.error_not_ready;
++        out.* = switch (bad) {
++            .nan => std.math.nan(f32),
++            .negative => -1,
++            else => times[@intFromPtr(b)] - times[@intFromPtr(a)],
++        };
++        return 0;
++    }
++    fn sync(_: cuda.abi.Event) callconv(.c) c_int {
++        syncs += 1;
++        return 0;
++    }
++};
++
++fn stream(d: *const cuda.Driver) cuda.Stream {
++    return .{ .d = d, .handle = @ptrFromInt(1) };
++}
++
++test "GLM decode detail: nested durations aggregate once; event reuse does not allocate or synchronize" {
++    Fake.reset();
++    var d = Fake.driver();
++    const tr = try detail.Trace.init(&d);
++    defer tr.deinit();
++    try t.expectEqual(@as(usize, 1024), Fake.live);
++    tr.begin();
++    Fake.clock = 10;
++    const outer = tr.span(stream(&d), .kda_project);
++    Fake.clock = 13;
++    const inner = tr.span(stream(&d), .kda_copy);
++    Fake.clock = 15;
++    inner.end();
++    Fake.clock = 20;
++    outer.end();
++    tr.finish("host fixture", 1000);
++    try t.expectEqual(@as(usize, 1), tr.calls);
++    try t.expectEqual(@as(f64, 10), tr.totals[@intFromEnum(detail.Stage.kda_project)]);
++    try t.expectEqual(@as(f64, 2), tr.totals[@intFromEnum(detail.Stage.kda_copy)]);
++    tr.finish("host fixture", 1000);
++    try t.expectEqual(@as(usize, 1), tr.calls);
++    tr.begin();
++    Fake.clock = 22;
++    const next = tr.span(stream(&d), .kda_project);
++    Fake.clock = 25;
++    next.end();
++    next.end();
++    tr.finish("host fixture", 1000);
++    try t.expectEqual(@as(usize, 2), tr.calls);
++    try t.expectEqual(@as(f64, 13), tr.totals[@intFromEnum(detail.Stage.kda_project)]);
++    try t.expectEqual(@as(usize, 1024), Fake.made);
++    try t.expectEqual(@as(usize, 6), Fake.records);
++    try t.expectEqual(@as(usize, 0), Fake.syncs);
++}
++
++test "GLM decode detail: failed first middle last allocation releases every completed event" {
++    for ([_]usize{ 0, 512, 1023 }) |at| {
++        Fake.reset();
++        Fake.fail_create = at;
++        var d = Fake.driver();
++        try t.expectError(error.NotReady, detail.Trace.init(&d));
++        try t.expectEqual(@as(usize, 0), Fake.live);
++    }
++    Fake.reset();
++    var d = Fake.driver();
++    const tr = try detail.Trace.init(&d);
++    tr.deinit();
++    try t.expectEqual(@as(usize, 0), Fake.live);
++}
++
++test "GLM decode detail: stale scopes cannot close reused slots or change completed event timestamps" {
++    Fake.reset();
++    var d = Fake.driver();
++    const tr = try detail.Trace.init(&d);
++    defer tr.deinit();
++    tr.begin();
++    const stale = tr.span(stream(&d), .moe_slot);
++    tr.begin();
++    const current = tr.span(stream(&d), .moe_combine);
++    stale.end();
++    try t.expect(!tr.closed[0]);
++    Fake.clock = 7;
++    current.end();
++    tr.finish("host fixture", 1000);
++    const records = Fake.records;
++    Fake.clock = 99;
++    current.end();
++    stale.end();
++    try t.expectEqual(records, Fake.records);
++    try t.expectEqual(@as(f64, 7), tr.totals[@intFromEnum(detail.Stage.moe_combine)]);
++}
++
++test "GLM decode detail: incomplete overflow record errors and invalid timings discard the whole call" {
++    Fake.reset();
++    var d = Fake.driver();
++    const tr = try detail.Trace.init(&d);
++    defer tr.deinit();
++    for (0..7) |mode| {
++        tr.begin();
++        Fake.clock = 0;
++        Fake.bad = .none;
++        Fake.fail_record = std.math.maxInt(usize);
++        const good = tr.span(stream(&d), .sample_gather);
++        Fake.clock = 5;
++        good.end();
++        if (mode == 1) Fake.fail_record = Fake.records;
++        const scope = tr.span(stream(&d), .sample_draw);
++        if (mode == 2) Fake.fail_record = Fake.records;
++        Fake.clock = 9;
++        if (mode != 0) scope.end();
++        switch (mode) {
++            3 => Fake.bad = .not_ready,
++            4 => Fake.bad = .nan,
++            5 => Fake.bad = .negative,
++            6 => for (0..513) |_| {
++                const extra = tr.span(stream(&d), .moe_combine);
++                extra.end();
++            },
++            else => {},
++        }
++        tr.finish("host fixture", 1000);
++        try t.expectEqual(@as(usize, 0), tr.calls);
++        for (tr.totals) |ms| try t.expectEqual(@as(f64, 0), ms);
++    }
++    try t.expectEqual(@as(usize, 0), Fake.syncs);
++}
++
++test "GLM decode detail: disabled profiler and aborted scopes perform no event operations" {
++    Fake.reset();
++    var d = Fake.driver();
++    const inactive = prof.detailSpan(null, stream(&d), .sample_draw);
++    inactive.end();
++    try t.expectEqual(@as(usize, 0), Fake.made + Fake.records + Fake.syncs + Fake.elapsed_calls);
++    const tr = try detail.Trace.init(&d);
++    defer tr.deinit();
++    tr.begin();
++    const scope = tr.span(stream(&d), .moe_slot);
++    tr.abort();
++    const before = Fake.records;
++    scope.end();
++    tr.finish("host fixture", 1000);
++    try t.expectEqual(before, Fake.records);
++    try t.expectEqual(@as(usize, 0), tr.calls);
++}
++
++test "GLM decode detail: failed coarse begin never leaves the profiler open" {
++    Fake.reset();
++    var d = Fake.driver();
++    const p = try prof.Prof.init(&d, t.io);
++    defer p.deinit();
++    p.decode_detail = try detail.Trace.init(&d);
++    Fake.fail_record = 0;
++    try t.expectError(error.NotReady, p.begin(stream(&d), "host fixture"));
++    try t.expect(!p.open);
++    const before = Fake.records;
++    const no_scope = prof.detailSpan(p, stream(&d), .sample_draw);
++    no_scope.end();
++    try t.expectEqual(before, Fake.records);
++}
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -59,6 +59,7 @@
+     packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
+     drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
+     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
++    shared_prof: ?*prof_mod.Prof = null,
+     profiling_prompt: ?*prof_mod.Prof = null,
+     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
+     checkpoint_digest: [32]u8,
+@@ -200,6 +201,7 @@
+         if (prof_mod.Prof.wanted()) for (&e.profs) |*p| {
+             p.* = try prof_mod.Prof.init(d, io);
+         };
++        if (prof_mod.Prof.wanted()) e.shared_prof = try prof_mod.Prof.init(d, io);
+         if (prof_mod.Prof.wanted()) for (&e.prompt_profs) |*p| {
+             p.* = try prof_mod.Prof.init(d, io);
+             p.*.?.every = 4;
+@@ -465,11 +467,17 @@
+         const at = e.cur.st.pos;
+         f.prof = e.profs[ids.len - 1];
+         if (f.prof) |p| try p.begin(e.stream, verifyLabel(ids.len));
++        e.smp.profile = f.prof;
++        defer e.smp.profile = null;
++        errdefer if (f.prof) |p| p.abort();
+         try f.run(@ptrCast(ids));
+         if (e.drafter) |dr| try dr.noteVerify(e.slot, 0, ids.len, at, true);
+         e.cur.rows_at = e.bd.fnormed;
+         try e.draw(e.bd.logits, ids.len, at + 1, bits, out);
+-        if (f.prof) |p| p.end();
++        if (f.prof) |p| {
++            p.mark(e.stream, .draw);
++            p.end();
++        }
+     }
+ 
+     const verifyLabel = @import("cuda_engine_prof.zig").verifyLabel;
+@@ -490,13 +498,21 @@
+             rows += p.ids.len;
+         }
+         var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
+-        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null };
++        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .prof = e.shared_prof };
++        if (f.prof) |p| try p.begin(e.stream, "shared verify");
++        e.smp.profile = f.prof;
++        defer e.smp.profile = null;
++        errdefer if (f.prof) |p| p.abort();
+         try f.run(@ptrCast(ids[0..rows]));
+         if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
+         for (parts, segs[0..parts.len]) |p, g| {
+             try e.bind(p.slot);
+             e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
+             try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
++        }
++        if (f.prof) |p| {
++            p.mark(e.stream, .draw);
++            p.end();
+         }
+     }
+ 
+diff --git a/zig/src/families/glm/cuda_engine_prof.zig b/zig/src/families/glm/cuda_engine_prof.zig
+--- a/zig/src/families/glm/cuda_engine_prof.zig
++++ b/zig/src/families/glm/cuda_engine_prof.zig
+@@ -2,6 +2,8 @@
+ const std = @import("std");
+ const Engine = @import("cuda_engine.zig").Engine;
+ pub fn freeProfs(e: *Engine) void {
++    if (e.shared_prof) |p| p.deinit();
++    e.shared_prof = null;
+     for (&e.profs) |*p| {
+         if (p.*) |v| v.deinit();
+         p.* = null;
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -47,6 +47,7 @@
+     pack_dense: cuda.Function,
+     quant: quant.Kernels,
+     q4: q4.Kernels,
++    fused_moe_tail: bool = false,
+ 
+     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context) !Modules {
+         const k = cuda.kernels;
+@@ -75,6 +76,11 @@
+         m.mm = try mm_mod.Kernels.load(m.mods[7]);
+         m.tiled = false;
+         m.packs = null; // `m` starts undefined: the field default does not apply
++        m.fused_moe_tail = false;
++        if (std.c.getenv("TF_GLM_FUSED_MOE_TAIL")) |raw| {
++            const value = std.mem.span(raw);
++            if (std.mem.eql(u8, value, "1")) m.fused_moe_tail = true else if (!std.mem.eql(u8, value, "0")) return error.InvalidFusedMoeTail;
++        }
+         return m;
+     }
+ 
+@@ -248,7 +254,7 @@
+                 }
+                 const conv = st.conv + li * 3 * st.conv_c * 2;
+                 try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof);
+-                if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
++                if (out) |o| try kda_block.fillProfile(f.set(), f.stream, k, s, 0, rows, o, f.prof);
+                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
+             },
+             .mla => |a| {
+@@ -281,7 +287,7 @@
+     }
+ 
+     fn moeKernels(f: *const Forward) moe.Kernels {
+-        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof };
++        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof, .fused_tail = f.m.fused_moe_tail };
+     }
+ 
+     pub const Site = enum { mixer, ffn };
+@@ -294,7 +300,7 @@
+         const b = r.b;
+         switch (site) {
+             .mixer => switch (l.mixer) {
+-                .kda => |k| try kda_block.fill(f.set(), f.stream, k, b.kda, lo, hi, out),
++                .kda => |k| try kda_block.fillProfile(f.set(), f.stream, k, b.kda, lo, hi, out, f.prof),
+                 .mla => |a| try dsa_block.fill(f.set(), f.stream, a, b.dsa, lo, hi, out),
+             },
+             .ffn => switch (l.ffn) {
+diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+--- a/zig/src/families/glm/cuda_glue.zig
++++ b/zig/src/families/glm/cuda_glue.zig
+@@ -21,6 +21,7 @@
+     rank_sum: cuda.Function,
+     hc_post: cuda.Function,
+     combine: cuda.Function,
++    combine_shared: cuda.Function,
+     slice_sum: cuda.Function,
+     top1: cuda.Function,
+     put_words: cuda.Function,
+@@ -186,6 +187,14 @@
+     try rows8Launch(set.glue.combine, stream, &a, rows, d, .{ y, out });
+ }
+ 
++/// Decode's combine without the shared-slot copy: same fp32 FMA order, shared weight included, no input writes.
++pub fn combineShared(set: Set, stream: cuda.Stream, y: u64, shared: u64, wts: u64, out: u64, rows: usize, d: usize, slots: usize) !void {
++    if (slots == 0) return error.NoMoeSlots;
++    var a: cuda.Args = .{};
++    inline for (.{ y, shared, wts, out, i64of(d), cint(slots) }) |v| a.add(v);
++    try rows8Launch(set.glue.combine_shared, stream, &a, rows, d, .{ y, shared, out });
++}
++
+ /// K blocks of the hyper-connection mixing dots (glue.HC_BLOCKS): fixed by the shape, like the router's slices.
+ pub const hc_blocks = 16;
+ 
+diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
+--- a/zig/src/families/glm/cuda_kda_block.zig
++++ b/zig/src/families/glm/cuda_kda_block.zig
+@@ -50,6 +50,12 @@
+ 
+ /// forward.out_proj's fill for the KDA block: o_proj of rows lo..hi (s.saves.out) into out [hi - lo][dims] fp32.
+ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi: usize, out: u64) !void {
++    return fillProfile(set, stream, l, s, lo, hi, out, null);
++}
++
++pub fn fillProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi: usize, out: u64, profile: ?*prof.Prof) !void {
++    const stamp = prof.detailSpan(profile, stream, .kda_output);
++    defer stamp.end();
+     const n = l.heads * kda.dk;
+     try projection.matmul(set, stream, l.o, s.saves.out + lo * n * 2, n, out, s.mm_part, hi - lo, l.dims, n, true);
+ }
+@@ -61,16 +67,24 @@
+ 
+ pub fn bodyProfile(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool, profile: ?*prof.Prof) !void {
+     var stamp = prof.span(profile, stream, .projections);
+-    try project(set, stream, l, s, x, x_stride, rows);
++    try projectProfile(set, stream, l, s, x, x_stride, rows, profile);
+     stamp.end();
+     stamp = prof.span(profile, stream, .kda);
+     defer stamp.end();
++    const detail = prof.detailSpan(profile, stream, .kda_chain);
+     try chainRows(ks, stream, l, s, rows, conv_state, state_in, wide);
++    detail.end();
+     if (prompt) try glue.convShift(set, stream, conv_state, s.p, rows, rows * l.width(), l.width(), 1, 3 * l.heads * kda.dk);
+ }
+ 
+ /// The projections of `rows` rows into s.p, s.ka (decay) and s.kg (gate), row by row so segments share one call.
+ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize) !void {
++    return projectProfile(set, stream, l, s, x, x_stride, rows, null);
++}
++
++pub fn projectProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, profile: ?*prof.Prof) !void {
++    const stamp = prof.detailSpan(profile, stream, .kda_project);
++    defer stamp.end();
+     var selected = set;
+     if (!l.tiledInput()) selected.mm = null;
+     const n = l.heads * kda.dk;
+@@ -78,13 +92,21 @@
+     const fa = 3 * n;
+     switch (l.proj) {
+         .bf16 => |p| try b16.matmul(selected, stream, x, x_stride, p, s.p, s.mm_part, rows, w, l.dims, false),
+-        .split => |sp| { // each part on its own kernel into its columns of s.p: one row straight there, more through tmp
+-            // cc-defer: two row copies a window; an output row stride on the lane and glm_mm if a profile flags them
++        .split => |sp| { // one row already writes directly; multirow decode can opt into the same strided output
+             const one = rows == 1;
+-            try projection.matmul(set, stream, .{ .mxfp8 = sp.qkv }, x, x_stride, if (one) s.p else s.tmp, s.mm_part, rows, fa, l.dims, false);
+-            if (!one) try columns(set, stream, s.tmp, fa, s.p, w, rows);
+-            try b16.matmul(selected, stream, x, x_stride, sp.rest, if (one) s.p + fa * 2 else s.tmp, s.mm_part, rows, w - fa, l.dims, false);
+-            if (!one) try columns(set, stream, s.tmp, w - fa, s.p + fa * 2, w, rows);
++            const direct = !set.prompt and !one and rows <= 32 and selected.mm != null and
++                selected.mm.?.kda_direct_out and set.linear.lane != null and cuda.qmmf.splitK(fa, l.dims) == 1 and
++                b16.supportsStrided(selected, sp.rest, w - fa, l.dims);
++            if (direct) {
++                if (sp.qkv.n != fa or sp.qkv.k != l.dims) return error.ShapeMismatch;
++                try set.linear.lane.?.matmulMxfp8Strided(stream, x, x_stride, rows, sp.qkv, s.p, w);
++                try b16.matmulStrided(selected, stream, x, x_stride, sp.rest, s.p + fa * 2, w, s.mm_part, rows, w - fa, l.dims);
++            } else {
++                try projection.matmul(set, stream, .{ .mxfp8 = sp.qkv }, x, x_stride, if (one) s.p else s.tmp, s.mm_part, rows, fa, l.dims, false);
++                if (!one) try columns(set, stream, s.tmp, fa, s.p, w, rows, profile);
++                try b16.matmul(selected, stream, x, x_stride, sp.rest, if (one) s.p + fa * 2 else s.tmp, s.mm_part, rows, w - fa, l.dims, false);
++                if (!one) try columns(set, stream, s.tmp, w - fa, s.p + fa * 2, w, rows, profile);
++            }
+         },
+     }
+     try b16.matmul(selected, stream, s.p + fa * 2, w, l.fb, s.ka, s.mm_part, rows, n, kda.dk, false);
+@@ -92,7 +114,9 @@
+ }
+ 
+ /// `rows` rows of `cols` bf16 packed at `src` into `dst`, rows `stride` apart (tf_glm_copy_rows).
+-fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64, stride: usize, rows: usize) !void {
++fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64, stride: usize, rows: usize, profile: ?*prof.Prof) !void {
++    const stamp = prof.detailSpan(profile, stream, .kda_copy);
++    defer stamp.end();
+     const f = set.copy_rows orelse return error.FormatNotLoaded;
+     var a: cuda.Args = .{};
+     a.add(src);
+diff --git a/zig/src/families/glm/cuda_kda_tp3_test.zig b/zig/src/families/glm/cuda_kda_tp3_test.zig
+--- a/zig/src/families/glm/cuda_kda_tp3_test.zig
++++ b/zig/src/families/glm/cuda_kda_tp3_test.zig
+@@ -43,7 +43,7 @@
+     var d: cuda.Driver = undefined;
+     d.api.cuLaunchKernel = Capture.launch;
+     const stream: cuda.Stream = .{ .d = &d, .handle = null };
+-    var kernels: mm.Kernels = .{ .by_rows = @splat(function(&d, 1)), .prompt = function(&d, 2), .reduce = function(&d, 3), .pdl = false, .packed_rows = undefined, .tile = undefined, .tile_packed = undefined };
++    var kernels: mm.Kernels = .{ .by_rows = @splat(function(&d, 1)), .prompt = function(&d, 2), .reduce = function(&d, 3), .reduce_strided = undefined, .pdl = false, .packed_rows = undefined, .tile = undefined, .tile_packed = undefined };
+     var raw: glue.Kernels = undefined;
+     raw.bmm_decode = function(&d, 4);
+     raw.bmm_rows = function(&d, 5);
+diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
+--- a/zig/src/families/glm/cuda_mm.zig
++++ b/zig/src/families/glm/cuda_mm.zig
+@@ -42,13 +42,15 @@
+     packed_rows: [3][4]cuda.Function, // 4, 6 and 8 bits, as by_rows
+     prompt: cuda.Function, // 128-row blocks, row blocks fastest: a prompt's blocks share each weight tile in L2
+     reduce: cuda.Function,
++    reduce_strided: cuda.Function,
+     tile: cuda.Function,
+     tile_packed: [3]cuda.Function, // glm_mm_tile4/6/8: packed rows and their scales into the tiles
+     prompt_fixed_k: bool = false, // opt-in prompt experiment; never selected from the number of batched rows
++    kda_direct_out: bool = false, // opt-in decode-only KDA row-copy elimination
+     pdl: bool, // dependent launches: a matmul's weights stream in while the kernel before it finishes
+ 
+     pub fn load(m: cuda.Module) !Kernels {
+-        var k: Kernels = .{ .by_rows = undefined, .packed_rows = undefined, .tile_packed = undefined, .prompt = try m.function("glm_mm16_rows"), .reduce = try m.function("glm_mm_reduce"), .tile = try m.function("glm_mm_tile16"), .pdl = true };
++        var k: Kernels = .{ .by_rows = undefined, .packed_rows = undefined, .tile_packed = undefined, .prompt = try m.function("glm_mm16_rows"), .reduce = try m.function("glm_mm_reduce"), .reduce_strided = try m.function("glm_mm_reduce_stride"), .tile = try m.function("glm_mm_tile16"), .pdl = true };
+         inline for (.{ "glm_mm16_16", "glm_mm16_32", "glm_mm16_64", "glm_mm16_128" }, 0..) |name, i| {
+             k.by_rows[i] = try m.function(name);
+             try k.by_rows[i].allowDynamicShared(smem(bucket(i)));
+@@ -62,6 +64,11 @@
+         }
+         try k.prompt.allowDynamicShared(smem(128));
+         if (std.c.getenv("TF_GLM_PDL")) |v| k.pdl = !std.mem.eql(u8, std.mem.span(v), "0");
++        if (std.c.getenv("TF_GLM_KDA_DIRECT_OUT")) |v| {
++            const value = std.mem.span(v);
++            if (!std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "1")) return error.InvalidKdaDirectOut;
++            k.kda_direct_out = std.mem.eql(u8, value, "1");
++        }
+         return k;
+     }
+ };
+@@ -99,6 +106,18 @@
+ 
+ /// x [m][k] (`ldx` apart) by `w` -> out [m][n] (`wide`: fp32); `one`: prompt blocks at any rows, sums per row alike.
+ pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, out: u64, part: u64, m: usize, wide: bool, one: bool) !void {
++    return matmulOutput(k, s, x, ldx, w, out, w.n, part, m, wide, one);
++}
++
++/// Decode-sized BF16 split-K into wider rows: only the final reduction's output addresses differ.
++pub fn matmulStrided(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, out: u64, ldy: usize, part: u64, m: usize) !void {
++    if (w.bits != 16 or m == 0 or m > 32 or splitK(w.n, w.k) == 1) return error.UnsupportedStridePlan;
++    if (w.k == 0 or w.n == 0 or ldx < w.k or ldy < w.n or ldy % 8 != 0 or out % 16 != 0 or part == 0)
++        return error.BadShape;
++    return matmulOutput(k, s, x, ldx, w, out, ldy, part, m, false, false);
++}
++
++fn matmulOutput(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, out: u64, ldy: usize, part: u64, m: usize, wide: bool, one: bool) !void {
+     if (w.k % 64 != 0 or w.n % 8 != 0 or x % 16 != 0 or ldx % 8 != 0) return error.BadShape;
+     var done: usize = 0;
+     const wi = try widthIndex(w.bits);
+@@ -108,7 +127,7 @@
+         const i: usize = if (big) 3 else if (rows <= 16) 0 else if (rows <= 32) 1 else 2;
+         const bm = bucket(i);
+         const sk = if (big) 1 else splitK(w.n, w.k); // a prompt's blocks share each weight tile in L2: no slices
+-        const o = out + done * w.n * @as(usize, if (wide) 4 else 2);
++        const o = out + done * ldy * @as(usize, if (wide) 4 else 2);
+         var a: cuda.Args = .{};
+         a.add(x + done * ldx * 2);
+         a.add(@as(c_longlong, @intCast(ldx)));
+@@ -136,8 +155,12 @@
+             r.add(o);
+             r.add(@as(c_longlong, @intCast(total)));
+             r.add(@as(c_int, @intCast(sk)));
+-            r.add(@as(c_int, @intFromBool(wide)));
+-            try cuda.launch.launch(k.reduce, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, s, &r);
++            const strided = ldy != w.n;
++            if (strided) {
++                r.add(@as(c_int, @intCast(w.n)));
++                r.add(@as(c_int, @intCast(ldy)));
++            } else r.add(@as(c_int, @intFromBool(wide)));
++            try cuda.launch.launch(if (strided) k.reduce_strided else k.reduce, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, s, &r);
+         }
+         done += rows;
+     }
+diff --git a/zig/src/families/glm/cuda_moe.zig b/zig/src/families/glm/cuda_moe.zig
+--- a/zig/src/families/glm/cuda_moe.zig
++++ b/zig/src/families/glm/cuda_moe.zig
+@@ -41,7 +41,7 @@
+ };
+ 
+ /// The kernels the block runs: the captured Triton set, the grouped NVFP4 experts, the plan, and glm_ops.
+-pub const Kernels = struct { set: glue.Set, experts: *const experts.Kernels, exl3: *const exl3.Kernels, put_slot: cuda.Function, prof: ?*prof_mod.Prof = null };
++pub const Kernels = struct { set: glue.Set, experts: *const experts.Kernels, exl3: *const exl3.Kernels, put_slot: cuda.Function, fused_tail: bool = false, prof: ?*prof_mod.Prof = null };
+ 
+ /// forward.moe_block: out [rows][dims] fp32 partial; `prompt`: 64-pair items, the prompt kernels, bf16 slot rows.
+ pub fn block(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, prompt: bool, out: u64) !void {
+@@ -81,10 +81,21 @@
+     try projection.matmul(k.set, stream, l.shared_gu, x + lo * x_stride * 2, x_stride, s.sgu + lo * 2 * l.shared * 2, s.mm_part, n, 2 * l.shared, d, false);
+     try glue.swiglu(k.set, stream, s.sgu + lo * 2 * l.shared * 2, s.sact + lo * l.shared * 2, s.sxs + lo * (l.shared / 64) * 4, l.routed.limit, n, l.shared);
+     try projection.matmul(k.set, stream, l.shared_down, s.sact + lo * l.shared * 2, l.shared, s.sy + lo * d * 4, s.mm_part, n, d, l.shared, true);
++    if (k.fused_tail and !prompt and l.exl3 == null) {
++        const tail = prof_mod.detailSpan(k.prof, stream, .moe_combine);
++        defer tail.end();
++        return glue.combineShared(k.set, stream, s.ey + lo * slots * d * 4, s.sy + lo * d * 4, s.wts + lo * slots * 4, out, n, d, slots);
++    }
+     var a: cuda.Args = .{};
+     a.add(s.sy + lo * d * 4);
+     a.add(s.ey + lo * slots * d * eb);
+     for ([_]usize{ n, d, slots, l.top_k, @intFromBool(bf16_slots) }) |v| a.add(@as(c_int, @intCast(v)));
+-    try cuda.launch.launch(k.put_slot, .{ .grid = .{ .x = @intCast((n * d + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
++    {
++        const slot_stamp = prof_mod.detailSpan(k.prof, stream, .moe_slot);
++        defer slot_stamp.end();
++        try cuda.launch.launch(k.put_slot, .{ .grid = .{ .x = @intCast((n * d + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
++    }
++    const combine_stamp = prof_mod.detailSpan(k.prof, stream, .moe_combine);
++    defer combine_stamp.end();
+     try glue.combine(k.set, stream, s.ey + lo * slots * d * eb, !bf16_slots, s.wts + lo * slots * 4, out, n, d, slots);
+ }
+diff --git a/zig/src/families/glm/cuda_prof.zig b/zig/src/families/glm/cuda_prof.zig
+--- a/zig/src/families/glm/cuda_prof.zig
++++ b/zig/src/families/glm/cuda_prof.zig
+@@ -2,6 +2,7 @@
+ const std = @import("std");
+ const cuda = @import("cuda");
+ pub const prompt_trace = @import("cuda_prompt_trace.zig");
++const detail = @import("cuda_decode_detail.zig");
+ 
+ pub const Section = enum { gate, embed, kda, mla, gather_a, dense, router, routed, shared, gather_b, head, draw, mtp, commit };
+ const names = [_][]const u8{ "gate", "embed", "kda", "mla", "gather_a", "dense", "router", "routed", "shared", "gather_b", "head", "draw", "mtp", "commit" };
+@@ -21,6 +22,7 @@
+     calls: u64 = 0,
+     label: []const u8 = "",
+     prompt: ?*prompt_trace.Trace = null,
++    decode_detail: ?*detail.Trace = null,
+     every: u64 = 64, // calls a report sums
+ 
+     pub fn init(d: *const cuda.Driver, io: std.Io) !*Prof {
+@@ -41,6 +43,7 @@
+     }
+ 
+     pub fn deinit(p: *Prof) void {
++        if (p.decode_detail) |t| t.deinit();
+         if (p.prompt) |t| t.deinit();
+         for (&p.events) |*e| e.deinit();
+         std.heap.page_allocator.destroy(p);
+@@ -61,11 +64,20 @@
+ 
+     /// A call begins on `s` (its wall clock and its first event).
+     pub fn begin(p: *Prof, s: cuda.Stream, label: []const u8) !void {
++        p.abort();
++        if (p.decode_detail == null and detail.wanted()) p.decode_detail = try detail.Trace.init(p.d);
+         p.n = 0;
+-        p.open = true;
+         p.label = label;
+         p.t0 = std.Io.Clock.awake.now(p.io).toNanoseconds();
+         try p.events[0].record(s);
++        p.open = true;
++        if (p.decode_detail) |t| t.begin();
++    }
++
++    /// Errors/cancellation discard the unfinished decode receipt; no extra stream wait is introduced.
++    pub fn abort(p: *Prof) void {
++        p.open = false;
++        if (p.decode_detail) |t| t.abort();
+     }
+ 
+     /// The work queued on `s` since the last mark belongs to `section`.
+@@ -82,8 +94,15 @@
+         defer if (p.prompt) |t| t.finish();
+         p.open = false;
+         const wall: f64 = @as(f64, @floatFromInt(std.Io.Clock.awake.now(p.io).toNanoseconds() - p.t0)) / 1e6;
+-        if (p.n == 0) return;
+-        p.events[p.n].synchronize() catch return;
++        if (p.n == 0) {
++            if (p.decode_detail) |t| t.abort();
++            return;
++        }
++        p.events[p.n].synchronize() catch {
++            if (p.decode_detail) |t| t.abort();
++            return;
++        };
++        if (p.decode_detail) |t| t.finish(p.label, p.every);
+         if (p.prompt) |t| t.finish();
+         for (0..p.n) |i| p.sections[@backingInt(p.ends[i])] += cuda.Event.elapsedMs(p.events[i], p.events[i + 1]) catch 0;
+         p.gpu_ms += cuda.Event.elapsedMs(p.events[0], p.events[p.n]) catch 0;
+@@ -158,6 +177,15 @@
+     return .{};
+ }
+ 
++pub inline fn detailSpan(p: ?*Prof, s: cuda.Stream, stage: detail.Stage) detail.Scope {
++    if (p) |v| {
++        if (!v.open) return .{};
++        if (v.prompt) |t| if (t.active) return .{};
++        if (v.decode_detail) |t| return t.span(s, stage);
++    }
++    return .{};
++}
++
+ pub inline fn context(p: ?*Prof, layer: ?usize, piece: ?usize, site: prompt_trace.Site) void {
+     if (p) |v| if (v.prompt) |t| {
+         t.layer = layer;
+@@ -168,4 +196,5 @@
+ 
+ test {
+     _ = @import("cuda_prompt_trace_test.zig");
+-}
++    _ = @import("cuda_decode_detail_test.zig");
++}
+diff --git a/zig/src/families/glm/cuda_ranks.zig b/zig/src/families/glm/cuda_ranks.zig
+--- a/zig/src/families/glm/cuda_ranks.zig
++++ b/zig/src/families/glm/cuda_ranks.zig
+@@ -14,6 +14,9 @@
+     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
+     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
+     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
++    kda_direct_out: bool = false, // TF_GLM_KDA_DIRECT_OUT: direct strided split-input writes
++    fused_moe_tail: bool = false, // TF_GLM_FUSED_MOE_TAIL: no intermediate shared-slot copy
++    sample_gather: bool = false, // TF_GLM_SAMPLE_GATHER: changes the sampled-draw collective sequence
+     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole).
+     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
+     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
+@@ -23,6 +26,12 @@
+     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
+     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
+         var s: Settings = .{};
++        inline for (.{ .{ "TF_GLM_KDA_DIRECT_OUT", "kda_direct_out" }, .{ "TF_GLM_FUSED_MOE_TAIL", "fused_moe_tail" }, .{ "TF_GLM_SAMPLE_GATHER", "sample_gather" } }) |entry| if (get(entry[0])) |v| {
++            if (std.mem.eql(u8, v, "1")) @field(s, entry[1]) = true else if (!std.mem.eql(u8, v, "0")) {
++                problem.* = entry[0] ++ ": 0 or 1";
++                return error.BadSetting;
++            }
++        };
+         if (get("TF_GLM_A4_PREFILL")) |v| {
+             if (std.mem.eql(u8, v, "1")) s.a4_prefill = true else if (!std.mem.eql(u8, v, "0")) {
+                 problem.* = "TF_GLM_A4_PREFILL: 0 or 1";
+@@ -106,7 +115,7 @@
+ 
+ /// What every rank must agree on, as bytes the communicator carries.
+ pub const Fingerprint = extern struct {
+-    layout: u32 = 12, // includes A4 prompt arithmetic
++    layout: u32 = 13, // includes decode flags, especially the sampled-draw collective sequence
+     world: u32,
+     rank: u32,
+     kv8: u32 = 0,
+@@ -115,6 +124,9 @@
+     tiled: u32,
+     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
+     kda_wide: u32,
++    kda_direct_out: u32 = 0,
++    fused_moe_tail: u32 = 0,
++    sample_gather: u32 = 0,
+     pieces: u32,
+     layers: u32, // TF_GLM_LAYERS (0: all)
+     mtp: u32, // 1: the MTP head loads and runs (drafts on); 2: and DFlash2 (--drafter), whose rounds gather
+@@ -141,6 +153,9 @@
+         tiled,
+         split,
+         kda_wide,
++        kda_direct_out,
++        fused_moe_tail,
++        sample_gather,
+         pieces,
+         layers,
+         mtp,
+@@ -177,6 +192,9 @@
+             .tiled = @intFromBool(s.tiled),
+             .split = if (!s.split) 0 else if (s.ring) 2 else 1,
+             .kda_wide = @intFromBool(s.kda_wide),
++            .kda_direct_out = @intFromBool(s.kda_direct_out),
++            .fused_moe_tail = @intFromBool(s.fused_moe_tail),
++            .sample_gather = @intFromBool(s.sample_gather),
+             .pieces = s.pieces,
+             .layers = s.layers,
+             .mtp = @intFromBool(mtp),
+@@ -213,6 +231,9 @@
+             "tiled",
+             "split",
+             "kda_wide",
++            "kda_direct_out",
++            "fused_moe_tail",
++            "sample_gather",
+             "pieces",
+             "layers",
+             "mtp",
+@@ -321,6 +342,9 @@
+         .tiled => "TF_GLM_MM",
+         .split => "TF_GLM_PREFILL_REDUCE",
+         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
++        .kda_direct_out => "TF_GLM_KDA_DIRECT_OUT",
++        .fused_moe_tail => "TF_GLM_FUSED_MOE_TAIL",
++        .sample_gather => "TF_GLM_SAMPLE_GATHER (allGather vs row broadcasts)",
+         .pieces => "TF_GLM_OVERLAP_PIECES",
+         .layers => "TF_GLM_LAYERS",
+         .mtp => "--no-drafts given to some ranks and not others",
+@@ -607,3 +631,36 @@
+     all[0].prompt_fixed_k = 1;
+     try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
+ }
++
++test "decode optimizations default off, parse strict0/1 and participate in rank agreement" {
++    const Reader = struct {
++        var key: []const u8 = "";
++        var value: ?[]const u8 = null;
++        fn get(name: [:0]const u8) ?[]const u8 {
++            return if (std.mem.eql(u8, name, key)) value else null;
++        }
++    };
++    inline for (.{ .{ "TF_GLM_KDA_DIRECT_OUT", "kda_direct_out" }, .{ "TF_GLM_FUSED_MOE_TAIL", "fused_moe_tail" }, .{ "TF_GLM_SAMPLE_GATHER", "sample_gather" } }) |entry| {
++        Reader.key = entry[0];
++        var problem: []const u8 = "";
++        Reader.value = null;
++        try std.testing.expect(!@field(try Settings.read(Reader.get, &problem), entry[1]));
++        Reader.value = "0";
++        try std.testing.expect(!@field(try Settings.read(Reader.get, &problem), entry[1]));
++        Reader.value = "1";
++        const enabled = try Settings.read(Reader.get, &problem);
++        try std.testing.expect(@field(enabled, entry[1]));
++        var all = [_]Fingerprint{
++            Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), @splat(0)),
++            Fingerprint.of(2, 1, enabled, 8192, true, @splat(0), @splat(0), @splat(0)),
++        };
++        try std.testing.expectEqual(Mismatch{ .field = @field(Fingerprint.Field, entry[1]), .rank = 1 }, mismatch(&all).?);
++        all[0] = Fingerprint.of(2, 0, enabled, 8192, true, @splat(0), @splat(0), @splat(0));
++        try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
++        for ([_][]const u8{ "", "true", "false", "2", " 1", "1 " }) |bad_value| {
++            Reader.value = bad_value;
++            try std.testing.expectError(error.BadSetting, Settings.read(Reader.get, &problem));
++            try std.testing.expectEqualStrings(entry[0] ++ ": 0 or 1", problem);
++        }
++    }
++}
+diff --git a/zig/src/families/glm/cuda_sampler.zig b/zig/src/families/glm/cuda_sampler.zig
+--- a/zig/src/families/glm/cuda_sampler.zig
++++ b/zig/src/families/glm/cuda_sampler.zig
+@@ -5,6 +5,7 @@
+ const lanes = @import("lanes");
+ const Span = @import("cuda_shard.zig").Span;
+ const Exchange = @import("cuda_forward.zig").Exchange;
++const prof_mod = @import("cuda_prof.zig");
+ 
+ pub const Sampling = lanes.Sampling;
+ 
+@@ -24,6 +25,13 @@
+ 
+ /// A rank's logits rows: bf16 [rows][its vocabulary span].
+ pub const Local = struct { rank: usize, logits: u64 };
++
++fn gatherSetting(value: ?[]const u8) error{InvalidSampleGather}!bool {
++    const v = value orelse return false;
++    if (std.mem.eql(u8, v, "1")) return true;
++    if (std.mem.eql(u8, v, "0")) return false;
++    return error.InvalidSampleGather;
++}
+ 
+ pub const Sampler = struct {
+     d: *const cuda.Driver,
+@@ -34,12 +42,20 @@
+     vocab: usize,
+     rows: usize,
+     full: cuda.DeviceBuffer, // bf16 [rows][vocab]: every rank's columns in place
++    ranked: ?cuda.DeviceBuffer = null, // opt-in TP2 gather scratch: bf16 [rank][rows][vocab / 2]
+     rule: cuda.DeviceBuffer,
+     meta: cuda.DeviceBuffer,
+     tok: cuda.DeviceBuffer,
+     prob: cuda.DeviceBuffer,
++    profile: ?*prof_mod.Prof = null,
+ 
+     pub fn init(d: *const cuda.Driver, vocab: usize, rows: usize) !Sampler {
++        const enabled = try gatherSetting(if (std.c.getenv("TF_GLM_SAMPLE_GATHER")) |v| std.mem.span(v) else null);
++        return initWithGather(d, vocab, rows, enabled);
++    }
++
++    /// Explicit switch for same-build checks; production defaults to the existing row broadcasts.
++    pub fn initWithGather(d: *const cuda.Driver, vocab: usize, rows: usize, enabled: bool) !Sampler {
+         var m = try cuda.Module.load(d, cuda.kernels.sample);
+         errdefer m.unload();
+         const f = try m.function("tf_draw");
+@@ -47,6 +63,8 @@
+         const gm = try m.function("tf_grammar_mask");
+         var full = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
+         errdefer full.free();
++        var ranked: ?cuda.DeviceBuffer = if (enabled) try cuda.DeviceBuffer.alloc(d, rows * vocab * 2) else null;
++        errdefer if (ranked) |*b| b.free();
+         var r = try cuda.DeviceBuffer.alloc(d, @sizeOf(Rule));
+         errdefer r.free();
+         var meta = try cuda.DeviceBuffer.alloc(d, 16);
+@@ -54,7 +72,8 @@
+         var tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
+         errdefer tok.free();
+         const prob = try cuda.DeviceBuffer.alloc(d, rows * 4);
+-        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok, .prob = prob };
++        if (ranked) |b| std.log.info("glm sampled window gather enabled: {d} bytes scratch, max {d} rows; equal TP2 only", .{ b.len, rows });
++        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .ranked = ranked, .rule = r, .meta = meta, .tok = tok, .prob = prob };
+     }
+ 
+     pub fn deinit(s: *Sampler) void {
+@@ -62,38 +81,55 @@
+         s.tok.free();
+         s.meta.free();
+         s.rule.free();
++        if (s.ranked) |*b| b.free();
+         s.full.free();
+         s.module.unload();
+     }
+ 
+     /// `rows` rows of `mine` -> `out`, tokens at positions first, first + 1, ...; `spans`: every rank's, rank order.
+     pub fn draw(s: *Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, first: u64, r: Rule, out: []u32) !void {
+-        try s.gather(stream, exchange, spans, mine, rows, s.full.ptr);
++        {
++            const stamp = prof_mod.detailSpan(s.profile, stream, .sample_gather);
++            defer stamp.end();
++            if (!try s.gatherWindow(stream, exchange, spans, mine, rows, s.full.ptr))
++                try s.gatherRows(stream, exchange, spans, mine, rows, s.full.ptr);
++        }
+         try s.drawFull(stream, rows, first, r, out);
+     }
+ 
+     /// `rows` whole rows already in `full` -> `out` under `r`, tokens at positions first, first + 1, ...
+     pub fn drawFull(s: *Sampler, stream: cuda.Stream, rows: usize, first: u64, r: Rule, out: []u32) !void {
+         std.debug.assert(rows <= s.rows and out.len >= rows and first >= 1);
+-        const V = s.vocab;
+-        try s.rule.uploadAsync(0, std.mem.asBytes(&r), stream.handle);
+-        const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 }; // row r keys meta[0] + r + 1
+-        try s.meta.uploadAsync(0, std.mem.asBytes(&meta), stream.handle);
+-        var args: cuda.Args = .{};
+-        args.add(s.full.ptr);
+-        args.add(@as(u32, @intCast(V)));
+-        args.add(s.rule.ptr);
+-        args.add(s.meta.ptr);
+-        args.add(@as(i32, 0));
+-        args.add(s.tok.ptr);
+-        args.add(s.prob.ptr);
+-        try cuda.launch.launch(s.tf_draw, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
++        {
++            const stamp = prof_mod.detailSpan(s.profile, stream, .sample_draw);
++            defer stamp.end(); // record before the host wait/readback, not after its idle gap
++            const V = s.vocab;
++            try s.rule.uploadAsync(0, std.mem.asBytes(&r), stream.handle);
++            const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 }; // row r keys meta[0] + r + 1
++            try s.meta.uploadAsync(0, std.mem.asBytes(&meta), stream.handle);
++            var args: cuda.Args = .{};
++            args.add(s.full.ptr);
++            args.add(@as(u32, @intCast(V)));
++            args.add(s.rule.ptr);
++            args.add(s.meta.ptr);
++            args.add(@as(i32, 0));
++            args.add(s.tok.ptr);
++            args.add(s.prob.ptr);
++            try cuda.launch.launch(s.tf_draw, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
++        }
+         try stream.synchronize();
+         try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
+     }
+ 
+     /// `rows` rows of `mine` made whole in `full` (bf16 [rows][vocab]) on every rank, each column from its rank.
++    /// Grammar and prompt-logprob callers keep their original transport, including >window_rows buffers.
+     pub fn gather(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, full: u64) !void {
++        const stamp = prof_mod.detailSpan(s.profile, stream, .sample_gather);
++        defer stamp.end();
++        return s.gatherRows(stream, exchange, spans, mine, rows, full);
++    }
++
++    fn gatherRows(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, full: u64) !void {
+         const V = s.vocab;
+         for (mine) |l| {
+             const span = spans[l.rank];
+@@ -103,6 +139,28 @@
+             .local => {},
+             .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = full, .vocab = V, .spans = spans, .rows = rows }, Spread.post),
+         }
++    }
++
++    /// Equal TP2 shards only. One collective gathers the whole window, then byte copies restore
++    /// exactly the old row layout. The sampler, grammar masks, per-stream rules and RNG are untouched.
++    /// Group.allGather chooses RoCE only within its configured cap (4 MiB here), otherwise NCCL.
++    fn gatherWindow(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, full: u64) !bool {
++        const ranked = s.ranked orelse return false;
++        if (rows > s.rows) return false;
++        const x = switch (exchange) { .local => return false, .nccl => |n| n };
++        const p = PackedLayout.init(s.vocab, rows, spans) orelse return false;
++        if (mine.len != 1 or mine[0].rank >= 2) return false;
++        if (x.group) |g| {
++            if (g.world != 2 or g.rank != mine[0].rank) return false;
++            try g.allGather(stream, mine[0].logits, ranked.ptr, p.shardBytes());
++        } else {
++            try x.lib.check(x.lib.api.ncclAllGather(mine[0].logits, ranked.ptr, p.shardBytes(), .u8, x.comm, stream.handle), "ncclAllGather");
++        }
++        for (0..rows) |row| for (0..2) |rank| {
++            const c = p.copyAt(row, rank);
++            try s.copy(stream, full + c.dst, ranked.ptr + c.src, c.bytes);
++        };
++        return true;
+     }
+ 
+     /// Structured output: each of `rows` whole rows in `full` keeps its allowed tokens (`words` u32 a row at `bits`).
+@@ -137,6 +195,68 @@
+     }
+ };
+ 
++test "sample gather is opt-in and refuses misspelled flag values" {
++    try std.testing.expect(!try gatherSetting(null));
++    try std.testing.expect(!try gatherSetting("0"));
++    try std.testing.expect(try gatherSetting("1"));
++    for ([_][]const u8{ "", "true", "false", "2", " 1", "1 " }) |v|
++        try std.testing.expectError(error.InvalidSampleGather, gatherSetting(v));
++}
++
++/// Pure byte-layout plan, kept separate so the real vocabulary/window sizes are host-testable.
++const PackedLayout = struct {
++    vocab: usize,
++    rows: usize,
++    half: usize,
++
++    fn init(vocab: usize, rows: usize, spans: []const Span) ?PackedLayout {
++        if (rows == 0 or vocab == 0 or vocab % 2 != 0 or spans.len != 2) return null;
++        const h = vocab / 2;
++        if (spans[0].lo != 0 or spans[0].hi != h or spans[1].lo != h or spans[1].hi != vocab) return null;
++        return .{ .vocab = vocab, .rows = rows, .half = h };
++    }
++
++    fn shardBytes(p: PackedLayout) usize {
++        return p.rows * p.half * 2;
++    }
++
++    fn copyAt(p: PackedLayout, row: usize, rank: usize) struct { dst: usize, src: usize, bytes: usize } {
++        std.debug.assert(row < p.rows and rank < 2);
++        return .{ .dst = (row * p.vocab + rank * p.half) * 2, .src = (rank * p.rows + row) * p.half * 2, .bytes = p.half * 2 };
++    }
++};
++
++test "TP2 whole-window gather preserves every bf16 bit at real GLM widths; row32 exceeds RoCE cap" {
++    const V = 154880;
++    const spans = [_]Span{ .{ .lo = 0, .hi = V / 2 }, .{ .lo = V / 2, .hi = V } };
++    const a = std.testing.allocator;
++    for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 32 }) |rows| {
++        const p = PackedLayout.init(V, rows, &spans).?;
++        const want = try a.alloc(u16, V * rows);
++        defer a.free(want);
++        const ranked = try a.alloc(u16, V * rows);
++        defer a.free(ranked);
++        const got = try a.alloc(u16, V * rows);
++        defer a.free(got);
++        for (want, 0..) |*w, i| w.* = @truncate(i *% 40503 +% (i / V) *% 97);
++        for (0..2) |rank| for (0..rows) |row| {
++            const c = p.copyAt(row, rank);
++            @memcpy(std.mem.sliceAsBytes(ranked)[c.src..][0..c.bytes], std.mem.sliceAsBytes(want)[c.dst..][0..c.bytes]);
++        };
++        for (0..rows) |row| for (0..2) |rank| {
++            const c = p.copyAt(row, rank);
++            @memcpy(std.mem.sliceAsBytes(got)[c.dst..][0..c.bytes], std.mem.sliceAsBytes(ranked)[c.src..][0..c.bytes]);
++        };
++        try std.testing.expectEqualSlices(u16, want, got);
++        try std.testing.expectEqual(rows != 32, p.shardBytes() <= 4 * 1024 * 1024);
++        try std.testing.expectEqual(@as(usize, 0), p.shardBytes() % 16);
++    }
++    try std.testing.expectEqual(@as(?PackedLayout, null), PackedLayout.init(V, 0, &spans));
++    try std.testing.expectEqual(@as(?PackedLayout, null), PackedLayout.init(V, 1, spans[0..1]));
++    const uneven = [_]Span{ .{ .lo = 0, .hi = V / 2 - 64 }, .{ .lo = V / 2 - 64, .hi = V } };
++    try std.testing.expectEqual(@as(?PackedLayout, null), PackedLayout.init(V, 1, &uneven));
++}
++
+ test "rules as nemotron/cuda_sampler fills them; temperature 0 is greedy" {
+     const s: Sampling = .{ .seed = 1234, .temperature = 0.5, .top_k = 20, .top_p = 0.95 };
+     const r = rule(check(s).?);
+diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_shared.zig
+--- a/zig/src/families/glm/cuda_shared.zig
++++ b/zig/src/families/glm/cuda_shared.zig
+@@ -46,7 +46,7 @@
+             const w = k.width();
+             var s = b.kda;
+             s.p = b.kproj;
+-            try kda_block.project(f.set(), f.stream, k, s, b.normed, c.hidden, rows);
++            try kda_block.projectProfile(f.set(), f.stream, k, s, b.normed, c.hidden, rows, f.prof);
+             for (r.segs) |g| {
+                 const st = g.st;
+                 const cur = st.cur[li];
+@@ -72,7 +72,7 @@
+                 v.saves.b = st.save_b + li * fw.window_rows * st.heads * 4;
+                 try kda_block.chainRows(&f.m.kda, f.stream, k, v, g.rows, conv, st.recAt(cur, li), f.kda_wide);
+             }
+-            if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
++            if (out) |o| try kda_block.fillProfile(f.set(), f.stream, k, s, 0, rows, o, f.prof);
+         },
+         .mla => |a| {
+             var sparse_any = false;
+diff --git a/zig/src/families/nemotron/cuda_subset_batch_test.zig b/zig/src/families/nemotron/cuda_subset_batch_test.zig
+--- a/zig/src/families/nemotron/cuda_subset_batch_test.zig
++++ b/zig/src/families/nemotron/cuda_subset_batch_test.zig
+@@ -192,7 +192,7 @@
+     e.k.ck = null;
+     e.k.ggml = null;
+     const f: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(1) };
+-    const lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = @splat(@splat(f)), .f32_fns = @splat(@splat(f)), .reduce = @splat(f), .clusters = false };
++    const lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = @splat(@splat(f)), .f32_fns = @splat(@splat(f)), .mxfp8_strided = @splat(f), .reduce = @splat(f), .clusters = false };
+     e.k.modelopt = .{ .lane = lane, .gemm = undefined, .experts = undefined, .pack = undefined };
+     e.k.draws.draw_fn = .{ .d = &d, .handle = @ptrFromInt(2) };
+     e.k.draws.draw_ids_fn = .{ .d = &d, .handle = @ptrFromInt(3) };
+diff --git a/zig/tests/cuda/contract_glm_moe_tail.zig b/zig/tests/cuda/contract_glm_moe_tail.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/contract_glm_moe_tail.zig
+@@ -0,0 +1,204 @@
++//! Decode-only FP32 shared-slot copy/combine fusion: fixed slot FMA order, no precision or prompt-path change.
++const std = @import("std");
++const cuda = @import("cuda");
++const core = @import("core");
++const rig_ = @import("contract_rig.zig");
++const check_ = @import("check.zig");
++const c = core.contract.spec;
++const g = core.contract.gates;
++
++fn depth(s: c.Shape) usize {
++    return s.k;
++}
++
++const shapes: [32]c.Shape = blk: {
++    var s: [32]c.Shape = undefined;
++    for (&s, 0..) |*v, i| v.* = .{ .rows = i + 1, .n = 4096, .k = 9 };
++    break :blk s;
++};
++
++pub fn spec() c.Spec {
++    return .{ .name = "cuda glm tf_glm_combine_shared (decode FP32 shared tail)", .accum = .f32,
++        .depth = depth, .out = .f32, .replaces = "tf_glm_put_slot(fp32) + tf_glm_combine(fp32)",
++        .tiles = .{ .{}, .{ .size = 1024, .step = 8, .min = 8 }, .{} }, .served = &shapes };
++}
++
++pub const Tail = struct {
++    rig: rig_.Rig,
++    candidate: cuda.Function,
++    baseline: cuda.Function,
++    put_slot: cuda.Function,
++    arena: std.heap.ArenaAllocator,
++    shape: c.Shape = undefined,
++    y: []f32 = &.{},
++    shared: []f32 = &.{},
++    wts: []f32 = &.{},
++    ptrs: [6]u64 = @splat(0), // y, shared, wts, output, baseline slots, baseline output
++    stress: bool = false,
++
++    pub fn init(rig: rig_.Rig, mod: cuda.Module, ops: cuda.Module) !Tail {
++        return .{ .rig = rig, .arena = .init(rig.gpu.gpa),
++            .candidate = try mod.function("tf_glm_combine_shared"),
++            .baseline = try mod.function("tf_glm_combine"), .put_slot = try ops.function("tf_glm_put_slot") };
++    }
++
++    pub fn deinit(self: *Tail) void {
++        self.arena.deinit();
++        self.rig.deinit();
++    }
++
++    pub fn kernel(self: *Tail) g.Kernel {
++        return .{ .spec = spec(), .ctx = self, .vt = &vt };
++    }
++
++    const vt = g.hooks(Tail);
++
++    pub fn count(self: *Tail) usize {
++        return self.shape.rows * self.shape.n;
++    }
++
++    pub fn prepare(self: *Tail, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
++        if (shape.rows == 0 or shape.rows > 32 or shape.n == 0 or shape.n % 8 != 0 or shape.k != 9)
++            return false;
++        self.rig.reset();
++        _ = self.arena.reset(.retain_capacity);
++        const a = self.arena.allocator();
++        self.shape = shape;
++        self.stress = fill == .stress;
++        self.y = try a.alloc(f32, shape.rows * shape.k * shape.n);
++        self.shared = try a.alloc(f32, self.count());
++        self.wts = try a.alloc(f32, shape.rows * shape.k);
++        var prng = std.Random.DefaultPrng.init(seed);
++        const rng = prng.random();
++        for (self.y) |*v| v.* = rng.float(f32) * 4 - 2;
++        for (self.shared) |*v| v.* = rng.float(f32) * 4 - 2;
++        for (self.wts) |*v| v.* = rng.float(f32) * 2 - 1; // shared need not weigh exactly 1 in this contract
++        if (fill == .stress) {
++            @memset(self.wts, 1);
++            // Four large positives, their negatives with an integer delta, then a small shared value.
++            // Every FP32 sum is exact; FP16 overflows and BF16 misses even in pairwise/strided orders.
++            for (0..shape.rows) |r| for (0..shape.n) |col| {
++                for (0..4) |slot| {
++                    const v: f32 = @floatFromInt(262144 + rng.uintLessThan(u32, 512));
++                    self.y[(r * 9 + slot) * shape.n + col] = v;
++                    self.y[(r * 9 + slot + 4) * shape.n + col] = -v + 17;
++                }
++                self.shared[r * shape.n + col] = 3;
++            };
++        }
++        if (fill == .nonfinite) {
++            self.y[0] = std.math.nan(f32);
++            self.y[1] = std.math.inf(f32);
++            self.y[2] = -std.math.inf(f32);
++            self.shared[3] = std.math.nan(f32);
++            self.shared[4] = std.math.inf(f32);
++            self.shared[5] = -std.math.inf(f32);
++            self.y[6] = std.math.inf(f32);
++            self.shared[6] = -std.math.inf(f32);
++            // Same-sign positive weights make the opposite infinities in column 6 cancel to NaN.
++            self.wts[0] = 1;
++            self.wts[8] = 1;
++            if (shape.rows > 1) self.wts[9 + 8] = std.math.nan(f32);
++        }
++        // A poisoned last slot detects accidental stale reads and is an immutable input to the fused kernel.
++        for (0..shape.rows) |r| @memset(self.y[(r * shape.k + shape.k - 1) * shape.n ..][0..shape.n],
++            std.math.nan(f32));
++        self.ptrs = .{ try self.rig.input(std.mem.sliceAsBytes(self.y)),
++            try self.rig.input(std.mem.sliceAsBytes(self.shared)), try self.rig.input(std.mem.sliceAsBytes(self.wts)),
++            try self.rig.output(self.count() * 4), try self.rig.scratch(self.y.len * 4),
++            try self.rig.scratch(self.count() * 4) };
++        return true;
++    }
++
++    pub fn run(self: *Tail) !void {
++        const p = self.ptrs;
++        var args: cuda.Args = .{};
++        inline for (.{ p[0], p[1], p[2], p[3], @as(i64, @intCast(self.shape.n)),
++            @as(c_int, @intCast(self.shape.k)) }) |v| args.add(v);
++        try self.launch(self.candidate, &args);
++        try self.rig.s.synchronize();
++    }
++
++    fn launch(self: *Tail, f: cuda.Function, args: *cuda.Args) !void {
++        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(self.shape.rows),
++            .y = @intCast((self.shape.n + 1023) / 1024) }, .block = .{ .x = 128 } }, self.rig.s, args);
++    }
++
++    pub fn replaced(self: *Tail) ![]const u8 {
++        const p = self.ptrs;
++        const s = self.shape;
++        try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = p[4], .len = self.y.len * 4 })
++            .copyFrom(0, p[0], self.y.len * 4, self.rig.s.handle);
++        var a: cuda.Args = .{};
++        inline for (.{ p[1], p[4], @as(c_int, @intCast(s.rows)), @as(c_int, @intCast(s.n)),
++            @as(c_int, @intCast(s.k)), @as(c_int, @intCast(s.k - 1)), @as(c_int, 0) }) |v| a.add(v);
++        try cuda.launch.launch(self.put_slot, .{ .grid = .{ .x = @intCast((self.count() + 255) / 256) },
++            .block = .{ .x = 256 } }, self.rig.s, &a);
++        var b: cuda.Args = .{};
++        inline for (.{ p[4], @as(c_int, 1), p[2], p[5], @as(i64, @intCast(s.n)),
++            @as(c_int, @intCast(s.k)) }) |v| b.add(v);
++        try self.launch(self.baseline, &b);
++        return self.rig.bytes(p[5], self.count() * 4);
++    }
++
++    fn terms(self: *Tail, out: usize, t: *[9]f64) void {
++        const r = out / self.shape.n;
++        const col = out % self.shape.n;
++        for (t, 0..) |*v, slot| {
++            const y: f64 = if (slot == 8) self.shared[out] else self.y[(r * 9 + slot) * self.shape.n + col];
++            v.* = y * @as(f64, self.wts[r * 9 + slot]);
++        }
++    }
++
++    pub fn reference(self: *Tail, want: []f64, mag: []f64) !void {
++        var t: [9]f64 = undefined;
++        for (want, mag, 0..) |*w, *m, i| {
++            self.terms(i, &t);
++            w.* = 0;
++            m.* = 0;
++            for (t) |v| {
++                w.* += v;
++                m.* += @abs(v);
++            }
++        }
++    }
++
++    pub fn simulate(self: *Tail, acc: c.Accum, order: g.Order, out: []f64) !void {
++        var t: [9]f64 = undefined;
++        for (out, 0..) |*v, i| {
++            self.terms(i, &t);
++            v.* = core.contract.rows.sumIn(acc, order, &t);
++        }
++    }
++
++    pub fn bounds(self: *Tail, _: []const f64, _: []const f64, allow: []f64) !void {
++        if (!self.stress) return error.NotStressInputs;
++        @memset(allow, 0);
++    }
++};
++
++/// Focused local run. Frozen-fatbin cross-build equality, signed zero and subranges live in test_moe_tail.py.
++pub fn run(gpu: check_.Gpu) !void {
++    if (try gpu.ctx.capability() != 121) return error.GlmMoeTailRequiresSm121;
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
++    defer mod.unload();
++    var ops = try cuda.Module.load(gpu.d, cuda.kernels.glm_ops);
++    defer ops.unload();
++    var tail = try Tail.init(.{ .gpu = gpu, .s = s }, mod, ops);
++    defer tail.deinit();
++    var tally: g.Tally = .{};
++    try g.runAll(gpu.gpa, &.{tail.kernel()}, 0x6b63, &tally);
++    const f = tail.candidate;
++    const regs = try f.attribute(.num_regs);
++    const smem = try f.attribute(.shared_size_bytes);
++    const bound = try f.attribute(.max_threads_per_block);
++    const local = try f.attribute(.local_size_bytes);
++    std.debug.print("moe tail resource receipt: regs={d} static={d} max_threads={d} local={d}\n",
++        .{ regs, smem, bound, local });
++    try check_.expect(bound >= 128 and smem == 0 and local == 0, "moe tail unexpected resources", .{});
++    std.debug.print("MOE TAIL focused: {d} pass, {d} fail; standalone run does not exercise planted controls\n",
++        .{ tally.passed, tally.failed });
++    try check_.expect(tally.problems() == 0, "moe tail gates failed", .{});
++}
+diff --git a/zig/tests/cuda/contract_kda_direct.zig b/zig/tests/cuda/contract_kda_direct.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/contract_kda_direct.zig
+@@ -0,0 +1,224 @@
++//! KDA direct-output projections: unchanged dot products, strided stores and explicit padding guards.
++const std = @import("std");
++const cuda = @import("cuda");
++const glm = @import("glm_cuda");
++const core = @import("core");
++const Rig = @import("contract_rig.zig").Rig;
++const check_ = @import("check.zig");
++const c = core.contract.spec;
++const g = core.contract.gates;
++const Dense = core.contract.dense.Dense;
++
++pub const Kind = enum { mxfp8, bf16 };
++
++/// Local gate run; frozen-v5 equality, zeros and full rows 1-8 coverage also live in bench_kda_direct.py.
++pub fn run(gpu: check_.Gpu) !void {
++    const cap = try gpu.ctx.capability();
++    if (cap != 121) return error.KdaDirectRequiresSm121;
++    var stream = try cuda.Stream.init(gpu.d, false);
++    defer stream.deinit();
++    var lane = try cuda.qmmf.Lane.load(gpu.d, cap / 10);
++    defer lane.unload();
++    var mm_mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_mm);
++    defer mm_mod.unload();
++    const mm = try glm.mm.Kernels.load(mm_mod);
++    var ops = try cuda.Module.load(gpu.d, cuda.kernels.glm_ops);
++    defer ops.unload();
++    const copy_rows = try ops.function("tf_glm_copy_rows");
++    var mx: Product = .{ .rig = .{ .gpu = gpu, .s = stream }, .kind = .mxfp8,
++        .lane = &lane, .mm = &mm, .copy_rows = copy_rows };
++    defer mx.deinit();
++    var bf: Product = .{ .rig = .{ .gpu = gpu, .s = stream }, .kind = .bf16,
++        .lane = &lane, .mm = &mm, .copy_rows = copy_rows };
++    defer bf.deinit();
++    var tally: g.Tally = .{};
++    try g.runAll(gpu.gpa, &.{ mx.kernel(), bf.kernel() }, 0x6b6461, &tally);
++    try receipt("qmmf_mxfp8_stride16", lane.mxfp8_strided[0], 128, cuda.qmmf.sharedBytes(.mxfp8, 16));
++    try receipt("qmmf_mxfp8_stride32", lane.mxfp8_strided[1], 128, cuda.qmmf.sharedBytes(.mxfp8, 32));
++    try receipt("glm_mm_reduce_stride", mm.reduce_strided, 256, 0);
++    std.debug.print("KDA DIRECT focused: {d} pass, {d} fail; standalone run does not exercise planted controls\n",
++        .{ tally.passed, tally.failed });
++    try check_.expect(tally.problems() == 0, "KDA direct gates failed", .{});
++}
++
++fn receipt(name: []const u8, f: cuda.Function, threads: u32, dynamic: u32) !void {
++    const regs = try f.attribute(.num_regs);
++    const shared = try f.attribute(.shared_size_bytes);
++    const bound = try f.attribute(.max_threads_per_block);
++    const local = try f.attribute(.local_size_bytes);
++    const active = try f.occupancy(threads, dynamic);
++    std.debug.print("KDA resource receipt {s}: regs={d} static={d} dynamic={d} max_threads={d} local={d} blocks/SM={d}\n",
++        .{ name, regs, shared, dynamic, bound, local, active });
++    try check_.expect(bound >= @as(c_int, @intCast(threads)) and active > 0,
++        "KDA direct invalid launch resources: {s}", .{name});
++}
++
++fn depth(s: c.Shape) usize {
++    return s.k / 16 + 32;
++}
++
++pub fn spec(kind: Kind) c.Spec {
++    return .{
++        .name = if (kind == .mxfp8) "cuda KDA direct MXFP8 output" else "cuda KDA direct BF16 split-K output",
++        .accum = .f32,
++        .depth = depth,
++        .out = .bf16,
++        .replaces = if (kind == .mxfp8) "qmmf MXFP8 contiguous output" else "glm_mm contiguous slice reduction",
++        .nan = .{ .stated = "bitwise equal to the contiguous projection for NaN and infinite BF16 inputs" },
++        .tiles = .{ .{ .size = 16 }, .{ .size = 64, .step = 8, .min = 8 }, .{ .size = 64, .step = 64, .min = 64 } },
++        .served = if (kind == .mxfp8) &.{ .{ .rows = 1, .n = 12288, .k = 4096 },
++            .{ .rows = 8, .n = 12288, .k = 4096 }, .{ .rows = 17, .n = 12288, .k = 4096 },
++            .{ .rows = 32, .n = 12296, .k = 4096 } } else &.{ .{ .rows = 1, .n = 288, .k = 4096 },
++            .{ .rows = 8, .n = 288, .k = 4096 }, .{ .rows = 17, .n = 288, .k = 4096 },
++            .{ .rows = 32, .n = 296, .k = 4096 } },
++    };
++}
++
++pub const Product = struct {
++    rig: Rig,
++    kind: Kind,
++    lane: *const cuda.qmmf.Lane,
++    mm: *const glm.mm.Kernels,
++    copy_rows: cuda.Function,
++    d: ?Dense = null,
++    weight: cuda.qmmf.Weight = undefined,
++    tiled: glm.mm.Tiled = undefined,
++    x: u64 = 0,
++    part: u64 = 0,
++    out: u64 = 0,
++    base: u64 = 0,
++    strided: u64 = 0,
++    ldy: usize = 0,
++
++    pub fn deinit(self: *Product) void {
++        if (self.d) |d| d.deinit();
++        self.rig.deinit();
++    }
++
++    pub fn kernel(self: *Product) g.Kernel {
++        return .{ .spec = spec(self.kind), .ctx = self, .vt = &vt };
++    }
++
++    const vt = g.hooks(Product);
++
++    pub fn prepare(self: *Product, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
++        if (shape.rows == 0 or shape.rows > 32 or shape.n == 0 or shape.n % 8 != 0 or
++            shape.k == 0 or shape.k % 64 != 0) return false;
++        if (self.kind == .mxfp8 and cuda.qmmf.splitK(shape.n, shape.k) != 1) return false;
++        if (self.kind == .bf16 and glm.mm.splitK(shape.n, shape.k) == 1) return false;
++        if (self.d) |d| d.deinit();
++        self.d = null;
++        self.rig.reset();
++        const a = self.rig.gpu.gpa;
++        const d = try Dense.init(a, shape, 1);
++        self.d = d;
++        d.fillX(fill, seed, 16);
++        try self.prepareWeight(shape, fill, seed);
++        self.x = try self.rig.input(std.mem.sliceAsBytes(d.x));
++        self.part = try self.rig.scratch(@max(16, 8 * shape.rows * shape.n * 4));
++        self.out = try self.rig.output(shape.rows * shape.n * 2);
++        self.base = try self.rig.scratch(shape.rows * shape.n * 2);
++        self.ldy = shape.n + if (self.kind == .mxfp8) @as(usize, 288) else 12288;
++        self.strided = try self.rig.scratch((shape.rows * self.ldy + 16) * 2);
++        return true;
++    }
++
++    fn prepareWeight(self: *Product, shape: c.Shape, fill: g.Fill, seed: u64) !void {
++        var arena = std.heap.ArenaAllocator.init(self.rig.gpu.gpa);
++        defer arena.deinit();
++        const a = arena.allocator();
++        const n = shape.n;
++        const k = shape.k;
++        const d = self.d.?;
++        var prng = std.Random.DefaultPrng.init(seed ^ 0x6b6461);
++        const rng = prng.random();
++        if (self.kind == .bf16) {
++            const words = try a.alloc(u16, n * k);
++            for (words) |*v| v.* = c.toBf16(if (fill == .stress)
++                @floatFromInt(1 + rng.uintLessThan(u8, 7)) else rng.float(f32) * 4 - 2);
++            if (fill == .stress) for (0..n) |j| for (k / 2..k) |i| {
++                words[j * k + i] = words[j * k + i - k / 2] | 0x8000;
++            };
++            for (d.w, words) |*v, w| v.* = c.fromBf16(w);
++            const src = try self.rig.input(std.mem.sliceAsBytes(words));
++            const zeros = try a.alloc(u8, n * k * 2);
++            @memset(zeros, 0);
++            const tiled_ptr = try self.rig.input(zeros);
++            try glm.mm.tile(self.mm, self.rig.s, src, tiled_ptr, n, k);
++            try self.rig.s.synchronize();
++            self.tiled = .{ .w = tiled_ptr, .n = n, .k = k };
++            return;
++        }
++        const codes = try a.alloc(u8, n * k);
++        const scales = try a.alloc(u8, n * k / 32);
++        for (scales) |*v| v.* = if (fill == .stress) 127 else 123 + rng.uintLessThan(u8, 8);
++        for (codes) |*v| {
++            v.* = if (fill == .stress) 0x38 + rng.uintLessThan(u8, 24) else rng.uintLessThan(u8, 0x7f);
++            if (fill != .stress and rng.boolean()) v.* |= 0x80;
++        }
++        if (fill == .stress) for (0..n) |j| for (k / 2..k) |i| {
++            codes[j * k + i] = codes[j * k + i - k / 2] | 0x80;
++        };
++        for (0..n) |j| for (0..k) |i| {
++            const scale = std.math.ldexp(@as(f64, 1), @as(i32, scales[j * (k / 32) + i / 32]) - 127);
++            d.w[j * k + i] = core.quant.fp8.e4m3(codes[j * k + i]) * scale;
++        };
++        const npad = cuda.mxfp8.padded(n);
++        const tiled_codes = try a.alloc(u8, npad * k);
++        const packed_scales = try a.alloc(u8, npad * k / 32);
++        cuda.mxfp8.packCodes(tiled_codes, codes, n, k);
++        cuda.mxfp8.packScales(packed_scales, scales, n, k);
++        self.weight = cuda.mxfp8.weight(try self.rig.input(tiled_codes), try self.rig.input(packed_scales), n, k);
++    }
++
++    pub fn count(self: *Product) usize {
++        return self.d.?.outputs();
++    }
++
++    /// Store at an offset inside guarded wider rows, then copy only the logical result for the generic harness.
++    pub fn run(self: *Product) !void {
++        const sh = self.d.?.shape;
++        const bytes = (sh.rows * self.ldy + 16) * 2;
++        try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = self.strided, .len = bytes }).fill8(0xa5, self.rig.s.handle);
++        const dest = self.strided + 16;
++        if (self.kind == .mxfp8) {
++            try self.lane.matmulMxfp8Strided(self.rig.s, self.x, sh.k, sh.rows, self.weight, dest, self.ldy);
++        } else try glm.mm.matmulStrided(self.mm, self.rig.s, self.x, sh.k, self.tiled, dest, self.ldy, self.part, sh.rows);
++        var args: cuda.Args = .{};
++        inline for (.{ dest, @as(i64, @intCast(self.ldy * 2)), self.out, @as(i64, @intCast(sh.n * 2)),
++            @as(i32, @intCast(sh.rows)), @as(i32, @intCast(sh.n * 2)) }) |v| args.add(v);
++        try cuda.launch.launch(self.copy_rows, .{ .grid = .{ .x = @intCast((sh.rows * sh.n * 2 + 255) / 256) },
++            .block = .{ .x = 256 } }, self.rig.s, &args);
++        const got = try self.rig.bytes(self.strided, bytes);
++        for (got, 0..) |v, i| {
++            const rel = i -| 16;
++            const payload = i >= 16 and rel / (self.ldy * 2) < sh.rows and rel % (self.ldy * 2) < sh.n * 2;
++            if (!payload) try check_.expect(v == 0xa5, "KDA direct output changed row padding at byte {d}", .{i});
++        }
++    }
++
++    pub fn replaced(self: *Product) ![]const u8 {
++        const sh = self.d.?.shape;
++        if (self.kind == .mxfp8) {
++            try self.lane.matmul(self.rig.s, self.x, sh.k, sh.rows, self.weight, self.base, 0);
++        } else try glm.mm.matmul(self.mm, self.rig.s, self.x, sh.k, self.tiled, self.base, self.part, sh.rows, false, false);
++        return self.rig.bytes(self.base, self.count() * 2);
++    }
++
++    pub fn check(self: *Product, gate: g.Gate) !?[]const u8 {
++        const got = try self.rig.outputBytes();
++        const want = try self.replaced();
++        if (!std.mem.eql(u8, got, want)) return "KDA strided output differs from contiguous baseline";
++        if (gate != .nonfinite) return null;
++        for (0..self.count()) |i| if (c.classOf(c.read(.bf16, got, i)) != .finite) return null;
++        return "non-finite fixture produced no non-finite output";
++    }
++
++    pub fn reference(self: *Product, want: []f64, mag: []f64) !void {
++        return self.d.?.reference(want, mag);
++    }
++
++    pub fn simulate(self: *Product, accumulator: c.Accum, order: g.Order, out: []f64) !void {
++        return self.d.?.simulate(accumulator, order, out);
++    }
++};
+diff --git a/zig/tests/cuda/contract_tests.zig b/zig/tests/cuda/contract_tests.zig
+--- a/zig/tests/cuda/contract_tests.zig
++++ b/zig/tests/cuda/contract_tests.zig
+@@ -27,6 +27,8 @@
+ const act_round_k = @import("contract_act_round.zig");
+ const f32w_k = @import("contract_glm_f32w.zig");
+ const glm_a4_k = @import("contract_glm_a4.zig");
++const glm_moe_tail_k = @import("contract_glm_moe_tail.zig");
++const glm_kda_direct_k = @import("contract_kda_direct.zig");
+ 
+ const round_k = @import("contract_tree_round.zig");
+ 
+@@ -411,6 +413,20 @@
+     for (&glues) |*m| try kernels.append(a, m.kernel());
+     var glm_glue = try cuda.Module.load(gpu.d, kk.glm_glue);
+     defer glm_glue.unload();
++    var glm_ops = try cuda.Module.load(gpu.d, kk.glm_ops);
++    defer glm_ops.unload();
++    var glm_mm = try cuda.Module.load(gpu.d, kk.glm_mm);
++    defer glm_mm.unload();
++    const glm_mm_k = try @import("glm_cuda").mm.Kernels.load(glm_mm);
++    var moe_tail = try glm_moe_tail_k.Tail.init(.{ .gpu = gpu, .s = s }, glm_glue, glm_ops);
++    defer moe_tail.deinit();
++    try kernels.append(a, moe_tail.kernel());
++    var kda_direct: [2]glm_kda_direct_k.Product = undefined;
++    for (std.enums.values(glm_kda_direct_k.Kind), &kda_direct) |kind, *product| {
++        product.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .lane = &lane, .mm = &glm_mm_k, .copy_rows = try glm_ops.function("tf_glm_copy_rows") };
++        try kernels.append(a, product.kernel());
++    }
++    defer for (&kda_direct) |*product| product.deinit();
+     var f32ws: [6]f32w_k.F32w = undefined;
+     for (std.enums.values(f32w_k.Which), &f32ws) |w, *x| x.* = .init(.{ .gpu = gpu, .s = s }, w, try glm_glue.function(switch (w) {
+         .norm_y, .norm_sums => "tf_glm_rmsnorm_4096_f32w",
+@@ -461,6 +477,11 @@
+ /// Includes the independent dyadic FP32 stress fixture; no gate failure is hidden as a known finding.
+ pub fn runGlmA4(gpu: check.Gpu) !void {
+     return glm_a4_k.run(gpu);
++}
++
++pub fn runGlmDecode(gpu: check.Gpu) !void {
++    try glm_moe_tail_k.run(gpu);
++    try glm_kda_direct_k.run(gpu);
+ }
+ 
+ /// Gate 5 on this GPU: the table's row for it against the driver, each record against the loaded function.
+diff --git a/zig/tests/cuda/glm_sample_gather.zig b/zig/tests/cuda/glm_sample_gather.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/glm_sample_gather.zig
+@@ -0,0 +1,134 @@
++//! TP2 sampled-window transport: baseline broadcasts vs one all-gather, exact logits and tf_draw outputs.
++//! Both ranks: NCCL_COMM_ID=<rank0-ip>:<port> tf-cuda-test glm-sample-gather <rank> [roce]
++const std = @import("std");
++const cuda = @import("cuda");
++const glm = @import("glm_cuda");
++const check = @import("check.zig");
++
++const V = 154880;
++const H = V / 2;
++const capacity = 32;
++const max_rows = capacity + 1; // prompt-logprob gather has its own buffer beyond the sampler's capacity
++const guard = 32; // u16s, so the actual logits retain 16-byte alignment
++const cap_bytes = 4 * 1024 * 1024;
++const spans = [_]glm.shard.Span{ .{ .lo = 0, .hi = H }, .{ .lo = H, .hi = V } };
++
++pub fn run(gpu: check.Gpu, rank: usize, use_roce: bool) !void {
++    try check.expect(rank < 2, "glm-sample-gather needs rank0 or rank1", .{});
++    var stream = try cuda.Stream.init(gpu.d, false);
++    defer stream.deinit();
++    var group = try cuda.tp_group.Group.open(rank, 2);
++    defer group.close();
++    if (use_roce) {
++        try group.openRoce(gpu.gpa, gpu.io, gpu.d, stream, cap_bytes);
++        try check.expect(group.fast != null, "requested RoCE did not come up", .{});
++    }
++    const exchange: glm.forward.Exchange = .{ .nccl = .{ .lib = &group.lib, .comm = group.comm, .group = &group } };
++    const nccl_only: glm.forward.Exchange = .{ .nccl = .{ .lib = &group.lib, .comm = group.comm } };
++    var baseline = try glm.sampler.Sampler.initWithGather(gpu.d, V, capacity, false);
++    defer baseline.deinit();
++    var batched = try glm.sampler.Sampler.initWithGather(gpu.d, V, capacity, true);
++    defer batched.deinit();
++    try check.expect(baseline.ranked == null and batched.ranked.?.len == capacity * V * 2, "OFF allocates no scratch; ON counts exactly rows*vocab*2 bytes", .{});
++
++    const a = gpu.gpa;
++    const input = try a.alloc(u16, max_rows * H + 2 * guard);
++    defer a.free(input);
++    const source_after = try a.alloc(u16, input.len);
++    defer a.free(source_after);
++    const expected = try a.alloc(u16, max_rows * V);
++    defer a.free(expected);
++    const got = try a.alloc(u16, max_rows * V);
++    defer a.free(got);
++    var local = try cuda.DeviceBuffer.alloc(gpu.d, input.len * 2);
++    defer local.free();
++    var bigger = try cuda.DeviceBuffer.alloc(gpu.d, max_rows * V * 2);
++    defer bigger.free();
++    const mine = [_]glm.sampler.Local{.{ .rank = rank, .logits = local.ptr + guard * 2 }};
++
++    const words = (V + 31) / 32;
++    const mask = try a.alloc(u32, capacity * words);
++    defer a.free(mask);
++    for (mask, 0..) |*w, i| w.* = if ((i / words) % 2 == 0) 0x55555555 else 0xaaaaaaaa;
++    var bits = try cuda.DeviceBuffer.alloc(gpu.d, mask.len * 4);
++    defer bits.free();
++    try bits.uploadAsync(0, std.mem.sliceAsBytes(mask), stream.handle);
++    const rules = [_]glm.sampler.Rule{
++        glm.sampler.rule(.{ .seed = 7, .temperature = 1.0, .top_p = 0.95, .top_k = 20 }),
++        glm.sampler.rule(.{ .seed = 0xabcdef012345, .temperature = 0.6, .top_p = 0.8, .top_k = 0 }),
++        glm.sampler.rule(.{ .seed = 99, .temperature = 1.3, .top_p = 1.0, .top_k = 1 }),
++    };
++    var want_tokens: [capacity]u32 = undefined;
++    var got_tokens: [capacity]u32 = undefined;
++    var want_prob: [capacity]u32 = undefined;
++    var got_prob: [capacity]u32 = undefined;
++    var cases: usize = 0;
++
++    for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 32 }) |rows| {
++        if (group.fast) |fast| try check.expect(fast.fits(rows * H * 2) == (rows != 32), "rows{d}: safe4MiB RoCE/NCCL selection", .{rows});
++        for (0..4) |fixture| {
++            fill(input, expected, rows, rank, fixture);
++            try local.uploadAsync(0, std.mem.sliceAsBytes(input), stream.handle);
++            for (rules, 0..) |rule, ri| {
++                const first: u64 = 32769 + ri * 127; // preserve absolute-position keyed RNG, beyond32K
++                try baseline.draw(stream, exchange, &spans, &mine, rows, first, rule, &want_tokens);
++                try batched.draw(stream, exchange, &spans, &mine, rows, first, rule, &got_tokens);
++                try group.check();
++                try check.sameBytes("sampled IDs", std.mem.sliceAsBytes(got_tokens[0..rows]), std.mem.sliceAsBytes(want_tokens[0..rows]));
++                try baseline.prob.download(0, std.mem.sliceAsBytes(want_prob[0..rows]));
++                try batched.prob.download(0, std.mem.sliceAsBytes(got_prob[0..rows]));
++                try check.sameBytes("sampled probability bits", std.mem.sliceAsBytes(got_prob[0..rows]), std.mem.sliceAsBytes(want_prob[0..rows]));
++                if (ri == 0) {
++                    try baseline.rowsRead(rows, got);
++                    try check.sameBytes("baseline full logits", std.mem.sliceAsBytes(got[0 .. rows * V]), std.mem.sliceAsBytes(expected[0 .. rows * V]));
++                    try batched.rowsRead(rows, got);
++                    try check.sameBytes("packed full logits", std.mem.sliceAsBytes(got[0 .. rows * V]), std.mem.sliceAsBytes(expected[0 .. rows * V]));
++                }
++                cases += 1;
++            }
++            // Existing grammar path still uses gather+mask+drawFull. Exact full rows are also safe to mask.
++            try baseline.mask(stream, rows, bits.ptr, words);
++            try batched.mask(stream, rows, bits.ptr, words);
++            try baseline.drawFull(stream, rows, 17, rules[0], &want_tokens);
++            try batched.drawFull(stream, rows, 17, rules[0], &got_tokens);
++            try check.sameBytes("grammar masked sampled IDs", std.mem.sliceAsBytes(got_tokens[0..rows]), std.mem.sliceAsBytes(want_tokens[0..rows]));
++
++            // No Group attached: the same packed transport must work with plain NCCL too.
++            if (fixture == 0) {
++                try baseline.draw(stream, nccl_only, &spans, &mine, rows, 5, rules[0], &want_tokens);
++                try batched.draw(stream, nccl_only, &spans, &mine, rows, 5, rules[0], &got_tokens);
++                try check.sameBytes("raw NCCL sampled IDs", std.mem.sliceAsBytes(got_tokens[0..rows]), std.mem.sliceAsBytes(want_tokens[0..rows]));
++            }
++            try local.download(0, std.mem.sliceAsBytes(source_after));
++            try check.sameBytes("input and guard bytes unchanged", std.mem.sliceAsBytes(source_after), std.mem.sliceAsBytes(input));
++        }
++    }
++
++    // Public gather remains baseline even with the option ON: grammar and prompt logprobs can use
++    // their own output buffers, including rows beyond the scratch capacity. Do not silently truncate.
++    fill(input, expected, max_rows, rank, 0);
++    try local.uploadAsync(0, std.mem.sliceAsBytes(input), stream.handle);
++    try batched.gather(stream, exchange, &spans, &mine, max_rows, bigger.ptr);
++    try stream.synchronize();
++    try group.check();
++    try bigger.download(0, std.mem.sliceAsBytes(got));
++    try check.sameBytes("over-capacity public gather unchanged", std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(expected));
++    check.pass("glm-sample-gather rank{d}: {d} exact sampled draws; V154880 rows1..8,32; NCCL{s}; grammar, source guards and >capacity gather", .{ rank, cases, if (use_roce) "+RoCE4MiB fallback" else "" });
++}
++
++fn fill(input: []u16, expected: []u16, rows: usize, rank: usize, fixture: usize) void {
++    @memset(input, 0x5a5a);
++    @memset(expected, 0);
++    for (0..rows) |row| for (0..V) |col| {
++        const value: f32 = switch (fixture) {
++            0 => @as(f32, @floatFromInt(@as(i32, @intCast((col * 97 + row * 103) % 4093)) - 2046)) / 256.0,
++            1 => if ((col + row) % 97 == 0) 2.0 else 0.0, // equal maxima on both ranks
++            2 => if (col == (row * 7919 + H - 1) % V) 1000.0 else -1000.0,
++            else => if ((col + row) % 2 == 0) 0.0 else -0.0,
++        };
++        const raw: u32 = @bitCast(value);
++        const bf: u16 = @truncate((raw +% 0x7fff +% ((raw >> 16) & 1)) >> 16);
++        expected[row * V + col] = bf;
++        if (col >= rank * H and col < (rank + 1) * H) input[guard + row * H + col - rank * H] = bf;
++    };
++}
+diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+--- a/zig/tests/cuda/main.zig
++++ b/zig/tests/cuda/main.zig
+@@ -57,6 +57,7 @@
+ const lfm2_vision_tests = @import("lfm2_vision_tests.zig");
+ const radio_tests = @import("radio_tests.zig");
+ const glm_lanes_tests = @import("glm_lanes_tests.zig");
++const glm_sample_gather = @import("glm_sample_gather.zig");
+ const glm_synth = @import("glm_synth.zig");
+ const tree_round_tests = @import("tree_round_tests.zig");
+ const tree_tests = @import("tree_tests.zig");
+@@ -381,6 +382,7 @@
+     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
+     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu);
+     if (std.mem.eql(u8, cmd, "kernel-contract-glm-a4")) return contract_tests.runGlmA4(gpu);
++    if (std.mem.eql(u8, cmd, "kernel-contract-glm-decode")) return contract_tests.runGlmDecode(gpu);
+     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
+     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
+     if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);
+@@ -389,6 +391,7 @@
+     if (std.mem.eql(u8, cmd, "dense-rows")) return dense_rows_tests.run(gpu);
+     if (std.mem.eql(u8, cmd, "train-pack")) return train_pack.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 24);
+     if (std.mem.eql(u8, cmd, "glm-lanes-cover")) return glm_lanes_tests.coverCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
++    if (std.mem.eql(u8, cmd, "glm-sample-gather")) return glm_sample_gather.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10), rest.len > 1 and std.mem.eql(u8, rest[1], "roce"));
+     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+     if (std.mem.eql(u8, cmd, "glm-synth")) {
+         const kind = if (rest.len > 1) std.meta.stringToEnum(glm_synth.Kind, rest[1]) orelse return error.UnknownCommand else .nvfp4;
+diff --git a/zig/tests/cuda/projection_f32_host_tests.zig b/zig/tests/cuda/projection_f32_host_tests.zig
+--- a/zig/tests/cuda/projection_f32_host_tests.zig
++++ b/zig/tests/cuda/projection_f32_host_tests.zig
+@@ -59,6 +59,7 @@
+         .mod = .{ .d = &driver, .handle = null },
+         .fns = @splat(@splat(f)),
+         .f32_fns = @splat(@splat(f)),
++        .mxfp8_strided = @splat(f),
+         .reduce = @splat(f),
+         .clusters = false,
+     };

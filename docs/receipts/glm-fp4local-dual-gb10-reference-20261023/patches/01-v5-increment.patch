@@ -1,0 +1,1369 @@
+diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
+--- a/zig/build/cuda_kernels.zig
++++ b/zig/build/cuda_kernels.zig
+@@ -54,7 +54,7 @@
+     .{ .name = "fp8_experts", .flags = &.{"-O3"} }, // fp8/experts.cu's device code, tensorfold_fp8_experts_v6
+     .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 lane projections, the Metal kernels' order
+     .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 dense matrices by row, the Metal order
+-    .{ .name = "nvfp4_experts", .flags = &.{"-O3"} }, // nvfp4/experts.cu's device code, the NVFP4 expert kernels
++    .{ .name = "nvfp4_experts", .flags = &.{"-O3"}, .arch_specific = true }, // GLM A4 needs SM121a block-scaled MMA
+     .{ .name = "rank_sum", .flags = &.{"-O3"} }, // ours: the rank-order sum of a reduce-scatter (rank_scatter.zig)
+     .{ .name = "lane_gemv", .flags = &.{"-O3"} }, // ours: qmm_group's arithmetic, a column tile's K slices in one CTA
+     .{ .name = "sample", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // ours: the Metal engine's keyed draws
+diff --git a/zig/glm_dflash_host.zig b/zig/glm_dflash_host.zig
+--- a/zig/glm_dflash_host.zig
++++ b/zig/glm_dflash_host.zig
+@@ -3,6 +3,13 @@
+ const glm = @import("glm");
+ const registry = @import("core").contract.registry;
+ const t = std.testing;
++
++test "glm dflash: lane cost policy retains legacy defaults" {
++    const p: glm.lanes.DraftPolicy = .{};
++    try t.expectEqual(@as(f64, 52), p.window[0].ms);
++    const legacy_step: f64 = 1.6 / @as(f64, 7);
++    try t.expectEqual(@as(u64, @bitCast(legacy_step)), @as(u64, @bitCast(p.stepMs(7))));
++}
+ 
+ test "glm dflash: gather and read fit for every supported rank count" {
+     for (1..17) |world| for ([_]usize{ 1, 8, glm.dflash.MAX_M }) |rows| {
+diff --git a/zig/kernels/cuda/glm_a4_prompt.cuh b/zig/kernels/cuda/glm_a4_prompt.cuh
+new file mode 100644
+--- /dev/null
++++ b/zig/kernels/cuda/glm_a4_prompt.cuh
+@@ -0,0 +1,153 @@
++// GLM A4 prompt experts reading the existing A16 compact pack; no second resident weight representation.
++#pragma once
++#include <cuda_bf16.h>
++#include <stdint.h>
++#include "mma4.cuh"
++#include "nvfp4q.cuh"
++
++#if defined(__CUDA_ARCH_FEAT_SM120_ALL) || defined(__CUDA_ARCH_FEAT_SM121_ALL)
++extern "C" __device__ __constant__ uint32_t tf_glm_a4_native_mma = 1;
++#endif
++
++namespace glm_a4 {
++// Extract eight consecutive codes from the A16 pack's two four-input fragments, without dequantizing weights.
++__device__ __forceinline__ uint32_t word8(const uint32_t* block, int j, int g, int t) {
++    uint32_t result = 0;
++#pragma unroll
++    for (int h = 0; h < 2; ++h) {
++        const uint32_t w = __ldg(block + (g * 4 + (t & 1) * 2 + h) * 4 + j);
++#pragma unroll
++        for (int q = 0; q < 4; ++q) {
++            const int shift = 4 * (2 * (t >> 1) + q / 2 + 4 * (q & 1));
++            result |= ((w >> shift) & 15u) << (4 * (4 * h + q));
++        }
++    }
++    return result;
++}
++
++__device__ __forceinline__ uint32_t scale2(const uint32_t* block, int j, int g) {
++    const uint8_t* s = reinterpret_cast<const uint8_t*>(block + 128);
++    const int i = (((g / 2) * 2) * 4 + j) * 2 + (g & 1);
++    return static_cast<uint32_t>(s[i]) | (static_cast<uint32_t>(s[i + 8]) << 8);
++}
++
++__device__ __forceinline__ float bf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
++
++__device__ __forceinline__ float swiglu(float gate, float up, float limit) {
++    gate = bf(gate);
++    up = bf(up);
++    if (limit > 0.0f) {
++        gate = fminf(gate, limit);
++        up = fminf(fmaxf(up, -limit), limit);
++    }
++    return bf(gate / (1.0f + expf(-gate))) * up;
++}
++
++// One CTA: at most 64 routed pairs; N-warps reuse quantized rows with each projection's own input scale.
++template<int PARTS, int NW = 2>
++__device__ __forceinline__ void prompt(const __nv_bfloat16* x, int ldx, int slots, const uint32_t* weights,
++                                      const float* globals, const float* inputs, int K, int N, const int* items,
++                                      const int* counts, const int* members, __nv_bfloat16* out, float limit, int skip) {
++    __shared__ uint32_t codes[PARTS][64][8];
++    __shared__ __align__(4) uint8_t scales[PARTS][64][4];
++    constexpr int NC = NW * 32, THREADS = NW * 64;
++    const int nt = (N + NC - 1) / NC, item = blockIdx.x / nt, ct = blockIdx.x % nt;
++    if (item >= __ldg(counts)) return;
++    const int e = __ldg(items + item * 3), first = __ldg(items + item * 3 + 1);
++    const int count = __ldg(items + item * 3 + 2);
++    if (e == skip) return;
++    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
++    const int wm = warp / NW, wn = warp % NW, g = lane >> 2, t = lane & 3;
++    const int n0 = ct * NC + wn * 32, KG = K / 32;
++    float acc[PARTS][2][4][4] = {};
++    float input[PARTS], alpha[PARTS];
++#pragma unroll
++    for (int m = 0; m < PARTS; ++m) {
++        input[m] = __ldg(inputs + e * 3 + (PARTS == 2 ? m : 2));
++        alpha[m] = __ldg(globals + e * PARTS + m) * input[m];
++    }
++    for (int kg = 0; kg < K / 64; ++kg) {
++        for (int q = tid; q < 64 * 4; q += THREADS) {
++            const int row = q / 4, block = q % 4;
++            float values[16] = {}, amax = 0.0f;
++            if (row < count) {
++                const int pair = __ldg(members + first + row);
++                const int xr = slots ? pair / slots : pair;
++#pragma unroll
++                for (int j = 0; j < 16; ++j) {
++                    values[j] = __bfloat162float(x[static_cast<size_t>(xr) * ldx + kg * 64 + block * 16 + j]);
++                    amax = fmaxf(amax, fabsf(values[j]));
++                }
++            }
++#pragma unroll
++            for (int m = 0; m < PARTS; ++m) {
++                const auto sc = nvfp4q::block_scale(amax, __fdiv_rn(1.0f, input[m]));
++                uint32_t lo = 0, hi = 0;
++#pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    lo |= nvfp4q::e2m1(values[j] * sc.mul) << (4 * j);
++                    hi |= nvfp4q::e2m1(values[j + 8] * sc.mul) << (4 * j);
++                }
++                codes[m][row][2 * block] = lo;
++                codes[m][row][2 * block + 1] = hi;
++                scales[m][row][block] = static_cast<uint8_t>(sc.sf8);
++            }
++        }
++        __syncthreads();
++        if (n0 < N) {
++#pragma unroll
++            for (int m = 0; m < PARTS; ++m) {
++                const size_t base = ((static_cast<size_t>(e) * (N / 32) + n0 / 32) * KG + kg * 2) * PARTS * 144;
++                const uint32_t* w0 = weights + base + m * 144;
++                const uint32_t* w1 = w0 + PARTS * 144;
++#pragma unroll
++                for (int j = 0; j < 4; ++j) {
++                    const uint32_t b0 = word8(w0, j, g, t), b1 = word8(w1, j, g, t);
++                    const uint32_t sb = scale2(w0, j, g) | (scale2(w1, j, g) << 16);
++#pragma unroll
++                    for (int r = 0; r < 2; ++r) {
++                        const int row = wm * 32 + r * 16 + g;
++                        const uint32_t a[4] = {codes[m][row][t], codes[m][row + 8][t],
++                                                codes[m][row][t + 4], codes[m][row + 8][t + 4]};
++                        const uint32_t sa = *reinterpret_cast<const uint32_t*>(scales[m][row + (t & 1) * 8]);
++                        mma4::mma_fp4(acc[m][r][j], a, b0, b1, sa, sb);
++                    }
++                }
++            }
++        }
++        __syncthreads();
++    }
++    if (n0 >= N) return;
++#pragma unroll
++    for (int r = 0; r < 2; ++r) {
++#pragma unroll
++        for (int h = 0; h < 2; ++h) {
++            const int row = wm * 32 + r * 16 + g + h * 8;
++            if (row >= count) continue;
++            const size_t dest = static_cast<size_t>(__ldg(members + first + row)) * N;
++#pragma unroll
++            for (int j = 0; j < 4; ++j) {
++                float v0 = acc[0][r][j][2 * h] * alpha[0];
++                float v1 = acc[0][r][j][2 * h + 1] * alpha[0];
++                if constexpr (PARTS == 2) {
++                    v0 = swiglu(v0, acc[1][r][j][2 * h] * alpha[1], limit);
++                    v1 = swiglu(v1, acc[1][r][j][2 * h + 1] * alpha[1], limit);
++                }
++                const int col = n0 + j * 8 + 2 * t;
++                *reinterpret_cast<__nv_bfloat162*>(out + dest + col) = __floats2bfloat162_rn(v0, v1);
++            }
++        }
++    }
++}
++} // namespace glm_a4
++
++#define GLM_A4_ENTRY(NAME, PARTS, NW) \
++extern "C" __global__ void __launch_bounds__(NW * 64) NAME(const __nv_bfloat16* x, int ldx, int slots, \
++ const uint32_t* weights, const float* globals, const float* inputs, int K, int N, const int* items, \
++ const int* counts, const int* members, __nv_bfloat16* out, float limit, int skip) { \
++ glm_a4::prompt<PARTS, NW>(x, ldx, slots, weights, globals, inputs, K, N, items, counts, members, out, limit, skip); }
++GLM_A4_ENTRY(tf_glm_a4_prompt_up, 2, 2)
++GLM_A4_ENTRY(tf_glm_a4_prompt_down, 1, 2)
++GLM_A4_ENTRY(tf_glm_a4_prompt_up_n128, 2, 4)
++GLM_A4_ENTRY(tf_glm_a4_prompt_down_n128, 1, 4)
++#undef GLM_A4_ENTRY
+diff --git a/zig/kernels/cuda/nvfp4_experts.cu b/zig/kernels/cuda/nvfp4_experts.cu
+--- a/zig/kernels/cuda/nvfp4_experts.cu
++++ b/zig/kernels/cuda/nvfp4_experts.cu
+@@ -5,6 +5,7 @@
+ #include <stdint.h>
+ 
+ #include "experts.cuh"
++#include "glm_a4_prompt.cuh"
+ 
+ namespace tf_nvfp4_experts {
+ 
+diff --git a/zig/src/core/contract/glm_cuda_records.zig b/zig/src/core/contract/glm_cuda_records.zig
+--- a/zig/src/core/contract/glm_cuda_records.zig
++++ b/zig/src/core/contract/glm_cuda_records.zig
+@@ -1,8 +1,19 @@
+ //! GLM-5.3-Flash's packed matmul, DFlash2 and float32 norm weight launches, by kernel-contract-limits from every SM.
+ const registry = @import("registry.zig");
+ 
++/// Local experimental A4 fatbin, measured on SM121a; other targets are intentionally not claimed.
++fn a4Usage(regs: u32, static: u32, bound: u32) @TypeOf(registry.none) {
++    var usage = registry.none;
++    usage[4] = .{ .regs = regs, .static = static, .bound = bound, .local = 0 };
++    return usage;
++}
++
+ /// nvcc 13.0's usage, the compiler of the release fatbins.
+ pub const cuda = [_]registry.CudaRecord{
++    .{ .launch = .{ .name = "glm_a4 tf_glm_a4_prompt_up", .symbol = "tf_glm_a4_prompt_up", .image = "nvfp4_experts", .threads = 128, .min_sm = 121 }, .usage = a4Usage(128, 4608, 128) },
++    .{ .launch = .{ .name = "glm_a4 tf_glm_a4_prompt_down", .symbol = "tf_glm_a4_prompt_down", .image = "nvfp4_experts", .threads = 128, .min_sm = 121 }, .usage = a4Usage(80, 2304, 128) },
++    .{ .launch = .{ .name = "glm_a4 tf_glm_a4_prompt_up_n128", .symbol = "tf_glm_a4_prompt_up_n128", .image = "nvfp4_experts", .threads = 256, .min_sm = 121 }, .usage = a4Usage(128, 4608, 256) },
++    .{ .launch = .{ .name = "glm_a4 tf_glm_a4_prompt_down_n128", .symbol = "tf_glm_a4_prompt_down_n128", .image = "nvfp4_experts", .threads = 256, .min_sm = 121 }, .usage = a4Usage(80, 2304, 256) },
+     .{ .launch = .{ .name = "glm_mm16_16", .symbol = "glm_mm16_16", .image = "glm_mm", .threads = 128, .dynamic = 31104, .opt_in = true, .min_sm = 80 }, .usage = .{ .{ .regs = 95, .static = 0, .bound = 128 }, .{ .regs = 95, .static = 0, .bound = 128 }, .{ .regs = 95, .static = 0, .bound = 128 }, .{ .regs = 52, .static = 0, .bound = 128 }, .{ .regs = 52, .static = 0, .bound = 128 } } },
+     .{ .launch = .{ .name = "glm_mm16_32", .symbol = "glm_mm16_32", .image = "glm_mm", .threads = 128, .dynamic = 37248, .opt_in = true, .min_sm = 80 }, .usage = .{ .{ .regs = 95, .static = 0, .bound = 128 }, .{ .regs = 95, .static = 0, .bound = 128 }, .{ .regs = 95, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 } } },
+     .{ .launch = .{ .name = "glm_mm16_64", .symbol = "glm_mm16_64", .image = "glm_mm", .threads = 256, .dynamic = 49536, .opt_in = true, .min_sm = 80 }, .usage = .{ .{ .regs = 95, .static = 0, .bound = 256 }, .{ .regs = 95, .static = 0, .bound = 256 }, .{ .regs = 95, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 } } },
+diff --git a/zig/src/cuda/experts.zig b/zig/src/cuda/experts.zig
+--- a/zig/src/cuda/experts.zig
++++ b/zig/src/cuda/experts.zig
+@@ -25,6 +25,8 @@
+     down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]; iq2xxs [E][D/16][NI/256][1056]
+     up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2] global scales; affine4's are in the blocks
+     down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]
++    input_scales: u64 = 0, // GLM NVFP4 [E][3] gate/up/down globals, kept separately
++    a4_prefill: bool = false, // explicit GLM prompt arithmetic, never inherited by decode or MTP
+     width: usize, // NI
+     dims: usize, // D
+     experts: usize,
+@@ -427,6 +429,7 @@
+ 
+     /// Prompt rows on a plan of at most `items` items of 64 pairs: up (relu^2 or SwiGLU by the layer), bf16 sums down.
+     pub fn runPrompt(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
++        if (l.a4_prefill) return @import("glm_a4.zig").run(e.mod, s, epi, in, l, p, out, items, skip);
+         if (epi == .down_f32) return error.EpilogueNotBuilt;
+         const gate = epi == .up;
+         const parts: usize = if (gate and !l.relu2) 2 else 1;
+diff --git a/zig/src/cuda/glm_a4.zig b/zig/src/cuda/glm_a4.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/cuda/glm_a4.zig
+@@ -0,0 +1,52 @@
++//! GLM-only A4 prompt launch, sharing the existing compact A16 weight pack.
++const std = @import("std");
++const ex = @import("experts.zig");
++const cuda_module = @import("module.zig");
++const launch = @import("launch.zig");
++const Stream = @import("stream.zig").Stream;
++const Plan = @import("grouped.zig").Plan;
++
++pub fn nTile(value: ?[]const u8) !usize {
++    const v = value orelse return 64;
++    if (std.mem.eql(u8, v, "64")) return 64;
++    if (std.mem.eql(u8, v, "128")) return 128;
++    return error.BadGlmA4Tile;
++}
++
++pub fn run(mod: cuda_module.Module, s: Stream, epi: ex.Epi, in: ex.Rows, l: ex.Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
++    if (l.input_scales == 0) return error.MissingA4InputScales;
++    if (l.relu2 or epi == .down_f32 or l.format != .nvfp4) return error.UnsupportedGlmA4;
++    const up = epi == .up;
++    const n = if (up) l.width else l.dims;
++    const k = if (up) l.dims else l.width;
++    if (n % 32 != 0 or k % 64 != 0) return error.UnsupportedGlmA4Shape;
++    if (items == 0) return;
++    const value = if (std.c.getenv("TF_GLM_A4_N_TILE")) |v| std.mem.span(v) else null;
++    const tile = try nTile(value);
++    const name: [:0]const u8 = if (tile == 128)
++        (if (up) "tf_glm_a4_prompt_up_n128" else "tf_glm_a4_prompt_down_n128")
++    else
++        (if (up) "tf_glm_a4_prompt_up" else "tf_glm_a4_prompt_down");
++    const f = try mod.function(name);
++    var a: launch.Args = .{};
++    a.add(in.x);
++    a.add(@as(i32, @intCast(in.stride)));
++    a.add(@as(i32, @intCast(if (up) in.slots else 0)));
++    a.add(if (up) l.up else l.down);
++    a.add(if (up) l.up_scale else l.down_scale);
++    a.add(l.input_scales);
++    a.add(@as(i32, @intCast(k)));
++    a.add(@as(i32, @intCast(n)));
++    for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
++    a.add(l.limit);
++    a.add(skip);
++    try launch.launch(f, .{ .grid = .{ .x = @intCast(items * ((n + tile - 1) / tile)) }, .block = .{ .x = @intCast(tile * 2) } }, s, &a);
++}
++
++test "A4 prompt tile choice is explicit and preserves the baseline default" {
++    try std.testing.expectEqual(@as(usize, 64), try nTile(null));
++    try std.testing.expectEqual(@as(usize, 64), try nTile("64"));
++    try std.testing.expectEqual(@as(usize, 128), try nTile("128"));
++    try std.testing.expectError(error.BadGlmA4Tile, nTile("256"));
++    try std.testing.expectError(error.BadGlmA4Tile, nTile(""));
++}
+diff --git a/zig/src/families/glm/cuda_bf16.zig b/zig/src/families/glm/cuda_bf16.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_bf16.zig
+@@ -0,0 +1,28 @@
++//! Checkpoint loader's host-side BF16 rounding and exact-narrowing rules.
++const std = @import("std");
++
++/// Host bf16 from fp32: round to nearest even (torch's float -> bfloat16), NaN kept quiet.
++pub fn toBf16(v: f32) u16 {
++    const b: u32 = @bitCast(v);
++    if (std.math.isNan(v)) return @intCast((b >> 16) | 0x40);
++    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
++}
++
++/// A float32 narrowed to bf16 by the loader, or null when bf16 does not hold it exactly (NaN stays NaN).
++pub fn narrow(v: f32) ?u16 {
++    const h = toBf16(v);
++    return if (std.math.isNan(v) or @as(f32, @bitCast(@as(u32, h) << 16)) == v) h else null;
++}
++
++test "bf16 rounding of fp32 is to nearest even" {
++    try std.testing.expectEqual(@as(u16, 0x3f80), toBf16(1.0));
++    try std.testing.expectEqual(@as(u16, 0x3f80), toBf16(@bitCast(@as(u32, 0x3f808000)))); // a tie to even (down)
++    try std.testing.expectEqual(@as(u16, 0x3f82), toBf16(@bitCast(@as(u32, 0x3f818000)))); // a tie to even (up)
++    try std.testing.expectEqual(@as(u16, 0x3f81), toBf16(@bitCast(@as(u32, 0x3f808001))));
++}
++
++test "the loader narrows a float32 to bf16 only when bf16 holds it, unlike FP4-Local's norms" {
++    try std.testing.expectEqual(@as(?u16, 0x3f80), narrow(1.0));
++    try std.testing.expectEqual(@as(?u16, null), narrow(@bitCast(@as(u32, 0x3f808001))));
++    try std.testing.expect(narrow(std.math.nan(f32)) != null);
++}
+diff --git a/zig/src/families/glm/cuda_dflash_policy.zig b/zig/src/families/glm/cuda_dflash_policy.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_dflash_policy.zig
+@@ -0,0 +1,184 @@
++//! Optional GLM DFlash2 scheduling estimates; target arithmetic and the lane core's live timing stay unchanged.
++const std = @import("std");
++
++pub const Config = struct {
++    window_one_ms: f64 = 52.0,
++    window_row_ms: f64 = 6.8,
++    shared_one_ms: f64 = 76.0,
++    shared_row_ms: f64 = 4.1,
++    block_ms: f64 = 1.6,
++    confidence: f64 = 0.7,
++    custom_costs: bool = false,
++
++    /// TF_GLM_DFLASH_COSTS has five comma-separated milliseconds: window one/row, shared one/row, draft block.
++    pub fn parse(active: bool, costs: ?[]const u8, confidence: ?[]const u8) !Config {
++        var c: Config = .{};
++        if (!active) return c;
++        if (costs) |text| {
++            var fields = std.mem.splitScalar(u8, text, ',');
++            var values: [5]f64 = undefined;
++            for (&values) |*v| v.* = number(fields.next() orelse return error.BadDflashCosts) catch
++                return error.BadDflashCosts;
++            if (fields.next() != null) return error.BadDflashCosts;
++            if (values[0] <= 0 or values[1] < 0 or values[2] <= 0 or values[3] < 0 or values[4] <= 0)
++                return error.BadDflashCosts;
++            c.window_one_ms = values[0];
++            c.window_row_ms = values[1];
++            c.shared_one_ms = values[2];
++            c.shared_row_ms = values[3];
++            c.block_ms = values[4];
++            c.custom_costs = true;
++        }
++        if (confidence) |text| {
++            c.confidence = number(text) catch return error.BadDflashConfidence;
++            if (c.confidence < 0 or c.confidence > 1) return error.BadDflashConfidence;
++        }
++        return c;
++    }
++
++    pub fn environment(active: bool) !Config {
++        return parse(active, env("TF_GLM_DFLASH_COSTS"), env("TF_GLM_DRAFT_CONFIDENCE")) catch |err| {
++            std.log.err("GLM DFlash2 tuning: {s}; five finite costs >= 0, bases/block > 0; confidence 0..1", .{
++                @errorName(err),
++            });
++            return err;
++        };
++    }
++};
++
++fn env(name: [*:0]const u8) ?[]const u8 {
++    return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
++}
++
++fn number(text: []const u8) !f64 {
++    const v = try std.fmt.parseFloat(f64, std.mem.trim(u8, text, " \t\r\n"));
++    if (!std.math.isFinite(v)) return error.NonFinite;
++    return v;
++}
++
++fn table(comptime n: usize, comptime Cost: type, one: f64, row: f64) [n]Cost {
++    var out: [n]Cost = undefined;
++    for (&out, 0..) |*x, i| x.* = .{ .width = @intCast(i + 1), .ms = one + row * @as(f64, @floatFromInt(i)) };
++    return out;
++}
++
++/// Tables live with the lanes, so Model's borrowed slices remain valid until that backend closes.
++pub fn Policy(comptime window_rows: usize, comptime shared_rows: usize, comptime Cost: type) type {
++    return struct {
++        const Self = @This();
++        const legacy_window = table(window_rows, Cost, 52.0, 6.8);
++        const legacy_shared = table(shared_rows, Cost, 76.0, 4.1);
++        config: Config = .{},
++        window: [window_rows]Cost = legacy_window,
++        shared: [shared_rows]Cost = legacy_shared,
++
++        pub fn from(c: Config) !Self {
++            for ([_]f64{ c.window_one_ms, c.shared_one_ms, c.block_ms }) |v|
++                if (!std.math.isFinite(v) or v <= 0) return error.BadDflashCosts;
++            for ([_]f64{ c.window_row_ms, c.shared_row_ms }) |v|
++                if (!std.math.isFinite(v) or v < 0) return error.BadDflashCosts;
++            if (!std.math.isFinite(c.confidence) or c.confidence < 0 or c.confidence > 1)
++                return error.BadDflashConfidence;
++            const self: Self = .{
++                .config = c,
++                .window = if (c.window_one_ms == 52.0 and c.window_row_ms == 6.8)
++                    legacy_window
++                else
++                    table(window_rows, Cost, c.window_one_ms, c.window_row_ms),
++                .shared = if (c.shared_one_ms == 76.0 and c.shared_row_ms == 4.1)
++                    legacy_shared
++                else
++                    table(shared_rows, Cost, c.shared_one_ms, c.shared_row_ms),
++            };
++            for (&self.window) |v| if (!std.math.isFinite(v.ms) or v.ms <= 0) return error.BadDflashCosts;
++            for (&self.shared) |v| if (!std.math.isFinite(v.ms) or v.ms <= 0) return error.BadDflashCosts;
++            return self;
++        }
++
++        pub fn environment(active: bool) !Self {
++            return from(try Config.environment(active));
++        }
++
++        pub fn stepMs(self: *const Self, comptime drafts: usize) f64 {
++            std.debug.assert(drafts > 0);
++            const legacy_step: f64 = 1.6 / @as(f64, drafts);
++            if (self.config.block_ms == 1.6) return legacy_step;
++            return self.config.block_ms / @as(f64, @floatFromInt(drafts));
++        }
++
++        pub fn log(self: *const Self) void {
++            const c = self.config;
++            std.log.info("DFlash2 policy: {s}; window={d}+{d}/row shared={d}+{d}/row block={d}ms confidence={d}", .{
++                if (c.custom_costs) "custom estimates" else "legacy estimates",
++                c.window_one_ms, c.window_row_ms, c.shared_one_ms, c.shared_row_ms, c.block_ms, c.confidence,
++            });
++        }
++    };
++}
++
++const TestCost = struct { width: u32, ms: f64 };
++const TestPolicy = Policy(8, 32, TestCost);
++
++// Independent reference: the old cuda_lanes costTable, with its compile-time f64 arguments and evaluation.
++fn legacyCostTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]TestCost {
++    var c: [n]TestCost = undefined;
++    for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = one + row * @as(f64, @floatFromInt(i)) };
++    return c;
++}
++
++test "glm dflash: tuning absent settings retain every legacy estimate" {
++    const c = try Config.parse(true, null, null);
++    const p = try TestPolicy.from(c);
++    try std.testing.expectEqual(@as(f64, 0.7), p.config.confidence);
++    try std.testing.expect(!p.config.custom_costs);
++    const legacy_step: f64 = 1.6 / @as(f64, 7); // retain the old expression, not comptime_float 1.6 / 7.0
++    const legacy_window = comptime legacyCostTable(8, 52.0, 6.8);
++    const legacy_shared = comptime legacyCostTable(32, 76.0, 4.1);
++    const explicit = try TestPolicy.from(try Config.parse(true, "52,6.8,76,4.1,1.6", "0"));
++    for ([_]TestPolicy{ p, .{}, explicit }) |policy| {
++        try std.testing.expectEqual(@as(u64, @bitCast(legacy_step)), @as(u64, @bitCast(policy.stepMs(7))));
++        for (policy.window, legacy_window) |v, expected| {
++            try std.testing.expectEqual(expected.width, v.width);
++            try std.testing.expectEqual(@as(u64, @bitCast(expected.ms)), @as(u64, @bitCast(v.ms)));
++        }
++        for (policy.shared, legacy_shared) |v, expected| {
++            try std.testing.expectEqual(expected.width, v.width);
++            try std.testing.expectEqual(@as(u64, @bitCast(expected.ms)), @as(u64, @bitCast(v.ms)));
++        }
++    }
++}
++
++test "glm dflash: tuning explicit estimates build complete tables and confidence remains independent" {
++    const p = try TestPolicy.from(try Config.parse(true, "41.5, 6.3,76,4.1,5", "0.5"));
++    try std.testing.expectEqual(@as(f64, 41.5), p.window[0].ms);
++    try std.testing.expectEqual(@as(f64, 41.5 + 7 * 6.3), p.window[7].ms);
++    try std.testing.expectEqual(@as(f64, 76.0 + 31 * 4.1), p.shared[31].ms);
++    try std.testing.expectEqual(@as(f64, 5.0 / 7.0), p.stepMs(7));
++    try std.testing.expectEqual(@as(f64, 0.5), p.config.confidence);
++    try std.testing.expect(p.config.custom_costs);
++    const only = try Config.parse(true, null, "0");
++    try std.testing.expect(!only.custom_costs);
++    try std.testing.expectEqual(@as(f64, 52.0), only.window_one_ms);
++    try std.testing.expectEqual(@as(f64, 0.0), only.confidence);
++    const flat = try TestPolicy.from(try Config.parse(true, "41,0,70,0,5", "1"));
++    try std.testing.expectEqual(flat.window[0].ms, flat.window[7].ms);
++}
++
++test "glm dflash: tuning malformed costs, confidence and table overflow are refused" {
++    for ([_][]const u8{
++        "", "1,2,3,4", "1,2,3,4,5,6", "1,2,,4,5", "x,2,3,4,5", "0,2,3,4,5",
++        "1,-2,3,4,5", "1,2,0,4,5", "1,2,3,-4,5", "1,2,3,4,0", "1,2,3,4,-5",
++        "nan,2,3,4,5", "1,inf,3,4,5", "1,2,3,4,-inf", "1,2,3,4,1e999",
++    }) |text| try std.testing.expectError(error.BadDflashCosts, Config.parse(true, text, null));
++    for ([_][]const u8{ "", "x", "nan", "inf", "-inf", "-0.1", "1.01" }) |text|
++        try std.testing.expectError(error.BadDflashConfidence, Config.parse(true, null, text));
++    const huge = try Config.parse(true, "1e308,1e308,1,0,1", null);
++    try std.testing.expectError(error.BadDflashCosts, TestPolicy.from(huge));
++    try std.testing.expectError(error.BadDflashCosts, TestPolicy.from(.{ .block_ms = -1 }));
++    try std.testing.expectError(error.BadDflashConfidence, TestPolicy.from(.{ .confidence = std.math.nan(f64) }));
++}
++
++test "glm dflash: tuning absent drafter ignores settings and retains MTP defaults" {
++    const c = try Config.parse(false, "not used", "not used");
++    try std.testing.expectEqualDeep(Config{}, c);
++}
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -134,6 +134,8 @@
+         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
+         var m = try fw.Modules.load(d, ctx);
+         errdefer m.deinit();
++        if (o.settings.a4_prefill and !m.experts.nvfp4.mod.holds("tf_glm_a4_native_mma"))
++            return error.GlmA4RequiresArchitectureSpecificBuild;
+         var pieces = try fw.Pieces.init(d, o.settings.pieces);
+         errdefer pieces.deinit();
+         if (o.settings.layers > c.layers) return error.BadLayers;
+@@ -156,11 +158,22 @@
+             }
+         };
+         const tiler: Tile = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
+-        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, Tile.apply);
++        const drafting: weights.DraftLoad = if (o.drafter) .dflash else if (o.mtp) .mtp else .none;
++        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, drafting), tiler, Tile.apply);
+         errdefer e.w.deinit();
+         errdefer {
+             gpa.free(e.packs.ptrs);
+             gpa.free(e.packs.bits);
++        }
++        if (o.settings.a4_prefill) {
++            for (e.w.layers) |*l| switch (l.ffn) {
++                .moe => |*moe| {
++                    if (moe.exl3 != null or moe.routed.input_scales == 0) return error.MissingA4InputScales;
++                    moe.routed.a4_prefill = true;
++                },
++                else => {},
++            };
++            std.log.info("GLM routed A4 prefill enabled; decode/verification A16; shared compact weights", .{});
+         }
+         e.m.mm.prompt_fixed_k = o.settings.prompt_fixed_k;
+         e.m.tiled = o.settings.tiled;
+@@ -359,7 +372,7 @@
+         if (f.prof) |p| p.mark(e.stream, .draw);
+         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
+         stamp = prof_mod.span(f.prof, e.stream, .mtp);
+-        if (e.mtp) {
++        if (e.w.mtp != null) {
+             const nxt = as_i32[1..];
+             if (nxt.len > 0) { // decode._absorb_rows
+                 const mp = f.prof;
+diff --git a/zig/src/families/glm/cuda_kda_tp3_test.zig b/zig/src/families/glm/cuda_kda_tp3_test.zig
+--- a/zig/src/families/glm/cuda_kda_tp3_test.zig
++++ b/zig/src/families/glm/cuda_kda_tp3_test.zig
+@@ -36,7 +36,7 @@
+     return .{ .d = d, .handle = @ptrFromInt(id) };
+ }
+ fn layer(heads: usize, dims: usize) kda.Layer {
+-    return .{ .proj = 0x100000000, .fb = 0x200000000, .gb = 0x300000000, .o = 0x400000000, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = heads, .dims = dims };
++    return .{ .proj = .{ .bf16 = 0x100000000 }, .fb = 0x200000000, .gb = 0x300000000, .o = .{ .bf16 = 0x400000000 }, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = heads, .dims = dims };
+ }
+ test "GLM TP3: real KDA projections accept uneven shares and retain aligned tiled dispatch" {
+     const c = Config{};
+@@ -58,7 +58,7 @@
+         for ([_]usize{ 1, 17, 64, 65, 127, 128, 2066 }) |rows| for ([_]bool{ false, true }) |prompt| {
+             Capture.count = 0;
+             try kda.project(.{ .glue = &raw, .mm = &kernels, .prompt = prompt }, stream, l, scratch, 0x900000000, c.hidden, rows);
+-            const weights = [_]u64{ l.proj, l.fb, l.gb };
++            const weights = [_]u64{ l.proj.bf16, l.fb, l.gb };
+             const xs = [_]u64{ 0x900000000, scratch.p + 3 * l.heads * 128 * 2, scratch.p + (3 * l.heads * 128 + 128) * 2 };
+             const strides = [_]usize{ c.hidden, width, width };
+             const ns = [_]usize{ width, l.heads * 128, l.heads * 128 };
+diff --git a/zig/src/families/glm/cuda_kv8_test.zig b/zig/src/families/glm/cuda_kv8_test.zig
+--- a/zig/src/families/glm/cuda_kv8_test.zig
++++ b/zig/src/families/glm/cuda_kv8_test.zig
+@@ -147,7 +147,13 @@
+     ks.merge.handle = @ptrFromInt(7);
+     const k: dsa.Kernels = .{ .set = .{ .glue = &ks }, .ops = .{ .d = &d, .handle = null } };
+     const stream: cuda.Stream = .{ .d = &d, .handle = null };
+-    var l = std.mem.zeroes(dsa.Layer);
++    var l: dsa.Layer = .{
++        .proj = .{ .bf16 = 0 }, .q_norm = 0, .kv_norm = 0, .q_b = .{ .bf16 = 0 },
++        .wk = 0, .wv = 0, .o = .{ .bf16 = 0 },
++        .index = .{ .kw = .{ .bf16 = 0 }, .gate = 0, .ln_w = 0, .ln_b = 0, .ape = 0,
++            .qb = .{ .bf16 = 0 }, .heads = 0, .d = 0 },
++        .heads = 0, .qk = 0, .dv = 0, .lw = 0, .q_lora = 0, .dims = 0, .eps = 0, .dense_limit = 0,
++    };
+     l.lw = 512;
+     l.heads = 32;
+     l.qk = 256;
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -8,6 +8,7 @@
+ const dflash = @import("dflash.zig");
+ const prompt_lp = @import("cuda_prompt_logprobs.zig");
+ const cuda = @import("cuda");
++const dflash_policy = @import("cuda_dflash_policy.zig");
+ 
+ const be = lanes.backend;
+ 
+@@ -19,15 +20,7 @@
+ const mtp_rows = 1 + engine.max_drafts;
+ const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
+ 
+-/// With DFlash2: a window's ms by rows on two GB10s (EXL3, TF_GLM_PROF: 86 to 107 ms at 5 to 8), shared as glm_cuda's.
+-const gb10_window_costs = costTable(max_rows, 52.0, 6.8);
+-const gb10_shared_costs = costTable(engine.shared_rows, 76.0, 4.1);
+-
+-fn costTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]lanes.config.Cost {
+-    var c: [n]lanes.config.Cost = undefined;
+-    for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = one + row * @as(f64, @floatFromInt(i)) };
+-    return c;
+-}
++pub const DraftPolicy = dflash_policy.Policy(max_rows, engine.shared_rows, lanes.config.Cost);
+ 
+ /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
+ const Lane = struct {
+@@ -50,6 +43,7 @@
+     next: u64 = 0,
+     bits: ?cuda.HostBuffer = null, // structured output's grammar words (shared_rows rows), device-read, at first use
+     bits_dev: u64 = 0,
++    draft_policy: DraftPolicy = .{},
+ 
+     pub fn deinit(self: *Lanes) void {
+         if (self.bits) |*b| b.free();
+@@ -112,10 +106,10 @@
+             .speculate_early = false,
+             .drafts = if (block) max_held else engine.max_drafts,
+             .draft_streams = block, // one block pass drafts every stream of the round
+-            .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
++            .mtp_step_ms = if (block) self.draft_policy.stepMs(max_held) else 0,
+             .draft_probabilities = block, // the selector's chances size each window against the costs below
+-            .window_costs = if (block) &gb10_window_costs else &.{},
+-            .shared_costs = if (block) &gb10_shared_costs else &.{},
++            .window_costs = if (block) &self.draft_policy.window else &.{},
++            .shared_costs = if (block) &self.draft_policy.shared else &.{},
+             .hidden_rows = sharing,
+             .batch_rows = if (sharing) engine.shared_rows else 0,
+             .max_streams = if (sharing) engine.max_shared else 1,
+@@ -445,7 +439,7 @@
+             held[i] = l;
+         }
+         try self.x.block(reqs[0..requests.len]);
+-        const cut = confidence();
++        const cut = self.draft_policy.config.confidence;
+         for (requests, held[0..requests.len]) |r, l| {
+             l.held_n = @min(r.depth, max_held);
+             var chain: f64 = 1; // glm_cuda's rule: past the first, a chain stops where its product falls under the cut
+@@ -455,12 +449,6 @@
+                 if (c.* == 0) chain = 0;
+             }
+         }
+-    }
+-
+-    /// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
+-    fn confidence() f64 {
+-        const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
+-        return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
+     }
+ 
+     /// DFlash2's chance for each held draft (the MTP head gives none: the lane core's per-depth rates stand).
+diff --git a/zig/src/families/glm/cuda_mtp_load.zig b/zig/src/families/glm/cuda_mtp_load.zig
+--- a/zig/src/families/glm/cuda_mtp_load.zig
++++ b/zig/src/families/glm/cuda_mtp_load.zig
+@@ -23,7 +23,13 @@
+         try L.whole(try L.get("layers.{d}.{s}", .{ i, name }), .bf16);
+         p.* = try L.put("mtp.{s}", .{what});
+     }
+-    // the draft head: quantize4 of the head's bf16 rows (an MXFP8 head's widened exactly), then make_q4's tiling
++    return .{ .enorm = out[0], .hnorm = out[1], .eh = out[2], .norm = out[3], .layer = layer_w, .draft = try draftHead(L, head_ck) };
++}
++
++/// Same vocabulary projection for MTP and DFlash2, independent of the MTP transformer layer.
++pub fn draftHead(L: anytype, head_ck: *core.Checkpoint) !q4.Q4 {
++    const c = &L.w.config;
++    // quantize4 of the head's bf16 rows (an MXFP8 head's widened exactly), then make_q4's tiling
+     const qk = L.tools.quant orelse return error.NoQuantizer;
+     const tk = L.tools.q4 orelse return error.NoQuantizer;
+     const n = L.w.share.vocab.len();
+@@ -56,5 +62,5 @@
+     const draft: q4.Q4 = .{ .w = tiled[0], .s = tiled[1], .b = tiled[2], .n = n, .k = k, .npad = q4.npadOf(n) };
+     try q4.pack(tk, L.stream, raw[0].ptr, raw[1].ptr, raw[2].ptr, draft);
+     try L.stream.synchronize();
+-    return .{ .enorm = out[0], .hnorm = out[1], .eh = out[2], .norm = out[3], .layer = layer_w, .draft = draft };
++    return draft;
+ }
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -154,6 +154,8 @@
+ 
+ /// `open` once the ranks' lines are up: NCCL, the engine and the link, then a follower's loop or rank 0's lanes.
+ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings, roce_bytes: usize) !Loaded {
++    const draft_policy = try glm_lanes.DraftPolicy.environment(o.drafter != null);
++    if (p.rank == 0 and o.drafter != null) draft_policy.log();
+     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
+     const own = try gpa.create(Owned);
+     errdefer gpa.destroy(own);
+@@ -226,6 +228,7 @@
+     }.get;
+     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
+     own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED") };
++    own.lanes.draft_policy = draft_policy;
+     return .{
+         .backend = own.lanes.backend(),
+         .facts = own.lanes.facts(),
+diff --git a/zig/src/families/glm/cuda_ranks.zig b/zig/src/families/glm/cuda_ranks.zig
+--- a/zig/src/families/glm/cuda_ranks.zig
++++ b/zig/src/families/glm/cuda_ranks.zig
+@@ -8,6 +8,7 @@
+ /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
+ pub const Settings = struct {
+     kv8: bool = false, // --kv-cache fp8, supplied by the native options rather than an environment override
++    a4_prefill: bool = false, // TF_GLM_A4_PREFILL, routed NVFP4 prompt arithmetic only
+     prompt_fixed_k: bool = false, // TF_GLM_PROMPT_K: one (default) or shape (experimental fixed K slices)
+     tiled: bool = true, // TF_GLM_MM: 1 (the bf16 linears on glm_mm, tiled at load) or 0
+     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
+@@ -22,6 +23,12 @@
+     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
+     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
+         var s: Settings = .{};
++        if (get("TF_GLM_A4_PREFILL")) |v| {
++            if (std.mem.eql(u8, v, "1")) s.a4_prefill = true else if (!std.mem.eql(u8, v, "0")) {
++                problem.* = "TF_GLM_A4_PREFILL: 0 or 1";
++                return error.BadSetting;
++            }
++        }
+         if (get("TF_GLM_PROMPT_K")) |v| {
+             if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
+                 problem.* = "TF_GLM_PROMPT_K: one or shape";
+@@ -99,10 +106,11 @@
+ 
+ /// What every rank must agree on, as bytes the communicator carries.
+ pub const Fingerprint = extern struct {
+-    layout: u32 = 11, // this struct's version
++    layout: u32 = 12, // includes A4 prompt arithmetic
+     world: u32,
+     rank: u32,
+     kv8: u32 = 0,
++    a4_prefill: u32 = 0,
+     prompt_fixed_k: u32,
+     tiled: u32,
+     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
+@@ -128,6 +136,7 @@
+         rank,
+         world,
+         kv8,
++        a4_prefill,
+         prompt_fixed_k,
+         tiled,
+         split,
+@@ -161,6 +170,7 @@
+     ) Fingerprint {
+         const f: Fingerprint = .{
+             .kv8 = @intFromBool(s.kv8),
++            .a4_prefill = @intFromBool(s.a4_prefill),
+             .world = @intCast(world),
+             .rank = @intCast(rank),
+             .prompt_fixed_k = @intFromBool(s.prompt_fixed_k),
+@@ -184,6 +194,12 @@
+ 
+ pub const Mismatch = struct { field: Fingerprint.Field, rank: usize };
+ 
++test "GLM A4 prefill changes the rank fingerprint" {
++    const a = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), @splat(0));
++    const b = Fingerprint.of(2, 1, .{ .a4_prefill = true }, 8192, true, @splat(0), @splat(0), @splat(0));
++    try std.testing.expectEqual(Fingerprint.Field.a4_prefill, mismatch(&.{ a, b }).?.field);
++}
++
+ /// The first field where rank `r`'s fingerprint differs from rank 0's (or holds the wrong rank), null when all agree.
+ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
+     for (all, 0..) |f, r| {
+@@ -191,6 +207,7 @@
+         if (f.rank != r) return .{ .field = .rank, .rank = r };
+         const fields = .{
+             "kv8",
++            "a4_prefill",
+             "prompt_fixed_k",
+             "world",
+             "tiled",
+@@ -299,6 +316,7 @@
+         .rank => "a rank number given twice or out of order",
+         .world => "the ranks were started with different world sizes",
+         .kv8 => "--kv-cache fp8",
++        .a4_prefill => "TF_GLM_A4_PREFILL",
+         .prompt_fixed_k => "TF_GLM_PROMPT_K",
+         .tiled => "TF_GLM_MM",
+         .split => "TF_GLM_PREFILL_REDUCE",
+diff --git a/zig/src/families/glm/cuda_tile.zig b/zig/src/families/glm/cuda_tile.zig
+--- a/zig/src/families/glm/cuda_tile.zig
++++ b/zig/src/families/glm/cuda_tile.zig
+@@ -166,14 +166,14 @@
+     for ([_]usize{ 1, 2, 3, 4, 5, 8 }) |world| for (0..world) |rank| {
+         const share = try Share.of(&c, rank, world);
+         var l: Layer = undefined;
+-        l.mixer = .{ .kda = .{ .proj = 1, .fb = 2, .gb = 3, .o = 4, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = share.kda.len(), .dims = c.hidden } };
++        l.mixer = .{ .kda = .{ .proj = .{ .bf16 = 1 }, .fb = 2, .gb = 3, .o = .{ .bf16 = 4 }, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = share.kda.len(), .dims = c.hidden } };
+         l.ffn = .{ .dense = .{ .w = .{ .nvfp4 = undefined }, .width = share.dense.len(), .dims = c.hidden, .limit = 0 } };
+         var list: std.ArrayList(Lin) = .empty;
+         defer list.deinit(a);
+         try layerLinears(a, &l, &list);
+         const aligned = share.kda.len() % 8 == 0;
+         try std.testing.expectEqual(@as(usize, if (aligned) 4 else 1), list.items.len);
+-        try std.testing.expectEqual(&l.mixer.kda.o, list.items[list.items.len - 1].field);
++        try std.testing.expectEqual(&l.mixer.kda.o.bf16, list.items[list.items.len - 1].field);
+         if (aligned) {
+             for (list.items, [_]u64{ 1, 2, 3, 4 }) |linear, ptr| try std.testing.expectEqual(ptr, linear.field.*);
+         }
+diff --git a/zig/src/families/glm/cuda_weights.zig b/zig/src/families/glm/cuda_weights.zig
+--- a/zig/src/families/glm/cuda_weights.zig
++++ b/zig/src/families/glm/cuda_weights.zig
+@@ -31,6 +31,7 @@
+ 
+ /// The MTP head (weights.MTPW): norms, eh_proj, a DSA + MoE layer (NVFP4 experts), shared_head.norm, 4-bit draft head.
+ pub const Mtp = struct { enorm: u64, hnorm: u64, eh: u64, norm: u64, layer: Layer, draft: q4.Q4 };
++pub const DraftLoad = enum { none, mtp, dflash };
+ 
+ /// The kernels a load runs: affine4_pack's tf_pack_dense, the FP8 lane, and the MTP head's quantizers and 4-bit tiling.
+ pub const Tools = struct { pack_dense: cuda.Function, lane: *const cuda.qmmf.Lane, quant: ?*const quant.Kernels = null, q4: ?*const q4.Kernels = null };
+@@ -47,6 +48,7 @@
+     norm: glue.Norm = .{ .bf16 = 0 },
+     head: projection.Proj = .{ .bf16 = 0 }, // [share.vocab][dims]: bf16, or MXFP8 for the lane
+     mtp: ?Mtp = null,
++    draft_head: ?q4.Q4 = null, // DFlash uses this vocabulary projection, not the MTP transformer layer
+     exl3_shx: bool = true, // EXL3: every layer's gate and up share one input rotation (a prompt rotates each row once)
+     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
+     named: std.ArrayList(Named) = .empty,
+@@ -67,18 +69,8 @@
+     }
+ };
+ 
+-/// Host bf16 from fp32: round to nearest even (torch's float -> bfloat16), NaN kept quiet.
+-fn toBf16(v: f32) u16 {
+-    const b: u32 = @bitCast(v);
+-    if (std.math.isNan(v)) return @intCast((b >> 16) | 0x40);
+-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
+-}
+-
+-/// A float32 narrowed to bf16 by the loader, or null when bf16 does not hold it exactly (NaN stays NaN).
+-fn narrow(v: f32) ?u16 {
+-    const h = toBf16(v);
+-    return if (std.math.isNan(v) or @as(f32, @bitCast(@as(u32, h) << 16)) == v) h else null;
+-}
++const toBf16 = @import("cuda_bf16.zig").toBf16;
++const narrow = @import("cuda_bf16.zig").narrow;
+ 
+ const Loader = struct {
+     gpa: std.mem.Allocator,
+@@ -486,6 +478,9 @@
+         defer L.gpa.free(up_scale);
+         const down_scale = try L.gpa.alloc(f32, count);
+         defer L.gpa.free(down_scale);
++        const input_scales = try L.gpa.alloc(f32, count * 3);
++        defer L.gpa.free(input_scales);
++        @memset(input_scales, 0);
+         const codes = try L.gpa.alloc(u8, d * ni / 2);
+         defer L.gpa.free(codes);
+         const scales = try L.gpa.alloc(u8, d * ni / 16);
+@@ -500,6 +495,13 @@
+             inline for (.{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, m| {
+                 const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj, .{ i, e });
+                 ls[m] = try formats.expert(L, name, decoded[m * per ..][0..per]);
++                if (i < c.layers) {
++                    const t = try L.get("layers.{d}.mlp.experts.{d}." ++ proj ++ ".input_scale", .{ i, e });
++                    if (t.dtype != .f32 or t.numel() != 1) return error.InvalidA4InputScale;
++                    const v = std.mem.bytesToValue(f32, t.bytes[0..4]);
++                    if (!(v > 0) or !std.math.isFinite(v)) return error.InvalidA4InputScale;
++                    input_scales[e * 3 + m] = v;
++                }
+             }
+             // gate and up: the rank's rows; down: every row, the rank's columns
+             const gate = .{ ls[0].codes[cut.lo * d / 2 ..][0 .. ni * d / 2], ls[0].scales[cut.lo * d / 16 ..][0 .. ni * d / 16] };
+@@ -520,7 +522,12 @@
+             try L.host.appendSlice(L.gpa, bytes);
+             p.* = try L.put("layers.{d}.moe.experts.{s}", .{ i, what });
+         }
+-        return .{ .format = .nvfp4, .up = ptrs[0], .down = ptrs[1], .up_scale = ptrs[2], .down_scale = ptrs[3], .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
++        var ip: u64 = 0;
++        if (i < c.layers) {
++            try L.host.appendSlice(L.gpa, std.mem.sliceAsBytes(input_scales));
++            ip = try L.put("layers.{d}.moe.experts.input_scales", .{i});
++        }
++        return .{ .format = .nvfp4, .up = ptrs[0], .down = ptrs[1], .up_scale = ptrs[2], .down_scale = ptrs[3], .input_scales = ip, .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
+     }
+ 
+     fn layer(L: *Loader, i: u32) !Layer {
+@@ -543,7 +550,7 @@
+ };
+ 
+ /// weights.load without the MTP head: embedding, layers, final norm, the rank's head rows (bf16, MXFP8); `pack_dense`.
+-pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, tools: Tools, dir: []const u8, c: cfg.Config, share: shard.Share, layers: []const u32, with_mtp: bool) !Weights {
++pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, tools: Tools, dir: []const u8, c: cfg.Config, share: shard.Share, layers: []const u32, drafting: DraftLoad) !Weights {
+     var w: Weights = .{ .gpa = gpa, .config = c, .share = share };
+     errdefer w.deinit();
+     var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, prefix);
+@@ -566,24 +573,17 @@
+     w.norm = try L.norm("norm.weight", .{}, "norm");
+     const vocab: formats.Part = .{ .rel = "lm_head", .rows = .{ share.vocab.lo, share.vocab.hi } };
+     w.head = try formats.cut(&L, &head_ck, &.{"lm_head"}, &.{vocab}, &.{ .bf16, .mxfp8 }, "head", .{});
+-    if (with_mtp and c.mtp > 0) w.mtp = try @import("cuda_mtp_load.zig").load(&L, &head_ck);
++    if (drafting == .mtp and c.mtp > 0) {
++        w.mtp = try @import("cuda_mtp_load.zig").load(&L, &head_ck);
++        w.draft_head = w.mtp.?.draft;
++    } else if (drafting == .dflash) {
++        w.draft_head = try @import("cuda_mtp_load.zig").draftHead(&L, &head_ck);
++    }
+     return w;
+ }
+ 
+-test "bf16 rounding of fp32 is to nearest even" {
+-    try std.testing.expectEqual(@as(u16, 0x3f80), toBf16(1.0));
+-    try std.testing.expectEqual(@as(u16, 0x3f80), toBf16(@bitCast(@as(u32, 0x3f808000)))); // a tie to even (down)
+-    try std.testing.expectEqual(@as(u16, 0x3f82), toBf16(@bitCast(@as(u32, 0x3f818000)))); // a tie to even (up)
+-    try std.testing.expectEqual(@as(u16, 0x3f81), toBf16(@bitCast(@as(u32, 0x3f808001))));
+-}
+-
+-test "the loader narrows a float32 to bf16 only when bf16 holds it, unlike FP4-Local's norms" {
+-    try std.testing.expectEqual(@as(?u16, 0x3f80), narrow(1.0));
+-    try std.testing.expectEqual(@as(?u16, null), narrow(@bitCast(@as(u32, 0x3f808001))));
+-    try std.testing.expect(narrow(std.math.nan(f32)) != null);
+-}
+-
+ test {
++    _ = @import("cuda_bf16.zig");
+     _ = @import("cuda_formats.zig");
+     _ = @import("cuda_proj.zig");
+     _ = @import("cuda_fp8pb.zig");
+diff --git a/zig/src/families/glm/dflash_block.zig b/zig/src/families/glm/dflash_block.zig
+--- a/zig/src/families/glm/dflash_block.zig
++++ b/zig/src/families/glm/dflash_block.zig
+@@ -158,7 +158,7 @@
+     }
+     // every row through the drafts' 4-bit head (this rank's vocabulary), its 16 best, gathered; rank 0's projections
+     try glue.rmsnorm(set(e), e.stream, dr.x, D, dr.norm, dr.hn, D, dr.xs, df.EPS, M, D);
+-    const head = e.w.mtp.?.draft;
++    const head = e.w.draft_head orelse return error.DrafterNeedsDraftHead;
+     var r0: usize = 0;
+     while (r0 < M) : (r0 += 16) {
+         const rows = @min(16, M - r0);
+diff --git a/zig/src/families/glm/dflash_load.zig b/zig/src/families/glm/dflash_load.zig
+--- a/zig/src/families/glm/dflash_load.zig
++++ b/zig/src/families/glm/dflash_load.zig
+@@ -117,7 +117,7 @@
+     if (bits != 0 and bits != 4) return error.BadDrafterBits;
+     try checkConfig(gpa, io, dir);
+     const d = e.d;
+-    const head = (e.w.mtp orelse return error.DrafterNeedsDraftHead).draft;
++    const head = e.w.draft_head orelse return error.DrafterNeedsDraftHead;
+     const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors" });
+     defer gpa.free(path);
+     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+diff --git a/zig/tests/cuda/contract_glm_a4.zig b/zig/tests/cuda/contract_glm_a4.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/contract_glm_a4.zig
+@@ -0,0 +1,314 @@
++//! The wider GLM A4 N tile is a bit-preserving replacement, not a new quantization/reference claim.
++//! Independent finite FP64 cases also live in tests/test_a4.py; gate 4 uses exactly representable dyadic sums.
++const std = @import("std");
++const cuda = @import("cuda");
++const core = @import("core");
++const rig_ = @import("contract_rig.zig");
++const check_ = @import("check.zig");
++const c = core.contract.spec;
++const g = core.contract.gates;
++const experts = 4;
++const slots = 4;
++
++fn depth(s: c.Shape) usize {
++    return s.k / 64 + 64;
++}
++
++pub fn spec(up: bool) c.Spec {
++    return .{
++        .name = if (up) "cuda glm A4 up N128" else "cuda glm A4 down N128",
++        .accum = .f32,
++        .depth = depth,
++        .ops = if (up) 8 else 1,
++        .mids = if (up) 3 else 0,
++        .out = .bf16,
++        .replaces = if (up) "tf_glm_a4_prompt_up N64" else "tf_glm_a4_prompt_down N64",
++        .nan = .{ .stated = "bitwise equal to N64 for NaN and infinite globals and BF16 inputs" },
++        .tiles = .{ .{ .size = 64 / slots }, .{ .size = 128, .step = 32, .min = 32 },
++            .{ .size = 64, .step = 64, .min = 64 } },
++        .served = if (up) &.{ .{ .rows = 17, .n = 768, .k = 4096 },
++            .{ .rows = 65, .n = 1024, .k = 4096 } } else &.{ .{ .rows = 17, .n = 4096, .k = 768 },
++            .{ .rows = 65, .n = 4096, .k = 1024 } },
++    };
++}
++
++pub const Prompt = struct {
++    rig: rig_.Rig,
++    up: bool,
++    candidate: cuda.Function,
++    baseline: cuda.Function,
++    arena: std.heap.ArenaAllocator,
++    shape: c.Shape = undefined,
++    ptrs: [8]u64 = @splat(0), // x, compact weights, globals, input scales, items, counts, members, output
++    base: u64 = 0,
++    nitems: usize = 0,
++    stress_terms: []f64 = &.{}, // [N][K] independent products, shared across identically filled rows/experts
++
++    pub fn init(rig: rig_.Rig, up: bool, mod: cuda.Module) !Prompt {
++        return .{ .rig = rig, .up = up, .arena = .init(rig.gpu.gpa),
++            .candidate = try mod.function(if (up) "tf_glm_a4_prompt_up_n128" else "tf_glm_a4_prompt_down_n128"),
++            .baseline = try mod.function(if (up) "tf_glm_a4_prompt_up" else "tf_glm_a4_prompt_down") };
++    }
++
++    pub fn deinit(self: *Prompt) void {
++        self.arena.deinit();
++        self.rig.deinit();
++    }
++
++    pub fn kernel(self: *Prompt) g.Kernel {
++        return .{ .spec = spec(self.up), .ctx = self, .vt = &vt };
++    }
++
++    const vt = g.hooks(Prompt);
++
++    pub fn count(self: *Prompt) usize {
++        return self.shape.rows * slots * self.shape.n;
++    }
++
++    pub fn prepare(self: *Prompt, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
++        if (shape.rows == 0 or shape.n == 0 or shape.n % 32 != 0 or shape.k == 0 or shape.k % 64 != 0)
++            return false;
++        self.rig.reset();
++        _ = self.arena.reset(.retain_capacity);
++        self.stress_terms = &.{};
++        self.shape = shape;
++        const a = self.arena.allocator();
++        const parts: usize = if (self.up) 2 else 1;
++        const pairs = shape.rows * slots;
++        const xrows = if (self.up) shape.rows else pairs;
++        const x = try a.alloc(u16, xrows * (shape.k + 16));
++        const w = try a.alloc(u32, experts * (shape.n / 32) * (shape.k / 32) * parts * 144);
++        const globals = try a.alloc(f32, experts * parts);
++        const input = try a.alloc(f32, experts * 3);
++        const members = try a.alloc(i32, pairs);
++        var items: std.ArrayList(i32) = .empty;
++        var prng = std.Random.DefaultPrng.init(seed);
++        const rng = prng.random();
++        for (x, 0..) |*v, i| v.* = c.toBf16(if (i < shape.k) 0 else (rng.float(f32) - 0.5) * 12);
++        rng.bytes(std.mem.sliceAsBytes(w));
++        // Independently random E2M1 codes and finite power-of-two E4M3 block scales in the existing pack.
++        var block: usize = 0;
++        while (block < w.len) : (block += 144) {
++            const scales = std.mem.sliceAsBytes(w[block + 128 .. block + 144]);
++            for (scales) |*v| v.* = 0x18 + 8 * rng.uintLessThan(u8, 6);
++        }
++        for (globals) |*v| v.* = 0.005 + rng.float(f32) * 0.025;
++        for (input, 0..) |*v, i| v.* = 0.125 * @as(f32, @floatFromInt(i % 7 + 1));
++        if (fill == .stress) try self.stress(a, rng, x, w, globals, input);
++        if (fill == .nonfinite) {
++            globals[parts] = std.math.nan(f32);
++            globals[2 * parts] = std.math.inf(f32);
++            globals[3 * parts] = -std.math.inf(f32);
++            const row = if (xrows > 1) shape.k + 16 else 0;
++            x[row + 2] = c.toBf16(std.math.nan(f32));
++            x[row + 3] = c.toBf16(std.math.inf(f32));
++        }
++        var nmembers: usize = 0;
++        // Include a skipped shared expert and deliberately uneven routing, tails and extra inactive CTAs.
++        for (0..experts + 1) |e| {
++            var start = nmembers;
++            for (0..pairs) |p| {
++                const pick = if (fill != .stress and p % 11 == 0) experts else (p / 3) % experts;
++                if (pick != e) continue;
++                members[nmembers] = @intCast(p);
++                nmembers += 1;
++                if (nmembers - start == 64) {
++                    try items.appendSlice(a, &.{ @intCast(e), @intCast(start), 64 });
++                    start = nmembers;
++                }
++            }
++            if (nmembers > start) try items.appendSlice(a, &.{ @intCast(e), @intCast(start), @intCast(nmembers - start) });
++        }
++        self.nitems = items.items.len / 3;
++        const count_: i32 = @intCast(self.nitems);
++        const r = &self.rig;
++        self.ptrs = .{ try r.input(std.mem.sliceAsBytes(x)), try r.input(std.mem.sliceAsBytes(w)),
++            try r.input(std.mem.sliceAsBytes(globals)), try r.input(std.mem.sliceAsBytes(input)),
++            try r.input(std.mem.sliceAsBytes(items.items)), try r.input(std.mem.asBytes(&count_)),
++            try r.input(std.mem.sliceAsBytes(members)), try r.output(self.count() * 2) };
++        self.base = try r.scratch(self.count() * 2);
++        return true;
++    }
++
++    fn launch(self: *Prompt, wide: bool) !void {
++        const p = self.ptrs;
++        const dest = if (wide) p[7] else self.base;
++        const buf: cuda.DeviceBuffer = .{ .d = self.rig.gpu.d, .ptr = dest, .len = self.count() * 2 };
++        try buf.fill8(0xff, self.rig.s.handle);
++        const n = self.shape.n;
++        const tile: usize = if (wide) 128 else 64;
++        var args: cuda.Args = .{};
++        args.add(p[0]);
++        args.add(@as(i32, @intCast(self.shape.k + 16)));
++        args.add(@as(i32, if (self.up) slots else 0));
++        inline for (.{ p[1], p[2], p[3] }) |v| args.add(v);
++        args.add(@as(i32, @intCast(self.shape.k)));
++        args.add(@as(i32, @intCast(n)));
++        inline for (.{ p[4], p[5], p[6], dest }) |v| args.add(v);
++        args.add(@as(f32, 10));
++        args.add(@as(i32, experts));
++        try cuda.launch.launch(if (wide) self.candidate else self.baseline,
++            .{ .grid = .{ .x = @intCast((self.nitems + 3) * ((n + tile - 1) / tile)) },
++                .block = .{ .x = @intCast(tile * 2) } }, self.rig.s, &args);
++        try self.rig.s.synchronize();
++    }
++
++    pub fn run(self: *Prompt) !void {
++        try self.launch(true);
++    }
++
++    pub fn replaced(self: *Prompt) ![]const u8 {
++        try self.launch(false);
++        return self.rig.bytes(self.base, self.count() * 2);
++    }
++
++    pub fn check(self: *Prompt, _: g.Gate) !?[]const u8 {
++        const got = try self.rig.outputBytes();
++        const base = try self.replaced();
++        if (!std.mem.eql(u8, got, base)) return "N128 bytes differ from unchanged N64 baseline";
++        return null;
++    }
++
++    // Half-integer E2M1 codes in the A16 compact schema; this does not call the device packer.
++    fn put(self: *Prompt, w: []u32, e: usize, m: usize, n: usize, k: usize, code: u8) void {
++        const parts: usize = if (self.up) 2 else 1;
++        const base = (((e * (self.shape.n / 32) + n / 32) * (self.shape.k / 32) + k / 32) * parts + m) * 144;
++        const j = (n % 32) / 8;
++        const group = n % 8;
++        const t = (k % 16) / 4;
++        const h = (k % 32) / 16;
++        const q = k % 4;
++        const shift: u5 = @intCast(4 * (2 * h + q / 2 + 4 * (q % 2)));
++        const at = base + (group * 4 + t) * 4 + j;
++        w[at] = (w[at] & ~(@as(u32, 15) << shift)) | (@as(u32, code) << shift);
++    }
++
++    /// Mirror large positive/negative integer products, leaving -128. Every FP32 partial is < 2^24.
++    /// Input max 96 quantizes exactly with scale 16; all weight block scales are 8, globals 1/256.
++    /// Up's gate has one product 256, hence gate=1; its up sum=-128, hence up=-0.5, with no clipping.
++    fn stress(self: *Prompt, a: std.mem.Allocator, rng: std.Random, x: []u16, w: []u32,
++        globals: []f32, input: []f32) !void
++    {
++        const k = self.shape.k;
++        const n = self.shape.n;
++        const half = k / 2;
++        const xrows = if (self.up) self.shape.rows else self.shape.rows * slots;
++        @memset(x, c.toBf16(96));
++        for (0..xrows) |row| x[row * (k + 16)] = c.toBf16(64);
++        @memset(w, 0);
++        var block: usize = 0;
++        while (block < w.len) : (block += 144) @memset(std.mem.sliceAsBytes(w[block + 128 .. block + 144]), 0x50);
++        @memset(globals, 1.0 / 256.0);
++        @memset(input, 1);
++        self.stress_terms = try a.alloc(f64, n * k);
++        const part: usize = if (self.up) 1 else 0;
++        for (0..n) |col| {
++            for (0..half) |i| {
++                const code: u8 = if (i == 0) 1 else 6 + rng.uintLessThan(u8, 2);
++                const value: f64 = if (code == 1) 4 else if (code == 6) 32 else 48;
++                self.stress_terms[col * k + i] = (if (i == 0) @as(f64, 64) else 96) * value;
++                self.stress_terms[col * k + half + i] = -96 * value;
++                for (0..experts) |e| {
++                    self.put(w, e, part, col, i, code);
++                    self.put(w, e, part, col, half + i, code | 8);
++                }
++            }
++            if (self.up) for (0..experts) |e| self.put(w, e, 0, col, 0, 1);
++        }
++    }
++
++    fn bf(v: f64) f64 {
++        return c.fromBf16(c.toBf16(@floatCast(v)));
++    }
++
++    /// The actual BF16 boundaries and CUDA fmin/fmax NaN handling, including the final BF16 store.
++    fn finish(self: *Prompt, sum: f64) f64 {
++        const scaled: f64 = @as(f32, @floatCast(sum * (1.0 / 256.0)));
++        if (!self.up) return bf(scaled);
++        var up = bf(scaled);
++        if (std.math.isNan(up)) up = -10;
++        up = std.math.clamp(up, -10, 10);
++        const gate_silu = bf(1.0 / (1.0 + @exp(-@as(f64, 1))));
++        return bf(gate_silu * up);
++    }
++
++    pub fn reference(self: *Prompt, want: []f64, mag: []f64) !void {
++        if (self.stress_terms.len == 0) return error.BitPreservingReplacementOnly;
++        const n = self.shape.n;
++        const k = self.shape.k;
++        for (0..n) |col| {
++            var sum: f64 = 0;
++            var magnitude: f64 = 0;
++            for (self.stress_terms[col * k ..][0..k]) |v| {
++                sum += v;
++                magnitude += @abs(v);
++            }
++            for (0..self.shape.rows * slots) |row| {
++                want[row * n + col] = self.finish(sum);
++                mag[row * n + col] = magnitude;
++            }
++        }
++    }
++
++    pub fn simulate(self: *Prompt, acc: c.Accum, order: g.Order, out: []f64) !void {
++        if (self.stress_terms.len == 0) return error.NotStressInputs;
++        const n = self.shape.n;
++        const k = self.shape.k;
++        for (0..n) |col| {
++            const sum = core.contract.rows.sumIn(acc, order, self.stress_terms[col * k ..][0..k]);
++            for (0..self.shape.rows * slots) |row| out[row * n + col] = self.finish(sum);
++        }
++    }
++
++    /// Gate 4's integer partials and 1/256 alpha are exact; final BF16 boundaries are in the reference.
++    /// silu(1)=0.73105858 rounds to 0.73046875, far from either BF16 midpoint; the product is dyadic.
++    pub fn bounds(self: *Prompt, _: []const f64, _: []const f64, allow: []f64) !void {
++        if (self.stress_terms.len == 0) return error.NotStressInputs;
++        @memset(allow, 0);
++    }
++};
++
++/// Focused gates 1-5 for the same registrations, without loading unrelated families or their controls.
++pub fn run(gpu: check_.Gpu) !void {
++    if (try gpu.ctx.capability() != 121) return error.GlmA4RequiresSm121;
++    if (!cuda.kernels.available) return error.BuiltWithoutKernels;
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var mod = try cuda.Module.load(gpu.d, cuda.kernels.nvfp4_experts);
++    defer mod.unload();
++    var up = try Prompt.init(.{ .gpu = gpu, .s = s }, true, mod);
++    defer up.deinit();
++    var down = try Prompt.init(.{ .gpu = gpu, .s = s }, false, mod);
++    defer down.deinit();
++    const kernels = [_]g.Kernel{ up.kernel(), down.kernel() };
++    var tally: g.Tally = .{};
++    try g.runAll(gpu.gpa, &kernels, 0x6b63, &tally);
++    const limits = core.contract.limits;
++    var problems: usize = 0;
++    var count_: usize = 0;
++    for (core.contract.registry.all_cuda) |r| {
++        if (!std.mem.startsWith(u8, r.launch.name, "glm_a4 ")) continue;
++        count_ += 1;
++        const symbol = try gpu.gpa.dupeSentinel(u8, r.launch.symbol, 0);
++        defer gpu.gpa.free(symbol);
++        const f = try mod.function(symbol);
++        const got: limits.Usage = .{ .regs = @intCast(try f.attribute(.num_regs)),
++            .static = @intCast(try f.attribute(.shared_size_bytes)),
++            .bound = @intCast(try f.attribute(.max_threads_per_block)),
++            .local = @intCast(try f.attribute(.local_size_bytes)) };
++        var errors: std.ArrayList(u8) = .empty;
++        defer errors.deinit(gpu.gpa);
++        problems += try limits.cuda(r.launch, got, limits.sms[4], &errors, gpu.gpa);
++        const current = std.meta.eql(got, r.usage[4]);
++        if (!current) problems += 1;
++        std.debug.print("{s} limits {s}: regs={d} shared={d} bound={d} local={d} (record {s})\n",
++            .{ if (current and errors.items.len == 0) "PASS" else "FAIL", r.launch.name,
++                got.regs, got.static, got.bound, got.local, if (current) "current" else "stale" });
++        if (errors.items.len > 0) std.debug.print("{s}", .{errors.items});
++    }
++    if (count_ != 4) problems += 1;
++    std.debug.print("A4 candidate: {d} pass, {d} fail, {d} known; {d} limit problems\n",
++        .{ tally.passed, tally.failed, tally.known, problems });
++    try check_.expect(tally.problems() + problems == 0,
++        "A4 candidate failed: {d} kernels, {d} physical limits", .{ tally.failed, problems });
++}
+diff --git a/zig/tests/cuda/contract_tests.zig b/zig/tests/cuda/contract_tests.zig
+--- a/zig/tests/cuda/contract_tests.zig
++++ b/zig/tests/cuda/contract_tests.zig
+@@ -26,6 +26,7 @@
+ const latent_k = @import("contract_latent.zig");
+ const act_round_k = @import("contract_act_round.zig");
+ const f32w_k = @import("contract_glm_f32w.zig");
++const glm_a4_k = @import("contract_glm_a4.zig");
+ 
+ const round_k = @import("contract_tree_round.zig");
+ 
+@@ -61,6 +62,7 @@
+ 
+ /// The named embedded image; only contract_controls may select the planted controls.
+ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
++    if (std.mem.eql(u8, name, "nvfp4_experts")) return kk.nvfp4_experts;
+     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
+     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
+     inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+@@ -420,6 +422,20 @@
+     f32w_control.bf16_gamma = true;
+     defer f32w_control.deinit();
+     try kernels.append(a, f32w_control.kernel());
++    // The A4 candidate is qualified only on the local SM121a target; retain a real replaced-kernel hook.
++    var glm_a4_mod: ?cuda.Module = null;
++    defer if (glm_a4_mod) |*m| m.unload();
++    var glm_a4_list: [2]glm_a4_k.Prompt = undefined;
++    var glm_a4_count: usize = 0;
++    defer for (glm_a4_list[0..glm_a4_count]) |*x| x.deinit();
++    if (cap == 121) {
++        glm_a4_mod = try cuda.Module.load(gpu.d, kk.nvfp4_experts);
++        for ([_]bool{ true, false }, &glm_a4_list) |up, *x| {
++            x.* = try .init(.{ .gpu = gpu, .s = s }, up, glm_a4_mod.?);
++            glm_a4_count += 1;
++            try kernels.append(a, x.kernel());
++        }
++    }
+     var t: g.Tally = .{};
+     try @import("contract_dump.zig").run(a, kernels.items);
+     const t0 = check.now(gpu.io);
+@@ -439,6 +455,12 @@
+     const t2 = check.now(gpu.io);
+     std.debug.print("SUMMARY {d} kernels: {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: {d} red as planted, {d} missed; {d} limit problems; gates {d} ms, limits {d} ms\n", .{ t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed, lim, @divTrunc(t1 - t0, std.time.ns_per_ms), @divTrunc(t2 - t1, std.time.ns_per_ms) });
+     try check.expect(t.problems() + lim == 0, "kernel-contract: {d} gate failures, {d} controls missed, {d} limit problems", .{ t.failed, t.missed, lim });
++}
++
++/// Focused local candidate audit through the same gates as the unified runner.
++/// Includes the independent dyadic FP32 stress fixture; no gate failure is hidden as a known finding.
++pub fn runGlmA4(gpu: check.Gpu) !void {
++    return glm_a4_k.run(gpu);
+ }
+ 
+ /// Gate 5 on this GPU: the table's row for it against the driver, each record against the loaded function.
+diff --git a/zig/tests/cuda/glm_loader_gate.zig b/zig/tests/cuda/glm_loader_gate.zig
+--- a/zig/tests/cuda/glm_loader_gate.zig
++++ b/zig/tests/cuda/glm_loader_gate.zig
+@@ -439,7 +439,7 @@
+ /// Rank `rank` of `world` loaded, each upload compared: how many differ or are not known, one more if none was.
+ fn rankGate(gpu: check.Gpu, a: std.mem.Allocator, ck: *core.Checkpoint, c: *const Config, m: *const glm.forward.Modules, stream: cuda.Stream, dir: []const u8, layers: []const u32, rank: usize, world: usize, tamper: *Tamper) !usize {
+     const s = try glm.shard.Share.of(c, rank, world);
+-    var w = try glm.weights.load(gpu.gpa, gpu.io, gpu.d, stream, m.tools(), dir, c.*, s, layers, true);
++    var w = try glm.weights.load(gpu.gpa, gpu.io, gpu.d, stream, m.tools(), dir, c.*, s, layers, .mtp);
+     defer w.deinit();
+     var bad: usize = 0;
+     var cut: usize = 0;
+diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+--- a/zig/tests/cuda/main.zig
++++ b/zig/tests/cuda/main.zig
+@@ -198,6 +198,7 @@
+     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
+     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
+     \\  kernel-contract           the registered kernels through the contract's gates, each planted control red (needs -Dnvcc)
++    \\  kernel-contract-glm-a4    focused N64/N128 A4 replacement audit, including FP32 accumulation stress
+     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
+     \\  glm-exl3                  GLM's EXL3 routed experts, decode and prompt, against float64 (synthetic)
+     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
+@@ -379,6 +380,7 @@
+     if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
+     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
+     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu);
++    if (std.mem.eql(u8, cmd, "kernel-contract-glm-a4")) return contract_tests.runGlmA4(gpu);
+     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
+     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
+     if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);

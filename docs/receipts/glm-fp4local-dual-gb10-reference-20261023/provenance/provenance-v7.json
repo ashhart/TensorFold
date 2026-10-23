@@ -1,0 +1,19 @@
+{
+  "status": "diagnostic_candidate_not_promoted",
+  "date": "2026-10-23",
+  "image": "local-reference/tensorfold-fp4local:exp-v7-20261023",
+  "image_id": "sha256:8676dafdf71fc035c4e5a5a0c3acc8b8698e5e1fd273ca6dff17e44f5819c4d3",
+  "binary_sha256": "c5b77e328359351a7e6f6ea23434978ced9bf7b0012447100061b0b757281993",
+  "source_archive": "results/source-v7-20261023.tar.gz",
+  "source_archive_sha256": "1706077d70b5d6bf15c9d0aa9d84d87c0307ecb2c5c379ad4bd4c52b6ead736f",
+  "upstream_base": "f8d254c5e0f9ab91eb325a2e7c28d2e5cb07c94d",
+  "loader_commit": "b960da830a2722e39513f354211efe2f4531cd02",
+  "host_tests": {"passed": 1055, "skipped": 2, "failed": 0},
+  "route_host_target": "test-glm-route-profile-host passed",
+  "round_trace_focused_tests": "2 passed",
+  "tuning": "off",
+  "inference_precision_changed": false,
+  "default_controller_changed": false,
+  "port": 8890,
+  "rollback": "tfctl stop, then tfctl start original 8890 (immutable v5)"
+}
