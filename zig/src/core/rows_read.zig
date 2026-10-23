@@ -79,6 +79,16 @@ fn bad(r: *Rows, name: Name, ext: []const u8, err: anyerror) anyerror {
     return err;
 }
 
+/// State `i`'s own file still on disk with its trailer, checked before kept states go to make room for reading it.
+fn present(r: *Rows, i: usize) !void {
+    const st = r.states.items[i];
+    var buf: [1200]u8 = undefined;
+    const p = try file.path(&buf, r.dir, &chain.hex(st.name), ".st", false);
+    var o = file.open(p, .state, st.name) catch |err| return bad(r, st.name, ".st", err);
+    defer o.close();
+    if (o.trailer.block != r.keying.block or o.trailer.at != st.at) return bad(r, st.name, ".st", error.RowsRead);
+}
+
 /// A disk state reaching further than `have`, read back into a new RAM entry where that costs less than prefilling.
 pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry) ?*pc.Entry {
     const r = s.disk orelse return have;
@@ -86,6 +96,7 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
     const st = r.states.items[i];
     const bytes = s.family.vtable.bytes(s.family.ptr, st.at);
     if (bytes > s.budget or s.most == 0) return have;
+    if (!ready(s, bytes)) present(r, i) catch return have; // nothing goes to make room for a state whose file is gone
     while (!ready(s, bytes)) {
         if (s.family.vtable.trim) |trim| {
             const spare = s.spare();
