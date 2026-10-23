@@ -345,6 +345,11 @@ pub const Engine = struct {
         return e.scores.?.ptr;
     }
 
+    /// The pass's rows as admitted: the scratch's own capacity, so a caller can price its requests without growing it.
+    pub fn admittedRows(e: *Engine) usize {
+        return if (e.batch_s) |*bs| bs.cap else 0;
+    }
+
     /// Scratch for chunks of `rows` rows, reallocated only to grow.
     pub fn reserve(e: *Engine, rows: usize) !*batch.Scratch {
         if (e.batch_s) |*bs| {

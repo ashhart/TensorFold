@@ -7,6 +7,15 @@ const batch = @import("cuda_batch.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
 const mtp = @import("cuda_mtp.zig");
+const plan = @import("cuda_mtp_plan.zig");
+
+/// One group of lanes in the batched head's pass: the lanes' drafts, their rows and whether the head scores.
+const Group = struct {
+    ds: []const *Draft,
+    nexts: []const []const u32,
+    rows: []const u64,
+    scores: bool,
+};
 
 const dims = wt.dims;
 const streams = wt.streams;
@@ -233,8 +242,6 @@ pub fn Ops(comptime Tri: type) type {
         /// forwardHead over several drafts in one pass, a lane each: every row's ops and sums as a lone forwardHead's.
         pub fn forwardHeadMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, scores: bool) !void {
             const e = o.e;
-            const tri = o.tri;
-            const h = o.h;
             const n_l = ds.len;
             if (n_l == 0) return;
             var total: usize = 0;
@@ -245,17 +252,43 @@ pub fn Ops(comptime Tri: type) type {
                 total += nx.len;
                 cap = @max(cap, d.cap);
             }
-            const s = try e.reserve(@max(@as(usize, 32), 2 * total));
-            if (total > s.cap or n_l > max_lanes) return error.UnexpectedTensor;
-            const score_rows = try e.reserveScores(cap, piece_rows);
+            if (n_l > max_lanes) return error.UnexpectedTensor;
+            // the head's plan: the admitted capacity bounds the pass's rows, so the head never grows the shared scratch
+            const pl = plan.plan(e.admittedRows(), total);
+            const s = try e.reserve(pl.pass_rows);
+            // the engine's block scores, priced to the piece (the single-stream head's rule)
+            const score_rows = try e.reserveScores(cap, pl.score_rows);
+            // the lanes in groups whose rows fit the piece
+            var lane_rows: [max_lanes]usize = undefined;
+            for (nexts, 0..) |nx, i| lane_rows[i] = nx.len;
+            var group_sizes: [max_lanes]usize = undefined;
+            const n_groups = plan.groups(lane_rows[0..n_l], pl.piece, group_sizes[0..]);
+            var at: usize = 0;
+            for (group_sizes[0..n_groups]) |g| {
+                try o.headGroup(.{ .ds = ds[at..][0..g], .nexts = nexts[at..][0..g], .rows = rows[at..][0..g], .scores = scores }, s, score_rows);
+                at += g;
+            }
+        }
+
+        /// One group of lanes' rows in one pass: the head's rows beside the others', each lane's last row its own.
+        fn headGroup(o: Self, group: Group, s: *batch.Scratch, score_rows: u64) !void {
+            const e = o.e;
+            const tri = o.tri;
+            const h = o.h;
+            const ds = group.ds;
+            const nexts = group.nexts;
+            const n_l = ds.len;
+            var total: usize = 0;
             var lane_buf: [max_lanes]batch.Lane = undefined;
             var ids_buf: [max_lanes * piece_rows]u32 = undefined;
             var at: usize = 0;
             for (ds, nexts, 0..) |d, nx, i| {
+                total += nx.len;
                 lane_buf[i] = .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = nx.len };
                 @memcpy(ids_buf[at..][0..nx.len], nx);
                 at += nx.len;
             }
+            if (total > s.cap) return error.UnexpectedTensor;
             var p: batch.Pass(Tri) = .{
                 .gpa = e.gpa,
                 .io = e.io,
@@ -282,7 +315,7 @@ pub fn Ops(comptime Tri: type) type {
             try p.sumSlices(s.part, s.branch, true, total * dims, esk);
             // each lane's rows of main-model streams, side by side (the head reads them as one block of rows)
             at = 0;
-            for (rows, nexts) |r, nx| {
+            for (group.rows, nexts) |r, nx| {
                 try p.copy(s.ple_nrow + at * wide * 2, r, nx.len * wide * 2);
                 at += nx.len;
             }
@@ -303,14 +336,14 @@ pub fn Ops(comptime Tri: type) type {
             for (ds, nexts, 0..) |d, nx, i| {
                 const last = at + nx.len - 1;
                 try p.copy(d.out.ptr, s.h + last * wide * 2, wide * 2);
-                if (scores and last != i) {
+                if (group.scores and last != i) {
                     try p.copy(s.h + i * wide * 2, s.h + last * wide * 2, wide * 2);
                     try p.copy(s.pss + i * pss_n * 4, s.pss + last * pss_n * 4, pss_n * 4);
                 }
                 d.len += nx.len;
                 at += nx.len;
             }
-            if (!scores) return;
+            if (!group.scores) return;
             try p.readout(h.mixer, 0, n_l);
             const n_ids = h.ids.len;
             _ = try p.lane(s.mixed, s.xsm, h.draft, s.head_local, s.dummy, n_l, 1);
