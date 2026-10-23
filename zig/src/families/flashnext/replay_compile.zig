@@ -102,6 +102,9 @@ pub fn compileGlue(r: *Run) !void {
     r.argmax_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_argmax", false));
     r.add_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_bcast_add", false));
     r.argids_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_argmax_ids", false));
+    r.argpart_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_argmax_part", false));
+    r.argjoin_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_argmax_join", false));
+    r.arg_parts = .{ .b = try r.buffer(MAXR * 64 * 2 * 4) };
     r.pleids_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_ple_ids", false));
     r.copy_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_copy_kept", false));
     const verdict = try r.ownResource(try mtl.Library.fromSource(r.device, verdict_kernels.source, mtl.CompileOptions.mlx()));

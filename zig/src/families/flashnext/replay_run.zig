@@ -44,6 +44,9 @@ pub const Run = struct {
     argmax_pipe: mtl.Pipeline = undefined,
     add_pipe: mtl.Pipeline = undefined,
     argids_pipe: mtl.Pipeline = undefined,
+    argpart_pipe: mtl.Pipeline = undefined, // the round's argmaxes in two launches (fz_argmax_part, fz_argmax_join)
+    argjoin_pipe: mtl.Pipeline = undefined,
+    arg_parts: Buf = undefined, // their winners: rows x parts x (value bits, index)
     pleids_pipe: mtl.Pipeline = undefined,
     copy_pipe: mtl.Pipeline = undefined,
     accept_pipe: mtl.Pipeline = undefined,
@@ -279,6 +282,25 @@ pub const Run = struct {
         r.enc.setBuffer(r.sink.b, 0, 1);
         r.enc.setBytes(std.mem.asBytes(&n), 2);
         r.enc.dispatchThreads(mtl.Size.of(256 * 64, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// Each of `rows` rows' first largest of `n` logits into `out[row]` (ids[pick] with `ids`): fz_argmax's pick.
+    pub fn argmax(r: *Run, logits: Buf, n: Buf, out: Buf, ids: ?Buf, rows: usize) void {
+        const parts: u32 = 64;
+        r.enc.setPipeline(r.argpart_pipe);
+        for ([_]Buf{ logits, r.arg_parts, n }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchGroups(mtl.Size.of(parts, rows, 1), mtl.Size.of(256, 1, 1));
+        if (!r.serial) r.enc.barrier();
+        r.enc.setPipeline(r.argjoin_pipe);
+        r.enc.setBuffer(r.arg_parts.b, r.arg_parts.off, 0);
+        r.enc.setBuffer(out.b, out.off, 1);
+        r.enc.setBytes(std.mem.asBytes(&parts), 2);
+        const map: u32 = @intFromBool(ids != null);
+        const id = ids orelse out;
+        r.enc.setBuffer(id.b, id.off, 3);
+        r.enc.setBytes(std.mem.asBytes(&map), 4);
+        r.enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
+        if (!r.serial) r.enc.barrier();
     }
 
     /// fz_copy_kept: `layers` copies of `n` words from row (keep + base) of src (row and layer strides in words).

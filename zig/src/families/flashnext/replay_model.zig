@@ -363,12 +363,7 @@ pub const Model = struct {
             return;
         }
         try m.lane(t.mixed, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
-        r.enc.setPipeline(r.argmax_pipe);
-        r.enc.setBuffer(t.logits.b, 0, 0);
-        r.enc.setBuffer(t.picks.b, 0, 1);
-        r.enc.setBuffer(t.vocab.b, 0, 2);
-        r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
-        if (!r.serial) r.enc.barrier();
+        r.argmax(.{ .b = t.logits.b }, .{ .b = t.vocab.b }, .{ .b = t.picks.b }, null, rows);
     }
 
     /// The MTP head on `rows` rows: each row's next token and the streams it follows (target or head output, row by...

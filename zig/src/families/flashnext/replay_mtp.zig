@@ -163,10 +163,7 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
         return;
     }
     try m.mtpLane(h.draft, "mtp:lane_qmm_bytes_grouped@mtp.draft", x, md1, 1, D, h.logits);
-    r.enc.setPipeline(r.argids_pipe);
-    for ([_]Buf{ h.logits, out, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
-    r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
-    if (!r.serial) r.enc.barrier();
+    r.argmax(h.logits, h.n_ids, out, h.ids, 1);
 }
 
 pub fn mtpLane(m: *Model, l: Lane, role: []const u8, x: Buf, md: Buf, rows: usize, k: usize, y: Buf) !void {
