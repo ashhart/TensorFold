@@ -38,6 +38,19 @@ pub fn table(a: usize, b: usize) [MAXR * STRIDE]i32 {
     return t;
 }
 
+/// The table of a root, a chain of `a` rows from it, then `k` siblings of the chain row at each depth 1..a.
+pub fn siblingTable(a: usize, k: usize) [MAXR * STRIDE]i32 {
+    var t = table(a, 0);
+    for (1..a + 1) |d| for (1..k + 1) |i| {
+        const r = a + (d - 1) * k + i;
+        t[r * STRIDE] = @intCast(d - 1);
+        t[r * STRIDE + 1] = @intCast(d);
+        for (0..d) |j| t[r * STRIDE + 2 + j] = @intCast(j);
+        t[r * STRIDE + 2 + d] = @intCast(r);
+    };
+    return t;
+}
+
 const source =
     \\#include <metal_stdlib>
     \\using namespace metal;
@@ -48,7 +61,7 @@ const source =
     \\    constant uint4& cfg [[buffer(5)]], device uint* H [[buffer(6)]], const device int* T [[buffer(7)]],
     \\    uint tid [[thread_position_in_grid]]) {
     \\  if (tid != 0) return;
-    \\  const int W = int(cfg.x), Wn = int(cfg.y), cap = int(cfg.z), an = int(cfg.w);
+    \\  const int W = int(cfg.x), Wn = int(cfg.y), cap = int(cfg.z);
     \\  bool ok[16];
     \\  ok[0] = true;
     \\  int best = 0;
@@ -72,7 +85,7 @@ const source =
     \\  const int t_old = ar[1], t_new = t_old + keep;
     \\  ar[0] = keep; ar[1] = t_new; ar[2] = round + 1;
     \\  for (int i = 0; i < 16; i++) {
-    \\    const int dn = i <= an ? i : i - an;
+    \\    const int dn = i < Wn ? T[i * 18 + 1] : 0; // a row's position is its depth
     \\    ar[4 + i] = i < Wn ? t_new + dn : 0;
     \\    ar[20 + i] = i < Wn ? t_new + dn + 1 : 0;
     \\    ar[40 + i] = i < W ? t_old + i : 0;
@@ -142,6 +155,38 @@ const source =
     \\    if (j < 128) raw[size_t(t0 + i) * 128 + j] = raw[size_t(t0 + s) * 128 + j];
     \\  }
     \\}
+    \\// The head's next k picks after its own (largest logit, lowest id on ties) into wids[c.y ..]: c = (k, first row)
+    \\kernel void fz_tree_sib(device const bfloat* L [[buffer(0)]], device uint* wids [[buffer(1)]],
+    \\    constant uint& n [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint2& c [[buffer(4)]],
+    \\    uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint sg [[simdgroup_index_in_threadgroup]]) {
+    \\  constexpr int KM = 5;
+    \\  float v[KM]; uint at[KM];
+    \\  for (int j = 0; j < KM; j++) { v[j] = -INFINITY; at[j] = 0xffffffffu; }
+    \\  for (uint i = t; i < n; i += 1024) {
+    \\    float x = float(L[i]); uint ix = i;
+    \\    for (int j = 0; j < KM; j++) if (x > v[j]) { const float tv = v[j]; const uint ta = at[j]; v[j] = x; at[j] = ix; x = tv; ix = ta; }
+    \\  }
+    \\  threadgroup float vb[32]; threadgroup uint va[32];
+    \\  int head = 0;
+    \\  for (int round = 0; round <= int(c.x); round++) {
+    \\    float best = head < KM ? v[head] : -INFINITY; uint bat = head < KM ? at[head] : 0xffffffffu;
+    \\    for (ushort o = 16; o > 0; o >>= 1) {
+    \\      const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(bat, o);
+    \\      if (ob > best || (ob == best && oa < bat)) { best = ob; bat = oa; }
+    \\    }
+    \\    if (lane == 0) { vb[sg] = best; va[sg] = bat; }
+    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\    best = vb[lane]; bat = va[lane];
+    \\    for (ushort o = 16; o > 0; o >>= 1) {
+    \\      const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(bat, o);
+    \\      if (ob > best || (ob == best && oa < bat)) { best = ob; bat = oa; }
+    \\    }
+    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\    if (head < KM && at[head] == bat) head++;
+    \\    if (round > 0 && t == 0) wids[c.y + round - 1] = bat < n ? ids[bat] : 248053u;
+    \\  }
+    \\}
     \\// The branch's drafts (rows a + 1 ..) from a guess a reply position: c = (a, b, prompt length, guesses)
     \\kernel void fz_tree_feed(device uint* wids [[buffer(0)]], device const int* ar [[buffer(1)]],
     \\    device const uint* F [[buffer(2)]], constant uint4& c [[buffer(3)]], uint t [[thread_position_in_grid]]) {
@@ -193,6 +238,8 @@ pub const Tree = struct {
     attn: *Variant,
     conv: *Variant,
     feed: Buf,
+    sib: usize = 0, // the head's siblings at each chain depth (siblingTable), in place of a fed branch
+    sibling: mtl.Pipeline,
     entries: []const Entry,
     guesses: []const u32 = &.{},
     prompt_len: usize = 0,
@@ -219,6 +266,16 @@ pub const Tree = struct {
     /// The first window's branch drafts, the pick being the reply's first token.
     pub fn firstDrafts(t: *const Tree, w: []u32) void {
         for (0..t.b) |k| w[t.a + 1 + k] = if (1 + k < t.guesses.len) t.guesses[1 + k] else NONE;
+    }
+
+    /// The head's next picks at chain depth `d` from its draft logits, into that depth's sibling rows.
+    pub fn siblingsEncode(t: *const Tree, r: *Run, logits: Buf, n_ids: Buf, ids: Buf, wids: Buf, d: usize) void {
+        r.enc.setPipeline(t.sibling);
+        for ([_]Buf{ logits, wids, n_ids, ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        const c = [2]u32{ @intCast(t.sib), @intCast(t.a + (d - 1) * t.sib + 1) };
+        r.enc.setBytes(std.mem.asBytes(&c), 4);
+        r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
+        if (!r.serial) r.enc.barrier();
     }
 
     pub fn feedEncode(t: *const Tree, r: *Run, wids: Buf) void {
@@ -305,12 +362,12 @@ fn patched(r: *Run, role: []const u8, edits: []const [2][]const u8) !*Variant {
     return nv;
 }
 
-/// A tree of a head chain of `a` and a branch of `b` (1 + a + b <= MAXR), the branch's guesses from `feed` (parse).
-pub fn init(r: *Run, a: usize, b: usize, feed: ?[]const u8) !*Tree {
-    if (a == 0 or b == 0 or 1 + a + b > MAXR) return error.TreeShape;
+/// A tree of a head chain of `a` and a branch of `b` (1 + a + b <= MAXR) fed from `feed`, or `sib` head siblings a depth.
+pub fn init(r: *Run, a: usize, b: usize, feed: ?[]const u8, sib: usize) !*Tree {
+    if (a == 0 or b == 0 or 1 + a + b > MAXR or (sib > 0 and (b != a * sib or sib > 4))) return error.TreeShape;
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, source, mtl.CompileOptions.mlx()));
     const t = try r.arena.create(Tree);
-    const tab = table(a, b);
+    const tab = if (sib > 0) siblingTable(a, sib) else table(a, b);
     const tb: Buf = .{ .b = try r.buffer(@sizeOf(@TypeOf(tab))) };
     @memcpy(tb.b.slice(i32, tab.len), &tab);
     t.* = .{
@@ -322,6 +379,8 @@ pub fn init(r: *Run, a: usize, b: usize, feed: ?[]const u8) !*Tree {
         .rows = try r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_tree_rows", false)),
         .kv = try r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_tree_kv", false)),
         .feeder = try r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_tree_feed", false)),
+        .sib = sib,
+        .sibling = try r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_tree_sib", false)),
         .gdn = try gdn_step.compileTree(r),
         .attn = try patched(r, "q4_attn_parts#[24, 256]", &attn_edits),
         .conv = try patched(r, "q4_ple_conv@ple", &conv_edits),
@@ -354,6 +413,18 @@ test "a two-branch tree: the chain's rows, then the branch from the root" {
     try std.testing.expectEqualSlices(i32, &.{ 1, 2, 0, 1, 2 }, t[2 * STRIDE ..][0..5]); // row 2: chain depth 2
     try std.testing.expectEqualSlices(i32, &.{ 0, 1, 0, 3 }, t[3 * STRIDE ..][0..4]); // row 3: the branch's first
     try std.testing.expectEqualSlices(i32, &.{ 4, 3, 0, 3, 4, 5 }, t[5 * STRIDE ..][0..6]); // row 5: its third
+}
+
+test "a sibling tree: each sibling hangs off the chain row one depth up, ancestors the chain's" {
+    const t = siblingTable(5, 2);
+    try std.testing.expectEqual(@as(i32, 0), t[6 * STRIDE]); // depth 1 siblings hang off the root
+    try std.testing.expectEqual(@as(i32, 1), t[6 * STRIDE + 1]);
+    try std.testing.expectEqual(@as(i32, 6), t[6 * STRIDE + 3]);
+    const r = 5 + 4 * 2 + 2; // depth 5, second sibling
+    try std.testing.expectEqual(@as(i32, 4), t[r * STRIDE]);
+    try std.testing.expectEqual(@as(i32, 5), t[r * STRIDE + 1]);
+    for (0..5) |j| try std.testing.expectEqual(@as(i32, @intCast(j)), t[r * STRIDE + 2 + j]);
+    try std.testing.expectEqual(@as(i32, @intCast(r)), t[r * STRIDE + 7]);
 }
 
 test "the tree patches apply once to the recorded attention and PLE conv texts" {

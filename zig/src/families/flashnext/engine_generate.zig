@@ -265,13 +265,17 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             if (wr > 1) {
                 try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
                 if (gt) |g| g.encode(r, m.mtp.logits, 0);
+                if (tr) |t| if (t.sib > 0) t.siblingsEncode(r, m.mtp.logits, m.mtp.n_ids, m.mtp.ids, e.wids, 1);
                 for (1..if (tr) |t| t.a else wr - 1) |j| {
                     r.head_md1 = if (gt) |g| g.md1() else null; // the gated chain step runs only when the gate opened it
                     defer r.head_md1 = null;
                     try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
                     if (gt) |g| g.encode(r, m.mtp.logits, @intCast(j));
+                    if (tr) |t| if (t.sib > 0) t.siblingsEncode(r, m.mtp.logits, m.mtp.n_ids, m.mtp.ids, e.wids, j + 1);
                 }
-                if (tr) |t| t.feedEncode(r, e.wids) else if (e.copy and gt == null) { // copied drafts replace the head's when the history repeats its last tokens
+                if (tr) |t| {
+                    if (t.sib == 0) t.feedEncode(r, e.wids);
+                } else if (e.copy and gt == null) { // copied drafts replace the head's when the history repeats its last tokens
                     r.enc.setPipeline(r.lookup_pipe);
                     r.enc.setBuffer(e.hist, 0, 0);
                     r.enc.setBuffer(r.ar.b, r.ar.off, 1);

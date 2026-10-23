@@ -388,16 +388,17 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         e.gate = try @import("gate.zig").init(r, tau, m.mtp.ids_n);
         std.log.info("flash next: gated lanes, up to {d} rows while the drafts' probability stays >= {d}", .{ @import("gate.zig").WMAX, tau });
     };
-    if (r.tp == null) if (platform.c.getenv("FZ_TREE")) |v| { // dev: tree rounds, the branch's guesses from FZ_FEED
+    if (r.tp == null) if (platform.c.getenv("FZ_TREE")) |v| { // dev: a,b (the branch from FZ_FEED) or a,k,sib (head siblings)
         var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
         const a = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
         const b = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
+        const sib: usize = if (it.next()) |w| (if (std.mem.eql(u8, w, "sib")) b else return error.TreeShape) else 0;
         const feed: ?[]const u8 = if (platform.c.getenv("FZ_FEED")) |f| blk: {
             const file = try r.mapFile(std.mem.span(f));
             break :blk file.bytes[0..file.size];
         } else null;
-        e.tree = try @import("tree.zig").init(r, a, b, feed);
-        std.log.info("flash next: tree rounds, a head chain of {d} and a branch of {d}", .{ a, b });
+        e.tree = try @import("tree.zig").init(r, a, if (sib > 0) a * sib else b, feed, sib);
+        if (sib > 0) std.log.info("flash next: tree rounds, a head chain of {d} and {d} head siblings a depth", .{ a, sib }) else std.log.info("flash next: tree rounds, a head chain of {d} and a branch of {d}", .{ a, b });
     };
     return e;
 }
