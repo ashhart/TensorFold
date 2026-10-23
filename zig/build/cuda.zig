@@ -522,6 +522,17 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     memory_cli.root_source_file = b.path("zig/src/cli/tests.zig");
     b.step("test-cli-memory-host", "Actual checkpoint info memory tests without device or shader producers").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory_cli, .filters = &.{ "info prints family", "issue 934:" } })).step);
     b.step("test-info-config", "Info shares the checkpoint config reader and diagnostics").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli, .filters = &.{"issue 934:"} })).step);
+    // `pull`'s tests need the engine registry (`hub.family`) and EXLR8's import; nothing else pulls them in whole.
+    const pull_tests = b.createModule(.{
+        .root_source_file = b.path("zig/src/cli/pull_test.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "native_engines", .module = native_modules.engines }, exlr8_build.cliImport(b, host, .debug, mods.core) },
+    });
+    const pull_run = b.addRunArtifact(b.addTest(.{ .root_module = pull_tests }));
+    b.step("test-pull-host", "Checkpoint download paths: a nested shard folder, retries, resume and the whole-file fallback").dependOn(&pull_run.step);
+    step.dependOn(&pull_run.step);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli })).step);
 }
 
