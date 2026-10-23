@@ -1,4 +1,4 @@
-//! `tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel`: one rank of TP=2.
+//! `tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel`: one rank of TP=2..16.
 const std = @import("std");
 const cuda = @import("cuda");
 const tp = @import("tp");
@@ -91,7 +91,7 @@ fn hca(cfg: tp.Config, io: std.Io) !u8 {
 }
 
 fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.Config) !u8 {
-    var c = try checks.Ctx.init(d, gpa, cfg.rank, max_bytes);
+    var c = try checks.Ctx.init(d, gpa, cfg.rank, cfg.world, max_bytes);
     defer c.deinit();
     var backends: [2]struct { comm: tp.Collective, label: []const u8 } = undefined;
     var n_backends: usize = 1;
@@ -99,6 +99,8 @@ fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.
     if (s.comm().kind() != .nccl) {
         backends[1] = .{ .comm = s.comm(), .label = if (s.roce != null) "roce" else "mailbox" };
         n_backends = 2;
+    } else if (cfg.backend != .nccl and cfg.rank == 0) {
+        std.debug.print("WARN TF_COMM_BACKEND={t} fell back to NCCL (see the [tensorfold] tp log lines above): only NCCL is measured\n", .{cfg.backend});
     }
     const sizes = [_]usize{ 6, 1000, 4096, 65536, 256 * 1024, 256 * 1024 + 16, 1 << 20, 4 << 20 };
     for (backends[0..n_backends]) |b| {
@@ -111,7 +113,7 @@ fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.
         try bench.sweep(&c, b.comm, b.label, 4096, 4 << 20);
         try bench.decodeWindow(&c, b.comm, b.label, 86, 8192);
     }
-    // the stop: rank 0 marks it expected first, then both meet and close
+    // the stop: rank 0 marks it expected first, then every rank meets and closes
     if (s.fate) |*f| f.expectStop();
     try s.comm().barrier();
     std.debug.print("SUMMARY rank {d}: {d} passed, {d} failed\n", .{ cfg.rank, c.passes, c.failures });
@@ -131,9 +133,9 @@ pub fn realNow() f64 {
     return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1e9;
 }
 
-/// Exchanges until the victim fails; the survivor is left waiting inside one, which only the fate channel ends.
+/// Exchanges until the victim fails; the survivors are left waiting inside one, which only the fate channel ends.
 fn failfast(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.Config, victim: u32, mode: []const u8) !u8 {
-    var c = try checks.Ctx.init(d, gpa, cfg.rank, 1 << 20);
+    var c = try checks.Ctx.init(d, gpa, cfg.rank, cfg.world, 1 << 20);
     defer c.deinit();
     const comm = s.comm();
     var k: u32 = 0;

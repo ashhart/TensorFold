@@ -11,7 +11,7 @@ pub fn run(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: t
         std.debug.print("failfast transport needs TF_COMM_BACKEND=roce (the session runs {t})\n", .{s.comm().kind()});
         return 2;
     };
-    var c = try checks.Ctx.init(d, gpa, cfg.rank, 4096);
+    var c = try checks.Ctx.init(d, gpa, cfg.rank, cfg.world, 4096);
     defer c.deinit();
     const comm = s.comm();
     for (0..n) |_| {
