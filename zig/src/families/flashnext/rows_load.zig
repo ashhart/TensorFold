@@ -57,7 +57,7 @@ pub fn hc(
         mixed,
         inj,
         !r.serial,
-        sh.hc_tiles,
+        sh.hc_tiles and r.limit == null, // a gated window's rows: the per-row kernels leave the unverified ones alone
     );
     if (!r.serial) r.enc.barrier();
 }

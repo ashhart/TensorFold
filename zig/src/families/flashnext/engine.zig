@@ -116,7 +116,7 @@ pub const Engine = struct {
     hist: mtl.Buffer, // the token history the copy drafts search
     copy: bool = true, // copy drafts from the history when a long enough match exists
     tree: ?*@import("tree.zig").Tree = null, // FZ_TREE=a,b: rounds as a root, a head chain of a and a branch of b
-    gate: ?*@import("gate.zig").Gate = null, // FZ_GATE=tau: each round's width from the head's confidence (gate.zig)
+    gate: ?*@import("gate.zig").Gate = null, // each round's width from the head's confidence (gate.zig), FZ_GATE=tau
     copy_min: u32 = 3,
     copy_long: u32 = 6, // shorter matches copy only when the head's first draft agrees
     mark_taps: bool = true, // a prompt call writes the DeltaNet states at marks inside it (false: calls end at marks)

@@ -49,9 +49,10 @@ pub const source =
     \\// Copy drafts: the latest earlier occurrence of the longest suffix (cfg.y .. 8 tokens) of the history H[0, L);
     \\// when there is one and it is at least cfg.z long or the tokens after it start with the head's first cfg.w drafts,
     \\// they replace the drafts wids[1 .. cfg.x) (as many as follow it); ar[801] = 1 then, else 0; ar[802] the match
-    \\// length. One threadgroup of 1024.
+    \\// length. A gated window (gated != 0) opens to the copied drafts' rows in G[0]. One threadgroup of 1024.
     \\kernel void fz_lookup(device const uint* H [[buffer(0)]], device int* ar [[buffer(1)]], device uint* wids [[buffer(2)]],
-    \\    constant uint4& cfg [[buffer(3)]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    constant uint4& cfg [[buffer(3)]], device int* G [[buffer(4)]], constant uint& gated [[buffer(5)]],
+    \\    uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     \\    uint sg [[simdgroup_index_in_threadgroup]]) {
     \\  const int L = ar[800], W = int(cfg.x), MINN = int(cfg.y), LONGN = int(cfg.z), AGREE = int(cfg.w);
     \\  const uint last = H[L - 1];
@@ -77,6 +78,7 @@ pub const source =
     \\  const int k = min(W - 1, L - 1 - p);
     \\  for (int i = 0; i < k; i++) wids[1 + i] = H[p + 1 + i];
     \\  ar[801] = 1;
+    \\  if (gated != 0) G[0] = max(G[0], k + 1);
     \\}
     \\// Before a window of c.x rows; a forced span at ar + c.y: first position (0: done), cancel token, length, seen, tokens.
     \\kernel void fz_force(device uint* wids [[buffer(0)]], device int* ar [[buffer(1)]], device const uint* H [[buffer(2)]],

@@ -383,10 +383,13 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         r.gx = try @import("gx.zig").init(r, try std.fmt.parseInt(usize, std.mem.span(v), 10));
         std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
     };
-    if (r.tp == null) if (platform.c.getenv("FZ_GATE")) |v| { // dev: GPU-gated lanes at this probability product
-        const tau = try std.fmt.parseFloat(f32, std.mem.span(v));
-        e.gate = try @import("gate.zig").init(r, tau, m.mtp.ids_n);
-        std.log.info("flash next: gated lanes, up to {d} rows while the drafts' probability stays >= {d}", .{ @import("gate.zig").WMAX, tau });
+    // GPU-gated lanes at this probability product: 0.6 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
+    const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.6" else null;
+    if (r.tp == null) if (gate_tau) |v| if (!std.mem.eql(u8, v, "off")) {
+        const tau = try std.fmt.parseFloat(f32, v);
+        const width = if (platform.c.getenv("FZ_GATE_ROWS")) |w| try std.fmt.parseInt(usize, std.mem.span(w), 10) else @import("gate.zig").WMAX; // dev
+        e.gate = try @import("gate.zig").init(r, tau, m.mtp.ids_n, width);
+        std.log.info("flash next: gated lanes, up to {d} rows while the drafts' probability stays >= {d}", .{ width, tau });
     };
     if (r.tp == null) if (platform.c.getenv("FZ_TREE")) |v| { // dev: a,b (the branch from FZ_FEED) or a,k,sib (head siblings)
         var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
