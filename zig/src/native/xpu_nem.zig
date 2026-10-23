@@ -141,7 +141,9 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.backend.halt = &stopping;
     h.backend.started = chainStopHandlers;
     try h.backend.measure();
-    if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
+    if (@hasDecl(S.Engine, "copy_only")) {
+        if (getenv("XPU_COPY_MATCH")) |v| h.backend.copy_match = std.fmt.parseInt(i64, v, 10) catch 8;
+    } else if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
     const facts = h.backend.facts();
     h.cfg = try lanes.Config.init(gpa, facts, facts.exact_width, facts.exact_width - 1);
     h.clock = .{ .io = io };
@@ -149,15 +151,14 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     const note = try S.note(a, h.engine);
     h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; {d} stream(s) a round on the lane core, sampling on the host", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note, h.backend.streams });
     const drafted = facts.exact_width > 1;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted) S.promptRows(h.engine) else 0 });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted and !@hasDecl(S.Engine, "copy_only")) S.promptRows(h.engine) else 0 });
     // kept prompt states (with sequences): --prompt-cache-gib, else 4 GiB, inside the device memory left past 2 GiB
     const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 4) * (1 << 30));
     const free = freeMemory(&h.ctx);
     const budget: u64 = if (free > 2 << 30) @min(want, free - (2 << 30)) else 0;
     h.cache = null;
     std.log.info("xpu: prompt cache budget {d} MiB (free {d} MiB, asked {d} MiB)", .{ budget >> 20, free >> 20, want >> 20 });
-    const kept = @hasDecl(S.Engine, "snapSave");
-    if ((drafted or kept) and budget > 0) {
+    if (drafted and budget > 0) {
         const rules: api.prompt_cache.Rules = if (@hasDecl(S, "cache_rules")) S.cache_rules else .{ .lookahead = 1, .planned = true };
         h.cache = api.prompt_cache.Store.init(gpa, h.backend.snapshots(), rules, budget);
         h.host.cache = &h.cache.?;

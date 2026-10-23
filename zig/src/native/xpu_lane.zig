@@ -47,8 +47,6 @@ pub fn Xpu(comptime S: type) type {
         const Self = @This();
         /// The family's engine has drafted rounds (Nemotron: verifyRows, keepRows, draftKept, draftFirst).
         const has_head = @hasDecl(S.Engine, "verifyRows");
-        /// A one-stream engine that keeps and restores prompt states (Gemma 4): the prompt pass uses the cache.
-        const cached = !has_head and @hasDecl(S.Engine, "snapSave");
         /// A stream's sequence, its held drafts, its last window's unkept rows and where that window started.
         const Lane = struct { seq: *Seq, held: [max_rows]u32 = undefined, held_n: usize = 0, pending: ?u32 = null, start: u32 = 0 };
         const Seq = if (has_head) S.Engine.Sequence else void;
@@ -69,9 +67,12 @@ pub fn Xpu(comptime S: type) type {
         costs: [max_rows]lanes.config.Cost = undefined,
         mtp_ms: f64 = 0,
         row_logits: []f32 = &.{},
+        /// Context tokens a copy draft must match (copy-only engines).
+        copy_match: i64 = 8,
 
         /// The engine family has drafted rounds (an MTP head) and it loaded one.
         fn drafting(self: *const Self) bool {
+            if (comptime @hasDecl(S.Engine, "copy_only")) return true; // copy drafts of the lane core, no head
             return if (comptime has_head) self.e.head != null else false;
         }
 
@@ -96,6 +97,7 @@ pub fn Xpu(comptime S: type) type {
             var ms: [max_rows]f64 = undefined;
             self.mtp_ms = try self.e.timeRounds(&ms);
             for (ms, 1..) |v, w| self.costs[w - 1] = .{ .width = @intCast(w), .ms = v };
+            std.log.info("xpu: window ms by rows: 1 {d:.2}, 2 {d:.2}, 3 {d:.2}, 4 {d:.2}, 8 {d:.2}, 12 {d:.2}, 16 {d:.2}", .{ ms[0], ms[1], ms[2], ms[3], ms[7], ms[11], ms[15] });
             self.row_logits = try self.gpa.alloc(f32, max_rows * self.e.vocab());
         }
 
@@ -115,6 +117,7 @@ pub fn Xpu(comptime S: type) type {
 
         /// What the round loop reads at setup: one stream; with a head, drafted windows of up to 16 rows.
         pub fn facts(self: *const Self) lanes.Model {
+            if (comptime @hasDecl(S.Engine, "copy_only")) return .{ .exact_width = max_rows, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .plain_guard = true, .window_costs = self.costs[0..max_rows], .max_streams = 1, .copy_match = self.copy_match };
             if (!self.drafting()) return .{ .exact_width = 1, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .max_streams = 1 };
             return .{
                 .exact_width = max_rows,
@@ -136,10 +139,7 @@ pub fn Xpu(comptime S: type) type {
         fn stepOne(self: *Self, token: u32, sampling: ?lanes.Sampling, position: u64) !u32 {
             if (comptime !has_head) unreachable;
             try self.e.stepRow(token);
-            const greedy = if (sampling) |s| s.temperature <= 0 else true;
-            if (greedy) return self.e.argmax();
-            try self.e.fetchLogits(self.logits);
-            return draw(self.gpa, self.logits, sampling.?, position);
+            return self.drawKept(sampling, position);
         }
 
         /// The window's rows drawn: greedy on the device, else each row's logits drawn at its keyed position.
@@ -152,6 +152,23 @@ pub fn Xpu(comptime S: type) type {
                 for (out[0..rows], g[0..rows]) |*o, t| o.* = @intCast(t);
                 return;
             }
+            if (comptime @hasDecl(S.Engine, "rowCandidates")) if (sampling.?.top_k > 0 and sampling.?.top_k <= 64) {
+                const k = sampling.?.top_k; // each row's top_k from the card
+                for (0..rows) |r| {
+                    var v32: [64]f32 = undefined;
+                    var ids: [64]u32 = undefined;
+                    var vals: [64]f64 = undefined;
+                    var id64: [64]u64 = undefined;
+                    try self.e.rowCandidates(@intCast(r), k, &v32, &ids);
+                    for (0..k) |i| {
+                        if (!std.math.isFinite(v32[i])) return error.NonfiniteLogits;
+                        vals[i] = v32[i];
+                        id64[i] = ids[i];
+                    }
+                    out[r] = @intCast(try lanes.sampling.choose(self.gpa, vals[0..k], id64[0..k], positions[r], sampling.?));
+                }
+                return;
+            };
             const v = self.e.vocab();
             try self.e.rowLogits(self.row_logits[0 .. rows * v]);
             for (0..rows) |r| out[r] = try draw(self.gpa, self.row_logits[r * v ..][0..v], sampling.?, positions[r]);
@@ -242,12 +259,6 @@ pub fn Xpu(comptime S: type) type {
                 _ = self.take(first[0]);
                 return;
             };
-            if (comptime cached) {
-                try self.prefillPlanned(s, ids);
-                if (s.isCancelled()) return error.Cancelled;
-                _ = self.take(try self.drawKept(s.sampling, ids.len));
-                return;
-            }
             try e.reset();
             const head = ids[0 .. ids.len - 1];
             if (head.len > 16) {
@@ -268,7 +279,7 @@ pub fn Xpu(comptime S: type) type {
 
         /// A bound sequence's prompt pass: from a kept state if the cache has one, planned chunks, the cache's marks.
         fn prefillPlanned(self: *Self, s: *lanes.Stream, ids: []const u32) !void {
-            if (comptime !(has_head or cached)) unreachable;
+            if (comptime !has_head) unreachable;
             const e = self.e;
             const rows = S.promptRows(e);
             s.cached = 0;
@@ -289,7 +300,7 @@ pub fn Xpu(comptime S: type) type {
                 while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
                 const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(ids.len);
                 var n = @min(end - at, rows);
-                if (comptime cached) for (s.reuse.marks) |m| if (m > at and m < at + n) {
+                if (comptime @hasDecl(S.Engine, "copy_only")) for (s.reuse.marks) |m| if (m > at and m < at + n) {
                     n = m - at; // an unplanned family cuts where the cache keeps a state
                     break;
                 };
@@ -306,29 +317,27 @@ pub fn Xpu(comptime S: type) type {
         }
 
         fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-            if (comptime !(has_head or cached)) return 0;
+            if (comptime !has_head) return 0;
             return of(ptr).e.snapBytes(at);
         }
 
         fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
-            if (comptime !(has_head or cached)) return error.NoSnapshots;
+            if (comptime !has_head) return error.NoSnapshots;
             const self = of(ptr);
-            if (comptime cached) return try self.e.snapSave(at);
             const l = try self.bound(@ptrCast(@alignCast(owner orelse return error.NoStream)));
             if (l.pending != null) return error.SnapshotOutOfStep;
             return try self.e.snapSave(at);
         }
 
         fn snapRestore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
-            if (comptime !(has_head or cached)) return error.NoSnapshots;
+            if (comptime !has_head) return error.NoSnapshots;
             const self = of(ptr);
-            if (comptime cached) return try self.e.snapRestore(@ptrCast(@alignCast(saved)));
             _ = try self.bound(@ptrCast(@alignCast(owner orelse return error.NoStream)));
             try self.e.snapRestore(@ptrCast(@alignCast(saved)));
         }
 
         fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
-            if (comptime !(has_head or cached)) return;
+            if (comptime !has_head) return;
             of(ptr).e.snapDrop(@ptrCast(@alignCast(saved)));
         }
 
