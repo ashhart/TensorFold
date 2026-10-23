@@ -28,7 +28,7 @@ pub fn windows(self: anytype, wins: []const be.Window, out: []be.Verified, draft
         if (n == 1 or self.ranks != null or cap <= 1) {
             for (seqs[0..n], ds[0..n], idss[0..n]) |q, d, ids| try self.ops().verify(q, d, ids);
         } else try self.ops().verifyMany(seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
-        for (drafted[at..][0..n], ds[0..n]) |wi, d| try self.ops().draws(d, wins[wi].stream.sampling, out[wi].sampled[0..wins[wi].rows()]);
+        for (drafted[at..][0..n], ds[0..n]) |wi, d| try self.ops().draws(d, wins[wi].stream.sampling, wins[wi].masks, out[wi].sampled[0..wins[wi].rows()]);
         at += n;
     }
 }
