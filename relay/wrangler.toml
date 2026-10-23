@@ -1,0 +1,14 @@
+name = "tensorfold-donation-relay"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# One Durable Object per card id. The object owns the donor socket and the
+# in-flight requests waiting on it, so a card id is always served by exactly
+# one object even when requests land on different Workers isolates.
+[[durable_objects.bindings]]
+name = "DONORS"
+class_name = "DonorRelay"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DonorRelay"]
