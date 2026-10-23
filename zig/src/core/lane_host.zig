@@ -519,6 +519,7 @@ pub const LaneHost = struct {
     }
 
     fn run(h: *LaneHost) void {
+        defer scoring.close(h);
         if (!@import("lane_thread.zig").start(h)) return;
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
         if (h.rounds) |rd| return rounds.run(h, rd);

@@ -470,3 +470,7 @@ test "prompt tiles retain per-operation ownership" {
         try std.testing.expectEqual(mask & 24 == 24, t.fusedAttentionOwned());
     }
 }
+
+test {
+    _ = @import("cuda_score.zig").CapabilityCases(native.Cuda);
+}

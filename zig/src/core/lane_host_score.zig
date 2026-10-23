@@ -65,6 +65,7 @@ pub fn answer(h: *LaneHost) void {
 /// Questions left when the engine stops: each fails.
 pub fn close(h: *LaneHost) void {
     h.lock();
+    h.closing = true;
     for (h.scores.asks.items) |a| {
         a.failed = true;
         a.done = true;

@@ -41,3 +41,34 @@ test "the logsumexp of a bf16 row in f64, and a non-finite row refused" {
     try std.testing.expectApproxEqRel(want, try logsumexp(&row), 1e-15);
     try std.testing.expectError(error.NonFiniteScore, logsumexp(&[_]u16{ one, 0x7f80 }));
 }
+
+pub fn CapabilityCases(comptime Cuda: type) type {
+    return struct {
+        test "decision capability: one rank scores and two ranks refuse before a score runs" {
+            var self: Cuda = undefined;
+            self.head = null;
+            self.ranks = null;
+            try std.testing.expect(self.backend().vtable.score != null);
+            self.ranks = @ptrFromInt(16);
+            try std.testing.expect(self.backend().vtable.score == null);
+        }
+    };
+}
+
+/// The native adapter's one-rank score hook, kept with its allocation and numerical implementation.
+pub fn Hook(comptime Cuda: type, comptime Tri: type) type {
+    return struct {
+        pub fn call(ptr: *anyopaque, ids: []const u32, wanted: []const u32, logits: []f64, mass: bool) anyerror!f64 {
+            const self: *Cuda = @ptrCast(@alignCast(ptr));
+            if (self.ranks != null) return error.UnsupportedRankOperation;
+            return labels(Tri, self.engine, self.tri(), self.context, ids, wanted, logits, mass);
+        }
+    };
+}
+
+/// A ranked backend keeps its existing callbacks and deliberately advertises no scoring capability.
+pub fn withoutScore(comptime scored: @import("lanes").backend.Backend.VTable) @import("lanes").backend.Backend.VTable {
+    var v = scored;
+    v.score = null;
+    return v;
+}

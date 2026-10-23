@@ -11,3 +11,7 @@ test {
     _ = @import("lane_failure_review_test.zig");
     _ = @import("lane_host_first_test.zig");
 }
+
+test {
+    _ = @import("lane_host_score_exit_test.zig");
+}
