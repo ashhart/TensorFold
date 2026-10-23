@@ -28,6 +28,8 @@ pub const Engine = struct {
     /// The lane backend reads the position here (the runner's, kept in step).
     m: struct { pos: u32 = 0 } = .{},
     max_len: usize,
+    sc: ?*fwd.Runner = null, // the decisions' sequence (a fork), made at the first score
+    sc_ids: std.ArrayList(u32) = .empty, // the tokens its K/V holds
 
     pub fn init(dir: []const u8, context: u32) !*Engine {
         const e = try std.heap.page_allocator.create(Engine);
@@ -37,6 +39,8 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        if (e.sc) |f| f.deinitFork();
+        e.sc_ids.deinit(std.heap.page_allocator);
         e.r.deinit();
         std.heap.page_allocator.destroy(e);
     }
@@ -135,5 +139,30 @@ pub const Engine = struct {
             e.r.d.g.free(s.v[l]);
         }
         std.heap.page_allocator.destroy(s);
+    }
+
+    /// A decision: the labels' logits after `prompt` (softcapped) and the row's log-sum-exp, on the second sequence.
+    pub fn score(e: *Engine, prompt: []const u32, labels: []const u32, logits: []f64, _: bool) !f64 {
+        if (prompt.len == 0 or prompt.len + 1 > e.max_len) return error.PromptTooLong;
+        const r = e.sc orelse blk: {
+            e.sc = try e.r.fork();
+            break :blk e.sc.?;
+        };
+        const gpa = std.heap.page_allocator;
+        var l: usize = 0;
+        while (l < e.sc_ids.items.len and l + 1 < prompt.len and e.sc_ids.items[l] == prompt[l]) l += 1;
+        // the ring holds positions back to (end - 1536): resume only if the old end is not too far past the prefix
+        if (e.sc_ids.items.len > l + 1024) l = 0;
+        e.sc_ids.clearRetainingCapacity();
+        r.pos = @intCast(l);
+        try r.feed(prompt[l..], true);
+        try e.sc_ids.appendSlice(gpa, prompt);
+        const row = try r.logits(0);
+        var peak: f64 = -std.math.inf(f64);
+        for (row) |x| peak = @max(peak, x);
+        var sum: f64 = 0;
+        for (row) |x| sum += @exp(@as(f64, x) - peak);
+        for (labels, logits) |t, *o| o.* = row[t];
+        return peak + @log(sum);
     }
 };

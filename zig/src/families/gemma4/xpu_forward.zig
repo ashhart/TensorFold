@@ -142,7 +142,14 @@ pub const Runner = struct {
         d.prof_on = false;
         r.m = try load_mod.load(d, r.k.repack, &r.ckpt);
         d.prof_on = prof;
-        r.ntl_max = (context + KEYS - 1) / KEYS + 1;
+        try r.buffers();
+        return r;
+    }
+
+    /// The activations, K/V caches and host logits of one sequence (a fork has its own; the weights are shared).
+    fn buffers(r: *Runner) !void {
+        const d = r.d;
+        r.ntl_max = (r.context + KEYS - 1) / KEYS + 1;
         const nt: usize = r.ntl_max;
         r.a = .{
             .ids = try d.alloc_(MAXT * 4),
@@ -169,12 +176,28 @@ pub const Runner = struct {
             .toi = try d.alloc_(ROWS * MAXK * 4),
         };
         for (0..24) |i| {
-            const bytes: usize = if (cfg.isGlobal(i)) @as(usize, context) * cfg.kv_heads * cfg.dim_g * 2 else cfg.ring * cfg.kv_heads * cfg.dim_s * 2;
+            const bytes: usize = if (cfg.isGlobal(i)) @as(usize, r.context) * cfg.kv_heads * cfg.dim_g * 2 else cfg.ring * cfg.kv_heads * cfg.dim_s * 2;
             r.kc[i] = try d.alloc_(bytes);
             r.vc[i] = try d.alloc_(bytes);
         }
         r.host_logits = try alloc.alloc(f32, cfg.vocab);
-        return r;
+    }
+
+    /// A second sequence on the same weights, kernels and device (decisions score on it while streams run).
+    pub fn fork(r: *Runner) !*Runner {
+        const f = try alloc.create(Runner);
+        errdefer alloc.destroy(f);
+        f.* = r.*;
+        f.pos = 0;
+        f.last = 0;
+        try f.buffers();
+        return f;
+    }
+
+    /// A fork's host memory back (its device buffers go with the device).
+    pub fn deinitFork(f: *Runner) void {
+        alloc.free(f.host_logits);
+        alloc.destroy(f);
     }
 
     pub fn deinit(r: *Runner) void {
