@@ -57,6 +57,14 @@ pub const Fixture = struct {
             try up.?.fill(fill, seed ^ 0x1130);
             if (fill == .stress and (v.mode == .up_oracle or (v.mode != .oracle and up.?.bits > f.bits))) @memcpy(f.x, up.?.x);
             @memcpy(up.?.x, f.x);
+            if (fill == .stress and v.nonlinear()) {
+                // Keep final SwiGLU's sigmoid normal; the unscaled gate/up observers prove the large FP32 sums.
+                for ([_]Affine{ f, up.? }) |q| {
+                    const scale = std.math.ldexp(@as(f32, 1), 2 - @as(i32, q.bits));
+                    @memset(q.scales, c.toBf16(scale));
+                    @memset(q.biases, c.toBf16(-2));
+                }
+            }
         }
         const order = try a.alloc(i32, s.rows);
         for (order, 0..) |*o, i| o.* = @intCast(s.rows - 1 - i);

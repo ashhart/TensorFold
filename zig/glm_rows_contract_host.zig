@@ -297,3 +297,78 @@ test "GLM window contract: gate and up observers read different matrices at inde
         for (want) |w| try std.testing.expectEqual(@as(f64, 576), w);
     }
 }
+
+fn metalScalarBf(v: f32) f32 {
+    const normal = if (@abs(v) < 0x1p-126) std.math.copysign(@as(f32, 0), v) else v;
+    return c.fromBf16(c.toBf16(normal));
+}
+fn metalScalarGlu(gate: f64, value: f64) f64 {
+    const x = metalScalarBf(@min(metalScalarBf(@floatCast(gate)), 10));
+    const up = metalScalarBf(std.math.clamp(metalScalarBf(@floatCast(value)), -10, 10));
+    const e = metalScalarBf(@exp(@abs(x)));
+    const y = metalScalarBf(1 / metalScalarBf(1 + e));
+    return metalScalarBf(metalScalarBf(x * (if (x < 0) y else metalScalarBf(1 - y))) * up);
+}
+fn fixedGluDots(f: Fixture) void {
+    for ([_]contract.affine.Affine{ f.f, f.up.? }, [_]u8{ 11, 2 }) |q, delta| {
+        const half: u8 = @as(u8, 1) << @intCast(q.bits - 1);
+        for (0..q.shape.n) |j| for (0..q.shape.k / 2) |i| {
+            q.codes[j * q.shape.k + i] = half + delta;
+            q.codes[j * q.shape.k + q.shape.k / 2 + i] = half - delta;
+        };
+    }
+}
+test "GLM window contract: exact FP32 dots cannot falsely fail final GLU at a subnormal sigmoid" {
+    for ([_]u8{ 5, 6 }) |bits| {
+        const shape: c.Shape = .{ .rows = 4, .n = 4, .k = 4096 };
+        const v: cases.Entry = .{ .kind = .glu, .bits = bits, .mode = .replacement };
+        const f = try Fixture.init(a, v, shape, .stress, 0x6b63);
+        defer f.deinit();
+        fixedGluDots(f);
+        var want: [16]f64 = undefined;
+        var mag: [16]f64 = undefined;
+        f.reference(&want, &mag);
+        const spec = cases.spec(v, "normal nonlinear stress", &.{shape});
+        for (want, mag, 0..) |w, m, i| {
+            const at = f.coordinates(i);
+            const gate = f.f.one(at.row, at.col)[0];
+            const up = f.up.?.one(at.row, at.col)[0];
+            const got = metalScalarGlu(gate, up);
+            try std.testing.expect(@abs(got - w) <= c.bound(spec, shape, w, m));
+        }
+        for ([_]cases.Mode{ .oracle, .up_oracle }) |mode| {
+            const raw = try Fixture.init(a, .{ .kind = .glu, .bits = bits, .mode = mode }, shape, .stress, 0x6b63);
+            defer raw.deinit();
+            fixedGluDots(raw);
+            const at = raw.coordinates(0);
+            try std.testing.expectEqual(@as(f64, -88), raw.f.one(at.row, at.col)[0]);
+            try std.testing.expectEqual(@as(f64, -16), raw.up.?.one(at.row, at.col)[0]);
+            for ([_]contract.affine.Affine{ raw.f, raw.up.? }) |q| {
+                for (q.scales) |s| try std.testing.expectEqual(c.toBf16(1), s);
+                for (q.biases) |b| try std.testing.expectEqual(c.toBf16(-@as(f32, @floatFromInt(@as(u32, 1) << @intCast(q.bits - 1)))), b);
+            }
+        }
+    }
+}
+
+test "GLM window contract: final nonlinear stress stays normal across widths, groups and seeds" {
+    for (cases.bits) |bits| for ([_]usize{ 3, 4 }) |rows| for ([_]usize{ 576, 4096 }) |k| for ([_]u64{ 0x6b63, 0xa11ce }) |seed| {
+        const shape: c.Shape = .{ .rows = rows, .n = 4, .k = k };
+        const v: cases.Entry = .{ .kind = .glu, .bits = bits, .mode = .replacement };
+        const f = try Fixture.init(a, v, shape, .stress, seed);
+        defer f.deinit();
+        var want: [16]f64 = undefined;
+        var mag: [16]f64 = undefined;
+        f.reference(want[0..f.count()], mag[0..f.count()]);
+        const spec = cases.spec(v, "normal nonlinear stress", &.{shape});
+        for (0..f.count()) |i| {
+            const at = f.coordinates(i);
+            const gate = f.f.one(at.row, at.col)[0];
+            const up = f.up.?.one(at.row, at.col)[0];
+            try std.testing.expect(gate < 0 and gate >= -16 and up < 0 and up >= -16);
+            try std.testing.expect(want[i] >= 0x1p-126);
+            const got = metalScalarGlu(gate, up);
+            try std.testing.expect(@abs(got - want[i]) <= c.bound(spec, shape, want[i], mag[i]));
+        }
+    };
+}
