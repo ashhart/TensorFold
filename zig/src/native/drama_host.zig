@@ -280,7 +280,7 @@ const Host = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, o: Options) !api.Opened {
     if (o.context < 1025 or o.context > 8192) return error.BadDramaContext;
-const budget = try @import("drama_budget.zig").budget(o.context, o.max_frames);
+    const budget = try @import("drama_budget.zig").budget(o.context, o.max_frames);
     if (!is_cuda) try d3.load_limit.admit(gpa, io, dir, o.context); // refused before a weight is read: the floor's one-Mac limit
     try o.silence.validate();
     const h = try gpa.create(Host);

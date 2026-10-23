@@ -113,10 +113,10 @@ pub fn promptFor(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs
 }
 
 /// A voice's prompt for a speech request: its ids and frame rows; null when the request named no voice.
-pub fn requestPrompt(cx: *Cx, text: text_mod.Text, sp: api.SpeechInfo, input: []const u8, refs: []const prompt.Reference) errors.Refused!?Prompt {
+pub fn requestPrompt(cx: *Cx, tokenizer: text_mod.Text, sp: api.SpeechInfo, input: []const u8, refs: []const prompt.Reference) errors.Refused!?Prompt {
     if (refs.len == 0) return null;
     if (try checks.problem(cx.a, input)) |message| return cx.refuse(message);
-    const made = promptFor(cx.a, text, input, refs) catch |e| return switch (e) {
+    const made = promptFor(cx.a, tokenizer, input, refs) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => cx.other("the tokenizer cannot encode this voice prompt"),
     };

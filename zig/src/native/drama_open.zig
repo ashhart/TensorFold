@@ -37,7 +37,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "Drama 3 uses embedded native kernels, not captured kernel sets: unset TENSORFOLD_CUDA_KERNELS or set it to native";
         return null;
     };
-return drama_host.open(gpa, io, o.dir, "", .{
+    return drama_host.open(gpa, io, o.dir, "", .{
         .context = @intCast(window),
         .device = device,
         .lanes = if (o.lanes_fixed) o.lanes else 2,
@@ -62,7 +62,7 @@ pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = "Drama 3 needs context 1025..8192, 1..8 frame lanes and no text, vision, TP or cache modifiers";
         return null;
     }
-if (frameProblem(@intCast(window), o.max_frames)) |why| {
+    if (frameProblem(@intCast(window), o.max_frames)) |why| {
         problem.* = why;
         return null;
     }

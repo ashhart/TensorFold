@@ -17,7 +17,6 @@ const Mailbox = @import("mailbox.zig").Mailbox;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
 pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
 
 /// What a route hands the reply: Python's chat() arguments.

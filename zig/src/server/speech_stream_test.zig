@@ -107,7 +107,8 @@ pub const Bytes = struct {
         for (ids, out) |id, *byte| byte.* = @intCast(id);
         return out;
     }
-    fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
+    fn tokenId(_: *anyopaque, piece: []const u8) ?u32 {
+        if (std.mem.eql(u8, piece, "<|semantic:0|>")) return 1000;
         return null;
     }
     fn tokenString(_: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error![]u8 {

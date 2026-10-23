@@ -169,7 +169,7 @@ pub const Args = struct {
     metrics_open: bool = false,
     dashboard: bool = false,
     context: ?i64 = null,
-max_frames: ?u32 = null,
+    max_frames: ?u32 = null,
     silence: api.speech_guard.Config = .{},
     redraw: @import("speech_redraw.zig").Policy = .{},
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
@@ -357,7 +357,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.chat_template = v;
         return;
     }
-if (is(name, "--max-frames")) {
+    if (is(name, "--max-frames")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 8190) return fail(u, a, "argument --max-frames: expected 1 through 8190: '{s}'", .{v});
         out.max_frames = @intCast(n);
@@ -502,7 +502,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .dir = dir,
         .model_type = model_type,
         .context = args.context,
-.max_frames = args.max_frames,
+        .max_frames = args.max_frames,
         .silence = args.silence,
         .lanes = parallel(args.parallel) orelse 8,
         .lanes_fixed = parallelFixed(args.parallel),
