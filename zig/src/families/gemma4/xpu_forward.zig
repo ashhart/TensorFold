@@ -37,7 +37,6 @@ pub const Kernels = struct {
     gemv256: ze.H,
     dense: ze.H,
     dec_narrow16: ze.H,
-    exp: [6]ze.H, // prefetch experiments
     dec_wide16: ze.H,
     attn_rows: [2]ze.H,
     ngen_wide: ze.H,
@@ -135,13 +134,6 @@ pub const Runner = struct {
             .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
             .gemv256 = try d.kernel(mg, "g4_gemv256", 64),
             .dense = try d.kernel(mg, "g4_dense", 256),
-            .exp = blk: {
-                const mx = try d.g.module(&kb.gemm_g4);
-                const names = [_][:0]const u8{ "g4_d16_pf3", "g4_d16_pf4", "g4_d16_pf6", "g4_d16_pf8", "g4_d32_pf4", "g4_d32_pf8" };
-                var out: [6]ze.H = undefined;
-                for (names, &out) |n, *o| o.* = try d.kernel(mx, n, 64);
-                break :blk out;
-            },
             .dec_narrow16 = try d.kernel(mm, "w4k_s16x16", 64),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
             .attn_rows = .{ try d.kernel(mg, "g4_attn_rows", 128), try d.kernel(mgg, "g4_attn_rows", 128) },
@@ -319,12 +311,7 @@ pub const Runner = struct {
             return;
         }
         if (w.wide) {
-            if (w.n <= 6144 and std.c.getenv("XPU_EXP") != null) {
-                const v = std.c.getenv("XPU_EXP").?;
-                const i = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0;
-                const cols: u32 = if (i >= 4) 128 else 64;
-                try r.d.launch(k.exp[i], .{ .x = 1, .y = w.n / (cols) }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
-            } else if (w.n <= 6144) // 64 columns a group: twice the groups of the 128-column kernel on these narrow-N shapes
+            if (w.n <= 6144) // 64 columns a group: twice the groups of the 128-column kernel on these narrow-N shapes
                 try r.d.launch(k.dec_wide16, .{ .x = 1, .y = w.n / 64 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
             else if (w.n >= 30000)
                 try r.d.launch(k.dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
