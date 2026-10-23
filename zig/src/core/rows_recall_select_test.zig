@@ -100,3 +100,35 @@ test "restore selection: corrupt files and allocation refusal keep the valid RAM
         try t.expectEqual(@as(u32, 0), s.entries.items[0].borrowers);
     }
 }
+test "restore selection: a state whose directory another identity's cap removed evicts no kept state" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    defer a.free(dir);
+    var prompt: [3000]u32 = undefined;
+    for (&prompt, 0..) |*token, i| token.* = @intCast(29 + i * 7);
+    try seed(dir, &prompt);
+    var kept: [1200]u32 = undefined;
+    for (&kept, 0..) |*token, i| token.* = @intCast(31 + i * 5);
+    var f: fake.Fake = .{ .gpa = a, .prompt = &kept, .at = 1000 };
+    const family = f.snapshots();
+    const r = try rows.Rows.open(a, family, options(dir));
+    defer r.deinit();
+    var s = pc.Store.init(a, family, rules, family.vtable.bytes(family.ptr, 2600));
+    defer s.deinit();
+    try t.expect(s.keep(&kept, 1000, null, &.{}, &.{}));
+    s.disk = r;
+    f.prompt = &prompt;
+    const status = rows.read.resumable(&s, &prompt, &.{}, &.{});
+    try t.expect(status.from == .disk and status.disk == 2600);
+    var o = options(dir);
+    o.identity = 170;
+    const other = try rows.Rows.open(a, family, o);
+    defer other.deinit();
+    _ = other.room(o.cap);
+    try t.expect(rows.read.recall(&s, &prompt, prompt.len, &.{}, &.{}, null) == null);
+    try t.expectEqual(@as(u64, 0), s.counts.evicted);
+    try t.expectEqual(@as(usize, 1), s.entries.items.len);
+    try t.expectEqual(@as(usize, 1), f.live);
+    try t.expectEqual(@as(u64, 1), r.counts.failed);
+}
