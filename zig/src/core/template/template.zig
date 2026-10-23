@@ -20,6 +20,7 @@ pub const Diag = struct { msg: []const u8 = "", raised: bool = false };
 
 /// A parsed template; its arena owns the syntax tree.
 pub const Compiled = struct {
+    /// Its child allocator also backs each render's scratch, so concurrent renders need it thread-safe.
     arena: std.heap.ArenaAllocator,
     tree: ast.Template,
 
@@ -114,7 +115,8 @@ pub fn renderProvenance(gpa: Allocator, t: *const Compiled, messages: std.json.V
 
 /// Checkpoint-owned globals are template data; request context overrides them and retains its provenance.
 pub fn renderProvenanceGlobals(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, diag: ?*Diag) Error!Str {
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    // not on `gpa`: an arena there, such as a server request's, would keep the freed scratch until it is reset
+    var arena = std.heap.ArenaAllocator.init(t.arena.child_allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var out: v.Buffer = .{};
