@@ -35,6 +35,7 @@ const embed_k = @import("contract_embed.zig");
 
 const tree_k = @import("contract_tree_attn.zig");
 const block_k = @import("contract_block_attn.zig");
+const q35_k = @import("contract_q35_attn.zig");
 
 const window_k = @import("contract_window.zig");
 const moe_k = @import("contract_moe.zig");
@@ -312,6 +313,14 @@ pub fn run(gpu: check.Gpu) !void {
     var blocks: [2]block_k.Block = .{ .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = false }, .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = true } };
     defer for (&blocks) |*x| x.deinit();
     for (&blocks) |*x| try kernels.append(a, x.kernel());
+    var q35_mod = try cuda.Module.load(gpu.d, kk.qwen35);
+    defer q35_mod.unload();
+    var q35_kv8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
+    defer q35_kv8.unload();
+    var q35s: [q35_k.forms.len]q35_k.Q35 = undefined;
+    for (q35_k.forms, &q35s) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .partial = try if (f.cache == .fp8) q35_kv8.function("tf_q35_attn_partial8") else q35_mod.function("tf_q35_attn_partial"), .merge = try q35_mod.function("tf_q35_attn_merge") };
+    defer for (&q35s) |*x| x.deinit();
+    for (&q35s) |*x| try kernels.append(a, x.kernel());
     var window_fns = try cuda.window_attention.WindowAttention.load(gpu.d);
     defer window_fns.unload();
     var windows: [window_k.cfgs.len]window_k.Window = undefined;

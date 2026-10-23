@@ -409,7 +409,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
     rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, StoreBf16{layer, geo.kvh});
 }
 
-// Causal attention in chunks of chunk_keys(the row's keys), a warp a query head; partials by (row, head, chunk).
+// Causal attention in chunks of chunk_keys(the row's keys), a warp a query head; grid (rows, key heads, chunks).
 extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                  const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                  const int* __restrict__ P, float scale,
@@ -417,9 +417,9 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
     constexpr int DPL = HD / 32;
     const int QH = geo.qh, KVH = geo.kvh;
     const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
-    const int c = blockIdx.x, h = blockIdx.y;
-    if (c >= MAXCH || past_rows(P, blockIdx.z)) return;
-    const size_t m = blockIdx.z;
+    const int c = blockIdx.z, h = blockIdx.y;
+    if (c >= MAXCH || past_rows(P, blockIdx.x)) return;
+    const size_t m = blockIdx.x;
     const int qh = h * (QH / KVH) + g;
     const Seg sg = segs[rowseg[m]];
     const Ancestor anc = rowanc[m];
