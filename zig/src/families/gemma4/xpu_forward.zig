@@ -27,7 +27,6 @@ pub const Kernels = struct {
     geglu: ze.H,
     ple_mid: ze.H,
     attn_prep: [2]ze.H, // [sliding, global]
-    attn_part: [2]ze.H,
     attn_merge: [2]ze.H,
     argmax_part: ze.H,
     argmax: ze.H,
@@ -38,7 +37,9 @@ pub const Kernels = struct {
     dense: ze.H,
     dec_narrow16: ze.H,
     dec_wide16: ze.H,
-    attn_rows: [2]ze.H,
+    dp_part: [2]ze.H,
+    dp_rows: [2]ze.H,
+    dp_sums: [2]ze.H,
     ngen_wide: ze.H,
     ngen_narrow: ze.H,
     topk_part: ze.H,
@@ -125,7 +126,6 @@ pub const Runner = struct {
             .geglu = try d.kernel(mg, "g4_geglu", 256),
             .ple_mid = try d.kernel(mg, "g4_ple_mid", 64),
             .attn_prep = .{ try d.kernel(mg, "g4_attn_prep", 256), try d.kernel(mgg, "g4_attn_prep", 256) },
-            .attn_part = .{ try d.kernel(mg, "g4_attn_part", 128), try d.kernel(mgg, "g4_attn_part", 128) },
             .attn_merge = .{ try d.kernel(mg, "g4_attn_merge", 128), try d.kernel(mgg, "g4_attn_merge", 128) },
             .argmax_part = try d.kernel(mg, "argmax_part", 256),
             .argmax = try d.kernel(mg, "argmax", 256),
@@ -136,7 +136,9 @@ pub const Runner = struct {
             .dense = try d.kernel(mg, "g4_dense", 256),
             .dec_narrow16 = try d.kernel(mm, "w4k_s16x16", 64),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
-            .attn_rows = .{ try d.kernel(mg, "g4_attn_rows", 128), try d.kernel(mgg, "g4_attn_rows", 128) },
+            .dp_part = .{ try d.kernel(mg, "g4_attn_dp_part", 256), try d.kernel(mgg, "g4_attn_dp_part", 256) },
+            .dp_rows = .{ try d.kernel(mg, "g4_attn_dp_rows", 256), try d.kernel(mgg, "g4_attn_dp_rows", 256) },
+            .dp_sums = .{ try d.kernel(mg, "g4_attn_sums", 128), try d.kernel(mgg, "g4_attn_sums", 128) },
             .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
             .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
             .topk_part = try d.kernel(mg, "g4_topk_part", 256),
@@ -371,14 +373,18 @@ pub const Runner = struct {
             r.tag = "qkv";
             try r.gemm(a.h, a.ahi, a.alo, l.qkv, a.p, T);
             try d.launch(k.attn_prep[@intFromBool(glob)], .{ .x = T }, .{ a.p, @as(i32, @intCast(l.qkv.n)), l.qn, l.kn orelse l.qn, if (glob) m.invf_g else m.invf_s, a.q, r.kc[src], r.vc[src], @as(i32, @intCast(p0)), EPS, @as(i32, if (glob) 0 else cfg.ring), @as(i32, @intFromBool(own)) });
-            const ntl: u32 = if (glob) (p0 + T - 1) / KEYS + 1 else 5;
             const window: i32 = if (glob) 0 else cfg.window;
             const ring: i32 = if (glob) 0 else cfg.ring;
-            if (T > ROWS) {
-                try d.launch(k.attn_rows[@intFromBool(glob)], .{ .x = 8, .y = T }, .{ a.q, r.kc[src], r.vc[src], @as(i32, @intCast(p0)), window, ring, a.h, a.ahi, a.alo });
-            } else {
-            try d.launch(k.attn_part[@intFromBool(glob)], .{ .x = ntl, .y = 8, .z = T }, .{ a.q, r.kc[src], r.vc[src], a.pm, a.pl, a.po, @as(i32, @intCast(p0)), window, ring, @as(i32, @intCast(ntl)) });
-            try d.launch(k.attn_merge[@intFromBool(glob)], .{ .x = 8, .y = T }, .{ a.pm, a.pl, a.po, @as(i32, @intCast(p0)), window, @as(i32, @intCast(ntl)), a.h, a.ahi, a.alo });
+            const krows: i32 = if (glob) @intCast(r.context) else cfg.ring;
+            const g = @intFromBool(glob);
+            const blocks: u32 = (T + 3) / 4;
+            if (T > ROWS) { // prompt rows: every tile of a block's rows in one group, folded in order
+                try d.launch(k.dp_rows[g], .{ .x = 2, .y = blocks }, .{ a.q, r.kc[src], r.vc[src], @as(i32, @intCast(p0)), @as(i32, @intCast(T)), window, ring, krows, a.h });
+                try d.launch(k.dp_sums[g], .{ .x = 8, .y = T }, .{ a.h, a.ahi, a.alo });
+            } else { // a window: the tiles in parallel, then the ordered fold
+                const nt: u32 = if (glob) (p0 + T - 1) / KEYS + 1 else 6; // a block's rows may span one tile more than a row's window
+                try d.launch(k.dp_part[g], .{ .x = nt, .y = 2, .z = blocks }, .{ a.q, r.kc[src], r.vc[src], a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(T)), window, ring, krows, @as(i32, @intCast(nt)) });
+                try d.launch(k.attn_merge[g], .{ .x = 8, .y = T }, .{ a.pm, a.pl, a.po, @as(i32, @intCast(p0)), window, @as(i32, @intCast(nt)), a.h, a.ahi, a.alo });
             }
             if (r.dump_dir != null and p0 == 0 and i == 0) {
                 try r.dumpBuf("q0", a.q, T * 8 * hd * 2);
