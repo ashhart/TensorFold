@@ -89,7 +89,11 @@ fn driver() cuda.Driver {
 
 const Heads = struct {
     var broadcasts: [2]usize = .{ 0, 0 };
-    fn launch(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+    var launches: [3]usize = .{ 0, 0, 0 }; // by function handle: [1] the glue's bmm_decode, [2] the lane's
+    var mxfp8 = false; // score's head: bf16, or MXFP8 (FP4-Local's)
+    fn launch(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+        const h = @intFromPtr(f);
+        if (h < launches.len) launches[h] += 1;
         return 0;
     }
     fn copy(_: u64, _: u64, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
@@ -127,10 +131,14 @@ const Heads = struct {
         e.m.tiled = false;
         e.m.packs = null;
         e.m.glue.bmm_decode = .{ .d = d, .handle = @ptrFromInt(1) };
+        e.m.lane.clusters = true;
+        for (&e.m.lane.fns) |*fns| for (fns) |*f| {
+            f.* = .{ .d = d, .handle = @ptrFromInt(2) };
+        };
         e.bp.fnormed = 0x10000;
         e.bp.kda.mm_part = 0x20000;
         e.bd.logits = 0x30000;
-        e.w.head = 0x40000;
+        e.w.head = if (mxfp8) .{ .mxfp8 = cuda.mxfp8.weight(0x40000, 0x48000, 8, 64) } else .{ .bf16 = 0x40000 };
         e.smp.d = d;
         e.smp.vocab = 16;
         e.smp.full = .{ .d = d, .ptr = 0x50000, .len = 1024 };
@@ -191,4 +199,22 @@ test "GLM prompt rows: both cached addresses survive later driver mapping refusa
     }
     try std.testing.expectEqualSlices(usize, &.{ 1, 1 }, &Mapping.maps);
     try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, &Heads.broadcasts);
+}
+
+test "GLM prompt rows: an MXFP8 head (FP4-Local's) is scored on the lane, as the forward runs it" {
+    var d = [_]cuda.Driver{ driver(), driver() };
+    var outputs: [2]?Output = .{ null, null };
+    defer for (&outputs) |*o| if (o.*) |*p| p.free();
+    Mapping.refuse = .{ false, false };
+    for (0..2) |r| {
+        Mapping.allocating = r;
+        outputs[r] = try Output.init(&d[r]);
+    }
+    Heads.mxfp8 = true;
+    defer Heads.mxfp8 = false;
+    for (0..2) |r| {
+        Heads.launches = .{ 0, 0, 0 };
+        try Heads.score(&d[r], outputs[r].?, r);
+        try std.testing.expectEqualSlices(usize, &.{ 0, 0, 1 }, &Heads.launches);
+    }
 }

@@ -1,0 +1,17 @@
+head: 797dd2e13926962cb29b544322861da0a830b248
+head tree: 9bd2e5b01ecc63b7546cab99c984a84a76066950
+tested implementation: 80517fc36ea6ee9183c5237ae92b1abd70619f75 (receipt: c595d643019b5590c97746463a08fbbb18844f4b)
+
+code commits above the receipt:
+797dd2e13926962cb29b544322861da0a830b248 contract: a gate 3 control for GLM's float32 norm weight, the same kernel given that weight as bf16 values
+fac8a7aa8fe641dfdf19197abbf51de8d3d4d0cd glm/cuda: a test holds csfLinear's refusal of an empty weight, which the loader's formats.of meets first
+af81cf33fff3b0e5af06ce334770907a3fe1a3c1 glm/cuda: readRecipes returns a failed read or allocation as itself, not as a config without recipes
+1f9d88e4346c907b31c0a615d42bdcdbe42e882e glm/cuda: the loader refuses by name an FP8 projection this GPU's lane cannot run, before its upload
+d23862ab7d93638fa29eaa488bc47a7d147e1885 glm/cuda: capabilities list modelopt-mixed, and the refusal and log texts name what the loader reads
+12389501b61afa8d8ba0a8c2c8d25c644029ccc8 glm-loader-gate: a tamper run passes only red as planted, and a run that compares nothing fails
+6beac759acb8375eadeef473901ccf8582997928 glm/cuda: comments and docs say what the code and the receipt hold, with no host number or local label
+
+commits above the receipt that touch only docs/receipts:
+61e9c85855ed0ccca5b9c066ccd97acf78a88ae2 docs: the FP4-Local receipt's tools name no local plan, records folder or container
+ae5b93f2b8e1696423c3b4d04b646d702df9cd9d docs: the FP4-Local receipt's video row counts video_http.py's checks as upstream's 15 and a repeat
+839a32f7fb38bfe432c4f2d438934792452e2929 docs: the FP4-Local receipt's video serves, and the checks of d23862ab on its own binaries

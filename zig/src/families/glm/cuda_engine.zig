@@ -103,8 +103,8 @@ pub const Engine = struct {
         const cfg_path = try std.fs.path.join(a, &.{ checkpoint, "config.json" });
         const text = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 24));
         var why: modelopt.Why = .{};
-        const admitted = if (exl3.isExl3(gpa, text)) exl3.admit(gpa, text, &why) else modelopt.admit(gpa, text, &why);
-        admitted catch |err| { // anything but ModelOpt NVFP4 or EXL3 (4-bit mcg routed experts) is refused before loading
+        const admitted = if (exl3.isExl3(gpa, text)) exl3.admit(gpa, text, &why) else @import("cuda_formats.zig").admit(gpa, text, &why);
+        admitted catch |err| { // anything but NVFP4, MIXED_PRECISION in recipes read here or EXL3 is refused by name before loading
             std.log.err("{s}: {s}", .{ cfg_path, why.text() });
             return err;
         };

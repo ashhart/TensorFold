@@ -1,0 +1,85 @@
+{
+ "k": 4,
+ "n": 64,
+ "nonce": "551113673",
+ "alone": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "2a6ff2e8f6c5ec99cdf2f9252196e10d02bd47f5d18f0ddf3ec9f89dc543ea4a",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\n1. The harbour and its tide\n\nThe harbour is small, with a stone quay, a slipway, and a channel that dries at low water. Twice",
+   "ttft": 0.356332306,
+   "prefill_s": 0.33973973,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "2d82a6d43e0c67e683b44fa01a252e2c9f6b27843f112bffbab5f7bacde511f2",
+   "text": " a short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks. (1.0) a short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks",
+   "ttft": 0.47816446,
+   "prefill_s": 0.477354049,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "9183dfe322669f3c35a11b7f2a7e37c2b8656864eb1110506f606ae5728245d9",
+   "text": " a short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\n\nJesse Clarke\n\n1. The recipe as it stands\n\nThe recipe is short. It says: take 500 g barley flour, 350 ml water, 7 g",
+   "ttft": 0.559614458,
+   "prefill_s": 0.55851894,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 758,
+   "n": 64,
+   "token_sha256": "743beac17d2a01b99fe758e9180b36e9dde768646d4ab7700957a3df0978baba",
+   "text": " a short study of the rules of a card game, what one sees and measures there, and what one would write down for a friend who asks.\nSummary: a short study of the rules of a card game, what one sees and measures there, and what one would write down for a friend who asks.\nSummary:",
+   "ttft": 0.6762345,
+   "prefill_s": 0.675450395,
+   "prefill_widths": []
+  }
+ ],
+ "together": [
+  {
+   "prompt_tokens": 131,
+   "n": 64,
+   "token_sha256": "2a6ff2e8f6c5ec99cdf2f9252196e10d02bd47f5d18f0ddf3ec9f89dc543ea4a",
+   "text": " A short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n\n1. The harbour and its tide\n\nThe harbour is small, with a stone quay, a slipway, and a channel that dries at low water. Twice",
+   "ttft": 0.45512382,
+   "prefill_s": 0.40132027,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 338,
+   "n": 64,
+   "token_sha256": "2d82a6d43e0c67e683b44fa01a252e2c9f6b27843f112bffbab5f7bacde511f2",
+   "text": " a short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks. (1.0) a short study of how a sundial keeps time, what one sees and measures there, and what one would write down for a friend who asks",
+   "ttft": 5.143980659,
+   "prefill_s": 0.533963194,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 535,
+   "n": 64,
+   "token_sha256": "9183dfe322669f3c35a11b7f2a7e37c2b8656864eb1110506f606ae5728245d9",
+   "text": " a short study of a recipe for barley bread, what one sees and measures there, and what one would write down for a friend who asks.\n\nJesse Clarke\n\n1. The recipe as it stands\n\nThe recipe is short. It says: take 500 g barley flour, 350 ml water, 7 g",
+   "ttft": 1.164784171,
+   "prefill_s": 1.111840056,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 758,
+   "n": 64,
+   "token_sha256": "743beac17d2a01b99fe758e9180b36e9dde768646d4ab7700957a3df0978baba",
+   "text": " a short study of the rules of a card game, what one sees and measures there, and what one would write down for a friend who asks.\nSummary: a short study of the rules of a card game, what one sees and measures there, and what one would write down for a friend who asks.\nSummary:",
+   "ttft": 2.0311723,
+   "prefill_s": 1.977966279,
+   "prefill_widths": []
+  }
+ ],
+ "ttft_spread": 4.6888568390000005,
+ "blocker_beside": true,
+ "one_pass": false,
+ "passes": []
+}

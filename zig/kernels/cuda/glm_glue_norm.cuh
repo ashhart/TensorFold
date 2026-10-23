@@ -33,6 +33,31 @@ __device__ __forceinline__ void load_s(const __nv_bfloat16* p, float* v, bool ve
     for (int j = 0; j < S; ++j) v[j] = bf(p[j]);
   }
 }
+// A norm's weight as float: bf16 (load_s's packing), or float32 (FP4-Local's hidden norms) in 16-byte loads.
+template <int S>
+__device__ __forceinline__ bool wpacked(const __nv_bfloat16* w) {
+  return packed<S>(w, 0);
+}
+template <int S>
+__device__ __forceinline__ bool wpacked(const float* w) {
+  return (reinterpret_cast<uintptr_t>(w) & 15) == 0;
+}
+template <int S>
+__device__ __forceinline__ void load_w(const __nv_bfloat16* p, float* v, bool vec) {
+  load_s<S>(p, v, vec);
+}
+template <int S>
+__device__ __forceinline__ void load_w(const float* p, float* v, bool vec) {
+  static_assert(S % 4 == 0, "whole float4 loads");
+#pragma unroll
+  for (int j = 0; j < S; j += 4) {
+    const float4 f = vec ? *reinterpret_cast<const float4*>(p + j) : make_float4(p[j], p[j + 1], p[j + 2], p[j + 3]);
+    v[j] = f.x;
+    v[j + 1] = f.y;
+    v[j + 2] = f.z;
+    v[j + 3] = f.w;
+  }
+}
 template <int S>
 __device__ __forceinline__ void store_s(__nv_bfloat16* p, const __nv_bfloat16* o, bool vec) {
   if (vec) {
@@ -48,15 +73,15 @@ __device__ __forceinline__ void store_s(__nv_bfloat16* p, const __nv_bfloat16* o
 }
 
 // glue._rmsnorm, BLOCK = D to a power of two, NW warps, S values a thread: bf16(w * bf16(x / rms)), `sums` per 64.
-template <int D, int BLOCK, int NW, int S>
-__device__ void rmsnorm(const __nv_bfloat16* x, int64_t x_stride, const __nv_bfloat16* w, __nv_bfloat16* out,
+template <int D, int BLOCK, int NW, int S, typename W = __nv_bfloat16>
+__device__ void rmsnorm(const __nv_bfloat16* x, int64_t x_stride, const W* w, __nv_bfloat16* out,
                         int64_t o_stride, float* xs, float eps, int sums) {
   constexpr int T = NW * 32, TILE = S * T, REPS = BLOCK / TILE, N = REPS * S, G = 64 / S;
   static_assert(D % S == 0, "a thread's values all inside D or all past it");
   __shared__ float smem[NW];
   const int64_t r = blockIdx.x;
   const int t = threadIdx.x;
-  const bool xv = packed<S>(x, x_stride), wv = packed<S>(w, 0), ov = packed<S>(out, o_stride);
+  const bool xv = packed<S>(x, x_stride), wv = wpacked<S>(w), ov = packed<S>(out, o_stride);
   float v[N];
 #pragma unroll
   for (int rep = 0; rep < REPS; ++rep) {
@@ -85,7 +110,7 @@ __device__ void rmsnorm(const __nv_bfloat16* x, int64_t x_stride, const __nv_bfl
     }
     float wf[S];
     __nv_bfloat16 o[S];
-    load_s<S>(w + d, wf, wv);
+    load_w<S>(w + d, wf, wv);
 #pragma unroll
     for (int j = 0; j < S; ++j) {
       o[j] = __float2bfloat16_rn(__fmul_rn(wf[j], rbf(__fmul_rn(rinv, v[rep * S + j]))));
@@ -120,3 +145,10 @@ __device__ void rmsnorm(const __nv_bfloat16* x, int64_t x_stride, const __nv_bfl
 RMSNORM(4096, 4096, 8, 8)
 RMSNORM(1536, 2048, 4, 8)
 RMSNORM(512, 512, 4, 4)
+
+// FP4-Local's float32 hidden norm weight: rmsnorm_4096's arithmetic, the weight read as float32.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_glm_rmsnorm_4096_f32w(const __nv_bfloat16* x, int64_t x_stride, const float* w, __nv_bfloat16* out,
+                             int64_t o_stride, float* xs, float eps, int sums) {
+  glm_glue::rmsnorm<4096, 4096, 8, 8, float>(x, x_stride, w, out, o_stride, xs, eps, sums);
+}

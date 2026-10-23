@@ -1,0 +1,6 @@
+first: prompt 7603 cached 0 tokens 64 7.982 s sha256 5dfa4e0b2833
+repeated: prompt 7603 cached 6144 tokens 64 2.386 s sha256 5dfa4e0b2833 same_as_first True
+draft_false: prompt 7603 cached 6144 tokens 64 3.232 s sha256 5dfa4e0b2833 same_as_first True
+concurrent: prompt 7603 cached 6144 tokens 64 3.848 s sha256 5dfa4e0b2833 same_as_first True
+concurrent: prompt 7603 cached 6144 tokens 64 3.767 s sha256 5dfa4e0b2833 same_as_first True
+exit 0

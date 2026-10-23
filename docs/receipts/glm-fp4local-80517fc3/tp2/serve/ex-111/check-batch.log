@@ -1,0 +1,10 @@
+alone 0: 134 prompt tokens, 64 tokens, b8cfcaa3729de639da3c7e0f5d096765d3a65c94ea211f4fed834fd861ae52c2, first token 0.378218469 s
+alone 1: 346 prompt tokens, 64 tokens, 25be32e6dbed5d7cea62a3ed6f5d5ea87e5c234e8e53d2af065a33467da6a1a6, first token 0.488163788 s
+alone 2: 548 prompt tokens, 64 tokens, 31733f4f7c48519c0a67da03fcae5f53382f268dd0d8bb401d41cecbbd27ded5, first token 0.577444342 s
+alone 3: 776 prompt tokens, 64 tokens, 27b931d523b70cb7da8b648905ce610b1bb20068531e638c37e7e68a01f19e1f, first token 0.688734462 s
+PASS 0: together equal to alone (b8cfcaa3729de639da3c7e0f5d096765d3a65c94ea211f4fed834fd861ae52c2, first token 0.503108817 s, widths [])
+PASS 1: together equal to alone (25be32e6dbed5d7cea62a3ed6f5d5ea87e5c234e8e53d2af065a33467da6a1a6, first token 1.160543624 s, widths [])
+PASS 2: together equal to alone (31733f4f7c48519c0a67da03fcae5f53382f268dd0d8bb401d41cecbbd27ded5, first token 1.951840281 s, widths [])
+PASS 3: together equal to alone (27b931d523b70cb7da8b648905ce610b1bb20068531e638c37e7e68a01f19e1f, first token 6.542359798 s, widths [])
+INFO first tokens together: [0.503, 1.161, 1.952, 6.542] s, spread 6.0392509809999995 s; alone: [0.378218469, 0.488163788, 0.577444342, 0.688734462]; the blocker still decoding at the end: True
+exit 0

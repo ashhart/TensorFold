@@ -48,7 +48,7 @@ pub const Images = struct {
     pub const video = video_mod;
 
     /// Rank 0 (`tower`) or another rank: the rows buffer, and rank 0's tower; null with `problem` when no tower.
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, dir: []const u8, limits: Limits, max_rows: usize, tower: bool, problem: *[]const u8) !?*Images {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, dir: []const u8, limits: Limits, max_rows: usize, tower: bool, ql: cuda.qlinear.Linear, problem: *[]const u8) !?*Images {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
         const a = arena.allocator();
@@ -71,7 +71,7 @@ pub const Images = struct {
         errdefer v.map.free();
         v.host_map = try gpa.alloc(i32, max_rows);
         errdefer gpa.free(v.host_map);
-        if (tower) v.tower = try vision.Tower.load(gpa, io, d, dir);
+        if (tower) v.tower = try vision.Tower.load(gpa, io, d, dir, ql);
         v.marks = .{ .image = cfg.image_token, .open = cfg.image_start, .close = cfg.image_end };
         v.mark_ids = .{ cfg.image_start, cfg.image_token, cfg.image_end };
         return v;

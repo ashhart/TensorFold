@@ -134,6 +134,18 @@ const Ops = struct {
         return 0;
     }
 };
+/// std.mem.zeroes, a projection as stored (a union) taken as a zero bf16 address.
+fn zeroed(comptime T: type) T {
+    if (T == @import("cuda_proj.zig").Proj) return .{ .bf16 = 0 };
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| {
+            var v: T = undefined;
+            inline for (info.field_names, info.field_types) |name, F| @field(v, name) = zeroed(F);
+            return v;
+        },
+        else => return std.mem.zeroes(T),
+    }
+}
 test "GLM FP8 KV: actual DSA dense and sparse passes retain the sequence-owned scale pointer" {
     const glue = @import("cuda_glue.zig");
     const dsa = @import("cuda_dsa_block.zig");
@@ -147,7 +159,7 @@ test "GLM FP8 KV: actual DSA dense and sparse passes retain the sequence-owned s
     ks.merge.handle = @ptrFromInt(7);
     const k: dsa.Kernels = .{ .set = .{ .glue = &ks }, .ops = .{ .d = &d, .handle = null } };
     const stream: cuda.Stream = .{ .d = &d, .handle = null };
-    var l = std.mem.zeroes(dsa.Layer);
+    var l = zeroed(dsa.Layer);
     l.lw = 512;
     l.heads = 32;
     l.qk = 256;

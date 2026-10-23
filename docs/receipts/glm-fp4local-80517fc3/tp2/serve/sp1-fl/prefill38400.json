@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "fixture_sha256": "41456a6f83f7eda19c29a0b094d78bc2787a04785abd73b3c47099c209a5d1af",
+  "requested_reply_tokens": 16,
+  "temperature": 0,
+  "seed": 1234,
+  "rows": [
+    {
+      "phase": "first",
+      "prompt_tokens": 38400,
+      "cached_tokens": 0,
+      "tokens": 16,
+      "cache_state": "cold",
+      "complete": true,
+      "token_sha": "00efe51d9743",
+      "token_sha256": "00efe51d9743455b156a63c4b0680c35365994e32a80b778f4c6634f6a1d34ff",
+      "output_sha256": "386135aa99debf6d56925276a8089a42be2c76302390d6734d63ab097c8145b9",
+      "ttft_s": 28.520686774048954,
+      "decode_tps": 34.221190878950246
+    },
+    {
+      "phase": "repeated",
+      "prompt_tokens": 38400,
+      "cached_tokens": 0,
+      "tokens": 16,
+      "cache_state": "cold",
+      "complete": true,
+      "token_sha": "00efe51d9743",
+      "token_sha256": "00efe51d9743455b156a63c4b0680c35365994e32a80b778f4c6634f6a1d34ff",
+      "output_sha256": "386135aa99debf6d56925276a8089a42be2c76302390d6734d63ab097c8145b9",
+      "ttft_s": 28.518507294007577,
+      "decode_tps": 34.32871400326899,
+      "equal_first_tokens": true,
+      "equal_first_output": true
+    },
+    {
+      "phase": "repeated",
+      "prompt_tokens": 38400,
+      "cached_tokens": 0,
+      "tokens": 16,
+      "cache_state": "cold",
+      "complete": true,
+      "token_sha": "00efe51d9743",
+      "token_sha256": "00efe51d9743455b156a63c4b0680c35365994e32a80b778f4c6634f6a1d34ff",
+      "output_sha256": "386135aa99debf6d56925276a8089a42be2c76302390d6734d63ab097c8145b9",
+      "ttft_s": 28.506953392003197,
+      "decode_tps": 33.99640418706475,
+      "equal_first_tokens": true,
+      "equal_first_output": true
+    },
+    {
+      "phase": "concurrent",
+      "prompt_tokens": 38400,
+      "cached_tokens": 0,
+      "tokens": 16,
+      "cache_state": "cold",
+      "complete": true,
+      "token_sha": "00efe51d9743",
+      "token_sha256": "00efe51d9743455b156a63c4b0680c35365994e32a80b778f4c6634f6a1d34ff",
+      "output_sha256": "386135aa99debf6d56925276a8089a42be2c76302390d6734d63ab097c8145b9",
+      "ttft_s": 28.4985329999472,
+      "decode_tps": 34.3629095605631,
+      "equal_first_tokens": true,
+      "equal_first_output": true
+    }
+  ],
+  "qualified": true
+}

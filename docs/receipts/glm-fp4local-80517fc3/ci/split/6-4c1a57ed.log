@@ -1,0 +1,453 @@
+test
++- run test w
+[default] (warn): a round could not be recorded: OutOfDeviceMemory
+failed command: ./.zig-cache/o/551e9cbc17f16b6195954a6a530991e4/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- run test w
+[default] (warn): glm: restoring 1500 tokens failed (PoolMoveNotDrained); pool relocation aborted
+failed command: ./.zig-cache/o/6b599836a11a2a971768fa7362d7b429/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- run test w
+[default] (warn): XPU: a command list did not drain at close; its memory and context stay until the process ends
+failed command: ./.zig-cache/o/118b9193dec9a3e60accadd0f8f10aca/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- run test w
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+failed command: ./.zig-cache/o/b4129bb1c93af2d836ffd747ad1f5bd4/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+fake target: proposed=68 verified=68 accepted=68
+failed command: ./.zig-cache/o/f63ff2456f2d7c3ff04a5e94dcf003ba/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (err): rank 0: another rank's process ended (its line closed); this rank stops instead of waiting on it
+[default] (err): rank 0: rank 1 stopped (peer OOM); this rank stops too
+failed command: ./.zig-cache/o/7a68c42f4e407bd51c3c8a95667f08f5/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): lm_head is 8-bit in groups of 64: CUDA reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+[default] (warn): backbone.embeddings is 8-bit in groups of 64: the Intel GPU engine reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs
+failed command: ./.zig-cache/o/75fc6fb66bc2af0472b799403a2ad853/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+failed command: ./.zig-cache/o/545637059ce142f0f09fc11c291f40c1/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): qwen3_5: a failed restore's stream did not drain: its kept state's host copy stays
+[default] (warn): qwen3_5: a kept state's host copy goes to the copy-source quarantine: a restore's copies did not drain
+[default] (warn): qwen3_5: a failed restore's stream did not drain: its kept state's host copy stays
+failed command: ./.zig-cache/o/ae0e9b160ccf08834131f0925dafcf69/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 0 cannot exchange with rank 2; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 1 cannot exchange with rank 3; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 2 cannot exchange with rank 0; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+REFUSE TF_GLM_PREFILL_REDUCE=split: rank 3 cannot exchange with rank 1; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+failed command: ./.zig-cache/o/fc76de995ae0106173ed93c289f2c829/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+failed command: ./.zig-cache/o/0ed9b9b7ca11ea00b90b8fa93855da8b/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+libjpeg-turbo 3.1.4.1 not found: LFM2's JPEG cases skipped
+libjpeg-turbo 3.1.4.1 not found: LFM2's JPEG cases skipped
+failed command: ./.zig-cache/o/6e30319579da4aa7a8ba6f61faf5a515/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zig-cache/o/a0c3fd011abdf097e816d7413fc3e50a/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): libcublasLt.so.13 is required for CUDA vision towers (--vision) and CUDA cuBLASLt projections; install the NVIDIA CUDA 13 cuBLAS runtime; on Linux, add its directory to LD_LIBRARY_PATH; a driver-only host does not include it
+[default] (warn): libnccl.so.2 is required for CUDA ranks (including the GLM pair); install the NVIDIA NCCL 2 runtime compatible with CUDA 13; on Linux, add its directory to LD_LIBRARY_PATH
+[default] (warn): libibverbs.so.1 is required for RoCE/RDMA gathers; install rdma-core's libibverbs runtime and the provider for the network adapter
+[default] (warn): libmcdma-rpc.so is required for MCDMA mailbox and Metal speed-up communication; build and install MCDMA's RPC helper and set MCDMA_RPC_LIBRARY to its file
+[default] (warn): libmcdma-rpc.so is required for MCDMA mailbox and Metal speed-up communication; build and install MCDMA's RPC helper and set MCDMA_RPC_LIBRARY to its file
+[default] (warn): libmcdma-rpc.so is required for MCDMA mailbox and Metal speed-up communication; build and install MCDMA's RPC helper and set MCDMA_RPC_LIBRARY to its file
+failed command: ./.zig-cache/o/0470feed9d93318abe59b367c87dca8f/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zig-cache/o/69503c3a32624f71b4559c8a65c85205/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+libwebp 1.6.0 not found: WebP pixel cases skipped
+libjpeg-turbo 3.1.4.1 not found: JPEG pixel cases skipped
+[default] (warn): model.layers.0.mlp.up_proj.weight: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+[default] (warn): model.layers.0.mlp.up_proj: another spelling of module layers.0.mlp.up_proj declares a different width
+failed command: ./.zig-cache/o/75e4d8c023b6c1553f791e5cbedc8f55/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): slide pocket: a deleted fact's 1 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): slide pocket: a deleted fact's 1 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): slide pocket: a delete failed (UploadFailed), and its put-back did not reach the device (PutBackNotOnDevice)
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+[default] (warn): slide pocket: a delete failed (UploadFailed), and its put-back did not reach the device (PutBackNotOnDevice)
+[default] (warn): slide pocket: a deleted fact's 2 layers are put back in memory, but not all on the device (UploadFailed): replies are refused until they are
+failed command: ./.zig-cache/o/5d61929277e62c5ed95608152f9a3987/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): lane host: stopping at a round boundary: 2 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): 4 prompts together: SamplingRefused; each goes alone
+[default] (warn): lane host: a round failed (the planner refused): every admitted stream fails
+[default] (warn): lane host: a round failed (PlannerFull): every admitted stream fails
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (drain deadline)
+[default] (warn): lane host: stopping at a round boundary: 0 running and 1 queued request(s) end (NoContext)
+[default] (warn): lane host: a round failed (OutOfMemory): every admitted stream fails
+[default] (warn): lane host: a round failed (AdmittedFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (FinalsFailed): every admitted stream fails
+failed command: ./.zig-cache/o/652c3f156c7d815dc6725dc3a566539d/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+FAIL kernel-contract: unknown image name: unknown_image
+FAIL kernel-contract: unknown image name: glm_glu
+FAIL kernel-contract: unknown image name:
+FAIL kernel-contract: unknown image name: contract_control
+FAIL kernel-contract: unknown image name: GLM_GLUE
+failed command: ./.zig-cache/o/c1bffab480fb8c9f93c3b0db9167ae23/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+discovery verbs: retained through TLS, atexit and destructor; child exit 0
+discovery grammar: retained through TLS, atexit and destructor; child exit 0
+test
++- test-cuda-host
+   +- run test w
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 1.000 of its tolerance (element 1)
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+RESULT CPU reference comparison: largest difference 2.000 of its tolerance (element 0)
+FAIL CPU reference comparison within its float64 tolerance
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 2 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 1 (got -nan, reference 0e0, tolerance 1e0)
+FAIL CPU reference comparison: non-finite error at element 0 (got inf, reference 0e0, tolerance 1e0)
+failed command: ./.zig-cache/o/bab528e5d00528236b436981769f52fb/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+RESULT valid stale prefix: largest difference 0.000 of its tolerance (element 0)
+FAIL no-op projection: non-finite error at element 0 (got -nan, reference 0e0, tolerance 1e0)
+failed command: ./.zig-cache/o/dc24f7953f4a043581ab711ed146a488/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- run test w
+[default] (warn): lane host: stopping at a round boundary: 2 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): 4 prompts together: SamplingRefused; each goes alone
+[default] (warn): lane host: a round failed (the planner refused): every admitted stream fails
+[default] (warn): lane host: a round failed (PlannerFull): every admitted stream fails
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (drain deadline)
+[default] (warn): lane host: stopping at a round boundary: 0 running and 1 queued request(s) end (NoContext)
+[default] (warn): lane host: a round failed (OutOfMemory): every admitted stream fails
+[default] (warn): lane host: a round failed (AdmittedFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (FinalsFailed): every admitted stream fails
+failed command: ./.zig-cache/o/c74456518c2943afafde330acec5dd48/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+test
++- test-cuda-host
+   +- run test 502 pass, 4 fail (506 total)
+error: 'benchmark_receipt_test.test.the receipt built from the golden facts equals the golden canonical bytes' failed:
+       ====== expected this output: =========
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+       ␃
+
+       ======== instead found this: =========
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+       ␃
+
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          ^ ('\x0d')
+       found:
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          ^ ('\x0a')
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:696:9: 0x14a85f5 in expectEqualStrings (std.zig)
+               return error.TestExpectedEqual;
+               ^
+       <home>/zt/split/6-4c1a57ed/zig/src/server/benchmark_receipt_test.zig:73:5: 0x22e7a52 in test.the receipt built from the golden facts equals the golden canonical bytes (root.zig)
+           try std.testing.expectEqualStrings(golden, bytes);
+           ^
+error: 'benchmark_receipt_test.test.the parsed golden writes back byte for byte, and previews as json.dumps(indent=2)' failed:
+       ====== expected this output: =========
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}␃
+
+       ======== instead found this: =========
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}␃
+
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          ^ ('\x0d')
+       found:
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          ^ (end of string)
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:696:9: 0x14a85f5 in expectEqualStrings (std.zig)
+               return error.TestExpectedEqual;
+               ^
+       <home>/zt/split/6-4c1a57ed/zig/src/server/benchmark_receipt_test.zig:91:5: 0x22e6a51 in test.the parsed golden writes back byte for byte, and previews as json.dumps(indent=2) (root.zig)
+           try std.testing.expectEqualStrings(golden[0 .. golden.len - 1], try receipt.canonical(a, v));
+           ^
+error: 'benchmark_receipt_test.test.a saved receipt is private, atomic and loads back equal' failed:
+       ====== expected this output: =========
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+       ␃
+
+       ======== instead found this: =========
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+       ␃
+
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          ^ ('\x0d')
+       found:
+       {"created_at":"2026-01-01T00:00:00Z","hardware":{"cpu_model":null,"gpu_count":null,"gpus":[],"memory_type":"unknown","source":"unavailable","system_memory_bytes":null},"model":{"config_sha256":null,"drafter_repo_id":null,"family":null,"local":false,"quantization":null,"repo_id":"example-org/test-model","revision":null,"tokenizer_sha256":null},"run_id":"00000000-0000-4000-8000-000000000001","runtime":{"backend":"cuda","dependencies":{},"platform":"linux","python_version":"3.11.0","tensorfold_version":"0.0.0-test"},"samples":[{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"code","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05},{"cached_tokens":0,"completion_tokens":4,"delivery_seconds":0.3,"delivery_tps":10.0,"end_to_end_seconds":0.4,"error_code":null,"finish_reason":"length","fixture_id":"chat","prefill_seconds":0.04,"prompt_tokens":24,"repeat":0,"route":"/v1/chat/completions","seed":1234,"server_decode_seconds":0.25,"server_decode_tps":12.0,"status":"ok","temperature":0.0,"token_sha":"0123456789ab","ttft_seconds":0.05}],"schema_version":1,"settings":{"context_tokens":null,"managed":false,"rank_count":null,"repetitions":1,"serial":false,"temperatures":[0.0],"tokens":4},"suite":{"id":"community-v2","sha256":"51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"}}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          ^ ('\x0a')
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:696:9: 0x14a85f5 in expectEqualStrings (std.zig)
+               return error.TestExpectedEqual;
+               ^
+       <home>/zt/split/6-4c1a57ed/zig/src/server/benchmark_receipt_test.zig:119:5: 0x22e5341 in test.a saved receipt is private, atomic and loads back equal (root.zig)
+           try std.testing.expectEqualStrings(golden, try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)));
+           ^
+error: 'benchmark_receipt_test.test.oversized, duplicate-key, non-finite and deeply nested files are refused with fixed words' failed:
+       ====== expected this output: =========
+       Duplicate JSON field␃
+
+       ======== instead found this: =========
+       Invalid benchmark JSON␃
+
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       Duplicate JSON field
+       ^ ('\x44')
+       found:
+       Invalid benchmark JSON
+       ^ ('\x49')
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:696:9: 0x14a85f5 in expectEqualStrings (std.zig)
+               return error.TestExpectedEqual;
+               ^
+       <home>/zt/split/6-4c1a57ed/zig/src/server/benchmark_receipt_test.zig:141:9: 0x22e3b39 in test.oversized, duplicate-key, non-finite and deeply nested files are refused with fixed words (root.zig)
+               try std.testing.expectEqualStrings(c[1], problem);
+               ^
+failed command: ./.zig-cache/o/d29f7d3c46d14c74fa4d673a4266cb59/test --cache-dir=./.zig-cache --seed=0xabb2dcfc --listen=-
+
+Build Summary: 208/211 steps succeeded (1 failed); 2977/2995 tests passed (14 skipped, 4 failed)
+test transitive failure
++- test-cuda-host transitive failure
+   +- run test 502 pass, 4 fail (506 total)

@@ -1,0 +1,73 @@
+{
+ "image_bytes": 2524274,
+ "requested_reply_tokens": 128,
+ "temperature": 0,
+ "seed": 1234,
+ "rows": [
+  {
+   "phase": "first",
+   "prompt_tokens": 2050,
+   "cached_tokens": 0,
+   "tokens": 128,
+   "cache_state": "cold",
+   "complete": true,
+   "token_sha256": "e8ad891eaff14c54d10b4831c67672f5de1875b82f48db0c3e32a32147a8992c",
+   "error": null
+  },
+  {
+   "phase": "repeated",
+   "prompt_tokens": 2050,
+   "cached_tokens": 0,
+   "tokens": 128,
+   "cache_state": "cold",
+   "complete": true,
+   "token_sha256": "e8ad891eaff14c54d10b4831c67672f5de1875b82f48db0c3e32a32147a8992c",
+   "error": null,
+   "equal_first": true
+  },
+  {
+   "phase": "draft_false",
+   "prompt_tokens": 2050,
+   "cached_tokens": 0,
+   "tokens": 128,
+   "cache_state": "cold",
+   "complete": true,
+   "token_sha256": "e8ad891eaff14c54d10b4831c67672f5de1875b82f48db0c3e32a32147a8992c",
+   "error": null,
+   "equal_first": true
+  },
+  {
+   "phase": "concurrent",
+   "prompt_tokens": 2050,
+   "cached_tokens": 0,
+   "tokens": 128,
+   "cache_state": "cold",
+   "complete": true,
+   "token_sha256": "e8ad891eaff14c54d10b4831c67672f5de1875b82f48db0c3e32a32147a8992c",
+   "error": null,
+   "equal_first": true
+  },
+  {
+   "phase": "concurrent",
+   "prompt_tokens": 2050,
+   "cached_tokens": 0,
+   "tokens": 128,
+   "cache_state": "cold",
+   "complete": true,
+   "token_sha256": "e8ad891eaff14c54d10b4831c67672f5de1875b82f48db0c3e32a32147a8992c",
+   "error": null,
+   "equal_first": true
+  },
+  {
+   "phase": "concurrent",
+   "prompt_tokens": 2050,
+   "cached_tokens": 0,
+   "tokens": 128,
+   "cache_state": "cold",
+   "complete": true,
+   "token_sha256": "e8ad891eaff14c54d10b4831c67672f5de1875b82f48db0c3e32a32147a8992c",
+   "error": null,
+   "equal_first": true
+  }
+ ]
+}

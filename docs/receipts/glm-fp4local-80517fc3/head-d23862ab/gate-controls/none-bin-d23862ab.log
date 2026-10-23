@@ -1,0 +1,2 @@
+FAIL glm-loader-gate: TF_GATE_WORLDS and TF_GATE_RANKS leave no rank to gate
+FAIL glm-loader-gate: TestFailed

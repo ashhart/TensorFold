@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's packed matmul and DFlash2 launches on CUDA, read by kernel-contract-limits from every SM's image.
+//! GLM-5.3-Flash's packed matmul, DFlash2 and float32 norm weight launches, by kernel-contract-limits from every SM.
 const registry = @import("registry.zig");
 
 /// nvcc 13.0's usage, the compiler of the release fatbins.
@@ -36,6 +36,8 @@ pub const cuda = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "df_top16_part", .symbol = "df_top16_part", .image = "glm_dflash", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 32, .static = 32864, .bound = 256 }, .{ .regs = 32, .static = 32864, .bound = 256 }, .{ .regs = 32, .static = 32864, .bound = 256 }, .{ .regs = 30, .static = 32864, .bound = 256 }, .{ .regs = 30, .static = 32864, .bound = 256 } } },
     .{ .launch = .{ .name = "df_top16_merge", .symbol = "df_top16_merge", .image = "glm_dflash", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 23, .static = 8416, .bound = 256 } } },
     .{ .launch = .{ .name = "df_gsum", .symbol = "df_gsum", .image = "glm_dflash", .threads = 128, .min_sm = 80 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 } } },
+    .{ .launch = .{ .name = "glm_glue tf_glm_rmsnorm_4096_f32w", .symbol = "tf_glm_rmsnorm_4096_f32w", .image = "glm_glue", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 44, .static = 32, .bound = 256 }, .{ .regs = 44, .static = 32, .bound = 256 }, .{ .regs = 44, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 } } },
+    .{ .launch = .{ .name = "glm_glue tf_glm_hc_finish_f32w", .symbol = "tf_glm_hc_finish_f32w", .image = "glm_glue", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 80, .static = 48, .bound = 256 }, .{ .regs = 78, .static = 48, .bound = 256 }, .{ .regs = 78, .static = 48, .bound = 256 }, .{ .regs = 80, .static = 48, .bound = 256 }, .{ .regs = 80, .static = 48, .bound = 256 } } },
 };
 
 /// nvcc 13.2's usage where it differs from 13.0's.

@@ -1,7 +1,7 @@
 //! Whole-vocabulary grammar draws and prompt redraws.
 const cuda = @import("cuda");
 const sampler = @import("cuda_sampler.zig");
-const b16 = @import("cuda_b16.zig");
+const projection = @import("cuda_proj.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 
@@ -43,5 +43,5 @@ pub fn redrawFirst(e: anytype, len: usize, bits: u64) !u32 {
 /// Recompute only the bound sequence's prompt head, using the same projection policy as prompt finishing.
 pub fn promptHead(e: *Engine) !void {
     const D = e.c.hidden;
-    try b16.matmul(prompt_lp.projectionSet(e), e.stream, e.cur.st.prompt_hidden, D, e.w.head, e.bd.logits, e.bd.kda.mm_part, 1, e.share.vocab.len(), D, false);
+    try projection.matmul(prompt_lp.projectionSet(e), e.stream, e.w.head, e.cur.st.prompt_hidden, D, e.bd.logits, e.bd.kda.mm_part, 1, e.share.vocab.len(), D, false);
 }

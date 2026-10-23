@@ -114,13 +114,36 @@ __device__ __forceinline__ float col4(float v) {
 }
 __device__ __forceinline__ float sigmoid(float v) { return div_full(1.0f, exp_approx(0.0f - v) + 1.0f); }
 
-}  // namespace glm_hc
+// A thread's 8 norm weights of each half, loaded with its inputs: bf16 in one 16-byte load, float32 in two.
+template <typename W>
+struct Weights;
+template <>
+struct Weights<__nv_bfloat16> {
+  uint4 u[2];
+  __device__ __forceinline__ void load(const __nv_bfloat16* nw, int rep, int t) {
+    u[rep] = __ldg(reinterpret_cast<const uint4*>(nw + rep * 2048 + t * 8));
+  }
+  __device__ __forceinline__ float at(int rep, int j) const {
+    return bf(reinterpret_cast<const __nv_bfloat16*>(&u[rep])[j]);
+  }
+};
+template <>
+struct Weights<float> {
+  float4 u[2][2];
+  __device__ __forceinline__ void load(const float* nw, int rep, int t) {
+    u[rep][0] = __ldg(reinterpret_cast<const float4*>(nw + rep * 2048 + t * 8));
+    u[rep][1] = __ldg(reinterpret_cast<const float4*>(nw + rep * 2048 + t * 8 + 4));
+  }
+  __device__ __forceinline__ float at(int rep, int j) const {
+    return reinterpret_cast<const float*>(&u[rep][0])[j];
+  }
+};
 
 // glue._hc_finish, 256 threads a row (D 4096, 4 streams): warp 0 sums K blocks and Sinkhorn, then collapse, RMS-norm.
-extern "C" __global__ void __launch_bounds__(256)
-    tf_glm_hc_finish(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
-                     const __nv_bfloat16* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
-                     float hc_eps, int nb, int iters) {
+template <typename W>
+__device__ __forceinline__ void finish(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
+                                       const W* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
+                                       float hc_eps, int nb, int iters) {
   constexpr int D = 4096, S = 4;
   __shared__ float smem[8];
   __shared__ float pre[4];
@@ -128,10 +151,11 @@ extern "C" __global__ void __launch_bounds__(256)
   const int t = threadIdx.x, lane = t & 31;
   // A thread's 8 inputs of each half are contiguous: one 16-byte load per stream and half, issued before Sinkhorn.
   const __nv_bfloat16* row = x + r * S * D;
-  uint4 xu[2][S], wu[2];
+  uint4 xu[2][S];
+  Weights<W> wu;
   for (int rep = 0; rep < 2; ++rep) {
     for (int st = 0; st < S; ++st) xu[rep][st] = *reinterpret_cast<const uint4*>(row + st * D + rep * 2048 + t * 8);
-    wu[rep] = __ldg(reinterpret_cast<const uint4*>(nw + rep * 2048 + t * 8));
+    wu.load(nw, rep, t);
   }
   if (t < 32) {
     const float* p = part + r * nb * 32;
@@ -183,11 +207,10 @@ extern "C" __global__ void __launch_bounds__(256)
   const float rinv = div_full(1.0f, sqrt_approx(eps + div_full(total, (float)D)));
   for (int rep = 0; rep < 2; ++rep) {
     float y[8];
-    const __nv_bfloat16* wh = reinterpret_cast<const __nv_bfloat16*>(&wu[rep]);
     uint4 ou;
     __nv_bfloat16* oh = reinterpret_cast<__nv_bfloat16*>(&ou);
     for (int j = 0; j < 8; ++j) {
-      const __nv_bfloat16 o = __float2bfloat16_rn(__fmul_rn(bf(wh[j]), rbf(__fmul_rn(rinv, c[rep * 8 + j]))));
+      const __nv_bfloat16 o = __float2bfloat16_rn(__fmul_rn(wu.at(rep, j), rbf(__fmul_rn(rinv, c[rep * 8 + j]))));
       oh[j] = o;
       y[j] = bf(o);
     }
@@ -197,4 +220,21 @@ extern "C" __global__ void __launch_bounds__(256)
     for (int o = 4; o > 0; o >>= 1) g = g + __shfl_xor_sync(0xffffffffu, g, o);
     if ((t & 7) == 0) xs[r * (D / 64) + rep * 32 + t / 8] = g;
   }
+}
+
+}  // namespace glm_hc
+
+extern "C" __global__ void __launch_bounds__(256)
+    tf_glm_hc_finish(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
+                     const __nv_bfloat16* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
+                     float hc_eps, int nb, int iters) {
+  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
+}
+
+// FP4-Local's float32 post-attention norm weight: hc_finish's arithmetic, the weight read as float32.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_glm_hc_finish_f32w(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
+                          const float* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
+                          float hc_eps, int nb, int iters) {
+  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
 }

@@ -1,0 +1,75 @@
+{
+ "k": 4,
+ "n": 64,
+ "nonce": "551847053",
+ "alone": [
+  {
+   "prompt_tokens": 134,
+   "n": 64,
+   "token_sha256": "b8cfcaa3729de639da3c7e0f5d096765d3a65c94ea211f4fed834fd861ae52c2",
+   "text": " a short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n1. Purpose and scope\n1.1 This note describes the tidal behaviour of a small harbour, the instruments used to observe it, and the simple calculations that turn",
+   "ttft": 0.378218469,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 346,
+   "n": 64,
+   "token_sha256": "25be32e6dbed5d7cea62a3ed6f5d5ea87e5c234e8e53d2af065a33467da6a1a6",
+   "text": " I found 8 result(s) on this page for 'sundial' at http://www.sundials.org/faq/index.html. I am confident this is the answer. I am confident this is the answer. I am confident this is the answer. I am confident this is the answer. I am confident",
+   "ttft": 0.488163788,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 548,
+   "n": 64,
+   "token_sha256": "31733f4f7c48519c0a67da03fcae5f53382f268dd0d8bb401d41cecbbd27ded5",
+   "text": " A brief, friendly note on a recipe for barley bread: what the numbers say, what the senses say, and what to write down for a friend who asks.\nLabels: recipe, barley, bread, baking, notes\n\nA short study of a recipe for barley bread, what one sees and measures there, and what",
+   "ttft": 0.577444342,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 776,
+   "n": 64,
+   "token_sha256": "27b931d523b70cb7da8b648905ce610b1bb20068531e638c37e7e68a01f19e1f",
+   "text": " A short study of the rules of a card game, what one sees and measures there, and what one would write down for a friend who asks. The note records the rules, the observations, and the measurements in plain language, with a few numbers and a few remarks about what the numbers mean. The note is written",
+   "ttft": 0.688734462,
+   "prefill_widths": []
+  }
+ ],
+ "together": [
+  {
+   "prompt_tokens": 134,
+   "n": 64,
+   "token_sha256": "b8cfcaa3729de639da3c7e0f5d096765d3a65c94ea211f4fed834fd861ae52c2",
+   "text": " a short study of the tides of a small harbour, what one sees and measures there, and what one would write down for a friend who asks.\n1. Purpose and scope\n1.1 This note describes the tidal behaviour of a small harbour, the instruments used to observe it, and the simple calculations that turn",
+   "ttft": 0.503108817,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 346,
+   "n": 64,
+   "token_sha256": "25be32e6dbed5d7cea62a3ed6f5d5ea87e5c234e8e53d2af065a33467da6a1a6",
+   "text": " I found 8 result(s) on this page for 'sundial' at http://www.sundials.org/faq/index.html. I am confident this is the answer. I am confident this is the answer. I am confident this is the answer. I am confident this is the answer. I am confident",
+   "ttft": 1.160543624,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 548,
+   "n": 64,
+   "token_sha256": "31733f4f7c48519c0a67da03fcae5f53382f268dd0d8bb401d41cecbbd27ded5",
+   "text": " A brief, friendly note on a recipe for barley bread: what the numbers say, what the senses say, and what to write down for a friend who asks.\nLabels: recipe, barley, bread, baking, notes\n\nA short study of a recipe for barley bread, what one sees and measures there, and what",
+   "ttft": 1.951840281,
+   "prefill_widths": []
+  },
+  {
+   "prompt_tokens": 776,
+   "n": 64,
+   "token_sha256": "27b931d523b70cb7da8b648905ce610b1bb20068531e638c37e7e68a01f19e1f",
+   "text": " A short study of the rules of a card game, what one sees and measures there, and what one would write down for a friend who asks. The note records the rules, the observations, and the measurements in plain language, with a few numbers and a few remarks about what the numbers mean. The note is written",
+   "ttft": 6.542359798,
+   "prefill_widths": []
+  }
+ ],
+ "ttft_spread": 6.0392509809999995,
+ "blocker_beside": true
+}
