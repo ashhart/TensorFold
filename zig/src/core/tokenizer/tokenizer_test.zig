@@ -118,6 +118,45 @@ test "a kept segment's ids equal a fresh encode's wherever the segment sits" {
     }
 }
 
+test "encode, encodeMasked, encodePlain, decode and tokenBytes put only their result in the caller's allocator" {
+    const json =
+        \\{"added_tokens":[{"id":7,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],
+        \\ "pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":" ?\\S+|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]},
+        \\ "decoder":{"type":"ByteLevel"},
+        \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
+        \\  "vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6},"merges":[["Ġ","a"],"a b","Ġa b"]}}
+    ;
+    const a = std.testing.allocator;
+    var t = try parse(a, json);
+    defer t.deinit();
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    try text.appendSlice(a, "<|end|>");
+    while (text.items.len < 1 << 16) try text.appendSlice(a, "ab abc cab ");
+    const body = text.items["<|end|>".len..];
+    const spans = [_]tokenizer.Span{.{ "<|end|>".len, text.items.len }};
+    const encoded = try t.encode(a, text.items);
+    defer a.free(encoded);
+    // a server's request arena keeps all it is given until the reply ends: this budget holds results, not scratch
+    const budget = try a.alloc(u8, 3 * @sizeOf(u32) * encoded.len);
+    defer a.free(budget);
+    var fba = std.heap.FixedBufferAllocator.init(budget);
+    try std.testing.expectEqualSlices(u32, encoded, try t.encode(fba.allocator(), text.items));
+    fba.reset();
+    try std.testing.expectEqualSlices(u32, encoded, try t.encodeMasked(fba.allocator(), text.items, &spans));
+    fba.reset();
+    try std.testing.expectEqualSlices(u32, encoded[1..], try t.encodePlain(fba.allocator(), body));
+    fba.reset();
+    try std.testing.expectEqualStrings(text.items, try t.decode(fba.allocator(), encoded, false));
+    var few: [16]u8 = undefined;
+    for (encoded[0..16]) |id| {
+        const bytes = (try t.tokenBytes(a, id)).?;
+        defer a.free(bytes);
+        var one = std.heap.FixedBufferAllocator.init(&few);
+        try std.testing.expectEqualStrings(bytes, (try t.tokenBytes(one.allocator(), id)).?);
+    }
+}
+
 test "sentencepiece-style BPE with byte fallback" {
     const json =
         \\{"added_tokens":[],"normalizer":{"type":"Replace","pattern":{"String":" "},"content":"▁"},

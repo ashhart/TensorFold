@@ -119,6 +119,7 @@ fn validMasked(a: Allocator, text: []const u8, spans: []const Span) Allocator.Er
 const Segment = struct { start: usize, end: usize, id: ?u32 };
 
 pub const Tokenizer = struct {
+    /// Owns the loaded tables and backs each call's scratch, so concurrent calls need it thread-safe.
     allocator: Allocator,
     arena: ?*std.heap.ArenaAllocator = null,
     /// Token to id for the model vocabulary and every added token.
@@ -161,7 +162,7 @@ pub const Tokenizer = struct {
 
     /// Token ids for `text`, without post-processor tokens; invalid UTF-8 reads as U+FFFD. Caller frees with `a`.
     pub fn encode(t: *const Tokenizer, a: Allocator, text: []const u8) Error![]u32 {
-        var arena = std.heap.ArenaAllocator.init(a);
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
         defer arena.deinit();
         var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
         var valid = text;
@@ -191,7 +192,7 @@ pub const Tokenizer = struct {
             if (p[0] < previous or p[0] >= p[1] or p[1] > text.len) return error.BadRequestSpans;
             previous = p[1];
         }
-        var arena = std.heap.ArenaAllocator.init(a);
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
         defer arena.deinit();
         var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
         const valid = try validMasked(ctx.a, text, spans);
@@ -248,7 +249,7 @@ pub const Tokenizer = struct {
 
     /// `encode` with no added token matched: text that spells one (a quoted marker) is ordinary text.
     pub fn encodePlain(t: *const Tokenizer, a: Allocator, text: []const u8) Error![]u32 {
-        var arena = std.heap.ArenaAllocator.init(a);
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
         defer arena.deinit();
         var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
         var valid = text;
@@ -380,7 +381,7 @@ pub const Tokenizer = struct {
 
     /// Text for `ids` through the decoder chain; unknown ids are skipped. Caller frees with `a`.
     pub fn decode(t: *const Tokenizer, a: Allocator, ids: []const u32, skip_special_tokens: bool) Error![]u8 {
-        var arena = std.heap.ArenaAllocator.init(a);
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
         defer arena.deinit();
         var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
         var tokens = try std.ArrayList([]const u8).initCapacity(ctx.a, ids.len);
@@ -399,7 +400,7 @@ pub const Tokenizer = struct {
         if (!d.tokenLocal()) return null;
         const piece = t.id_to_token.get(id) orelse return try a.dupe(u8, "");
         if (t.specials.contains(piece)) return try a.dupe(u8, piece);
-        var arena = std.heap.ArenaAllocator.init(a);
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
         defer arena.deinit();
         var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() }, .raw_bytes = true };
         return try d.decode(a, &ctx, &.{piece});
