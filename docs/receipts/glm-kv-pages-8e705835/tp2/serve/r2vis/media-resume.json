@@ -1,0 +1,57 @@
+{
+ "nonce": "18e10971e6e945ff",
+ "image_bytes": 2524274,
+ "requested_reply_tokens": 64,
+ "temperature": 0,
+ "rows": [
+  {
+   "phase": "first",
+   "seconds": 10.029,
+   "prompt_tokens": 7603,
+   "cached_tokens": 0,
+   "tokens": 64,
+   "token_sha256": "f37200c7eb0e24fac362871560e45550320db103eedec1c71fd023eaf2adf0ef",
+   "content": "The line mentioning the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: they increase by 37 each time, modulo 101. The maximum value is 100, which"
+  },
+  {
+   "phase": "repeated",
+   "seconds": 3.46,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "f37200c7eb0e24fac362871560e45550320db103eedec1c71fd023eaf2adf0ef",
+   "content": "The line mentioning the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: they increase by 37 each time, modulo 101. The maximum value is 100, which",
+   "same_as_first": true
+  },
+  {
+   "phase": "draft_false",
+   "seconds": 4.75,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "f37200c7eb0e24fac362871560e45550320db103eedec1c71fd023eaf2adf0ef",
+   "content": "The line mentioning the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: they increase by 37 each time, modulo 101. The maximum value is 100, which",
+   "same_as_first": true
+  },
+  {
+   "phase": "concurrent",
+   "seconds": 5.098,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "f37200c7eb0e24fac362871560e45550320db103eedec1c71fd023eaf2adf0ef",
+   "content": "The line mentioning the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: they increase by 37 each time, modulo 101. The maximum value is 100, which",
+   "same_as_first": true
+  },
+  {
+   "phase": "concurrent",
+   "seconds": 5.016,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "f37200c7eb0e24fac362871560e45550320db103eedec1c71fd023eaf2adf0ef",
+   "content": "The line mentioning the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: they increase by 37 each time, modulo 101. The maximum value is 100, which",
+   "same_as_first": true
+  }
+ ]
+}

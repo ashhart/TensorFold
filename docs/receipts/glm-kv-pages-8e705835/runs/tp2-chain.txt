@@ -1,0 +1,90 @@
+kvp-r9t2 start 10:01:18
+04: 67 logs aside
+05: 11 logs aside
+2026-10-23 10:01:24 fmt rc=0
+2026-10-23 10:06:48 build rc=0 324s:
+2026-10-23 10:09:21 native rc=0 153s:
+2026-10-23 10:11:43 host rc=0 142s: failed command: ./.zig-cache/o/4326653e6bd8ad6fdc5508bee4ba3a38/test --cache-dir=./.zig-cache --seed=0xf03f5e41 --listen=- failed command: ./.zig-cache/o/da1ace8218
+2026-10-23 10:11:48 kvpool rc=0 5s: Build Summary: 5/5 steps succeeded; 17/17 tests passed
+2026-10-23 10:12:30 test rc=0 42s: failed command: ./.zig-cache/o/33d3a117abb9ad8e9ed4ec4bcd11c3a0/test --cache-dir=./.zig-cache --seed=0x2fc29d03 --listen=- Build Summary: 276/276 steps succeeded; 20
+2026-10-23 10:12:30 lean rc=1 0s:
+0c7727776fda6e28 d82043de5d8b1f04 05: 0c7727776fda6e28
+kvp-k2 start 10:16:00
+=== kvp-check pg2r9 rc 0 0
+started rank 1 (r2all) on host-e
+started rank 0 (r2all) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r2all rc 0
+started rank 1 (r2on) on host-e
+started rank 0 (r2on) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r2on rc 0
+started rank 1 (r2auto) on host-e
+started rank 0 (r2auto) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r2auto rc 0
+started rank 1 (r2main) on host-e
+started rank 0 (r2main) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r2main rc 0
+compare auto-on rc=0
+PASS: 43/43 replies equal and as cached as planned
+timing: 0 resumed replies no sooner than fresh
+compare auto-all rc=0
+PASS: 43/43 replies equal and as cached as planned
+timing: 0 resumed replies no sooner than fresh
+compare main-on rc=0
+PASS: 43/43 replies equal and as cached as planned
+timing: 0 resumed replies no sooner than fresh
+compare main-all rc=0
+PASS: 43/43 replies equal and as cached as planned
+timing: 0 resumed replies no sooner than fresh
+=== kvp-r2m done
+2026-10-23 11:47:35 === kvp-reg r9 done 0 failed
+=== kvp-check pg1r9 rc 0
+2026-10-23 11:52:47 === kvp-base tp3 done
+2026-10-23 11:49:45 build rc=0 289s:
+2026-10-23 11:52:20 native rc=0 155s:
+2026-10-23 11:52:38 host rc=0 18s: failed command: ./.zig-cache/o/a8dc8f3d17c2d0d217c7f824aa1d3537/test --cache-dir=./.zig-cache --seed=0x2c5a266f --listen=- failed command: ./.zig-cache/o/46e19a6c1fc
+2026-10-23 11:52:38 kvpool rc=0 0s: Build Summary: 5/5 steps succeeded
+2026-10-23 11:52:47 test rc=0 9s: failed command: ./.zig-cache/o/8a4d02bb9d3c4e71d1e5e01e68a5f951/test --cache-dir=./.zig-cache --seed=0xc2d912a1 --listen=- Build Summary: 276/276 steps succeeded; 224
+2026-10-23 11:52:47 lean rc=1 0s:
+2026-10-23 11:52:47 === kvp-base tp3 done
+358a8335696f005a
+=== kvp-post3 done
+started rank 1 (r2vis) on host-e
+started rank 0 (r2vis) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r2vis rc 0
+=== kvp-k2 done 12:02:30
+started rank 1 (r3r9a) on host-e
+started rank 0 (r3r9a) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r3r9a rc 0
+started rank 1 (r3mainr9) on host-e
+started rank 0 (r3mainr9) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r3mainr9 rc 0
+started rank 1 (r3r9b) on host-e
+started rank 0 (r3r9b) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r3r9b rc 0
+started rank 1 (r3mainr92) on host-e
+started rank 0 (r3mainr92) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r3mainr92 rc 0
+started rank 1 (r3r9all) on host-e
+started rank 0 (r3r9all) on host-d
+stopped on host-d
+stopped on host-e
+=== kvp-phase r3r9all rc 0
+=== kvp-r9t2 done 13:24:36

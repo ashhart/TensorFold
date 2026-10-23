@@ -1,0 +1,9 @@
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+info: kv pool idle: promised 0, free 37 + store 0 == total 37
+info: kv pool idle: promised 0, free 37 + store 0 == total 37
+info: kv pool idle: promised 0, free 37 + store 0 == total 37
+info: kv pool idle: promised 0, free 37 + store 0 == total 37
+info: kv pool idle: promised 0, free 37 + store 0 == total 37
+info: kv pool idle: promised 0, free 37 + store 0 == total 37
+info: kv pool idle: promised 0, free 37 + store 0 == total 37
+PASS pages at TP=1: on the engine's own sequence, 7 prompts at the pages' edges (511 to 5,000 tokens) and 91 window rows equal their twins' logits, tokens and drafts byte for byte, pages out of order (12 jumps) and NaN before use; the pool idle after

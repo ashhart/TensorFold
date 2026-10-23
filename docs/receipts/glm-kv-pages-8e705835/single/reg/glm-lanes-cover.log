@@ -1,0 +1,47 @@
+info: checkpoint digest: 2.0 GiB read in 2.0 s, 0/1 cached files
+PASS copy drafts, greedy: 256 ids equal, finished by length (120 rounds)
+PASS copy drafts: the proposer judged 139 copied rows (135 kept)
+PASS copy drafts, sampled: 256 ids equal, finished by length (254 rounds)
+PASS copy drafts, sampled, thin model: the proposer judged 0 copied rows (0 kept)
+PASS a cancel at ask 0 of the prompt pass ended it with error.Cancelled
+PASS the cancel was heard at ask 0 (1 asks)
+PASS the request after a cancel at prompt ask 0: 64 ids equal, finished by length (63 rounds)
+PASS a cancel at ask 1 of the prompt pass ended it with error.Cancelled
+PASS the cancel was heard at ask 1 (2 asks)
+PASS the request after a cancel at prompt ask 1: 64 ids equal, finished by length (63 rounds)
+PASS a cancel at ask 3 of the prompt pass ended it with error.Cancelled
+PASS the cancel was heard at ask 3 (4 asks)
+PASS the request after a cancel at prompt ask 3: 64 ids equal, finished by length (63 rounds)
+PASS a stream was discarded mid-decode (after 1 rounds)
+PASS the request after a discard after 1 rounds: 64 ids equal, finished by length (63 rounds)
+PASS a stream was discarded mid-decode (after 8 rounds)
+PASS the request after a discard after 8 rounds: 64 ids equal, finished by length (63 rounds)
+PASS a stream was discarded mid-decode (after a rejected draft)
+PASS the request after a discard after a rejected draft: 64 ids equal, finished by length (63 rounds)
+PASS eos at token 0 with drafts: 1 ids equal, finished by stop (0 rounds)
+PASS eos at token 0: 1 ids equal, finished by stop (0 rounds)
+PASS eos at token 9 with drafts: 10 ids equal, finished by stop (9 rounds)
+PASS eos at token 9: 10 ids equal, finished by stop (9 rounds)
+PASS eos at token 33 with drafts: 34 ids equal, finished by stop (33 rounds)
+PASS eos at token 33: 34 ids equal, finished by stop (33 rounds)
+PASS eos at token 100 with drafts: 101 ids equal, finished by stop (100 rounds)
+PASS eos at token 100: 101 ids equal, finished by stop (100 rounds)
+PASS max_new 1 with drafts: 1 ids equal, finished by length (0 rounds)
+PASS max_new 2 with drafts: 2 ids equal, finished by length (1 rounds)
+PASS max_new 3 with drafts: 3 ids equal, finished by length (2 rounds)
+PASS max_new 4 with drafts: 4 ids equal, finished by length (3 rounds)
+PASS max_new 5 with drafts: 5 ids equal, finished by length (4 rounds)
+PASS the pass kept 2 states at its marks (2 asked)
+PASS the pass resumed at 2048 (2048 restored)
+PASS resumed at 2048, against the fresh pass: 64 ids equal, finished by length (63 rounds)
+PASS cached drafted against cached plain: 64 ids equal, finished by length (63 rounds)
+PASS cached concurrent equals fresh solo at 2048
+PASS cached concurrent equals fresh solo at 2048
+PASS the pass resumed at 4096 (4096 restored)
+PASS resumed at 4096, against the fresh pass: 64 ids equal, finished by length (63 rounds)
+PASS cached drafted against cached plain: 64 ids equal, finished by length (63 rounds)
+PASS cached concurrent equals fresh solo at 4096
+PASS cached concurrent equals fresh solo at 4096
+PASS another tail resumed at 4096 (4096 restored)
+PASS another tail after the kept 4096, against its fresh pass: 64 ids equal, finished by length (63 rounds)
+PASS the last request, all of W with drafts: 512 ids equal, finished by length (511 rounds)

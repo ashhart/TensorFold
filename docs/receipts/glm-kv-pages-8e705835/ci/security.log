@@ -1,0 +1,38 @@
+PASS key required for /systemone
+PASS valid key admits /systemone
+PASS key required for /alternative/systemone
+PASS valid key admits /alternative/systemone
+PASS key required for /systemone/?x=1
+PASS valid key admits /systemone/?x=1
+PASS key required for /v1/systemone
+PASS valid key admits /v1/systemone
+PASS GET body cannot become another request
+PASS GET chunked body stays framed
+PASS DELETE body cannot become another request
+PASS DELETE chunked body stays framed
+PASS malformed header 0 closes before routing
+PASS malformed header 1 closes before routing
+PASS malformed header 2 closes before routing
+PASS malformed header 3 closes before routing
+PASS malformed header 4 closes before routing
+PASS malformed header 5 closes before routing
+PASS malformed header 6 closes before routing
+PASS malformed header 7 closes before routing
+PASS truncated request head cannot dispatch
+PASS GET conflicting framing is rejected
+PASS GET body preserves a genuine following request
+PASS ordinary pipelining remains supported
+SUMMARY server-security: 24 passed, 0 failed, 0 skipped
+Build Summary: 12/12 steps succeeded; 20/20 tests passed
+test-pull-security success
++- run test 1 pass (1 total) 31ms MaxRSS:6M
+|  +- compile test debug native success 1s MaxRSS:147M
++- run test 4 pass (4 total) 3s MaxRSS:9M
+|  +- compile test debug native success 3s MaxRSS:204M
++- run test 1 pass (1 total) 36ms MaxRSS:6M
+   +- compile test debug native success 1s MaxRSS:153M
+test-server-security success
++- run python3 success 340ms
+|  +- compile exe fake_serve debug native cached 58ms MaxRSS:39M
++- run test 14 pass (14 total) 21ms MaxRSS:6M
+   +- compile test debug native success 1s MaxRSS:171M

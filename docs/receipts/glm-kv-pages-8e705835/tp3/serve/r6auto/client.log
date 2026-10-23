@@ -1,0 +1,97 @@
+server up 2026-10-23 10:27:12
+{"label": "", "prompt": "code", "temperature": 1.0, "streams": 1, "failed": 0, "unmeasured": 0, "aggregate_tps": 48.0, "per_stream_tps": 48.0, "ttft_s_max": 0.11, "timing_valid": true, "end_to_end_tps": 47.257280915012245, "makespan_s": 5.417154669994488, "alone": {"equal": 1, "unequal": 0, "failed": 0}, "serial": {"equal": 8, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "code", "temperature": 1.0, "streams": 2, "failed": 0, "unmeasured": 0, "aggregate_tps": 58.2, "per_stream_tps": 31.6, "ttft_s_max": 0.28, "timing_valid": true, "end_to_end_tps": 57.66509920199466, "makespan_s": 8.878854057053104, "steady_tps": 60.3, "alone": {"equal": 2, "unequal": 0, "failed": 0}, "serial": {"equal": 8, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "code", "temperature": 1.0, "streams": 4, "failed": 0, "unmeasured": 0, "aggregate_tps": 76.8, "per_stream_tps": 20.1, "ttft_s_max": 0.7, "timing_valid": true, "end_to_end_tps": 76.51423462307243, "makespan_s": 13.383130669011734, "steady_tps": 80.3, "alone": {"equal": 4, "unequal": 0, "failed": 0}, "serial": {"equal": 8, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "code", "temperature": 1.0, "streams": 8, "failed": 0, "unmeasured": 0, "aggregate_tps": 95.9, "per_stream_tps": 13.1, "ttft_s_max": 1.77, "timing_valid": true, "end_to_end_tps": 95.74105439383828, "makespan_s": 21.39103243604768, "steady_tps": 102.7, "alone": {"equal": 8, "unequal": 0, "failed": 0}, "serial": {"equal": 8, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "chat", "temperature": 1.0, "streams": 1, "failed": 0, "unmeasured": 0, "aggregate_tps": 35.0, "per_stream_tps": 35.0, "ttft_s_max": 0.16, "timing_valid": true, "end_to_end_tps": 34.410944851454865, "makespan_s": 7.439493483980186, "alone": {"equal": 1, "unequal": 0, "failed": 0}, "serial": {"equal": 8, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "chat", "temperature": 1.0, "streams": 2, "failed": 0, "unmeasured": 0, "aggregate_tps": 53.0, "per_stream_tps": 27.6, "ttft_s_max": 0.38, "timing_valid": true, "end_to_end_tps": 52.30382685011293, "makespan_s": 9.788958683027886, "steady_tps": 55.1, "alone": {"equal": 2, "unequal": 0, "failed": 0}, "serial": {"equal": 8, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "chat", "temperature": 1.0, "streams": 4, "failed": 0, "unmeasured": 0, "aggregate_tps": 68.8, "per_stream_tps": 17.8, "ttft_s_max": 0.87, "timing_valid": true, "end_to_end_tps": 68.33455152681384, "makespan_s": 14.985098710982129, "steady_tps": 72.4, "alone": {"equal": 4, "unequal": 0, "failed": 0}, "serial": {"equal": 8, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "chat", "temperature": 1.0, "streams": 8, "failed": 0, "unmeasured": 0, "aggregate_tps": 85.3, "per_stream_tps": 11.4, "ttft_s_max": 2.13, "timing_valid": true, "end_to_end_tps": 85.09953798990507, "makespan_s": 24.06593558995519, "steady_tps": 92.1, "alone": {"equal": 8, "unequal": 0, "failed": 0}, "serial": {"equal": 8, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "code", "temperature": 0.0, "streams": 1, "failed": 0, "unmeasured": 0, "aggregate_tps": 70.6, "per_stream_tps": 70.6, "ttft_s_max": 0.11, "timing_valid": true, "end_to_end_tps": 68.74996928956655, "makespan_s": 3.7236380269750953, "alone": {"equal": 1, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "code", "temperature": 0.0, "streams": 2, "failed": 0, "unmeasured": 0, "aggregate_tps": 81.8, "per_stream_tps": 41.6, "ttft_s_max": 0.28, "timing_valid": true, "end_to_end_tps": 80.73287904860639, "makespan_s": 6.341901912004687, "steady_tps": 83.6, "alone": {"equal": 2, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "code", "temperature": 0.0, "streams": 4, "failed": 0, "unmeasured": 0, "aggregate_tps": 112.0, "per_stream_tps": 29.1, "ttft_s_max": 0.68, "timing_valid": true, "end_to_end_tps": 111.06214999689927, "makespan_s": 9.220062820939347, "steady_tps": 117.4, "alone": {"equal": 4, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "code", "temperature": 0.0, "streams": 8, "failed": 0, "unmeasured": 0, "aggregate_tps": 151.8, "per_stream_tps": 20.5, "ttft_s_max": 1.7, "timing_valid": true, "end_to_end_tps": 151.14135774187514, "makespan_s": 13.55022894195281, "steady_tps": 166.0, "alone": {"equal": 8, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "chat", "temperature": 0.0, "streams": 1, "failed": 0, "unmeasured": 0, "aggregate_tps": 34.9, "per_stream_tps": 34.9, "ttft_s_max": 0.16, "timing_valid": true, "end_to_end_tps": 34.24796634969847, "makespan_s": 7.474896389059722, "alone": {"equal": 1, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "chat", "temperature": 0.0, "streams": 2, "failed": 0, "unmeasured": 0, "aggregate_tps": 50.6, "per_stream_tps": 25.6, "ttft_s_max": 0.38, "timing_valid": true, "end_to_end_tps": 50.009440527290046, "makespan_s": 10.23806694499217, "steady_tps": 51.6, "alone": {"equal": 2, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "chat", "temperature": 0.0, "streams": 4, "failed": 0, "unmeasured": 0, "aggregate_tps": 69.8, "per_stream_tps": 18.0, "ttft_s_max": 0.89, "timing_valid": true, "end_to_end_tps": 69.31546214563338, "makespan_s": 14.773038630955853, "steady_tps": 72.3, "alone": {"equal": 4, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "", "prompt": "chat", "temperature": 0.0, "streams": 8, "failed": 0, "unmeasured": 0, "aggregate_tps": 88.3, "per_stream_tps": 11.6, "ttft_s_max": 2.1, "timing_valid": true, "end_to_end_tps": 88.00613725206625, "makespan_s": 23.27110431098845, "steady_tps": 93.6, "alone": {"equal": 8, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+logs/r6auto-conc.json: 16 cells; alone 60/60 equal (0 unequal, 0 failed); serial 72/72 equal (0 unequal, 0 failed)
+  0   S1 t1 drafted prompt 7759 history 7757 cached 0 (allowed [0]) ttft 5.13s sha f0f55b35a3041a6716cb165a5123890e5529def20f710539eabeab0f645d5595 tool_calls ok
+  1   S1 t1 plain   prompt 7759 history 7757 cached 6144 (allowed {'min': 1, 'max': 7757}) ttft 1.02s sha f0f55b35a3041a6716cb165a5123890e5529def20f710539eabeab0f645d5595 tool_calls ok
+system cuts [4563, 6099, 6611]
+  2   S1 t2 drafted prompt 15550 history 15548 cached 6144 (allowed {'min': 1, 'max': 7757}) ttft 6.15s sha 539973cb8b1338012688798a31f9be73a16145d5519666f26482b6ca9dba075b tool_calls ok
+  3   S1 t2 plain   prompt 15550 history 15548 cached 14336 (allowed {'min': 7356, 'max': 15548}) ttft 0.83s sha 539973cb8b1338012688798a31f9be73a16145d5519666f26482b6ca9dba075b tool_calls ok
+  4   S1 t3 drafted prompt 19462 history 19460 cached 14336 (allowed {'min': 7356, 'max': 15548}) ttft 3.44s sha 8fc3c26162f14ba8483ee67abcd4150e6796fd196dc5725076a025830aff7eaa tool_calls ok
+  5   S1 t3 plain   prompt 19462 history 19460 cached 18432 (allowed {'min': 11268, 'max': 19460}) ttft 0.75s sha 8fc3c26162f14ba8483ee67abcd4150e6796fd196dc5725076a025830aff7eaa tool_calls ok
+  6   S1 t4 drafted prompt 21892 history 21890 cached 18432 (allowed {'min': 11268, 'max': 19460}) ttft 2.32s sha dedd451779f3b6be763b095da54f5ca69962325e26c090a61a60fa296cdd03af tool_calls ok
+  7   S1 t4 plain   prompt 21892 history 21890 cached 20480 (allowed {'min': 13698, 'max': 21890}) ttft 0.93s sha dedd451779f3b6be763b095da54f5ca69962325e26c090a61a60fa296cdd03af tool_calls ok
+  8   S1 t5 drafted prompt 24388 history 24386 cached 20480 (allowed {'min': 13698, 'max': 21890}) ttft 2.55s sha 8bcbd355dc0446c05f07f16f95e98d734d0a227a0addadb1b85b2a904f8e77aa length ok
+  9   S1 t5 plain   prompt 24388 history 24386 cached 22528 (allowed {'min': 16194, 'max': 24386}) ttft 1.15s sha 8bcbd355dc0446c05f07f16f95e98d734d0a227a0addadb1b85b2a904f8e77aa length ok
+ 10   S1 t6 drafted prompt 26895 history 26893 cached 22528 (allowed {'min': 16194, 'max': 24386}) ttft 3.12s sha c8e79afc5a1062b02819420d6496258462263a9f609485bdcc31da6855267af1 tool_calls ok
+ 11   S1 t6 plain   prompt 26895 history 26893 cached 26624 (allowed {'min': 18701, 'max': 26893}) ttft 0.40s sha c8e79afc5a1062b02819420d6496258462263a9f609485bdcc31da6855267af1 tool_calls ok
+ 12   S1 t7 drafted prompt 29798 history 29796 cached 26624 (allowed {'min': 18701, 'max': 26893}) ttft 2.22s sha 7629aa6bf5dfeea920770da75f63b6ab1fc010cd0b669ec22529cee049e38efb tool_calls ok
+ 13   S1 t7 plain   prompt 29798 history 29796 cached 28672 (allowed {'min': 21604, 'max': 29796}) ttft 0.82s sha 7629aa6bf5dfeea920770da75f63b6ab1fc010cd0b669ec22529cee049e38efb tool_calls ok
+ 14   S1 t8 drafted prompt 35434 history 35432 cached 28672 (allowed {'min': 21604, 'max': 29796}) ttft 4.66s sha 1adac255ff32acc04618c1f9db94e931b1e9cb783c4e441a21a9ba32b740da6e length ok
+ 15   S1 t8 plain   prompt 35434 history 35432 cached 34816 (allowed {'min': 27240, 'max': 35432}) ttft 0.58s sha 1adac255ff32acc04618c1f9db94e931b1e9cb783c4e441a21a9ba32b740da6e length ok
+ 16   S1 t9 drafted prompt 38152 history 38150 cached 34816 (allowed {'min': 27240, 'max': 35432}) ttft 2.31s sha 6fb6a6ab70d0834a329f5ce9263d1fddc174959ad7839578fbeb4a923bd285c3 length ok
+ 17   S1 t9 plain   prompt 38152 history 38150 cached 36864 (allowed {'min': 29958, 'max': 38150}) ttft 0.91s sha 6fb6a6ab70d0834a329f5ce9263d1fddc174959ad7839578fbeb4a923bd285c3 length ok
+ 18    X t1 drafted prompt 2115 history 2113 cached 0 (allowed [0]) ttft 1.49s sha 7b1461bf71da95a2b74977aec25ecf7215b9f0fa044c82d2e1f4905ed66b798a length ok
+ 19    A t1 drafted prompt 7412 history 7410 cached 6144 (allowed {'min': 1, 'max': 6611}) ttft 0.90s sha d0573eef060977d98da46af682ca71f30b35a155da5be22aa3baecca9ffc9666 tool_calls ok
+ 20    A t1 plain   prompt 7412 history 7410 cached 6144 (allowed {'min': 1, 'max': 7410}) ttft 0.86s sha d0573eef060977d98da46af682ca71f30b35a155da5be22aa3baecca9ffc9666 tool_calls ok
+ 21    B t1 drafted prompt 7474 history 7472 cached 6144 (allowed {'min': 1, 'max': 6611}) ttft 0.93s sha 9a2685e9905fa6973f8dbdf29d644d01cab9b75737d07335885b31808eaad9fb tool_calls ok
+ 22    B t1 plain   prompt 7474 history 7472 cached 6144 (allowed {'min': 1, 'max': 7472}) ttft 0.88s sha 9a2685e9905fa6973f8dbdf29d644d01cab9b75737d07335885b31808eaad9fb tool_calls ok
+ 23    A t2 drafted prompt 12632 history 12630 cached 6144 (allowed {'min': 1, 'max': 7410}) ttft 4.42s sha e1f2511e60f396ff14ef731907b19803773915834a46d457301acf811d384dfe length ok
+ 24    A t2 plain   prompt 12632 history 12630 cached 12288 (allowed {'min': 4438, 'max': 12630}) ttft 0.43s sha e1f2511e60f396ff14ef731907b19803773915834a46d457301acf811d384dfe length ok
+ 25    B t2 drafted prompt 12721 history 12719 cached 6144 (allowed {'min': 1, 'max': 7472}) ttft 4.44s sha f202ab6075aea8369fa69b3aa1d7872cf7a0444e28ea89b871f4593ef4609ca2 tool_calls ok
+ 26    B t2 plain   prompt 12721 history 12719 cached 12288 (allowed {'min': 4527, 'max': 12719}) ttft 0.47s sha f202ab6075aea8369fa69b3aa1d7872cf7a0444e28ea89b871f4593ef4609ca2 tool_calls ok
+ 27    A t3 drafted prompt 15383 history 15381 cached 12288 (allowed {'min': 4438, 'max': 12630}) ttft 2.13s sha 7695627844cdcc276b656d8e0c654fd9201331a6d8f02d4892bf4b04a5d549f8 tool_calls ok
+ 28    A t3 plain   prompt 15383 history 15381 cached 14336 (allowed {'min': 7189, 'max': 15381}) ttft 0.76s sha 7695627844cdcc276b656d8e0c654fd9201331a6d8f02d4892bf4b04a5d549f8 tool_calls ok
+ 29    B t3 drafted prompt 17330 history 17328 cached 12288 (allowed {'min': 4527, 'max': 12719}) ttft 3.42s sha 8b15f58457e8e1e15a72bbbe2fbfbfa473b6503e6726a86003d24df79009de49 length ok
+ 30    B t3 plain   prompt 17330 history 17328 cached 16384 (allowed {'min': 9136, 'max': 17328}) ttft 0.72s sha 8b15f58457e8e1e15a72bbbe2fbfbfa473b6503e6726a86003d24df79009de49 length ok
+ 31    E t1 drafted prompt 40901 history 40899 cached 6144 (allowed {'min': 0, 'max': 6611}) ttft 22.65s sha 6fb6a6ab70d0834a329f5ce9263d1fddc174959ad7839578fbeb4a923bd285c3 length ok
+ 32    E t1 plain   prompt 40901 history 40899 cached 38912 (allowed {'min': 32707, 'max': 40899}) ttft 1.26s sha 6fb6a6ab70d0834a329f5ce9263d1fddc174959ad7839578fbeb4a923bd285c3 length ok
+ 33    T t1 drafted prompt 1520 history 1517 cached 0 (allowed [0]) ttft 0.92s sha 033a197da586db255fee4cdbf2d9ce5937da0137c9ffa99fe75ec35f893aae89 stop ok
+ 34    T t1 plain   prompt 1520 history 1517 cached 0 (allowed [0]) ttft 0.89s sha 033a197da586db255fee4cdbf2d9ce5937da0137c9ffa99fe75ec35f893aae89 stop ok
+ 35    T t2 drafted prompt 4202 history 4199 cached 0 (allowed [0]) ttft 3.05s sha a94919711db84742c30e2de91de5f8dcca3dcb8c55965a6c6ae08f7fb72592fa stop ok
+ 36    T t2 plain   prompt 4202 history 4199 cached 4096 (allowed {'min': 1, 'max': 4199}) ttft 0.27s sha a94919711db84742c30e2de91de5f8dcca3dcb8c55965a6c6ae08f7fb72592fa stop ok
+ 37    C t1 cancel  prompt None history 0 cached None (allowed None) ttft 0.00s sha None None ok
+ 38    C t1 drafted prompt 9702 history 9700 cached 6144 (allowed {'min': 0, 'max': 9688}) ttft 2.39s sha 88f98460968aa13c4baf13ac8cd3d60277e3cf4641b79f641b67398dda514d0c tool_calls ok
+ 39    C t1 plain   prompt 9702 history 9700 cached 8192 (allowed {'min': 1508, 'max': 9700}) ttft 0.97s sha 88f98460968aa13c4baf13ac8cd3d60277e3cf4641b79f641b67398dda514d0c tool_calls ok
+ 40    C t2 drafted prompt 15180 history 15178 cached 8192 (allowed {'min': 1508, 'max': 9700}) ttft 4.68s sha 5694b66a89958146e8f8e5a989c1bab8c538f7dad576c43f3cafd47675f84ab8 length ok
+ 41    C t2 plain   prompt 15180 history 15178 cached 14336 (allowed {'min': 6986, 'max': 15178}) ttft 0.68s sha 5694b66a89958146e8f8e5a989c1bab8c538f7dad576c43f3cafd47675f84ab8 length ok
+ 42    A t4 drafted prompt 18246 history 18244 cached 14336 (allowed {'min': 7189, 'max': 15381}) ttft 2.54s sha 9599ff0fa9b19bbb5cb5218a5b6f538de1146ce12dad36c729686f12f666389e length ok
+ 43    B t4 drafted prompt 19808 history 19806 cached 16384 (allowed {'min': 9136, 'max': 17328}) ttft 4.97s sha 025c4856c697674513547e9be3c33a84537e8a4fcb74e731ea09263af3e6d80d tool_calls ok
+record: 44 requests, 0 not cached as planned
+{"length": 1024, "rep": 0, "ttft": 0.7270355030195788, "prompt": 1023, "cached": 0}
+{"length": 2048, "rep": 0, "ttft": 1.2436724250437692, "prompt": 2048, "cached": 0}
+{"length": 2048, "rep": 1, "ttft": 1.24278286495246, "prompt": 2048, "cached": 0}
+{"length": 2048, "rep": 2, "ttft": 1.2355036230292171, "prompt": 2047, "cached": 0}
+{"length": 8192, "rep": 0, "ttft": 5.396785218035802, "prompt": 8191, "cached": 0}
+{"length": 8192, "rep": 1, "ttft": 5.406543482095003, "prompt": 8192, "cached": 0}
+{"length": 8192, "rep": 2, "ttft": 5.404332814970985, "prompt": 8191, "cached": 0}
+{"length": 16384, "rep": 0, "ttft": 10.687900383025408, "prompt": 16384, "cached": 0}
+{"length": 16384, "rep": 1, "ttft": 10.693931889953092, "prompt": 16384, "cached": 0}
+{"length": 16384, "rep": 2, "ttft": 10.713210720103234, "prompt": 16383, "cached": 0}
+{"length": 32768, "rep": 0, "ttft": 21.40478678198997, "prompt": 32768, "cached": 0}
+{"length": 32768, "rep": 1, "ttft": 21.408089085947722, "prompt": 32766, "cached": 0}
+{"length": 32768, "rep": 2, "ttft": 21.37812329805456, "prompt": 32766, "cached": 0}
+{"length": 65536, "rep": 0, "ttft": 43.39012634602841, "prompt": 65536, "cached": 0}
+{"length": 65536, "rep": 1, "ttft": 43.3315977670718, "prompt": 65536, "cached": 0}
+{"length": 65536, "rep": 2, "ttft": 43.32970841496717, "prompt": 65536, "cached": 0}
+alone p2048-0-0: prompt 2048 ttft 1.260909931967035 sha 7d62171119f86883ec9ea4e3542846c00509f1ad0baba0a0676ccd3b8e14cd56
+alone p2048-1-0: prompt 2048 ttft 1.2505641130264848 sha c948b4bcbd5833ccd9c3bbd0f64e960f0ed36def137ba411ed3ade9437416854
+alone p2048-2-0: prompt 2047 ttft 1.2464342470047995 sha 6a2fb209181c72c924d2f9c33c76a176bd29daed59cf2e524f9797dc123b2b19
+alone p2048-0-1: prompt 2048 ttft 1.2466398840770125 sha f8aaeecc59d0c280cda17bf00ec2c94ab68bf77c8f76edf8f6198403d239a62b
+alone p2048-1-1: prompt 2048 ttft 1.2500573369907215 sha 854ffaa5d75926074fa12f5f072ace31fab67f02428f5cc5cde0f8536b956273
+alone p2048-2-1: prompt 2047 ttft 1.2476839119335636 sha 0effe3e2e261cfefd427f381703c20e16f63a81a352520ec51fc2d517053699c
+alone p2048-0-2: prompt 2048 ttft 1.252152565983124 sha 2d30fcc66f9925bb2dbab2bfa2c3b819cfbe1e820d089d4774f26089df2b46b3
+   p2048-0-0: prompt 2048 first 5.98 s last 21.30 s equal_alone True started after -
+   p2048-1-0: prompt 2048 first 7.36 s last 22.24 s equal_alone True started after -
+   p2048-2-0: prompt 2047 first 3.28 s last 21.56 s equal_alone True started after -
+   p2048-0-1: prompt 2048 first 11.63 s last 21.56 s equal_alone True started after -
+   p2048-1-1: prompt 2048 first 8.77 s last 22.79 s equal_alone True started after -
+   p2048-2-1: prompt 2047 first 4.60 s last 20.38 s equal_alone True started after -
+   p2048-0-2: prompt 2048 first 10.19 s last 21.14 s equal_alone True started after -
+   long65536: prompt 65536 first 1.45 s last 19.51 s equal_alone None started after -
+together == alone: 7/7; 0 request(s) started only after another ended
+=== kvp-client r6auto rc 0

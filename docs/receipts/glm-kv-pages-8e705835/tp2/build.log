@@ -1,0 +1,11 @@
+-- run 2026-10-23 10:01:23
+2026-10-23 10:01:24 tree 8e705835 glm cuda tests: the paged check's stream is the engine's own sequence, on pages f; changed: zig/glm_snapshot_host.zig zig/src/core/contract/glm_cuda_records.zig zig/src/core/contract/registry.zig zig/src/core/kv_pool.zig zig/src/core/kv_pool_test.zig zig/src/families/glm/cuda.zig zig/src/families/glm/cuda_dsa_block.zig zig/src/families/glm/cuda_engine.zig zig/src/families/glm/cuda_follow.zig zig/src/families/glm/cuda_kv8_test.zig zig/src/families/glm/cuda_lanes.zig zig/src/families/glm/cuda_latent.zig zig/src/families/glm/cuda_native.zig zig/src/families/glm/cuda_pages.zig zig/src/families/glm/cuda_pages_test.zig zig/src/families/glm/cuda_ranks.zig zig/src/families/glm/cuda_snapshot_layout.zig zig/src/families/glm/cuda_snapshot_pages.zig zig/src/families/glm/cuda_snapshots.zig zig/src/families/glm/cuda_sparse.zig zig/src/families/glm/cuda_state.zig zig/src/native/cuda.zig zig/src/native/cuda_kv_pool.zig zig/src/native/cuda_kv_safety_test.zig zig/tests/cuda/contract_glm_attn.zig zig/tests/cuda/contract_glm_index.zig zig/tests/cuda/contract_glm_pages.zig zig/tests/cuda/contract_tests.zig zig/tests/cuda/glm_paged_tests.zig zig/tests/cuda/glm_ref_attn.zig zig/tests/cuda/glm_ref_fp8.zig zig/tests/cuda/glm_ref_index.zig zig/tests/cuda/main.zig
+2026-10-23 10:01:24 fmt rc=0
+2026-10-23 10:01:24 -- r9: 8e705835 glm cuda tests: the paged check's stream is the engine's own sequence, on pages f
+2026-10-23 10:06:48 build rc=0 324s:
+2026-10-23 10:09:21 native rc=0 153s:
+2026-10-23 10:11:43 host rc=0 142s: failed command: ./.zig-cache/o/4326653e6bd8ad6fdc5508bee4ba3a38/test --cache-dir=./.zig-cache --seed=0xf03f5e41 --listen=- failed command: ./.zig-cache/o/da1ace8218d407d58b4a1b7a9ef6c22b/test --cache-dir=./.zig-cache --seed=0xf03f5e41 --listen=- Build Summary: 155/155 steps succeeded; 2516/2522 test
+2026-10-23 10:11:48 kvpool rc=0 5s: Build Summary: 5/5 steps succeeded; 17/17 tests passed
+2026-10-23 10:12:30 test rc=0 42s: failed command: ./.zig-cache/o/33d3a117abb9ad8e9ed4ec4bcd11c3a0/test --cache-dir=./.zig-cache --seed=0x2fc29d03 --listen=- Build Summary: 276/276 steps succeeded; 2023/2037 tests passed (14 skipped) |     |  +- compile lib hip-mock-failed debug native success 65ms MaxRSS:62M
+2026-10-23 10:12:30 lean rc=1 0s:
+2026-10-23 10:12:31 === kvp-base r9 done

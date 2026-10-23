@@ -1,0 +1,418 @@
+test-cuda-host
++- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zig-cache/o/b04b5cfc81a4382b056d0bf0dc2e8cba/test --cache-dir=./.zig-cache --seed=0xeb20131d --listen=-
+
+discovery verbs: retained through TLS, atexit and destructor; child exit 0
+discovery grammar: retained through TLS, atexit and destructor; child exit 0
+test-cuda-host
++- run test 0 pass, 1 fail (1 total)
+error: 'cuda_cost_identity.test.cost identity: stable reads reuse a drafter, while a changed payload at the same path invalidates it' failed:
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:584:14: 0x123efa9 in expect (std.zig)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       <home>/zt/kvp-r9c/zig/src/families/qwen3_5/cuda_cost_identity.zig:67:5: 0x123fa53 in test.cost identity: stable reads reuse a drafter, while a changed payload at the same path invalidates it (cuda_cost_identity.zig)
+           try std.testing.expect(!std.mem.eql(u8, &first, &changed));
+           ^
+failed command: ./.zig-cache/o/50d121a9ab9d688f31bd98df2c908ad4/test --cache-dir=./.zig-cache --seed=0xeb20131d --listen=-
+
+test-cuda-host
++- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zig-cache/o/ba389278848dd62bdeff7f7a7b458416/test --cache-dir=./.zig-cache --seed=0xeb20131d --listen=-
+
+test-glm-snapshots-host
++- run test w
+GLM snapshot sizing rank=0 world=2 at=2048 bytes=203423744 arena=7034250752
+GLM snapshot sizing rank=0 world=2 at=34816 bytes=643825664 arena=7034250752
+GLM snapshot sizing rank=0 world=2 at=266240 bytes=3665821696 arena=7034250752
+failed command: ./.zig-cache/o/8a659e07ef41ab76477b7d9e749b71ca/test --cache-dir=./.zig-cache --seed=0xeb20131d --listen=-
+
+Build Summary: 161/163 steps succeeded (1 failed); 72/73 tests passed (1 failed)
+test-cuda-host transitive failure
++- run test cached
+|  +- compile test debug native cached 192ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 145ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 173ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 696ms MaxRSS:39M
++- run exe runtime-discovery-exit success 23ms
+|  +- compile exe runtime-discovery-exit debug native cached 104ms MaxRSS:39M
+|     +- options cached
+|        +- compile lib runtime-discovery-mock debug native cached 112ms MaxRSS:38M
++- run exe rpc-warning-check success 18ms
+|  +- compile exe rpc-warning-check debug native cached 462ms MaxRSS:39M
+|     +- options cached
+|        +- compile lib rpc-mock-complete debug native cached 461ms MaxRSS:39M
+|        +- compile lib rpc-mock-abi debug native cached 337ms MaxRSS:39M
+|        +- compile lib rpc-mock-wait debug native cached 338ms MaxRSS:39M
+|        +- compile lib rpc-mock-store debug native cached 563ms MaxRSS:39M
+|        +- compile lib rpc-mock-wrong debug native cached 337ms MaxRSS:38M
++- run test cached
+|  +- compile test debug native cached 463ms MaxRSS:39M
+|     +- options (+5 more reused dependencies)
++- run test cached
+|  +- compile test debug native cached 349ms MaxRSS:39M
++- run test 30 pass (30 total) 61ms MaxRSS:10M
+|  +- compile test debug native cached 187ms MaxRSS:39M
+|     +- WriteFile h3-compile-only.fatbin cached
+|     +- options cached
++- run test cached
+|  +- compile test debug native cached 286ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 157ms MaxRSS:40M
+|     +- WriteFile attn_train.fatbin cached
+|     +- WriteFile dsv41_exl3_experts.fatbin cached
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- options cached
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- options cached
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
+|     +- WriteFile attn_train.fatbin (reused)
++- run test cached
+|  +- compile test debug native cached 1s MaxRSS:40M
+|     +- options cached
+|     |  +- compile exe qwen-round-timing-probe debug native cached 814ms MaxRSS:40M
+|     |     +- WriteFile draft_ids.txt cached
+|     |     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 403ms MaxRSS:40M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 425ms MaxRSS:39M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 302ms MaxRSS:39M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 101ms MaxRSS:39M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 524ms MaxRSS:39M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- compile obj exl3_host_compile debug native cached 115ms MaxRSS:39M
+|  +- options (reused)
++- run test cached
+|  +- compile test debug native cached 235ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 126ms MaxRSS:38M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 293ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 115ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 173ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 641ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 204ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 108ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 514ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 1s MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 204ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test fast native cached 233ms MaxRSS:40M
+|     +- options (reused)
++- run test cached
+|  +- compile test fast native cached 679ms MaxRSS:41M
+|     +- options (reused)
++- compile obj bolt_host_compile debug x86_64-linux-gnu cached 16ms MaxRSS:39M
+|  +- options cached
+|  +- WriteFile draft_ids.txt (reused)
++- run test 26 pass (26 total) 3s MaxRSS:8M
+|  +- compile test debug native cached 126ms MaxRSS:38M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 497ms MaxRSS:40M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 401ms MaxRSS:39M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run exe qwen-cost-key-process success 1m
+|  +- compile exe qwen-cost-key-process debug native cached 238ms MaxRSS:40M
+|  |  +- WriteFile draft_ids.txt (reused)
+|  |  +- options (reused)
+|  +- WriteFile target/config.json cached
++- run test 0 pass, 1 fail (1 total)
+|  +- compile test debug native cached 628ms MaxRSS:39M
++- compile obj drama_cuda_native_host debug native cached 286ms MaxRSS:39M
+|  +- options (reused)
++- run test cached
+|  +- compile test debug native cached 644ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 124ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 521ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 626ms MaxRSS:40M
++- run test cached
+|  +- compile test debug native cached 165ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 530ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 146ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 1s MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 104ms MaxRSS:39M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 132ms MaxRSS:39M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 173ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 117ms MaxRSS:40M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 255ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 485ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 107ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 81ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 172ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 536ms MaxRSS:40M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 657ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 213ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 271ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 238ms MaxRSS:40M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 242ms MaxRSS:40M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 301ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 273ms MaxRSS:39M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 281ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 195ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 448ms MaxRSS:39M
++- run test cached
+|  +- compile test debug native cached 209ms MaxRSS:39M
++- run test cached
+   +- compile test debug native cached 497ms MaxRSS:40M
+      +- options cached
+      +- options (reused)
+      +- WriteFile draft_ids.txt (reused)
+      +- WriteFile exlr8_alias.zig cached
+test-kv-pool success
++- run test cached
+|  +- compile test debug native cached 123ms MaxRSS:39M
++- run test cached
+   +- compile test debug native cached 167ms MaxRSS:39M
+test-glm-snapshots-host success
++- run test 16 pass (16 total) 6s MaxRSS:65M
+   +- compile test debug native success 2s MaxRSS:184M
+      +- options (reused)

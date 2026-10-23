@@ -1,0 +1,13 @@
+tested implementation: 8e70583591644011bbb680fd3f2ae6e17a16b7f3 (commit 20: #1163's 14 commits and this pull request's first six)
+implementation tree: ae42919c8f46bf12e4ccc2f399eba299b94dd3d2
+base: #1163's head d7ff6494dcd3bd9164d223d710a4dcc4659590da, on main after v1.1.2 f8d254c5e0f9ab91eb325a2e7c28d2e5cb07c94d
+the no-GPU CI and the mutations: on commit 20
+after it: the receipt's commit adds this folder
+TP=3's ranks: 10698886af0b9db9acfda5687d5a94b9b9059a95, commit 20 with the two commits in tp3/ring.patch
+
+62e2aeb3905d7f067f1bc4a5550a023bba929584 kv pool: the engine's own sequence can take pages too, a window of them planned before the other streams
+7d4f8dc854f9304bd18ccb9d82dcf36035666878 native cuda: an engine whose own rows are pages plans a window of them first and says so at startup
+8737d30dfaa0b03e81fa09bb35074b474b69d0cb glm cuda: the plan's window holds a request's last verify window, so its pages are a stream's whole table
+b216a74b808018e68fc1d9d8b044c124beae7545 glm cuda: a kept prefix's size is counted to the capacity, so it needs no whole window to measure
+27feda8b637dfe4b3c4da0ae40c9e847de53dff6 glm cuda: the engine's own sequence takes pages too, so its window's pages serve the other streams while it is short
+8e70583591644011bbb680fd3f2ae6e17a16b7f3 glm cuda tests: the paged check's stream is the engine's own sequence, on pages from its init
