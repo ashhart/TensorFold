@@ -1,0 +1,1929 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "photo-styles",
+      "label": "Photo Styles",
+      "group": "Photo Styles",
+      "setups": [
+        {
+          "id": "editorial-photography",
+          "label": "Editorial",
+          "snippet": "Editorial photography style with confident magazine-page composition, purposeful negative space for text overlay, and a controlled, considered color palette that reads as intentional and art-directed.",
+          "tags": [
+            "editorial",
+            "magazine",
+            "art-directed"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "documentary-photography",
+          "label": "Documentary",
+          "snippet": "Documentary photography style with unobtrusive observational framing, available light, and a candid, unstaged sense of a real moment captured as it happened.",
+          "tags": [
+            "documentary",
+            "candid",
+            "observational"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "fashion-photography",
+          "label": "Fashion",
+          "snippet": "High-fashion photography style with a strong hero pose, sculpted studio or location lighting, and a polished, glossy finish that foregrounds silhouette and garment texture.",
+          "tags": [
+            "fashion",
+            "editorial",
+            "glossy"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "street-photography",
+          "label": "Street",
+          "snippet": "Street photography style with spontaneous, decisive-moment framing, natural urban light, and a raw, textured grain that favors authenticity over polish.",
+          "tags": [
+            "street",
+            "candid",
+            "urban"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "portrait-photography",
+          "label": "Portrait",
+          "snippet": "Classic portrait photography style with a shallow depth of field isolating the subject, soft directional key light, and close attention to catchlight and skin tonality.",
+          "tags": [
+            "portrait",
+            "shallow-depth",
+            "studio"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "product-photography",
+          "label": "Product",
+          "snippet": "Commercial product photography style with clean, evenly diffused lighting, crisp edge definition, and a neutral or gradient backdrop that keeps focus entirely on the object.",
+          "tags": [
+            "product",
+            "studio",
+            "clean"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "sports-photography",
+          "label": "Sports",
+          "snippet": "Sports photography style with frozen peak-action framing, a fast shutter feel, and a shallow depth of field that isolates the athlete from a blurred, motion-streaked background.",
+          "tags": [
+            "sports",
+            "action",
+            "freeze-frame"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "wildlife-photography",
+          "label": "Wildlife",
+          "snippet": "Wildlife photography style with a long-lens compressed perspective, patient natural-light framing, and tack-sharp focus on the animal's eye against a softly blurred habitat.",
+          "tags": [
+            "wildlife",
+            "telephoto",
+            "nature"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "architectural-photography",
+          "label": "Architectural",
+          "snippet": "Architectural photography style with corrected vertical lines, symmetrical framing, and a clean, graphic treatment of geometry, materials, and negative space.",
+          "tags": [
+            "architecture",
+            "geometry",
+            "symmetry"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "macro-photography",
+          "label": "Macro",
+          "snippet": "Macro photography style with extreme close-up magnification, razor-thin depth of field, and fine surface texture rendered in crisp, magnified detail.",
+          "tags": [
+            "macro",
+            "close-up",
+            "texture"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "aerial-photography",
+          "label": "Aerial",
+          "snippet": "Aerial photography style with a bird's-eye vantage, graphic top-down patterns, and a scale that transforms the landscape into abstract shape and color.",
+          "tags": [
+            "aerial",
+            "top-down",
+            "landscape"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "underwater-photography",
+          "label": "Underwater",
+          "snippet": "Underwater photography style with diffused blue-green ambient light, suspended particulate haze, and soft-edged refraction that gives the frame a weightless, dreamlike quality.",
+          "tags": [
+            "underwater",
+            "diffused-light",
+            "aquatic"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "night-photography",
+          "label": "Night",
+          "snippet": "Night photography style with deep shadow detail, practical light sources as the primary illumination, and a moody high-contrast exposure balancing pools of light against darkness.",
+          "tags": [
+            "night",
+            "low-light",
+            "high-contrast"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "long-exposure-photography",
+          "label": "Long Exposure",
+          "snippet": "Long-exposure photography style with streaked light trails, silky smoothed motion in water or clouds, and a static frame that renders time itself as visible movement.",
+          "tags": [
+            "long-exposure",
+            "motion-blur",
+            "time"
+          ],
+          "section": "style"
+        }
+      ]
+    },
+    {
+      "id": "film-stocks",
+      "label": "Film Stocks",
+      "group": "Photo Styles",
+      "setups": [
+        {
+          "id": "kodak-portra-400",
+          "label": "Kodak Portra 400",
+          "snippet": "Shot on Kodak Portra 400 with warm, naturalistic skin tones, fine grain, and gently rolled-off highlights characteristic of a classic portrait film stock.",
+          "tags": [
+            "film-stock",
+            "portra",
+            "warm-tones"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "kodak-portra-800",
+          "label": "Kodak Portra 800",
+          "snippet": "Shot on Kodak Portra 800 with slightly heavier grain than its slower counterpart, rich shadow latitude, and warm color rendering suited to lower-light available-light work.",
+          "tags": [
+            "film-stock",
+            "portra",
+            "low-light"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "kodak-ektachrome",
+          "label": "Kodak Ektachrome",
+          "snippet": "Shot on Ektachrome reversal film with punchy, saturated color, cooler neutral tones, and crisp fine grain typical of a slide-film aesthetic.",
+          "tags": [
+            "film-stock",
+            "ektachrome",
+            "saturated"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "kodak-vision3-500t",
+          "label": "Kodak Vision3 500T",
+          "snippet": "Shot on a tungsten-balanced 500T cinema stock with rich shadow detail, a cool base color science, and the fine grain structure typical of a high-speed motion-picture negative.",
+          "tags": [
+            "film-stock",
+            "vision3",
+            "tungsten",
+            "cinema"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "kodak-vision3-250d",
+          "label": "Kodak Vision3 250D",
+          "snippet": "Shot on a daylight-balanced 250D cinema stock with clean color fidelity, moderate grain, and well-controlled highlight roll-off suited to bright exterior work.",
+          "tags": [
+            "film-stock",
+            "vision3",
+            "daylight",
+            "cinema"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "fuji-velvia",
+          "label": "Fuji Velvia",
+          "snippet": "Shot on Velvia-style reversal film with intensely saturated color, deep contrast, and vivid greens and reds characteristic of a landscape-oriented slide stock.",
+          "tags": [
+            "film-stock",
+            "velvia",
+            "saturated",
+            "landscape"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "fuji-provia",
+          "label": "Fuji Provia",
+          "snippet": "Shot on Provia-style reversal film with balanced, true-to-life color, moderate contrast, and fine grain suited to accurate, versatile color reproduction.",
+          "tags": [
+            "film-stock",
+            "provia",
+            "balanced"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "fuji-eterna",
+          "label": "Fuji Eterna",
+          "snippet": "Shot on an Eterna-style cinema stock with a soft, low-contrast tonal curve, muted color rendition, and gentle highlight handling built for subtle grading latitude.",
+          "tags": [
+            "film-stock",
+            "eterna",
+            "low-contrast",
+            "cinema"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "ilford-hp5",
+          "label": "Ilford HP5",
+          "snippet": "Shot on Ilford HP5 black-and-white stock with punchy midtone contrast, pronounced but pleasing grain, and a classic photojournalistic monochrome character.",
+          "tags": [
+            "film-stock",
+            "black-and-white",
+            "hp5",
+            "grain"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "kodak-tri-x",
+          "label": "Kodak Tri-X",
+          "snippet": "Shot on Tri-X black-and-white stock with deep blacks, gritty pronounced grain, and a high-contrast monochrome look associated with classic reportage.",
+          "tags": [
+            "film-stock",
+            "black-and-white",
+            "tri-x",
+            "grain"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "cinestill-800t",
+          "label": "CineStill 800T",
+          "snippet": "Shot on a tungsten-balanced 800-speed stock with distinctive red halation blooming around bright practical lights, cool ambient color, and a nostalgic night-photography character.",
+          "tags": [
+            "film-stock",
+            "cinestill",
+            "halation",
+            "night"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "16mm-grain",
+          "label": "16mm Grain",
+          "snippet": "Rendered with the coarse, organic grain structure and softer resolving power of 16mm film, giving the image a raw, textured, small-format motion-picture character.",
+          "tags": [
+            "film-format",
+            "16mm",
+            "grain",
+            "texture"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "35mm-grain",
+          "label": "35mm Grain",
+          "snippet": "Rendered with the balanced grain structure and resolving power of standard 35mm motion-picture film, the workhorse texture of mainstream theatrical cinematography.",
+          "tags": [
+            "film-format",
+            "35mm",
+            "grain"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "65mm-grain",
+          "label": "65mm Grain",
+          "snippet": "Rendered with the ultra-fine grain and exceptional resolving power of large-format 65mm film, delivering immersive detail and sweeping large-frame clarity.",
+          "tags": [
+            "film-format",
+            "65mm",
+            "large-format",
+            "detail"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "bleach-bypass",
+          "label": "Bleach Bypass",
+          "snippet": "Processed with a bleach-bypass look that retains silver in the print for desaturated color, boosted contrast, and a gritty, metallic sheen across the image.",
+          "tags": [
+            "process",
+            "bleach-bypass",
+            "desaturated",
+            "gritty"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "cross-process",
+          "label": "Cross-Process",
+          "snippet": "Processed with a cross-processed look yielding shifted, unpredictable color casts, boosted contrast, and a hyper-saturated, slightly unstable palette.",
+          "tags": [
+            "process",
+            "cross-process",
+            "saturated",
+            "color-shift"
+          ],
+          "section": "style"
+        }
+      ]
+    },
+    {
+      "id": "cinematic-styles",
+      "label": "Cinematic Styles",
+      "group": "Composition",
+      "setups": [
+        {
+          "id": "noir",
+          "label": "Noir",
+          "snippet": "Classic noir look with hard venetian-blind shadow patterns, low-key single-source lighting, and deep black shadow pools that conceal as much as they reveal.",
+          "tags": [
+            "noir",
+            "low-key",
+            "shadows"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "neo-noir",
+          "label": "Neo-Noir",
+          "snippet": "Neo-noir look with saturated color shadows in cyan and magenta, rain-slicked reflective surfaces, and a moody urban-night palette layered over classic hard-shadow staging.",
+          "tags": [
+            "neo-noir",
+            "urban-night",
+            "saturated-shadows"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "western",
+          "label": "Western",
+          "snippet": "Western genre look with wide dusty-horizon framing, harsh unforgiving sunlight, and a warm, sun-bleached palette of ochre, rust, and faded denim blue.",
+          "tags": [
+            "western",
+            "wide-landscape",
+            "sun-bleached"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "epic",
+          "label": "Epic",
+          "snippet": "Epic genre look with vast wide-scale framing, sweeping scope, and a grand, saturated palette designed to dwarf the human figure against monumental landscape or architecture.",
+          "tags": [
+            "epic",
+            "scale",
+            "grand-scope"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "thriller",
+          "label": "Thriller",
+          "snippet": "Thriller genre look with tight, claustrophobic framing, cool desaturated tones, and hard shadow edges that build unease through restrained, controlled visual tension.",
+          "tags": [
+            "thriller",
+            "claustrophobic",
+            "tense"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "horror",
+          "label": "Horror",
+          "snippet": "Horror genre look with underlit faces, pools of near-total darkness at the frame edges, and a sickly desaturated color cast that unsettles the eye.",
+          "tags": [
+            "horror",
+            "underlit",
+            "desaturated"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "romance",
+          "label": "Romance",
+          "snippet": "Romantic genre look with soft diffused backlight, warm golden color temperature, gentle lens glow, and intimate close framing that flatters and softens.",
+          "tags": [
+            "romance",
+            "soft-light",
+            "warm-tone"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "sci-fi",
+          "label": "Sci-Fi",
+          "snippet": "Science-fiction genre look with cool blue-cyan color dominance, hard practical light sources embedded in the environment, and clean, geometric, high-contrast staging.",
+          "tags": [
+            "sci-fi",
+            "cool-tone",
+            "practical-lights"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "war",
+          "label": "War",
+          "snippet": "War genre look with desaturated muddy tones, handheld immediacy, harsh haze and smoke diffusion, and a bleached, high-contrast exposure that reads as documentary urgency.",
+          "tags": [
+            "war",
+            "desaturated",
+            "handheld",
+            "haze"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "heist",
+          "label": "Heist",
+          "snippet": "Heist genre look with sleek high-contrast lighting, cool metallic tones, confident symmetrical framing, and a polished, stylish visual control that signals precision.",
+          "tags": [
+            "heist",
+            "sleek",
+            "high-contrast"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "coming-of-age",
+          "label": "Coming-of-Age",
+          "snippet": "Coming-of-age genre look with warm nostalgic color grading, soft natural light, handheld intimacy, and loose, observational framing that favors emotional authenticity.",
+          "tags": [
+            "coming-of-age",
+            "nostalgic",
+            "warm-tone"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "mockumentary",
+          "label": "Mockumentary",
+          "snippet": "Mockumentary genre look with static talking-head framing, flat naturalistic lighting, slightly imperfect handheld reframes, and a plain, unstylized visual honesty.",
+          "tags": [
+            "mockumentary",
+            "naturalistic",
+            "handheld"
+          ],
+          "section": "style"
+        }
+      ]
+    },
+    {
+      "id": "commercial-styles",
+      "label": "Commercial Styles",
+      "group": "Composition",
+      "setups": [
+        {
+          "id": "automotive-spot",
+          "label": "Automotive Spot",
+          "snippet": "Automotive commercial look with sweeping low-angle tracking shots, glossy specular highlights raked across the bodywork, and a saturated, high-production color grade.",
+          "tags": [
+            "automotive",
+            "commercial",
+            "glossy"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "tech-product",
+          "label": "Tech Product",
+          "snippet": "Tech-product commercial look with a minimalist white or dark studio void, crisp rim lighting on clean edges, and a precise, controlled, ultra-modern presentation.",
+          "tags": [
+            "tech",
+            "product",
+            "minimalist"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "fragrance",
+          "label": "Fragrance",
+          "snippet": "Fragrance commercial look with soft diffused backlight, dreamy slow motion, gauzy atmospheric haze, and a sensual, romantic color palette built around skin and light.",
+          "tags": [
+            "fragrance",
+            "luxury",
+            "dreamy"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "sportswear",
+          "label": "Sportswear",
+          "snippet": "Sportswear commercial look with high-energy freeze and motion-blur contrast, gritty urban texture, and a bold, saturated, high-contrast athletic color grade.",
+          "tags": [
+            "sportswear",
+            "athletic",
+            "high-energy"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "food-commercial",
+          "label": "Food Commercial",
+          "snippet": "Food commercial look with warm, appetizing top-light, glistening texture on glaze and steam, and a shallow depth of field that isolates the dish in tight close-up.",
+          "tags": [
+            "food",
+            "commercial",
+            "appetizing"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "luxury-watch",
+          "label": "Luxury Watch",
+          "snippet": "Luxury-watch commercial look with macro precision on dial and mechanism, hard controlled specular highlights, and a rich, dark, jewel-toned studio backdrop.",
+          "tags": [
+            "luxury",
+            "watch",
+            "macro",
+            "studio"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "real-estate",
+          "label": "Real Estate",
+          "snippet": "Real-estate commercial look with bright, evenly balanced interior exposure, corrected wide-angle lines, and an inviting, airy, naturally lit sense of space.",
+          "tags": [
+            "real-estate",
+            "interior",
+            "bright"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "pharma-warmth",
+          "label": "Pharma Warmth",
+          "snippet": "Pharmaceutical commercial look with soft warm natural light, gentle handheld intimacy, and a reassuring, approachable palette of skin tones and soft neutrals.",
+          "tags": [
+            "pharma",
+            "warm",
+            "reassuring"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "energy-drink-chaos",
+          "label": "Energy Drink Chaos",
+          "snippet": "Energy-drink commercial look with whip-fast frenetic motion, oversaturated neon color, hard flash-lit highlights, and a chaotic, adrenaline-charged visual pace.",
+          "tags": [
+            "energy-drink",
+            "frenetic",
+            "neon"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "beauty-cosmetics",
+          "label": "Beauty & Cosmetics",
+          "snippet": "Beauty commercial look with soft flattering beauty-dish lighting, luminous skin highlights, and a clean, glowing close-up focus on texture and color.",
+          "tags": [
+            "beauty",
+            "cosmetics",
+            "glowing"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "financial-trust",
+          "label": "Financial Trust",
+          "snippet": "Financial-services commercial look with cool corporate blue tones, clean symmetrical framing, and a composed, confident, steady visual authority.",
+          "tags": [
+            "financial",
+            "corporate",
+            "composed"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "travel-airline",
+          "label": "Travel & Airline",
+          "snippet": "Travel and airline commercial look with wide aspirational landscape framing, golden natural light, and a smooth, polished sense of ease and movement.",
+          "tags": [
+            "travel",
+            "airline",
+            "aspirational"
+          ],
+          "section": "style"
+        }
+      ]
+    },
+    {
+      "id": "depth-layers",
+      "label": "Depth & Layers",
+      "group": "Composition",
+      "setups": [
+        {
+          "id": "foreground-anchor",
+          "label": "Foreground Anchor",
+          "snippet": "A strong foreground element is placed close to the lens, softly out of focus, anchoring the frame and giving the deeper scene beyond it a tangible sense of physical depth.",
+          "tags": [
+            "depth",
+            "foreground",
+            "layering"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "layered-midground-action",
+          "label": "Layered Midground Action",
+          "snippet": "A distinct midground layer of secondary action unfolds between the foreground anchor and the background, giving the frame three readable planes of depth.",
+          "tags": [
+            "depth",
+            "midground",
+            "layering"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "atmospheric-depth-haze",
+          "label": "Atmospheric Depth Haze",
+          "snippet": "Thin atmospheric haze or dust settles over the far distance, softening contrast and desaturating color with each successive plane to sell natural depth.",
+          "tags": [
+            "depth",
+            "haze",
+            "atmosphere"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "rack-focus-planes",
+          "label": "Rack-Focus Planes",
+          "snippet": "Multiple distinct focal planes are staged front to back so a rack focus can travel smoothly from foreground to background within a single continuous shot.",
+          "tags": [
+            "depth",
+            "rack-focus",
+            "staging"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "through-object-framing",
+          "label": "Through-Object Framing",
+          "snippet": "The camera shoots through a translucent or partially obscuring object in the extreme foreground, layering texture and depth between lens and subject.",
+          "tags": [
+            "depth",
+            "foreground",
+            "texture"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "mirror-depth",
+          "label": "Mirror Depth",
+          "snippet": "A mirror or reflective surface within the frame doubles the spatial depth, revealing a second layer of action or environment behind the camera's actual position.",
+          "tags": [
+            "depth",
+            "mirror",
+            "reflection"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "deep-focus-staging",
+          "label": "Deep Focus Staging",
+          "snippet": "Deep focus staging keeps foreground, midground, and background elements all sharply resolved simultaneously, inviting the eye to travel through every plane of the frame.",
+          "tags": [
+            "depth",
+            "deep-focus",
+            "staging"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "foreground-bokeh-elements",
+          "label": "Foreground Bokeh Elements",
+          "snippet": "Small out-of-focus points of light or texture drift across the extreme foreground, softening the frame's edge and separating the sharp subject from the lens.",
+          "tags": [
+            "depth",
+            "bokeh",
+            "foreground"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "receding-lines-depth",
+          "label": "Receding Lines Depth",
+          "snippet": "Converging architectural or environmental lines recede toward a vanishing point, pulling the eye from foreground to background along a clear depth axis.",
+          "tags": [
+            "depth",
+            "leading-lines",
+            "composition"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "scale-contrast-depth",
+          "label": "Scale Contrast Depth",
+          "snippet": "A large, close foreground subject is set against a much smaller, distant background element, using scale contrast to exaggerate the sense of spatial depth.",
+          "tags": [
+            "depth",
+            "scale",
+            "contrast"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "overlapping-silhouette-planes",
+          "label": "Overlapping Silhouette Planes",
+          "snippet": "Successive silhouetted planes overlap from foreground to background, each rendered as a darker or lighter tonal layer to stack visible depth in the frame.",
+          "tags": [
+            "depth",
+            "silhouette",
+            "layering"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "color-temperature-depth-falloff",
+          "label": "Color Temperature Depth Falloff",
+          "snippet": "Color temperature shifts subtly cooler with each receding plane of the frame, using temperature falloff rather than focus alone to communicate distance.",
+          "tags": [
+            "depth",
+            "color-temperature",
+            "atmosphere"
+          ],
+          "section": "composition"
+        }
+      ]
+    },
+    {
+      "id": "frame-within-frame",
+      "label": "Frame Within Frame",
+      "group": "Composition",
+      "setups": [
+        {
+          "id": "doorway-frame",
+          "label": "Doorway Frame",
+          "snippet": "The subject is composed within an open doorway, its rectangular architecture forming a natural frame-within-a-frame that isolates and centers the action beyond it.",
+          "tags": [
+            "frame-within-frame",
+            "doorway",
+            "architecture"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "window-frame",
+          "label": "Window Frame",
+          "snippet": "A window frame divides the composition, containing the subject within its panes and using the glass edge as a graphic border inside the wider shot.",
+          "tags": [
+            "frame-within-frame",
+            "window",
+            "architecture"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "mirror-frame",
+          "label": "Mirror Frame",
+          "snippet": "The subject is framed within a mirror's edge, the reflective boundary acting as a secondary frame nested inside the primary composition.",
+          "tags": [
+            "frame-within-frame",
+            "mirror",
+            "reflection"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "screen-frame",
+          "label": "Screen Frame",
+          "snippet": "A television, monitor, or phone screen within the shot contains a secondary image, creating a frame-within-a-frame that layers two visual planes at once.",
+          "tags": [
+            "frame-within-frame",
+            "screen",
+            "technology"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "blinds-frame",
+          "label": "Blinds Frame",
+          "snippet": "Venetian blinds or slatted shutters cut horizontal bands across the frame, fragmenting the subject into a rhythmic frame-within-a-frame pattern of light and shadow.",
+          "tags": [
+            "frame-within-frame",
+            "blinds",
+            "shadow-pattern"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "arch-frame",
+          "label": "Arch Frame",
+          "snippet": "An architectural archway curves around the edges of the composition, its rounded silhouette forming a natural vignette that frames the subject beyond.",
+          "tags": [
+            "frame-within-frame",
+            "arch",
+            "architecture"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "vehicle-glass-frame",
+          "label": "Vehicle Glass Frame",
+          "snippet": "The subject is viewed through a car or train window, the glass edge and interior framing elements nesting the scene inside a secondary, moving frame.",
+          "tags": [
+            "frame-within-frame",
+            "vehicle",
+            "glass"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "crowd-gap-frame",
+          "label": "Crowd Gap Frame",
+          "snippet": "A narrow gap between figures in a foreground crowd frames the subject beyond, using bodies rather than architecture to create the inner border.",
+          "tags": [
+            "frame-within-frame",
+            "crowd",
+            "foreground"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "stairwell-frame",
+          "label": "Stairwell Frame",
+          "snippet": "The geometric lines of a stairwell or bannister enclose the subject, its angular negative space forming a graphic secondary frame.",
+          "tags": [
+            "frame-within-frame",
+            "stairwell",
+            "geometry"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "foliage-frame",
+          "label": "Foliage Frame",
+          "snippet": "Overhanging branches or foreground foliage arch around the edges of the composition, framing the subject with an organic, natural border.",
+          "tags": [
+            "frame-within-frame",
+            "foliage",
+            "natural"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "tunnel-frame",
+          "label": "Tunnel Frame",
+          "snippet": "A tunnel, underpass, or corridor frames the subject in silhouette against the bright opening beyond, the dark architecture forming a bold enclosing border.",
+          "tags": [
+            "frame-within-frame",
+            "tunnel",
+            "silhouette"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "scaffolding-frame",
+          "label": "Scaffolding Frame",
+          "snippet": "Industrial scaffolding or structural beams crisscross the foreground, their geometric grid forming an incidental frame-within-a-frame around the subject.",
+          "tags": [
+            "frame-within-frame",
+            "scaffolding",
+            "industrial"
+          ],
+          "section": "composition"
+        }
+      ]
+    },
+    {
+      "id": "realism",
+      "label": "Realism",
+      "group": "Composition",
+      "setups": [
+        {
+          "id": "photoreal-skin-texture",
+          "label": "Photoreal Skin Texture",
+          "snippet": "Skin is rendered with photoreal texture \u2014 visible pores, fine lines, and natural sheen \u2014 avoiding any airbrushed or artificially smoothed surface.",
+          "tags": [
+            "realism",
+            "skin",
+            "texture"
+          ],
+          "section": "subject"
+        },
+        {
+          "id": "natural-imperfections",
+          "label": "Natural Imperfections",
+          "snippet": "The subject carries natural imperfections \u2014 asymmetry, stray hairs, minor blemishes \u2014 left untouched to preserve an authentic, unidealized human presence.",
+          "tags": [
+            "realism",
+            "imperfection",
+            "authentic"
+          ],
+          "section": "subject"
+        },
+        {
+          "id": "practical-light-realism",
+          "label": "Practical Light Realism",
+          "snippet": "Lighting is motivated entirely by visible practical sources within the scene, with no invisible key light breaking the illusion of a real, lived-in space.",
+          "tags": [
+            "realism",
+            "practical-light",
+            "motivated-lighting"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "handheld-authenticity",
+          "label": "Handheld Authenticity",
+          "snippet": "A subtly handheld camera introduces the small imperfect drift of a real operator, lending the shot an unrehearsed, observational authenticity.",
+          "tags": [
+            "realism",
+            "handheld",
+            "authentic"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "weather-worn-surfaces",
+          "label": "Weather-Worn Surfaces",
+          "snippet": "Surfaces throughout the frame show real weathering \u2014 peeling paint, rust streaks, water stains \u2014 grounding the environment in tangible physical history.",
+          "tags": [
+            "realism",
+            "weathering",
+            "texture"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "documentary-grade",
+          "label": "Documentary Grade",
+          "snippet": "The color grade stays naturalistic and restrained, avoiding stylized saturation or contrast pushes in favor of an accurate, true-to-life documentary tonality.",
+          "tags": [
+            "realism",
+            "documentary",
+            "natural-grade"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "unretouched-candid-realism",
+          "label": "Unretouched Candid Realism",
+          "snippet": "The moment reads as unretouched and candid, with natural expressions and body language captured rather than posed or directed.",
+          "tags": [
+            "realism",
+            "candid",
+            "unposed"
+          ],
+          "section": "subject"
+        },
+        {
+          "id": "environmental-wear-detail",
+          "label": "Environmental Wear Detail",
+          "snippet": "Set dressing and props show accumulated real-world wear \u2014 scuffed floors, worn handles, faded signage \u2014 that sells lived-in environmental history.",
+          "tags": [
+            "realism",
+            "environment",
+            "wear"
+          ],
+          "section": "composition"
+        },
+        {
+          "id": "fabric-material-realism",
+          "label": "Fabric & Material Realism",
+          "snippet": "Clothing and materials are rendered with true fabric behavior \u2014 natural drape, creasing, and texture \u2014 rather than an artificially crisp or synthetic surface.",
+          "tags": [
+            "realism",
+            "fabric",
+            "texture"
+          ],
+          "section": "subject"
+        },
+        {
+          "id": "naturalistic-color-science",
+          "label": "Naturalistic Color Science",
+          "snippet": "Color science favors accurate, naturalistic skin and environmental tones over stylized grading, keeping the palette grounded and believable.",
+          "tags": [
+            "realism",
+            "color-science",
+            "natural"
+          ],
+          "section": "style"
+        },
+        {
+          "id": "imperfect-focus-realism",
+          "label": "Imperfect Focus Realism",
+          "snippet": "Focus carries the small imperfections of a real camera operator \u2014 a slight softness or drift \u2014 rather than a mathematically perfect lock.",
+          "tags": [
+            "realism",
+            "focus",
+            "authentic"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "real-world-grime-and-dust",
+          "label": "Real-World Grime & Dust",
+          "snippet": "Fine dust, grime, and airborne particulate are visible catching the light, adding the tactile imperfection of a genuinely inhabited physical space.",
+          "tags": [
+            "realism",
+            "grime",
+            "texture"
+          ],
+          "section": "composition"
+        }
+      ]
+    },
+    {
+      "id": "single-shot",
+      "label": "Single Shots",
+      "group": "Single Shots",
+      "setups": [
+        {
+          "id": "oner-continuous-take",
+          "label": "Oner (Continuous Take)",
+          "snippet": "The entire scene unfolds in a single unbroken continuous take, the camera moving fluidly between beats without a cut to sustain unbroken spatial and temporal continuity.",
+          "tags": [
+            "single-shot",
+            "oner",
+            "continuous"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "whip-pan-transition",
+          "label": "Whip-Pan Transition",
+          "snippet": "A fast whip pan blurs the frame into motion streaks before snapping to a new subject, using the blur itself as an in-camera scene transition.",
+          "tags": [
+            "single-shot",
+            "whip-pan",
+            "transition"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "push-in-reveal",
+          "label": "Push-In Reveal",
+          "snippet": "The camera pushes slowly and steadily toward the subject, tightening the frame over time to build intensity and reveal emotional detail.",
+          "tags": [
+            "single-shot",
+            "push-in",
+            "reveal"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "pull-back-reveal",
+          "label": "Pull-Back Reveal",
+          "snippet": "The camera pulls back from a tight opening frame to reveal the wider surrounding context, recontextualizing the subject within its environment.",
+          "tags": [
+            "single-shot",
+            "pull-back",
+            "reveal"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "orbit-move",
+          "label": "Orbit Move",
+          "snippet": "The camera orbits smoothly around the subject in a continuous arc, revealing the full three-dimensional space surrounding them within one shot.",
+          "tags": [
+            "single-shot",
+            "orbit",
+            "arc"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "crash-zoom",
+          "label": "Crash Zoom",
+          "snippet": "A sudden, aggressive crash zoom snaps the frame from wide to tight in an instant, punctuating the moment with jarring emphasis.",
+          "tags": [
+            "single-shot",
+            "crash-zoom",
+            "emphasis"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "dolly-counter-move",
+          "label": "Dolly Counter-Move",
+          "snippet": "The camera dollies in one direction while the subject moves in the opposite direction, holding the frame steady through counter-motion.",
+          "tags": [
+            "single-shot",
+            "dolly",
+            "counter-move"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "top-down-god-shot",
+          "label": "Top-Down God Shot",
+          "snippet": "A direct overhead top-down angle looks straight down on the scene, flattening depth into a graphic, god's-eye composition.",
+          "tags": [
+            "single-shot",
+            "top-down",
+            "overhead"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "low-mode-gimbal-chase",
+          "label": "Low-Mode Gimbal Chase",
+          "snippet": "The camera rides low to the ground in gimbal-stabilized pursuit, chasing the subject at near ankle height for an urgent, immersive tracking perspective.",
+          "tags": [
+            "single-shot",
+            "gimbal",
+            "low-angle",
+            "chase"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "360-spin-reveal",
+          "label": "360 Spin Reveal",
+          "snippet": "The camera completes a full 360-degree spin around the subject in one continuous motion, ending back where it began to reveal the entire surrounding space.",
+          "tags": [
+            "single-shot",
+            "360",
+            "spin"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "vertical-rise-reveal",
+          "label": "Vertical Rise Reveal",
+          "snippet": "The camera rises vertically from a low starting point, revealing scale and scope as it climbs above the subject within a single continuous move.",
+          "tags": [
+            "single-shot",
+            "vertical",
+            "rise"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "long-lens-compression-walk",
+          "label": "Long-Lens Compression Walk",
+          "snippet": "A long lens follows the subject's walk from a distance, compressing the background into the frame and keeping the subject visually pinned against it throughout the move.",
+          "tags": [
+            "single-shot",
+            "long-lens",
+            "compression"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "first-person-pov-shot",
+          "label": "First-Person POV Shot",
+          "snippet": "The camera adopts the subject's first-person point of view, moving as their eyes would move through the space for an immersive subjective perspective.",
+          "tags": [
+            "single-shot",
+            "pov",
+            "subjective"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "over-the-shoulder-follow",
+          "label": "Over-the-Shoulder Follow",
+          "snippet": "The camera follows tight behind the subject's shoulder, keeping their point of view and immediate surroundings visible as they move through the space.",
+          "tags": [
+            "single-shot",
+            "over-the-shoulder",
+            "follow"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "drone-flythrough-reveal",
+          "label": "Drone Flythrough Reveal",
+          "snippet": "A drone flies continuously through the environment, threading between obstacles before rising or pulling back to reveal the full scale of the location.",
+          "tags": [
+            "single-shot",
+            "drone",
+            "flythrough"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "static-hold-reveal",
+          "label": "Static Hold Reveal",
+          "snippet": "The camera holds perfectly static while the action within the frame reveals new information over time, letting composition rather than camera movement drive the reveal.",
+          "tags": [
+            "single-shot",
+            "static",
+            "hold"
+          ],
+          "section": "camera"
+        }
+      ]
+    },
+    {
+      "id": "camera",
+      "label": "Camera",
+      "group": "Camera & Lighting",
+      "setups": [
+        {
+          "id": "locked-off-tripod",
+          "label": "Locked-Off Tripod",
+          "snippet": "The camera is locked off on a tripod, perfectly static and stable, letting the action within the frame carry all the movement.",
+          "tags": [
+            "camera",
+            "tripod",
+            "static"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "handheld-urgency",
+          "label": "Handheld Urgency",
+          "snippet": "A handheld camera introduces a raw, unstable urgency, its small shakes and reframes lending immediacy and visceral energy to the moment.",
+          "tags": [
+            "camera",
+            "handheld",
+            "urgent"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "steadicam-glide",
+          "label": "Steadicam Glide",
+          "snippet": "A stabilized rig glides smoothly through the space, floating the camera at a consistent height with none of the jitter of handheld operation.",
+          "tags": [
+            "camera",
+            "stabilized",
+            "smooth"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "crane-sweep",
+          "label": "Crane Sweep",
+          "snippet": "A crane arm sweeps the camera through a broad vertical and lateral arc, opening up scale and grandeur as it rises above the scene.",
+          "tags": [
+            "camera",
+            "crane",
+            "sweep"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "drone-descent",
+          "label": "Drone Descent",
+          "snippet": "A drone descends smoothly from a high aerial vantage down toward the subject, collapsing scale from landscape to human-level detail in one continuous move.",
+          "tags": [
+            "camera",
+            "drone",
+            "descent"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "snorricam-rig",
+          "label": "Body-Mounted Rig",
+          "snippet": "A body-mounted rig keeps the camera fixed relative to the subject's torso, isolating their face against a swirling, disorienting moving background.",
+          "tags": [
+            "camera",
+            "body-mounted",
+            "disorienting"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "probe-lens-pass-through",
+          "label": "Probe Lens Pass-Through",
+          "snippet": "An ultra-wide probe lens pushes through tight gaps and small apertures in the environment, threading the camera where a normal lens body could never fit.",
+          "tags": [
+            "camera",
+            "probe-lens",
+            "macro"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "high-speed-slow-mo",
+          "label": "High-Speed Slow-Mo",
+          "snippet": "Footage is captured at a high frame rate and played back in slow motion, stretching a brief instant into fluid, hyper-detailed extended time.",
+          "tags": [
+            "camera",
+            "slow-motion",
+            "high-speed"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "dolly-track-push",
+          "label": "Dolly Track Push",
+          "snippet": "The camera rides smoothly along a dolly track, pushing or pulling with mechanical precision and none of the drift of a handheld or gimbal move.",
+          "tags": [
+            "camera",
+            "dolly",
+            "track"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "gimbal-walk-and-talk",
+          "label": "Gimbal Walk-and-Talk",
+          "snippet": "A gimbal-stabilized camera follows the subject at walking pace, keeping the frame smooth and level while moving through the environment alongside them.",
+          "tags": [
+            "camera",
+            "gimbal",
+            "walk-and-talk"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "vehicle-mounted-rig",
+          "label": "Vehicle-Mounted Rig",
+          "snippet": "The camera is rigidly mounted to a moving vehicle, holding a fixed relationship to it while the surrounding world streams past in the background.",
+          "tags": [
+            "camera",
+            "vehicle-mount",
+            "motion"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "underwater-housing-rig",
+          "label": "Underwater Housing Rig",
+          "snippet": "The camera operates inside a submersible housing, moving with the soft resistance and drift of water to capture the scene from beneath the surface.",
+          "tags": [
+            "camera",
+            "underwater",
+            "housing"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "jib-arm-rise",
+          "label": "Jib Arm Rise",
+          "snippet": "A jib arm lifts the camera smoothly upward and over the scene, transitioning from an eye-level frame to an elevated vantage in one fluid arc.",
+          "tags": [
+            "camera",
+            "jib",
+            "rise"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "motion-control-repeat-pass",
+          "label": "Motion-Control Repeat Pass",
+          "snippet": "A motion-controlled rig repeats an identical, mechanically precise camera path, allowing multiple passes to be composited into a single seamless move.",
+          "tags": [
+            "camera",
+            "motion-control",
+            "precision"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "shoulder-mount-run-and-gun",
+          "label": "Shoulder-Mount Run-and-Gun",
+          "snippet": "The camera rides on the operator's shoulder in fast, reactive run-and-gun style, chasing the action with immediate, unplanned energy.",
+          "tags": [
+            "camera",
+            "shoulder-mount",
+            "run-and-gun"
+          ],
+          "section": "camera"
+        }
+      ]
+    },
+    {
+      "id": "lens-characteristics",
+      "label": "Lens Characteristics",
+      "group": "Camera & Lighting",
+      "setups": [
+        {
+          "id": "14mm-ultra-wide",
+          "label": "14mm Ultra-Wide",
+          "snippet": "Shot on an ultra-wide 14mm perspective with pronounced edge distortion, expansive field of view, and dramatic exaggerated depth between near and far elements.",
+          "tags": [
+            "lens",
+            "ultra-wide",
+            "distortion"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "24mm-wide",
+          "label": "24mm Wide",
+          "snippet": "Shot on a 24mm wide-angle perspective with a broad field of view and a natural sense of environmental context surrounding the subject.",
+          "tags": [
+            "lens",
+            "wide-angle",
+            "environmental"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "35mm-standard-wide",
+          "label": "35mm Standard-Wide",
+          "snippet": "Shot on a 35mm perspective that balances environmental context with subject presence, a versatile everyday field of view with minimal distortion.",
+          "tags": [
+            "lens",
+            "35mm",
+            "versatile"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "50mm-normal",
+          "label": "50mm Normal",
+          "snippet": "Shot on a 50mm normal perspective closely matching natural human vision, rendering the scene with neutral, undistorted proportion.",
+          "tags": [
+            "lens",
+            "50mm",
+            "natural-perspective"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "85mm-portrait",
+          "label": "85mm Portrait",
+          "snippet": "Shot on an 85mm portrait perspective with flattering facial compression, a pleasingly shallow depth of field, and creamy background separation.",
+          "tags": [
+            "lens",
+            "85mm",
+            "portrait",
+            "shallow-depth"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "135mm-telephoto",
+          "label": "135mm Telephoto",
+          "snippet": "Shot on a 135mm telephoto perspective with strong background compression, a narrow field of view, and a tightly isolated, intimate framing of the subject.",
+          "tags": [
+            "lens",
+            "telephoto",
+            "compression"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "anamorphic-flare-bokeh",
+          "label": "Anamorphic Flare & Bokeh",
+          "snippet": "Shot with anamorphic characteristics \u2014 horizontal streaking blue flares off practical lights, oval-shaped bokeh, and a wider aspect ratio with subtly compressed edges.",
+          "tags": [
+            "lens",
+            "anamorphic",
+            "flare",
+            "bokeh"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "vintage-glass-softness",
+          "label": "Vintage Glass Softness",
+          "snippet": "Shot through vintage-character glass with softened corner sharpness, gentle veiling flare, and a warm, slightly imperfect optical rendering.",
+          "tags": [
+            "lens",
+            "vintage",
+            "soft"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "macro-lens-detail",
+          "label": "Macro Lens Detail",
+          "snippet": "Shot with true macro magnification, resolving fine surface texture at extreme close range with a razor-thin plane of focus.",
+          "tags": [
+            "lens",
+            "macro",
+            "close-up"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "tilt-shift-miniature",
+          "label": "Tilt-Shift Miniature",
+          "snippet": "Shot with a tilt-shift perspective that skews the focal plane, creating a shallow band of sharp focus that renders the scene with a miniature, toy-like quality.",
+          "tags": [
+            "lens",
+            "tilt-shift",
+            "miniature"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "fisheye-distortion",
+          "label": "Fisheye Distortion",
+          "snippet": "Shot through a fisheye perspective with extreme barrel distortion, a circular bulging field of view, and heavily curved straight lines.",
+          "tags": [
+            "lens",
+            "fisheye",
+            "distortion"
+          ],
+          "section": "camera"
+        },
+        {
+          "id": "zoom-compression",
+          "label": "Zoom Compression",
+          "snippet": "Shot at the long end of a zoom, compressing spatial depth so foreground and background elements appear pressed closer together than they truly are.",
+          "tags": [
+            "lens",
+            "zoom",
+            "compression"
+          ],
+          "section": "camera"
+        }
+      ]
+    },
+    {
+      "id": "lighting-setups",
+      "label": "Lighting Setups",
+      "group": "Camera & Lighting",
+      "setups": [
+        {
+          "id": "rembrandt-lighting",
+          "label": "Rembrandt Lighting",
+          "snippet": "Classic Rembrandt lighting places the key light at a 45-degree angle above the subject, casting a small triangular patch of light on the shadowed cheek.",
+          "tags": [
+            "lighting",
+            "rembrandt",
+            "portrait"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "butterfly-lighting",
+          "label": "Butterfly Lighting",
+          "snippet": "Butterfly lighting places the key light directly above and in front of the subject's face, casting a small symmetrical shadow beneath the nose.",
+          "tags": [
+            "lighting",
+            "butterfly",
+            "glamour"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "split-lighting",
+          "label": "Split Lighting",
+          "snippet": "Split lighting places the key light directly to the side, dividing the face into one fully lit half and one fully shadowed half.",
+          "tags": [
+            "lighting",
+            "split",
+            "dramatic"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "rim-lighting",
+          "label": "Rim Lighting",
+          "snippet": "A rim light traces a bright edge of separation around the subject's silhouette, distinguishing them crisply from a darker background.",
+          "tags": [
+            "lighting",
+            "rim",
+            "separation"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "silhouette-lighting",
+          "label": "Silhouette Lighting",
+          "snippet": "The subject is lit entirely from behind, rendering their form as a pure dark silhouette against a bright background with no visible frontal detail.",
+          "tags": [
+            "lighting",
+            "silhouette",
+            "backlight"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "golden-hour-light",
+          "label": "Golden Hour",
+          "snippet": "Warm, low-angle golden-hour sunlight bathes the scene in a soft amber glow, casting long shadows and gently flattering warm tones.",
+          "tags": [
+            "lighting",
+            "golden-hour",
+            "warm"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "blue-hour-light",
+          "label": "Blue Hour",
+          "snippet": "Cool, even blue-hour twilight fills the scene with a soft desaturated ambient glow, balanced between the last daylight and emerging artificial light.",
+          "tags": [
+            "lighting",
+            "blue-hour",
+            "twilight"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "sodium-vapor-night",
+          "label": "Sodium Vapor Night",
+          "snippet": "Sodium-vapor streetlights cast a warm amber-orange glow across the night scene, pooling light in isolated patches against deep surrounding shadow.",
+          "tags": [
+            "lighting",
+            "sodium-vapor",
+            "night",
+            "urban"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "neon-practicals",
+          "label": "Neon Practicals",
+          "snippet": "Colored neon practicals within the frame wash the scene in saturated pink, cyan, and magenta light, their glow reflecting off wet or glossy surfaces.",
+          "tags": [
+            "lighting",
+            "neon",
+            "saturated",
+            "night"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "firelight",
+          "label": "Firelight",
+          "snippet": "Flickering firelight casts a warm, unstable orange glow that dances across the subject's face, its intensity and shadow shifting moment to moment.",
+          "tags": [
+            "lighting",
+            "firelight",
+            "warm",
+            "flicker"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "moonlight",
+          "label": "Moonlight",
+          "snippet": "Cool, low-intensity moonlight bathes the scene in a soft blue-silver glow, casting faint long shadows across a dim nocturnal landscape.",
+          "tags": [
+            "lighting",
+            "moonlight",
+            "night",
+            "cool"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "overcast-soft-light",
+          "label": "Overcast Soft Light",
+          "snippet": "Soft, shadowless overcast daylight wraps evenly around the subject, diffused by a full sky of cloud cover into gentle, flattering illumination.",
+          "tags": [
+            "lighting",
+            "overcast",
+            "soft",
+            "diffused"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "hard-noon-sun",
+          "label": "Hard Noon Sun",
+          "snippet": "Hard, high-angle noon sunlight casts short, dense shadows and harsh contrast directly down onto the scene, with minimal fill in the shadow areas.",
+          "tags": [
+            "lighting",
+            "hard-light",
+            "noon",
+            "high-contrast"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "strobe-lighting",
+          "label": "Strobe Lighting",
+          "snippet": "A single hard strobe freezes the moment with a burst of intense, directional light, its sharp-edged shadow falling crisply behind the subject.",
+          "tags": [
+            "lighting",
+            "strobe",
+            "hard-light"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "candlelight",
+          "label": "Candlelight",
+          "snippet": "Warm, low-intensity candlelight flickers softly across the scene, its narrow throw pooling light close to the subject and dropping quickly into shadow.",
+          "tags": [
+            "lighting",
+            "candlelight",
+            "warm",
+            "intimate"
+          ],
+          "section": "lighting"
+        },
+        {
+          "id": "window-light",
+          "label": "Window Light",
+          "snippet": "Soft, directional window light spills in from one side of the frame, wrapping gently around the subject with a natural, motivated falloff into shadow.",
+          "tags": [
+            "lighting",
+            "window-light",
+            "natural",
+            "soft"
+          ],
+          "section": "lighting"
+        }
+      ]
+    },
+    {
+      "id": "mood-atmosphere",
+      "label": "Mood & Atmosphere",
+      "group": "Composition",
+      "setups": [
+        {
+          "id": "tension-mood",
+          "label": "Tension",
+          "snippet": "Tension is built through tight, restrictive framing, cool desaturated tones, and hard shadow edges that compress the space around the subject.",
+          "tags": [
+            "mood",
+            "tension",
+            "tight-framing"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "dread-mood",
+          "label": "Dread",
+          "snippet": "Dread is conveyed through near-total darkness at the frame edges, a sickly low-saturation color cast, and unsettling negative space that suggests an unseen threat.",
+          "tags": [
+            "mood",
+            "dread",
+            "dark"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "wonder-mood",
+          "label": "Wonder",
+          "snippet": "Wonder is conveyed through soft upward light, a wide open frame, and a gently glowing, slightly overexposed palette that lifts the eye skyward.",
+          "tags": [
+            "mood",
+            "wonder",
+            "luminous"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "melancholy-mood",
+          "label": "Melancholy",
+          "snippet": "Melancholy is conveyed through muted, desaturated color, soft overcast light, and a slow, still frame heavy with quiet, unresolved stillness.",
+          "tags": [
+            "mood",
+            "melancholy",
+            "muted"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "euphoria-mood",
+          "label": "Euphoria",
+          "snippet": "Euphoria is conveyed through saturated warm color, bright blown-out highlights, and a dynamic, slightly overexposed glow that radiates unrestrained energy.",
+          "tags": [
+            "mood",
+            "euphoria",
+            "saturated",
+            "bright"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "isolation-mood",
+          "label": "Isolation",
+          "snippet": "Isolation is conveyed through a small subject set against a vast, empty negative space, with cool, flat light removing any sense of warmth or company.",
+          "tags": [
+            "mood",
+            "isolation",
+            "negative-space"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "chaos-mood",
+          "label": "Chaos",
+          "snippet": "Chaos is conveyed through fragmented, off-kilter framing, clashing hard light sources, and a frenetic sense of visual disorder across the frame.",
+          "tags": [
+            "mood",
+            "chaos",
+            "frenetic"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "serenity-mood",
+          "label": "Serenity",
+          "snippet": "Serenity is conveyed through calm, balanced symmetry, soft even light, and a cool, quiet palette with minimal contrast or visual noise.",
+          "tags": [
+            "mood",
+            "serenity",
+            "calm"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "nostalgia-mood",
+          "label": "Nostalgia",
+          "snippet": "Nostalgia is conveyed through a warm, slightly faded color grade, soft highlight bloom, and gentle grain that evokes the texture of a remembered past.",
+          "tags": [
+            "mood",
+            "nostalgia",
+            "faded"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "paranoia-mood",
+          "label": "Paranoia",
+          "snippet": "Paranoia is conveyed through skewed, off-balance framing, deep pockets of shadow at the frame's edge, and a restless, watchful sense of unseen observation.",
+          "tags": [
+            "mood",
+            "paranoia",
+            "off-balance"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "triumph-mood",
+          "label": "Triumph",
+          "snippet": "Triumph is conveyed through a low heroic angle, warm rim-lit backlighting, and a wide, expansive frame that elevates the subject above their surroundings.",
+          "tags": [
+            "mood",
+            "triumph",
+            "heroic"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "intimacy-mood",
+          "label": "Intimacy",
+          "snippet": "Intimacy is conveyed through close, tight framing, soft warm low-key light, and shallow depth of field that shuts out the wider world.",
+          "tags": [
+            "mood",
+            "intimacy",
+            "close"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "alienation-mood",
+          "label": "Alienation",
+          "snippet": "Alienation is conveyed through cold symmetrical framing, harsh sterile light, and a wide gap of empty space isolating the subject within it.",
+          "tags": [
+            "mood",
+            "alienation",
+            "cold"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "awe-mood",
+          "label": "Awe",
+          "snippet": "Awe is conveyed through a small human figure dwarfed by vast scale, dramatic raking light, and an expansive frame that emphasizes overwhelming grandeur.",
+          "tags": [
+            "mood",
+            "awe",
+            "scale"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "grief-mood",
+          "label": "Grief",
+          "snippet": "Grief is conveyed through desaturated, heavy shadow, a still and static frame, and low, somber light that settles without movement across the scene.",
+          "tags": [
+            "mood",
+            "grief",
+            "somber"
+          ],
+          "section": "mood"
+        },
+        {
+          "id": "anticipation-mood",
+          "label": "Anticipation",
+          "snippet": "Anticipation is conveyed through a partially withheld frame, a tight edge of shadow at the composition's border, and a held, charged stillness before motion.",
+          "tags": [
+            "mood",
+            "anticipation",
+            "charged"
+          ],
+          "section": "mood"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# GHCR carrier for Wasserman Slate AI Studio, powered by TensorFold (Mac + DGX Spark), one image for both builds. This is NOT a
+# runtime: neither Metal nor the Spark's models run in it. For a DGX Spark it carries the prebuilt CUDA engine
+# (/payload/spark-engine); for a Mac it carries
+# the pinned TensorFold wheel (with the H3 and Qwen-Image families), the dependency lock and the render scripts;
+# oneshot-setup.sh copies them out and installs natively on the Mac. It holds no model weights.
+#
+#   docker run --rm -v "$PWD":/out ghcr.io/drowzeys/keys-tensorfold-studio:2.8.0 cp -a /payload/. /out/
+FROM busybox:1.37
+LABEL org.opencontainers.image.source="https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3"
+LABEL org.opencontainers.image.description="Carrier (not a runtime): Wasserman Slate AI Studio, powered by TensorFold (Mac + DGX Spark) 2.8.0, both builds: the DGX Spark's prebuilt CUDA H3 engine (with LoRA support); for Macs the TensorFold wheel with the MiniMax H3 and Qwen-Image-2.1 families, the prebuilt native Zig + Metal FastH3 engine, dependency lock and render scripts for Apple Silicon"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+COPY payload/ /payload/
