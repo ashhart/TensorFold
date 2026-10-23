@@ -481,3 +481,30 @@ KERNEL(128) void g4_attn_rows(global const ushort *Q, global const ushort *KC, g
     }
   }
 }
+
+// Dense projection (a bf16 weight kept as stored): OUT = A · Wᵀ in fp16. A fp16 [M, K], W bf16 [N, K], K a multiple of 128.
+// One subgroup a column, 8 columns a group; grid (N / 8, rows / 16): a chunk of 16 rows reads the column once. Each row's sum is
+// the lanes' partial sums added by the subgroup, in an order that does not depend on the other rows.
+KERNEL(128) void g4_dense(global const half *A, global const ushort *W, global half *OUT, int M, int N, int K) {
+  const int n = get_group_id(0) * 8 + get_sub_group_id(), m0 = get_group_id(1) * 16, lane = get_sub_group_local_id();
+  float acc[16];
+  for (int m = 0; m < 16; m++) acc[m] = 0.0f;
+  global const ushort *w = W + (long)n * K;
+  for (int k = lane * 8; k < K; k += 128) {
+    const ushort8 wv = vload8(0, w + k);
+    float wf[8];
+    for (int j = 0; j < 8; j++) wf[j] = bf2f(wv[j]);
+    for (int m = 0; m < 16; m++) {
+      if (m0 + m >= M) break;
+      const half8 av = vload8(0, A + (long)(m0 + m) * K + k);
+      float a = acc[m];
+      for (int j = 0; j < 8; j++) a = fma(wf[j], (float)av[j], a);
+      acc[m] = a;
+    }
+  }
+  for (int m = 0; m < 16; m++) {
+    if (m0 + m >= M) break;
+    const float s = sub_group_reduce_add(acc[m]);
+    if (lane == 0) OUT[(long)(m0 + m) * N + n] = convert_half_rte(s);
+  }
+}

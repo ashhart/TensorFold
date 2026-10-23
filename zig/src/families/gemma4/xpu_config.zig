@@ -105,7 +105,13 @@ pub fn admit(gpa: std.mem.Allocator, bytes: []const u8) Error!void {
     if (!str(gl.object.get("rope_type"), "proportional") or (num(gl.object.get("rope_theta")) orelse 0) != 1000000 or (num(gl.object.get("partial_rotary_factor")) orelse 0) != 0.25) return error.UnsupportedGemmaRotary;
     // weights: MLX affine 4-bit in groups of 64 for every module (8-bit per-layer tables are not read yet)
     const q = root.get("quantization") orelse return error.UnsupportedGemmaQuantization;
-    if (q != .object or q.object.count() != 3) return error.UnsupportedGemmaQuantization;
+    if (q != .object) return error.UnsupportedGemmaQuantization;
+    var it = q.object.iterator(); // beside bits, group_size and mode, only modules named `false`: left in bf16
+    while (it.next()) |e| {
+        const k = e.key_ptr.*;
+        if (std.mem.eql(u8, k, "bits") or std.mem.eql(u8, k, "group_size") or std.mem.eql(u8, k, "mode")) continue;
+        if (e.value_ptr.* != .bool or e.value_ptr.bool) return error.UnsupportedGemmaQuantization;
+    }
     if ((int(q.object, "bits") orelse 0) != 4 or (int(q.object, "group_size") orelse 0) != 64 or !str(q.object.get("mode"), "affine")) return error.UnsupportedGemmaQuantization;
 }
 
