@@ -177,7 +177,7 @@ pub fn validate(c: *const Config) error{ UnsupportedMiniMaxAttention, Unsupporte
     if (c.head_dim != 128 or c.index_dim != 128 or c.heads % c.kv_heads != 0 or c.heads / c.kv_heads > 32 or
         c.index_heads != c.kv_heads or c.index_heads != 4 or c.rotary == 0 or c.rotary > c.head_dim or c.rotary % 2 != 0 or c.block != 128 or
         c.topk_blocks == 0 or c.topk_blocks > 32) return error.UnsupportedMiniMaxAttention;
-    if (c.hidden == 0 or c.hidden % 1024 != 0 or c.experts == 0 or c.experts > 256 or c.topk == 0 or c.topk > 8 or
+    if (c.hidden == 0 or c.hidden % 1024 != 0 or c.experts == 0 or c.experts % 8 != 0 or c.experts > 256 or c.topk == 0 or c.topk > 8 or
         c.moe_intermediate % 64 != 0 or c.shared_intermediate % 64 != 0 or c.dense_intermediate % 64 != 0) return error.UnsupportedMiniMaxExperts;
 }
 
