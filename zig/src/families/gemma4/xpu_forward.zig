@@ -72,6 +72,14 @@ pub const Acts = struct {
     toi: *anyopaque,
 };
 
+pub const MAXS = 8; // sequences (streams) the runner holds at most
+
+const SeqSt = struct { kc: [24]*anyopaque, vc: [24]*anyopaque, pos: u32, last: u32 };
+
+/// A window of the rows `ro` .. `ro + t` of a shared forward: sequence `slot`, positions p0 ..
+const Part = struct { slot: u32, ro: u32, t: u32, p0: u32 };
+pub const MultiWindow = struct { slot: u32, ids: []const u32 };
+
 pub const Want = enum { none, last, rows };
 
 pub const Runner = struct {
@@ -88,6 +96,9 @@ pub const Runner = struct {
     last: u32 = 0,
     host_logits: []f32,
     dump_dir: ?[]const u8 = null,
+    slot: u32 = 0, // the sequence the fields below stand for (kc, vc, pos, last)
+    nslots: u32 = 1,
+    seqs: [MAXS]SeqSt = undefined, // the other sequences' fields, parked
     tag: []const u8 = "",
     t_enqueue: f64 = 0, // seconds the host spent queueing forwards, XPU_TIMING
     t_forward: f64 = 0,
@@ -111,6 +122,12 @@ pub const Runner = struct {
         r.pos = 0;
         r.last = 0;
         r.window = MAXT;
+        r.slot = 0;
+        r.nslots = 1;
+        r.rows_last = 0;
+        r.tag = "";
+        r.t_enqueue = 0;
+        r.t_forward = 0;
         r.dump_dir = if (std.c.getenv("XPU_DUMP")) |v| std.mem.span(v) else null;
         const mg = try d.g.module(&kb.glue);
         const mgg = try d.g.module(&kb.glue_g);
@@ -192,6 +209,33 @@ pub const Runner = struct {
         r.host_logits = try alloc.alloc(f32, cfg.vocab);
     }
 
+    /// Makes `n` sequences (streams) of the runner: each has its own K/V caches and position; `select` switches.
+    pub fn addSlots(r: *Runner, n: u32) !void {
+        if (n > MAXS or r.nslots != 1 or r.slot != 0) return error.TooManySlots;
+        for (1..n) |s| {
+            for (0..24) |i| {
+                const bytes: usize = if (cfg.isGlobal(i)) @as(usize, r.context) * cfg.kv_heads * cfg.dim_g * 2 else cfg.ring * cfg.kv_heads * cfg.dim_s * 2;
+                r.seqs[s].kc[i] = try r.d.alloc_(bytes);
+                r.seqs[s].vc[i] = try r.d.alloc_(bytes);
+            }
+            r.seqs[s].pos = 0;
+            r.seqs[s].last = 0;
+        }
+        r.nslots = n;
+    }
+
+    /// The sequence `s` becomes the current one (its caches, position and next greedy token).
+    pub fn select(r: *Runner, s: u32) void {
+        if (s == r.slot) return;
+        r.seqs[r.slot] = .{ .kc = r.kc, .vc = r.vc, .pos = r.pos, .last = r.last };
+        const t = r.seqs[s];
+        r.kc = t.kc;
+        r.vc = t.vc;
+        r.pos = t.pos;
+        r.last = t.last;
+        r.slot = s;
+    }
+
     /// A second sequence on the same weights, kernels and device (decisions score on it while streams run).
     pub fn fork(r: *Runner) !*Runner {
         const f = try alloc.create(Runner);
@@ -199,6 +243,8 @@ pub const Runner = struct {
         f.* = r.*;
         f.pos = 0;
         f.last = 0;
+        f.slot = 0;
+        f.nslots = 1;
         try f.buffers();
         return f;
     }
@@ -351,6 +397,40 @@ pub const Runner = struct {
 
     /// One forward over `ids` (at most 16 rows) at positions p0 ..; with `want`, the last row's greedy token.
     pub fn forward(r: *Runner, ids: []const i32, p0: u32, want: Want) !?i32 {
+        const one = [1]Part{.{ .slot = r.slot, .ro = 0, .t = @intCast(ids.len), .p0 = p0 }};
+        return r.forwardParts(ids, &one, want);
+    }
+
+    /// The caches of sequence `slot`.
+    fn cachesOf(r: *Runner, slot: u32) struct { kc: *const [24]*anyopaque, vc: *const [24]*anyopaque } {
+        return if (slot == r.slot) .{ .kc = &r.kc, .vc = &r.vc } else .{ .kc = &r.seqs[slot].kc, .vc = &r.seqs[slot].vc };
+    }
+
+    /// The position the next row of sequence `slot` lands at.
+    pub fn posOf(r: *const Runner, slot: u32) u32 {
+        return if (slot == r.slot) r.pos else r.seqs[slot].pos;
+    }
+
+    /// A shared window: rows of several sequences (at most 16) in one forward, each on its caches; a sequence once.
+    pub fn verifyMulti(r: *Runner, windows: []const MultiWindow) !void {
+        var ids: [ROWS]i32 = undefined;
+        var parts: [ROWS]Part = undefined;
+        var n: u32 = 0;
+        for (windows, 0..) |w, i| {
+            if (w.ids.len == 0 or n + w.ids.len > ROWS) return error.BadWindow;
+            for (windows[0..i]) |o| if (o.slot == w.slot) return error.BadWindow;
+            const p0 = r.posOf(w.slot);
+            if (p0 + w.ids.len > r.context) return error.ContextFull;
+            for (w.ids, 0..) |t, j| ids[n + j] = @intCast(t);
+            parts[i] = .{ .slot = w.slot, .ro = n, .t = @intCast(w.ids.len), .p0 = p0 };
+            n += @intCast(w.ids.len);
+        }
+        _ = try r.forwardParts(ids[0..n], parts[0..windows.len], .rows);
+        r.rows_last = n;
+    }
+
+    fn forwardParts(r: *Runner, ids: []const i32, parts: []const Part, want: Want) !?i32 {
+        const p0 = parts[0].p0;
         const d = r.d;
         const a = &r.a;
         const m = &r.m;
@@ -378,19 +458,26 @@ pub const Runner = struct {
             const own = i < cfg.shared_from;
             r.tag = "qkv";
             try r.gemm(a.h, a.ahi, a.alo, l.qkv, a.p, T);
-            try d.launch(k.attn_prep[@intFromBool(glob)], .{ .x = T }, .{ a.p, @as(i32, @intCast(l.qkv.n)), l.qn, l.kn orelse l.qn, if (glob) m.invf_g else m.invf_s, a.q, r.kc[src], r.vc[src], @as(i32, @intCast(p0)), EPS, @as(i32, if (glob) 0 else cfg.ring), @as(i32, @intFromBool(own)) });
             const window: i32 = if (glob) 0 else cfg.window;
             const ring: i32 = if (glob) 0 else cfg.ring;
-            const krows: i32 = if (glob) @intCast(r.context) else cfg.ring;
             const g = @intFromBool(glob);
-            const blocks: u32 = (T + 3) / 4;
-            if (T > ROWS) { // prompt rows: every tile of a block's rows in one group, folded in order
-                try d.launch(k.dp_rows[g], .{ .x = 2, .y = blocks }, .{ a.q, r.kc[src], r.vc[src], @as(i32, @intCast(p0)), @as(i32, @intCast(T)), window, ring, krows, a.h });
-                try d.launch(k.dp_sums[g], .{ .x = 8, .y = T }, .{ a.h, a.ahi, a.alo });
-            } else { // a window: the tiles in parallel, then the ordered fold
-                const nt: u32 = if (glob) (p0 + T - 1) / KEYS + 1 else 6; // a block's rows may span one tile more than a row's window
-                try d.launch(k.dp_part[g], .{ .x = nt, .y = 2, .z = blocks }, .{ a.q, r.kc[src], r.vc[src], a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(T)), window, ring, krows, @as(i32, @intCast(nt)) });
-                try d.launch(k.attn_merge[g], .{ .x = 8, .y = T }, .{ a.pm, a.pl, a.po, @as(i32, @intCast(p0)), window, @as(i32, @intCast(nt)), a.h, a.ahi, a.alo });
+            for (parts) |pt| {
+                const ca = r.cachesOf(pt.slot);
+                const krows: i32 = if (glob) @intCast(r.context) else cfg.ring;
+                const qn_off = @as(usize, pt.ro) * l.qkv.n * 2;
+                const q_off = @as(usize, pt.ro) * 8 * hd * 2;
+                const h_off = @as(usize, pt.ro) * 8 * hd * 2;
+                const ps_off = @as(usize, pt.ro) * ((8 * hd) / 64) * 2;
+                try d.launch(k.attn_prep[g], .{ .x = pt.t }, .{ off(a.p, qn_off), @as(i32, @intCast(l.qkv.n)), l.qn, l.kn orelse l.qn, if (glob) m.invf_g else m.invf_s, off(a.q, q_off), ca.kc[src], ca.vc[src], @as(i32, @intCast(pt.p0)), EPS, ring, @as(i32, @intFromBool(own)) });
+                const blocks: u32 = (pt.t + 3) / 4;
+                if (pt.t > ROWS) { // prompt rows: every tile of a block's rows in one group, folded in order
+                    try d.launch(k.dp_rows[g], .{ .x = 2, .y = blocks }, .{ off(a.q, q_off), ca.kc[src], ca.vc[src], @as(i32, @intCast(pt.p0)), @as(i32, @intCast(pt.t)), window, ring, krows, off(a.h, h_off) });
+                    try d.launch(k.dp_sums[g], .{ .x = 8, .y = pt.t }, .{ off(a.h, h_off), off(a.ahi, ps_off), off(a.alo, ps_off) });
+                } else { // a window: the tiles in parallel, then the ordered fold
+                    const nt: u32 = if (glob) (pt.p0 + pt.t - 1) / KEYS + 1 else 6; // a block's rows may span one tile more than a row's window
+                    try d.launch(k.dp_part[g], .{ .x = nt, .y = 2, .z = blocks }, .{ off(a.q, q_off), ca.kc[src], ca.vc[src], a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), @as(i32, @intCast(pt.t)), window, ring, krows, @as(i32, @intCast(nt)) });
+                    try d.launch(k.attn_merge[g], .{ .x = 8, .y = pt.t }, .{ a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), window, @as(i32, @intCast(nt)), off(a.h, h_off), off(a.ahi, ps_off), off(a.alo, ps_off) });
+                }
             }
             if (r.dump_dir != null and p0 == 0 and i == 0) {
                 try r.dumpBuf("q0", a.q, T * 8 * hd * 2);

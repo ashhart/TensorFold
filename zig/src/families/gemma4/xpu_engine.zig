@@ -24,14 +24,15 @@ fn rowsKept(layer: usize, at: u32) u64 {
 }
 
 /// The lane core drafts by copying the context (no head): windows of up to 16 rows are verified, bit for bit the steps.
-const OneSeq = struct {};
+const OneSeq = struct { slot: u32 = 0 };
 
 pub const Engine = struct {
     pub const Snapshot = Snap;
     pub const Sequence = OneSeq;
     /// The lane core drafts by copying the context (no head): windows of up to 16 rows, bit for bit the steps.
     pub const copy_only = true;
-    own: OneSeq = .{},
+    own: OneSeq = .{ .slot = 0 },
+    used: [fwd.MAXS]bool = @splat(false), // the runner's sequences held by streams (0 is `own`)
     head: ?u8 = null,
     r: *fwd.Runner,
     /// The lane backend reads the position here (the runner's, kept in step).
@@ -41,9 +42,16 @@ pub const Engine = struct {
     sc_ids: std.ArrayList(u32) = .empty, // the tokens its K/V holds
 
     pub fn init(dir: []const u8, context: u32) !*Engine {
+        return initSlots(dir, context, 1);
+    }
+
+    /// An engine holding `slots` sequences (one per concurrent stream).
+    pub fn initSlots(dir: []const u8, context: u32, slots: u32) !*Engine {
         const e = try std.heap.page_allocator.create(Engine);
         errdefer std.heap.page_allocator.destroy(e);
         e.* = .{ .r = try fwd.Runner.init(dir, context), .max_len = context };
+        try e.r.addSlots(@min(@max(slots, 1), fwd.MAXS));
+        e.used[0] = true;
         return e;
     }
 
@@ -177,13 +185,30 @@ pub const Engine = struct {
 
     // -- windows for the lane core's copy drafts --------------------------------------------------------------------
 
-    pub fn newSeq(_: *Engine) !*OneSeq {
+    pub fn newSeq(e: *Engine) !*OneSeq {
+        for (1..e.r.nslots) |i| if (!e.used[i]) {
+            const q = try std.heap.page_allocator.create(OneSeq);
+            q.* = .{ .slot = @intCast(i) };
+            e.used[i] = true;
+            return q;
+        };
         return error.OneStream;
     }
 
-    pub fn freeSeq(_: *Engine, _: *OneSeq) void {}
+    pub fn freeSeq(e: *Engine, q: *OneSeq) void {
+        e.used[q.slot] = false;
+        std.heap.page_allocator.destroy(q);
+    }
 
-    pub fn bind(_: *Engine, _: *OneSeq) void {}
+    /// The runner works on `q`'s sequence from now on.
+    pub fn slotOf(_: *const Engine, q: *const OneSeq) u32 {
+        return q.slot;
+    }
+
+    pub fn bind(e: *Engine, q: *OneSeq) void {
+        e.r.select(q.slot);
+        e.m.pos = e.r.pos;
+    }
 
     /// One token in, committed; the next one's logits kept.
     pub fn stepRow(e: *Engine, token: u32) !void {
@@ -193,6 +218,13 @@ pub const Engine = struct {
     /// A window at the position, not committed: every row's greedy token and logits are kept.
     pub fn verifyRows(e: *Engine, ids: []const u32) !void {
         try e.r.verify(ids);
+    }
+
+    /// Windows of several sequences in one shared forward (at most 16 rows); `slots[i]` is `windows[i]`'s sequence.
+    pub fn verifyMulti(e: *Engine, slots: []const u32, windows: []const []const u32) !void {
+        var w: [fwd.MAXS]fwd.MultiWindow = undefined;
+        for (slots, windows, w[0..slots.len]) |s, ids, *o| o.* = .{ .slot = s, .ids = ids };
+        try e.r.verifyMulti(w[0..slots.len]);
     }
 
     pub fn rowTokens(e: *Engine, out: []i32) !void {
