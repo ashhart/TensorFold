@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "Actualiza dispositivos, selecciona el teléfono y permite su control al chat actual.",
   "Refresh file states": "Actualizar estados de archivos",
   "Refresh models": "Actualizar modelos",
-  "Refresh phone devices": "Actualizar teléfonos"
+  "Refresh phone devices": "Actualizar teléfonos",
+  "Lend or borrow": "Prestar o tomar prestado",
+  "Lend or borrow compute": "Prestar o tomar prestado cómputo",
+  "Community": "Comunidad"
 }

@@ -41,7 +41,7 @@ export function isBuiltInProvider(provider: ProviderTrustInput | null | undefine
 
 /** Classify a provider; `baseUrl` is the endpoint a call will actually use, when it differs. */
 export function classifyProvider(provider: ProviderTrustInput | null | undefined, baseUrl?: string | null): ProviderTrust {
-  if (provider?.remoteCompute || provider?.id?.startsWith('cluster:')) return 'external'
+  if (provider?.remoteCompute || provider?.id?.startsWith('cluster:') || provider?.id?.startsWith('donation:')) return 'external'
   const transport = provider?.transport || 'chat-completions'
   if (transport !== 'chat-completions') return 'external'
   const urls = [provider?.baseUrl, baseUrl].map((url) => String(url ?? '').trim()).filter(Boolean)
@@ -51,6 +51,10 @@ export function classifyProvider(provider: ProviderTrustInput | null | undefined
   if (!urls.length) return 'external'
   if (!provider) return allLoopback ? 'trusted-local' : 'external'
   return provider.kind === 'local' && allLoopback ? 'trusted-local' : 'external'
+}
+
+export function isDonationProvider(provider: ProviderTrustInput | null | undefined): boolean {
+  return provider?.id?.startsWith('donation:') === true
 }
 
 export function isExternalProvider(provider: ProviderTrustInput | null | undefined, baseUrl?: string | null): boolean {

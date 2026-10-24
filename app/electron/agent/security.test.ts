@@ -200,6 +200,13 @@ async function main() {
   await assert.rejects(() => assertProviderEndpointResolved(disguisedPublicLocal), /public address|mark public endpoints as cloud/i,
     'kind:local cannot downgrade an arbitrary public HTTP endpoint into the local trust policy')
 
+  // A donated endpoint is remote compute: HTTPS, or plain HTTP only through a loopback forward.
+  const donatedLoopback = { id: 'donation:card', name: 'Community card', kind: 'cloud', remoteCompute: true, source: 'custom', transport: 'chat-completions', baseUrl: 'http://127.0.0.1:8020/v1', apiKey: 'synthetic', models: ['m'] } as Provider
+  await assertProviderEndpointResolved(donatedLoopback)
+  const donatedLan = { ...donatedLoopback, baseUrl: 'http://192.168.0.45:8020/v1' } as Provider
+  await assert.rejects(() => assertProviderEndpointResolved(donatedLan), /HTTPS or a verified loopback forward/i,
+    'a donated endpoint over plain LAN HTTP is refused; it must be tunnelled or use TLS')
+
   await assert.rejects(() => assertConnectorBaseUrlResolved('http://example.com', 'Connector'), /must use HTTPS/i,
     'public connector HTTP is rejected without a private-network opt-in')
   await assert.rejects(() => assertConnectorBaseUrlResolved('http://8.8.8.8', 'Connector', { allowPrivateNetwork: true }), /public address|must use HTTPS/i,

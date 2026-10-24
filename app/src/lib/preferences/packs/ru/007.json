@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "Обновите устройства, выберите телефон, затем разрешите текущему чату управлять им.",
   "Refresh file states": "Обновить состояния файлов",
   "Refresh models": "Обновить модели",
-  "Refresh phone devices": "Обновить устройства телефонов"
+  "Refresh phone devices": "Обновить устройства телефонов",
+  "Lend or borrow": "Одолжить или взять",
+  "Lend or borrow compute": "Одолжить или взять вычисления",
+  "Community": "Сообщество"
 }

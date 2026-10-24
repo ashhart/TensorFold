@@ -1,4 +1,5 @@
 import { clusterPreload } from './preload/cluster'
+import { donationPreload } from './preload/donation'
 import { inputHistoryPreload } from './preload/input-history'
 import { modelQualificationPreload } from './preload/model-qualification'
 import { workspaceBackupPreload } from './preload/workspace-backup'
@@ -37,6 +38,7 @@ import type { AttachmentTextRequest } from './agent/types'
 
 const api = {
   ...clusterPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  ...donationPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
   ...inputHistoryPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
   prepareMessageQuote: input => ipcRenderer.invoke('threads:prepareMessageQuote', input),
   ...googleWorkspacePreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),

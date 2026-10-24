@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "รีเฟรช เลือกโทรศัพท์ แล้วอนุญาตให้แชตปัจจุบันควบคุม",
   "Refresh file states": "รีเฟรชสถานะไฟล์",
   "Refresh models": "รีเฟรชโมเดล",
-  "Refresh phone devices": "รีเฟรชอุปกรณ์โทรศัพท์"
+  "Refresh phone devices": "รีเฟรชอุปกรณ์โทรศัพท์",
+  "Lend or borrow": "ให้ยืมหรือยืม",
+  "Lend or borrow compute": "ให้ยืมหรือยืมพลังประมวลผล",
+  "Community": "ชุมชน"
 }

@@ -92,6 +92,8 @@ const entries = [
   ['setup.localDesc', 'oMLX, Ollama, LM Studio, or another OpenAI-compatible runtime.', 'oMLX, Ollama, LM Studio u otro motor compatible con OpenAI.'],
   ['setup.providerSettings', 'Provider settings', 'Ajustes del proveedor'],
   ['setup.withoutModel', 'Continue without a model', 'Continuar sin un modelo'],
+  ['compute.lendOrBorrow', 'Lend or borrow', 'Prestar o tomar prestado'],
+  ['compute.lendOrBorrowTitle', 'Lend or borrow compute', 'Prestar o tomar prestado cómputo'],
   ['first.title', 'Your path to a first answer', 'El camino a tu primera respuesta'],
   ['first.checklist', 'First answer checklist', 'Pasos para la primera respuesta'],
   ['first.choose', 'Choose a model for this conversation.', 'Elige un modelo para esta conversación.'],

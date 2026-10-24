@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "Segarkan perangkat, pilih ponsel, lalu izinkan chat ini mengendalikannya.",
   "Refresh file states": "Segarkan status berkas",
   "Refresh models": "Segarkan model",
-  "Refresh phone devices": "Segarkan perangkat ponsel"
+  "Refresh phone devices": "Segarkan perangkat ponsel",
+  "Lend or borrow": "Pinjamkan atau pinjam",
+  "Lend or borrow compute": "Pinjamkan atau pinjam komputasi",
+  "Community": "Komunitas"
 }

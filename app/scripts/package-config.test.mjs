@@ -20,7 +20,7 @@ async function main() {
   assert.equal(pkg.build?.directories?.buildResources, 'build')
   assert.equal(pkg.build?.directories?.output, 'release')
   assert.equal(pkg.scripts?.preinstall, 'node scripts/check-package-manager.mjs')
-  assert.equal(pkg.scripts?.build, 'npm run install:check && node scripts/clean-build-output.mjs && vite build && node scripts/build-cluster-node.mjs', 'build directly refuses hybrid dependencies, removes stale output and builds the separate headless node even when npm lifecycle hooks are disabled')
+  assert.equal(pkg.scripts?.build, 'npm run install:check && node scripts/clean-build-output.mjs && vite build && node scripts/build-cluster-node.mjs && node scripts/build-donation-node.mjs', 'build directly refuses hybrid dependencies, removes stale output and builds the separate headless node even when npm lifecycle hooks are disabled')
   const headlessBuilder = await readFile(path.join(root, 'scripts/build-cluster-node.mjs'), 'utf8')
   assert.match(headlessBuilder, /entryPoints:\s*\['electron\/cluster-node-main\.ts'\]/)
   assert.match(headlessBuilder, /target:\s*'node22'.*format:\s*'cjs'/s)

@@ -1,4 +1,5 @@
 import type { ClusterWorkspaceApi } from './cluster-workspace'
+import type { DonationApi } from './donation'
 import type { InputHistoryApi } from './input-history'
 import type { MessageQuoteApi } from './message-quotes'
 import type { ModelHelperApi } from './model-helper'
@@ -36,7 +37,7 @@ import type { ComposerDraftScope, ComposerDraftSnapshot, ComposerDraftWrite, Com
 import type { ThreadMessageEditInput, ThreadMessageEditPreparation } from './thread-message-edit'
 import type { AttachmentTextCapability, AttachmentTextRequest, AttachmentTextResult } from '../electron/agent/types'
 
-export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryApi, MessageQuoteApi, GoogleWorkspaceApi, ModelBenchmarkApi, ConversationSearchApi, DocumentLibraryApi, ReadableExportApi, WorkspaceBackupApi, RunRecoveryApi, ModelQualificationApi, ModelHelperApi {
+export interface TensorFoldStudioApi extends ClusterWorkspaceApi, DonationApi, InputHistoryApi, MessageQuoteApi, GoogleWorkspaceApi, ModelBenchmarkApi, ConversationSearchApi, DocumentLibraryApi, ReadableExportApi, WorkspaceBackupApi, RunRecoveryApi, ModelQualificationApi, ModelHelperApi {
   verifyTelegram(): Promise<TelegramVerificationResult>
   configureTelegramRemote(input: TelegramRemoteConfigInput): Promise<TelegramRemotePublicStatus>
   listTelegramRemoteTargets(): Promise<TelegramRemotePublicStatus>

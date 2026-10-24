@@ -6,6 +6,7 @@ import type { TensorFoldStudioApi } from './studio-api'
 // Keep main-process validation and preload channel forwarding explicit.
 export const STUDIO_API_SCHEMA = {
   clusterWorkspace: 'method', clusterSaveHost: 'method', clusterRemoveHost: 'method', clusterDiscover: 'method', clusterInspectHost: 'method', clusterPlan: 'method', clusterEnsureModel: 'method', clusterActivate: 'method', clusterStop: 'method', clusterCancelJob: 'method', clusterReconcile: 'method', clusterEndpointCredentials: 'method', clusterUseEndpoint: 'method', clusterSshKey: 'method', clusterBootstrapPreview: 'method', clusterBootstrapApply: 'method',
+  donationList: 'method', donationImport: 'method', donationRemove: 'method', donationProbe: 'method', donationHostStart: 'method', donationHostStop: 'method', donationHostStatus: 'method',
   ...GOOGLE_WORKSPACE_API_SCHEMA,
   ...MODEL_BENCHMARK_API_SCHEMA,
   getInputHistory: 'method', recallInputHistory: 'method', clearInputHistory: 'method', prepareMessageQuote: 'method',

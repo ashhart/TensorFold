@@ -248,5 +248,8 @@
   "Refresh devices, select your phone, then allow the current chat to control it.": "기기를 새로 고치고 휴대전화를 선택한 다음 현재 채팅의 제어를 허용하세요.",
   "Refresh file states": "파일 상태 새로 고침",
   "Refresh models": "모델 새로 고침",
-  "Refresh phone devices": "휴대전화 기기 새로 고침"
+  "Refresh phone devices": "휴대전화 기기 새로 고침",
+  "Lend or borrow": "빌려주기 또는 빌리기",
+  "Lend or borrow compute": "컴퓨트 빌려주기 또는 빌리기",
+  "Community": "커뮤니티"
 }

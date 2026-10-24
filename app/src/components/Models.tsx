@@ -1,5 +1,7 @@
 import { aggregateHubFailures, decodeHubFailure } from '../../shared/hub-failure'
 import { ClusterWorkspace } from './clusters/ClusterWorkspace'
+import { DonationPanel } from './compute/DonationPanel'
+import { CommunityModels } from './compute/CommunityModels'
 import { OriginalDiagnostic } from './OriginalDiagnostic'
 import { authoredText } from '../lib/preferences/language-packs'
 import { useStore as useLocaleStore } from '../lib/store'
@@ -35,7 +37,7 @@ import { ModelBenchmarkDrawer } from './models/benchmark/ModelBenchmarkDrawer'
 const AUTO_CHECK = 10
 const TABS = ['Models', 'Discover', 'Workers', 'Learning', 'API'] as const
 type WorkspaceTab = typeof TABS[number]
-type Utility = 'downloads' | 'folders' | 'runtime' | 'compare' | 'benchmark' | 'clusters' | null
+type Utility = 'downloads' | 'folders' | 'runtime' | 'compare' | 'benchmark' | 'clusters' | 'donation' | null
 const TAB_LABEL: Record<WorkspaceTab, string> = { get Models() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "My models") }, get Discover() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Discover") }, get Workers() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Workers") }, get Learning() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Learning") }, API: 'API' }
 const route = (model: EngineInstalledModel) => ({ providerId: ENGINE_PROVIDER_ID, accountId: null, model: model.repo })
 function errorText(error: unknown): string { return decodeHubFailure(error).message }
@@ -44,13 +46,19 @@ function errorText(error: unknown): string { return decodeHubFailure(error).mess
 // instead of an unavailable engine, downloads and Apple-silicon recommendations.
 function NoLocalEngineModels() {
   const tx = useAuthoredText()
+  const [drawer, setDrawer] = useState<'donation' | null>(null)
   return <div data-testid="models-page" className="scroll-thin h-full overflow-y-auto">
     <div className="mx-auto w-full max-w-[1040px] px-4 py-6 sm:px-6">
-      <header><h1 className="text-[21px] font-semibold tracking-[-0.02em] text-ink">{tx("Models")}</h1></header>
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div><h1 className="text-[21px] font-semibold tracking-[-0.02em] text-ink">{tx("Models")}</h1><p className="mt-1 text-[13px] text-ink-2">{tx("Choose a model and get started.")}</p></div>
+        <Button size="sm" variant="ghost" onClick={() => setDrawer('donation')}>{tx("Lend or borrow")}</Button>
+      </header>
       <section className="mt-5 rounded-xl border border-line bg-card p-5">
         <Button size="sm" variant="primary" icon="plus" onClick={() => useStore.getState().setView({ name: 'settings', section: 'models' })}>{tx("Connect provider")}</Button>
       </section>
+      <CommunityModels onOpen={() => setDrawer('donation')} />
     </div>
+    {drawer === 'donation' && <ModelsDrawer title={tx('Lend or borrow compute')} labelId="models-donation-title" onClose={() => setDrawer(null)}><DonationPanel /></ModelsDrawer>}
   </div>
 }
 
@@ -175,7 +183,7 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
     <div className="mx-auto w-full max-w-[1040px] px-4 py-6 sm:px-6">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div><h1 className="text-[21px] font-semibold tracking-[-0.02em] text-ink">{tx("Models")}</h1><p className="mt-1 text-[13px] text-ink-2">{minimal ? tx("Choose a model for your local API.") : tx("Choose a model and get started.")}</p></div>
-        <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" onClick={() => setUtility('clusters')}>{tx("Compute and clusters")}</Button><Button size="sm" variant="ghost" icon="folder" onClick={() => setUtility('folders')}>{tx("Model folders")}</Button><Button size="sm" variant="ghost" icon="arrowDown" onClick={() => setUtility('downloads')}>{tx("Downloads")}{pendingPulls.length ? ` (${pendingPulls.length})` : failedPulls.length ? tx(" ({value0} need attention)", { value0: failedPulls.length }) : ''}</Button><Button size="sm" variant="ghost" icon="refresh" aria-label={tx("Refresh models")} onClick={() => void refreshEngine(true)} /></div>
+        <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" onClick={() => setUtility('clusters')}>{tx("Compute and clusters")}</Button><Button size="sm" variant="ghost" onClick={() => setUtility('donation')}>{tx("Lend or borrow")}</Button><Button size="sm" variant="ghost" icon="folder" onClick={() => setUtility('folders')}>{tx("Model folders")}</Button><Button size="sm" variant="ghost" icon="arrowDown" onClick={() => setUtility('downloads')}>{tx("Downloads")}{pendingPulls.length ? ` (${pendingPulls.length})` : failedPulls.length ? tx(" ({value0} need attention)", { value0: failedPulls.length }) : ''}</Button><Button size="sm" variant="ghost" icon="refresh" aria-label={tx("Refresh models")} onClick={() => void refreshEngine(true)} /></div>
       </header>
       <EngineRuntimePanel compact minimal={minimal} activeRuns={activeRuns} onDetails={() => setUtility('runtime')} onApi={showApi} onWorkers={showWorkers} onUnload={() => void unload()} />
       <div role="tablist" aria-label={tx("Local AI workspace")} className="mt-5 flex flex-wrap gap-x-5 gap-y-1 border-b border-line">
@@ -187,6 +195,7 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
       </div>
       {currentPull && <button type="button" onClick={() => setUtility('downloads')} className="mt-3 flex w-full flex-wrap items-center gap-2 rounded-lg bg-card px-3 py-2 text-left text-[12px] text-ink-2 hover:bg-card-2 focus-visible:outline-2 focus-visible:outline-accent"><Icon name="arrowDown" size={13} /><span className="min-w-0 flex-1 break-words">{downloadStateLabel(currentPull)}: {repoDisplayName(currentPull.repo)}</span>{pendingPulls.length > 1 && <span>{pendingPulls.length - 1} {tx("more in queue")}</span>}<Icon name="chevronRight" size={13} /></button>}
       <div id="local-panel-Models" role="tabpanel" aria-labelledby="local-tab-Models" hidden={tab !== 'Models'}>
+        <CommunityModels onOpen={() => setUtility('donation')} />
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 flex-1 basis-56 items-center gap-2"><Input aria-label={tx("Search your models")} value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder={tx("Search your models")} maxLength={200} /><button type="button" disabled={!favorites.ready} aria-pressed={favoritesOnly} aria-label={tx("Show favourite models only")} onClick={() => setFavoritesOnly((value) => !value)} className={clsx('flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-2 text-[13px] focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40', favoritesOnly ? 'border-accent/40 bg-accent/10 text-accent' : 'border-line text-ink-2 hover:text-ink')}><Icon name={favoritesOnly ? 'starFilled' : 'star'} size={14} />{tx("Favourites")}{favoriteCount > 0 ? ` (${favoriteCount})` : ''}</button></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="default" onClick={() => { setBenchmarkModel(null); setUtility('benchmark') }}>{tx("Benchmarks")}</Button><Button size="sm" variant="default" icon="layers" disabled={locked || !canCompare} title={!canCompare ? tx("Install two compatible models to compare their replies") : locked ? tx("Finish active local work before comparing models") : undefined} onClick={() => setUtility('compare')}>{tx("Compare models")}</Button></div></div>
         {favorites.error && <p role="alert" className="mt-3 text-[13px] text-warn">{<OriginalDiagnostic>{favorites.error}</OriginalDiagnostic>}</p>}
         {!snapshot ? <p role="status" className="mt-6 text-[14px] text-ink-2">{tx("Checking installed models…")}</p> : installed.length === 0 ? <div className="mt-6"><div className="rounded-xl border border-dashed border-line px-5 py-7"><h2 className="text-[16px] font-medium text-ink">{tx("Your models will appear here")}</h2><p className="mt-2 max-w-xl text-[14px] leading-relaxed text-ink-2">{tx("Download a compatible model or add a folder with models you already have.")}</p><div className="mt-4 flex flex-wrap gap-2"><Button variant="primary" icon="search" onClick={() => setTab('Discover')}>{tx("Discover models")}</Button><Button icon="folder" onClick={() => setUtility('folders')}>{tx("Add model folder")}</Button></div></div>{recommendationPanel}</div> : <>
@@ -216,6 +225,7 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
     </div>
     {editingModel && <ModelDetailsDrawer key={editingModel.repo} model={editingModel} status={status} blocked={locked} onClose={() => setEditingModel(null)} onBenchmark={() => { setBenchmarkModel(editingModel.repo); setEditingModel(null); setUtility('benchmark') }} />}
     {utility === 'clusters' && <ModelsDrawer title={tx('Compute and clusters')} labelId="models-clusters-title" onClose={() => setUtility(null)} closeDisabled={clusterCloseBlocked}><ClusterWorkspace onCloseBlockedChange={setClusterCloseBlocked} /></ModelsDrawer>}
+    {utility === 'donation' && <ModelsDrawer title={tx('Lend or borrow compute')} labelId="models-donation-title" onClose={() => setUtility(null)}><DonationPanel /></ModelsDrawer>}
     {utility === 'benchmark' && <ModelBenchmarkDrawer models={installed} activeModel={status?.model ?? null} preferredModel={benchmarkModel} blockedReason={benchmarkBlockedReason} onClose={() => setUtility(null)} />}
     {utility === 'compare' && <ModelComparisonPanel models={installed} activeModel={status?.model ?? null} locked={locked} onClose={() => setUtility(null)} />}
     {utility === 'downloads' && <ModelsDrawer title={tx("Downloads")} labelId="models-downloads-title" onClose={() => setUtility(null)} description={tx("Follow queued downloads, resume failures and check completed files.")}>{pulls.length ? <DownloadCentre pulls={pulls} onCancel={(repo) => api.engineCancelPull(repo)} onRetry={(repo, revision) => api.enginePull(repo, revision)} /> : <p className="py-4 text-[14px] text-ink-2">{tx("No downloads yet; find a model in Discover to get started.")}</p>}</ModelsDrawer>}
