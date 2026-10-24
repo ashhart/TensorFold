@@ -362,6 +362,41 @@
    ]
   ]
  },
+ "lfm2_json": {
+  "chunks": [
+   [
+    "<|tool_call_start|>[{\"name\":\"lookup\",",
+    "\"parameters\":{\"limit\":\"4\"}}]"
+   ],
+   [
+    "<|tool_call_end"
+   ],
+   [
+    "|>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "lfm2_typed": {
+  "chunks": [
+   [
+    "<|tool_call_start|>[lookup(",
+    "query=123, ",
+    "limit='4')]"
+   ],
+   [
+    "<|tool_call_end"
+   ],
+   [
+    "|>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
  "bare_json": {
   "chunks": [
    [
