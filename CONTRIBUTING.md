@@ -106,6 +106,56 @@ State the hardware RAM class and context; a budget on a larger host is not a mea
 Use a single model process per test machine, the existing GPU lock and admission guard, and record load/cleanup boundaries.
 Never raise a shared machine's limits to get a test through without its owner's authorization.
 
+### Speed claims
+
+A pull request whose title, description, commits or changelog say it is faster, or that changes a default because it is faster, attaches a receipt from [The Grill](https://github.com/plotarmordev/thegrill).
+The receipt measures `main` at your branch point (A), your pull request (B), then the same `main` again (A2), on one machine with one checkpoint and the same serve flags.
+Install The Grill 0.11.0 with its [install guide](https://github.com/plotarmordev/thegrill/blob/v0.11.0/docs/performance/INSTALL.md), including the checksum and release receipt checks; it sets `GRILL_PERF`.
+Then run this from your pull request's checkout, with the model pulled and `origin` pointing at this repository.
+On Linux, leave out `-Dcpu=apple_m1`.
+
+```sh
+MODEL=mlx-community/Qwen3.5-2B-MLX-4bit QUANT="MLX 4-bit"
+FLAGS=(--context 8192 --no-thinking --prompt-cache-gib 0)
+PR=$PWD A=$(git merge-base origin/main HEAD) B=$(git rev-parse HEAD)
+git worktree add --detach /tmp/tf-main "$A"
+(cd /tmp/tf-main && zig build native -Dcpu=apple_m1 -Dversion=1.0.0)
+zig build native -Dcpu=apple_m1 -Dversion=1.0.0
+up() { "$1/zig-out/native/bin/tensorfold-native" serve "$MODEL" --name grill --port 18080 "${FLAGS[@]}" > "/tmp/tf-server-$2.log" 2>&1 & SERVER=$!
+  until curl -fs http://127.0.0.1:18080/v1/models > /dev/null; do kill -0 $SERVER || return 1; sleep 1; done
+  curl -fs http://127.0.0.1:18080/v1/benchmark/manifest > "manifest-$2.json"; }
+down() { kill -TERM $SERVER; wait $SERVER; }
+mkdir -p /tmp/tf-receipt/attempt-1 && cd /tmp/tf-receipt/attempt-1
+up /tmp/tf-main A
+jq -n --arg m "$MODEL" --arg q "$QUANT" --arg r "TensorFold $A" --arg s "serve ${FLAGS[*]}" 'input as $f | $f.hardware as $h | {
+  model_revision: "\($m)@\($f.model.revision // "unknown") (\($q))", runtime: $r, settings: $s,
+  hardware: "\($h.gpus[0].name), \($h.gpus[0].cores // "unknown") GPU cores, \($h.system_memory_bytes // "unknown") bytes, \($h.cpu_model // "unknown")"}' manifest-A.json > a.json
+jq --arg r "TensorFold $B" '.runtime = $r' a.json > b.json
+"$GRILL_PERF" baseline --workload portable-v1 --client-placement same-host --endpoint http://127.0.0.1:18080/v1/chat/completions --local-http --model grill --deployment a.json --out A
+down; sleep 60; up "$PR" B
+"$GRILL_PERF" check A --change runtime --deployment b.json --out B
+down; sleep 60; up /tmp/tf-main A2
+"$GRILL_PERF" check A --change none --deployment a.json --out A2
+down
+"$GRILL_PERF" compare A B --reference A2 | tee compare.txt
+"$GRILL_PERF" outputs A B | tee outputs.txt
+tar -czf ../attempt-1.tgz A B A2 a.json b.json manifest-*.json compare.txt outputs.txt
+```
+
+`FLAGS` is the README's serve line with prefix retention off; add only the flags your claim is about.
+For a new opt-in flag, serve all three runs from your build, add the flag to B's server and to `settings` in `b.json`, and use `--change settings`.
+A concurrency claim uses `--workload portable-c2-v1`, `portable-c4-v1` or `portable-c8-v1` and gives all three captures the same `--seconds` from the install guide's table.
+Keep both `sleep 60` lines: `check` accepts a shorter gap, but `compare` then refuses the three captures.
+Attach the archive and paste `compare.txt`; the server logs stay out of the archive.
+The claim stands only when `compare` says `MEASURED FASTER`, which means B beat both A and A2; quote the smaller of the two changes.
+A script reads `"result": "IMPROVED"` from `compare --json`, not the exit code.
+`MEASURED SLOWER`, `INCONCLUSIVE` or an error leaves no speed claim, and the pull request can still be opened.
+Attach every attempt, failed ones included; a later attempt starts again from the `mkdir` line with the next number.
+New code pushed after measuring needs a new receipt.
+The Grill measures request throughput on its count prompt, prompt processing included, so its receipt sits beside the decode speed from `tools/bench_openai.py` and does not replace it.
+Drafting stays on as shipped, and the count prompt favors it, so a drafting claim also keeps the prose and code numbers from `tools/bench_openai.py`.
+The hardware and settings in the receipt are your word, and maintainers may re-run it.
+
 ## Lean code and review
 
 Each module has one job, source files stay at or below 600 lines, and comments/docstrings are single lines of at most 120 columns.
