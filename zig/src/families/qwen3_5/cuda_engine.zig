@@ -379,8 +379,8 @@ pub const Engine = struct {
 
     /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
     pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
-        if (e.embed_bits == 16) return modelopt.embed(e, ids, out, rows); // bf16 rows; padding rows' ids are zeroed
         if (e.kit) |kit| return kit.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
+        if (e.embed_bits == 16) return modelopt.embed(e, ids, out, rows); // bf16 rows; padding rows' ids are zeroed
         const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }

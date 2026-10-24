@@ -265,11 +265,11 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     const rope = try object(t.get("rope_parameters") orelse return error.UnsupportedQwenRotary);
     try is(rope, if (rope.get("rope_type") != null) "rope_type" else "type", []const u8, "default"); // "type": the older key
     if (try number(rope, "rope_theta") != 10000000 or try number(rope, "partial_rotary_factor") != 0.25) return error.UnsupportedQwenRotary;
-    // an MLX table, else a ModelOpt quantization_config with bf16 activations
-    const modelopt = root.get("quantization") == null and root.get("quantization_config") != null;
+    // An MLX table keeps precedence; otherwise the format selects its own loader and BF16 embedding owner.
     const qv = root.get("quantization");
-    if (!modelopt and qv == null) return error.UnsupportedQwenQuantization;
-    const exl3 = isExl3(root);
+    const exl3 = qv == null and isExl3(root);
+    const modelopt = !exl3 and qv == null and root.get("quantization_config") != null;
+    if (!modelopt and !exl3 and qv == null) return error.UnsupportedQwenQuantization;
     var g: Geometry = .{
         .hidden = try integer(t, "hidden_size"),
         .intermediate = try integer(t, if (moe) "moe_intermediate_size" else "intermediate_size"),

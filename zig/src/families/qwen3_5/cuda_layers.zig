@@ -16,14 +16,14 @@ pub const Proj = union(enum) {
 
     pub fn outputs(p: Proj) usize {
         return switch (p) {
-            inline .a4, .an => |q| q.n,
+            inline .a4, .an, .x3, .bf => |q| q.n,
             .ql => |w| w.outputs(),
         };
     }
 
     pub fn inputs(p: Proj) usize {
         return switch (p) {
-            inline .a4, .an => |q| q.k,
+            inline .a4, .an, .x3, .bf => |q| q.k,
             .ql => |w| w.inputs(),
         };
     }

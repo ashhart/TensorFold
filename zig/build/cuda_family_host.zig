@@ -15,6 +15,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const late_run = b.addRunArtifact(b.addTest(.{ .root_module = late, .filters = &.{"EXL3 late init:"} }));
     b.step("test-qwen35-exl3-owner-host", "Real EXL3 owners survive no late allocation or warm failure").dependOn(&late_run.step);
     step.dependOn(&late_run.step);
+    const formats = b.createModule(.{ .root_source_file = b.path("zig/qwen35_formats_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen_vision", .module = mods.qwen_vision } } });
+    const formats_run = b.addRunArtifact(b.addTest(.{ .root_module = formats, .filters = &.{"format coexistence:"} }));
+    b.step("test-qwen35-formats-host", "MLX, ModelOpt and EXL3 admission and actual embedding dispatch without devices").dependOn(&formats_run.step);
+    step.dependOn(&formats_run.step);
     const proposal = b.createModule(.{ .root_source_file = b.path("zig/proposal_router_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
     b.step("test-proposal-router-host", "Optional common proposal routing, legacy parity and lifecycle").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = proposal, .filters = &.{"proposal router:"} })).step);
 
