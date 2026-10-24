@@ -79,12 +79,15 @@ stack still requires the exactness, accuracy and erasure receipts agreed in #101
 Real-tokenizer checks require an explicit model directory:
 
 ```sh
-TF_NOTES_TOKENIZER_DIR=/path/to/model zig build test-notes-tokenizer -Dcpu=apple_m1
+TF_NOTES_TOKENIZER_DIR=/path/to/model zig build test-notes-tokenizer \
+  --cache-poison=poisoned -Dcpu=apple_m1
 ```
 
-This target always runs and fails if the directory is unset or invalid. Normal
-CPU tests skip the real-tokenizer case when its directory is unset; changing an
-environment variable alone does not invalidate Zig's normal test-run cache.
+The cache flag refreshes the build configuration so each invocation sees the
+current tokenizer directory. The target always runs and fails if its directory
+is unset or invalid. Normal CPU tests skip the real-tokenizer case when its
+directory is unset; changing an environment variable alone does not invalidate
+Zig's normal test-run cache.
 The check covers exact teaching turns, prefixes such as "Hi!" and "Remember:",
 trailing text and terminal-punctuation variants. It does not prove clearance for
 all paraphrases or arbitrary tokenization contexts. The external-copy and

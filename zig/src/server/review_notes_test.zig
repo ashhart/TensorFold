@@ -1,5 +1,6 @@
 //! Adversarial erase regressions, including the independent review and crash recovery.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const Server = @import("server.zig").Server;
@@ -44,12 +45,12 @@ const Recorder = struct {
 };
 
 const Reader = struct {
-    fd: std.c.fd_t,
+    fd: platform.posix.socket_t,
     buf: [65536]u8 = undefined,
     len: usize = 0,
     fn run(r: *Reader) void {
         while (r.len < r.buf.len) {
-            const n = std.c.read(r.fd, r.buf[r.len..].ptr, r.buf.len - r.len);
+            const n = platform.posix.system.read(r.fd, r.buf[r.len..].ptr, r.buf.len - r.len);
             if (n <= 0) return;
             r.len += @intCast(n);
         }
@@ -57,12 +58,12 @@ const Reader = struct {
 };
 
 fn exchange(srv: *Server, a: std.mem.Allocator, method: []const u8, path: []const u8, body: []const u8) !struct { code: u16, value: json.Value } {
-    var pair: [2]std.c.fd_t = undefined;
-    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
-    defer _ = std.c.close(pair[0]);
-    defer _ = std.c.close(pair[1]);
+    var pair: [2]platform.posix.socket_t = undefined;
+    if (platform.windows) try platform.posix.socketpair(&pair) else if (platform.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
+    defer _ = platform.posix.system.close(pair[0]);
+    defer _ = platform.posix.system.close(pair[1]);
     const wire = try std.fmt.allocPrint(a, "{s} {s} HTTP/1.1\r\nHost: test\r\nContent-Length: {d}\r\n\r\n{s}", .{ method, path, body.len, body });
-    _ = std.c.write(pair[0], wire.ptr, wire.len);
+    _ = platform.posix.system.write(pair[0], wire.ptr, wire.len);
     var conn = try Conn.init(testing.allocator, pair[1], "test");
     defer conn.deinit();
     conn.timeouts = .{ .idle_ms = 2000, .read_ms = 2000, .write_ms = 2000 };
@@ -70,7 +71,7 @@ fn exchange(srv: *Server, a: std.mem.Allocator, method: []const u8, path: []cons
     var reader: Reader = .{ .fd = pair[0] };
     const thread = try std.Thread.spawn(.{}, Reader.run, .{&reader});
     routes.dispatch(srv, &conn, a);
-    _ = std.c.shutdown(pair[1], 1);
+    _ = platform.posix.system.shutdown(pair[1], 1);
     thread.join();
     const response = reader.buf[0..reader.len];
     const sep = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.Response;

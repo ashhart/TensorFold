@@ -133,10 +133,12 @@ fn localOrdinal(io: std.Io) i64 {
     const Tm = extern struct { sec: c_int, min: c_int, hour: c_int, mday: c_int, mon: c_int, year: c_int, wday: c_int, yday: c_int, isdst: c_int, gmtoff: c_long, zone: ?[*:0]const u8 };
     const ext = struct {
         extern "c" fn localtime_r(t: *const i64, out: *Tm) ?*Tm;
+        extern "c" fn _localtime64_s(out: *Tm, t: *const i64) c_int;
     };
     const now: i64 = @intCast(@divFloor(std.Io.Clock.real.now(io).toNanoseconds(), std.time.ns_per_s));
     var tm: Tm = undefined;
-    if (ext.localtime_r(&now, &tm) == null) return @divFloor(now, 86400) + 719163;
+    const ok = if (@import("sys").windows) ext._localtime64_s(&tm, &now) == 0 else ext.localtime_r(&now, &tm) != null;
+    if (!ok) return @divFloor(now, 86400) + 719163;
     return line_mod.ordinalOf(@as(i64, tm.year) + 1900, @intCast(tm.mon + 1), @intCast(tm.mday));
 }
 

@@ -1,5 +1,6 @@
 //! A journal rewrite's temporary file: a second server never touches it, and a planted link never redirects it.
 const std = @import("std");
+const platform = @import("sys");
 const rig = @import("notes_storage_rig_test.zig");
 const ops = @import("notes/operations.zig");
 const journal_mod = @import("notes/journal.zig");
@@ -52,6 +53,7 @@ const Second = struct {
 };
 
 test "a second server (another process) starting mid-rewrite is refused as Locked and leaves the first's temp" {
+    if (platform.windows) return error.SkipZigTest; // fork is POSIX-only
     const r = try rig.Rig.init(testing.allocator);
     defer r.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -75,6 +77,7 @@ test "a second server (another process) starting mid-rewrite is refused as Locke
 }
 
 test "a symlink or hardlink planted at the old temp name and at every name a rewrite tries changes no other file" {
+    if (platform.windows) return error.SkipZigTest; // Windows symlinks need privilege; hardlink identity tested separately
     const r = try rig.Rig.init(testing.allocator);
     defer r.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -137,4 +140,28 @@ fn rewriteFails() !void {
     try testing.expect(r.store().model == before_model and r.store().model.placeOf(gone) != null); // nothing swapped in
     var it = r.tmp.dir.iterate();
     while (try it.next(testing.io)) |e| try testing.expect(std.mem.indexOf(u8, e.name, ".tmp") == null); // no temp left
+}
+
+test "a replacement hardlink has a different identity and removeOwn leaves its file intact" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    const journal = try std.fs.path.join(a, &.{ dir, "notes.journal" });
+    const t = try tmp_file.create(a, journal);
+    const original = try std.fmt.allocPrintSentinel(a, "{s}.original", .{t.path}, 0);
+    try testing.expectEqual(@as(c_int, 0), platform.c.rename(t.path, original));
+    const sentinel = try std.fmt.allocPrintSentinel(a, "{s}/sentinel", .{dir}, 0);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "sentinel", .data = "KEEP" });
+    try testing.expectEqual(@as(c_int, 0), platform.c.link(sentinel, t.path));
+    const replaced = tmp_file.idOf(-1, t.path) orelse return error.NoIdentity;
+    try testing.expect(replaced.dev != t.dev or replaced.ino != t.ino);
+    const same = tmp_file.idOf(-1, sentinel) orelse return error.NoIdentity;
+    try testing.expectEqual(same.dev, replaced.dev);
+    try testing.expectEqual(same.ino, replaced.ino);
+    tmp_file.removeOwn(t);
+    try testing.expect(tmp_file.idOf(-1, t.path) != null);
+    try testing.expectEqualStrings("KEEP", try tmp.dir.readFileAlloc(testing.io, "sentinel", a, .unlimited));
 }

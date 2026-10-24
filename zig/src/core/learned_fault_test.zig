@@ -459,12 +459,12 @@ test "single-file learned forget reports a blocked bin path and tolerates absent
     const r = try root(&buf, "single-forget");
     var path: [160]u8 = undefined;
     const dir = try std.fmt.bufPrintSentinel(&path, "{s}", .{r}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir, 0o700));
-    defer _ = std.c.rmdir(dir);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(dir, 0o700));
+    defer _ = platform.c.rmdir(dir);
     var binbuf: [200]u8 = undefined;
     const blocked = try std.fmt.bufPrintSentinel(&binbuf, "{s}/{x:0>16}.bin", .{ dir, @as(u64, 7) }, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(blocked, 0o700));
-    defer _ = std.c.rmdir(blocked);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(blocked, 0o700));
+    defer _ = platform.c.rmdir(blocked);
     var ctx: u8 = 0;
     try std.testing.expectError(error.LearnedUnlink, pc.singleForgetChecked(&ctx, dir, 7));
     try pc.singleForgetChecked(&ctx, dir, 8);

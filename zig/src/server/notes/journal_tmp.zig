@@ -1,6 +1,7 @@
 //! A journal rewrite's temporary file: a fresh name each time, made exclusively, and only ours ever removed.
 const std = @import("std");
 const builtin = @import("builtin");
+const libc = @import("sys").c;
 const Allocator = std.mem.Allocator;
 
 /// A temporary file this process made: its path, descriptor, and the file it is (device, inode).
@@ -16,6 +17,10 @@ pub const Id = struct { dev: i128, ino: i128, dir: bool };
 
 /// The open file `fd`, or with `fd` < 0 the name `path` itself (a link not followed); null when it cannot be read.
 pub fn idOf(fd: c_int, path: [*:0]const u8) ?Id {
+    if (builtin.os.tag == .windows) {
+        const id = libc.fileId(fd, path) orelse return null;
+        return .{ .dev = id.dev, .ino = id.ino, .dir = id.dir };
+    }
     return if (builtin.os.tag == .linux) idStatx(fd, path) else idStat(fd, path);
 }
 
@@ -60,8 +65,8 @@ fn random() u64 {
     } else if (comptime @TypeOf(std.c.getentropy) != void) {
         if (std.c.getentropy(bytes, @sizeOf(u64)) == 0) return x;
     }
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: libc.timespec = undefined;
+    _ = libc.clock_gettime(libc.CLOCK.MONOTONIC, &ts);
     return @as(u64, @bitCast(@as(i64, ts.nsec))) *% 0x9E3779B97F4A7C15 ^ counter.load(.monotonic);
 }
 
@@ -70,28 +75,28 @@ pub fn create(a: Allocator, path: []const u8) error{ OutOfMemory, JournalIo }!Tm
     var tries: usize = 0;
     while (tries < 16) : (tries += 1) {
         const n = counter.fetchAdd(1, .monotonic);
-        const name = try std.fmt.allocPrintSentinel(a, "{s}.tmp.{d}.{d}.{x:0>16}", .{ path, std.c.getpid(), n, random() }, 0);
-        const fd = std.c.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+        const name = try std.fmt.allocPrintSentinel(a, "{s}.tmp.{d}.{d}.{x:0>16}", .{ path, libc.getpid(), n, random() }, 0);
+        const fd = libc.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0o600));
         if (fd >= 0) {
             const id = idOf(fd, "") orelse {
-                _ = std.c.close(fd);
-                _ = std.c.unlink(name); // it is ours: made exclusively a moment ago
+                _ = libc.close(fd);
+                _ = libc.unlink(name); // it is ours: made exclusively a moment ago
                 a.free(name);
                 return error.JournalIo;
             };
             return .{ .path = name, .fd = fd, .dev = id.dev, .ino = id.ino };
         }
         a.free(name);
-        if (std.c.errno(fd) != .EXIST) return error.JournalIo;
+        if (libc.errno(fd) != .EXIST) return error.JournalIo;
     }
     return error.JournalIo;
 }
 
 /// Closes it and removes its name, only while that name is still this very file (never what replaced it).
 pub fn removeOwn(t: Tmp) void {
-    _ = std.c.close(t.fd);
+    _ = libc.close(t.fd);
     const id = idOf(-1, t.path) orelse return;
-    if (id.dev == t.dev and id.ino == t.ino) _ = std.c.unlink(t.path);
+    if (id.dev == t.dev and id.ino == t.ino) _ = libc.unlink(t.path);
 }
 
 /// Whether `name` is one of ours for the journal named `base`: base.tmp (before unique names) or base.tmp.P.C.R.
@@ -118,14 +123,14 @@ pub fn cleanStale(a: Allocator, path: []const u8) error{OutOfMemory}!usize {
     const base = std.fs.path.basename(path);
     const dirz = try a.dupeSentinel(u8, dir, 0);
     defer a.free(dirz);
-    const d = std.c.opendir(dirz) orelse return 0;
-    defer _ = std.c.closedir(d);
+    const d = libc.opendir(dirz) orelse return 0;
+    defer _ = libc.closedir(d);
     var gone: std.ArrayList([:0]u8) = .empty;
     defer {
         for (gone.items) |g| a.free(g);
         gone.deinit(a);
     }
-    while (std.c.readdir(d)) |e| {
+    while (libc.readdir(d)) |e| {
         const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&e.name)), 0);
         if (!isOurs(base, name)) continue;
         try gone.append(a, try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0));
@@ -134,7 +139,7 @@ pub fn cleanStale(a: Allocator, path: []const u8) error{OutOfMemory}!usize {
     for (gone.items) |g| {
         const id = idOf(-1, g) orelse continue;
         if (id.dir) continue;
-        if (std.c.unlink(g) == 0) n += 1;
+        if (libc.unlink(g) == 0) n += 1;
     }
     return n;
 }

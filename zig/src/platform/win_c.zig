@@ -141,8 +141,16 @@ pub extern "c" fn malloc(n: usize) ?*anyopaque;
 const Stat64 = extern struct { dev: u32, ino: u16, mode: u16, nlink: i16, uid: i16, gid: i16, rdev: u32, size: i64, atime: i64, mtime: i64, ctime: i64 };
 
 const lock = @import("win_lock.zig");
+const file_id = @import("win_file_id.zig");
 pub const LOCK = lock.LOCK;
 pub const flock = lock.flock;
+
+/// An open file, or a name without following a reparse point; CRT stat's inode is not a Windows file identity.
+pub fn fileId(fd: fd_t, path: [*:0]const u8) ?file_id.Id {
+    if (fd >= 0) return file_id.handle(_get_osfhandle(fd));
+    var buf: Wide = undefined;
+    return file_id.path(wide(&buf, std.mem.span(path)) orelse return null);
+}
 
 pub fn fail(e: E) c_int {
     _errno().* = @backingInt(e);
@@ -271,11 +279,19 @@ fn openFile(path: [*:0]const u8, flags: O) c_int {
         else 3; // OPEN_EXISTING
     var attrs: u32 = 0x80; // FILE_ATTRIBUTE_NORMAL
     if (flags.DIRECT) attrs |= 0x2000_0000; // FILE_FLAG_NO_BUFFERING
+    if (flags.NOFOLLOW) attrs |= 0x0020_0000; // FILE_FLAG_OPEN_REPARSE_POINT
     const h = CreateFileW(w, rights, 0x7, null, disposition, attrs, null); // share read, write and delete
     if (h == invalid_handle) {
         // a directory opened without O.DIRECTORY, as POSIX allows for reading its entries
         if (GetLastError() == 5 and flags.ACCMODE == .RDONLY and GetFileAttributesW(w) & 0x10 != 0 and GetFileAttributesW(w) != 0xFFFF_FFFF) return openDir(p);
         return fail(lastError());
+    }
+    if (flags.NOFOLLOW) {
+        const id = file_id.handle(h);
+        if (id == null or id.?.reparse) {
+            _ = CloseHandle(@ptrFromInt(@as(usize, @bitCast(h))));
+            return fail(if (id == null) .IO else .LOOP);
+        }
     }
     var crt: c_int = 0x8000; // _O_BINARY
     crt |= switch (flags.ACCMODE) {

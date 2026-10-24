@@ -1,5 +1,6 @@
 //! --learn: a shared cut's kept state written to disk above the free-disk floor and within the cap, on every rank.
 const std = @import("std");
+const c = @import("sys").c;
 const pc = @import("prompt_cache.zig");
 const imprint = @import("prompt_imprint.zig");
 const Store = pc.Store;
@@ -166,9 +167,9 @@ pub fn forget(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgo
 
 /// The folder's entries made durable: removed files and the renamed index survive a power cut.
 fn syncDir(dir: [:0]const u8) !void {
-    const fd = std.c.open(dir, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = c.open(dir, .{ .ACCMODE = .RDONLY }, @as(c.mode_t, 0));
     if (fd < 0) return error.SyncFailed;
-    defer _ = std.c.close(fd);
+    defer _ = c.close(fd);
     if (!@import("learned_sync.zig").full(fd)) return error.SyncFailed;
 }
 

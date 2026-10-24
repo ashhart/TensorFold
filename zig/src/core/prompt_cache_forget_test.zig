@@ -1,5 +1,6 @@
 //! Store.forgetSpan regressions plant kept and learned states, erase matching copies, and preserve unrelated ones.
 const std = @import("std");
+const libc = @import("sys").c;
 const pc = @import("prompt_cache.zig");
 const imprint = @import("prompt_imprint.zig");
 const rmTree = @import("prompt_imprint_test.zig").rmTree;
@@ -58,7 +59,7 @@ test "forgetSpan folder diagnostics are owned bounded deduplicated and preserve 
 
 test "forgetSpan searches sibling identities created after the current index opened" {
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-sibling-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-sibling-{d}", .{libc.getpid()});
     defer rmTree(root);
     var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
     defer im.deinit();
@@ -90,7 +91,7 @@ test "forgetSpan searches sibling identities created after the current index ope
 
 test "learned sibling inspection refuses a torn index without repairing it" {
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-inspect-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-inspect-{d}", .{libc.getpid()});
     defer rmTree(root);
     var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
     defer im.deinit();
@@ -101,10 +102,10 @@ test "learned sibling inspection refuses a torn index without repairing it" {
         try testing.expectEqual(@as(usize, 1), scanned.metas.items.len);
     }
     var path: [1100]u8 = undefined;
-    const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(std.c.mode_t, 0));
+    const fd = libc.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(libc.mode_t, 0));
     if (fd < 0) return error.TestFile;
-    defer _ = std.c.close(fd);
-    try testing.expectEqual(@as(isize, 3), std.c.write(fd, "bad", 3));
+    defer _ = libc.close(fd);
+    try testing.expectEqual(@as(isize, 3), libc.write(fd, "bad", 3));
     const before = try im.indexScratchBytes();
     try testing.expectError(error.ImprintAppending, imprint.Imprint.inspect(testing.allocator, root, 3));
     try testing.expectEqual(before, try im.indexScratchBytes());
@@ -120,7 +121,7 @@ test "learned sibling inspection refuses a torn index without repairing it" {
     try testing.expectEqual(@as(u32, 0), held.failed);
     try testing.expect(!current.forget_pending);
     const junk = std.mem.zeroes([33]u8);
-    try testing.expectEqual(@as(isize, junk.len), std.c.write(fd, &junk, junk.len));
+    try testing.expectEqual(@as(isize, junk.len), libc.write(fd, &junk, junk.len));
     try testing.expectError(error.ImprintRead, imprint.Imprint.inspect(testing.allocator, root, 3));
     const corrupt = store.forgetSpan(&note, &.{});
     try testing.expectEqual(@as(u32, 0), corrupt.failed);
@@ -130,7 +131,7 @@ test "learned sibling inspection refuses a torn index without repairing it" {
 
 test "forgetSpan names an unindexed sibling without retaining retry work" {
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-sibling-missing-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-sibling-missing-{d}", .{libc.getpid()});
     defer rmTree(root);
     var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
     defer im.deinit();
@@ -156,7 +157,7 @@ test "forgetSpan names an unindexed sibling without retaining retry work" {
 
 test "learned batch removal preserves unrelated records across restart" {
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-batch-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-batch-{d}", .{libc.getpid()});
     defer rmTree(root);
     const a = [_]u32{ 71, 72 };
     const b = [_]u32{ 81, 82 };
@@ -172,9 +173,9 @@ test "learned batch removal preserves unrelated records across restart" {
         try testing.expect(!im.has(ka) and im.has(kb) and !im.has(kc));
         try testing.expectEqual(@as(usize, 1), im.metas.items.len);
         var orphan: [1100]u8 = undefined;
-        const fd = std.c.open(try Fake.file(&orphan, im.dir, ka), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+        const fd = libc.open(try Fake.file(&orphan, im.dir, ka), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(libc.mode_t, 0o600));
         if (fd < 0) return error.TestFile;
-        _ = std.c.close(fd); // simulate the crash/failure window between index commit and file unlink
+        _ = libc.close(fd); // simulate the crash/failure window between index commit and file unlink
         try testing.expect(exists(im.dir, ka));
     }
     var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
@@ -186,7 +187,7 @@ test "learned batch removal preserves unrelated records across restart" {
 
 test "forgetSpan removes the learned index before a failing file unlink" {
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-order-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-order-{d}", .{libc.getpid()});
     defer rmTree(root);
     var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
     defer im.deinit();
@@ -221,7 +222,7 @@ test "forgetSpan removes the learned index before a failing file unlink" {
 
 test "forgetSpan preserves learned files when the batch index cannot be rewritten" {
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-batch-fail-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-batch-fail-{d}", .{libc.getpid()});
     defer rmTree(root);
     var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
     defer im.deinit();
@@ -229,12 +230,12 @@ test "forgetSpan preserves learned files when the batch index cannot be rewritte
     try im.add(key, with_note.len, &with_note, &.{}, 0);
     var path: [1100]u8 = undefined;
     const file = try Fake.file(&path, im.dir, key);
-    const fd = std.c.open(file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    const fd = libc.open(file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(libc.mode_t, 0o600));
     if (fd < 0) return error.TestFile;
-    _ = std.c.close(fd);
+    _ = libc.close(fd);
     var part: [1100]u8 = undefined;
     const blocked = try std.fmt.bufPrintSentinel(&part, "{s}/index.part", .{im.dir}, 0);
-    if (std.c.mkdir(blocked, 0o700) != 0) return error.TestDirectory;
+    if (libc.mkdir(blocked, 0o700) != 0) return error.TestDirectory;
     var f: Fake = .{ .gpa = testing.allocator };
     var s = Store.init(testing.allocator, f.learned(), .{}, 1 << 20);
     defer s.deinit();
@@ -292,7 +293,7 @@ test "forgetSpan drops states cut inside an erased span" {
 
 test "forgetSpan removes learned index records cut inside an erased span" {
     var root_buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-cut-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-cut-{d}", .{libc.getpid()});
     defer rmTree(root);
     var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
     defer im.deinit();
@@ -377,13 +378,13 @@ test "forgetSpan leaves a state a prompt pass is restoring, counted, and takes i
 fn fileHolds(dir: []const u8, name: []const u8, span: []const u32) !bool {
     var buf: [512]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0);
-    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = libc.open(path, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
     if (fd < 0) return false;
-    defer _ = std.c.close(fd);
+    defer _ = libc.close(fd);
     var bytes: [1 << 16]u8 = undefined;
     var n: usize = 0;
     while (n < bytes.len) {
-        const got = std.c.read(fd, bytes[n..].ptr, bytes.len - n);
+        const got = libc.read(fd, bytes[n..].ptr, bytes.len - n);
         if (got <= 0) break;
         n += @intCast(got);
     }
@@ -393,7 +394,7 @@ fn fileHolds(dir: []const u8, name: []const u8, span: []const u32) !bool {
 fn exists(dir: []const u8, key: u64) bool {
     var buf: [512]u8 = undefined;
     const path = Fake.file(&buf, dir, key) catch return false;
-    return std.c.access(path, std.c.F_OK) == 0;
+    return libc.access(path, libc.F_OK) == 0;
 }
 
 test "forgetSpan removes learned states on disk that hold the note, also ones an earlier server learned, and keeps the rest" {
@@ -402,7 +403,7 @@ test "forgetSpan removes learned states on disk that hold the note, also ones an
     defer arena.deinit();
     const a = arena.allocator();
     var root_buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-forget-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-forget-{d}", .{libc.getpid()});
     defer rmTree(root);
     const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
     const tainted = [_]u32{ 7, 50, 51, 52, 53, 7 }; // a shared block holding the note: its state at 5 reads it all
@@ -468,7 +469,7 @@ test "forgetSpan on a store that read a learned state back drops it from memory 
     defer arena.deinit();
     const a = arena.allocator();
     var root_buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-forget-mem-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-forget-mem-{d}", .{libc.getpid()});
     defer rmTree(root);
     const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
     const tainted = [_]u32{ 7, 50, 51, 52, 53, 7 };

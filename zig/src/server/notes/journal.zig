@@ -1,5 +1,6 @@
 //! The notes' journal next to the snapshot: each write one JSON line, on disk before its reply, replayed at startup.
 const std = @import("std");
+const libc = @import("sys").c;
 const builtin = @import("builtin");
 const json = @import("json");
 const write = @import("write.zig");
@@ -8,7 +9,6 @@ const tmp_file = @import("journal_tmp.zig");
 const Record = write.Record;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
-
 pub const format = "tf-notes-journal/3";
 pub const format_v2 = "tf-notes-journal/2";
 /// The first format: no commit lines, every whole line a write (read, then rewritten as format 3, at open).
@@ -28,7 +28,7 @@ pub const Faults = struct {
     sync: ?u32 = null,
     dir: ?u32 = null,
     full: ?u32 = null, // this F_FULLFSYNC returns `full_errno`, and fullSync's fallback rule decides
-    full_errno: std.c.E = .IO,
+    full_errno: libc.E = .IO,
     writes: u32 = 0,
     truncates: u32 = 0,
     syncs: u32 = 0,
@@ -80,8 +80,8 @@ pub const Journal = struct {
     runs: std.ArrayList(Run) = .empty, // start manifests; strings owned by gpa
 
     pub fn deinit(j: *Journal) void {
-        if (j.fd >= 0) _ = std.c.close(j.fd);
-        if (j.lock_fd >= 0) _ = std.c.close(j.lock_fd);
+        if (j.fd >= 0) _ = libc.close(j.fd);
+        if (j.lock_fd >= 0) _ = libc.close(j.lock_fd);
         for (j.erases.items) |i| i.deinit(j.gpa);
         j.erases.deinit(j.gpa);
         for (j.runs.items) |r| freeRun(j.gpa, r);
@@ -95,20 +95,20 @@ pub const Journal = struct {
         errdefer j.deinit();
         const lock_path = try std.fmt.allocPrintSentinel(a, "{s}.lock", .{path}, 0);
         defer a.free(lock_path);
-        j.lock_fd = std.c.open(lock_path, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+        j.lock_fd = libc.open(lock_path, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0o600));
         if (j.lock_fd < 0) return error.JournalIo;
-        if (std.c.flock(j.lock_fd, std.c.LOCK.EX | std.c.LOCK.NB) != 0) {
+        if (libc.flock(j.lock_fd, libc.LOCK.EX | libc.LOCK.NB) != 0) {
             problem.* = "another process holds the notes journal: one server per snapshot";
             return error.Locked;
         }
-        const fd = std.c.open(j.path, .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+        const fd = libc.open(j.path, .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0o600));
         if (fd < 0) {
-            if (std.c.errno(fd) == .NOENT) return j; // no write yet: the file comes with the first one
+            if (libc.errno(fd) == .NOENT) return j; // no write yet: the file comes with the first one
             problem.* = "the notes journal exists but cannot be opened for reading and writing";
             return error.JournalIo;
         }
         j.fd = fd;
-        if (std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB) != 0) {
+        if (libc.flock(fd, libc.LOCK.EX | libc.LOCK.NB) != 0) {
             problem.* = "another process holds the notes journal: one server per snapshot";
             return error.Locked;
         }
@@ -247,7 +247,7 @@ pub const Journal = struct {
 
     fn cut(j: *Journal, len: u64) bool {
         if (j.faults) |f| if (Faults.hit(f.truncate, &f.truncates)) return false;
-        return std.c.ftruncate(j.fd, @intCast(len)) == 0;
+        return libc.ftruncate(j.fd, @intCast(len)) == 0;
     }
 
     fn sync(j: *Journal) bool {
@@ -267,9 +267,9 @@ pub const Journal = struct {
         if (dir.len >= buf.len) return false;
         @memcpy(buf[0..dir.len], dir);
         buf[dir.len] = 0;
-        const fd = std.c.open(@ptrCast(&buf), .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
+        const fd = libc.open(@ptrCast(&buf), .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
         if (fd < 0) return false;
-        defer _ = std.c.close(fd);
+        defer _ = libc.close(fd);
         return fullSync(fd, j.faults);
     }
 
@@ -295,13 +295,13 @@ pub const Journal = struct {
             size += line.len + mark.len;
         }
         if (!j.syncFile(fd)) return error.JournalIo;
-        if (std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB) != 0) return error.JournalIo;
+        if (libc.flock(fd, libc.LOCK.EX | libc.LOCK.NB) != 0) return error.JournalIo;
         if (j.hook) |h| h(j.hook_ctx, t.path);
         // up to here a failure leaves the old journal as it was: nothing changed (rename either happens or not)
-        if (std.c.rename(t.path, j.path) != 0) return error.JournalIo;
+        if (libc.rename(t.path, j.path) != 0) return error.JournalIo;
         ok = true;
         // the path names the new file now; until its folder is synced a power cut may bring back the old one
-        if (j.fd >= 0) _ = std.c.close(j.fd);
+        if (j.fd >= 0) _ = libc.close(j.fd);
         j.fd = fd;
         j.size = size;
         j.next_source = next_source;
@@ -322,26 +322,26 @@ pub const Journal = struct {
     fn create(j: *Journal, a: Allocator) IoError!void {
         const head = try j.header(a, j.next_source);
         defer a.free(head);
-        const fd = std.c.open(j.path, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+        const fd = libc.open(j.path, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0o600));
         if (fd < 0) return error.JournalIo;
-        if (std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB) != 0) {
-            _ = std.c.close(fd);
+        if (libc.flock(fd, libc.LOCK.EX | libc.LOCK.NB) != 0) {
+            _ = libc.close(fd);
             return error.JournalIo;
         }
         // the header synced and the new name in the folder synced, or no journal (it holds no write yet)
         if (!writeAll(fd, head, 0)) {
-            _ = std.c.close(fd);
-            _ = std.c.unlink(j.path);
+            _ = libc.close(fd);
+            _ = libc.unlink(j.path);
             return error.JournalIo;
         }
         const extra = writeRuns(j, a, fd, head.len) catch {
-            _ = std.c.close(fd);
-            _ = std.c.unlink(j.path);
+            _ = libc.close(fd);
+            _ = libc.unlink(j.path);
             return error.JournalIo;
         };
         if (!j.syncFile(fd) or !j.syncDir()) {
-            _ = std.c.close(fd);
-            _ = std.c.unlink(j.path);
+            _ = libc.close(fd);
+            _ = libc.unlink(j.path);
             return error.JournalIo;
         }
         j.fd = fd;
@@ -553,7 +553,7 @@ fn readAll(gpa: Allocator, fd: c_int, problem: *[]const u8) OpenError![]u8 {
     var buf: [65536]u8 = undefined;
     var at: i64 = 0;
     while (true) {
-        const n = std.c.pread(fd, &buf, buf.len, at);
+        const n = libc.pread(fd, &buf, buf.len, at);
         if (n < 0) {
             problem.* = "the notes journal cannot be read";
             return error.JournalIo;
@@ -568,7 +568,7 @@ fn readAll(gpa: Allocator, fd: c_int, problem: *[]const u8) OpenError![]u8 {
 fn writeAll(fd: c_int, data: []const u8, at: u64) bool {
     var done: usize = 0;
     while (done < data.len) {
-        const n = std.c.pwrite(fd, data[done..].ptr, data.len - done, @intCast(at + done));
+        const n = libc.pwrite(fd, data[done..].ptr, data.len - done, @intCast(at + done));
         if (n <= 0) return false;
         done += @intCast(n);
     }
@@ -579,7 +579,7 @@ fn writeAll(fd: c_int, data: []const u8, at: u64) bool {
 const upgrade_unsynced = "the notes journal (older format) was rewritten as format 3 and renamed in, but its folder could not be synced: after a power cut either file may be there, each whole and with the same writes; start again";
 
 /// An F_FULLFSYNC errno that means the filesystem does not do it: XNU's own test (kern_descrip.c, F_BARRIERFSYNC).
-fn unsupported(e: std.c.E) bool {
+fn unsupported(e: libc.E) bool {
     return e == .NOTTY or e == .OPNOTSUPP or e == .INVAL; // OPNOTSUPP is ENOTSUP (45) on Darwin
 }
 
@@ -592,9 +592,9 @@ pub fn fullSync(fd: c_int, faults: ?*Faults) bool {
         if (faults) |f| f.fallbacks += 1;
     }
     // Linux fsync(2): "includes writing through or flushing a disk cache if present" (not tested on Linux here)
-    return std.c.fsync(fd) == 0;
+    return libc.fsync(fd) == 0;
 }
 
-fn fcntlFull(fd: c_int) std.c.E {
-    return std.c.errno(std.c.fcntl(fd, std.c.F.FULLFSYNC));
+fn fcntlFull(fd: c_int) libc.E {
+    return libc.errno(libc.fcntl(fd, libc.F.FULLFSYNC));
 }

@@ -1,5 +1,6 @@
 //! Erasure covers saved conversations after their RAM entry leaves, and cancels writes that could restore them.
 const std = @import("std");
+const libc = @import("sys").c;
 const pc = @import("prompt_cache.zig");
 const rows = @import("rows_store.zig");
 const Fake = @import("rows_fake.zig").Fake;
@@ -9,7 +10,7 @@ const t = std.testing;
 test "erase saved conversation removes disk-only states and pending writes across restart" {
     const gpa = t.allocator;
     var buf: [128]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&buf, "/tmp/tf-rows-erase-{d}", .{std.c.getpid()});
+    const dir = try std.fmt.bufPrint(&buf, "/tmp/tf-rows-erase-{d}", .{libc.getpid()});
     defer rmTree(dir);
     const options: rows.Options = .{ .root = dir, .identity = 7, .cap = 1 << 30, .floor = 0, .daily = 1 << 30, .lookahead = 1 };
     var bad: [700]u32 = undefined;
@@ -61,7 +62,7 @@ test "erase saved conversation removes disk-only states and pending writes acros
 test "erase saved conversation reports a failed unlink and never claims its remaining copy clear" {
     const gpa = t.allocator;
     var buf: [128]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&buf, "/tmp/tf-rows-erase-fault-{d}", .{std.c.getpid()});
+    const dir = try std.fmt.bufPrint(&buf, "/tmp/tf-rows-erase-fault-{d}", .{libc.getpid()});
     defer rmTree(dir);
     const prompt = [_]u32{ 1, 2, 80, 81, 82, 83, 7, 8, 9, 10 };
     var f: Fake = .{ .gpa = gpa, .prompt = &prompt, .at = 8 };
@@ -85,14 +86,14 @@ test "erase saved conversation reports a failed unlink and never claims its rema
     }, 0);
     var parked_buf: [1200]u8 = undefined;
     const parked = try std.fmt.bufPrintSentinel(&parked_buf, "{s}.saved", .{path}, 0);
-    try t.expectEqual(@as(c_int, 0), std.c.rename(path, parked));
-    try t.expectEqual(@as(c_int, 0), std.c.mkdir(path, 0o700));
+    try t.expectEqual(@as(c_int, 0), libc.rename(path, parked));
+    try t.expectEqual(@as(c_int, 0), libc.mkdir(path, 0o700));
     const failed = s.forgetSpan(&.{ 80, 81, 82, 83 }, &.{});
     try t.expect(failed.failed > 0);
     try t.expect(!failed.complete());
     try t.expectEqual(@as(usize, 1), r.states.items.len);
-    try t.expectEqual(@as(c_int, 0), std.c.rmdir(path));
-    try t.expectEqual(@as(c_int, 0), std.c.rename(parked, path));
+    try t.expectEqual(@as(c_int, 0), libc.rmdir(path));
+    try t.expectEqual(@as(c_int, 0), libc.rename(parked, path));
     const retried = s.forgetSpan(&.{ 80, 81, 82, 83 }, &.{});
     try t.expect(!retried.complete());
     try t.expectEqual(@as(usize, 0), r.states.items.len);
@@ -101,7 +102,7 @@ test "erase saved conversation reports a failed unlink and never claims its rema
 test "erase saved conversation allocation failure preserves the disk state and reports incomplete" {
     const gpa = t.allocator;
     var buf: [128]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&buf, "/tmp/tf-rows-erase-oom-{d}", .{std.c.getpid()});
+    const dir = try std.fmt.bufPrint(&buf, "/tmp/tf-rows-erase-oom-{d}", .{libc.getpid()});
     defer rmTree(dir);
     var prompt: [700]u32 = undefined;
     for (&prompt, 0..) |*v, i| v.* = @intCast(i + 1000);

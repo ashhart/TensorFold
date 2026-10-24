@@ -14,7 +14,7 @@ pub const Rig = struct {
 
     pub fn init(_: std.mem.Allocator) !*Rig {
         const r = try a.create(Rig);
-        r.* = .{ .tmp = std.testing.tmpDir(.{}), .arena = .init(a) };
+        r.* = .{ .tmp = std.testing.tmpDir(.{ .iterate = true }), .arena = .init(a) };
         errdefer r.deinit();
         const temp = r.arena.allocator();
         const dir = try r.tmp.dir.realPathFileAlloc(std.testing.io, ".", temp);

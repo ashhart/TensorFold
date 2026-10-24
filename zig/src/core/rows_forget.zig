@@ -1,5 +1,6 @@
 //! Remove saved conversations on the engine thread, including writes that could restore an erased span.
 const std = @import("std");
+const c = @import("sys").c;
 const pc = @import("prompt_cache.zig");
 const rows = @import("rows_store.zig");
 const sync = @import("learned_sync.zig");
@@ -84,13 +85,13 @@ fn collect(r: *rows.Rows) !void {
 fn unlink(dir: []const u8, name: rows.chain.Stem, ext: []const u8) !void {
     var buffer: [1200]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&buffer, "{s}/{s}{s}", .{ dir, std.fmt.bytesToHex(name, .lower), ext }, 0);
-    const rc = std.c.unlink(path);
-    if (rc != 0 and std.c.errno(rc) != .NOENT) return error.RowsErase;
+    const rc = c.unlink(path);
+    if (rc != 0 and c.errno(rc) != .NOENT) return error.RowsErase;
 }
 
 fn syncDir(dir: [:0]const u8) !void {
-    const fd = std.c.open(dir, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = c.open(dir, .{ .ACCMODE = .RDONLY }, @as(c.mode_t, 0));
     if (fd < 0) return error.RowsErase;
-    defer _ = std.c.close(fd);
+    defer _ = c.close(fd);
     if (!sync.full(fd)) return error.RowsErase;
 }
