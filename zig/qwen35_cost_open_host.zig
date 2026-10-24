@@ -85,23 +85,23 @@ fn open(root: []const u8, expected: usize, capacity: usize) ![64]f64 {
     return ms;
 }
 
-test "window cost open: first open measures 64 forwards, next open uses the same prices with zero" {
+test "window cost open: first open measures every width, next open keeps the prices after one probe" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);
     defer a.free(root);
-    const first = try open(root, 64, 32);
-    const second = try open(root, 0, 32);
+    const first = try open(root, 64 * lanes.cost_rule.reps, 32);
+    const second = try open(root, lanes.cost_rule.reps, 32);
     try std.testing.expectEqualSlices(f64, &first, &second);
 }
 
-test "window cost open: a fresh-process hit warms valid context-64 storage without timing" {
+test "window cost open: a fresh-process hit warms valid context-64 storage and probes one width" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);
     defer a.free(root);
-    _ = try open(root, 64, 64);
-    _ = try open(root, 0, 64);
+    _ = try open(root, 64 * lanes.cost_rule.reps, 64);
+    _ = try open(root, lanes.cost_rule.reps, 64);
 }
 
 test "window cost open: production key covers the bound device and effective workload" {

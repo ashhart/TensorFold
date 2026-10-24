@@ -2,6 +2,8 @@
 const std = @import("std");
 const q = @import("qwen35");
 const cuda = @import("cuda");
+/// lanes.cost_rule.reps: each of the 64 live widths is timed that many times.
+const reps = 7;
 const Shape = q.engine.Engine.Shape;
 
 test "a lone window does not launch the widest row and stream capacity" {
@@ -152,10 +154,10 @@ test "startup warms shared shapes once but measures all live widths independentl
     try q.native.warm.time(fakeIo(), &probe, &probe, &cache, &seen);
     var calls: usize = 0;
     for (probe.calls) |n| calls += n;
-    try std.testing.expectEqual(@as(usize, 74), calls);
-    try std.testing.expectEqual(@as(usize, 3), probe.calls[1]);
-    try std.testing.expectEqual(@as(usize, 3), probe.calls[2]);
-    try std.testing.expectEqual(@as(usize, 1), probe.calls[3]);
+    try std.testing.expectEqual(@as(usize, 10 + 64 * reps), calls);
+    try std.testing.expectEqual(@as(usize, 2 + reps), probe.calls[1]);
+    try std.testing.expectEqual(@as(usize, 2 + reps), probe.calls[2]);
+    try std.testing.expectEqual(@as(usize, reps), probe.calls[3]);
     for (probe.costs) |measured| try std.testing.expect(measured);
     // The injected clock gives every measured window one tick, so none of them can be zero.
     for (probe.ms) |m| try std.testing.expectEqual(@as(f64, 1.0), m);
@@ -184,8 +186,8 @@ test "shared warmups count actual passes without replacing any width measurement
     try q.native.warm.time(fakeIo(), &probe, &probe, &cache, &seen);
     var calls: usize = 0;
     for (probe.calls) |n| calls += n;
-    try std.testing.expectEqual(@as(usize, 73), calls);
-    try std.testing.expectEqual(@as(usize, 2), probe.calls[1]);
+    try std.testing.expectEqual(@as(usize, 9 + 64 * reps), calls);
+    try std.testing.expectEqual(@as(usize, 1 + reps), probe.calls[1]);
     try std.testing.expect(!cache.advanced);
     for (probe.costs) |measured| try std.testing.expect(measured);
     for (probe.ms) |m| try std.testing.expectEqual(@as(f64, 1.0), m);

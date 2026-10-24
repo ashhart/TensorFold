@@ -89,12 +89,14 @@ pub fn resolve(l: anytype, d: anytype, reserved: anytype, id: ?costs.Keys, root:
     if (result.hit) {
         if (reserved) |cache| {
             result.measured.phases.add(try warm.prepareMode(l.gpa, l.io, l.e, d, cache, &l.warmed, false));
+            try checkKept(l, &sampler, &result, id, root, cache);
         } else {
             const allocating = profile.now(l.io);
             var cache = try Cache.init(l.gpa, l.e, l.e.window_rows);
             errdefer cache.deinit(l.gpa);
             result.measured.phases.reserve += profile.elapsed(l.io, allocating);
             result.measured.phases.add(try warm.prepareMode(l.gpa, l.io, l.e, d, &cache, &l.warmed, false));
+            try checkKept(l, &sampler, &result, id, root, &cache);
             const freeing = profile.now(l.io);
             cache.deinit(l.gpa);
             result.measured.phases.reserve += profile.elapsed(l.io, freeing);
@@ -105,6 +107,25 @@ pub fn resolve(l: anytype, d: anytype, reserved: anytype, id: ?costs.Keys, root:
     phases.add(result.measured.phases);
     std.log.info("CUDA window costs: {s} {d} widths{s}{s}", .{ if (result.hit) "cached" else "measured", l.e.window_rows, if (result.retried) " (reference drift retry)" else "", if (id == null) " (cache identity unavailable)" else "" });
     return phases;
+}
+
+/// A kept table stands while a quick probe of one width stays within drift; one that does not stand is measured again.
+fn checkKept(l: anytype, sampler: anytype, result: *costs.Result, id: ?costs.Keys, root: ?[]const u8, cache: anytype) !void {
+    const rows = l.e.window_rows;
+    const at = rows / 2; // the middle width: its cost the window choice turns on
+    if (at == 0) return;
+    const probed = try warm.probeWidth(l.io, l.e, cache, at);
+    if (lanes.cost_rule.entryHolds(result.measured.ms[at - 1], probed)) return;
+    const again = try sampler.run();
+    if (!costs.valid(again.ms[0..rows])) return error.InvalidWindowMeasurements;
+    result.measured.ms = again.ms;
+    result.measured.phases.add(again.phases);
+    result.hit = false;
+    result.retried = true;
+    if (id) |k| {
+        _ = lanes.cost_cache.saveAt(costs.Record, l.gpa, l.io, k.current, costs.record(k.current, @intCast(rows), result.measured.ms), root);
+        _ = lanes.cost_cache.saveAt(costs.Record, l.gpa, l.io, k.reference, costs.record(k.reference, @intCast(rows), result.measured.ms), root);
+    }
 }
 
 fn draftBytes(a: std.mem.Allocator, d: anytype) ![]u8 {

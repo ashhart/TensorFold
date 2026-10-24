@@ -3,6 +3,7 @@ const std = @import("std");
 const q = @import("qwen35");
 const costs = q.native.window_costs;
 const shared = @import("lanes").cost_cache;
+const rule = @import("lanes").cost_rule;
 const a = std.testing.allocator;
 const io = std.testing.io;
 
@@ -31,11 +32,18 @@ pub const Fake = struct {
     runs: usize = 0,
     step: i96 = 1_000_000,
     fail_at: usize = 0,
+    /// The forward that runs slow: the outlier a noisy start leaves behind.
+    slow_forward: ?usize = null,
+    slow_seen: usize = 0,
     prices: [64]f64 = @splat(0),
     pub fn forward(f: *Fake, batch: []const Part, ids: []const u32, _: anytype) !void {
         try std.testing.expectEqual(batch[0].rows, ids.len);
         f.forwards += 1;
         Clock.step = f.step * @as(i96, @intCast(ids.len));
+        if (f.slow_forward) |at| if (at + 1 == f.forwards) {
+            Clock.step += 10 * f.step;
+            f.slow_seen += 1;
+        };
         if (f.fail_at == ids.len) return error.PlantedCalibrationFailure;
     }
     pub fn setCost(f: *Fake, rows: u32, ms: f64) void {
@@ -66,13 +74,30 @@ test "window cost cache: open measures all 64 widths on a miss and zero on a hit
     const key = costs.keys("binary", &parts);
     const first = try costs.resolve(a, io, key, 64, root, &engine);
     try std.testing.expect(!first.hit);
-    try std.testing.expectEqual(@as(usize, 64), engine.forwards);
+    try std.testing.expectEqual(@as(usize, 64 * rule.reps), engine.forwards);
     engine.forwards = 0;
     const second = try costs.resolve(a, io, key, 64, root, &engine);
     try std.testing.expect(second.hit);
     try std.testing.expectEqual(@as(usize, 0), engine.forwards);
     try std.testing.expectEqualSlices(f64, &first.measured.ms, &second.measured.ms);
     for (second.measured.ms, 1..) |ms, width| try std.testing.expectEqual(@as(f64, @floatFromInt(width)), ms);
+}
+
+test "window cost cache: one slow run cannot set a width's price" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    var engine: Fake = .{ .slow_forward = 0 }; // the first timed run of the first width
+    const key = costs.keys("binary", &parts);
+    const measured = try costs.resolve(a, io, key, 64, root, &engine);
+    try std.testing.expect(!measured.hit);
+    try std.testing.expectEqual(@as(usize, 1), engine.slow_seen);
+    for (measured.measured.ms, 1..) |ms, width| try std.testing.expectEqual(@as(f64, @floatFromInt(width)), ms);
+
+    const kept = shared.loadAt(costs.Record, a, io, key.current, root);
+    try std.testing.expect(kept != null);
+    for (kept.?.ms[0..64], 1..) |ms, width| try std.testing.expectEqual(@as(f64, @floatFromInt(width)), ms);
 }
 
 test "window cost cache: executable and every identity part separate keys" {
@@ -138,7 +163,7 @@ test "window cost cache: short foreign corrupt and invalid files measure again a
         engine.forwards = 0;
         const got = try costs.resolve(a, io, key, 64, root, &engine);
         try std.testing.expect(!got.hit);
-        try std.testing.expectEqual(@as(usize, 64), engine.forwards);
+        try std.testing.expectEqual(@as(usize, 64 * rule.reps), engine.forwards);
         engine.forwards = 0;
         try std.testing.expect((try costs.resolve(a, io, key, 64, root, &engine)).hit);
         try std.testing.expectEqual(@as(usize, 0), engine.forwards);
@@ -155,12 +180,12 @@ test "window cost cache: a changed build measures once against its reference and
     engine.forwards = 0;
     const stable = try costs.resolve(a, io, costs.keys("second-build", &parts), 64, root, &engine);
     try std.testing.expect(!stable.hit and !stable.retried);
-    try std.testing.expectEqual(@as(usize, 64), engine.forwards);
+    try std.testing.expectEqual(@as(usize, 64 * rule.reps), engine.forwards);
     engine.forwards = 0;
     engine.step = 2_000_000;
     const drift = try costs.resolve(a, io, costs.keys("third-build", &parts), 64, root, &engine);
     try std.testing.expect(!drift.hit and drift.retried);
-    try std.testing.expectEqual(@as(usize, 128), engine.forwards);
+    try std.testing.expectEqual(@as(usize, 128 * rule.reps), engine.forwards);
     engine.forwards = 0;
     try std.testing.expect((try costs.resolve(a, io, costs.keys("third-build", &parts), 64, root, &engine)).hit);
     try std.testing.expectEqual(@as(usize, 0), engine.forwards);
@@ -178,7 +203,7 @@ test "window cost cache: failed or partial measurements publish no table" {
     engine.fail_at = 0;
     engine.forwards = 0;
     try std.testing.expect(!(try costs.resolve(a, io, key, 64, root, &engine)).hit);
-    try std.testing.expectEqual(@as(usize, 64), engine.forwards);
+    try std.testing.expectEqual(@as(usize, 64 * rule.reps), engine.forwards);
 }
 
 test "window cost cache: live widths fit the record and smaller windows leave unused slots zero" {
@@ -192,7 +217,7 @@ test "window cost cache: live widths fit the record and smaller windows leave un
     var engine: Fake = .{ .window_rows = 16 };
     const key = costs.keys("binary-16", &parts);
     const first = try costs.resolve(a, io, key, 16, root, &engine);
-    try std.testing.expectEqual(@as(usize, 16), engine.forwards);
+    try std.testing.expectEqual(@as(usize, 16 * rule.reps), engine.forwards);
     for (first.measured.ms[16..]) |m| try std.testing.expectEqual(@as(u64, 0), @as(u64, @bitCast(m)));
     engine.forwards = 0;
     try std.testing.expect((try costs.resolve(a, io, key, 16, root, &engine)).hit);
@@ -216,6 +241,6 @@ test "window cost cache: unavailable storage still measures every width" {
     for (0..2) |_| {
         engine.forwards = 0;
         try std.testing.expect(!(try costs.resolve(a, io, key, 64, root, &engine)).hit);
-        try std.testing.expectEqual(@as(usize, 64), engine.forwards);
+        try std.testing.expectEqual(@as(usize, 64 * rule.reps), engine.forwards);
     }
 }
