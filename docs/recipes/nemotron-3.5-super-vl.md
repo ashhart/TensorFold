@@ -25,9 +25,9 @@ The weights take 70.8 GiB of the GB10's memory (73.2 GiB with the image tower an
 16,384-token window the server admits 8 streams at 0.35 GiB each and keeps a prompt cache of about 8 to 10 GiB, and
 about 24 GB of the GB10's memory stays available. Leave the other ranks' variables below unset.
 
-[A one-GB10 recipe](https://github.com/plotarmordev/Nemotron-3.5-Super-VL-Single-DGX-Spark-TensorFold) sets this up
-on stock v1.1.3: it downloads the release, checks it and the checkpoint against pinned sha256 sums, and has start and
-stop scripts and smoke and benchmark clients.
+A [community recipe](https://github.com/plotarmordev/Nemotron-3.5-Super-VL-Single-DGX-Spark-TensorFold/tree/72ef12b05b0b3d839ff973ff624e8410859dfb8c)
+from @plotarmordev sets this up on stock v1.1.3: it downloads the release, checks it and the checkpoint against pinned
+sha256 sums, and has start and stop scripts and smoke and benchmark clients.
 
 The MTP draft head can use the embedded draft vocabulary's FP8 output rows or the already-resident full output head.
 A stream drafts on the subset while the last 16 tokens of its context, its prompt's tail at first, are all draft ids,
