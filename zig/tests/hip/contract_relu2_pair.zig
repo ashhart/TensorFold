@@ -224,7 +224,10 @@ pub const Pair = struct {
             defer a.free(all);
             const y = all[0..f.outputs()];
             const m = all[f.outputs()..];
-            if (sim) |how| try f.simulate(how[0], how[1], y) else try f.reference(y, m);
+            if (sim) |how| {
+                try f.simulate(how[0], how[1], y);
+                @memset(m, 0); // simulations produce values only; no undefined magnitude may be copied or scaled
+            } else try f.reference(y, m);
             if (which == 1) {
                 @memcpy(want[top_k * n ..][0 .. 2 * n], y);
                 @memcpy(mag[top_k * n ..][0 .. 2 * n], m);
@@ -252,3 +255,34 @@ pub const Pair = struct {
         return self.outputs(out, m, .{ acc, order });
     }
 };
+
+test "HIP pair contract: simulation initializes magnitude scratch and preserves exact positive sums" {
+    const a = std.testing.allocator;
+    const n = 2;
+    const fa = try Affine.init(a, .{ .rows = 1, .n = experts * n, .k = group }, bits, group);
+    defer fa.deinit();
+    const fb = try Affine.init(a, .{ .rows = 1, .n = 2 * n, .k = group }, bits, group);
+    defer fb.deinit();
+    for ([_]Affine{ fa, fb }) |f| {
+        @memset(f.x, c.toBf16(1));
+        @memset(f.codes, 1);
+        @memset(f.scales, c.toBf16(1));
+        @memset(f.biases, 0);
+    }
+    // Only the host inputs used by outputs; no runtime, stream or driver is constructed or accessed.
+    var pair: Pair = undefined;
+    pair.rig.a = a;
+    pair.fa = fa;
+    pair.fb = fb;
+    pair.arg[0].n = n;
+    for (&pair.picks, 0..) |*p, i| p.* = i;
+    var out: [(top_k + 2) * n]f64 = undefined;
+    var mag: [out.len]f64 = undefined;
+    for ([_]c.Accum{ .f32, .f16, .bf16 }) |acc| for ([_]g.Order{ .sequential, .pairwise, .strided }) |order| {
+        try pair.outputs(&out, &mag, .{ acc, order });
+        for (out, mag) |value, magnitude| {
+            try std.testing.expectEqual(@as(f64, group * group), value);
+            try std.testing.expectEqual(@as(f64, 0), magnitude);
+        }
+    };
+}

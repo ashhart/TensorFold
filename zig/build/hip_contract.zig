@@ -16,6 +16,16 @@ pub const Options = struct {
 
 /// hip-kernel-contract (gates 1-5 on this GPU), hip-kernel-contract-objects and hip-kernel-contract-limits (no GPU).
 pub fn steps(b: *std.Build, o: Options) void {
+    const pair_host = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/contract_relu2_pair.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = o.host }, .{ .name = "core", .module = o.host.import_table.get("core").? } },
+    }), .filters = &.{"HIP pair contract:"} }));
+    pair_host.has_side_effects = true;
+    o.test_step.dependOn(&pair_host.step);
+    b.step("test-hip-pair-contract-host", "Paired projection simulation without uninitialized magnitude reads or GPU calls").dependOn(&pair_host.step);
     const source = b.path("zig/kernels/hip/contract_controls.hip");
     const own = hip.compile(b, o.hipcc, o.arch, source, "contract_controls.hsaco");
     const exe = runner(b, o.target, o.optimize, o.gpu, controls(b, o.arch, own));
