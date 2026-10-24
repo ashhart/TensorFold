@@ -165,3 +165,54 @@ test "a replacement hardlink has a different identity and removeOwn leaves its f
     try testing.expect(tmp_file.idOf(-1, t.path) != null);
     try testing.expectEqualStrings("KEEP", try tmp.dir.readFileAlloc(testing.io, "sentinel", a, .unlimited));
 }
+
+test "journal replacement: old readers stay valid and the stable writer lock stays held" {
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    _ = try add(r, a, "My favourite colour is green.");
+    const gone = try add(r, a, "I live in Oslo.");
+    const before = try r.journal(a);
+    const path = try a.dupeSentinel(u8, r.path, 0);
+    const old = platform.c.open(path, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
+    if (old < 0) return error.TestFile;
+    defer _ = platform.c.close(old);
+    const id = tmp_file.idOf(old, "") orelse return error.NoIdentity;
+    const Probe = struct {
+        path: []const u8,
+        sha: [64]u8,
+        refused: bool = false,
+        temp_intact: bool = false,
+        fn hook(ctx: *anyopaque, temp: [:0]const u8) void {
+            const p: *@This() = @ptrCast(@alignCast(ctx));
+            var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+            defer scratch.deinit();
+            var records: std.ArrayList(write.Record) = .empty;
+            var problem: []const u8 = "";
+            if (journal_mod.Journal.open(testing.allocator, scratch.allocator(), p.path, p.sha, &records, &problem)) |j| {
+                var unexpected = j;
+                unexpected.deinit();
+            } else |e| p.refused = e == error.Locked;
+            p.temp_intact = tmp_file.idOf(-1, temp) != null;
+        }
+    };
+    var probe: Probe = .{ .path = r.path, .sha = r.store().journal.?.snapshot_sha };
+    r.store().journal.?.hook = Probe.hook;
+    r.store().journal.?.hook_ctx = &probe;
+    defer r.store().journal.?.hook = null;
+    try eraseOne(r, a, gone);
+    try testing.expect(probe.refused and probe.temp_intact);
+    const current = tmp_file.idOf(r.store().journal.?.fd, "") orelse return error.NoIdentity;
+    try testing.expect(id.dev != current.dev or id.ino != current.ino);
+    const old_bytes = try a.alloc(u8, before.len);
+    var at: usize = 0;
+    while (at < old_bytes.len) {
+        const n = platform.c.pread(old, old_bytes[at..].ptr, old_bytes.len - at, @intCast(at));
+        if (n <= 0) return error.Read;
+        at += @intCast(n);
+    }
+    try testing.expectEqualStrings(before, old_bytes);
+    try testing.expect(std.mem.indexOf(u8, try r.journal(a), "Oslo") == null);
+}

@@ -358,10 +358,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.default_voice = v;
         return;
     }
-    if (is(name, "--notes")) {
-        out.notes = v;
-        return;
-    }
+    if (@import("notes_flags.zig").parse(out, name, v)) return;
     if (is(name, "--chat-template")) {
         out.chat_template = v;
         return;

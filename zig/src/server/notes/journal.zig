@@ -108,7 +108,7 @@ pub const Journal = struct {
             return error.JournalIo;
         }
         j.fd = fd;
-        if (libc.flock(fd, libc.LOCK.EX | libc.LOCK.NB) != 0) {
+        if (!tmp_file.lockData(fd)) {
             problem.* = "another process holds the notes journal: one server per snapshot";
             return error.Locked;
         }
@@ -295,7 +295,7 @@ pub const Journal = struct {
             size += line.len + mark.len;
         }
         if (!j.syncFile(fd)) return error.JournalIo;
-        if (libc.flock(fd, libc.LOCK.EX | libc.LOCK.NB) != 0) return error.JournalIo;
+        if (!tmp_file.lockData(fd)) return error.JournalIo;
         if (j.hook) |h| h(j.hook_ctx, t.path);
         // up to here a failure leaves the old journal as it was: nothing changed (rename either happens or not)
         if (libc.rename(t.path, j.path) != 0) return error.JournalIo;
@@ -324,7 +324,7 @@ pub const Journal = struct {
         defer a.free(head);
         const fd = libc.open(j.path, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0o600));
         if (fd < 0) return error.JournalIo;
-        if (libc.flock(fd, libc.LOCK.EX | libc.LOCK.NB) != 0) {
+        if (!tmp_file.lockData(fd)) {
             _ = libc.close(fd);
             return error.JournalIo;
         }

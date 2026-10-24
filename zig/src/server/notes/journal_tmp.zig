@@ -4,6 +4,12 @@ const builtin = @import("builtin");
 const libc = @import("sys").c;
 const Allocator = std.mem.Allocator;
 
+/// Windows uses the journal's stable sidecar lock: a mandatory data lock would block other readers and replacement.
+pub fn lockData(fd: c_int) bool {
+    if (builtin.os.tag == .windows) return true;
+    return libc.flock(fd, libc.LOCK.EX | libc.LOCK.NB) == 0;
+}
+
 /// A temporary file this process made: its path, descriptor, and the file it is (device, inode).
 pub const Tmp = struct {
     path: [:0]u8,

@@ -452,8 +452,10 @@ pub fn rename(from: [*:0]const u8, to: [*:0]const u8) c_int {
     var b: Wide = undefined;
     const wa = wide(&a, std.mem.span(from)) orelse return -1;
     const wb = wide(&b, std.mem.span(to)) orelse return -1;
-    if (MoveFileExW(wa, wb, 0x1 | 0x8) == 0) return fail(lastError()); // REPLACE_EXISTING | WRITE_THROUGH
-    return 0;
+    if (MoveFileExW(wa, wb, 0x1 | 0x8) != 0) return 0; // REPLACE_EXISTING | WRITE_THROUGH
+    const e = lastError();
+    if (e == .ACCES and @import("win_rename.zig").replace(wa, wb)) return 0;
+    return fail(e);
 }
 
 /// POSIX link: `new` names the same file as `old` (same volume).
