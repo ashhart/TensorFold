@@ -33,6 +33,7 @@ test {
     _ = @import("reply_text.zig");
     _ = @import("tool_parse.zig");
     _ = @import("tool_lfm2.zig");
+    _ = @import("lfm2_template_test.zig");
     _ = @import("tool_stream.zig");
     _ = @import("tool_params.zig");
     _ = @import("tool_grammar.zig");

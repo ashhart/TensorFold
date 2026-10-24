@@ -192,7 +192,9 @@ pub fn toolArguments(cx: *Cx, messages: Value) errors.Refused!Value {
             const args = function.get("arguments").?;
             if (args == .object) continue;
             var parsed: ?Value = args;
-            if (args == .string) {
+            if (args == .string and std.mem.trim(u8, args.string, " \t\r\n").len == 0) {
+                parsed = .{ .object = try json.newObject(cx.a) }; // a call with no arguments, as clients spell it
+            } else if (args == .string) {
                 parsed = switch (try json.parseText(cx.a, args.string)) {
                     .ok => |v| v,
                     .err => null,
