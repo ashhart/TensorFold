@@ -58,6 +58,8 @@ pub const Prepared = struct {
         s.model = p.fresh;
         s.log = p.log;
         s.idx = p.idx;
+        s.gen += 1;
+        if (p.idx) |idx| idx.ver = s.gen;
         p.committed = true;
         old_log.deinit();
         old.deinit();

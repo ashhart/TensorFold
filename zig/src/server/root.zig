@@ -33,6 +33,9 @@ test {
     _ = @import("notes_lookup_rig_test.zig");
     _ = @import("notes_route.zig");
     _ = @import("notes_lookup_test.zig");
+    _ = @import("notes_decode.zig");
+    _ = @import("notes_decode_test.zig");
+    _ = @import("notes_decode_more_test.zig");
     _ = @import("vision_markers_test.zig");
     _ = @import("embedding_protocol_test.zig");
     _ = @import("embedding_service_test.zig");

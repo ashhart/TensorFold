@@ -11,8 +11,8 @@ const Allocator = std.mem.Allocator;
 /// A chat request's lookup: who first (the subjects the question names; none known, no block), or retrieve()'s.
 pub const Lookup = enum { who, plain };
 
-/// How one lookup is made: the hop (null: the snapshot's), and who first with the question's text.
-pub const Way = struct { hop: ?index.Hop = null, who: ?[]const u8 = null };
+/// How one lookup is made: the hop (null: the snapshot's), who first with the question's text, and subject aliases.
+pub const Way = struct { hop: ?index.Hop = null, who: ?[]const u8 = null, resolve_subjects: bool = false };
 
 pub const Failure = error{ OutOfMemory, Tokenizer };
 
@@ -28,10 +28,11 @@ pub const Found = struct {
     lookup_ns: i96,
     fit_ns: i96,
     in_store: usize = 0, // notes in the index it read
+    ver: u64 = 0, // Storage.gen of the index this lookup read
 };
 
 /// The store's kept scratch, made again when the index has more notes than it has room for.
-fn scratchFor(s: *Storage, idx: *const index.Index) Allocator.Error!*lookup.Scratch {
+pub fn scratchFor(s: *Storage, idx: *const index.Index) Allocator.Error!*lookup.Scratch {
     var room: usize = 0; // a scratch for fewer notes comes back with room for more: writes add them one by one
     if (s.scratch) |*k| {
         if (k.slot.len >= idx.notes() and (idx.kind != .sa or k.seen.len >= idx.notes())) return k;
@@ -48,9 +49,10 @@ pub fn retrieve(s: *Storage, io: std.Io, a: Allocator, text: model_text.Text, qi
     const current = s.idx.?;
     const hop = if (way.who == null) way.hop else null; // who first keeps the snapshot's hop, which its scores rank by
     var view: index.Index = undefined; // a shallow copy: the same notes and maps, read only
-    const idx = if (hop) |h| blk: {
+    const idx = if (hop != null or way.resolve_subjects) blk: {
         view = current.*;
-        view.settings.hop = h;
+        if (hop) |h| view.settings.hop = h;
+        if (way.resolve_subjects) view.settings.resolve_subjects = true;
         break :blk &view;
     } else current;
     const sc = try scratchFor(s, idx);
@@ -88,5 +90,6 @@ pub fn retrieve(s: *Storage, io: std.Io, a: Allocator, text: model_text.Text, qi
         .lookup_ns = t1 - t0,
         .fit_ns = t2 - t1,
         .in_store = idx.notes(),
+        .ver = s.gen,
     };
 }

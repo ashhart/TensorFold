@@ -14,6 +14,7 @@ const clock = @import("clock.zig");
 const Server = @import("server.zig").Server;
 const chunk_plan = @import("chunk_plan.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
+const notes_decode = @import("notes_decode.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -34,6 +35,8 @@ pub const Input = struct {
     logprobs: ?u8 = null,
     /// ``/v1/completions``' ``prompt_logprobs``: rows for the prompt with this many alternatives; null: not asked.
     prompt_logprobs: ?u8 = null,
+    /// --notes: the notes looked up again while the reply decodes (notes_decode.zig); null: not.
+    notes_live: ?*notes_decode.Live = null,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -189,6 +192,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, thinking, request.think_budget, count);
     request.prompt_logprobs = input.prompt_logprobs;
+    try @import("notes_decode_retention.zig").prepare(srv, cx, input, thinking, effort, &request);
     return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
 }
 
@@ -233,7 +237,9 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
     var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null };
-    defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
+    gen.live = if (input.notes_live) |l| l.bind(srv, &prepared, &request, &box) else null;
+    defer if (gen.live) |l| l.free(); // after the line below, which reads the last segment's mailbox
+    defer srv.noteRequest(prepared.prompt_len, gen.box.cached orelse 0, gen.collected.items.len, gen.box.stats.drafted, gen.box.stats.accepted, gen.box.stats.rounds, received, gen.first_ns, gen.last_ns, gen.box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
         if (sink) |s| if (s.begin) |begin| begin(s.ctx, prepared.prompt_len) catch break :blk error.Cancelled;
@@ -245,16 +251,10 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     return result;
 }
 
-/// The ``ended`` line of a submitted reply that ends without one: its client left, or it failed.
-fn logEnded(id: []const u8, e: Failure, message: []const u8, prompt: usize, tokens: usize, after: f64) void {
-    const why: ?[]const u8 = switch (e) {
-        error.Cancelled => null,
-        error.Refused => message, // once submitted, only the engine's own failure refuses
-        else => @errorName(e),
-    };
-    var buf: [1024]u8 = undefined;
-    log.line("{s}", .{log.ended(&buf, id, why, prompt, tokens, after)});
-}
+const logEnded = @import("chat_output.zig").logEnded;
+const StopHook = @import("chat_output.zig").StopHook;
+const decodeText = @import("chat_output.zig").decodeText;
+pub const deltaOf = @import("chat_output.zig").deltaOf;
 
 /// The reply to ``input``; ``sink`` hears the stream (null: not streamed). ``gone`` says the client left.
 pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Failure!Reply {
@@ -296,6 +296,8 @@ const Generation = struct {
     consumed: usize = 0,
     chunk_index: usize = 0,
     lp: ?@import("logprobs.zig").Stream = null, // the request asked for logprobs: its rows, copied with each round
+    live: ?*notes_decode.Live = null, // --notes: the notes looked up again at the reply's sentence ends
+    next: ?*api.Request = null, // the continuation with more notes in, which the reply switches to after this round
 
     fn eos(g: *const Generation, t: u32) bool {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
@@ -322,7 +324,7 @@ const Generation = struct {
     fn commit(g: *Generation, chunk: []const u32) Failure!void {
         var landed: usize = 0;
         for (chunk) |t| {
-            if (g.reason != null) break;
+            if (g.reason != null or g.next != null) break; // the round's tokens after a switch point are never sent
             try g.collected.append(g.a, t);
             landed += 1;
             if (g.eos(t)) {
@@ -330,12 +332,15 @@ const Generation = struct {
             } else if (try g.stopHit()) {
                 g.reason = "stop";
                 g.srv.engine.cancel(g.id); // the engine ends EOS and length itself; a stop string is the server's
-            } else if (g.collected.items.len >= g.max_tokens) g.reason = "length";
+            } else if (g.collected.items.len >= g.max_tokens) {
+                g.reason = "length";
+            } else if (g.live) |l| g.next = try l.atToken(g.srv, g.a, g.collected.items);
         }
         if (landed == 0) return;
         const arrived = nowNs(g.srv.io);
         if (g.first_ns == null) g.first_ns = arrived;
         g.last_ns = arrived;
+        if (g.live) |l| l.landed(g.reply_id, arrived, g.box, g.next != null);
         const sink = g.sink orelse return;
         if (g.streaming_done) return;
         var fresh: std.ArrayList(u32) = .empty;
@@ -405,8 +410,8 @@ const Generation = struct {
             .pointer => |p| p.child,
             else => @TypeOf(gone),
         };
-        const m = g.box;
         while (true) {
+            const m = g.box; // a switch to a continuation (notes_decode.zig) moves it
             m.mutex.lockUncancelable(m.io);
             var chunk: ?[]u32 = null;
             var ended = false;
@@ -449,13 +454,29 @@ const Generation = struct {
             }
             const tokens = chunk orelse continue;
             if (g.reason == null) try g.commit(tokens);
+            if (g.next) |n| try g.switchTo(n);
         }
+    }
+
+    /// Ends the engine's request and goes on with `next`: the same reply, its prompt with more notes in.
+    fn switchTo(g: *Generation, next: *api.Request) Failure!void {
+        g.next = null;
+        const cancelled = nowNs(g.srv.io);
+        g.srv.engine.cancel(g.id);
+        g.drain(); // the tokens it made past the switch point are dropped with its mailbox's
+        g.box = try g.live.?.segment(g.srv, g.box, cancelled);
+        g.chunk_index = 0;
+        g.consumed = 0;
+        g.id = g.srv.next_id.fetchAdd(1, .monotonic);
+        g.srv.engine.submit(g.id, next, .{ .ctx = g.box, .event = Mailbox.onEvent }) catch return error.Failed;
+        g.engine_done = false;
     }
 
     fn finish(g: *Generation, cx: *Cx, prompt_len: usize, received: i96, thinking: bool, effort: ?[]const u8, exact: bool, drafts: bool) Failure!Reply {
         const a = g.a;
         const m = g.box;
         if (!g.engine_done) g.drain();
+        if (g.live) |l| l.carry(m);
         const reason: []const u8 = g.reason orelse switch (m.reason) {
             .stop => "stop",
             .length => "length",
@@ -567,30 +588,9 @@ const Generation = struct {
         var seed_text: [32]u8 = undefined;
         const seed = if (g.seed) |v| std.fmt.bufPrint(&seed_text, " seed={d}", .{v}) catch unreachable else "";
         const rate = if (decode_log_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_log_s else 0;
-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
+        var fetch_text: [128]u8 = undefined;
+        const fetch = @import("notes_decode_totals.zig").suffix(&fetch_text, if (g.live) |l| l.injections.items else null);
+        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed, fetch });
         return reply;
     }
 };
-
-/// The request's stop strings as the engine checks them after each token: the newest tokens' text holds one.
-const StopHook = struct {
-    srv: *Server,
-    stops: reply_text.Stops,
-
-    fn check(ctx: *anyopaque, emitted: []const u32) bool {
-        const h: *StopHook = @ptrCast(@alignCast(ctx));
-        var arena: std.heap.ArenaAllocator = .init(h.srv.gpa);
-        defer arena.deinit();
-        const tail = emitted[emitted.len -| h.stops.tail()..];
-        const text = h.srv.text.decode(arena.allocator(), tail) catch return false;
-        for (h.stops.strings) |stop| if (std.mem.indexOf(u8, text, stop) != null) return true;
-        return false;
-    }
-};
-
-/// ``{key: text}``: a streamed delta (role, content or reasoning_content).
-pub fn deltaOf(a: Allocator, key: []const u8, text: []const u8) Allocator.Error!Value {
-    const o = try json.newObject(a);
-    try o.put(a, key, .{ .string = text });
-    return .{ .object = o };
-}

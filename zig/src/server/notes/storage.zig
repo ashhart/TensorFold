@@ -34,6 +34,7 @@ pub const Storage = struct {
     scratch: ?@import("lookup.zig").Scratch = null, // the lookups' (retrieve.zig), made again when it has too little room
     language: @import("lang.zig").Lang = .en, // past-cue language when a request omits notes_language (--notes-language)
     lookup: @import("retrieve.zig").Lookup = .who, // a chat request's lookup when it sends no notes_lookup (English only)
+    gen: u64 = 0, // bumped when a write or erase swaps the live index; live fetch stops if it changes mid-reply
 
     /// File-backed startup checks tokenizer identity before opening or replaying the journal.
     pub fn open(parent: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Storage {
@@ -218,6 +219,8 @@ pub const Pending = struct {
         s.journal.?.next_id = s.model.nextId();
         const old = s.idx;
         s.idx = p.idx;
+        s.gen += 1;
+        p.idx.ver = s.gen;
         if (old) |x| x.deinit();
         p.committed = true;
     }
