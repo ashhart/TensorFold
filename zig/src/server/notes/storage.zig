@@ -122,6 +122,7 @@ pub const Storage = struct {
                 try s.journal.?.rewrite(arena.allocator(), stable.items, s.log.next_source);
             }
         }
+        errdefer if (s.journal) |*j| j.deinit();
         s.idx = index.Index.buildKind(g, m, kind) catch |e| {
             if (e == error.Unsupported) problem.* = "the suffix-array index needs a vocabulary whose keys are all real and whose ids of one key agree on being a word";
             return e;

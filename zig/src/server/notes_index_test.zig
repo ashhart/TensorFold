@@ -113,6 +113,27 @@ test "a vocabulary the suffix array cannot match as the postings do is refused" 
     defer post.deinit();
 }
 
+test "an unsupported suffix-array load with a journal path closes the journal" {
+    var bytes: @import("notes_storage_bytes_test.zig").Bytes = .{};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ dir, "notes.journal" });
+    const at = std.mem.indexOf(u8, snapshot, "\"wordy\":\"").? + "\"wordy\":\"".len;
+    const bad = try testing.allocator.dupe(u8, snapshot);
+    defer testing.allocator.free(bad);
+    try testing.expect(bad[at + 'a'] == '1');
+    bad[at + 'a'] = '0';
+    var problem: []const u8 = "";
+    try testing.expectError(error.Unsupported, Storage.loadKind(testing.allocator, bad, bytes.text(), path, .sa, &problem));
+    const post = try Storage.loadKind(testing.allocator, bad, bytes.text(), path, .postings, &problem);
+    defer post.deinit();
+    try testing.expectEqual(index.Kind.postings, post.kind);
+}
+
 test "storage load builds the default suffix-array index, postings on request" {
     var bytes: @import("notes_storage_bytes_test.zig").Bytes = .{};
     var problem: []const u8 = "";
