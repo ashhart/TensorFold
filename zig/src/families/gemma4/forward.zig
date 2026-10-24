@@ -55,7 +55,7 @@ pub fn prepare(s: *state.Scratch, segments: []const Segment, ids: []const u32, c
 
 /// A projection: the row path on a chip without tensor units; at 4/64 on the group sums its input's kernel wrote.
 fn project(m: *Model, s: *state.Scratch, e: mtl.ComputeEncoder, l: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
-    if (l.raw) |raw| return weights.projectRow(&m.projections, m.device, e, raw, l, x, y, rows);
+    if (l.raw) |raw| return weights.projectRow(&m.projections, m.device, e, raw, l, .{ .buf = x }, y, rows);
     const p = try m.projections.get(m.gpa, m.device, l);
     const out: lane.Ref = .{ .buf = y, .off = l.col * 2 };
     if (!l.reg()) return l.encodeRows(p, e, .{ .buf = x }, out, rows);

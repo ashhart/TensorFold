@@ -301,11 +301,11 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
 }
 
 /// The row path's projection (a chip without tensor units): the checkpoint's arrays as stored on the simdgroup tiles.
-pub fn projectRow(ps: *Projections, device: mtl.Device, e: mtl.ComputeEncoder, raw: rowp.Weights, l: Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
+pub fn projectRow(ps: *Projections, device: mtl.Device, e: mtl.ComputeEncoder, raw: rowp.Weights, l: Linear, x: lane.Ref, y: mtl.Buffer, rows: usize) !void {
     const p = try ps.simd(device);
     const mtx = rowp.simd_bits.Matrix{ .w = raw.w, .scales = raw.scales, .biases = raw.biases };
     const call = try rowp.simd_bits.call(p, raw.bits, raw.n, raw.k, rows, l.y_stride orelse l.n, false);
-    rowp.simd_bits.encode(e, call, mtx, x, 0, y, l.col * 2);
+    rowp.simd_bits.encode(e, call, mtx, x.buf, x.off, y, l.col * 2);
 }
 
 /// The lane pipelines, one per distinct (n, k, width, stride, prologue).

@@ -77,7 +77,7 @@ fn biasOrder(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, ps: *g4
     defer y.deinit();
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    try g4.weights.projectRow(ps, device, e, l.raw.?, l, x, y, rows);
+    try g4.weights.projectRow(ps, device, e, l.raw.?, l, .{ .buf = x }, y, rows);
     e.end();
     cb.commit();
     cb.wait();
@@ -195,7 +195,7 @@ pub fn main(_: std.process.Init) !void {
     {
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        try g4.weights.projectRow(&projections, device, e, linear.raw.?, linear, x, y, rows);
+        try g4.weights.projectRow(&projections, device, e, linear.raw.?, linear, .{ .buf = x }, y, rows);
         e.end();
         cb.commit();
         cb.wait();

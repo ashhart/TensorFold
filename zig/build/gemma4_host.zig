@@ -27,6 +27,11 @@ pub fn tests(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = if (filter) |f| &.{f} else &.{} }));
     run.has_side_effects = true;
     b.step("test-gemma4-affine-host", "Record actual shared dispatch without devices or shader compilation").dependOn(&run.step);
+    const head_fake = b.createModule(.{ .root_source_file = b.path("zig/gemma4_head_metal.zig"), .target = b.graph.host });
+    const head_root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_head_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = head_fake }, .{ .name = "kernel_sources", .module = sources } } });
+    const head_run = b.addRunArtifact(b.addTest(.{ .root_module = head_root }));
+    head_run.has_side_effects = true;
+    b.step("test-gemma4-prompt-head-host", "Last prompt-row and decode projection bindings against synthetic layer logits").dependOn(&head_run.step);
     return family_step;
 }
 
