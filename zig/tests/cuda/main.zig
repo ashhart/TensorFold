@@ -233,6 +233,7 @@ const usage =
     \\  glm-paged-check <ckpt> <rank> <world> <idfile>  a paged stream (pages out of order, NaN first) against a whole-window twin
     \\  dory MODEL LOOPS N TEXT     Dory (NVFP4): N greedy tokens from TEXT, then verify windows of 2 to 16 rows bit-equal
     \\  dory-serve MODEL LOOPS TEXT N   Dory served: eager == graphs, copy drafts == plain, 2/4/8 streams == solo
+    \\  dory-states MODEL LOOPS TEXT N  Dory kept prompt states at 8k and 32k resumed into wiped caches == fresh
     \\  dory-bench MODEL LOOPS TEXT N [STREAMS...]  Dory greedy decode tok/s at 1/2/4/8 streams (graphs on)
     \\  kolibri-reference MODEL IDS  Kolibri-1's layer 0 and head against float64 from the checkpoint (prompt and decode rows)
     \\  kolibri-layers MODEL IDS    Kolibri-1's window edge (513 keys) and its fifth layer's full reach, on the checkpoint

@@ -91,8 +91,10 @@ pub fn teardown(x: *Setup, gpa: std.mem.Allocator) void {
     gpa.free(x.ids);
 }
 
+/// tf-cuda-test dory-serve|dory-states|dory-bench MODEL LOOPS TEXT N [STREAMS...]
 pub fn run(gpu: Gpu, cmd: []const u8, rest: []const []const u8) !void {
     if (std.mem.eql(u8, cmd, "dory-serve")) return serve(gpu, rest);
+    if (std.mem.eql(u8, cmd, "dory-states")) return @import("dory_states_tests.zig").states(gpu, rest);
     if (std.mem.eql(u8, cmd, "dory-bench")) return bench(gpu, rest);
     return error.UnknownCommand;
 }
