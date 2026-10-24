@@ -55,14 +55,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope8(Geo geo, __nv_bfl
 #include "qwen35_attn_tc.cuh"
 
 // Decode attention over e4m3 rows on tensor cores: a short stream's rows a block each, a long stream's in groups.
-extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
-                                                                         const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
-                                                                         const int* __restrict__ P, float scale,
-                                                                         float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
-    __shared__ __align__(16) uint4 kt[tf_q35_tc::TK * tf_q35_tc::CH], vt[tf_q35_tc::TK * tf_q35_tc::CH];
-    __shared__ float ksc[tf_q35_tc::TK], vsc[tf_q35_tc::TK];
-    tf_q35_tc::attn_one<tf_q35_tc::Fp8Tiles<128>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc, layer, P, scale, PM, PL, PO);
-}
+
 
 // A layer's block in Seg.kv: kvh * cap rows of HD bytes for keys then values, then kvh * cap fp32 scales for each.
 __device__ __forceinline__ unsigned char* layer_at(const Seg& sg, int layer, int kvh) {
@@ -131,7 +124,7 @@ extern "C" __global__ void tf_q35_attn_partial8_contiguous(Geo geo, const __nv_b
 }
 
 // tf_q35_attn_partial over e4m3 rows: a key's dot taken on its codes, then scaled; a value's weight carries its scale.
-extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+extern "C" __global__ void tf_q35_attn_partial8_legacy(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                   const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                   const int* __restrict__ P, float scale,
                                                   float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
@@ -287,4 +280,23 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35k_compact8(Geo geo, Seg 
         }
         __syncthreads();
     }
+}
+
+
+extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+                                                                         const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
+                                                                         const int* __restrict__ P, float scale,
+                                                                         float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+    __shared__ __align__(16) uint4 kt[tf_q35_tc::TK * tf_q35_tc::CH], vt[tf_q35_tc::TK * tf_q35_tc::CH];
+    __shared__ float ksc[tf_q35_tc::TK], vsc[tf_q35_tc::TK];
+    tf_q35_tc::attn_one<tf_q35_tc::Fp8Tiles<128>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc, layer, P, scale, PM, PL, PO);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_q35_attn_rows8(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+                                                                      const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
+                                                                      const int* __restrict__ P, float scale, int total,
+                                                                      float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+    __shared__ __align__(16) uint4 kt[tf_q35_tc::TK * tf_q35_tc::CH], vt[tf_q35_tc::TK * tf_q35_tc::CH];
+    __shared__ float ksc[tf_q35_tc::TK], vsc[tf_q35_tc::TK];
+    tf_q35_tc::attn_rows<4, tf_q35_tc::Fp8Tiles<256>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO);
 }

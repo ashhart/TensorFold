@@ -564,7 +564,7 @@ pub fn run(gpu: check.Gpu) !void {
         .rig = .{ .gpu = gpu, .s = s },
         .form = f,
         .partial = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8_contiguous") else q35_mod.function("tf_q35_attn_partial_contiguous"),
-        .baseline = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8") else q35_mod.function("tf_q35_attn_partial"),
+        .baseline = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8_legacy") else q35_mod.function("tf_q35_attn_partial_legacy"),
         .merge = try q35_mod.function("tf_q35_attn_merge"),
     };
     defer for (&contiguous) |*x| x.deinit();

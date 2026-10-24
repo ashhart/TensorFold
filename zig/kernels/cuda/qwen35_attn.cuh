@@ -60,7 +60,7 @@ extern "C" __global__ void tf_q35_attn_partial_contiguous(Geo geo, const __nv_bf
     for (int i = 0; i < DPL; i++) PO[slot * HD + lane * DPL + i] = o[i];
 }
 
-extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+extern "C" __global__ void tf_q35_attn_partial_legacy(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                  const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                  const int* __restrict__ P, float scale,
                                                  float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {

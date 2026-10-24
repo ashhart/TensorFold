@@ -2,6 +2,8 @@
 const CudaRecord = @import("registry.zig").CudaRecord;
 const none = @import("registry.zig").none;
 pub const records = [_]CudaRecord{
+    .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial_legacy", .symbol = "tf_q35_attn_partial_legacy", .image = "qwen35", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8_legacy", .symbol = "tf_q35_attn_partial8_legacy", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
     .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_1", .symbol = "tf_q35_gdn_slots_1", .image = "qwen35", .threads = 128 }, .usage = .{ .{ .regs = 64, .static = 4096, .bound = 128 }, .{ .regs = 63, .static = 4096, .bound = 128 }, .{ .regs = 63, .static = 4096, .bound = 128 }, .{ .regs = 64, .static = 4096, .bound = 128 }, .{ .regs = 64, .static = 4096, .bound = 128 } }, .later_pending = true },
     .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_2", .symbol = "tf_q35_gdn_slots_2", .image = "qwen35", .threads = 128 }, .usage = .{ .{ .regs = 64, .static = 8192, .bound = 128 }, .{ .regs = 63, .static = 8192, .bound = 128 }, .{ .regs = 63, .static = 8192, .bound = 128 }, .{ .regs = 64, .static = 8192, .bound = 128 }, .{ .regs = 64, .static = 8192, .bound = 128 } }, .later_pending = true },
     .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_4", .symbol = "tf_q35_gdn_slots_4", .image = "qwen35", .threads = 128 }, .usage = .{ .{ .regs = 64, .static = 16384, .bound = 128 }, .{ .regs = 84, .static = 16384, .bound = 128 }, .{ .regs = 84, .static = 16384, .bound = 128 }, .{ .regs = 84, .static = 16384, .bound = 128 }, .{ .regs = 84, .static = 16384, .bound = 128 } }, .later_pending = true },

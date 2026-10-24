@@ -24,7 +24,7 @@ const most_window = 64;
 
 /// cuda_engine.zig's Geo, cuda_cache.zig's Seg and cuda_round.zig's Ancestor, as the kernels read them.
 const Geo = extern struct { hid: c_int = 5120, nk: c_int = 16, nv: c_int = 48, qh: c_int = qh, kvh: c_int = kvh, nl: c_int = 1 };
-const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0 };
+const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0 };
 const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
 
 pub const Cache = enum { bf16, fp8 };

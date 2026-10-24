@@ -45,8 +45,8 @@ const nan_key = "a NaN key in one of a row's several chunks leaves the row finit
 
 pub fn spec(f: Form) c.Spec {
     const name = switch (f.cache) {
-        .bf16 => if (f.control) "control qwen35 contiguous attention dropping each row's last chunk" else "cuda qwen35 contiguous attention, bf16 cache (tf_q35_attn_partial, tf_q35_attn_merge)",
-        .fp8 => "cuda qwen35 contiguous attention, fp8 cache (tf_q35_attn_partial8, tf_q35_attn_merge)",
+        .bf16 => if (f.control) "control qwen35 contiguous attention dropping each row's last chunk" else "cuda qwen35 contiguous attention, bf16 cache (tf_q35_attn_partial_legacy, tf_q35_attn_merge)",
+        .fp8 => "cuda qwen35 contiguous attention, fp8 cache (tf_q35_attn_partial8_legacy, tf_q35_attn_merge)",
     };
     // Verify windows, prompt chains, chunk-width seams and long cold prefixes keep their original key order.
     const served: []const c.Shape = &.{ .{ .rows = 16, .n = qh, .k = 2100 }, .{ .rows = 64, .n = qh, .k = 700 }, .{ .rows = 128, .n = qh, .k = 300 }, .{ .rows = 16, .n = qh, .k = 9000 }, .{ .rows = 1, .n = qh, .k = 32768 }, .{ .rows = 1, .n = qh, .k = 65536 } };

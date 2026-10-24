@@ -68,7 +68,10 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                 try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
                 try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos });
-                if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
+                if (shape.paged) {
+                    try @import("cuda_attention.zig").partial(e, shape, ai);
+                    try launch(e, e.fns.attn_merge, sig.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
+                } else if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
                     try @import("cuda_prompt.zig").run(e, @intCast(ai), total);
                 } else {
