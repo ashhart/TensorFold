@@ -300,7 +300,7 @@ libwebp, Pillow or PyTorch code is included.
 - `zig/src/families/lfm2/image.zig` ports transformers' `Lfm2VlImageProcessor` and `Lfm2VlProcessor` (smart resize,
   tile grid, placeholder tokens). Apache License 2.0, Copyright 2025 the HuggingFace Inc. team; see
   [the license text](LICENSES/Apache-2.0.txt).
-- `zig/src/families/cosmos3/` ports transformers' Cosmos3-Edge reasoner (`modeling_cosmos3_edge.py`: the SigLIP2
+- `zig/src/families/cosmos3/` (with its CUDA glue, `zig/kernels/cuda/cosmos3.cu`) ports transformers' Cosmos3-Edge reasoner (`modeling_cosmos3_edge.py`: the SigLIP2
   tower with its learned position grid resized as `F.interpolate(..., antialias=True)` does, the patch merger, the
   interleaved M-RoPE text model) and its image processor (Glm4v geometry, block-major HWC patches), and
   `tools/cosmos3_edge_to_mlx.py` reads the checkpoint through it. Apache License 2.0, Copyright 2026 NVIDIA
