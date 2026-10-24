@@ -162,7 +162,7 @@ pub fn run(
             ),
             .moe => |w| {
                 try moeResidual(o, m, d, w, normed, rows, x, next, dst);
-                if (ctx.trace) |t| t.layer(t.ctx, i, x, rows) catch return error.BadShape;
+                try traceLayer(ctx.trace, i, x, rows);
                 continue;
             },
         };
