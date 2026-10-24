@@ -58,6 +58,13 @@ pub const Tower = struct {
         return t;
     }
 
+    /// The device bytes init allocates for its scratch.
+    pub fn workspaceBytes() u64 {
+        const p: u64 = max_patches;
+        const n: u64 = image.max_budget;
+        return p * wts.patch_width * 2 + 11 * p * W * 2 + 3 * p * wts.tower_inter * 2 + 2 * p * 4 + 2 * p * D * 2 + 2 * n * W * 2 + p * W * 4;
+    }
+
     fn alloc(t: *Tower, d: *const cuda.Driver, bytes: usize) !u64 {
         const b = try cuda.DeviceBuffer.alloc(d, bytes);
         errdefer {
