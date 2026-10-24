@@ -26,7 +26,7 @@ pub fn run(r: *Rig, set: glm.glue.Set) !void {
         const input = try r.dev(std.mem.sliceAsBytes(x));
         const fp_cache = try r.zeros(try latent.cacheBytes(capacity, lw, true));
         const scales = fp_cache + capacity * lw;
-        try latent.latentWriteFormat(set, r.s, input, stride, fp_cache, scales, try position(r, 0), keys, lw);
+        try latent.latentWriteFormat(set, r.s, input, stride, fp_cache, scales, .{}, try position(r, 0), keys, lw);
         const want_codes = try r.a.alloc(u8, keys * lw);
         const want_scales = try r.a.alloc(f32, keys);
         const decoded = try r.a.alloc(u16, capacity * lw);
@@ -48,7 +48,7 @@ pub fn run(r: *Rig, set: glm.glue.Set) !void {
             const split = try r.zeros(try latent.cacheBytes(capacity, lw, true));
             const ss = split + capacity * lw;
             var row: usize = 0;
-            while (row < keys) : (row += chunk) try latent.latentWriteFormat(set, r.s, input + row * stride * 2, stride, split, ss, try position(r, row), @min(chunk, keys - row), lw);
+            while (row < keys) : (row += chunk) try latent.latentWriteFormat(set, r.s, input + row * stride * 2, stride, split, ss, .{}, try position(r, row), @min(chunk, keys - row), lw);
             try check.sameBytes("GLM FP8 chunk-independent row codes", try r.back(split, keys * lw), want_codes);
             try check.sameBytes("GLM FP8 chunk-independent scales", try r.back(ss, keys * 4), std.mem.sliceAsBytes(want_scales));
         }
@@ -69,14 +69,14 @@ pub fn run(r: *Rig, set: glm.glue.Set) !void {
         for ([_]usize{ 16, 32 }) |hb| {
             const fp_out = try r.zeros(rows * heads * lw * 2);
             const bf_out = try r.zeros(rows * heads * lw * 2);
-            try latent.attentionFormat(set, r.s, dq, fp_cache, scales, at, try partials(r, nch, rows), fp_out, try r.zeros(4), rows, heads, lw, nch, 0.125, hb);
-            try latent.attention(set, r.s, dq, bf_cache, at, try partials(r, nch, rows), bf_out, try r.zeros(4), rows, heads, lw, nch, 0.125, hb);
+            try latent.attentionFormat(set, r.s, dq, fp_cache, scales, .{}, at, try partials(r, nch, rows), fp_out, try r.zeros(4), rows, heads, lw, nch, 0.125, hb);
+            try latent.attention(set, r.s, dq, bf_cache, .{}, at, try partials(r, nch, rows), bf_out, try r.zeros(4), rows, heads, lw, nch, 0.125, hb);
             const wide = try r.back(fp_out, rows * heads * lw * 2);
             try check.sameBytes("GLM FP8 reader equals reconstructed BF16 cache", wide, try r.back(bf_out, wide.len));
             try ref.closeCols(r, "GLM FP8 reconstructed attention vs FP64", fp_out, false, want.want, want.tol, lw);
             for (0..rows) |row| {
                 const one = try r.zeros(heads * lw * 2);
-                try latent.attentionFormat(set, r.s, dq + row * heads * lw * 2, fp_cache, scales, try position(r, pos + row), try partials(r, nch, 1), one, try r.zeros(4), 1, heads, lw, nch, 0.125, hb);
+                try latent.attentionFormat(set, r.s, dq + row * heads * lw * 2, fp_cache, scales, .{}, try position(r, pos + row), try partials(r, nch, 1), one, try r.zeros(4), 1, heads, lw, nch, 0.125, hb);
                 try check.sameBytes("GLM FP8 concurrent row equals solo row", try r.back(one, heads * lw * 2), wide[row * heads * lw * 2 ..][0 .. heads * lw * 2]);
             }
         }
@@ -86,8 +86,8 @@ pub fn run(r: *Rig, set: glm.glue.Set) !void {
         const dc = try r.dev(std.mem.asBytes(&counts));
         const sparse_fp = try r.zeros(rows * heads * lw * 2);
         const sparse_bf = try r.zeros(rows * heads * lw * 2);
-        try latent.sparseAttentionFormat(set, r.s, dq, fp_cache, scales, dt, dc, 3, try partials(r, 1, rows), sparse_fp, rows, heads, lw, 0.125);
-        try latent.sparseAttention(set, r.s, dq, bf_cache, dt, dc, 3, try partials(r, 1, rows), sparse_bf, rows, heads, lw, 0.125);
+        try latent.sparseAttentionFormat(set, r.s, dq, fp_cache, scales, .{}, dt, dc, 3, try partials(r, 1, rows), sparse_fp, rows, heads, lw, 0.125);
+        try latent.sparseAttention(set, r.s, dq, bf_cache, .{}, dt, dc, 3, try partials(r, 1, rows), sparse_bf, rows, heads, lw, 0.125);
         try check.sameBytes("GLM FP8 sparse reader and count-zero preservation", try r.back(sparse_fp, rows * heads * lw * 2), try r.back(sparse_bf, rows * heads * lw * 2));
     }
     check.pass("GLM FP8 synthetic format, masking, row/chunk identity and reconstructed BF16/FP64 attention", .{});

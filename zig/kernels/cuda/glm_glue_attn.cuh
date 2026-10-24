@@ -54,7 +54,7 @@ constexpr int wide_smem() {
 template <int HB, bool FP8 = false>
 __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
                             const int* cnt, float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w,
-                            float scale, int sparse, const float* scales = nullptr) {
+                            float scale, int sparse, const int* pt, int64_t pstep, const float* scales = nullptr) {
   constexpr int MT = HB / 16;
   extern __shared__ __align__(16) unsigned char smem[];
   __nv_bfloat16* qs = reinterpret_cast<__nv_bfloat16*>(smem);
@@ -67,6 +67,8 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
   const int64_t r = blockIdx.x, h0 = (int64_t)blockIdx.y * HB, c = blockIdx.z;
   const int64_t n = sparse ? cnt[r] : 0, limit = sparse ? 0 : (int64_t)pos[0] + r, start = c * CH;
   const bool live = sparse ? start < n : start <= limit;
+  // a dense chunk's 512 keys are one page, its rows from that page's; a sparse key's row comes as the token list has it
+  const __nv_bfloat16* keys_at = !FP8 && pt && !sparse && live ? lc + ((int64_t)pt[c] * (pstep / 2) - start * LW) : lc;
   auto load_kv = [&](int tile) {
     __nv_bfloat16* dst = kvs + (tile & 1) * KT * LW;
     const int64_t first = start + tile * KT;
@@ -87,7 +89,7 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
           dst[wide(key, u) + j + 1] = __float2bfloat16_rn(__fmul_rn(v.y, row_scale));
         }
       } else {
-        cp16(dst + wide(key, u), lc + src * LW + u * 8, ok);
+        cp16(dst + wide(key, u), keys_at + src * LW + u * 8, ok);
       }
     }
   };
@@ -221,14 +223,16 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
 // The 16-head form (decode windows) and 32-head form (prompt chunks), each in glm_attn::wide_smem<HB>() bytes of smem.
 extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_16(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
-                     float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
-  glm_attn::chunks_wide<16>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse);
+                     float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse,
+                     const int* pt, int64_t pstep) {
+  glm_attn::chunks_wide<16>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse, pt, pstep);
 }
 
 extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_32(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
-                     float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
-  glm_attn::chunks_wide<32>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse);
+                     float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse,
+                     const int* pt, int64_t pstep) {
+  glm_attn::chunks_wide<32>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse, pt, pstep);
 }
 
 // E4M3 cache variants reconstruct the existing BF16 shared tile before the unchanged attention math.
@@ -237,14 +241,14 @@ extern "C" __global__ void __launch_bounds__(256)
                          const int* tok, const int* cnt, float* po, float* pm, float* pl,
                          int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
   glm_attn::chunks_wide<16, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
-                                 po, pm, pl, rows, heads, w, scale, sparse, scales);
+                                 po, pm, pl, rows, heads, w, scale, sparse, nullptr, 0, scales);
 }
 extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_32_fp8(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
                          const int* tok, const int* cnt, float* po, float* pm, float* pl,
                          int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
   glm_attn::chunks_wide<32, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
-                                 po, pm, pl, rows, heads, w, scale, sparse, scales);
+                                 po, pm, pl, rows, heads, w, scale, sparse, nullptr, 0, scales);
 }
 
 // latent._merge, block (row, head), 128 threads: chunks merged in order, o / l by div.full; skips sparse count-0 rows.
@@ -279,7 +283,7 @@ extern "C" __global__ void __launch_bounds__(128)
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_scores(const __nv_bfloat16* qi, const __nv_bfloat16* wts, int64_t w_stride, const __nv_bfloat16* pk,
                   float* out, const int* pos, int64_t np, int64_t nb, float scale, float wscale, int64_t heads,
-                  int loop) {
+                  int loop, const int* pt, int64_t ps) {
   constexpr int D = 128, HP = 32, BP = 64;
   __shared__ __align__(16) __nv_bfloat16 sm[4 * 2 * 16 * D];  // q's 32 rows, then each warp's two 16-pool buffers
   auto at = [](int row, int u) { return row * D + ((u ^ (row & 7)) << 3); };
@@ -296,14 +300,15 @@ extern "C" __global__ void __launch_bounds__(128)
     const int64_t hh = g + 8 * i;
     wv[i] = hh < heads ? glm_triton::fmul(__bfloat162float(wts[r * w_stride + hh]), wscale) : 0.0f;
   }
-  // A block's pools for this warp: rows p0 .. p0 + 15 of pk, 16 chunks of 16 bytes each, 8 a lane.
+  // A block's pools for this warp: rows p0 .. p0 + 15 of pk (16 | p0: one page), 16 chunks of 16 bytes, 8 a lane.
   auto stage = [&](int buf, int64_t p0) {
+    const __nv_bfloat16* src = pk + glm_pages::at<128>(pt, ps / 2, p0 < npool ? p0 : 0, D);
 #pragma unroll
     for (int t = 0; t < 8; ++t) {
       const int idx = lane + t * 32, row = idx / (D / 8), u = idx % (D / 8);
       const int64_t p = p0 + row;
       const bool ok = p < npool;
-      glm_attn::cp16(sm + (warp * 2 + buf) * 16 * D + at(row, u), pk + (ok ? p : 0) * D + u * 8, ok);
+      glm_attn::cp16(sm + (warp * 2 + buf) * 16 * D + at(row, u), src + (ok ? row : 0) * D + u * 8, ok);
     }
   };
   const int64_t first = (int64_t)blockIdx.y * loop;

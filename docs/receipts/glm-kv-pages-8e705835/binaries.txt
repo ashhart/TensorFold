@@ -1,0 +1,11 @@
+bin-8e705835: 8e705835 built with Zig 0.17.0 and nvcc 13.3 (V13.3.73) for sm_121; TP=2's ranks and the checks
+0c7727776fda6e2838ce71bdde2cc4192cec7ef30b073634b529bb21e4bf84d2  tensorfold-native
+0c7727776fda6e2838ce71bdde2cc4192cec7ef30b073634b529bb21e4bf84d2  tensorfold-native-r9
+15eb214d024fafbcf1b102b436672f1dfcda0a3e21b77f7e5165a42cd91bc791  tf-cuda-test
+
+bin-f8d254c5: main f8d254c5 built the same way; the replay on main and the A/B's main serves
+d9181ac075f36ee5c118ef0b38513f6ebf61ab9fba312dbe592f2c434bd02a39  tensorfold-native
+
+bin-10698886: 8e705835 with tp3/ring.patch above it, built the same way; TP=3's ranks and check
+eed66a8b83e10eb3190fa7b86babb8881b4390a9158904e39e5bbce3dc5ec18e  tensorfold-native
+6530f1e42385bf43e015a6db68abdbe9fc7f1f84b1aef3a9b16f5f63a1384418  tf-cuda-test

@@ -1,0 +1,39 @@
+info: checkpoint digest: 0.0 GiB read in 0.0 s, 1/1 cached files
+PASS all at once: stream 0 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS all at once: stream 1 (prompt 1) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS all at once: stream 2 (prompt 2) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS all at once: 3 streams at most in one round, 127 rounds with two or more
+PASS staggered by 5 rounds: stream 0 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS staggered by 5 rounds: stream 1 (prompt 1) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS staggered by 5 rounds: stream 2 (prompt 2) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS staggered by 5 rounds: 3 streams at most in one round, 127 rounds with two or more
+PASS in reverse: stream 0 (prompt 2) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS in reverse: stream 1 (prompt 1) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS in reverse: stream 2 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS in reverse: 3 streams at most in one round, 127 rounds with two or more
+PASS the same prompt twice: stream 0 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS the same prompt twice: stream 1 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS the same prompt twice: 2 streams at most in one round, 127 rounds with two or more
+PASS sampled: stream 0 (prompt 0, sampled) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS sampled: stream 1 (prompt 1, sampled) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS sampled: stream 2 (prompt 2, sampled) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS sampled: 3 streams at most in one round, 127 rounds with two or more
+PASS the second discarded after 6 rounds: stream 0 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS the second discarded after 6 rounds: stream 2 (prompt 2) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS the second discarded after 6 rounds: 3 streams at most in one round, 127 rounds with two or more
+PASS prompts a chunk at a time while the others decode: stream 0 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS prompts a chunk at a time while the others decode: stream 1 (prompt 1) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS prompts a chunk at a time while the others decode: stream 2 (prompt 2) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS prompts a chunk at a time while the others decode: 3 streams at most in one round, 127 rounds with two or more
+PASS prompts a chunk at a time while the others decode: 2 rounds of the others between a prompt's chunks
+PASS every prompt a chunk at a time: stream 0 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS every prompt a chunk at a time: stream 1 (prompt 1) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS every prompt a chunk at a time: stream 2 (prompt 2) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS every prompt a chunk at a time: 3 streams at most in one round, 127 rounds with two or more
+PASS every prompt a chunk at a time: 2 rounds of the others between a prompt's chunks
+PASS sampled, prompts a chunk at a time: stream 0 (prompt 0, sampled) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS sampled, prompts a chunk at a time: stream 1 (prompt 1, sampled) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS sampled, prompts a chunk at a time: stream 2 (prompt 2, sampled) against its solo run: 128 ids equal, finished by length (127 rounds)
+PASS sampled, prompts a chunk at a time: 3 streams at most in one round, 127 rounds with two or more
+PASS sampled, prompts a chunk at a time: 2 rounds of the others between a prompt's chunks
+PASS 1143 forwards held several streams' windows (Engine.verifyShared)

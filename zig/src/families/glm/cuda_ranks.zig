@@ -8,6 +8,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
     kv8: bool = false, // --kv-cache fp8, supplied by the native options rather than an environment override
+    pages: bool = false, // TF_KV_PAGES as `open` resolves it (with the world and --kv-cache): every sequence on pages
     prompt_fixed_k: bool = false, // TF_GLM_PROMPT_K: one (default) or shape (experimental fixed K slices)
     tiled: bool = true, // TF_GLM_MM: 1 (the bf16 linears on glm_mm, tiled at load) or 0
     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
@@ -99,10 +100,11 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 11, // this struct's version
+    layout: u32 = 12, // this struct's version
     world: u32,
     rank: u32,
     kv8: u32 = 0,
+    pages: u32 = 0, // TF_KV_PAGES: the engine's own sequence is made on pages at init, so every rank pages alike
     prompt_fixed_k: u32,
     tiled: u32,
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
@@ -128,6 +130,7 @@ pub const Fingerprint = extern struct {
         rank,
         world,
         kv8,
+        pages,
         prompt_fixed_k,
         tiled,
         split,
@@ -161,6 +164,7 @@ pub const Fingerprint = extern struct {
     ) Fingerprint {
         const f: Fingerprint = .{
             .kv8 = @intFromBool(s.kv8),
+            .pages = @intFromBool(s.pages),
             .world = @intCast(world),
             .rank = @intCast(rank),
             .prompt_fixed_k = @intFromBool(s.prompt_fixed_k),
@@ -191,6 +195,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
         if (f.rank != r) return .{ .field = .rank, .rank = r };
         const fields = .{
             "kv8",
+            "pages",
             "prompt_fixed_k",
             "world",
             "tiled",
@@ -299,6 +304,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .rank => "a rank number given twice or out of order",
         .world => "the ranks were started with different world sizes",
         .kv8 => "--kv-cache fp8",
+        .pages => "TF_KV_PAGES (unset or auto pages from three ranks)",
         .prompt_fixed_k => "TF_GLM_PROMPT_K",
         .tiled => "TF_GLM_MM",
         .split => "TF_GLM_PREFILL_REDUCE",
@@ -378,6 +384,8 @@ test "fingerprints: agreeing ranks pass; the first differing field and rank are 
     const heat_on: Settings = .{ .heat = .{ .high_c = 92, .low_c = 88 } };
     all[1] = Fingerprint.of(2, 1, heat_on, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
     try std.testing.expectEqual(Fingerprint.Field.heat_high, mismatch(&all).?.field);
+    all[1] = Fingerprint.of(2, 1, .{ .pages = true }, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
+    try std.testing.expectEqual(Mismatch{ .field = .pages, .rank = 1 }, mismatch(&all).?); // TF_KV_PAGES on one rank
     all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, hashBytes("/hub/snapshots/other"));
     try std.testing.expectEqual(Fingerprint.Field.checkpoint, mismatch(&all).?.field);
     all[1] = Fingerprint.of(2, 1, .{}, 8192, false, h0, h0, hashBytes("/hub/snapshots/423acf37")); // --no-drafts on rank 1 only
@@ -501,7 +509,7 @@ test "every media limit is part of the ranks' agreement" {
 test "every scheduling and identity field that differs stops the ranks" {
     const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
     const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
-    inline for (.{ "layout", "world", "rank", "split", "kda_wide", "pieces", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "capacity", "heat_high", "heat_low" }) |name| {
+    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "pieces", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "capacity", "heat_high", "heat_low" }) |name| {
         var all = [_]Fingerprint{ zero, one };
         @field(all[1], name) += 1;
         try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);

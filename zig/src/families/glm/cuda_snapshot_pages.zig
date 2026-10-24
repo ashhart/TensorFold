@@ -57,9 +57,9 @@ pub const Pool = struct {
             while (done < part.len) {
                 const at = off + done;
                 const target = arena.ptr + @as(u64, lease.ids.items[at / page]) * page + at % page;
-                const n = @min(part.len - done, page - at % page);
-                const live = part.live + done;
-                try arena.d.check(arena.d.api.cuMemcpyDtoDAsync_v2(if (into) target else live, if (into) live else target, n, stream.handle), "cuMemcpyDtoDAsync");
+                const live = plan.piece(part, done);
+                const n = @min(live.len, page - at % page);
+                try arena.d.check(arena.d.api.cuMemcpyDtoDAsync_v2(if (into) target else live.live, if (into) live.live else target, n, stream.handle), "cuMemcpyDtoDAsync");
                 done += n;
             }
             off += part.len;

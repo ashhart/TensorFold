@@ -1,0 +1,12 @@
+2026-10-23 10:18:38 -- R6 chain on kvp-tp3-r9 from check; rank.env without TF_GLM_MM (1.1.2's default)
+2026-10-23 10:18:52 binaries from 04's tp3: tensorfold-native eed66a8b83e10eb3, tf-cuda-test 6530f1e42385bf43
+2026-10-23 10:19:19 setup rc 0: <container> up on host-a: /hub is <home>/.cache/huggingface/h <container> up on host-b: /hub is <home>/.cache/huggingface/h <container> up on host-c: /hub is <home>/.cache/huggingface/h
+2026-10-23 10:20:01 check: === kvp3-check pg3 rc 0 0 0
+2026-10-23 10:46:02 auto: === kvp3-phase r6auto rc 0
+2026-10-23 11:02:13 all: === kvp3-phase r6all rc 0
+2026-10-23 11:21:03 off: === kvp3-phase r6off rc 0
+2026-10-23 11:21:06 off's replay against auto's record (logs/r6-compare-off.log): rc=0      B t4 drafted prompt  19808 cached  16384: ttft   4.97 s vs fresh  26.47 s (  5.3x) PASS: 43/43 replies equal and as cached as planned timing: 0 resumed replies no sooner than fresh
+2026-10-23 11:24:11 admit: a 37.2 GiB prompt cache (the all step's room less its streams' fixed parts, and 0.9 GiB of pages but on R9's floor)
+2026-10-23 11:31:18 admit: === kvp3-phase r6admit rc 0
+2026-10-23 11:31:55 <container> stopped on 01-03; GPU processes there: 0
+== R6 finished

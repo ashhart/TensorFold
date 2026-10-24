@@ -13,6 +13,8 @@ const config = @import("config.zig");
 const shard = @import("cuda_shard.zig");
 const dflash = @import("dflash.zig");
 const dflash_load = @import("dflash_load.zig");
+const pages_mod = @import("cuda_pages.zig");
+const kv = @import("core").kv_pool;
 
 pub const model_type = "glm5_next";
 pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
@@ -59,7 +61,23 @@ pub const Loaded = struct {
     target: *engine.Engine, // the prompt cache keeps this engine's states (snap_*)
     peer_room: ?Peer = null, // rank 0: the server admits streams and kept states by this when it is smaller
     vision: ?*images_mod.Images = null, // rank 0's tower for the server's image offer
+    layout: ?kv.Layout = null, // every stream's memory as one pool of KV pages (null: a window each, by TF_KV_PAGES)
+    engine_paged: bool = false, // with a layout, the engine's own sequence takes pages too: the plan sets a window aside
 };
+
+/// The pool behind every stream: the engine's own sequence and `streams` more on `pages` KV pages, on every rank.
+pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    const l = own.layout orelse return error.NoPages;
+    try own.lanes.x.pool(streams + 1, pages, l.pageBytes());
+    own.e.pages = try pages_mod.Pages.init(own.gpa, own.e, l, streams + 1, pages, true);
+}
+
+/// Whether a request's caches fit now (the lane host's admission, on its engine thread).
+pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return own.lanes.fits(prompt, max_tokens);
+}
 
 /// This rank's place: TF_GLM_RANK of TF_GLM_WORLD (both, or neither for a refusal that names them).
 pub const Place = struct { rank: usize, world: usize };
@@ -93,6 +111,9 @@ pub fn capacity(context: usize) usize {
     return std.mem.alignForward(usize, context + fw.window_rows, 64);
 }
 
+/// A request's last verify window: the plan's window holds that many rows past the context, as `capacity` does.
+pub const window_rows: u32 = fw.window_rows;
+
 const snapshots = @import("cuda_snapshots.zig");
 
 const Owned = struct {
@@ -101,6 +122,7 @@ const Owned = struct {
     e: *engine.Engine,
     link: follow.Link,
     lanes: glm_lanes.Lanes,
+    layout: ?kv.Layout,
 };
 
 const env = @import("sys").env;
@@ -133,6 +155,16 @@ pub fn roceBytes(text: ?[]const u8) !usize {
     return std.math.mul(usize, n, 1024) catch return error.BadRoceCap;
 }
 
+/// TF_KV_PAGES: every sequence on pages, the engine's own too (on, all, any other value), or a window each (off, 0).
+fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
+    const v = text orelse "auto";
+    // unset or auto pages from TP=3 (two GB10s' room past the weights is under the prompt cache); FP8 keeps windows
+    if (std.mem.eql(u8, v, "auto")) return world >= 3 and !kv8;
+    if (std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off")) return false;
+    if (kv8) return error.Fp8OnPages;
+    return true;
+}
+
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
     const p = try place();
@@ -144,6 +176,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         return err;
     };
     set.kv8 = o.kv8;
+    set.pages = try paging(if (std.c.getenv("TF_KV_PAGES")) |v| std.mem.span(v) else null, p.world, o.kv8); // every rank
     // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
     if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
     return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes) catch |err| {
@@ -220,17 +253,21 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     }.get;
     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
     own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED") };
+    const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
+    own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
     return .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
         .rows = glm_lanes.max_rows,
-        .stream_bytes = own.e.seqBytes() + (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0), // each stream past the first makes its own sequence on every rank
+        .stream_bytes = own.e.seqBytes() + extra, // each stream past the first makes its own sequence on every rank
         .free_streams = 1, // the first is the sequence the engine made
         .ctx = own,
         .deinit = close,
         .target = own.e,
         .peer_room = peer,
         .vision = own.e.images,
+        .layout = own.layout,
+        .engine_paged = set.pages,
     };
 }
 
@@ -315,6 +352,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NoRank => "GLM-5.3-Flash runs at TP over hosts: set TF_GLM_RANK and TF_GLM_WORLD on every host (WORLD 1: one GPU, with TF_GLM_LAYERS for a thin model)",
         error.NoCommId => "GLM-5.3-Flash's ranks meet over NCCL: with TF_GLM_WORLD 2 or more, set NCCL_COMM_ID to rank 0's address:port on every host",
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",
+        error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
             .{ ranks.max_world, ranks.max_world },
@@ -331,10 +369,46 @@ test "a place inside its world of at most 16 ranks serves; a larger world is ref
     try std.testing.expect(explain(null, error.TooManyRanks) != null);
 }
 
+test "TF_KV_PAGES: auto pages from three ranks, off and 0 give windows, all and other values page like on" {
+    for ([_]usize{ 1, 2 }) |w| {
+        try std.testing.expect(!try paging(null, w, false));
+        try std.testing.expect(!try paging("auto", w, false));
+    }
+    for ([_]usize{ 3, 16 }) |w| {
+        try std.testing.expect(try paging(null, w, false));
+        try std.testing.expect(try paging("auto", w, false));
+    }
+    for ([_]usize{ 1, 2, 3 }) |w| {
+        try std.testing.expect(try paging("on", w, false));
+        try std.testing.expect(try paging("1", w, false));
+        try std.testing.expect(!try paging("off", w, false));
+        try std.testing.expect(!try paging("0", w, false));
+        try std.testing.expect(try paging("all", w, false));
+    }
+}
+
+test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank count, on and all are refused by name" {
+    for ([_]usize{ 1, 2, 3, 16 }) |w| {
+        try std.testing.expect(!try paging(null, w, true));
+        try std.testing.expect(!try paging("auto", w, true));
+        try std.testing.expect(!try paging("off", w, true));
+        try std.testing.expect(!try paging("0", w, true));
+        for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
+    }
+    try std.testing.expect(explain(null, error.Fp8OnPages) != null);
+}
+
 test "capacity keeps a verify window past the context and a multiple of 64" {
     try std.testing.expectEqual(@as(usize, 8256), capacity(8192));
     try std.testing.expectEqual(@as(usize, 330560), capacity(330529));
     try std.testing.expect(capacity(330529) % 64 == 0);
+}
+
+test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {
+    const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = @import("cuda_state.zig").page_rows, .snap_bytes = 0 };
+    for ([_]usize{ 8192, 8191, 245_760, 524_288 - 9, 524_288 - 8, 524_288 - 7, 1_048_576 }) |context| {
+        try std.testing.expectEqual(pages_mod.tableLen(capacity(context)), l.pages(context + window_rows));
+    }
 }
 
 // Enough words for every offered frame pair and image, even with a small text context.

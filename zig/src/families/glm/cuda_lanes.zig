@@ -248,17 +248,41 @@ pub const Lanes = struct {
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
+        const pages = try self.seat(s, ids.len, s.max_new);
+        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
+        try self.x.beginOn(s.sampling, pages);
+        s.cached = 0;
+        s.prompt_rows.clearRetainingCapacity();
+        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+    }
+
+    /// The stream's slot, its pages, then its sequence: a slot past the paged ones waits before binding makes a window.
+    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize) ![]const u32 {
         const l = try self.claim(s);
         l.pending_rows = null;
         l.held_n = 0;
         l.fill = null;
         l.first = null;
+        const pages = self.pagesFor(l.slot, prompt, max_new) catch |err| {
+            _ = self.lanes.remove(s); // nothing held or made: a LaneMemory request waits for a stream to end
+            return err;
+        };
         try self.x.bind(l.slot);
-        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
-        try self.x.begin(s.sampling);
-        s.cached = 0;
-        s.prompt_rows.clearRetainingCapacity();
-        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+        return pages;
+    }
+
+    /// A slot's pages for a prompt and its reply (none without a pool); LaneMemory: the pool lacks them now.
+    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize) ![]const u32 {
+        const p = self.x.e.pages orelse return &.{};
+        if (!p.paged(slot)) return error.LaneMemory; // every paged sequence is taken
+        p.close(slot); // a stream that opens again gives its earlier pages back first
+        return p.open(slot, prompt, max_new);
+    }
+
+    /// The lane host's admission: with a pool, a paged sequence and the request's pages are free.
+    pub fn fits(self: *const Lanes, prompt: usize, max_tokens: usize) bool {
+        const p = self.x.e.pages orelse return true;
+        return p.fits(prompt, max_tokens);
     }
 
     /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
@@ -479,7 +503,7 @@ pub const Lanes = struct {
         return true;
     }
 
-    /// The stream left the rounds: its sequence is freed on every rank (slot 0 stays for the next stream).
+    /// The stream left the rounds: its sequence is freed, or its pages given back, on every rank (slot 0 stays).
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const self = of(ptr);
         const kv = self.lanes.fetchRemove(s) orelse return;
