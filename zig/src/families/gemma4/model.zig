@@ -85,11 +85,11 @@ pub const Model = struct {
         m.vision = null;
         m.mm = @splat(null);
         m.config = try cfg.Config.read(gpa, io, dir);
-        m.fuse = m.config.widths.allFast(m.config.geo.layers);
         m.projections = .{ .geo = m.config.geo };
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
-        if (!m.device.tensorUnits()) return error.GemmaNeedsTensorUnits;
+        // the fused one-row path is the reg lane kernel: M5 only. Before it the row path serves the projections.
+        m.fuse = m.device.tensorUnits() and m.config.widths.allFast(m.config.geo.layers);
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.checkpoint = ckpt.Checkpoint.init(gpa);

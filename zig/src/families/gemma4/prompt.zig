@@ -14,7 +14,8 @@ const R = state.chunk_rows;
 const private = mtl.ResourceOptions.private | mtl.ResourceOptions.untracked;
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-const Q = @import("weights.zig").Mlx;
+const weights = @import("weights.zig");
+const Q = weights.Mlx;
 
 pub const Scratch = struct {
     ids: mtl.Buffer,
@@ -142,8 +143,12 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
         cur = 1 - cur;
     }
     // the head on the last row only (the lane kernel's one-row bits), soft-capped
-    const head = try m.projections.get(m.gpa, m.device, w.head);
-    try head.encode(e, .{ .buf = s.normed[cur], .off = (rows - 1) * geo.hidden * 2 }, .{ .buf = w.head.w }, .{ .buf = w.head.sb }, .{ .buf = s.logits }, 1);
+    if (w.head.raw) |raw| {
+        try weights.projectRow(&m.projections, m.device, e, raw, w.head, s.normed[cur], s.logits, 1);
+    } else {
+        const head = try m.projections.get(m.gpa, m.device, w.head);
+        try head.encode(e, .{ .buf = s.normed[cur], .off = (rows - 1) * geo.hidden * 2 }, .{ .buf = w.head.w }, .{ .buf = w.head.sb }, .{ .buf = s.logits }, 1);
+    }
     e.setPipeline(ks.softcap);
     bind(e, &.{s.logits}, 0);
     e.setValue(cfg.softcap, 1);

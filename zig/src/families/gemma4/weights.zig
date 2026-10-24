@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const lane = @import("../../core/lane_projection.zig");
+const rowp = @import("../../core/row_projection.zig");
 const ks = @import("kernel_sources");
 const fused = @import("fused_lane.zig");
 const cfg = @import("config.zig");
@@ -23,6 +24,8 @@ pub const Linear = struct {
     format: lane.Format = fast,
     col: usize = 0,
     y_stride: ?usize = null,
+    /// The row path's weights (a chip without tensor units): the checkpoint's arrays as stored.
+    raw: ?rowp.Weights = null,
 
     /// The reg kernel's width, which reads the group sums its input's kernel wrote; others sum their input themselves.
     pub fn reg(x: Linear) bool {
@@ -228,6 +231,7 @@ fn stack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, 
 
 /// MLX affine words, scales and biases [x.n, x.k] at x's width in the lane layout (reg order at 4/64).
 pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, words: []const u32, scales: []const u16, biases: []const u16, x: Linear) !Linear {
+    if (!device.tensorUnits()) return packRows(gpa, device, owned, words, scales, biases, x);
     const l = layout(geo, x);
     const wb = try device.buffer(l.weightWords() * 4, shared);
     errdefer wb.deinit();
@@ -241,6 +245,28 @@ pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayL
     var out = x;
     out.w = wb;
     out.sb = sb;
+    return out;
+}
+
+/// The row path's weights (a chip without tensor units): the checkpoint's arrays as stored, no lane layout.
+pub fn packRows(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), words: []const u32, scales: []const u16, biases: []const u16, x: Linear) !Linear {
+    const wb = try device.buffer(words.len * 4, shared);
+    errdefer wb.deinit();
+    const scb = try device.buffer(scales.len * 2, shared);
+    errdefer scb.deinit();
+    const bib = try device.buffer(biases.len * 2, shared);
+    errdefer bib.deinit();
+    @memcpy(wb.slice(u32, words.len), words);
+    @memcpy(scb.slice(u16, scales.len), scales);
+    @memcpy(bib.slice(u16, biases.len), biases);
+    try owned.ensureUnusedCapacity(gpa, 3);
+    owned.appendAssumeCapacity(wb);
+    owned.appendAssumeCapacity(scb);
+    owned.appendAssumeCapacity(bib);
+    var out = x;
+    out.w = wb;
+    out.sb = scb;
+    out.raw = rowp.Weights{ .w = wb, .scales = scb, .biases = bib, .n = x.n, .k = x.k, .group = x.format.group, .bits = x.format.bits, .sum = .f32 };
     return out;
 }
 
@@ -274,12 +300,22 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
     return w;
 }
 
+/// The row path's projection (a chip without tensor units): the checkpoint's arrays as stored on the simdgroup tiles.
+pub fn projectRow(ps: *Projections, device: mtl.Device, e: mtl.ComputeEncoder, raw: rowp.Weights, l: Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
+    const p = try ps.simd(device);
+    const mtx = rowp.simd_bits.Matrix{ .w = raw.w, .scales = raw.scales, .biases = raw.biases };
+    const call = try rowp.simd_bits.call(p, raw.bits, raw.n, raw.k, rows, l.y_stride orelse l.n, false);
+    rowp.simd_bits.encode(e, call, mtx, x, 0, y, l.col * 2);
+}
+
 /// The lane pipelines, one per distinct (n, k, width, stride, prologue).
 pub const Projections = struct {
     geo: cfg.Geometry,
     follow: ?mtl.ResidencySet.Follow = null,
     list: std.ArrayList(struct { x: Linear, p: lane.Projection }) = .empty,
     fused_list: std.ArrayList(struct { x: Linear, fuse: u8, p: fused.Projection }) = .empty,
+    /// The row path's tiles (a chip without tensor units): the simdgroup matrices at any width.
+    row_simd: ?rowp.simd_bits.Pipelines = null,
     fn same(a: Linear, b: Linear) bool {
         return a.n == b.n and a.k == b.k and std.meta.eql(a.format, b.format) and a.y_stride == b.y_stride;
     }
@@ -298,8 +334,15 @@ pub const Projections = struct {
         try ps.fused_list.append(gpa, .{ .x = x, .fuse = fuse, .p = p });
         return p;
     }
+    /// The row path's tiles, built once (a chip without tensor units).
+    pub fn simd(ps: *Projections, device: mtl.Device) !*rowp.simd_bits.Pipelines {
+        if (ps.row_simd == null) ps.row_simd = try rowp.simd_bits.Pipelines.load(device);
+        return &ps.row_simd.?;
+    }
+
     pub fn deinit(ps: *Projections, gpa: std.mem.Allocator) void {
         ps.setResident(null);
+        if (ps.row_simd) |*p| p.deinit();
         for (ps.list.items) |v| v.p.deinit();
         ps.list.deinit(gpa);
         for (ps.fused_list.items) |v| v.p.deinit();

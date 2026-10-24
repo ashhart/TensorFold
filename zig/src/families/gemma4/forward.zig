@@ -53,8 +53,9 @@ pub fn prepare(s: *state.Scratch, segments: []const Segment, ids: []const u32, c
     }
 }
 
-/// A projection: at 4/64 on the group sums in s.sums its input's kernel wrote; other widths sum their input themselves.
+/// A projection: the row path on a chip without tensor units; at 4/64 on the group sums its input's kernel wrote.
 fn project(m: *Model, s: *state.Scratch, e: mtl.ComputeEncoder, l: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
+    if (l.raw) |raw| return weights.projectRow(&m.projections, m.device, e, raw, l, x, y, rows);
     const p = try m.projections.get(m.gpa, m.device, l);
     const out: lane.Ref = .{ .buf = y, .off = l.col * 2 };
     if (!l.reg()) return l.encodeRows(p, e, .{ .buf = x }, out, rows);
@@ -237,7 +238,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
         while (sub < n) : (sub += attend_rows) {
             const r = at + sub;
             const rn = @min(attend_rows, n - sub);
-            if (global) { // the tensor units, a key head's eight query heads as one tile: each key read once a token
+            if (global) { // a key head's eight query heads as one tile: each key read once a token (M5's tensor units)
                 const nch = chunks[r][kind]; // from the first key, in 256-key chunks (prepare)
                 e.setPipeline(kd.decode_attn);
                 e.setBuffer(s.q, r * geo.query_heads * dh * 2, 0);

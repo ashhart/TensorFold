@@ -85,6 +85,8 @@ pub const Drafter = struct {
     knr: mtl.Buffer,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, target: *Model, dir: []const u8, options: Options) !*Drafter {
+        // the draft's own weights are the lane layout: M5 only. The target's row path does not serve them.
+        if (!target.device.tensorUnits()) return error.GemmaDraftNeedsTensorUnits;
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
         d.* = undefined;

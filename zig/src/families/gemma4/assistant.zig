@@ -91,6 +91,8 @@ pub const Drafter = struct {
     /// `metal`: the target's backend, whose stream caches the assistant reads; its streams' capacity sizes the scratch.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, metal: *backend.Metal, dir: []const u8) !*Drafter {
         const target = metal.model;
+        // the assistant's own weights are the lane layout: M5 only. The target's row path does not serve them.
+        if (!target.device.tensorUnits()) return error.GemmaDraftNeedsTensorUnits;
         const geo = target.config.geo;
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
