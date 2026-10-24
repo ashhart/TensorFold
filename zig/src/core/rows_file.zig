@@ -105,6 +105,13 @@ pub const Writer = struct {
         w.fd = -1;
         _ = platform.c.unlink(w.tmpPath());
     }
+
+    pub fn abortChecked(w: *Writer) !void {
+        const closed = w.fd < 0 or platform.c.close(w.fd) == 0;
+        w.fd = -1;
+        const rc = platform.c.unlink(w.tmpPath());
+        if (!closed or (rc != 0 and platform.c.errno(rc) != .NOENT)) return error.RowsErase;
+    }
 };
 
 fn put(fd: c_int, bytes: []const u8) !void {

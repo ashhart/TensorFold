@@ -76,6 +76,27 @@ pub fn closeAll(h: *LaneHost) void {
     for (queued.items) |job| h.finish(job, .cancelled, "");
 }
 
+/// Stops admitting, cancels what is left and joins the engine thread (after `halt`: the thread is gone already).
+pub fn stop(h: *LaneHost) void {
+    @import("lane_host_rows.zig").drainThread(h);
+    @import("lane_host_rows.zig").close(h);
+    @import("lane_host_score.zig").close(h);
+    h.lock();
+    h.forgets.close(h.gpa, h.io); // a forget asked after the thread's last pass: refused
+    h.unlock();
+    const closed: @import("engine_api.zig").LearnEvent = .{ .done = .{ .message = "the engine closed" } };
+    for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
+    h.lessons.deinit(h.gpa);
+    h.queued.deinit(h.gpa);
+    h.admitted.deinit(h.gpa);
+    h.filling.deinit(h.gpa);
+    h.cancels.deinit(h.gpa);
+    h.decoded.deinit(h.gpa);
+    h.live_tokens.deinit(h.gpa);
+    h.pieces.deinit(h.gpa);
+    h.finals.deinit(h.gpa);
+}
+
 test {
     _ = @import("lane_host_interrupted_test.zig");
 }

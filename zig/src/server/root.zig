@@ -17,6 +17,10 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("notes_storage_test.zig");
+    _ = @import("notes_storage_http_test.zig");
+    _ = @import("notes_refuse.zig");
+    _ = @import("notes_refuse_serve_test.zig");
     _ = @import("vision_markers_test.zig");
     _ = @import("embedding_protocol_test.zig");
     _ = @import("embedding_service_test.zig");

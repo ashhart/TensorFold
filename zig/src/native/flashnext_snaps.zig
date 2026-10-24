@@ -11,6 +11,11 @@ const Host = @import("flashnext_host.zig").Host;
 
 /// The prompt cache's copies of the engine's state (snapshot.zig), on the engine's thread.
 pub const Snaps = struct {
+    pub fn peersClear(ptr: *anyopaque) bool {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        return h.eng.r.tp == null;
+    }
+
     pub fn bytes(ptr: *anyopaque, at: u32) u64 {
         const h: *Host = @ptrCast(@alignCast(ptr));
         return h.eng.snap_pool.size(snap.bytes(at)); // a new buffer's size; a free one in the pool may take the state instead

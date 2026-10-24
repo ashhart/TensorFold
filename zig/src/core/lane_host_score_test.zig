@@ -47,6 +47,7 @@ test "a backend's score runs on the engine thread, a failure comes back as Faile
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
     try host.start();
     const engine = host.engine();
+    try std.testing.expectEqual(api.prompt_cache.Forgotten{}, try engine.forgetPrompts(&.{ 7, 8 }));
     Scorer.calls = 0;
     var logits: [3]f64 = undefined;
     const lse = try engine.score(&.{ 1, 2, 3, 4 }, &.{ 9, 8, 7 }, &logits, true);
@@ -56,6 +57,7 @@ test "a backend's score runs on the engine thread, a failure comes back as Faile
     try std.testing.expectError(error.Failed, engine.score(&.{1}, &.{}, logits[0..0], true));
     try std.testing.expectEqual(@as(usize, 2), Scorer.calls);
     host.stop();
+    try std.testing.expectError(error.Closed, engine.forgetPrompts(&.{ 7, 8 }));
     try std.testing.expectError(error.Failed, engine.score(&.{1}, &.{2}, logits[0..1], false));
     try std.testing.expectEqual(@as(usize, 2), Scorer.calls);
 }

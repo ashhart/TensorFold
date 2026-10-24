@@ -373,6 +373,8 @@ pub const LearnSink = @import("learning_api.zig").LearnSink;
 pub const LearnError = @import("learning_api.zig").LearnError;
 pub const Learner = @import("learning_api.zig").Learner;
 
+pub const ForgetError = error{ Closed, Busy, Unsupported };
+
 pub const Engine = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
@@ -400,7 +402,14 @@ pub const Engine = struct {
         imprint: ?*const fn (ctx: *anyopaque, ask: *ImprintAsk) bool = null,
         /// A planned stop's first half: no more work, disk writes finished under a deadline, the engine thread joined.
         drain: ?*const fn (ctx: *anyopaque) void = null,
+        /// Wait for the engine thread to erase matching retained prompt states.
+        forget_prompts: ?*const fn (ctx: *anyopaque, span: []const u32) ForgetError!prompt_cache.Forgotten = null,
     };
+
+    pub fn forgetPrompts(e: Engine, span: []const u32) ForgetError!prompt_cache.Forgotten {
+        const f = e.vtable.forget_prompts orelse return error.Unsupported;
+        return f(e.ctx, span);
+    }
 
     pub fn info(e: Engine) Info {
         return e.vtable.info(e.ctx);
@@ -503,6 +512,7 @@ pub const Rounds = @import("lane_host.zig").Rounds;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
+pub const prompt_forget = @import("prompt_forget.zig");
 
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
 pub const prompt_radix = @import("prompt_radix.zig");
@@ -538,6 +548,8 @@ test {
     _ = @import("lane_rounds_test.zig");
     _ = @import("lane_halt_test.zig");
     _ = @import("prompt_cache.zig");
+    _ = @import("lane_host_forget_test.zig");
+    _ = @import("prompt_forget.zig");
     _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");
     _ = @import("keepalive.zig");

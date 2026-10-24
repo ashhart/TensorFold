@@ -11,6 +11,7 @@ const admit = @import("lane_host_admit.zig");
 const recalls = @import("lane_host_recall.zig");
 const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
+const prompt_forget = @import("prompt_forget.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -65,6 +66,7 @@ pub const LaneHost = struct {
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
     lessons: std.ArrayList(Lesson) = .empty, // learn requests waiting for an idle engine
+    forgets: prompt_forget.Queue = .{}, // forget_prompts calls waiting for the engine thread, run between rounds
     lesson_open: bool = false, // the learner holds a begun job (engine thread only)
     admissions: u64 = 0, // jobs admitted so far: each job's `seq`
     memory_lanes: ?usize = null, // lanes the backend had memory for at its last LaneMemory, until a job ends
@@ -93,23 +95,7 @@ pub const LaneHost = struct {
         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
     }
 
-    /// Stops admitting, cancels what is left and joins the engine thread (after `halt`: the thread is gone already).
-    pub fn stop(h: *LaneHost) void {
-        rows_host.drainThread(h);
-        rows_host.close(h);
-        scoring.close(h);
-        const closed: api.LearnEvent = .{ .done = .{ .message = "the engine closed" } };
-        for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
-        h.lessons.deinit(h.gpa);
-        h.queued.deinit(h.gpa);
-        h.admitted.deinit(h.gpa);
-        h.filling.deinit(h.gpa);
-        h.cancels.deinit(h.gpa);
-        h.decoded.deinit(h.gpa);
-        h.live_tokens.deinit(h.gpa);
-        h.pieces.deinit(h.gpa);
-        h.finals.deinit(h.gpa);
-    }
+    pub const stop = ends.stop;
 
     /// A drain's deadline: the round in flight completes on every rank, so the ranks stop at the same boundary.
     pub const halt = lane_halt.halt;
@@ -130,6 +116,7 @@ pub const LaneHost = struct {
         .recall = recalls.attach,
         .imprint = rows_host.ask,
         .drain = rows_host.drain,
+        .forget_prompts = forgetFn,
     };
 
     const scored_vtable: Engine.VTable = blk: {
@@ -137,6 +124,8 @@ pub const LaneHost = struct {
         v.score = scoring.score;
         break :blk v;
     };
+    const forgetFn = @import("lane_host_forget.zig").submit;
+    pub const takeForgets = @import("lane_host_forget.zig").take;
 
     /// The family's queue as a keepalive target, when it set one.
     fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
@@ -528,6 +517,7 @@ pub const LaneHost = struct {
             rows_host.answer(h);
             scoring.answer(h);
             learn.refuse(h);
+            h.takeForgets();
             while (h.admitOne()) {}
             h.fillOne();
             h.core.sweep() catch |err| {
@@ -559,7 +549,7 @@ pub const LaneHost = struct {
                     continue;
                 }
                 if (rows_host.idle(h)) continue;
-                if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))
+                if (h.cancels.items.len == 0 and !h.forgets.pending() and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))
                     h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
                 h.unlock();
                 continue;
@@ -574,6 +564,25 @@ pub const LaneHost = struct {
         }
     }
 };
+
+test "forget with an active cache entry and no memory for held entries stays incomplete" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var h: LaneHost = .{ .gpa = failing.allocator(), .io = std.testing.io, .core = undefined, .info_ = .{} };
+    const request: Request = .{ .prompt = &.{ 50, 51 }, .max_tokens = 1 };
+    var entry: pc.Entry = undefined;
+    var job: LaneHost.Job = .{ .host = &h, .id = 1, .request = &request, .sink = undefined, .entry = &entry };
+    try h.admitted.append(std.testing.allocator, &job);
+    defer h.admitted.deinit(std.testing.allocator);
+    var ask: prompt_forget.Ask = .{ .span = &.{ 50, 51 } };
+    try h.forgets.asks.append(std.testing.allocator, &ask);
+    defer h.forgets.close(std.testing.allocator, std.testing.io);
+    h.takeForgets();
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(ask.done);
+    try std.testing.expectEqual(@as(u32, 1), ask.out.held);
+    try std.testing.expectEqual(@as(u32, 1), ask.out.in_flight);
+    try std.testing.expect(!ask.out.complete());
+}
 
 test {
     _ = @import("lane_host_frame_test.zig");

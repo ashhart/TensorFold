@@ -148,6 +148,7 @@ pub const flags = [_]Flag{
     .{ .name = "--recall-read-only", .kind = .store_true, .native = true },
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
+    .{ .name = "--notes", .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
@@ -155,6 +156,7 @@ pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENS
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB" } else [_][]const u8{});
 
 pub const Args = struct {
+    notes: ?[]const u8 = null,
     model: []const u8 = "",
     host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
@@ -358,6 +360,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.default_voice = v;
         return;
     }
+    if (@import("notes_flags.zig").parse(out, name, v)) return;
     if (is(name, "--chat-template")) {
         out.chat_template = v;
         return;
@@ -586,7 +589,6 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
 }
 
 const cli = @This();
-
 /// The private flag helpers cli_test.zig checks.
 pub const Test = if (builtin.is_test) struct {
     pub const cuda_build = cli.cuda_build;

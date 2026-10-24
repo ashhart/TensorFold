@@ -157,6 +157,10 @@ test "parse and capabilities share the table" {
     defer arena.deinit();
     const a = arena.allocator();
     var u: Usage = .{};
+    try std.testing.expect((try parse(a, &.{"m"}, &u)).notes == null);
+    try std.testing.expectEqualStrings("snapshot.json", (try parse(a, &.{ "m", "--notes", "snapshot.json" }, &u)).notes.?);
+    try std.testing.expectEqualStrings("snapshot.json", (try parse(a, &.{ "m", "--notes=snapshot.json" }, &u)).notes.?);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--notes" }, &u));
     const args = try parse(a, &.{ "/models/x", "--port", "9000", "--api-key=k1", "--api-key", "k2", "--no-thinking", "--reasoning-effort", "low" }, &u);
     try std.testing.expectEqual(@as(u16, 9000), args.port);
     try std.testing.expectEqual(@as(usize, 2), args.api_key.len);
@@ -192,6 +196,7 @@ test "parse and capabilities share the table" {
     var out: std.Io.Writer.Allocating = .init(a);
     try capabilities(&out.writer, .{ .version = "0.6.5" });
     const doc = out.written();
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--notes\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--no-thinking\": {}") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--recall-read-only\": {}") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--drafter\"") != null);
