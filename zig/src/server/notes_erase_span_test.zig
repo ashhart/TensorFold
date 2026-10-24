@@ -18,11 +18,11 @@ fn prompt(a: std.mem.Allocator, t: @import("model_text.zig").Text, lines: []cons
     return t.renderIds(a, (try json.parseText(a, messages)).ok, .{}, &problem);
 }
 
-test "on Nemotron 3.5 Lightning's tokenizer the span of each note is inside every prompt that carried it, and the raw text's is not" {
-    const dir = std.c.getenv("TF_NOTES_TOKENIZER_DIR") orelse return error.SkipZigTest;
-    var probe: [1100]u8 = undefined;
-    const file = try std.fmt.bufPrintSentinel(&probe, "{s}/tokenizer.json", .{std.mem.sliceTo(dir, 0)}, 0);
-    if (std.c.access(file, std.c.F_OK) != 0) return error.SkipZigTest;
+test "real-tokenizer erase spans cover quoted notes and short or embedded teaching turns" {
+    const dir = std.c.getenv("TF_NOTES_TOKENIZER_DIR") orelse {
+        if (std.c.getenv("TF_NOTES_TOKENIZER_REQUIRED") != null) return error.TokenizerDirectoryRequired;
+        return error.SkipZigTest;
+    };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -74,4 +74,11 @@ test "on Nemotron 3.5 Lightning's tokenizer the span of each note is inside ever
     const green = (try places.rawSpanOf(a, t, "My favourite colour is green.")).?;
     const blue = try t.encode(a, "My favourite colour is blue.", false);
     try testing.expect(std.mem.indexOf(u32, blue, green) == null);
+    const note = "My favourite colour is green.";
+    const raw = (try places.rawSpanOf(a, t, note)).?;
+    for ([_][]const u8{ note, "Hi! My favourite colour is green.", "Remember: My favourite colour is green.", "My favourite colour is green. Thanks!", "my favourite colour is green" }) |said| {
+        const messages = try std.fmt.allocPrint(a, "[{{\"role\":\"user\",\"content\":{s}}}]", .{try json.quote(a, said, .{})});
+        const ids = try t.renderIds(a, (try json.parseText(a, messages)).ok, .{}, &problem);
+        try testing.expect(std.mem.indexOf(u32, ids, raw) != null);
+    }
 }

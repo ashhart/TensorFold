@@ -1,4 +1,4 @@
-//! Durable cleanup work: identities and token spans, never the removed note's plaintext.
+//! Durable retry work: identities and reversible token spans, retired after engine-reachable cleanup.
 const std = @import("std");
 const json = @import("json");
 const Allocator = std.mem.Allocator;

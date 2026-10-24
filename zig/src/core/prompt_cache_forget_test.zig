@@ -79,7 +79,8 @@ test "forgetSpan searches sibling identities created after the current index ope
     try testing.expectEqual(@as(u8, 1), out.folders.len);
     try testing.expectEqual(@as(u64, 4), out.folders.items[0].identity);
     try testing.expectEqual(.unowned_match, out.folders.items[0].reason);
-    try testing.expectEqual(@as(u32, 1), out.held);
+    try testing.expectEqual(@as(u32, 0), out.held);
+    try testing.expectEqual(@as(u32, 1), out.unmanaged);
     try testing.expect(!out.complete());
     var other = try imprint.Imprint.inspect(testing.allocator, root, 4);
     defer other.deinit();
@@ -114,18 +115,20 @@ test "learned sibling inspection refuses a torn index without repairing it" {
     defer store.deinit();
     store.imprint = &current;
     const held = store.forgetSpan(&note, &.{});
-    try testing.expectEqual(@as(u32, 1), held.held);
+    try testing.expectEqual(@as(u32, 0), held.held);
+    try testing.expectEqual(@as(u32, 1), held.unmanaged);
     try testing.expectEqual(@as(u32, 0), held.failed);
     try testing.expect(!current.forget_pending);
     const junk = std.mem.zeroes([33]u8);
     try testing.expectEqual(@as(isize, junk.len), std.c.write(fd, &junk, junk.len));
     try testing.expectError(error.ImprintRead, imprint.Imprint.inspect(testing.allocator, root, 3));
     const corrupt = store.forgetSpan(&note, &.{});
-    try testing.expectEqual(@as(u32, 1), corrupt.failed);
-    try testing.expect(current.forget_pending);
+    try testing.expectEqual(@as(u32, 0), corrupt.failed);
+    try testing.expectEqual(@as(u32, 1), corrupt.unmanaged);
+    try testing.expect(!current.forget_pending);
 }
 
-test "forgetSpan holds an unindexed sibling without poisoning later erases" {
+test "forgetSpan names an unindexed sibling without retaining retry work" {
     var buf: [128]u8 = undefined;
     const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-sibling-missing-{d}", .{std.c.getpid()});
     defer rmTree(root);
@@ -139,13 +142,15 @@ test "forgetSpan holds an unindexed sibling without poisoning later erases" {
     s.imprint = &im;
     const out = s.forgetSpan(&note, &.{});
     try testing.expectEqual(@as(u32, 0), out.failed);
-    try testing.expectEqual(@as(u32, 1), out.held);
+    try testing.expectEqual(@as(u32, 0), out.held);
+    try testing.expectEqual(@as(u32, 1), out.unmanaged);
     try testing.expect(!out.complete());
     try testing.expect(!im.forget_pending);
     try other.beginWrite(42); // the first payload may precede the first index
     const again = s.forgetSpan(&note, &.{});
     try testing.expectEqual(@as(u32, 0), again.failed);
-    try testing.expectEqual(@as(u32, 1), again.held);
+    try testing.expectEqual(@as(u32, 0), again.held);
+    try testing.expectEqual(@as(u32, 1), again.unmanaged);
     try testing.expect(!im.forget_pending);
 }
 

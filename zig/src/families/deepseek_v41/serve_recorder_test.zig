@@ -33,7 +33,8 @@ test "DeepSeek trace forwards forget and reports its retained token record" {
     const got = try rec.engine().forgetPrompts(&.{ 7, 11, 13 });
     try std.testing.expectEqual(@as(u32, 1), f.calls);
     try std.testing.expectEqual(@as(u32, 2), got.states);
-    try std.testing.expectEqual(@as(u32, 1), got.failed);
+    try std.testing.expectEqual(@as(u32, 0), got.failed);
+    try std.testing.expectEqual(@as(u32, 1), got.unmanaged);
     try std.testing.expect(!got.complete());
     rec.path = null;
     const direct = try rec.engine().forgetPrompts(&.{ 7, 11, 13 });

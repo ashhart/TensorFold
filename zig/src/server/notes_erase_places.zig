@@ -24,7 +24,7 @@ pub const Place = enum {
     pub fn why(p: Place) []const u8 {
         return switch (p) {
             .journal => "the journal retains token spans for pending cleanup, or its folder sync failed; retry this erase after the named blockers clear",
-            .engine_records => "speech-engine state, an operator-selected token trace or a reported cleanup failure has not been shown clear",
+            .engine_records => "speech state, token traces, unowned learned folders or an engine cleanup failure remain unverified",
             .recall => "this or an earlier --recall run may have recorded prompt or reply tokens; recall records have not been searched",
             .prompt_cache => "the engine could not show this note's prompt states gone: an unsupported hook, an unverified token span, or requests restoring states may prevent clearance",
             .learn_files => "this or an earlier run may have written learned prompt states; not every possible learned folder has been shown free of this note's tokens",
@@ -52,6 +52,8 @@ pub const Forget = struct {
     holders: bool = false,
     asked: bool = false, // the engine was asked (the erase removed at least one note)
     ok: bool = false, // every call answered: none Unsupported, Closed or Busy
+    unsupported: bool = false,
+    transient: bool = false,
     short: bool = false, // a note too short to find by its tokens alone: a match cannot be shown
     out: api.prompt_cache.Forgotten = .{ .disk = true }, // summed; disk: every call searched the learned index
 
@@ -75,8 +77,8 @@ pub fn rawSpanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) 
 fn candidate(a: std.mem.Allocator, text: model_text.Text, note: []const u8, body: []const u8, raw: bool) !?[]const u32 {
     if (body.len == 0) return null;
     const first_space = std.mem.indexOfScalar(u8, body, ' ') orelse 0;
-    const ends = [_]usize{ body.len, if (std.ascii.isPunctuation(body[body.len - 1])) body.len - 1 else body.len };
-    for ([_]usize{ 0, first_space }) |lo| for (ends) |hi| {
+    const ends = [_]usize{ if (std.ascii.isPunctuation(body[body.len - 1])) body.len - 1 else body.len, body.len };
+    for ([_]usize{ first_space, 0 }) |lo| for (ends) |hi| {
         if (hi <= lo) continue;
         const span = try text.encode(a, body[lo..hi], false);
         if (span.len == 0) continue;
@@ -89,18 +91,19 @@ fn candidate(a: std.mem.Allocator, text: model_text.Text, note: []const u8, body
 }
 
 fn insideRaw(a: std.mem.Allocator, text: model_text.Text, note: []const u8, span: []const u32) !bool {
-    const quoted = try json.quote(a, note, .{});
+    const said = [_][]const u8{ note, try std.mem.concat(a, u8, &.{ "Hi! ", note }), try std.mem.concat(a, u8, &.{ "Remember: ", note }), try std.mem.concat(a, u8, &.{ note, " Thanks!" }) };
     const histories = [_][]const u8{
         "",
         "{\"role\":\"system\",\"content\":\"Be concise.\"},",
         "{\"role\":\"user\",\"content\":\"Hello\"},{\"role\":\"assistant\",\"content\":\"Hello!\"},",
     };
-    for (histories) |history| {
+    for (said) |message| for (histories) |history| {
+        const quoted = try json.quote(a, message, .{});
         const messages = try std.fmt.allocPrint(a, "[{s}{{\"role\":\"user\",\"content\":{s}}}]", .{ history, quoted });
         var problem: []const u8 = "";
         const ids = try text.renderIds(a, (try json.parseText(a, messages)).ok, .{}, &problem);
         if (std.mem.indexOf(u32, ids, span) == null) return false;
-    }
+    };
     return true;
 }
 
@@ -156,7 +159,8 @@ pub fn forget(srv: *Server, a: std.mem.Allocator, notes: []const []const u8) For
 fn ask(srv: *Server, f: *Forget, span: []const u32) void {
     if (!f.asked) f.ok = true;
     f.asked = true;
-    const got = srv.engine.forgetPrompts(span) catch {
+    const got = srv.engine.forgetPrompts(span) catch |e| {
+        if (e == error.Unsupported) f.unsupported = true else f.transient = true;
         f.ok = false;
         return;
     };
@@ -165,6 +169,7 @@ fn ask(srv: *Server, f: *Forget, span: []const u32) void {
     f.out.learned += got.learned;
     f.out.held += got.held;
     f.out.failed += got.failed;
+    f.out.unmanaged += got.unmanaged;
     f.out.in_flight += got.in_flight;
     f.out.folders.merge(got.folders);
     f.out.conversations += got.conversations;
@@ -172,12 +177,18 @@ fn ask(srv: *Server, f: *Forget, span: []const u32) void {
     f.out.disk = f.out.disk and got.disk;
 }
 
+/// Keep recoverable spans only for actionable engine work, not for permanent external-copy warnings.
+pub fn needsRetry(f: Forget, checked: std.EnumArray(Place, Status)) bool {
+    if (f.transient or f.out.failed > 0 or f.out.held > 0 or checked.get(.requests) == .may_hold) return true;
+    return false;
+}
+
 /// Each place's status, by the server's own flags and stores now and what the engine's forget showed.
 pub fn check(srv: *Server, forgot: Forget, origin: Origin) std.EnumArray(Place, Status) {
     var out: std.EnumArray(Place, Status) = .initFill(.off);
     const held = forgot.holders or srv.prompt_holders.load(.acquire) > 0 or srv.preparing.load(.acquire) > 0;
     out.set(.prompt_cache, if (!srv.info.prompt_cache) .off else if (!held and forgot.cacheClear()) .forgotten else .may_hold);
-    out.set(.engine_records, if (forgot.out.failed > 0 or srv.info.speech != null) .may_hold else .empty);
+    out.set(.engine_records, if (forgot.out.failed > 0 or forgot.out.unmanaged > 0 or srv.info.speech != null) .may_hold else .empty);
     out.set(.recall, if (srv.recall != null) .may_hold else diskOff(srv, origin, .recall));
     out.set(.learn_files, if (srv.config.learn) .may_hold else diskOff(srv, origin, .learn)); // on: current-root clearance cannot rule out earlier operator-selected roots
     out.set(.responses, if (srv.store.count(srv.io) > 0) .may_hold else .empty); // always on: empty is what shows it holds nothing

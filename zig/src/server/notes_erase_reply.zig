@@ -35,13 +35,10 @@ pub const Reply = struct {
             .source_num = e.source_num,
         });
         if (e.unsynced) checked.set(.journal, .may_hold);
-        var all_clear = true;
-        for (std.enums.values(places.Place)) |p| if (checked.get(p) == .may_hold) {
-            all_clear = false;
-        };
-        if (!all_clear) checked.set(.journal, .may_hold);
-        if (all_clear) e.finish(a) catch {
+        var retryable = e.unsynced or places.needsRetry(forgotten, checked);
+        if (retryable) checked.set(.journal, .may_hold) else e.finish(a) catch {
             e.retire_failed = true;
+            retryable = true;
             checked.set(.journal, .may_hold);
         };
         var b: Buffer = .{ .bytes = r.buffer };
@@ -52,9 +49,11 @@ pub const Reply = struct {
             try b.put("\"{s}\":\"{s}\"", .{ @tagName(p), @tagName(checked.get(p)) });
             pending += @intFromBool(checked.get(p) == .may_hold);
         }
-        try b.put("}},\"complete\":{s},\"state\":\"{s}\",\"remaining_places\":[", .{
+        try b.put("}},\"cleanup_complete\":{s},\"retryable\":{s},\"complete\":{s},\"state\":\"{s}\",\"remaining_places\":[", .{
+            if (retryable) "false" else "true",
+            if (retryable) "true" else "false",
             if (pending == 0) "true" else "false",
-            if (pending == 0) "complete" else "pending",
+            if (pending == 0) "complete" else if (retryable) "pending" else "unresolved",
         });
         var first = true;
         for (std.enums.values(places.Place)) |p| if (checked.get(p) == .may_hold) {

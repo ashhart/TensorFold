@@ -175,21 +175,17 @@ fn syncDir(dir: [:0]const u8) !void {
 /// Search every existing sibling identity afresh; the cached size at startup is not coverage evidence.
 pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgotten) void {
     const dirs = @import("lanes").learned_dirs;
-    const before = out.failed;
-    defer if (out.failed > before) {
-        im.forget_pending = true;
-    };
     var cursor: ?u64 = null;
     var inspected: usize = 0;
     while (true) {
         const id = (dirs.next(im.root, im.dir, cursor) catch {
-            out.failed += 1;
+            out.unmanaged += 1;
             return;
         }) orelse break;
         cursor = id;
         if (inspected == 16) {
             out.folders.add(id, .scan_budget);
-            out.held += 1;
+            out.unmanaged += 1;
             return;
         }
         inspected += 1;
@@ -198,10 +194,10 @@ pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc
             if (err == error.ImprintUnindexed or err == error.ImprintAppending) {
                 out.folders.add(id, if (err == error.ImprintUnindexed) .unindexed else .appending);
                 // First append writes payload before index; without a lease even an empty directory can change.
-                out.held += 1;
+                out.unmanaged += 1;
                 continue;
             }
-            out.failed += 1;
+            out.unmanaged += 1;
             out.folders.add(id, if (err == error.ImprintInspectBudget) .scan_budget else .unreadable);
             continue;
         };
@@ -209,7 +205,7 @@ pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc
         // Without writer ownership, rewriting a sibling snapshot could discard concurrent writes.
         for (other.metas.items) |meta| {
             if (pc.holdsSpan(meta.tokens, span) or pc.weakSpanTail(meta.tokens, span)) {
-                out.held += 1;
+                out.unmanaged += 1;
                 out.folders.add(id, .unowned_match);
             }
         }

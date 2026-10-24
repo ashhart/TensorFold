@@ -17,6 +17,7 @@ pub const Forgotten = struct {
     learned: u32 = 0, // learned states on disk (--learn) whose tokens held it: files and index records removed
     held: u32 = 0, // kept states a running prompt pass is restoring: left in place, a later forget takes them
     failed: u32 = 0, // learned states whose files or index record could not be removed, or a folder sync that failed
+    unmanaged: u32 = 0, // records outside selective cleanup: token traces, speech state or unowned learned folders
     in_flight: u32 = 0, // requests queued or running whose prompt holds the span (the engine counts them)
     conversations: u32 = 0, // saved conversation states removed from disk
     conversation_disk: bool = false, // the current saved-conversation identity was searched
@@ -24,7 +25,7 @@ pub const Forgotten = struct {
 
     /// Nothing the engine keeps holds the span any more, and no request carrying it is still running.
     pub fn complete(f: Forgotten) bool {
-        return f.held == 0 and f.failed == 0 and f.in_flight == 0;
+        return f.held == 0 and f.failed == 0 and f.in_flight == 0 and f.unmanaged == 0;
     }
 };
 

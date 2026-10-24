@@ -41,6 +41,10 @@ fn reply(srv: *Server, conn: *Conn, a: Allocator, r: request.Route) Allocator.Er
         for (all, data) |v, *slot| slot.* = try values.viewValue(a, v);
         try o.put(a, "data", .{ .array = data });
         try o.put(a, "history", .{ .bool = flag(conn.path, "history") });
+        const work = if (s.journal) |j| j.erases.items else &.{};
+        const pending = try a.alloc(json.Value, work.len);
+        for (pending, work) |*value, intent| value.* = try json.intValue(a, intent.id);
+        try o.put(a, "pending_erases", .{ .array = pending });
         return send(conn, a, 200, .{ .object = o });
     }
     if (std.mem.eql(u8, conn.method, "DELETE") and flag(conn.path, "erase")) {

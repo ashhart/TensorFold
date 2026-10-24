@@ -15,7 +15,7 @@ The routes use the server's existing authentication:
 
 | Request | Behavior |
 | --- | --- |
-| `GET /v1/notes` | List current notes. |
+| `GET /v1/notes` | List current notes and IDs with retryable work in `pending_erases`. |
 | `GET /v1/notes?history=true` | Include superseded and withdrawn notes. |
 | `GET /v1/notes/ID` | Read one note, including its state and source. |
 | `POST /v1/notes` with `{"text":"My favourite colour is green."}` | Add a durable write. |
@@ -38,12 +38,19 @@ result incomplete. A journal rename followed by a failed directory sync returns
 HTTP 500 with `erased` and the journal's unresolved status.
 
 `complete: false` means the store change applied but other copies may remain.
-Retry the same DELETE to resume pending cleanup, including after a restart. The
-journal atomically records the target identity and token spans before engine
-cleanup. These spans can reveal the erased text and remain protected like the
-notes journal until cleanup completes; the response names the journal while
-that record remains. No removed note plaintext is retained. A completed erase
-subsequently returns 404 and can never target a different note.
+The reply distinguishes `cleanup_complete` from `complete`. While engine cleanup
+or journal retirement can be retried, `retryable` is true and `state` is pending.
+Retry the same DELETE after a failure or restart; startup logs the pending count,
+and `GET /v1/notes` lists its IDs. The journal atomically keeps identities and
+reversible token spans before engine cleanup. These spans can reveal the erased
+text and remain until that retryable work clears or record retirement succeeds.
+
+Once engine-reachable cleanup is finished, the journal retires those spans even
+when other places remain unresolved. Then `cleanup_complete` is true and
+`retryable` is false. Unsupported hooks, unverified span coverage and external-copy warnings keep
+`complete` false and `state` unresolved; they do not retain recoverable note tokens in the journal. A later
+DELETE returns 404 and can never target a different note. Erasing a take-back can
+also make a later write redundant; that write is explicitly listed as removed.
 
 The reply names unresolved places, including Recall prompt/reply records,
 engine token traces, running requests, stored Responses,
@@ -68,3 +75,19 @@ zig build native -Dcpu=apple_m1
 
 These checks do not establish real-model Metal/CUDA qualification. The final
 stack still requires the exactness, accuracy and erasure receipts agreed in #1012.
+
+Real-tokenizer checks require an explicit model directory:
+
+```sh
+TF_NOTES_TOKENIZER_DIR=/path/to/model zig build test-notes-tokenizer -Dcpu=apple_m1
+```
+
+This target always runs and fails if the directory is unset or invalid. Normal
+CPU tests skip the real-tokenizer case when its directory is unset; changing an
+environment variable alone does not invalidate Zig's normal test-run cache.
+The check covers exact teaching turns, prefixes such as "Hi!" and "Remember:",
+trailing text and terminal-punctuation variants. It does not prove clearance for
+all paraphrases or arbitrary tokenization contexts. The external-copy and
+synchronous-I/O limits above remain separate from these token-span checks.
+Unowned learned-folder diagnostics are warnings, not retryable local I/O errors;
+the files remain untouched, and their warnings do not retain the erased spans.

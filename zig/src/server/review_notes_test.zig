@@ -346,6 +346,8 @@ test "review: historical Recall records are named when today's writer is off" {
     defer srv.deinit();
     const got = try exchange(srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id}), "");
     try testing.expectEqualStrings("may_hold", got.value.get("places").?.strField("recall").?);
+    try testing.expect(got.value.get("cleanup_complete").?.truthy());
+    try testing.expectEqual(@as(usize, 0), srv.notes.?.journal.?.erases.items.len);
     try testing.expect(!got.value.get("complete").?.truthy());
 }
 

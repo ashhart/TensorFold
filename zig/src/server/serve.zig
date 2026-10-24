@@ -219,7 +219,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             std.debug.print("tensorfold: --notes cannot persist writer flags ({s})\n", .{@errorName(e)});
             return 2;
         };
-        log.line("notes: {d} notes, {d} writes replayed; storage HTTP only", .{ notes.model.notes.items.len, notes.replayed });
+        log.line("notes: {d} notes, {d} writes replayed, {d} pending erases (GET /v1/notes); storage HTTP only", .{ notes.model.notes.items.len, notes.replayed, notes.journal.?.erases.items.len });
     }
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
         .disabled, .enabled => {},

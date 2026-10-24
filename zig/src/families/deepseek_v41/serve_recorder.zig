@@ -48,7 +48,7 @@ pub const Recorder = struct {
         r.mutex.lockUncancelable(r.io);
         defer r.mutex.unlock(r.io);
         // The operator's trace remains on disk and can contain prompts, reply tokens or structured output.
-        if (r.path != null) out.failed += 1;
+        if (r.path != null) out.unmanaged += 1;
         return out;
     }
 

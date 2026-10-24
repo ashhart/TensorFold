@@ -487,7 +487,8 @@ test "erase sibling inspection refuses an oversized index without reading its pa
     defer s.deinit();
     var out: pc.Forgotten = .{};
     @import("prompt_learn.zig").forgetOthers(&s, &im, &.{ 7, 11, 13 }, &out);
-    try std.testing.expect(out.failed > 0);
+    try std.testing.expectEqual(@as(u32, 0), out.failed);
+    try std.testing.expect(out.unmanaged > 0);
     try std.testing.expectEqual(@as(u8, 1), out.folders.len);
     try std.testing.expectEqual(@import("forget_folders.zig").Reason.scan_budget, out.folders.items[0].reason);
 }

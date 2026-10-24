@@ -56,7 +56,7 @@ pub const Prepared = struct {
         old_log.deinit();
         old.deinit();
     }
-    /// Clear durable work only after every named location is clear; failed retirement remains retryable.
+    /// Retire the token spans after engine-reachable cleanup; external-copy warnings do not retain the note.
     pub fn finish(p: *Prepared, a: Allocator) !void {
         const j = &p.storage.journal.?;
         if (j.poisoned) return error.JournalPoisoned;

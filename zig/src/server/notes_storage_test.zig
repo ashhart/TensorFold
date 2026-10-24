@@ -59,6 +59,7 @@ test "storage erase prepares without mutation and survives journal replay" {
 
 test {
     _ = @import("review_notes_test.zig");
+    _ = @import("notes_erase_review_test.zig");
     _ = @import("notes_journal_oom_test.zig");
     _ = @import("notes_journal_tmp_test.zig");
     _ = @import("notes_erase_span_test.zig");
