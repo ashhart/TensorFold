@@ -56,7 +56,7 @@ pub fn retrieve(s: *Storage, io: std.Io, a: Allocator, text: model_text.Text, qi
     const sc = try scratchFor(s, idx);
     const t0 = clock.nowNs(io);
     const long: index.Long = .{}; // longer matches off, as LLWZ's tests
-    const packed_notes = if (way.who) |q| try who.lookup(idx, sc, text, a, q, qids, past, cap, exclude, long) else try lookup.lookup(idx, sc, qids, past, cap, exclude, long);
+    const packed_notes = if (way.who) |q| try who.lookup(idx, sc, text, q, qids, past, cap, exclude, long) else try lookup.lookup(idx, sc, qids, past, cap, exclude, long);
     const chosen = try a.dupe(u32, packed_notes.chosen);
     var shown = try lookup.render(idx, sc, chosen);
     const t1 = clock.nowNs(io);

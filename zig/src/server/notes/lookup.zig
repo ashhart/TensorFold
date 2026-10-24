@@ -38,8 +38,9 @@ pub const Scratch = struct {
     hits: std.ArrayList(u32) = .empty, // sa: one n-gram's notes in the views searched
     codes: std.ArrayList(u32) = .empty, // sa: a pattern's codes
     long: std.ArrayList([2]usize) = .empty, // sa, longer matches: the n-grams added (start and length in qkeys)
+    loose: std.ArrayList(u32) = .empty, // who.zig: the pool's notes the server wrote and has not sorted
 
-    const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "found_weights", "spans", "chosen", "order", "ids", "scores", "block", "hits", "codes", "long" };
+    const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "found_weights", "spans", "chosen", "order", "ids", "scores", "block", "hits", "codes", "long", "loose" };
 
     pub fn init(gpa: Allocator, idx: *const Index) Allocator.Error!Scratch {
         return initRoom(gpa, idx, 0);

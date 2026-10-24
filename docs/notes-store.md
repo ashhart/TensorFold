@@ -46,13 +46,17 @@ counts and the times.
 
 The block is looked up who first. The lookup finds the subjects the question
 names: the store's entity phrases, the user, and the entities a current name
-note calls by a word of the question. The user is named by I, me, mine or
+note calls by a name in the question. A name is a run of Latin, Greek or
+Cyrillic letters, which may hold a hyphen, or up to four such runs one space
+apart. The user is named by I, me, mine or
 myself, but not by the me of "tell me", "give me" or "show me", or by "my X"
 when X is a word of the user's own notes or of a stored attribute's name and no
 word of an entity's name. The block holds the subjects' notes and the notes of
 the entities those notes name. An excluded note is never shown, and the link it
-states is never followed. A question that names nobody the store knows gets no
-block. `"notes_lookup": "plain"` keeps the earlier lookup (Python's
+states is never followed. A note written through `/v1/notes` without a subject
+is not sorted by who it is about, so such a note is a candidate whenever the
+plain lookup finds it. A question that names nobody the store knows, and finds
+none of those notes, gets no block. `"notes_lookup": "plain"` keeps the earlier lookup (Python's
 `retrieve()`). German and Finnish questions keep it too.
 
 The lookup reads the index that the last write or erase left, under the same

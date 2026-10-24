@@ -1,27 +1,18 @@
-"""The server's who-first note lookup (zig/src/server/notes/who.zig) in Python, on LLWZ's NoteStore: the tests' answers.
-
-A question's subjects are the store's entity phrases it holds (retrieve()'s subject matching), the user, and the
-entities a current name fact calls a word of it. The user is a subject when the question says I, me, mine or myself
-(not the "me" of "tell me", "give me", "show me"), or "my X" where X is no word of any entity's name and is a part of
-a stored attribute's name or a word of one of the user's current notes. A name several entities hold names those of
-the user's circle ("me", "my ...", "the <word>" and the entities their current notes name), or else all of them with
-a weight below 1. The candidates are the subjects' notes (every state for a question about the past) and one hop to
-the entities those notes name; an excluded note is never a candidate and its link is never followed. They are ranked
-by retrieve()'s scores times the weights, then packed and fitted as retrieve() packs and fits. No subject: no block.
-
-  lookup(nm, ns, owner, question, cap=None, past=None, exclude=())   nm: LLWZ's notes module
-"""
+"""The server's who-first note lookup (zig/src/server/notes/who.zig) in Python, on LLWZ's NoteStore."""
 import heapq
 import math
 import re
 
-FIRST = re.compile(r"\b(?:I|me|mine|myself)\b")
-TELL_ME = re.compile(r"(?i)\b(?:tell|give|show)\s+me\b")
-MY = re.compile(r"(?i)\bmy\s+([a-z']+)")
-WORD = re.compile(r"[A-Za-z]+")
-LETTERS = re.compile(r"[a-z]+")
+FIRST = re.compile(r"\b(?:I|me|mine|myself)\b", re.ASCII)
+TELL_ME = re.compile(r"(?i)\b(?:tell|give|show)\s+me\b", re.ASCII)
+MY = re.compile(r"(?i)\bmy\s+([a-z']+)", re.ASCII)
+LETTERS = re.compile(r"[A-Za-z]+")
 KEY_SPLIT = re.compile(r"[_\- \t\r\n]+")
-CIRCLE = re.compile(r"^(?:me|my .+|the [a-z]+)$")
+CIRCLE = re.compile(r"me|my [^\n]+|the [a-z]+")
+NAME_LETTER = "A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u04ff\u1e00-\u1eff"  # Latin, Greek, Cyrillic
+NAME_RUN = re.compile(f"[{NAME_LETTER}]+(?:-[{NAME_LETTER}]+)*")
+CHAIN = 4  # a name is up to this many runs of name letters, one space apart
+LOOSE = "note:"  # the attribute prefix of a note the server wrote without sorting it
 
 
 def name_value(subject, text):
@@ -50,7 +41,7 @@ def name_value(subject, text):
 
 
 def scores(nm, ns, O, qids, cap, past, exclude):
-    """NoteStore._lookup up to pack(): retrieve()'s scores after its hop, without the excluded notes."""
+    """NoteStore._lookup up to pack(): retrieve()'s scores after its hop and its pool, without the excluded notes."""
     cfg = ns.cfg
     qkeys = [ns.key(O, i) for i in qids]
     cands, dfs, N = ns.postings(O, [nm.CURRENT, "history"] if past else [nm.CURRENT])
@@ -75,7 +66,7 @@ def scores(nm, ns, O, qids, cap, past, exclude):
     for i in exclude:
         score.pop(i, None)
     if not score:
-        return score
+        return score, set()
     notes = O.notes
     order = lambda i: (-score[i], -notes[i]["told"], i)  # noqa: E731
     room = max(1, (cap - ns.fixed()["head"]) // 4)
@@ -83,6 +74,7 @@ def scores(nm, ns, O, qids, cap, past, exclude):
     if cfg["min_rel"] > 0:
         floor = score[direct[0]] * cfg["min_rel"]
         direct = [i for i in direct if score[i] >= floor]
+    pool = set(direct)
     for i in direct[:cfg["hop_from"]]:
         n = notes[i]
         s, near = score[i] * cfg["hop_weight"], []
@@ -94,13 +86,15 @@ def scores(nm, ns, O, qids, cap, past, exclude):
             near.append(O.by_key.get((n["entity"], n["attribute"]), ()))
         for js in near:
             for j in js:
-                if j not in exclude and s > score.get(j, 0.0):
-                    score[j] = s
-    return score
+                if j not in exclude:
+                    if s > score.get(j, 0.0):
+                        score[j] = s
+                    pool.add(j)
+    return score, pool
 
 
 def circle(O):
-    out = {e for e in O.ent_cur if CIRCLE.match(e)}
+    out = {e for e in O.ent_cur if CIRCLE.fullmatch(e)}
     for e in list(out):
         for i in O.ent_cur.get(e, ()):
             v = O.notes[i]["value"]
@@ -125,16 +119,16 @@ def names(nm, ns, O):
 
 
 def speaker(ns, O, question):
+    """I, me, mine or myself; or "my X" with X no word of an entity's name, a key part or a word of the user's notes."""
     if FIRST.search(TELL_ME.sub(" ", question)):
         return True
-    ent_words = {w for e in O.ent_cur for w in LETTERS.findall(e.lower())}
-    key_parts = {t.lower() for n in O.notes.values() for t in KEY_SPLIT.split(n["attribute"]) if t}
-    own = {w for i in O.ent_cur.get("me", ()) for w in LETTERS.findall(ns.line(O, i).lower())}
-    for m in MY.finditer(question):
-        x = m.group(1).lower().split("'")[0]
-        if x and x not in ent_words and (x in key_parts or x in own):
-            return True
-    return False
+    xs = {m.group(1).split("'")[0].lower() for m in MY.finditer(question)} - {""}
+    xs -= {w.lower() for e in O.ent_cur for w in LETTERS.findall(e)}
+    if not xs:
+        return False
+    key_parts = {t.lower() for n in O.notes.values() for t in KEY_SPLIT.split(n["attribute"]) if t and t.isascii()}
+    own = {w.lower() for i in O.ent_cur.get("me", ()) for w in LETTERS.findall(ns.line(O, i))}
+    return bool(xs & (key_parts | own))
 
 
 def subjects(nm, ns, O, question, wts):
@@ -143,20 +137,29 @@ def subjects(nm, ns, O, question, wts):
     if speaker(ns, O, question) and (O.ent_cur.get("me") or O.ent_keys.get("me")):
         out.add("me")
     by, mine = names(nm, ns, O), None
-    for w in WORD.findall(question):
-        cs = by.get(tuple(ns.key(O, t) for t in ns.tok.encode(" " + w)), set())
-        if len(cs) <= 1:
+    runs = [(m.start(), m.end(), tuple(ns.key(O, t) for t in ns.tok.encode(" " + m.group())))
+            for m in NAME_RUN.finditer(question)] if by else []
+    for k in range(len(runs)):
+        got = ()
+        for j in range(k, max(-1, k - CHAIN), -1):
+            if j < k and not (runs[j][1] + 1 == runs[j + 1][0] and question[runs[j][1]] == " "):
+                break
+            got = runs[j][2] + got
+            if len(got) > 8:
+                break
+            cs = by.get(got, set())
+            if len(cs) <= 1:
+                out |= cs
+                continue
+            mine = circle(O) if mine is None else mine
+            if cs & mine:
+                out |= cs & mine
+                continue
+            E = max(len(O.ent_cur), len(cs))
+            wgt = math.log(1.0 + (E - len(cs) + 0.5) / (len(cs) + 0.5)) / math.log(1.0 + (E - 0.5) / 1.5)
             out |= cs
-            continue
-        mine = circle(O) if mine is None else mine
-        if cs & mine:
-            out |= cs & mine
-            continue
-        E = max(len(O.ent_cur), len(cs))
-        wgt = math.log(1.0 + (E - len(cs) + 0.5) / (len(cs) + 0.5)) / math.log(1.0 + (E - 0.5) / 1.5)
-        out |= cs
-        for e in cs:
-            wts[e] = min(wts.get(e, 1.0), wgt)
+            for e in cs:
+                wts[e] = min(wts.get(e, 1.0), wgt)
     return out
 
 
@@ -169,9 +172,11 @@ def lookup(nm, ns, owner, question, cap=None, past=None, exclude=()):
     res = {"ids": [], "block": "", "tokens": 0, "candidates": 0, "past": past}
     wts = {}
     subj = subjects(nm, ns, O, question, wts)
-    if not subj:
+    score, pool = scores(nm, ns, O, ns.tok.encode(question), cap, past, exclude)
+    notes = O.notes
+    loose = {i for i in pool if notes[i]["entity"] == "me" and notes[i]["attribute"].startswith(LOOSE)}
+    if not subj and not loose:
         return res
-    score = scores(nm, ns, O, ns.tok.encode(question), cap, past, exclude)
 
     def notes_of(e):
         got = set(O.ent_cur.get(e, ()))
@@ -183,14 +188,13 @@ def lookup(nm, ns, owner, question, cap=None, past=None, exclude=()):
     own = set()
     for e in subj:
         own |= notes_of(e)
-    cand = set(own)
+    cand = own | loose
     for i in own:
-        v = O.notes[i]["value"]
+        v = notes[i]["value"]
         if isinstance(v, str) and v in O.ent_cur and v not in subj:
-            if O.notes[i]["entity"] in wts:
-                wts[v] = min(wts.get(v, 1.0), wts[O.notes[i]["entity"]])
+            if notes[i]["entity"] in wts:
+                wts[v] = min(wts.get(v, 1.0), wts[notes[i]["entity"]])
             cand |= notes_of(v)
-    notes = O.notes
     sc = lambda i: score.get(i, 0.0) * wts.get(notes[i]["entity"], 1.0)  # noqa: E731
     order = sorted(cand, key=lambda i: (-sc(i), -notes[i]["told"], i))
     chosen, block, ntok = ns.fit(O, ns.pack(O, order, cap, past), cap)
