@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const tool_params = @import("tool_params.zig");
+const tool_kinds = @import("tool_kinds.zig");
 const reply_text = @import("reply_text.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
@@ -49,7 +50,7 @@ fn block(a: Allocator, body: []const u8, schemas: *const tool_params.Schemas) Al
         const name = p.name();
         if (name.len == 0 or !p.eat('(')) return null;
         const tool = schemas.get(try std.ascii.allocLowerString(a, name)) orelse return null;
-        const args = (try arguments(a, &p, tool.properties.keys())) orelse return null;
+        const args = (try arguments(a, &p, schemas, name, tool.properties.keys())) orelse return null;
         try out.print(a, "\n<\u{ff5c}DSML\u{ff5c}invoke name=\"{s}\">", .{name});
         for (args.keys(), args.values()) |k, v| {
             if (v == .string) {
@@ -71,7 +72,13 @@ fn block(a: Allocator, body: []const u8, schemas: *const tool_params.Schemas) Al
 }
 
 /// A call's arguments up to its `)`, positionals named in schema property order; null if Python would refuse them.
-fn arguments(a: Allocator, p: *Scanner, order: []const []const u8) Allocator.Error!?*json.Object {
+fn arguments(
+    a: Allocator,
+    p: *Scanner,
+    schemas: *const tool_params.Schemas,
+    name: []const u8,
+    order: []const []const u8,
+) Allocator.Error!?*json.Object {
     const args = try json.newObject(a);
     var keyword = false;
     var positional: usize = 0;
@@ -85,8 +92,9 @@ fn arguments(a: Allocator, p: *Scanner, order: []const []const u8) Allocator.Err
             break :blk order[positional - 1];
         };
         if (std.mem.indexOfScalar(u8, key, '"') != null or args.contains(key)) return null;
-        const v = (try literal(a, p.value() orelse return null)) orelse return null;
-        try args.put(a, key, v);
+        const raw = p.value() orelse return null;
+        const v = (try literal(a, raw)) orelse return null;
+        try args.put(a, key, try coerce(a, v, raw, try tool_params.schemaOf(schemas, name, key, a)));
         if (p.eat(',')) {
             if (p.eat(')')) return args;
             continue;
@@ -103,6 +111,26 @@ fn literal(a: Allocator, raw: []const u8) Allocator.Error!?Value {
         .err => (try tool_params.pythonLiteral(a, raw)) orelse return null,
     };
     return if (tool_params.finite(v)) v else null;
+}
+
+/// A value the schema does not take, read as the type it names: "4" as 4, 4.0 as 4, 1 as true, 123 as "123".
+fn coerce(a: Allocator, v: Value, raw: []const u8, schema: tool_params.Schema) Allocator.Error!Value {
+    const kinds = (try tool_kinds.schemaKinds(a, schema.value, schema.root)) orelse return v;
+    switch (v) {
+        .string => return if (kinds.contains(.string)) v else try tool_params.decode(a, v.string, schema, true),
+        .int, .float, .bool => {
+            if (tool_kinds.accepts(kinds, v)) return v;
+            if (kinds.contains(.string)) return .{ .string = raw };
+            if (v == .float and kinds.contains(.integer) and @trunc(v.float) == v.float and @abs(v.float) < 1e15) {
+                return .{ .int = try std.fmt.allocPrint(a, "{d}", .{@as(i64, @intFromFloat(v.float))}) };
+            }
+            if (v == .int and kinds.contains(.boolean) and (std.mem.eql(u8, v.int, "0") or std.mem.eql(u8, v.int, "1"))) {
+                return .{ .bool = v.int[0] == '1' };
+            }
+            return v;
+        },
+        else => return v,
+    }
 }
 
 /// The block's text, read left to right; every reader skips the blanks before what it reads.
@@ -298,5 +326,27 @@ test "tool_lfm2: the calls a stream sends at every byte boundary are the whole r
     try std.testing.expectEqual(want.len, names.items.len);
     for (want, names.items, args.items) |w, n, arg| {
         try std.testing.expectEqualStrings(w, try std.fmt.allocPrint(a, "{s} {s}", .{ n, arg.items }));
+    }
+}
+
+test "tool_lfm2: a value is read as the type the schema names" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a,
+        \\[{"type":"function","function":{"name":"typed","parameters":{"type":"object","properties":{
+        \\"s":{"type":"string"},"n":{"type":"integer"},"b":{"type":"boolean"},"r":{"type":"number"},"u":{"anyOf":[{"type":"string"},{"type":"integer"}]}}}}}]
+    )).ok.array;
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "[typed(s=123, n=4, b=True)]", "typed {\"s\":\"123\",\"n\":4,\"b\":true}" },
+        .{ "[typed(s=True, n='4', b='true')]", "typed {\"s\":\"True\",\"n\":4,\"b\":true}" },
+        .{ "[typed(n=4.0, b=1, r=2)]", "typed {\"n\":4,\"b\":true,\"r\":2}" },
+        .{ "[typed(n=4.5, b=0, r='1.5')]", "typed {\"n\":4.5,\"b\":false,\"r\":1.5}" },
+        .{ "[typed(s='12', u='7', n='x')]", "typed {\"s\":\"12\",\"u\":\"7\",\"n\":\"x\"}" },
+    };
+    for (cases) |c| {
+        const got = try whole(a, try std.mem.concat(a, u8, &.{ open, c[0], close }), tools);
+        try std.testing.expectEqual(@as(usize, 1), got.len);
+        try std.testing.expectEqualStrings(c[1], got[0]);
     }
 }
