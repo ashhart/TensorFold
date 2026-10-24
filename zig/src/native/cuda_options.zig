@@ -40,6 +40,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (comptime @hasField(F.Options, "drafter_bits")) opts.drafter_bits = o.drafter_bits;
     if (@hasField(F.Options, "kv8")) opts.kv8 = o.kv8;
     if (@hasField(F.Options, "prompt_int8")) opts.prompt_int8 = o.prompt_int8;
+    if (@hasField(F.Options, "loops")) opts.loops = o.loops;
     return true;
 }
 

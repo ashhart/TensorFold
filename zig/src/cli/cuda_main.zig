@@ -14,12 +14,14 @@ const checkpoint_cli = @import("checkpoint_cli");
 const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
 const train_check = @import("cuda_train_check.zig");
+const dory_cli = @import("cuda_dory.zig");
 const decode = nemotron.decode;
 
 const usage =
     \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR|native] [--device N]
     \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
     \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MSW,LEVEL]   (W window rows: 32 for a latent MoE, else 16)
+    \\         [--loops N]   (a Dory checkpoint: passes over its recurrent block, 1-4; default its n_recurrent_loops)
     \\         [--carveout]   (KV caches in GB10's display memory first; also TF_CUDA_CARVEOUT=1,
     \\         sized by TF_CUDA_CARVEOUT_MIB (default 1792), card TF_DRM_CARD (default /dev/dri/card0))
     \\         [--tokens-file PATH] [--segments N]   (N whole 2048-row prompt chunks a call as staggered segments,
@@ -132,6 +134,9 @@ pub fn main(init: std.process.Init) !u8 {
             gpa.free(opts.tokens);
             opts.tokens = try segments_cli.readIds(gpa, init.io, value);
             i += 1;
+        } else if (std.mem.eql(u8, a, "--loops")) {
+            opts.loops = try std.fmt.parseInt(usize, value, 10);
+            i += 1;
         } else if (std.mem.eql(u8, a, "--segments")) {
             opts.segments = try std.fmt.parseInt(usize, value, 10);
             i += 1;
@@ -183,6 +188,14 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         },
     };
+    if (std.mem.eql(u8, args[1], "run") and dory_cli.wants(gpa, init.io, opts.model)) {
+        const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
+        return dory_cli.run(gpa, init.io, &ctx, opts.model, .{ .tokens = opts.tokens, .max_tokens = opts.max_tokens, .loops = opts.loops, .context = opts.context, .drafts = opts.drafts, .graphs = opts.graphs, .stop_eos = opts.stop_eos, .sampling = s });
+    }
+    if (opts.loops != null) {
+        std.debug.print("--loops sets a Dory checkpoint's recurrent passes: {s} is not one\n", .{opts.model});
+        return 2;
+    }
     const env = init.environ_map;
     var carve: ?cuda.Carveout = null;
     if (try cuda.carveout.requested(opts.carveout, env.get("TF_CUDA_CARVEOUT"), env.get("TF_CUDA_CARVEOUT_MIB"))) |bytes| {
@@ -274,6 +287,7 @@ const Options = struct {
     solo: bool = false,
     costs: ?[]f64 = null,
     segments: ?usize = null,
+    loops: ?usize = null, // a Dory checkpoint's recurrent passes (run only)
     counts: Counts = .{ .items = .{ 1, 2, 3, 4 }, .len = 4 },
     repeat: usize = 3,
     streams: usize = 4,
