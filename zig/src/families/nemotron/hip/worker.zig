@@ -47,7 +47,7 @@ pub const Worker = struct {
 
     /// The prompt's rows [from, to) through the model, as rank 0 ran them.
     pub fn fill(w: *Worker, l: *Lane, prompt: []const u32, from: usize, to: usize) !void {
-        _ = try w.h.chunk(l, prompt, from, to);
+        _ = try w.h.chunk(l, prompt, from, to, null);
     }
 
     /// verify: id, rows, the window's tokens.
