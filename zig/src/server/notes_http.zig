@@ -50,6 +50,15 @@ fn reply(srv: *Server, conn: *Conn, a: Allocator, r: request.Route) Allocator.Er
     if (std.mem.eql(u8, conn.method, "DELETE") and flag(conn.path, "erase")) {
         const id = r.id orelse return fail(conn, a, 405, "erase takes a note id");
         if (body.len != 0) return fail(conn, a, 400, "erase takes no body");
+        _ = srv.generating.fetchAdd(1, .seq_cst);
+        defer _ = srv.generating.fetchSub(1, .seq_cst);
+        if (srv.draining.load(.seq_cst)) return @import("routes.zig").draining(conn, false);
+        if (srv.idle_manager) |m| m.begin();
+        defer if (srv.idle_manager) |m| m.end();
+        if (srv.idle_manager) |m| {
+            const problem = try @import("idle_unload.zig").wakeReload(m, srv, a);
+            if (problem.len > 0) return fail(conn, a, 503, problem);
+        }
         var p = erase.prepare(s, a, id) catch |e| return eraseError(conn, a, e);
         defer p.deinit();
         const response = try erase_reply.Reply.prepare(a, id, &p);

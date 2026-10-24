@@ -95,26 +95,7 @@ pub const LaneHost = struct {
         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
     }
 
-    /// Stops admitting, cancels what is left and joins the engine thread (after `halt`: the thread is gone already).
-    pub fn stop(h: *LaneHost) void {
-        rows_host.drainThread(h);
-        rows_host.close(h);
-        scoring.close(h);
-        h.lock();
-        h.forgets.close(h.gpa, h.io); // a forget asked after the thread's last pass: refused
-        h.unlock();
-        const closed: api.LearnEvent = .{ .done = .{ .message = "the engine closed" } };
-        for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
-        h.lessons.deinit(h.gpa);
-        h.queued.deinit(h.gpa);
-        h.admitted.deinit(h.gpa);
-        h.filling.deinit(h.gpa);
-        h.cancels.deinit(h.gpa);
-        h.decoded.deinit(h.gpa);
-        h.live_tokens.deinit(h.gpa);
-        h.pieces.deinit(h.gpa);
-        h.finals.deinit(h.gpa);
-    }
+    pub const stop = ends.stop;
 
     /// A drain's deadline: the round in flight completes on every rank, so the ranks stop at the same boundary.
     pub const halt = lane_halt.halt;

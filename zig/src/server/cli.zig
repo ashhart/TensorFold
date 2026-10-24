@@ -589,7 +589,6 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
 }
 
 const cli = @This();
-
 /// The private flag helpers cli_test.zig checks.
 pub const Test = if (builtin.is_test) struct {
     pub const cuda_build = cli.cuda_build;

@@ -187,3 +187,112 @@ test "storage HTTP: real Conn writes, lists, changes and takes back without an i
     try srv.notes.?.beginRun(a, .{});
     try testing.expect(srv.notes.?.model.placeOfSource(source) == null);
 }
+
+const IdleHarness = @import("idle_unload_test.zig").Harness;
+
+fn attachIdle(h: *IdleHarness, bytes: *@import("notes_storage_bytes_test.zig").Bytes, a: std.mem.Allocator, dir: std.Io.Dir) !void {
+    const root = try dir.realPathFileAlloc(testing.io, ".", a);
+    const path = try std.fs.path.join(a, &.{ root, "notes.journal" });
+    var problem: []const u8 = "";
+    h.srv.?.text = bytes.text();
+    h.srv.?.notes = try Storage.load(testing.allocator, @embedFile("notes/testdata/l6_bytes_snapshot.json"), bytes.text(), path, &problem);
+    try h.srv.?.notes.?.beginRun(a, .{});
+}
+
+fn detachIdle(h: *IdleHarness) void {
+    if (h.srv.?.notes) |s| s.deinit();
+    h.srv.?.notes = null;
+}
+
+test "notes idle: parked erase reloads first; a failed reload leaves the note retryable" {
+    for ([_]bool{ false, true }) |fails| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var h: IdleHarness = .{};
+        try h.setup(1000);
+        defer h.deinit();
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var bytes: @import("notes_storage_bytes_test.zig").Bytes = .{};
+        try attachIdle(&h, &bytes, a, tmp.dir);
+        defer detachIdle(&h);
+        const added = try exchange(h.srv.?, a, "POST", "/v1/notes", "{\"text\":\"My favourite colour is green.\"}");
+        const id: u32 = @intCast(added.value.get("id").?.int64().?);
+        h.expire();
+        try h.waitUnloaded(2000);
+        h.fail_open = fails;
+        const path = try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id});
+        const reply = try exchange(h.srv.?, a, "DELETE", path, "");
+        if (fails) {
+            try testing.expectEqual(@as(u16, 503), reply.code);
+            try testing.expect(h.srv.?.notes.?.model.placeOf(id) != null);
+            try testing.expectEqual(@as(usize, 0), h.srv.?.notes.?.journal.?.erases.items.len);
+        } else {
+            try testing.expectEqual(@as(u16, 200), reply.code);
+            try testing.expectEqual(@as(u32, 1), h.opens.load(.acquire));
+            try testing.expect(!h.man.?.isParked());
+        }
+    }
+}
+
+const IdleProbe = struct {
+    h: *IdleHarness,
+    original: api.Engine,
+    leased: bool = false,
+    stayed_open: bool = false,
+
+    fn engine(p: *IdleProbe) api.Engine {
+        return .{ .ctx = p, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .forget_prompts = forget } };
+    }
+    fn self(ctx: *anyopaque) *IdleProbe {
+        return @ptrCast(@alignCast(ctx));
+    }
+    fn info(ctx: *anyopaque) api.Info {
+        return self(ctx).original.info();
+    }
+    fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
+        return error.Closed;
+    }
+    fn cancel(_: *anyopaque, _: api.Id) void {}
+    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
+        out.* = .{};
+    }
+    fn memory(_: *anyopaque, _: bool) ?api.Memory {
+        return null;
+    }
+    fn forget(ctx: *anyopaque, _: []const u32) api.ForgetError!api.prompt_cache.Forgotten {
+        const p = self(ctx);
+        const m = p.h.man.?;
+        m.mutex.lockUncancelable(m.io);
+        p.leased = m.active > 0 and p.h.srv.?.generating.load(.seq_cst) > 0;
+        m.mutex.unlock(m.io);
+        p.h.expire();
+        p.h.sleepMs(250);
+        p.stayed_open = p.h.closes.load(.acquire) == 0;
+        return .{};
+    }
+};
+
+test "notes idle: erase holds the engine lease across every forget callback" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h: IdleHarness = .{};
+    try h.setup(1000);
+    defer h.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bytes: @import("notes_storage_bytes_test.zig").Bytes = .{};
+    try attachIdle(&h, &bytes, a, tmp.dir);
+    defer detachIdle(&h);
+    var probe: IdleProbe = .{ .h = &h, .original = h.srv.?.engine };
+    h.srv.?.engine = probe.engine();
+    const added = try exchange(h.srv.?, a, "POST", "/v1/notes", "{\"text\":\"My favourite colour is green.\"}");
+    const id = added.value.get("id").?.int64().?;
+    const path = try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id});
+    const reply = try exchange(h.srv.?, a, "DELETE", path, "");
+    try testing.expectEqual(@as(u16, 200), reply.code);
+    try testing.expect(probe.leased);
+    try testing.expect(probe.stayed_open);
+}
