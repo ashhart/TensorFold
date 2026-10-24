@@ -184,13 +184,13 @@ fn denseCheck(g: *const Gpu, m: Mat, t: *Tally) !void {
         try eql(core.slice(u16, n), got[0..n]);
         t.pairs += n;
     }
-    // windows, contiguous (two rows a weight read) and strided (one at a time, out rows apart with a lead offset)
+    // windows of every width, contiguous and strided (out rows apart with a lead offset)
     const xs = try buf(g.device, rows * (k + pad) * 2);
     defer xs.deinit();
     for (0..rows) |i| @memcpy(xs.slice(u16, rows * (k + pad))[i * (k + pad) ..][0..k], m.x().slice(u16, rows * k)[i * k ..][0..k]);
     const out = try buf(g.device, (rows * (n + pad) + 4) * 2);
     defer out.deinit();
-    for ([_]usize{ 2, 3, 16 }) |w| for ([_]bool{ false, true }) |strided| {
+    for (1..rows + 1) |w| for ([_]bool{ false, true }) |strided| {
         const ld: usize = if (strided) n + pad else n;
         const at: usize = if (strided) 4 else 0;
         try g.run(dense, .{ &g.p, m.q, wide.Io{ .in = ref(if (strided) xs else m.x()), .ldx = @intCast(if (strided) k + pad else k), .out = ref(out).at(at * 2), .ldo = @intCast(ld), .rows = @intCast(w) } });

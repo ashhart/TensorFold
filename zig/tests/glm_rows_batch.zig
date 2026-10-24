@@ -145,14 +145,16 @@ pub fn sharedGluCheck(g: *const Gpu) !usize {
             try buf(g.device, rows * n * 2),
         };
         defer for (bs) |b| b.deinit();
-        try g.run(
-            dense,
-            .{ &g.p, m.q, wide.Io{ .in = ref(m.x()), .ldx = 4096, .out = ref(bs[0]), .ldo = 2 * n, .rows = rows } },
-        );
-        try g.run(swiglu, .{ g.swiglu, ref(bs[0]), ref(bs[1]), @as(u32, rows), @as(u32, n), @as(f32, 0.75) });
-        try g.run(gluLaunch, .{ &g.p, m.q, @as(u32, n), ref(m.x()), ref(bs[2]), @as(u32, rows) });
-        try eql(bs[2].slice(u16, rows * n), bs[1].slice(u16, rows * n));
-        pairs += rows * n;
+        for ([_]u32{ 1, 3, rows }) |r| { // a lone last row and pairs
+            try g.run(
+                dense,
+                .{ &g.p, m.q, wide.Io{ .in = ref(m.x()), .ldx = 4096, .out = ref(bs[0]), .ldo = 2 * n, .rows = r } },
+            );
+            try g.run(swiglu, .{ g.swiglu, ref(bs[0]), ref(bs[1]), r, @as(u32, n), @as(f32, 0.75) });
+            try g.run(gluLaunch, .{ &g.p, m.q, @as(u32, n), ref(m.x()), ref(bs[2]), r });
+            try eql(bs[2].slice(u16, r * n), bs[1].slice(u16, r * n));
+            pairs += r * n;
+        }
     }
     std.debug.print(
         "shared expert gate|up at one width in one launch == glm_swiglu(dense [gate; up]): {d} bit-equal values\n",
