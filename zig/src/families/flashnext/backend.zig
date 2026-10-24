@@ -20,6 +20,7 @@ const grammar = @import("grammar.zig");
 const fill = @import("prefill.zig");
 const prompt_gpu = @import("prefill_metal.zig");
 const RoundTimes = @import("round_times.zig").RoundTimes;
+const batch_settle = @import("batch_settle.zig");
 
 /// A stream's images through the host's tower: its prompt pass's rows and frame (in `a`), then their release.
 pub const Images = struct { ctx: *anyopaque, build: *const fn (ctx: *anyopaque, a: std.mem.Allocator, images: []const lanes.stream.Image, prompt_len: usize, from: usize) anyerror!*fz.vis_prompt.VisPrompt, release: *const fn (ctx: *anyopaque, p: *fz.vis_prompt.VisPrompt) void };
@@ -105,49 +106,8 @@ pub const Backend = struct {
     fn session(b: *Backend, s: *Stream) !*Session {
         return &b.sessions[b.by.get(s) orelse return error.UnknownStream];
     }
-    /// settle's host half: pending rounds keep their rows; true when a session's state rows still need their copy.
-    fn settleKeep(b: *Backend) !bool {
-        var needed = false;
-        for (b.sessions) |*s| if (s.used) {
-            if (s.round.pending) try s.keep(s.round.rows);
-            needed = needed or s.m.state != 0 or s.m.state_row != 0;
-        };
-        return needed;
-    }
-
-    /// settle's copies at the head of `cb`, fenced before the compute encoder that follows them.
-    fn settleBlit(b: *Backend, cb: mtl.CommandBuffer, fence: mtl.counters.Fence) void {
-        const blit = cb.blit();
-        for (b.sessions) |*s| if (s.used) s.normalizeGpu(blit);
-        fence.updateBlit(blit);
-        blit.end();
-        for (b.sessions) |*s| if (s.used) {
-            s.m.state = 0;
-            s.m.state_row = 0;
-        };
-    }
-
     pub fn settle(b: *Backend) !void {
-        var needed = false;
-        for (b.sessions) |*s| if (s.used) {
-            if (s.round.pending) try s.keep(s.round.rows);
-            needed = needed or s.m.state != 0 or s.m.state_row != 0;
-        };
-        if (!needed) return;
-        const cb = b.e.r.queue.commandBuffer();
-        const blit = cb.blit();
-        for (b.sessions) |*s| if (s.used) s.normalizeGpu(blit);
-        blit.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |message| {
-            std.log.err("session state copy failed: {s}", .{message});
-            return error.GpuFailed;
-        }
-        for (b.sessions) |*s| if (s.used) {
-            s.m.state = 0;
-            s.m.state_row = 0;
-        };
+        return batch_settle.now(b);
     }
 
     const Binding = @import("session_binding.zig").Binding;
@@ -392,7 +352,7 @@ pub const Backend = struct {
         defer pool.pop();
         const b = self(ptr);
         b.times.begin(false);
-        const fold = if (b.fence != null and !b.sized) try b.settleKeep() else blk: {
+        const fold = if (b.fence != null and !b.sized) try batch_settle.keep(b) else blk: {
             try b.settle();
             break :blk false;
         };
@@ -437,7 +397,7 @@ pub const Backend = struct {
             fz.vis_prompt.decodePositions(pos8[plan.starts[i]..][0..w.rows()], d);
         }
         const cb = b.e.r.queue.commandBuffer();
-        if (fold) b.settleBlit(cb, b.fence.?);
+        if (fold) batch_settle.encode(b, cb, b.fence.?);
         b.e.r.enc = cb.compute(.serial);
         if (fold) b.fence.?.waitCompute(b.e.r.enc);
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);
