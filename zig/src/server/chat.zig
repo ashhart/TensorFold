@@ -7,6 +7,7 @@ const fields_mod = @import("fields.zig");
 const reply_text = @import("reply_text.zig");
 const tool_stream = @import("tool_stream.zig");
 const tool_parse = @import("tool_parse.zig");
+const tool_lfm2 = @import("tool_lfm2.zig");
 const prompt_mod = @import("prompt.zig");
 const log = @import("log.zig");
 const ids = @import("ids.zig");
@@ -360,6 +361,7 @@ const Generation = struct {
             }
             answer = split.answer;
         }
+        answer = try tool_lfm2.dsml(g.a, answer, g.tools, false); // the answer only, so a call the reasoning mentions is not made
         const shown = if (g.calls != null) try reply_text.hideInto(g.a, &g.hidden, answer, false) else answer;
         const vis = reply_text.heldBack(reply_text.streamingVisible(shown), g.calls != null);
         const copied = @intFromPtr(vis.ptr) >= @intFromPtr(g.hidden.items.ptr) and @intFromPtr(vis.ptr) <= @intFromPtr(g.hidden.items.ptr) + g.hidden.items.len;
@@ -482,6 +484,7 @@ const Generation = struct {
             content = h.content;
             reasoning = h.reasoning;
         }
+        content = try tool_lfm2.dsml(a, content, g.tools, true);
         if (g.sink) |sink| {
             const thought = g.streamed_reasoning.text.items;
             if (reasoning) |r| if (std.mem.startsWith(u8, r, thought) and r.len > thought.len)
