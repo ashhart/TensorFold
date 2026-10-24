@@ -95,9 +95,17 @@ pub fn ctKinds(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, g: Geometry)
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26));
     defer gpa.free(bytes);
+    return ctKindsBytes(gpa, bytes, g);
+}
+
+/// The same index admission without filesystem allocation, for deterministic OOM coverage.
+pub fn ctKindsBytes(gpa: std.mem.Allocator, bytes: []const u8, g: Geometry) !Kinds {
     const doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer doc.deinit();
-    const map = (doc.value.object.get("weight_map") orelse return error.UnsupportedQwenQuantization).object;
+    if (doc.value != .object) return error.UnsupportedQwenQuantization;
+    const value = doc.value.object.get("weight_map") orelse return error.UnsupportedQwenQuantization;
+    if (value != .object) return error.UnsupportedQwenQuantization;
+    const map = value.object;
     const K = struct {
         fn of(m: std.json.ObjectMap, module: []const u8) !Kind {
             var b: [192]u8 = undefined;
@@ -254,8 +262,6 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
     if (k % 64 != 0) return error.UnsupportedQwenGeometry;
     const p = &(e.mo orelse return error.FormatNotLoaded).pack;
     var buf: [192]u8 = undefined;
-    // the static input scale: read for the checkpoint's math (--precision checkpoint), unused by bf16 rows
-    const act: f32 = if (kind != .bf16 and ck.has(try tname(&buf, pre, name, "input_scale"))) try scalar(ck, try tname(&buf, pre, name, "input_scale")) else 0;
     const out: Weight = switch (kind) {
         .bf16 => blk: {
             const t = try ck.expect(try tname(&buf, pre, name, "weight"), .bf16, &.{ n, k });
@@ -270,9 +276,7 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
             try stage.upload(0, t.bytes);
             const w = try e.alloc(padded(n) * k);
             try p.fp8Lane(e.stream, stage.ptr, w, n, k);
-            var q = cuda.modelopt.fp8Weight(w, scale, n, k);
-            q.act = act;
-            break :blk .{ .fp8 = q };
+            break :blk .{ .fp8 = cuda.modelopt.fp8Weight(w, scale, n, k) };
         },
         .fp8c => blk: { // compressed-tensors FP8, a bf16 scale a row: the FP8G lane, every 64 inputs a row's scale
             const t = try ck.expect(try tname(&buf, pre, name, "weight"), .f8_e4m3, &.{ n, k });
@@ -298,9 +302,7 @@ pub fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, pre: []con
             const words = try e.alloc(padded(n) * k / 2);
             const tiles = try e.alloc(padded(n) * k / 16);
             try p.fp4Lane(e.stream, stage.ptr, stage.ptr + codes.bytes.len, words, tiles, n, k);
-            var q = cuda.nvfp4.weight(words, tiles, global, n, k);
-            q.act = act;
-            break :blk .{ .nvfp4 = q };
+            break :blk .{ .nvfp4 = cuda.nvfp4.weight(words, tiles, global, n, k) };
         },
         .affine => unreachable,
     };

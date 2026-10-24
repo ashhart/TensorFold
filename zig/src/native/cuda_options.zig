@@ -31,7 +31,10 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
             problem.* = "--precision: this CUDA family reads no NVFP4 checkpoint; serve it without --precision";
             return false;
         }
-        opts.precision = std.meta.stringToEnum(@typeInfo(@TypeOf(opts.precision)).optional.child, @tagName(p)).?;
+        opts.precision = std.meta.stringToEnum(@typeInfo(@TypeOf(opts.precision)).optional.child, @tagName(p)) orelse {
+            problem.* = "--precision: unknown value for this CUDA family; serve without --precision or with --precision full";
+            return false;
+        };
     }
     if (comptime @hasField(F.Options, "drafter")) opts.drafter = o.drafter;
     if (comptime @hasField(F.Options, "drafter_bits")) opts.drafter_bits = o.drafter_bits;
@@ -83,4 +86,22 @@ test "prompt precision: family options receive both explicit int8 and default bf
         try std.testing.expect(set(F, .{ .dir = "d", .model_type = "qwen3_5", .prompt_int8 = on }, &opts, &why));
         try std.testing.expectEqual(on, opts.prompt_int8);
     }
+}
+
+test "full-only precision: checkpoint is unknown before a family can load or allocate" {
+    const Full = struct {
+        pub const Options = struct { precision: ?enum { full } = null };
+    };
+    var opts: Full.Options = .{};
+    var why: []const u8 = "";
+    try std.testing.expect(set(Full, .{ .dir = "d", .model_type = "qwen3_5", .precision = .full }, &opts, &why));
+    try std.testing.expectEqual(@as(?@typeInfo(@TypeOf(opts.precision)).optional.child, .full), opts.precision);
+    try std.testing.expect(!set(Full, .{ .dir = "d", .model_type = "qwen3_5", .precision = .checkpoint }, &opts, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why, "unknown") != null);
+    const Both = struct {
+        pub const Options = struct { precision: ?enum { checkpoint, full } = null };
+    };
+    var existing: Both.Options = .{};
+    try std.testing.expect(set(Both, .{ .dir = "d", .model_type = "nemotron_h", .precision = .checkpoint }, &existing, &why));
+    try std.testing.expectEqual(@as(?@typeInfo(@TypeOf(existing.precision)).optional.child, .checkpoint), existing.precision);
 }
