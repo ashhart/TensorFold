@@ -25,11 +25,19 @@ pub fn draw(
     vocab: usize,
     s: lanes.Sampling,
 ) void {
-    const rule = lanes.gpu_rule.rule(s);
+    var each: [fz.MAXR]lanes.Sampling = undefined;
+    for (each[0..rows]) |*x| x.* = s;
+    drawRows(enc, pipe, logits, pos, picks, each[0..rows], vocab);
+}
+
+/// tf_sample_full on one row per entry of `ss`, each row under its own window's rule: one dispatch for several windows.
+pub fn drawRows(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, logits: fz.Buf, pos: fz.Buf, picks: fz.Buf, ss: []const lanes.Sampling, vocab: usize) void {
+    const rows = ss.len;
     var seeds: [2 * fz.MAXR]u32 = @splat(0);
     var cfgs: [4 * fz.MAXR]f32 = @splat(0);
     var caps: [fz.MAXR]u32 = @splat(0);
-    for (0..rows) |i| {
+    for (ss, 0..) |si, i| {
+        const rule = lanes.gpu_rule.rule(si);
         seeds[2 * i ..][0..2].* = rule.seedHalves();
         cfgs[4 * i ..][0..4].* = rule.cfg();
         caps[i] = rule.top_k;
