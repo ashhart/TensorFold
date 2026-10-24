@@ -9,6 +9,11 @@ pub const memory = @import("memory.zig");
 pub const ref = @import("ref.zig");
 pub const cuda_weights = @import("cuda_weights.zig");
 pub const cuda_model = @import("cuda_model.zig");
+pub const cuda_backend = @import("cuda_backend.zig");
+pub const cuda_snap = @import("cuda_snap.zig");
+pub const cuda_run = @import("cuda_run.zig");
+/// The native CUDA registry's entry (native/cuda.zig).
+pub const native = @import("cuda_native.zig");
 
 test {
     _ = @import("config.zig");
@@ -18,4 +23,9 @@ test {
     _ = @import("ref.zig");
     _ = @import("cuda_weights.zig");
     _ = @import("cuda_model.zig");
+    _ = @import("cuda_kernels.zig");
+    _ = @import("cuda_backend.zig");
+    _ = @import("cuda_snap.zig");
+    _ = @import("cuda_run.zig");
+    _ = @import("cuda_native.zig");
 }

@@ -14,9 +14,12 @@ pub const Rig = struct {
     k: fwd.Kernels,
     s: cuda.Stream,
     m: fwd.Model,
-    logits: cuda.DeviceBuffer,
 
     pub fn init(r: *Rig, gpu: Gpu, model: []const u8, loops: usize, context: usize) !void {
+        return r.initSlots(gpu, model, loops, context, 1);
+    }
+
+    pub fn initSlots(r: *Rig, gpu: Gpu, model: []const u8, loops: usize, context: usize, slots: usize) !void {
         r.gpu = gpu;
         r.w = try dory.cuda_weights.load(gpu.gpa, gpu.io, gpu.d, model, loops);
         errdefer r.w.deinit();
@@ -24,26 +27,28 @@ pub const Rig = struct {
         errdefer r.k.deinit();
         r.s = try cuda.Stream.init(gpu.d, false);
         errdefer r.s.deinit();
-        r.m = try fwd.Model.init(gpu.gpa, gpu.d, r.s, &r.w, &r.k, context);
-        errdefer r.m.deinit();
-        r.logits = try cuda.DeviceBuffer.alloc(gpu.d, fwd.prompt_rows * r.w.config.vocab * 4);
+        r.m = try fwd.Model.init(gpu.gpa, gpu.d, r.s, &r.w, &r.k, context, slots);
     }
 
     pub fn deinit(r: *Rig) void {
-        r.logits.free();
         r.m.deinit();
         r.s.deinit();
         r.k.deinit();
         r.w.deinit();
     }
 
-    /// fp32 logits of `tokens` at p0.. (each row's), on the host.
+    /// fp32 logits of `tokens` at p0.. (rows pick[0].. in order, a run), on the host; slot 0.
     pub fn rows(r: *Rig, tokens: []const u32, p0: usize, prompt: bool, pick: []const usize) ![]f32 {
-        try r.m.forward(&r.k, r.s, tokens, p0, prompt, pick, r.logits.ptr);
+        return r.slotRows(0, tokens, p0, prompt, pick[0], pick.len);
+    }
+
+    /// fp32 logits of rows [head0, head0 + heads) of `tokens` at p0.. in `slot`'s caches, on the host.
+    pub fn slotRows(r: *Rig, slot: usize, tokens: []const u32, p0: usize, prompt: bool, head0: usize, heads: usize) ![]f32 {
+        try r.m.forward(&r.k, r.s, &.{.{ .slot = slot, .p0 = p0, .tokens = tokens }}, prompt, head0, heads);
         try r.s.synchronize();
         const v = r.w.config.vocab;
-        const out = try r.gpu.gpa.alloc(f32, pick.len * v);
-        try r.logits.download(0, std.mem.sliceAsBytes(out));
+        const out = try r.gpu.gpa.alloc(f32, heads * v);
+        try (cuda.DeviceBuffer{ .d = r.gpu.d, .ptr = r.m.s.logits, .len = out.len * 4, .borrowed = true }).download(0, std.mem.sliceAsBytes(out));
         return out;
     }
 };

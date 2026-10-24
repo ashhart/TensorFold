@@ -85,6 +85,7 @@ const kv8_refusal = "--kv-cache fp8 keeps fp8 caches on CUDA; the HIP engines ke
 
 /// The cache flags this backend cannot honour, refused on every rank before a family loads.
 fn cacheRefused(o: api.Open) ?[]const u8 {
+    if (o.loops != null) return "--loops sets Dory's recurrent passes, served on CUDA: the HIP engines run no looped model";
     return if (o.kv8) kv8_refusal else null;
 }
 
