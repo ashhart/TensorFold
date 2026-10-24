@@ -520,3 +520,19 @@ extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_add_rms_rows_bf
     const __nv_bfloat16* w, __nv_bfloat16* h, __nv_bfloat16* y, float* xs, int width, float eps) {
     tf_rms_tail::tail<tf_rms_tail::MLX>(x, r, wb, sc, w, h, y, xs, width, eps);
 }
+
+// nGPT rows (norms_l2.cuh): L2 norms with eps on the sum, and the normalized lerp residual (Dory).
+#include "norms_l2.cuh"
+
+// y = bf16(l2(s)), s = x, or bf16(x + r) with r (a loop's entry): a block a row, width % 64, at most 8,192.
+extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_l2_rows(const __nv_bfloat16* x, const __nv_bfloat16* r,
+                                                                   __nv_bfloat16* y, int width, float eps) {
+    tf_l2::l2_rows<tf_l2::SUM>(x, r, y, width, eps);
+}
+
+// h = bf16(l2(a + |alpha scale| (b - a))), a = bf16(l2(res)), b = bf16(l2(out)): dory.py's slerp_norm.
+extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_slerp_rows(const __nv_bfloat16* res, const __nv_bfloat16* out,
+                                                                      const __nv_bfloat16* alpha, float scale,
+                                                                      __nv_bfloat16* h, int width, float eps) {
+    tf_l2::slerp_rows<tf_l2::A | tf_l2::B>(res, out, alpha, scale, h, width, eps);
+}
