@@ -66,10 +66,8 @@ pub fn Namespace(comptime Tri: type) type {
             const own: *Cuda = @ptrCast(@alignCast(p));
             return .{ .e = own.engine, .tri = own.tri(), .dir = dir, .lay = own.lay };
         }
-
         /// One stream's prompt-and-reply driver, as native/cuda.zig types it; this family has none.
         pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
-
         pub const Loaded = struct {
             vision: ?*@import("cuda_images.zig").Vision = null,
             backend: be.Backend,

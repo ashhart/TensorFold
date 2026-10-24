@@ -246,7 +246,7 @@ test "KV admission: a refusal prices the running states beside the fixed part an
     var problem: []const u8 = "";
     const l: kv_pool.Layout = .{ .fixed_bytes = 1 << 30, .token_bytes = 1 << 28, .page_tokens = 4, .snap_bytes = 1, .run_bytes = 1 << 30 };
     const o: api.Open = .{ .dir = "", .model_type = "n", .lanes = 2, .lanes_fixed = true, .prompt_cache_gib = 0 };
-    try std.testing.expectEqual(@as(?Plan, null), try plan(struct {}, arena.allocator(), l, 2 << 30, o, 8, &problem, false));
+    try std.testing.expectEqual(@as(?Plan, null), try plan(struct {}, arena.allocator(), l, 2 << 30, o, 8, &problem, false, false));
     try std.testing.expect(std.mem.indexOf(u8, problem, "needs 3.00 GiB") != null);
     try std.testing.expect(std.mem.indexOf(u8, problem, "state runs") != null);
 }

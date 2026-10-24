@@ -91,21 +91,17 @@ fn made(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype) ![]B {
     }
     return out;
 }
-
 pub const vocabulary: usize = vocab;
 /// Prompt plus reply tokens a sequence can hold: the model's window.
 pub const max_tokens: usize = weights.window;
-
 /// One position's keys and values in one attention layer, bf16.
 pub const kv_row_bytes: usize = kv_heads * head_dim * 2;
-
 /// Device bytes `Engine.newSeq(cap)` allocates: conv tails, recurrent states, KV with indexer keys, the n-gram tail.
 pub fn seqBytes(cap: usize) usize {
     const linear = linear_n * ((gdn.taps - 1) * gdn.conv_dim * 2 + state_n * 4);
     const attn = attn_n * (cap * (2 * kv_row_bytes + index_dim * 2) + pooledBytes(cap));
     return linear + attn + ple_tail_n * wide * 2;
 }
-
 /// Contiguous storage or the page diagnostic's rounded arena and table, with every live allocation priced.
 pub fn seqBytesPaged(cap: usize, tokens: usize) !usize {
     if (cap == 0 or cap > max_tokens) return error.BadFlashNextPageTest;
@@ -114,15 +110,12 @@ pub fn seqBytesPaged(cap: usize, tokens: usize) !usize {
     const attention = attn_n * (cap * (2 * kv_row_bytes + index_dim * 2) + pooledBytes(cap));
     return std.math.add(usize, seqBytes(cap) - attention, p.total) catch error.BadFlashNextPageTest;
 }
-
 /// One attention layer's pooled indexer keys for a cache of `cap` tokens: a bf16 row of 128 a block of 4.
 pub fn pooledBytes(cap: usize) usize {
     return (cap + weights.index_ratio - 1) / weights.index_ratio * index_dim * 2;
 }
-
 const round_graph = @import("cuda_round_graph.zig");
 const pages = @import("cuda_pages.zig");
-
 /// One loaded checkpoint: the embedding table, every layer, the mixer and head, and the batched pass's scratch.
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -153,11 +146,9 @@ pub const Engine = struct {
     pockets: pocket.Pockets = .{},
     /// During a round of taught and untaught streams: its rows' pocket scales (0 on an untaught row); 0: none.
     taught_rows: u64 = 0,
-
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8) !*Engine {
         return initRank(gpa, io, driver, stream, model_dir, 1, 0);
     }
-
     pub fn initRank(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8, world: usize, rank: usize) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
