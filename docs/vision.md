@@ -1,8 +1,8 @@
 # Image input
 
 This page describes image input in the Python engine, frozen at 0.6.6, until [The native server](#the-native-server),
-which covers the native binary: it reads images for GLM-5.3-Flash, Qwen3.8-27B and Qwen3.8 Flash Next on a Mac and
-refuses `--vision` for other models. Install the Python engine from the
+which covers the native binary: it reads images for the models listed there and refuses `--vision` for other models.
+Install the Python engine from the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6) for the rest.
 Parts of it came from pull requests: GLM-5.3-Flash images by @mgoldwasser
 ([#101](https://github.com/ashhart/TensorFold/pull/101)), Flash Next images on CUDA by @shantanugoel
@@ -148,7 +148,8 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 `tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
 4,096; 13,312 for Nemotron 3.5 Super VL) for engines that read images: GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4
 [31B](recipes/gemma-4-native.md#images) and [12B](recipes/gemma-4-12b-native.md#images) and Step-5-Preview on one
-Mac, and Nemotron 3.5 Super VL on CUDA. Other native engines refuse the flag at startup.
+Mac, GLM-5.3-Flash on [CUDA ranks](recipes/glm-5.3-flash-cuda.md#requests) and Nemotron 3.5 Super VL on CUDA. Other
+native engines refuse the flag at startup.
 The CLI accepts explicit image budgets from 16 to 262,144 tokens; each engine still applies its own limits and memory admission.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
