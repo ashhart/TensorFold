@@ -58,3 +58,26 @@ test "compiler receipts: 13.0 additions cannot replace a different later measure
     for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
         try std.testing.expectEqualDeep(registry.none, registry.usageFor(absent, version));
 }
+
+test "compiler receipts: Qwen BF16 rows keep measured 13.0 usage and pending later releases" {
+    const names = [_][]const u8{ "tf_q35_embed_bf16", "tf_q35_dense_bf16" };
+    const regs = [_][5]u32{ .{ 16, 16, 16, 40, 40 }, .{ 34, 40, 40, 42, 42 } };
+    for (names, regs, 0..) |symbol, counts, n| {
+        const row = for (registry.all_cuda) |r| {
+            if (std.mem.eql(u8, r.launch.symbol, symbol)) break r;
+        } else return error.MissingBf16Record;
+        try std.testing.expectEqualStrings("qwen35_bf16_rows", row.launch.image);
+        try std.testing.expectEqual(@as(u32, 256), row.launch.threads);
+        var want: [5]limits.Usage = undefined;
+        for (&want, counts) |*u, count| u.* = .{ .regs = count, .static = if (n == 0) 0 else 32, .bound = 256 };
+        for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 1 } }) |version|
+            try std.testing.expectEqualDeep(want, registry.usageFor(row, version));
+        for (limits.sms, want) |sm, usage| {
+            var problems: std.ArrayList(u8) = .empty;
+            defer problems.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 0), try limits.cuda(row.launch, usage, sm, &problems, std.testing.allocator));
+        }
+        for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
+            try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
+    }
+}
