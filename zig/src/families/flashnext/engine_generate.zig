@@ -170,6 +170,11 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     var rule: DepthRule = .{ .pair = r.tp != null };
     var by_cost: ?CostDepth = if (r.tp == null and !r.device.tensorUnits()) .{} else null; // 0.6.5's rule before M5
     var last_end: f64 = 0; // the previous read round's GPU end (s): a round's time is the gap to its own
+    const busy_log = platform.c.getenv("FZ_BUSY") != null; // dev: the GPU's busy share of a reply's rounds
+    var busy_s: f64 = 0;
+    var gap_s: f64 = 0;
+    var first_start: f64 = 0;
+    defer if (busy_log and last_end > first_start) std.log.info("rounds: GPU busy {d:.1} ms, gaps {d:.2} ms, span {d:.1} ms", .{ busy_s * 1e3, gap_s * 1e3, (last_end - first_start) * 1e3 });
     var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
     var head_rate: f64 = 0.6;
     const long = prompt.len + max_tokens + 8 > 4 * TOP;
@@ -181,10 +186,11 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     if (tr) |t| t.select(prompt);
     // gated lanes (FZ_GATE) for the same replies: the head's confidence sets each round's width on the GPU
     const gt: ?*gate_mod.Gate = if (e.gate) |g| (if (tr == null and drafted and out.sampling == null and !watch.armed and r.tp == null and !long) g else null) else null;
-    const fixed = if (tr) |t| t.a + t.b else if (gt != null) gate_mod.WMAX_FIRST - 1 else depth;
+    const gfix: ?usize = if (platform.c.getenv("FZ_GATE_FIX")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch null else null; // dev: a fixed host window
+    const fixed = if (tr) |t| t.a + t.b else if (gt != null) (gfix orelse gate_mod.WMAX_FIRST) - 1 else depth;
     const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
     var next_depth: usize = depth0; // the rule's drafts for the next round to encode (rank 0's in speed-up mode)
-    var gw: usize = gate_mod.WMAX_FIRST; // a gated reply's window, rows (up to the gate's width)
+    var gw: usize = gfix orelse gate_mod.WMAX_FIRST; // a gated reply's window, rows (up to the gate's width)
     const w = e.wids.b.slice(u32, 16);
     w[0] = pick;
     if (depth0 > 0) { // the head: the last prompt row with the first token, then its chain
@@ -350,6 +356,12 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         const keep = rg[slot];
         const wd: usize = if (gt != null) rg[slot + 19] else widths[done % 4]; // a gated round's width is the GPU's
         if (by_cost) |*c| if (last_end > 0) c.time(wd - 1, (prev.gpuEnd() - last_end) * 1e3);
+        if (busy_log) { // dev: GPU time inside rounds against gaps between them
+            if (first_start == 0) first_start = prev.gpuStart();
+            const from = if (last_end > 0) @max(prev.gpuStart(), last_end) else prev.gpuStart();
+            busy_s += prev.gpuEnd() - from;
+            if (last_end > 0 and prev.gpuStart() > last_end) gap_s += prev.gpuStart() - last_end;
+        }
         last_end = prev.gpuEnd();
         const got = rg[slot + 3 .. slot + 3 + keep];
         const learn = !watch.read(got); // a round that landed the close's tokens teaches no rate, rule or counter
@@ -365,7 +377,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             res.copy_by_len[n][0] += 1;
             res.copy_by_len[n][1] += keep - 1;
         }
-        if (gt) |g| if (learn and rg[slot + 1] == 0) { // a row wider after the gate kept the window whole, one narrower after two short
+        if (gt) |g| if (learn and gfix == null and rg[slot + 1] == 0) { // a row wider after the gate kept the window whole, one narrower after two short
             const wh = widths[done % 4];
             if (wd == wh) gw = @min(gw + 1, g.width) else if (wd + 2 <= wh) gw = @max(gw - 1, gate_mod.WMAX_FIRST);
         };

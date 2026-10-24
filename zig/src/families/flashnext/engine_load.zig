@@ -389,6 +389,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         r.gx = try @import("gx.zig").init(r, try std.fmt.parseInt(usize, std.mem.span(v), 10));
         std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
     };
+    if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
     // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
     const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.4" else null;
     if (r.tp == null) if (gate_tau) |v| if (!std.mem.eql(u8, v, "off")) {
