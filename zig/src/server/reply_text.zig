@@ -5,14 +5,21 @@ const Allocator = std.mem.Allocator;
 pub const Markers = struct { open: []const u8, close: []const u8 };
 /// Qwen's prompt opens the think block; Gemma 4's reply opens its thought channel.
 pub const think_markers: Markers = .{ .open = "", .close = "</think>" };
-/// The opener a reply writes itself when its template leaves the think block to it (Kolibri 1's does).
+/// MiniMax-M3's adaptive thinking: the reply writes `<mm:think>...</mm:think>` itself, or `</mm:think>` alone.
+pub const mm_markers: Markers = .{ .open = "", .close = "</mm:think>" };
+/// The opener a reply writes itself when its template leaves the think block to it (Kolibri 1's and MiniMax-M3's do).
 const think_open = "<think>";
+
+fn openerOf(m: Markers) []const u8 {
+    return if (std.mem.eql(u8, m.close, mm_markers.close)) "<mm:think>" else think_open;
+}
 pub const channel_markers: Markers = .{ .open = "<|channel>thought", .close = "<channel|>" };
-/// (opener, closer) of a tool call's markup: Qwen's, Gemma 4's, DeepSeek-V4's DSML block.
+/// (opener, closer) of a tool call's markup: Qwen's, Gemma 4's, DeepSeek-V4's DSML block, MiniMax-M3's.
 pub const calls = [_][2][]const u8{
     .{ "<tool_call>", "</tool_call>" },
     .{ "<|tool_call>", "<tool_call|>" },
     .{ "<\u{ff5c}DSML\u{ff5c}tool_calls>", "</\u{ff5c}DSML\u{ff5c}tool_calls>" },
+    .{ "]<]minimax[>[<tool_call>", "]<]minimax[>[</tool_call>" },
 };
 
 /// ``text.find(tag, from)`` led by a vector scan for the tag's first byte: markup is rare in prose, so it is fast.
@@ -112,12 +119,12 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
         const trimmed = trimNewlines(rest);
         shift = m.open.len + (rest.len - trimmed.len);
         text = trimmed;
-    } else if (std.mem.startsWith(u8, text, think_open)) {
-        const rest = text[think_open.len..];
+    } else if (std.mem.startsWith(u8, text, openerOf(m))) {
+        const rest = text[openerOf(m).len..];
         const trimmed = trimNewlines(rest);
-        shift = think_open.len + (rest.len - trimmed.len);
+        shift = openerOf(m).len + (rest.len - trimmed.len);
         text = trimmed;
-    } else if (!finished and std.mem.startsWith(u8, think_open, text)) {
+    } else if (!finished and std.mem.startsWith(u8, openerOf(m), text)) {
         return .{ .reasoning = "", .answer = "" }; // held while the reply may still be writing that opener
     }
     if (at) |v| at = if (v >= shift) v - shift else null;
@@ -454,4 +461,16 @@ test "a reply that writes its own think opener keeps the tag out of its reasonin
         try std.testing.expectEqualStrings("Plan.\n", s.reasoning);
         try std.testing.expectEqualStrings("Done.", s.answer);
     }
+}
+
+test "reply text: MiniMax-M3's adaptive think block, written by the reply or skipped with its close alone" {
+    const a = std.testing.allocator;
+    const full = try splitThinking(a, "<mm:think>17 * 23 = 391.</mm:think>391", true, mm_markers);
+    try std.testing.expectEqualStrings("17 * 23 = 391.", full.reasoning);
+    try std.testing.expectEqualStrings("391", full.answer);
+    const bare = try splitThinking(a, "</mm:think>Hello there", true, mm_markers);
+    try std.testing.expectEqualStrings("", bare.reasoning);
+    try std.testing.expectEqualStrings("Hello there", bare.answer);
+    const held = try splitThinking(a, "<mm:th", false, mm_markers);
+    try std.testing.expectEqualStrings("", held.answer);
 }

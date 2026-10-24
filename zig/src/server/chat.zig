@@ -347,7 +347,7 @@ const Generation = struct {
             try fresh.append(g.a, t);
         }
         const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
-        const text = g.stops.visible(all, true);
+        const text = try @import("tool_minimax.zig").dsml(g.a, g.stops.visible(all, true), g.tools); // MiniMax-M3's calls as DSML
         if (g.visible.pending()) return; // a character still split across tokens
         var answer = text;
         if (g.thinking) {
@@ -466,7 +466,7 @@ const Generation = struct {
         const finished_ns = nowNs(g.srv.io);
         const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
-        const visible = g.stops.visible(raw, false);
+        const visible = try @import("tool_minimax.zig").dsml(a, g.stops.visible(raw, false), g.tools);
         // closed before the think split, so a call ending an unclosed think block is the answer
         const close = try g.closeCall(visible);
         const text = if (close.len > 0) try std.mem.concat(a, u8, &.{ visible, close }) else visible;
