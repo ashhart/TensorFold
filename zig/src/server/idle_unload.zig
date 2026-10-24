@@ -198,7 +198,8 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, reply: Allocator, problem_ou
     if (m.state == .resident) return m.mutex.unlock(m.io);
     if (m.state != .unloaded) {
         problem_out.* = "the engine is still unloading; send the request again";
-        return m.mutex.unlock(m.io); // still closing: a deliberate retry, not a race
+        m.mutex.unlock(m.io);
+        return error.ReloadFailed; // the route returns the retry reason with Retry-After
     }
     m.state = .loading;
     m.mutex.unlock(m.io); // `parked` stays true: the server's engine is the stub until the swap below publishes
@@ -356,4 +357,6 @@ test {
     _ = @import("idle_unload_cases.zig");
     _ = @import("idle_unload_carry_test.zig");
     _ = @import("idle_unload_deadline_test.zig");
+    _ = @import("idle_unload_policy.zig");
+    _ = @import("idle_unload_review_test.zig");
 }

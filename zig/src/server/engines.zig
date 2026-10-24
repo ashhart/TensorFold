@@ -26,6 +26,13 @@ pub fn identity(a: Allocator, args: cli.Args) build_identity.Identity {
 
 /// The engine for the checkpoint in ``dir``, or null with ``problem`` set.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !?Opened {
+    if (args.idle_unload > 0) {
+        const world = if (std.c.getenv("TF_GLM_WORLD")) |value| std.mem.span(value) else null;
+        if (@import("idle_unload_policy.zig").refusal(native.backends, model_type, args.idle_unload, world)) |why| {
+            problem.* = why;
+            return null;
+        }
+    }
     if (args.record != null and !@hasDecl(native, "records")) {
         problem.* = "--record writes rows from the CUDA engine only so far: serve without --record";
         return null;
