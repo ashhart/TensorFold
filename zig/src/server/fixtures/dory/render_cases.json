@@ -1,0 +1,183 @@
+[
+ {
+  "name": "plain_on",
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "prompt": "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "plain_off",
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "add_generation_prompt": true,
+   "enable_thinking": false
+  },
+  "prompt": "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think></think>"
+ },
+ {
+  "name": "conv",
+  "request": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Oslo?"
+    },
+    {
+     "role": "assistant",
+     "content": "Checking.",
+     "tool_calls": [
+      {
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Oslo",
+         "days": 2
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "Rain, 5C"
+    },
+    {
+     "role": "user",
+     "content": "Thanks, and Rome?"
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<think></think>Checking.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>\n<parameter=days>\n2\n</parameter>\n</function>\n</tool_call>\n<|im_end|>\n<|im_start|>user\n<tool_response>\nRain, 5C\n</tool_response>\n<|im_end|>\n<|im_start|>user\nThanks, and Rome?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "tools",
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Oslo?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "days": {
+         "type": "integer",
+         "enum": [
+          1,
+          2,
+          3
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "prompt": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Get the weather.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n<description>City name</description>\n</parameter>\n<parameter>\n<name>days</name>\n<type>integer</type>\n<enum>[1, 2, 3]</enum>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "tools_conv",
+  "request": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Oslo?"
+    },
+    {
+     "role": "assistant",
+     "content": "Checking.",
+     "tool_calls": [
+      {
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Oslo",
+         "days": 2
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "Rain, 5C"
+    },
+    {
+     "role": "user",
+     "content": "Thanks, and Rome?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "days": {
+         "type": "integer",
+         "enum": [
+          1,
+          2,
+          3
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "add_generation_prompt": true,
+   "enable_thinking": false
+  },
+  "prompt": "<|im_start|>system\nBe brief.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Get the weather.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n<description>City name</description>\n</parameter>\n<parameter>\n<name>days</name>\n<type>integer</type>\n<enum>[1, 2, 3]</enum>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<think></think>Checking.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>\n<parameter=days>\n2\n</parameter>\n</function>\n</tool_call>\n<|im_end|>\n<|im_start|>user\n<tool_response>\nRain, 5C\n</tool_response>\n<|im_end|>\n<|im_start|>user\nThanks, and Rome?<|im_end|>\n<|im_start|>assistant\n<think></think>"
+ }
+]
