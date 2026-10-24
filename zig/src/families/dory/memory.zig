@@ -5,10 +5,11 @@ const schedule = @import("schedule.zig");
 
 const Config = config.Config;
 
-/// A projection's bytes as stored: NVFP4 codes, e4m3 scales a 16 and the fp32 scale, or bf16.
+/// A projection's bytes as stored: NVFP4 codes, scales and the fp32 scale, MXFP8 codes and u8 scales, or bf16.
 pub fn projBytes(c: Config, n: usize, k: usize) usize {
     return switch (c.quant) {
         .nvfp4 => n * k / 2 + n * k / 16 + 4,
+        .mxfp8 => n * k + n * k / 32,
         .bf16 => n * k * 2,
     };
 }
@@ -52,11 +53,23 @@ fn pinned() !Config {
     return config.parse(testing.allocator, text, &why);
 }
 
-test "3.97B parameters; the NVFP4 tensors' bytes equal the pinned file's data (3,202,498,032 bytes less its header)" {
+test "3.97B parameters; the tensors' bytes equal each pinned checkpoint's data (file size less its header)" {
     const c = try pinned();
-    try testing.expectEqual(@as(usize, 3_975_229_440), parameters(c));
+    for ([_]config.Quant{ .nvfp4, .mxfp8, .bf16 }) |quant| {
+        var q = c;
+        q.quant = quant;
+        try testing.expectEqual(@as(usize, 3_975_229_440), parameters(q));
+    }
     // model.safetensors at 41f02335: 8 bytes of length, a 121,192-byte header, then the tensors
     try testing.expectEqual(@as(usize, 3_202_498_032 - 8 - 121_192), weightBytes(c));
+    // the published MXFP8 model.safetensors: 8 bytes of length, a 91,616-byte header, then the tensors
+    var mx = c;
+    mx.quant = .mxfp8;
+    try testing.expectEqual(@as(usize, 4_750_755_304 - 8 - 91_616), weightBytes(mx));
+    // the published BF16 model.safetensors: 8 bytes of length, a 56,584-byte header, then the tensors
+    var bf = c;
+    bf.quant = .bf16;
+    try testing.expectEqual(@as(usize, 7_950_515_472 - 8 - 56_584), weightBytes(bf));
 }
 
 test "KV a token: 36, 56, 96 KiB at 1, 2, 4 loops; 7 GiB at 128K and two loops, plus fixed sliding rings" {

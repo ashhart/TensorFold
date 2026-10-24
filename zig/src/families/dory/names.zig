@@ -7,11 +7,11 @@ const Config = config.Config;
 const Tensor = core.checkpoint.Tensor;
 const Checkpoint = core.checkpoint.Checkpoint;
 
-/// A projection [n, k] as stored: NVFP4 codes [n, k/2] with e4m3 scales a 16 and an fp32 scale, or bf16 [n, k].
+/// A projection [n, k] as stored: NVFP4 codes a 2 and scales a 16, MXFP8 codes with u8 scales a 32, or bf16.
 pub const Proj = struct {
     w: Tensor,
-    blocks: ?Tensor = null, // NVFP4's weight_scale
-    scale: f32 = 1, // NVFP4's weight_scale_2
+    blocks: ?Tensor = null, // NVFP4's or MXFP8's weight_scale
+    scale: f32 = 1, // NVFP4's weight_scale_2; 1 for MXFP8 and bf16
     n: usize,
     k: usize,
 };
@@ -48,6 +48,11 @@ const Names = struct {
 
     fn proj(self: *Names, n: usize, k: usize, comptime fmt: []const u8, args: anytype) !Proj {
         if (self.quant == .bf16) return .{ .w = try self.bf16(&.{ n, k }, fmt ++ ".weight", args), .n = n, .k = k };
+        if (self.quant == .mxfp8) {
+            const w = try self.ck.expect(try self.name(fmt ++ ".weight", args), .f8_e4m3, &.{ n, k });
+            const b = try self.ck.expect(try self.name(fmt ++ ".weight_scale", args), .u8, &.{ n, k / 32 });
+            return .{ .w = w, .blocks = b, .n = n, .k = k };
+        }
         const w = try self.ck.expect(try self.name(fmt ++ ".weight", args), .u8, &.{ n, k / 2 });
         const b = try self.ck.expect(try self.name(fmt ++ ".weight_scale", args), .f8_e4m3, &.{ n, k / 16 });
         const s = try self.ck.expect(try self.name(fmt ++ ".weight_scale_2", args), .f32, &.{});
@@ -62,7 +67,8 @@ const Names = struct {
 
 /// Every tensor the loader reads, sublayer by sublayer; a missing, mistyped or leftover tensor refuses the checkpoint.
 pub fn map(gpa: std.mem.Allocator, ck: *Checkpoint, c: Config) !Map {
-    if (c.hidden % 16 != 0 or c.intermediate % 16 != 0 or c.qDim() % 16 != 0) return error.UnsupportedShapes;
+    const g = if (c.quant == .mxfp8) @as(usize, 32) else 16;
+    if (c.hidden % g != 0 or c.intermediate % g != 0 or c.qDim() % g != 0) return error.UnsupportedShapes;
     var nm: Names = .{ .ck = ck, .quant = c.quant };
     const d = c.hidden;
     const f = c.intermediate;
@@ -117,6 +123,10 @@ pub fn writeFile(a: std.mem.Allocator, dir: std.Io.Dir, c: Config) !void {
         }
         fn proj(list: *std.ArrayList(E), al: std.mem.Allocator, cc: Config, pre: []const u8, n: usize, k: usize) !void {
             if (cc.quant == .bf16) return bf(list, al, try std.fmt.allocPrint(al, "{s}.weight", .{pre}), &.{ n, k });
+            if (cc.quant == .mxfp8) {
+                try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight", .{pre}), .dtype = "F8_E4M3", .shape = try al.dupe(usize, &.{ n, k }) });
+                return list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale", .{pre}), .dtype = "U8", .shape = try al.dupe(usize, &.{ n, k / 32 }) });
+            }
             try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight", .{pre}), .dtype = "U8", .shape = try al.dupe(usize, &.{ n, k / 2 }) });
             try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale", .{pre}), .dtype = "F8_E4M3", .shape = try al.dupe(usize, &.{ n, k / 16 }) });
             try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale_2", .{pre}), .dtype = "F32", .shape = &.{} });
@@ -174,11 +184,11 @@ fn tmpPath(a: std.mem.Allocator, tmp: testing.TmpDir) ![]u8 {
     return std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}", .{ cwd, tmp.sub_path });
 }
 
-test "every tensor of a tiny NVFP4 and a tiny bf16 checkpoint maps" {
+test "every tensor of a tiny NVFP4, MXFP8 and bf16 checkpoint maps" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_]config.Quant{ .nvfp4, .bf16 }) |quant| {
+    for ([_]config.Quant{ .nvfp4, .mxfp8, .bf16 }) |quant| {
         var c = tiny;
         c.quant = quant;
         var tmp = testing.tmpDir(.{});
@@ -193,12 +203,13 @@ test "every tensor of a tiny NVFP4 and a tiny bf16 checkpoint maps" {
         const o = m.subs[4].attn.o;
         try testing.expectEqual(@as(usize, 64), o.n);
         try testing.expectEqual(@as(usize, 64), o.k);
-        try testing.expectEqual(quant == .nvfp4, o.blocks != null);
+        try testing.expectEqual(quant != .bf16, o.blocks != null);
     }
 }
 
-test "the pinned NVFP4 checkpoint (TF_DORY_DIR): 1,083 tensors, none left over" {
-    const dir = @import("sys").getenv("TF_DORY_DIR") orelse return error.SkipZigTest;
+/// The checkpoint at the `env` directory: 72 sublayers, an mlp last, its end tokens.
+fn pinnedMaps(env: [*:0]const u8) !void {
+    const dir = @import("sys").getenv(env) orelse return error.SkipZigTest;
     const c = try Config.read(testing.allocator, io, dir);
     var ck = try Checkpoint.openModel(testing.allocator, io, dir);
     defer ck.close();
@@ -207,4 +218,16 @@ test "the pinned NVFP4 checkpoint (TF_DORY_DIR): 1,083 tensors, none left over" 
     try testing.expectEqual(@as(usize, 72), m.subs.len);
     try testing.expect(m.subs[71] == .mlp and m.subs[70] == .attn);
     try testing.expectEqualSlices(u32, &.{ 2, 11 }, c.eos[0..c.eos_count]);
+}
+
+test "the pinned NVFP4 checkpoint (TF_DORY_DIR): 1,083 tensors, none left over" {
+    try pinnedMaps("TF_DORY_DIR");
+}
+
+test "the pinned MXFP8 checkpoint (TF_DORY_MXFP8_DIR): 795 tensors, none left over" {
+    try pinnedMaps("TF_DORY_MXFP8_DIR");
+}
+
+test "the pinned BF16 checkpoint (TF_DORY_BF16_DIR): 507 tensors, none left over" {
+    try pinnedMaps("TF_DORY_BF16_DIR");
 }

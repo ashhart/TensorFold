@@ -10,8 +10,8 @@ pub const max_width = 8192; // the rows kernels' widest row: 4 sixteen-byte load
 /// A sublayer: attention over a sliding window, attention over every key before, or a SwiGLU MLP.
 pub const Kind = enum { sliding, full, mlp };
 
-/// How the projections are stored: ModelOpt NVFP4 W4A16 (group 16) or plain bf16.
-pub const Quant = enum { nvfp4, bf16 };
+/// How the projections are stored: NVFP4 W4A16 at group 16, compressed-tensors MXFP8 at group 32, or plain bf16.
+pub const Quant = enum { nvfp4, mxfp8, bf16 };
 
 /// Why a check refused the checkpoint, kept for the caller's log line (tests read it instead).
 pub const Why = struct {
@@ -210,7 +210,7 @@ fn rope(o: std.json.ObjectMap, kind: []const u8, why: *Why) !f64 {
     return number(p.object, "rope_theta", why);
 }
 
-/// The quantization config.json declares: none (bf16) or ModelOpt's W4A16_NVFP4 at group 16.
+/// The quantization config.json declares: none (bf16), ModelOpt's W4A16_NVFP4, or compressed-tensors' mxfp8.
 fn quantOf(o: std.json.ObjectMap, why: *Why) !Quant {
     const q = o.get("quantization_config") orelse return .bf16;
     if (q != .object) return error.BadConfig;
@@ -218,11 +218,16 @@ fn quantOf(o: std.json.ObjectMap, why: *Why) !Quant {
     const algo = q.object.get("quant_algo");
     const modelopt = method != null and method.? == .string and std.mem.eql(u8, method.?.string, "modelopt");
     const w4a16 = algo != null and algo.? == .string and std.mem.eql(u8, algo.?.string, "W4A16_NVFP4");
-    if (!modelopt or !w4a16) {
-        why.set("Dory on CUDA reads ModelOpt's W4A16_NVFP4 checkpoint or plain bf16; this one is quantized otherwise", .{});
-        return error.UnsupportedQuantization;
-    }
-    if (q.object.get("config_groups")) |groups| if (groups == .object) {
+    if (modelopt and w4a16) return nvfp4Groups(q.object, why);
+    const mxfp8 = method != null and method.? == .string and std.mem.eql(u8, method.?.string, "compressed-tensors");
+    if (mxfp8) return mxfp8Groups(q.object, why);
+    why.set("Dory on CUDA reads ModelOpt's W4A16_NVFP4, compressed-tensors' mxfp8-quantized or plain bf16; this one is quantized otherwise", .{});
+    return error.UnsupportedQuantization;
+}
+
+/// ModelOpt's groups: 16 weights a scale.
+fn nvfp4Groups(q: std.json.ObjectMap, why: *Why) !Quant {
+    if (q.get("config_groups")) |groups| if (groups == .object) {
         var it = groups.object.iterator();
         while (it.next()) |g| {
             const w = if (g.value_ptr.* == .object) g.value_ptr.object.get("weights") else null;
@@ -234,6 +239,38 @@ fn quantOf(o: std.json.ObjectMap, why: *Why) !Quant {
         }
     };
     return .nvfp4;
+}
+
+/// compressed-tensors' groups: mxfp8-quantized at 8 bits, float, 32 weights a scale.
+fn mxfp8Groups(q: std.json.ObjectMap, why: *Why) !Quant {
+    const groups = q.get("config_groups") orelse {
+        why.set("mxfp8's config.json has no config_groups", .{});
+        return error.BadConfig;
+    };
+    if (groups != .object) return error.BadConfig;
+    var it = groups.object.iterator();
+    while (it.next()) |g| if (g.value_ptr.* == .object) {
+        const w = g.value_ptr.object.get("weights");
+        const ok = w != null and w.? == .object and intField(w.?.object, "num_bits", 8) and intField(w.?.object, "group_size", 32) and
+            stringField(w.?.object, "type", "float") and stringField(g.value_ptr.object, "format", "mxfp8-quantized");
+        if (!ok) {
+            why.set("mxfp8 group {s} is not mxfp8-quantized at 8-bit float, group 32", .{g.key_ptr.*});
+            return error.UnsupportedQuantization;
+        }
+    };
+    return .mxfp8;
+}
+
+/// The object's `key` as the integer `want`.
+fn intField(o: std.json.ObjectMap, key: []const u8, want: i64) bool {
+    const v = o.get(key) orelse return false;
+    return v == .integer and v.integer == want;
+}
+
+/// The object's `key` as the string `want`.
+fn stringField(o: std.json.ObjectMap, key: []const u8, want: []const u8) bool {
+    const v = o.get(key) orelse return false;
+    return v == .string and std.mem.eql(u8, v.string, want);
 }
 
 /// config.json's text; a refusal's reason goes to `why`.
@@ -474,4 +511,45 @@ test "bf16 checkpoints parse without a quantization_config; shapes outside the k
     var odd = c;
     odd.kv_heads = 3;
     try testing.expectError(error.UnsupportedShapes, checkShapes(odd, &why));
+}
+
+/// The published MXFP8 quantization_config (targets shortened to "Linear"), spliced in place of NVFP4's.
+const mxfp8_config =
+    \\{"config_groups": {"dory_matmul_weights": {"format": "mxfp8-quantized",
+    \\  "input_activations": null,
+    \\  "output_activations": null,
+    \\  "targets": ["Linear"],
+    \\  "weights": {"actorder": null, "block_structure": null, "dynamic": false, "group_size": 32, "num_bits": 8,
+    \\   "observer": "mse", "scale_dtype": "torch.uint8", "strategy": "group", "symmetric": true, "type": "float",
+    \\   "zp_dtype": null}}},
+    \\ "format": "mxfp8-quantized", "global_compression_ratio": null,
+    \\ "ignore": ["backbone.embeddings", "lm_head"],
+    \\ "kv_cache_scheme": null,
+    \\ "quant_method": "compressed-tensors",
+    \\ "quantization_status": "compressed"}
+;
+
+fn mxfp8Text(a: std.mem.Allocator) ![]u8 {
+    const t = try pinnedText(a);
+    defer a.free(t);
+    const at = std.mem.indexOf(u8, t, "\"quantization_config\"").?;
+    const end = std.mem.indexOf(u8, t, "\"head_dim\"").?;
+    return std.mem.concat(a, u8, &.{ t[0..at], "\"quantization_config\": ", mxfp8_config, ", ", t[end..] });
+}
+
+test "the MXFP8 quantization_config parses to mxfp8; group 16, 4-bit and other compressed-tensors refuse" {
+    var why: Why = .{};
+    const mx = try mxfp8Text(testing.allocator);
+    defer testing.allocator.free(mx);
+    const c = try parse(testing.allocator, mx, &why);
+    try testing.expectEqual(Quant.mxfp8, c.quant);
+    const gs16 = try std.mem.replaceOwned(u8, testing.allocator, mx, "\"group_size\": 32", "\"group_size\": 16");
+    defer testing.allocator.free(gs16);
+    try refused(gs16, error.UnsupportedQuantization, "mxfp8");
+    const bits4 = try std.mem.replaceOwned(u8, testing.allocator, mx, "\"num_bits\": 8", "\"num_bits\": 4");
+    defer testing.allocator.free(bits4);
+    try refused(bits4, error.UnsupportedQuantization, "mxfp8");
+    const int4 = try std.mem.replaceOwned(u8, testing.allocator, mx, "mxfp8-quantized", "int4-quantized");
+    defer testing.allocator.free(int4);
+    try refused(int4, error.UnsupportedQuantization, "mxfp8");
 }
