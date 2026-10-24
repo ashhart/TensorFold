@@ -22,6 +22,8 @@ pub const gemma4_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("ge
 pub const lfm2 = @embedFile("lfm2/lfm2.metal");
 /// LFM2's prompt attention on the tensor units (nax.h inlined at load, after lfm2.metal's text).
 pub const lfm2_attn_nax = @embedFile("lfm2/lfm2_attn_nax.metal");
+/// Cosmos3-Edge: M-RoPE, relu^2, attention and the SigLIP2 image tower glue.
+pub const cosmos3 = @embedFile("cosmos3/cosmos3.metal");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");

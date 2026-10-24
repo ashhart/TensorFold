@@ -53,6 +53,7 @@ pub const gemma4 = @import("families/gemma4/gemma4.zig");
 pub const step5 = @import("families/step5/step5.zig");
 pub const spark25_metal = @import("families/spark25/metal.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
+pub const cosmos3 = @import("families/cosmos3/cosmos3.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
 test {
@@ -84,6 +85,7 @@ test {
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");
+    _ = @import("families/cosmos3/cosmos3.zig");
 }
 
 pub const lane_projection = @import("core/lane_projection.zig");
