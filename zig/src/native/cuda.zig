@@ -81,7 +81,6 @@ pub const Host = struct {
         if (h.gpu) |g| try g.ctx.makeCurrent();
         return h.follow_fn.?(h.family);
     }
-    /// A family's readiness reads host state only: no CUDA binding or blocking device work.
     fn readiness(h: *Host, comptime F: type) void {
         if (@hasDecl(F, "healthy")) h.health = .{ .ctx = h.family, .read = F.healthy };
     }
@@ -122,7 +121,7 @@ pub const Host = struct {
         h.host.on_thread = .{ .ctx = h, .run = initThread };
         h.host.memory = if (h.gpu != null) .{ .read = family_memory.read } else null;
         h.host.explain = explain;
-        h.host.health = h.health;
+        h.host.health = @import("cuda_readiness.zig").source(h);
         h.host.cache = h.store;
         h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
         if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
@@ -581,6 +580,7 @@ test "Flash Next takes --vision at family admission" {
     try @import("cuda_flashnext_refusal_test.zig").vision();
 }
 test {
+    _ = @import("cuda_health_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = kv_pages;
     _ = drafted;

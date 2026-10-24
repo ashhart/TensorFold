@@ -113,6 +113,7 @@ fn launched(f: Function, cfg: Config, res: abi.Result, what: []const u8) Error!v
     if (res == abi.success) return;
     if (res == abi.error_not_ready) return error.NotReady;
     const d = f.d;
+    _ = d.result(res) catch {};
     var buf: [160]u8 = undefined;
     std.log.err("{s}: {s} ({d}) {s}; {s}{s}", .{ what, d.errorName(res), res, d.errorText(res), describe(&buf, d.functionName(f.handle), cfg), driver.shutdownNote(res) });
     return driver.Driver.errorOf(res);

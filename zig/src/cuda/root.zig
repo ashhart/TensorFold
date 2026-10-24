@@ -147,3 +147,11 @@ test {
     _ = exl3.block.lin2;
     _ = exl3.block.x3gm;
 }
+
+test {
+    _ = @import("context_health.zig");
+}
+
+test {
+    _ = @import("graph_instantiate_failure_test.zig");
+}
