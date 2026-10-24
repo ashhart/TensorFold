@@ -350,3 +350,10 @@ No external reference, captured cubin, model shard or CUDA compiler is bundled b
 
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
 with the common EXL3 and DeepSeek contributor credits preserved.
+
+## Notes storage and test fixtures
+
+The Notes storage semantics, intake tables and exported test fixture derive from the
+ThinkOff Notes test suite at https://github.com/ThinkOffApp/dynamic-ngram-memory.
+That suite is MIT licensed, Copyright (c) 2026 ThinkOff. Its notice is retained in
+LICENSES/TEST-SUITE-MIT.txt. The native implementation uses TensorFold engine interfaces.

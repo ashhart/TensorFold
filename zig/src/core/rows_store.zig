@@ -80,6 +80,7 @@ pub const Rows = struct {
     prefill_rate: f64 = 0, // the family's prompt tokens a second (0: none measured yet)
     counts: Counts = .{},
     turn: u64 = 0, // bytes written since the last report line
+    forget_pending: bool = false, // failed erasure cannot be reported clear before restart cleanup
     verify: bool = false, // TF_IMPRINT_VERIFY=1: each state written is read back and compared with the RAM state
 
     /// The store under `o.root` for `o.identity` (made 0700 when missing); its files are read, unreferenced blocks go.
@@ -513,6 +514,7 @@ test {
     _ = chain;
     _ = file;
     _ = @import("rows_test.zig");
+    _ = @import("rows_forget_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_pool_select_test.zig");

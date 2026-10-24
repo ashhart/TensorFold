@@ -13,10 +13,26 @@ pub const serve = @import("serve.zig");
 pub const idle_unload = @import("idle_unload.zig");
 pub const hub = @import("hub.zig");
 pub const tool_specs = @import("tool_specs.zig");
+pub const notes_storage = @import("notes/storage.zig");
+pub const notes_retrieve = @import("notes/retrieve.zig");
+pub const notes_index = @import("notes/index.zig");
+pub const notes_lang = @import("notes/lang.zig");
 pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("notes_storage_test.zig");
+    _ = @import("notes_storage_http_test.zig");
+    _ = @import("notes_index_test.zig");
+    _ = @import("notes/lookup.zig");
+    _ = @import("notes/past.zig");
+    _ = @import("notes/lang.zig");
+    _ = @import("notes/retrieve.zig");
+    _ = @import("notes/who.zig");
+    _ = @import("notes_who_test.zig");
+    _ = @import("notes_lookup_rig_test.zig");
+    _ = @import("notes_route.zig");
+    _ = @import("notes_lookup_test.zig");
     _ = @import("vision_markers_test.zig");
     _ = @import("embedding_protocol_test.zig");
     _ = @import("embedding_service_test.zig");

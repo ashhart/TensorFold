@@ -161,6 +161,7 @@ pub fn equal(x: Value, y: Value) bool {
 /// ``json.dumps(v, **options)`` into memory owned by ``a``.
 pub fn stringify(a: Allocator, v: Value, options: Options) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);
+    errdefer out.deinit(); // a failed write keeps nothing, for callers that free (not only arenas)
     write(&out.writer, v, options) catch return error.OutOfMemory;
     return out.toOwnedSlice();
 }
@@ -168,6 +169,7 @@ pub fn stringify(a: Allocator, v: Value, options: Options) ![]u8 {
 /// A JSON string literal of ``s`` (``json.dumps(s)``).
 pub fn quote(a: Allocator, s: []const u8, options: Options) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);
+    errdefer out.deinit();
     writeString(&out.writer, s, options) catch return error.OutOfMemory;
     return out.toOwnedSlice();
 }

@@ -1,0 +1,146 @@
+# Notes storage API
+
+This first slice of #1012 adds a single-owner, journal-backed Notes store. The
+third slice adds the lookup: a chat request can ask for the notes its question
+finds, and gets them as its first system message. Live fetching and promotion
+are separate dependent changes. A request that does not ask for notes does not
+read the store.
+
+Start the native server with `--notes snapshot.json`. The snapshot must use the
+served tokenizer's vocabulary and, when present, its `tokenizer.json` SHA-256.
+The journal is stored beside the snapshot as `snapshot.json.journal`. A second
+writer is refused from startup, including before the first write. The journal
+uses format 3 for stable identities and retry work; older formats are upgraded
+under the writer lock, and older binaries refuse the new format. Without `--notes`, `/v1/notes` routes return 404.
+
+The routes use the server's existing authentication:
+
+| Request | Behavior |
+| --- | --- |
+| `GET /v1/notes` | List current notes and IDs with retryable work in `pending_erases`. |
+| `GET /v1/notes?history=true` | Include superseded and withdrawn notes. |
+| `GET /v1/notes/ID` | Read one note, including its state and source. |
+| `POST /v1/notes` with `{"text":"My favourite colour is green."}` | Add a durable write. |
+| `POST /v1/notes/ID` with `{"text":"My favourite colour is blue now."}` | Change a note. |
+| `DELETE /v1/notes/ID` | Record a take-back; its history remains. |
+| `DELETE /v1/notes/ID?erase=true` | Rewrite the journal and replay the snapshot without the erased write's closure. |
+
+## Lookup
+
+A chat completion request that sends `"notes": true` (or a `"notes_exclude"`
+list) has its last user message looked up in the store, as LLWZ's Python
+`retrieve()` does. The notes found go into one block, which is put before the
+client's messages as a system message. The block is cut to the snapshot's cap,
+counted by the served tokenizer. When nothing is found, the prompt is the same
+as without notes. The reply's `notes` field lists the note ids, the token
+counts and the times.
+
+| Field | Meaning |
+| --- | --- |
+| `notes_exclude` | Note ids never to show. |
+| `notes_past` | Ask about the past (all versions) or not. By default the question's own wording decides. |
+| `notes_cap` | The block's token limit for this request. |
+| `notes_echo` | Also return the block itself in the reply. |
+| `notes_lookup` | `who` (the default) or `plain`. `--notes-lookup` sets the default. |
+| `notes_language` | `en`, `de` or `fi`: the past cues read from the question. `--notes-language` sets the default. |
+
+The block is looked up who first. The lookup finds the subjects the question
+names: the store's entity phrases, the user, and the entities a current name
+note calls by a name in the question. A name note gives its name right after
+its subject ("My dog is called Bo.") or in a later clause after one word that
+stands for it ("My dog has a new name, it is called Bo now."). A name is a run
+of Latin, Greek or
+Cyrillic letters, which may hold a hyphen, or up to four such runs one space
+apart. The user is named by I, me, mine or
+myself, but not by the me of "tell me", "give me" or "show me", or by "my X"
+when X is a word of the user's own notes or of a stored attribute's name and no
+word of an entity's name. The block holds the subjects' notes and the notes of
+the entities those notes name. An excluded note is never shown, and the link it
+states is never followed. A note written through `/v1/notes` without a subject
+is not sorted by who it is about, so such a note is a candidate whenever the
+plain lookup finds it. A question that names nobody the store knows, and finds
+none of those notes, gets no block. `"notes_lookup": "plain"` keeps the earlier lookup (Python's
+`retrieve()`), and `--notes-lookup plain` does so for the whole server. A
+request in German or Finnish (`notes_language` or `--notes-language`) keeps it
+too.
+
+The lookup reads the index that the last write or erase left, under the same
+lock. An erase also drops the lookup's kept scratch memory, which may hold the
+erased note's text.
+
+`zig build notes-golden` builds a tool that compares the lookup with LLWZ
+Python's answers, question by question, for exported snapshots.
+
+## Erase
+
+An erase refuses snapshot-owned notes: change the source snapshot and export it
+again. It also refuses a snapshot file that changed since startup. Source numbers and numeric note IDs
+are never reused, including after erase and restart. Surviving IDs stay unchanged;
+`renumbered` is retained as an empty compatibility field. Invalid or repeated
+`erase` query values are refused before either delete mode runs.
+
+The erase reply reports the erased ID, removed sources, per-place status and
+`complete`. It asks the engine thread to remove matching prompt states, clears
+tokenizer memoized encodes, cancels matching pending conversation writes and
+removes matching persisted conversation states and their unreferenced row blocks.
+Unrelated states remain reusable. Failed file removal or directory sync keeps the
+result incomplete. A journal rename followed by a failed directory sync returns
+HTTP 500 with `erased` and the journal's unresolved status.
+
+`complete: false` means the store change applied but other copies may remain.
+The reply distinguishes `cleanup_complete` from `complete`. While engine cleanup
+or journal retirement can be retried, `retryable` is true and `state` is pending.
+Retry the same DELETE after a failure or restart; startup logs the pending count,
+and `GET /v1/notes` lists its IDs. The journal atomically keeps identities and
+reversible token spans before engine cleanup. These spans can reveal the erased
+text and remain until that retryable work clears or record retirement succeeds.
+
+Once engine-reachable cleanup is finished, the journal retires those spans even
+when other places remain unresolved. Then `cleanup_complete` is true and
+`retryable` is false. Unsupported hooks, unverified span coverage and external-copy warnings keep
+`complete` false and `state` unresolved; they do not retain recoverable note tokens in the journal. A later
+DELETE returns 404 and can never target a different note. Erasing a take-back can
+also make a later write redundant; that write is explicitly listed as removed.
+
+The reply names unresolved places, including Recall prompt/reply records,
+engine token traces, running requests, stored Responses,
+compaction files, request logs and learned weights. Learned-folder diagnostics
+cover only the current configured root; they do not prove that earlier roots or
+another server's files are clear. Enabling a learned writer therefore remains
+conservative even after the current conversation states have been removed.
+
+Erase matching is linear for engine requests of at most 64k tokens. Sibling
+inspection stops at 16 folders and refuses indexes over 8 MiB, reporting an
+unresolved scan budget. Erase still waits for checked disk writes and syncs;
+these checks do not establish a frame-latency bound on slow storage.
+
+Host regression checks use fake engine states and real journal/state files:
+
+```sh
+zig build test-server-cpu test-lane-api-host test-cuda-host
+zig build test-kernel-contract test-golden test-server-security test-pull-security fuzz-cortheon
+zig build
+zig build native -Dcpu=apple_m1
+```
+
+These checks do not establish real-model Metal/CUDA qualification. The final
+stack still requires the exactness, accuracy and erasure receipts agreed in #1012.
+
+Real-tokenizer checks require an explicit model directory:
+
+```sh
+TF_NOTES_TOKENIZER_DIR=/path/to/model zig build test-notes-tokenizer \
+  --cache-poison=poisoned -Dcpu=apple_m1
+```
+
+The cache flag refreshes the build configuration so each invocation sees the
+current tokenizer directory. The target always runs and fails if its directory
+is unset or invalid. Normal CPU tests skip the real-tokenizer case when its
+directory is unset; changing an environment variable alone does not invalidate
+Zig's normal test-run cache.
+The check covers exact teaching turns, prefixes such as "Hi!" and "Remember:",
+trailing text and terminal-punctuation variants. It does not prove clearance for
+all paraphrases or arbitrary tokenization contexts. The external-copy and
+synchronous-I/O limits above remain separate from these token-span checks.
+Unowned learned-folder diagnostics are warnings, not retryable local I/O errors;
+the files remain untouched, and their warnings do not retain the erased spans.

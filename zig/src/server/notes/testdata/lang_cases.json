@@ -1,0 +1,4412 @@
+{
+  "python": "3.12.8",
+  "unicode": "15.0.0",
+  "de_alt_count": 25,
+  "fi_alt_count": 32,
+  "de_subsumed": [
+    22
+  ],
+  "fi_subsumed": [],
+  "cases": [
+    {
+      "lang": "de",
+      "text": "war",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "WAR",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "War",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "waren",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "WAREN",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Waren",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "warst",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "WARST",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Warst",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "wart",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "WART",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Wart",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "hatte",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "HATTE",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Hatte",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "hatten",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "HATTEN",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Hatten",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "hattest",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "HATTEST",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Hattest",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "früher",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "FRÜHER",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Früher",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "vorher",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "VORHER",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Vorher",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "zuvor",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "ZUVOR",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Zuvor",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "damals",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "DAMALS",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Damals",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "ursprünglich",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "URSPRÜNGLICH",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Ursprünglich",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "einst",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "EINST",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Einst",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "je",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "JE",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Je",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "jemals",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "JEMALS",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Jemals",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "immer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "IMMER",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Immer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "geändert",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "GEÄNDERT",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Geändert",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "verändert",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "VERÄNDERT",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Verändert",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "gewechselt",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "GEWECHSELT",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Gewechselt",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "bis",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "BIS",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Bis",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "seit",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "SEIT",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Seit",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "seitdem",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "SEITDEM",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Seitdem",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "schon immer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "SCHON IMMER",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Schon Immer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "schon\timmer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "schon immer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "schon　immer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "schon  immer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "schon \t immer",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "vor drei Jahren",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "vor 3 Jahren",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "vor  Jahren",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "vor drei Monaten",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "vor drei Wochen",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "vor drei Tagen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "oli",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLI",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Oli",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "oliko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Oliko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olikö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olikö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olikin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olikin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olikaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olikaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olikään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olikään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olihan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olihan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olihän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olihän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olivat",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIVAT",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olivat",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olivatko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIVATKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olivatko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olivatkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIVATKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olivatkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olivatkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIVATKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olivatkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olivatkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIVATKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olivatkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olivatkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIVATKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olivatkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olivathan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIVATHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olivathan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olivathän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIVATHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olivathän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olinko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLINKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olinko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olinkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLINKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olinkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olinkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLINKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olinkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olinkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLINKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olinkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olinkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLINKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olinkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olinhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLINHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olinhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olinhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLINHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olinhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olit",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIT",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olit",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olitko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olitko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olitkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olitkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olitkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olitkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olitkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olitkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olitkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olitkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olithan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olithan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olithän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olithän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olimme",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIMME",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olimme",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olimmeko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIMMEKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olimmeko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olimmekö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIMMEKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olimmekö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olimmekin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIMMEKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olimmekin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olimmekaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIMMEKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olimmekaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olimmekään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIMMEKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olimmekään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olimmehan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIMMEHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olimmehan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olimmehän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLIMMEHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olimmehän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olitte",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITTE",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olitte",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olitteko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITTEKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olitteko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olittekö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITTEKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olittekö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olittekin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITTEKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olittekin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olittekaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITTEKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olittekaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olittekään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITTEKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olittekään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olittehan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITTEHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olittehan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olittehän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLITTEHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olittehän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ollut",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLUT",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ollut",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ollutko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLUTKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ollutko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ollutkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLUTKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ollutkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ollutkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLUTKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ollutkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ollutkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLUTKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ollutkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ollutkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLUTKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ollutkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olluthan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLUTHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olluthan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olluthän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLUTHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olluthän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olleet",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLEET",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olleet",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olleetko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLEETKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olleetko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olleetkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLEETKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olleetkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olleetkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLEETKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olleetkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olleetkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLEETKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olleetkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olleetkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLEETKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olleetkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olleethan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLEETHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olleethan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "olleethän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "OLLEETHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Olleethän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ennen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENNEN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ennen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ennenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENNENKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ennenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ennenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENNENKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ennenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ennenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENNENKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ennenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ennenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENNENKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ennenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ennenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENNENKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ennenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ennenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENNENHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ennenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ennenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENNENHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ennenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aiemmin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIEMMIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aiemmin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aiemminko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIEMMINKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aiemminko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aiemminkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIEMMINKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aiemminkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aiemminkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIEMMINKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aiemminkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aiemminkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIEMMINKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aiemminkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aiemminkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIEMMINKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aiemminkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aiemminhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIEMMINHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aiemminhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aiemminhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIEMMINHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aiemminhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aikaisemmin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIKAISEMMIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aikaisemmin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aikaisemminko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIKAISEMMINKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aikaisemminko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aikaisemminkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIKAISEMMINKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aikaisemminkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aikaisemminkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIKAISEMMINKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aikaisemminkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aikaisemminkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIKAISEMMINKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aikaisemminkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aikaisemminkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIKAISEMMINKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aikaisemminkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aikaisemminhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIKAISEMMINHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aikaisemminhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aikaisemminhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AIKAISEMMINHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aikaisemminhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkujaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKUJAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkujaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkujaanko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKUJAANKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkujaanko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkujaankö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKUJAANKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkujaankö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkujaankin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKUJAANKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkujaankin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkujaankaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKUJAANKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkujaankaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkujaankään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKUJAANKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkujaankään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkujaanhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKUJAANHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkujaanhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkujaanhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKUJAANHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkujaanhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entinen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTINEN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entinen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entinenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTINENKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entinenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entinenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTINENKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entinenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entinenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTINENKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entinenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entinenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTINENKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entinenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entinenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTINENKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entinenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entinenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTINENHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entinenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entinenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTINENHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entinenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entisen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTISEN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entisen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entisenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTISENKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entisenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entisenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTISENKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entisenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entisenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTISENKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entisenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entisenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTISENKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entisenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entisenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTISENKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entisenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entisenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTISENHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entisenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "entisenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ENTISENHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Entisenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "joskus",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "JOSKUS",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Joskus",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "joskusko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "JOSKUSKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Joskusko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "joskuskö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "JOSKUSKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Joskuskö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "joskuskin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "JOSKUSKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Joskuskin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "joskuskaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "JOSKUSKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Joskuskaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "joskuskään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "JOSKUSKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Joskuskään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "joskushan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "JOSKUSHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Joskushan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "joskushän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "JOSKUSHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Joskushän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "koskaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "KOSKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Koskaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "koskaanko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "KOSKAANKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Koskaanko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "koskaankö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "KOSKAANKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Koskaankö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "koskaankin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "KOSKAANKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Koskaankin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "koskaankaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "KOSKAANKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Koskaankaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "koskaankään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "KOSKAANKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Koskaankään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "koskaanhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "KOSKAANHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Koskaanhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "koskaanhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "KOSKAANHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Koskaanhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ikinä",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "IKINÄ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ikinä",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ikinäko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "IKINÄKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ikinäko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ikinäkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "IKINÄKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ikinäkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ikinäkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "IKINÄKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ikinäkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ikinäkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "IKINÄKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ikinäkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ikinäkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "IKINÄKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ikinäkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ikinähan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "IKINÄHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ikinähan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ikinähän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "IKINÄHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ikinähän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aina",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AINA",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Aina",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ainako",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AINAKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ainako",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ainakö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AINAKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ainakö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ainakin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AINAKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ainakin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ainakaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AINAKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ainakaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ainakään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AINAKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ainakään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ainahan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AINAHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ainahan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ainahän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "AINAHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Ainahän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttunut",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNUT",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttunut",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttunutko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNUTKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttunutko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttunutkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNUTKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttunutkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttunutkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNUTKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttunutkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttunutkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNUTKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttunutkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttunutkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNUTKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttunutkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttunuthan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNUTHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttunuthan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttunuthän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNUTHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttunuthän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuneet",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNEET",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuneet",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuneetko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNEETKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuneetko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuneetkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNEETKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuneetkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuneetkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNEETKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuneetkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuneetkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNEETKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuneetkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuneetkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNEETKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuneetkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuneethan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNEETHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuneethan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuneethän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUNEETHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuneethän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttui",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUI",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttui",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuiko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuiko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuikö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuikö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuikin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuikin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuikaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuikaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuikään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuikään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuihan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuihan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuihän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuihän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuivat",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIVAT",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuivat",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuivatko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIVATKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuivatko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuivatkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIVATKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuivatkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuivatkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIVATKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuivatkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuivatkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIVATKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuivatkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuivatkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIVATKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuivatkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuivathan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIVATHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuivathan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "muuttuivathän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "MUUTTUIVATHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Muuttuivathän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtunut",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUNUT",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtunut",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtunutko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUNUTKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtunutko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtunutkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUNUTKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtunutkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtunutkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUNUTKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtunutkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtunutkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUNUTKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtunutkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtunutkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUNUTKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtunutkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtunuthan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUNUTHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtunuthan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtunuthän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUNUTHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtunuthän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtui",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUI",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtui",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtuiko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUIKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtuiko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtuikö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUIKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtuikö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtuikin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUIKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtuikin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtuikaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUIKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtuikaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtuikään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUIKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtuikään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtuihan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUIHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtuihan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtuihän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTUIHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtuihän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtanut",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTANUT",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtanut",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtanutko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTANUTKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtanutko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtanutkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTANUTKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtanutkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtanutkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTANUTKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtanutkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtanutkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTANUTKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtanutkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtanutkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTANUTKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtanutkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtanuthan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTANUTHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtanuthan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "vaihtanuthän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "VAIHTANUTHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Vaihtanuthän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "asti",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ASTI",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Asti",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "astiko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ASTIKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Astiko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "astikö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ASTIKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Astikö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "astikin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ASTIKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Astikin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "astikaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ASTIKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Astikaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "astikään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ASTIKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Astikään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "astihan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ASTIHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Astihan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "astihän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ASTIHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Astihän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "saakka",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SAAKKA",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Saakka",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "saakkako",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SAAKKAKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Saakkako",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "saakkakö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SAAKKAKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Saakkakö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "saakkakin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SAAKKAKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Saakkakin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "saakkakaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SAAKKAKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Saakkakaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "saakkakään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SAAKKAKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Saakkakään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "saakkahan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SAAKKAHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Saakkahan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "saakkahän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SAAKKAHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Saakkahän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "lähtien",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "LÄHTIEN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Lähtien",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "lähtienko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "LÄHTIENKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Lähtienko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "lähtienkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "LÄHTIENKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Lähtienkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "lähtienkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "LÄHTIENKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Lähtienkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "lähtienkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "LÄHTIENKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Lähtienkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "lähtienkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "LÄHTIENKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Lähtienkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "lähtienhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "LÄHTIENHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Lähtienhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "lähtienhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "LÄHTIENHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Lähtienhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkaen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKAEN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkaen",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkaenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKAENKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkaenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkaenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKAENKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkaenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkaenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKAENKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkaenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkaenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKAENKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkaenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkaenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKAENKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkaenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkaenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKAENHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkaenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alkaenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALKAENHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alkaenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "sitten",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SITTEN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Sitten",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "sittenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SITTENKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Sittenko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "sittenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SITTENKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Sittenkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "sittenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SITTENKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Sittenkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "sittenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SITTENKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Sittenkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "sittenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SITTENKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Sittenkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "sittenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SITTENHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Sittenhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "sittenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "SITTENHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Sittenhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALUN PERIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alun Perin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun\tperin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun　perin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun  perin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun \t perin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perinko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALUN PERINKO",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alun Perinko",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perinkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALUN PERINKÖ",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alun Perinkö",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perinkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALUN PERINKIN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alun Perinkin",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perinkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALUN PERINKAAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alun Perinkaan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perinkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALUN PERINKÄÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alun Perinkään",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perinhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALUN PERINHAN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alun Perinhan",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "alun perinhän",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ALUN PERINHÄN",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Alun Perinhän",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "xbis",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "bisx",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "4bis",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "bis4",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "_bis",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "bis_",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "́bis",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "biś",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "ébis",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "bisé",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "ẞbis",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "bisẞ",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "™bis",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "bis™",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "Жbis",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "bisЖ",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "中bis",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "bis中",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "xaina",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "ainax",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "4aina",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "aina4",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "_aina",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "aina_",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "́aina",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "ainá",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "éaina",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "ainaé",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "ẞaina",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "ainaẞ",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "™aina",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "aina™",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "Жaina",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "ainaЖ",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "中aina",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "aina中",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "1999",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "1999",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "2025",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "2025",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "20250",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "20250",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "19٣٤",
+      "want": true
+    },
+    {
+      "lang": "fi",
+      "text": "19٣٤",
+      "want": true
+    },
+    {
+      "lang": "de",
+      "text": "１９９９",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "１９９９",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "Was ist die Augenfarbe meiner Katze?",
+      "want": false
+    },
+    {
+      "lang": "de",
+      "text": "Wo wohne ich?",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "Was ist die Augenfarbe meiner Katze?",
+      "want": false
+    },
+    {
+      "lang": "fi",
+      "text": "Wo wohne ich?",
+      "want": false
+    },
+    {
+      "lang": "en",
+      "text": "Was ist die Augenfarbe meiner Katze?",
+      "want": true
+    }
+  ]
+}

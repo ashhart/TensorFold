@@ -232,6 +232,17 @@ pub fn abort(r: *Rows, j: *Job) void {
     end(r, j, true);
 }
 
+/// Erasure checks temporary-file removal and leaves block collection to its checked caller.
+pub fn abortForErase(r: *Rows, j: *Job) !void {
+    var failed = false;
+    if (j.writer) |*w| w.abortChecked() catch {
+        failed = true;
+    };
+    j.writer = null;
+    finishJob(r, j, true);
+    if (failed) return error.RowsErase;
+}
+
 /// A job ended unwritten; `disk_ok` false (a write failed) backs the free-disk floor's admission off.
 fn end(r: *Rows, j: *Job, disk_ok: bool) void {
     if (j.writer) |*w| w.abort();

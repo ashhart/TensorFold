@@ -87,6 +87,8 @@ pub const Config = struct {
     cortheon_search_key: ?[]const u8 = null,
     /// --learn-conversations: /v1/imprint answers; without it each of its routes refuses and names the flag.
     saved_conversations: bool = false,
+    learn: bool = false,
+    slide: bool = false,
     timeouts: http_conn.Timeouts = .{},
     max_connections: u32 = @import("http_admission.zig").default_limit,
     /// The open /health names these after its other keys; empty fields are left out.
@@ -126,12 +128,15 @@ pub const Server = struct {
     /// The idle-unload manager (--idle-unload); null when off. Its thread parks the engine; a wake reloads it.
     idle_manager: ?*idle_unload.Manager = null,
     preparing: std.atomic.Value(i64) = .init(0),
+    prompt_holders: std.atomic.Value(u64) = .init(0),
     speech_inflight: std.atomic.Value(u32) = .init(0),
     arena: std.heap.ArenaAllocator,
     /// Structured output's compiler, opened by the first structured request (Python's grammar.compiler).
     grammars: ?*api.grammar.Compiler = null,
     grammar_problem: ?[]const u8 = null,
     grammar_mutex: std.Io.Mutex = .init,
+    notes: ?*@import("notes/storage.zig").Storage = null,
+    notes_mutex: std.Io.Mutex = .init,
     /// The facts the learner was taught and whether the weights recall them.
     slide: slide_graph.Graph,
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
@@ -202,6 +207,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(srv: *Server) void {
+        if (srv.notes) |n| n.deinit();
         srv.stopKeepalive();
         if (srv.grammars) |g| g.close();
         srv.metrics.deinit();

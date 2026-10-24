@@ -98,6 +98,13 @@ pub const Store = struct {
         return try json.deepCopy(a, s.entries.items[i].response);
     }
 
+    /// How many responses are stored now.
+    pub fn count(s: *Store, io: std.Io) usize {
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        return s.entries.items.len;
+    }
+
     pub fn delete(s: *Store, io: std.Io, id: []const u8) bool {
         s.mutex.lockUncancelable(io);
         defer s.mutex.unlock(io);
