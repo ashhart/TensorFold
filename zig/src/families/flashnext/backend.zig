@@ -19,6 +19,7 @@ const batch_costs = @import("batch_costs.zig");
 const grammar = @import("grammar.zig");
 const fill = @import("prefill.zig");
 const prompt_gpu = @import("prefill_metal.zig");
+const RoundTimes = @import("round_times.zig").RoundTimes;
 
 /// A stream's images through the host's tower: its prompt pass's rows and frame (in `a`), then their release.
 pub const Images = struct { ctx: *anyopaque, build: *const fn (ctx: *anyopaque, a: std.mem.Allocator, images: []const lanes.stream.Image, prompt_len: usize, from: usize) anyerror!*fz.vis_prompt.VisPrompt, release: *const fn (ctx: *anyopaque, p: *fz.vis_prompt.VisPrompt) void };
@@ -46,6 +47,7 @@ pub const Backend = struct {
     costs: ?batch_costs.Costs = null, // timeCosts: the lane allocator's prices
     images: ?Images = null, // --vision: the tower's rows for a stream's images; null: an image stream fails
     grammar: grammar.Masks, // structured output: the rounds' mask rows and first rows
+    times: RoundTimes = .{}, // FZ_ROUND_TIMES=1: a shared round's phases
 
     /// Sessions of the given capacities (the first, the engine's own, holds its whole window whatever is given).
     pub fn init(gpa: std.mem.Allocator, e: *Engine, capacities: []const usize) !Backend {
@@ -66,7 +68,7 @@ pub const Backend = struct {
                 return if (std.c.getenv(name)) |v| v[0] == '1' else false;
             }
         };
-        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL") };
+        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .times = RoundTimes.init() };
     }
 
     /// Times shared-round costs on the last free session, or leaves them unpriced when it cannot fit.
@@ -365,7 +367,9 @@ pub const Backend = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const b = self(ptr);
+        b.times.begin(false);
         try b.settle();
+        b.times.settled();
         if (windows.len == 0 or windows.len > fz.MAXR or out.len != windows.len) return error.BadBatch;
         for (windows) |w| try b.makeRoom(w.stream, w.rows());
         var desc: [fz.MAXR]meta.Window = undefined;
@@ -413,7 +417,9 @@ pub const Backend = struct {
         for (windows, 0..) |w, i| if (sample.active(w.stream.sampling)) |p| {
             sample.encode(b.e.r.enc, b.e.r.draw_pipe, t.logits, b.e.draw_at, t.picks, plan.starts[i], w.rows(), p);
         };
+        b.times.commit();
         try b.primary.finish(cb);
+        b.times.end(cb, false, plan.total, windows.len);
         Session.copy(b.primary.last, b.hidden, plan.total * fz.WIDE * 2);
         for (out, 0..) |o, i| @memcpy(o.sampled, t.picks.b.slice(u32, plan.total)[plan.starts[i]..][0..o.sampled.len]);
         b.window_count += 1;
@@ -476,6 +482,7 @@ pub const Backend = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const start = mtl.clock.seconds();
+        b.times.begin(true);
         var follows: [fz.MAXR][]const u32 = undefined;
         var hiddens: [fz.MAXR]Buf = undefined;
         var ones: [fz.MAXR][1]u32 = undefined;
@@ -516,7 +523,9 @@ pub const Backend = struct {
                 return err;
             };
         }
+        b.times.commit();
         try b.primary.finish(cb);
+        b.times.end(cb, true, 0, requests.len);
         for (requests) |r| (try b.session(r.stream)).heldDrafts(r.depth);
         b.draft_waits += 1;
         b.draft_calls += requests.len;
