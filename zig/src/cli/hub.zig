@@ -127,6 +127,71 @@ pub fn modelType(a: Allocator, io: std.Io, dir: []const u8) []const u8 {
     return if (t == .string) t.string else "unknown";
 }
 
+const ConfigDetails = struct { is_bolt: bool, modelopt_formats: ?[]const []const u8 = null };
+
+/// Bolt identity and sorted modelopt algorithms from one config.json read; formats live in the caller's allocator.
+pub fn configDetails(a: Allocator, io: std.Io, dir: []const u8) ConfigDetails {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const text = @import("checkpoint_config").optional(temp, io, dir) orelse return .{ .is_bolt = false };
+    var parsed = std.json.parseFromSlice(std.json.Value, temp, text, .{}) catch return .{ .is_bolt = false };
+    defer parsed.deinit();
+    if (parsed.value != .object) return .{ .is_bolt = false };
+    const root = parsed.value.object;
+    const is_bolt = blk: {
+        const model_type = root.get("model_type") orelse break :blk false;
+        if (model_type != .string or !std.mem.eql(u8, model_type.string, "nemotron_h_omni")) break :blk false;
+        const llm = root.get("llm_config") orelse break :blk false;
+        if (llm != .object) break :blk false;
+        const llm_type = llm.object.get("model_type") orelse break :blk false;
+        break :blk llm_type == .string and std.mem.eql(u8, llm_type.string, "nemotron_h_puzzle");
+    };
+    var result: ConfigDetails = .{ .is_bolt = is_bolt };
+    const qc = root.get("quantization_config") orelse return result;
+    if (qc != .object) return result;
+
+    var formats: std.ArrayList([]const u8) = .empty;
+    if (qc.object.get("quantized_layers")) |layers| {
+        if (layers != .object) return result;
+        var it = layers.object.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != .object) return result;
+            const algorithm = entry.value_ptr.object.get("quant_algo") orelse return result;
+            if (algorithm != .string or algorithm.string.len == 0) return result;
+            var seen = false;
+            for (formats.items) |format| if (std.mem.eql(u8, format, algorithm.string)) {
+                seen = true;
+                break;
+            };
+            if (seen) continue;
+            formats.append(temp, algorithm.string) catch return result;
+        }
+    } else {
+        const algorithm = qc.object.get("quant_algo") orelse return result;
+        if (algorithm != .string or algorithm.string.len == 0) return result;
+        if (std.mem.eql(u8, algorithm.string, "MIXED_PRECISION")) return result;
+        formats.append(temp, algorithm.string) catch return result;
+    }
+    if (formats.items.len == 0) return result;
+    std.mem.sort([]const u8, formats.items, {}, struct {
+        fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+            return std.mem.lessThan(u8, left, right);
+        }
+    }.lessThan);
+
+    const owned = a.alloc([]const u8, formats.items.len) catch return result;
+    for (formats.items, 0..) |format, i| {
+        owned[i] = a.dupe(u8, format) catch {
+            for (owned[0..i]) |copy| a.free(copy);
+            a.free(owned);
+            return result;
+        };
+    }
+    result.modelopt_formats = owned;
+    return result;
+}
+
 /// config.json's quantization: bits and group size, when the checkpoint is MLX-affine quantized.
 pub fn quantization(a: Allocator, io: std.Io, dir: []const u8) ?struct { bits: u64, group: u64 } {
     const text = @import("checkpoint_config").optional(a, io, dir) orelse return null;
