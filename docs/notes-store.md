@@ -41,7 +41,7 @@ counts and the times.
 | `notes_past` | Ask about the past (all versions) or not. By default the question's own wording decides. |
 | `notes_cap` | The block's token limit for this request. |
 | `notes_echo` | Also return the block itself in the reply. |
-| `notes_lookup` | `who` (the default) or `plain`. |
+| `notes_lookup` | `who` (the default) or `plain`. `--notes-lookup` sets the default. |
 | `notes_language` | `en`, `de` or `fi`: the past cues read from the question. `--notes-language` sets the default. |
 
 The block is looked up who first. The lookup finds the subjects the question
@@ -57,7 +57,9 @@ states is never followed. A note written through `/v1/notes` without a subject
 is not sorted by who it is about, so such a note is a candidate whenever the
 plain lookup finds it. A question that names nobody the store knows, and finds
 none of those notes, gets no block. `"notes_lookup": "plain"` keeps the earlier lookup (Python's
-`retrieve()`). German and Finnish questions keep it too.
+`retrieve()`), and `--notes-lookup plain` does so for the whole server. A
+request in German or Finnish (`notes_language` or `--notes-language`) keeps it
+too.
 
 The lookup reads the index that the last write or erase left, under the same
 lock. An erase also drops the lookup's kept scratch memory, which may hold the

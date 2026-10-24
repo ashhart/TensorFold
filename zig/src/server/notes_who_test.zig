@@ -6,6 +6,7 @@ const rig = @import("notes_lookup_rig_test.zig");
 const index = @import("notes/index.zig");
 const retrieve = @import("notes/retrieve.zig");
 const Storage = @import("notes/storage.zig").Storage;
+const cli = @import("cli.zig");
 const Bytes = @import("notes_storage_bytes_test.zig").Bytes;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -244,7 +245,7 @@ test "who first: a long question takes no more request memory than today's looku
     try testing.expect(bytes[1][1] <= bytes[0][1] + q.items.len); // not a run's encode kept for each of the 11,000 runs
 }
 
-test "who first: notes_lookup chooses the lookup; other languages keep today's; the refusals" {
+test "who first: notes_lookup and --notes-lookup choose the lookup; other languages keep today's; the refusals" {
     const r = try rig.Rig.initWithSnap(testing.allocator, .{}, snapshot);
     defer r.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -275,4 +276,9 @@ test "who first: notes_lookup chooses the lookup; other languages keep today's; 
         try testing.expectEqual(@as(u16, 200), got.status);
         try testing.expect(got.value.get("notes") == null);
     }
+    var u: cli.Usage = .{};
+    try testing.expectEqualStrings("who", (try cli.parse(a, &.{ "m", "--notes", "s.json" }, &u)).notes.lookup);
+    try testing.expectEqualStrings("plain", (try cli.parse(a, &.{ "m", "--notes", "s.json", "--notes-lookup", "plain" }, &u)).notes.lookup);
+    try testing.expectEqualStrings("who", (try cli.parse(a, &.{ "m", "--notes-lookup=who" }, &u)).notes.lookup);
+    try testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--notes-lookup", "all" }, &u));
 }
