@@ -326,7 +326,7 @@ inline int tile_fn(int l) { return ((l / 4) & 2) * 2 + (l % 2) * 2; }
   }
 }
 
-// qa_hc_down_split with qa_hc_up2's split sums and gates: threadgroup (b, r) on outputs 2 b and 2 b + 1, split k
+// qa_hc_down_split with qa_hc_up2's split sums and gates: threadgroup (b, r) on outputs 4 b .. 4 b + 3, split k
 [[kernel]] void qa_hc_down_act(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
     const device float* NW [[buffer(2)]], const device uint32_t* QW [[buffer(3)]],
     const device bfloat* QS [[buffer(4)]],
@@ -337,7 +337,7 @@ inline int tile_fn(int l) { return ((l / 4) & 2) * 2 + (l % 2) * 2; }
     uint thread_index_in_threadgroup [[thread_index_in_threadgroup]],
     uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
     uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
-  constexpr int S = FZ_S, D = FZ_D, ND = FZ_ND, LOW = FZ_LOW, KS = FZ_KS, BITS = FZ_DB, GS = FZ_DG, OPS = 2;
+  constexpr int S = FZ_S, D = FZ_D, ND = FZ_ND, LOW = FZ_LOW, KS = FZ_KS, BITS = FZ_DB, GS = FZ_DG, OPS = 4;
   const uint lane = thread_index_in_simdgroup;
   const int k = int(simdgroup_index_in_threadgroup);
   const int R = rows[0];

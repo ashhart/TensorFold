@@ -31,8 +31,8 @@ pub const Pipes = struct {
 pub const tiles_from = 8;
 /// Rows from which the act pair runs: its threads grow with the rows, not its critical path (2 rows: 2.24 -> 1.76 ms).
 pub const act_from = 2;
-/// Outputs a qa_hc_down_act threadgroup and threads a qa_hc_up_act threadgroup.
-const act_outs = 2;
+/// Outputs a qa_hc_down_act threadgroup (4: half the waves of 2 from two lanes) and threads a qa_hc_up_act threadgroup.
+const act_outs = 4;
 const act_up_threads = 64;
 
 pub const Cache = std.AutoHashMapUnmanaged(Spec, Pipes);
