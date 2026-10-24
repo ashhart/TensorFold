@@ -133,7 +133,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     // The wake for every engine-using route: a parked server reloads under the `active` count this begin raised.
     if (srv.idle_manager) |m| {
-        if (idle_unload.wakeReload(m, srv)) |wake_problem| {
+        if (idle_unload.wakeReload(m, srv, a)) |wake_problem| {
             if (wake_problem.len > 0) {
                 discardBody(conn, a);
                 log.line("idle reload failed: {s}", .{wake_problem});

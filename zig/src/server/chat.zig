@@ -351,7 +351,7 @@ const Generation = struct {
         if (g.visible.pending()) return; // a character still split across tokens
         var answer = text;
         if (g.thinking) {
-            const close = try g.visible.closeOf(g.a, decodeText, g.srv.text, g.srv.close_id);
+            const close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
             const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
             const piece = g.streamed_reasoning.after(split.reasoning, true);
             if (piece.len > 0) {
@@ -473,7 +473,7 @@ const Generation = struct {
         var content: []const u8 = text;
         var reasoning: ?[]const u8 = null;
         if (g.thinking) {
-            const split = try reply_text.splitThinkingTokens(a, decodeText, g.srv.text, text, true, g.srv.markers, content_tokens, g.srv.close_id);
+            const split = try reply_text.splitThinkingTokens(a, reply_text.decodeText, g.srv.text, text, true, g.srv.markers, content_tokens, g.srv.close_id);
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;
             content = split.answer;

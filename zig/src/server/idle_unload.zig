@@ -13,12 +13,12 @@ pub const Reopen = struct {
     ctx: *anyopaque,
     /// `engines.open`'s shape: the engine for `dir`/`model_type` with `args`, or null with `problem` set.
     open: *const fn (ctx: *anyopaque, a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) anyerror!?api.Opened,
-    /// Closes the engine the process started with, freeing its weights; once.
+    /// Closes the current process-owned engine once; retains its info scratch until replacement or teardown.
     close_held: *const fn (ctx: *anyopaque) void,
-    /// Halts the engine the process started with (not the reload's); the drain's deadline routes here.
-    halt_held: *const fn (ctx: *anyopaque, reason: []const u8) void,
-    /// Adopts `opened` as the engine the process closes at shutdown.
-    replace: *const fn (ctx: *anyopaque, opened: api.Opened) void,
+    /// Adopts `opened` and its scratch; close the engine before freeing the scratch.
+    replace: *const fn (ctx: *anyopaque, opened: api.Opened, scratch: *std.heap.ArenaAllocator) void,
+    /// Halts the current owner at the drain deadline; the manager calls this only while resident.
+    halt_held: ?*const fn (ctx: *anyopaque, reason: []const u8) void = null,
 };
 
 /// The engine's lifetime: resident serves; unloading closes; unloaded waits; loading reopens; stopped ends the server.
@@ -44,8 +44,8 @@ pub const Manager = struct {
     /// The manager's timer thread, waiting out idle windows forever until `stop`.
     thread: ?std.Thread = null,
     stopped: bool = false,
-    /// True once a reload published a reopened engine: the drain's halt then belongs to the Closer, not the startup.
-    reloaded: bool = false,
+    /// One drain halt per resident cycle.
+    halt_sent: bool = false,
     /// The parked stand-in the server holds while no engine is resident; destroyed at the reload's swap.
     stub: ?*Stub = null,
     /// True while the server's engine is the stub; the reload's swap clears it.
@@ -59,9 +59,9 @@ pub const Manager = struct {
     pub fn begin(m: *Manager) void {
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
+        if (m.state == .unloading and !m.parked) m.state = .resident;
         m.active += 1;
         m.last_activity_ns = now(m.io);
-        m.cond.broadcast(m.io); // a timer waiting out its window re-evaluates at once instead of at the old deadline
     }
 
     /// The request ended, any outcome: drops `active` and restarts the idle window.
@@ -73,7 +73,7 @@ pub const Manager = struct {
         m.cond.broadcast(m.io);
     }
 
-    /// Whether the server's engine is the parked stub; the stub answers every read, no closed-engine touch.
+    /// Whether the server's engine is the parked stub; this check alone does not lease the engine.
     pub fn isParked(m: *Manager) bool {
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
@@ -112,10 +112,10 @@ fn now(io: std.Io) i64 {
 }
 
 /// Starts the idle timer for `args.idle_unload` seconds; null and 0 keep the manager off.
-pub fn start(gpa: Allocator, io: std.Io, args: cli.Args, re: Reopen, dir: []const u8, model_type: []const u8) ?*Manager {
-    if (args.idle_unload <= 0) return null;
+pub fn start(gpa: Allocator, io: std.Io, args: cli.Args, re: Reopen, dir: []const u8, model_type: []const u8, srv: ?*server_mod.Server) ?*Manager {
+    if (args.idle_unload <= 0 or srv == null) return null;
     const m = gpa.create(Manager) catch return null;
-    m.* = .{ .gpa = gpa, .io = io, .args = args, .re = re, .dir = dir, .model_type = model_type, .idle_s = args.idle_unload, .last_activity_ns = now(io) };
+    m.* = .{ .gpa = gpa, .io = io, .args = args, .re = re, .dir = dir, .model_type = model_type, .idle_s = args.idle_unload, .last_activity_ns = now(io), .srv = srv };
     m.thread = std.Thread.spawn(.{}, timer, .{m}) catch {
         gpa.destroy(m);
         return null;
@@ -123,15 +123,25 @@ pub fn start(gpa: Allocator, io: std.Io, args: cli.Args, re: Reopen, dir: []cons
     return m;
 }
 
+pub const Startup = enum { disabled, enabled, no_reopen, out_of_memory };
+
+/// Sets up the manager without owning the caller's serving scope; the caller must defer `stopServer`.
+pub fn startServer(srv: *server_mod.Server, args: cli.Args, re: ?Reopen, dir: []const u8, model_type: []const u8) Startup {
+    if (args.idle_unload <= 0) return .disabled;
+    const reopen = re orelse return .no_reopen;
+    srv.idle_manager = start(srv.gpa, srv.io, args, reopen, dir, model_type, srv);
+    return if (srv.idle_manager != null) .enabled else .out_of_memory;
+}
+
 /// The idle timer: re-arms after every activity; parks when a whole window passed with no request.
 fn timer(m: *Manager) void {
     while (true) {
         m.mutex.lockUncancelable(m.io);
-        while (!m.stopped and m.state != .resident) m.cond.waitUncancelable(m.io, &m.mutex);
+        while (!m.stopped and (m.state != .resident or m.active > 0))
+            m.cond.waitUncancelable(m.io, &m.mutex);
         if (m.stopped) return m.mutex.unlock(m.io);
         // `idle_s` is seconds: nanoseconds, clamped so a huge setting cannot overflow the window math
         const window_ns = std.math.mul(i64, m.idle_s, std.time.ns_per_s) catch std.math.maxInt(i64);
-        // Bounded waits out the window: `end`, `begin` and `stop` broadcast, so activity re-evaluates at once.
         while (!m.stopped and m.state == .resident and m.active == 0) {
             const elapsed = now(m.io) -% m.last_activity_ns;
             if (elapsed >= window_ns) break;
@@ -167,10 +177,7 @@ fn park(m: *Manager) void {
         m.parked = true;
     }
     srv.engine = m.stub.?.engine();
-    srv.stopKeepalive(); // its target was the closed engine's queue: a tick would hit freed memory; every park stops the current one
-    // Requests that began before the swap still read the real engine: they end before the weights leave.
-    while (m.active > 0 and m.state == .unloading) m.cond.waitUncancelable(m.io, &m.mutex);
-    if (m.state != .unloading) return m.mutex.unlock(m.io); // a request began and restarted the window: stay resident
+    srv.stopKeepalive(); // each resident cycle owns a fresh ticker; it must stop before this engine closes
     m.mutex.unlock(m.io);
     m.re.close_held(m.re.ctx); // the weights leave here, outside the lock: the reload opens with them gone
     m.mutex.lockUncancelable(m.io);
@@ -181,7 +188,7 @@ fn park(m: *Manager) void {
 }
 
 /// A request's reload: the parked request drives the reopen; every fallible step runs before the engine publishes.
-pub fn reload(m: *Manager, srv: *server_mod.Server, problem_out: *[]const u8) error{ OutOfMemory, ReloadFailed, EngineOpenFailed }!void {
+pub fn reload(m: *Manager, srv: *server_mod.Server, reply: Allocator, problem_out: *[]const u8) error{ OutOfMemory, ReloadFailed, EngineOpenFailed }!void {
     m.mutex.lockUncancelable(m.io);
     while (m.state == .loading) {
         m.cond.waitUncancelable(m.io, &m.mutex); // one reload at a time: the others wait for publish or failure
@@ -201,12 +208,15 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, problem_out: *[]const u8) er
         m.mutex.unlock(m.io);
         m.cond.broadcast(m.io);
     }
+    const scratch = try m.gpa.create(std.heap.ArenaAllocator);
+    scratch.* = .init(m.gpa);
+    errdefer @import("idle_unload_closer.zig").destroyScratch(scratch);
     var problem: []const u8 = "";
-    const opened = (m.re.open(m.re.ctx, srv.arena.allocator(), m.gpa, m.io, m.dir, m.model_type, m.args, &problem) catch {
-        problem_out.* = problem; // the open path wrote its reason into serve's arena, which outlives this request
+    const opened = (m.re.open(m.re.ctx, scratch.allocator(), m.gpa, m.io, m.dir, m.model_type, m.args, &problem) catch {
+        problem_out.* = try reply.dupe(u8, problem);
         return error.EngineOpenFailed;
     }) orelse {
-        problem_out.* = try std.fmt.allocPrint(m.gpa, "the engine could not reload ({s}); send the request again", .{problem});
+        problem_out.* = try std.fmt.allocPrint(reply, "the engine could not reload ({s}); send the request again", .{problem});
         return error.ReloadFailed;
     };
     var attached = true;
@@ -229,21 +239,20 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, problem_out: *[]const u8) er
     m.mutex.lockUncancelable(m.io);
     if (m.state == .stopped) { // the server stopped while the weights loaded: close the candidate at once
         m.mutex.unlock(m.io);
-        opened.close(opened.ctx);
         if (keepalive) |k| k.stop();
+        opened.close(opened.ctx);
         return error.ReloadFailed;
     }
     const old_stub = m.stub;
     m.stub = null;
     m.parked = false; // the swap publishes the resident engine: the stub reads end here
     m.state = .resident;
-    m.reloaded = true; // the drain's halt now belongs to the Closer's current engine, not the startup one
+    m.halt_sent = false;
     m.last_activity_ns = now(m.io);
-    // swap everything the request paths read while every reader holds this lock or waits on `cond`
     srv.engine = opened.engine;
     srv.info = info;
     srv.keepalive = keepalive;
-    m.re.replace(m.re.ctx, opened); // shutdown closes this engine, not the long-gone startup one
+    m.re.replace(m.re.ctx, opened, scratch); // shutdown closes this engine, not the long-gone startup one
     m.mutex.unlock(m.io);
     m.cond.broadcast(m.io);
     if (old_stub) |s| m.gpa.destroy(s);
@@ -251,9 +260,9 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, problem_out: *[]const u8) er
 }
 
 /// A request's wake: reloads the parked server; the only error is OutOfMemory, a failure returns its reason.
-pub fn wakeReload(m: *Manager, srv: *server_mod.Server) error{OutOfMemory}![]const u8 {
+pub fn wakeReload(m: *Manager, srv: *server_mod.Server, reply: Allocator) error{OutOfMemory}![]const u8 {
     var problem: []const u8 = "";
-    reload(m, srv, &problem) catch |e| {
+    reload(m, srv, reply, &problem) catch |e| {
         if (e == error.OutOfMemory) return error.OutOfMemory;
         if (problem.len == 0) problem = "the engine could not reload; send the request again";
         log.line("idle reload failed: {s}", .{problem});
@@ -262,24 +271,34 @@ pub fn wakeReload(m: *Manager, srv: *server_mod.Server) error{OutOfMemory}![]con
     return "";
 }
 
-/// The drain's halt while the startup engine is resident: the Closer's halt would hit the park-closed engine.
+/// The drain waits for a transition, then halts only the resident current owner under its lifetime lock.
 pub fn haltHeld(m: *Manager, reason: []const u8) void {
     m.mutex.lockUncancelable(m.io);
     defer m.mutex.unlock(m.io);
-    if (!m.reloaded) m.re.halt_held(m.re.ctx, reason);
+    while (m.state == .loading or m.state == .unloading)
+        m.cond.waitUncancelable(m.io, &m.mutex);
+    if (m.state != .resident or m.parked or m.halt_sent) return;
+    if (m.re.halt_held) |halt| {
+        m.halt_sent = true;
+        halt(m.re.ctx, reason);
+    }
 }
 
-/// Whether the drain's deadline halt belongs to the manager (the startup engine is still resident).
-pub fn haltsStartupEngine(m: *Manager) bool {
-    m.mutex.lockUncancelable(m.io);
-    defer m.mutex.unlock(m.io);
-    return !m.reloaded;
-}
-
-/// Stops the timer and frees the manager; the server's own shutdown path closes the resident engine.
-pub fn stop(m: *Manager) void {
+/// Stops and joins only the timer; the parked stub remains valid until all server readers end.
+pub fn stopTimer(m: *Manager) void {
     m.mutex.lockUncancelable(m.io);
     m.stopped = true;
+    m.cond.broadcast(m.io);
+    m.mutex.unlock(m.io);
+    if (m.thread) |thread| thread.join();
+    m.thread = null;
+}
+
+/// Stops the timer and frees the manager after the caller has joined every request and reload user.
+pub fn stop(m: *Manager) void {
+    stopTimer(m);
+    m.mutex.lockUncancelable(m.io);
+    m.state = .stopped;
     m.cond.broadcast(m.io);
     var stub: ?*Stub = null;
     if (m.stub) |s| { // a still-parked server's stub dies here; its engine holds no weights
@@ -287,9 +306,16 @@ pub fn stop(m: *Manager) void {
         stub = s;
     }
     m.mutex.unlock(m.io);
-    if (stub) |s| m.gpa.destroy(s);
     if (m.thread) |t| t.join();
+    if (stub) |s| m.gpa.destroy(s);
     m.gpa.destroy(m);
+}
+
+/// Ends the manager's serving scope and removes the published pointer before freeing it.
+pub fn stopServer(srv: *server_mod.Server) void {
+    const m = srv.idle_manager orelse return;
+    srv.idle_manager = null;
+    stop(m);
 }
 
 /// The parked stand-in: refuses every submit, reports the server unavailable, holds no weights.
@@ -326,109 +352,8 @@ const Stub = struct {
     }
 };
 
-test "the manager stays off for 0 and negative idle seconds" {
-    var args: cli.Args = .{};
-    args.idle_unload = 0;
-    const re: Reopen = .{ .ctx = undefined, .open = undefined, .close_held = undefined, .halt_held = undefined, .replace = undefined };
-    const m = start(std.testing.allocator, std.testing.io, args, re, "d", "t");
-    try std.testing.expect(m == null);
-    args.idle_unload = -5;
-    try std.testing.expect(start(std.testing.allocator, std.testing.io, args, re, "d", "t") == null);
-}
-
-test "a one-second window parks the engine without a request; the timer does not re-close" {
-    const Harness = @import("idle_unload_test.zig").Harness;
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    try h.waitParked(3000); // the window passed with no request: the park landed
-    try std.testing.expectEqual(@as(u32, 1), h.closes);
-    h.sleepMs(1100); // a second window: the engine is already closed, the park does not re-close
-    try std.testing.expectEqual(@as(u32, 1), h.closes);
-}
-
-test "active work prevents the park; its end restarts the window" {
-    const Harness = @import("idle_unload_test.zig").Harness;
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    h.man.?.begin();
-    h.sleepMs(1400); // a whole window with a request in flight: no park
-    try std.testing.expectEqual(@as(u32, 0), h.closes);
-    h.man.?.end();
-    try h.waitParked(3000); // the end re-armed the deadline: the park lands after the fresh window
-    try std.testing.expectEqual(@as(u32, 1), h.closes);
-}
-
-test "the wake reloads: the candidate opens, the stub is freed, and a second cycle works" {
-    const Harness = @import("idle_unload_test.zig").Harness;
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    try h.waitUnloaded(3000);
-    var problem: []const u8 = "";
-    try h.reload(&problem);
-    try std.testing.expectEqual(@as(u32, 1), h.opens);
-    try std.testing.expectEqual(@as(u32, 1), h.replaces);
-    try std.testing.expect(!h.man.?.isParked());
-    try h.waitUnloaded(3000); // a second complete cycle
-    try h.reload(&problem);
-    try std.testing.expectEqual(@as(u32, 2), h.opens);
-    try std.testing.expectEqual(@as(u32, 2), h.closes);
-}
-
-test "concurrent wake requests produce exactly one reload; both find the engine resident" {
-    const Harness = @import("idle_unload_test.zig").Harness;
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    try h.waitUnloaded(3000);
-    var a_err: ?anyerror = null;
-    var b_err: ?anyerror = null;
-    const Wa = struct {
-        fn run(x: *Harness, e: *?anyerror) void {
-            var p: []const u8 = "";
-            x.reload(&p) catch |err| {
-                e.* = err;
-            };
-        }
-    };
-    const ta = try std.Thread.spawn(.{}, Wa.run, .{ &h, &a_err });
-    const tb = try std.Thread.spawn(.{}, Wa.run, .{ &h, &b_err });
-    ta.join();
-    tb.join();
-    try std.testing.expectEqual(@as(u32, 1), h.opens); // exactly one reload opened the engine
-    try std.testing.expect(a_err == null and b_err == null);
-    try std.testing.expect(!h.man.?.isParked());
-}
-
-test "a failed open cleans up and leaves the server parked and retryable" {
-    const Harness = @import("idle_unload_test.zig").Harness;
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    h.fail_open = true;
-    try h.waitUnloaded(3000);
-    var problem: []const u8 = "";
-    try std.testing.expectError(error.EngineOpenFailed, h.reload(&problem));
-    try std.testing.expect(h.man.?.isParked()); // still parked: the next request retries
-    h.fail_open = false;
-    try h.reload(&problem); // the retry succeeds
-    try std.testing.expectEqual(@as(u32, 1), h.opens);
-    try std.testing.expect(!h.man.?.isParked());
-}
-
-test "the parked stub refuses submits and reports unhealthy" {
-    const Harness = @import("idle_unload_test.zig").Harness;
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    try h.waitParked(3000);
-    const engine = h.srv.?.engine;
-    var probe: api.Request = .{ .prompt = &.{}, .max_tokens = 0 };
-    try std.testing.expectError(error.Closed, engine.submit(1, &probe, .{ .ctx = undefined, .event = undefined }));
-    var status: api.Status = .{};
-    engine.status(&status, &.{});
-    try std.testing.expect(!status.healthy);
-    try std.testing.expect(engine.memory(false) == null);
+test {
+    _ = @import("idle_unload_cases.zig");
+    _ = @import("idle_unload_carry_test.zig");
+    _ = @import("idle_unload_deadline_test.zig");
 }

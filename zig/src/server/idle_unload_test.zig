@@ -1,4 +1,4 @@
-//! The idle-unload test harness: a fake engine, a counting Reopen and a short-window manager.
+//! Synchronized fake-engine owners and gates for idle-unload host tests.
 const std = @import("std");
 const api = @import("engine_api");
 const cli = @import("cli.zig");
@@ -6,15 +6,8 @@ const idle_unload = @import("idle_unload.zig");
 const server_mod = @import("server.zig");
 const Allocator = std.mem.Allocator;
 
-/// A fake engine: refuses nothing, reports one lane, holds no weights, and panics on any call after its close.
 const Fake = struct {
-    closed: bool = false,
-    /// A reader parked inside statusFn: the gate holds it while the test drives an unload attempt.
-    hold_status: bool = false,
-    status_entered: std.atomic.Value(bool) = .init(false),
-
-    ticks: std.atomic.Value(u32) = .init(0),
-
+    owner: *Harness,
     fn engine(f: *Fake) api.Engine {
         return .{ .ctx = f, .vtable = &.{
             .info = infoFn,
@@ -22,259 +15,224 @@ const Fake = struct {
             .cancel = cancelFn,
             .status = statusFn,
             .memory = memoryFn,
-            .keepalive = keepaliveFn,
+            .keepalive = target,
         } };
     }
-
-    fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
-        return .{ .ctx = ctx, .tick = tickFn };
-    }
-
-    fn tickFn(ctx: *anyopaque) void {
+    fn target(ctx: *anyopaque) ?api.keepalive.Target {
         const f: *Fake = @ptrCast(@alignCast(ctx));
-        if (f.closed) @panic("keepalive tick after the engine's close"); // the lifetime failure park must prevent
-        _ = f.ticks.fetchAdd(1, .monotonic);
+        return .{ .ctx = f.owner, .tick = Harness.tick };
     }
-
     fn infoFn(_: *anyopaque) api.Info {
         return .{ .lanes = 1, .name = "fake" };
     }
-
     fn submitFn(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
         return error.Closed;
     }
-
     fn cancelFn(_: *anyopaque, _: api.Id) void {}
-
     fn statusFn(ctx: *anyopaque, out: *api.Status, _: []u32) void {
         const f: *Fake = @ptrCast(@alignCast(ctx));
-        if (f.closed) @panic("engine read after its close"); // the lifetime failure the stub must prevent
-        f.status_entered.store(true, .release);
-        while (f.hold_status) std.Thread.yield() catch {};
+        if (f.owner.dead.load(.acquire)) _ = f.owner.unsafe_reads.fetchAdd(1, .acq_rel);
+        f.owner.status_entered.set(f.owner.io);
+        if (f.owner.gate_status.load(.acquire)) f.owner.status_release.waitUncancelable(f.owner.io);
         out.* = .{ .healthy = true };
     }
-
     fn memoryFn(ctx: *anyopaque, _: bool) ?api.Memory {
         const f: *Fake = @ptrCast(@alignCast(ctx));
-        if (f.closed) @panic("engine read after its close");
+        if (f.owner.dead.load(.acquire)) _ = f.owner.unsafe_reads.fetchAdd(1, .acq_rel);
         return null;
-    }
-
-    fn close(f: *Fake) void {
-        f.closed = true;
     }
 };
 
-/// The test shell: a real `Server` struct shell, a counting Reopen, and the manager under test.
 pub const Harness = struct {
-    gpa: Allocator = undefined,
-    io: std.Io = undefined,
+    gpa: Allocator = std.testing.allocator,
+    io: std.Io = std.testing.io,
     man: ?*idle_unload.Manager = null,
     fake: ?*Fake = null,
-    reloaded_fake: ?*Fake = null,
     srv: ?*server_mod.Server = null,
-    arena: std.heap.ArenaAllocator = undefined,
-    opens: u32 = 0,
-    closes: u32 = 0,
-    halts: u32 = 0,
-    replaces: u32 = 0,
+    arena: ?std.heap.ArenaAllocator = null,
+    cycle: ?*std.heap.ArenaAllocator = null,
+    opens: std.atomic.Value(u32) = .init(0),
+    closes: std.atomic.Value(u32) = .init(0),
+    replaces: std.atomic.Value(u32) = .init(0),
+    halts: std.atomic.Value(u32) = .init(0),
+    candidate_closes: std.atomic.Value(u32) = .init(0),
+    unsafe_keepalive: std.atomic.Value(u32) = .init(0),
+    unsafe_reads: std.atomic.Value(u32) = .init(0),
+    unsafe_halts: std.atomic.Value(u32) = .init(0),
+    gate_open: std.atomic.Value(bool) = .init(false),
+    open_entered: std.Io.Event = .unset,
+    open_release: std.Io.Event = .unset,
+    gate_status: std.atomic.Value(bool) = .init(false),
+    status_entered: std.Io.Event = .unset,
+    status_release: std.Io.Event = .unset,
     fail_open: bool = false,
-    keep_warm_s: i64 = 0,
-    fail_closes: u32 = 0,
+    null_open: bool = false,
+    dead: std.atomic.Value(bool) = .init(false),
+    ticks: std.atomic.Value(u32) = .init(0),
+    unsafe_ticks: std.atomic.Value(u32) = .init(0),
+    tick_seen: std.Io.Event = .unset,
     opened: ?api.Opened = null,
+    opened_allocator: ?Allocator = null,
+    gate_close: std.atomic.Value(bool) = .init(false),
+    close_entered: std.Io.Event = .unset,
+    close_release: std.Io.Event = .unset,
 
-    /// Builds a server shell and a manager with `idle_s`; the startup engine is a fresh fake.
     pub fn setup(self: *Harness, idle_s: i64) !void {
-        const keep_warm_s = self.keep_warm_s; // read before the struct reset below
-        const gpa = std.testing.allocator;
-        const io = std.testing.io;
-        self.* = .{ .gpa = gpa, .io = io, .arena = .init(gpa), .man = undefined, .fake = undefined, .srv = undefined };
-        self.keep_warm_s = keep_warm_s;
-        errdefer self.arena.deinit();
-        const a = self.arena.allocator();
-        self.fake = try a.create(Fake);
-        self.fake.?.* = .{};
-        // a Server shell, not Server.init: the manager reads engine, info, config, keepalive, recall
+        return self.setupWith(std.testing.allocator, idle_s);
+    }
+
+    pub fn setupWith(self: *Harness, gpa: Allocator, idle_s: i64) !void {
+        self.* = .{ .gpa = gpa, .arena = .init(gpa) };
+        errdefer self.deinit();
+        self.fake = try self.arena.?.allocator().create(Fake);
+        self.fake.?.* = .{ .owner = self };
         const srv = try gpa.create(server_mod.Server);
-        errdefer gpa.destroy(srv);
-        const startup: api.Opened = .{ .engine = self.fake.?.engine(), .close = closeFake, .ctx = self.fake.? };
         srv.* = .{
             .gpa = gpa,
-            .io = io,
-            .engine = startup.engine,
-            .info = startup.engine.info(),
+            .io = self.io,
+            .engine = self.fake.?.engine(),
+            .info = self.fake.?.engine().info(),
             .text = undefined,
-            .config = .{ .served_name = "fake", .model_ids = &.{}, .keep_warm_s = self.keep_warm_s },
+            .config = .{ .served_name = "fake", .model_ids = &.{}, .keep_warm_s = 0 },
             .keys = null,
             .metrics = .{ .gpa = gpa },
             .store = .{ .gpa = gpa },
             .arena = .init(gpa),
-            .slide = .init(gpa, io, null),
+            .slide = .init(gpa, self.io, null),
             .teacher = .init(gpa),
         };
+        self.srv = srv;
         var args: cli.Args = .{};
         args.idle_unload = idle_s;
-        const re: idle_unload.Reopen = .{ .ctx = self, .open = open, .close_held = closeHeld, .halt_held = haltHeld, .replace = replace };
-        self.man = idle_unload.start(gpa, io, args, re, "d", "t") orelse return error.TestUnexpectedResult;
-        self.man.?.srv = srv;
-        self.srv = srv;
-        srv.idle_manager = self.man;
+        if (idle_unload.startServer(srv, args, self.reopen(), "d", "t") != .enabled)
+            return error.OutOfMemory;
+        self.man = srv.idle_manager;
+    }
+
+    pub fn reopen(self: *Harness) idle_unload.Reopen {
+        return .{ .ctx = self, .open = open, .close_held = closeHeld, .replace = replace, .halt_held = haltHeld };
     }
 
     fn open(ctx: *anyopaque, a: Allocator, _: Allocator, _: std.Io, _: []const u8, _: []const u8, _: cli.Args, problem: *[]const u8) anyerror!?api.Opened {
         const h: *Harness = @ptrCast(@alignCast(ctx));
-        if (h.fail_open) {
-            h.fail_closes += 1; // the caller closes a failed open's return; nothing to close here
-            problem.* = "the fake open failed";
-            return error.OpenFailed;
+        h.open_entered.set(h.io);
+        if (h.gate_open.load(.acquire)) h.open_release.waitUncancelable(h.io);
+        const scratch = try a.alloc(u8, 4096);
+        @memset(scratch, 7);
+        if (h.fail_open or h.null_open) {
+            problem.* = try a.dupe(u8, "the fake open failed");
+            if (h.fail_open) return error.OpenFailed;
+            return null;
         }
-        h.opens += 1;
-        const fresh = try a.create(Fake);
-        fresh.* = .{};
-        h.reloaded_fake = fresh;
-        h.opened = .{ .engine = fresh.engine(), .close = closeFake, .ctx = fresh };
-        return h.opened;
+        h.opened_allocator = a;
+        h.dead.store(false, .release);
+        _ = h.opens.fetchAdd(1, .acq_rel);
+        return .{ .engine = h.fake.?.engine(), .close = closeCandidate, .ctx = h };
+    }
+
+    fn closeCandidate(ctx: *anyopaque) void {
+        const h: *Harness = @ptrCast(@alignCast(ctx));
+        _ = h.candidate_closes.fetchAdd(1, .acq_rel);
     }
 
     fn closeHeld(ctx: *anyopaque) void {
         const h: *Harness = @ptrCast(@alignCast(ctx));
-        h.closes += 1;
-        h.fake.?.closed = true; // the startup engine's close: later calls on it must be caught
+        if (h.srv.?.keepalive != null) _ = h.unsafe_keepalive.fetchAdd(1, .acq_rel);
+        h.close_entered.set(h.io);
+        if (h.gate_close.load(.acquire)) h.close_release.waitUncancelable(h.io);
+        h.dead.store(true, .release);
+        _ = h.closes.fetchAdd(1, .release);
     }
 
-    fn closeFake(ctx: *anyopaque) void {
-        const f: *Fake = @ptrCast(@alignCast(ctx));
-        f.closed = true;
-    }
-
-    fn haltHeld(ctx: *anyopaque, reason: []const u8) void {
-        _ = reason;
+    fn replace(ctx: *anyopaque, opened: api.Opened, scratch: *std.heap.ArenaAllocator) void {
         const h: *Harness = @ptrCast(@alignCast(ctx));
-        h.halts += 1;
-    }
-
-    fn replace(ctx: *anyopaque, opened: api.Opened) void {
-        const h: *Harness = @ptrCast(@alignCast(ctx));
-        h.replaces += 1;
+        if (h.cycle) |a| @import("idle_unload_closer.zig").destroyScratch(a);
         h.opened = opened;
+        h.dead.store(false, .release);
+        h.cycle = scratch;
+        _ = h.replaces.fetchAdd(1, .release);
+    }
+
+    fn haltHeld(ctx: *anyopaque, _: []const u8) void {
+        const h: *Harness = @ptrCast(@alignCast(ctx));
+        if (h.dead.load(.acquire)) _ = h.unsafe_halts.fetchAdd(1, .acq_rel);
+        _ = h.halts.fetchAdd(1, .acq_rel);
+    }
+
+    fn tick(ctx: *anyopaque) void {
+        const h: *Harness = @ptrCast(@alignCast(ctx));
+        if (h.dead.load(.acquire)) _ = h.unsafe_ticks.fetchAdd(1, .acq_rel);
+        _ = h.ticks.fetchAdd(1, .release);
+        h.tick_seen.set(h.io);
+    }
+
+    pub fn waitEvent(self: *Harness, event: *std.Io.Event) !void {
+        var waited: u32 = 0;
+        while (!event.isSet() and waited < 2000) : (waited += 10) self.sleepMs(10);
+        try std.testing.expect(event.isSet());
     }
 
     pub fn deinit(self: *Harness) void {
-        if (self.man) |m| idle_unload.stop(m);
+        self.close_release.set(self.io);
+        self.open_release.set(self.io);
+        self.status_release.set(self.io);
         if (self.srv) |s| {
-            s.stopKeepalive(); // a test ending resident leaves no ticker ticking the freed fake
+            idle_unload.stopServer(s);
+            self.man = null;
+            s.stopKeepalive();
+            if (self.cycle) |a| @import("idle_unload_closer.zig").destroyScratch(a);
+            self.cycle = null;
             s.arena.deinit();
             s.metrics.deinit();
             s.store.deinit();
             s.slide.deinit();
             s.teacher.deinit();
             self.gpa.destroy(s);
+            self.srv = null;
         }
-        self.arena.deinit();
+        if (self.arena) |*a| a.deinit();
+        self.arena = null;
+        self.fake = null;
+    }
+
+    pub fn state(self: *Harness) idle_unload.State {
+        const m = self.man.?;
+        m.mutex.lockUncancelable(self.io);
+        defer m.mutex.unlock(self.io);
+        return m.state;
+    }
+
+    pub fn expire(self: *Harness) void {
+        const m = self.man.?;
+        m.mutex.lockUncancelable(self.io);
+        const at: i64 = @intCast(std.Io.Clock.awake.now(self.io).toNanoseconds());
+        m.last_activity_ns = at -% (m.idle_s * std.time.ns_per_s) -% 1;
+        m.mutex.unlock(self.io);
+        m.cond.broadcast(self.io);
     }
 
     pub fn waitParked(self: *Harness, timeout_ms: u32) !void {
         var waited: u32 = 0;
-        while (!self.man.?.isParked() and waited < timeout_ms) : (waited += 10) {
-            std.Io.sleep(self.io, .fromMilliseconds(10), .awake) catch {};
-        }
-        try std.testing.expect(self.man.?.isParked());
+        while (self.state() != .unloaded and waited < timeout_ms) : (waited += 10) self.sleepMs(10);
+        if (self.state() != .unloaded) return error.CloseNotComplete;
     }
 
-    /// Waits until the park fully finished (state `unloaded`): `parked` is already true while the engine closes.
+    /// Waits for completed park under the same lock the timer uses to publish the state.
     pub fn waitUnloaded(self: *Harness, timeout_ms: u32) !void {
-        var waited: u32 = 0;
-        while (self.man.?.state != .unloaded and waited < timeout_ms) : (waited += 10) {
-            std.Io.sleep(self.io, .fromMilliseconds(10), .awake) catch {};
-        }
-        try std.testing.expectEqual(idle_unload.State.unloaded, self.man.?.state);
+        return self.waitParked(timeout_ms);
     }
 
     pub fn reload(self: *Harness, problem: *[]const u8) !void {
-        try idle_unload.reload(self.man.?, self.srv.?, problem);
+        var reply: std.heap.ArenaAllocator = .init(self.gpa);
+        defer reply.deinit();
+        idle_unload.reload(self.man.?, self.srv.?, reply.allocator(), problem) catch |err| {
+            // Tests inspect only the result; retain no pointer into the temporary reply arena.
+            problem.* = "fake reopen failed";
+            return err;
+        };
     }
 
     pub fn sleepMs(self: *Harness, ms: u64) void {
         std.Io.sleep(self.io, .fromMilliseconds(@intCast(ms)), .awake) catch {};
     }
 };
-
-test "the manager stays alive after setup: the server shell serves through the resident engine" {
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    var status: api.Status = .{};
-    h.man.?.readStatus(h.srv.?, &status, &.{});
-    try std.testing.expect(status.healthy); // the resident engine answered, no park yet
-    try std.testing.expectEqual(@as(u32, 0), h.closes);
-}
-
-test "two complete cycles with the keepalive armed: every park stops the current keepalive" {
-    var h: Harness = .{};
-    defer h.deinit();
-    h.keep_warm_s = 60;
-    try h.setup(1);
-    try h.waitUnloaded(3000); // the first park stopped the startup keepalive
-    try std.testing.expect(h.srv.?.keepalive == null);
-    var problem: []const u8 = "";
-    try h.reload(&problem);
-    try std.testing.expect(h.srv.?.keepalive != null); // the reload armed a fresh one
-    try h.waitUnloaded(3000); // the second park must stop THAT one too
-    try std.testing.expect(h.srv.?.keepalive == null);
-    try h.reload(&problem);
-    try std.testing.expectEqual(@as(u32, 2), h.opens);
-}
-
-test "a reader inside the engine holds the park off: the close waits for the read" {
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    h.fake.?.hold_status = true;
-    const Reader = struct {
-        fn run(w: *Harness, out: *api.Status) void {
-            w.man.?.readStatus(w.srv.?, out, &.{});
-        }
-    };
-    var read_status: api.Status = .{};
-    const thread = try std.Thread.spawn(.{}, Reader.run, .{ &h, &read_status });
-    var joined = false;
-    defer if (!joined) {
-        h.fake.?.hold_status = false; // a cancelled test must not leave the reader spinning
-        thread.join();
-    };
-    while (!h.fake.?.status_entered.load(.acquire)) std.Io.sleep(h.io, .fromMilliseconds(5), .awake) catch {};
-    h.sleepMs(1500); // a whole idle window with the reader holding the manager lock
-    try std.testing.expectEqual(@as(u32, 0), h.closes); // the park cannot take the lock: the engine stays open
-    h.fake.?.hold_status = false;
-    thread.join();
-    joined = true;
-    try std.testing.expect(read_status.healthy); // the read finished on the live engine, no closed-engine read
-    try h.waitUnloaded(5000); // the reader gone, the park proceeds and closes
-    try std.testing.expectEqual(@as(u32, 1), h.closes);
-}
-
-test "a request arriving while parked wakes and reloads: the next reads hit the reopened engine" {
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    try h.waitParked(3000); // the route's begin() ran, the wake follows
-    var problem: []const u8 = "";
-    try h.reload(&problem); // what routes.post's centralized wake calls
-    try std.testing.expectEqual(@as(u32, 1), h.opens);
-    try std.testing.expect(!h.man.?.isParked());
-}
-
-test "the drain deadline halts the startup engine before a reload and the Closer's after" {
-    var h: Harness = .{};
-    defer h.deinit();
-    try h.setup(1);
-    try std.testing.expect(idle_unload.haltsStartupEngine(h.man.?));
-    idle_unload.haltHeld(h.man.?, "test");
-    try std.testing.expectEqual(@as(u32, 1), h.halts); // the startup engine's halt ran
-    try h.waitUnloaded(3000);
-    var problem: []const u8 = "";
-    try h.reload(&problem);
-    try std.testing.expect(!idle_unload.haltsStartupEngine(h.man.?)); // a reload's engine belongs to the Closer
-    idle_unload.haltHeld(h.man.?, "test");
-    try std.testing.expectEqual(@as(u32, 1), h.halts); // no second halt: the startup engine is gone
-}

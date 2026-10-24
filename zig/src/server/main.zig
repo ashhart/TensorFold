@@ -136,8 +136,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer up.text.deinit();
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
-    var closer: Closer = .{ .opened = up.engine, .startup = up.engine };
-    defer closer.closeOnce();
+    var closer: Closer = .{ .opened = up.engine };
+    defer closer.deinit();
     const served = hub.servedName(args.name, args.model, dir);
     problem = "";
     record = recall_open.open(gpa, io, a, args, up.text, served, &problem) catch |e| {
@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !u8 {
         .recall = record,
         .model_dir = dir,
         .model_type = model_type,
-        .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Reopen.haltHeld, .replace = Reopen.replace },
+        .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Closer.halt, .replace = Reopen.replace },
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,
         .started = started,
@@ -169,21 +169,11 @@ const Reopen = struct {
     }
     fn closeHeld(ctx: *anyopaque) void {
         const c: *Closer = @ptrCast(@alignCast(ctx));
-        if (!c.closed) {
-            c.closed = true;
-            c.opened.close(c.opened.ctx); // the startup engine's weights leave the machine here
-        }
+        c.closeOnce();
     }
-    fn haltHeld(ctx: *anyopaque, reason: []const u8) void {
+    fn replace(ctx: *anyopaque, opened: api.Opened, scratch: *std.heap.ArenaAllocator) void {
         const c: *Closer = @ptrCast(@alignCast(ctx));
-        if (comptime @hasField(api.Opened, "halt")) {
-            if (c.startup.halt) |f| f(c.startup.ctx, reason); // the startup engine, not the reload's `opened`
-        }
-    }
-    fn replace(ctx: *anyopaque, opened: api.Opened) void {
-        const c: *Closer = @ptrCast(@alignCast(ctx));
-        c.opened = opened; // shutdown closes the reload's engine
-        c.closed = false;
+        c.adopt(opened, scratch);
     }
 };
 
@@ -234,23 +224,4 @@ fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !
     return if (out.count() > 0) json.Value{ .object = out } else null;
 }
 
-const Closer = struct {
-    opened: api.Opened,
-    startup: api.Opened, // the engine the process started with; the idle park closes it, the drain's halt still names it
-    closed: bool = false,
-    fn closeOnce(c: *Closer) void {
-        if (c.closed) return;
-        c.closed = true;
-        c.opened.close(c.opened.ctx);
-    }
-    fn close(p: *anyopaque) void {
-        const c: *Closer = @ptrCast(@alignCast(p));
-        c.closeOnce();
-    }
-    fn halt(p: *anyopaque, reason: []const u8) void {
-        const c: *Closer = @ptrCast(@alignCast(p));
-        if (comptime @hasField(api.Opened, "halt")) {
-            if (c.opened.halt) |f| f(c.opened.ctx, reason);
-        }
-    }
-};
+const Closer = @import("idle_unload_closer.zig").Closer;
