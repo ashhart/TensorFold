@@ -123,6 +123,56 @@ test "a foreground prompt arriving while a background one fills takes the next c
     try std.testing.expectEqualSlices(Id, &.{ 2, 1 }, &order.prefilled);
 }
 
+test "short prompts admitted together all go in before a decode round, as whole passes at admission did" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 2 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 3 });
+    const Count = struct {
+        mutex: std.Io.Mutex = .init,
+        prefilled: usize = 0,
+        tokens: usize = 0,
+        at_last: ?usize = null, // tokens out when the third prompt was in
+        done: usize = 0,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const o: *@This() = @ptrCast(@alignCast(ctx));
+            o.mutex.lockUncancelable(std.testing.io);
+            defer o.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .prefilled => {
+                    o.prefilled += 1;
+                    if (o.prefilled == 3) o.at_last = o.tokens;
+                },
+                .tokens => |t| o.tokens += t.len,
+                .finished => o.done += 1,
+                else => {},
+            }
+        }
+    };
+    var count: Count = .{};
+    const prompts = [3][4]u32{ .{ 2, 7, 1, 8 }, .{ 3, 1, 4, 1 }, .{ 1, 6, 1, 8 } };
+    var requests: [3]Request = undefined;
+    for (&requests, &prompts) |*r, *p| r.* = .{ .prompt = p, .max_tokens = 4 };
+    const e = host.engine();
+    for (&requests, 1..) |*r, id| try e.submit(@intCast(id), r, .{ .ctx = &count, .event = Count.event });
+    try host.start();
+    defer host.stop();
+    while (true) {
+        count.mutex.lockUncancelable(std.testing.io);
+        const d = count.done;
+        count.mutex.unlock(std.testing.io);
+        if (d == 3) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    // at most the first two prompts' first tokens: no round ran between the passes
+    try std.testing.expect(count.at_last.? <= 2);
+}
+
 test "status reads a filling prompt's tokens while its pass runs, and none once it ends" {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);

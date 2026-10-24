@@ -6,6 +6,13 @@ pub const preference_rounds = 8;
 
 /// After eight skipped choices, oldest wait wins; each fill runs within eight plus the admitted lane count.
 pub fn next(h: *const LaneHost) usize {
+    const at = pick(h);
+    for (h.filling.items, 0..) |j, i| j.fill_wait = if (i == at) 0 else j.fill_wait +| 1;
+    return at;
+}
+
+/// The fill `next` takes, its waits untouched.
+fn pick(h: *const LaneHost) usize {
     var at: usize = 0;
     for (h.filling.items, 0..) |j, i| {
         const best = h.filling.items[at];
@@ -19,7 +26,6 @@ pub fn next(h: *const LaneHost) usize {
             if (!j.request.background) at = i;
         } else if (remaining(h, j) < remaining(h, best)) at = i;
     }
-    for (h.filling.items, 0..) |j, i| j.fill_wait = if (i == at) 0 else j.fill_wait +| 1;
     return at;
 }
 
@@ -64,15 +70,33 @@ pub const Share = struct {
     }
 };
 
-/// A prompt step runs now: none owed, nothing decoding, or a short prompt waiting (it goes first, least remaining).
-pub fn due(h: *LaneHost) bool {
+/// Prompts before the next round: none waiting is main's round; short ones go whole; then a long one's step when due.
+pub fn run(h: *LaneHost) void {
     if (h.filling.items.len == 0) {
         h.share.debt_ns = 0;
-        return false;
+        return;
     }
-    if (h.share.debt_ns <= 0 or h.core.activeCount() == 0) return true;
-    for (h.filling.items) |j| if (remaining(h, j) <= Share.short_rows) return true;
-    return false;
+    // short prompts back to back, as a whole pass at admission went: a burst of them waits on no decode round
+    while (h.filling.items.len > 0 and short(h.filling.items[pick(h)])) {
+        h.fillAt(next(h));
+        while (h.admitOne()) {}
+    }
+    if (h.filling.items.len == 0 or !due(h)) return;
+    if (h.share.p >= 1) return h.fillAt(next(h));
+    const decoding = h.core.activeCount() > 0;
+    const t0 = std.Io.Clock.awake.now(h.io);
+    h.fillAt(next(h));
+    h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);
+}
+
+/// A prompt whose whole pass is at most `short_rows` rows (a long prompt's last rows are not).
+fn short(j: *const LaneHost.Job) bool {
+    return j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
+}
+
+/// A long prompt's step runs now: none owed, or nothing decoding.
+fn due(h: *LaneHost) bool {
+    return h.share.debt_ns <= 0 or h.core.activeCount() == 0;
 }
 
 test "a share of 0.5 owes the decoders a step's time; 1 owes nothing; rounds pay it down" {
