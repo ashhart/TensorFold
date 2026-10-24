@@ -110,7 +110,7 @@ Never raise a shared machine's limits to get a test through without its owner's 
 
 A pull request whose title, description, commits or changelog say it is faster, or that changes a default because it is faster, attaches a receipt from [The Grill](https://github.com/plotarmordev/thegrill).
 The receipt measures `main` at your branch point (A), your pull request (B), then the same `main` again (A2), on one machine with one checkpoint and the same serve flags.
-Install The Grill 0.11.0 with its [install guide](https://github.com/plotarmordev/thegrill/blob/v0.11.0/docs/performance/INSTALL.md), including the checksum and release receipt checks; it sets `GRILL_PERF`.
+Install The Grill 0.11.0 with its [install guide](https://github.com/plotarmordev/thegrill/blob/a551fdf2b63059f56df6287e72ed573ca06cca2f/docs/performance/INSTALL.md), including the checksum and release receipt checks; it sets `GRILL_PERF`.
 Then run this from your pull request's checkout, with the model pulled and `origin` pointing at this repository.
 On Linux, leave out `-Dcpu=apple_m1`.
 
@@ -143,7 +143,8 @@ tar -czf ../attempt-1.tgz A B A2 a.json b.json manifest-*.json compare.txt outpu
 ```
 
 `FLAGS` is the README's serve line with prefix retention off; add only the flags your claim is about.
-For a new opt-in flag, serve all three runs from your build, add the flag to B's server and to `settings` in `b.json`, and use `--change settings`.
+For a new opt-in flag, serve all three runs from your build, so `a.json` and `b.json` both carry your pull request's commit as `runtime` and differ only in `settings`; add the flag to B's server and to `settings` in `b.json`, and use `--change settings`.
+Before measuring, fill in any field that came out `unknown` or `null` in `a.json` and `b.json`.
 A concurrency claim uses `--workload portable-c2-v1`, `portable-c4-v1` or `portable-c8-v1` and gives all three captures the same `--seconds` from the install guide's table.
 Keep both `sleep 60` lines: `check` accepts a shorter gap, but `compare` then refuses the three captures.
 Attach the archive and paste `compare.txt`; the server logs stay out of the archive.
