@@ -20,6 +20,7 @@ pub const Args = struct {
     temperatures: []const f64 = &.{ 1.0, 0.0 },
     serial: bool = false,
     context: ?i64 = null,
+    kv_cache: ?[]const u8 = null, // the managed server's attention cache format (bf16 or fp8)
     drafter: []const u8 = "auto",
     timeout: f64 = 600,
     /// null: scaled with the checkpoint's weights (``server.startupTimeout``).
@@ -31,7 +32,7 @@ pub const Args = struct {
     token_stdin: bool = false,
 };
 
-pub const usage_line = "usage: tensorfold benchmark [-h] [--backend {auto,mlx,cuda,rocm}] [--server SERVER] [--model-id MODEL_ID] [--chat-only] [--tokens TOKENS] [--reps REPS] [--temperatures TEMPERATURES] [--serial] [--context CONTEXT] [--drafter DRAFTER] [--timeout TIMEOUT] [--startup-timeout STARTUP_TIMEOUT] [--output OUTPUT] [--publish] [--yes] [--upload-url UPLOAD_URL] [--token-stdin] [target] [file]";
+pub const usage_line = "usage: tensorfold benchmark [-h] [--backend {auto,mlx,cuda,rocm}] [--server SERVER] [--model-id MODEL_ID] [--chat-only] [--tokens TOKENS] [--reps REPS] [--temperatures TEMPERATURES] [--serial] [--context CONTEXT] [--kv-cache {bf16,fp8}] [--drafter DRAFTER] [--timeout TIMEOUT] [--startup-timeout STARTUP_TIMEOUT] [--output OUTPUT] [--publish] [--yes] [--upload-url UPLOAD_URL] [--token-stdin] [target] [file]";
 
 const Flag = struct { name: []const u8, value: bool = true, help: []const u8 };
 
@@ -45,6 +46,7 @@ pub const flags = [_]Flag{
     .{ .name = "--temperatures", .help = "comma-separated sampling temperatures (default: 1.0,0)" },
     .{ .name = "--serial", .value = false, .help = "use the same engine with drafts disabled" },
     .{ .name = "--context", .help = "explicit prompt plus reply capacity" },
+    .{ .name = "--kv-cache", .help = "the managed server's attention cache format: bf16 (default) or fp8" },
     .{ .name = "--drafter", .help = "a drafter checkpoint directory or cached repo ID for the managed server; auto (default) passes the family's own drafter when cached; none passes none" },
     .{ .name = "--download", .value = false, .help = "not supported natively; run tensorfold pull MODEL first" },
     .{ .name = "--timeout", .help = "request timeout in seconds (default: 600)" },
@@ -123,6 +125,10 @@ pub fn parse(a: Allocator, argv: []const []const u8, problem: *[]const u8) error
         if (is(name, "--temperatures")) temperatures = value;
         if (is(name, "--serial")) out.serial = true;
         if (is(name, "--context")) out.context = try int(a, problem, name, value);
+        if (is(name, "--kv-cache")) {
+            if (!std.mem.eql(u8, value, "bf16") and !std.mem.eql(u8, value, "fp8")) return usage(a, problem, "argument --kv-cache: invalid choice: '{s}' (choose from bf16, fp8)", .{value});
+            out.kv_cache = value;
+        }
         if (is(name, "--drafter")) out.drafter = value;
         if (is(name, "--timeout")) out.timeout = try float(a, problem, name, value);
         if (is(name, "--startup-timeout")) out.startup_timeout = try float(a, problem, name, value);
@@ -154,6 +160,7 @@ fn checks(a: Allocator, out: *Args, temperatures: []const u8, problem: *[]const 
         out.action = act;
     };
     if (out.chat_only and (out.action != .run or out.server == null)) return invalid(problem, "--chat-only applies only to a v2 run with --server; managed runs use the native family declaration");
+    if (out.kv_cache != null and out.server != null) return invalid(problem, "--kv-cache applies only to a managed run; an attached server's cache format is its own");
     if (out.action == .publish or out.action == .inspect) {
         if (out.file == null) return invalid(problem, "This action needs a receipt JSON file");
         return;
@@ -240,4 +247,20 @@ test "the --drafter help says how to name a drafter, that auto passes the family
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "--drafter          a drafter checkpoint directory or cached repo ID") != null);
     const auto = "auto (default) passes the family's own drafter when cached; none passes none";
     try std.testing.expect(std.mem.indexOf(u8, out.written(), auto) != null);
+}
+
+test "--kv-cache takes bf16 or fp8, and only a managed run takes it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    try std.testing.expectEqualStrings("fp8", (try parse(a, &.{ "m", "--kv-cache", "fp8" }, &problem)).kv_cache.?);
+    try std.testing.expect((try parse(a, &.{"m"}, &problem)).kv_cache == null);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--kv-cache", "fp4" }, &problem));
+    try std.testing.expectEqualStrings("argument --kv-cache: invalid choice: 'fp4' (choose from bf16, fp8)", problem);
+    try std.testing.expectError(error.Invalid, parse(a, &.{ "m", "--server", "http://127.0.0.1:1", "--kv-cache", "fp8" }, &problem));
+    try std.testing.expectEqualStrings("--kv-cache applies only to a managed run; an attached server's cache format is its own", problem);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try help(&out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "[--kv-cache {bf16,fp8}]") != null);
 }

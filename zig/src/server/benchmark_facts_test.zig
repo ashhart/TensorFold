@@ -25,7 +25,7 @@ fn checkpoint(a: std.mem.Allocator, root: []const u8, parts: []const []const u8,
 }
 
 fn modelJson(a: std.mem.Allocator, m: model.Model) ![]const u8 {
-    const v = try receipt.value(a, "x", "x", m, .{ .tensorfold_version = "x", .backend = "mlx", .python_version = "none", .platform = "macos" }, .{}, .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true }, &.{});
+    const v = try receipt.value(a, "x", "x", m, .{ .tensorfold_version = "x", .backend = "mlx", .python_version = "none", .platform = "macos" }, .{}, .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true, .kv_cache = "bf16" }, &.{});
     return json.stringify(a, v.get("model").?, .{});
 }
 
@@ -317,7 +317,7 @@ test "a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no d
     try std.testing.expectEqualStrings("partial", host.rocm(a, null, 128 << 30, rocminfo_strix, null).hardware.source);
     const runtime: receipt.Runtime = .{ .tensorfold_version = "0.0.0-test", .backend = "rocm", .python_version = "none", .platform = "linux", .driver = probe.driver };
     const sample: suite.Sample = .{ .fixture_id = "code", .temperature = 0, .repeat = -1, .seed = 1, .status = .@"error", .error_code = .server_error };
-    const v = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", .{ .repo_id = "example-org/test-model", .local = false }, runtime, probe.hardware, .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true }, &.{sample});
+    const v = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", .{ .repo_id = "example-org/test-model", .local = false }, runtime, probe.hardware, .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true, .kv_cache = "bf16" }, &.{sample});
     var why: []const u8 = "";
     if (!check.receipt(v, .save, 1767225600000, &why)) {
         std.debug.print("rocm probe failed save: {s}\n", .{why});
@@ -330,7 +330,7 @@ test "a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no d
     const dir = try checkpoint(a, try fake.tmpPath(a, &tmp), &.{ "snapshots", revision }, config);
     const checkpoint_facts = try model.describe(a, std.testing.io, "example-org/test-model", dir, false, &families, null);
     try std.testing.expect(checkpoint_facts.revision != null and checkpoint_facts.config_sha256 != null and checkpoint_facts.tokenizer_sha256 != null);
-    const settings: receipt.Settings = .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true, .rank_count = 1 };
+    const settings: receipt.Settings = .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true, .rank_count = 1, .kv_cache = "bf16" };
     const rocm_receipt = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", checkpoint_facts, runtime, probe.hardware, settings, &.{sample});
     try std.testing.expect(!check.receipt(rocm_receipt, .publish, 1767225600000, &why));
     try std.testing.expectEqualStrings(check.rocm_local, why);
@@ -406,7 +406,7 @@ test "rocm visible-device indices count every GPU agent: selecting an unreportab
         .{ .key = "CUDA_VISIBLE_DEVICES", .visible = "0", .want = &.{}, .source = "partial" },
     };
     const runtime: receipt.Runtime = .{ .tensorfold_version = "0.0.0-test", .backend = "rocm", .python_version = "none", .platform = "linux" };
-    const settings: receipt.Settings = .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true };
+    const settings: receipt.Settings = .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true, .kv_cache = "bf16" };
     const sample: suite.Sample = .{ .fixture_id = "code", .temperature = 0, .repeat = -1, .seed = 1, .status = .@"error", .error_code = .server_error };
     var wrong: usize = 0;
     for (cases) |c| {

@@ -329,7 +329,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
     }
     const run_id = receipt.runId(ctx.io);
     const bench_dir = try std.fs.path.join(a, &.{ ctx.home, ".tensorfold", "benchmarks" });
-    const settings: receipt.Settings = .{ .tokens = @intCast(args.tokens), .repetitions = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .context_tokens = args.context, .managed = args.server == null };
+    const settings: receipt.Settings = .{ .tokens = @intCast(args.tokens), .repetitions = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .context_tokens = args.context, .managed = args.server == null, .kv_cache = if (args.server == null) (args.kv_cache orelse "bf16") else null };
     var facts: struct { model: receipt.Model, hardware: receipt.Hardware, runtime: receipt.Runtime } = undefined;
     var rank_count: ?u8 = if (args.server == null) 1 else null;
     var target: stream.Target = undefined;
@@ -390,7 +390,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
             startup_s = server.startupTimeout(bytes);
             if (startup_s > 600) wait = try std.fmt.allocPrint(a, "The server gets up to {d} s to load {d:.0} GB of weights; --startup-timeout sets another limit.", .{ startup_s, @as(f64, @floatFromInt(bytes)) / 1e9 });
         }
-        plan = .{ .exe = ctx.self_exe orelse try std.process.executablePathAlloc(ctx.io, a), .dir = dir, .backend = backend, .tokens = @intCast(args.tokens), .context = args.context, .drafter_dir = drafter_dir, .serial = args.serial };
+        plan = .{ .exe = ctx.self_exe orelse try std.process.executablePathAlloc(ctx.io, a), .dir = dir, .backend = backend, .tokens = @intCast(args.tokens), .context = args.context, .drafter_dir = drafter_dir, .serial = args.serial, .kv_cache = args.kv_cache orelse "bf16" };
         var u: cli.Usage = .{};
         _ = cli.parse(a, (try server.argv(a, plan.?))[2..], &u) catch |e| switch (e) {
             error.Usage => return fail(ctx, try std.fmt.allocPrint(a, "the managed server refuses its flags: {s}", .{u.message})),

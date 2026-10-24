@@ -469,3 +469,25 @@ test "an exited child is seen without being reaped, and once stopped it is relea
     fake.nap(100);
     try std.testing.expectEqual(@as(posix.pid_t, 0), platform.c.waitpid(other.id.?, &status, platform.c.W.NOHANG));
 }
+
+test "the child's flags carry the cache format the benchmark asked for" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = plan;
+    p.backend = server.buildBackend();
+    for ([_][]const u8{ "bf16", "fp8" }) |format| {
+        p.kv_cache = format;
+        const args = try server.argv(a, p);
+        var u: cli.Usage = .{};
+        const parsed = try cli.parse(a, args[2..], &u);
+        try std.testing.expectEqualStrings(format, parsed.kv_cache);
+        var n: usize = 0;
+        for (args) |x| n += @intFromBool(std.mem.eql(u8, x, "--kv-cache"));
+        try std.testing.expectEqual(@as(usize, 1), n);
+    }
+    p.kv_cache = "fp4";
+    const args = try server.argv(a, p);
+    var u: cli.Usage = .{};
+    try std.testing.expectError(error.Usage, cli.parse(a, args[2..], &u));
+}

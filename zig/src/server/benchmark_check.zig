@@ -25,6 +25,7 @@ const runtime_keys = [_][]const u8{ "tensorfold_version", "backend", "python_ver
 const model_keys = [_][]const u8{ "repo_id", "revision", "family", "config_sha256", "tokenizer_sha256", "quantization", "drafter_repo_id", "local" };
 const hardware_keys = [_][]const u8{ "cpu_model", "system_memory_bytes", "memory_type", "gpus", "gpu_count", "source" };
 const settings_keys = [_][]const u8{ "tokens", "repetitions", "temperatures", "serial", "context_tokens", "managed", "rank_count" };
+const settings_keys_v2 = [_][]const u8{ "tokens", "repetitions", "temperatures", "serial", "context_tokens", "managed", "rank_count", "kv_cache" };
 const sample_keys = [_][]const u8{ "fixture_id", "temperature", "repeat", "seed", "status", "prompt_tokens", "completion_tokens", "cached_tokens", "delivery_seconds", "delivery_tps", "ttft_seconds", "end_to_end_seconds", "server_decode_tps", "server_decode_seconds", "prefill_seconds", "token_sha", "error_code" };
 
 const Num = struct { nullable: bool = false, integer: bool = false, min: f64 = 0, max: f64 = 1e15 };
@@ -117,12 +118,21 @@ const Check = struct {
     }
 
     fn settings(c: *Check, s: Value) Bad!void {
-        try c.need(exact(s, &settings_keys), "settings must hold exactly its fields");
+        try c.need(exact(s, if (c.v2) &settings_keys_v2 else &settings_keys), "settings must hold exactly its fields");
         try c.need(num(s.get("tokens").?, .{ .integer = true, .min = 2, .max = 8192 }), "settings.tokens must be 2 to 8192");
         try c.need(num(s.get("repetitions").?, .{ .integer = true, .min = 1, .max = 20 }), "settings.repetitions must be 1 to 20");
         try c.need(num(s.get("context_tokens").?, .{ .nullable = true, .integer = true, .min = 1, .max = 10000000 }), "settings.context_tokens must be 1 to 10000000 or null");
         try c.need(num(s.get("rank_count").?, .{ .nullable = true, .integer = true, .min = 1, .max = 2 }), "settings.rank_count must be 1, 2 or null");
         try c.need(s.get("serial").? == .bool and s.get("managed").? == .bool, "settings.serial and managed must be true or false");
+        if (c.v2) {
+            const managed = s.get("managed").?.bool;
+            const kv = s.get("kv_cache") orelse return c.fail("settings must hold exactly its fields");
+            if (managed) {
+                try c.need(oneOf(kv, &.{ "bf16", "fp8" }), "settings.kv_cache must be bf16 or fp8 for a managed run");
+            } else {
+                try c.need(kv == .null, "settings.kv_cache must be null for an attached run: its server's own format is not known here");
+            }
+        }
         const temps = s.get("temperatures").?;
         try c.need(temps == .array and temps.array.len >= 1 and temps.array.len <= 4, "settings.temperatures must hold one to four values");
         for (temps.array, 0..) |t, i| {

@@ -31,7 +31,7 @@ fn listed(a: std.mem.Allocator, vars: []const [2][]const u8, text: []const u8) !
     const names = try a.alloc([]const u8, hw.gpus.len);
     for (hw.gpus, names) |g, *n| n.* = g.name;
     const runtime: receipt.Runtime = .{ .tensorfold_version = "0.0.0-test", .backend = "rocm", .python_version = "none", .platform = "linux" };
-    const settings: receipt.Settings = .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true };
+    const settings: receipt.Settings = .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true, .kv_cache = "bf16" };
     const sample: suite.Sample = .{ .fixture_id = "code", .temperature = 0, .repeat = -1, .seed = 1, .status = .@"error", .error_code = .server_error };
     const v = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", .{ .repo_id = "example-org/test-model", .local = false }, runtime, hw, settings, &.{sample});
     var why: []const u8 = "";
