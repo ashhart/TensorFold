@@ -157,6 +157,34 @@ test "encode, encodeMasked, encodePlain, decode and tokenBytes put only their re
     }
 }
 
+test "small calls use stack scratch and a large encode frees its allocator spill" {
+    const json =
+        \\{"decoder":{"type":"ByteLevel"},
+        \\ "model":{"type":"BPE","vocab":{"a":0},"merges":[]}}
+    ;
+    const a = std.testing.allocator;
+    var t = try parse(a, json);
+    defer t.deinit();
+    var counting = std.testing.FailingAllocator.init(a, .{});
+    t.allocator = counting.allocator();
+    defer t.allocator = a;
+
+    const decoded = try t.decode(a, &.{ 0, 0, 0, 0 }, false);
+    defer a.free(decoded);
+    const bytes = (try t.tokenBytes(a, 0)).?;
+    defer a.free(bytes);
+    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+
+    const text = try a.alloc(u8, 64 * 1024);
+    defer a.free(text);
+    @memset(text, 'a');
+    const encoded = try t.encode(a, text);
+    defer a.free(encoded);
+    try std.testing.expect(counting.allocations > 0);
+    try std.testing.expectEqual(counting.allocations, counting.deallocations);
+    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+}
+
 test "sentencepiece-style BPE with byte fallback" {
     const json =
         \\{"added_tokens":[],"normalizer":{"type":"Replace","pattern":{"String":" "},"content":"▁"},
