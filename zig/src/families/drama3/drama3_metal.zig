@@ -13,6 +13,7 @@ pub const shards = @import("shards.zig");
 pub const gpu = @import("metal/gpu.zig");
 pub const kernels = @import("metal/kernels.zig");
 pub const weights = @import("metal/weights.zig");
+pub const load_limit = @import("metal/load_limit.zig");
 pub const engine = @import("metal/engine.zig");
 pub const codec = @import("metal/codec.zig");
 pub const tts = @import("metal/tts.zig");
@@ -34,6 +35,7 @@ test {
     _ = prompt;
     _ = wav;
     _ = kernels;
+    _ = load_limit;
 }
 
 pub const residency = @import("metal/residency.zig");

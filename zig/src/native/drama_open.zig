@@ -61,7 +61,10 @@ pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
         return null;
     }
     return drama_host.open(gpa, io, o.dir, "", .{ .context = @intCast(window), .lanes = if (o.lanes_fixed) o.lanes else 2, .max_frames = o.max_frames }) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "Drama 3 Metal checkpoint load failed ({s})", .{@errorName(err)});
+        problem.* = if (err == error.OverMemoryLimit)
+            try std.fmt.allocPrint(a, "Drama 3 needs more memory than this Mac's load limit allows (70% of RAM, or DRAMA_LOAD_LIMIT_GB); the log names the sizes", .{})
+        else
+            try std.fmt.allocPrint(a, "Drama 3 Metal checkpoint load failed ({s})", .{@errorName(err)});
         return null;
     };
 }
