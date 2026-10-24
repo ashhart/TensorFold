@@ -208,3 +208,27 @@ test "DeepSeek chat: the no-Jinja OpenAI route submits the native masked prompt 
     const expected = try hf.text().renderIds(a, msgs, .{ .enable_thinking = true, .reasoning_effort = "low" }, &problem);
     try t.expectEqualSlices(u32, expected, script.seen);
 }
+
+test "DeepSeek chat: tool-only Jinja metadata survives the native default fallback" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = try fixture(a, "deepseek_v41");
+    defer tmp.deinit();
+    try tmp.tmp.dir.writeFile(t.io, .{ .sub_path = "tokenizer_config.json", .data =
+        \\{"chat_template":{"tool_use":"No user query found {{ messages[0].content }}"}}
+    });
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer hf.deinit();
+    try t.expect(std.mem.indexOf(u8, hf.text().templateSource(), "No user query found") != null);
+    try t.expect(std.mem.indexOf(u8, hf.text().templateSource(), "thinking_mode") != null);
+    const messages = try tf.messages(a, "H");
+    try t.expectEqualStrings("No user query found H", (try hf.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem)).text);
+    try t.expect(std.mem.startsWith(u8, (try hf.text().render(a, messages, .{}, &problem)).text, "<｜begin▁of▁sentence｜>"));
+    var script: Script = .{};
+    const srv = try @import("server.zig").Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    try t.expect(srv.needs_user_after_tool);
+    try t.expect(srv.thinking_switch);
+}

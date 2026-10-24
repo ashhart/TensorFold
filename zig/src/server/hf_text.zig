@@ -305,8 +305,8 @@ pub const HfText = struct {
 
     fn sourceFn(ctx: *anyopaque) []const u8 {
         const t = self(ctx);
-        if (t.native_deepseek and t.compiled == null) return "enable_thinking thinking_mode reasoning_effort [\"none\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"] " ++ dsv41.BOS ++ dsv41.USER ++ dsv41.ASSISTANT ++ dsv41.CALLS_OPEN;
-        return if (t.tool_source.len > 0) std.mem.concat(t.arena.allocator(), u8, &.{ t.source, " ", t.tool_source }) catch t.source else t.source;
+        const source = if (t.native_deepseek and t.compiled == null) "enable_thinking thinking_mode reasoning_effort [\"none\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"] " ++ dsv41.BOS ++ dsv41.USER ++ dsv41.ASSISTANT ++ dsv41.CALLS_OPEN else t.source;
+        return if (t.tool_source.len > 0) std.mem.concat(t.arena.allocator(), u8, &.{ source, " ", t.tool_source }) catch source else source;
     }
 
     fn renderDeepseek(_: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
