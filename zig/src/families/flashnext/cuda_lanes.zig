@@ -21,8 +21,6 @@ const be = lanes.backend;
 const ring = 1024;
 /// Streams a round takes at most (a round with more live streams takes them in turns).
 const round_streams = 32;
-/// Drafted windows' rows a shared verify takes at most: a drafting round's (TF_FLASHNEXT_WINDOW_ROWS; 0: each alone).
-const window_rows_default = mtp.round_rows;
 
 /// The Triton entry points the pass launches and the head's two more: a captured set replaces our glue with all.
 pub const captured_entries = [_][]const u8{ "_embed", "_hc_writeback", "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_ple_gate", "_ple_conv", "_attn_prep", "_attn_gate", "_pool", "_scores", "_chunks", "_merge", "_router", "_topk_rows" };
@@ -202,7 +200,7 @@ pub fn Namespace(comptime Tri: type) type {
                 return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 
-            /// With the head: chains of up to 16 rows cut by its confidence, copies of up to 32; else shared one-row rounds.
+            /// With the head: chains of up to 16 rows cut by its confidence, copies of up to 32; else one-row rounds.
             pub fn facts(self: *const Cuda) lanes.Model {
                 const drafting = self.head != null;
                 return .{
@@ -463,7 +461,7 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 if (w.tokens.len > 0) @memcpy(o.drafts[0..w.tokens.len], w.tokens);
             }
-            const cap = @min(@min(envUsize("TF_FLASHNEXT_WINDOW_ROWS", window_rows_default), window_rows_default), self.engine.chunk);
+            const cap = @min(@min(envUsize("TF_FLASHNEXT_WINDOW_ROWS", mtp.round_rows), mtp.round_rows), self.engine.chunk);
             try @import("cuda_lanes_verify.zig").windows(self, windows, out, drafted[0..held], row_ids, cap);
             var at: usize = 0;
             while (at < plain) : (at += round_streams) {

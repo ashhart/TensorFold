@@ -35,7 +35,7 @@ pub const default_depth: usize = 6;
 pub const default_confidence: f64 = 0.6;
 /// A verify window's rows at most: the pending token and a chain, or a copied continuation.
 pub const max_rows: usize = 32;
-/// A drafting round's rows at most (a shared verify pass's).
+/// A drafting round's rows at most: a shared verify's (TF_FLASHNEXT_WINDOW_ROWS lowers it; 0: each alone).
 pub const round_rows: usize = 64;
 /// qmm.split_for(2560, 2560): fc_embedding and fc_hidden sum K in four slices, in order.
 pub const fc_sk: usize = 4;
