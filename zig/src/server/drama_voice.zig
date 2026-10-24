@@ -97,19 +97,20 @@ const Tokenizer = struct {
     }
 };
 
-pub fn build(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs: []const prompt.Reference) ![][11]i32 {
+pub fn build(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs: []const prompt.Reference) !prompt.Built {
     return prompt.build(a, Tokenizer{ .value = tokenizer }, input, refs);
 }
 
 /// A voice's prompt: its own ids and frame rows.
-pub const Prompt = struct { prompt: []const u32, frames: []const [11]i32 };
+pub const Prompt = struct { prompt: []const u32, frames: []const [11]i32, reference_rows: u32 = 0 };
 
 /// A voice's prompt ids and frame rows for an input.
 pub fn promptFor(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs: []const prompt.Reference) !Prompt {
-    const frames = try build(a, tokenizer, input, refs);
+    const built = try build(a, tokenizer, input, refs);
+    const frames = built.frames;
     const ids = try a.alloc(u32, frames.len);
     for (frames, ids) |row, *token| token.* = @intCast(row[0]);
-    return .{ .prompt = ids, .frames = frames };
+    return .{ .prompt = ids, .frames = frames, .reference_rows = built.reference_rows };
 }
 
 /// A voice's prompt for a speech request: its ids and frame rows; null when the request named no voice.
@@ -231,5 +232,6 @@ test "voices: real tokenizer rows equal the CLI path without server postprocessi
     const refs = [_]prompt.Reference{.{ .transcript = "A small cloud passes.", .codes = &codes }};
     const cli_rows = try prompt.build(a, &tok, "A cloud.", &refs);
     const http_rows = try build(a, hf.text(), "A cloud.", &refs);
-    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(cli_rows), std.mem.sliceAsBytes(http_rows));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(cli_rows.frames), std.mem.sliceAsBytes(http_rows.frames));
+    try std.testing.expectEqual(cli_rows.reference_rows, http_rows.reference_rows);
 }

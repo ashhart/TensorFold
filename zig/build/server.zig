@@ -30,6 +30,7 @@ pub fn addTo(
     if (family) |drama3| {
         const source = b.addWriteFiles().add("drama_prompt.zig",
             \\pub const Reference = @import("drama3").prompt.Reference;
+            \\pub const Built = @import("drama3").prompt.Built;
             \\pub const build = @import("drama3").prompt.build;
         );
         m.addImport("drama_prompt", b.createModule(.{

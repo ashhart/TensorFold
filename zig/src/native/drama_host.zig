@@ -5,6 +5,7 @@ const d3 = @import("drama3");
 const completion = d3.completion;
 const decode = d3.speech_decode;
 const rounds = @import("core").frame_rounds;
+const reference = d3.reference_cache;
 const is_cuda = !@hasDecl(d3, "gpu");
 const cuda = if (is_cuda) @import("cuda") else struct {};
 const Limit = if (is_cuda) @import("drama_limit.zig").Limit else struct {
@@ -12,7 +13,15 @@ const Limit = if (is_cuda) @import("drama_limit.zig").Limit else struct {
     fn deinit(_: *@This()) void {}
 };
 const Warm = if (is_cuda) struct {} else d3.residency.Warm;
-const Session = struct { e: *d3.Engine, t: *d3.tts.Tts };
+const Session = struct {
+    e: *d3.Engine,
+    t: *d3.tts.Tts,
+    /// Valid only while this lane's prefix KV remains untouched; snapshots own no KV copies.
+    prefix: reference.Prefix = .{},
+    cache: Snap = .{},
+};
+/// Metal snapshot buffers belong to the shared GPU owner; CUDA keeps its uncached path.
+const Snap = if (is_cuda) struct {} else d3.Snapshot;
 const Job = struct {
     id: api.Id,
     request: *const api.SpeechRequest,
@@ -173,18 +182,48 @@ const Host = struct {
     }
     fn advance(h: *Host, work: rounds.Work) !void {
         const i = work.lane;
-        const s = h.sessions[i];
+        const lane = &h.sessions[i];
+        errdefer if (!is_cuda) lane.prefix.invalidate();
+        const s = lane.*;
         const j = &h.jobs[i].?;
         const r = j.request;
         if (work.stage == .prompt) {
-            if (!j.state.started) {
-                try s.e.startPrompt(r.frames);
-                if (is_cuda) try s.t.c.reset(s.t.cs) else try s.t.c.reset();
-                j.state.started = true;
+            if (is_cuda) {
+                if (!j.state.started) {
+                    try s.e.startPrompt(r.frames);
+                    try s.t.c.reset(s.t.cs);
+                    j.state.started = true;
+                }
+                const count = s.e.o.promptRows(r.frames.len - j.state.prompt);
+                try s.e.promptChunk(r.frames.len, j.state.prompt, count, null);
+                j.state.prompt += count;
+            } else {
+                const ref_rows = reference.prefillRows(r.frames.len, r.reference_rows, s.e.o.max_rows);
+                if (!j.state.started) {
+                    // Invalidate before reset, GPU work or any fallible preparation for a miss.
+                    if (try lane.prefix.begin(h.gpa, r.frames, ref_rows)) {
+                        try s.e.restore(&lane.cache);
+                        try s.e.beginPromptFrom(r.frames, ref_rows);
+                        j.state.prompt = ref_rows;
+                        std.log.info("drama3: reference cache hit ({d} rows restored)", .{ref_rows});
+                    } else {
+                        try s.e.startPrompt(r.frames);
+                        j.state.prompt = 0;
+                    }
+                    try s.t.c.reset();
+                    j.state.started = true;
+                }
+                var count = s.e.o.promptRows(r.frames.len - j.state.prompt);
+                const want_snapshot = ref_rows > 0 and !lane.prefix.valid;
+                if (want_snapshot and j.state.prompt < ref_rows) count = @min(count, ref_rows - j.state.prompt);
+                try s.e.promptChunk(r.frames.len, j.state.prompt, count, null);
+                j.state.prompt += count;
+                if (want_snapshot and j.state.prompt == ref_rows) {
+                    try s.e.snapshot(&lane.cache);
+                    lane.prefix.saved();
+                    std.log.info("drama3: reference cache built ({d} rows)", .{ref_rows});
+                }
             }
-            const count = s.e.o.promptRows(r.frames.len - j.state.prompt);
-            try s.e.promptChunk(r.frames.len, j.state.prompt, count, null);
-            j.state.prompt += count;
             if (j.state.prompt == r.frames.len) {
                 try s.e.finishPrompt(r.frames);
                 h.lock();
@@ -260,6 +299,7 @@ const Host = struct {
     fn close(p: *anyopaque) void {
         const h = self(p);
         drain(h);
+        for (h.sessions[0..h.queue.lanes]) |*s| if (!is_cuda) s.prefix.deinit(h.gpa);
         var safe = true;
         for (h.sessions[0..h.queue.lanes]) |*s| waitSession(s) catch {
             safe = false;
@@ -301,6 +341,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
     var made: usize = 0;
     errdefer while (made > 0) {
         made -= 1;
+        if (!is_cuda) h.sessions[made].prefix.deinit(gpa);
         h.sessions[made].t.destroy();
         h.sessions[made].e.destroy();
     };

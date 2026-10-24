@@ -294,6 +294,32 @@ pub const Engine = struct {
         e.rows_done = n;
     }
 
+    /// Recurrent state only. The caller must invalidate it before its lane's live prefix KV changes.
+    pub const Snapshot = @import("../reference_cache.zig").Snapshot;
+
+    /// Captures into one reusable, GPU-owned buffer pair (including partial allocation on failure).
+    pub fn snapshot(e: *Engine, saved: *Snapshot) !void {
+        try saved.capture(e.g, e.state_bufs, e.state_bytes);
+    }
+
+    pub fn restore(e: *Engine, saved: *const Snapshot) !void {
+        try saved.restore(e.g, e.state_bufs, e.state_bytes);
+    }
+
+    /// Starts a prompt whose first `start` rows are already in the engine's state; writes the rest, no reset.
+    pub fn beginPromptFrom(e: *Engine, rows: []const [W]i32, start: usize) !void {
+        try model.validate(rows, e.c.ids, e.o.max_ctx, 1);
+        const n = rows.len;
+        if (n < 2 or start == 0 or start >= n) return error.PromptTooShort;
+        if (n + 2 > e.o.max_ctx) return error.PromptTooLong;
+        try e.put(e.pframes, std.mem.sliceAsBytes(rows));
+        // The suffix prefill/finishPrompt rebuilds all other decode state, including hlast and RAS.
+        @memset(e.g.host(e.count, 8), 0);
+        @memset(e.g.host(e.step, 8), 0);
+        e.rows_done = start;
+        e.prompt_rows = start;
+    }
+
     fn tower(e: *Engine, tt: usize, c0: usize, hfin: u64, probe: ?Probe) !void {
         var hin = hfin;
         var nb: [64]u8 = undefined;
