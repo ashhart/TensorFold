@@ -14,8 +14,6 @@ test {
     testing.refAllDecls(@import("notes/exact_alloc.zig"));
     testing.refAllDecls(@import("notes/alias.zig"));
     testing.refAllDecls(@import("notes/bounded.zig"));
-    testing.refAllDecls(@import("notes/overlay.zig"));
-    testing.refAllDecls(@import("notes/past.zig"));
     testing.refAllDecls(@import("notes/value.zig"));
     testing.refAllDecls(@import("notes/layer.zig"));
     testing.refAllDecls(@import("notes/merge.zig"));

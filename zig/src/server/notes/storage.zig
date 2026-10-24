@@ -1,4 +1,4 @@
-//! Journaled model ownership and its n-gram index; callers serialize access to the model and log.
+//! Journaled model ownership and its n-gram index; each write and erase rebuilds the whole index.
 const std = @import("std");
 const model_mod = @import("model.zig");
 const write = @import("write.zig");
