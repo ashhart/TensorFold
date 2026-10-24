@@ -296,7 +296,60 @@ pub const Streamer = struct {
             }
         }
     }
+
+    /// A call that the reply's end left open: its name streamed, its envelope not closed.
+    pub fn open(s: *const Streamer) bool {
+        return s.index >= 0 and (s.state == .function or s.state == .value or s.state == .closing);
+    }
+
+    /// ``feed`` of the reply's final text; a value it cuts sends the bytes held back for a closer that never came.
+    pub fn finishCut(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
+        try s.feed(text, out);
+        if (s.state != .value) return;
+        const cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
+        s.pos = text.len;
+        s.held = "";
+        s.buffer.clearRetainingCapacity();
+        if (cut.len > 0) try out.append(s.a, try s.args(if (s.typed) cut else try s.esc(cut)));
+    }
 };
+
+/// A streamed reply's final prose: ``cutProse`` when max_tokens left a call open, else ``finishedProse``.
+pub fn endProse(a: Allocator, content: []const u8, text: []const u8, tools: []const Value, reason: []const u8) Allocator.Error![]const u8 {
+    const cut = std.mem.eql(u8, reason, "length") and (try cutCalls(a, text, tools)) != null;
+    return if (cut) reply_text.cutProse(a, content) else reply_text.finishedProse(a, content);
+}
+
+/// A reply max_tokens cut inside a call: the calls its stream sent, the cut one included; null when none was left open.
+pub fn cutCalls(a: Allocator, text: []const u8, tools: []const Value) Allocator.Error!?[]Value {
+    var s: Streamer = try .init(a, tools);
+    var deltas: std.ArrayList(Value) = .empty;
+    try s.finishCut(text, &deltas);
+    if (!s.open()) return null;
+    const Call = struct { id: []const u8 = "", name: []const u8 = "", args: std.ArrayList(u8) = .empty };
+    const built = try a.alloc(Call, @intCast(s.index + 1));
+    for (built) |*c| c.* = .{};
+    for (deltas.items) |d| {
+        const one = d.get("tool_calls").?.array[0];
+        const c = &built[@intCast(one.get("index").?.int64().?)];
+        if (one.strField("id")) |id| c.id = id;
+        const f = one.get("function").?;
+        if (f.strField("name")) |n| c.name = n;
+        if (f.strField("arguments")) |piece| try c.args.appendSlice(a, piece);
+    }
+    const calls = try a.alloc(Value, built.len);
+    for (built, calls) |*c, *slot| {
+        const function = try json.newObject(a);
+        try function.put(a, "name", .{ .string = c.name });
+        try function.put(a, "arguments", .{ .string = c.args.items });
+        const one = try json.newObject(a);
+        try one.put(a, "id", .{ .string = if (c.id.len > 0) c.id else try ids.make(a, "call_", 24) });
+        try one.put(a, "type", .{ .string = "function" });
+        try one.put(a, "function", .{ .object = function });
+        slot.* = .{ .object = one };
+    }
+    return calls;
+}
 
 /// Bytes of ``rest`` that cannot be the start of a ``tail``-byte closer (Python slices characters).
 fn trimTail(rest: []const u8, tail: usize) usize {

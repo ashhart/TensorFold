@@ -132,6 +132,12 @@ const Seen = struct {
     calls: usize = 0, // the tool calls the stream started, or the whole reply's tool calls
     arguments: [2048]u8 = undefined,
     arguments_len: usize = 0,
+    finish: ?enum { stop, length, tool_calls } = null, // the reply's or the stream's last finish_reason
+
+    fn keepFinish(c: *Seen, choice: json.Value) void {
+        const f = choice.strField("finish_reason") orelse return;
+        c.finish = std.meta.stringToEnum(@TypeOf(c.finish.?), f);
+    }
 
     fn keepArguments(c: *Seen, call: json.Value) void {
         const f = call.get("function") orelse return;
@@ -171,6 +177,7 @@ const Seen = struct {
             c.context_code = code == .string and std.mem.eql(u8, code.string, "context_length_exceeded");
             return;
         }
+        if (p.get("choices")) |ch| if (ch == .array and ch.array.len > 0) c.keepFinish(ch.array[0]);
         if (p.get("choices")) |ch| if (ch == .array and ch.array.len > 0) if (ch.array[0].get("delta")) |d| {
             if (d.get("content")) |t| c.keep(t);
             if (d.get("tool_calls")) |t| if (t == .array) for (t.array) |call| {
@@ -191,6 +198,7 @@ const Seen = struct {
         if (payload.get("tensorfold")) |t| if (t.get("sampling")) |l| if (l == .string) {
             c.label = if (std.mem.eql(u8, l.string, "exact")) .exact else if (std.mem.eql(u8, l.string, "greedy")) .greedy else null;
         };
+        if (payload.get("choices")) |ch| if (ch == .array and ch.array.len > 0) c.keepFinish(ch.array[0]);
         if (payload.get("choices")) |ch| if (ch == .array and ch.array.len > 0) if (ch.array[0].get("message")) |m| {
             if (m.get("content")) |t| c.keep(t);
             if (m.get("tool_calls")) |t| if (t == .array) {

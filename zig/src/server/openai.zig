@@ -333,10 +333,15 @@ const Run = struct {
         if (tools.len == 0) return null;
         const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
         if (parsed.rejected_envelopes > 0) log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});
-        const calls = (if (r.turn != null) cortheon.clientCalls(parsed.calls) else parsed.calls) orelse {
+        // max_tokens cut a call the stream had begun: the whole reply returns it cut too, as the stream did (#1238)
+        const cut = if (!r.plan.policy.single and std.mem.eql(u8, reply.finish_reason, "length")) try tool_stream.cutCalls(r.a, reply.content, tools) else null;
+        if (cut != null) reply.content = try @import("reply_text.zig").cutProse(r.a, reply.content);
+        const found = cut orelse parsed.calls;
+        const calls = (if (r.turn != null) cortheon.clientCalls(found) else found) orelse {
             if (r.plan.policy.single or parsed.calls != null) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
             return null;
         };
+        if (cut != null) return calls;
         reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
         reply.finish_reason = "tool_calls";
         if (r.plan.policy.single) reply.tool_calls_streamed = false;

@@ -226,6 +226,12 @@ pub fn finishedProse(a: Allocator, text: []const u8) Allocator.Error![]const u8 
     return if (prose.len != text.len) prose[0..pyRstrip(prose).len] else prose;
 }
 
+/// A reply max_tokens cut inside a call it returns: the open envelope is that call, not text (#1238).
+pub fn cutProse(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    const prose = try hideToolCalls(a, text, false);
+    return if (prose.len != text.len) prose[0..pyRstrip(prose).len] else prose;
+}
+
 const harmony_final = "<|channel|>final<|message|>";
 const harmony_analysis = "<|channel|>analysis<|message|>";
 const harmony_ends = [_][]const u8{ "<|return|>", "<|end|>", "<|call|>", "<|start|>" };
