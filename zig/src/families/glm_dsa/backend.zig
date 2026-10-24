@@ -139,6 +139,10 @@ pub const Backend = struct {
         return error.BackendRestores; // the prompt pass restores, before its first chunk
     }
 
+    pub fn snapPeersClear(_: *anyopaque) bool {
+        return false; // DSA runs on a pair; drop sends have no verified peer acknowledgement.
+    }
+
     pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
         const k: *snap.Snap = @ptrCast(@alignCast(saved));
         fl.drop(self(ptr).e, k.id);

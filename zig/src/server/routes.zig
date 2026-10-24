@@ -7,6 +7,7 @@ const json = @import("json");
 const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");
 const auth = @import("auth.zig");
+const notes_http = @import("notes_http.zig");
 const openai = @import("openai.zig");
 const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
@@ -29,6 +30,7 @@ const Allocator = std.mem.Allocator;
 const fact_path = "/v1/slide/fact/";
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
+    if (notes_http.route(auth.routePath(conn.path))) |r| return notes_http.handle(srv, conn, a, r);
     const m = conn.method;
     if (!std.mem.eql(u8, m, "POST") and !consumeBody(conn, a)) return;
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);

@@ -266,6 +266,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         rows_host.answer(h);
         @import("lane_host_score.zig").answer(h);
         learn.refuse(h);
+        h.takeForgets();
         h.lock();
         if (h.closing) {
             const left = h.queued.items.len + h.admitted.items.len;
@@ -286,7 +287,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         }
         if (!work) {
             if (rows_host.idle(h)) continue;
-            if (h.cancels.items.len == 0) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+            if (h.cancels.items.len == 0 and !h.forgets.pending()) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();
             continue;
         }
@@ -295,7 +296,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         status.noteLive(h);
         if (!did) {
             h.lock();
-            if (h.cancels.items.len == 0) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }) catch {};
+            if (h.cancels.items.len == 0 and !h.forgets.pending()) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }) catch {};
             h.unlock();
         }
     }

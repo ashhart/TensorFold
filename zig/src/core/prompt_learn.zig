@@ -1,5 +1,6 @@
 //! --learn: a shared cut's kept state written to disk above the free-disk floor and within the cap, on every rank.
 const std = @import("std");
+const c = @import("sys").c;
 const pc = @import("prompt_cache.zig");
 const imprint = @import("prompt_imprint.zig");
 const Store = pc.Store;
@@ -116,6 +117,102 @@ fn unlearnChecked(s: *Store, im: *imprint.Imprint, key: u64) !void {
     if (s.family.vtable.forget_checked) |f| try f(s.family.ptr, im.dir, key) else if (s.family.vtable.forget) |f| f(s.family.ptr, im.dir, key);
     try im.remove(key);
 }
+/// Remove matching index records in one durable batch before unlinking their files.
+pub fn forget(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgotten) void {
+    if (im.forget_pending) out.failed += 1;
+    var keys: std.ArrayList(u64) = .empty;
+    defer keys.deinit(s.gpa);
+    for (im.metas.items) |meta| {
+        if (!pc.holdsSpan(meta.tokens, span)) {
+            if (pc.weakSpanTail(meta.tokens, span)) out.held += 1;
+            continue;
+        }
+        keys.append(s.gpa, meta.key) catch {
+            out.failed += 1;
+            return;
+        };
+    }
+    if (keys.items.len == 0) return;
+    im.eraseMany(keys.items) catch {
+        out.failed += 1;
+        return;
+    };
+    const prior_pending = im.forget_pending;
+    const prior_failed = out.failed;
+    im.forget_pending = true;
+    defer if (!prior_pending and out.failed == prior_failed) {
+        im.forget_pending = false;
+    };
+    // A crash after this point leaves unindexed files, never an index that names missing files.
+    syncDir(im.dir) catch {
+        out.failed += 1;
+        return;
+    };
+    for (keys.items) |key| {
+        if (s.family.vtable.forget_checked) |f| f(s.family.ptr, im.dir, key) catch |err| {
+            note("forgetting a learned state that holds an erased span failed ({s})", .{@errorName(err)});
+            out.failed += 1;
+            continue;
+        } else {
+            // An unchecked callback cannot establish that the file was removed.
+            out.failed += 1;
+            continue;
+        }
+        out.learned += 1;
+    }
+    syncDir(im.dir) catch {
+        out.failed += 1;
+    };
+}
+
+/// The folder's entries made durable: removed files and the renamed index survive a power cut.
+fn syncDir(dir: [:0]const u8) !void {
+    const fd = c.open(dir, .{ .ACCMODE = .RDONLY }, @as(c.mode_t, 0));
+    if (fd < 0) return error.SyncFailed;
+    defer _ = c.close(fd);
+    if (!@import("learned_sync.zig").full(fd)) return error.SyncFailed;
+}
+
+/// Search every existing sibling identity afresh; the cached size at startup is not coverage evidence.
+pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgotten) void {
+    const dirs = @import("lanes").learned_dirs;
+    var cursor: ?u64 = null;
+    var inspected: usize = 0;
+    while (true) {
+        const id = (dirs.next(im.root, im.dir, cursor) catch {
+            out.unmanaged += 1;
+            return;
+        }) orelse break;
+        cursor = id;
+        if (inspected == 16) {
+            out.folders.add(id, .scan_budget);
+            out.unmanaged += 1;
+            return;
+        }
+        inspected += 1;
+        if (s.disk) |r| if (r.keying.identity == id) continue;
+        var other = imprint.Imprint.inspect(s.gpa, im.root, id) catch |err| {
+            if (err == error.ImprintUnindexed or err == error.ImprintAppending) {
+                out.folders.add(id, if (err == error.ImprintUnindexed) .unindexed else .appending);
+                // First append writes payload before index; without a lease even an empty directory can change.
+                out.unmanaged += 1;
+                continue;
+            }
+            out.unmanaged += 1;
+            out.folders.add(id, if (err == error.ImprintInspectBudget) .scan_budget else .unreadable);
+            continue;
+        };
+        defer other.deinit();
+        // Without writer ownership, rewriting a sibling snapshot could discard concurrent writes.
+        for (other.metas.items) |meta| {
+            if (pc.holdsSpan(meta.tokens, span) or pc.weakSpanTail(meta.tokens, span)) {
+                out.unmanaged += 1;
+                out.folders.add(id, .unowned_match);
+            }
+        }
+    }
+}
+
 pub fn unlearn(s: *Store, im: *imprint.Imprint, key: u64) void {
     unlearnChecked(s, im, key) catch |err| note("forgetting a learned state failed ({s})", .{@errorName(err)});
 }

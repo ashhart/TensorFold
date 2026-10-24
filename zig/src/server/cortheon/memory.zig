@@ -44,6 +44,13 @@ pub const Store = struct {
         s.bytes += copy.len;
     }
 
+    /// How many replies' hidden messages are kept now.
+    pub fn count(s: *Store) usize {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        return s.map.count();
+    }
+
     /// The hidden messages kept for `key`, copied into `a`.
     pub fn get(s: *Store, a: Allocator, key: u64) ?[]const u8 {
         s.mutex.lockUncancelable(s.io);

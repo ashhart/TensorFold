@@ -8,6 +8,9 @@ const lifetime = @import("prompt_cache_lifetime.zig");
 const policy = @import("prompt_cache_policy.zig");
 const cuts = @import("prompt_cuts.zig");
 pub const rows = @import("rows_store.zig");
+pub const holdsSpan = @import("prompt_cache_forget.zig").holdsSpan;
+pub const weakSpanTail = @import("prompt_cache_forget.zig").weakSpanTail;
+pub const Forgotten = @import("prompt_cache_forget.zig").Forgotten;
 
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
@@ -28,6 +31,8 @@ pub const Snapshots = struct {
         /// Make the live state `saved`'s: the next prompt chunk starts at its position.
         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, saved: Saved) anyerror!void,
         drop: *const fn (ptr: *anyopaque, saved: Saved) void,
+        /// True when no remote retained copy can survive the local forget operation.
+        forget_peers_clear: ?*const fn (ptr: *anyopaque) bool = null,
         /// The storage a kept state holds: new storage up to `bytes`, or the spare storage it took (null: `bytes`).
         charged: ?*const fn (ptr: *anyopaque, saved: Saved) u64 = null,
         /// Free storage the family keeps for later saves, inside the budget (null: none).
@@ -335,7 +340,9 @@ pub const Store = struct {
         };
     }
 
-    fn sharedKey(tokens: []const u32) u64 {
+    pub const forgetSpan = @import("prompt_cache_forget.zig").forgetSpan;
+
+    pub fn sharedKey(tokens: []const u32) u64 {
         return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
     }
 
@@ -578,6 +585,7 @@ pub fn note(comptime fmt: []const u8, args: anytype) void {
 
 test {
     _ = @import("prompt_cache_test.zig");
+    _ = @import("prompt_cache_forget_test.zig");
     _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
