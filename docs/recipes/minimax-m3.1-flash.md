@@ -47,10 +47,10 @@ For mix256k (revision `c7defa69b0e8b57426a9945eb3f9eb91cfef9f8c`), `--context 26
   (78.2%).
 - Drafted replies equal plain ones (DFlash2 and DSpark); windows equal one-row steps bit for bit; two streams'
   replies equal their runs alone; replies are equal with the prompt cache on and off.
-- A needle at 251,713 tokens on mix256k (545 s cold). The tower against transformers': relative error 0.030 to fp32
-  (torch bf16: 0.039).
-- Decode, one stream: 43-44 tokens a second plain, 42-66 drafted (prose to code). Cold prompts: about 1,200 tokens
-  a second at 8k, 1,000 at 32k, 700 at 128k.
+- A needle at 246,842 tokens on mix256k (219 s cold; 209 GiB wired at the peak). The tower against transformers':
+  relative error 0.030 to fp32 (torch bf16: 0.039).
+- Decode, one stream: 43-44 tokens a second plain, 42-66 drafted (prose to code). Cold prompts on mix256k: 1,429
+  tokens a second at 8k, 1,420 at 32k, 1,319 at 128k (4,096-row chunks).
 
 ## Not covered
 
