@@ -48,6 +48,7 @@ test "GLM snapshots: a short prefix fits 4 GiB even with a 524288-token configur
         std.debug.print("GLM snapshot sizing rank=0 world=2 at={d} bytes={d} arena={d}\n", .{ at, glm.native.snap_bytes(&e, at), seq.st.arena.buf.len });
     }
     const short = glm.native.snap_bytes(&e, 2048);
+    try t.expectEqual(short, glm.native.snap_min_bytes(&e));
     const longer = glm.native.snap_bytes(&e, 34816);
     try t.expect(short < 4 * @as(u64, 1 << 30));
     try t.expect(short < longer);
@@ -396,4 +397,36 @@ test "GLM snapshots: FP8 prefix rows and separate scales restore for every rank 
         }
         try t.expectEqual(allocs, rec.allocs);
     };
+}
+
+test "GLM snapshots: 0.3 GiB fits the first default TP2 prefix at 256K but not a longer prefix" {
+    var d: cuda.Driver = undefined;
+    d.api.cuMemAlloc_v2 = Sizing.alloc;
+    d.api.cuMemFree_v2 = Sizing.free;
+    d.api.cuMemsetD8_v2 = Sizing.zero;
+    var w: glm.weights.Weights = undefined;
+    w.config = .{};
+    w.share = try glm.shard.Share.of(&w.config, 0, 2);
+    var layers: [glm.config.max_layers]glm.weights.Layer = undefined;
+    w.layers = layers[0..w.config.layers];
+    for (w.layers, 0..) |*layer, i| {
+        layer.* = undefined;
+        layer.mixer = switch (w.config.kind(@intCast(i))) {
+            .mla => .{ .mla = undefined },
+            .kda => .{ .kda = undefined },
+        };
+    }
+    var e: glm.engine.Engine = undefined;
+    var seq: @TypeOf(e.cur.*) = undefined;
+    seq.st = try glm.forward.State.init(t.allocator, &d, &w, glm.native.capacity(262144));
+    defer seq.st.deinit();
+    e.cur = &seq;
+    e.c = w.config;
+    e.mtp = true;
+    e.capacity = seq.st.capacity;
+    const minimum = glm.native.snap_min_bytes(&e);
+    const budget: u64 = 322122547;
+    try t.expectEqual(@as(u64, 203423744), minimum);
+    try t.expect(minimum <= budget);
+    try t.expect(glm.native.snap_bytes(&e, 34816) > budget);
 }

@@ -242,6 +242,11 @@ pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
     return e.stateBytes(at);
 }
 
+/// The first legal chunk mark, with the same page rounding and possible head window used by cache admission.
+pub fn snap_min_bytes(ptr: *anyopaque) u64 {
+    return snap_bytes(ptr, snap_grid);
+}
+
 /// Reserve every spare page inside the admitted cache budget before requests can enter either rank.
 pub fn snap_ready(ptr: *engine.Engine, budget: u64) !u64 {
     if (ptr.snap_setup) |s| try s.run(s.ptr, budget) else try ptr.prepareSnapshots(budget);

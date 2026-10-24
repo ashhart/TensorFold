@@ -198,6 +198,8 @@ pub const Info = struct {
     prefill_step: u32 = 0,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
+    /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
+    prompt_cache_capacity: ?PromptCacheCapacity = null,
     /// The policy the engine runs under, one line (`/health` shows it); empty: none.
     policy: []const u8 = "",
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
@@ -234,6 +236,8 @@ pub const Admit = struct {
     ctx: *anyopaque,
     fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool,
 };
+
+pub const PromptCacheCapacity = struct { budget_bytes: u64, minimum_state_bytes: u64 };
 
 pub const PromptCachePlan = struct {
     source: enum { physical_footprint, explicit, metal_working_set },

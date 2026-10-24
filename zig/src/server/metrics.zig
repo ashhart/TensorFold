@@ -154,6 +154,11 @@ pub const Metrics = struct {
         try gauge(w, "requests_waiting", "gauge", "Requests queued or held until a lane is free.", status.waiting);
         try gauge(w, "generation_tokens_running", "gauge", "Generated tokens held by live streams.", status.generation_tokens);
         try gauge(w, "prompt_tokens_total", "counter", "Prompt tokens of finished requests.", snap.prompt);
+        if (info.prompt_cache_capacity) |c| {
+            try gauge(w, "prompt_cache_budget_bytes", "gauge", "Startup budget for retained prompt states.", c.budget_bytes);
+            try gauge(w, "prompt_cache_minimum_state_bytes", "gauge", "Smallest planned retained state, with the family's admission rounding.", c.minimum_state_bytes);
+            try gauge(w, "prompt_cache_can_keep_state", "gauge", "Startup budget holds at least one planned state; not current occupancy.", @intFromBool(c.budget_bytes >= c.minimum_state_bytes));
+        }
         const keeps = info.prompt_cache;
         if (keeps) try gauge(w, "prompt_tokens_cached_total", "counter", "Prompt tokens of finished requests restored from kept prompt states.", snap.cached);
         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
@@ -370,4 +375,14 @@ test "request counter append failure frees its label" {
     m.httpRequest(std.testing.io, "client", 200);
     try std.testing.expectEqual(@as(u64, 2), m.requests.items[0].count);
     try std.testing.expectEqual(allocations, failing.allocations);
+}
+
+test "metrics expose cache budget, minimum and inability to retain a state" {
+    var m: Metrics = .{ .gpa = std.testing.allocator };
+    defer m.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const info: api.Info = .{ .prompt_cache = true, .prompt_cache_capacity = .{ .budget_bytes = 322122547, .minimum_state_bytes = 384 << 20 } };
+    try m.render(std.testing.io, &out.writer, .{}, &.{}, info, null, 262144);
+    for ([_][]const u8{ "tensorfold:prompt_cache_budget_bytes 322122547\n", "tensorfold:prompt_cache_minimum_state_bytes 402653184\n", "tensorfold:prompt_cache_can_keep_state 0\n" }) |line| try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
 }

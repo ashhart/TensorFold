@@ -176,3 +176,22 @@ test "kv safety: keep zero reserves and allocates no staging through native plan
 fn hostBudget(o: api.Open, bytes: u64) u64 {
     return if (named(o) == 0) 0 else bytes;
 }
+
+/// Startup facts use the actual family planner without changing any budget, store or allocation.
+pub fn capacity(comptime F: type, loaded: anytype, k: Kept, window: u64) ?api.PromptCacheCapacity {
+    if (comptime !@hasDecl(F, "snap_min_bytes")) return null;
+    if (window <= F.snap_grid) return null;
+    const minimum = F.snap_min_bytes(loaded.target);
+    if (minimum == 0 or minimum == std.math.maxInt(u64)) return null;
+    return .{ .budget_bytes = k.copied, .minimum_state_bytes = minimum };
+}
+
+pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, comptime log: type) void {
+    const c = facts orelse return;
+    if (disabled or c.budget_bytes >= c.minimum_state_bytes) return;
+    log.warn("GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); adjust --context, --parallel, --prompt-cache-gib or TENSORFOLD_MEMORY_RESERVE_GIB to make room", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
+}
+
+test {
+    _ = @import("cuda_cache_capacity_test.zig");
+}
