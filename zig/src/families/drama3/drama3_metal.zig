@@ -3,6 +3,7 @@ pub const completion = @import("completion.zig");
 pub const speech_decode = @import("speech_decode.zig");
 pub const model = @import("model.zig");
 pub const kv_state = @import("kv_state.zig");
+pub const reference_cache = @import("reference_cache.zig");
 pub const codec_load = @import("codec_load.zig");
 pub const replay = @import("replay.zig").Replay(@This());
 pub const config = @import("config.zig");
@@ -19,6 +20,7 @@ pub const codec = @import("metal/codec.zig");
 pub const tts = @import("metal/tts.zig");
 
 pub const Engine = engine.Engine;
+pub const Snapshot = engine.Engine.Snapshot;
 pub const Sampling = engine.Sampling;
 pub const Options = engine.Options;
 
@@ -29,6 +31,7 @@ test {
     _ = config;
     _ = model;
     _ = kv_state;
+    _ = reference_cache;
     _ = @import("codec_map.zig");
     _ = @import("codec_schema.zig");
     _ = @import("codec_pth.zig");

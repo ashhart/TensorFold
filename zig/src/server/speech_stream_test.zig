@@ -32,6 +32,7 @@ pub const Script = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     seeds: [4]u64 = undefined,
+    reference_rows: [4]u32 = undefined,
     takes: usize = 0,
     voices: []const @import("drama_voice.zig").Voice = &.{},
     get_voices: bool = false,
@@ -55,6 +56,7 @@ pub const Script = struct {
         }
         const take = e.takes;
         e.seeds[take] = request.seed;
+        e.reference_rows[take] = request.reference_rows;
         e.takes += 1;
         if (e.inline_) return run(e, id, request, sink, take);
         e.thread = std.Thread.spawn(.{}, run, .{ e, id, request, sink, take }) catch return error.Busy;
@@ -518,13 +520,14 @@ test "voices: HTTP listing and reference rows use the family CLI builder" {
         }
     };
     const expected = try family.build(a, CliTokenizer{}, "hi", &refs);
-    var script: Script = .{ .steps = &.{frame}, .voices = &voices, .expected_rows = expected };
+    var script: Script = .{ .steps = &.{frame}, .voices = &voices, .expected_rows = expected.frames };
     var s: Served = undefined;
     try s.start(&script, "HTTP/1.1", "{\"model\":\"m\",\"input\":\"hi\",\"voice\":\"tone\",\"response_format\":\"pcm\"}", 2000);
     defer s.deinit();
     try expectHeader(try s.readHead(), " 200 ");
     s.join(&script);
     try std.testing.expect(script.rows_equal);
+    try std.testing.expectEqual(expected.reference_rows, script.reference_rows[0]);
     try std.testing.expectEqualStrings(&pcm(1), try s.readRest());
     var listing_script: Script = .{ .steps = &.{}, .voices = &voices, .get_voices = true };
     var listing: Served = undefined;
@@ -553,5 +556,6 @@ test "voices: without configuration the default prompt rows stay unchanged" {
     try expectHeader(try s.readHead(), " 200 ");
     s.join(&script);
     try std.testing.expect(script.rows_equal);
+    try std.testing.expectEqual(@as(u32, 0), script.reference_rows[0]);
     try std.testing.expectEqualStrings(&pcm(1), try s.readRest());
 }
