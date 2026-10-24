@@ -8,7 +8,8 @@ const c = core.contract.spec;
 const g = core.contract.gates;
 const bfr = core.bf16_round;
 
-pub const Kind = enum { qkv, gelu, pool };
+const ref = @import("vit_gemma_reference.zig");
+pub const Kind = ref.Kind;
 
 /// A registration: a served kernel (keep null), or a control keeping all of its points but one.
 pub const Entry = struct { name: []const u8, kind: Kind, keep: ?i32 = null };
@@ -28,8 +29,16 @@ const dim = 72;
 const width = heads * dim;
 const eps: f32 = 1e-6;
 
-/// The kernels' own float32 steps on the host: the qkv rows' norm sum in the warp's butterfly order.
+/// Three lane terms and five warp reductions; pooling has nine ordered terms.
 fn qkvDepth(_: c.Shape) usize {
+    return 8;
+}
+
+fn poolDepth(_: c.Shape) usize {
+    return 9;
+}
+
+fn pointDepth(_: c.Shape) usize {
     return 0;
 }
 
@@ -37,10 +46,10 @@ pub fn spec(e: Entry) c.Spec {
     const name = e.name;
     return switch (e.kind) {
         // the 31B's patches: up to 2,520 (280 tokens x 9), a 16 x 16 grid, one row
-        .qkv => .{ .name = name, .accum = .none, .depth = qkvDepth, .out = .raw, .tiles = .{ .{ .size = 64 }, .{}, .{} }, .served = &.{ .{ .rows = 2520, .n = 3 * width, .k = dim }, .{ .rows = 256, .n = 3 * width, .k = dim }, .{ .rows = 9, .n = 3 * width, .k = dim } } },
-        .gelu => .{ .name = name, .accum = .none, .depth = qkvDepth, .out = .raw, .served = &.{ .{ .rows = 2520, .n = 4304, .k = 1 }, .{ .rows = 9, .n = 4304, .k = 1 } } },
-        // tokens (rows) and the grid's blocks across (k): one block, the processor's 42 x 57 patches (266), 280 x 1
-        .pool => .{ .name = name, .accum = .none, .depth = qkvDepth, .out = .raw, .served = &.{ .{ .rows = 1, .n = width, .k = 1 }, .{ .rows = 266, .n = width, .k = 19 }, .{ .rows = 280, .n = width, .k = 1 } } },
+        .qkv => .{ .name = name, .accum = .f32, .depth = qkvDepth, .out = .bf16, .tiles = .{ .{ .size = 64 }, .{}, .{} }, .served = &.{ .{ .rows = 2520, .n = 3 * width, .k = dim }, .{ .rows = 256, .n = 3 * width, .k = dim }, .{ .rows = 9, .n = 3 * width, .k = dim } } },
+        .gelu => .{ .name = name, .accum = .none, .depth = pointDepth, .out = .bf16, .served = &.{ .{ .rows = 2520, .n = 4304, .k = 1 }, .{ .rows = 9, .n = 4304, .k = 1 } } },
+        // k is the nine-term reduction; 266 tokens use the processor's 14 x 19-block grid, the others a strip.
+        .pool => .{ .name = name, .accum = .f32, .depth = poolDepth, .out = .bf16, .served = &.{ .{ .rows = 1, .n = width, .k = 9 }, .{ .rows = 266, .n = width, .k = 9 }, .{ .rows = 280, .n = width, .k = 9 } } },
     };
 }
 
@@ -62,6 +71,7 @@ pub const Glue = struct {
     in: [5][]const u16 = .{ &.{}, &.{}, &.{}, &.{}, &.{} },
     dev: [6]u64 = @splat(0),
     msg: [240]u8 = undefined,
+    exact_sums: bool = false,
 
     pub fn deinit(self: *Glue) void {
         if (self.arena) |*a| a.deinit();
@@ -82,7 +92,7 @@ pub const Glue = struct {
         switch (self.entry.kind) {
             .qkv => if (shape.k != dim or shape.n != 3 * width) return false,
             .gelu => {},
-            .pool => if (shape.k == 0 or shape.rows % shape.k != 0 or shape.n != width) return false,
+            .pool => if (shape.k != 9 or shape.n != width) return false,
         }
         if (shape.rows == 0) return false;
         self.rig.reset();
@@ -92,6 +102,7 @@ pub const Glue = struct {
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         self.shape = shape;
+        self.exact_sums = fl == .stress;
         const n = shape.rows * shape.n;
         switch (self.entry.kind) {
             .qkv => {
@@ -108,7 +119,12 @@ pub const Glue = struct {
                     cv.* = bfr.bits(@cos(ang));
                     sv.* = bfr.bits(@sin(ang));
                 }
-                if (fl == .nonfinite) x[3 * width + 5] = bfr.bits(std.math.nan(f32));
+                if (fl == .nonfinite) for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }, 0..) |value, row| {
+                    if (row < shape.rows) for (0..3) |part| {
+                        x[(row * 3 + part) * width + 5] = bfr.bits(value);
+                    };
+                };
+                if (fl == .stress) ref.fillStress(.qkv, shape.rows, .{ x, qw, kw, cs, sn }, rng);
                 self.in = .{ x, qw, kw, cs, sn };
                 for (self.in, 0..) |t, i| self.dev[i] = try self.rig.input(std.mem.sliceAsBytes(t));
                 self.dev[5] = try self.rig.output(n * 2);
@@ -118,7 +134,19 @@ pub const Glue = struct {
                 const up = try a.alloc(u16, n);
                 fill(rng, gate, 4);
                 fill(rng, up, 2);
-                if (fl == .nonfinite) gate[n / 2] = bfr.bits(std.math.inf(f32));
+                if (fl == .nonfinite) {
+                    const special = [_]f32{ std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32) };
+                    for (special, 0..) |value, i| {
+                        gate[i] = bfr.bits(value);
+                        up[i] = bfr.bits(1);
+                    }
+                    gate[3] = bfr.bits(1);
+                    up[3] = bfr.bits(std.math.inf(f32));
+                    gate[4] = bfr.bits(1);
+                    up[4] = bfr.bits(-std.math.inf(f32));
+                    gate[5] = bfr.bits(0);
+                    up[5] = bfr.bits(std.math.inf(f32));
+                }
                 self.in = .{ gate, up, &.{}, &.{}, &.{} };
                 self.dev[0] = try self.rig.input(std.mem.sliceAsBytes(gate));
                 self.dev[1] = try self.rig.input(std.mem.sliceAsBytes(up));
@@ -131,7 +159,12 @@ pub const Glue = struct {
                 const scale = try a.alloc(u16, width);
                 fill(rng, bias, 30);
                 for (scale) |*v| v.* = bfr.bits(0.02 + rng.float(f32) * 0.2);
-                if (fl == .nonfinite) x[7] = bfr.bits(std.math.nan(f32));
+                if (fl == .nonfinite) {
+                    x[7] = bfr.bits(std.math.nan(f32));
+                    x[8] = bfr.bits(std.math.inf(f32));
+                    x[9] = bfr.bits(-std.math.inf(f32));
+                }
+                if (fl == .stress) ref.fillStress(.pool, shape.rows, .{ x, bias, scale, &.{}, &.{} }, rng);
                 self.in = .{ x, bias, scale, &.{}, &.{} };
                 for (self.in[0..3], 0..) |t, i| self.dev[i] = try self.rig.input(std.mem.sliceAsBytes(t));
                 self.dev[5] = try self.rig.output(shape.rows * width * 2);
@@ -167,7 +200,7 @@ pub const Glue = struct {
                 } else try self.vit.g4GeluMul(s, self.dev[0], self.dev[1], self.dev[5], n);
             },
             .pool => {
-                const gw = 3 * sh.k;
+                const gw = 3 * ref.poolWidth(sh.rows);
                 const gh = 9 * sh.rows / gw;
                 if (self.ctl) |fun| {
                     for ([_]u64{ self.dev[0], self.dev[1], self.dev[2], self.dev[5] }) |p| args.add(p);
@@ -184,22 +217,51 @@ pub const Glue = struct {
 
     pub fn count(self: *Glue) usize {
         const sh = self.shape;
-        return 2 * sh.rows * sh.n;
+        return sh.rows * sh.n;
     }
 
-    pub fn reference(_: *Glue, out: []f64, mag: []f64) !void {
-        @memset(out, 0);
-        @memset(mag, 0);
+    fn input(self: *const Glue) ref.Input {
+        return .{ .kind = self.entry.kind, .shape = self.shape, .values = self.in, .exact_sums = self.exact_sums };
     }
 
-    /// Every output as the host's float32 steps give it, bit for bit; the GeGLU within tanhf's ulps.
+    pub fn reference(self: *Glue, out: []f64, mag: []f64) !void {
+        try ref.outputs(self.input(), .none, .sequential, out, null, null);
+        for (mag, out) |*m, value| m.* = @abs(value);
+    }
+
+    pub fn simulate(self: *Glue, acc: c.Accum, order: g.Order, out: []f64) !void {
+        try ref.outputs(self.input(), acc, order, out, null, null);
+    }
+
+    const Bound = struct { want: []const f64, allow: []f64 };
+    fn boundOne(b: Bound, i: usize, point: f64, low: f64, high: f64) !void {
+        if (!std.math.isFinite(point) or !std.math.isFinite(low) or !std.math.isFinite(high)) return error.InvalidReferenceBound;
+        b.allow[i] = @max(@abs(b.want[i] - low), @abs(high - b.want[i])) + 1e-30;
+    }
+
+    pub fn bounds(self: *Glue, want: []const f64, _: []const f64, allow: []f64) !void {
+        try ref.each(self.input(), .none, .sequential, Bound{ .want = want, .allow = allow }, boundOne);
+    }
+
+    const Verify = struct { got: []align(1) const u16, owner: *Glue, failed: ?[]const u8 = null };
+    fn verifyOne(v: *Verify, i: usize, point: f64, low: f64, high: f64) !void {
+        if (v.failed == null and !ref.inside(point, low, high, v.got[i])) {
+            v.failed = try std.fmt.bufPrint(&v.owner.msg, "out[{d}] = {e}, independent FP64 {e} in [{e}, {e}]", .{ i, f(v.got[i]), point, low, high });
+        }
+    }
+
+    /// Retain the exact FP32 mirror and independently check FP64 ranges at the BF16 nodes.
     pub fn check(self: *Glue, _: g.Gate) !?[]const u8 {
-        const got = std.mem.bytesAsSlice(u16, try self.rig.bytes(self.dev[5], self.count()));
-        return switch (self.entry.kind) {
-            .qkv => self.checkQkv(got),
-            .gelu => self.checkGelu(got),
-            .pool => self.checkPool(got),
+        const got = std.mem.bytesAsSlice(u16, try self.rig.bytes(self.dev[5], 2 * self.count()));
+        const mirrored = switch (self.entry.kind) {
+            .qkv => try self.checkQkv(got),
+            .gelu => try self.checkGelu(got),
+            .pool => try self.checkPool(got),
         };
+        if (mirrored != null or self.entry.kind == .gelu) return mirrored;
+        var verify: Verify = .{ .got = got, .owner = self };
+        try ref.each(self.input(), .none, .sequential, &verify, verifyOne);
+        return verify.failed;
     }
 
     fn same(want: f32, got: u16) bool {
@@ -263,7 +325,8 @@ pub const Glue = struct {
             const u = f(uv);
             const v = f(o);
             if (!std.math.isFinite(x) or !std.math.isFinite(u)) {
-                if (std.math.isFinite(v) and !(std.math.isInf(x) and x < 0)) return try std.fmt.bufPrint(&self.msg, "out[{d}] = {e} finite for gate {e}, up {e}", .{ i, v, x, u });
+                const point = ref.gelu(x, u);
+                if (!ref.inside(point, point, point, o)) return try std.fmt.bufPrint(&self.msg, "out[{d}] = {e}, wrong class/sign for gate {e}, up {e}", .{ i, v, x, u });
                 continue;
             }
             const t: f32 = @floatCast(std.math.tanh(@as(f64, inner32(x))));
@@ -283,7 +346,7 @@ pub const Glue = struct {
     }
 
     fn checkPool(self: *Glue, got: []align(1) const u16) !?[]const u8 {
-        const bw = self.shape.k;
+        const bw = ref.poolWidth(self.shape.rows);
         const gw = 3 * bw;
         const root: f32 = @floatCast(@sqrt(@as(f64, width)));
         const x = self.in[0];
@@ -311,4 +374,52 @@ test "every control keeps all of its kernel's points but one" {
         seen[kind] |= dropped;
     };
     try std.testing.expectEqualSlices(i32, &all, &seen);
+}
+
+test {
+    _ = @import("vit_gemma_reference_test.zig");
+}
+
+test "tower nonfinite GeGLU checks each class and infinity sign" {
+    const gate = [_]u16{ 0x7f80, 0xff80, 0x7fc1, 0x3f80, 0x3f80, 0 };
+    const up = [_]u16{ 0x3f80, 0x3f80, 0x3f80, 0x7f80, 0xff80, 0x7f80 };
+    const want = [_]u16{ 0x7f80, 0x7fc0, 0x7fc0, 0x7f80, 0xff80, 0x7fc0 };
+    var glue: Glue = .{ .rig = undefined, .entry = entries[3], .vit = undefined, .in = .{ &gate, &up, &.{}, &.{}, &.{} } };
+    try std.testing.expect(try glue.checkGelu(&want) == null);
+    for (0..want.len) |i| {
+        var wrong = want;
+        wrong[i] = if (std.math.isNan(f(want[i]))) 0x7f80 else if (want[i] == 0x7f80) 0xff80 else 0x7fc0;
+        try std.testing.expect(try glue.checkGelu(&wrong) != null);
+    }
+}
+
+test "tower reductions declare FP32 sums, BF16 outputs and actual reduction depths" {
+    for (entries) |e| {
+        const s = spec(e);
+        try std.testing.expectEqual(c.Elem.bf16, s.out);
+        if (e.kind == .gelu) continue;
+        try std.testing.expectEqual(c.Accum.f32, s.accum);
+        try std.testing.expect(s.depth(s.served[0]) > 0);
+        if (e.kind == .pool) for (s.served) |shape| try std.testing.expectEqual(@as(usize, 9), shape.k);
+    }
+}
+
+test "actual tower hook returns populated FP64 references without a driver" {
+    const x: [9 * width]u16 = @splat(0x3f80);
+    const weight: [width]u16 = @splat(0x3f80);
+    const zero: [width]u16 = @splat(0);
+    var out: [3 * width]f64 = undefined;
+    var mag: [3 * width]f64 = undefined;
+    var glue: Glue = .{ .rig = undefined, .entry = entries[0], .vit = undefined, .shape = .{ .rows = 1, .n = 3 * width, .k = dim }, .in = .{ x[0 .. 3 * width], weight[0..dim], weight[0..dim], weight[0..dim], zero[0..dim] } };
+    try glue.reference(&out, &mag);
+    for (out, mag) |value, magnitude| {
+        try std.testing.expectEqual(@as(f64, 1), value);
+        try std.testing.expectEqual(@abs(value), magnitude);
+    }
+    glue.entry = entries[5];
+    glue.shape = .{ .rows = 1, .n = width, .k = 9 };
+    glue.in = .{ &x, &zero, &weight, &.{}, &.{} };
+    try glue.reference(out[0..width], mag[0..width]);
+    const expected = bfr.bf16(@as(f32, @floatCast(@sqrt(@as(f64, width)))));
+    for (out[0..width]) |value| try std.testing.expectEqual(expected, value);
 }

@@ -81,7 +81,7 @@ pub const Kernels = struct {
 
     /// Gemma 4's tower: qkv [P, 3 H D] in place, q and k RMSNorm and 2D RoPE (cos, sin [P, D]), v weightless; D <= 96.
     pub fn g4Qkv(k: *const Kernels, s: Stream, qkv: u64, qw: u64, kw: u64, cs: u64, sn: u64, rows: usize, heads: usize, dim: usize, eps: f32) !void {
-        if (dim > 96 or dim % 4 != 0) return error.RowShape;
+        if (!g4QkvShape(heads, dim)) return error.RowShape;
         if (rows == 0) return;
         var a: Args = .{};
         for ([_]u64{ qkv, qw, kw, cs, sn }) |p| a.add(p);
@@ -166,6 +166,17 @@ pub const Kernels = struct {
 
 fn int(x: usize) i32 {
     return @intCast(x);
+}
+
+fn g4QkvShape(heads: usize, dim: usize) bool {
+    return heads > 0 and dim > 0 and dim <= 96 and dim % 4 == 0;
+}
+
+test "tower QKV rejects zero heads and dimensions before a launch" {
+    for ([_]usize{ 0, 1, 3, 4, 72, 96, 100 }) |dim| {
+        try std.testing.expectEqual(dim > 0 and dim <= 96 and dim % 4 == 0, g4QkvShape(16, dim));
+        try std.testing.expect(!g4QkvShape(0, dim));
+    }
 }
 
 fn blocks(n: usize, by: usize) usize {
