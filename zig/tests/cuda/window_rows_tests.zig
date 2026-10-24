@@ -20,16 +20,19 @@ pub const Bufs = struct {
     }
 
     pub fn up(b: *Bufs, bytes: []const u8) !u64 {
+        try b.list.ensureUnusedCapacity(b.gpu.gpa, 1);
         const x = try cuda.DeviceBuffer.fromHost(b.gpu.d, bytes);
-        try b.list.append(b.gpu.gpa, x);
+        b.list.appendAssumeCapacity(x);
         return x.ptr;
     }
 
     /// `n` bytes of 0xff (an output no launch writes reads as NaN).
     pub fn out(b: *Bufs, s: cuda.Stream, n: usize) !u64 {
-        const x = try cuda.DeviceBuffer.alloc(b.gpu.d, @max(n, 16));
-        try b.list.append(b.gpu.gpa, x);
+        try b.list.ensureUnusedCapacity(b.gpu.gpa, 1);
+        var x = try cuda.DeviceBuffer.alloc(b.gpu.d, @max(n, 16));
+        errdefer x.free();
         try x.fill8(0xff, s.handle);
+        b.list.appendAssumeCapacity(x);
         return x.ptr;
     }
 

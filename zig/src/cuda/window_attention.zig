@@ -18,6 +18,10 @@ pub fn wide(d: usize) bool {
     return d == 256 or d == 512;
 }
 
+fn wideShape(w: Window) bool {
+    return wide(w.d) and w.h > 0 and w.hk > 0 and w.h % w.hk == 0 and w.h / w.hk <= 16;
+}
+
 /// window_rows.cu's decode chunk: keys [c * chunk_keys, (c + 1) * chunk_keys), merged in chunk order.
 pub const chunk_keys = 256;
 /// The head dim 512 decode partials' staged K and V tiles: two of 32 keys.
@@ -143,7 +147,7 @@ pub const WindowAttention = struct {
 
     /// Wide decode rows by `f` (wideFns, or the contract's controls): chunk partials (scratchBytes), their merge.
     pub fn decodeWith(f: *const Wide, s: Stream, q: u64, kc: u64, vc: u64, out: u64, pos: u64, slot: ?u64, w: Window, scratch: u64, n: usize) !void {
-        if (!wide(w.d) or w.hk == 0 or w.h % w.hk != 0 or w.h / w.hk > 16 or w.ring == 0 or w.ring > std.math.maxInt(i32)) return error.WindowShape;
+        if (!wideShape(w) or w.ring == 0 or w.ring > std.math.maxInt(i32)) return error.WindowShape;
         if (n == 0) return;
         const t = chunks(w);
         const parts = n * w.hk * t * (w.h / w.hk);
@@ -198,7 +202,7 @@ pub const WindowAttention = struct {
     /// promptRows by `f` (wideFns, or the contract's controls).
     pub fn promptWith(f: *const Wide, s: Stream, q: u64, kc: u64, vc: u64, out: u64, p0: usize, n: usize, w: Window, hi: ?u64) !void {
         const grp = if (w.hk > 0) w.h / w.hk else 0;
-        if (!wide(w.d) or w.hk == 0 or w.h % w.hk != 0 or grp > 16 or p0 + n > std.math.maxInt(i32)) return error.WindowShape;
+        if (!wideShape(w) or p0 + n > std.math.maxInt(i32)) return error.WindowShape;
         if (n == 0) return;
         const ng = 1024 / w.d; // 16-row groups a block: 8 warps, a 128-dim slice each
         const hb = if (grp % ng == 0) ng else 1;
@@ -213,3 +217,17 @@ pub const WindowAttention = struct {
         try launch_.launch(f.prompt[@intFromBool(w.p32)], cfg, s, &a);
     }
 };
+
+test "wide geometry rejects empty heads and preserves all sixteen GQA ratios" {
+    for ([_]usize{ 256, 512 }) |d| for (0..18) |ratio| {
+        const w: Window = .{ .h = 2 * ratio, .hk = 2, .d = d, .win = 0, .ring = 4096, .scale = 1 };
+        try std.testing.expectEqual(ratio > 0 and ratio <= 16, wideShape(w));
+    };
+    var w: Window = .{ .h = 3, .hk = 2, .d = 256, .win = 0, .ring = 4096, .scale = 1 };
+    try std.testing.expect(!wideShape(w));
+    w.hk = 0;
+    try std.testing.expect(!wideShape(w));
+    w.hk = 1;
+    w.d = 0;
+    try std.testing.expect(!wideShape(w));
+}

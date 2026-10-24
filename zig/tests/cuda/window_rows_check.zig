@@ -49,17 +49,17 @@ pub const Call = struct {
 /// Scratch for a call's heads: one (row, key head)'s keys and values as float64, and a head's weights and ends.
 pub const Work = struct {
     a: std.mem.Allocator,
-    k: []f64,
-    v: []f64,
-    q: []f64,
-    w: []f64,
-    t: []f64,
-    point: []f64,
-    half: []f64,
+    k: []f64 = &.{},
+    v: []f64 = &.{},
+    q: []f64 = &.{},
+    w: []f64 = &.{},
+    t: []f64 = &.{},
+    point: []f64 = &.{},
+    half: []f64 = &.{},
 
     pub fn init(a: std.mem.Allocator, d: usize, most: usize) !Work {
-        var self: Work = undefined;
-        self.a = a;
+        var self: Work = .{ .a = a };
+        errdefer self.deinit();
         inline for (.{ "k", "v" }) |n| @field(self, n) = try a.alloc(f64, most * d);
         inline for (.{ "w", "t" }) |n| @field(self, n) = try a.alloc(f64, most);
         inline for (.{ "q", "point", "half" }) |n| @field(self, n) = try a.alloc(f64, d);
@@ -70,6 +70,17 @@ pub const Work = struct {
         inline for (.{ "k", "v", "w", "t", "q", "point", "half" }) |n| self.a.free(@field(self, n));
     }
 };
+
+fn workAllocation(a: std.mem.Allocator) !void {
+    var work = try Work.init(a, 256, 17);
+    defer work.deinit();
+    try std.testing.expectEqual(@as(usize, 256 * 17), work.k.len);
+    try std.testing.expectEqual(@as(usize, 256), work.half.len);
+}
+
+test "window reference scratch unwinds every partial allocation" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, workAllocation, .{});
+}
 
 /// The most keys any row of the call sees.
 pub fn mostKeys(c: Call) usize {

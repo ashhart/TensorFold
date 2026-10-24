@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "qmm_frag.cuh"
+#include "window_fallback.h"
 
 namespace tf_wrows {
 
@@ -526,7 +527,7 @@ __device__ __forceinline__ bool rows(const __nv_bfloat16* __restrict__ q, const 
     return __syncthreads_or(odd);
 }
 
-// A block with a NaN or infinite output: each of its rows' heads again in float64 (off the common path).
+// A block with a NaN or infinite output: recompute only affected heads, leaving every finite head's bits alone.
 template <int D>
 __device__ __noinline__ void odd(const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc,
                                  __nv_bfloat16* out, const int* hi, int p0, int W, int H, int HK, int G, float scale,
@@ -541,9 +542,13 @@ __device__ __noinline__ void odd(const __nv_bfloat16* q, const __nv_bfloat16* kc
     for (int i = 0; i < 16 * RB * HB; ++i) {
         const int r = row0 + i % (16 * RB), head = hk * G + hg * HB + i / (16 * RB);
         if (r >= W) continue;
+        __nv_bfloat16* dst = out + ((int64_t)r * H + head) * D;
+        const bool affected = tf_wrows_head_affected(reinterpret_cast<const uint16_t*>(dst), D, threadIdx.x, NT);
+        // Every thread makes the same decision before slow_head's block barriers. rows() has published all stores.
+        if (!__syncthreads_or(affected)) continue;
         const int p = p0 + r;
         slow_head<D>(q + ((int64_t)r * H + head) * D, kv, win > 0 ? max(p - win + 1, 0) : 0,
-                     hi != nullptr ? hi[r] : p, (double)scale, out + ((int64_t)r * H + head) * D, 0, D);
+                     hi != nullptr ? hi[r] : p, (double)scale, dst, 0, D);
     }
 }
 

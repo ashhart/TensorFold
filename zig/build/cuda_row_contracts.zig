@@ -16,6 +16,8 @@ pub fn host(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Mo
             .link_libc = true,
             .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } },
         });
-        step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+        const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
+        step.dependOn(&run.step);
+        if (std.mem.eql(u8, name, "contract_window_rows.zig")) b.step("test-window-rows-host", "Wide attention reference, admission coverage and diagnostic failure ownership on CPU").dependOn(&run.step);
     }
 }

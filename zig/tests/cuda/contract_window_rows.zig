@@ -66,7 +66,7 @@ pub const cfgs = [_]Cfg{
 } ++ ratio(12, 4) ++ ratio(20, 4) ++ ratio(32, 4) ++ ratio(32, 2) ++ [_]Cfg{
     .{ .name = "control: decode merge without each chunk's exp(m_c - M), 20/4 heads (GQA 5)", .h = 20, .hk = 4, .ctl = .rescale, .served = decodeAt(20) },
     .{ .name = "control: P32 prompt rows whose window starts a key early, 20/4 heads (GQA 5)", .h = 20, .hk = 4, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = promptAt(20) },
-};
+} ++ @import("window_rows_shapes.zig").cases(Cfg);
 
 fn decodeAt(comptime h: usize) []const c.Shape {
     return &[_]c.Shape{ .{ .rows = 16, .n = h, .k = 3000 }, .{ .rows = 1, .n = h, .k = 1100 } };
@@ -336,4 +336,18 @@ test "every control names a kernel of contract_controls.cu, or runs the served b
 
 test {
     _ = wc;
+    _ = @import("window_rows_bufs_test.zig");
+}
+
+test "wide branch registrations cover every admitted GQA ratio and prompt mode" {
+    const extra = comptime @import("window_rows_shapes.zig").cases(Cfg);
+    for ([_]usize{ 256, 512 }) |d| for (1..17) |ratio_| for (0..3) |mode| {
+        var count: usize = 0;
+        for (extra) |f| if (f.d == d and f.h / f.hk == ratio_ and f.prompt == (mode != 0) and f.p32 == (mode == 2)) {
+            count += 1;
+            try std.testing.expectEqual(@as(usize, 17), f.served[0].rows);
+            try std.testing.expectEqual(f.h, f.served[0].n);
+        };
+        try std.testing.expectEqual(@as(usize, 1), count);
+    };
 }
