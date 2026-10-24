@@ -26,7 +26,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `drama3-voice` writes an attested voice catalog file from reference WAVs and transcripts, with codes from `drama3-generate --encode`, and refuses a file without `--source-kind` and `--source-note` (#1153). Thanks to @plotarmordev.
 
-- Drama 3 on CUDA prefills bounded row chunks in each shared round. `TF_DRAMA_PREFILL_ROWS` selects 1 through 1024 rows (default 128); the generation tool uses `--max-rows`. Batched projections and attention can change rounding relative to single-row prefill; oracle checks now compare the selected prompt chunks at their reference-row offsets.
+- Drama 3 on CUDA can prefill bounded row chunks in each shared round. The stock path stays one row a chunk; `TF_DRAMA_PREFILL_ROWS` (1 through 1024) and the generation tool's `--max-rows` opt in to N-row chunks, which on a GB10 bring the first audio from 18.2 s to 0.76 s and the whole utterance from 47.5 s to 30.2 s. Batched projections and attention can change rounding relative to single-row prefill; oracle checks now compare the selected prompt chunks at their reference-row offsets (#1120). Thanks to @plotarmordev.
 
 ## 1.1.3
 

@@ -28,7 +28,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
-    const prefill_rows = try setting(a, null, "TF_DRAMA_PREFILL_ROWS", 128, problem) orelse return null;
+    const prefill_rows = try setting(a, null, "TF_DRAMA_PREFILL_ROWS", (drama_host.Options{}).prefill_rows, problem) orelse return null;
     if (prefill_rows == 0 or prefill_rows > 1024) {
         problem.* = "TF_DRAMA_PREFILL_ROWS must be 1 through 1024";
         return null;

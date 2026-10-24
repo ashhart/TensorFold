@@ -48,6 +48,15 @@ pub fn metal(b: *std.Build, core: *std.Build.Module, api: *std.Build.Module) voi
     native(b, step, family, core, api, null, "drama_metal_native_host");
 }
 
+/// Drama's prompt plan on the host: the single-row default and the opt-in batched plan.
+pub fn plan(b: *std.Build, family: *std.Build.Module, core: *std.Build.Module, api: *std.Build.Module, cuda: *std.Build.Module) void {
+    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/drama_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "core", .module = core }, .{ .name = "engine_api", .module = api }, .{ .name = "cuda", .module = cuda } } });
+    const tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/generate.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "core", .module = core } } });
+    const plan_module = b.createModule(.{ .root_source_file = b.path("zig/tests/drama_prefill_plan.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "drama_host", .module = host }, .{ .name = "drama_generate", .module = tool } } });
+    const step = b.step("test-drama-prefill-host", "Drama 3's prompt prefill plan: the single-row default and the opt-in batched plan");
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = plan_module })).step);
+}
+
 /// Drama's family module over a runtime and the core; its tests run on the host with mocked CUDA waits.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });

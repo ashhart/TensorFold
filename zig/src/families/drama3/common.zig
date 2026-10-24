@@ -1,11 +1,14 @@
 //! What both Drama 3 backends share: request settings, the parity probe, streaming stats and the clock.
 const std = @import("std");
 
+/// The prompt path's default: one row a chunk, the arithmetic the single-row path used.
+pub const single_row: usize = 1;
+
 pub const Options = struct {
     device: u32 = 0,
     max_ctx: usize = 4096, // positions (prompt rows + frames)
-    max_rows: usize = 128, // prompt rows a chunk
-    attn_chunk: usize = 128, // query rows a prompt attention GEMM
+    max_rows: usize = 1024, // prompt rows a chunk (Metal's capacity; the CUDA path asks for its own)
+    attn_chunk: usize = 512, // query rows a prompt attention GEMM
     max_frames: usize = 2048,
     threads: usize = 16,
     pdl: bool = true, // CUDA: GEMVs launched with programmatic dependent launch
@@ -95,7 +98,13 @@ test "prefill capacity rejects empty and oversized chunks" {
 test "prefill rounds cover the prompt and its partial tail" {
     const t = std.testing;
     const defaults: Options = .{};
-    try t.expectEqual(@as(usize, 128), defaults.max_rows);
+    try t.expectEqual(@as(usize, 1024), defaults.max_rows); // Metal's capacity; the CUDA path asks for its own
+    try t.expectEqual(@as(usize, 512), defaults.attn_chunk);
+    // the default the CUDA path takes: one row a chunk, the arithmetic the single-row path used
+    const single: Options = .{ .max_rows = single_row, .attn_chunk = single_row };
+    try single.validatePrefill();
+    try t.expectEqual(@as(usize, 1), single.promptRows(1));
+    try t.expectEqual(@as(usize, 1), single.promptRows(4096));
     for ([_]usize{ 1, 2, 128, 1024 }) |capacity| {
         const o: Options = .{ .max_rows = capacity };
         for ([_]usize{ 2, 127, 128, 129, 1025, 8192 }) |n| {

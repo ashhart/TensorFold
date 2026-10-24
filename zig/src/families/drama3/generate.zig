@@ -21,7 +21,7 @@ pub const Args = struct {
     max_frames: usize = 1500,
     graphs: bool = true,
     sync_every: usize = 8,
-    opts: d3.Options = .{},
+    opts: d3.Options = .{ .max_rows = d3.common.single_row, .attn_chunk = d3.common.single_row },
     replay: bool = false,
     speed_probe: bool = false,
     repeat: usize = 1,
@@ -44,12 +44,13 @@ const usage =
     \\       drama3-generate --model DIR --text "..." [--ref-text "..." --ref-codes FILE] [--rows FILE]
     \\                       [--temperature 1.0] [--top-k 30] [--top-p 0.9] [--seed 1] [--greedy]
     \\                       [--max-frames 1500] [--graphs 1] [--sync-every 8] [--out FILE] [--rows-out FILE]
-    \\                       [--max-ctx 4096] [--max-rows 128] [--threads 16] [--repeat N] [--pdl 1] [--split 1]
+    \\                       [--max-ctx 4096] [--max-rows 1] [--threads 16] [--repeat N] [--pdl 1] [--split 1]
     \\       drama3-generate --model DIR --check DUMPDIR [--check-frames 40]
     \\       drama3-generate --codec-check REF --codec CODEC --frames FRAMES [--ref-audio WAV]
     \\
     \\WAV out: 16-bit PCM mono 44.1 kHz; --pcm-out streams raw s16le ("-" is stdout). Reference WAVs: any PCM or float32.
     \\--replay 1 checks eager/graphs, scratch poisoning, codec chunks and interleaved independent state.
+    \\--max-rows N prefills N prompt rows a chunk; the default 1 is the single-row path, and N opts into batched prefill.
     \\--check honors --max-rows for prompt probes; compare the same oracle vectors at 1 and N rows.
     \\--speed-probe 1 compares the staged CUDA GEMV candidate; it never promotes a serving kernel.
     \\--rows: prompt rows int32 [n, 11]; --ref-codes and --encode: int32 [frames, 10]; --out: frames int32 [n, 11].
@@ -77,7 +78,10 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const v = argv[i + 1];
         i += 1;
-        if (std.mem.eql(u8, k, "--replay")) a.replay = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--speed-probe")) a.speed_probe = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--model")) a.model = v else if (std.mem.eql(u8, k, "--text")) a.text = v else if (std.mem.eql(u8, k, "--ref-text")) a.ref_text = v else if (std.mem.eql(u8, k, "--ref-codes")) a.ref_codes = v else if (std.mem.eql(u8, k, "--rows")) a.rows = v else if (std.mem.eql(u8, k, "--rows-out")) a.rows_out = v else if (std.mem.eql(u8, k, "--out")) a.out = v else if (std.mem.eql(u8, k, "--check")) a.check = v else if (std.mem.eql(u8, k, "--check-frames")) a.check_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--temperature")) a.smp.temperature = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--top-k")) a.smp.top_k = try std.fmt.parseInt(i32, v, 10) else if (std.mem.eql(u8, k, "--top-p")) a.smp.top_p = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--seed")) a.smp.seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--max-frames")) a.max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--graphs")) a.graphs = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--sync-every")) a.sync_every = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) a.opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) a.opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--threads")) a.opts.threads = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--repeat")) a.repeat = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--wav")) a.wav = v else if (std.mem.eql(u8, k, "--pcm-out")) a.pcm = v else if (std.mem.eql(u8, k, "--encode")) a.encode_out = v else if (std.mem.eql(u8, k, "--chunk")) a.chunk = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--chunks-log")) a.verbose_chunks = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--codec")) a.codec = v else if (std.mem.eql(u8, k, "--codec-check")) a.codec_check = v else if (std.mem.eql(u8, k, "--frames")) a.frames = v else if (std.mem.eql(u8, k, "--ref-audio")) a.ref_audio = v else if (std.mem.eql(u8, k, "--first-chunk")) a.first_chunk = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--pdl")) a.opts.pdl = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--split")) a.opts.split = !std.mem.eql(u8, v, "0") else {
+        if (std.mem.eql(u8, k, "--replay")) a.replay = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--speed-probe")) a.speed_probe = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--model")) a.model = v else if (std.mem.eql(u8, k, "--text")) a.text = v else if (std.mem.eql(u8, k, "--ref-text")) a.ref_text = v else if (std.mem.eql(u8, k, "--ref-codes")) a.ref_codes = v else if (std.mem.eql(u8, k, "--rows")) a.rows = v else if (std.mem.eql(u8, k, "--rows-out")) a.rows_out = v else if (std.mem.eql(u8, k, "--out")) a.out = v else if (std.mem.eql(u8, k, "--check")) a.check = v else if (std.mem.eql(u8, k, "--check-frames")) a.check_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--temperature")) a.smp.temperature = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--top-k")) a.smp.top_k = try std.fmt.parseInt(i32, v, 10) else if (std.mem.eql(u8, k, "--top-p")) a.smp.top_p = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--seed")) a.smp.seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--max-frames")) a.max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--graphs")) a.graphs = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--sync-every")) a.sync_every = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) a.opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) {
+            a.opts.max_rows = try std.fmt.parseInt(usize, v, 10);
+            a.opts.attn_chunk = @min(a.opts.max_rows, 1024);
+        } else if (std.mem.eql(u8, k, "--threads")) a.opts.threads = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--repeat")) a.repeat = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--wav")) a.wav = v else if (std.mem.eql(u8, k, "--pcm-out")) a.pcm = v else if (std.mem.eql(u8, k, "--encode")) a.encode_out = v else if (std.mem.eql(u8, k, "--chunk")) a.chunk = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--chunks-log")) a.verbose_chunks = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--codec")) a.codec = v else if (std.mem.eql(u8, k, "--codec-check")) a.codec_check = v else if (std.mem.eql(u8, k, "--frames")) a.frames = v else if (std.mem.eql(u8, k, "--ref-audio")) a.ref_audio = v else if (std.mem.eql(u8, k, "--first-chunk")) a.first_chunk = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--pdl")) a.opts.pdl = !std.mem.eql(u8, v, "0") else if (std.mem.eql(u8, k, "--split")) a.opts.split = !std.mem.eql(u8, v, "0") else {
             std.debug.print("unknown flag {s}\n{s}", .{ k, usage });
             return 2;
         }
