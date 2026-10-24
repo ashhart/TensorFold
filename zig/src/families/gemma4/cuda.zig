@@ -45,6 +45,7 @@ test {
     _ = @import("cuda_assistant_weights.zig");
     _ = @import("cuda_vision.zig");
     _ = @import("cuda_dflash.zig");
+    _ = @import("cuda_dflash_test.zig");
     _ = @import("cuda_tower.zig");
     _ = @import("cuda_image.zig");
     _ = @import("cuda_native.zig");
