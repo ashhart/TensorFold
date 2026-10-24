@@ -593,6 +593,7 @@ pub const Engine = struct {
     }
 
     pub fn release(e: *Engine, s: *Stream) void {
+        if (s.inflight) |h| _ = e.backend.read(h) catch 0; // the handle frees the backend's ring slot
         s.dropRoundState(e.gpa);
         e.backend.release(s);
     }

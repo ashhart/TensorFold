@@ -12,6 +12,35 @@ const p2 = rounds.p2;
 
 const gpa = std.testing.allocator;
 
+/// GLM's ring: a queued draw holds its slot until its handle is read; a taken slot refuses the next draw.
+const ring_len = 4;
+
+/// A peer's prompt pass running a hook that completes another stream (the cold request inside the pass).
+const Peer = struct {
+    engine: *Engine,
+    target: *fake.Fake,
+    peer: *sm.Stream,
+    other: *sm.Stream,
+    added: bool = false,
+    held: usize = 0,
+    failure: ?anyerror = null,
+
+    fn duringPrefill(p: *Peer, s: *sm.Stream, _: usize) void {
+        if (p.added or s != p.peer) return;
+        p.added = true;
+        p.engine.addStream(p.other) catch |err| {
+            p.failure = err;
+            return;
+        };
+        p.held = p.target.ringHeld();
+    }
+};
+
+fn peerPrefill(ctx: *anyopaque, s: *sm.Stream, chunk: usize) void {
+    const p: *Peer = @ptrCast(@alignCast(ctx));
+    p.duringPrefill(s, chunk);
+}
+
 /// The fake target's one-token decode after `c.prompt`, to `c.max_new` tokens or an eos one: `s`'s reply and reason.
 fn expectDecode(c: Case, s: *const sm.Stream) !void {
     var history: std.ArrayList(u32) = .empty;
@@ -112,4 +141,113 @@ test "a stream another driver opened and hands to the lane core replies as its o
         while (engine.activeCount() > 0) try engine.step();
         try expectDecode(c, &s);
     }
+}
+
+test "a stream that completes while a peer prefills retires the draw it left queued" {
+    var cfg = try modelWith(false);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa, .ring_len = ring_len, .prefill_chunks = 2 };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer engine.deinit();
+    var pa = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pa.deinit();
+    var a = try sm.Stream.init(gpa, .{ .id = "a", .prompt = &p1, .max_new = 1, .eos = &.{96}, .proposer = pa.proposer() });
+    defer a.deinit(gpa);
+    var pb = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pb.deinit();
+    var b = try sm.Stream.init(gpa, .{ .id = "b", .prompt = &p2, .max_new = 6, .eos = &.{96}, .proposer = pb.proposer() });
+    defer b.deinit(gpa);
+    var pc = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pc.deinit();
+    var c = try sm.Stream.init(gpa, .{ .id = "c", .prompt = &p1, .max_new = 6, .eos = &.{96}, .proposer = pc.proposer() });
+    defer c.deinit(gpa);
+    var peer: Peer = .{ .engine = &engine, .target = &target, .peer = &b, .other = &a };
+    target.prefill_hook = peerPrefill;
+    target.prefill_hook_ctx = &peer;
+    try engine.addStream(&b);
+    try std.testing.expect(peer.added);
+    try std.testing.expect(peer.failure == null);
+    try std.testing.expectEqual(@as(usize, 0), peer.held);
+    try engine.addStream(&c);
+    while (engine.activeCount() > 0) try engine.step();
+    try expectDecode(.{ .prompt = &p1, .max_new = 1 }, &a);
+    try expectDecode(.{ .prompt = &p2, .max_new = 6 }, &b);
+    try expectDecode(.{ .prompt = &p1, .max_new = 6 }, &c);
+}
+
+test "a cancelled stream retires the draw it left queued" {
+    var cfg = try modelWith(false);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa, .ring_len = 2 };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer engine.deinit();
+    var pa = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pa.deinit();
+    var a = try sm.Stream.init(gpa, .{ .id = "a", .prompt = &p1, .max_new = 40, .eos = &.{96}, .proposer = pa.proposer() });
+    defer a.deinit(gpa);
+    try engine.addStream(&a);
+    try std.testing.expect(a.inflight != null);
+    engine.discard(&a);
+    try std.testing.expectEqual(@as(usize, 0), target.ringHeld());
+    var pb = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pb.deinit();
+    var b = try sm.Stream.init(gpa, .{ .id = "b", .prompt = &p2, .max_new = 6, .eos = &.{96}, .proposer = pb.proposer() });
+    defer b.deinit(gpa);
+    try engine.addStream(&b);
+    while (engine.activeCount() > 0) try engine.step();
+    try expectDecode(.{ .prompt = &p2, .max_new = 6 }, &b);
+}
+
+test "a failed read of the queued draw still frees the ring's slot" {
+    var cfg = try modelWith(false);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa, .ring_len = 2 };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer engine.deinit();
+    var pa = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pa.deinit();
+    var a = try sm.Stream.init(gpa, .{ .id = "a", .prompt = &p1, .max_new = 40, .eos = &.{96}, .proposer = pa.proposer() });
+    defer a.deinit(gpa);
+    try engine.addStream(&a);
+    target.fail_read = a.inflight.?;
+    engine.discard(&a);
+    try std.testing.expectEqual(@as(usize, 0), target.ringHeld());
+    var pb = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pb.deinit();
+    var b = try sm.Stream.init(gpa, .{ .id = "b", .prompt = &p2, .max_new = 6, .eos = &.{96}, .proposer = pb.proposer() });
+    defer b.deinit(gpa);
+    try engine.addStream(&b);
+    while (engine.activeCount() > 0) try engine.step();
+    try expectDecode(.{ .prompt = &p2, .max_new = 6 }, &b);
+}
+
+test "a release retires its own draw and leaves another stream's pending one" {
+    var cfg = try modelWith(false);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa, .ring_len = ring_len };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer engine.deinit();
+    var pa = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pa.deinit();
+    var a = try sm.Stream.init(gpa, .{ .id = "a", .prompt = &p1, .max_new = 40, .eos = &.{96}, .proposer = pa.proposer() });
+    defer a.deinit(gpa);
+    var pb = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer pb.deinit();
+    var b = try sm.Stream.init(gpa, .{ .id = "b", .prompt = &p2, .max_new = 40, .eos = &.{96}, .proposer = pb.proposer() });
+    defer b.deinit(gpa);
+    try engine.addStream(&a);
+    try engine.addStream(&b);
+    try std.testing.expectEqual(@as(usize, 2), target.ringHeld());
+    engine.discard(&a);
+    try std.testing.expectEqual(@as(usize, 1), target.ringHeld());
+    engine.discard(&b);
+    try std.testing.expectEqual(@as(usize, 0), target.ringHeld());
 }

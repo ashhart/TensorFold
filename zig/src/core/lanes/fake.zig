@@ -50,6 +50,9 @@ pub const Reserve = struct {
 };
 
 pub const Fake = struct {
+    /// A ring slot: the draw it holds (null: free) and whether it still blocks a queued draw.
+    const Slot = struct { handle: ?u64 = null, blocking: bool = false };
+
     gpa: Allocator,
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
     drawn: std.ArrayList(u32) = .empty, // handle -> token
@@ -72,6 +75,10 @@ pub const Fake = struct {
     memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
     reserve: ?Reserve = null, // a new lane's caches come from here first (LaneMemory: no room yet); release gives them back
     fail_round: ?u64 = null, // this round's verify fails with error.GpuFailed, as a round the GPU fails does
+    ring_len: ?usize = null, // a finite ring of draws (GLM's): a slot still holding an unread draw refuses the next one
+    ring: std.ArrayList(Slot) = .empty, // the ring's slots (the draw each holds)
+    ring_at: usize = 0, // the slot the next draw takes
+    fail_read: ?u64 = null, // this handle's read fails with error.GpuFailed, as a failed buffer's does
     last_rows: usize = 0, // the last verify's rows, for test clocks
     last_sampled: bool = false, // and whether one of its streams drew keyed samples
     pieces_run: usize = 0, // prompt pieces run (`pieceBackend`)
@@ -86,6 +93,7 @@ pub const Fake = struct {
         while (it.next()) |l| freeLane(x.gpa, l);
         x.lanes.deinit(x.gpa);
         x.drawn.deinit(x.gpa);
+        x.ring.deinit(x.gpa);
     }
 
     fn freeLane(gpa: Allocator, l: *Lane) void {
@@ -195,10 +203,39 @@ pub const Fake = struct {
         return x.lanes.getPtr(s).?;
     }
 
-    fn draw(x: *Fake, l: *Lane, s: *Stream, position: u64) !u64 {
+    fn draw(x: *Fake, l: *Lane, s: *Stream, position: u64, blocking: bool) !u64 {
         if (position != l.history.items.len) return error.PositionMismatch;
         try x.drawn.append(x.gpa, x.targetNext(l.history.items, s.sampling, position));
-        return x.drawn.items.len - 1;
+        const h = x.drawn.items.len - 1;
+        try x.ringTake(h, blocking);
+        return h;
+    }
+
+    /// GLM's ring: a draw takes a slot until its handle is read; a queued draw on a taken slot refuses.
+    fn ringTake(x: *Fake, h: u64, blocking: bool) !void {
+        const len = x.ring_len orelse return;
+        if (x.ring.items.len != len) try x.ring.resize(x.gpa, len);
+        const slot = &x.ring.items[x.ring_at];
+        if (blocking and slot.blocking) return error.HandleOutOfStep;
+        slot.* = .{ .handle = h, .blocking = blocking };
+        x.ring_at = (x.ring_at + 1) % len;
+    }
+
+    /// The slot a draw's handle took (its token is free again).
+    fn ringFree(x: *Fake, h: u64) void {
+        for (x.ring.items) |*slot| if (slot.handle == h) {
+            slot.* = .{};
+            return;
+        };
+    }
+
+    /// The queued draws the ring still holds unread (a released stream's draw stays one).
+    pub fn ringHeld(x: *const Fake) usize {
+        var n: usize = 0;
+        for (x.ring.items) |slot| if (slot.blocking) {
+            n += 1;
+        };
+        return n;
     }
 
     fn targetNext(x: *Fake, history: []const u32, sampling: ?Sampling, position: u64) u32 {
@@ -307,12 +344,12 @@ pub const Fake = struct {
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         const x = self(ptr);
-        return x.draw(x.lane(s), s, position);
+        return x.draw(x.lane(s), s, position, false);
     }
 
     fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
         const x = self(ptr);
-        const h = try x.draw(x.lane(s), s, position);
+        const h = try x.draw(x.lane(s), s, position, false);
         x.drawn.items[h] = try allowed(x.drawn.items[h], mask);
         return h;
     }
@@ -352,11 +389,14 @@ pub const Fake = struct {
         const x = self(ptr);
         const l = x.lane(s);
         try l.history.append(x.gpa, x.value(feed));
-        return x.draw(l, s, position);
+        return x.draw(l, s, position, true);
     }
 
     fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
-        return self(ptr).drawn.items[handle];
+        const x = self(ptr);
+        x.ringFree(handle);
+        if (x.fail_read == handle) return error.GpuFailed;
+        return x.drawn.items[handle];
     }
 
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
