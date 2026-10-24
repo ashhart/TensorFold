@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { EngineCapabilities, EngineLibraryFolder, EngineLibraryModel, EngineLibraryScanOptions, EngineModelLibrarySnapshot } from '../types'
 import { formatName } from './cli'
+import { admitGeometry } from './geometry'
 import { isRepoId } from './paths'
 
 const STATE_LIMIT = 2 * 1024 * 1024
@@ -255,7 +256,8 @@ export class ModelLibrary {
       model.drafterOnly = !!config.dflash_config
       model.format = formatName(config) ?? 'full precision'
       const formats = caps.families[model.modelType]
-      model.compatible = !!formats && !config.dflash_config && (formats.length === 0 || formats.includes(formatName(config) ?? ''))
+      const geometry = admitGeometry(model.modelType, config)
+      model.compatible = !!formats && !config.dflash_config && geometry.admitted && (formats.length === 0 || formats.includes(formatName(config) ?? ''))
       const weights = names.filter((name) => name.endsWith('.safetensors'))
       if (!weights.length) throw new Error('The checkpoint has no safetensors weights yet.')
       if (names.some((name) => /\.(incomplete|ranges)$/.test(name))) throw new Error('This model is still downloading; finish the download and scan again.')
@@ -282,7 +284,7 @@ export class ModelLibrary {
       model.memoryFloorBytes = bytes + 2 * GIB
       model.fitsMemory = model.memoryFloorBytes <= this.options.memoryLimitBytes()
       fingerprint = `${repo || ''}:${digest(JSON.stringify(config))}:${identities.sort().join('|')}`
-      if (!model.compatible) model.reason = config.dflash_config ? 'This is a drafter checkpoint, not a standalone chat model.' : !formats ? `The bundled engine does not support ${model.modelType}.` : `The bundled engine does not support this ${model.format} checkpoint format.`
+      if (!model.compatible) model.reason = config.dflash_config ? 'This is a drafter checkpoint, not a standalone chat model.' : !formats ? `The bundled engine does not support ${model.modelType}.` : !geometry.admitted ? geometry.reason! : `The bundled engine does not support this ${model.format} checkpoint format.`
       else if (!model.fitsMemory) model.reason = MEMORY_REASON
       model.loadable = model.complete && model.compatible && model.fitsMemory === true
     } catch (error) {
