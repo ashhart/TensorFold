@@ -35,7 +35,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
     " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
-    " [--segments SEGMENTS] model\n";
+    " [--segments SEGMENTS] [--notes SNAPSHOT] model\n";
 const not_lanes = "--recall drafts from a record in the lane engine's rounds, " ++
     "which this model's engine does not run: serve it without --recall, --recall-dir, " ++
     "--recall-gib or --recall-read-only";

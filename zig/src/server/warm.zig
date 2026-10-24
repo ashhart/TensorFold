@@ -12,6 +12,7 @@ const Value = json.Value;
 
 /// One background prompt pass and the arena holding its request until the engine finishes it.
 const Pass = struct {
+    srv: *Server,
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     request: api.Request,
@@ -19,6 +20,7 @@ const Pass = struct {
     fn event(ptr: *anyopaque, _: api.Id, e: *const api.Event) void {
         if (e.* != .finished) return;
         const p: *Pass = @ptrCast(@alignCast(ptr));
+        _ = p.srv.prompt_holders.fetchSub(1, .acq_rel);
         var arena = p.arena;
         p.gpa.destroy(p);
         arena.deinit();
@@ -33,9 +35,11 @@ pub fn reply(srv: *Server, input: chat.Input, message: Value, thinking: bool, ef
 
 fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) !void {
     const p = try srv.gpa.create(Pass);
-    p.* = .{ .gpa = srv.gpa, .arena = .init(srv.gpa), .request = undefined };
+    p.* = .{ .srv = srv, .gpa = srv.gpa, .arena = .init(srv.gpa), .request = undefined };
+    _ = srv.prompt_holders.fetchAdd(1, .acq_rel);
     var handed = false;
     defer if (!handed) {
+        _ = srv.prompt_holders.fetchSub(1, .acq_rel);
         p.arena.deinit();
         srv.gpa.destroy(p);
     };

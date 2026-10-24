@@ -20,6 +20,8 @@ pub const Imprint = struct {
     metas: std.ArrayList(Meta) = .empty,
     clock: u64 = 0, // a meta's `used`: the clock at its last write or read
     index_end: u64 = 0,
+    forget_pending: bool = false, // failed erase may leave unindexed files until startup cleanup
+    inspect_only: bool = false, // strict sibling scan: never repair a torn index or perform startup cleanup
 
     /// The states learned under `identity` in `root` (made when missing); other identities past `cap` go, oldest first.
     pub fn open(gpa: Allocator, root: []const u8, identity: u64, cap: u64) !Imprint {
@@ -45,6 +47,21 @@ pub const Imprint = struct {
         m.metas.deinit(m.gpa);
         m.gpa.free(m.dir);
         m.gpa.free(m.root);
+    }
+
+    /// Inspect an existing identity without startup cleanup, stamps, directory creation or tail repair.
+    pub fn inspect(gpa: Allocator, root: []const u8, identity: u64) !Imprint {
+        const r = try gpa.dupe(u8, root);
+        errdefer gpa.free(r);
+        const dir = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ root, identity }, 0);
+        var m: Imprint = .{ .gpa = gpa, .root = r, .dir = dir, .cap = 0, .inspect_only = true };
+        errdefer {
+            for (m.metas.items) |x| free(gpa, x);
+            m.metas.deinit(gpa);
+            gpa.free(dir);
+        }
+        try m.load();
+        return m;
     }
 
     fn free(gpa: Allocator, x: Meta) void {
@@ -146,7 +163,7 @@ pub const Imprint = struct {
             std.mem.writeInt(u64, data[8..16], key, .little);
             std.crypto.hash.sha2.Sha256.hash(data[0..16], data[16..48], .{});
             try writeAll(fd, &data);
-            if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
+            if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
         }
         if (platform.c.rename(tmp, try std.fmt.bufPrintSentinel(&dest, "{s}/pending", .{m.dir}, 0)) != 0) return error.ImprintWrite;
     }
@@ -179,7 +196,7 @@ pub const Imprint = struct {
         try m.metas.ensureUnusedCapacity(m.gpa, 1);
         errdefer _ = platform.c.ftruncate(fd, end);
         try record(fd, key, at, tokens, below, bytes);
-        if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
+        if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
         m.index_end = @as(u64, @intCast(end)) + HEAD * 4 + 4 * (tokens.len + below.len);
         m.clock += 1;
         m.metas.appendAssumeCapacity(.{ .key = key, .at = at, .tokens = t, .starts = s, .bytes = bytes, .used = m.clock });
@@ -187,7 +204,16 @@ pub const Imprint = struct {
 
     /// Forget state `key`: the index is rewritten without it (its family removes the files).
     pub fn remove(m: *Imprint, key: u64) !void {
-        const i = m.find(key) orelse return;
+        if (!m.has(key)) return;
+        try m.removeMany(&.{key});
+    }
+
+    /// One atomic index rewrite for a batch; the caller removes the family's files afterwards.
+    pub fn removeMany(m: *Imprint, keys: []const u64) !void {
+        if (keys.len == 0) return;
+        var removed: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer removed.deinit(m.gpa);
+        for (keys) |key| try removed.put(m.gpa, key, {});
         var path: [1100]u8 = undefined;
         var part: [1100]u8 = undefined;
         const tmp = try std.fmt.bufPrintSentinel(&part, "{s}/index.part", .{m.dir}, 0);
@@ -196,11 +222,15 @@ pub const Imprint = struct {
         errdefer _ = platform.c.unlink(tmp);
         {
             defer _ = platform.c.close(fd);
-            for (m.metas.items, 0..) |x, j| if (j != i) try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
-            if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
+            for (m.metas.items) |x| if (!removed.contains(x.key)) try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
+            if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
         }
         if (platform.c.rename(tmp, try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) != 0) return error.ImprintWrite;
-        free(m.gpa, m.metas.orderedRemove(i));
+        var i = m.metas.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (removed.contains(m.metas.items[i].key)) free(m.gpa, m.metas.orderedRemove(i));
+        }
         m.index_end = 0;
         for (m.metas.items) |x| m.index_end += HEAD * 4 + 4 * (x.tokens.len + x.starts.len);
     }
@@ -208,8 +238,12 @@ pub const Imprint = struct {
     /// Keep a valid prefix across torn or invalid suffixes; unknown versions and I/O errors refuse learning.
     fn load(m: *Imprint) !void {
         var path: [1100]u8 = undefined;
-        const fd = platform.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .NONBLOCK = true }, @as(platform.c.mode_t, 0));
-        if (fd < 0) return if (platform.c.errno(fd) == .NOENT) {} else error.ImprintRead;
+        const fd = platform.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = if (m.inspect_only) .RDONLY else .RDWR, .NOFOLLOW = true, .NONBLOCK = true }, @as(platform.c.mode_t, 0));
+        if (fd < 0) {
+            if (platform.c.errno(fd) != .NOENT) return error.ImprintRead;
+            if (m.inspect_only) return error.ImprintUnindexed;
+            return;
+        }
         defer _ = platform.c.close(fd);
         try m.readIndex(fd);
     }
@@ -232,8 +266,14 @@ pub const Imprint = struct {
     }
 
     fn torn(m: *Imprint, fd: c_int, whole: u64, observed: u64) !void {
+        if (m.inspect_only) return error.ImprintRead;
         try repairTail(fd, whole, observed);
         m.index_end = whole;
+    }
+
+    fn incomplete(m: *Imprint, fd: c_int, whole: u64, observed: u64) !void {
+        if (m.inspect_only) return error.ImprintAppending;
+        return m.torn(fd, whole, observed);
     }
 
     fn readIndex(m: *Imprint, fd: c_int) !void {
@@ -246,7 +286,7 @@ pub const Imprint = struct {
                     if (!readAt(fd, std.mem.sliceAsBytes(&version), off)) return error.ImprintRead;
                     if (version[0] == MAGIC and version[1] != VERSION) return error.ImprintRead;
                 }
-                return m.torn(fd, off, end);
+                return m.incomplete(fd, off, end);
             }
             var head: [HEAD]u32 = undefined;
             if (!readAt(fd, std.mem.sliceAsBytes(&head), off)) return error.ImprintRead;
@@ -257,7 +297,7 @@ pub const Imprint = struct {
             if (n > 1 << 22 or k > n or head[4] == 0 or head[4] > n) return m.torn(fd, off, end);
             const at = off + @sizeOf(@TypeOf(head));
             const next = at + 4 * (n + k);
-            if (next > end) return m.torn(fd, off, end);
+            if (next > end) return m.incomplete(fd, off, end);
             const t = try m.gpa.alloc(u32, n);
             const s = m.gpa.alloc(u32, k) catch |err| {
                 m.gpa.free(t);
@@ -314,7 +354,7 @@ fn indexSize(fd: c_int) !u64 {
 
 fn repairTail(fd: c_int, whole: u64, observed: u64) !void {
     if (platform.c.lseek(fd, 0, platform.c.SEEK.END) != observed) return error.ImprintRead;
-    if (platform.c.ftruncate(fd, @intCast(whole)) != 0 or platform.c.fsync(fd) != 0) return error.ImprintWrite;
+    if (platform.c.ftruncate(fd, @intCast(whole)) != 0 or !@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
 }
 
 fn ordered(starts: []const u32) bool {
@@ -488,6 +528,7 @@ test {
     _ = @import("prompt_imprint_test.zig");
     _ = @import("prompt_imprint_fault_test.zig");
     _ = @import("learned_disk.zig");
+    _ = @import("learned_sync.zig");
 }
 
 test "a failed tail truncation keeps the bytes and refuses repair" {

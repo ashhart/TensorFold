@@ -311,6 +311,10 @@ pub const Backend = struct {
         return error.BackendRestores; // the prompt pass restores, before its first chunk
     }
 
+    pub fn snapPeersClear(ptr: *anyopaque) bool {
+        return self(ptr).sl.e.ep == null;
+    }
+
     pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
         const b = self(ptr);
         const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));

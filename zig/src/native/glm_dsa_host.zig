@@ -71,8 +71,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const used = e.device.allocated();
     const budget: u64 = @min(@as(u64, @intFromFloat((cache_gib orelse 8) * (1 << 30))), limit -| used);
     if (e.rank() == 0 and budget > 0) {
-        const B = g.backend.Backend;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop } }, cache_rules, budget);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &cache_vtable }, cache_rules, budget);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
     }
@@ -85,6 +84,16 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     std.log.info("GLM-5.3 (EXLR8) loaded in {d:.1} s, {d:.1} GB on this Mac, pair rank {d}, context {d} tokens, {d} streams", .{ e.load_seconds, @as(f64, @floatFromInt(e.m.bytes)) / 1e9, e.rank(), window, streams });
     if (h.back.timed) for (h.back.costs) |c| std.log.info("glm_dsa: a window of {d} rows {d:.1} ms", .{ c.width, c.ms });
     return h;
+}
+
+const B = g.backend.Backend;
+const cache_vtable: api.prompt_cache.Snapshots.VTable = .{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .forget_peers_clear = B.snapPeersClear };
+
+test "DSA paired cache never claims an unacknowledged peer is clear" {
+    try std.testing.expect(cache_vtable.forget_peers_clear != null);
+    try std.testing.expect(cache_vtable.forget_peers_clear.? == B.snapPeersClear);
+    var context: u8 = 0;
+    try std.testing.expect(!cache_vtable.forget_peers_clear.?(&context));
 }
 
 fn follow(h: *Host) void {

@@ -103,6 +103,21 @@ pub const Memo = struct {
         free(m.gpa, e);
     }
 
+    pub fn clear(m: *Memo) void {
+        m.lock();
+        defer m.unlock();
+        var it = m.map.valueIterator();
+        while (it.next()) |e| {
+            std.crypto.secureZero(u8, e.text);
+            std.crypto.secureZero(u32, e.ids);
+            free(m.gpa, e.*);
+        }
+        m.map.clearRetainingCapacity();
+        m.oldest = null;
+        m.newest = null;
+        m.held = 0;
+    }
+
     fn lock(m: *Memo) void {
         while (m.busy.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     }
@@ -123,6 +138,22 @@ fn free(gpa: Allocator, e: Entry) void {
 
 test {
     _ = @import("memo_reuse_test.zig");
+}
+
+test "clear removes all memo entries and permits fresh encodes" {
+    const a = std.testing.allocator;
+    const m = try Memo.create(a, 1024);
+    defer m.destroy();
+    var out: std.ArrayList(u32) = .empty;
+    defer out.deinit(a);
+    m.put("fictional cobalt meadow", false, &.{ 1, 2, 3 });
+    try std.testing.expect(try m.append("fictional cobalt meadow", false, a, &out));
+    m.clear();
+    try std.testing.expectEqual(@as(usize, 0), m.map.count());
+    try std.testing.expectEqual(@as(usize, 0), m.held);
+    try std.testing.expect(!try m.append("fictional cobalt meadow", false, a, &out));
+    m.put("fresh", false, &.{4});
+    try std.testing.expect(try m.append("fresh", false, a, &out));
 }
 
 test "a kept segment comes back only for the same text and first flag, and the oldest goes past the cap" {

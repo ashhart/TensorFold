@@ -186,6 +186,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
         .saved_conversations = args.learn_conversations,
+        .learn = args.learn or args.learn_conversations,
+        .slide = args.slide,
         .identity = s.identity,
         .environ = s.environ,
     };
@@ -198,6 +200,26 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     };
     defer srv.deinit();
     srv.recall = s.recall;
+    if (args.notes) |path| {
+        var why: []const u8 = "";
+        srv.notes = @import("notes/storage.zig").Storage.open(gpa, io, path, s.text, s.model_dir, &why) catch |e| {
+            std.debug.print("tensorfold: --notes {s}: {s} ({s})\n", .{ path, why, @errorName(e) });
+            return 2;
+        };
+        const notes = srv.notes.?;
+        notes.beginRun(a, .{
+            .learn = args.learn or args.learn_conversations,
+            .compact_memory = config.compact_memory orelse "",
+            .request_log = config.request_log orelse "",
+            .slide = args.slide,
+            .pocket = (if (srv.slide.model) |m| m.pocket > 0 else false) or srv.slide.facts.items.len > 0,
+            .next_source = notes.log.next_source,
+        }) catch |e| {
+            std.debug.print("tensorfold: --notes cannot persist writer flags ({s})\n", .{@errorName(e)});
+            return 2;
+        };
+        log.line("notes: {d} notes, {d} writes replayed; storage HTTP only", .{ notes.model.notes.items.len, notes.replayed });
+    }
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
         .disabled, .enabled => {},
         .no_reopen => log.line("idle unload off: this server has no reopen path", .{}),
