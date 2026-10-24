@@ -568,3 +568,11 @@ constant constexpr uint SORT_CHUNKS = 16;  // thread (e, c) counts expert e's pi
     best[2 * row + 1] = bad;
   }
 }
+
+// A drafter's tap: H's rows [rows, D] copied into TAPS at column `at.y` of rows `at.x` values apart, 8 a thread.
+[[kernel]] void lfm2_tap(const device bfloat* h [[buffer(0)]], device bfloat* taps [[buffer(1)]], constant uint2& at [[buffer(2)]],
+                         uint2 i [[thread_position_in_grid]]) {
+  if (i.x >= D / 8) return;
+  const device vec<bfloat, 8>* from = (const device vec<bfloat, 8>*)(h + size_t(i.y) * D);
+  ((device vec<bfloat, 8>*)(taps + size_t(i.y) * at.x + at.y))[i.x] = from[i.x];
+}

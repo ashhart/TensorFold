@@ -28,6 +28,7 @@ const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const lfm2_argmax = @import("metal_lfm2_argmax.zig");
 const lfm2_streams = @import("metal_lfm2_streams.zig");
+const lfm2_tap = @import("metal_lfm2_tap.zig");
 const lfm2_controls = @import("metal_lfm2_controls.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
@@ -192,6 +193,12 @@ pub fn main(init: std.process.Init) !u8 {
             try lfm2_streams_list.append(a, p);
             try kernels.append(a, p.kernel());
         }
+    }
+    var tap: ?lfm2_tap.Probe = null;
+    defer if (tap) |*p| p.deinit();
+    if (wanted(o, lfm2_tap.name)) {
+        tap = try lfm2_tap.Probe.init(a, device, queue);
+        try kernels.append(a, tap.?.kernel());
     }
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
@@ -416,6 +423,7 @@ pub fn main(init: std.process.Init) !u8 {
         lim += try gemma.limits(a, device, o.only);
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
+        lim += try lfm2_tap.limits(a, device, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

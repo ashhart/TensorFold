@@ -51,6 +51,12 @@ pub const Storage = struct {
 };
 
 pub const Attention = struct { keys: mtl.Buffer, values: mtl.Buffer };
+/// Layers a drafter reads at most (each layer's output, hidden wide).
+pub const max_taps = 8;
+/// The drafter's layers in its order and every forward row's outputs of them, [rows][count][hidden] bf16.
+pub const Taps = struct { layers: [max_taps]u32 = @splat(0), count: u32 = 0, buf: mtl.Buffer };
+/// Where a stream's latest tapped rows sit in the scratch: cache rows [start, start + rows) from scratch row `row`.
+pub const TapRows = struct { start: usize, row: usize, rows: usize, gen: u64 };
 pub const Mixer = union(enum) { conv: mtl.Buffer, attention: Attention };
 
 pub const Cache = struct {
@@ -60,6 +66,9 @@ pub const Cache = struct {
     last: ?struct { start: usize, base: usize, rows: usize } = null,
     blocks: [c.layers]Mixer,
     logits: mtl.Buffer,
+    /// The stream's latest tapped rows in the scratch, and its prompt's last row's taps (kept for the first draft).
+    tap: ?TapRows = null,
+    last_tap: ?mtl.Buffer = null,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, capacity: usize) !Cache {
         var out: Cache = .{ .memory = .{ .gpa = gpa, .device = device }, .capacity = capacity, .blocks = undefined, .logits = undefined };
@@ -148,6 +157,8 @@ pub const Scratch = struct {
     segs: mtl.Buffer,
     rowseg: mtl.Buffer,
     tiles: mtl.Buffer,
+    /// A drafter's taps of every row, once the backend is told its layers (null: none kept).
+    taps: ?Taps = null,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, rows: usize) !Scratch {
         var out: Scratch = undefined;
@@ -155,6 +166,7 @@ pub const Scratch = struct {
         errdefer out.memory.deinit();
         out.rows = rows;
         out.snapshots = @splat(null);
+        out.taps = null;
         const mem = &out.memory;
         const slots = rows * c.topk;
         out.ids = try mem.alloc(rows * 4);

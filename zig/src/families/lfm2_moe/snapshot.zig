@@ -4,7 +4,7 @@ const c = @import("config.zig");
 const st = @import("state.zig");
 
 /// One state: conv states by conv layer, then keys and values [kv head][at][head dim] by attention layer.
-pub const Snap = struct { at: u32, bytes: []u8 };
+pub const Snap = struct { at: u32, bytes: []u8, draft: ?[]u8 = null };
 
 /// A row's keys or values for every kv head of one attention layer.
 const row_bytes = c.kv_heads * c.head_dim * 2;
@@ -56,6 +56,7 @@ pub fn restore(cache: *st.Cache, snap: *const Snap) !void {
 }
 
 pub fn drop(gpa: std.mem.Allocator, snap: *Snap) void {
+    if (snap.draft) |d| gpa.free(d); // the drafter's context at `at`, when one was kept with the state
     gpa.free(snap.bytes);
     gpa.destroy(snap);
 }

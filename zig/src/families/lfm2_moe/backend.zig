@@ -23,6 +23,8 @@ pub const Metal = struct {
     /// Forward ms by window width, timed at load: the lane core weighs drafts against them.
     costs: [st.window_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
+    /// Forwards run so far: a stream's tapped rows in the scratch are current while their gen matches.
+    gen: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -88,7 +90,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -107,8 +109,65 @@ pub const Metal = struct {
         return cache;
     }
 
+    /// One forward on the scratch; a stream's tapped rows from earlier forwards are stale after it.
+    fn run(self: *Metal, segments: []const fwd.Segment, tokens: []const u32, record: bool, head: fwd.Head) !void {
+        self.gen += 1;
+        try fwd.run(self.model, &self.scratch, segments, tokens, record, head);
+    }
+
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        return cast(ptr).prefillWith(stream, null);
+    }
+
+    /// The prompt pass, `sink` taking each chunk's tapped rows before the chunk's end is kept for reuse.
+    fn prefillFeaturesFn(ptr: *anyopaque, stream: *lanes.Stream, layers: []const u32, sink: be.FeatureSink) !void {
         const self = cast(ptr);
+        const t = self.scratch.taps orelse return error.UnpreparedLfmTaps;
+        if (layers.len != t.count) return error.UnpreparedLfmTaps;
+        return self.prefillWith(stream, sink);
+    }
+
+    /// A tapped row's bytes: every tap's hidden row, bf16.
+    fn tapBytes(self: *const Metal) usize {
+        return if (self.scratch.taps) |t| t.count * c.hidden * 2 else 0;
+    }
+
+    /// The drafter's layers: every forward from now on keeps their outputs for each row.
+    fn prepareFn(ptr: *anyopaque, layers: []const u32) !void {
+        const self = cast(ptr);
+        if (layers.len == 0 or layers.len > st.max_taps) return error.BadLfmTaps;
+        for (layers) |l| if (l >= c.layers) return error.BadLfmTaps;
+        if (self.scratch.taps) |t| return if (std.mem.eql(u32, t.layers[0..t.count], layers)) {} else error.BadLfmTaps;
+        var t: st.Taps = .{ .count = @intCast(layers.len), .buf = undefined };
+        @memcpy(t.layers[0..layers.len], layers);
+        t.buf = try self.scratch.memory.alloc(self.scratch.rows * layers.len * c.hidden * 2);
+        self.scratch.taps = t;
+    }
+
+    /// Cache rows [start, start + count) of the stream's latest tapped rows, on the device.
+    fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, layers: []const u32, start: u64, count: u32) !be.Features {
+        const self = cast(ptr);
+        const t = self.scratch.taps orelse return error.UnpreparedLfmTaps;
+        if (layers.len != t.count) return error.UnpreparedLfmTaps;
+        const cache = try self.cacheOf(stream);
+        const held = cache.tap orelse return error.LfmTapsNotHeld;
+        if (count == 0 or start < held.start or start + count > held.start + held.rows) return error.LfmTapsNotHeld;
+        const width = self.tapBytes();
+        const buf = if (held.gen == 0) cache.last_tap.? else if (held.gen == self.gen) t.buf else return error.StaleLfmTaps;
+        const row = held.row + @as(usize, @intCast(start - held.start));
+        return .{ .buffer = @intFromPtr(buf.id), .offset = row * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+    }
+
+    /// The prompt's last row's taps, copied beside the stream's caches for its first draft (gen 0: kept there).
+    fn keepLastTap(self: *Metal, cache: *st.Cache, row: usize, position: usize) !void {
+        const width = self.tapBytes();
+        if (width == 0) return;
+        if (cache.last_tap == null) cache.last_tap = try cache.memory.alloc(width);
+        @memcpy(cache.last_tap.?.contents()[0..width], (self.scratch.taps.?.buf.contents() + row * width)[0..width]);
+        cache.tap = .{ .start = position, .row = 0, .rows = 1, .gen = 0 };
+    }
+
+    fn prefillWith(self: *Metal, stream: *lanes.Stream, sink: ?be.FeatureSink) !void {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidLfmPrompt;
         const capacity = @min(self.options.capacity, ids.len + stream.max_new + st.window_rows);
@@ -121,7 +180,9 @@ pub const Metal = struct {
         stream.cached = 0;
         if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (snap.at < ids.len) if (snapshot.restore(cache, snap)) |_| {
+            // a drafting stream resumes only a state kept with its drafter's context
+            const drafter_less = sink != null and snap.draft == null;
+            if (snap.at < ids.len and !drafter_less) if (snapshot.restore(cache, snap)) |_| {
                 at = snap.at;
             } else |_| {};
             stream.cached = @intCast(at);
@@ -136,7 +197,13 @@ pub const Metal = struct {
             };
             while (mark < stream.reuse.marks.len and stream.reuse.marks[mark] <= at) mark += 1;
             if (mark < stream.reuse.marks.len) end = @min(end, stream.reuse.marks[mark]);
-            try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last);
+            try self.run(&.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last);
+            if (sink) |k| {
+                const width = self.tapBytes();
+                const f: be.Features = .{ .buffer = @intFromPtr(self.scratch.taps.?.buf.id), .rows = @intCast(end - at), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+                try k.take(k.ptr, stream, f, at);
+                if (end == ids.len) try self.keepLastTap(cache, end - 1 - at, end - 1);
+            }
             at = end;
             if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null)
                 hk.at(hk.ptr, stream, @intCast(at));
@@ -165,7 +232,8 @@ pub const Metal = struct {
             .value => |v| v,
             .handle => |h| @intCast(h),
         };
-        try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
+        try self.run(&.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
+        if (self.scratch.taps != null) cache.tap = .{ .start = cache.len - 1, .row = 0, .rows = 1, .gen = self.gen };
         return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
     }
 
@@ -191,7 +259,11 @@ pub const Metal = struct {
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
-        try fwd.run(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all);
+        try self.run(segments[0..windows.len], ids[0..total], true, .all);
+        if (self.scratch.taps != null) for (segments[0..windows.len]) |seg| {
+            const last = seg.cache.last.?;
+            seg.cache.tap = .{ .start = last.start, .row = last.base, .rows = last.rows, .gen = self.gen };
+        };
         const logits = self.scratch.logits.slice(u16, total * c.vocab);
         const best = self.scratch.best.slice(u32, 2 * total);
         var base: usize = 0;

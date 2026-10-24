@@ -27,6 +27,7 @@ const names = [_][:0]const u8{
     "lfm2_qk_segs",
     "lfm2_attn_segs",
     "lfm2_attn_merge_segs",
+    "lfm2_tap",
 };
 
 pub const Kernels = struct {
