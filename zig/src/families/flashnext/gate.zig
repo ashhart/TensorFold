@@ -71,6 +71,7 @@ pub const Gate = struct {
     buf: mtl.Buffer,
     pipe: mtl.Pipeline,
     tau: f32,
+    taus: [STEPS + 1]f32, // each draft step's threshold (dev FZ_GATE_STEPS; tau throughout by default)
     n: usize, // the head's draft vocabulary
     width: usize = WMAX, // the host's window for a gated round, rows
 
@@ -107,7 +108,7 @@ pub const Gate = struct {
         r.enc.setPipeline(g.pipe);
         r.enc.setBuffer(logits.b, logits.off, 0);
         r.enc.setBuffer(g.buf, 0, 1);
-        const c = [4]u32{ @intCast(g.n), step, @bitCast(g.tau), @intCast(w) };
+        const c = [4]u32{ @intCast(g.n), step, @bitCast(g.taus[@min(step, STEPS)]), @intCast(w) };
         r.enc.setBytes(std.mem.asBytes(&c), 2);
         r.enc.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1024, 1, 1));
         if (!r.serial) r.enc.barrier();
@@ -125,7 +126,15 @@ pub fn init(r: *Run, tau: f32, n: usize, width: usize) !*Gate {
     if (width < WMAX_FIRST or width > replay.MAXR) return error.GateWidth;
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, source, mtl.CompileOptions.mlx()));
     const g = try r.arena.create(Gate);
-    g.* = .{ .buf = try r.buffer(WORDS * 4), .pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_gate", false)), .tau = tau, .n = n, .width = width };
+    g.* = .{ .buf = try r.buffer(WORDS * 4), .pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_gate", false)), .tau = tau, .taus = @splat(tau), .n = n, .width = width };
+    if (@import("sys").c.getenv("FZ_GATE_STEPS")) |v| { // dev: thresholds for the absorb's draft, then chain steps
+        var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
+        var j: usize = 0;
+        while (it.next()) |x| : (j += 1) if (j <= STEPS) {
+            g.taus[j] = try std.fmt.parseFloat(f32, x);
+            for (j + 1..STEPS + 1) |k| g.taus[k] = g.taus[j];
+        };
+    }
     const w = g.buf.slice(i32, WORDS);
     @memset(w, 0);
     for (0..STEPS) |j| { // the dims layouts' second word, as mdims_w's

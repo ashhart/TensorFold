@@ -303,7 +303,9 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         .vocab = try i32Buf(r, &.{VOCAB}),
     };
     {
-        const ids_n = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
+        const ids_all = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
+        const keep = if (platform.c.getenv("FZ_DRAFT_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else ids_all; // dev
+        const ids_n = @max(64, @min(ids_all, keep) / 64 * 64); // FZ_DRAFT_N: the head scores the first ids only
         const ids = try r.load("mtp.draft_ids");
         const mtp_root = @import("index.zig").mtpRoot(index.object.get("weight_map").?.object);
         var ex: [18]Buf = undefined;
