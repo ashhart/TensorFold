@@ -8,7 +8,7 @@ pub const window_rows = 16;
 /// Rows a shared decode forward takes at most (several streams' windows, row kernels); more take the prompt path.
 pub const batch_rows = 32;
 /// Rows a prompt chunk takes at most: each expert's weights are read once a chunk.
-pub const prompt_rows = 2048;
+pub const prompt_rows = 4096;
 
 /// Slots of a layer for `capacity` positions: whole index blocks, so a block's reads stay in the layer.
 pub fn slots(c: *const cfg.Config, capacity: usize) usize {
