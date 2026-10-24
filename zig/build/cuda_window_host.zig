@@ -16,7 +16,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, all: *std.Build.St
 }
 /// New pointwise and tower contracts beside main's row contracts.
 pub fn contracts(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, core: *std.Build.Module, all: *std.Build.Step) void {
-    for ([_][]const u8{ "contract_softcap.zig" }) |name| {
+    for ([_][]const u8{ "contract_softcap.zig", "contract_layer_norm.zig" }) |name| {
         const m = b.createModule(.{ .root_source_file = b.path(b.pathJoin(&.{ "zig/tests/cuda", name })), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
         const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
         all.dependOn(&run.step);
