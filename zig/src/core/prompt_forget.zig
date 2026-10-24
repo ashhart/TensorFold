@@ -13,6 +13,7 @@ pub const Queue = struct {
 
     /// Queues `span` for the engine thread, wakes it with `wake` and waits (unlocking `mutex`) for its answer.
     pub fn ask(q: *Queue, gpa: Allocator, io: std.Io, mutex: *std.Io.Mutex, wake: *std.Io.Condition, span: []const u32) error{ Closed, Busy }!pc.Forgotten {
+        if (span.len == 0 or span.len > @import("erase_match.zig").max_span) return error.Busy;
         var a: Ask = .{ .span = span };
         q.asks.append(gpa, &a) catch return error.Busy;
         wake.signal(io);

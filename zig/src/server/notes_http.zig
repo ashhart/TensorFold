@@ -25,6 +25,7 @@ fn reply(srv: *Server, conn: *Conn, a: Allocator, r: request.Route) Allocator.Er
     };
     const body = if (get) "" else payload;
     const s = srv.notes orelse return fail(conn, a, 404, "notes are off: this server was started without --notes");
+    if (!validErase(conn.path)) return fail(conn, a, 400, "erase must occur once with true, 1, false or 0");
     if (r.bad_id) return fail(conn, a, 404, "a note id is a whole number: /v1/notes/ID");
     srv.notes_mutex.lockUncancelable(srv.io);
     defer srv.notes_mutex.unlock(srv.io);
@@ -53,7 +54,7 @@ fn reply(srv: *Server, conn: *Conn, a: Allocator, r: request.Route) Allocator.Er
             conn.sendJson(500, "{\"erased\":true,\"complete\":false,\"state\":\"pending\",\"error\":{\"message\":\"erase applied; response capacity exceeded\"}}");
             return;
         };
-        conn.sendJson(if (p.unsynced) 500 else 200, encoded);
+        conn.sendJson(if (p.unsynced or p.retire_failed) 500 else 200, encoded);
         return;
     }
     var why: ops.Refusal = .{};
@@ -124,4 +125,20 @@ fn localOrdinal(io: std.Io) i64 {
     var tm: Tm = undefined;
     if (ext.localtime_r(&now, &tm) == null) return @divFloor(now, 86400) + 719163;
     return line_mod.ordinalOf(@as(i64, tm.year) + 1900, @intCast(tm.mon + 1), @intCast(tm.mday));
+}
+
+fn validErase(path: []const u8) bool {
+    const q = std.mem.indexOfScalar(u8, path, '?') orelse return true;
+    var seen = false;
+    var it = std.mem.splitScalar(u8, path[q + 1 ..], '&');
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse kv.len;
+        if (!std.mem.eql(u8, kv[0..eq], "erase")) continue;
+        if (seen or eq == kv.len) return false;
+        seen = true;
+        const v = kv[eq + 1 ..];
+        if (!std.mem.eql(u8, v, "1") and !std.mem.eql(u8, v, "0") and
+            !std.ascii.eqlIgnoreCase(v, "true") and !std.ascii.eqlIgnoreCase(v, "false")) return false;
+    }
+    return true;
 }

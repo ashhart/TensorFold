@@ -83,7 +83,7 @@ fn exchange(srv: *Server, a: std.mem.Allocator, method: []const u8, path: []cons
     const response = reader.buf[0..reader.len];
     const sep = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.Response;
     const code = try std.fmt.parseInt(u16, response[9..12], 10);
-    const parsed = try json.parse(a, response[sep + 4 ..]);
+    const parsed = try json.parse(a, try a.dupe(u8, response[sep + 4 ..]));
     return .{ .code = code, .value = switch (parsed) {
         .ok => |v| v,
         .err => return error.Response,

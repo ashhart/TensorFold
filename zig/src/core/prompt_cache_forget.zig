@@ -3,15 +3,7 @@ const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const learned = @import("prompt_learn.zig");
 
-pub fn holdsSpan(tokens: []const u32, span: []const u32) bool {
-    if (span.len == 0) return false;
-    if (std.mem.indexOf(u32, tokens, span) != null) return true;
-    var n = @min(tokens.len, span.len - 1);
-    while (n >= 2) : (n -= 1) {
-        if (std.mem.eql(u32, tokens[tokens.len - n ..], span[0..n])) return true;
-    }
-    return false;
-}
+pub const holdsSpan = @import("erase_match.zig").holds;
 
 pub fn weakSpanTail(tokens: []const u32, span: []const u32) bool {
     return tokens.len > 0 and span.len > 0 and tokens[tokens.len - 1] == span[0];

@@ -209,6 +209,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         const notes = srv.notes.?;
         notes.beginRun(a, .{
             .learn = args.learn or args.learn_conversations,
+            .recall = srv.recall != null,
             .compact_memory = config.compact_memory orelse "",
             .request_log = config.request_log orelse "",
             .slide = args.slide,

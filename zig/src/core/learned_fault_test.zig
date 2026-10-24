@@ -453,3 +453,41 @@ test "Store learns after old zero-byte and torn used stamps under cap pressure" 
         try std.testing.expectEqual(@as(u64, 0), try dirs.otherBytes(r, im.dir, 1));
     }
 }
+
+test "single-file learned forget reports a blocked bin path and tolerates absent files" {
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "single-forget");
+    var path: [160]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&path, "{s}", .{r}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir, 0o700));
+    defer _ = std.c.rmdir(dir);
+    var binbuf: [200]u8 = undefined;
+    const blocked = try std.fmt.bufPrintSentinel(&binbuf, "{s}/{x:0>16}.bin", .{ dir, @as(u64, 7) }, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(blocked, 0o700));
+    defer _ = std.c.rmdir(blocked);
+    var ctx: u8 = 0;
+    try std.testing.expectError(error.LearnedUnlink, pc.singleForgetChecked(&ctx, dir, 7));
+    try pc.singleForgetChecked(&ctx, dir, 8);
+}
+
+test "erase sibling inspection refuses an oversized index without reading its payload" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "erase-budget");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    var im = try Imprint.open(a, r, 1, 1 << 20);
+    defer im.deinit();
+    {
+        var other = try Imprint.open(a, r, 2, 1 << 20);
+        defer other.deinit();
+        try put(other.dir, "index", (8 << 20) + 1);
+    }
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    var out: pc.Forgotten = .{};
+    @import("prompt_learn.zig").forgetOthers(&s, &im, &.{ 7, 11, 13 }, &out);
+    try std.testing.expect(out.failed > 0);
+    try std.testing.expectEqual(@as(u8, 1), out.folders.len);
+    try std.testing.expectEqual(@import("forget_folders.zig").Reason.scan_budget, out.folders.items[0].reason);
+}

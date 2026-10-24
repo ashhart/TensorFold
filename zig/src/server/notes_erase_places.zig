@@ -10,6 +10,8 @@ const json = @import("json");
 pub const Place = enum {
     journal,
     prompt_cache,
+    recall,
+    engine_records,
     learn_files,
     responses,
     cortheon,
@@ -21,8 +23,10 @@ pub const Place = enum {
     /// What may still hold the note there, said to the client.
     pub fn why(p: Place) []const u8 {
         return switch (p) {
-            .journal => "the rewritten journal's folder could not be synced; a power cut may restore the old journal containing the note",
-            .prompt_cache => "the engine could not show this note's prompt states gone: an unsupported hook, fewer than four stable span tokens, or requests restoring states may prevent clearance",
+            .journal => "the journal retains token spans for pending cleanup, or its folder sync failed; retry this erase after the named blockers clear",
+            .engine_records => "speech-engine state, an operator-selected token trace or a reported cleanup failure has not been shown clear",
+            .recall => "this or an earlier --recall run may have recorded prompt or reply tokens; recall records have not been searched",
+            .prompt_cache => "the engine could not show this note's prompt states gone: an unsupported hook, an unverified token span, or requests restoring states may prevent clearance",
             .learn_files => "this or an earlier run may have written learned prompt states; not every possible learned folder has been shown free of this note's tokens",
             .responses => "stored Responses (/v1/responses with store) keep their conversations in memory, and one may quote this note",
             .cortheon => "Cortheon keeps the hidden rounds of its replies in memory, and one may quote this note",
@@ -53,41 +57,38 @@ pub const Forget = struct {
 
     /// Whether this forget shows the engine's kept prompt states hold none of the notes.
     pub fn cacheClear(f: Forget) bool {
-        return f.asked and f.ok and !f.short and f.out.held == 0;
-    }
-
-    /// Whether it shows the learned states on disk hold none of them.
-    pub fn diskClear(f: Forget) bool {
-        return f.cacheClear() and f.out.disk and f.out.failed == 0;
+        return f.asked and f.ok and !f.short and f.out.held == 0 and f.out.failed == 0;
     }
 };
 
-/// Find an interior token span stable across note labels and surrounding prompt text.
+/// Keep the value word: only remove an unstable leading word or terminal punctuation.
 pub fn spanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) !?[]const u32 {
     var q: std.ArrayList(u8) = .empty;
     try line.quote(a, &q, note);
-    const p = q.items;
-    var lo = std.mem.indexOfScalar(u8, p, ' ') orelse return null;
-    var hi = std.mem.lastIndexOfScalar(u8, p, ' ') orelse return null;
-    while (lo < hi) {
-        const span = text.encode(a, p[lo..hi], false) catch |e| switch (e) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return null,
-        };
-        if (span.len >= 4 and try insideEveryWrapper(a, text, note, span)) return span;
-        lo = std.mem.indexOfScalarPos(u8, p, lo + 1, ' ') orelse return null;
-        hi = std.mem.lastIndexOfScalar(u8, p[0..hi], ' ') orelse return null;
-    }
+    return candidate(a, text, note, q.items[1 .. q.items.len - 1], false);
+}
+
+pub fn rawSpanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) !?[]const u32 {
+    return candidate(a, text, note, note, true);
+}
+
+fn candidate(a: std.mem.Allocator, text: model_text.Text, note: []const u8, body: []const u8, raw: bool) !?[]const u32 {
+    if (body.len == 0) return null;
+    const first_space = std.mem.indexOfScalar(u8, body, ' ') orelse 0;
+    const ends = [_]usize{ body.len, if (std.ascii.isPunctuation(body[body.len - 1])) body.len - 1 else body.len };
+    for ([_]usize{ 0, first_space }) |lo| for (ends) |hi| {
+        if (hi <= lo) continue;
+        const span = try text.encode(a, body[lo..hi], false);
+        if (span.len == 0) continue;
+        if (span.len > 64 << 10) return error.SpanTooLong;
+        var scratch = std.heap.ArenaAllocator.init(a);
+        defer scratch.deinit();
+        if (if (raw) try insideRaw(scratch.allocator(), text, note, span) else try insideEveryWrapper(scratch.allocator(), text, note, span)) return span;
+    };
     return null;
 }
 
-/// Interior raw text: teaching turns do not contain the JSON escapes used by rendered notes.
-pub fn rawSpanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) !?[]const u32 {
-    const lo = std.mem.indexOfScalar(u8, note, ' ') orelse return null;
-    const hi = std.mem.lastIndexOfScalar(u8, note, ' ') orelse return null;
-    if (lo >= hi) return null;
-    const span = try text.encode(a, note[lo..hi], false);
-    if (span.len < 4) return null;
+fn insideRaw(a: std.mem.Allocator, text: model_text.Text, note: []const u8, span: []const u32) !bool {
     const quoted = try json.quote(a, note, .{});
     const histories = [_][]const u8{
         "",
@@ -98,9 +99,9 @@ pub fn rawSpanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) 
         const messages = try std.fmt.allocPrint(a, "[{s}{{\"role\":\"user\",\"content\":{s}}}]", .{ history, quoted });
         var problem: []const u8 = "";
         const ids = try text.renderIds(a, (try json.parseText(a, messages)).ok, .{}, &problem);
-        if (std.mem.indexOf(u32, ids, span) == null) return null;
+        if (std.mem.indexOf(u32, ids, span) == null) return false;
     }
-    return span;
+    return true;
 }
 
 /// Whether `span` is inside the tokens of `note`'s line in each way a block can render and surround it.
@@ -124,29 +125,32 @@ fn insideEveryWrapper(a: std.mem.Allocator, text: model_text.Text, note: []const
     return true;
 }
 
-/// Ask the engine about quoted-note and raw teaching-turn spans, retaining conservative failures.
-pub fn forget(srv: *Server, a: std.mem.Allocator, notes: []const []const u8) Forget {
-    var f: Forget = .{ .holders = srv.prompt_holders.load(.acquire) > 0 or srv.preparing.load(.acquire) > 0 };
+pub const Spans = struct { items: []const []const u32, short: bool };
+
+/// Discover before journal commit, so a crash leaves sufficient durable work to retry.
+pub fn discover(a: std.mem.Allocator, text: model_text.Text, notes: []const []const u8) !Spans {
+    var spans: std.ArrayList([]const u32) = .empty;
+    var short = false;
     for (notes) |note| {
-        const found = spanOf(a, srv.text, note) catch null;
-        const span = found orelse blk: {
-            f.short = true; // still forgotten where its whole quoted text is found; only not shown gone
-            var q: std.ArrayList(u8) = .empty;
-            line.quote(a, &q, note) catch break :blk &[_]u32{};
-            break :blk srv.text.encode(a, q.items, false) catch &[_]u32{};
-        };
-        if (span.len == 0) {
-            f.short = true;
-            continue;
-        }
-        ask(srv, &f, span);
-        const raw = (rawSpanOf(a, srv.text, note) catch null) orelse {
-            f.short = true;
-            continue;
-        };
-        if (!std.mem.eql(u32, raw, span)) ask(srv, &f, raw);
+        const quoted = try spanOf(a, text, note);
+        const raw = try rawSpanOf(a, text, note);
+        if (quoted) |s| try spans.append(a, s) else short = true;
+        if (raw) |s| {
+            if (quoted == null or !std.mem.eql(u32, quoted.?, s)) try spans.append(a, s);
+        } else short = true;
     }
+    return .{ .items = spans.items, .short = short };
+}
+
+pub fn forgetSpans(srv: *Server, spans: []const []const u32, short: bool) Forget {
+    var f: Forget = .{ .short = short, .holders = srv.prompt_holders.load(.acquire) > 0 or srv.preparing.load(.acquire) > 0 };
+    for (spans) |span| ask(srv, &f, span);
     return f;
+}
+
+pub fn forget(srv: *Server, a: std.mem.Allocator, notes: []const []const u8) Forget {
+    const spans = discover(a, srv.text, notes) catch return .{ .short = true };
+    return forgetSpans(srv, spans.items, spans.short);
 }
 
 fn ask(srv: *Server, f: *Forget, span: []const u32) void {
@@ -173,6 +177,8 @@ pub fn check(srv: *Server, forgot: Forget, origin: Origin) std.EnumArray(Place, 
     var out: std.EnumArray(Place, Status) = .initFill(.off);
     const held = forgot.holders or srv.prompt_holders.load(.acquire) > 0 or srv.preparing.load(.acquire) > 0;
     out.set(.prompt_cache, if (!srv.info.prompt_cache) .off else if (!held and forgot.cacheClear()) .forgotten else .may_hold);
+    out.set(.engine_records, if (forgot.out.failed > 0 or srv.info.speech != null) .may_hold else .empty);
+    out.set(.recall, if (srv.recall != null) .may_hold else diskOff(srv, origin, .recall));
     out.set(.learn_files, if (srv.config.learn) .may_hold else diskOff(srv, origin, .learn)); // on: current-root clearance cannot rule out earlier operator-selected roots
     out.set(.responses, if (srv.store.count(srv.io) > 0) .may_hold else .empty); // always on: empty is what shows it holds nothing
     out.set(.cortheon, if (srv.cortheon) |c| (if (c.memory.count() > 0) .may_hold else .empty) else .off);
@@ -185,7 +191,7 @@ pub fn check(srv: *Server, forgot: Forget, origin: Origin) std.EnumArray(Place, 
     return out;
 }
 
-const Disk = enum { learn, compact, log, slide };
+const Disk = enum { learn, compact, log, slide, recall };
 
 fn pocketMade(srv: *Server) bool {
     if (srv.slide.model) |m| if (m.pocket > 0) return true;
@@ -205,6 +211,7 @@ fn diskOff(srv: *Server, origin: Origin, which: Disk) Status {
         if (!born) continue;
         any_on = any_on or switch (which) {
             .learn => run.learn,
+            .recall => run.recall orelse true,
             .compact => run.compact_memory.len != 0,
             .log => run.request_log.len != 0,
             .slide => run.slide or run.pocket,

@@ -7,7 +7,9 @@ separate dependent changes. Ordinary generation does not read the store.
 Start the native server with `--notes snapshot.json`. The snapshot must use the
 served tokenizer's vocabulary and, when present, its `tokenizer.json` SHA-256.
 The journal is stored beside the snapshot as `snapshot.json.journal`. A second
-writer is refused. Without `--notes`, `/v1/notes` routes return 404.
+writer is refused from startup, including before the first write. The journal
+uses format 3 for stable identities and retry work; older formats are upgraded
+under the writer lock, and older binaries refuse the new format. Without `--notes`, `/v1/notes` routes return 404.
 
 The routes use the server's existing authentication:
 
@@ -22,9 +24,10 @@ The routes use the server's existing authentication:
 | `DELETE /v1/notes/ID?erase=true` | Rewrite the journal and replay the snapshot without the erased write's closure. |
 
 An erase refuses snapshot-owned notes: change the source snapshot and export it
-again. It also refuses a snapshot file that changed since startup. Source numbers
-are never reused, including after erase and restart. IDs can move during replay;
-the reply lists those changes in `renumbered` as `from` / `to` pairs.
+again. It also refuses a snapshot file that changed since startup. Source numbers and numeric note IDs
+are never reused, including after erase and restart. Surviving IDs stay unchanged;
+`renumbered` is retained as an empty compatibility field. Invalid or repeated
+`erase` query values are refused before either delete mode runs.
 
 The erase reply reports the erased ID, removed sources, per-place status and
 `complete`. It asks the engine thread to remove matching prompt states, clears
@@ -35,11 +38,24 @@ result incomplete. A journal rename followed by a failed directory sync returns
 HTTP 500 with `erased` and the journal's unresolved status.
 
 `complete: false` means the store change applied but other copies may remain.
-The reply names those places, including running requests, stored Responses,
+Retry the same DELETE to resume pending cleanup, including after a restart. The
+journal atomically records the target identity and token spans before engine
+cleanup. These spans can reveal the erased text and remain protected like the
+notes journal until cleanup completes; the response names the journal while
+that record remains. No removed note plaintext is retained. A completed erase
+subsequently returns 404 and can never target a different note.
+
+The reply names unresolved places, including Recall prompt/reply records,
+engine token traces, running requests, stored Responses,
 compaction files, request logs and learned weights. Learned-folder diagnostics
 cover only the current configured root; they do not prove that earlier roots or
 another server's files are clear. Enabling a learned writer therefore remains
 conservative even after the current conversation states have been removed.
+
+Erase matching is linear for engine requests of at most 64k tokens. Sibling
+inspection stops at 16 folders and refuses indexes over 8 MiB, reporting an
+unresolved scan budget. Erase still waits for checked disk writes and syncs;
+these checks do not establish a frame-latency bound on slow storage.
 
 Host regression checks use fake engine states and real journal/state files:
 

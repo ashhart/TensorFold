@@ -27,14 +27,23 @@ pub const Reply = struct {
         return .{ .prefix = encoded[0 .. encoded.len - 1], .buffer = try a.alloc(u8, encoded.len + 16384) };
     }
 
-    pub fn finish(r: Reply, srv: *Server, a: std.mem.Allocator, e: *const erase.Prepared) ![]const u8 {
+    pub fn finish(r: Reply, srv: *Server, a: std.mem.Allocator, e: *erase.Prepared) ![]const u8 {
         defer srv.text.forget();
-        const forgotten = places.forget(srv, a, e.texts);
+        const forgotten = places.forgetSpans(srv, e.intent.spans, e.intent.short);
         var checked = places.check(srv, forgotten, .{
             .this_process = e.source_num >= e.storage.start_source,
             .source_num = e.source_num,
         });
         if (e.unsynced) checked.set(.journal, .may_hold);
+        var all_clear = true;
+        for (std.enums.values(places.Place)) |p| if (checked.get(p) == .may_hold) {
+            all_clear = false;
+        };
+        if (!all_clear) checked.set(.journal, .may_hold);
+        if (all_clear) e.finish(a) catch {
+            e.retire_failed = true;
+            checked.set(.journal, .may_hold);
+        };
         var b: Buffer = .{ .bytes = r.buffer };
         try b.put("{s},\"places\":{{", .{r.prefix});
         var pending: usize = 0;
@@ -72,6 +81,7 @@ pub const Reply = struct {
         try b.put("],\"learned_folders_omitted\":{d},\"conversation_states_removed\":{d}", .{
             forgotten.out.folders.omitted, forgotten.out.conversations,
         });
+        if (e.retire_failed) try b.put(",\"error\":{{\"message\":\"erase applied; cleanup record could not be retired\",\"type\":\"server_error\",\"code\":500}}", .{});
         if (e.unsynced) try b.put(",\"error\":{{\"message\":\"erase applied but journal directory sync failed\",\"type\":\"server_error\",\"code\":500}}", .{});
         try b.put("}}", .{});
         return b.bytes[0..b.len];

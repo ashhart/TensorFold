@@ -58,7 +58,10 @@ test "storage erase prepares without mutation and survives journal replay" {
 }
 
 test {
+    _ = @import("review_notes_test.zig");
     _ = @import("notes_journal_oom_test.zig");
+    _ = @import("notes_journal_tmp_test.zig");
+    _ = @import("notes_erase_span_test.zig");
     const testing = @import("std").testing;
     testing.refAllDecls(@import("notes/model.zig"));
     testing.refAllDecls(@import("notes/write.zig"));

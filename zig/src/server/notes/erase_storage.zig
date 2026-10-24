@@ -2,6 +2,8 @@
 const std = @import("std");
 const Storage = @import("storage.zig").Storage;
 const model = @import("model.zig");
+const places = @import("../notes_erase_places.zig");
+const intent_mod = @import("erase_intent.zig");
 const write = @import("write.zig");
 const records = @import("../notes_records.zig");
 const Allocator = std.mem.Allocator;
@@ -16,11 +18,14 @@ pub const Prepared = struct {
     moved: []const [2]u32,
     texts: []const []const u8,
     source_num: u64,
+    intent: intent_mod.Intent,
+    retry: bool = false,
     committed: bool = false,
     unsynced: bool = false,
+    retire_failed: bool = false,
 
     pub fn deinit(p: *Prepared) void {
-        if (!p.committed) {
+        if (!p.committed and !p.retry) {
             p.log.deinit();
             p.fresh.deinit();
         }
@@ -30,6 +35,15 @@ pub const Prepared = struct {
     pub fn commit(p: *Prepared, a: Allocator) !void {
         if (p.committed) return error.AlreadyCommitted;
         const s = p.storage;
+        if (p.retry) {
+            p.committed = true;
+            return;
+        }
+        const j = &s.journal.?;
+        const owned = try p.intent.dupe(j.gpa);
+        errdefer owned.deinit(j.gpa);
+        try j.erases.append(j.gpa, owned);
+        errdefer _ = j.erases.pop();
         s.journal.?.rewrite(a, p.kept, p.log.next_source) catch |e| switch (e) {
             error.RenamedUnsynced => p.unsynced = true,
             else => return e,
@@ -42,6 +56,20 @@ pub const Prepared = struct {
         old_log.deinit();
         old.deinit();
     }
+    /// Clear durable work only after every named location is clear; failed retirement remains retryable.
+    pub fn finish(p: *Prepared, a: Allocator) !void {
+        const j = &p.storage.journal.?;
+        if (j.poisoned) return error.JournalPoisoned;
+        for (j.erases.items, 0..) |i, k| if (i.id == p.intent.id) {
+            const removed = j.erases.orderedRemove(k);
+            j.rewrite(a, p.kept, p.log.next_source) catch |e| {
+                j.erases.insertAssumeCapacity(k, removed);
+                return e;
+            };
+            removed.deinit(j.gpa);
+            return;
+        };
+    }
 };
 
 pub fn prepare(s: *Storage, a: Allocator, id: u32) !Prepared {
@@ -49,6 +77,11 @@ pub fn prepare(s: *Storage, a: Allocator, id: u32) !Prepared {
     if (j.poisoned) return error.JournalPoisoned;
     if (!s.started) return error.MissingRun;
     const old = s.model;
+    for (j.erases.items) |i| if (i.id == id) {
+        var kept: std.ArrayList(write.Record) = .empty;
+        for (s.log.items.items) |e| try kept.append(a, e.r);
+        return .{ .storage = s, .fresh = old, .log = s.log, .kept = kept.items, .removed = i.removed, .moved = &.{}, .texts = &.{}, .source_num = i.source_num, .intent = i, .retry = true };
+    };
     const place = old.placeOf(id) orelse return error.NoNote;
     if (place < old.base_notes) return error.SnapshotNote;
     const source = old.notes.items[place].source().?;
@@ -68,14 +101,21 @@ pub fn prepare(s: *Storage, a: Allocator, id: u32) !Prepared {
             continue;
         }
         // These records borrow the old log until commit has finished rewriting the journal.
-        try kept.append(a, entry.r);
         var outcome: write.Outcome = undefined;
         var undo: write.Undo = .{};
         defer undo.deinit(g);
         try write.apply(fresh, s.text, a, entry.r, &outcome, &undo);
         write.commit(fresh, &undo);
+        // Replaying without a take-back may make a later write redundant. Name that removal explicitly.
+        if (outcome.note == 0 and old.placeOfSource(entry.r.source) != null) {
+            try removed.append(a, try a.dupe(u8, entry.r.source));
+            continue;
+        }
         try log.add(entry.r, outcome, fresh);
+        try kept.append(a, log.items.items[log.items.items.len - 1].r);
+        fresh.id_floor = @max(fresh.nextId(), entry.r.id + 1);
     }
+    fresh.id_floor = @max(fresh.nextId(), old.nextId());
     try fresh.trim();
     var moved: std.ArrayList([2]u32) = .empty;
     for (old.notes.items[old.base_notes..]) |*note| if (fresh.placeOfSource(note.source().?)) |q| {
@@ -95,7 +135,9 @@ pub fn prepare(s: *Storage, a: Allocator, id: u32) !Prepared {
             if (std.mem.eql(u8, seen, raw)) break;
         } else try texts.append(a, try a.dupe(u8, raw));
     }
+    const spans = try places.discover(a, s.text, texts.items);
     return .{
+        .intent = .{ .id = id, .source_num = source_num, .removed = removed.items, .spans = spans.items, .short = spans.short },
         .storage = s,
         .fresh = fresh,
         .log = log,

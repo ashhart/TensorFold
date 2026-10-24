@@ -140,7 +140,7 @@ test {
     _ = @import("memo_reuse_test.zig");
 }
 
-test "clear removes all memo entries and permits fresh encodes" {
+test "clear drops every kept segment, zeroed, and the memo keeps working" {
     const a = std.testing.allocator;
     const m = try Memo.create(a, 1024);
     defer m.destroy();

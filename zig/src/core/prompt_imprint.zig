@@ -163,7 +163,7 @@ pub const Imprint = struct {
             std.mem.writeInt(u64, data[8..16], key, .little);
             std.crypto.hash.sha2.Sha256.hash(data[0..16], data[16..48], .{});
             try writeAll(fd, &data);
-            if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
+            if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
         }
         if (platform.c.rename(tmp, try std.fmt.bufPrintSentinel(&dest, "{s}/pending", .{m.dir}, 0)) != 0) return error.ImprintWrite;
     }
@@ -196,7 +196,7 @@ pub const Imprint = struct {
         try m.metas.ensureUnusedCapacity(m.gpa, 1);
         errdefer _ = platform.c.ftruncate(fd, end);
         try record(fd, key, at, tokens, below, bytes);
-        if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
+        if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
         m.index_end = @as(u64, @intCast(end)) + HEAD * 4 + 4 * (tokens.len + below.len);
         m.clock += 1;
         m.metas.appendAssumeCapacity(.{ .key = key, .at = at, .tokens = t, .starts = s, .bytes = bytes, .used = m.clock });
@@ -210,6 +210,14 @@ pub const Imprint = struct {
 
     /// One atomic index rewrite for a batch; the caller removes the family's files afterwards.
     pub fn removeMany(m: *Imprint, keys: []const u64) !void {
+        return m.removeBatch(keys, false);
+    }
+
+    pub fn eraseMany(m: *Imprint, keys: []const u64) !void {
+        return m.removeBatch(keys, true);
+    }
+
+    fn removeBatch(m: *Imprint, keys: []const u64, erase: bool) !void {
         if (keys.len == 0) return;
         var removed: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer removed.deinit(m.gpa);
@@ -223,7 +231,9 @@ pub const Imprint = struct {
         {
             defer _ = platform.c.close(fd);
             for (m.metas.items) |x| if (!removed.contains(x.key)) try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
-            if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
+            if (erase) {
+                if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
+            } else if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
         }
         if (platform.c.rename(tmp, try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) != 0) return error.ImprintWrite;
         var i = m.metas.items.len;
@@ -278,6 +288,7 @@ pub const Imprint = struct {
 
     fn readIndex(m: *Imprint, fd: c_int) !void {
         const end = try indexSize(fd);
+        if (m.inspect_only and end > 8 << 20) return error.ImprintInspectBudget;
         var off: u64 = 0;
         while (off < end) {
             if (end - off < HEAD * 4) {
@@ -354,7 +365,7 @@ fn indexSize(fd: c_int) !u64 {
 
 fn repairTail(fd: c_int, whole: u64, observed: u64) !void {
     if (platform.c.lseek(fd, 0, platform.c.SEEK.END) != observed) return error.ImprintRead;
-    if (platform.c.ftruncate(fd, @intCast(whole)) != 0 or !@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
+    if (platform.c.ftruncate(fd, @intCast(whole)) != 0 or platform.c.fsync(fd) != 0) return error.ImprintWrite;
 }
 
 fn ordered(starts: []const u32) bool {

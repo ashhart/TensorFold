@@ -1,5 +1,5 @@
 //! Bounded, owned diagnostics for sibling identities under the current learned root.
-pub const Reason = enum { unowned_match, unindexed, appending, unreadable };
+pub const Reason = enum { unowned_match, unindexed, appending, unreadable, scan_budget };
 pub const Issue = struct { identity: u64, reason: Reason };
 pub const Folders = struct {
     items: [8]Issue = @splat(.{ .identity = 0, .reason = .unowned_match }),

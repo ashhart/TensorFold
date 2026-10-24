@@ -102,6 +102,7 @@ pub const Model = struct {
     pairs: std.ArrayList(Pair) = .empty,
     phrases: std.ArrayList(Phrase) = .empty,
     notes: std.ArrayList(Note) = .empty, // by id, ascending
+    id_floor: u32 = 1, // persisted high-water mark: an erased id is never assigned again
     base_notes: usize = 0, // the snapshot's notes come first
     told_last: i64 = 0,
     grams_current: u32 = 0, // the snapshot's own n-gram counts, which Index.load checks
@@ -136,7 +137,7 @@ pub const Model = struct {
     }
 
     pub fn nextId(m: *const Model) u32 {
-        return if (m.notes.items.len == 0) 1 else m.notes.items[m.notes.items.len - 1].id + 1;
+        return @max(m.id_floor, if (m.notes.items.len == 0) 1 else m.notes.items[m.notes.items.len - 1].id +| 1);
     }
 
     /// The first entity with this name.

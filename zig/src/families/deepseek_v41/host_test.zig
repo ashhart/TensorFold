@@ -336,3 +336,7 @@ test "real pack headers (TF_DSV41_HEADERS: model.safetensors.index.json and <sha
         }
     }
 }
+
+test {
+    _ = @import("serve_recorder_test.zig");
+}

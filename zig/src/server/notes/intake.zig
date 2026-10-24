@@ -1,6 +1,5 @@
 //! The deterministic part of LLWZ's intake check (zengine/intake.py): a sentence's normal form, and the verdicts.
 const std = @import("std");
-const question = @import("question.zig");
 const Allocator = std.mem.Allocator;
 
 /// intake.VERDICTS. A write here gives IMPLIED only on replay, for a take-back of a note that was erased.
@@ -64,47 +63,6 @@ pub fn norm(a: Allocator, text: []const u8) Allocator.Error![]u8 {
     while (end > 0 and std.mem.indexOfScalar(u8, ".!? ", out.items[end - 1]) != null) end -= 1;
     out.shrinkRetainingCapacity(end);
     return out.toOwnedSlice(a);
-}
-
-/// The most a chat message written as a note may hold: one sentence, not a pasted document (the server's own rule).
-pub const statement_limit: usize = 400;
-
-/// A user's chat message as the intake takes it: its text without the space around it, or why it is not a note.
-pub const Statement = union(enum) { text: []const u8, skip: []const u8 };
-
-pub fn statement(text: []const u8) Statement {
-    var start: ?usize = null;
-    var end: usize = 0;
-    var words = false;
-    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-    while (it.nextCodepointSlice()) |s| {
-        const cp = std.unicode.utf8Decode(s) catch 0xfffd;
-        if (isSpace(cp)) continue;
-        if (start == null) start = it.i - s.len;
-        end = it.i;
-        if (cp >= 0x80 and !question.isDecoration(cp) or cp < 0x80 and std.ascii.isAlphanumeric(@intCast(cp))) words = true;
-    }
-    const t = text[start orelse 0..end];
-    // intake.readings' rule ("My eyes are green?" asks; it does not tell), widened for chat: question.zig
-    if (question.reason(t)) |why| return .{ .skip = why };
-    if (!words) return .{ .skip = "no words" };
-    if (std.mem.indexOfAny(u8, t, "\n\r") != null) return .{ .skip = "more than one line: a note is one sentence" };
-    if (t.len > statement_limit) return .{ .skip = "over 400 bytes: a note is one sentence" };
-    return .{ .text = t };
-}
-
-test "a statement is written; a question, an empty message, several lines or a long text are not" {
-    try std.testing.expectEqualStrings("My favourite colour is green.", statement(" My favourite colour is green.\n").text);
-    try std.testing.expectEqualStrings("Yes, that's right.", statement("Yes, that's right.").text);
-    try std.testing.expectEqualStrings("a question: it ends in a question mark", statement("What colour do I like?").skip);
-    try std.testing.expectEqualStrings("a question: it ends in a question mark", statement("My eyes are green? \u{3000}\n").skip);
-    try std.testing.expectEqualStrings("a question: it opens as one", statement("What colour do I like").skip);
-    try std.testing.expectEqualStrings("no words", statement(" ... ").skip);
-    try std.testing.expectEqualStrings("no words", statement("\u{1F44D}\u{1F3FD} \u{2764}\u{FE0F}").skip);
-    try std.testing.expectEqualStrings("more than one line: a note is one sentence", statement("a\nb").skip);
-    const long: [401]u8 = @splat('x');
-    try std.testing.expect(statement(long[0..400]) == .text);
-    try std.testing.expect(statement(&long) == .skip);
 }
 
 test "norm: one line, straight quotes, single spaces, no closing punctuation, ASCII lowered" {

@@ -132,7 +132,7 @@ pub fn forget(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgo
         };
     }
     if (keys.items.len == 0) return;
-    im.removeMany(keys.items) catch {
+    im.eraseMany(keys.items) catch {
         out.failed += 1;
         return;
     };
@@ -180,12 +180,19 @@ pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc
         im.forget_pending = true;
     };
     var cursor: ?u64 = null;
+    var inspected: usize = 0;
     while (true) {
         const id = (dirs.next(im.root, im.dir, cursor) catch {
             out.failed += 1;
             return;
         }) orelse break;
         cursor = id;
+        if (inspected == 16) {
+            out.folders.add(id, .scan_budget);
+            out.held += 1;
+            return;
+        }
+        inspected += 1;
         if (s.disk) |r| if (r.keying.identity == id) continue;
         var other = imprint.Imprint.inspect(s.gpa, im.root, id) catch |err| {
             if (err == error.ImprintUnindexed or err == error.ImprintAppending) {
@@ -195,7 +202,7 @@ pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc
                 continue;
             }
             out.failed += 1;
-            out.folders.add(id, .unreadable);
+            out.folders.add(id, if (err == error.ImprintInspectBudget) .scan_budget else .unreadable);
             continue;
         };
         defer other.deinit();

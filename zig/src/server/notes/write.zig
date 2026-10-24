@@ -18,6 +18,7 @@ pub const Target = union(enum) { none, note: u32, source: []const u8 };
 /// One write as the journal keeps it: what replay needs to make it again, nothing derived.
 pub const Record = struct {
     op: Op,
+    id: u32 = 0, // persisted identity; zero only for legacy records and direct model callers
     source: []const u8, // the write's own name ("w1"), which the note keeps as its source
     told: i64,
     subject: []const u8, // the entity; a change or take-back keeps its target's
@@ -155,7 +156,8 @@ pub fn apply(m: *Model, text: model_text.Text, a: Allocator, r: Record, out: *Ou
         out.* = .{ .verdict = verdict };
         return;
     }
-    const id = m.nextId();
+    const id = if (r.id == 0) m.nextId() else r.id;
+    if (id < m.nextId() or id == std.math.maxInt(u32)) return error.Tokenizer;
     const kind: model_mod.Kind = if (r.op == .take_back) .tombstone else .fact;
     const ids = try encode(g, text, r.text);
     defer g.free(ids);
@@ -290,15 +292,6 @@ fn indexWrite(m: *Model, undo: *const Undo) void {
 pub fn commit(m: *Model, undo: *Undo) void {
     indexWrite(m, undo);
     for (undo.gone.items) |s| m.gpa.free(s.line);
-    undo.gone.clearRetainingCapacity();
-    undo.pair = null;
-    undo.fact = null;
-}
-
-/// commit() for a model an index reads: the old lines go to `keep` (room reserved), freed with the last reader.
-pub fn commitKeeping(m: *Model, undo: *Undo, keep: *std.ArrayList([]u8)) void {
-    indexWrite(m, undo);
-    for (undo.gone.items) |s| keep.appendAssumeCapacity(s.line);
     undo.gone.clearRetainingCapacity();
     undo.pair = null;
     undo.fact = null;

@@ -86,17 +86,28 @@ pub const Storage = struct {
             var recs: std.ArrayList(write.Record) = .empty;
             s.journal = try journal_mod.Journal.open(g, arena.allocator(), p, s.snapshot_sha, &recs, problem);
             errdefer s.journal.?.deinit();
-            for (recs.items) |r| {
+            for (recs.items) |old_record| {
+                var r = old_record;
+                if (r.id == 0) r.id = m.nextId();
                 var out: write.Outcome = undefined;
                 var undo: write.Undo = .{};
                 defer undo.deinit(g);
                 try write.apply(m, text, arena.allocator(), r, &out, &undo);
                 write.commit(m, &undo);
+                if (old_record.id == 0 and out.note == 0) r.id = 0;
+                if (r.id != 0) m.id_floor = @max(m.nextId(), r.id + 1);
                 try s.log.add(r, out, m);
             }
             try m.trim();
             s.replayed = recs.items.len;
             s.log.next_source = @max(s.log.next_source, s.journal.?.next_source);
+            m.id_floor = @max(m.nextId(), s.journal.?.next_id);
+            s.journal.?.next_id = m.id_floor;
+            if (s.journal.?.upgraded) {
+                var stable: std.ArrayList(write.Record) = .empty;
+                for (s.log.items.items) |e| try stable.append(arena.allocator(), e.r);
+                try s.journal.?.rewrite(arena.allocator(), stable.items, s.log.next_source);
+            }
         }
         return s;
     }
@@ -139,10 +150,12 @@ pub const Storage = struct {
         var out: write.Outcome = undefined;
         var undo: write.Undo = .{};
         errdefer undo.deinit(g);
-        try write.apply(s.model, s.text, a, r, &out, &undo);
+        var record = r;
+        record.id = s.model.nextId();
+        try write.apply(s.model, s.text, a, record, &out, &undo);
         errdefer write.revert(s.model, &undo);
-        const entry = try s.log.prepare(r, out, s.model);
-        return .{ .storage = s, .record = r, .out = out, .undo = undo, .entry = entry };
+        const entry = try s.log.prepare(record, out, s.model);
+        return .{ .storage = s, .record = record, .out = out, .undo = undo, .entry = entry };
     }
 };
 
@@ -170,6 +183,8 @@ pub const Pending = struct {
         try s.journal.?.append(a, p.record);
         write.commit(s.model, &p.undo);
         s.log.push(p.entry);
+        s.model.id_floor = @max(s.model.nextId(), p.record.id + 1);
+        s.journal.?.next_id = s.model.nextId();
         p.committed = true;
     }
 };

@@ -60,6 +60,7 @@ pub const Host = struct {
     disk: api.ImprintDisk = .{}, // the Mac app's questions about kept states, and the disk writer's quiet
     served: u64 = 0, // requests taken from the queue: a new one restarts the writer's quiet
     vis: ?*images.Vision = null, // --vision: the image tower and its prompt rows
+    forgets: api.prompt_forget.Queue = .{}, // forget_prompts calls waiting for the engine thread, run between replies
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -78,7 +79,7 @@ pub const Host = struct {
     }
 
     /// A container constant: a literal with a call in a field lives on the stack, so engine() handed it out dangling.
-    const vtable: api.Engine.VTable = .{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .imprint = disk.ask(Host), .drain = drainFn };
+    const vtable: api.Engine.VTable = .{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .imprint = disk.ask(Host), .drain = drainFn, .forget_prompts = forgetFn };
 
     pub fn engine(h: *Host) api.Engine {
         return .{ .ctx = h, .vtable = &vtable };
@@ -93,6 +94,40 @@ pub const Host = struct {
         h.unlock();
         if (h.thread) |t| t.join();
         h.thread = null;
+        h.lock();
+        h.forgets.close(h.gpa, h.io); // a forget asked after the thread's last pass: refused
+        h.unlock();
+    }
+
+    /// Engine.forget_prompts: queued for the engine thread, which runs it before the next reply.
+    fn forgetFn(ctx: *anyopaque, span: []const u32) api.ForgetError!pc.Forgotten {
+        const h = self(ctx);
+        h.lock();
+        defer h.unlock();
+        if (h.closing) return error.Closed;
+        return h.forgets.ask(h.gpa, h.io, &h.mutex, &h.wake, span);
+    }
+
+    /// Runs the forgets asked since the last reply (engine thread, no reply running: no kept state is being restored).
+    fn takeForgets(h: *Host) void {
+        h.lock();
+        var asks = h.forgets.take();
+        for (asks.items) |ask| {
+            ask.out = .{};
+            for (h.queued.items) |job| if (api.prompt_forget.carries(job.request.prompt, ask.span)) {
+                ask.out.in_flight += 1;
+            };
+        }
+        h.unlock();
+        for (asks.items) |ask| {
+            const in_flight = ask.out.in_flight;
+            ask.out = if (h.cache) |*store| store.forgetSpan(ask.span, &.{}) else .{};
+            ask.out.in_flight = in_flight;
+        }
+        h.lock();
+        h.forgets.answer(h.io, asks.items);
+        h.unlock();
+        asks.deinit(h.gpa);
     }
 
     /// The engine's queue as a keepalive target: the ticker commits a tiny buffer on it while idle.
@@ -217,11 +252,16 @@ pub const Host = struct {
     fn run(h: *Host) void {
         while (true) {
             h.lock();
-            if (h.queued.items.len == 0 and !h.closing) {
+            if (h.queued.items.len == 0 and !h.closing and !h.forgets.pending()) {
                 const ms_: i64 = if (disk.idleWork(h)) 10 else 100; // writes waiting for the quiet look again soon
                 if (ms_ == 100 or !h.disk.quiet(h.served, h.now())) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(ms_), .clock = .awake } }) catch {};
                 h.unlock();
                 _ = disk.idleStep(h);
+                continue;
+            }
+            if (h.forgets.pending()) { // between replies, before the next one is taken
+                h.unlock();
+                h.takeForgets();
                 continue;
             }
             if (h.closing) {
@@ -485,7 +525,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
     errdefer dropResident(h);
     // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call
-    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .forget_peers_clear = Snaps.peersClear, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget, .rows = &rows_image } }, .{ .lookahead = 1, .chunk = 1, .warm = .on }, budget);
+    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &cache_vtable }, .{ .lookahead = 1, .chunk = 1, .warm = .on }, budget);
     h.info_.prompt_cache = h.cache != null;
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
@@ -535,64 +575,19 @@ pub fn close(ctx: *anyopaque) void {
     h.gpa.destroy(h);
 }
 
+const cache_vtable: pc.Snapshots.VTable = .{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .forget_peers_clear = Snaps.peersClear, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget, .forget_checked = pc.singleForgetChecked, .rows = &rows_image };
+
+test "FlashNext cache wires checked learned-file forgetting" {
+    try std.testing.expect(cache_vtable.forget_checked != null);
+    try std.testing.expect(cache_vtable.forget_checked.? == pc.singleForgetChecked);
+    try std.testing.expect(cache_vtable.forget_peers_clear != null);
+    try std.testing.expect(cache_vtable.forget_peers_clear.? == Snaps.peersClear);
+}
+
 test "status after a reply finishes reads no freed job" {
-    const gpa = std.testing.allocator;
-    var h: Host = .{ .gpa = gpa, .io = std.testing.io, .eng = undefined, .info_ = undefined };
-    defer h.decoded.deinit(gpa);
-    const Reader = struct { // the server's status poll, here inside the finished event and after it
-        h: *Host,
-        running: u32 = 9,
-        fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
-            const r: *@This() = @ptrCast(@alignCast(ctx));
-            var st: api.Status = .{};
-            var toks: [2]u32 = .{ 0, 0 };
-            if (e.* == .finished) {
-                Host.statusFn(r.h, &st, &toks);
-                r.running = st.running;
-            }
-        }
-    };
-    var reader: Reader = .{ .h = &h };
-    const prompt = [_]u32{ 1, 2, 3 };
-    const request: api.Request = .{ .prompt = &prompt, .max_tokens = 4 };
-    const job = try gpa.create(Job);
-    job.* = .{ .id = 1, .request = &request, .sink = .{ .ctx = &reader, .event = Reader.event } };
-    try job.emitted.append(gpa, 7);
-    h.lock();
-    h.running = job; // as run() holds it while serve runs
-    h.live_prompt = prompt.len;
-    h.live_generated = 1;
-    h.unlock();
-    var st: api.Status = .{};
-    var toks: [2]u32 = .{ 0, 0 };
-    Host.statusFn(&h, &st, &toks);
-    try std.testing.expectEqual(@as(u32, 1), st.running);
-    try std.testing.expectEqual(@as(u32, 4), toks[0]);
-    h.finish(job, .stop, .{}, ""); // serve's completion: the job is freed, serve has not returned
-    try std.testing.expectEqual(@as(u32, 0), reader.running);
-    Host.statusFn(&h, &st, &toks); // a poll before run() clears its own pointer
-    try std.testing.expectEqual(@as(u32, 0), st.running);
-    try std.testing.expectEqual(@as(usize, 0), st.streams);
+    try @import("flashnext_host_test.zig").lifetime(Host, Job, Host.statusFn, Host.finish);
 }
 
 test "a drained Flash Next host is unhealthy before another submit" {
-    const gpa = std.testing.allocator;
-    var host: Host = .{ .gpa = gpa, .io = std.testing.io, .eng = undefined, .info_ = .{} };
-    defer host.decoded.deinit(gpa);
-    const engine = host.engine();
-    var status: api.Status = .{};
-    engine.status(&status, &.{});
-    try std.testing.expect(status.healthy);
-    engine.drain();
-    engine.status(&status, &.{});
-    const Sink = struct {
-        fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {
-            @panic("a drained host must refuse admission");
-        }
-    };
-    var ctx: u8 = 0;
-    const request: api.Request = .{ .prompt = &.{1}, .max_tokens = 1 };
-    try std.testing.expectError(error.Closed, engine.submit(1, &request, .{ .ctx = &ctx, .event = Sink.event }));
-    try std.testing.expectEqual(@as(usize, 0), host.queued.items.len);
-    try std.testing.expect(!status.healthy);
+    try @import("flashnext_host_test.zig").drained(Host);
 }
