@@ -57,7 +57,7 @@ pub const Ask = struct {
     gap: u32 = notes_decode.default_gap,
 };
 
-/// The defaults, measured (NOTES-DECODE.md): a hit's notes before the question, a name the reply writes a check point.
+/// Defaults (NOTES-CODE-COMMENTS.md section 21): notes before the question; a name the reply writes is a check.
 pub const default_place: Place = .user;
 pub const default_names = true;
 /// The first lookup's hop is off unless the request sends notes_value_hop: who first stays the default.

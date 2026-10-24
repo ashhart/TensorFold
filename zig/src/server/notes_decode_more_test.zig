@@ -5,8 +5,12 @@ const json = server.json;
 const index = @import("notes/index.zig");
 const model_mod = @import("notes/model.zig");
 const value = @import("notes/value.zig");
+const retrieve = @import("notes/retrieve.zig");
+const notes_decode = @import("notes_decode.zig");
+const lookup_rig = @import("notes_lookup_rig_test.zig");
 const base = @import("notes_decode_test.zig");
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
 const Rig = base.Rig;
 const question = base.question;
 const answers = base.answers;
@@ -157,4 +161,75 @@ test "the defaults: the name trigger and the notes before the question, with no 
     try testing.expect(d.get("names").?.bool);
     try testing.expect(!d.get("value_hop").?.bool);
     try testing.expectEqualStrings("first", d.strField("position").?);
+}
+
+const zebra_text = "Zebra eats hay.";
+const zebra_reply = "The zebra is here.";
+const extra = answers ++ more ++ [_][]const u8{ zebra_text, zebra_reply, "I like blue ink." };
+
+fn journaled(r: *Rig, tmp: *testing.TmpDir) !void {
+    const a = r.arena.allocator();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    r.journal = try std.fs.path.join(a, &.{ dir, "notes.json.journal" });
+    try r.init(&extra);
+}
+
+fn addNote(r: *Rig, a: Allocator, text: []const u8, subject: []const u8) !u32 {
+    const body = try std.fmt.allocPrint(a, "{{\"text\":{s},\"subject\":{s}}}", .{ try json.quote(a, text, .{}), try json.quote(a, subject, .{}) });
+    const got = try lookup_rig.request(r.srv, a, "POST", "/v1/notes", body);
+    try testing.expectEqual(@as(u16, 201), got.status);
+    return @intCast(got.value.get("id").?.int64().?);
+}
+
+fn firstBlock(r: *Rig, a: Allocator) !retrieve.Found {
+    const store = r.srv.notes.?;
+    return retrieve.retrieve(store, r.srv.io, a, r.words.text(), try r.ids(question), false, 512, &.{}, .{});
+}
+
+fn liveOf(r: *Rig, a: Allocator, found: retrieve.Found) !notes_decode.Live {
+    var l: notes_decode.Live = .{ .a = a, .on = true, .store = r.srv.notes.?, .io = r.srv.io, .ver = found.ver, .question = question, .past = false, .cap = 512, .exclude = &.{}, .place = .first, .echo = true, .block = found.block, .block_tokens = found.tokens };
+    try l.held.appendSlice(a, found.ids);
+    return l;
+}
+
+test "an erase of a note a live fetch would take stops further fetches" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r: Rig = .{};
+    try journaled(&r, &tmp);
+    defer r.deinit();
+    const a = r.arena.allocator();
+    const id = try addNote(&r, a, zebra_text, "zebra");
+    const found = try firstBlock(&r, a);
+    try testing.expect(std.mem.indexOfScalar(u32, found.ids, id) == null);
+    var l = try liveOf(&r, a, found);
+    const hit = (try l.check(r.words.text(), a, zebra_reply, 5)).?;
+    try testing.expectEqualSlices(u32, &.{id}, hit.ids);
+    const erased = try lookup_rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id}), "");
+    try testing.expectEqual(@as(u16, 200), erased.status);
+    try testing.expect(r.srv.notes.?.gen != found.ver);
+    var m = try liveOf(&r, a, found);
+    try testing.expect(try m.check(r.words.text(), a, zebra_reply, 5) == null);
+    try testing.expectEqualStrings("the notes changed during the reply", m.stopped.?);
+    try testing.expectEqual(@as(usize, 0), m.injections.items.len);
+    try testing.expect(m.nameWritten(try r.ids(" zebra")) == null);
+}
+
+test "a write mid-reply stops live fetch even when the named note is still there" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r: Rig = .{};
+    try journaled(&r, &tmp);
+    defer r.deinit();
+    const a = r.arena.allocator();
+    const id = try addNote(&r, a, zebra_text, "zebra");
+    const found = try firstBlock(&r, a);
+    var l = try liveOf(&r, a, found);
+    try testing.expectEqualSlices(u32, &.{id}, (try l.check(r.words.text(), a, zebra_reply, 5)).?.ids);
+    _ = try addNote(&r, a, "I like blue ink.", "me");
+    try testing.expect(r.srv.notes.?.gen != found.ver);
+    var m = try liveOf(&r, a, found);
+    try testing.expect(try m.check(r.words.text(), a, zebra_reply, 5) == null);
+    try testing.expectEqualStrings("the notes changed during the reply", m.stopped.?);
+    try testing.expectEqual(@as(usize, 0), m.injections.items.len);
 }

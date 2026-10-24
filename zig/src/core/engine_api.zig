@@ -72,7 +72,7 @@ pub const Request = struct {
     shared_prefixes: []const u32 = &.{},
     /// Where the latest user message's text starts: a state kept before it lets an edit of that turn resume (0: none).
     rewind_len: u32 = 0,
-    /// Exact state to retain for an in-request prompt edit, even on short prompts (0: none); budget still applies.
+    /// Prefix cut for an in-request prompt edit (0: none). Used for the chunk plan; the engine does not read it yet.
     retain_at: u32 = 0,
     /// Prompt chunk starts after 0 (Python PrefillPlan); empty selects the engine's plan.
     chunks: []const u32 = &.{},
