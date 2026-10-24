@@ -11,7 +11,7 @@ const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
 /// The template's call envelope, with XML parameters or JSON arguments.
-pub const Style = enum { xml, json, gemma, glm };
+pub const Style = enum { xml, json, gemma, glm, minimax };
 
 const probe = "tfprobe_fn";
 const key = "tfprobe_k";
@@ -25,6 +25,7 @@ const value_blanks = 32;
 /// The style of `rendered`, a turn that calls `probe` with {key: "v"}; null: markup this grammar does not write.
 pub fn style(rendered: []const u8) ?Style {
     if (std.mem.indexOf(u8, rendered, "<|tool_call>call:" ++ probe ++ "{") != null) return .gemma;
+    if (std.mem.indexOf(u8, rendered, mm ++ "<invoke name=\"" ++ probe ++ "\">") != null) return .minimax;
     const at = std.mem.lastIndexOf(u8, rendered, "<tool_call>") orelse return null;
     const text = rendered[at..];
     if (std.mem.indexOf(u8, text, "<function=" ++ probe ++ ">") != null and std.mem.indexOf(u8, text, "<parameter=" ++ key ++ ">") != null) return .xml;
@@ -32,6 +33,9 @@ pub fn style(rendered: []const u8) ?Style {
     if (std.mem.indexOf(u8, text, "<tool_call>" ++ probe ++ "<arg_key>" ++ key ++ "</arg_key>") != null) return .glm;
     return null;
 }
+
+/// MiniMax-M3's prefix: one call block around every invoke, each argument an element (xgrammar's minimax_m3_xml).
+const mm = "]<]minimax[>[";
 
 /// The grammar for a reply that must call one of `tools`: one call, or (`parallel`) one or more, then the end.
 pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, thinking: bool) errors.Refused!api.Structure {
@@ -53,6 +57,14 @@ pub fn build(a: Allocator, s: Style, tools: []const Value, parallel: bool) Alloc
     for (tools, calls) |t, *c| c.* = try call(a, s, try tool_specs.toolName(a, t), try parameters(a, t));
     const one: Value = if (calls.len == 1) calls[0] else try node(a, "or", &.{.{ "elements", .{ .array = calls } }});
     const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
+    if (s == .minimax) { // one block: its invokes back to back, as the template writes parallel calls
+        var inner: std.ArrayList(Value) = .empty;
+        try inner.appendSlice(a, &.{ ws, try constant(a, mm ++ "<tool_call>\n"), one });
+        if (parallel) try inner.append(a, try node(a, "star", &.{.{ "content", one }}));
+        try inner.appendSlice(a, &.{ try constant(a, mm ++ "</tool_call>"), ws });
+        const block = try node(a, "sequence", &.{.{ "elements", .{ .array = inner.items } }});
+        return json.stringify(a, try node(a, "structural_tag", &.{.{ "format", block }}), .{ .ascii = false, .compact = true });
+    }
     var parts: std.ArrayList(Value) = .empty;
     try parts.appendSlice(a, &.{ ws, one });
     if (parallel) try parts.append(a, try node(a, "star", &.{.{ "content", try node(a, "sequence", &.{.{ "elements", try list(a, &.{ ws, one }) }}) }}));
@@ -84,6 +96,10 @@ fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error
             try whole.put(a, "required", try list(a, &.{ .{ .string = "name" }, .{ .string = "arguments" } }));
             break :blk try list(a, &.{ try constant(a, "<tool_call>"), ws, try arguments(a, .{ .object = whole }, "json"), ws, try constant(a, "</tool_call>") });
         },
+        .minimax => try list(a, &.{
+            try constant(a, try std.fmt.allocPrint(a, mm ++ "<invoke name=\"{s}\">", .{name})), try arguments(a, schema, "minimax_m3_xml"),
+            try constant(a, mm ++ "</invoke>\n"),
+        }),
         // GLM's template writes NAME<arg_key>K</arg_key><arg_value>V</arg_value>... with no blanks: xgrammar's glm_xml
         .glm => try list(a, &.{
             try constant(a, try std.fmt.allocPrint(a, "<tool_call>{s}", .{name})), try arguments(a, schema, "glm_xml"),
@@ -128,6 +144,18 @@ test "the probe call's markup picks the style" {
     try std.testing.expectEqual(Style.json, style("<tool_call>\n{\"name\": \"tfprobe_fn\", \"arguments\": {\"tfprobe_k\": \"v\"}}\n</tool_call>").?);
     try std.testing.expectEqual(Style.gemma, style("<|tool_call>call:tfprobe_fn{tfprobe_k:<|\"|>v<|\"|>}<tool_call|>").?);
     try std.testing.expectEqual(Style.glm, style("</think><tool_call>tfprobe_fn<arg_key>tfprobe_k</arg_key><arg_value>v</arg_value></tool_call>").?);
+    try std.testing.expectEqual(Style.minimax, style("</mm:think>" ++ mm ++ "<tool_call>\n" ++ mm ++ "<invoke name=\"tfprobe_fn\">" ++ mm ++ "<tfprobe_k>v" ++ mm ++ "</tfprobe_k>" ++ mm ++ "</invoke>\n" ++ mm ++ "</tool_call>").?);
+}
+
+test "MiniMax-M3's grammar: one call block, invokes in minimax_m3_xml, more of them only with parallel calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}]")).ok;
+    const single = try build(a, .minimax, tools.array, false);
+    for ([_][]const u8{ "<tool_call>\\n", "<invoke name=\\\"get_weather\\\">", "minimax_m3_xml", "</invoke>\\n", "</tool_call>" }) |text| try std.testing.expect(std.mem.indexOf(u8, single, text) != null);
+    try std.testing.expect(std.mem.indexOf(u8, single, "\"type\":\"star\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, try build(a, .minimax, tools.array, true), "\"type\":\"star\"") != null);
 }
 
 test "a required call's grammar names every offered tool and its schema; one call without parallel" {

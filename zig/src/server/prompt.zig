@@ -42,6 +42,10 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         error.OutOfMemory => return error.OutOfMemory,
         error.Template => return cx.fail(.request, "{s}", .{problem}),
     };
+    // MiniMax-M3 thinks adaptively: with thinking off, its reply begins after the `</mm:think>` the prompt ends with
+    if (!thinking and generation and std.mem.eql(u8, srv.markers.close, @import("reply_text.zig").mm_markers.close)) {
+        if (srv.text.tokenId(srv.markers.close)) |close| return try std.mem.concat(cx.a, u32, &.{ ids, &.{close} });
+    }
     if (!thinking and generation and ids.len > 0) {
         const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);
         if (std.mem.eql(u8, @import("reply_text.zig").pyStrip(last), "<think>")) {

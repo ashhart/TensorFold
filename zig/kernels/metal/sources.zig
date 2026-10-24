@@ -156,6 +156,18 @@ pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
 /// Step-5's glue at StepFun's rounding points: embed, norms, q/k rotation, gate, SwiGLU, residual adds.
 pub const step5_glue = @embedFile("step5/glue.metal");
+/// MiniMax-M3's glue at transformers' rounding points: norms, rotation, SwiGLU-OAI, router, indexer, decode attention.
+pub const minimax_m3_glue = @embedFile("minimax_m3/glue.metal");
+/// MiniMax-M3's prompt attention on the tensor units over each row's kept index blocks.
+pub const minimax_m3_attention_nax = @embedFile("minimax_m3/attention_nax.metal");
+/// MiniMax-M3's DSpark drafter (norms, q/k into its context rings, block attention, the Markov chain) and the taps.
+pub const minimax_m3_dspark = @embedFile("minimax_m3/dspark.metal");
+/// MiniMax-M3's decode-window experts expert by expert (after core_row_projection: its sums, each weight read once).
+pub const minimax_m3_experts = @embedFile("minimax_m3/experts.metal");
+/// incoai's DFlash2 drafter for MiniMax-M3: Qwen3 norms, full RoPE, the block convolution, top-k and the selector.
+pub const minimax_m3_dflash2 = @embedFile("minimax_m3/dflash2.metal");
+/// MiniMax-M3's indexer block scores on the tensor units (a prompt chunk's).
+pub const minimax_m3_index_nax = @embedFile("minimax_m3/index_nax.metal");
 /// Step-5's sparse indexer (summaries, scores, top-k) and its sliding, sparse and dense attention.
 pub const step5_sparse = @embedFile("step5/sparse.metal");
 /// Step-5's prompt attention on the tensor units (a KV group's 16 heads one operand; nax.h inlined at load).
