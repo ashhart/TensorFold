@@ -35,6 +35,7 @@ pub const Kernels = struct {
     dec_narrow: ze.H,
     gemv256: ze.H,
     dense: ze.H,
+    w8: ze.H,
     dec_narrow16: ze.H,
     dec_wide16: ze.H,
     dp_part: [2]ze.H,
@@ -134,6 +135,7 @@ pub const Runner = struct {
             .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
             .gemv256 = try d.kernel(mg, "g4_gemv256", 64),
             .dense = try d.kernel(mg, "g4_dense", 256),
+            .w8 = try d.kernel(mg, "g4_w8", 256),
             .dec_narrow16 = try d.kernel(mm, "w4k_s16x16", 64),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
             .dp_part = .{ try d.kernel(mg, "g4_attn_dp_part", 256), try d.kernel(mgg, "g4_attn_dp_part", 256) },
@@ -297,6 +299,10 @@ pub const Runner = struct {
         const k = r.k;
         if (w.dense) { // a bf16 weight
             try r.d.launch(k.dense, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, out, M, N, K });
+            return;
+        }
+        if (w.bits8) { // 8-bit attention: one kernel for every row count
+            try r.d.launch(k.w8, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, w.s, w.bg, out, ahi, alo, M, N, K });
             return;
         }
         if (m > ROWS and w.k != 256) { // prompt rows: the nGEN GEMMs, the decode kernels' arithmetic
