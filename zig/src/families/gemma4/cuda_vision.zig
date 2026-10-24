@@ -75,6 +75,12 @@ pub const Embedder = struct {
         return e;
     }
 
+    /// The device bytes init allocates for its scratch.
+    pub fn workspaceBytes() u64 {
+        const t: u64 = image.max_budget;
+        return 2 * t * wts.merged_width * 2 + 6 * t * wts.vision_width * 2 + t * wts.vision_width * 4 + 2 * t * 4;
+    }
+
     fn alloc(e: *Embedder, d: *const cuda.Driver, bytes: usize) !u64 {
         const b = try cuda.DeviceBuffer.alloc(d, bytes);
         errdefer {

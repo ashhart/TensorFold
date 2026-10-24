@@ -44,7 +44,7 @@ const native = @This();
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 /// No `precision` field: the server refuses --precision for this family by name. --vision: the 12B's image embedder.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null };
 
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
@@ -59,7 +59,7 @@ pub const Loaded = struct {
     vision: ?*cv.Vision = null,
 };
 
-const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, gb: be.Gemma, v: ?*cv.Vision = null };
+const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, gb: be.Gemma, v: ?*cv.Vision = null, room: ?Room = null };
 
 /// Streams to allocate in `room`: as asked, else (auto) the most that fit; a fixed count past them or a round refuses.
 fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
@@ -76,12 +76,32 @@ const Plan = struct {
     own: *const Owned,
     d: *const cuda.Driver,
     context: usize,
+    /// What open allocates beside the streams: the vision workspace and the drafter's weights.
+    beside: u64,
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
-        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, p.context, n) + be.Gemma.openBytes(n);
+        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, p.context, n) + be.Gemma.openBytes(n) + p.beside;
     }
 };
+
+/// The device bytes of the image path's workspace (the 31B's tower or the 12B's embedder), 0 without --vision.
+fn visionBytes(vision: bool, tower: bool) u64 {
+    if (!vision) return 0;
+    return if (tower) tw.Tower.workspaceBytes() else cv.Embedder.workspaceBytes();
+}
+
+/// The drafter's weights on the device: the checkpoint's files, a DFlash drafter's bf16 linears made 4-bit (5/16).
+fn drafterBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+    var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var total: u64 = 0;
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        if (std.mem.endsWith(u8, e.name, ".safetensors")) total += (try d.statFile(io, e.name, .{})).size;
+    }
+    return if (try dfl.isDFlash(gpa, io, dir)) total / 16 * 5 else total;
+}
 
 /// Positions a stream's caches hold: whole 1,024s.
 fn positions(context: usize) usize {
@@ -101,7 +121,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.w = try wts.load(gpa, io, ctx.d, own.s, &own.k, dir, null, o.vision != null);
     errdefer own.w.deinit();
     const context = @min(positions(o.context), own.w.config.context);
-    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context };
+    const beside = visionBytes(o.vision != null, own.w.tower != null) + if (o.drafter) |dd| (if (o.drafts) try drafterBytes(gpa, io, dd) else 0) else 0;
+    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .beside = beside };
+    own.room = o.room;
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
     const n = fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
         if (e == error.ParallelPastMemory) {
@@ -184,6 +206,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.CapturedKernels => "Gemma 4 runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.ParallelPastRound => std.fmt.comptimePrint("--parallel: Gemma 4 on CUDA holds at most {d} streams (a round's rows): serve --parallel {d} or fewer, or auto", .{ be.round_rows, be.round_rows }),
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Gemma 4 streams than asked (each stream's caches are allocated at load): lower --parallel or --context, serve --parallel auto, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
+        error.DrafterPastMemory => "--drafter: the CUDA memory budget leaves less room than the drafter's weights need after the streams: lower --parallel or --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
         error.NoStreamFits => "the CUDA memory budget fits no Gemma 4 stream after the weights: lower --context, free device memory, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
         else => null,
     };
@@ -194,6 +217,7 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     if (bits != 4) return error.DrafterBitsUnsupported;
     const own: *Owned = @ptrCast(@alignCast(p));
     if (own.gb.lanes.count() != 0) return error.TapsAfterStreams;
+    if (own.room) |r| if (r.read(r.ctx)) |left| if (left < try drafterBytes(gpa, io, dir)) return error.DrafterPastMemory;
     if (try dfl.isDFlash(gpa, io, dir)) {
         const d = try dfl.Drafter.init(gpa, io, &own.gb, dir);
         errdefer d.deinit();
@@ -243,7 +267,7 @@ fn release(p: *anyopaque) void {
 }
 
 test "every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported, error.NoGemmaVision, error.GemmaVisionDenseQuantized }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.NonFiniteLogits, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.DrafterPastMemory, error.GemmaDrafterNotServed, error.AssistantForAnotherTarget, error.DrafterBitsUnsupported, error.NoGemmaVision, error.GemmaVisionDenseQuantized }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);
@@ -265,4 +289,16 @@ test "the streams allocated at open fit the room the weights leave: auto takes w
     try std.testing.expectError(error.ParallelPastMemory, fit(2 * g, 8, true, one));
     try std.testing.expectError(error.NoStreamFits, fit(g - 1, 8, false, one));
     try std.testing.expectError(error.ParallelPastRound, fit(1024 * g, be.round_rows + 1, true, one));
+}
+
+test "admission counts the vision workspace: more bytes per open, fewer streams under a tight room" {
+    const g: u64 = 1 << 30;
+    try std.testing.expectEqual(@as(u64, 0), visionBytes(false, true));
+    try std.testing.expect(visionBytes(true, true) > 0 and visionBytes(true, false) > 0);
+    const plain: Fake = .{ .stream = g, .fixed = visionBytes(false, true) };
+    const with: Fake = .{ .stream = g, .fixed = visionBytes(true, true) };
+    try std.testing.expect(try with.bytes(2) > try plain.bytes(2));
+    const room = 4 * g + visionBytes(true, true) / 2;
+    try std.testing.expectEqual(@as(usize, 4), try fit(room, 8, false, plain));
+    try std.testing.expectEqual(@as(usize, 3), try fit(room, 8, false, with));
 }
