@@ -1,4 +1,4 @@
-//! notes-golden MODEL_DIR [--index K] [--lang L] [--hop H] SNAPSHOT REF.json...: each question as the server asks it.
+//! notes-golden MODEL_DIR [flags] SNAPSHOT REF.json...: each question as the server asks it, against Python.
 const std = @import("std");
 const server = @import("server");
 const Storage = server.notes_storage.Storage;
@@ -12,13 +12,14 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(a);
     if (argv.len < 4) {
-        std.debug.print("usage: notes-golden MODEL_DIR [--index postings|sa (default sa)] [--lang en|de|fi (default en)] [--hop subject|subject_value|none] SNAPSHOT REF.json [SNAPSHOT REF.json ...]\n", .{});
+        std.debug.print("usage: notes-golden MODEL_DIR [--index postings|sa (default sa)] [--lang en|de|fi (default en)] [--hop subject|subject_value|none] [--lookup plain|who (default plain)] SNAPSHOT REF.json [SNAPSHOT REF.json ...]\n", .{});
         return 2;
     }
     var at: usize = 2;
     var kind: index.Kind = index.default_kind;
     var lang: lang_mod.Lang = .en;
     var hop: ?index.Hop = null;
+    var how: server.notes_retrieve.Lookup = .plain;
     while (at + 1 < argv.len and std.mem.startsWith(u8, argv[at], "--")) {
         if (std.mem.eql(u8, argv[at], "--index")) {
             kind = std.meta.stringToEnum(index.Kind, argv[at + 1]) orelse {
@@ -33,6 +34,11 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, argv[at], "--hop")) {
             hop = std.meta.stringToEnum(index.Hop, argv[at + 1]) orelse {
                 std.debug.print("--hop: subject, subject_value or none\n", .{});
+                return 2;
+            };
+        } else if (std.mem.eql(u8, argv[at], "--lookup")) {
+            how = std.meta.stringToEnum(server.notes_retrieve.Lookup, argv[at + 1]) orelse {
+                std.debug.print("--lookup: plain or who\n", .{});
                 return 2;
             };
         } else {
@@ -79,7 +85,7 @@ pub fn main(init: std.process.Init) !u8 {
                 if (n < 1 or n > std.math.maxInt(u32)) return 2;
                 break :blk @intCast(n);
             } else store.model.settings.cap;
-            const found = try retrieve(store, io, qa_a, text, qids, past, cap, ex.items, .{ .hop = hop });
+            const found = try retrieve(store, io, qa_a, text, qids, past, cap, ex.items, .{ .hop = hop, .who = if (how == .who) question else null });
             const want_ids = q.get("ids").?.items().?;
             var ids_eq = want_ids.len == found.ids.len;
             if (ids_eq) for (want_ids, found.ids) |w, f| {
@@ -96,10 +102,11 @@ pub fn main(init: std.process.Init) !u8 {
             t.past += @intFromBool(past_eq);
             t.candidates += @intFromBool(cand_eq);
             t.all_equal += @intFromBool(block_eq and ids_eq and tokens_eq and past_eq and cand_eq);
+            if (!(block_eq and ids_eq and tokens_eq and past_eq and cand_eq)) std.debug.print("{{\"differs\":\"{s}\",\"at\":{d},\"got\":{any},\"tokens\":{d},\"candidates\":{d}}}\n", .{ std.fs.path.basename(argv[k]), t.questions - 1, found.ids, found.tokens, found.candidates });
             t.retrieving += @intFromBool(found.block.len > 0);
         }
-        try out.writer.print("{{\"snapshot\":\"{s}\",\"ref\":\"{s}\",\"index\":\"{s}\",\"questions\":{d},\"all_equal\":{d},\"block\":{d},\"ids\":{d},\"tokens\":{d},\"past\":{d},\"candidates\":{d},\"retrieving\":{d}}}\n", .{
-            std.fs.path.basename(argv[k]), std.fs.path.basename(argv[k + 1]), @tagName(kind), t.questions, t.all_equal, t.block, t.ids, t.tokens, t.past, t.candidates, t.retrieving,
+        try out.writer.print("{{\"snapshot\":\"{s}\",\"ref\":\"{s}\",\"index\":\"{s}\",\"lookup\":\"{s}\",\"questions\":{d},\"all_equal\":{d},\"block\":{d},\"ids\":{d},\"tokens\":{d},\"past\":{d},\"candidates\":{d},\"retrieving\":{d}}}\n", .{
+            std.fs.path.basename(argv[k]), std.fs.path.basename(argv[k + 1]), @tagName(kind), @tagName(how), t.questions, t.all_equal, t.block, t.ids, t.tokens, t.past, t.candidates, t.retrieving,
         });
         inline for (@typeInfo(Tally).@"struct".field_names) |f| @field(total, f) += @field(t, f);
     }
