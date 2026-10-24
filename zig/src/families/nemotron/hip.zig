@@ -49,7 +49,3 @@ test {
     @import("std").testing.refAllDecls(pages.Pool);
     @import("std").testing.refAllDecls(native);
 }
-
-test {
-    _ = @import("hip/prompt_test.zig");
-}
