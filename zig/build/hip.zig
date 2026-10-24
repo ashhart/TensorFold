@@ -1,12 +1,37 @@
-//! HIP: mock-backed admission tests join `zig build test`; GPU builds and runs are opt-in steps (-Dhipcc, -Dhip-include, -Dhip-arch).
+//! HIP, built only with -Dhip=true: admission tests in `test`, GPU steps; options on every target (#1165).
 
 const std = @import("std");
 const caps = @import("../src/hip/caps.zig");
 const exlr8_build = @import("exlr8.zig");
 const LazyPath = std.Build.LazyPath;
 
+/// HIP's options as given, declared whether or not -Dhip=true builds anything with them.
+pub const Options = struct { hipcc: ?[]const u8, hip_include: ?[]const u8, hip_arch: ?[]const u8, device_lib: ?[]const u8 };
+
+pub fn options(b: *std.Build) Options {
+    return .{
+        .hipcc = b.option([]const u8, "hipcc", "HIP compiler for model-free tests"),
+        .hip_include = b.option([]const u8, "hip-include", "HIP header directory"),
+        .hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object"),
+        .device_lib = b.option([]const u8, "hip-device-lib", "ROCm device bitcode directory (default <rocm>/lib/llvm/amdgcn/bitcode; Arch: <rocm>/amdgcn/bitcode)"),
+    };
+}
+
+/// The Qwen3.5 / 3.6 checkpoint loader tests: part of `test` on every build, HIP or not.
+pub fn loaderTests(b: *std.Build, test_step: *std.Build.Step) void {
+    const loader = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "core", .module = coreModule(b, b.graph.host) }},
+    }) }));
+    loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
+    test_step.dependOn(&loader.step);
+    b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
+}
+
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
-pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options, test_step: *std.Build.Step) void {
+pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options, test_step: *std.Build.Step, o: Options) void {
     const hip_fixtures = b.addOptions();
     for ([_][]const u8{ "success", "failed", "missing" }) |kind| {
         const fixture_module = b.createModule(.{ .target = b.graph.host, .link_libc = true });
@@ -29,20 +54,11 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const run_hip_tests = b.addRunArtifact(hip_tests);
     test_step.dependOn(&run_hip_tests.step);
     b.step("hip-host-test", "HIP admission tests without GPU work").dependOn(&run_hip_tests.step);
-    const loader = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"),
-        .target = b.graph.host,
-        .link_libc = true,
-        .imports = &.{.{ .name = "core", .module = coreModule(b, b.graph.host) }},
-    }) }));
-    loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
-    test_step.dependOn(&loader.step);
-    b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
-    const hipcc = b.option([]const u8, "hipcc", "HIP compiler for model-free tests") orelse "hipcc";
+    const hipcc = o.hipcc orelse "hipcc";
     const hipcc_resolved = b.findProgram(.{ .names = &.{hipcc} }) orelse hipcc;
-    const hip_include = b.option([]const u8, "hip-include", "HIP header directory") orelse
+    const hip_include = o.hip_include orelse
         b.pathResolve(&.{ std.fs.path.dirname(hipcc_resolved) orelse "/opt/rocm/bin", "..", "include" });
-    const hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object") orelse "gfx1151";
+    const hip_arch = o.hip_arch orelse "gfx1151";
     if (caps.Caps.of(hip_arch) == null or std.mem.indexOfScalar(u8, hip_arch, ':') != null)
         std.debug.panic("-Dhip-arch {s} is not an exact name in the caps table (zig/src/hip/caps.zig)", .{hip_arch});
     const hip_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
@@ -76,7 +92,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const affine_test = b.addTest(.{ .root_module = affine_module });
     b.step("hip-affine-build", "Compile affine golden GPU test without executing").dependOn(&affine_test.step);
     b.step("hip-affine-test", "Run exact affine golden GPU regression").dependOn(&b.addRunArtifact(affine_test).step);
-    const device_lib = b.option([]const u8, "hip-device-lib", "ROCm device bitcode directory (default <rocm>/lib/llvm/amdgcn/bitcode; Arch: <rocm>/amdgcn/bitcode)");
+    const device_lib = o.device_lib;
     const objects = kernelObjects(b, hipcc, hipcc_resolved, device_lib, hip_arch);
     const kernel_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/kernel_tests.zig"), .target = target, .link_libc = true });
     kernel_module.addIncludePath(.{ .cwd_relative = hip_include });

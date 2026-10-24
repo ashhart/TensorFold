@@ -162,7 +162,9 @@ pub fn build(b: *std.Build) void {
     }
     poolChecks(b, b.graph.host, test_step);
     const with_hip = b.option(bool, "hip", "Enable the opt-in HIP backend and its host/device targets") orelse false;
-    if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step);
+    const hip_options = hip_build.options(b); // declared on every target (#1165), used only with -Dhip=true
+    hip_build.loaderTests(b, test_step);
+    if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step, hip_options);
     exlr8_build.hostTests(b, target, test_step);
     xpu_build.steps(b, target, optimize, build_options);
     video_build.steps(b, target, test_step);
