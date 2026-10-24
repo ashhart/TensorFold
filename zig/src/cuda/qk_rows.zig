@@ -30,6 +30,10 @@ pub const Shape = struct {
     round: bool = false,
     /// v by a unit RMS norm, bf16(x * inv); else v as is.
     v_norm: bool = false,
+    /// Dory's order (tf_qk_rows_l2): RoPE first, then each head's L2 norm (eps on the sum), v as is; no norm weights.
+    l2: bool = false,
+    /// With l2: q times this fp32 vector [h, dim] after its normalized row's rounding (null: q as k).
+    q_scale: ?u64 = null,
 };
 
 /// qk_rows.cu's QkW.
@@ -61,12 +65,14 @@ pub const QkRows = struct {
     /// tf_qk_rows_once and tf_qk_rows_round: dims past 256, a unit v norm, MLX's rounding points.
     once_fn: Function,
     round_fn: Function,
+    /// tf_qk_rows_l2: Dory's attention inputs.
+    l2_fn: Function,
 
     pub fn load(d: *const Driver) !QkRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.qk_rows);
         errdefer mod.unload();
-        return .{ .mod = mod, .fn_ = try mod.function("tf_qk_rows"), .warp_fn = try mod.function("tf_qk_rows_w"), .once_fn = try mod.function("tf_qk_rows_once"), .round_fn = try mod.function("tf_qk_rows_round") };
+        return .{ .mod = mod, .fn_ = try mod.function("tf_qk_rows"), .warp_fn = try mod.function("tf_qk_rows_w"), .once_fn = try mod.function("tf_qk_rows_once"), .round_fn = try mod.function("tf_qk_rows_round"), .l2_fn = try mod.function("tf_qk_rows_l2") };
     }
 
     pub fn unload(g: *QkRows) void {
@@ -94,6 +100,7 @@ pub const QkRows = struct {
         if (roped and shape.rot == 0) return error.HeadShape;
         if (src.v == 0 and out.vc != null) return error.HeadShape;
         if (n == 0) return;
+        if (shape.l2) return g.rowsL2(f, s, src, hs, shape, pos, slot, out, n);
         var a: launch_.Args = .{};
         a.add(src);
         const wsize: usize = if (shape.norms_bf16) 2 else 4;
@@ -129,5 +136,35 @@ pub const QkRows = struct {
         }
         const grid: launch_.Dim3 = .{ .x = @intCast(n), .y = @intCast(heads), .z = 1 };
         try launch_.launch(g.fn_, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) } }, s, &a);
+    }
+
+    /// tf_qk_rows_l2 (or `f`, a control with its arguments) on the shape's RoPE, q scale and caches.
+    fn rowsL2(g: *const QkRows, f: ?Function, s: Stream, src: Src, hs: Heads, shape: Shape, pos: u64, slot: ?u64, out: Out, n: usize) !void {
+        if (shape.norms != null or shape.round or shape.v_norm) return error.HeadShape;
+        var a: launch_.Args = .{};
+        a.add(src);
+        a.add(shape.q_scale orelse 0);
+        a.add(shape.cos orelse 0);
+        a.add(shape.sin orelse 0);
+        a.add(shape.inv orelse 0);
+        const roped = shape.cos != null or shape.inv != null;
+        a.add(@as(i32, @intCast(if (roped) shape.rot else 0)));
+        a.add(pos);
+        a.add(slot orelse 0);
+        const dim: i64 = @intCast(hs.dim);
+        const qld: i64 = if (out.q_ld != 0) @intCast(out.q_ld) else @as(i64, @intCast(hs.h)) * dim;
+        const qhs: i64 = if (out.q_hs != 0) @intCast(out.q_hs) else dim;
+        const kld: i64 = if (out.kv_ld != 0) @intCast(out.kv_ld) else @as(i64, @intCast(hs.hk)) * dim;
+        const khs: i64 = if (out.kv_hs != 0) @intCast(out.kv_hs) else dim;
+        a.add(Dst{ .q = out.q, .q_ld = qld, .q_hs = qhs, .k = out.k, .k_ld = kld, .k_hs = khs, .v = out.v, .v_ld = kld, .v_hs = khs });
+        a.add(out.kc orelse 0);
+        a.add(out.vc orelse 0);
+        a.add(@as(i64, @intCast(out.len)));
+        a.add(@as(i32, @intCast(hs.h)));
+        a.add(@as(i32, @intCast(hs.hk)));
+        a.add(shape.eps);
+        const heads = hs.h + (if (src.v != 0) 2 * hs.hk else hs.hk);
+        const grid: launch_.Dim3 = .{ .x = @intCast(n), .y = @intCast(heads), .z = 1 };
+        try launch_.launch(f orelse g.l2_fn, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) } }, s, &a);
     }
 };

@@ -44,9 +44,15 @@ pub fn mul(x: Iv, y: Iv, u: f64) Iv {
         if (std.math.isNan(p)) return @splat(std.math.nan(f64));
         r = .{ @min(r[0], p), @max(r[1], p) };
     };
-    const m = @max(@abs(r[0]), @abs(r[1])) * u;
-    return .{ r[0] - m, r[1] + m };
+    return widen(r, u);
 }
+
+/// r widened by u of its largest magnitude and, with u, fp32's least subnormal step; infinite ends stay as they are.
+pub fn widen(r: Iv, u: f64) Iv {
+    const m = @max(@abs(r[0]), @abs(r[1])) * u + @as(f64, if (u > 0) 0x1p-149 else 0);
+    return .{ if (std.math.isFinite(r[0])) r[0] - m else r[0], if (std.math.isFinite(r[1])) r[1] + m else r[1] };
+}
+
 
 /// 1 / sqrt(sum(v^2) + eps) over every v in its interval, and the root's and quotient's spread `sp`.
 pub fn invL2(v: []const Iv, eps: f64, sums: anytype, sp: f64, small: []f64, big: []f64) Iv {
@@ -149,3 +155,29 @@ test "an fp32 run's ranges hold the points and stay far inside a bf16 step" {
     }
     try std.testing.expect(ranged < 32);
 }
+
+/// tf_qk_rows_l2's rounding points: the rotated head, q's normalized head before its scale.
+pub const QkPoints = struct { rope: bool = true, norm: bool = true };
+
+/// tf_qk_rows_l2's head as ranges: RoPE (cos, sin within `trig`), bf16; its L2 norm n; q bf16(qs n), k bf16(n).
+pub fn qkHead(x: []const f64, cos: []const f64, sin: []const f64, rot: usize, qs: ?[]const f64, p: QkPoints, eps: f64, sums: anytype, st: Stray, trig: f64, y: []Iv, small: []f64, big: []f64) void {
+    const half = rot / 2;
+    for (y, x, 0..) |*o, v, i| {
+        if (i >= rot) {
+            o.* = point(v);
+            continue;
+        }
+        const xp = if (i < half) -x[i + half] else x[i - half];
+        const cs = order(cos[i] - trig * @abs(cos[i]), cos[i] + trig * @abs(cos[i]));
+        const sn = order(sin[i] - trig * @abs(sin[i]), sin[i] + trig * @abs(sin[i]));
+        const a = mul(point(v), cs, st.u);
+        const b = mul(point(xp), sn, st.u);
+        o.* = bf16If(p.rope, widen(order(a[0] + b[0], a[1] + b[1]), st.u));
+    }
+    const inv = invL2(y, eps, sums, st.spread, small, big);
+    for (y, 0..) |*o, i| {
+        const n = mul(o.*, inv, st.u);
+        o.* = if (qs) |q| bf16(mul(bf16If(p.norm, n), point(q[i]), st.u)) else bf16(n);
+    }
+}
+

@@ -294,3 +294,17 @@ extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_ctl_l2_drop_sum(const
 TF_CTL_SLERP(tf_ctl_slerp_drop_a, tf_l2::B)
 TF_CTL_SLERP(tf_ctl_slerp_drop_b, tf_l2::A)
 #undef TF_CTL_SLERP
+
+// Gate 3: qk_rows.cu's tf_qk_rows_l2 with one rounding point dropped each; its range check must go red.
+#include "qk_l2.cuh"
+
+#define TF_CTL_QK_L2(NAME, KEEP)                                                                                   \
+    extern "C" __global__ void __launch_bounds__(tf_qk_l2::WIDE) NAME(                                             \
+        const tf_qk::QkSrc in, const float* qs, const float* cosv, const float* sinv, const float* inv, int rot,   \
+        const int* pos, const int* slot, const tf_qk::QkDst dst, __nv_bfloat16* kc, __nv_bfloat16* vc,            \
+        long long len, int h, int hk, float eps) {                                                                 \
+        tf_qk_l2::rows<KEEP>(in, qs, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps);               \
+    }
+TF_CTL_QK_L2(tf_ctl_qk_l2_drop_rope, tf_qk_l2::NORM)
+TF_CTL_QK_L2(tf_ctl_qk_l2_drop_norm, tf_qk_l2::ROPE)
+#undef TF_CTL_QK_L2
