@@ -13,7 +13,15 @@ pub fn open(s: anytype, d: *const cuda.Driver, b: *Bootstrap, image: []const u8)
     const cfg = s.cfg;
     if (cfg.world < 3 or cfg.world > roce.max_world) return fallback(s, error.UnsupportedRoceWorld);
     var specs: [rv.max_hcas]rv.HcaSpec = undefined;
-    const n = if (cfg.roce_wire == .verbs) try pick.resolve(cfg, b, &specs) else 0;
+    var picked = true;
+    const n = if (cfg.roce_wire == .verbs) pick.resolve(cfg, b, &specs) catch blk: {
+        picked = false;
+        break :blk 0;
+    } else 0;
+    var pick_blobs: [bootstrap.max_ranks][]const u8 = undefined;
+    var pick_buf: [bootstrap.max_ranks]u8 = undefined;
+    for (try b.allGather(&.{@intFromBool(picked)}, &pick_buf, &pick_blobs)) |x|
+        if (x.len != 1 or x[0] != 1) return fallback(s, error.RoceHcaSelectionFailed);
     const r = roce.Roce.init(d, b, image, .{ .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks }) catch |e| return fallback(s, e);
     s.roce_multi = r;
     if (cfg.roce_chunked_bytes > 0 and !r.chunk_abi) {

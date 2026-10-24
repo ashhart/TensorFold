@@ -157,3 +157,35 @@ test "multirank verbs: malformed peer tables refuse before any connection or pos
     try t.expectError(error.BadRecord, f.wires[0].validateRecords(&recs));
     try t.expectEqual(@as(u64, 0), f.order);
 }
+
+test "multirank setup: failed CUDA drain retains the partial device owner exactly once" {
+    const cuda = @import("cuda");
+    const device = @import("roce_multi_device.zig");
+    const Driver = struct {
+        var frees: usize = 0;
+        fn sync() callconv(.c) cuda.abi.Result {
+            return 700;
+        }
+        fn free(_: cuda.abi.DevicePtr) callconv(.c) cuda.abi.Result {
+            frees += 1;
+            return 0;
+        }
+    };
+    var f: Fabric = undefined;
+    try f.init(3, 1, 4096);
+    defer f.deinit();
+    var d: cuda.Driver = undefined;
+    d.api.cuCtxSynchronize = Driver.sync;
+    d.api.cuMemFree_v2 = Driver.free;
+    var r: Roce = .{ .me = 0, .world = 3, .layout = f.layout, .slot_bytes = 4096, .timeout_ns = 1000, .region = f.regions[0], .mapping = f.regions[0], .wire = .{ .verbs = f.wires[0] }, .cpu = null, .d = &d, .state = .{ .d = &d, .ptr = 0x4000, .len = 16 } };
+    const before = Roce.kept.load(.monotonic);
+    defer Roce.kept.store(before, .monotonic);
+    Driver.frees = 0;
+    device.close(&r);
+    try t.expectEqual(@as(usize, 0), Driver.frees);
+    try t.expect(r.retained and r.state != null);
+    try t.expectEqual(before + 1, Roce.kept.load(.monotonic));
+    device.close(&r);
+    try t.expectEqual(@as(usize, 0), Driver.frees);
+    try t.expectEqual(before + 1, Roce.kept.load(.monotonic));
+}

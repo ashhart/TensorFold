@@ -135,6 +135,8 @@ pub const Roce = struct {
     func: ?cuda.Function = null,
     /// The kernel image takes `RoceArgs.chunk` (it exports tp_roce_chunk_abi): TF_TP_ROCE_CHUNKED_KB needs it.
     chunk_abi: bool = false,
+    registered: bool = false,
+    retained: bool = false,
     // the proxy thread
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = .init(false),
@@ -158,7 +160,9 @@ pub const Roce = struct {
         const layout = Layout.of(b.world, @intCast(slot));
         const len: usize = @intCast(layout.len);
         const r = try std.heap.page_allocator.create(Roce);
-        errdefer std.heap.page_allocator.destroy(r);
+        r.* = undefined;
+        r.retained = false;
+        errdefer if (!r.retained) std.heap.page_allocator.destroy(r);
         r.* = .{ .me = b.rank, .world = b.world, .layout = layout, .slot_bytes = slot, .timeout_ns = o.timeout_ns, .fast = o.fast, .max_grid = o.blocks, .region = undefined, .mapping = undefined, .wire = undefined, .cpu = o.cpu };
         // 1. the regions and the wire, each rank alone; every rank learns whether all did
         const ok = r.openWire(b, o, len) catch |e| blk: {
@@ -245,34 +249,15 @@ pub const Roce = struct {
     }
 
     fn openDevice(r: *Roce, d: *const cuda.Driver, image: []const u8) !bool {
-        if (image.len == 0) return error.NoKernel;
-        errdefer r.closeDevice();
-        r.d = d;
-        r.hr = try HostRegister.open();
-        try d.check(r.hr.?.register(r.region.ptr, r.region.len, 1 | 2), "cuMemHostRegister"); // PORTABLE | DEVICEMAP
-        try d.check(d.api.cuMemHostGetDevicePointer_v2(&r.dev, r.region.ptr, 0), "cuMemHostGetDevicePointer");
-        r.state = try cuda.DeviceBuffer.alloc(d, 16);
-        try r.state.?.fill8(0, null);
-        r.module = try cuda.Module.load(d, image);
-        _ = try r.module.?.function("tp_roce_multi_abi_v1");
-        r.func = try r.module.?.function("tp_roce_multi");
-        r.chunk_abi = if (r.module.?.function("tp_roce_multi_chunk_abi")) |_| true else |_| false;
-        return true;
+        return @import("roce_multi_device.zig").open(r, d, image);
     }
 
     fn closeDevice(r: *Roce) void {
-        if (r.module) |*m| m.unload();
-        if (r.state) |*s| s.free();
-        if (r.hr) |*h| {
-            _ = h.unregister(r.region.ptr);
-            h.lib.close();
-        }
-        r.module = null;
-        r.state = null;
-        r.hr = null;
+        @import("roce_multi_device.zig").close(r);
     }
 
     fn closeWire(r: *Roce) void {
+        if (r.retained) return;
         switch (r.wire) {
             .verbs => |*v| v.close(),
             .shm => {},
@@ -297,6 +282,7 @@ pub const Roce = struct {
             return;
         }
         r.closeDevice();
+        if (r.retained) return;
         r.closeWire();
         std.heap.page_allocator.destroy(r);
     }
