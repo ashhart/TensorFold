@@ -40,6 +40,7 @@ const Lane = struct {
     rows: std.ArrayList(u32) = .empty, // the last verify's row tokens
     filled: usize = 0, // prompt chunks a stepped prefill has run
     filling: bool = false,
+    restored: u32 = 0, // prompt rows a kept state stood in for
 };
 
 /// Where a lane's caches come from: taken before its prompt goes in, given back once it is released.
@@ -295,8 +296,8 @@ pub const Fake = struct {
         l.filled += 1;
         const at = s.prompt_len * l.filled / @max(1, x.prefill_chunks);
         s.fill_at.store(@intCast(at), .monotonic);
-        // a cold pass's rows are held (features) as each step makes them; a restored one's at its end
-        if (s.reuse.saved == null) try x.grow(l, s, at);
+        try x.seed(l, s); // the kept rows are held from the first step, as the steps' features are asked for them
+        try x.grow(l, s, at);
         if (l.filled < @max(1, x.prefill_chunks)) return false;
         l.filling = false;
         try x.fillPrompt(l, s);
@@ -316,19 +317,24 @@ pub const Fake = struct {
 
     /// The pass's end: the cache holds the prompt, from a kept state where one was restored.
     fn fillPrompt(x: *Fake, l: *Lane, s: *Stream) !void {
-        const h = &l.history;
-        s.cached = 0;
-        if (s.reuse.saved) |saved| { // the kept state's tokens stand in for the prompt's first `at`
-            const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));
-            try h.appendSlice(x.gpa, kept.items);
-            s.cached = s.reuse.at;
-        }
+        try x.seed(l, s);
+        s.cached = l.restored;
         try x.grow(l, s, s.prompt().len);
+    }
+
+    /// The kept state's tokens, which stand in for the prompt's first `at`, into an empty history.
+    fn seed(x: *Fake, l: *Lane, s: *Stream) !void {
+        const saved = s.reuse.saved orelse return; // the host drops it once the pass has restored it
+        if (l.history.items.len > 0) return;
+        const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));
+        try l.history.appendSlice(x.gpa, kept.items);
+        l.restored = s.reuse.at;
     }
 
     /// The prompt's tokens into the lane's history up to `to`, a mark's hook at each one passed.
     fn grow(x: *Fake, l: *Lane, s: *Stream, to: usize) !void {
         const h = &l.history;
+        if (to <= h.items.len) return;
         for (s.prompt()[h.items.len..to], h.items.len + 1..) |t, at| {
             try h.append(x.gpa, t);
             if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));

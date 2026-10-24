@@ -51,17 +51,23 @@ pub const Share = struct {
     debt_ns: i64 = 0, // decode time owed before the next step of a long prompt
 
     pub const short_rows = 512;
+    pub const min_share = 0.01; // below it a step's debt is minutes of decoding, and is no share
 
     pub fn fromEnv() Share {
-        const v = std.c.getenv("TENSORFOLD_PREFILL_SHARE") orelse return .{};
-        const p = std.fmt.parseFloat(f64, std.mem.span(v)) catch return .{};
-        return .{ .p = if (p > 0 and p <= 1) p else 1 };
+        return fromText(std.mem.span(std.c.getenv("TENSORFOLD_PREFILL_SHARE") orelse return .{}));
+    }
+
+    /// A share from its text: anything but a number in [min_share, 1] is the default, 1.
+    pub fn fromText(text: []const u8) Share {
+        const p = std.fmt.parseFloat(f64, text) catch return .{};
+        return .{ .p = if (p >= min_share and p <= 1) p else 1 };
     }
 
     /// A step that took `ns` while `decoding` streams were live: the decode time it owes them.
     pub fn stepped(s: *Share, ns: i64, decoding: bool) void {
         if (s.p >= 1 or !decoding) return;
-        s.debt_ns += @intFromFloat(@as(f64, @floatFromInt(ns)) * (1 - s.p) / s.p);
+        const owed = @as(f64, @floatFromInt(ns)) * (1 - s.p) / s.p;
+        s.debt_ns +|= @intFromFloat(@min(owed, @as(f64, @floatFromInt(std.math.maxInt(i64) / 2))));
     }
 
     /// A decode round of `ns` pays the debt down.
@@ -83,7 +89,7 @@ pub fn run(h: *LaneHost) void {
     }
     if (h.filling.items.len == 0 or !due(h)) return;
     if (h.share.p >= 1) return h.fillAt(next(h));
-    const decoding = h.core.activeCount() > 0;
+    const decoding = runnable(h) > 0;
     const t0 = std.Io.Clock.awake.now(h.io);
     h.fillAt(next(h));
     h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);
@@ -95,8 +101,15 @@ fn short(j: *const LaneHost.Job) bool {
 }
 
 /// A long prompt's step runs now: none owed, or nothing decoding.
-fn due(h: *LaneHost) bool {
-    return h.share.debt_ns <= 0 or h.core.activeCount() == 0;
+pub fn due(h: *LaneHost) bool {
+    return h.share.debt_ns <= 0 or runnable(h) == 0;
+}
+
+/// Streams the next decode round runs: unfinished and not paused.
+fn runnable(h: *const LaneHost) usize {
+    var n: usize = 0;
+    for (h.core.live.items) |s| n += @intFromBool(!s.finished and !s.paused);
+    return n;
 }
 
 test "a share of 0.5 owes the decoders a step's time; 1 owes nothing; rounds pay it down" {
@@ -114,4 +127,22 @@ test "a share of 0.5 owes the decoders a step's time; 1 owes nothing; rounds pay
     var q: Share = .{ .p = 0.25 };
     q.stepped(1000, true);
     try std.testing.expectEqual(@as(i64, 3000), q.debt_ns);
+}
+
+test "a share below the floor, NaN and inf fall back to 1; the floor and 1 stand" {
+    for ([_][]const u8{ "1e-12", "0.0099", "0", "-0.5", "nan", "inf", "-inf", "2", "x", "" }) |text| {
+        try std.testing.expectEqual(@as(f64, 1), Share.fromText(text).p);
+    }
+    try std.testing.expectEqual(@as(f64, 0.01), Share.fromText("0.01").p);
+    try std.testing.expectEqual(@as(f64, 1), Share.fromText("1").p);
+}
+
+test "a step's debt saturates instead of overflowing" {
+    var s: Share = .{ .p = Share.min_share };
+    s.stepped(std.math.maxInt(i64), true);
+    try std.testing.expect(s.debt_ns > 0);
+    s.stepped(std.math.maxInt(i64), true);
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), s.debt_ns);
+    s.rounded(1000);
+    try std.testing.expect(s.debt_ns < std.math.maxInt(i64));
 }
