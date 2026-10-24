@@ -15,6 +15,24 @@ pub fn encode(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, logits: fz.Buf, posit
     sample.draw(enc, pipe, logits.at(row * fz.VOCAB * 2), positions.at(row * 4), picks.at(row * 4), rows, fz.VOCAB, p);
 }
 
+/// Every sampled window's rows in one dispatch a run of adjacent sampled windows (greedy rows keep their argmax picks).
+pub fn encodeAll(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, logits: fz.Buf, positions: fz.Buf, picks: fz.Buf, starts: []const usize, widths: []const usize, ps: []const ?lanes.Sampling) void {
+    var each: [fz.MAXR]lanes.Sampling = undefined;
+    var n: usize = 0; // rows in the open run
+    var at: usize = 0; // the open run's first row
+    for (starts, widths, ps) |row, rows, p| {
+        const s = active(p) orelse {
+            if (n > 0) sample.drawRows(enc, pipe, logits.at(at * fz.VOCAB * 2), positions.at(at * 4), picks.at(at * 4), each[0..n], fz.VOCAB);
+            n = 0;
+            continue;
+        };
+        if (n == 0) at = row;
+        for (each[n..][0..rows]) |*x| x.* = s;
+        n += rows;
+    }
+    if (n > 0) sample.drawRows(enc, pipe, logits.at(at * fz.VOCAB * 2), positions.at(at * 4), picks.at(at * 4), each[0..n], fz.VOCAB);
+}
+
 /// The last prompt row's pick, before another prompt or draft overwrites its logits.
 pub fn first(e: *Engine, model: *fz.Model, p: lanes.Sampling, position: u32) !u32 {
     e.draw_at.b.slice(u32, fz.MAXR)[0] = position;

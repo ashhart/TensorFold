@@ -414,9 +414,13 @@ pub const Backend = struct {
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);
         try forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null);
         @memcpy(b.e.draw_at.b.slice(u32, fz.MAXR)[0..plan.total], plan.keys[0..plan.total]);
-        for (windows, 0..) |w, i| if (sample.active(w.stream.sampling)) |p| {
-            sample.encode(b.e.r.enc, b.e.r.draw_pipe, t.logits, b.e.draw_at, t.picks, plan.starts[i], w.rows(), p);
-        };
+        var widths: [fz.MAXR]usize = undefined;
+        var ps: [fz.MAXR]?lanes.Sampling = undefined;
+        for (windows, 0..) |w, i| {
+            widths[i] = w.rows();
+            ps[i] = w.stream.sampling;
+        }
+        sample.encodeAll(b.e.r.enc, b.e.r.draw_pipe, t.logits, b.e.draw_at, t.picks, plan.starts[0..windows.len], widths[0..windows.len], ps[0..windows.len]);
         b.times.commit();
         try b.primary.finish(cb);
         b.times.end(cb, false, plan.total, windows.len);
