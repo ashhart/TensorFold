@@ -1,4 +1,4 @@
-//! LFM2's own chat template (the checkpoint's chat_template.jinja) over the history a tool-calling client sends.
+//! A template in LFM2's prompt format (not the checkpoint's own file) over the history a tool-calling client sends.
 const std = @import("std");
 const json = @import("json");
 const template = @import("template");
