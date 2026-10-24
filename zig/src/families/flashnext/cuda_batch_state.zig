@@ -7,7 +7,6 @@ const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const tk = @import("cuda_tile_kernels.zig");
 const load = @import("cuda_prompt_load.zig");
-
 const layers_n = wt.layers_n;
 const linear_n = wt.linear_n;
 const dims = wt.dims;
