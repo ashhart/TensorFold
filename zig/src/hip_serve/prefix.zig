@@ -8,6 +8,12 @@ const snapshots = @import("snapshots.zig");
 const protocol = @import("protocol.zig");
 const Allocator = std.mem.Allocator;
 
+pub const poll_rows: usize = 512;
+
+pub fn pollsLayers(world: usize, rows: usize) bool {
+    return world == 1 and rows >= poll_rows;
+}
+
 /// The cache over family side `F`: `F.Owner` is what a stream gives (`F.idOf`, `F.table`); the hooks copy its state.
 pub fn Prefix(comptime F: type) type {
     return struct {

@@ -13,6 +13,8 @@ const Lane = lane_mod.Lane;
 /// A mark other than the history's is kept only this far from every other mark and the resume point.
 pub const min_gap = 256;
 
+pub const pollsLayers = serve.prefix.pollsLayers;
+
 /// The family's side of the cache: a snapshot is a lane's Mamba state and its last final-normed row.
 pub const Side = struct {
     e: *Engine,

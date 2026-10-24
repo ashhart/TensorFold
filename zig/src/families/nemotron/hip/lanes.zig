@@ -226,45 +226,10 @@ pub const Hip = struct {
     }
 
     /// The prompt's rows [from, to) through the model (the head absorbing them): the last row's logits at the end.
-    pub fn chunk(h: *Hip, l: *Lane, prompt: []const u32, from: usize, to: usize) !?Tensor {
-        const e = h.e;
-        const m = e.model_();
-        const n = to - from;
-        try e.fresh();
-        const o = e.ops(&e.arena);
-        if (l.resumed) {
-            l.resumed = false;
-            if (h.head) |hd| _ = try hd.absorb(
-                o,
-                &l.s,
-                .{ .ptr = l.hidden.base(), .kind = e.act },
-                prompt[from..][0..1],
-                true,
-            );
-        }
-        const dev = try e.ids(o, prompt[from..to]);
-        const hidden = try forward.run(
-            o,
-            m,
-            e.place[0..e.cfg.layers],
-            .{ .pool = &e.pool, .stream = &l.s },
-            dev,
-            n,
-            from,
-            true,
-        );
-        l.s.len = to;
-        // the head absorbs each row with the token after it; the last row waits for the first drawn token
-        const last = to == prompt.len;
-        const pairs = if (last) n - 1 else n;
-        if (h.head) |hd| if (pairs > 0) {
-            _ = try hd.absorb(o, &l.s, hidden, prompt[from + 1 ..][0..pairs], true);
-        };
-        // the last row is kept for the head: the first token's pair, or a kept state's resume
-        const width = m.dims.hidden * e.act.size();
-        try hip.raw.copy(l.hidden, 0, hidden.ptr + (n - 1) * width, width, o.stream);
-        if (!last) return null;
-        return try e.logits(o, forward.at(hidden, (n - 1) * m.dims.hidden), 1);
+    pub const chunk = @import("prompt.zig").chunk;
+
+    pub fn runPrompt(h: *Hip, o: hip.ops.Ops, ctx: forward.Ctx, ids: u64, rows: usize, pos: usize) !Tensor {
+        return forward.run(o, h.e.model_(), h.e.place[0..h.e.cfg.layers], ctx, ids, rows, pos, true);
     }
 
     /// Where the chunk from `at` ends: the engine's chunk rows, or the cut; its pages ready on every rank.
@@ -274,14 +239,19 @@ pub const Hip = struct {
         return to;
     }
 
-    pub fn advance(h: *Hip, l: *Lane, prompt: []const u32, from: usize, to: usize) !void {
-        _ = try h.chunk(l, prompt, from, to);
+    pub fn cancelOf(_: anytype, s: *lanes.Stream) ?Engine.Cancel {
+        const c = s.cancel_check orelse return null;
+        return .{ .ctx = c.ptr, .check = c.check };
+    }
+
+    pub fn advance(h: anytype, l: *Lane, prompt: []const u32, from: usize, to: usize, cancel: ?Engine.Cancel) !void {
+        _ = try h.chunk(l, prompt, from, to, cancel);
     }
 
     /// The prompt's last chunk; its last row's token drawn as `req` says.
-    pub fn finish(h: *Hip, l: *Lane, prompt: []const u32, from: usize, req: draw.Request) !u32 {
+    pub fn finish(h: anytype, l: *Lane, prompt: []const u32, from: usize, req: draw.Request, cancel: ?Engine.Cancel) !u32 {
         const e = h.e;
-        const y = try h.chunk(l, prompt, from, prompt.len);
+        const y = try h.chunk(l, prompt, from, prompt.len, cancel);
         var token: [1]u32 = undefined;
         try h.sampler.draw(e.ops(&e.arena), e.stream, y.?, &.{req}, &token, false);
         return token[0];

@@ -11,7 +11,13 @@ const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
 const Kind = hip.ops.Kind;
 
-pub const Error = hip.reduce.Error || mamba.Error || moe.Error;
+pub const Error = hip.reduce.Error || mamba.Error || moe.Error || error{Cancelled};
+
+pub fn traceLayer(trace: ?Trace, index: usize, x: Tensor, rows: usize) Error!void {
+    if (trace) |t| t.layer(t.ctx, index, x, rows) catch |err| {
+        return if (err == error.Cancelled) error.Cancelled else error.BadShape;
+    };
+}
 
 /// A device buffer of `n` values of `kind` from the arena.
 pub fn take(o: Ops, kind: Kind, n: usize) Error!Tensor {
@@ -147,7 +153,7 @@ pub fn run(
             .moe => |w| try moe.layer(o, d, m.act, w, normed, rows),
         };
         try hip.reduce.residual(o, m.tp, x, y, rows * d.hidden);
-        if (ctx.trace) |t| t.layer(t.ctx, i, x, rows) catch return error.BadShape;
+        try traceLayer(ctx.trace, i, x, rows);
     }
     const out = try take(o, m.act, rows * d.hidden);
     try o.rms(x, m.norm_f, out, rows, d.hidden, d.eps);
