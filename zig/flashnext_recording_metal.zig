@@ -149,6 +149,12 @@ pub const CommandBuffer = struct {
     pub fn gpuSeconds(_: CommandBuffer) f64 {
         return 0;
     }
+    pub fn gpuStart(_: CommandBuffer) f64 {
+        return 0;
+    }
+    pub fn gpuEnd(_: CommandBuffer) f64 {
+        return 0;
+    }
     pub fn failure(_: CommandBuffer) ?[]const u8 {
         return null;
     }
@@ -164,6 +170,17 @@ pub const BlitEncoder = struct {
         blits += 1;
     }
     pub fn end(_: BlitEncoder) void {}
+};
+/// Recorded calls run in order on the host, so a fence orders nothing here.
+pub const counters = struct {
+    pub const Fence = struct {
+        pub fn init(_: Device) !Fence {
+            return .{};
+        }
+        pub fn updateBlit(_: Fence, _: BlitEncoder) void {}
+        pub fn waitCompute(_: Fence, _: ComputeEncoder) void {}
+        pub fn deinit(_: Fence) void {}
+    };
 };
 pub const ResidencySet = struct {
     pub const Follow = struct { ctx: *anyopaque, join: *const fn (*anyopaque, Buffer) void, leave: *const fn (*anyopaque, Buffer) void };
