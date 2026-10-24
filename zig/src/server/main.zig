@@ -14,6 +14,7 @@ const api = @import("engine_api");
 const recall_open = @import("recall_open.zig");
 const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
+const notes_flags = @import("notes_flags.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
@@ -35,7 +36,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
     " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
-    " [--segments SEGMENTS] [--notes SNAPSHOT] model\n";
+    " [--segments SEGMENTS]" ++ notes_flags.usage ++ " model\n" ++ notes_flags.help;
 const not_lanes = "--recall drafts from a record in the lane engine's rounds, " ++
     "which this model's engine does not run: serve it without --recall, --recall-dir, " ++
     "--recall-gib or --recall-read-only";

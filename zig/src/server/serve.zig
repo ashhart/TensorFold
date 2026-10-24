@@ -200,7 +200,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     };
     defer srv.deinit();
     srv.recall = s.recall;
-    if (args.notes) |path| {
+    if (args.notes.path) |path| {
         var why: []const u8 = "";
         srv.notes = @import("notes/storage.zig").Storage.open(gpa, io, path, s.text, s.model_dir, &why) catch |e| {
             std.debug.print("tensorfold: --notes {s}: {s} ({s})\n", .{ path, why, @errorName(e) });
