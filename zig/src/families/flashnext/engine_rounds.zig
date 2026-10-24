@@ -56,7 +56,7 @@ pub fn rounds(e: *Engine) !void {
     }
 }
 
-/// fz_gdn keeping one state a layer, kept rows replayed (the recorded bits): without tensor units and shared rounds only.
+/// fz_gdn keeping one state a layer, kept rows replayed (the recorded bits): no tensor units, shared rounds only.
 pub fn keepStates(e: *Engine) !void {
     const r = e.r;
     if (r.gdn_kept != null or r.tp != null or r.device.tensorUnits() or e.tree != null) return;

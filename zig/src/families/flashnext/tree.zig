@@ -362,7 +362,7 @@ fn patched(r: *Run, role: []const u8, edits: []const [2][]const u8) !*Variant {
     return nv;
 }
 
-/// A tree of a head chain of `a` and a branch of `b` (1 + a + b <= MAXR) fed from `feed`, or `sib` head siblings a depth.
+/// A tree of a head chain of `a` and a branch of `b` (1 + a + b <= MAXR) fed from `feed`, or `sib` siblings a depth.
 pub fn init(r: *Run, a: usize, b: usize, feed: ?[]const u8, sib: usize) !*Tree {
     if (a == 0 or b == 0 or 1 + a + b > MAXR or (sib > 0 and (b != a * sib or sib > 4))) return error.TreeShape;
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, source, mtl.CompileOptions.mlx()));

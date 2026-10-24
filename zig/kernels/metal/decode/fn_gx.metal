@@ -229,7 +229,7 @@ inline int gx_pair(const device int* LIST, int4 it, int c) {
   return it.x < 0 ? (it.y + c) * SLOTS + TOPK : LIST[L_MEM + it.y + c] & 0xFFFF;
 }
 
-// Down tiles: the recorded sum's 32 lane partials (chunk l, then 32 + l for l < 8) in simd_sum's xor tree 1, 2, 4, 8, 16
+// Down tiles: the recorded sum's 32 lane partials (chunk l, then 32 + l, l < 8) in simd_sum's xor tree 1, 2, 4, 8, 16
 kernel void gx_down_tile(const device bfloat* ACT [[buffer(0)]], const device int* LIST [[buffer(1)]],
     const device uint* DW [[buffer(2)]], const device bfloat* DS [[buffer(3)]], const device bfloat* DB [[buffer(4)]],
     const device uint* SDW [[buffer(5)]], const device bfloat* SDS [[buffer(6)]], const device bfloat* SDB [[buffer(7)]],
