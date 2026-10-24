@@ -5,6 +5,7 @@ const core = @import("core");
 const check = @import("check.zig");
 const l2_k = @import("contract_l2.zig");
 const qk_k = @import("contract_qk_l2.zig");
+const act_k = @import("contract_act_l2.zig");
 
 const g = core.contract.gates;
 
@@ -14,6 +15,9 @@ pub const Dory = struct {
     qk_rows: ?cuda.qk_rows.QkRows = null,
     qk: [qk_k.forms.len]qk_k.Qk = undefined,
     qks: usize = 0,
+    act_rows: ?cuda.act_rows.ActRows = null,
+    act: [std.enums.values(act_k.Which).len]act_k.Act = undefined,
+    acts: usize = 0,
 
     /// Every Dory registration onto `kernels`; the controls' symbols from the contract_controls image `ctl_mod`.
     pub fn add(self: *Dory, gpu: check.Gpu, s: cuda.Stream, norms: *const cuda.norms.Norms, ctl_mod: cuda.Module, kernels: *std.ArrayList(g.Kernel)) !void {
@@ -30,11 +34,19 @@ pub const Dory = struct {
             self.qks += 1;
         }
         for (&self.qk) |*t| try kernels.append(a, t.kernel());
+        self.act_rows = try cuda.act_rows.ActRows.load(gpu.d);
+        for (std.enums.values(act_k.Which), &self.act) |w, *t| {
+            t.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &self.act_rows.?, .ctl = if (act_k.control(w) != null) try ctl_mod.function(act_k.symbol(w)) else null };
+            self.acts += 1;
+        }
+        for (&self.act) |*t| try kernels.append(a, t.kernel());
     }
 
     pub fn deinit(self: *Dory) void {
         for (self.l2[0..self.l2s]) |*t| t.deinit();
         for (self.qk[0..self.qks]) |*t| t.deinit();
         if (self.qk_rows) |*q| q.unload();
+        for (self.act[0..self.acts]) |*t| t.deinit();
+        if (self.act_rows) |*q| q.unload();
     }
 };

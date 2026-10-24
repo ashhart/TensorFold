@@ -308,3 +308,23 @@ TF_CTL_SLERP(tf_ctl_slerp_drop_b, tf_l2::A)
 TF_CTL_QK_L2(tf_ctl_qk_l2_drop_rope, tf_qk_l2::NORM)
 TF_CTL_QK_L2(tf_ctl_qk_l2_drop_norm, tf_qk_l2::ROPE)
 #undef TF_CTL_QK_L2
+
+// Gate 3: act_rows.cu's nGPT activations with one rounding point dropped each; their range checks must go red.
+#include "act_l2.cuh"
+
+extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_ctl_gate_l2_drop_gated(const __nv_bfloat16* o, const __nv_bfloat16* g,
+                                                                                     long long g_ld, const float* sg,
+                                                                                     __nv_bfloat16* out, int n, float eps) {
+    tf_act_l2::gate_rows<0>(o, g, g_ld, sg, out, n, eps);
+}
+
+#define TF_CTL_SWIGLU_L2(NAME, KEEP)                                                                               \
+    extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) NAME(                                              \
+        const __nv_bfloat16* g, long long g_ld, const __nv_bfloat16* u, long long u_ld, const float* sug,          \
+        const float* suu, __nv_bfloat16* out, int n, float eps) {                                                  \
+        tf_act_l2::swiglu_rows<KEEP>(g, g_ld, u, u_ld, sug, suu, out, n, eps);                                     \
+    }
+TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_gs, tf_act_l2::US | tf_act_l2::PROD)
+TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_us, tf_act_l2::GS | tf_act_l2::PROD)
+TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_prod, tf_act_l2::GS | tf_act_l2::US)
+#undef TF_CTL_SWIGLU_L2

@@ -31,12 +31,14 @@ pub const ActRows = struct {
     geglu_fn: Function,
     swiglu_round_fn: Function,
     softcap_fn: Function,
+    gate_l2_fn: Function,
+    swiglu_l2_fn: Function,
 
     pub fn load(d: *const Driver) !ActRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.act_rows);
         errdefer mod.unload();
-        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round"), .softcap_fn = try mod.function("tf_softcap_rows") };
+        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round"), .softcap_fn = try mod.function("tf_softcap_rows"), .gate_l2_fn = try mod.function("tf_gate_l2_rows"), .swiglu_l2_fn = try mod.function("tf_swiglu_l2_rows") };
     }
 
     pub fn unload(g: *ActRows) void {
@@ -101,6 +103,38 @@ pub const ActRows = struct {
         a.add(@as(i32, @intCast(d)));
         const t = launch_.rowThreads(rows, threads, 64);
         try launch_.launch(g.gate_fn, .{ .grid = grid(rows, heads * d, t), .block = .{ .x = t } }, s, &a);
+    }
+
+    /// Dory's gate: out [rows, n] = bf16(l2(bf16(o * sigmoid(g * sg)))), o packed, g rows g_ld apart, sg fp32 [n].
+    pub fn gateL2(g: *const ActRows, s: Stream, o: u64, gate_: u64, g_ld: usize, sg: u64, out: u64, rows: usize, n: usize, eps: f32) !void {
+        if (n % 64 != 0 or n > 8192 or !aligned(&.{ o, gate_, out, sg }, &.{g_ld})) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(o);
+        a.add(gate_);
+        a.add(@as(i64, @intCast(g_ld)));
+        a.add(sg);
+        a.add(out);
+        a.add(@as(i32, @intCast(n)));
+        a.add(eps);
+        try launch_.launch(g.gate_l2_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+    }
+
+    /// Dory's MLP: out = bf16(l2(bf16(silu(bf16(g * sug)) * bf16(u * suu)))), sug and suu fp32 [n].
+    pub fn swigluL2(g: *const ActRows, s: Stream, gate_: u64, g_ld: usize, up: u64, u_ld: usize, sug: u64, suu: u64, out: u64, rows: usize, n: usize, eps: f32) !void {
+        if (n % 64 != 0 or n > 8192 or !aligned(&.{ gate_, up, out, sug, suu }, &.{ g_ld, u_ld })) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(gate_);
+        a.add(@as(i64, @intCast(g_ld)));
+        a.add(up);
+        a.add(@as(i64, @intCast(u_ld)));
+        a.add(sug);
+        a.add(suu);
+        a.add(out);
+        a.add(@as(i32, @intCast(n)));
+        a.add(eps);
+        try launch_.launch(g.swiglu_l2_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
     }
 
     /// xs [rows, k / 64]: x's rows (stride ld) summed over each 64 values. k % 64 == 0.

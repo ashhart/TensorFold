@@ -164,3 +164,21 @@ extern "C" __global__ void __launch_bounds__(NT) tf_softcap_rows(const __nv_bflo
                                                                  float cap) {
     tf_act_round::softcap_rows(x, out, n, cap, tf_act_round::SOFTCAP_ALL);
 }
+
+// Dory's nGPT activations (act_l2.cuh): a scaled sigmoid gate and a scaled SwiGLU, each row then L2-normed.
+#include "act_l2.cuh"
+
+// out = bf16(l2(bf16(o * sigmoid(g * sg)))) over a row's n values (all heads), sg fp32 [n]: dory.py's output gate.
+extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_gate_l2_rows(const __nv_bfloat16* o, const __nv_bfloat16* g,
+                                                                           long long g_ld, const float* sg, __nv_bfloat16* out,
+                                                                           int n, float eps) {
+    tf_act_l2::gate_rows<tf_act_l2::GATED>(o, g, g_ld, sg, out, n, eps);
+}
+
+// out = bf16(l2(bf16(silu(bf16(g * sug)) * bf16(u * suu)))), sug and suu fp32 [n]: dory.py's MLP before down.
+extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_swiglu_l2_rows(const __nv_bfloat16* g, long long g_ld,
+                                                                             const __nv_bfloat16* u, long long u_ld,
+                                                                             const float* sug, const float* suu,
+                                                                             __nv_bfloat16* out, int n, float eps) {
+    tf_act_l2::swiglu_rows<tf_act_l2::GS | tf_act_l2::US | tf_act_l2::PROD>(g, g_ld, u, u_ld, sug, suu, out, n, eps);
+}

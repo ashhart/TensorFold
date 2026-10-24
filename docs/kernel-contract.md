@@ -157,6 +157,8 @@ CUDA also checks Dory's nGPT rows: the L2 norm rows with and without their bf16 
 (`norms_l2.cuh`), each output within float64's range at its bf16 points (three controls, each dropping one point).
 CUDA also checks Dory's attention inputs (`qk_l2.cuh`): RoPE first, each head's L2 norm, q times its scale vector, v as is, at
 head dim 256 and positions past 199,800 (two controls, each dropping one rounding point).
+CUDA also checks Dory's activation rows (`act_l2.cuh`): the scaled sigmoid output gate over all heads and the scaled SwiGLU,
+each row then L2-normed, against float64's ranges at their bf16 points and expf's ulps (four controls, one point each).
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
