@@ -62,6 +62,8 @@ pub const Prepared = struct {
         old_log.deinit();
         old.deinit();
         if (old_idx) |x| x.deinit();
+        if (s.scratch) |*sc| sc.deinit(); // it may hold the erased note's text
+        s.scratch = null;
     }
     /// Retire the token spans after engine-reachable cleanup; external-copy warnings do not retain the note.
     pub fn finish(p: *Prepared, a: Allocator) !void {

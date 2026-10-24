@@ -209,6 +209,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             return 2;
         };
         const notes = srv.notes.?;
+        notes.language = @import("notes/lang.zig").Lang.parse(args.notes.language) orelse .en; // argparse checked it
         notes.beginRun(a, .{
             .learn = args.learn or args.learn_conversations,
             .recall = srv.recall != null,
@@ -221,7 +222,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             std.debug.print("tensorfold: --notes cannot persist writer flags ({s})\n", .{@errorName(e)});
             return 2;
         };
-        log.line("notes: {d} notes, {d} writes replayed, {d} pending erases (GET /v1/notes); {s} index; storage HTTP only", .{ notes.model.notes.items.len, notes.replayed, notes.journal.?.erases.items.len, @tagName(notes.kind) });
+        log.line("notes: {d} notes, {d} writes replayed, {d} pending erases (GET /v1/notes); {s} index; language {s}; a chat request sends \"notes\": true to have them looked up", .{ notes.model.notes.items.len, notes.replayed, notes.journal.?.erases.items.len, @tagName(notes.kind), @tagName(notes.language) });
     }
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
         .disabled, .enabled => {},

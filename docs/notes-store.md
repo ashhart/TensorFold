@@ -1,8 +1,10 @@
 # Notes storage API
 
-This first slice of #1012 adds a single-owner, journal-backed Notes store. It does
-not add note retrieval, prompt injection, live fetching or promotion. Those are
-separate dependent changes. Ordinary generation does not read the store.
+This first slice of #1012 adds a single-owner, journal-backed Notes store. The
+third slice adds the lookup: a chat request can ask for the notes its question
+finds, and gets them as its first system message. Live fetching and promotion
+are separate dependent changes. A request that does not ask for notes does not
+read the store.
 
 Start the native server with `--notes snapshot.json`. The snapshot must use the
 served tokenizer's vocabulary and, when present, its `tokenizer.json` SHA-256.
@@ -22,6 +24,33 @@ The routes use the server's existing authentication:
 | `POST /v1/notes/ID` with `{"text":"My favourite colour is blue now."}` | Change a note. |
 | `DELETE /v1/notes/ID` | Record a take-back; its history remains. |
 | `DELETE /v1/notes/ID?erase=true` | Rewrite the journal and replay the snapshot without the erased write's closure. |
+
+## Lookup
+
+A chat completion request that sends `"notes": true` (or a `"notes_exclude"`
+list) has its last user message looked up in the store, as LLWZ's Python
+`retrieve()` does. The notes found go into one block, which is put before the
+client's messages as a system message. The block is cut to the snapshot's cap,
+counted by the served tokenizer. When nothing is found, the prompt is the same
+as without notes. The reply's `notes` field lists the note ids, the token
+counts and the times.
+
+| Field | Meaning |
+| --- | --- |
+| `notes_exclude` | Note ids never to show. |
+| `notes_past` | Ask about the past (all versions) or not. By default the question's own wording decides. |
+| `notes_cap` | The block's token limit for this request. |
+| `notes_echo` | Also return the block itself in the reply. |
+| `notes_language` | `en`, `de` or `fi`: the past cues read from the question. `--notes-language` sets the default. |
+
+The lookup reads the index that the last write or erase left, under the same
+lock. An erase also drops the lookup's kept scratch memory, which may hold the
+erased note's text.
+
+`zig build notes-golden` builds a tool that compares the lookup with LLWZ
+Python's answers, question by question, for exported snapshots.
+
+## Erase
 
 An erase refuses snapshot-owned notes: change the source snapshot and export it
 again. It also refuses a snapshot file that changed since startup. Source numbers and numeric note IDs

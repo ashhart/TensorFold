@@ -31,6 +31,8 @@ pub const Storage = struct {
     start_source: u64 = 0,
     kind: index.Kind = index.default_kind,
     idx: ?*index.Index = null,
+    scratch: ?@import("lookup.zig").Scratch = null, // the lookups' (retrieve.zig), made again when it has too little room
+    language: @import("lang.zig").Lang = .en, // past-cue language when a request omits notes_language (--notes-language)
 
     /// File-backed startup checks tokenizer identity before opening or replaying the journal.
     pub fn open(parent: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Storage {
@@ -134,6 +136,7 @@ pub const Storage = struct {
 
     pub fn deinit(s: *Storage) void {
         const parent = s.parent;
+        if (s.scratch) |*sc| sc.deinit();
         if (s.idx) |idx| idx.deinit();
         if (s.journal) |*j| j.deinit();
         s.log.deinit();

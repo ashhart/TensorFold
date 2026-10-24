@@ -166,6 +166,10 @@ test "parse and capabilities share the table" {
     try std.testing.expectEqualStrings("sa", (try parse(a, &.{ "m", "--notes-index=sa" }, &u)).notes.index);
     try std.testing.expectEqualStrings("postings", (try parse(a, &.{ "m", "--notes-index=postings" }, &u)).notes.index);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--notes-index", "suffix" }, &u));
+    try std.testing.expectEqualStrings("en", (try parse(a, &.{ "m", "--notes", "s.json" }, &u)).notes.language);
+    try std.testing.expectEqualStrings("de", (try parse(a, &.{ "m", "--notes", "s.json", "--notes-language", "de" }, &u)).notes.language);
+    try std.testing.expectEqualStrings("fi", (try parse(a, &.{ "m", "--notes-language=fi" }, &u)).notes.language);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--notes-language", "sv" }, &u));
     const args = try parse(a, &.{ "/models/x", "--port", "9000", "--api-key=k1", "--api-key", "k2", "--no-thinking", "--reasoning-effort", "low" }, &u);
     try std.testing.expectEqual(@as(u16, 9000), args.port);
     try std.testing.expectEqual(@as(usize, 2), args.api_key.len);
@@ -201,6 +205,7 @@ test "parse and capabilities share the table" {
     const doc = out.written();
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--notes\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--notes-index\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--notes-language\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--no-thinking\": {}") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--recall-read-only\": {}") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--drafter\"") != null);

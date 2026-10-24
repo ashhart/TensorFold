@@ -114,6 +114,11 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
     // the frozen server parity goldens, checked by Zig driving fake_serve
     golden_build.step(b, target, server_tests, api, tokenizer, template, engines);
+    // the notes lookup against LLWZ Python's answers, on the same server imports as the native server
+    const server_safe = b.createModule(.{ .root_source_file = b.path("zig/src/server/root.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = living } } });
+    _ = server_build.addTo(b, server_safe, target, .ReleaseSafe);
+    const notes_golden = b.addExecutable(.{ .name = "notes-golden", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_golden_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
+    b.step("notes-golden", "LLWZ Python's blocks against the server's lookup, question by question (MODEL_DIR [--index postings|sa] SNAPSHOT REF.json ...)").dependOn(&b.addInstallArtifact(notes_golden, .{}).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
