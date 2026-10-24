@@ -9,12 +9,22 @@ const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
+const clear_thinking_env = "TF_GLM_CLEAR_THINKING";
+
+/// ``TF_GLM_CLEAR_THINKING`` (#236): false unless 1, null unless 0 or 1; given always, as TR3's template clears unset.
+pub fn glmClearThinking(value: ?[]const u8) ?bool {
+    const v = std.mem.trim(u8, value orelse "", " \t\r\n");
+    if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
+    return if (std.mem.eql(u8, v, "1")) true else null;
+}
+
 pub const HfText = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     tok: tokenizer.Tokenizer,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    clear_thinking: ?bool = null, // GLM-5.3's, given to its template on every render (``glmClearThinking``)
     tool_source: []const u8 = "",
     compiled: ?template.Compiled = null,
     tool_compiled: ?template.Compiled = null,
@@ -49,6 +59,13 @@ pub const HfText = struct {
         if (model_config == .object) if (model_config.object.get("model_type")) |kind| {
             t.native_deepseek = template_override == null and kind == .string and
                 (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
+            if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) {
+                const value = if (std.c.getenv(clear_thinking_env)) |v| std.mem.span(v) else null;
+                t.clear_thinking = glmClearThinking(value) orelse {
+                    problem.* = try std.fmt.allocPrint(pa, "{s}={s}: expected 0 or 1", .{ clear_thinking_env, value.? });
+                    return error.Load;
+                };
+            }
         };
         if (template_override) |path| {
             t.source = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch |e| {
@@ -351,6 +368,7 @@ pub const HfText = struct {
         var context: std.json.ObjectMap = .empty;
         try context.put(a, "enable_thinking", .{ .bool = options.enable_thinking });
         if (options.reasoning_effort) |e| try context.put(a, "reasoning_effort", .{ .string = e });
+        if (t.clear_thinking) |clear| try context.put(a, "clear_thinking", .{ .bool = options.clear_thinking orelse clear });
         var diag: template.Diag = .{};
         const tools: std.json.Value = if (options.tools) |tl| try toStd(a, tl) else .null;
         const out = template.renderProvenanceGlobals(a, compiled, try toStd(a, messages), tools, .{ .object = context }, .{ .object = globals }, options.add_generation_prompt, &diag) catch |e| {
@@ -444,6 +462,68 @@ test "explicit template overrides checkpoint templates including tool prompts an
     const empty = try HfText.load(gpa, io, dir, path, a, &problem);
     defer empty.deinit();
     try std.testing.expectError(error.Template, empty.text().render(a, messages, .{}, &problem));
+}
+
+test "GLM-5.3 gives its template clear_thinking: earlier reasoning kept unless TF_GLM_CLEAR_THINKING=1" {
+    try std.testing.expectEqual(@as(?bool, false), glmClearThinking(null));
+    try std.testing.expectEqual(@as(?bool, false), glmClearThinking(" "));
+    try std.testing.expectEqual(@as(?bool, false), glmClearThinking("0"));
+    try std.testing.expectEqual(@as(?bool, true), glmClearThinking("1\n"));
+    for ([_][]const u8{ "true", "2", "yes" }) |bad| try std.testing.expectEqual(@as(?bool, null), glmClearThinking(bad));
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data =
+        \\{"model":{"type":"BPE","vocab":{"H":0},"merges":[]},"added_tokens":[]}
+    });
+    // the template's first revision (the TR3 checkpoint's): reasoning kept only when clear_thinking is false
+    try tmp.dir.writeFile(io, .{ .sub_path = "chat_template.jinja", .data =
+        \\{%- for m in messages -%}{%- if (clear_thinking is defined and not clear_thinking) and m.reasoning_content is defined -%}[{{ m.reasoning_content }}]{%- endif -%}{{ m.content }}{%- endfor -%}
+    });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var problem: []const u8 = "";
+    const messages = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"u\"},{\"role\":\"assistant\",\"content\":\"a\",\"reasoning_content\":\"r\"},{\"role\":\"user\",\"content\":\"v\"}]")).ok;
+    const other = try HfText.load(gpa, io, dir, null, a, &problem); // no config.json: not GLM, nothing given
+    defer other.deinit();
+    try std.testing.expectEqual(@as(?bool, null), other.clear_thinking);
+    try std.testing.expectEqualStrings("uav", (try other.text().render(a, messages, .{}, &problem)).text);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"glm5_next\"}" });
+    const glm = try HfText.load(gpa, io, dir, null, a, &problem);
+    defer glm.deinit();
+    if (std.c.getenv(clear_thinking_env) == null) try std.testing.expectEqual(@as(?bool, false), glm.clear_thinking);
+    glm.clear_thinking = false;
+    try std.testing.expectEqualStrings("u[r]av", (try glm.text().render(a, messages, .{}, &problem)).text);
+    glm.clear_thinking = true;
+    try std.testing.expectEqualStrings("uav", (try glm.text().render(a, messages, .{}, &problem)).text);
+    // a request's clear_thinking wins either way; other families never hear it
+    try std.testing.expectEqualStrings("u[r]av", (try glm.text().render(a, messages, .{ .clear_thinking = false }, &problem)).text);
+    glm.clear_thinking = false;
+    try std.testing.expectEqualStrings("uav", (try glm.text().render(a, messages, .{ .clear_thinking = true }, &problem)).text);
+    try std.testing.expectEqualStrings("uav", (try other.text().render(a, messages, .{ .clear_thinking = false }, &problem)).text);
+}
+
+test "chat_template_kwargs.clear_thinking: a bool, null as unset, anything else refused" {
+    const fields = @import("fields.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    const cases = [_]struct { body: []const u8, want: ?bool }{
+        .{ .body = "{}", .want = null },
+        .{ .body = "{\"chat_template_kwargs\":{\"clear_thinking\":null}}", .want = null },
+        .{ .body = "{\"chat_template_kwargs\":{\"clear_thinking\":true}}", .want = true },
+        .{ .body = "{\"chat_template_kwargs\":{\"clear_thinking\":false,\"enable_thinking\":true}}", .want = false },
+    };
+    for (cases) |c| try std.testing.expectEqual(c.want, (try fields.thinkingFields(&cx, (try json.parse(a, c.body)).ok, &.{})).clear);
+    for ([_][]const u8{ "1", "\"true\"", "{}" }) |bad| {
+        const body = try std.fmt.allocPrint(a, "{{\"chat_template_kwargs\":{{\"clear_thinking\":{s}}}}}", .{bad});
+        try std.testing.expectError(error.Refused, fields.thinkingFields(&cx, (try json.parse(a, body)).ok, &.{}));
+        try std.testing.expectEqualStrings("chat_template_kwargs.clear_thinking must be true or false", cx.message);
+    }
 }
 
 test {

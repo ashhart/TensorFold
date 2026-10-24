@@ -37,6 +37,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         .add_generation_prompt = generation,
         .enable_thinking = thinking,
         .reasoning_effort = if (thinking) effort else null,
+        .clear_thinking = cx.clear_thinking,
     };
     var ids = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -81,7 +82,7 @@ fn generationPrompt(srv: *Server, cx: *Cx, thinking: bool) errors.Refused![]cons
 /// Earlier replies' decoded rows: from each turn's generation prompt end through its closing stop token.
 pub fn replySpans(srv: *Server, cx: *Cx, prompt: []const u32) errors.Refused![]const [2]u32 {
     if (srv.eos.len == 0) return &.{};
-    var probe: Cx = .{ .a = cx.a }; // a template that refuses the probe leaves the request without spans, not failed
+    var probe: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking }; // a template that refuses the probe leaves the request without spans, not failed
     const openers = [2][]const u32{ generationPrompt(srv, &probe, false) catch &.{}, generationPrompt(srv, &probe, true) catch &.{} };
     var spans: std.ArrayList([2]u32) = .empty;
     var i: usize = 0;
@@ -154,7 +155,7 @@ pub fn rewindLen(srv: *Server, cx: *Cx, messages: Value, real_count: usize, tool
     const user = json.copyObject(cx.a, messages.array[user_index].object) catch return 0;
     user.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return 0;
     list[user_index] = .{ .object = user };
-    var scratch: Cx = .{ .a = cx.a };
+    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking };
     const probe = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, true) catch return 0;
     const i = std.mem.indexOfDiff(u32, prompt, probe) orelse return 0;
     return if (i < prompt.len) i else 0;
@@ -173,7 +174,7 @@ pub fn systemPrefixLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Va
     user.put(cx.a, "role", .{ .string = "user" }) catch return 0;
     user.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return 0;
     probe[first_user] = .{ .object = user };
-    var scratch: Cx = .{ .a = cx.a };
+    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking };
     const other = renderIds(srv, &scratch, .{ .array = probe }, tools, thinking, effort, true) catch return 0;
     var shared: usize = 0;
     while (shared < @min(prompt_ids.len, other.len) and prompt_ids[shared] == other[shared]) shared += 1;

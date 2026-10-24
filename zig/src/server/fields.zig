@@ -193,7 +193,7 @@ fn thinkingSwitch(v: ?Value) ?bool {
     return null;
 }
 
-pub const Thinking = struct { effort: ?[]const u8 = null, enable: ?bool = null };
+pub const Thinking = struct { effort: ?[]const u8 = null, enable: ?bool = null, clear: ?bool = null };
 
 /// ``thinking_fields``: a request's effort and thinking switch where it sets them.
 pub fn thinkingFields(cx: *Cx, body: Value, levels: []const []const u8) errors.Refused!Thinking {
@@ -218,6 +218,10 @@ pub fn thinkingFields(cx: *Cx, body: Value, levels: []const []const u8) errors.R
     if (kw_object) if (enable) |on| {
         out.enable = on.truthy();
         if (out.enable.? and out.effort != null and std.mem.eql(u8, out.effort.?, "none")) out.effort = null;
+    };
+    if (kw_object) if (kwargs) |k| if (k.get("clear_thinking")) |c| if (c != .null) {
+        if (c != .bool) return cx.refuse("chat_template_kwargs.clear_thinking must be true or false");
+        out.clear = c.bool;
     };
     return out;
 }

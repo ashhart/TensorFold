@@ -10,6 +10,8 @@ pub const RenderOptions = struct {
     /// Also ``thinking_mode`` ("thinking" or "chat") for templates that read that switch.
     enable_thinking: bool = false,
     reasoning_effort: ?[]const u8 = null,
+    /// A request's ``clear_thinking``; a GLM-5.3 template takes it over the server's.
+    clear_thinking: ?bool = null,
 };
 
 pub const Error = error{ Template, OutOfMemory };

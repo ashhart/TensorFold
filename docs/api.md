@@ -338,10 +338,11 @@ the same prompt for the same request. Effort support depends on the checkpoint's
 token budget. With thinking off, GLM-5.3's prompt is its thinking-off template's: no reasoning-effort line and an
 empty think block. GLM-5.3 keeps every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
 default (`clear_thinking` false), also on checkpoints whose template still clears it before the last user message, so
-a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. A request's
-`chat_template_kwargs.clear_thinking: true` drops it, as the model card advises for plain chat. In the Python 0.6.6
-engine that works on CUDA, and on a Mac `TF_GLM_CLEAR_THINKING=1` sets it for the server, from @MiaAI-Lab's
-[#236](https://github.com/ashhart/TensorFold/pull/236); the native binary does not read that variable.
+a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. The native server
+gives the template `clear_thinking` false on every render, and `TF_GLM_CLEAR_THINKING=1` sets it true for the server,
+from @MiaAI-Lab's [#236](https://github.com/ashhart/TensorFold/pull/236); any value but 0 or 1 refuses to load. A
+request's `chat_template_kwargs.clear_thinking` (true or false) overrides the server's setting for that request, as the
+model card advises `true` for plain chat; any other value is a 400, and other families' templates never receive it.
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.

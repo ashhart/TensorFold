@@ -40,7 +40,8 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
         srv.gpa.destroy(p);
     };
     const a = p.arena.allocator();
-    var cx: errors.Cx = .{ .a = a };
+    const clear = input.fields.get("clear_thinking");
+    var cx: errors.Cx = .{ .a = a, .clear_thinking = if (clear != null and clear.? == .bool) clear.?.bool else null };
     const warm_prompt = try shared(srv, &cx, input, message, thinking, effort);
     var prompt = warm_prompt.ids;
     // an image conversation's pass holds its images as its turns did (data URLs only: no URL is fetched twice)
