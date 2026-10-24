@@ -3,6 +3,7 @@
 #include <cuda_fp8.h>
 
 #include "qwen35.cuh"
+#include "qwen35_page_run.h"
 
 using namespace tf_q35;
 
@@ -63,6 +64,67 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial8(Geo geo, 
     tf_q35_tc::attn_one<tf_q35_tc::Fp8Tiles<128>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc, layer, P, scale, PM, PL, PO);
 }
 
+// Contiguous attention retains the pre-paging FP8 body.
+extern "C" __global__ void tf_q35_attn_partial8_contiguous(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+                                                  const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
+                                                  const int* __restrict__ P, float scale,
+                                                  float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+    constexpr int DPL = HD / 32;
+    const int QH = geo.qh, KVH = geo.kvh;
+    const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
+    const int c = blockIdx.x, h = blockIdx.y;
+    if (c >= MAXCH || past_rows(P, blockIdx.z)) return;
+    const size_t m = blockIdx.z;
+    const int qh = h * (QH / KVH) + g;
+    const Seg sg = segs[rowseg[m]];
+    const Ancestor anc = rowanc[m];
+    const int keys = sg.len + rows_seen(anc), ck = chunk_keys(keys);
+    const int k0 = c * ck, k1 = min(k0 + ck, keys);
+    const size_t slot = (m * QH + qh) * MAXCH + c;
+    if (k0 >= k1) {
+        if (lane == 0) {
+            PM[slot] = -INFINITY;
+            PL[slot] = 0.0f;
+        }
+        return;
+    }
+    const unsigned char* K = layer_at(sg, layer, KVH);
+    const unsigned char* V = K + (size_t)KVH * sg.cap * HD;
+    const float* KS = reinterpret_cast<const float*>(V + (size_t)KVH * sg.cap * HD);
+    const float* VS = KS + (size_t)KVH * sg.cap;
+    float q[DPL], o[DPL];
+#pragma unroll
+    for (int i = 0; i < DPL; i++) {
+        q[i] = bf(Q[(m * QH + qh) * HD + lane * DPL + i]);
+        o[i] = 0.0f;
+    }
+    float mx = -INFINITY, l = 0.0f;
+    for (int t = k0; t < k1; t++) {
+        const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
+        const size_t row = (size_t)h * sg.cap + pos;
+        float kf[DPL], vf[DPL];
+        widen8(*reinterpret_cast<const uint2*>(K + row * HD + lane * DPL), kf);
+        float dot = 0.0f;
+#pragma unroll
+        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
+        const float s = warp_sum(dot) * KS[row] * scale;
+        const float mn = fmaxf(mx, s);
+        const float a = __expf(mx - mn), b = __expf(s - mn);
+        l = l * a + b;
+        widen8(*reinterpret_cast<const uint2*>(V + row * HD + lane * DPL), vf);
+        const float bv = b * VS[row];
+#pragma unroll
+        for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
+        mx = mn;
+    }
+    if (lane == 0) {
+        PM[slot] = mx;
+        PL[slot] = l;
+    }
+#pragma unroll
+    for (int i = 0; i < DPL; i++) PO[slot * HD + lane * DPL + i] = o[i];
+}
+
 // tf_q35_attn_partial over e4m3 rows: a key's dot taken on its codes, then scaled; a value's weight carries its scale.
 extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                   const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
@@ -120,6 +182,79 @@ extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __
         scan([&](int pos) { return Row8{r0.k + (size_t)pos * HD, r0.v + (size_t)pos * HD, r0.ks + pos, r0.vs + pos}; });
     } else {
         scan([&](int pos) { return row8(sg, layer, KVH, h, pos); });
+    }
+    if (lane == 0) {
+        PM[slot] = mx;
+        PL[slot] = l;
+    }
+#pragma unroll
+    for (int i = 0; i < DPL; i++) PO[slot * HD + lane * DPL + i] = o[i];
+}
+
+extern "C" __global__ void tf_q35_attn_partial8_paged(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+                                                  const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
+                                                  const int* __restrict__ P, float scale,
+                                                  float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+    constexpr int DPL = HD / 32;
+    const int QH = geo.qh, KVH = geo.kvh;
+    const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
+    const int c = blockIdx.x, h = blockIdx.y;
+    if (c >= MAXCH || past_rows(P, blockIdx.z)) return;
+    const size_t m = blockIdx.z;
+    const int qh = h * (QH / KVH) + g;
+    const Seg sg = segs[rowseg[m]];
+    const Ancestor anc = rowanc[m];
+    const int keys = sg.len + rows_seen(anc), ck = chunk_keys(keys);
+    const int k0 = c * ck, k1 = min(k0 + ck, keys);
+    const size_t slot = (m * QH + qh) * MAXCH + c;
+    if (k0 >= k1) {
+        if (lane == 0) {
+            PM[slot] = -INFINITY;
+            PL[slot] = 0.0f;
+        }
+        return;
+    }
+    float q[DPL], o[DPL];
+#pragma unroll
+    for (int i = 0; i < DPL; i++) {
+        q[i] = bf(Q[(m * QH + qh) * HD + lane * DPL + i]);
+        o[i] = 0.0f;
+    }
+    float mx = -INFINITY, l = 0.0f;
+    // the keys in order; a row's codes and scales by `at` (one branch here, not one a key)
+    const auto scan = [&](auto at) {
+        for (int t = k0; t < k1; t++) {
+            const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
+            const Row8 r = at(pos);
+            float kf[DPL], vf[DPL];
+            widen8(*reinterpret_cast<const uint2*>(r.k + lane * DPL), kf);
+            float dot = 0.0f;
+#pragma unroll
+            for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
+            const float s = warp_sum(dot) * *r.ks * scale;
+            const float mn = fmaxf(mx, s);
+            const float a = __expf(mx - mn), b = __expf(s - mn);
+            l = l * a + b;
+            widen8(*reinterpret_cast<const uint2*>(r.v + lane * DPL), vf);
+            const float bv = b * *r.vs;
+#pragma unroll
+            for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
+            mx = mn;
+        }
+    };
+    if (sg.pt == 0) {
+        const Row8 r0 = row8(sg, layer, KVH, h, 0); // row p is row 0's plus p rows
+        scan([&](int pos) { return Row8{r0.k + (size_t)pos * HD, r0.v + (size_t)pos * HD, r0.ks + pos, r0.vs + pos}; });
+    } else {
+        TfQ35PageRun page{reinterpret_cast<const int*>(sg.pt), sg.ptok, -1, sg.ps, 0};
+        scan([&](int pos) {
+            unsigned char* base = reinterpret_cast<unsigned char*>(sg.kv) + tf_q35_page_base(&page, pos);
+            unsigned char* keys = base + (size_t)layer * 2 * KVH * sg.ptok * (HD + 4);
+            unsigned char* values = keys + (size_t)KVH * sg.ptok * HD;
+            float* scales = reinterpret_cast<float*>(values + (size_t)KVH * sg.ptok * HD);
+            const size_t row = (size_t)h * sg.ptok + pos % sg.ptok;
+            return Row8{keys + row * HD, values + row * HD, scales + row, scales + (size_t)KVH * sg.ptok + row};
+        });
     }
     if (lane == 0) {
         PM[slot] = mx;

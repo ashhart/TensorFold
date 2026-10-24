@@ -438,72 +438,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
 }
 
 // Causal attention in chunks of chunk_keys(the row's keys), a warp a query head; partials by (row, head, chunk).
-extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
-                                                 const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
-                                                 const int* __restrict__ P, float scale,
-                                                 float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
-    constexpr int DPL = HD / 32;
-    const int QH = geo.qh, KVH = geo.kvh;
-    const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
-    const int c = blockIdx.x, h = blockIdx.y;
-    if (c >= MAXCH || past_rows(P, blockIdx.z)) return;
-    const size_t m = blockIdx.z;
-    const int qh = h * (QH / KVH) + g;
-    const Seg sg = segs[rowseg[m]];
-    const Ancestor anc = rowanc[m];
-    // chunks cut at logical positions (a window key's: the stream's length plus its ancestors), as a step's are
-    const int keys = sg.len + rows_seen(anc), ck = chunk_keys(keys);
-    const int k0 = c * ck, k1 = min(k0 + ck, keys);
-    const size_t slot = (m * QH + qh) * MAXCH + c;
-    if (k0 >= k1) {
-        if (lane == 0) {
-            PM[slot] = -INFINITY;
-            PL[slot] = 0.0f;
-        }
-        return;
-    }
-    const __nv_bfloat16* KV = reinterpret_cast<const __nv_bfloat16*>(sg.kv);
-    float q[DPL], o[DPL];
-#pragma unroll
-    for (int i = 0; i < DPL; i++) {
-        q[i] = bf(Q[(m * QH + qh) * HD + lane * DPL + i]);
-        o[i] = 0.0f;
-    }
-    float mx = -INFINITY, l = 0.0f;
-    // the keys in order; a key's and value's rows by `row` (one branch here, not one a key)
-    const auto scan = [&](auto row) {
-        for (int t = k0; t < k1; t++) {
-            const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
-            const uint4 kw = *reinterpret_cast<const uint4*>(row(0, pos) + lane * DPL);
-            const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw);
-            float dot = 0.0f;
-#pragma unroll
-            for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
-            const float s = warp_sum(dot) * scale;
-            const float mn = fmaxf(mx, s);
-            const float a = __expf(mx - mn), b = __expf(s - mn);
-            l = l * a + b;
-            const uint4 vw = *reinterpret_cast<const uint4*>(row(1, pos) + lane * DPL);
-            const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw);
-#pragma unroll
-            for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
-            mx = mn;
-        }
-    };
-    if (sg.pt == 0) {
-        const __nv_bfloat16* K = KV + kv_row(sg, KVH, layer, 0, h, 0);
-        const __nv_bfloat16* V = KV + kv_row(sg, KVH, layer, 1, h, 0);
-        scan([&](int s, int pos) { return (s == 0 ? K : V) + (size_t)pos * HD; });
-    } else {
-        scan([&](int s, int pos) { return KV + kv_row(sg, KVH, layer, s, h, pos); });
-    }
-    if (lane == 0) {
-        PM[slot] = mx;
-        PL[slot] = l;
-    }
-#pragma unroll
-    for (int i = 0; i < DPL; i++) PO[slot * HD + lane * DPL + i] = o[i];
-}
+#include "qwen35_attn.cuh"
 
 // A row's chunks' partials into each (row, query head)'s output, rows qh * HD wide. Grid (qh, rows), a warp each.
 extern "C" __global__ void __launch_bounds__(32) tf_q35_attn_merge(Geo geo, const float* __restrict__ PM, const float* __restrict__ PL,

@@ -17,6 +17,12 @@ pub fn host(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void {
     }) }));
     b.step("test-qwen-pages-contract-host", "Paged Qwen FP32 stress and non-finite references without GPU code").dependOn(&page_math.step);
     all.dependOn(&page_math.step);
+    const page_run_root = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_page_runs.zig"), .target = b.graph.host, .link_libc = true });
+    page_run_root.addIncludePath(b.path("zig/kernels/cuda"));
+    page_run_root.addCSourceFile(.{ .file = b.path("zig/tests/cuda/contract_q35_page_runs.c"), .flags = &.{"-std=c11"} });
+    const page_run = b.addRunArtifact(b.addTest(.{ .root_module = page_run_root }));
+    b.step("test-qwen35-page-runs-host", "Actual CUDA page-run helper and table-read controls without devices").dependOn(&page_run.step);
+    all.dependOn(&page_run.step);
     imageTests(b, core, all);
 }
 

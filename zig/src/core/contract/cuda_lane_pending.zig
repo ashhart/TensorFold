@@ -44,6 +44,12 @@ pub const records = [_]CudaRecord{
         .{ .regs = 42, .static = 32, .bound = 256 },
         .{ .regs = 42, .static = 32, .bound = 256 },
     }, .later_pending = true },
+    .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial_paged", .symbol = "tf_q35_attn_partial_paged", .image = "qwen35", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8_paged", .symbol = "tf_q35_attn_partial8_paged", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial_contiguous", .symbol = "tf_q35_attn_partial_contiguous", .image = "qwen35", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8_contiguous", .symbol = "tf_q35_attn_partial8_contiguous", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial", .symbol = "tf_q35_attn_partial", .image = "qwen35", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8", .symbol = "tf_q35_attn_partial8", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
 };
 
 test "five-SM receipts qualify every CUDA lane while preserving later compiler selections" {

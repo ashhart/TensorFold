@@ -62,6 +62,7 @@ const route_k = @import("contract_route_rows.zig");
 const fexp_k = @import("contract_flashnext_fexp.zig");
 const glue_k = @import("contract_flashnext_glue.zig");
 
+const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
@@ -554,6 +555,20 @@ pub fn run(gpu: check.Gpu) !void {
     var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f);
     defer glm_controls.deinit();
     try glm_controls.append(a, &kernels);
+    var q35_mod = try cuda.Module.load(gpu.d, kk.qwen35);
+    defer q35_mod.unload();
+    var q35_fp8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
+    defer q35_fp8.unload();
+    var contiguous: [q35_contiguous.forms.len]q35_contiguous.Q35 = undefined;
+    for (q35_contiguous.forms, &contiguous) |f, *x| x.* = .{
+        .rig = .{ .gpu = gpu, .s = s },
+        .form = f,
+        .partial = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8_contiguous") else q35_mod.function("tf_q35_attn_partial_contiguous"),
+        .baseline = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8") else q35_mod.function("tf_q35_attn_partial"),
+        .merge = try q35_mod.function("tf_q35_attn_merge"),
+    };
+    defer for (&contiguous) |*x| x.deinit();
+    for (&contiguous) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

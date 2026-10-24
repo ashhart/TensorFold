@@ -319,9 +319,11 @@ pub fn run(gpu: check.Gpu) !void {
     const merge = try mod.function("tf_q35_attn_merge");
     for (std.enums.values(Format)) |format| {
         const fns: Fns = switch (format) {
-            .bf16 => .{ .rope = try mod.function("tf_q35_rope"), .partial = try mod.function("tf_q35_attn_partial"), .merge = merge, .compact = try keep.function("tf_q35k_compact") },
-            .fp8 => .{ .rope = try kv8.function("tf_q35_rope8"), .partial = try kv8.function("tf_q35_attn_partial8"), .merge = merge, .compact = try kv8.function("tf_q35k_compact8") },
+            .bf16 => .{ .rope = try mod.function("tf_q35_rope"), .partial = try mod.function("tf_q35_attn_partial_paged"), .merge = merge, .compact = try keep.function("tf_q35k_compact") },
+            .fp8 => .{ .rope = try kv8.function("tf_q35_rope8"), .partial = try kv8.function("tf_q35_attn_partial8_paged"), .merge = merge, .compact = try kv8.function("tf_q35k_compact8") },
         };
+        var flat_fns = fns;
+        flat_fns.partial = try if (format == .fp8) kv8.function("tf_q35_attn_partial8_contiguous") else mod.function("tf_q35_attn_partial_contiguous");
         var red_table = false;
         var red_bound = false;
         for (cases, 0..) |c, i| {
@@ -330,7 +332,9 @@ pub fn run(gpu: check.Gpu) !void {
             const a = arena.allocator();
             var f = try Fixture.make(a, c, format, 0x9a6e + i);
             try numerical.fill(&f, c.mode);
-            const flat = try launch(gpu, s, fns, f, null, null, a, 1);
+            const flat = try launch(gpu, s, flat_fns, f, null, null, a, 1);
+            const old = try launch(gpu, s, fns, f, null, null, a, 1);
+            try check.sameBytes("qwen35 pages: contiguous specialization against general entry", flat.out, old.out);
             try check.expect(try checked(a, f, flat), "qwen35 pages {t}: contiguous attention off float64 at lens {any}, rows {d}", .{ format, c.lens, c.rows });
             for (0..5) |rep| {
                 var repeated = std.heap.ArenaAllocator.init(gpu.gpa);

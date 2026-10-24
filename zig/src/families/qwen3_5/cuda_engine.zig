@@ -479,6 +479,7 @@ pub const Engine = struct {
             if (p.rows == 1) try recurrent.mark(p.cache, true);
         };
         shape.hidden = keep == .hidden;
+        shape.paged = @import("cuda_attention.zig").hasPages(segs);
         if (e.learning != null or e.pockets.any()) {
             var exact = shape;
             exact.total = @intCast(total);

@@ -5,7 +5,6 @@ const sig = @import("cuda_signatures.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const geometry = @import("cuda_geometry.zig");
 const head_dim = geometry.head_dim;
-const max_chunks = 64;
 /// Prompt experts keep the shipped arithmetic boundary, independently of verification capacity.
 pub const prompt_moe_cutoff: usize = 16;
 /// qwen35_attn_tc.cuh's bf16 tile buffers: two of a 32-key tile's keys and values, 512 bytes a row each.
@@ -37,7 +36,6 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const t_anc = e.tables.ptr + rowanc_at;
     const t_params = e.tables.ptr + params_at;
     const geo = e.geo;
-    const group = g.q_heads / g.kv_heads;
 
     try e.embed(t_ids, e.h, total, t_params);
     // the producers of the out, o and down inputs write their group sums; a prompt GEMM past 16 rows needs none
