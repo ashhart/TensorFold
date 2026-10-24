@@ -354,12 +354,11 @@ const Lanes = struct {
         }
         cache.untaught = stream.untaught;
         while (at < ids.len) {
+            // Cancel between chunks and retain the last complete prefix before releasing the cache.
             if (stream.isCancelled()) {
                 stream.keepInterruptedPrefill(@intCast(at));
                 return error.Cancelled;
             }
-            // a cancel or the host's halt lands between chunks, not after a pass of minutes (its cache goes back reset)
-            if (stream.isCancelled()) return error.Cancelled;
             const end = nextCut(ids.len, stream.chunks, at);
             try self.e.forward(&.{.{ .cache = cache, .rows = end - at, .images = if (images) |*im| im else null }}, ids[at..end], .last);
             at = end;

@@ -58,6 +58,8 @@ const Driver = struct {
     stop_at: ?usize = 4,
     started_at: u32 = 0,
     saves: usize = 0,
+    steps: usize = 0,
+    cancels: usize = 0,
     fail_prefill: bool = false,
     fail_save: bool = false,
     fail_cancel: bool = false,
@@ -73,6 +75,7 @@ const Driver = struct {
     fn step(ptr: *anyopaque, s: *lanes.Stream) !bool {
         const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
         const d = of(f.prefill_hook_ctx.?);
+        d.steps += 1;
         const got = try f.lanes.getOrPut(a, s);
         if (!got.found_existing) got.value_ptr.* = .{};
         const h = &got.value_ptr.history;
@@ -101,6 +104,7 @@ const Driver = struct {
 
     fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) !void {
         const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+        of(f.prefill_hook_ctx.?).cancels += 1;
         if (of(f.prefill_hook_ctx.?).fail_cancel) return error.PeerFailed;
         const l = f.lanes.getPtr(s) orelse return;
         s.keepInterruptedPrefill(@intCast(l.history.items.len));
@@ -251,5 +255,41 @@ test "interrupted prefill: cache refusals, zero progress and backend failures le
         try t.expectEqual(api.Reason.length, try retry.wait());
         try t.expectEqual(@as(?u32, 0), retry.cached);
         try retry.exact(&prompt);
+    }
+}
+
+test "interrupted prefill: uncancelled whole and stepped paths do no retention work" {
+    for ([_]bool{ false, true }) |stepped| {
+        for ([_]bool{ false, true }) |enabled| {
+            var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+            defer cfg.deinit(a);
+            var target: lanes.fake.Fake = .{ .gpa = a };
+            defer target.deinit();
+            var vt = target.backend().vtable.*;
+            vt.prefill = Driver.prefill;
+            vt.prefill_step = if (stepped) Driver.step else null;
+            vt.cancel_prefill = if (enabled) Driver.cancelPrefill else null;
+            var clock: lanes.fake.FixedClock = .{};
+            var core = lanes.Engine.init(a, &cfg, .{ .ptr = &target, .vtable = &vt }, clock.clock());
+            defer core.deinit();
+            var host = api.LaneHost.init(a, t.io, &core, .{ .lanes = 2 });
+            var driver: Driver = .{ .target = &target, .engine = host.engine(), .stop_at = null };
+            target.prefill_hook_ctx = &driver;
+            var store = pc.Store.init(a, .{ .ptr = &driver, .vtable = &snapshots }, .{ .min_prompt = 0 }, 200);
+            defer store.deinit();
+            host.cache = &store;
+            try host.start();
+            defer host.stop();
+            const request: api.Request = .{ .prompt = &prompt, .max_tokens = 12 };
+            var reply: Reply = .{};
+            defer reply.ids.deinit(a);
+            try driver.submit(&request, &reply);
+            try t.expectEqual(api.Reason.length, try reply.wait());
+            try reply.exact(&prompt);
+            try t.expectEqual(@as(?u32, 0), reply.cached);
+            try t.expectEqual(@as(usize, 4), driver.steps);
+            try t.expectEqual(@as(usize, 0), driver.cancels);
+            try t.expectEqual(@as(usize, 0), driver.saves);
+        }
     }
 }
