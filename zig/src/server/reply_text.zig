@@ -15,8 +15,8 @@ pub const calls = [_][2][]const u8{
     .{ "<\u{ff5c}DSML\u{ff5c}tool_calls>", "</\u{ff5c}DSML\u{ff5c}tool_calls>" },
     .{ "<|tool_call_start|>", "<|tool_call_end|>" },
 };
-/// How each opener's call payload starts: Gemma 4's ``call:`` (the 26B's ``:``) and DSML's invoke; ``<tool_call>`` has none.
-const leads = [calls.len][]const []const u8{ &.{}, &.{ "call:", ":" }, &.{"<\u{ff5c}DSML\u{ff5c}invoke"} };
+/// Each opener's payload lead: Gemma 4's ``call:`` (26B: ``:``), DSML's invoke; ``<tool_call>`` and LFM2 have none.
+const leads = [calls.len][]const []const u8{ &.{}, &.{ "call:", ":" }, &.{"<\u{ff5c}DSML\u{ff5c}invoke"}, &.{} };
 
 /// Whether the text after an opener is a call's payload, may still become one, or is prose that names the opener.
 fn payloadOf(rest: []const u8, which: usize, finished: bool) enum { call, wait, prose } {

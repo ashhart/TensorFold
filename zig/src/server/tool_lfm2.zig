@@ -1,4 +1,4 @@
-//! LFM2's Pythonic tool calls (`<|tool_call_start|>[name(key=value)]<|tool_call_end|>`) rewritten as DeepSeek-V4's DSML.
+//! LFM2's Pythonic tool calls (`<|tool_call_start|>[name(key=value)]<|tool_call_end|>`) rewritten as DSML.
 const std = @import("std");
 const json = @import("json");
 const tool_params = @import("tool_params.zig");
@@ -11,7 +11,7 @@ pub const close = reply_text.calls[3][1];
 const dsml_open = reply_text.calls[2][0];
 const dsml_close = reply_text.calls[2][1];
 
-/// `text` with each complete block of offered calls as a DSML block; while streaming (not `finished`) an open block is held back.
+/// `text` with each complete block of offered calls as DSML; while streaming (not `finished`) an open block is held.
 pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool) Allocator.Error![]const u8 {
     if (tools.len == 0) return text;
     var at = reply_text.findTag(text, 0, open) orelse return text;
@@ -22,7 +22,7 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
     var rewrote = false;
     while (true) {
         const e = reply_text.findTag(text, at + open.len, close) orelse {
-            if (!finished) end = at; // the stream's call parser reads on from where it stopped, so it must first meet the block as DSML
+            if (!finished) end = at; // the stream's parser resumes where it stopped: it must meet the block as DSML
             break;
         };
         if (try block(a, text[at + open.len .. e], &schemas)) |b| {
@@ -40,7 +40,7 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
 
 /// One block's list of calls as DSML, or null when it is not a list of calls to offered tools.
 fn block(a: Allocator, body: []const u8, schemas: *const tool_params.Schemas) Allocator.Error!?[]const u8 {
-    if (std.mem.indexOf(u8, body, "\u{ff5c}DSML\u{ff5c}") != null) return null; // DSML markup in a value would end the block early
+    if (std.mem.indexOf(u8, body, "\u{ff5c}DSML\u{ff5c}") != null) return null; // DSML in a value would end the block early
     var p: Scanner = .{ .s = body };
     if (!p.eat('[')) return null;
     var out: std.ArrayList(u8) = .empty;
@@ -70,7 +70,7 @@ fn block(a: Allocator, body: []const u8, schemas: *const tool_params.Schemas) Al
     return out.items;
 }
 
-/// A call's arguments up to its `)`, positional ones named in the schema's property order; null if Python would refuse them.
+/// A call's arguments up to its `)`, positionals named in schema property order; null if Python would refuse them.
 fn arguments(a: Allocator, p: *Scanner, order: []const []const u8) Allocator.Error!?*json.Object {
     const args = try json.newObject(a);
     var keyword = false;
@@ -78,7 +78,7 @@ fn arguments(a: Allocator, p: *Scanner, order: []const []const u8) Allocator.Err
     if (p.eat(')')) return args;
     while (true) {
         const named = p.keyword();
-        if (named == null and (keyword or positional >= order.len)) return null; // positional after a keyword, or past the schema's properties
+        if (named == null and (keyword or positional >= order.len)) return null; // positional after a keyword, or past the properties
         keyword = named != null;
         const key = named orelse blk: {
             positional += 1;
@@ -267,7 +267,8 @@ test "tool_lfm2: a block still being written is held back while streaming and st
     const r = try tool_parse.parse(a, try dsml(a, cut, tools, true), tools, null);
     try std.testing.expect(r.calls == null);
     try std.testing.expectEqualStrings(cut, r.content);
-    try std.testing.expectEqualStrings("Checking.", try reply_text.finishedProse(a, cut));
+    // a finished reply's unclosed envelope is text (#1243), as the content above keeps it
+    try std.testing.expectEqualStrings(cut, try reply_text.finishedProse(a, cut));
 }
 
 test "tool_lfm2: the calls a stream sends at every byte boundary are the whole reply's calls" {
