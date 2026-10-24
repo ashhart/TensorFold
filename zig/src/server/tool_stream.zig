@@ -484,9 +484,8 @@ pub const Policy = struct {
         return out.items;
     }
 
-    /// What the filter held back that the reply keeps as text (a malformed call): ``final`` past the prose ``sent``.
-    pub fn kept(p: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
-        if (!p.single) return null;
+    /// What the stream held back that the reply keeps as text (a malformed or unoffered call): ``final`` past the prose ``sent``.
+    pub fn kept(_: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
         const shown = reply_text.pyLstrip(sent); // the parsed content starts stripped
         if (!std.mem.startsWith(u8, final, shown)) return null;
         const rest = final[shown.len..];

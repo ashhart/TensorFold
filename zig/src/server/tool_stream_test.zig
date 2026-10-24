@@ -120,8 +120,6 @@ test "a one-call reply retains an unoffered call and still hides an unclosed one
     // a stream that sent the prose before the block ends with the block
     try std.testing.expectEqualStrings(text["Launching. ".len..], single.kept(text, "\nLaunching. ").?);
     try std.testing.expect(single.kept("Launching.", "Launching. ") == null);
-    const parallel: Policy = .{};
-    try std.testing.expect(parallel.kept(text, "Launching. ") == null);
 }
 
 const tool_parse = @import("tool_parse.zig");

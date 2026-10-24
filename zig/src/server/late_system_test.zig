@@ -390,6 +390,49 @@ test "legacy tool stream sends prose before and after exactly one call and warms
     try std.testing.expectEqual(backend.prompt.len, backend.background_born);
 }
 
+test "a stream ends with a call to a tool the request did not offer as text, as the whole reply keeps it" {
+    var text: DropLate = .{};
+    // prose, then a call to a tool the request does not offer: the parser leaves the block as text
+    var backend: Capture = .{ .reply = "Checking the vault.\n<tool_call>\n<function=vault_list>\n<parameter=path>\nimported/\n</parameter>\n</function>\n</tool_call>" };
+    defer std.testing.allocator.free(backend.prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const whole = try exchange(srv, "/v1/chat/completions", prose_chat ++ "}");
+    defer std.testing.allocator.free(whole.body);
+    const message = (try json.parse(a, whole.body)).ok.get("choices").?.array[0].get("message").?;
+    try std.testing.expect(message.get("tool_calls") == null);
+    try std.testing.expectEqualStrings(backend.reply, message.get("content").?.string);
+    const got = try exchange(srv, "/v1/chat/completions", prose_chat ++ ",\"stream\":true}");
+    defer std.testing.allocator.free(got.body);
+    var prose: std.ArrayList(u8) = .empty;
+    var finish: []const u8 = "";
+    var lines = std.mem.splitScalar(u8, got.body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data: ")) continue;
+        const data = std.mem.trimEnd(u8, line["data: ".len..], "\r");
+        if (std.mem.eql(u8, data, "[DONE]")) continue;
+        const choices = (try json.parse(a, data)).ok.get("choices").?.array;
+        if (choices.len == 0) continue;
+        const delta = choices[0].get("delta").?;
+        try std.testing.expect(delta.get("tool_calls") == null);
+        if (delta.get("content")) |content| try prose.appendSlice(a, content.string);
+        if (choices[0].get("finish_reason")) |f| if (f == .string) {
+            finish = f.string;
+        };
+    }
+    try std.testing.expectEqualStrings("stop", finish);
+    // the streamed prose joins to the whole reply's content: the block is not silently lost
+    try std.testing.expectEqualStrings(message.get("content").?.string, std.mem.trim(u8, prose.items, " \n"));
+}
+
 test "single-call whole replies retain prose and tool-only replies still have null content" {
     var text: DropLate = .{};
     var backend: Capture = .{};
