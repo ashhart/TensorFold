@@ -19,6 +19,7 @@ GENERATOR_OUTPUT = (
     "zig/src/core/tokenizer/nfkd_data.zig",
     "zig/src/families/flashnext/roles_gen.zig",
     "zig/kernels/metal/flashnext/sources_gen.zig",
+    "zig/src/server/notes/lang_tables.zig",
 )
 
 
