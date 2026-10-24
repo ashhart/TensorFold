@@ -76,30 +76,36 @@ inline float mm_sigmoid(float x) {
   A[(size_t)p.y * a.width + p.x] = bfloat(float(bfloat(u + 1.0f)) * glu);
 }
 
-// The router's fp32 logits: L[r, e] = sum_d float(X[r, d]) * W[e, d], 16 rows a threadgroup, an expert a threadgroup.
+// The router's fp32 logits: L[r, e] = sum_d float(X[r, d]) * W[e, d], 8 rows and 8 experts a threadgroup.
 [[kernel]] void mm_router(const device bfloat* X [[buffer(0)]], const device float* W [[buffer(1)]],
     constant mm_args& a [[buffer(2)]], device float* L [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
     uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-  constexpr uint RB = 16;
-  threadgroup float part[RB][8];
-  const uint e = tg.x, r0 = tg.y * RB, nr = min(RB, a.rows - r0);
-  const device float* w = W + (size_t)e * a.width;
-  float acc[RB];
-  for (uint r = 0; r < RB; ++r) acc[r] = 0.0f;
+  constexpr uint RB = 8, EB = 8; // rows and experts a threadgroup: each x load serves EB experts
+  threadgroup float part[EB][RB][8];
+  const uint e0 = tg.x * EB, r0 = tg.y * RB, nr = min(RB, a.rows - r0);
+  float acc[EB][RB];
+  for (uint k = 0; k < EB; ++k)
+    for (uint r = 0; r < RB; ++r) acc[k][r] = 0.0f;
   for (uint d = 4 * t; d < a.width; d += 4 * 256) {
-    const float4 wv = *(const device float4*)(w + d);
-    for (uint r = 0; r < nr; ++r) acc[r] += dot(wv, float4(*(const device bfloat4*)(X + (size_t)(r0 + r) * a.width + d)));
+    float4 wv[EB];
+    for (uint k = 0; k < EB; ++k) wv[k] = *(const device float4*)(W + (size_t)(e0 + k) * a.width + d);
+    for (uint r = 0; r < nr; ++r) {
+      const float4 xv = float4(*(const device bfloat4*)(X + (size_t)(r0 + r) * a.width + d));
+      for (uint k = 0; k < EB; ++k) acc[k][r] += dot(wv[k], xv);
+    }
   }
-  for (uint r = 0; r < nr; ++r) {
-    const float s = simd_sum(acc[r]);
-    if (lane == 0) part[r][sg] = s;
-  }
+  for (uint k = 0; k < EB; ++k)
+    for (uint r = 0; r < nr; ++r) {
+      const float s = simd_sum(acc[k][r]);
+      if (lane == 0) part[k][r][sg] = s;
+    }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (t < nr) {
+  if (t < nr * EB) {
+    const uint k = t / nr, r = t % nr;
     float s = 0.0f;
-    for (uint j = 0; j < 8; ++j) s += part[t][j];
-    L[(size_t)(r0 + t) * a.heads + e] = s;
+    for (uint j = 0; j < 8; ++j) s += part[k][r][j];
+    L[(size_t)(r0 + r) * a.heads + e0 + k] = s;
   }
 }
 

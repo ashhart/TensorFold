@@ -280,7 +280,7 @@ fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, ne
             } else x.glue(.add, Args{ .rows = nr, .width = c.hidden }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
         },
         .moe => |e| {
-            x.glue(.router, Args{ .rows = nr, .width = c.hidden, .heads = c.experts }, &.{ b(s.x), t(e.router), A, b(s.logits32) }, .{ c.experts, (n + 15) / 16, 1 }, .{ 256, 1, 1 }, true);
+            x.glue(.router, Args{ .rows = nr, .width = c.hidden, .heads = c.experts }, &.{ b(s.x), t(e.router), A, b(s.logits32) }, .{ c.experts / 8, (n + 7) / 8, 1 }, .{ 256, 1, 1 }, true);
             // a decode window's picks and its slots by expert in one threadgroup; a prompt chunk's picks a row each
             if (n > st.batch_rows) {
                 x.glue(.route_pick, Args{ .rows = nr, .width = c.experts, .heads = c.topk }, &.{ b(s.logits32), t(e.bias), A, b(s.pick), b(s.wts) }, .{ n, 1, 1 }, .{ 32, 1, 1 }, true);
