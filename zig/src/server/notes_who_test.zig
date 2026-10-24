@@ -16,6 +16,9 @@ const snapshot = @embedFile("notes/testdata/who_bytes_snapshot.json");
 const cases_json = @embedFile("notes/testdata/who_bytes_cases.json");
 const live_json = @embedFile("notes/testdata/who_bytes_live.json");
 const l6_who_json = @embedFile("notes/testdata/l6_bytes_who.json");
+/// LLWZ's L6-seed2 teach store and Python's answers (who_fixture.py): its dog's name is given in a later clause.
+const l6s2_snapshot = @embedFile("notes/testdata/l6s2_bytes_snapshot.json");
+const l6s2_who_json = @embedFile("notes/testdata/l6s2_bytes_who.json");
 const empty_snapshot = @embedFile("notes/testdata/tb_empty_bytes_snapshot.json");
 
 /// One chat request's notes field, the reply checked to be a 200.
@@ -136,6 +139,18 @@ test "who first: a name of Latin letters with marks, with a hyphen, or of severa
     try testing.expectEqual(@as(usize, 0), (try idsOf(r, a, "Is Al  Ko big?", "")).len);
 }
 
+test "who first: a name the name note gives in a later clause, after a word for its subject, names its holder" {
+    const r = try rig.Rig.initWithSnap(testing.allocator, .{}, snapshot);
+    defer r.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // "Noor's goat got renamed, it is called Pim now." and "Noor's goat eats hay."
+    try testing.expectEqualSlices(u32, &.{ 28, 29 }, try idsOf(r, a, "What does Pim eat?", ""));
+    const plain = try idsOf(r, a, "What does Pim eat?", ",\"notes_lookup\":\"plain\"");
+    try testing.expect(has(plain, 12) and has(plain, 28)); // retrieve() also brings the cats' notes
+}
+
 test "who first: on notes the server wrote, a question that names someone gets the notes today's lookup finds" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -192,7 +207,7 @@ fn differing(store: *Storage, text: anytype, cases: []const u8, plain: bool) !us
 test "who first gives Python's ids, tokens, candidates and block for every case, with either index" {
     var text: Bytes = .{};
     for ([_]index.Kind{ .postings, .sa }) |kind| {
-        for ([_][2][]const u8{ .{ snapshot, cases_json }, .{ rig.snapshot, l6_who_json } }) |pair| {
+        for ([_][2][]const u8{ .{ snapshot, cases_json }, .{ rig.snapshot, l6_who_json }, .{ l6s2_snapshot, l6s2_who_json } }) |pair| {
             var why: []const u8 = "";
             const store = try Storage.loadKind(testing.allocator, pair[0], text.text(), null, kind, &why);
             defer store.deinit();

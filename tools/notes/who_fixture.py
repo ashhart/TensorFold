@@ -15,7 +15,9 @@ OWNER = "u"
 USAGE = """who_bytes_snapshot.json: the made-up store (LLWZ's notes_export.py, fixture.py's byte tokenizer).
 who_bytes_cases.json: per case the who-first answer and retrieve()'s ids.
 who_bytes_live.json: WRITES as /v1/notes adds on that store, and per LIVE case the who-first answer after them.
-l6_bytes_who.json: the who-first answer for each case of l6_bytes_cases.json (the L6 store must export unchanged)."""
+l6_bytes_who.json: the who-first answer for each case of l6_bytes_cases.json (the L6 store must export unchanged).
+l6s2_bytes_snapshot.json, l6s2_bytes_who.json: LLWZ's L6-seed2 teach store, and the who-first answer for each of its
+questions asked plain, about the past, and without retrieve()'s first two notes, and both."""
 STORE = [  # (entity, attribute, value, text); a phrase of the byte tokenizer is at most 8 keys: " my son" is 7
     ("my son", "name", "Ivo", "My son's name is Ivo."),
     ("my son", "eyes", "hazel", "My son has hazel eyes."),
@@ -44,6 +46,8 @@ STORE = [  # (entity, attribute, value, text); a phrase of the byte tokenizer is
     ("Uma's cat", "name", "Zo\u00eb", "Uma's cat is called Zo\u00eb."),
     ("Ida's ox", "name", "Ea-Li", "Ida's ox is called Ea-Li."),
     ("Ida's yak", "name", "Al Ko", "Ida's yak is called Al Ko."),
+    ("Noor's goat", "name", "Pim", "Noor's goat got renamed, it is called Pim now."),  # a later clause names it
+    ("Noor's goat", "food", "hay", "Noor's goat eats hay."),
 ]
 # (question, past, cap, exclude)
 CASES = [
@@ -78,6 +82,7 @@ CASES = [
     ("Is Al  Ko big?", None, None, ()),
     ("What colour are my\u00a0eyes?", None, None, ()),
     ("\u00e9my eyes", None, None, ()),
+    ("What does Pim eat?", None, None, ()),
 ]
 # /v1/notes adds on the made-up store: the server files them under the user (or `subject`) as "note:SOURCE"
 WRITES = [
@@ -91,7 +96,7 @@ LIVE = [
     ("What does Lumi like?", None, None, ()),
     ("Where does Ivo sleep?", None, None, ()),
     ("What colour are my cousin's eyes?", None, None, ()),
-    ("Where does Rex sleep?", None, None, (28,)),
+    ("Where does Rex sleep?", None, None, (30,)),
 ]
 
 
@@ -139,6 +144,21 @@ def live(nm, nx, tok, snap):
     return {"today": fixture.TODAY, "writes": writes, "cases": cases}
 
 
+def seed2(nm, nx, tok, llwz):
+    """LLWZ's L6-seed2 teach store and the who-first answer for each question in the four ways the hold-out asks it."""
+    S = nm.load_set(os.path.join(llwz, "examples", "L6-seed2.json"))
+    teach = next(p for p in S["phases"] if p["name"] == "teach")
+    ns, _w = nm.set_store(S, teach["store"], tok)
+    snap, _v = nx.snapshot(ns, "user", meta={"set": S["id"], "phase": "teach", "tokenizer": "bytes"})
+    out = []
+    for q in S["questions"]:
+        for past in (None, True):
+            out.append(answer(nm, ns, "user", q["text"], past, None, ()))
+            ex = tuple(ns.retrieve("user", q["text"], past=past)["ids"][:2])
+            out.append(answer(nm, ns, "user", q["text"], past, None, ex))
+    return snap, out
+
+
 def main():
     raw = argparse.RawDescriptionHelpFormatter
     ap = argparse.ArgumentParser(description=__doc__, epilog=USAGE, formatter_class=raw)
@@ -172,9 +192,13 @@ def main():
     fixture.dump(os.path.join(args.out, "who_bytes_cases.json"), cases)
     fixture.dump(os.path.join(args.out, "who_bytes_live.json"), written)
     fixture.dump(os.path.join(args.out, "l6_bytes_who.json"), l6_who)
+    s2_snap, s2_who = seed2(nm, nx, tok, args.llwz)
+    fixture.dump(os.path.join(args.out, "l6s2_bytes_snapshot.json"), s2_snap)
+    fixture.dump(os.path.join(args.out, "l6s2_bytes_who.json"), s2_who)
     empty = sum(1 for c in l6_who if not c["ids"])
     print(f"{args.out}: {len(snap['notes'])} made-up notes, {len(cases)} cases, {len(written['cases'])} after "
-          f"{len(WRITES)} writes; L6 {len(l6_who)} cases, {empty} empty")
+          f"{len(WRITES)} writes; L6 {len(l6_who)} cases, {empty} empty; L6-seed2 {len(s2_who)} cases, "
+          f"{sum(1 for c in s2_who if not c['ids'])} empty")
 
 
 if __name__ == "__main__":

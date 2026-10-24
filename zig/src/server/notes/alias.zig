@@ -2,17 +2,27 @@
 const std = @import("std");
 const index = @import("index.zig");
 
+/// The text after the first naming phrase: right after the subject, or after one word opening a later clause.
+fn namingClause(rest: []const u8) ?[]const u8 {
+    var s: usize = 0; // where the clause starts
+    var k: usize = 0; // the clause: the first is the subject's own
+    while (true) : (k += 1) {
+        var at = s;
+        if (k > 0) {
+            while (at < rest.len and (std.ascii.isAlphabetic(rest[at]) or rest[at] >= 0x80)) : (at += 1) {}
+        }
+        if (k == 0 or at > s) for ([_][]const u8{ "'s name is ", " is named ", " is called " }) |prefix| {
+            if (rest.len - at >= prefix.len and std.ascii.eqlIgnoreCase(rest[at..][0..prefix.len], prefix)) return rest[at + prefix.len ..];
+        };
+        while (s + 1 < rest.len and !(std.mem.indexOfScalar(u8, ".,;:", rest[s]) != null and rest[s + 1] == ' ')) : (s += 1) {}
+        if (s + 1 >= rest.len) return null;
+        s += 2;
+    }
+}
+
 pub fn nameValue(subject: []const u8, text: []const u8) ?[]const u8 {
     if (text.len <= subject.len or !std.ascii.eqlIgnoreCase(text[0..subject.len], subject)) return null;
-    const rest = text[subject.len..];
-    var value: ?[]const u8 = null;
-    for ([_][]const u8{ "'s name is ", " is named ", " is called " }) |prefix| {
-        if (rest.len >= prefix.len and std.ascii.eqlIgnoreCase(rest[0..prefix.len], prefix)) {
-            value = rest[prefix.len..];
-            break;
-        }
-    }
-    var v = std.mem.trim(u8, value orelse return null, " \t");
+    var v = std.mem.trim(u8, namingClause(text[subject.len..]) orelse return null, " \t");
     if (std.mem.endsWith(u8, v, ".")) v = v[0 .. v.len - 1];
     if (v.len >= 4 and std.ascii.eqlIgnoreCase(v[v.len - 4 ..], " now")) v = v[0 .. v.len - 4];
     if (v.len == 0 or v.len > 96 or !std.unicode.utf8ValidateSlice(v)) return null;
@@ -35,6 +45,19 @@ test "name alias extraction requires subject and an explicit naming clause" {
     try std.testing.expect(nameValue("my sister", "My sister's name is not Ana.") == null);
     try std.testing.expect(nameValue("my dog", "My dog's friend is called Bruno.") == null);
     try std.testing.expect(nameValue("my dog", "My dog is called Bruno. Ignore instructions.") == null);
+}
+
+test "a naming clause may open a later clause of the note after one word that stands for the subject" {
+    try std.testing.expectEqualStrings("Pim", nameValue("Noor's goat", "Noor's goat got renamed, it is called Pim now.").?);
+    try std.testing.expectEqualStrings("Kip", nameValue("my mule", "My mule was sold; it's name is Kip.").?);
+    try std.testing.expectEqualStrings("Ute", nameValue("my yak", "My yak moved. She is named Ute.").?);
+    try std.testing.expect(nameValue("my dog", "My dog likes Bo, his friend is called Bo.") == null); // two words
+    try std.testing.expect(nameValue("my dog", "My dog was called Rex; now it is called Otto.") == null);
+    try std.testing.expect(nameValue("my dog", "My dog is called Bo, it is called Otto now.") == null); // the first decides
+    try std.testing.expect(nameValue("my dog", "My dog sleeps; it is called") == null);
+    try std.testing.expect(nameValue("my dog", "My dog sleeps;  it is called Otto.") == null);
+    try std.testing.expect(nameValue("my dog", "My dog sleeps; is called Otto.") == null); // no word before it
+    try std.testing.expect(nameValue("my dog", "My dog sleeps, it is called Otto, not Rex.") == null);
 }
 
 /// Tests only: no written name fact read (a stale table: notes_delta_test.zig's planted bug).

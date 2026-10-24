@@ -15,15 +15,32 @@ CHAIN = 4  # a name is up to this many runs of name letters, one space apart
 LOOSE = "note:"  # the attribute prefix of a note the server wrote without sorting it
 
 
+CLAUSE_MARKS = ".,;:"  # a clause mark and a space open a later clause of a note
+PREFIXES = ("'s name is ", " is named ", " is called ")
+
+
+def naming_clause(rest):
+    """What follows the first naming phrase that opens the note (right after its subject) or opens a later clause
+    after one word that stands for the subject ("; it is called X"), or None."""
+    starts = [0] + [j + 2 for j in range(len(rest) - 1) if rest[j] in CLAUSE_MARKS and rest[j + 1] == " "]
+    for k, s in enumerate(starts):
+        at = s
+        if k > 0:  # one word: ASCII letters or any non-ASCII character, as alias.zig reads bytes
+            while at < len(rest) and (65 <= ord(rest[at]) <= 90 or 97 <= ord(rest[at]) <= 122 or ord(rest[at]) >= 0x80):
+                at += 1
+            if at == s:
+                continue
+        for prefix in PREFIXES:
+            if rest[at:at + len(prefix)].lower() == prefix:
+                return rest[at + len(prefix):]
+    return None
+
+
 def name_value(subject, text):
     """alias.zig's nameValue: the name a name fact's text gives its subject, or None."""
     if len(text) <= len(subject) or text[:len(subject)].lower() != subject.lower():
         return None
-    rest, value = text[len(subject):], None
-    for prefix in ("'s name is ", " is named ", " is called "):
-        if rest[:len(prefix)].lower() == prefix:
-            value = rest[len(prefix):]
-            break
+    value = naming_clause(text[len(subject):])
     if value is None:
         return None
     v = value.strip(" \t")

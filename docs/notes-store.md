@@ -46,7 +46,10 @@ counts and the times.
 
 The block is looked up who first. The lookup finds the subjects the question
 names: the store's entity phrases, the user, and the entities a current name
-note calls by a name in the question. A name is a run of Latin, Greek or
+note calls by a name in the question. A name note gives its name right after
+its subject ("My dog is called Bo.") or in a later clause after one word that
+stands for it ("My dog has a new name, it is called Bo now."). A name is a run
+of Latin, Greek or
 Cyrillic letters, which may hold a hyphen, or up to four such runs one space
 apart. The user is named by I, me, mine or
 myself, but not by the me of "tell me", "give me" or "show me", or by "my X"
