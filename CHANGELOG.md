@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- A CUDA request cancelled during its prompt keeps the prefill it had completed in the prompt cache, so retrying the same prompt resumes from there instead of starting over; repeated cancellations add up, and an uncancelled request's path is unchanged. On a GB10 with Qwen3.8-27B, a request cancelled 2 s into a 32k prompt kept 1,792 tokens, and its retry's reply equalled an uncancelled run's (#1228). Thanks to @Sapphire-Rapids.
+
 ## 1.1.4
 
 - Qwen3.8-27B on CUDA has a new default prompt and decode recipe: prompts run in 4,096-row chunks with tensor-core attention and a chained delta rule, decode attention runs on tensor cores for bf16 and fp8 caches, and DFlash2 verify rounds take less time. On a GB10, cold prefill goes from 834 to 1,281 tokens/s at 2k (+54%), 612 to 1,266 at 8k (+107%), 326 to 1,165 at 32k (+258%) and 203 to 1,045 at 64k (+416%), and the decode sweep gains 1.8% to 2.2% at 1 to 8 streams. Quality equals the previous recipe's, 27 of 40 exact cases on both. The prompt arithmetic changed, so replies can differ in bits from 1.1.3; every stream still equals its run alone, a resumed prompt equals a fresh one, and a reply's tokens are always the target's picks. A query-to-KV head ratio or window the kernels do not take is refused at admission, before anything is allocated (#1079, #1080, #1168). Thanks to @BobClawblaw.
