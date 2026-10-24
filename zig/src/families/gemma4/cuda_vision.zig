@@ -66,6 +66,7 @@ pub const Embedder = struct {
         errdefer e.vit.unload();
         e.gemms = try vit.Gemms.init(gpa, d);
         errdefer e.gemms.deinit();
+        errdefer e.buffers.deinit(gpa);
         errdefer for (e.buffers.items) |*b| b.free();
         const t = image.max_budget;
         for (&e.x) |*p| p.* = try e.alloc(d, t * wts.merged_width * 2);
@@ -73,6 +74,12 @@ pub const Embedder = struct {
         e.acc = try e.alloc(d, t * wts.vision_width * 4);
         e.ids = try e.alloc(d, 2 * t * 4);
         return e;
+    }
+
+    /// The device bytes init allocates for its scratch.
+    pub fn workspaceBytes() u64 {
+        const t: u64 = image.max_budget;
+        return 2 * t * wts.merged_width * 2 + 6 * t * wts.vision_width * 2 + t * wts.vision_width * 4 + 2 * t * 4;
     }
 
     fn alloc(e: *Embedder, d: *const cuda.Driver, bytes: usize) !u64 {

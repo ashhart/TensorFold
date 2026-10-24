@@ -33,6 +33,7 @@ pub const Tower = struct {
         errdefer t.attn.unload();
         t.gemms = try vit.Gemms.init(gpa, d);
         errdefer t.gemms.deinit();
+        errdefer t.buffers.deinit(gpa);
         errdefer for (t.buffers.items) |*b| b.free();
         const p = max_patches;
         const n = image.max_budget;
@@ -56,6 +57,13 @@ pub const Tower = struct {
             .acc = try t.alloc(d, p * W * 4),
         };
         return t;
+    }
+
+    /// The device bytes init allocates for its scratch.
+    pub fn workspaceBytes() u64 {
+        const p: u64 = max_patches;
+        const n: u64 = image.max_budget;
+        return p * wts.patch_width * 2 + 11 * p * W * 2 + 3 * p * wts.tower_inter * 2 + 2 * p * 4 + 2 * p * D * 2 + 2 * n * W * 2 + p * W * 4;
     }
 
     fn alloc(t: *Tower, d: *const cuda.Driver, bytes: usize) !u64 {
