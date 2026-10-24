@@ -1,0 +1,10 @@
+server up 2026-10-23 03:00:11
+fit: 206 pages; 65536-token prompts take 129 each
+alone p65536-0: prompt 65536 ttft 43.23778672295157 sha d8a8421597ee17ad5b7801dacb29f07eb6692a742fb9fc92104dd0e7527a4a3d
+alone p65536-1: prompt 65536 ttft 43.24564397195354 sha bf47482e16cb91a3294931e7a597aa8938db10afebffe6941e0abe5a20c9d02d
+alone p65536-2: prompt 65536 ttft 43.30708783795126 sha 30f96d96d0b71ddd72f2ccfbcb05bce868c47cc84c22cbf27d7b26c6a33cc946
+    p65536-0: prompt 65536 first 1.44 s last 5.22 s equal_alone True started after -
+    p65536-1: prompt 65536 first 6.67 s last 9.79 s equal_alone True started after ['p65536-0']
+    p65536-2: prompt 65536 first 11.23 s last 14.50 s equal_alone True started after ['p65536-0', 'p65536-1']
+together == alone: 3/3; 2 request(s) started only after another ended
+=== kvp-client r6admit rc 0

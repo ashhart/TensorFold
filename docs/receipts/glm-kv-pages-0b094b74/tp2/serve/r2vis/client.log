@@ -1,0 +1,15 @@
+server up 2026-10-23 01:37:21
+first: prompt 2050 cached 0 (cold) tokens 128 sha256 dda021de0feb
+repeated: prompt 2050 cached 0 (cold) tokens 128 sha256 dda021de0feb equal_first True
+draft_false: prompt 2050 cached 0 (cold) tokens 128 sha256 dda021de0feb equal_first True
+concurrent: prompt 2050 cached 0 (cold) tokens 128 sha256 dda021de0feb equal_first True
+concurrent: prompt 2050 cached 0 (cold) tokens 128 sha256 dda021de0feb equal_first True
+concurrent: prompt 2050 cached 0 (cold) tokens 128 sha256 dda021de0feb equal_first True
+exit 0
+first: prompt 7605 cached 0 tokens 64 9.98 s sha256 458576672307
+repeated: prompt 7605 cached 6144 tokens 64 3.371 s sha256 458576672307 same_as_first True
+draft_false: prompt 7605 cached 6144 tokens 64 4.773 s sha256 458576672307 same_as_first True
+concurrent: prompt 7605 cached 6144 tokens 64 5.242 s sha256 458576672307 same_as_first True
+concurrent: prompt 7605 cached 6144 tokens 64 5.171 s sha256 458576672307 same_as_first True
+exit 0
+=== kvp-client r2vis rc 0

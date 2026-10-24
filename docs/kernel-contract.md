@@ -111,7 +111,9 @@ A replacement kernel names the kernel it replaces and gives `replaced`, which ru
 A gate failure on a kernel already shipped is reported, not hidden. Until its fix lands, its spec can carry a
 `known` entry naming the gate and what fails. That gate must keep failing (the run prints `KNOWN`); once a fix makes
 it pass, the run fails until the entry is removed. Today: affine_mm's 4-bit form gives NaN for an infinite input where
-MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s.
+MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s. GLM-5.3-Flash's
+`tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `fmaxf(x, 0)`, as `tl.maximum` is in the
+Python family's Triton glue it was ported from.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -149,6 +151,10 @@ CUDA also checks `window_attention`'s rows at head dims 256 and 512 (`window_row
 prompt tiles with P as bf16 or in two halves, a row's last key, windows over a ring or none over a linear cache), each
 output within float64's range over the spread its fp32 steps and tensor-core sums allow (`core/attention_range.zig`;
 seven controls, each one planted fault).
+CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: the latent write and the pooled keys
+(`tf_glm_lat_write`, `tf_glm_pool_keys`), the index scores and the selected tokens' rows (`tf_glm_scores`,
+`tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
+sparse).
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
@@ -163,7 +169,8 @@ and its split-K form, prompt16's FP8 tile, qmmf's FP4 32-row cluster tile, five 
 and FP32-output paths, FP8G's 32-row cluster tile with FP32 output, the common EXL3 prompt products, Super's
 decode-sized latent top-k and NVFP4 up experts, the Mamba scan and Super's NVFP4 prompt down kernels, three of
 GLM-5.3-Flash's packed matmuls and three of its DFlash2 launches, and the training launches it compiles differently,
-and nvcc 13.3 keeps 13.2's and changes `tf_nemo_topk` on sm_120 and sm_121. `kernel-contract` and
+and nvcc 13.3 keeps 13.2's and changes `tf_nemo_topk` on sm_120 and sm_121 and four of GLM-5.3-Flash's KV page
+launches. `kernel-contract` and
 `kernel-contract-limits` read the release from each image's `.note.nv.tkinfo`, check the image against the newest set
 at or below that release (13.0's when an image names none), and print which set they used. A release with no set of
 its own is checked against the one below it, so its differences show as stale records: re-derive them with

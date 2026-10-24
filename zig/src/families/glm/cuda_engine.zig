@@ -17,6 +17,7 @@ const tile = @import("cuda_tile.zig");
 const mm_mod = @import("cuda_mm.zig");
 const dflash = @import("dflash.zig");
 const prof_mod = @import("cuda_prof.zig");
+const pages_mod = @import("cuda_pages.zig");
 pub const Options = @import("cuda_engine_types.zig").Options;
 
 /// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
@@ -91,6 +92,7 @@ pub const Engine = struct {
     prompt_tried: bool = false, // that pass came: without buffers after it, the passes take the window's
     prompt_out: prompt_lp.Output, // a head pass's logprob words, then its picks, host-mapped (rank 0 reads them)
     structured: bool = false, // a structured output step: every rank's draws gather whole rows, rank 0 masks them
+    pages: ?*pages_mod.Pages = null, // the other streams' KV pages and sequences (cuda_pages), once the server attached them
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
@@ -220,6 +222,7 @@ pub const Engine = struct {
         e.bm.deinit();
         e.bd.deinit();
         e.bp.deinit();
+        if (e.pages) |p| p.deinit();
         for (0..e.seqs.items.len) |i| e.free(i);
         e.seqs.deinit(e.gpa);
         e.w.deinit();
@@ -257,10 +260,11 @@ pub const Engine = struct {
         if (e.images) |v| try v.activate(slot);
     }
 
-    /// Frees slot `slot`'s sequence (slot 0 stays: the first stream's, made at init) and binds slot 0.
+    /// Frees slot `slot`'s sequence (slot 0 stays, and a paged one gives its pages back) and binds slot 0.
     pub fn release(e: *Engine, slot: u32) void {
         if (e.images) |v| v.release(slot);
-        if (slot != 0) e.free(slot);
+        const paged = if (e.pages) |p| p.paged(slot) else false;
+        if (paged) e.pages.?.close(slot) else if (slot != 0) e.free(slot);
         e.cur = e.seqs.items[0].?;
         e.slot = 0;
     }

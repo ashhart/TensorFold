@@ -44,6 +44,7 @@ pub const Lanes = struct {
     x: follow.Leader,
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
+    paged_only: bool = false, // TF_KV_PAGES=all: every stream on pages, the engine's own sequence left idle (checks)
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -140,9 +141,9 @@ pub const Lanes = struct {
         };
     }
 
-    /// The lowest slot no stream holds.
+    /// The lowest slot no stream holds (TF_KV_PAGES=all: past the engine's own).
     fn freeSlot(self: *const Lanes) u32 {
-        var slot: u32 = 0;
+        var slot: u32 = @intFromBool(self.paged_only);
         while (true) : (slot += 1) {
             var it = self.lanes.valueIterator();
             const taken = while (it.next()) |l| {
@@ -248,17 +249,49 @@ pub const Lanes = struct {
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
+        const pages = try self.seat(s, ids.len, s.max_new);
+        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
+        try self.x.beginOn(s.sampling, pages);
+        s.cached = 0;
+        s.prompt_rows.clearRetainingCapacity();
+        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+    }
+
+    /// The stream's slot, its pages, then its sequence: a slot past the paged ones waits before binding makes a window.
+    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize) ![]const u32 {
         const l = try self.claim(s);
         l.pending_rows = null;
         l.held_n = 0;
         l.fill = null;
         l.first = null;
+        const pages = self.pagesFor(l.slot, prompt, max_new) catch |err| {
+            _ = self.lanes.remove(s); // nothing held or made: a LaneMemory request waits for a stream to end
+            return err;
+        };
         try self.x.bind(l.slot);
-        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
-        try self.x.begin(s.sampling);
-        s.cached = 0;
-        s.prompt_rows.clearRetainingCapacity();
-        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+        return pages;
+    }
+
+    /// A paged slot's pages for a prompt and its reply (none on the engine's own); LaneMemory: the pool lacks them now.
+    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize) ![]const u32 {
+        const p = self.x.e.pages orelse return &.{};
+        if (slot == 0 and !self.paged_only) return &.{};
+        if (!p.paged(slot)) return error.LaneMemory; // every paged sequence is taken
+        p.close(slot); // a stream that opens again gives its earlier pages back first
+        return p.open(slot, prompt, max_new);
+    }
+
+    /// The lane host's admission: the engine's own sequence is free, or a paged one and the request's pages are.
+    pub fn fits(self: *const Lanes, prompt: usize, max_tokens: usize) bool {
+        const p = self.x.e.pages orelse return true;
+        if (!self.paged_only) {
+            var it = self.lanes.valueIterator();
+            const own = while (it.next()) |l| {
+                if (l.slot == 0) break false;
+            } else true;
+            if (own) return true;
+        }
+        return p.fits(prompt, max_tokens);
     }
 
     /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.

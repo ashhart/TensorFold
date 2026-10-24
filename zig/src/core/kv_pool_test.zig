@@ -52,6 +52,20 @@ test "the plan: the room pays the engine's own sequence, the other streams' fixe
     try expectEqual(@as(usize, kv.most_snaps), kv.split(16 * g, 48 * mib, 1000).snaps);
 }
 
+test "a family without snapshot slots (snap_bytes 0) keeps its whole cache as copied rows beside the pages" {
+    const g: u64 = 1 << 30;
+    // GLM-5.3-Flash on CUDA at TP=2: KDA states and rings fixed a stream, 13,056 bytes a token, kept states copied
+    const copies: kv.Layout = .{ .fixed_bytes = 180 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const s = kv.split(16 * g, 0, null);
+    try expectEqual(@as(usize, 0), s.snaps);
+    try expectEqual(16 * g, s.copied);
+    try expectEqual(16 * g, kv.split(16 * g, 0, 4).copied); // --keep names no slots here
+    const p = try kv.plan(copies, .{ .room = 60 * g, .engine = 0, .lanes = 4, .cache = 16 * g });
+    try expectEqual(@as(usize, 0), p.snaps);
+    try expectEqual(16 * g, p.copied);
+    try expectEqual(@as(usize, @intCast((44 * g - 3 * 180 * mib) / copies.pageBytes())), p.pages);
+}
+
 test "a cache holds when the room past the engine and every stream's fixed part and page is at least its bytes" {
     const g: u64 = 1 << 30;
     const streams = 3 * (64 * mib + nemotron.pageBytes());

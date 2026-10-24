@@ -1,0 +1,30 @@
+RESULT b16 matmul 300 rows x [512, 4096] (K in 8 slices), bf16 out: worst column 93 at 5.502e-1 of its tolerance
+RESULT b16 matmul 300 rows x [512, 4096] (K in 8 slices), fp32 out: worst column 165 at 2.086e-4 of its tolerance
+PASS b16 matmul [512, 4096] (8 slices): bf16 and fp32 out within float64 tolerance, every entry and row count's bits equal
+RESULT b16 matmul 300 rows x [1280, 1536] (K in 4 slices), bf16 out: worst column 257 at 7.984e-1 of its tolerance
+RESULT b16 matmul 300 rows x [1280, 1536] (K in 4 slices), fp32 out: worst column 1227 at 7.001e-4 of its tolerance
+PASS b16 matmul [1280, 1536] (4 slices): bf16 and fp32 out within float64 tolerance, every entry and row count's bits equal
+RESULT b16 matmul 300 rows x [1024, 128] (K in 1 slices), bf16 out: worst column 182 at 9.820e-1 of its tolerance
+RESULT b16 matmul 300 rows x [1024, 128] (K in 1 slices), fp32 out: worst column 839 at 1.471e-2 of its tolerance
+PASS b16 matmul [1024, 128] (1 slices): bf16 and fp32 out within float64 tolerance, every entry and row count's bits equal
+RESULT router 300 rows x [256, 4096] (K in 8 slices): worst column 57 at 1.681e-4 of its tolerance
+PASS router [256, 4096]: within float64 tolerance, router_tile and router_part bits equal at every row count
+RESULT select 300 rows, top 8 of 256: weights at 1.807e-2 of 2^-16 relative, 0 near-tie swaps
+PASS select top-8 of 256: picks follow the float64 ranking (near ties aside), weights within float64 tolerance
+RESULT latent attention 70 rows at 1430, 32 heads, 32-head blocks: worst column 306 at 1.809e-1 of its tolerance
+PASS latent attention over 1500 keys: within float64 tolerance, both head blocks and one-row windows equal
+RESULT latent sparse attention 70 rows, up to 1100 of 6000 keys: worst column 349 at 4.737e-1 of its tolerance
+PASS latent sparse attention over up to 1100 tokens: within float64 tolerance, one-row windows equal, count 0 left alone
+RESULT GLM FP8 reconstructed attention vs FP64: worst column 5 at 5.919e-1 of its tolerance
+RESULT GLM FP8 reconstructed attention vs FP64: worst column 5 at 5.919e-1 of its tolerance
+RESULT GLM FP8 reconstructed attention vs FP64: worst column 171 at 2.159e-1 of its tolerance
+RESULT GLM FP8 reconstructed attention vs FP64: worst column 171 at 2.159e-1 of its tolerance
+PASS GLM FP8 synthetic format, masking, row/chunk identity and reconstructed BF16/FP64 attention
+RESULT hc mixing 70 rows x 16 K blocks: 24 dots and the squares (column 24): worst column 24 at 2.226e-3 of its tolerance
+PASS hc mixing: dots and squares within float64 tolerance, decode windows' partials and outputs equal the prompt rows'
+RESULT KDA 70 rows x 32 heads, fused chain against float64 (column = head x 128 + t): worst column 1041 at 4.563e-1 of its tolerance
+RESULT KDA 3 rows x 32 heads, fused chain against float64 (column = head x 128 + t): worst column 476 at 3.576e-1 of its tolerance
+PASS KDA 32 heads: within float64 tolerance, fused and three-kernel chains equal at 70 and 3 rows, replays rebuild the state
+RESULT index scores 96 rows at 6000, 32 heads x 128, 1536 pools: worst column 862 at 1.974e-3 of its tolerance
+PASS DSA indexer 96 rows at 6000: scores within float64 tolerance, top-512 pools equal the host's rule exactly
+PASS glm-ref: every projection within 9.820e-1 of its float64 tolerance
