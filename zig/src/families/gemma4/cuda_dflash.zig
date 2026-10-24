@@ -50,7 +50,7 @@ pub const Config = struct {
         const archs = o.get("architectures") orelse return error.BadDraftConfig;
         if (archs != .array or archs.array.items.len != 1 or archs.array.items[0] != .string or !std.mem.eql(u8, archs.array.items[0].string, "DFlashDraftModel")) return error.NotDFlashV1;
         const d = if (o.get("dflash_config")) |v| (if (v == .object) v.object else return error.BadDraftConfig) else return error.BadDraftConfig;
-        var c: Config = .{ .layers = @intCast(try integer(o, "num_hidden_layers")), .hidden = @intCast(try integer(o, "hidden_size")), .intermediate = @intCast(try integer(o, "intermediate_size")), .heads = @intCast(try integer(o, "num_attention_heads")), .kv_heads = @intCast(try integer(o, "num_key_value_heads")), .head_dim = @intCast(try integer(o, "head_dim")), .block = @intCast(if (d.get("block_size") != null) try integer(d, "block_size") else try integer(o, "block_size")), .mask = @intCast(try integer(d, "mask_token_id")), .window = @intCast(try integer(o, "sliding_window")), .eps = @floatCast(try number(o, "rms_norm_eps")), .theta = try number(o, "rope_theta") };
+        var c: Config = .{ .layers = try size(o, "num_hidden_layers"), .hidden = try size(o, "hidden_size"), .intermediate = try size(o, "intermediate_size"), .heads = try size(o, "num_attention_heads"), .kv_heads = try size(o, "num_key_value_heads"), .head_dim = try size(o, "head_dim"), .block = try size(if (d.get("block_size") != null) d else o, "block_size"), .mask = try integer(u32, d, "mask_token_id"), .window = try size(o, "sliding_window"), .eps = @floatCast(try number(o, "rms_norm_eps")), .theta = try number(o, "rope_theta") };
         if (c.hidden != geo.hidden) return error.DraftForAnotherTarget;
         const taps = d.get("target_layer_ids") orelse return error.BadDraftConfig;
         if (taps != .array or taps.array.items.len == 0 or taps.array.items.len > 8) return error.BadDraftConfig;
@@ -66,16 +66,22 @@ pub const Config = struct {
             for (kinds.array.items, 0..) |k, i| c.sliding[i] = k == .string and std.mem.eql(u8, k.string, "sliding_attention");
         }
         if (o.get("is_causal") != null) return error.UnsupportedDraftMask; // the vendored default decides the block's mask
-        if (c.head_dim != dim or c.heads % c.kv_heads != 0 or c.heads / c.kv_heads > 8 or c.block != block_rows or c.window < 32) return error.UnsupportedDraftShape;
+        if (c.head_dim != dim or c.kv_heads == 0 or c.heads % c.kv_heads != 0 or c.heads / c.kv_heads > 8 or c.block != block_rows or c.window < 32) return error.UnsupportedDraftShape;
         if (c.hidden % 64 != 0 or c.intermediate % 64 != 0 or (c.heads * c.head_dim) % 64 != 0 or (c.kv_heads * c.head_dim) % 64 != 0) return error.UnsupportedDraftShape;
         if (c.mask >= cfg.vocab) return error.BadDraftConfig;
         return c;
     }
 };
 
-fn integer(o: std.json.ObjectMap, key: []const u8) !i64 {
+fn integer(comptime T: type, o: std.json.ObjectMap, key: []const u8) !T {
     const v = o.get(key) orelse return error.BadDraftConfig;
-    return if (v == .integer) v.integer else error.BadDraftConfig;
+    return if (v == .integer) std.math.cast(T, v.integer) orelse error.BadDraftConfig else error.BadDraftConfig;
+}
+
+/// A count: positive and within 32 bits, so no product of two of them overflows.
+fn size(o: std.json.ObjectMap, key: []const u8) !usize {
+    const n = try integer(u32, o, key);
+    return if (n == 0) error.BadDraftConfig else n;
 }
 
 fn number(o: std.json.ObjectMap, key: []const u8) !f64 {
