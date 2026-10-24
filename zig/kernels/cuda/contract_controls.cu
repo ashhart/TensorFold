@@ -76,6 +76,8 @@ extern "C" __global__ void __launch_bounds__(tf_qk_round::WIDE) tf_ctl_qk_round(
 }
 
 // Gate 3: act_rows.cu's tf_softcap_rows keeping only the rounding points in `keep`; the exact check must go red.
+#include "act_round.cuh"
+
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_softcap(const __nv_bfloat16* x, __nv_bfloat16* out, int n,
                                                                   float cap, int keep) {
     tf_act_round::softcap_rows(x, out, n, cap, keep);
@@ -93,8 +95,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_embed_affine(const int*
 
 
 // Gate 3: act_rows.cu's MLX activations keeping only the rounding points in `keep`; the exact check must go red.
-#include "act_round.cuh"
-
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_act_round(const __nv_bfloat16* gate, long long g_ld,
                                                                     const __nv_bfloat16* up, long long u_ld,
                                                                     __nv_bfloat16* out, float* xs, int n, int geglu,
