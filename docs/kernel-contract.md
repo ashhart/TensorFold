@@ -170,6 +170,10 @@ its own is checked against the one below it, so its differences show as stale re
 `kernel-contract-limits` and add a set for that release rather than loosening the audit. Launch dimensions, dynamic
 shared memory, the device's limits and the planted controls are checked the same way under every release.
 
+A restored 13.0 receipt can arrive after the later compiler sets. Such records mark `later_pending` so 13.0 and
+13.1 use their base usage, while 13.2 and later keep their independently measured or pending selection.
+A missing later receipt remains pending; a 13.0 measurement never substitutes for it.
+
 Gemma 4 CUDA tower QKV norms and nine-term pooling register FP32 sums and BF16 outputs.
 Their contract keeps the exact FP32 mirror and adds independent FP64 ranges at the BF16 nodes.
 The sum fixtures use integers with exact FP32 partials below 2^24, including pooling cancellation near 2^20;

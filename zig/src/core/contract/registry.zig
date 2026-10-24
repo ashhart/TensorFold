@@ -5,7 +5,14 @@ const M = limits.MetalLaunch;
 const C = limits.CudaLaunch;
 const U = limits.Usage;
 /// A CUDA launch and what nvcc made of it for sm_80, sm_86, sm_89, sm_120 and sm_121 (limits.sms' order; regs 0: none).
-pub const CudaRecord = struct { launch: C, usage: [limits.sms.len]U, geometry_pending: bool = false, optional_shared: bool = false };
+pub const CudaRecord = struct {
+    launch: C,
+    usage: [limits.sms.len]U,
+    geometry_pending: bool = false,
+    optional_shared: bool = false,
+    /// Keep the independent later compiler selection when adding a late 13.0 receipt.
+    later_pending: bool = false,
+};
 const target = @import("registry_target.zig");
 pub const TargetDecision = target.TargetDecision;
 pub const targetDecision = target.targetDecision;
@@ -329,6 +336,7 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     var u = r.usage;
     const rel = release orelse return u;
+    if (r.later_pending and !newer(.{ .major = 13, .minor = 2 }, rel)) u = none;
     if (for (u) |v| {
         if (v.regs > 0) break false;
     } else true) u = @import("pending_132.zig").lookup(r.launch.name, rel) orelse return u;
@@ -340,7 +348,7 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     }
     return u;
 }
-/// Pending Qwen launch records must be measured before passing the physical resource gate.
+/// Restored Qwen launches retain a pending entry wherever a compiler receipt is absent.
 pub const cuda_pending = @import("cuda_lane_pending.zig").records;
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
@@ -567,9 +575,9 @@ test {
     _ = @import("glm_kv_pending.zig");
     _ = @import("registry_pending_test.zig");
 }
-test "pending CUDA records cannot pass a compiled resource check" {
+test "unmeasured CUDA records cannot pass a compiled resource check" {
     for (cuda_pending) |r| {
-        try std.testing.expectEqual(none, r.usage);
+        if (!std.meta.eql(none, r.usage)) continue;
         try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
     }
 }
