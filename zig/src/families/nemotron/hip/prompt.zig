@@ -18,7 +18,6 @@ pub fn chunk(h: anytype, l: *Lane, prompt: []const u32, from: usize, to: usize, 
             &l.s,
             .{ .ptr = l.hidden.base(), .kind = e.act },
             prompt[from..][0..1],
-            true,
         );
     }
     const dev = try e.ids(o, prompt[from..to]);
@@ -29,7 +28,7 @@ pub fn chunk(h: anytype, l: *Lane, prompt: []const u32, from: usize, to: usize, 
     const last = to == prompt.len;
     const pairs = if (last) n - 1 else n;
     if (h.head) |hd| if (pairs > 0) {
-        _ = try hd.absorb(o, &l.s, hidden, prompt[from + 1 ..][0..pairs], true);
+        _ = try hd.absorb(o, &l.s, hidden, prompt[from + 1 ..][0..pairs]);
     };
     // the last row is kept for the head: the first token's pair, or a kept state's resume
     const width = m.dims.hidden * e.act.size();

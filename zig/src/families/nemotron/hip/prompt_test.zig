@@ -78,7 +78,7 @@ const RecordedEngine = struct {
 };
 
 const NoHead = struct {
-    pub fn absorb(_: *NoHead, _: hip.ops.Ops, _: *pages.Stream, _: hip.ops.Tensor, _: []const u32, _: bool) !void {}
+    pub fn absorb(_: *NoHead, _: hip.ops.Ops, _: *pages.Stream, _: hip.ops.Tensor, _: []const u32) !void {}
 };
 
 const Sampler = struct {

@@ -9,6 +9,7 @@ const pages = @import("pages.zig");
 const plan = @import("plan.zig");
 const admit = @import("admit.zig");
 const forward = @import("forward.zig");
+const prefix = @import("prefix.zig");
 const rounds = @import("round.zig");
 
 pub const Options = struct {
@@ -33,6 +34,27 @@ pub const Options = struct {
 };
 
 pub const Engine = struct {
+    pub const Cancel = struct { ctx: *anyopaque, check: *const fn (*anyopaque) bool };
+
+    pub const Poll = struct {
+        stream: hip.Stream,
+        cancel: Cancel,
+
+        fn layer(ctx: *anyopaque, _: usize, _: hip.ops.Tensor, _: usize) anyerror!void {
+            const p: *Poll = @ptrCast(@alignCast(ctx));
+            try p.stream.synchronize();
+            if (p.cancel.check(p.cancel.ctx)) return error.Cancelled;
+        }
+    };
+
+    /// The prompt's layer trace only where cancellation cannot strand another rank in a collective.
+    pub fn poll(e: anytype, cancel: ?Cancel, rows: usize, p: *Poll) ?forward.Trace {
+        const c = cancel orelse return null;
+        if (!prefix.pollsLayers(e.o.world, rows)) return null;
+        p.* = .{ .stream = e.stream, .cancel = c };
+        return .{ .ctx = p, .layer = Poll.layer };
+    }
+
     gpa: std.mem.Allocator,
     io: std.Io,
     driver: hip.Runtime,
