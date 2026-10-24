@@ -22,7 +22,7 @@ const ring = 1024;
 /// Streams a round takes at most (a round with more live streams takes them in turns).
 const round_streams = 32;
 /// Drafted windows' rows a shared verify takes at most: a drafting round's (TF_FLASHNEXT_WINDOW_ROWS; 0: each alone).
-const window_rows_default = 4 * mtp.max_rows;
+const window_rows_default = mtp.round_rows;
 
 /// The Triton entry points the pass launches and the head's two more: a captured set replaces our glue with all.
 pub const captured_entries = [_][]const u8{ "_embed", "_hc_writeback", "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_ple_gate", "_ple_conv", "_attn_prep", "_attn_gate", "_pool", "_scores", "_chunks", "_merge", "_router", "_topk_rows" };
@@ -202,11 +202,12 @@ pub fn Namespace(comptime Tri: type) type {
                 return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 
-            /// With the head: windows of up to 16 rows cut by its confidence; else shared one-row rounds.
+            /// With the head: chains of up to 16 rows cut by its confidence, copies of up to 32; else shared one-row rounds.
             pub fn facts(self: *const Cuda) lanes.Model {
                 const drafting = self.head != null;
                 return .{
                     .exact_width = if (drafting) mtp.max_rows else 2,
+                    .first_copy_rows = if (drafting) mtp.max_chain + 1 else 0,
                     .gpu_tokens = false,
                     .mtp = drafting,
                     .speculate = drafting,
@@ -215,7 +216,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .draft_probabilities = drafting,
                     .streams_exact = true,
                     .hidden_rows = true,
-                    .batch_rows = if (drafting) 4 * mtp.max_rows else round_streams,
+                    .batch_rows = if (drafting) mtp.round_rows else round_streams,
                     .max_streams = round_streams,
                     // a shared round's greedy streams draft in one head pass a step (lanes_draft.batched)
                     .draft_streams = drafting and lanes_draft.batchHeads(),
