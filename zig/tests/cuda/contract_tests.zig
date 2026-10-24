@@ -30,7 +30,6 @@ const act_round_k = @import("contract_act_round.zig");
 const round_k = @import("contract_tree_round.zig");
 
 const act_k = @import("contract_act.zig");
-const pick_ids_k = @import("contract_pick_ids.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
@@ -289,10 +288,6 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(round_k.Which), &rounds) |w, *r| r.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &round_fns };
     defer for (&rounds) |*r| r.deinit();
     for (&rounds) |*r| try kernels.append(a, r.kernel());
-    var pick_ids: [pick_ids_k.entries.len]pick_ids_k.PickIds = undefined;
-    for (pick_ids_k.entries, &pick_ids) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .round = &round_fns, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_pick_ids") else null };
-    defer for (&pick_ids) |*x| x.deinit();
-    for (&pick_ids) |*x| try kernels.append(a, x.kernel());
     var act_rows = try cuda.act_rows.ActRows.load(gpu.d);
     defer act_rows.unload();
     var acts: [std.enums.values(act_k.Which).len]act_k.Act = undefined;
@@ -305,7 +300,7 @@ pub fn run(gpu: check.Gpu) !void {
     for (&act_rounds) |*x| try kernels.append(a, x.kernel());
     var gemma_ops: @import("contract_gemma_ops.zig").Group = .{};
     defer gemma_ops.deinit();
-    try gemma_ops.init(gpu, s, &act_rows, &vit, mods[5]);
+    try gemma_ops.init(gpu, s, &act_rows, &vit, &round_fns, mods[5]);
     try gemma_ops.append(a, &kernels);
     var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
     defer gdn_prep.unload();
