@@ -26,7 +26,7 @@ pub fn note(_: Allocator, _: *const Engine) ![]const u8 {
 
 /// The engine for `o.dir`, or null with `problem` set (the caller releases the device).
 pub fn init(a: Allocator, _: std.Io, _: *const xpu.Context, o: api.Open, window: usize, problem: *[]const u8) !?*Engine {
-    return Engine.init(o.dir, @intCast(window)) catch |e| {
+    return Engine.initSlots(o.dir, @intCast(window), @max(1, o.lanes)) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the Intel GPU engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };

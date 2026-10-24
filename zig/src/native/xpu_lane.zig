@@ -117,7 +117,7 @@ pub fn Xpu(comptime S: type) type {
 
         /// What the round loop reads at setup: one stream; with a head, drafted windows of up to 16 rows.
         pub fn facts(self: *const Self) lanes.Model {
-            if (comptime @hasDecl(S.Engine, "copy_only")) return .{ .exact_width = max_rows, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .plain_guard = true, .window_costs = self.costs[0..max_rows], .max_streams = 1, .copy_match = self.copy_match };
+            if (comptime @hasDecl(S.Engine, "copy_only")) return .{ .exact_width = max_rows, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .plain_guard = true, .window_costs = self.costs[0..max_rows], .hidden_rows = self.streams > 1, .batch_rows = max_rows, .draft_step_ms = self.mtp_ms, .max_streams = self.streams, .copy_match = self.copy_match };
             if (!self.drafting()) return .{ .exact_width = 1, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .max_streams = 1 };
             return .{
                 .exact_width = max_rows,
@@ -143,13 +143,13 @@ pub fn Xpu(comptime S: type) type {
         }
 
         /// The window's rows drawn: greedy on the device, else each row's logits drawn at its keyed position.
-        fn drawRows(self: *Self, rows: usize, sampling: ?lanes.Sampling, positions: []const u64, out: []u32) !void {
+        fn drawRows(self: *Self, base: usize, rows: usize, sampling: ?lanes.Sampling, positions: []const u64, out: []u32) !void {
             if (comptime !has_head) unreachable;
             const greedy = if (sampling) |s| s.temperature <= 0 else true;
             if (greedy) {
                 var g: [max_rows]i32 = undefined;
-                try self.e.rowTokens(g[0..rows]);
-                for (out[0..rows], g[0..rows]) |*o, t| o.* = @intCast(t);
+                try self.e.rowTokens(g[0 .. base + rows]);
+                for (out[0..rows], g[base .. base + rows]) |*o, t| o.* = @intCast(t);
                 return;
             }
             if (comptime @hasDecl(S.Engine, "rowCandidates")) if (sampling.?.top_k > 0 and sampling.?.top_k <= 64) {
@@ -159,7 +159,7 @@ pub fn Xpu(comptime S: type) type {
                     var ids: [64]u32 = undefined;
                     var vals: [64]f64 = undefined;
                     var id64: [64]u64 = undefined;
-                    try self.e.rowCandidates(@intCast(r), k, &v32, &ids);
+                    try self.e.rowCandidates(@intCast(base + r), k, &v32, &ids);
                     for (0..k) |i| {
                         if (!std.math.isFinite(v32[i])) return error.NonfiniteLogits;
                         vals[i] = v32[i];
@@ -170,8 +170,8 @@ pub fn Xpu(comptime S: type) type {
                 return;
             };
             const v = self.e.vocab();
-            try self.e.rowLogits(self.row_logits[0 .. rows * v]);
-            for (0..rows) |r| out[r] = try draw(self.gpa, self.row_logits[r * v ..][0..v], sampling.?, positions[r]);
+            try self.e.rowLogits(self.row_logits[0 .. (base + rows) * v]);
+            for (0..rows) |r| out[r] = try draw(self.gpa, self.row_logits[(base + r) * v ..][0..v], sampling.?, positions[r]);
         }
 
         /// The stream's lane with its sequence bound to the model.
@@ -255,7 +255,7 @@ pub fn Xpu(comptime S: type) type {
                 try self.prefillPlanned(s, ids);
                 if (s.isCancelled()) return error.Cancelled;
                 var first: [1]u32 = undefined;
-                try self.drawRows(1, s.sampling, &.{ids.len}, &first);
+                try self.drawRows(0, 1, s.sampling, &.{ids.len}, &first);
                 _ = self.take(first[0]);
                 return;
             };
@@ -378,6 +378,7 @@ pub fn Xpu(comptime S: type) type {
         fn verifyWindow(self: *Self, windows: []const be.Window, out: []be.Verified) !void {
             if (comptime !has_head) unreachable;
             if (windows.len > self.streams) return error.WindowTooWide;
+            if (comptime @hasDecl(S.Engine, "verifyMulti")) if (windows.len > 1) return self.verifyShared(windows, out);
             const e = self.e;
             for (windows, out) |w, *o| {
                 if (w.parents != null) return error.TreesNotBuilt;
@@ -399,9 +400,48 @@ pub fn Xpu(comptime S: type) type {
                     continue;
                 }
                 try e.verifyRows(ids[0..rows]);
-                try self.drawRows(rows, w.stream.sampling, w.positions, o.sampled);
+                try self.drawRows(0, rows, w.stream.sampling, w.positions, o.sampled);
                 @memcpy(o.drafts, ids[1..rows]);
                 l.pending = @intCast(rows);
+            }
+        }
+
+        /// Several streams' windows in one forward over the weights (at most 16 rows), each row on its own sequence.
+        fn verifyShared(self: *Self, windows: []const be.Window, out: []be.Verified) !void {
+            if (comptime !(has_head and @hasDecl(S.Engine, "verifyMulti"))) unreachable;
+            const e = self.e;
+            var slots: [8]u32 = undefined;
+            var wins: [8][]const u32 = undefined;
+            var ids: [8][max_rows]u32 = undefined;
+            var lns: [8]*Lane = undefined;
+            var total: usize = 0;
+            for (windows, 0..) |w, i| {
+                if (w.parents != null) return error.TreesNotBuilt;
+                const rows = w.rows();
+                total += rows;
+                if (rows > max_rows or total > max_rows or i >= slots.len) return error.WindowTooWide;
+                const l = try self.bound(w.stream);
+                try self.settle(l, null);
+                for (w.positions, 0..) |p, r| if (p != e.m.pos + 1 + r) return error.PositionMismatch;
+                ids[i][0] = w.pending;
+                if (w.held > 0) {
+                    if (w.held > l.held_n) return error.NoHeldDrafts;
+                    @memcpy(ids[i][1..][0..w.held], l.held[0..w.held]);
+                } else @memcpy(ids[i][1..][0..w.tokens.len], w.tokens);
+                l.start = e.m.pos;
+                l.held_n = 0;
+                slots[i] = e.slotOf(l.seq);
+                wins[i] = ids[i][0..rows];
+                lns[i] = l;
+            }
+            try e.verifyMulti(slots[0..windows.len], wins[0..windows.len]);
+            var base: usize = 0;
+            for (windows, out, 0..) |w, *o, i| {
+                const rows = w.rows();
+                try self.drawRows(base, rows, w.stream.sampling, w.positions, o.sampled);
+                @memcpy(o.drafts, ids[i][1..rows]);
+                lns[i].pending = @intCast(rows);
+                base += rows;
             }
         }
 
