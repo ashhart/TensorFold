@@ -1,3 +1,4 @@
+import { canUseLinuxSandbox } from '../../agent/linux-sandbox'
 import { canUseMacSandbox } from '../../agent/sandbox'
 import type { SecurityControlSnapshot } from '../../agent/types'
 import { store } from '../state'
@@ -33,7 +34,7 @@ export function securityControlSnapshot(): SecurityControlSnapshot {
   return {
     actor: auditActor(),
     role: currentSecurityRole(),
-    commandSandboxAvailable: canUseMacSandbox(),
+    commandSandboxAvailable: canUseMacSandbox() || canUseLinuxSandbox(),
     mcpSandboxAvailable: canUseMacSandbox(),
     signedUpdatesRequired: signedUpdatesRequired(),
     updatePublicKeyConfigured: !!updateSignaturePublicKey(),
