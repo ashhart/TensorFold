@@ -535,7 +535,7 @@ test "voices: HTTP listing and reference rows use the family CLI builder" {
     defer listing.deinit();
     try expectHeader(try listing.readHead(), " 200 ");
     listing.join(&listing_script);
-    try std.testing.expectEqualStrings("{\"voices\": [\"default\", \"tone\"]}", try listing.readRest());
+    try std.testing.expectEqualStrings("{\"voices\": [\"default\", \"tone\"], \"details\": [{\"id\": \"tone\", \"description\": \"\"}]}", try listing.readRest());
 }
 
 test "voices: without configuration the default prompt rows stay unchanged" {

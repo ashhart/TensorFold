@@ -191,7 +191,11 @@ test "voices: synthetic parsing, attestation, bounds and selection" {
     try std.testing.expectEqual(refs.ptr, (try select(&voices, "default", "tone")).ptr);
     try std.testing.expectEqual(@as(usize, 0), (try select(&.{}, "default", "")).len);
     try std.testing.expectError(error.UnknownVoice, select(&voices, "default", "../tone"));
-    try std.testing.expectEqualStrings("{\"voices\": [\"default\", \"tone\"]}", try json.stringify(a, try listing(a, &voices), .{}));
+    try std.testing.expectEqualStrings("{\"voices\": [\"default\", \"tone\"], \"details\": [{\"id\": \"tone\", \"description\": \"\"}]}", try json.stringify(a, try listing(a, &voices), .{}));
+    try std.testing.expectEqualStrings("", try describe(a, fixture));
+    const described = "{\"description\":\"Calm.\"," ++ fixture[1..];
+    try std.testing.expectEqualStrings("Calm.", try describe(a, described));
+    try std.testing.expectError(error.BadVoice, describe(a, "{\"description\":7}"));
     const doc = (try json.parse(a, fixture)).ok;
     _ = doc.object.swapRemove("source");
     try std.testing.expectError(error.MissingAttestation, parse(a, try json.stringify(a, doc, .{})));
