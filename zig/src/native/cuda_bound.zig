@@ -24,6 +24,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.prefill_step.?(x.inner.ptr, s);
             }
         }.f else null,
+        .cancel_prefill = if (v.cancel_prefill != null) struct {
+            fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
+                const x = H.bind(p);
+                return x.inner.vtable.cancel_prefill.?(x.inner.ptr, s);
+            }
+        }.f else null,
         .prefill_many = if (v.prefill_many != null) struct {
             fn f(p: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
                 const x = H.bind(p);
@@ -147,7 +153,11 @@ test "every entry the family's backend gives is forwarded, and none it leaves ou
     };
     var fake: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
     defer fake.deinit();
-    for ([_]be.Backend{ fake.backend(), fake.stepped(), fake.batchedSteps() }) |b| {
+    var interrupted = fake.stepped().vtable.*;
+    interrupted.cancel_prefill = struct {
+        fn f(_: *anyopaque, _: *lanes.Stream) anyerror!void {}
+    }.f;
+    for ([_]be.Backend{ fake.backend(), fake.stepped(), fake.batchedSteps(), .{ .ptr = &fake, .vtable = &interrupted } }) |b| {
         const w = vtable(H, b.vtable.*);
         const info = @typeInfo(be.Backend.VTable).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
@@ -184,6 +194,11 @@ test "each forwarded entry calls the family's entry of the same name, once" {
             fn f(p: *anyopaque, _: *S) anyerror!bool {
                 Rec.hit(p, "prefill_step");
                 return true;
+            }
+        }.f,
+        .cancel_prefill = struct {
+            fn f(p: *anyopaque, _: *S) anyerror!void {
+                Rec.hit(p, "cancel_prefill");
             }
         }.f,
         .first = struct {
@@ -284,8 +299,11 @@ test "each forwarded entry calls the family's entry of the same name, once" {
     };
     const H = struct {
         inner: be.Backend,
+        binds: usize = 0,
         pub fn bind(p: *anyopaque) *@This() {
-            return @ptrCast(@alignCast(p));
+            const h: *@This() = @ptrCast(@alignCast(p));
+            h.binds += 1;
+            return h;
         }
     };
     var rec: Rec = .{};
@@ -302,6 +320,11 @@ test "each forwarded entry calls the family's entry of the same name, once" {
     try rec.once("prefill");
     _ = try w.prefill_step.?(p, &s);
     try rec.once("prefill_step");
+    try std.testing.expect(w.cancel_prefill != null);
+    const before_cancel = h.binds;
+    try w.cancel_prefill.?(p, &s);
+    try std.testing.expectEqual(before_cancel + 1, h.binds);
+    try rec.once("cancel_prefill");
     _ = try w.first(p, &s, 0);
     try rec.once("first");
     _ = try w.queue(p, &s, feed, 0);

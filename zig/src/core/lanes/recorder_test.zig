@@ -284,3 +284,30 @@ test "recorded backend preserves both values of first_before_draft" {
         try std.testing.expectEqual(enabled, recorded.backend().first_before_draft);
     }
 }
+
+test "recorded backend forwards optional prefill cancellation and its failure once" {
+    const Cancel = struct {
+        fn call(p: *anyopaque, _: *sm.Stream) anyerror!void {
+            const target: *fake.Fake = @ptrCast(@alignCast(p));
+            target.prefill_count += 1;
+            return error.SnapshotPeerFailed;
+        }
+    };
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [64]u8 = undefined;
+    var recorder = try rec.Recorder.init(gpa, io, try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0), &.{1});
+    defer recorder.deinit();
+    var s: sm.Stream = undefined;
+    for ([_]bool{ false, true }) |enabled| {
+        var table = target.stepped().vtable.*;
+        table.cancel_prefill = if (enabled) Cancel.call else null;
+        var recorded = try rec.Recorded.init(.{ .ptr = &target, .vtable = &table }, &recorder);
+        const backend = recorded.backend();
+        try std.testing.expectEqual(enabled, backend.vtable.cancel_prefill != null);
+        if (enabled) try std.testing.expectError(error.SnapshotPeerFailed, backend.vtable.cancel_prefill.?(backend.ptr, &s));
+    }
+    try std.testing.expectEqual(@as(usize, 1), target.prefill_count);
+}
