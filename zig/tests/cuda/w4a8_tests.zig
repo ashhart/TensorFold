@@ -110,13 +110,17 @@ fn shape(r: *Rig, a4: *const qlinear.Affine4Kernels, kk: cuda.w4a8.Kernels, n: u
     const dx = try r.dev(std.mem.sliceAsBytes(x));
     const ws = try r.zeros(cuda.w4a8.Kernels.scratch(rows, k));
     const out = try r.zeros(rows * n * 2);
-    try kk.prompt(r.s, dx, q, out, rows, ws);
+    const flag = try r.zeros(@sizeOf(u32));
+    var exceptional: u32 = undefined;
+    try kk.prompt(r.s, dx, q, out, rows, ws, flag, &exceptional);
+    try check.expect(exceptional == 0, "w4a8 finite inputs must take the int8 path", .{});
     const ref = try reference(r, x, rows, m);
     try r.close(try std.fmt.bufPrint(&name, "w4a8 [{d}, {d}], {d} rows, against float64 of its int8 formula", .{ n, k, rows }), out, false, ref.want, ref.tol);
     // a row's bits are its own: the first 37 rows alone equal their place in the 200
     const few = 37;
     const out_few = try r.zeros(few * n * 2);
-    try kk.prompt(r.s, dx, q, out_few, few, ws);
+    try kk.prompt(r.s, dx, q, out_few, few, ws, flag, &exceptional);
+    try check.expect(exceptional == 0, "w4a8 finite subset must take the int8 path", .{});
     try check.sameBytes(try std.fmt.bufPrint(&name, "w4a8 [{d}, {d}]: {d} rows equal the 200-row call's", .{ n, k, few }), try r.back(out_few, few * n * 2), try r.back(out, few * n * 2));
 }
 
