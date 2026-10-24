@@ -54,6 +54,8 @@ pub const Norms = struct {
     gated_fns: [3]Function, // head dim 64, 128, 256
     rms_sums_fn: Function,
     tail_fns: [2]Function, // each norm rounded once, MLX's bf16 steps
+    l2_fn: Function,
+    slerp_fn: Function,
 
     pub fn load(d: *const Driver) !Norms {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -70,6 +72,8 @@ pub const Norms = struct {
             .gated_fns = .{ try mod.function("tf_gated_rms_rows_64"), try mod.function("tf_gated_rms_rows_128"), try mod.function("tf_gated_rms_rows_256") },
             .rms_sums_fn = try mod.function("tf_rms_rows_sums"),
             .tail_fns = .{ try mod.function("tf_add_rms_rows_bf16h_tail"), try mod.function("tf_add_rms_rows_bf16h_tail_round") },
+            .l2_fn = try mod.function("tf_l2_rows"),
+            .slerp_fn = try mod.function("tf_slerp_rows"),
         };
     }
 
@@ -166,6 +170,30 @@ pub const Norms = struct {
         a.add(eps);
         const f = n.tail_fns[@intFromBool(t.round)];
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+    }
+
+    /// nGPT rows: y = bf16(s / sqrt(sum(s^2) + eps)), s = x, or bf16(x + r) with r; width % 64, at most 8,192.
+    pub fn l2(n: *const Norms, s: Stream, x: u64, r: ?u64, y: u64, rows: usize, width: usize, eps: f32) !void {
+        if (width % 64 != 0 or !vectorOk(width, &.{ x, r orelse 0, y })) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        for ([_]u64{ x, r orelse 0, y }) |v| a.add(v);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        try launch_.launch(n.l2_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+    }
+
+    /// The nGPT residual: h = bf16(l2(a + |alpha scale| (b - a))), a = bf16(l2(res)), b = bf16(l2(out)); bf16 alpha.
+    pub fn slerp(n: *const Norms, s: Stream, res: u64, out: u64, alpha: u64, scale: f32, h: u64, rows: usize, width: usize, eps: f32) !void {
+        if (width % 64 != 0 or !vectorOk(width, &.{ res, out, alpha, h })) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        for ([_]u64{ res, out, alpha }) |v| a.add(v);
+        a.add(scale);
+        a.add(h);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        try launch_.launch(n.slerp_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 
     /// Per head (dv 64/128/256): out = bf16(silu(z) * rms(y) * w), y/z rows at strides y_ld/z_ld; xs: 64-value sums.

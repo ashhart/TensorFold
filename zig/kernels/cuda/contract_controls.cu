@@ -276,3 +276,21 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_hc_mix8_bf16(const __nv
         XSM[static_cast<long long>(r) * (D / 32) + group] = sum;
     }
 }
+
+// Gate 3: norms.cu's nGPT rows with one rounding point dropped each; their range check must go red.
+#include "norms_l2.cuh"
+
+extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_ctl_l2_drop_sum(const __nv_bfloat16* x, const __nv_bfloat16* r,
+                                                                           __nv_bfloat16* y, int width, float eps) {
+    tf_l2::l2_rows<0>(x, r, y, width, eps);
+}
+
+#define TF_CTL_SLERP(NAME, KEEP)                                                                                   \
+    extern "C" __global__ void __launch_bounds__(tf_l2::NT) NAME(const __nv_bfloat16* res, const __nv_bfloat16* out, \
+                                                                 const __nv_bfloat16* alpha, float scale,          \
+                                                                 __nv_bfloat16* h, int width, float eps) {         \
+        tf_l2::slerp_rows<KEEP>(res, out, alpha, scale, h, width, eps);                                            \
+    }
+TF_CTL_SLERP(tf_ctl_slerp_drop_a, tf_l2::B)
+TF_CTL_SLERP(tf_ctl_slerp_drop_b, tf_l2::A)
+#undef TF_CTL_SLERP
