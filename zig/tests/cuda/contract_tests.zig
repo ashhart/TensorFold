@@ -70,7 +70,6 @@ const h3_image = struct {
     pub const bytes align(16) = @embedFile("fatbin_h3").*;
 };
 
-
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5 on this GPU.
 pub fn run(gpu: check.Gpu) !void {
     const a = gpu.gpa;
