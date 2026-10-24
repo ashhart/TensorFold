@@ -41,34 +41,74 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
 
 /// One block's list of calls as DSML, or null when it is not a list of calls to offered tools.
 fn block(a: Allocator, body: []const u8, schemas: *const tool_params.Schemas) Allocator.Error!?[]const u8 {
-    if (std.mem.indexOf(u8, body, "\u{ff5c}DSML\u{ff5c}") != null) return null; // DSML in a value would end the block early
-    var p: Scanner = .{ .s = body };
-    if (!p.eat('[')) return null;
+    // DSML markup in a value would end the block early
+    if (std.mem.indexOf(u8, body, "\u{ff5c}DSML\u{ff5c}") != null) return null;
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(a, dsml_open);
-    while (true) {
-        const name = p.name();
-        if (name.len == 0 or !p.eat('(')) return null;
-        const tool = schemas.get(try std.ascii.allocLowerString(a, name)) orelse return null;
-        const args = (try arguments(a, &p, schemas, name, tool.properties.keys())) orelse return null;
-        try out.print(a, "\n<\u{ff5c}DSML\u{ff5c}invoke name=\"{s}\">", .{name});
-        for (args.keys(), args.values()) |k, v| {
-            if (v == .string) {
-                try out.print(a, "<\u{ff5c}DSML\u{ff5c}parameter name=\"{s}\" string=\"true\">{s}</\u{ff5c}DSML\u{ff5c}parameter>", .{ k, v.string });
-            } else {
-                const spelled = json.stringify(a, v, .{ .ascii = false }) catch return error.OutOfMemory;
-                try out.print(a, "<\u{ff5c}DSML\u{ff5c}parameter name=\"{s}\" string=\"false\">{s}</\u{ff5c}DSML\u{ff5c}parameter>", .{ k, spelled });
-            }
-        }
-        try out.appendSlice(a, "</\u{ff5c}DSML\u{ff5c}invoke>");
-        if (p.eat(',')) continue;
-        if (p.eat(']')) break;
-        return null;
-    }
+    var p: Scanner = .{ .s = body };
+    if (!p.eat('[')) return null;
     p.space();
-    if (p.i != p.s.len) return null;
+    if (p.i < p.s.len and p.s[p.i] == '{') {
+        if (!try jsonCalls(a, &out, body, schemas)) return null;
+    } else {
+        while (true) {
+            const name = p.name();
+            if (name.len == 0 or !p.eat('(')) return null;
+            const tool = schemas.get(try std.ascii.allocLowerString(a, name)) orelse return null;
+            const args = (try arguments(a, &p, schemas, name, tool.properties.keys())) orelse return null;
+            try invoke(a, &out, name, args);
+            if (p.eat(',')) continue;
+            if (p.eat(']')) break;
+            return null;
+        }
+        p.space();
+        if (p.i != p.s.len) return null;
+    }
     try out.appendSlice(a, "\n" ++ dsml_close);
     return out.items;
+}
+
+/// One call as a DSML invoke, its arguments in order.
+fn invoke(a: Allocator, out: *std.ArrayList(u8), name: []const u8, args: *json.Object) Allocator.Error!void {
+    try out.print(a, "\n<\u{ff5c}DSML\u{ff5c}invoke name=\"{s}\">", .{name});
+    for (args.keys(), args.values()) |k, v| {
+        if (v == .string) {
+            try out.print(a, "<\u{ff5c}DSML\u{ff5c}parameter name=\"{s}\" string=\"true\">{s}</\u{ff5c}DSML\u{ff5c}parameter>", .{ k, v.string });
+        } else {
+            const spelled = json.stringify(a, v, .{ .ascii = false }) catch return error.OutOfMemory;
+            try out.print(a, "<\u{ff5c}DSML\u{ff5c}parameter name=\"{s}\" string=\"false\">{s}</\u{ff5c}DSML\u{ff5c}parameter>", .{ k, spelled });
+        }
+    }
+    try out.appendSlice(a, "</\u{ff5c}DSML\u{ff5c}invoke>");
+}
+
+/// A JSON list of `{"name", "arguments"}` calls (`parameters` for `arguments`, or a JSON string of them) as invokes.
+fn jsonCalls(a: Allocator, out: *std.ArrayList(u8), body: []const u8, schemas: *const tool_params.Schemas) Allocator.Error!bool {
+    const list = switch (try json.parseText(a, body)) {
+        .ok => |v| v,
+        .err => return false,
+    };
+    if (list != .array or list.array.len == 0) return false;
+    for (list.array) |call| {
+        if (call != .object) return false;
+        const name = call.get("name") orelse return false;
+        if (name != .string or name.string.len == 0) return false;
+        if (schemas.get(try std.ascii.allocLowerString(a, name.string)) == null) return false;
+        var given = call.get("arguments") orelse call.get("parameters") orelse Value{ .object = try json.newObject(a) };
+        if (given == .string) given = switch (try json.parseText(a, given.string)) {
+            .ok => |v| v,
+            .err => return false,
+        };
+        if (given != .object) return false;
+        const args = try json.newObject(a);
+        for (given.object.keys(), given.object.values()) |k, v| {
+            if (std.mem.indexOfScalar(u8, k, '"') != null or !tool_params.finite(v)) return false;
+            const raw = json.stringify(a, v, .{ .ascii = false }) catch return error.OutOfMemory;
+            try args.put(a, k, try coerce(a, v, raw, try tool_params.schemaOf(schemas, name.string, k, a)));
+        }
+        try invoke(a, out, name.string, args);
+    }
+    return true;
 }
 
 /// A call's arguments up to its `)`, positionals named in schema property order; null if Python would refuse them.
@@ -299,15 +339,8 @@ test "tool_lfm2: a block still being written is held back while streaming and st
     try std.testing.expectEqualStrings(cut, try reply_text.finishedProse(a, cut));
 }
 
-test "tool_lfm2: the calls a stream sends at every byte boundary are the whole reply's calls" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tools = (try json.parse(a, test_tools)).ok.array;
-    const reply = "Checking. <|tool_call_start|>[lookup(query=\"fast\", limit=4), web-search('zig')]<|tool_call_end|>" ++
-        " then <|tool_call_start|>[lookup(filters={\"a\": [True, None]})]<|tool_call_end|>";
-    const want = try whole(a, reply, tools);
-    try std.testing.expectEqual(@as(usize, 3), want.len);
+/// Each call a stream sends when `reply` arrives a byte at a time, as `name arguments`.
+fn streamed(a: Allocator, reply: []const u8, tools: []const Value) ![]const []const u8 {
     var s = try @import("tool_stream.zig").Streamer.init(a, tools);
     var deltas: std.ArrayList(Value) = .empty;
     for (1..reply.len + 1) |n| try s.feed(try dsml(a, reply[0..n], tools, n == reply.len), &deltas);
@@ -323,10 +356,23 @@ test "tool_lfm2: the calls a stream sends at every byte boundary are the whole r
         }
         try args.items[index].appendSlice(a, f.get("arguments").?.string);
     };
-    try std.testing.expectEqual(want.len, names.items.len);
-    for (want, names.items, args.items) |w, n, arg| {
-        try std.testing.expectEqualStrings(w, try std.fmt.allocPrint(a, "{s} {s}", .{ n, arg.items }));
-    }
+    var out: std.ArrayList([]const u8) = .empty;
+    for (names.items, args.items) |n, arg| try out.append(a, try std.fmt.allocPrint(a, "{s} {s}", .{ n, arg.items }));
+    return out.items;
+}
+
+test "tool_lfm2: the calls a stream sends at every byte boundary are the whole reply's calls" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, test_tools)).ok.array;
+    const reply = "Checking. <|tool_call_start|>[lookup(query=\"fast\", limit=4), web-search('zig')]<|tool_call_end|>" ++
+        " then <|tool_call_start|>[lookup(filters={\"a\": [True, None]})]<|tool_call_end|>";
+    const want = try whole(a, reply, tools);
+    try std.testing.expectEqual(@as(usize, 3), want.len);
+    const got = try streamed(a, reply, tools);
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
 }
 
 test "tool_lfm2: a value is read as the type the schema names" {
@@ -349,4 +395,69 @@ test "tool_lfm2: a value is read as the type the schema names" {
         try std.testing.expectEqual(@as(usize, 1), got.len);
         try std.testing.expectEqualStrings(c[1], got[0]);
     }
+}
+
+test "tool_lfm2: a JSON list of calls is the same calls, with the schema's types" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, test_tools)).ok.array;
+    const cases = [_]struct { []const u8, []const []const u8 }{
+        .{ "[{\"name\":\"lookup\",\"arguments\":{\"query\":\"x\",\"limit\":4}}]", &.{"lookup {\"query\":\"x\",\"limit\":4}"} },
+        .{ " [ {\"name\": \"Lookup\", \"parameters\": {\"query\": \"x\"}} , {\"name\": \"web-search\"} ] ", &.{ "lookup {\"query\":\"x\"}", "web-search {}" } },
+        .{ "[{\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\\\"a, b\\\",\\\"filters\\\":{\\\"t\\\":[1,null]}}\"}]", &.{"lookup {\"query\":\"a, b\",\"filters\":{\"t\":[1,null]}}"} },
+        .{ "[{\"name\":\"lookup\",\"arguments\":{\"query\":123,\"limit\":\"4\"}}]", &.{"lookup {\"query\":\"123\",\"limit\":4}"} },
+        .{ "[{\"name\":\"lookup\",\"arguments\":{\"limit\":4.0}},{\"name\":\"lookup\",\"arguments\":{\"limit\":true}}]", &.{ "lookup {\"limit\":4}", "lookup {\"limit\":true}" } },
+    };
+    for (cases) |c| {
+        const got = try whole(a, try std.mem.concat(a, u8, &.{ open, c[0], close }), tools);
+        try std.testing.expectEqual(c[1].len, got.len);
+        for (c[1], got) |want, have| try std.testing.expectEqualStrings(want, have);
+    }
+}
+
+test "tool_lfm2: a JSON block the request would refuse stays text" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, test_tools)).ok.array;
+    const bodies = [_][]const u8{
+        "[{\"name\":\"other\",\"arguments\":{}}]", // a tool the request did not offer
+        "[{\"name\":\"lookup\",\"arguments\":{}}, {\"name\":\"other\"}]", // one bad call spoils the list
+        "[{\"arguments\":{\"query\":\"x\"}}]",
+        "[{\"name\":4,\"arguments\":{}}]",
+        "[{\"name\":\"lookup\",\"arguments\":[1]}]",
+        "[{\"name\":\"lookup\",\"arguments\":\"not json\"}]",
+        "[{\"name\":\"lookup\",\"arguments\":\"[1]\"}]",
+        "[{\"name\":\"lookup\",\"arguments\":{\"query\":\"x\"}}", // no closing bracket
+        "[{\"name\":\"lookup\",\"arguments\":{\"query\":\"x\"}}] trailing",
+        "[{\"name\":\"lookup\",\"arguments\":{\"query\":\"x\"}},]",
+        "[{\"name\":\"lookup\"}, lookup()]", // the two forms do not mix
+        "{\"name\":\"lookup\",\"arguments\":{}}", // not a list
+        "[]",
+    };
+    for (bodies) |body| {
+        const text = try std.mem.concat(a, u8, &.{ "Hi ", open, body, close });
+        try std.testing.expectEqualStrings(text, try dsml(a, text, tools, true));
+        const r = try tool_parse.parse(a, try dsml(a, text, tools, true), tools, null);
+        try std.testing.expect(r.calls == null);
+    }
+}
+
+test "tool_lfm2: a JSON block still being written is held back, and its calls stream the same as the whole reply's" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, test_tools)).ok.array;
+    const cut = "Checking. <|tool_call_start|>[{\"name\":\"lookup\",\"arguments\":{\"query\":\"fa";
+    try std.testing.expectEqualStrings("Checking. ", try dsml(a, cut, tools, false));
+    try std.testing.expectEqualStrings("Checking. ", try reply_text.hideToolCalls(a, cut, false));
+    const reply = "Checking. <|tool_call_start|>[{\"name\":\"lookup\",\"arguments\":{\"query\":\"fast\",\"limit\":\"4\"}}," ++
+        " {\"name\":\"web-search\",\"parameters\":{\"q\":\"zig\"}}]<|tool_call_end|>";
+    const want = try whole(a, reply, tools);
+    try std.testing.expectEqual(@as(usize, 2), want.len);
+    const got = try streamed(a, reply, tools);
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+    try std.testing.expectEqualStrings("lookup {\"query\":\"fast\",\"limit\":4}", got[0]);
 }
