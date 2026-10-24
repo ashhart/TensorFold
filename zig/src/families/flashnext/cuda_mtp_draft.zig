@@ -44,6 +44,7 @@ pub const Chain = struct {
 
 /// A sequence's head cache and the buffers a window needs: its rows' scores and streams, and what it rolls back to.
 pub const Draft = struct {
+    stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").View = null,
     gpa: std.mem.Allocator,
     kc: cuda.DeviceBuffer,
@@ -96,7 +97,7 @@ pub const Draft = struct {
 
     /// A head cache of `cap` entries; `rows` the widest prompt chunk whose streams it keeps.
     pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize) !Draft {
-        var d: Draft = .{ .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
+        var d: Draft = .{ .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
         d.kc = try cuda.DeviceBuffer.alloc(driver, cap * kv_heads * head_dim * 2);
         errdefer d.kc.free();
         d.vc = try cuda.DeviceBuffer.alloc(driver, cap * kv_heads * head_dim * 2);
@@ -122,6 +123,7 @@ pub const Draft = struct {
         while (made < linear_n) : (made += 1) d.spare[made] = try cuda.DeviceBuffer.alloc(driver, state_n * 4);
         d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
         errdefer gpa.free(d.host);
+        errdefer cuda.completion.drain(driver, stream, "Flash Next draft fills did not drain before rollback");
         // zeroed on the compute stream, ahead of the passes that read them
         for ([_]cuda.DeviceBuffer{ d.kc, d.vc, d.ikc, d.pooled }) |b| try b.fill8(0, stream.handle);
         var li: usize = 0;
@@ -154,6 +156,7 @@ pub const Draft = struct {
     }
 
     pub fn deinit(d: *Draft) void {
+        if (d.stream) |stream| cuda.completion.drain(stream.d, stream, "Flash Next draft work did not drain before release");
         d.gpa.free(d.host);
         for (&d.spare) |*b| b.free();
         d.saved.free();

@@ -414,7 +414,10 @@ pub const Scratch = struct {
 
     pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize) !Scratch {
         var s: Scratch = .{ .cap = cap };
-        errdefer s.free(gpa);
+        errdefer {
+            cuda.completion.drain(d, stream, "Flash Next scratch work did not drain before rollback");
+            s.free(gpa);
+        }
         const pairs = cap * slots;
         const nblk = cdiv(pairs, plan_small);
         const items = cdiv(pairs, tile) + experts_n + 1;

@@ -67,6 +67,9 @@ fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: u
         driver: *cuda.Driver,
         stream: cuda.Stream,
         len: usize,
+        pub fn drain(z: @This()) void {
+            cuda.completion.drain(z.driver, z.stream, "Flash Next sequence fills did not drain before rollback");
+        }
         fn make(z: @This()) !cuda.DeviceBuffer {
             return cuda.DeviceBuffer.alloc(z.driver, z.len);
         }
@@ -82,6 +85,7 @@ fn made(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype) ![]B {
     const out = try gpa.alloc(B, n);
     var held: usize = 0;
     errdefer {
+        if (@hasDecl(@TypeOf(src), "drain")) src.drain();
         for (out[0..held]) |*b| b.free();
         gpa.free(out);
     }
@@ -289,36 +293,32 @@ pub const Engine = struct {
     pub fn newSeq(e: *Engine, cap: usize) !Seq {
         e.round_graph.clear();
         if (cap == 0) return error.UnexpectedTensor;
-        const logits = try e.gpa.alloc(u8, vocab * 2);
-        errdefer e.gpa.free(logits);
-        const conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
-        errdefer freeOwned(e.gpa, conv);
-        const state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, state_n * 4);
-        errdefer freeOwned(e.gpa, state);
-        const kc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
-        errdefer freeOwned(e.gpa, kc);
-        const vc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
-        errdefer freeOwned(e.gpa, vc);
-        const ikc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * index_dim * 2);
-        errdefer freeOwned(e.gpa, ikc);
-        const pooled = try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap));
-        errdefer freeOwned(e.gpa, pooled);
-        var tail = try cuda.DeviceBuffer.alloc(e.driver, ple_tail_n * wide * 2);
-        errdefer tail.free();
-        try tail.fill8(0, e.stream.handle);
-        return .{
-            .conv = conv,
-            .state = state,
-            .kc = kc,
-            .vc = vc,
-            .ikc = ikc,
-            .pooled = pooled,
-            .tail = tail,
+        var seq: Seq = .{
+            .stream = e.stream.*,
+            .conv = &.{},
+            .state = &.{},
+            .kc = &.{},
+            .vc = &.{},
+            .ikc = &.{},
+            .pooled = &.{},
+            .tail = .{ .d = e.driver, .ptr = 0, .len = 0 },
             .history = .{ e.eos, e.eos },
             .fed = 0,
-            .logits = logits,
+            .logits = &.{},
             .cap = cap,
         };
+        // One rollback owns every published array, and drains before releasing any destination.
+        errdefer seq.deinit(e.gpa);
+        seq.logits = try e.gpa.alloc(u8, vocab * 2);
+        seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
+        seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, state_n * 4);
+        seq.kc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
+        seq.vc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
+        seq.ikc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * index_dim * 2);
+        seq.pooled = try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap));
+        seq.tail = try cuda.DeviceBuffer.alloc(e.driver, ple_tail_n * wide * 2);
+        try seq.tail.fill8(0, e.stream.handle);
+        return seq;
     }
 
     /// Run `ids` on from `seq.fed` and leave the next token's scores in `seq.logits`.
@@ -450,6 +450,8 @@ pub const Engine = struct {
 
 /// One stream's caches. `fed` tokens have already gone through the model.
 pub const Seq = struct {
+    /// The owning compute stream; synthetic non-device fixtures may leave it absent.
+    stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").State = null,
     rank_id: u64 = 0,
     conv: []cuda.DeviceBuffer,
@@ -472,6 +474,7 @@ pub const Seq = struct {
     }
 
     pub fn deinit(s: *Seq, gpa: std.mem.Allocator) void {
+        if (s.stream) |stream| cuda.completion.drain(stream.d, stream, "Flash Next sequence work did not drain before release");
         if (s.media) |*m| m.deinit();
         freeBufs(s.conv);
         freeBufs(s.state);
@@ -492,11 +495,6 @@ pub const Seq = struct {
 
 fn freeBufs(bs: []cuda.DeviceBuffer) void {
     for (bs) |*b| b.free();
-}
-
-fn freeOwned(gpa: std.mem.Allocator, bs: []cuda.DeviceBuffer) void {
-    freeBufs(bs);
-    gpa.free(bs);
 }
 
 test "linear layers skip every fourth index and attention starts at 3" {
@@ -567,4 +565,8 @@ test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the re
     try std.testing.expectEqual(@as(usize, 4096), try parseChunk("4096"));
     try std.testing.expectEqual(batch.max_chunk, try parseChunk("16384"));
     for ([_][]const u8{ "0", "16385", "-1", "4k", "" }) |bad| try std.testing.expectError(error.BadChunk, parseChunk(bad));
+}
+
+test {
+    _ = @import("cuda_sequence_completion_test.zig");
 }
