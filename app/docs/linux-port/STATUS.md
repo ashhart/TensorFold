@@ -55,13 +55,13 @@ clean-machine install.
   read the workspace on any platform. Attachments are the supported way to give a bot file content;
   workspace work belongs to a task or project chat.
 
-## Linux command sandbox — separate work, not in this change
+## Linux command sandbox — follow-up branch
 
-Per the maintainer's review, the bubblewrap backend is not part of this client portability change:
-commands stay refused on Linux until the git and worktree gaps are closed. The implementation and its
-conformance test are preserved on the `sandbox-followup` branch for a separate PR. It remains
-**opt-in** (`TENSORFOLD_LINUX_SANDBOX=1`) because three deviations from the macOS sandbox profile
-remain:
+The bubblewrap backend is implemented on this branch with the git and worktree gaps closed, and
+remains **opt-in** (`TENSORFOLD_LINUX_SANDBOX=1`) until a maintainer decides otherwise. Nested
+repositories are pinned like the workspace root; a worktree whose gitdir or shared directory lies
+outside the workspace is refused, as is a workspace with no repository, so commands stay fail-closed
+where the profile cannot protect metadata. One deviation from the macOS sandbox profile remains:
 
 1. Creating a brand-new `.git` where none exists cannot be denied; existing repositories pin `.git`
    against rename and pin `config`, `config.worktree`, `hooks` and `info` read-only.
