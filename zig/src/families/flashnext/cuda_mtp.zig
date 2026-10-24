@@ -27,14 +27,16 @@ const HcW = wt.HcW;
 
 pub const Sampling = lanes.sampling.Sampling;
 
-/// Drafts a verify window can hold beside its pending token.
-pub const max_chain: usize = max_rows - 1;
+/// Drafts an MTP chain holds at most beside its pending token.
+pub const max_chain: usize = 15;
 /// Preserve the existing recipe unless an explicit depth is selected.
 pub const default_depth: usize = 6;
 /// The live recipe's --mtp-confidence (Python's CONFIDENCE default is 0.7).
 pub const default_confidence: f64 = 0.6;
 /// A verify window's rows at most: the pending token and a chain, or a copied continuation.
-pub const max_rows: usize = 16;
+pub const max_rows: usize = 32;
+/// A drafting round's rows at most (a shared verify pass's).
+pub const round_rows: usize = 64;
 /// qmm.split_for(2560, 2560): fc_embedding and fc_hidden sum K in four slices, in order.
 pub const fc_sk: usize = 4;
 /// Head rows one launch takes at most (a prompt's rows go through in pieces).
@@ -308,6 +310,8 @@ test "a masked row draws only allowed tokens, greedy the best of them" {
 
 test "draft chains fit one verify window while the default stays six" {
     try std.testing.expectEqual(@as(usize, 16), max_chain + 1);
+    try std.testing.expectEqual(@as(usize, 32), max_rows);
+    try std.testing.expect(max_chain < max_rows and max_rows <= round_rows);
     try std.testing.expectEqual(@as(usize, 6), default_depth);
     try std.testing.expect(default_depth <= max_chain);
 }
