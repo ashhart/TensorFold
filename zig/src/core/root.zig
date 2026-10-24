@@ -30,6 +30,7 @@ pub const nvfp4_slice = @import("nvfp4_slice.zig");
 pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
+pub const l2_ref = @import("l2_ref.zig");
 pub const act_ref = @import("act_ref.zig");
 pub const bf16_round = @import("bf16_round.zig");
 pub const embed_ref = @import("embed_ref.zig");
@@ -70,6 +71,7 @@ test {
     _ = registry;
     _ = tuning;
     _ = norms_ref;
+    _ = l2_ref;
     _ = act_ref;
     _ = bf16_round;
     _ = embed_ref;
