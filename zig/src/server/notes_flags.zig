@@ -29,4 +29,4 @@ pub const usage = " [--notes SNAPSHOT] [--notes-index {postings,sa}]";
 
 pub const help =
     "  --notes SNAPSHOT  look up an LLWZ note snapshot for each chat request that sends \"notes\": true; a snapshot naming a tokenizer.json SHA-256 starts only when the model's tokenizer.json is read and matches it, and one naming none is checked by vocabulary size only (vocabulary-only compatibility); /v1/notes adds, changes, takes back, erases and lists notes, each journaled beside the snapshot before its reply\n" ++
-    "  --notes-index {postings,sa}  the notes' n-gram index: a suffix array over the notes' folded tokens with a side buffer of the notes written since (the default: the same lookups, a smaller store), or LLWZ's posting lists\n";
+    "  --notes-index {postings,sa}  the notes' n-gram index, rebuilt whole on every write and erase: a suffix array over the notes' folded tokens (the default: the same lookups, a smaller store), or LLWZ's posting lists\n";
