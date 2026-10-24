@@ -37,7 +37,8 @@ pub const Tower = struct {
         errdefer t.memory.deinit();
         const mem = &t.memory;
         t.patches = try mem.alloc(P * c.patch_width * 2);
-        inline for (.{ "pos", "h", "x", "r", "q", "k", "v", "att" }) |name| @field(t, name) = try mem.alloc(P * c.v_hidden * 2);
+        // q has 32 rows of slack: the last flash tile reads whole 8-row query tiles past the image's rows
+        inline for (.{ "pos", "h", "x", "r", "q", "k", "v", "att" }) |name| @field(t, name) = try mem.alloc((P + 32) * c.v_hidden * 2);
         t.mlp = try mem.alloc(P * c.v_intermediate * 2);
         t.merged = try mem.alloc(tokens * c.projector_hidden * 2);
         t.sums = try mem.alloc(@max(P * (c.v_intermediate / 64), tokens * (c.projector_hidden / 64)) * 4);
@@ -88,7 +89,7 @@ pub const Tower = struct {
             enc.biased(l.q, t.x, 0, t.q, 0, P, .none);
             enc.biased(l.k, t.x, 0, t.k, 0, P, .none);
             enc.biased(l.v, t.x, 0, t.v, 0, P, .none);
-            enc.pipe("cos3_attn_72");
+            enc.pipe("cos3_flash_72");
             e.setBuffer(t.q, 0, 0);
             e.setBuffer(t.k, 0, 1);
             e.setBuffer(t.v, 0, 2);
@@ -105,7 +106,8 @@ pub const Tower = struct {
             };
             e.setBytes(std.mem.asBytes(&args), 3);
             e.setBuffer(t.att, 0, 4);
-            enc.groups(.{ c.v_heads, P, 1 }, .{ 32, 1, 1 });
+            e.setValue(@as(u32, @intCast(P)), 5);
+            enc.groups(.{ c.v_heads, (P + 31) / 32, 1 }, .{ 128, 1, 1 });
             enc.biased(l.out, t.att, 0, t.r, 0, P, .none);
             enc.layerNorm(l.ln2, h, r, x, P, W, c.v_eps);
             enc.biased(l.fc1, t.x, 0, t.mlp, 0, P, .gelu_tanh);

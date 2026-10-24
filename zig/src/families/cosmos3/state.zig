@@ -122,7 +122,8 @@ pub const Scratch = struct {
         out.pos = try mem.alloc(rows * 3 * 4);
         out.slots = try mem.alloc(rows * 4);
         out.map = try mem.alloc(rows * 4);
-        inline for (.{ "h", "x", "r", "y", "q", "queries" }) |name| @field(out, name) = try mem.alloc(rows * c.hidden * 2);
+        // queries has 32 rows of slack: the last flash tile reads whole 8-row query tiles past the call's rows
+        inline for (.{ "h", "x", "r", "y", "q", "queries" }) |name| @field(out, name) = try mem.alloc((rows + 32) * c.hidden * 2);
         out.k = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
         out.v = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
         out.act = try mem.alloc(rows * c.intermediate * 2);

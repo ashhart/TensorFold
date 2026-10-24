@@ -142,7 +142,8 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
-    const prompt = (!record and head == .last) or total >= tile_rows;
+    // a few rows (a prompt's tail after a kept state, decode, windows) read each weight once through the twin
+    const prompt = total >= tile_rows;
     const enc = Encoder{ .e = cb.compute(.serial), .m = m, .sums = s.sums, .prompt = prompt };
     const e = enc.e;
     const embedding = m.weights.embedding;
@@ -213,7 +214,8 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Layer, config: *const c.Config
         e.setBuffer(cache.keys, 0, 7);
         e.setBuffer(cache.values, 0, 8);
         enc.groups(.{ c.query_heads + c.kv_heads, seg.rows, 1 }, .{ 32, 1, 1 });
-        enc.pipe("cos3_attn_128");
+        const tiled = seg.rows >= 8;
+        if (tiled) enc.pipe("cos3_flash_128") else enc.pipe("cos3_attn_128");
         e.setBuffer(s.queries, base * c.hidden * 2, 0);
         e.setBuffer(cache.keys, 0, 1);
         e.setBuffer(cache.values, 0, 2);
@@ -230,7 +232,10 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Layer, config: *const c.Config
         };
         e.setBytes(std.mem.asBytes(&args), 3);
         e.setBuffer(s.y, base * c.hidden * 2, 4);
-        enc.groups(.{ c.query_heads, seg.rows, 1 }, .{ 32, 1, 1 });
+        if (tiled) {
+            e.setValue(@as(u32, @intCast(seg.rows)), 5);
+            enc.groups(.{ c.query_heads, (seg.rows + 31) / 32, 1 }, .{ 128, 1, 1 });
+        } else enc.groups(.{ c.query_heads, seg.rows, 1 }, .{ 32, 1, 1 });
         base += seg.rows;
     }
     enc.projection(a.o, s.y, 0, s.r, 0, total);

@@ -115,7 +115,10 @@ pub const Metal = struct {
         }
         var rows: ?mtl.Buffer = null;
         defer if (rows) |r| r.deinit();
+        const gpu0 = fwd.gpu_seconds;
         const map = try self.encodeImages(stream, at, &rows);
+        const gpu1 = fwd.gpu_seconds;
+        defer if (std.c.getenv("TF_COSMOS3_TIMING") != null) std.log.info("cosmos3 prefill: {d} rows, image tower {d:.1} ms GPU, text {d:.1} ms GPU", .{ ids.len, (gpu1 - gpu0) * 1e3, (fwd.gpu_seconds - gpu1) * 1e3 });
         defer if (map) |mp| self.gpa.free(mp);
         var mark: usize = 0;
         while (at < ids.len) {

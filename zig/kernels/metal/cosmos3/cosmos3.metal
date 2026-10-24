@@ -164,6 +164,185 @@ template <int HDT>
 template [[host_name("cos3_attn_128")]] [[kernel]] decltype(cos3_attn<128>) cos3_attn<128>;
 template [[host_name("cos3_attn_72")]] [[kernel]] decltype(cos3_attn<72>) cos3_attn<72>;
 
+// cos3_attn over 8 query rows a threadgroup (one simdgroup each, one head): each 32-key block of keys and values is
+// staged once in threadgroup memory (keys padded to an odd stride) for all 8 rows. Causal rows mask past their own.
+constant constexpr uint TR = 8;
+template <int HDT>
+[[kernel]] void cos3_attn_tile(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
+                               constant cos3_attn_args& p [[buffer(3)]], device bfloat* o [[buffer(4)]], constant uint& rows [[buffer(5)]],
+                               uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                               uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  constexpr int NS = (HDT + 31) / 32;
+  constexpr int KS = HDT + 1;  // odd: lane j's key row starts in its own bank
+  threadgroup bfloat ks[32 * KS];  // bf16 values as the caches hold them: staged exactly
+  threadgroup bfloat vs[32 * HDT];
+  threadgroup float qs[TR][HDT];
+  const uint head = tg.x, r0 = tg.y * TR, kh = head / p.group;
+  const uint r = r0 + sg;
+  const bool live = r < rows;
+  const uint rr = live ? r : rows - 1;
+  for (uint d = lane; d < uint(HDT); d += 32) qs[sg][d] = float(q[size_t(rr) * p.q_row + head * HDT + d]);
+  const uint n = p.causal != 0 ? p.first + rr + 1 : p.keys;
+  const uint top = p.causal != 0 ? p.first + min(r0 + TR, rows) : p.keys;  // the most keys a row here sees
+  const device bfloat* kb = k + size_t(kh) * p.k_head;
+  const device bfloat* vb = v + size_t(kh) * p.k_head;
+  float m = -INFINITY, l = 0.0f;
+  float acc[NS];
+  for (int i = 0; i < NS; ++i) acc[i] = 0.0f;
+  for (uint j0 = 0; j0 < top; j0 += 32) {
+    const uint count = min(32u, top - j0);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint e = tid; e < 32 * uint(HDT); e += TR * 32) {
+      const uint kj = e / HDT, d = e % HDT;
+      const bool in = kj < count;
+      ks[kj * KS + d] = in ? kb[size_t(j0 + kj) * p.k_row + d] : bfloat(0.0f);
+      vs[kj * HDT + d] = in ? vb[size_t(j0 + kj) * p.k_row + d] : bfloat(0.0f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint j = j0 + lane;
+    float s = -INFINITY;
+    if (j < n) {
+      float dot = 0.0f;
+      for (int d = 0; d < HDT; ++d) dot += qs[sg][d] * float(ks[lane * KS + d]);
+      s = dot * p.scale;
+    }
+    const float mb = simd_max(s);
+    if (mb == -INFINITY) continue;  // every key of this block is past this row
+    const float mn = max(m, mb);
+    const float pj = j < n ? metal::exp(s - mn) : 0.0f;
+    const float alpha = m == -INFINITY ? 0.0f : metal::exp(m - mn);
+    l = l * alpha + simd_sum(pj);
+    for (int i = 0; i < NS; ++i) acc[i] *= alpha;
+    const uint upto = min(count, n > j0 ? n - j0 : 0u);
+    for (uint t = 0; t < upto; ++t) {
+      const float pt = simd_shuffle(pj, ushort(t));
+      for (int i = 0; i < NS; ++i) {
+        const uint d = lane + 32 * i;
+        if (d < uint(HDT)) acc[i] += pt * float(vs[t * HDT + d]);
+      }
+    }
+    m = mn;
+  }
+  if (!live) return;
+  for (int i = 0; i < NS; ++i) {
+    const uint d = lane + 32 * i;
+    if (d < uint(HDT)) o[size_t(r) * p.o_row + head * HDT + d] = static_cast<bfloat>(acc[i] / l);
+  }
+}
+template [[host_name("cos3_attn_tile_128")]] [[kernel]] decltype(cos3_attn_tile<128>) cos3_attn_tile<128>;
+template [[host_name("cos3_attn_tile_72")]] [[kernel]] decltype(cos3_attn_tile<72>) cos3_attn_tile<72>;
+
+// Flash attention on simdgroup matrices: a threadgroup a (head, 32 query rows), a simdgroup 8 of them. Each 32-key block
+// of keys and values is staged in threadgroup memory; S = Q K^T on 8 x 8 bf16 tiles (fp32 sums), the block's online
+// softmax by rows (4 lanes a row), P rounded to bf16 as the eager attention's weights are, then O += P V.
+constant constexpr uint FQ = 32;  // query rows a threadgroup
+constant constexpr uint FK = 32;  // keys a block
+template <int HDT>
+[[kernel]] void cos3_flash(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
+                           constant cos3_attn_args& p [[buffer(3)]], device bfloat* o [[buffer(4)]], constant uint& rows [[buffer(5)]],
+                           uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  constexpr int DT = HDT / 8;
+  threadgroup bfloat ks[FK * HDT];
+  threadgroup bfloat vs[FK * HDT];
+  threadgroup float ss[4][8 * FK];
+  threadgroup bfloat ps[4][8 * FK];
+  threadgroup float rowv[4][8];
+  const uint head = tg.x, kh = head / p.group;
+  const uint r0 = tg.y * FQ, s0 = r0 + 8 * sg;  // this simdgroup's first row
+  const device bfloat* kb = k + size_t(kh) * p.k_head;
+  const device bfloat* vb = v + size_t(kh) * p.k_head;
+  // the lane's two elements of every 8 x 8 tile: row fm, columns fn and fn + 1
+  const uint qid = lane / 4, fm = (qid & 4) + ((lane / 2) % 4), fn = (qid & 2) * 2 + (lane % 2) * 2;
+  simdgroup_matrix<bfloat, 8, 8> Q[DT];
+  for (int d = 0; d < DT; ++d) simdgroup_load(Q[d], q + size_t(s0) * p.q_row + head * HDT, p.q_row, ulong2(8 * d, 0));
+  simdgroup_matrix<float, 8, 8> O[DT];
+  for (int d = 0; d < DT; ++d) O[d] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+  // softmax state of row (lane / 4), the same in its four lanes
+  const uint srow = lane / 4, scol = (lane % 4) * 8;
+  const uint my_row = s0 + srow;
+  const uint my_n = p.causal != 0 ? p.first + my_row + 1 : p.keys;
+  float m = -INFINITY, l = 0.0f;
+  const uint top = p.causal != 0 ? p.first + min(r0 + FQ, rows) : p.keys;
+  for (uint j0 = 0; j0 < top; j0 += FK) {
+    const uint count = min(FK, top - j0);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint e = tid; e < FK * uint(HDT) / 4; e += 128) {
+      const uint kj = (4 * e) / HDT, d = (4 * e) % HDT;
+      vec<bfloat, 4> kv = vec<bfloat, 4>(bfloat(0.0f)), vv = vec<bfloat, 4>(bfloat(0.0f));
+      if (kj < count) {
+        kv = *(const device vec<bfloat, 4>*)(kb + size_t(j0 + kj) * p.k_row + d);
+        vv = *(const device vec<bfloat, 4>*)(vb + size_t(j0 + kj) * p.k_row + d);
+      }
+      *(threadgroup vec<bfloat, 4>*)(ks + kj * HDT + d) = kv;
+      *(threadgroup vec<bfloat, 4>*)(vs + kj * HDT + d) = vv;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // S [8, 32] = Q K^T
+    for (uint kt = 0; kt < FK / 8; ++kt) {
+      simdgroup_matrix<float, 8, 8> S = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+      for (int d = 0; d < DT; ++d) {
+        simdgroup_matrix<bfloat, 8, 8> KT;
+        simdgroup_load(KT, ks, HDT, ulong2(8 * d, 8 * kt), true);
+        simdgroup_multiply_accumulate(S, Q[d], KT, S);
+      }
+      simdgroup_store(S, ss[sg], FK, ulong2(8 * kt, 0));
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    float sv[8];
+    float bm = -INFINITY;
+    for (uint c = 0; c < 8; ++c) {
+      const uint j = j0 + scol + c;
+      sv[c] = (j < my_n && scol + c < count) ? ss[sg][srow * FK + scol + c] * p.scale : -INFINITY;
+      bm = max(bm, sv[c]);
+    }
+    bm = max(bm, simd_shuffle_xor(bm, ushort(1)));
+    bm = max(bm, simd_shuffle_xor(bm, ushort(2)));
+    const float mn = max(m, bm);
+    float alpha = 1.0f, sum = 0.0f;
+    if (mn == -INFINITY) {
+      for (uint c = 0; c < 8; ++c) ps[sg][srow * FK + scol + c] = bfloat(0.0f);
+    } else {
+      alpha = m == -INFINITY ? 0.0f : metal::exp(m - mn);
+      for (uint c = 0; c < 8; ++c) {
+        const float e = sv[c] == -INFINITY ? 0.0f : metal::exp(sv[c] - mn);
+        sum += e;
+        ps[sg][srow * FK + scol + c] = static_cast<bfloat>(e);
+      }
+      m = mn;
+    }
+    sum += simd_shuffle_xor(sum, ushort(1));
+    sum += simd_shuffle_xor(sum, ushort(2));
+    l = l * alpha + sum;
+    if (lane % 4 == 0) rowv[sg][srow] = alpha;
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    const float a = rowv[sg][fm];
+    for (int d = 0; d < DT; ++d) reinterpret_cast<thread float2&>(O[d].thread_elements()) *= a;
+    for (uint kt = 0; kt < FK / 8; ++kt) {
+      simdgroup_matrix<bfloat, 8, 8> P;
+      simdgroup_load(P, ps[sg], FK, ulong2(8 * kt, 0));
+      for (int d = 0; d < DT; ++d) {
+        simdgroup_matrix<bfloat, 8, 8> V;
+        simdgroup_load(V, vs, HDT, ulong2(8 * d, 8 * kt));
+        simdgroup_multiply_accumulate(O[d], P, V, O[d]);
+      }
+    }
+  }
+  if (lane % 4 == 0) rowv[sg][srow] = l;
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+  const uint r = s0 + fm;
+  if (r >= rows) return;
+  const float inv = 1.0f / rowv[sg][fm];
+  for (int d = 0; d < DT; ++d) {
+    const float2 el = reinterpret_cast<thread float2&>(O[d].thread_elements());
+    device bfloat* out = o + size_t(r) * p.o_row + head * HDT + 8 * d + fn;
+    out[0] = static_cast<bfloat>(el.x * inv);
+    out[1] = static_cast<bfloat>(el.y * inv);
+  }
+}
+template [[host_name("cos3_flash_128")]] [[kernel]] decltype(cos3_flash<128>) cos3_flash<128>;
+template [[host_name("cos3_flash_72")]] [[kernel]] decltype(cos3_flash<72>) cos3_flash<72>;
+
 // h += r (bf16) when `add`, then x = LayerNorm(h) * w + b over `width` values (fp32 statistics), a threadgroup a row.
 struct cos3_ln_args { uint width; float eps; uint add; };
 [[kernel]] void cos3_layer_norm(device bfloat* h [[buffer(0)]], const device bfloat* r [[buffer(1)]], const device bfloat* w [[buffer(2)]],
