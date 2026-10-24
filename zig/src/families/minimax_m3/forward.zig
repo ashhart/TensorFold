@@ -380,12 +380,13 @@ fn attention(x: Enc, cache: *st.Cache, w: wts.Attention, i: usize, base: usize, 
         e.setValue(words, 5);
         e.dispatchGroups(mtl.Size.of(c.kv_heads, n, 1), mtl.Size.of(32, 1, 1));
     }
-    if (prompt) { // a prompt chunk: 32 rows of a head a tile, over the blocks any of its rows keeps
+    if (prompt) { // a prompt chunk: a key head's query heads on two rows a tile, over the blocks either row keeps
         e.setPipeline(x.m.prompt_attn);
         for ([_]B{ qn, keys, values, o, A, bits, kscale, vscale }, 0..) |r, slot| {
             if (r.args) e.setValue([2]i32{ @intCast(n), @intCast(start) }, slot) else e.setBuffer(r.buf, r.off, slot);
         }
-        e.dispatchGroups(mtl.Size.of((n + 31) / 32, c.heads, 1), mtl.Size.of(@as(usize, c.head_dim) / 64 * 32, 1, 1));
+        const per: usize = 32 / (c.heads / c.kv_heads); // rows a tile
+        e.dispatchGroups(mtl.Size.of((n + per - 1) / per, c.kv_heads, 1), mtl.Size.of(@as(usize, c.head_dim) / 64 * 32, 1, 1));
         return;
     }
     // decode rows: a key head's query heads a threadgroup over each kept block, then the merge in block order

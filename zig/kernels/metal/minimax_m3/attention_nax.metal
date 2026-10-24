@@ -74,7 +74,7 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
 #endif
 }
 
-// Q, O [R, NQ, DH] at positions P.y..; K, V the cache; SEL bit b of a row's key head: it keeps block b. RT rows a tile.
+// Q, O [R, NQ, DH] at P.y..; K, V the cache; SEL: a row's key head keeps block b; a tile: G heads on RT / G rows.
 [[max_total_threads_per_threadgroup(256)]]
 [[kernel]] void mm_prompt_attention(const device bfloat* Q [[buffer(0)]], const device KT* K [[buffer(1)]],
                                     const device KT* V [[buffer(2)]], device bfloat* O [[buffer(3)]],
@@ -82,12 +82,13 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
                                     const device float* KSC [[buffer(6)]], const device float* VSC [[buffer(7)]],
                                     uint sg [[simdgroup_index_in_threadgroup]],
                                     uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  static_assert(G == 16, "a 16-row fragment is one row's query heads");
   const int R = P.x, p0 = P.y;
-  const int qh = int(tg.y), kv = qh / G;
-  const int r0 = int(tg.x) * RT;
-  const int q_rows = min(RT, R - r0);
+  const int kv = int(tg.y);
+  const int r0 = int(tg.x) * (RT / G);
+  const int t_rows = min(RT / G, R - r0); // positions in the tile
   const int qs = NQ * DH;
-  const device bfloat* q = Q + r0 * qs + qh * DH;
+  const device bfloat* q = Q + r0 * qs + kv * G * DH;
   const device KT* kc = K + kv * DH;
   const device KT* vc = V + kv * DH + int(sg) * 64;
   const short2 home = frag_home(ushort(lane));
@@ -97,18 +98,18 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
   TF_UNROLL
   for (short i = 0; i < 8; i++) acc[i] = frag<float>(0);
   float top[4] = {kMasked, kMasked, kMasked, kMasked}, total[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  const int first_pos = p0 + r0, last_pos = p0 + r0 + q_rows - 1; // the tile's last key
+  const int first_pos = p0 + r0, last_pos = p0 + r0 + t_rows - 1; // the tile's last key
   const device uint* sel = SEL + long(r0) * KVH * WORDS + kv * WORDS;
   for (int kb = 0; kb <= last_pos / BKT; kb++) {
     const int ib = kb * BKT / 128; // the index block of these keys
     bool any = false;
-    for (int r = 0; r < q_rows; r++) any = any || ((sel[long(r) * KVH * WORDS + ib / 32] >> (ib % 32)) & 1u);
+    for (int r = 0; r < t_rows; r++) any = any || ((sel[long(r) * KVH * WORDS + ib / 32] >> (ib % 32)) & 1u);
     if (!any) continue; // uniform across the threadgroup: every thread reads the same words
     bool kept[4];
     TF_UNROLL
     for (short j = 0; j < 4; j++) {
-      const int local = home.y + 8 * j;
-      kept[j] = local < q_rows && ((sel[long(local) * KVH * WORDS + ib / 32] >> (ib % 32)) & 1u);
+      const int rl = (home.y + 8 * j) / G;
+      kept[j] = rl < t_rows && ((sel[long(rl) * KVH * WORDS + ib / 32] >> (ib % 32)) & 1u);
     }
     const int kpos = kb * BKT + int(sg) * KS;
     const device KT* kblk = kc + long(kpos) * LD;
@@ -119,8 +120,8 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
       const frag<bfloat> k0 = blk<true>(kblk, LD, 0, 16 * d, home);
       const frag<bfloat> k1 = blk<true>(kblk, LD, 16, 16 * d, home);
       TF_UNROLL
-      for (short h = 0; h < 2; h++) { // rows past q_rows read inside the chunk's buffer; their outputs stay unwritten
-        const frag<bfloat> qf = blk<false>(q, qs, 16 * h, 16 * d, home);
+      for (short h = 0; h < 2; h++) { // a row past t_rows reads inside the chunk's buffer; its outputs stay unwritten
+        const frag<bfloat> qf = blk<false>(q + h * qs, DH, 0, 16 * d, home);
         mma_16x32<false, true>(s[2 * h], s[2 * h + 1], qf, k0, k1);
       }
     }
@@ -128,7 +129,7 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
     for (short i = 0; i < 4; i++) {
       TF_UNROLL
       for (short e = 0; e < 8; e++) {
-        const int local = 16 * (i >> 1) + home.y + (e >> 2) * 8, row = first_pos + local;
+        const int local = 16 * (i >> 1) + home.y + (e >> 2) * 8, row = first_pos + local / G;
         const int col = kpos + 16 * (i & 1) + home.x + TF_COL(e);
         const bool out = col > row || !kept[2 * (i >> 1) + (e >> 2)];
 #ifdef KV8
@@ -226,11 +227,12 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
     for (int u = 0; u < NS; u++) t += rowmax[u][home.y + 8 * j];
     inv[j] = 1.0f / t;
   }
-  device bfloat* o = O + r0 * qs + qh * DH + int(sg) * 64;
+  device bfloat* o = O + r0 * qs + kv * G * DH + int(sg) * 64;
   TF_UNROLL
   for (short i = 0; i < 8; i++) {
     TF_UNROLL
     for (short e = 0; e < 8; e++) acc[i][e] = acc[i][e] * inv[2 * (i >> 2) + (e >> 2)];
-    frag_put_in(acc[i], o, qs, 16 * (i >> 2), 16 * (i & 3), home, q_rows, 64);
+    const int h = i >> 2;
+    if (h < t_rows) frag_put_in(acc[i], o + h * qs, DH, 0, 16 * (i & 3), home, 16, 64);
   }
 }
