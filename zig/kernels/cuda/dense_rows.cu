@@ -21,9 +21,9 @@ __device__ __forceinline__ void unpack(const uint4& u, float* f) {
 }
 
 // out[r, n] = x[r] . w[n] for a tile's rows: lane l sums k = 8 l + 256 j in order, then the fixed shuffle tree.
-template <int RT>
+template <int RT, bool SCALED = false> // SCALED: out = float(bf16(x[r] . w[n])) * scale[n] (Dory's logits)
 __device__ __forceinline__ void tile(const __nv_bfloat16* x, int64_t x_stride, const __nv_bfloat16* w, float* out,
-                                     int64_t out_stride, int rows, int n, int k) {
+                                     int64_t out_stride, int rows, int n, int k, const float* scale = nullptr) {
     const int lane = threadIdx.x & 31;
     const int col = blockIdx.x * WARPS + (threadIdx.x >> 5);
     const int r0 = blockIdx.y * RT;
@@ -49,6 +49,7 @@ __device__ __forceinline__ void tile(const __nv_bfloat16* x, int64_t x_stride, c
     for (int r = 0; r < RT; ++r) {
         float v = acc[r];
         for (int m = 16; m > 0; m >>= 1) v = __fadd_rn(v, __shfl_xor_sync(0xFFFFFFFFu, v, m));
+        if constexpr (SCALED) v = __fmul_rn(__bfloat162float(__float2bfloat16_rn(v)), scale[col]);
         if (lane == 0 && r0 + r < rows) out[(r0 + r) * out_stride + col] = v;
     }
 }
@@ -68,3 +69,16 @@ TF_DENSE_ROWS(1)
 TF_DENSE_ROWS(4)
 TF_DENSE_ROWS(16)
 TF_DENSE_ROWS(32)
+
+// tf_dense_rows with the scaled epilogue: out = float(bf16(x[r] . w[n])) * scale[n], the same sums.
+#define TF_DENSE_ROWS_SCALED(RT)                                                                                       \
+    extern "C" __global__ void __launch_bounds__(WARPS * 32) tf_dense_rows_scaled_##RT(                              \
+        const __nv_bfloat16* x, long long x_stride, const __nv_bfloat16* w, const float* scale, float* out,           \
+        long long out_stride, int rows, int n, int k) {                                                                \
+        tile<RT, true>(x, x_stride, w, out, out_stride, rows, n, k, scale);                                            \
+    }
+
+TF_DENSE_ROWS_SCALED(1)
+TF_DENSE_ROWS_SCALED(4)
+TF_DENSE_ROWS_SCALED(16)
+TF_DENSE_ROWS_SCALED(32)

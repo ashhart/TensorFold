@@ -159,6 +159,8 @@ CUDA also checks Dory's attention inputs (`qk_l2.cuh`): RoPE first, each head's 
 head dim 256 and positions past 199,800 (two controls, each dropping one rounding point).
 CUDA also checks Dory's activation rows (`act_l2.cuh`): the scaled sigmoid output gate over all heads and the scaled SwiGLU,
 each row then L2-normed, against float64's ranges at their bf16 points and expf's ulps (four controls, one point each).
+CUDA also checks `dense_rows`' scaled epilogue (Dory's logits, fp32(bf16(x . w)) times a per-column scale), bit-equal to its
+unscaled tile's outputs rounded and scaled on the host.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
