@@ -88,8 +88,8 @@ pub const Cache = struct {
 
 pub const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "iq", "o", "y", "shared", "gate", "act", "egu", "ea", "ey", "logits32", "pick", "wts", "xs", "sums", "offsets", "order", "logits_all", "pm", "pl", "po", "scores", "sel", "bits", "groups", "members" };
 
-/// A prompt scratch's buffers in another's memory, never live at once (the MLPs run after the experts, scores before).
-const shares = .{ .{ "gate", "egu" }, .{ "act", "ea" }, .{ "ey", "xs" }, .{ "scores", "xs" } };
+/// A prompt scratch's buffers in another's memory, never live at once (each host is dead before its guest is written).
+const shares = .{ .{ "gate", "egu" }, .{ "act", "ea" }, .{ "ey", "xs" }, .{ "scores", "xs" }, .{ "shared", "o" }, .{ "y", "qn" } };
 
 fn shared(comptime f: []const u8) bool {
     inline for (shares) |pair| if (comptime std.mem.eql(u8, pair[0], f)) return true;
