@@ -89,6 +89,8 @@ pub fn prepare(s: *Store, a: Allocator, ask: Ask, told: i64, why: *Refusal) Erro
         error.ReadOnly => refuse(why, 503, "the store has no journal"),
         error.MissingRun => refuse(why, 503, "the process writer flags have not been recorded"),
         error.JournalPoisoned => refuse(why, 503, "the notes journal needs recovery; restart the server"),
+        error.Unsupported => refuse(why, 500, "the notes index cannot be built from this vocabulary"),
+        error.BadSnapshot => refuse(why, 500, "the notes index cannot be built from this store"),
     };
     errdefer pending.deinit();
     const out = pending.out;

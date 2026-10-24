@@ -6,6 +6,8 @@ const places = @import("../notes_erase_places.zig");
 const intent_mod = @import("erase_intent.zig");
 const write = @import("write.zig");
 const records = @import("../notes_records.zig");
+const index = @import("index.zig");
+const alias = @import("alias.zig");
 const Allocator = std.mem.Allocator;
 
 /// Caller serializes the entire preparation/commit lifetime, including response serialization.
@@ -20,12 +22,14 @@ pub const Prepared = struct {
     source_num: u64,
     intent: intent_mod.Intent,
     retry: bool = false,
+    idx: ?*index.Index = null,
     committed: bool = false,
     unsynced: bool = false,
     retire_failed: bool = false,
 
     pub fn deinit(p: *Prepared) void {
         if (!p.committed and !p.retry) {
+            if (p.idx) |idx| idx.deinit();
             p.log.deinit();
             p.fresh.deinit();
         }
@@ -50,11 +54,14 @@ pub const Prepared = struct {
         };
         const old = s.model;
         var old_log = s.log;
+        const old_idx = s.idx;
         s.model = p.fresh;
         s.log = p.log;
+        s.idx = p.idx;
         p.committed = true;
         old_log.deinit();
         old.deinit();
+        if (old_idx) |x| x.deinit();
     }
     /// Retire the token spans after engine-reachable cleanup; external-copy warnings do not retain the note.
     pub fn finish(p: *Prepared, a: Allocator) !void {
@@ -117,6 +124,9 @@ pub fn prepare(s: *Storage, a: Allocator, id: u32) !Prepared {
     }
     fresh.id_floor = @max(fresh.nextId(), old.nextId());
     try fresh.trim();
+    const idx = try index.Index.buildKind(g, fresh, s.kind);
+    errdefer idx.deinit();
+    try alias.populate(idx, fresh, s.text);
     var moved: std.ArrayList([2]u32) = .empty;
     for (old.notes.items[old.base_notes..]) |*note| if (fresh.placeOfSource(note.source().?)) |q| {
         if (fresh.notes.items[q].id != note.id) try moved.append(a, .{ note.id, fresh.notes.items[q].id });
@@ -146,6 +156,7 @@ pub fn prepare(s: *Storage, a: Allocator, id: u32) !Prepared {
         .moved = moved.items,
         .texts = texts.items,
         .source_num = source_num,
+        .idx = idx,
     };
 }
 
