@@ -30,7 +30,7 @@ const act_round_k = @import("contract_act_round.zig");
 const round_k = @import("contract_tree_round.zig");
 
 const act_k = @import("contract_act.zig");
-const vit_g4_k = @import("contract_vit_gemma.zig");
+const vit_g4_group = @import("contract_gemma_group.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
@@ -299,18 +299,13 @@ pub fn run(gpu: check.Gpu) !void {
     for (act_round_k.entries, &act_rounds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .act = &act_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_act_round") else null };
     defer for (&act_rounds) |*x| x.deinit();
     for (&act_rounds) |*x| try kernels.append(a, x.kernel());
-    var vit_g4: [vit_g4_k.entries.len]vit_g4_k.Glue = undefined;
-    for (vit_g4_k.entries, &vit_g4) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .vit = &vit, .ctl = if (e.keep == null) null else try mods[5].function(switch (e.kind) {
-        .qkv => "tf_ctl_vit_g4_qkv",
-        .gelu => "tf_ctl_vit_g4_gelu_mul",
-        .pool => "tf_ctl_vit_g4_pool",
-    }) };
-    defer for (&vit_g4) |*x| x.deinit();
-    for (&vit_g4) |*x| try kernels.append(a, x.kernel());
     var gemma_ops: @import("contract_gemma_ops.zig").Group = .{};
     defer gemma_ops.deinit();
     try gemma_ops.init(gpu, s, &act_rows, &vit, &round_fns, mods[5]);
     try gemma_ops.append(a, &kernels);
+    var vit_g4 = try vit_g4_group.Group.init(gpu, s, &vit, mods[5]);
+    defer vit_g4.deinit();
+    try vit_g4.append(a, &kernels);
     var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
     defer gdn_prep.unload();
     var gdns: [9]gdn_k.Gdn = undefined;
