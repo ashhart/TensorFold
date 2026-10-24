@@ -223,24 +223,27 @@ inline float mm_moe_out(const device bfloat* Y, const device int* pick, const de
   R[i] = float(bfloat(R[i] + mm_moe_out(Y, pick, wts, shared, a, p.y, p.x)));
 }
 
-// A chunk's a.rows picks by expert (a.width of them): offsets[e] its first pair, order the pairs, each in pick order.
+// A chunk's a.rows picks by expert (a.width experts): offsets[e] its first pair, order the pairs (any order in one).
 [[kernel]] void mm_sort(const device int* pick [[buffer(0)]], constant mm_args& a [[buffer(1)]],
     device int* offsets [[buffer(2)]], device int* order [[buffer(3)]], uint t [[thread_position_in_threadgroup]]) {
-  threadgroup int counts[1024];
-  int n = 0;
-  if (t < a.width)
-    for (uint i = 0; i < a.rows; ++i) n += pick[i] == int(t) ? 1 : 0;
-  counts[t] = n;
+  threadgroup atomic_int counts[1024];
+  threadgroup atomic_int next[1024];
+  if (t < a.width) atomic_store_explicit(&counts[t], 0, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint i = t; i < a.rows; i += 1024) atomic_fetch_add_explicit(&counts[pick[i]], 1, memory_order_relaxed);
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (t == 0) {
     int sum = 0;
-    for (uint e = 0; e < a.width; ++e) { const int c = counts[e]; counts[e] = sum; sum += c; }
+    for (uint e = 0; e < a.width; ++e) {
+      const int c = atomic_load_explicit(&counts[e], memory_order_relaxed);
+      offsets[e] = sum;
+      atomic_store_explicit(&next[e], sum, memory_order_relaxed);
+      sum += c;
+    }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (t >= a.width) return;
-  int at = counts[t];
-  offsets[t] = at;
-  for (uint i = 0; i < a.rows; ++i) if (pick[i] == int(t)) order[at++] = int(i);
+  // a pair's products do not depend on the rows beside it, so an expert's pairs may land in any order
+  for (uint i = t; i < a.rows; i += 1024) order[atomic_fetch_add_explicit(&next[pick[i]], 1, memory_order_relaxed)] = int(i);
 }
 
 // Y[i] = X[order[i] / a.heads]: each sorted pair's input row (a.width wide).
