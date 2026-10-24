@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Drama speech on Metal reuses a catalog voice's reference prefill across requests on the same lane, so a request with the same voice prefills only its own text. Audio is byte-identical to an uncached request. On an M3 Ultra with Drama 3 and a catalog voice, the first audio byte of a streamed reply comes 90% sooner (15.6 s to 1.5 s over four texts) and whole replies take about half as long; the default voice and the first request with a voice are unchanged (#1237).
+
 - Flash Next on Macs without tensor units decodes faster with the same tokens: the hyper-connection act pair runs for windows of two rows and more, the HC down projection runs without staging or barriers at four outputs a threadgroup, rounds are gated on the GPU with a GPU-only event between them, drafts are gated at tau 0.4, the decode and draft argmaxes take two launches, and wide windows use grouped experts and exact tree windows. On an M3 Ultra with Qwen3.8 Flash Next MLX 4-bit MTP, the served sweep goes from 120.2 to 147.6 tokens/s on one stream (+22.7%), 129.7 to 155.3 at two (+19.8%), 143.8 to 167.0 at four (+16.2%) and 154.4 to 176.1 at eight (+14.1%); prefill is unchanged and every token is identical.
 
 - A CUDA request cancelled during its prompt keeps the prefill it had completed in the prompt cache, so retrying the same prompt resumes from there instead of starting over; repeated cancellations add up, and an uncancelled request's path is unchanged. On a GB10 with Qwen3.8-27B, a request cancelled 2 s into a 32k prompt kept 1,792 tokens, and its retry's reply equalled an uncancelled run's (#1228). Thanks to @Sapphire-Rapids.
