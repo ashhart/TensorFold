@@ -280,7 +280,7 @@ pub const LaneHost = struct {
     }
 
     /// The next queued request into a free lane (or several, when the backend batches prompts); false when none can go.
-    fn admitOne(h: *LaneHost) bool {
+    pub fn admitOne(h: *LaneHost) bool {
         if (admit.batches(h)) return admit.many(h);
         const job = switch (h.takeJob()) {
             .none => return false,
@@ -361,10 +361,8 @@ pub const LaneHost = struct {
         };
     }
 
-    /// The next filling job's next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
-    fn fillOne(h: *LaneHost) void {
-        if (h.filling.items.len == 0) return;
-        const at = fill.next(h);
+    /// Filling job `at`'s next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
+    pub fn fillAt(h: *LaneHost, at: usize) void {
         const job = h.filling.items[at];
         const first = !job.fill_began;
         job.fill_began = true;
@@ -530,12 +528,7 @@ pub const LaneHost = struct {
             scoring.answer(h);
             learn.refuse(h);
             while (h.admitOne()) {}
-            if (fill.due(h)) {
-                const decoding = h.core.activeCount() > 0;
-                const t0 = std.Io.Clock.awake.now(h.io);
-                h.fillOne();
-                h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);
-            }
+            fill.run(h);
             h.core.sweep() catch |err| {
                 ends.failAll(h, @errorName(err));
                 continue;
@@ -571,12 +564,13 @@ pub const LaneHost = struct {
                 continue;
             }
             h.unlock();
-            const r0 = std.Io.Clock.awake.now(h.io);
+            const owed = h.share.debt_ns > 0; // a round is timed only while it pays a prompt step's debt down
+            const r0 = if (owed) std.Io.Clock.awake.now(h.io) else std.Io.Timestamp.zero;
             h.core.step() catch |e| {
                 ends.failAll(h, @errorName(e));
                 continue;
             };
-            h.share.rounded(@intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()));
+            if (owed) h.share.rounded(@intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()));
             h.deliverPending();
             lone.reclaim(h);
         }

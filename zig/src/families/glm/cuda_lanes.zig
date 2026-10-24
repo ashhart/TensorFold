@@ -222,7 +222,7 @@ pub const Lanes = struct {
         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
     }
 
-    /// One chunk of the stream's prompt pass (fillOne runs other rounds between); true once the first token is drawn.
+    /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
     fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
         const self = of(ptr);
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
