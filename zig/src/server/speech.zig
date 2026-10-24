@@ -43,7 +43,7 @@ pub const Format = enum {
     }
 };
 
-const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, refs: []const @import("drama_prompt").Reference = &.{}, seed: u64, format: Format, stream: bool, budget_s: ?f64 = null };
+const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, seed: u64, format: Format, stream: bool, budget_s: ?f64 = null };
 
 /// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
 const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false, trip: bool = false, jump: ?f64 = null };
@@ -122,7 +122,7 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
             return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
         return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
     };
-    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .seed = api.seedFor(made.prompt, srv.config.seed_salt), .format = format, .stream = stream };
+    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .seed = api.seedFor(made.prompt, srv.config.seed_salt), .format = format, .stream = stream };
     const prompt = try promptOf(srv, cx, sp, input);
     return .{ .input = input, .prompt = prompt, .seed = api.seedFor(prompt, srv.config.seed_salt), .format = format, .stream = stream };
 }
@@ -178,6 +178,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         .top_p = drama_prompt.top_p,
         .top_k = drama_prompt.top_k,
         .stream = plan.stream,
+        .reference_rows = plan.reference_rows,
     };
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
@@ -222,6 +223,7 @@ fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, p
                     if (made) |voice| {
                         next.prompt = voice.prompt;
                         next.frames = voice.frames;
+                        next.reference_rows = voice.reference_rows;
                     } else {
                         next.prompt = promptOf(srv, cx, sp, input) catch |e| return unused(id, k, fallback, if (e == error.OutOfMemory) "out of memory" else cx.message);
                         next.frames = rows(cx.a, next.prompt) catch |e| return unused(id, k, fallback, @errorName(e));

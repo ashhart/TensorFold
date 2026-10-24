@@ -256,7 +256,7 @@ fn runRequest(gpa: std.mem.Allocator, io: std.Io, a: Args, e: *d3.Engine, tts: ?
             nref = 1;
         }
         if (nref > 0) ref_frames = refs[0].codes.len;
-        rows = try d3.prompt.build(ar, tok, text, refs[0..nref]);
+        rows = (try d3.prompt.build(ar, tok, text, refs[0..nref])).frames;
     }
     if (a.replay) try d3.replay.verify(gpa, io, e, tts orelse return error.CodecRequired, rows, q.smp);
     if (a.speed_probe) {
