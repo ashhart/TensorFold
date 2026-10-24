@@ -6,7 +6,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Drama3 CUDA replay waits for poison fills to finish before reset, prefill or decode reuses the buffers.
 
-- Drama 3 serving accepts `--max-frames` to bound synthesis frames, preserving the stock cap when omitted.
+- Drama 3 serving accepts `--max-frames` to bound synthesis frames, preserving the stock cap when omitted (#1134). Thanks to @plotarmordev.
 
 ## 1.1.3
 
