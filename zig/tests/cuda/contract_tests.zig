@@ -555,17 +555,17 @@ pub fn run(gpu: check.Gpu) !void {
     var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f);
     defer glm_controls.deinit();
     try glm_controls.append(a, &kernels);
-    var q35_mod = try cuda.Module.load(gpu.d, kk.qwen35);
-    defer q35_mod.unload();
+    var q35_flat_mod = try cuda.Module.load(gpu.d, kk.qwen35);
+    defer q35_flat_mod.unload();
     var q35_fp8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
     defer q35_fp8.unload();
     var contiguous: [q35_contiguous.forms.len]q35_contiguous.Q35 = undefined;
     for (q35_contiguous.forms, &contiguous) |f, *x| x.* = .{
         .rig = .{ .gpu = gpu, .s = s },
         .form = f,
-        .partial = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8_contiguous") else q35_mod.function("tf_q35_attn_partial_contiguous"),
-        .baseline = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8_legacy") else q35_mod.function("tf_q35_attn_partial_legacy"),
-        .merge = try q35_mod.function("tf_q35_attn_merge"),
+        .partial = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8_contiguous") else q35_flat_mod.function("tf_q35_attn_partial_contiguous"),
+        .baseline = try if (f.cache == .fp8) q35_fp8.function("tf_q35_attn_partial8_legacy") else q35_flat_mod.function("tf_q35_attn_partial_legacy"),
+        .merge = try q35_flat_mod.function("tf_q35_attn_merge"),
     };
     defer for (&contiguous) |*x| x.deinit();
     for (&contiguous) |*x| try kernels.append(a, x.kernel());

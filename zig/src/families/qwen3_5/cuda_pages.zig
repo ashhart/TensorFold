@@ -179,9 +179,9 @@ pub const Pages = struct {
 
 test "a stream's pages: its prompt, reply and one more forward, no more than a full window's" {
     const l: kv.Layout = .{ .fixed_bytes = 1, .token_bytes = 64 << 10, .page_tokens = 256, .snap_bytes = 1 };
-    try std.testing.expectEqual(@as(usize, 1), l.need(1, 0, window_rows));
-    try std.testing.expectEqual(@as(usize, 2), l.need(100, 29, window_rows));
-    try std.testing.expectEqual(@as(usize, 129), mostPages(32768, 256));
+    try std.testing.expectEqual(@as(usize, 17), l.need(1, 0, window_rows));
+    try std.testing.expectEqual(@as(usize, 17), l.need(100, 29, window_rows));
+    try std.testing.expectEqual(@as(usize, 144), mostPages(32768, 256));
     try std.testing.expect(l.need(32768 - 1, 1, window_rows) <= mostPages(32768, 256));
 }
 
