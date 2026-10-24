@@ -93,11 +93,11 @@ pub const Scratch = struct {
         x.score = x.score + w;
     }
 
-    inline fn get(sc: *const Scratch, i: u32) f64 {
+    pub inline fn get(sc: *const Scratch, i: u32) f64 {
         return if (sc.slot[i].stamp == sc.gen) sc.slot[i].score else 0.0;
     }
 
-    inline fn toPool(sc: *Scratch, i: u32) void {
+    pub inline fn toPool(sc: *Scratch, i: u32) void {
         if (sc.slot[i].pstamp != sc.gen) {
             sc.slot[i].pstamp = sc.gen;
             sc.pool.appendAssumeCapacity(i);
@@ -301,6 +301,16 @@ fn addLong(idx: *const Index, sc: *Scratch, j: usize, m: usize, N: u32) Allocato
 
 /// NoteStore._lookup up to pack() from a question's ids; `exclude` ids are never given; sums run in first-met order.
 pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, cap: u32, exclude: []const u32, long: index.Long) Allocator.Error!Packed {
+    const cands = try scored(idx, sc, qids, past, cap, exclude, long);
+    const long_n: u32 = @intCast(sc.long.items.len);
+    if (cands == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = 0, .long = long_n };
+    sc.keys.clearRetainingCapacity();
+    for (sc.pool.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.rankAt(i)));
+    return pack(idx, sc, cap, past, cands, long_n);
+}
+
+/// lookup() up to its pool: every note's score after the hop (sc.get), the pool, and how many notes scored.
+pub fn scored(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, cap: u32, exclude: []const u32, long: index.Long) Allocator.Error!u32 {
     const st = idx.settings;
     const gpa = sc.gpa;
     sc.next();
@@ -356,7 +366,7 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         sc.touched.shrinkRetainingCapacity(w);
     }
     const cands: u32 = @intCast(sc.touched.items.len);
-    if (cands == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = 0, .long = @intCast(sc.long.items.len) };
+    if (cands == 0) return 0;
 
     // the candidate cut: the 4*room best when there are more than 8*room candidates (4 tokens a line or more)
     const room: usize = @intCast(@max(1, @divFloor(@as(i64, cap) - @as(i64, idx.fx_head), 4)));
@@ -410,10 +420,12 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
             sc.toPool(j);
         };
     }
+    return cands;
+}
 
-    // pack(): sorted a part at a time; the walk stops once no line could fit, where Python's walk only skips
-    sc.keys.clearRetainingCapacity();
-    for (sc.pool.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.rankAt(i)));
+/// pack() over sc.keys: sorted a part at a time; the walk stops once no line fits, where Python's walk only skips.
+pub fn pack(idx: *const Index, sc: *Scratch, cap: u32, past: bool, cands: u32, long_n: u32) Allocator.Error!Packed {
+    const gpa = sc.gpa;
     var used: u32 = idx.fx_head;
     var has_cur = false;
     var has_hist = false;
@@ -439,8 +451,8 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         }
         rest = rest[m..];
     }
-    if (sc.chosen.items.len == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = cands, .long = @intCast(sc.long.items.len) };
-    return .{ .chosen = sc.chosen.items, .tokens = used, .candidates = cands, .long = @intCast(sc.long.items.len) };
+    if (sc.chosen.items.len == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = cands, .long = long_n };
+    return .{ .chosen = sc.chosen.items, .tokens = used, .candidates = cands, .long = long_n };
 }
 
 /// render(): the head, then the current notes and the earlier ones, each by told (ties keep pack order).
