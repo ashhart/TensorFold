@@ -6,6 +6,7 @@ const Config = @import("config.zig").Config;
 const projection = @import("projection.zig");
 const lane = @import("core").lane_projection;
 const widths = @import("widths.zig");
+const metal_experts = @import("core").qwen35_experts;
 const Width = widths.Width;
 const Ref = projection.Ref;
 const Linear = projection.Linear;
@@ -13,7 +14,10 @@ pub const Tensor = cp.Tensor;
 
 pub const Gdn = struct { qkv: Linear, zba: Linear, out: Linear, conv: Tensor, a_log: Tensor, dt: Tensor, norm: Tensor };
 pub const Attention = struct { q: Linear, kv: Linear, out: Linear, q_norm: Tensor, k_norm: Tensor };
-pub const Layer = struct { norm: Tensor, post_norm: Tensor, gu: Linear, down: Linear, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
+pub const Dense = struct { gu: Linear, down: Linear };
+/// A layer's MLP: the dense gate_up and down, or routed experts with a shared one (moe.zig runs them).
+pub const Mlp = union(enum) { dense: Dense, experts: metal_experts.Experts };
+pub const Layer = struct { norm: Tensor, post_norm: Tensor, mlp: Mlp, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
 
 pub const Weights = struct {
     allocator: std.mem.Allocator,
@@ -32,9 +36,12 @@ pub const Weights = struct {
         w.allocator.free(w.layers);
     }
 
-    /// Whether every MLP projection is 4-bit g64 in one matrix (the Neural Engine share's format).
+    /// Whether every MLP is dense, each projection 4-bit g64 in one matrix (the Neural Engine share's format).
     pub fn uniformMlp(w: *const Weights) bool {
-        for (w.layers) |l| for ([_]Linear{ l.gu, l.down }) |p| if (!uniform(p)) return false;
+        for (w.layers) |l| switch (l.mlp) {
+            .dense => |d| for ([_]Linear{ d.gu, d.down }) |p| if (!uniform(p)) return false,
+            .experts => return false,
+        };
         return true;
     }
 };
@@ -168,9 +175,13 @@ const Builder = struct {
                 .k_norm = try b.tensor(try Name.full(a, prefix, "self_attn.k_norm.weight"), .bf16, &.{c.head_dim}),
             } },
         };
-        const gu = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = c.intermediate, .w = w[@backingInt(M.gate)] }, .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = c.intermediate, .w = w[@backingInt(M.up)] } }, c.hidden);
-        const down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = c.hidden, .w = w[@backingInt(M.down)] }}, c.intermediate);
-        return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .gu = gu, .down = down, .mixer = mixer };
+        const shape: metal_experts.Shape = .{ .experts = c.experts, .hidden = c.hidden, .moe_width = c.moe_intermediate, .shared_width = c.shared_intermediate };
+        const ew: metal_experts.Widths = .{ .experts = .{ .bits = b.widths.experts.bits, .group = b.widths.experts.group }, .router = .{ .bits = b.widths.router.bits, .group = b.widths.router.group } };
+        const mlp: Mlp = if (c.moe()) .{ .experts = try metal_experts.load(b.allocator, b.device, b.checkpoint, b.prefix, shape, ew, i, b.owned) } else .{ .dense = .{
+            .gu = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = c.intermediate, .w = w[@backingInt(M.gate)] }, .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = c.intermediate, .w = w[@backingInt(M.up)] } }, c.hidden),
+            .down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = c.hidden, .w = w[@backingInt(M.down)] }}, c.intermediate),
+        } };
+        return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .mlp = mlp, .mixer = mixer };
     }
 };
 
@@ -214,10 +225,11 @@ fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, he
     defer jobs.deinit(a);
     for (layers) |l| {
         const list = switch (l.mixer) {
-            .linear => |g| [_]Linear{ g.qkv, g.zba, g.out, l.gu, l.down },
-            .attention => |t| [_]Linear{ t.q, t.kv, t.out, l.gu, l.down },
+            .linear => |g| [_]Linear{ g.qkv, g.zba, g.out },
+            .attention => |t| [_]Linear{ t.q, t.kv, t.out },
         };
         for (list) |p| try regJobs(a, &jobs, p);
+        if (l.mlp == .dense) for ([_]Linear{ l.mlp.dense.gu, l.mlp.dense.down }) |p| try regJobs(a, &jobs, p);
     }
     try regJobs(a, &jobs, head);
     try lane.regOrder(device, jobs.items);

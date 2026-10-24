@@ -518,7 +518,8 @@ pub const metal = [_]M{
     .{ .name = "drama3 codec c_snake", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 codec c_dwconv7", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 codec c_copy", .threads = 256, .tg_memory = 0, .reserved = 256 },
-};
+} ++ @import("registry_qwen27.zig").metal;
+
 /// Gate 5's planted Metal controls: a launch past M1/M2's compiled limit (#708's class), 36 KiB of threadgroup memory.
 pub const metal_controls = [_]M{
     .{ .name = "control: row projection q4 g64 at 1024 threads tf_row_projection_q4_f32", .threads = 1024, .tg_memory = 0, .m1 = 512, .m2 = 512 },
@@ -550,7 +551,7 @@ test {
     _ = paging;
 }
 /// The Metal collector keeps measured slots and the restored vision declarations.
-pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records;
+pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records ++ @import("registry_qwen27.zig").pending;
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;

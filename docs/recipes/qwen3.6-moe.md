@@ -6,8 +6,8 @@ engine. @cshintov brought the model to Macs in [#138](https://github.com/ashhart
 @philip-pentatonic ([#78](https://github.com/ashhart/TensorFold/pull/78),
 [#84](https://github.com/ashhart/TensorFold/pull/84)) and @BHCC2025
 ([#270](https://github.com/ashhart/TensorFold/pull/270)) worked on its CUDA path; see [credits](../credits.md).
-The native CUDA engine serves the checkpoint with its MTP layer ([docs/WINDOWS.md](../WINDOWS.md)); the Metal native
-binary has no `qwen3_5_moe` family yet, so `tensorfold pull` and `tensorfold info` refuse the checkpoint there.
+The native CUDA engine serves the checkpoint with its MTP layer ([docs/WINDOWS.md](../WINDOWS.md)); the native Metal
+binary serves the checkpoint's text through the 27B's engine; see [native Metal](#native-metal).
 
 The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on Apple Silicon and on one NVIDIA GPU. Its layers are the 27B's
 (Gated DeltaNet and gated full attention, every fourth layer attention) with routed experts in place of the dense
@@ -152,3 +152,19 @@ lengths, a unique first line each so nothing resumes; median time to first token
 
 The server process peaks at 31.3 GiB (nvidia-smi) during the 65,536-token prompts; vLLM holds its memory
 reservation, 72.9 GB at 0.60.
+
+## Native Metal
+
+The native binary serves `mlx-community/Qwen3.6-35B-A3B-4bit` (MLX affine 4-bit experts in groups of 64, routers
+and the shared-expert gate at 8 bits) on the 27B's engine: the same layers, rounds, `--parallel` lanes and prompt
+cache, with each layer's MLP the routed experts. Routing is #856's rule, the experts run on the shared tile
+kernels, and the router, selection and weighted sum are registered with the kernel contract.
+
+```bash
+tensorfold pull mlx-community/Qwen3.6-35B-A3B-4bit
+tensorfold serve mlx-community/Qwen3.6-35B-A3B-4bit --name bench
+```
+
+It serves text only for now: `--drafter` and `--vision` are refused before load, and so is an image part in a
+request. MTP drafts from the checkpoint's own layer and images on its own tower are the next slices of #931;
+other expert widths are refused at load.

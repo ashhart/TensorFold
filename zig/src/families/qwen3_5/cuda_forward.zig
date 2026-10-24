@@ -39,11 +39,13 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
     const mpos: u64 = if (e.features != 0) e.tables.ptr + mpos_at else 0;
     if (e.features != 0) try e.run(e.fns.splice, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.features, e.tables.ptr + src_at, @as(c_int, @intCast(g.hidden)), t_params });
+    if (e.stages) |s| try s.f(s.ctx, .embed, e.h, total);
     var di: usize = 0;
     var ai: c_int = 0;
     for (e.layers, 0..) |l, i| {
         try e.norm(i != 0, l.input_norm, total);
         if (e.learning) |k| try k.input(i, e.h, total);
+        if (i != 0) if (e.stages) |s| try s.f(s.ctx, .{ .block = i - 1 }, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
                 const layer: c_int = @intCast(di);
@@ -79,6 +81,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         }
         try e.norm(true, l.post_norm, total);
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
+        if (e.stages) |s| try s.f(s.ctx, .{ .mixer = i }, e.h, total);
         switch (l.mlp) {
             .dense => |m| {
                 try e.projAgain(m.gate, e.x, e.gate, total, prompt);
@@ -104,9 +107,15 @@ pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool) !void {
     const g = e.g;
     try e.norm(true, e.final_norm, total);
     if (e.learning) |k| try k.final(e.h, total);
+    const stages = if (@hasField(@TypeOf(e.*), "stages")) e.stages else null;
+    if (stages) |s| {
+        try s.f(s.ctx, .{ .block = e.layers.len - 1 }, e.h, total);
+        try s.f(s.ctx, .final, e.x, total);
+    }
     // the head over the kept rows
     try e.proj(e.head, e.x + (total - heads) * g.hidden * 2, e.logits, heads, false);
     if (e.learning) |k| try hooks.logits(k, e.logits, e.stream);
+    if (stages) |s| try s.f(s.ctx, .logits, e.logits, heads);
 }
 
 test "prompt MoE precision: target piece arithmetic keeps the shipped 16-row boundary" {

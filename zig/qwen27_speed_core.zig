@@ -2,3 +2,5 @@
 pub const tree_slots = @import("src/core/tree_slots.zig");
 pub const gpu_profile = @import("src/core/gpu_profile.zig");
 pub const checkpoint_host = @import("src/core/checkpoint.zig");
+pub const qwen35_config = @import("src/families/qwen3_5/config.zig");
+pub const qwen35_stages = @import("src/families/qwen3_5/stages.zig");

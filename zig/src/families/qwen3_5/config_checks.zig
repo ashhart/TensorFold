@@ -39,9 +39,9 @@ pub fn mrope(rope: std.json.ObjectMap, rotary: usize) Error!Mrope {
     for (list.array.items, &m.section) |item, *x| {
         if (item != .integer or item.integer < 0) return error.InvalidRotary;
         x.* = @intCast(item.integer);
-        sum += x.*;
+        sum = std.math.add(usize, sum, x.*) catch return error.InvalidRotary;
     }
-    if (sum * 2 != rotary) return error.InvalidRotary;
+    if (rotary % 2 != 0 or sum != rotary / 2) return error.InvalidRotary;
     return m;
 }
 
@@ -83,6 +83,7 @@ pub const Sizes = struct {
 };
 
 pub fn products(s: Sizes) Error!void {
+    if (s.kv_heads == 0 or s.key_heads == 0) return error.InvalidConfig;
     if (s.heads % s.kv_heads != 0 or s.value_heads % s.key_heads != 0) return error.InvalidConfig;
     const limit: usize = std.math.maxInt(u32);
     const q = try mul(try mul(s.heads, s.head_dim), 2);
@@ -186,6 +187,11 @@ test "sizes: products past 32 bits and uneven head groups are refused" {
     var uneven = ok;
     uneven.kv_heads = 5;
     try std.testing.expectError(error.InvalidConfig, products(uneven));
+    for ([_]*usize{ &uneven.kv_heads, &uneven.key_heads }) |field| {
+        uneven = ok;
+        field.* = 0;
+        try std.testing.expectError(error.InvalidConfig, products(uneven));
+    }
     var huge = ok;
     huge.hidden = std.math.maxInt(usize) / 2;
     try std.testing.expectError(error.InvalidConfig, products(huge));
@@ -215,6 +221,13 @@ test "mrope: three sections filling half the rotary width, interleaved; max_posi
     try std.testing.expectError(error.InvalidRotary, mrope(try parsed(a, "{\"mrope_section\":[11,11,11]}"), 64));
     try std.testing.expectError(error.InvalidRotary, mrope(try parsed(a, "{\"mrope_section\":[32,32]}"), 64));
     try std.testing.expectError(error.InvalidRotary, mrope(try parsed(a, "{\"mrope_interleaved\":false}"), 64));
+    // every mix of small, exact and i64-max sections: accepted only when they fill half the width, never an overflow
+    const values = [_]i64{ 0, 1, 10, 11, 32, std.math.maxInt(i64) };
+    for (values) |x| for (values) |y| for (values) |z| for ([_]usize{ 63, 64 }) |rotary| {
+        const text = try std.fmt.allocPrint(a, "{{\"mrope_section\":[{d},{d},{d}]}}", .{ x, y, z });
+        const fills = rotary % 2 == 0 and @as(i128, x) + y + z == rotary / 2;
+        if (fills) _ = try mrope(try parsed(a, text), rotary) else try std.testing.expectError(error.InvalidRotary, mrope(try parsed(a, text), rotary));
+    };
     try std.testing.expectEqual(@as(usize, 262144), try maxPosition(try parsed(a, "{}")));
     try std.testing.expectEqual(@as(usize, 32768), try maxPosition(try parsed(a, "{\"max_position_embeddings\":32768}")));
     try std.testing.expectError(error.InvalidConfig, maxPosition(try parsed(a, "{\"max_position_embeddings\":0}")));

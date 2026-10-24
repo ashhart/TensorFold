@@ -92,6 +92,13 @@ pub const shared_kv = @import("core/shared_kv.zig");
 pub const shared_attention = @import("core/shared_attention.zig");
 
 pub const tile_qmm = @import("core/tile_qmm.zig");
+pub const moe_route = @import("core/moe_route.zig");
+/// The Qwen3.5 family's config reader, which the CUDA and HIP engines read too.
+pub const qwen35_config = @import("families/qwen3_5/config.zig");
+/// The 35B-A3B's experts on Metal, which the 27B's engine loads in its one layer loop.
+pub const qwen35_experts = @import("families/qwen3_5/metal_experts.zig");
+/// Staged references: every engine's stage names and their on-disk layout.
+pub const qwen35_stages = @import("families/qwen3_5/stages.zig");
 
 pub const gpu_profile = @import("core/gpu_profile.zig");
 

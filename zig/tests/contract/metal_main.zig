@@ -7,6 +7,10 @@ const rows_k = @import("metal_rows.zig");
 const affine_k = @import("metal_affine.zig");
 const topk_k = @import("metal_topk.zig");
 const tile_k = @import("metal_tile.zig");
+const moe_k = @import("metal_q27_moe.zig");
+const route_k = @import("metal_route.zig");
+const attn_k = @import("metal_q27_attn.zig");
+const io_k = @import("metal_q27_attn_io.zig");
 const limits_k = @import("metal_limits.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
@@ -233,12 +237,72 @@ pub fn main(init: std.process.Init) !u8 {
         ntiles += 1;
     };
     for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
+    var moes: [3]moe_k.Moe = undefined;
+    var nmoe: usize = 0;
+    defer for (moes[0..nmoe]) |*x| x.deinit();
+    for (std.enums.values(moe_k.Which)) |w| {
+        if (!wanted(o, moe_k.spec(w).name)) continue;
+        moes[nmoe] = try moe_k.Moe.init(a, device, queue, w);
+        nmoe += 1;
+    }
+    for (moes[0..nmoe]) |*x| try kernels.append(a, x.kernel());
+    var routes: [3]route_k.Route = undefined;
+    var nroute: usize = 0;
+    defer for (routes[0..nroute]) |*x| x.deinit();
+    for (std.enums.values(route_k.Which)) |w| {
+        if (!wanted(o, route_k.spec(w).name)) continue;
+        routes[nroute] = try route_k.Route.init(a, device, queue, w);
+        nroute += 1;
+    }
+    for (routes[0..nroute]) |*x| try kernels.append(a, x.kernel());
+    // qwen27's attention at both head counts; the prompt kernel and its control on tensor units only
+    var attns: std.ArrayList(*attn_k.Attn) = .empty;
+    defer for (attns.items) |x| x.deinit();
+    var attn_regs: std.ArrayList(attn_k.Reg) = .empty;
+    for (std.enums.values(attn_k.Heads)) |h| {
+        try attn_regs.append(a, .{ .heads = h, .which = .decode });
+        if (tensor) try attn_regs.append(a, .{ .heads = h, .which = .prompt });
+    }
+    try attn_regs.appendSlice(a, &.{ .{ .heads = .q27b, .which = .decode, .control = .late_key }, .{ .heads = .q27b, .which = .decode, .control = .lost_chunk } });
+    if (tensor) try attn_regs.append(a, .{ .heads = .q27b, .which = .prompt, .control = .lost_edge });
+    for (attn_regs.items) |r| {
+        if (!wanted(o, attn_k.spec(r).name)) continue;
+        const x = try a.create(attn_k.Attn);
+        x.* = try attn_k.Attn.init(a, device, queue, r);
+        try attns.append(a, x);
+        try kernels.append(a, x.kernel());
+    }
+    var ios: std.ArrayList(*io_k.Io) = .empty;
+    defer for (ios.items) |x| x.deinit();
+    var io_regs: std.ArrayList(io_k.Reg) = .empty;
+    for (std.enums.values(attn_k.Heads)) |h| for (std.enums.values(io_k.Which)) |w| try io_regs.append(a, .{ .heads = h, .which = w });
+    try io_regs.append(a, .{ .heads = .q27b, .which = .append, .control = true });
+    for (io_regs.items) |r| {
+        if (!wanted(o, io_k.spec(r).name)) continue;
+        const x = try a.create(io_k.Io);
+        x.* = try io_k.Io.init(a, device, queue, r);
+        try ios.append(a, x);
+        try kernels.append(a, x.kernel());
+    }
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
     }
+    // the plans alone, on any chip (no M5 dispatch): gate 3's decode shapes must plan every reachable prefix launch
+    if (o.gates) for (std.enums.values(attn_k.Heads)) |h| {
+        const name = attn_k.spec(.{ .heads = h, .which = .decode }).name;
+        if (!wanted(o, name)) continue;
+        const seen = try attn_k.reach(a, h);
+        // a tree has 3 rows or more, so 2 tiles at least: prefix_1 serves chains alone
+        var all = seen.split_tree;
+        for (seen.prefix, 0..) |row, i| for (row, 0..) |x, j| {
+            all = all and (x or (i == 1 and j == 0));
+        };
+        if (!all) t.failed += 1;
+        std.debug.print("{s} reach {s}: planned prefix_1-6 as chains {any}, as trees {any}; a tree over two tail chunks {}\n", .{ if (all) "PASS" else "FAIL", name, seen.prefix[0], seen.prefix[1], seen.split_tree });
+    };
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
     if (o.limits) {

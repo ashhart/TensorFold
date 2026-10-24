@@ -16,6 +16,7 @@ const Round = @import("round_plan.zig").Round;
 const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
+const staged = @import("core").qwen35_stages;
 
 /// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
 pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
@@ -45,6 +46,8 @@ pub const Runner = struct {
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
+    /// Staged references for one stream's rounds; null (the default) records nothing.
+    stages: ?*@import("stage_planes.zig").Planes = null,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
     current_round: ?*const Round = null,
@@ -86,7 +89,12 @@ pub const Runner = struct {
         const units = m.device.tensorUnits();
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
-        const text = try @import("simd_attention.zig").library(a, units, true);
+        try geometry.check();
+        var defines: [64]u8 = undefined;
+        const head = try geometry.defines(&defines);
+        const body = try @import("simd_attention.zig").library(a, units, true);
+        defer a.free(body);
+        const text = try std.mem.concat(a, u8, &.{ head, body });
         defer a.free(text);
         // before M5 the prompt kernels are optional: a chip that cannot build them keeps the decode path for prompts
         const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
@@ -202,15 +210,14 @@ pub const Runner = struct {
     fn verifyImpl(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) !void {
         if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
+        if (r.stages != null) try staged.admit(round.windows.len, round.windows.len == 1 and staged.isChain(round.windows[0].parents), true);
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
         @memset(paths, &.{});
         var accepted_rows: [@import("gpu_frame.zig").max_rows]u32 = undefined;
         if (accepted) for (round.windows, round.firsts, paths) |window, first, *path| {
-            for (window.parents, 0..) |parent, row| {
-                if (parent != (if (row == 0) @as(i32, -1) else @as(i32, @intCast(row - 1)))) return error.NotAcceptedChain;
-                accepted_rows[first + row] = @intCast(row);
-            }
+            if (!staged.isChain(window.parents)) return error.NotAcceptedChain;
+            for (0..window.parents.len) |row| accepted_rows[first + row] = @intCast(row);
             path.* = accepted_rows[first..][0..window.parents.len];
         };
         r.accepted_chain = accepted;
@@ -238,9 +245,10 @@ pub const Runner = struct {
             r.current_placed = .{};
         }
         if (r.capture_taps) r.taps.begin();
+        if (r.stages) |planes| planes.begin();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .images = placed.images };
+        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .stage = if (r.stages != null) stage else null }, .head = head, .images = placed.images };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
@@ -250,6 +258,11 @@ pub const Runner = struct {
             return err;
         };
         if (r.capture_taps) try r.taps.complete();
+        // The GPU has committed this round's state: a round the recorder cannot take ends the runner, never a retry.
+        if (r.stages) |planes| planes.end(round.windows[0].start) catch |err| {
+            r.failed = true;
+            return err;
+        };
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);
@@ -415,6 +428,11 @@ pub const Runner = struct {
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
+    }
+
+    fn stage(ptr: *anyopaque, e: mtl.ComputeEncoder, at: forward.Point, x: @import("projection.zig").Ref, rows: u32) !void {
+        const r: *Runner = @ptrCast(@alignCast(ptr));
+        try r.stages.?.record(r.model.glue, e, at, x, rows);
     }
 };
 

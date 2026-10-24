@@ -4,13 +4,14 @@ const q = @import("qwen27");
 const mtl = @import("metal");
 const sources = @import("qwen_runtime_sources");
 const gdn_source = @import("qwen_gdn_source");
-const profile = @import("core").gpu_profile;
+const core = @import("core");
+const profile = core.gpu_profile;
 const core_lane = @import("core_lane");
 
 const help =
     \\tf-qwen27-run --run --model DIR --tokens IDS.json [--max-tokens 256]
     \\  [--chunk 128] [--compare-chunk 16] [--reference GENERATED.json] [--force-length]
-    \\  [--no-warmup] [--profile-steps N] [--profile-prompt] [--teacher] [--seams N]
+    \\  [--no-warmup] [--profile-steps N] [--profile-prompt] [--teacher] [--seams N] [--stages DIR]
     \\IDs and reference files are JSON arrays of unsigned token IDs, already chat-rendered.
     \\Greedy only, drafts off; JSON receipt on stdout, errors on stderr.
     \\--teacher feeds every reference token and records native top2 at all positions; margin timing is diagnostic.
@@ -18,6 +19,7 @@ const help =
     \\--compare-chunk reruns the whole prompt and decode and checks prompt state/KV/logits bytes.
     \\--seams N (with --compare-chunk): state/KV/logits bytes every N prompt rows under both chunks and after decode.
     \\--profile-prompt: GPU seconds by class over the timed prompt (split command buffers, so slower than unprofiled).
+    \\--stages DIR writes the measured prompt's and decode's staged references (stream per stage, final norm, logits).
     \\CPU only: --help or --emit-sources EXISTING_DIR, no Metal device or model load.
 ;
 
@@ -88,6 +90,7 @@ pub fn main(init: std.process.Init) !void {
     var chunk: usize = 128;
     var compare: usize = 0;
     var seam_every: usize = 0;
+    var stages_dir: ?[]const u8 = null;
     var run = false;
     var force = false;
     var warmup = true;
@@ -119,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const value = args[i];
-        if (std.mem.eql(u8, arg, "--model")) model = value else if (std.mem.eql(u8, arg, "--tokens")) file = value else if (std.mem.eql(u8, arg, "--reference")) reference = value else if (std.mem.eql(u8, arg, "--max-tokens")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--chunk")) chunk = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--profile-steps")) profile_steps = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--compare-chunk")) compare = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--seams")) seam_every = try std.fmt.parseInt(usize, value, 10) else return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--model")) model = value else if (std.mem.eql(u8, arg, "--tokens")) file = value else if (std.mem.eql(u8, arg, "--reference")) reference = value else if (std.mem.eql(u8, arg, "--max-tokens")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--chunk")) chunk = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--profile-steps")) profile_steps = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--compare-chunk")) compare = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--seams")) seam_every = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--stages")) stages_dir = value else return error.UnknownOption;
     }
     if (!run or model == null or file == null or chunk == 0 or chunk > 2048 or compare > 2048 or count > 65536 or (seam_every > 0 and compare == 0)) return error.BadOptions;
     const ids = try tokens(a, io, file.?);
@@ -145,6 +148,15 @@ pub fn main(init: std.process.Init) !void {
     var trace = profile.Trace{ .queue = m.queue };
     if (profile_steps > 0 or profile_prompt) runner.profile(&trace);
     trace.enabled = profile_prompt;
+    var recorder: ?core.qwen35_stages.Recorder = null;
+    defer if (recorder) |*r| r.deinit();
+    var planes: ?q.stage_planes.Planes = null;
+    defer if (planes) |p| p.deinit();
+    if (stages_dir != null) {
+        recorder = try core.qwen35_stages.Recorder.init(init.gpa, m.config.layers, m.config.hidden, m.config.vocab);
+        planes = try q.stage_planes.Planes.init(m.device, &recorder.?, m.frame.capacity, @min(m.frame.capacity, q.gpu_frame.logit_rows));
+        runner.stages = &planes.?;
+    }
     const start = std.Io.Clock.awake.now(io);
     try s.prefill(ids, chunk);
     const prompt_ns = start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
@@ -154,6 +166,8 @@ pub fn main(init: std.process.Init) !void {
     const generation = try generated(a, s, count, force, expected, if (profile_steps > 0) &trace else null, profile_steps, teacher);
     const out = generation.tokens;
     const decode_ns = decode_start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
+    runner.stages = null;
+    if (stages_dir) |dir| try recorder.?.write(io, dir);
     const decoded = if (compare > 0) try s.fingerprint() else digest;
     const reference_equal = if (expected) |wanted| std.mem.eql(u32, out, wanted) else false;
     if (compare > 0) {

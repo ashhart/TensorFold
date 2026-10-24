@@ -95,8 +95,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "attn_q", .lin = attn.?.q, .from = .input },
         .{ .name = "attn_kv", .lin = attn.?.kv, .from = .input },
         .{ .name = "attn_out", .lin = attn.?.out, .from = .mixer_out },
-        .{ .name = "gate_up", .lin = l0.gu, .from = .input },
-        .{ .name = "down", .lin = l0.down, .from = .activated },
+        .{ .name = "gate_up", .lin = l0.mlp.dense.gu, .from = .input },
+        .{ .name = "down", .lin = l0.mlp.dense.down, .from = .activated },
         .{ .name = "head", .lin = w.head, .from = .input },
     };
     // plausible bf16 activations in every source the cases read
@@ -207,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
     {
         const pool2 = mtl.objc.Pool.push();
         defer pool2.pop();
-        for ([_]Input{ .input, .activated }) |from| try fillSums(m, .{ .name = "", .lin = if (from == .input) l0.gu else l0.down, .from = from }, 1);
+        for ([_]Input{ .input, .activated }) |from| try fillSums(m, .{ .name = "", .lin = if (from == .input) l0.mlp.dense.gu else l0.mlp.dense.down, .from = from }, 1);
         const cb = m.queue.commandBuffer();
         const e = cb.compute(.serial);
         var calls: usize = 0;
@@ -217,8 +217,8 @@ pub fn main(init: std.process.Init) !void {
                 .attention => |x| &.{ .{ .name = "", .lin = x.q, .from = .input }, .{ .name = "", .lin = x.kv, .from = .input }, .{ .name = "", .lin = x.out, .from = .mixer_out } },
             };
             for (mixer) |c| try m.kernels.quant(e, c.lin, source(f, c.from), sumsOf(f, c.from, 1), f.get(.dims), logits, 1);
-            try m.kernels.quant(e, l.gu, f.get(.input), sumsOf(f, .input, 1), f.get(.dims), logits, 1);
-            try m.kernels.quant(e, l.down, f.get(.activated), sumsOf(f, .activated, 1), f.get(.dims), logits, 1);
+            try m.kernels.quant(e, l.mlp.dense.gu, f.get(.input), sumsOf(f, .input, 1), f.get(.dims), logits, 1);
+            try m.kernels.quant(e, l.mlp.dense.down, f.get(.activated), sumsOf(f, .activated, 1), f.get(.dims), logits, 1);
             calls += mixer.len + 2;
         }
         try m.kernels.quant(e, w.head, f.get(.input), sumsOf(f, .input, 1), f.get(.dims), logits, 1);

@@ -10,6 +10,8 @@ pub const mtp_check = @import("cuda_mtp_check.zig");
 pub const draft = @import("cuda_draft.zig");
 pub const vision = @import("cuda_vision.zig");
 pub const reuse = @import("cuda_reuse.zig");
+pub const stages = @import("stages.zig");
+pub const cuda_stages = @import("cuda_stages.zig");
 
 test {
     _ = @import("cuda_forward.zig");

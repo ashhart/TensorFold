@@ -13,7 +13,10 @@ pub const Mixer = struct {
     gdn: *const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Gdn, *Frame, u32) anyerror!void,
     attention: *const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Attention, *Frame, u32) anyerror!void,
     tap: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, Ref, u32) anyerror!void = null,
+    /// Staged references (off unless asked for): the stream after each stage, the final norm and the head's rows.
+    stage: ?*const fn (*anyopaque, mtl.ComputeEncoder, Point, Ref, u32) anyerror!void = null,
 };
+pub const Point = @import("core").qwen35_stages.Point;
 
 /// Serial decode and prompt segments own separate frames and order shared caches at the mixer.
 pub const Head = enum { all, last, none };
@@ -38,6 +41,7 @@ pub const Stages = struct {
             m.glue.imageRows(lane.enc, s.hidden, rows, m.frame.get(.takes), @intCast(m.config.hidden), s.rows);
             lane.enc.barrier();
         }
+        if (s.hooks.stage) |stage| try stage(s.hooks.ptr, lane.enc, .embed, s.hidden, s.rows);
     }
     pub fn wait(_: *Stages, _: usize) @import("core").segments.Wait {
         return .mixer;
@@ -54,6 +58,7 @@ pub const Stages = struct {
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
+            if (s.hooks.stage) |stage| try stage(s.hooks.ptr, e, .{ .block = index - 1 }, s.hidden, s.rows);
         }
     }
     pub fn mixer(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
@@ -79,6 +84,15 @@ pub const Stages = struct {
         try m.kernels.norm(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
+        if (s.hooks.stage) |stage| try stage(s.hooks.ptr, e, .{ .mixer = index }, s.hidden, s.rows);
+        const dense = switch (layer.mlp) {
+            .dense => |d| d,
+            .experts => |x| {
+                try m.moe.?.encode(e, x, f.get(.input), f.get(.output), s.rows, m.kernels.prompt);
+                s.pending = f.get(.output);
+                return;
+            },
+        };
         var up = f.get(.mixed);
         up.offset += @as(usize, m.config.intermediate) * 2;
         const width: u32 = @intCast(m.config.intermediate);
@@ -92,11 +106,11 @@ pub const Stages = struct {
             const all = width / 64;
             for (0..used) |slice| try m.kernels.aneInput(e, f.get(.input), f.get(.dims), .{ .buffer = share.inputs[slice].buffer }, h, width, share.columns, @intCast(slice * ane_mlp.width));
             try share.signal(lane, v[0]);
-            try m.kernels.quantSkip(lane.enc, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows, share.columns / 32);
+            try m.kernels.quantSkip(lane.enc, dense.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows, share.columns / 32);
             lane.enc.barrier();
             try m.kernels.mlpAne(lane.enc, f.get(.mixed), up, f.get(.dims), f.get(.activated), f.get(.act_sums), planes, h, width, share.columns, s.rows, own, all - own);
             lane.enc.barrier();
-            try m.kernels.quantCut(lane.enc, layer.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), .{ .buffer = share.partial }, s.rows, .{ own, all - own });
+            try m.kernels.quantCut(lane.enc, dense.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), .{ .buffer = share.partial }, s.rows, .{ own, all - own });
             share.wait(lane, v[1]);
             for (0..used) |slice| {
                 const base: u32 = @intCast(slice * ane_mlp.width);
@@ -106,12 +120,12 @@ pub const Stages = struct {
             s.pending = f.get(.output);
             return;
         } else {
-            try m.kernels.quant(e, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
+            try m.kernels.quant(e, dense.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
             e.barrier();
             try m.kernels.mlp(e, f.get(.mixed), up, f.get(.dims), f.get(.activated), f.get(.act_sums), width, s.rows);
         }
         lane.enc.barrier();
-        try m.kernels.quant(lane.enc, layer.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), f.get(.output), s.rows);
+        try m.kernels.quant(lane.enc, dense.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), f.get(.output), s.rows);
         lane.enc.barrier();
         s.pending = f.get(.output);
     }
@@ -123,6 +137,10 @@ pub const Stages = struct {
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
+        if (s.hooks.stage) |stage| {
+            try stage(s.hooks.ptr, e, .{ .block = m.config.layers - 1 }, s.hidden, s.rows);
+            try stage(s.hooks.ptr, e, .final, f.get(.input), s.rows);
+        }
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
             var input = f.get(.input);
@@ -132,6 +150,10 @@ pub const Stages = struct {
                 head_sums.ref.offset += @as(usize, s.rows - 1) * 4;
             }
             try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
+            if (s.hooks.stage) |stage| {
+                e.barrier();
+                try stage(s.hooks.ptr, e, .logits, f.get(.logits), if (s.head == .last) 1 else s.rows);
+            }
         }
         e.barrier();
     }
