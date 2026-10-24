@@ -176,10 +176,12 @@ pub const Drafter = struct {
         const x = try gpa.create(Drafter);
         errdefer gpa.destroy(x);
         x.* = .{ .gpa = gpa, .io = io, .d = gb.d, .m = m, .k = gb.k, .gb = gb, .s = gb.s, .c = c, .w = .{ .fc = undefined, .hidden_norm = 0, .norm = 0, .layers = undefined }, .ba = undefined };
+        errdefer x.w.buffers.deinit(gpa);
         errdefer for (x.w.buffers.items) |*b| b.free();
         try load(gpa, io, x.d, x.s, x.k, dir, &x.c, &x.w);
         x.ba = try cuda.block_attention.BlockAttention.load(x.d);
         errdefer x.ba.unload();
+        errdefer x.buffers.deinit(gpa);
         errdefer for (x.buffers.items) |*b| b.free();
         const h = c.hidden;
         const qw = c.heads * dim;

@@ -33,6 +33,7 @@ pub const Tower = struct {
         errdefer t.attn.unload();
         t.gemms = try vit.Gemms.init(gpa, d);
         errdefer t.gemms.deinit();
+        errdefer t.buffers.deinit(gpa);
         errdefer for (t.buffers.items) |*b| b.free();
         const p = max_patches;
         const n = image.max_budget;
