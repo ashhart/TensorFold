@@ -9,7 +9,7 @@ const errors = @import("errors.zig");
 const Allocator = std.mem.Allocator;
 const Cx = errors.Cx;
 
-pub const Voice = struct { name: []const u8, references: []const prompt.Reference };
+pub const Voice = struct { name: []const u8, references: []const prompt.Reference, description: []const u8 = "" };
 pub const max_frames = (30 * 44100 + 2047) / 2048;
 pub const max_file_bytes = 256 * 1024;
 
@@ -59,6 +59,18 @@ pub fn parse(a: Allocator, bytes: []const u8) ![]const prompt.Reference {
     return refs;
 }
 
+/// A checked file's optional one-line `description`, shown in the listing.
+fn describe(a: Allocator, bytes: []const u8) ![]const u8 {
+    const doc = switch (try json.parse(a, bytes)) {
+        .ok => |v| v,
+        else => return error.BadVoice,
+    };
+    if (doc.get("description") == null) return "";
+    const s = doc.strField("description") orelse return error.BadVoice;
+    if (s.len > 200 or !std.unicode.utf8ValidateSlice(s)) return error.BadVoice;
+    return s;
+}
+
 pub fn load(a: Allocator, io: std.Io, path: []const u8) ![]const Voice {
     var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
@@ -70,7 +82,7 @@ pub fn load(a: Allocator, io: std.Io, path: []const u8) ![]const Voice {
         if (entry.kind != .file or !validName(name)) return error.BadVoiceName;
         if (voices.items.len >= 256) return error.TooManyVoices;
         const bytes = try dir.readFileAlloc(io, entry.name, a, .limited(max_file_bytes + 1));
-        try voices.append(a, .{ .name = try a.dupe(u8, name), .references = try parse(a, bytes) });
+        try voices.append(a, .{ .name = try a.dupe(u8, name), .references = try parse(a, bytes), .description = try describe(a, bytes) });
     }
     std.mem.sort(Voice, voices.items, {}, struct {
         fn less(_: void, left: Voice, right: Voice) bool {
@@ -130,8 +142,16 @@ pub fn listing(a: Allocator, voices: []const Voice) !json.Value {
     const data = try a.alloc(json.Value, voices.len + 1);
     data[0] = .{ .string = "default" };
     for (voices, data[1..]) |voice, *slot| slot.* = .{ .string = voice.name };
+    const details = try a.alloc(json.Value, voices.len);
+    for (voices, details) |voice, *slot| {
+        const entry = try json.newObject(a);
+        try entry.put(a, "id", .{ .string = voice.name });
+        try entry.put(a, "description", .{ .string = voice.description });
+        slot.* = .{ .object = entry };
+    }
     const object = try json.newObject(a);
     try object.put(a, "voices", .{ .array = data });
+    try object.put(a, "details", .{ .array = details });
     return .{ .object = object };
 }
 
