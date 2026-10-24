@@ -64,6 +64,11 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial8(Geo geo, 
     tf_q35_tc::attn_one<tf_q35_tc::Fp8Tiles<128>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc, layer, P, scale, PM, PL, PO);
 }
 
+// A layer's block in Seg.kv: kvh * cap rows of HD bytes for keys then values, then kvh * cap fp32 scales for each.
+__device__ __forceinline__ unsigned char* layer_at(const Seg& sg, int layer, int kvh) {
+    return reinterpret_cast<unsigned char*>(sg.kv) + (size_t)layer * 2 * kvh * sg.cap * (HD + 4);
+}
+
 // Contiguous attention retains the pre-paging FP8 body.
 extern "C" __global__ void tf_q35_attn_partial8_contiguous(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                   const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
