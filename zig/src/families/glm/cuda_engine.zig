@@ -337,7 +337,10 @@ pub const Engine = struct {
             p.prompt.?.invalid = true;
         };
         var stamp = prof_mod.span(f.prof, e.stream, .gate);
-        try e.gate(cancel);
+        e.gate(cancel) catch |err| {
+            if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
+            return err;
+        };
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .gate);
         try f.run(as_i32[0..rows]);

@@ -93,6 +93,7 @@ pub const Lanes = struct {
     const steps_vt: be.Backend.VTable = vt: {
         var v = whole_vt;
         v.prefill_step = prefillStepFn;
+        v.cancel_prefill = cancelPrefillFn;
         v.prefill_many = null;
         v.many_rows = 0;
         break :vt v;
@@ -244,6 +245,23 @@ pub const Lanes = struct {
         return false;
     }
 
+    fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) !void {
+        const self = of(ptr);
+        const l = self.lanes.getPtr(s) orelse return;
+        const at = l.fill orelse return;
+        if (at <= s.cached or s.reuse.hook == null) return;
+        try self.x.bind(l.slot);
+        _ = self.x.chunk(s.prompt(), at, null, .{ .ptr = null, .check = cancelNow }, marksOf(s)) catch |err| {
+            if (err == error.Cancelled) return;
+            return err;
+        };
+        return error.CancellationIgnored;
+    }
+
+    fn cancelNow(_: ?*anyopaque) bool {
+        return true;
+    }
+
     /// A prompt pass begins: the stream's slot bound and its sequence fresh; where the pass resumes (a kept state).
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
@@ -271,7 +289,12 @@ pub const Lanes = struct {
     const Sink = @import("cuda_prompt_sink.zig").Sink;
 
     fn marksOf(s: *lanes.Stream) ?engine.Marks {
-        return if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
+        return if (s.reuse.hook == null) null else .{
+            .at = s.reuse.marks,
+            .ctx = s,
+            .call = keptAt,
+            .interrupted = keptInterrupted,
+        };
     }
 
     /// The stream's kept state, where its prompt pass starts (null: none, off the chunk grid, or no longer held).
@@ -291,6 +314,11 @@ pub const Lanes = struct {
     fn keptAt(ctx: *anyopaque, at: u32) void {
         const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
+    }
+
+    fn keptInterrupted(ctx: *anyopaque, at: u32) void {
+        const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
+        s.keepInterruptedPrefill(at);
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {

@@ -185,6 +185,7 @@ pub fn Namespace(comptime Tri: type) type {
                 const scoring_table: be.Backend.VTable = .{
                     .prefill = prefillFn,
                     .prefill_step = prefillStepFn,
+                    .cancel_prefill = cancelPrefillFn,
                     .first = firstFn,
                     .queue = queueFn,
                     .read = readFn,
@@ -302,7 +303,10 @@ pub fn Namespace(comptime Tri: type) type {
             fn step(self: *Cuda, s: *lanes.Stream, l: *Lane) !bool {
                 const ids = s.prompt();
                 const at = l.filled orelse return true;
-                if (s.isCancelled()) return error.Cancelled;
+                if (s.isCancelled()) {
+                    s.keepInterruptedPrefill(@intCast(at));
+                    return error.Cancelled;
+                }
                 var stop = @min(ids.len, at + self.engine.chunk);
                 for (s.reuse.marks) |m| if (m > at and m < stop) {
                     stop = m;
@@ -387,6 +391,10 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             const l = if (self.lanes.getPtr(s)) |x| (if (x.filled != null) x else try self.open(s)) else try self.open(s);
             return self.step(s, l);
+        }
+
+        fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) !void {
+            if (of(ptr).lanes.getPtr(s)) |l| if (l.filled) |at| s.keepInterruptedPrefill(@intCast(at));
         }
 
         fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {

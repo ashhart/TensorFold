@@ -331,6 +331,12 @@ pub const Stream = struct {
         return c.check(c.ptr);
     }
 
+    /// Keep a completed, resumable prompt prefix before cancellation releases the backend's state.
+    pub fn keepInterruptedPrefill(s: *Stream, at: u32) void {
+        if (at <= s.cached or at >= s.prompt_len) return;
+        if (s.reuse.hook) |hook| hook.at(hook.ptr, s, at);
+    }
+
     /// Whether a background prompt pass should step aside now (false with no hook); asked before each chunk.
     pub fn yields(s: *const Stream) bool {
         const c = s.yield_check orelse return false;

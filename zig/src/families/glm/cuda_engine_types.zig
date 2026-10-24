@@ -24,7 +24,12 @@ pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: 
 pub const Resume = struct { id: u64, at: usize };
 
 /// Rank 0's marks in a prompt pass: `call` may keep the state at a chunk start; other ranks copy at that chunk's gate.
-pub const Marks = struct { at: []const u32, ctx: *anyopaque, call: *const fn (ctx: *anyopaque, at: u32) void };
+pub const Marks = struct {
+    at: []const u32,
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, at: u32) void,
+    interrupted: ?*const fn (ctx: *anyopaque, at: u32) void = null,
+};
 
 const ranks = @import("cuda_ranks.zig");
 const images_mod = @import("cuda_images.zig");

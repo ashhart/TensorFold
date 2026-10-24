@@ -112,3 +112,9 @@ pub fn gate(e: anytype) !void {
         return;
     }
 }
+
+/// After all ranks agree to cancel, publish the last completed state before any rank releases or rebinds its slot.
+pub fn interrupted(e: anytype, marks: ?types.Marks, at: u32) !void {
+    if (marks) |m| if (m.interrupted) |save_prefix| save_prefix(m.ctx, at);
+    try gate(e);
+}

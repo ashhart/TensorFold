@@ -97,7 +97,7 @@ pub const Kolibri = struct {
         return .{ .ptr = x, .vtable = &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true };
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Kolibri) lanes.Model {
@@ -206,7 +206,10 @@ pub const Kolibri = struct {
     fn chunk(x: *Kolibri, s: *Stream, l: *Lane) !bool {
         const p = s.prompt();
         const at = l.fill.?;
-        if (s.isCancelled()) return error.Cancelled;
+        if (s.isCancelled()) {
+            s.keepInterruptedPrefill(@intCast(at));
+            return error.Cancelled;
+        }
         var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
         for (s.reuse.marks) |mk| if (mk > at and mk < end) {
             end = mk;
@@ -233,6 +236,11 @@ pub const Kolibri = struct {
         const l = if (going) x.lanes.getPtr(s).? else try x.opening(s);
         errdefer x.dropLane(s);
         return x.chunk(s, l);
+    }
+
+    fn cancelPrefill(ptr: *anyopaque, s: *Stream) !void {
+        const l = self(ptr).lanes.getPtr(s) orelse return;
+        if (l.fill) |at| s.keepInterruptedPrefill(@intCast(at));
     }
 
     fn handle(x: *Kolibri) usize {
