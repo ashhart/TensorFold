@@ -181,3 +181,65 @@ pub fn qkHead(x: []const f64, cos: []const f64, sin: []const f64, rot: usize, qs
     }
 }
 
+/// exp in fp32's range: past its largest finite value, infinity (expf overflows there).
+fn exp32(x: f64) f64 {
+    const e = @exp(x);
+    return if (e > std.math.floatMax(f32)) std.math.inf(f64) else e;
+}
+
+/// exp's ends over x's interval, each within `e` relative (expf's ulps); monotone.
+fn expIv(x: Iv, e: f64) Iv {
+    return .{ exp32(x[0]) * (1 - e), exp32(x[1]) * (1 + e) };
+}
+
+/// 1 / (1 + exp(-x)) over x's interval in fp32 steps (expf within `e`, the sum and quotient by u): increasing in x.
+pub fn sigmoid(x: Iv, e: f64, u: f64) Iv {
+    const ex = expIv(.{ -x[1], -x[0] }, e);
+    return .{ 1 / ((1 + ex[1]) * (1 + u)) * (1 - u), 1 / ((1 + ex[0]) * (1 - u)) * (1 + u) };
+}
+
+/// x / (1 + exp(-x)) at one value (a point x), its fp32 steps within e and u.
+pub fn silu(x: f64, e: f64, u: f64) Iv {
+    const ex = exp32(-x);
+    const lo = x / ((1 + ex * (1 + e)) * (1 + u));
+    const hi = x / ((1 + ex * (1 - e)) * (1 - u));
+    return mul(order(lo, hi), point(1), u);
+}
+
+/// tf_gate_l2_rows' rounding point: the gated row before its norm.
+pub const GatePoints = struct { gated: bool = true };
+
+/// tf_gate_l2_rows: out = bf16(l2(t)), t = o sigmoid(g sg) (bf16 at `gated`), over the row's values; expf within e.
+pub fn gateL2(o: []const f64, g: []const f64, sg: []const f64, p: GatePoints, eps: f64, sums: anytype, st: Stray, e: f64, y: []Iv, small: []f64, big: []f64) void {
+    for (y, o, g, sg) |*out, ov, gv, sv| {
+        const t = mul(point(gv), point(sv), st.u);
+        if (std.math.isNan(t[0])) {
+            out.* = @splat(std.math.nan(f64));
+            continue;
+        }
+        out.* = bf16If(p.gated, mul(point(ov), sigmoid(t, e, st.u), st.u));
+    }
+    normalize(y, eps, sums, st, true, small, big);
+}
+
+/// tf_swiglu_l2_rows' rounding points: the scaled gate and up, their product.
+pub const SwigluPoints = struct { gs: bool = true, us: bool = true, prod: bool = true };
+
+/// tf_swiglu_l2_rows: out = bf16(l2(m)), m = silu(gs) us, gs = g sug, us = u suu (bf16 at the points); expf within e.
+pub fn swigluL2(g: []const f64, u: []const f64, sug: []const f64, suu: []const f64, p: SwigluPoints, eps: f64, sums: anytype, st: Stray, e: f64, y: []Iv, small: []f64, big: []f64) void {
+    for (y, g, u, sug, suu) |*out, gv, uv, sgv, suv| {
+        const gs = bf16If(p.gs, mul(point(gv), point(sgv), st.u));
+        const us = bf16If(p.us, mul(point(uv), point(suv), st.u));
+        if (std.math.isNan(gs[0]) or std.math.isNan(us[0])) {
+            out.* = @splat(std.math.nan(f64));
+            continue;
+        }
+        // silu is not monotone below -1.28: its ends over gs's interval from both ends and the minimum between
+        var s = silu(gs[0], e, st.u);
+        const s2 = silu(gs[1], e, st.u);
+        s = .{ @min(s[0], s2[0]), @max(s[1], s2[1]) };
+        if (gs[0] < -1.2784645 and gs[1] > -1.2784645) s[0] = @min(s[0], -0.2784645 * (1 + 4 * st.u));
+        out.* = bf16If(p.prod, mul(s, us, st.u));
+    }
+    normalize(y, eps, sums, st, true, small, big);
+}
