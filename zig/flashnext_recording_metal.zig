@@ -35,6 +35,9 @@ pub const Device = struct {
         @memset(data, 0);
         return .{ .id = @intFromPtr(data.ptr), .data = data };
     }
+    pub fn event(_: Device) !Event {
+        return .{};
+    }
     pub fn tensorUnits(_: Device) bool {
         return true;
     }
@@ -115,11 +118,16 @@ pub const ComputeEncoder = struct {
             const b = bound[1];
             const out = @as([*]u32, @ptrCast(@alignCast(b.b.contents() + b.off)));
             for (0..grid.width / 1024) |i| out[i] = if (wrong == 0) 7 else 9;
+        } else if (std.mem.eql(u8, pipe.name, "fz_argmax_join")) { // the two-launch argmax: one group a row (dispatchGroups)
+            const b = bound[1];
+            const out = @as([*]u32, @ptrCast(@alignCast(b.b.contents() + b.off)));
+            for (0..grid.width) |i| out[i] = if (wrong == 0) 7 else 9;
         }
     }
     pub fn dispatchGroups(e: ComputeEncoder, grid: Size, threads: Size) void {
         e.dispatchThreads(grid, threads);
     }
+    pub fn dispatchIndirect(_: ComputeEncoder, _: Buffer, _: usize, _: Size) void {}
     pub fn barrier(_: ComputeEncoder) void {}
     pub fn end(_: ComputeEncoder) void {}
 };
@@ -144,6 +152,8 @@ pub const CommandBuffer = struct {
     pub fn failure(_: CommandBuffer) ?[]const u8 {
         return null;
     }
+    pub fn waitForEvent(_: CommandBuffer, _: Event, _: u64) void {}
+    pub fn signalEvent(_: CommandBuffer, _: Event, _: u64) void {}
 };
 pub const BlitEncoder = struct {
     pub fn copy(_: BlitEncoder, a: Buffer, ao: usize, b: Buffer, bo: usize, n: usize) void {
@@ -159,6 +169,10 @@ pub const ResidencySet = struct {
     pub const Follow = struct { ctx: *anyopaque, join: *const fn (*anyopaque, Buffer) void, leave: *const fn (*anyopaque, Buffer) void };
 };
 pub const SharedEvent = struct {
+    id: usize = 0,
+    pub fn deinit(_: @This()) void {}
+};
+pub const Event = struct {
     id: usize = 0,
     pub fn deinit(_: @This()) void {}
 };

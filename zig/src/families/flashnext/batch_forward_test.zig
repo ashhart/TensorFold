@@ -57,6 +57,9 @@ pub fn check(verify: Verify, keep: Keep) !void {
     r.xdown_pipe = .{ .name = "fz_xdown" };
     r.draw_pipe = .{ .name = "draw" };
     r.rotary_pipe = .{ .name = "tf_rotary_prepare" };
+    r.argpart_pipe = .{ .name = "fz_argmax_part" };
+    r.argjoin_pipe = .{ .name = "fz_argmax_join" };
+    r.arg_parts = .{ .b = try r.device.buffer(64 * 64 * 8, fz.opts) };
     const dummy: fz.Buf = .{ .b = try r.device.buffer(2 << 20, fz.opts) };
     try r.shapes.put(a, "Kc_shape", dummy.b);
     try r.shapes.put(a, "IDS_shape", dummy.b);
