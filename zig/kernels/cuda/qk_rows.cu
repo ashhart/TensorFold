@@ -156,3 +156,15 @@ extern "C" __global__ void __launch_bounds__(tf_qk_round::WIDE) tf_qk_rows_round
     tf_qk_round::rows(in, nw, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps,
                       tf_qk_round::MLX | (vnorm ? tf_qk_round::VNORM : 0));
 }
+
+// Dory's attention inputs (qk_l2.cuh): RoPE first, then each head's L2 norm, q times a scale vector, v as is.
+#include "qk_l2.cuh"
+
+// q = bf16(qs * bf16(l2(bf16(rope(x))))), k = bf16(l2(bf16(rope(x)))), v as is; k and v also into kc/vc.
+extern "C" __global__ void __launch_bounds__(tf_qk_l2::WIDE) tf_qk_rows_l2(const QkSrc in, const float* qs, const float* cosv,
+                                                                           const float* sinv, const float* inv, int rot,
+                                                                           const int* pos, const int* slot, const QkDst dst,
+                                                                           __nv_bfloat16* kc, __nv_bfloat16* vc, long long len,
+                                                                           int h, int hk, float eps) {
+    tf_qk_l2::rows<tf_qk_l2::ROPE | tf_qk_l2::NORM>(in, qs, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps);
+}
