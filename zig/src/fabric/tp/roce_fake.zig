@@ -15,8 +15,6 @@ pub const Fake = struct {
     pub var lag: u32 = 1;
     pub var polls: u64 = 0;
     pub var queue: [2][512]u64 = undefined;
-    /// Each queued completion's wr_id, as an HCA echoes it (the wire reads the peer from its high half).
-    pub var ids: [2][512]u64 = undefined;
     pub var head: [2]u32 = .{ 0, 0 };
     pub var len: [2]u32 = .{ 0, 0 };
     pub var inflight: u64 = 0;
@@ -54,7 +52,6 @@ pub const Fake = struct {
             }
             if (w.send_flags & abi.send_signaled != 0) {
                 queue[q][(head[q] + len[q]) % 512] = sum;
-                ids[q][(head[q] + len[q]) % 512] = w.wr_id;
                 len[q] += 1;
                 inflight += sum;
                 bytes += sum;
@@ -70,12 +67,10 @@ pub const Fake = struct {
         const q = cq.handle;
         polls += 1;
         if (polls % lag != 0 or len[q] == 0) return 0;
-        const id = ids[q][head[q]];
         inflight -= queue[q][head[q]];
         head[q] = (head[q] + 1) % 512;
         len[q] -= 1;
         wc[0] = std.mem.zeroes(abi.Wc);
-        wc[0].wr_id = id; // the signaled request's, as an HCA echoes it
         wc[0].status = abi.wc_success;
         return 1;
     }
@@ -133,28 +128,16 @@ pub const Hw = struct {
     mr: [2]abi.Mr = undefined,
 
     pub fn wire(hw: *Hw, region: []u8) rv.VerbsWire {
-        return hw.wireN(region, 2, 0);
-    }
-
-    /// The fake HCAs for `world` ranks at `me`: every peer shares one fake QP (the streams only count bytes).
-    pub fn wireN(hw: *Hw, region: []u8, world: u32, me: u32) rv.VerbsWire {
         const s = Fake.slot_bytes;
-        const layout = rv.Layout.of(world, s);
-        var w: rv.VerbsWire = .{ .v = undefined, .traffic_class = 0, .me = me, .layout = layout, .region = region };
+        var w: rv.VerbsWire = .{ .v = undefined, .traffic_class = 0, .recv_off = send_off + 2 * s, .flag_off = 4096, .send_off = send_off, .slot_bytes = s, .region = region };
         for (0..2) |i| {
             hw.ctx[i].ops = .{ ._before_poll = @splat(null), .poll_cq = Fake.pollCq, ._before_post = @splat(null), .post_send = Fake.postSend, .post_recv = undefined, ._after = @splat(null) };
             hw.qp[i].qp_num = @intCast(i);
             hw.cq[i].handle = @intCast(i);
             hw.mr[i].lkey = 7;
-            w.hcas[i] = .{ .ctx = &hw.ctx[i], .pd = undefined, .mr = &hw.mr[i], .cq = &hw.cq[i], .gid_index = 0, .gid = @splat(0), .mtu = 0, .lid = 0 };
-            for (0..world) |p| {
-                if (p != me) w.hcas[i].qp[p] = &hw.qp[i];
-            }
+            w.hcas[i] = .{ .ctx = &hw.ctx[i], .pd = undefined, .mr = &hw.mr[i], .cq = &hw.cq[i], .qp = &hw.qp[i], .gid_index = 0, .gid = @splat(0), .mtu = 0, .lid = 0 };
         }
         w.n_hca = 2;
-        for (0..world) |p| {
-            if (p != me) w.peer_region[p] = @intFromPtr(region.ptr);
-        }
         return w;
     }
 };

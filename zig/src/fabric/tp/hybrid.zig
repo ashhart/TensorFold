@@ -1,4 +1,4 @@
-//! Small exchanges through the mailbox (one host) or RoCE (2 to 16 hosts), the rest through NCCL; ranks always agree.
+//! Small exchanges through the mailbox (one host) or RoCE (two hosts), the rest through NCCL; ranks always agree.
 const std = @import("std");
 const collective = @import("collective.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
@@ -13,6 +13,7 @@ const Error = collective.Error;
 pub const Small = union(enum) {
     mailbox: *Mailbox,
     roce: *Roce,
+    roce_multi: *@import("roce_multi.zig").Roce,
 
     fn fits(s: Small, n: usize) bool {
         return switch (s) {
@@ -35,14 +36,6 @@ pub const Small = union(enum) {
     fn exchange(s: Small, src: DevicePtr, dst: DevicePtr, n: usize, stream: collective.Stream) Error!void {
         return switch (s) {
             inline else => |p| p.exchangeBytes(src, dst, n, stream),
-        };
-    }
-
-    /// The small path's exchange is the two-rank one (the mailbox is two ranks; RoCE above two sends to every peer).
-    fn exchanges(s: Small) bool {
-        return switch (s) {
-            .mailbox => true,
-            .roce => |p| p.exchanges(),
         };
     }
 
@@ -75,7 +68,7 @@ pub const Hybrid = struct {
     var_agreed: bool = false,
 
     pub fn iface(h: *Hybrid) collective.Collective {
-        return .{ .ptr = h, .vtable = if (h.small == .roce) &roce_vtable else &mailbox_vtable };
+        return .{ .ptr = h, .vtable = if (h.small == .mailbox) &mailbox_vtable else &roce_vtable };
     }
 
     fn vtable(comptime kind: collective.Kind) collective.Collective.VTable {
@@ -118,7 +111,7 @@ pub const Hybrid = struct {
 
     fn allReduce(ptr: *anyopaque, s: DevicePtr, r: DevicePtr, count: usize, t: DType, op: Op, stream: collective.Stream) Error!void {
         const h = self_(ptr);
-        if (op == .sum and (t == .f32 or t == .bf16) and h.routed(count * t.size())) return h.small.sum(s, r, count, t, stream);
+        if (h.small != .roce_multi and op == .sum and (t == .f32 or t == .bf16) and h.routed(count * t.size())) return h.small.sum(s, r, count, t, stream);
         return Nccl.allReduce(h.nccl, s, r, count, t, op, stream);
     }
 
@@ -132,14 +125,22 @@ pub const Hybrid = struct {
     fn allGatherV(ptr: *anyopaque, s: DevicePtr, r: DevicePtr, stride: usize, lens: DevicePtr, t: DType, stream: collective.Stream) Error!void {
         const h = self_(ptr);
         const n = stride * t.size();
-        if (singleFits(h, n)) return h.small.roce.allGatherV(s, r, n, lens, stream);
-        if (varFits(ptr, n)) return h.small.roce.allGatherVChunked(s, r, n, lens, stream);
+        if (singleFits(h, n)) return switch (h.small) {
+            .roce => |p| p.allGatherV(s, r, n, lens, stream),
+            .roce_multi => |p| p.allGatherV(s, r, n, lens, stream),
+            .mailbox => unreachable,
+        };
+        if (varFits(ptr, n)) return switch (h.small) {
+            .roce => |p| p.allGatherVChunked(s, r, n, lens, stream),
+            .roce_multi => |p| p.allGatherVChunked(s, r, n, lens, stream),
+            .mailbox => unreachable,
+        };
         return allGather(ptr, s, r, stride, t, stream);
     }
 
     fn singleFits(h: *const Hybrid, n: usize) bool {
         return switch (h.small) {
-            .roce => |p| n > 0 and h.routed(n) and p.d != null,
+            inline .roce, .roce_multi => |p| n > 0 and h.routed(n) and p.d != null,
             .mailbox => false,
         };
     }
@@ -149,7 +150,7 @@ pub const Hybrid = struct {
         const h = self_(ptr);
         const single = singleFits(h, n);
         return single or switch (h.small) {
-            .roce => |p| chunkRoute(h.chunked_bytes, n, single, p.d != null and p.chunk_abi),
+            inline .roce, .roce_multi => |p| chunkRoute(h.chunked_bytes, n, single, p.d != null and p.chunk_abi),
             .mailbox => false,
         };
     }
@@ -161,7 +162,7 @@ pub const Hybrid = struct {
     fn exchange(ptr: *anyopaque, s: DevicePtr, r: DevicePtr, count: usize, t: DType, peer: u32, stream: collective.Stream) Error!void {
         const h = self_(ptr);
         try collective.checkPeer(h.nccl.me, h.nccl.size, peer);
-        if (h.small.exchanges() and h.routed(count * t.size())) return h.small.exchange(s, r, count * t.size(), stream);
+        if (h.small != .roce_multi and h.routed(count * t.size())) return h.small.exchange(s, r, count * t.size(), stream);
         return Nccl.exchange(h.nccl, s, r, count, t, peer, stream);
     }
 

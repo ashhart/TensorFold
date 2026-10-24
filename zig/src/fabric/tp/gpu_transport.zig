@@ -7,14 +7,16 @@ const realNow = @import("gpu_main.zig").realNow;
 
 /// N clean sums, an NCCL meet, the victim's `Roce.inject` once every link is idle, then its close (fail-fast: exit 70).
 pub fn run(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.Config, victim: u32, n: u32, hold_s: u32) !u8 {
-    const r = s.roce orelse {
+    const r = s.roceLink() orelse {
         std.debug.print("failfast transport needs TF_COMM_BACKEND=roce (the session runs {t})\n", .{s.comm().kind()});
         return 2;
     };
     var c = try checks.Ctx.init(d, gpa, cfg.rank, cfg.world, 4096);
     defer c.deinit();
     const comm = s.comm();
+    try c.in.fill8(7, c.stream.handle);
     for (0..n) |_| {
+        try comm.allGather(c.in.ptr, c.out.ptr, 2048, .bf16, c.stream.handle);
         try comm.allReduce(c.in.ptr, c.out.ptr, 2048, .bf16, .sum, c.stream.handle);
         try c.stream.synchronize();
         try comm.check();
@@ -40,11 +42,11 @@ pub fn run(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: t
     } else if (s.fate != null) {
         while (true) tp.sock.sleepNs(std.time.ns_per_s); // the fate channel ends this rank (exit 70)
     }
-    const kept0 = tp.roce.Roce.kept.load(.monotonic);
+    const kept0 = tp.RoceLink.kept();
     s.close(); // fail-fast on: exit 70 from here
-    const kept = tp.roce.Roce.kept.load(.monotonic) - kept0;
+    const kept = tp.RoceLink.kept() - kept0;
     const want: u32 = @intFromBool(cfg.rank == victim);
-    const live = cfg.rank != victim or mapped(r.region);
+    const live = cfg.rank != victim or mapped(r.region());
     std.debug.print("rank {d}: closed; regions kept {d} (want {d}){s}\n", .{ cfg.rank, kept, want, if (cfg.rank != victim) "" else if (live) ", region still mapped" else ", region NOT mapped" });
     if (hold_s > 0) {
         std.debug.print("HOLD rank {d} pid {d} for {d} s\n", .{ cfg.rank, std.c.getpid(), hold_s });

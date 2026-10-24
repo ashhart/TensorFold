@@ -93,11 +93,12 @@ fn hca(cfg: tp.Config, io: std.Io) !u8 {
 fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.Config) !u8 {
     var c = try checks.Ctx.init(d, gpa, cfg.rank, cfg.world, max_bytes);
     defer c.deinit();
+    c.baseline = s.nccl.iface();
     var backends: [2]struct { comm: tp.Collective, label: []const u8 } = undefined;
     var n_backends: usize = 1;
     backends[0] = .{ .comm = s.nccl.iface(), .label = "nccl" };
     if (s.comm().kind() != .nccl) {
-        backends[1] = .{ .comm = s.comm(), .label = if (s.roce != null) "roce" else "mailbox" };
+        backends[1] = .{ .comm = s.comm(), .label = if (s.roceLink() != null) "roce" else "mailbox" };
         n_backends = 2;
     } else if (cfg.backend != .nccl and cfg.rank == 0) {
         std.debug.print("WARN TF_COMM_BACKEND={t} fell back to NCCL (see the [tensorfold] tp log lines above): only NCCL is measured\n", .{cfg.backend});

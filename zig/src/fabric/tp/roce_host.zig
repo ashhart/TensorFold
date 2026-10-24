@@ -1,7 +1,6 @@
-//! `tf-tp-test roce-host`: the RoCE wire and proxy between 2 to 16 hosts without a GPU, bit for bit, then timed.
+//! `tf-tp-test roce-host`: exact gathers and timing on the two-rank or versioned multirank wire.
 const std = @import("std");
 const tp = @import("tp");
-const roce = tp.roce;
 const rv = tp.roce_verbs;
 
 /// Shards a rank, bytes: the slot's edges and the engine's all-gathers (one 8 KiB bf16 row of 4,096 up to 128 rows).
@@ -9,6 +8,11 @@ const sizes = [_]usize{ 16, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524
 const max_bytes = 1024 * 1024;
 
 pub fn run(cfg: tp.Config, gpa: std.mem.Allocator) !u8 {
+    if (cfg.world == 2) return runWith(tp.roce, cfg, gpa);
+    return runWith(tp.roce_multi, cfg, gpa);
+}
+
+fn runWith(comptime roce: type, cfg: tp.Config, gpa: std.mem.Allocator) !u8 {
     var b = try tp.Bootstrap.open(cfg);
     defer b.close();
     const world: usize = cfg.world;
@@ -23,7 +27,7 @@ pub fn run(cfg: tp.Config, gpa: std.mem.Allocator) !u8 {
     defer gpa.free(want);
     const out = try gpa.alloc(u8, world * max_bytes);
     defer gpa.free(out);
-    var lens: [roce.max_world]u32 = undefined;
+    var lens: [tp.bootstrap.max_ranks]u32 = undefined;
     // 1. every size from 1 byte to the slot, both slots, bit for bit; every third op with variable lengths
     var checked: u32 = 0;
     for (0..1500) |k| {
@@ -31,7 +35,9 @@ pub fn run(cfg: tp.Config, gpa: std.mem.Allocator) !u8 {
         const v = k % 3 == 2;
         for (0..world) |q| lens[q] = @intCast(if (k % 5 == 0 and q == 0) 0 else (k * 31 + q * 17) % (len + 1));
         tp.reference.fill(in[0..len], .u8, cfg.rank, k);
-        try r.hostGatherV(in[0..len], out[0 .. world * len], if (v) lens[0..world] else null);
+        if (comptime roce == tp.roce) {
+            try r.hostGatherV(in[0..len], out[0 .. world * len], if (v) .{ lens[0], lens[1] } else null);
+        } else try r.hostGatherV(in[0..len], out[0 .. world * len], if (v) lens[0..world] else null);
         for (0..world) |q| {
             const l = if (v) lens[q] else len;
             tp.reference.fill(want[0..len], .u8, @intCast(q), k);

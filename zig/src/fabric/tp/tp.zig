@@ -1,4 +1,4 @@
-//! Tensor parallelism across processes, one GPU each (2 to 16 ranks): bootstrap, collectives, fail-fast.
+//! Tensor parallelism across processes, one GPU each: bootstrap, collectives, fail-fast; `Session.open` starts a rank.
 const std = @import("std");
 const log = @import("log.zig");
 const cuda = @import("cuda");
@@ -14,6 +14,8 @@ pub const nccl = @import("nccl.zig");
 pub const mailbox = @import("mailbox.zig");
 pub const hybrid = @import("hybrid.zig");
 pub const roce = @import("roce.zig");
+pub const roce_multi = @import("roce_multi.zig");
+pub const RoceLink = @import("roce_link.zig").Link;
 pub const roce_verbs = @import("roce_verbs.zig");
 pub const roce_pick = @import("roce_pick.zig");
 pub const planlink = @import("planlink.zig");
@@ -33,6 +35,7 @@ pub const Session = struct {
     nccl: nccl.Nccl,
     mail: ?mailbox.Mailbox = null,
     roce: ?*roce.Roce = null,
+    roce_multi: ?*roce_multi.Roce = null,
     route: hybrid.Hybrid = undefined,
     /// The round plan's link (rank 0 sends, the others receive), on its own TCP connection.
     plan: planlink.PlanLink = undefined,
@@ -56,6 +59,7 @@ pub const Session = struct {
         errdefer s.nccl.deinit();
         errdefer if (s.mail) |*m| m.deinit();
         errdefer if (s.roce) |rr| rr.deinit();
+        errdefer if (s.roce_multi) |rr| rr.deinit();
         switch (cfg.backend) {
             .nccl => {},
             .mailbox => if (try mailboxPossible(&b, kernel_image)) {
@@ -64,7 +68,7 @@ pub const Session = struct {
             } else if (cfg.rank == 0) {
                 log.warn("[tensorfold] tp: TF_COMM_BACKEND=mailbox needs two ranks on one host and the kernel; every rank uses NCCL", .{});
             },
-            .roce => try s.openRoce(d, &b, kernel_image),
+            .roce => if (cfg.world == 2) try s.openRoce(d, &b, kernel_image) else try @import("roce_multi_session.zig").open(s, d, &b, kernel_image),
         }
         try s.agreeVar(&b);
         s.plan = planlink.PlanLink.init(cfg.rank, cfg.world, b.releasePlan());
@@ -115,7 +119,7 @@ pub const Session = struct {
         const all = try b.allGather(&.{@intFromBool(s.comm().varFits(16))}, &buf, &blobs);
         var ok = true;
         for (all) |x| ok = ok and x[0] == 1;
-        if (s.mail != null or s.roce != null) s.route.var_agreed = ok;
+        if (s.mail != null or s.roce != null or s.roce_multi != null) s.route.var_agreed = ok;
     }
 
     fn roceFallback(s: *Session, e: anyerror) !void {
@@ -123,43 +127,31 @@ pub const Session = struct {
         if (s.cfg.rank == 0) log.warn("[tensorfold] tp: RoCE unavailable ({t}); every rank uses NCCL (TF_TP_ROCE_FALLBACK=error refuses instead)", .{e});
     }
 
-    /// One 4 KiB all-gather and one bf16 sum through RoCE and NCCL: gathers match, the sum equals the reference.
+    /// One 4 KiB all-gather and one bf16 sum through RoCE and through NCCL: the bytes must be equal.
     fn probe(s: *Session, d: *const cuda.Driver) !bool {
         const n = 4096;
-        const w: usize = s.cfg.world;
-        // input [0, n), gathers [n, (1 + w) n) and [(1 + w) n, (1 + 2w) n), sums after them
-        var a = try cuda.DeviceBuffer.alloc(d, (3 + 2 * w) * n);
+        // input [0, n), gathers [n, 3n) and [3n, 5n), sums [5n, 6n) and [6n, 7n)
+        var a = try cuda.DeviceBuffer.alloc(d, 7 * n);
         defer a.free();
         var stream = try cuda.Stream.init(d, true);
         defer stream.deinit();
-        const seed = 0x7072_6f62;
         var bytes: [n]u8 = undefined;
-        reference.fill(&bytes, .bf16, s.cfg.rank, seed);
+        reference.fill(&bytes, .bf16, s.cfg.rank, 0x7072_6f62);
         try a.uploadAsync(0, &bytes, stream.handle);
         const fast = s.route.iface();
         const slow = s.nccl.iface();
         try fast.allGather(a.ptr, a.ptr + n, n, .u8, stream.handle);
-        try slow.allGather(a.ptr, a.ptr + (1 + w) * n, n, .u8, stream.handle);
-        try fast.allReduce(a.ptr, a.ptr + (1 + 2 * w) * n, n / 2, .bf16, .sum, stream.handle);
-        try slow.allReduce(a.ptr, a.ptr + (2 + 2 * w) * n, n / 2, .bf16, .sum, stream.handle);
+        try slow.allGather(a.ptr, a.ptr + 3 * n, n, .u8, stream.handle);
+        try fast.allReduce(a.ptr, a.ptr + 5 * n, n / 2, .bf16, .sum, stream.handle);
+        try slow.allReduce(a.ptr, a.ptr + 6 * n, n / 2, .bf16, .sum, stream.handle);
         try stream.synchronize();
         try fast.check();
-        const got = try std.heap.page_allocator.alloc(u8, (2 + 2 * w) * n);
-        defer std.heap.page_allocator.free(got);
-        try a.download(n, got);
-        var want: [n]u8 = undefined;
-        var next: [n]u8 = undefined;
-        reference.fill(&want, .bf16, 0, seed);
-        for (1..w) |r| {
-            reference.fill(&next, .bf16, @intCast(r), seed);
-            reference.accumulate(&want, &next, .bf16, .sum);
-        }
-        const gathers = std.mem.eql(u8, got[0 .. w * n], got[w * n .. 2 * w * n]);
-        const sums = std.mem.eql(u8, got[2 * w * n ..][0..n], &want);
-        const nccl_sums = std.mem.eql(u8, got[2 * w * n + n ..][0..n], &want);
-        const ok = gathers and sums and (w > 2 or nccl_sums);
-        if (!ok or !nccl_sums) log.warn("[tensorfold] tp roce probe ({d} ranks): gather {s} against NCCL, sum {s} against the rank-order reference (NCCL's: {s}{s})", .{ w, if (gathers) "equal" else "DIFFERS", if (sums) "equal" else "DIFFERS", if (nccl_sums) "equal" else "differs", if (w > 2) ", its ring order; not used by the decision" else "" });
-        return ok;
+        var got: [6 * n]u8 = undefined;
+        try a.download(n, &got);
+        const gathers = std.mem.eql(u8, got[0 .. 2 * n], got[2 * n .. 4 * n]);
+        const sums = std.mem.eql(u8, got[4 * n .. 5 * n], got[5 * n .. 6 * n]);
+        if (!gathers or !sums) log.warn("[tensorfold] tp roce probe: gather {s}, sum {s} against NCCL", .{ if (gathers) "equal" else "DIFFERS", if (sums) "equal" else "DIFFERS" });
+        return gathers and sums;
     }
 
     fn mailboxPossible(b: *Bootstrap, image: []const u8) !bool {
@@ -182,8 +174,14 @@ pub const Session = struct {
 
     /// The communicator the model uses: NCCL, or the hybrid route over the mailbox / RoCE.
     pub fn comm(s: *Session) Collective {
-        if (s.mail != null or s.roce != null) return s.route.iface();
+        if (s.mail != null or s.roce != null or s.roce_multi != null) return s.route.iface();
         return s.nccl.iface();
+    }
+
+    pub fn roceLink(s: *Session) ?RoceLink {
+        if (s.roce) |p| return .{ .two = p };
+        if (s.roce_multi) |p| return .{ .many = p };
+        return null;
     }
 
     /// This rank failed inside a round: every rank goes down (exit 70). Without fail-fast it only aborts.
@@ -206,10 +204,12 @@ pub const Session = struct {
     /// A normal stop: every rank calls it (rank 0 first marks the stop as expected with `fate.expectStop`).
     pub fn close(s: *Session) void {
         // a failed transport: every rank goes down (the peers stop posting) before this one lets go of anything
+        if (s.roce_multi) |r| if (r.failed()) if (s.fate) |*f| f.fatal("transport", error.BackendFailed);
         if (s.roce) |r| if (r.failed()) if (s.fate) |*f| f.fatal("transport", error.BackendFailed);
         if (s.fate) |*f| f.close();
         s.plan.close();
         if (s.roce) |r| r.deinit();
+        if (s.roce_multi) |r| r.deinit();
         if (s.mail) |*m| m.deinit();
         s.nccl.deinit();
         s.lib.close();
@@ -224,10 +224,13 @@ test {
     _ = bootstrap;
     _ = mailbox;
     _ = roce_verbs;
-    _ = @import("roce_verbs_test.zig");
     _ = roce_pick;
     _ = planlink;
     _ = @import("roce_guard.zig");
+    _ = @import("roce_multi_guard.zig");
+    _ = @import("roce_verbs_test.zig");
+    _ = @import("roce_multi_wire_test.zig");
+    _ = @import("roce_multi_route_test.zig");
     _ = @import("roce_test.zig");
     _ = @import("roce_post_test.zig");
     _ = @import("roce_inflight_test.zig");

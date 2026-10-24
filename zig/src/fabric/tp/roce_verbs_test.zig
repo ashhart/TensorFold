@@ -1,6 +1,6 @@
 //! The RoCE verbs wire's pairing of HCAs across ranks, on records alone.
 const std = @import("std");
-const rv = @import("roce_verbs.zig");
+const rv = @import("roce_multi_verbs.zig");
 const Record = rv.Record;
 const VerbsWire = rv.VerbsWire;
 const max_peers = rv.max_peers;

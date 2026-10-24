@@ -1,8 +1,9 @@
 // The RoCE kernel's device side (mailbox.cu includes it): region [ctrl, flags, send, recv] per roce_guard.zig's Layout.
-namespace tftp {
+namespace tftp_multi {
+using namespace tftp;
 
 constexpr int kRoceHcas = 2;
-constexpr int kRoceMaxPeers = 16;  // roce_verbs.zig max_peers: (world - 1) x kRoceHcas pollers fit one warp
+constexpr int kRoceMaxPeers = 8;  // roce_verbs.zig max_peers: (world - 1) x kRoceHcas pollers fit one warp
 constexpr int kRoceSlots = 2;
 // ctrl words shared with roce.zig's proxy: [0] doorbell, [4 + slot] bytes, [8] completed, [12] abort, [16..22] failure
 constexpr int kRoceSeq = 0;
@@ -64,59 +65,6 @@ __device__ __noinline__ void roce_fail(const RoceArgs &a, uint32_t seq, uint32_t
     }
 }
 
-// Rank r's operand of a sum: this rank's input, else rank r's receive slot (system-scope loads: the NIC wrote it).
-__device__ __forceinline__ uint4 roce_v4(const RoceArgs &a, uint32_t r, uint64_t slot, uint64_t i) {
-    return r == a.rank ? reinterpret_cast<const uint4 *>(a.in)[i] : ld_relaxed_sys_v4(roce_inbox(a, r, slot) + (i << 4));
-}
-
-__device__ __forceinline__ uint16_t roce_u16(const RoceArgs &a, uint32_t r, uint64_t slot, uint64_t i) {
-    return r == a.rank ? reinterpret_cast<const uint16_t *>(a.in)[i]
-                       : static_cast<uint16_t>(ld_relaxed_sys_u16(roce_inbox(a, r, slot) + (i << 1)));
-}
-
-__device__ __forceinline__ uint32_t roce_u32(const RoceArgs &a, uint32_t r, uint64_t slot, uint64_t i) {
-    return r == a.rank ? reinterpret_cast<const uint32_t *>(a.in)[i]
-                       : ld_relaxed_sys(reinterpret_cast<const uint32_t *>(roce_inbox(a, r, slot)) + i);
-}
-
-// out <- every rank's operand added in rank order (bf16 through fp32), the same bits everywhere.
-template <bool Bf16>
-__device__ __forceinline__ void roce_sum(const RoceArgs &a, uint64_t slot, uint64_t index, uint64_t stride) {
-    const uint64_t n = a.nbytes;
-    const uint64_t al = reinterpret_cast<uint64_t>(a.out) | reinterpret_cast<uint64_t>(a.in) |
-                        reinterpret_cast<uint64_t>(roce_inbox(a, 0u, slot)) | a.slot_bytes | n;
-    if ((al & 15u) == 0u) {
-        const uint64_t packs = n >> 4;
-        for (uint64_t i = index; i < packs; i += stride) {
-            uint4 acc = roce_v4(a, 0u, slot, i);
-            for (uint32_t r = 1u; r < a.world; r++) {
-                const uint4 b = roce_v4(a, r, slot, i);
-                acc.x = Bf16 ? add_bf16x2(acc.x, b.x) : add_f32(acc.x, b.x);
-                acc.y = Bf16 ? add_bf16x2(acc.y, b.y) : add_f32(acc.y, b.y);
-                acc.z = Bf16 ? add_bf16x2(acc.z, b.z) : add_f32(acc.z, b.z);
-                acc.w = Bf16 ? add_bf16x2(acc.w, b.w) : add_f32(acc.w, b.w);
-            }
-            reinterpret_cast<uint4 *>(a.out)[i] = acc;
-        }
-    } else if (Bf16) {
-        for (uint64_t i = index; i < (n >> 1); i += stride) {
-            uint16_t acc = roce_u16(a, 0u, slot, i);
-            for (uint32_t r = 1u; r < a.world; r++) {
-                acc = add_bf16(acc, roce_u16(a, r, slot, i));
-            }
-            reinterpret_cast<uint16_t *>(a.out)[i] = acc;
-        }
-    } else {
-        for (uint64_t i = index; i < (n >> 2); i += stride) {
-            uint32_t acc = roce_u32(a, 0u, slot, i);
-            for (uint32_t r = 1u; r < a.world; r++) {
-                acc = add_f32(acc, roce_u32(a, r, slot, i));
-            }
-            reinterpret_cast<uint32_t *>(a.out)[i] = acc;
-        }
-    }
-}
-
 // Rank r's bytes this op: ``nbytes``, or lens[r] capped at nbytes.
 __device__ __forceinline__ uint64_t roce_shard(const RoceArgs &a, uint32_t r) {
     if (a.lens == nullptr) {
@@ -141,4 +89,160 @@ __device__ __forceinline__ uint64_t roce_part(const RoceArgs &a, uint64_t shard,
     return rest < a.slot_bytes ? rest : a.slot_bytes;
 }
 
-}  // namespace tftp
+extern "C" __global__ void tp_roce_multi_abi_v1() {}
+
+// Present in images whose RoceArgs carry ``chunk`` (roce.zig refuses TF_TP_ROCE_CHUNKED_KB without it); never launched.
+extern "C" __global__ void tp_roce_multi_chunk_abi() {}
+
+extern "C" __global__ void __launch_bounds__(512) tp_roce_multi(RoceArgs a) {
+    if (a.world < 3u || a.world > 8u || a.rank >= a.world || a.mode != kGather ||
+        a.n_hca == 0u || a.n_hca > 2u || a.slot_bytes == 0u || a.slot_bytes > (1u << 20)) {
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+            fail_record(a.state + 2, a.ctrl + kRoceFailed, 0u, 0u, 0u, 3u, 0u);
+        }
+        return;
+    }
+    __shared__ uint32_t s_head[2];  // poison, seq
+    __shared__ uint32_t s_bad;
+    __shared__ uint32_t s_done[kRoceMaxPeers * kRoceHcas];  // fast: some poller of (peer q, HCA h) saw its flag
+    const bool fast = (a.opts & 1u) != 0u;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t gdim = gridDim.x;
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x + tid;
+    const uint64_t stride = static_cast<uint64_t>(gdim) * blockDim.x;
+    const uint32_t peers = a.world - 1u;
+
+    if (tid == 0) {
+        s_head[0] = ld_relaxed_gpu(a.state + 2);
+        s_head[1] = ld_relaxed_gpu(a.state) + 1u;
+        s_bad = 0u;
+    }
+    if (tid < static_cast<uint32_t>(kRoceMaxPeers * kRoceHcas)) {
+        s_done[tid] = 0u;
+    }
+    __syncthreads();
+    if (s_head[0] != 0u) {
+        return;
+    }
+    const uint32_t seq = s_head[1];
+    const uint64_t slot = seq & 1u;
+    const bool var = a.mode == kGather && a.lens != nullptr;
+    const uint64_t off = var ? a.chunk : 0u;
+    const uint64_t mine = var ? roce_part(a, roce_shard(a, a.rank), off) : a.nbytes;
+    const uint64_t padded = var ? (mine < 16u ? 16u : (mine + 15u) & ~uint64_t(15u)) : (a.nbytes + 15u) & ~uint64_t(15u);
+    if (off != 0u && mine == 0u) {
+        bool rest = false;
+        for (uint32_t q = 0; q < peers; q++) {
+            rest = rest || roce_part(a, roce_shard(a, roce_src(a, q)), off) != 0u;
+        }
+        if (!rest) {
+            return;  // nothing past this offset on any rank: no op, the epoch stays (every rank skips alike)
+        }
+    }
+    if (padded > a.slot_bytes) {  // never staged past a slot: a refused wait (why 3), the transport poisoned
+        if (tid == 0 && blockIdx.x == 0) {
+            fail_record(a.state + 2, a.ctrl + kRoceFailed, seq, 0u, 0u, 3u, 0u);
+        }
+        return;
+    }
+
+    // 1. stage this block's share into the send slot (once for every peer); the last block to finish rings the doorbell
+    copy_any<false>(fast, a.send_slots + slot * a.slot_bytes, a.in + off, var ? roce_span(a, mine) : a.nbytes, index,
+                    stride);
+    __syncthreads();
+    if (tid == 0 && fast) {
+        // lean doorbell: release RMW per block arrival, the last acquires, then a release store (no SC system fences)
+        const bool last = gdim == 1u || atom_add_acq_rel_sys(a.state + 3, 1u) == gdim - 1u;
+        if (last) {
+            if (gdim > 1u) {
+                st_release_gpu(a.state + 3, 0u);
+            }
+            st_relaxed_sys(a.ctrl + kRoceSlotBytes + slot, static_cast<uint32_t>(padded));
+            st_release_sys(a.ctrl + kRoceSeq, seq);
+        }
+    } else if (tid == 0) {
+        fence_sc_sys();
+        const bool last = gdim == 1u || atom_add_acq_rel_gpu(a.state + 3, 1u) == gdim - 1u;
+        if (last) {
+            if (gdim > 1u) {
+                st_release_gpu(a.state + 3, 0u);
+                fence_sc_sys();  // every block's staging (seen through the counter) before the doorbell
+            }
+            st_relaxed_sys(a.ctrl + kRoceSlotBytes + slot, static_cast<uint32_t>(padded));
+            st_release_sys(a.ctrl + kRoceSeq, seq);
+        }
+    }
+    if (a.mode == kGather) {
+        copy_any<false>(fast, a.out + static_cast<uint64_t>(a.rank) * a.nbytes + off, a.in + off,
+                        var ? roce_span(a, mine) : a.nbytes, index, stride);
+    }
+
+    // 2. every peer's flag on every HCA for this slot; fast: one poller a (peer, HCA), thread 32 k + q x n_hca + h.
+    const uint32_t pollers = (a.opts >> 8) & 0xffu;
+    const uint32_t stagger_ns = a.opts >> 16;
+    if (fast) {
+        const uint32_t lane = tid & 31u;
+        const uint32_t k = tid >> 5;
+        if (lane < peers * a.n_hca && k < (pollers == 0u ? 1u : pollers)) {
+            if (k > 0u && stagger_ns != 0u) {
+                __nanosleep(k * stagger_ns);
+            }
+            const uint32_t src = roce_src(a, lane / a.n_hca);
+            const uint32_t h = lane % a.n_hca;
+            uint32_t seen = 0u, why = 0u, waited = 0u;
+            if (!wait_flag_shared(roce_flag(a, src, slot, h), seq, a.ctrl + kRoceAbort, a.timeout_ns, &seen, &why,
+                                  &waited, &s_done[lane])) {
+                s_bad = 1u;
+                roce_fail(a, seq, seen, src, h, why, waited);
+            }
+        }
+    } else if (tid == 0) {
+        bool failed = false;
+        for (uint32_t q = 0; q < peers && !failed; q++) {
+            const uint32_t src = roce_src(a, q);
+            for (uint32_t h = 0; h < a.n_hca; h++) {
+                uint32_t seen = 0u, why = 0u, waited = 0u;
+                if (!wait_flag(roce_flag(a, src, slot, h), seq, a.ctrl + kRoceAbort, a.timeout_ns, &seen, &why,
+                               &waited)) {
+                    s_bad = 1u;
+                    roce_fail(a, seq, seen, src, h, why, waited);
+                    failed = true;
+                    break;
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    // 3. copy out of the receive slots the peers' NICs wrote, each sender's shard at its rank
+    if (s_bad == 0u) {
+        switch (a.mode) {
+            case kGather:
+                for (uint32_t q = 0; q < peers; q++) {
+                    const uint32_t src = roce_src(a, q);
+                    const uint64_t theirs = var ? roce_part(a, roce_shard(a, src), off) : a.nbytes;
+                    copy_any<true>(fast, a.out + static_cast<uint64_t>(src) * a.nbytes + off,
+                                   roce_inbox(a, src, slot), var ? roce_span(a, theirs) : a.nbytes, index, stride);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    // 4. the epoch, as tp_mailbox; the host also sees the last completed seq
+    __syncthreads();
+    if (tid == 0) {
+        const bool last = gdim == 1u || atom_add_acq_rel_gpu(a.state + 1, 1u) == gdim - 1u;
+        const bool ok = gdim == 1u ? s_bad == 0u : ld_relaxed_gpu(a.state + 2) == 0u;
+        if (last && gdim > 1u) {
+            st_release_gpu(a.state + 1, 0u);
+        }
+        if (last && ok) {
+            st_release_gpu(a.state, seq);
+            st_relaxed_sys(a.ctrl + kRoceCompleted, seq);
+        }
+    }
+}
+
+}  // namespace tftp_multi

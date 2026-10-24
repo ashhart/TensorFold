@@ -8,7 +8,7 @@ const Halts = fake.Halts;
 const slot = fake.slot;
 
 test "chunked posts: the wire's own in-flight count and peak match the HCAs', and reach the 2 MiB cap" {
-    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(2, slot));
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(slot));
     defer std.testing.allocator.free(region);
     Fake.region = region;
     Fake.slot_bytes = slot;
@@ -27,7 +27,7 @@ test "chunked posts: the wire's own in-flight count and peak match the HCAs', an
 }
 
 test "a failed transport: both QPs go to error before the first flush and every posted write is reaped" {
-    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(2, slot));
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(slot));
     defer std.testing.allocator.free(region);
     @memset(region, 0);
     Fake.region = region;
@@ -55,7 +55,7 @@ test "a failed transport: both QPs go to error before the first flush and every 
     try std.testing.expectEqualStrings("HCA 0 QP ERR; posted 2, completed 2; HCA 1 QP ERR; posted 2, completed 2; reaped 4 (flushed 4), still posted 0", w.report(&line));
     // an aborted transport reports itself failed: its deinit keeps the region
     Halts.reset();
-    var r: Roce = .{ .me = 0, .world = 2, .layout = rv.Layout.of(2, slot), .slot_bytes = slot, .timeout_ns = 1, .region = region, .mapping = region, .wire = .{ .verbs = w }, .cpu = null };
+    var r: Roce = .{ .me = 0, .slot_bytes = slot, .timeout_ns = 1, .region = region, .mapping = region, .wire = .{ .verbs = w }, .cpu = null };
     try std.testing.expect(!r.failed());
     r.abort();
     try std.testing.expect(Halts.halted[0] and Halts.halted[1]);
@@ -94,7 +94,7 @@ fn vmFlags(at: usize, buf: []u8) ![]const u8 {
 
 test "the region is DONTFORK and NOHUGEPAGE before registration" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    const len = Roce.regionBytes(2, slot);
+    const len = Roce.regionBytes(slot);
     const m = try std.posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
     defer std.posix.munmap(m);
     const buf = try std.testing.allocator.alloc(u8, 4 << 20);

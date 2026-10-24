@@ -26,6 +26,7 @@ fn mailboxFatbin(b: *std.Build, nvcc: []const u8) std.Build.LazyPath {
     const run = b.addSystemCommand(&.{ nvcc, "-fatbin", "-O3", "-std=c++17", "-gencode=arch=compute_120,code=sm_120", "-gencode=arch=compute_121,code=sm_121", "-gencode=arch=compute_90,code=compute_90", "-o" });
     const out = run.addOutputFileArg("tp_mailbox.fatbin");
     run.addFileArg(b.path("zig/src/fabric/tp/mailbox.cu"));
+    _ = run.addFileInput(b.path("zig/src/fabric/tp/roce_device.cuh"));
     return out;
 }
 
@@ -58,6 +59,13 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     const tp_step = b.step("test-tp", "TP bootstrap, failure, settings and in-process transport tests");
     tp_step.dependOn(&tests.step);
     tp_step.dependOn(cli_step);
+    const multi_root = module(b, host, .debug, runtime(b, host, .debug));
+    multi_root.root_source_file = b.path("zig/src/fabric/tp/roce_multi_host.zig");
+    const multi = b.addRunArtifact(b.addTest(.{ .root_module = multi_root }));
+    multi.has_side_effects = true;
+    b.step("test-roce-multi-host", "Frozen two-rank posts and multirank fake-verbs byte and completion contracts").dependOn(&multi.step);
+    tp_step.dependOn(&multi.step);
+    if (host.result.os.tag != .windows) test_step.dependOn(&multi.step);
     // the bootstrap and failure tests run over POSIX sockets: Windows checks only the Linux compile below
     if (host.result.os.tag != .windows) test_step.dependOn(&tests.step);
     const linux = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });

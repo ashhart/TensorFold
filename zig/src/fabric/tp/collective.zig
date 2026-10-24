@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 pub const DevicePtr = cuda.abi.DevicePtr;
 pub const Stream = cuda.abi.Stream;
 
-pub const Error = error{ Aborted, Unsupported, Invalid, PeerFailed, Timeout, BackendFailed };
+pub const Error = error{ Aborted, NcclReductionRequired, NcclExchangeRequired, Unsupported, Invalid, PeerFailed, Timeout, BackendFailed };
 
 /// Element types the collectives move (`reduce` takes the float ones and the 32/64-bit integers).
 pub const DType = enum(u8) {

@@ -22,7 +22,7 @@ const slot_lens = [_]u64{ 15 * page + 7, 9 * page, 13 * page + 100 };
 const PostTap = @typeInfo(@typeInfo(@FieldType(roce.Options, "tap")).optional.child).pointer.child;
 const tap_params = @typeInfo(@typeInfo(@FieldType(PostTap, "seen")).pointer.child).@"fn".param_types;
 const Layout = tap_params[1].?;
-const Stripe = @typeInfo(tap_params[5].?).pointer.child;
+const Stripe = @typeInfo(tap_params[4].?).pointer.child;
 
 /// The served RoCE settings: two ranks, a 1 MiB slot, the fast kernel path.
 fn servedEnv(name: []const u8) ?[]const u8 {
@@ -50,24 +50,20 @@ const Seen = struct {
     outside: u64 = 0,
     mr_len: u64,
     slot: u64,
-    /// The rank doing the posting: a send lands in the peer's receive slot for this source.
-    me: u32 = 0,
 
-    fn seen(ctx: *anyopaque, l: Layout, _: u32, slot: u32, padded: u32, s: []const Stripe) void {
+    fn seen(ctx: *anyopaque, l: Layout, slot: u32, padded: u32, s: []const Stripe) void {
         const v: *Seen = @ptrCast(@alignCast(ctx));
         v.posts += 1;
         v.max_padded = @max(v.max_padded, padded);
-        // the expected layout from roce_guard's own formula, not from the wire's own numbers
-        const want = Layout.of(2, v.slot);
-        if (l.world != want.world or l.len != v.mr_len or l.slot != v.slot or l.send != want.send or l.recv != want.recv or l.flags != want.flags) v.outside += 1;
+        // the expected layout from roce.zig's region size, not from the wire's own numbers
+        if (l.len != v.mr_len or l.slot != v.slot or l.recv != l.send + 2 * v.slot or l.send + 4 * v.slot != v.mr_len) v.outside += 1;
         var total: u64 = 0;
-        for (s, 0..) |x, hca| {
-            // the posting rank's slot in its own send area, this source's slot in the peer's receive area
-            const lo_send = Layout.sendAt(want, slot);
-            const lo_recv = Layout.recvAt(want, v.me, slot);
+        for (s) |x| {
+            const lo_send = l.send + slot * v.slot;
+            const lo_recv = l.recv + slot * v.slot;
             if (x.local < lo_send or x.local + x.len > lo_send + v.slot or x.local + x.len > v.mr_len) v.outside += 1;
             if (x.remote < lo_recv or x.remote + x.len > lo_recv + v.slot or x.remote + x.len > v.mr_len) v.outside += 1;
-            if (x.flag != Layout.flagAt(want, v.me, slot, @intCast(hca))) v.outside += 1;
+            if (x.flag < l.flags or x.flag + 4 > l.send) v.outside += 1;
             total += x.len;
         }
         if (total != padded) v.outside += 1;
@@ -137,10 +133,10 @@ const Routed = struct {
         if (!h.single(n)) {
             h.roce_ops += 1;
             h.chunked += 1;
-            return h.r.hostGatherVChunked(in[0..n], out[0 .. 2 * n], &[_]u32{ @intCast(l[0]), @intCast(l[1]) }) catch error.BackendFailed;
+            return h.r.hostGatherVChunked(in[0..n], out[0 .. 2 * n], .{ @intCast(l[0]), @intCast(l[1]) }) catch error.BackendFailed;
         }
         h.took(n);
-        h.r.hostGatherV(in[0..n], out[0 .. 2 * n], &[_]u32{ @intCast(l[0]), @intCast(l[1]) }) catch return error.BackendFailed;
+        h.r.hostGatherV(in[0..n], out[0 .. 2 * n], .{ @intCast(l[0]), @intCast(l[1]) }) catch return error.BackendFailed;
     }
     fn exchange(p: *anyopaque, s: u64, r: u64, n: usize, t: tp.DType, peer: u32, st: tp.collective.Stream) tp.collective.Error!void {
         return self_(p).nccl.exchange(s, r, n, t, peer, st);
@@ -191,7 +187,7 @@ fn rank(comm: tp.Collective, me: u32, ctx: *Ctx) anyerror!void {
     var b = if (me == 0) try tp.Bootstrap.acceptOn(ctx.lfd, 2, 10 * std.time.ns_per_s) else try tp.Bootstrap.open(.{ .world = 2, .rank = 1, .link_port = ctx.port, .connect_timeout_ns = 10 * std.time.ns_per_s });
     defer b.close();
     const slot = std.mem.alignForward(usize, cfg.mailbox_max_bytes, 4096);
-    ctx.seen[me] = .{ .mr_len = roce.Roce.regionBytes(2, slot), .slot = slot, .me = me };
+    ctx.seen[me] = .{ .mr_len = roce.Roce.regionBytes(slot), .slot = slot };
     var tap: PostTap = .{ .ctx = &ctx.seen[me], .seen = Seen.seen };
     const r = try roce.Roce.init(null, &b, "", .{ .wire = .shm, .shm_stripes = 2, .tap = &tap, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = 20 * std.time.ns_per_s });
     defer r.deinit();
