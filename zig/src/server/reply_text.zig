@@ -14,6 +14,17 @@ pub const calls = [_][2][]const u8{
     .{ "<|tool_call>", "<tool_call|>" },
     .{ "<\u{ff5c}DSML\u{ff5c}tool_calls>", "</\u{ff5c}DSML\u{ff5c}tool_calls>" },
 };
+/// How each opener's call payload starts: Gemma 4's ``call:`` (the 26B's ``:``) and DSML's invoke; ``<tool_call>`` has none.
+const leads = [calls.len][]const []const u8{ &.{}, &.{ "call:", ":" }, &.{"<\u{ff5c}DSML\u{ff5c}invoke"} };
+
+/// Whether the text after an opener is a call's payload, may still become one, or is prose that names the opener.
+fn payloadOf(rest: []const u8, which: usize, finished: bool) enum { call, wait, prose } {
+    if (leads[which].len == 0) return .call;
+    const body = std.mem.trimStart(u8, rest, " \t\r\n");
+    for (leads[which]) |lead| if (std.mem.startsWith(u8, body, lead)) return .call;
+    if (!finished) for (leads[which]) |lead| if (std.mem.startsWith(u8, lead, body)) return .wait;
+    return .prose;
+}
 
 /// ``text.find(tag, from)`` led by a vector scan for the tag's first byte: markup is rare in prose, so it is fast.
 pub fn findTag(text: []const u8, from: usize, tag: []const u8) ?usize {
@@ -184,8 +195,21 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
             return out.items;
         }
         try out.appendSlice(a, text[pos..start.?]);
-        const opener = calls[which][0];
-        const end = findTag(text, start.? + opener.len, calls[which][1]) orelse return out.items;
+        const after = start.? + calls[which][0].len;
+        switch (payloadOf(text[after..], which, finished)) {
+            .call => {},
+            .wait => return out.items,
+            .prose => {
+                try out.appendSlice(a, text[start.?..after]);
+                pos = after;
+                continue;
+            },
+        }
+        const end = findTag(text, after, calls[which][1]) orelse {
+            // a finished reply's envelope that never closed is text, as tool_parse.parse keeps it in the content
+            if (finished) try out.appendSlice(a, text[start.?..]);
+            return out.items;
+        };
         pos = end + calls[which][1].len;
     }
 }
@@ -454,4 +478,26 @@ test "a reply that writes its own think opener keeps the tag out of its reasonin
         try std.testing.expectEqualStrings("Plan.\n", s.reasoning);
         try std.testing.expectEqualStrings("Done.", s.answer);
     }
+}
+
+test "an opener the reply names in prose keeps the text after it, streamed and whole" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prose = "Gemma writes <|tool_call>call:f{...} and DSML uses <\u{ff5c}DSML\u{ff5c}tool_calls>. The rest of my answer.";
+    try std.testing.expectEqualStrings(prose, try finishedProse(a, prose));
+    const named = "Gemma opens a call with <|tool_call> and DSML with <\u{ff5c}DSML\u{ff5c}tool_calls> too.";
+    try std.testing.expectEqualStrings(named, try hideToolCalls(a, named, false));
+    for ([_][]const u8{ prose, named, "a <tool_call>{\"name\"", "a <|tool_call>call:f{x:1}<tool_call|>b" }) |reply| {
+        const whole = try hideToolCalls(a, reply, true);
+        for (0..reply.len + 1) |n| try std.testing.expect(std.mem.startsWith(u8, whole, try hideToolCalls(a, reply[0..n], false)));
+    }
+    // a call being written still hides: its payload's lead, a partial lead, or a <tool_call> block that has not closed
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <|tool_call>call:f{", false));
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <|tool_call> ca", false));
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <\u{ff5c}DSML\u{ff5c}tool_calls>\n<\u{ff5c}DSML\u{ff5c}inv", false));
+    try std.testing.expectEqualStrings("a ", try hideToolCalls(a, "a <tool_call>{\"name\"", false));
+    try std.testing.expectEqualStrings("a b", try hideToolCalls(a, "a <|tool_call>call:f{x:1}<tool_call|>b", false));
+    // a finished reply's unclosed envelope is text, as tool_parse.parse keeps it in the content
+    try std.testing.expectEqualStrings("a <tool_call>{\"name\"", try finishedProse(a, "a <tool_call>{\"name\""));
 }
