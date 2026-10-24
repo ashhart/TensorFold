@@ -448,5 +448,6 @@ test "explicit template overrides checkpoint templates including tool prompts an
 
 test {
     _ = @import("hf_eos_test.zig");
+    _ = @import("dory_chat_test.zig");
     _ = @import("deepseek_chat_test.zig");
 }
