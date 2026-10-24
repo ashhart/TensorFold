@@ -5,6 +5,7 @@ const dr = @import("lanes").drafter;
 const draft = @import("cuda_draft.zig");
 const tree = @import("cuda_draft_tree.zig");
 const layers = @import("cuda_layers.zig");
+const sig = @import("cuda_signatures.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
 pub const chunks = 9;
@@ -50,6 +51,11 @@ pub fn stage(c: draft.Config, items: []const dr.Hold, contexts: []const *draft.C
         sg[i] = .{ .ring = ctx.ring.ptr, .begin = @intCast(ctx.begin), .position = @intCast(ctx.end) };
     }
 }
+/// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.
+fn launch(d: anytype, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, block: [3]usize, args: anytype) !void {
+    sig.check(s, @TypeOf(args));
+    return d.e.run(f, grid, block, args);
+}
 fn conv(d: anytype, x: u64, base: u64, res: u64, out: u64, rows: usize, branch: c_int) !void {
     try d.e.run(d.fns.dyn_conv_batch, .{ rows, (d.c.hidden + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ x, d.dyn, base, res, out, @as(c_int, @intCast(d.c.hidden)), @as(c_int, @intCast(d.c.group)), branch, @as(c_int, @intCast(d.c.block)) });
 }
@@ -58,8 +64,10 @@ fn rope(d: anytype, x: u64, w: u64, out: u64, rows: usize, heads: usize) !void {
 }
 pub fn attention(d: anytype, rows: usize, layer: usize) !void {
     const c = d.c;
-    try d.e.run(d.fns.attn_partial, .{ rows, c.heads, chunks }, .{ 128, 1, 1 }, .{ d.q, d.kb, d.vb, d.segments, @as(c_int, @intCast(c.block)), @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.kv_heads)), @as(c_int, @intCast(c.ringRows())), @as(c_int, @intCast(c.window)), @as(c_int, @intCast(layer)), d.pm, d.pl, d.po });
-    try d.e.run(d.fns.attn_merge, .{ rows, c.heads, 1 }, .{ 32, 1, 1 }, .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), d.att });
+    const partial = .{ d.q, d.kb, d.vb, d.segments, @as(c_int, @intCast(c.block)), @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.kv_heads)), @as(c_int, @intCast(c.ringRows())), @as(c_int, @intCast(c.window)), @as(c_int, @intCast(layer)), d.pm, d.pl, d.po };
+    try launch(d, d.fns.attn_partial, sig.draft_partial, .{ rows, c.heads, chunks }, .{ 128, 1, 1 }, partial);
+    const merge = .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), d.att };
+    try launch(d, d.fns.attn_merge, sig.draft_merge, .{ rows, c.heads, 1 }, .{ 32, 1, 1 }, merge);
 }
 pub fn publish(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx) !void {
     defer d.selection_base = 0;
