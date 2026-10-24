@@ -351,13 +351,6 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
     var queued: u64 = 0; // rounds submitted
     var read: u64 = 0; // rounds whose records the host took
     const log = platform.c.getenv("TF_ROUND_LOG") != null;
-    var depth = Depth{ .levels = o.depth, .most = o.depth, .fixed = o.fixed };
-    var windows: [ring]usize = undefined; // each queued round's verify rows
-    var levels = depth.levels; // the levels the last queued head drafts (the next verify's rows - 1)
-    var copy: u32 = 0; // the copy rows the last queued round may take for the next window
-    var copies = copy_lanes.Copy{ .most = o.copy_max };
-    var sib_offered: f64 = 0; // second choices' chances offered, and how many landed
-    var sib_landed: f64 = 0;
     var widths: [32]usize = undefined;
     var window_ms: [32]f64 = undefined;
     for (b.costs.window[0..b.costs.windows], 0..) |w, i| {
@@ -365,6 +358,13 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
         window_ms[i] = w.ms;
     }
     const costs = copy_lanes.Costs{ .rows = window_ms[0..b.costs.windows], .widths = widths[0..b.costs.windows] };
+    var depth = Depth.init(o.depth, o.fixed, costs, b.costs.head_ms);
+    var windows: [ring]usize = undefined; // each queued round's verify rows
+    var levels = depth.levels; // the levels the last queued head drafts (the next verify's rows - 1)
+    var copy: u32 = 0; // the copy rows the last queued round may take for the next window
+    var copies = copy_lanes.Copy{ .most = o.copy_max };
+    var sib_offered: f64 = 0; // second choices' chances offered, and how many landed
+    var sib_landed: f64 = 0;
     const Pre = struct {
         r: *Round,
         levels: usize,
