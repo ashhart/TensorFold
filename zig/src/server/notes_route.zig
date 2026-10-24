@@ -15,14 +15,16 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const Failure = retrieve_mod.Failure;
 pub const Found = retrieve_mod.Found;
+pub const Lookup = retrieve_mod.Lookup;
 
-/// What a chat request asks of the notes: "notes", and the notes_ fields exclude, past, cap, echo, language.
+/// What a chat request asks of the notes: "notes", and the notes_ fields exclude, past, cap, echo, language, lookup.
 pub const Ask = struct {
     exclude: []const u32 = &.{},
     past: ?bool = null, // null: notes.is_past(question), as retrieve() decides
     cap: ?u32 = null, // null: the snapshot's cap
     echo: bool = false, // the block itself in the reply's "notes" field
     lang: ?lang_mod.Lang = null, // "notes_language"; null: the store default
+    lookup: ?Lookup = null, // "notes_lookup": "who" or "plain"; null: the store's
 };
 
 fn optBool(cx: *Cx, body: Value, key: []const u8) errors.Refused!?bool {
@@ -58,7 +60,11 @@ pub fn asked(cx: *Cx, body: Value) errors.Refused!?Ask {
         ask.lang = lang_mod.Lang.parse(s) orelse return cx.refuse("notes_language must be en, de or fi");
     }
     if (on == false and listed) return cx.refuse("notes is false but notes_exclude names notes to leave out");
-    if (on == true or listed) return ask;
+    if (on == true or listed) {
+        // read only with notes on: a request without notes is answered as before, whatever else it sends
+        if (body.field("notes_lookup")) |v| ask.lookup = std.meta.stringToEnum(Lookup, v.str() orelse "") orelse return cx.refuse("notes_lookup must be \"who\" or \"plain\"");
+        return ask;
+    }
     if (ask.past != null or ask.cap != null or ask.echo) return cx.refuse("notes_past, notes_cap and notes_echo need \"notes\": true");
     if (ask.lang != null) return cx.refuse("notes_language needs \"notes\": true");
     return null;
@@ -70,6 +76,7 @@ pub const Used = struct {
     past: bool,
     past_given: bool,
     language: lang_mod.Lang = .en,
+    lookup: Lookup = .plain, // the lookup made: who first only for an English question
     cap: u32,
     question_tokens: usize,
     tokenize_ns: i96,
@@ -86,6 +93,7 @@ pub const Used = struct {
         try o.put(a, "past", .{ .bool = u.past });
         try o.put(a, "past_from", .{ .string = if (u.past_given) "request" else "question" });
         try o.put(a, "language", .{ .string = @tagName(u.language) });
+        try o.put(a, "lookup", .{ .string = @tagName(u.lookup) });
         try o.put(a, "cap", try json.intValue(a, u.cap));
         try o.put(a, "tokens", try json.intValue(a, u.found.tokens));
         try o.put(a, "pack_tokens", try json.intValue(a, u.found.pack_tokens));
@@ -168,7 +176,8 @@ pub fn apply(srv: *Server, cx: *Cx, body: Value, normalized: *Value) errors.Refu
     // the writes and erasures of /v1/notes replace the index and the model: the lookup reads them under their lock
     srv.notes_mutex.lockUncancelable(io);
     const cap = ask.cap orelse store.model.settings.cap;
-    const got = retrieve_mod.retrieve(store, io, cx.a, text, qids, past, cap, ask.exclude, .{});
+    const how: Lookup = if (lang == .en) ask.lookup orelse store.lookup else .plain;
+    const got = retrieve_mod.retrieve(store, io, cx.a, text, qids, past, cap, ask.exclude, .{ .who = if (how == .who) question else null });
     srv.notes_mutex.unlock(io);
     const found = got catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -180,6 +189,7 @@ pub fn apply(srv: *Server, cx: *Cx, body: Value, normalized: *Value) errors.Refu
         .past = past,
         .past_given = ask.past != null,
         .language = lang,
+        .lookup = how,
         .cap = cap,
         .question_tokens = qids.len,
         .tokenize_ns = t1 - t0,

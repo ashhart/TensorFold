@@ -33,6 +33,7 @@ pub const Storage = struct {
     idx: ?*index.Index = null,
     scratch: ?@import("lookup.zig").Scratch = null, // the lookups' (retrieve.zig), made again when it has too little room
     language: @import("lang.zig").Lang = .en, // past-cue language when a request omits notes_language (--notes-language)
+    lookup: @import("retrieve.zig").Lookup = .who, // a chat request's lookup when it sends no notes_lookup (English only)
 
     /// File-backed startup checks tokenizer identity before opening or replaying the journal.
     pub fn open(parent: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Storage {

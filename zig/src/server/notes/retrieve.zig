@@ -4,11 +4,15 @@ const model_text = @import("../model_text.zig");
 const clock = @import("../clock.zig");
 const index = @import("index.zig");
 const lookup = @import("lookup.zig");
+const who = @import("who.zig");
 const Storage = @import("storage.zig").Storage;
 const Allocator = std.mem.Allocator;
 
-/// How one lookup is made: the hop (null: the snapshot's).
-pub const Way = struct { hop: ?index.Hop = null };
+/// A chat request's lookup: who first (the subjects the question names; none known, no block), or retrieve()'s.
+pub const Lookup = enum { who, plain };
+
+/// How one lookup is made: the hop (null: the snapshot's), and who first with the question's text.
+pub const Way = struct { hop: ?index.Hop = null, who: ?[]const u8 = null };
 
 pub const Failure = error{ OutOfMemory, Tokenizer };
 
@@ -39,18 +43,20 @@ fn scratchFor(s: *Storage, idx: *const index.Index) Allocator.Error!*lookup.Scra
     return &s.scratch.?;
 }
 
-/// NoteStore.retrieve(owner, question, cap, past, exclude) from the question's ids; the caller holds the store's lock.
+/// NoteStore.retrieve(owner, question, cap, past, exclude) made `way`'s way; the caller holds the store's lock.
 pub fn retrieve(s: *Storage, io: std.Io, a: Allocator, text: model_text.Text, qids: []const u32, past: bool, cap: u32, exclude: []const u32, way: Way) Failure!Found {
     const current = s.idx.?;
+    const hop = if (way.who == null) way.hop else null; // who first keeps the snapshot's hop, which its scores rank by
     var view: index.Index = undefined; // a shallow copy: the same notes and maps, read only
-    const idx = if (way.hop) |h| blk: {
+    const idx = if (hop) |h| blk: {
         view = current.*;
         view.settings.hop = h;
         break :blk &view;
     } else current;
     const sc = try scratchFor(s, idx);
     const t0 = clock.nowNs(io);
-    const packed_notes = try lookup.lookup(idx, sc, qids, past, cap, exclude, .{}); // longer matches off, as LLWZ's tests
+    const long: index.Long = .{}; // longer matches off, as LLWZ's tests
+    const packed_notes = if (way.who) |q| try who.lookup(idx, sc, text, a, q, qids, past, cap, exclude, long) else try lookup.lookup(idx, sc, qids, past, cap, exclude, long);
     const chosen = try a.dupe(u32, packed_notes.chosen);
     var shown = try lookup.render(idx, sc, chosen);
     const t1 = clock.nowNs(io);

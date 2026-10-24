@@ -313,7 +313,7 @@ test "a note written over /v1/notes is looked up by the next chat request, and a
             srv.notes = null;
         }
         try srv.notes.?.beginRun(a, .{});
-        const q = try chatBody(a, &.{.{ "user", "What does my zebra eat?" }}, ",\"notes\":true");
+        const q = try chatBody(a, &.{.{ "user", "What does my zebra eat?" }}, ",\"notes\":true,\"notes_lookup\":\"plain\"");
         const before = try ask(srv, &backend, a, q); // the kept scratch is made for the store's notes
         const added = try exchange(srv, "POST", "/v1/notes", "{\"text\":\"My zebra eats hay.\"}");
         defer testing.allocator.free(added.body);
@@ -328,6 +328,7 @@ test "a note written over /v1/notes is looked up by the next chat request, and a
         const after = try ask(srv, &backend, a, q);
         try testing.expect(!hasId(after.reply, id));
         try testing.expectEqualSlices(i64, try idList(a, before.reply), try idList(a, after.reply));
+        try testing.expect(before.reply.get("notes").?.get("ids").?.array.len > 0);
     }
 }
 

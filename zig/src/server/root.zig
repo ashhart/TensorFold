@@ -28,6 +28,7 @@ test {
     _ = @import("notes/past.zig");
     _ = @import("notes/lang.zig");
     _ = @import("notes/retrieve.zig");
+    _ = @import("notes/who.zig");
     _ = @import("notes_route.zig");
     _ = @import("notes_lookup_test.zig");
     _ = @import("vision_markers_test.zig");

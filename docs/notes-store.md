@@ -41,7 +41,19 @@ counts and the times.
 | `notes_past` | Ask about the past (all versions) or not. By default the question's own wording decides. |
 | `notes_cap` | The block's token limit for this request. |
 | `notes_echo` | Also return the block itself in the reply. |
+| `notes_lookup` | `who` (the default) or `plain`. |
 | `notes_language` | `en`, `de` or `fi`: the past cues read from the question. `--notes-language` sets the default. |
+
+The block is looked up who first. The lookup finds the subjects the question
+names: the store's entity phrases, the user, and the entities a current name
+note calls by a word of the question. The user is named by I, me, mine or
+myself, but not by the me of "tell me", "give me" or "show me", or by "my X"
+when X is a word of the user's own notes or of a stored attribute's name and no
+word of an entity's name. The block holds the subjects' notes and the notes of
+the entities those notes name. An excluded note is never shown, and the link it
+states is never followed. A question that names nobody the store knows gets no
+block. `"notes_lookup": "plain"` keeps the earlier lookup (Python's
+`retrieve()`). German and Finnish questions keep it too.
 
 The lookup reads the index that the last write or erase left, under the same
 lock. An erase also drops the lookup's kept scratch memory, which may hold the
