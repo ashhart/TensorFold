@@ -11,8 +11,7 @@ constexpr int kNemoMaxTop = 32;
 
 }  // namespace
 
-// A row's top-k by sigmoid(logit) + bias (the lower id on a tie, a NaN never ahead of a number), weighted by its scores
-// over their sum times `scaling` (unnormalized when !norm); with `items`, one row's plan: an item a slot.
+// A row's top-k by sigmoid(logit) + bias, weighted by scores over their sum times `scaling`; ties take the lower id.
 extern "C" __global__ void __launch_bounds__(32)
     tf_nemo_select(const float* __restrict__ logits, const float* __restrict__ bias, int* __restrict__ pick,
                    float* __restrict__ wts, int* __restrict__ items, int* __restrict__ members, int capacity,
@@ -77,8 +76,7 @@ extern "C" __global__ void __launch_bounds__(32)
 
 constexpr int kNemoRankThreads = 512;
 
-// tf_nemo_select's picks and weights by rank: expert i is the k-th when k experts come before it (a higher value, or an
-// equal one at a lower id), counted by `per` lanes over every per-th expert and summed across them.
+// tf_nemo_select's picks and weights by rank: expert i is the k-th when k experts come before it, by `per` lanes.
 extern "C" __global__ void __launch_bounds__(kNemoRankThreads)
     tf_nemo_select_rank(const float* __restrict__ logits, const float* __restrict__ bias, int* __restrict__ pick,
                         float* __restrict__ wts, int* __restrict__ items, int* __restrict__ members, int capacity,
