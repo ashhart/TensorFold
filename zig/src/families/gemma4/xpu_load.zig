@@ -8,7 +8,7 @@ const Checkpoint = dev.Checkpoint;
 const alloc = dev.alloc;
 
 /// An int4 projection in the GEMM layout (words [K/8, N], fp16 scales and biases [K/64, N]); `wide`: no K slices.
-pub const Proj = struct { w: *anyopaque, s: *anyopaque, bg: *anyopaque, n: u32, k: u32, wide: bool, dense: bool = false };
+pub const Proj = struct { w: *anyopaque, s: *anyopaque, bg: *anyopaque, n: u32, k: u32, wide: bool, dense: bool = false, bits8: bool = false };
 
 pub const Layer = struct {
     in_norm: *anyopaque,
@@ -53,6 +53,25 @@ fn named(comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.allocPrint(alloc, fmt, args) catch @panic("out of memory");
 }
 
+/// 8-bit MLX parts stacked on N, kept as stored (uchar codes [N, K], bf16 scales and biases [N, K / 64]) for g4_w8.
+fn projection8(d: *Dev, c: *const Checkpoint, prefix: []const u8, parts: []const []const u8, n_total: u32, k: u32) !Proj {
+    if (n_total % 16 != 0 or k % 256 != 0) return error.UnexpectedShape;
+    const out: Proj = .{ .w = try d.alloc_(@as(usize, k) * n_total), .s = try d.alloc_(@as(usize, k / 64) * n_total * 2), .bg = try d.alloc_(@as(usize, k / 64) * n_total * 2), .n = n_total, .k = k, .wide = true, .bits8 = true };
+    var at: usize = 0;
+    var sat: usize = 0;
+    for (parts) |p| {
+        const w = try c.get(named("{s}{s}.weight", .{ prefix, p }));
+        const s = try c.get(named("{s}{s}.scales", .{ prefix, p }));
+        const b = try c.get(named("{s}{s}.biases", .{ prefix, p }));
+        try d.copyIn(dev.off(out.w, at), w.bytes);
+        try d.copyIn(dev.off(out.s, sat), s.bytes);
+        try d.copyIn(dev.off(out.bg, sat), b.bytes);
+        at += w.bytes.len;
+        sat += s.bytes.len;
+    }
+    return out;
+}
+
 /// A fused projection from MLX parts stacked on N, repacked on the device through the staging area `stage`.
 pub fn projection(d: *Dev, repack: ze.H, c: *const Checkpoint, prefix: []const u8, parts: []const []const u8, wide: bool, stage: *anyopaque) !Proj {
     var n_total: u32 = 0;
@@ -69,11 +88,15 @@ pub fn projection(d: *Dev, repack: ze.H, c: *const Checkpoint, prefix: []const u
             return .{ .w = p, .s = p, .bg = p, .n = @intCast(w.shape[0]), .k = @intCast(w.shape[1]), .wide = true, .dense = true };
         }
     }
+    var eight = false;
     for (parts) |p| {
         const w = try c.get(named("{s}{s}.weight", .{ prefix, p }));
+        const sc = try c.get(named("{s}{s}.scales", .{ prefix, p }));
         n_total += @intCast(w.shape[0]);
-        k = @intCast(w.shape[1] * 8);
+        k = @intCast(sc.shape[1] * 64);
+        eight = w.shape[1] * 32 == k * 8; // 8-bit codes: K bytes a row
     }
+    if (eight) return projection8(d, c, prefix, parts, n_total, k);
     if (n_total % 256 != 0 or k % 64 != 0) return error.UnexpectedShape;
     const out: Proj = .{ .w = try d.alloc_(@as(usize, k / 8) * n_total * 4), .s = try d.alloc_(@as(usize, k / 64) * n_total * 2), .bg = try d.alloc_(@as(usize, k / 64) * n_total * 2), .n = n_total, .k = k, .wide = wide };
     var n0: u32 = 0;

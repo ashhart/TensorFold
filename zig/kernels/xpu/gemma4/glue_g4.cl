@@ -352,6 +352,59 @@ KERNEL(256) void g4_dense(global const half *A, global const half *W, global hal
   if (m0 + sg < M) OUT[(long)(m0 + sg) * N + n0 + lane] = convert_half_rte(v);
 }
 
+// 8-bit MLX affine weights (groups of 64): OUT = A · Wᵀ fp16; W uchar [N, K], SC / BI bf16 [N, K/64], AHI / ALO sums.
+
+// A group is four DPAS steps on the integer codes (exact in fp16), then acc += total · scale + bias · groupsum.
+
+// The 16 subgroups take groups sg, sg + 16, ... and add totals in subgroup order: a row's bits depend on K only.
+#define W8_KERNEL(NAME, TILES)                                                                                                          \
+  KERNEL(256) void NAME(global const half *A, global const uchar *W, global const ushort *SC, global const ushort *BI, global half *OUT,  \
+                        global const half *AHI, global const half *ALO, int M, int N, int K) {                                           \
+    local float red[16 * 16 * 16];                                                                                                       \
+    const int G = K / 64;                                                                                                                \
+    const int mb = get_group_id(0) * 16 * TILES, n0 = get_group_id(1) * 16, sg = get_sub_group_id(), lane = get_sub_group_local_id();     \
+    const int n = n0 + lane;                                                                                                             \
+    float8 acc[TILES][2];                                                                                                                \
+    for (int u = 0; u < TILES; u++) acc[u][0] = acc[u][1] = 0.0f;                                                                        \
+    global const uchar *wr = W + (long)n * K;                                                                                            \
+    for (int g = sg; g < G; g += 16) {                                                                                                   \
+      float8 t[TILES][2];                                                                                                                \
+      for (int u = 0; u < TILES; u++) t[u][0] = t[u][1] = 0.0f;                                                                          \
+      for (int j = 0; j < 4; j++) {                                                                                                      \
+        const int k = g * 64 + j * 16;                                                                                                   \
+        const int8 bb = as_int8(convert_half16(vload16(0, wr + k)));                                                                     \
+        for (int u = 0; u < TILES; u++) {                                                                                                \
+          short8 a0, a1;                                                                                                                 \
+          intel_sub_group_2d_block_read_16b_8r16x1c((global void *)A, K * 2, M, K * 2, (int2)(k, mb + 16 * u), (private ushort *)&a0);  \
+          intel_sub_group_2d_block_read_16b_8r16x1c((global void *)A, K * 2, M, K * 2, (int2)(k, mb + 16 * u + 8), (private ushort *)&a1); \
+          t[u][0] = intel_sub_group_f16_f16_matrix_mad_k16(a0, bb, t[u][0]);                                                             \
+          t[u][1] = intel_sub_group_f16_f16_matrix_mad_k16(a1, bb, t[u][1]);                                                             \
+        }                                                                                                                                \
+      }                                                                                                                                  \
+      const float s = as_float((uint)SC[(long)n * G + g] << 16), b = as_float((uint)BI[(long)n * G + g] << 16);                          \
+      for (int u = 0; u < TILES; u++)                                                                                                    \
+        for (int r = 0; r < 8; r++) {                                                                                                    \
+          const int ra = mb + 16 * u + r, rb = ra + 8;                                                                                   \
+          const float sa = ra < M ? ((float)AHI[(long)ra * G + g] + (float)ALO[(long)ra * G + g]) * 0.25f : 0.0f;                       \
+          const float sb = rb < M ? ((float)AHI[(long)rb * G + g] + (float)ALO[(long)rb * G + g]) * 0.25f : 0.0f;                       \
+          acc[u][0][r] += t[u][0][r] * s + b * sa;                                                                                       \
+          acc[u][1][r] += t[u][1][r] * s + b * sb;                                                                                       \
+        }                                                                                                                                \
+    }                                                                                                                                    \
+    for (int u = 0; u < TILES; u++) {                                                                                                    \
+      if (u > 0) barrier(CLK_LOCAL_MEM_FENCE);                                                                                           \
+      for (int r = 0; r < 8; r++) {                                                                                                      \
+        red[(sg * 16 + r) * 16 + lane] = acc[u][0][r];                                                                                   \
+        red[(sg * 16 + 8 + r) * 16 + lane] = acc[u][1][r];                                                                               \
+      }                                                                                                                                  \
+      barrier(CLK_LOCAL_MEM_FENCE);                                                                                                      \
+      float v = 0.0f;                                                                                                                    \
+      for (int q = 0; q < 16; q++) v += red[(q * 16 + sg) * 16 + lane];                                                                  \
+      if (mb + 16 * u + sg < M) OUT[(long)(mb + 16 * u + sg) * N + n0 + lane] = convert_half_rte(v);                                     \
+    }                                                                                                                                    \
+  }
+W8_KERNEL(g4_w8, 1)
+
 // ---- Attention on DPAS (bf16 inputs, fp32 sums), 128 keys a tile; same arithmetic for decode and prompt ----
 
 // A group: 16 subgroups, one kv head, 4 tokens; 16 slots (token, head) as DPAS columns; S = K·Qᵀ, P (bf16), O = P·V.

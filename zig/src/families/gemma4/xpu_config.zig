@@ -110,6 +110,11 @@ pub fn admit(gpa: std.mem.Allocator, bytes: []const u8) Error!void {
     while (it.next()) |e| {
         const k = e.key_ptr.*;
         if (std.mem.eql(u8, k, "bits") or std.mem.eql(u8, k, "group_size") or std.mem.eql(u8, k, "mode")) continue;
+        if (e.value_ptr.* == .object) { // an attention projection at 8 bits (an entry of the quantization table)
+            const o = e.value_ptr.object;
+            if (std.mem.indexOf(u8, k, ".self_attn.") == null or (int(o, "bits") orelse 0) != 8 or (int(o, "group_size") orelse 0) != 64 or !str(o.get("mode"), "affine")) return error.UnsupportedGemmaQuantization;
+            continue;
+        }
         if (e.value_ptr.* != .bool or e.value_ptr.bool) return error.UnsupportedGemmaQuantization;
     }
     if ((int(q.object, "bits") orelse 0) != 4 or (int(q.object, "group_size") orelse 0) != 64 or !str(q.object.get("mode"), "affine")) return error.UnsupportedGemmaQuantization;
