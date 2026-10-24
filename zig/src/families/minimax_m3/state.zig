@@ -88,6 +88,19 @@ pub const Cache = struct {
 
 pub const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "iq", "o", "y", "shared", "gate", "act", "egu", "ea", "ey", "logits32", "pick", "wts", "xs", "sums", "offsets", "order", "logits_all", "pm", "pl", "po", "scores", "sel", "bits", "groups", "members" };
 
+/// A prompt scratch's buffers in another's memory, never live at once (the MLPs run after the experts, scores before).
+const shares = .{ .{ "gate", "egu" }, .{ "act", "ea" }, .{ "ey", "xs" }, .{ "scores", "xs" } };
+
+fn shared(comptime f: []const u8) bool {
+    inline for (shares) |pair| if (comptime std.mem.eql(u8, pair[0], f)) return true;
+    return false;
+}
+
+fn index(comptime f: []const u8) usize {
+    inline for (fields, 0..) |g, i| if (comptime std.mem.eql(u8, g, f)) return i;
+    @compileError("no scratch field " ++ f);
+}
+
 /// Bitmap words of a row's selected blocks: the model's whole window (the prompt attention is compiled for it).
 pub fn selWords(c: *const cfg.Config) usize {
     return std.math.divCeil(usize, c.blocks(c.context), 32) catch unreachable;
@@ -108,7 +121,7 @@ fn sizes(c: *const cfg.Config, rows: usize, context: usize) [fields.len]usize {
     const sums = if (prompt) @max(r * widest, slots_ * @max(h, @as(usize, c.moe_intermediate))) / 32 * 4 else 16;
     const nb = c.blocks(context);
     const sel_rows = r * c.kv_heads;
-    return .{
+    var out: [fields.len]usize = .{
         r * 4,                                      r * h * 4,                           r * h * 2,                                               r * c.qkvRows() * 2,          qw,
         (r + 32) * c.index_heads * c.index_dim * 2, qw,                                  r * h * 2,                                               r * h * 2,                    r * 2 * inter * 2,
         r * inter * 2,                              slots_ * 2 * c.moe_intermediate * 2, slots_ * c.moe_intermediate * 2,                         slots_ * h * 2,               r * c.experts * 4,
@@ -116,6 +129,11 @@ fn sizes(c: *const cfg.Config, rows: usize, context: usize) [fields.len]usize {
         slots_ * 4,                                 decode * @as(usize, c.vocab) * 2,    if (prompt) 16 else partials,                            if (prompt) 16 else partials, if (prompt) 16 else partials * c.head_dim,
         sel_rows * nb * 4,                          sel_rows * c.topk_blocks * 4,        if (r > window_rows) sel_rows * selWords(c) * 4 else 16, (1 + 2 * slots_) * 4,         slots_ * 4,
     };
+    if (prompt) inline for (shares) |pair| {
+        out[index(pair[1])] = @max(out[index(pair[1])], out[index(pair[0])]);
+        out[index(pair[0])] = 0;
+    };
+    return out;
 }
 
 /// Bytes a Scratch for `rows` rows over `context` positions holds.
@@ -166,20 +184,28 @@ pub const Scratch = struct {
         @setEvalBranchQuota(10000);
         const sizes_ = sizes(c, rows, context);
         var s: Scratch = undefined;
-        var made: usize = 0;
-        errdefer inline for (fields, 0..) |f, i| if (i < made) @field(s, f).deinit();
-        inline for (fields, 0..) |f, i| {
-            @field(s, f) = try device.buffer(sizes_[i], mtl.ResourceOptions.shared);
-            made += 1;
-        }
         s.rows = rows;
+        var made: [fields.len]bool = @splat(false);
+        errdefer inline for (fields, 0..) |f, i| if (made[i]) @field(s, f).deinit();
+        inline for (fields, 0..) |f, i| if (!(s.sharing() and comptime shared(f))) {
+            @field(s, f) = try device.buffer(sizes_[i], mtl.ResourceOptions.shared);
+            made[i] = true;
+        };
+        if (s.sharing()) inline for (shares) |pair| {
+            @field(s, pair[0]) = @field(s, pair[1]);
+        };
         s.context = context;
         s.taps = null;
         return s;
     }
 
+    /// A prompt scratch: some buffers share another's memory (`shares`).
+    fn sharing(s: *const Scratch) bool {
+        return s.rows > batch_rows;
+    }
+
     pub fn deinit(s: *Scratch) void {
-        inline for (fields) |f| @field(s, f).deinit();
+        inline for (fields) |f| if (!(s.sharing() and comptime shared(f))) @field(s, f).deinit();
         if (s.taps) |x| x.deinit();
     }
 };
