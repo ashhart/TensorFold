@@ -48,6 +48,7 @@ pub const Backend = struct {
     images: ?Images = null, // --vision: the tower's rows for a stream's images; null: an image stream fails
     grammar: grammar.Masks, // structured output: the rounds' mask rows and first rows
     times: RoundTimes = .{}, // FZ_ROUND_TIMES=1: a shared round's phases
+    fence: ?mtl.counters.Fence = null, // orders a round's state copies before its forward in one command buffer
 
     /// Sessions of the given capacities (the first, the engine's own, holds its whole window whatever is given).
     pub fn init(gpa: std.mem.Allocator, e: *Engine, capacities: []const usize) !Backend {
@@ -68,7 +69,7 @@ pub const Backend = struct {
                 return if (std.c.getenv(name)) |v| v[0] == '1' else false;
             }
         };
-        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .times = RoundTimes.init() };
+        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .times = RoundTimes.init(), .fence = if (std.c.getenv("FZ_SETTLE_SYNC") == null) mtl.counters.Fence.init(e.r.device) catch null else null };
     }
 
     /// Times shared-round costs on the last free session, or leaves them unpriced when it cannot fit.
@@ -77,6 +78,7 @@ pub const Backend = struct {
     }
 
     pub fn deinit(b: *Backend) void {
+        if (b.fence) |f| f.deinit();
         while (b.filling.count() > 0) {
             var it = b.filling.keyIterator();
             b.abortPrompt(it.next().?.*);
@@ -103,6 +105,28 @@ pub const Backend = struct {
     fn session(b: *Backend, s: *Stream) !*Session {
         return &b.sessions[b.by.get(s) orelse return error.UnknownStream];
     }
+    /// settle's host half: pending rounds keep their rows; true when a session's state rows still need their copy.
+    fn settleKeep(b: *Backend) !bool {
+        var needed = false;
+        for (b.sessions) |*s| if (s.used) {
+            if (s.round.pending) try s.keep(s.round.rows);
+            needed = needed or s.m.state != 0 or s.m.state_row != 0;
+        };
+        return needed;
+    }
+
+    /// settle's copies at the head of `cb`, fenced before the compute encoder that follows them.
+    fn settleBlit(b: *Backend, cb: mtl.CommandBuffer, fence: mtl.counters.Fence) void {
+        const blit = cb.blit();
+        for (b.sessions) |*s| if (s.used) s.normalizeGpu(blit);
+        fence.updateBlit(blit);
+        blit.end();
+        for (b.sessions) |*s| if (s.used) {
+            s.m.state = 0;
+            s.m.state_row = 0;
+        };
+    }
+
     pub fn settle(b: *Backend) !void {
         var needed = false;
         for (b.sessions) |*s| if (s.used) {
@@ -368,7 +392,10 @@ pub const Backend = struct {
         defer pool.pop();
         const b = self(ptr);
         b.times.begin(false);
-        try b.settle();
+        const fold = if (b.fence != null and !b.sized) try b.settleKeep() else blk: {
+            try b.settle();
+            break :blk false;
+        };
         b.times.settled();
         if (windows.len == 0 or windows.len > fz.MAXR or out.len != windows.len) return error.BadBatch;
         for (windows) |w| try b.makeRoom(w.stream, w.rows());
@@ -410,7 +437,9 @@ pub const Backend = struct {
             fz.vis_prompt.decodePositions(pos8[plan.starts[i]..][0..w.rows()], d);
         }
         const cb = b.e.r.queue.commandBuffer();
+        if (fold) b.settleBlit(cb, b.fence.?);
         b.e.r.enc = cb.compute(.serial);
+        if (fold) b.fence.?.waitCompute(b.e.r.enc);
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);
         try forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null);
         @memcpy(b.e.draw_at.b.slice(u32, fz.MAXR)[0..plan.total], plan.keys[0..plan.total]);
