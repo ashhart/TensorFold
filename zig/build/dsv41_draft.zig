@@ -63,6 +63,7 @@ fn server(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.Compi
     // the server's json and the family's text side share the engine's serving module (one `dsv41_serve`)
     m.addImport("json", engine.import_table.get("dsv41_serve").?.import_table.get("json").?);
     m.addImport("dsv41_serve", engine.import_table.get("dsv41_serve").?);
+    m.addImport("dsv41_chat", engine.import_table.get("dsv41_serve").?);
     const exe = b.addExecutable(.{ .name = name, .root_module = m });
     _ = exe.getEmittedBin();
     return exe;

@@ -40,7 +40,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
     };
     var ids = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Template => return cx.fail(.server, "{s}", .{problem}),
+        error.Template => return cx.fail(.request, "{s}", .{problem}),
     };
     if (!thinking and generation and ids.len > 0) {
         const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);

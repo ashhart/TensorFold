@@ -20,6 +20,12 @@ pub fn addTo(
     if (!m.import_table.contains("living")) m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     const j = json(b, target, optimize);
     m.addImport("json", j);
+    m.addImport("dsv41_chat", b.createModule(.{
+        .root_source_file = b.path("zig/src/families/deepseek_v41/serve/template.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "json", .module = j }},
+    }));
     if (m.import_table.get("engine_api")) |api| if (api.import_table.get("lanes")) |lanes| m.addImport("lanes", lanes);
     // a build whose engines learn hands the server their own living module; the rest read only its families
     if (m.import_table.get("living") == null) m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
@@ -34,4 +40,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const http = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool visibility HTTP:"} }));
     http.has_side_effects = true;
     b.step("test-tool-visibility-http-host", "Rejected tool envelopes survive actual chat JSON and SSE replies").dependOn(&http.step);
+    const deepseek = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"DeepSeek chat:"} }));
+    deepseek.has_side_effects = true;
+    all.dependOn(&deepseek.step);
+    b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
 }

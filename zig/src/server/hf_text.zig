@@ -4,6 +4,8 @@ const tokenizer = @import("tokenizer");
 const template = @import("template");
 const json = @import("json");
 const model_text = @import("model_text.zig");
+const dsv41_chat = @import("dsv41_chat");
+const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -12,6 +14,7 @@ pub const HfText = struct {
     arena: std.heap.ArenaAllocator,
     tok: tokenizer.Tokenizer,
     source: []const u8 = "",
+    native_deepseek: bool = false,
     tool_source: []const u8 = "",
     compiled: ?template.Compiled = null,
     tool_compiled: ?template.Compiled = null,
@@ -42,6 +45,10 @@ pub const HfText = struct {
         const generation = readEosJson(io, a, dir, "generation_config.json", 1 << 20) catch |e| {
             problem.* = try std.fmt.allocPrint(pa, "cannot read generation_config.json EOS ({s})", .{@errorName(e)});
             return error.Load;
+        };
+        if (model_config == .object) if (model_config.object.get("model_type")) |kind| {
+            t.native_deepseek = template_override == null and kind == .string and
+                (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
         };
         if (template_override) |path| {
             t.source = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch |e| {
@@ -298,12 +305,40 @@ pub const HfText = struct {
 
     fn sourceFn(ctx: *anyopaque) []const u8 {
         const t = self(ctx);
+        if (t.native_deepseek and t.compiled == null) return "enable_thinking thinking_mode reasoning_effort [\"none\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"] " ++ dsv41.BOS ++ dsv41.USER ++ dsv41.ASSISTANT ++ dsv41.CALLS_OPEN;
         return if (t.tool_source.len > 0) std.mem.concat(t.arena.allocator(), u8, &.{ t.source, " ", t.tool_source }) catch t.source else t.source;
+    }
+
+    fn renderDeepseek(_: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
+        var opts: dsv41.Options = .{ .thinking = options.enable_thinking, .add_generation_prompt = options.add_generation_prompt };
+        if (options.tools) |tools| {
+            if (tools != .array) {
+                problem.* = "tools must be a list";
+                return error.Template;
+            }
+            opts.tools = tools.array;
+        }
+        if (options.reasoning_effort) |effort| {
+            const budget = dsv41.effortOf(effort) orelse {
+                problem.* = "reasoning_effort must be 1-100 or low / medium / high / max";
+                return error.Template;
+            };
+            opts.thinking = options.enable_thinking and budget != null;
+            opts.budget = budget orelse dsv41.default_budget;
+        }
+        var diag: dsv41.Problem = .{};
+        const out = dsv41.renderProvenance(a, messages, opts, &diag) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            problem.* = diag.message;
+            return error.Template;
+        };
+        return .{ .text = out.text, .spans = out.spans };
     }
 
     fn renderFn(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
         const t = self(ctx);
         const compiled = if (options.tools != null and t.tool_compiled != null) &t.tool_compiled.? else if (t.compiled) |*c| c else {
+            if (t.native_deepseek) return t.renderDeepseek(a, messages, options, problem);
             problem.* = "this checkpoint has no chat template: send a completion prompt instead";
             return error.Template;
         };
@@ -413,4 +448,5 @@ test "explicit template overrides checkpoint templates including tool prompts an
 
 test {
     _ = @import("hf_eos_test.zig");
+    _ = @import("deepseek_chat_test.zig");
 }

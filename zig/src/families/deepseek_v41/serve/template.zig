@@ -90,6 +90,8 @@ const R = struct {
     a: Allocator,
     problem: *Problem,
     out: std.ArrayList(u8) = .empty,
+    spans: std.ArrayList([2]usize) = .empty,
+    track: bool = false,
 
     fn refuse(r: *R, comptime fmt: []const u8, args: anytype) Error {
         r.problem.message = try std.fmt.allocPrint(r.a, fmt, args);
@@ -100,10 +102,20 @@ const R = struct {
         try r.out.appendSlice(r.a, s);
     }
 
+    fn request(r: *R, s: []const u8) Allocator.Error!void {
+        // Images are unsupported here; preserve the established plain-text image escape.
+        const escaped = if (std.mem.indexOf(u8, s, IMAGE) != null) try std.mem.replaceOwned(u8, r.a, s, IMAGE, IMAGE_ESCAPED) else null;
+        defer if (escaped) |bytes| r.a.free(bytes);
+        const plain = escaped orelse s;
+        const start = r.out.items.len;
+        try r.put(plain);
+        if (r.track and plain.len > 0) try r.spans.append(r.a, .{ start, r.out.items.len });
+    }
+
     fn dumps(r: *R, v: Value) Allocator.Error!void {
-        var w: std.Io.Writer.Allocating = .fromArrayList(r.a, &r.out);
-        json.write(&w.writer, v, .{ .ascii = false }) catch return error.OutOfMemory;
-        r.out = w.toArrayList();
+        const bytes = json.stringify(r.a, v, .{ .ascii = false }) catch return error.OutOfMemory;
+        defer r.a.free(bytes);
+        try r.request(bytes);
     }
 };
 
@@ -257,15 +269,15 @@ fn renderCalls(r: *R, calls: []const Value) Error!void {
         if (fnv != .object) return r.refuse("a tool call's function must be an object", .{});
         const name = try qualifiedName(r.a, fnv, fnv.get("namespace")) orelse return r.refuse("a tool call has no name", .{});
         try r.put("<" ++ DSML ++ " invoke name=\"");
-        try r.put(name);
+        try r.request(name);
         try r.put("\">\n");
         const args = try argumentsOf(r.a, fnv.get("arguments"));
         for (args.keys(), args.values(), 0..) |k, v, j| {
             if (j > 0) try r.put("\n");
             try r.put("<" ++ DSML ++ " parameter name=\"");
-            try r.put(k);
+            try r.request(k);
             try r.put(if (v == .string) "\" string=\"true\">" else "\" string=\"false\">");
-            if (v == .string) try r.put(v.string) else try r.dumps(v);
+            if (v == .string) try r.request(v.string) else try r.dumps(v);
             try r.put("</" ++ DSML ++ " parameter>");
         }
         try r.put("\n</" ++ DSML ++ " invoke>");
@@ -363,7 +375,20 @@ fn messagesOf(r: *R, messages: Value, o: Options) Error![]Msg {
 
 /// The prompt text for ``messages`` (a JSON array of OpenAI messages); error.Refused sets ``problem``.
 pub fn render(a: Allocator, messages: Value, o: Options, problem: *Problem) Error![]u8 {
-    var r: R = .{ .a = a, .problem = problem };
+    return (try renderInner(a, messages, o, problem, false)).text;
+}
+
+/// The same prompt with request-derived byte ranges, including tool names, arguments and serialized schemas.
+pub const Rendered = struct { text: []u8, spans: []const [2]usize = &.{} };
+
+pub fn renderProvenance(a: Allocator, messages: Value, o: Options, problem: *Problem) Error!Rendered {
+    return renderInner(a, messages, o, problem, true);
+}
+
+fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, track: bool) Error!Rendered {
+    var r: R = .{ .a = a, .problem = problem, .track = track };
+    errdefer r.out.deinit(a);
+    errdefer r.spans.deinit(a);
     if (o.budget < 1 or o.budget > 100) return r.refuse("reasoning_effort must be 1-100 or low / medium / high / max", .{});
     const msgs = try messagesOf(&r, messages, o);
     const drop = o.drop_thinking and !(msgs.len > 0 and msgs[0].tools);
@@ -385,7 +410,7 @@ pub fn render(a: Allocator, messages: Value, o: Options, problem: *Problem) Erro
         switch (m.role) {
             .system => {
                 if (idx > 0) try r.put(SYSTEM);
-                try r.put(m.content);
+                try r.request(m.content);
                 if (m.tools) {
                     try r.put("\n\n");
                     try renderTools(&r, o.tools);
@@ -400,20 +425,20 @@ pub fn render(a: Allocator, messages: Value, o: Options, problem: *Problem) Erro
                 for (m.blocks.items, 0..) |b, k| {
                     if (k > 0) try r.put("\n\n");
                     if (b.tool) try r.put("<tool_result>");
-                    try r.put(b.text);
+                    try r.request(b.text);
                     if (b.tool) try r.put("</tool_result>");
                 }
             },
             .latest_reminder => {
                 try r.put(REMINDER);
-                try r.put(m.content);
+                try r.request(m.content);
             },
             .assistant => {
                 if (thinking and (!drop or after_last)) {
-                    try r.put(m.reasoning orelse "");
+                    try r.request(m.reasoning orelse "");
                     try r.put(THINK_END);
                 }
-                try r.put(m.content);
+                try r.request(m.content);
                 if (m.calls.len > 0) try renderCalls(&r, m.calls);
                 try r.put(EOS);
             },
@@ -428,7 +453,7 @@ pub fn render(a: Allocator, messages: Value, o: Options, problem: *Problem) Erro
             try r.put(if (open) THINK_OPEN else THINK_END);
         }
     }
-    return escapeImage(a, r.out.items);
+    return .{ .text = r.out.items, .spans = r.spans.items };
 }
 
 /// A typed ``<｜deepseek_image｜>`` as plain text (never the image id).
