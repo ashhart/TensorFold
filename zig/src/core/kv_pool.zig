@@ -54,7 +54,7 @@ pub const Budget = struct {
     snaps: ?usize = null,
     /// Rows one stream holds at most (0: no bound): pages past what the paged streams hold at once stay unmade.
     window: u64 = 0,
-    /// The engine's own rows are pages too: a window of them comes first, so one stream can still reach it.
+    /// The engine's own rows are pages too: a window of them first, then the cache after the windows the room holds.
     engine_paged: bool = false,
 };
 
@@ -78,7 +78,7 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const fit = @min(extra, left / each);
     if (fit < extra and b.fixed) return error.TooMany;
     left -= fit * l.fixed_bytes;
-    const c = split(@min(b.cache, left - fit * (1 + l.runPages()) * l.pageBytes()), l.snap_bytes, b.snaps);
+    const c = split(@min(b.cache, left -| held(l, b, fit)), l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
     const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() else std.math.maxInt(u64);
     return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)) };
@@ -90,7 +90,20 @@ pub fn holds(l: Layout, b: Budget) bool {
     if (b.engine + own > b.room or b.lanes == 0) return false;
     const left = b.room - b.engine - own;
     const each = l.fixed_bytes + (1 + l.runPages()) * l.pageBytes();
-    return left - @min(@as(u64, b.lanes - 1), left / each) * each >= b.cache;
+    const fit = @min(@as(u64, b.lanes - 1), left / each);
+    return left -| (fit * l.fixed_bytes + held(l, b, fit)) >= b.cache;
+}
+
+/// The pages the cache leaves the other streams: a page and a run each, or the windows the room would hold if more.
+fn held(l: Layout, b: Budget, fit: u64) u64 {
+    return @max(fit * (1 + l.runPages()), (windows(l, b) - 1) * l.pages(b.window)) * l.pageBytes();
+}
+
+/// Streams a window each would serve in this room, the engine's own among them (1 unless its rows are pages).
+fn windows(l: Layout, b: Budget) u64 {
+    if (!b.engine_paged or b.window == 0) return 1;
+    const own = ownPages(l, b);
+    return @min(b.lanes, 1 + (b.room - own) / (own + l.fixed_bytes));
 }
 
 /// The bytes of the engine's own window as pages, set aside first when its rows are pages (0 when it has a window).

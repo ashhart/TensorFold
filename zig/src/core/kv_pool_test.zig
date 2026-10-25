@@ -73,10 +73,11 @@ test "the engine's own sequence on pages: a window of them comes first, then the
     const window: u64 = 1_048_576 + 8;
     const floor = glm.pages(window) * glm.pageBytes();
     try expectEqual(@as(usize, 2049), glm.pages(window)); // one request at --context
-    const p = try kv.plan(glm, .{ .room = 40 * g, .engine = 0, .lanes = 4, .cache = 16 * g, .window = window, .engine_paged = true });
+    // a room under two windows' pages: only the engine's own window is set aside before the cache
+    const p = try kv.plan(glm, .{ .room = 24 * g, .engine = 0, .lanes = 4, .cache = 8 * g, .window = window, .engine_paged = true });
     try expectEqual(@as(u32, 4), p.lanes);
-    try expectEqual(16 * g, p.copied);
-    try expectEqual(@as(usize, @intCast((24 * g - 3 * 180 * mib) / glm.pageBytes())), p.pages);
+    try expectEqual(8 * g, p.copied);
+    try expectEqual(@as(usize, @intCast((16 * g - 3 * 180 * mib) / glm.pageBytes())), p.pages);
     // the window's pages before the cache: the cache gets what they and a page a stream leave
     const each = 180 * mib + glm.pageBytes();
     const tight = try kv.plan(glm, .{ .room = floor + 3 * each + g, .engine = 0, .lanes = 4, .cache = 16 * g, .window = window, .engine_paged = true });
@@ -92,11 +93,41 @@ test "the engine's own sequence on pages: a window of them comes first, then the
     const bounded = try kv.plan(glm, .{ .room = 100 * g, .engine = 0, .lanes = 2, .window = 8192 + 8, .engine_paged = true });
     try expectEqual(@as(usize, 2 * 17), bounded.pages);
     // what holds is what plan gives the cache whole, past the window's pages
-    const room = floor + 3 * each + 16 * g;
-    try expect(kv.holds(glm, .{ .room = room, .engine = 0, .lanes = 4, .cache = 16 * g, .window = window, .engine_paged = true }));
-    try expect(!kv.holds(glm, .{ .room = room - 1, .engine = 0, .lanes = 4, .cache = 16 * g, .window = window, .engine_paged = true }));
+    const room = floor + 3 * each + 8 * g;
+    try expect(kv.holds(glm, .{ .room = room, .engine = 0, .lanes = 4, .cache = 8 * g, .window = window, .engine_paged = true }));
+    try expect(!kv.holds(glm, .{ .room = room - 1, .engine = 0, .lanes = 4, .cache = 8 * g, .window = window, .engine_paged = true }));
     try expect(!kv.holds(glm, .{ .room = floor - 1, .engine = 0, .lanes = 1, .window = window, .engine_paged = true }));
-    try expectEqual(16 * g, (try kv.plan(glm, .{ .room = room, .engine = 0, .lanes = 4, .cache = 16 * g, .window = window, .engine_paged = true })).copied);
+    try expectEqual(8 * g, (try kv.plan(glm, .{ .room = room, .engine = 0, .lanes = 4, .cache = 8 * g, .window = window, .engine_paged = true })).copied);
+}
+
+test "the engine's own sequence on pages: the windows the room would hold come before the cache" {
+    const g: u64 = 1 << 30;
+    // GLM-5.3-Flash on CUDA at TP=2 (180 MiB fixed) and TP=3 (131 MiB); the cache asked is the default 16 GiB
+    const tp2: kv.Layout = .{ .fixed_bytes = 180 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const tp3: kv.Layout = .{ .fixed_bytes = 131 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const page = tp2.pageBytes();
+    // a 128k window, four streams: the room holds four windows, so the pool holds their rows and the cache the rest
+    const short: u64 = 131_072 + 8;
+    const room2 = 9 * g + g / 2;
+    const p = try kv.plan(tp2, .{ .room = room2, .engine = 0, .lanes = 4, .cache = 16 * g, .window = short, .engine_paged = true });
+    try expectEqual(@as(u32, 4), p.lanes);
+    try expectEqual(@as(usize, 4 * 257), p.pages);
+    try expectEqual(room2 - 4 * 257 * page - 3 * 180 * mib, p.copied);
+    try expect(kv.holds(tp2, .{ .room = room2, .engine = 0, .lanes = 4, .cache = p.copied, .window = short, .engine_paged = true }));
+    try expect(!kv.holds(tp2, .{ .room = room2, .engine = 0, .lanes = 4, .cache = p.copied + 1, .window = short, .engine_paged = true }));
+    // a 1M window, eight streams, a room for one window: as before, the window's pages, a page a stream, the cache
+    const long: u64 = 1_048_576 + 8;
+    const each = 180 * mib + page;
+    const one = try kv.plan(tp2, .{ .room = 2049 * page + 7 * each + g, .engine = 0, .lanes = 8, .cache = 16 * g, .window = long, .engine_paged = true });
+    try expectEqual(@as(u32, 8), one.lanes);
+    try expectEqual(@as(usize, 2049 + 7), one.pages);
+    try expectEqual(g, one.copied);
+    // TP=3, a 1M window, eight streams: the room holds two windows, so two windows' pages come before the cache
+    const room3 = 38 * g;
+    const t = try kv.plan(tp3, .{ .room = room3, .engine = 0, .lanes = 8, .cache = 16 * g, .window = long, .engine_paged = true });
+    try expectEqual(@as(u32, 8), t.lanes);
+    try expectEqual(@as(usize, 2 * 2049), t.pages);
+    try expectEqual(room3 - 2 * 2049 * page - 7 * 131 * mib, t.copied);
 }
 
 test "a cache holds when the room past the engine and every stream's fixed part and page is at least its bytes" {
