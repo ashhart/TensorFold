@@ -21,10 +21,14 @@ pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: st
     const host_counts = budget.hostCounts(unified, windows);
     const text = if (host_counts) Host.procText(a, io, "/proc/meminfo") else null;
     defer if (text) |bytes| a.free(bytes);
-    const available = budget.counts(host_counts, .{ .total = card.total, .available = card.free }, text) catch {
+    // read after MemAvailable, which the lists drain into: a page moving in between is missed, not counted twice
+    const zones = if (host_counts) Host.procText(a, io, "/proc/zoneinfo") else null;
+    defer if (zones) |bytes| a.free(bytes);
+    const measured = budget.counts(host_counts, .{ .total = card.total, .available = card.free }, text) catch {
         problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
         return null;
     };
+    const available = budget.counting(measured, zones);
     const free = available.available;
     const total = available.total;
     const reserve = budget.reserveBytes(Host.env("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
@@ -35,7 +39,7 @@ pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: st
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{Host.env("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
         return null;
     };
-    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
+    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified, .parked = free - measured.available };
 }
 
 /// `F`'s weight bytes on this rank: tensors or files, a split's share, a tower beside; null if tensors are unreadable.
@@ -49,6 +53,12 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
     };
     const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
     return text + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
+}
+
+/// Logs, from 0.25 GiB, the free pages on the per-CPU lists that a pool's reading counted.
+pub fn noteParked(p: budget.Pool, what: []const u8) void {
+    const line = "{s} counts the {d:.2} GiB free on the per-CPU page lists beyond their resting level (MemAvailable does not)";
+    if (p.parked >= 1 << 28) std.log.info(line, .{ what, toGib(p.parked) });
 }
 
 pub fn room(comptime F: type, ptr: *anyopaque, local: u64) !u64 {
