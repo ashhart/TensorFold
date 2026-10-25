@@ -179,10 +179,20 @@ __device__ __forceinline__ void tgateup(const half* __restrict__ Xg, const half*
                 float uu = uv[j] * HAD_SCALE * __half2float(svh_u[(size_t)e * N + n + j]);
                 if (act_mode == 0) { gg = bf16r(gg); uu = bf16r(uu); }
                 if (limit > 0) { gg = upTo(gg, limit); uu = within(uu, limit); }
-                float act = gg / (1.f + expf(-gg));
-                if (act_mode == 0) act = bf16r(act);
-                act *= uu;
-                if (act_mode == 0) act = bf16r(act);
+                float act;
+                if (act_mode == 2) {
+                    // the minimax M3.1 OAI swiglu contract at the fork's quantization points — the
+                    // same shape as the decode epilogue's mode 2: fp16 gate/up rows, then a fp16
+                    // activation row before the down-side rotation
+                    gg = __half2float(__float2half_rn(gg));
+                    uu = __half2float(__float2half_rn(uu));
+                    act = __half2float(__float2half_rn((uu + 1.0f) * (gg / (1.0f + __expf(-1.702f * gg)))));
+                } else {
+                    act = gg / (1.f + expf(-gg));
+                    if (act_mode == 0) act = bf16r(act);
+                    act *= uu;
+                    if (act_mode == 0) act = bf16r(act);
+                }
                 v[j] = act * __half2float(suh_d[(size_t)e * N + n + j]);
             }
             fwht128(v, lane);

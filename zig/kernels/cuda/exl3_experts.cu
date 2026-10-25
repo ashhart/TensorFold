@@ -309,6 +309,16 @@ extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
             float uu = bf16r(uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]));
             if (a.limit > 0) { gg = upTo(gg, a.limit); uu = within(uu, a.limit); }
             act = bf16r(bf16r(gg / (1.f + expf(-gg))) * uu);
+        } else if (a.act_mode == 2) {
+            // the minimax M3.1 OAI swiglu contract at the fork's quantization points — the dense
+            // path's shape: the gate/up rows are fp16 (the fork's f16 GEMM outputs), the sigmoid
+            // form is the tf_m3_swigluoai contract (gate clipped from above only, up clamped both
+            // ways and +1, sigmoid alpha = 1.702), and the activation is an fp16 row BEFORE this
+            // epilogue's down-side rotation (the fork's down kernel rotates an fp16 z in fp32)
+            float gg = __half2float(__float2half_rn(gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j])));
+            float uu = __half2float(__float2half_rn(uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j])));
+            if (a.limit > 0) { gg = upTo(gg, a.limit); uu = within(uu, a.limit); }
+            act = __half2float(__float2half_rn((uu + 1.0f) * (gg / (1.0f + __expf(-1.702f * gg)))));
         } else {
             float gg = gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j]);
             float uu = uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]);

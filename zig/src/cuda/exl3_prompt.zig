@@ -10,7 +10,7 @@ const Stream = @import("stream.zig").Stream;
 pub const tile = 64;
 pub const Scratch = struct { xg: u64, xu: u64, xd: u64, y: u64, rows: usize, slots: usize };
 pub fn eligible(l: ex.Layer) bool {
-    return l.codebook == .mcg and l.uniform_k2 == 8 and l.gu_stride == 0 and l.dims > 0 and l.width > 0 and l.dims % 256 == 0 and l.width % 128 == 0 and (l.act_mode == 0 or l.act_mode == 1);
+    return l.codebook == .mcg and l.uniform_k2 == 8 and l.gu_stride == 0 and l.dims > 0 and l.width > 0 and l.dims % 256 == 0 and l.width % 128 == 0 and (l.act_mode == 0 or l.act_mode == 1 or l.act_mode == 2);
 }
 fn mul(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch error.Exl3Shape;

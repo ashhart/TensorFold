@@ -2,7 +2,8 @@
 //! running the TP2 rank split shard.zig draws. The quantized projections run through the mainline
 //! EXL3 machinery the family already receipts — `cuda.exl3.Dense` decode-row GEMMs (mul1's odd
 //! half steps and the head's 8 halves included) and the grouped routed experts
-//! `cuda.exl3_experts.Experts` (the Stage-5 upload's fp32 epilogue, limit 7, act_mode 1); the MSA
+//! `cuda.exl3_experts.Experts` (the Stage-5 upload's fp32 epilogue, limit 7, act_mode 2 — the
+//! OAI swiglu contract tf_m3_swigluoai's shape; the mode-1 silu path cannot express it); the MSA
 //! indexer and the block-sparse attention run through the parity-proven `tf_m3_scores/topk/
 //! decode/decode_combine` launches (`cuda_sparse.zig`); the activation rows run through
 //! `tf_m3_swigluoai` (`cuda_serve.zig`). The between-the-kernels glue — the gemma norm rows, the
@@ -379,7 +380,9 @@ pub const Engine = struct {
             if (ep.*) |*lp| {
                 if (width == 0) return error.BadExperts;
                 if (dno < r.first or dno >= r.first + run_count) continue;
-                const routed = try exl3_upload.layer(&up, a, dims, width, .mul1, c.swiglu_limit, 1, lp.gate.items, lp.up.items, lp.down.items);
+                // act_mode 2: the OAI swiglu contract (tf_m3_swigluoai's) — the generic epilogue's
+                // mode-1 silu path cannot express the alpha 1.702 sigmoid form
+                const routed = try exl3_upload.layer(&up, a, dims, width, .mul1, c.swiglu_limit, 2, lp.gate.items, lp.up.items, lp.down.items);
                 const lidx: usize = dno - r.first;
                 const sg = s_gate[lidx] orelse return error.MissingTensor;
                 const su = s_up[lidx] orelse return error.MissingTensor;
