@@ -152,6 +152,7 @@ The claim stands only when `compare` says `MEASURED FASTER`, which means B beat 
 A script reads `"result": "IMPROVED"` from `compare --json`, not the exit code.
 `MEASURED SLOWER`, `INCONCLUSIVE` or an error leaves no speed claim, and the pull request can still be opened.
 Attach every attempt, failed ones included; a later attempt starts again from the `mkdir` line with the next number.
+On a checkpoint whose count prompt ends before 400 tokens, `portable-v1` cannot finish its captures; rerun all three with `--workload baseline-v2`, which fixes exactly 400 output tokens, and note the workload with the receipt.
 New code pushed after measuring needs a new receipt.
 The Grill measures request throughput on its count prompt, prompt processing included, so its receipt sits beside the decode speed from `tools/bench_openai.py` and does not replace it.
 Drafting stays on as shipped, and the count prompt favors it, so a drafting claim also keeps the prose and code numbers from `tools/bench_openai.py`.
