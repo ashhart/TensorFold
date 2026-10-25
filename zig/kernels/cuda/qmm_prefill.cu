@@ -153,5 +153,5 @@ template __global__ void tf_qmm_prefill::prefill_kernel<64, 128, 128, 2, 4, 3, f
     int, int, int);
 // The same tile on 2x2 warps, two stages (Tile<64, 128, 128, 2, 2, 2>): Qwen3.5's prompt chunks on an RTX 5090.
 template __global__ void tf_qmm_prefill::prefill_kernel<64, 128, 128, 2, 2, 2, false>(
-    const __nv_bfloat16*, const uint32_t*, const __nv_bfloat16*, const __nv_bfloat16*, void*, int, int, int,
+    const __nv_bfloat16* __restrict__, const uint32_t* __restrict__, const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, void* __restrict__, int, int, int,
     int, int, int);

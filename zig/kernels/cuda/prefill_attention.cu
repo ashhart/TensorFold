@@ -303,7 +303,9 @@ template __global__ void tf_prefill_attention::full_kernel<72, 8, 8>(const __nv_
 template __global__ void tf_prefill_attention::vision_kernel<80, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
     float);
 // Head dim 256, eight warps, two query heads a block, two staging slots (Qwen3.8-27B's prompt chunks, bf16 and fp8).
-template __global__ void tf_prefill_attention::hpattn_kernel<256, 8, 2, 2>(const __nv_bfloat16*, const __nv_bfloat16*,
-    const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float, int);
-template __global__ void tf_prefill_attention::hpattn8_kernel<256, 8, 2, 2>(const __nv_bfloat16*, const uint8_t*,
-    const uint8_t*, const float*, const float*, __nv_bfloat16*, int, int, int, int, int, float, int);
+template __global__ void tf_prefill_attention::hpattn_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
+    int, float, int);
+template __global__ void tf_prefill_attention::hpattn8_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+    const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
+    __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);

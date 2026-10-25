@@ -145,6 +145,6 @@ __global__ void __launch_bounds__(2 * ROWS) chain_kernel(
 } // namespace tf_gdn_prefill
 
 // Qwen3.5's prompt chunks: bf16 keys and strengths, 64 value rows a block (48 heads take 96 blocks).
-template __global__ void tf_gdn_prefill::chain_kernel<__nv_bfloat16, __nv_bfloat16, 64, 32>(const __nv_bfloat16*,
-    const __nv_bfloat16*, const __nv_bfloat16*, const float*, const __nv_bfloat16*, const float*, float*, __nv_bfloat16*,
-    int, int, int);
+template __global__ void tf_gdn_prefill::chain_kernel<__nv_bfloat16, __nv_bfloat16, 64, 32>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, const float* __restrict__,
+    const __nv_bfloat16* __restrict__, const float*, float*, __nv_bfloat16* __restrict__, int, int, int);
