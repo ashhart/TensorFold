@@ -532,6 +532,25 @@ pub const Runner = struct {
         return r;
     }
 
+    /// Device bytes one position of one slot takes in K/V: every attention layer, and the MTP layer when loaded.
+    pub fn kvBytesPerToken(r: *const Runner) usize {
+        const s = r.z.s;
+        var layers: usize = if (r.mtp != null) 1 else 0;
+        for (r.model.layers) |l| layers += @intFromBool(l.attn);
+        return layers * 2 * s.kv_heads * @as(usize, if (r.cap > 0) 256 + 4 else 256 * 2);
+    }
+
+    /// Device bytes one slot takes whatever its context: each GDN layer's states, the verify stash and the convolution.
+    pub fn slotStateBytes(r: *const Runner) usize {
+        const z = r.z;
+        const rec = @as(usize, z.s.gdn_v_heads) * 128 * 128 * 4;
+        var n: usize = 0;
+        for (r.model.layers) |l| {
+            if (!l.attn) n += 2 * rec + StashAt.of(z).end + 2 * 3 * @as(usize, z.nconv) * 2;
+        }
+        return n;
+    }
+
     pub fn deinit(r: *Runner) void {
         r.d.deinit();
         r.ckpt.deinit();

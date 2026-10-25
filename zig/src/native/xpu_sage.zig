@@ -505,6 +505,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "XPU_SPEC: 1 to {d} MTP drafts a round, not {d}", .{ sage.WINDOW - 1, h.back.depth });
         return null;
     }
+    if (!try fitsCard(a, r, slots, context, problem)) {
+        if (h.back.vision) |v| v.deinit(gpa);
+        h.back.deinit();
+        gpa.destroy(h);
+        r.deinit();
+        return null;
+    }
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), if (r.mtp != null) h.back.depth + 1 else 2, if (r.mtp != null) h.back.depth else 0);
     errdefer h.cfg.deinit(gpa);
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
@@ -516,6 +523,39 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (r.mtp != null) h.host.lone = .{ .ctx = &h.back, .run = Slots.loneFn };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Served.close, .ctx = h };
+}
+
+/// Card bytes kept free of the engine's buffers.
+const card_reserve: u64 = 64 << 20;
+/// Bytes Dev.allocated counts that the card does not hold once every slot is in use. Measured with drm-total-vram0
+/// after 8 streams at once: 34.60 GB counted and 34.12 GB held (--parallel 8 --context 133000), 32.91 and 32.42 GB
+/// (the same with the MTP head at --context 100000). Taken a little under the 0.49 GB seen.
+const counted_not_held: u64 = 450_000_000;
+
+/// Whether the card holds what the load allocated. A K/V page is written only when its slot first reaches it, so
+/// an overcommit loses the device then, not at load. Else `problem` names the largest context for these slots and
+/// the most slots for this context.
+fn fitsCard(a: Allocator, r: *sage.Runner, slots: u32, context: u32, problem: *[]const u8) !bool {
+    const mem = r.d.g.memory() catch |err| {
+        std.log.warn("XPU: no Sysman memory size ({s}), so the load does not check that the card holds every slot's K/V", .{@errorName(err)});
+        return true;
+    };
+    const room = mem.size -| card_reserve;
+    const need: u64 = r.d.allocated -| counted_not_held;
+    std.log.info("XPU: the load holds {d:.2} GB of the card's {d:.2} GB ({d:.2} GB kept free)", .{ gb(need), gb(mem.size), gb(card_reserve) });
+    if (need <= room) return true;
+    const per: u64 = r.kvBytesPerToken();
+    const state: u64 = r.slotStateBytes();
+    const fixed = need -| slots * (state + per * context); // weights, activations, the tower: what fewer slots leave
+    const left = room -| fixed;
+    const max_context = (left / slots -| state) / per;
+    const max_slots = left / (state + per * context);
+    problem.* = try std.fmt.allocPrint(a, "the XPU Sage engine needs {d:.2} GB for {d} stream(s) of {d} tokens{s}, and the card has {d:.2} GB with {d:.2} GB kept free. It fits {d} stream(s) of at most {d} tokens, or at most {d} stream(s) of {d} tokens (--parallel, --context)", .{ gb(need), slots, context, if (r.mtp != null) " with the MTP head" else "", gb(mem.size), gb(card_reserve), slots, max_context, max_slots, context });
+    return false;
+}
+
+fn gb(b: u64) f64 {
+    return @as(f64, @floatFromInt(b)) / 1e9;
 }
 
 fn off(p: *anyopaque, bytes: usize) *anyopaque {
