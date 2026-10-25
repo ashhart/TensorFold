@@ -84,8 +84,10 @@ pub const Store = enum {
     param,
     /// norms: bf16 in the pack (fp32 in the forward), fp32 accepted
     norm,
-    /// fp32 only (sinks, hc_*, router bias)
+    /// fp32 only (sinks, hc_*)
     f32,
+    /// router bias: fp32, or fp16 / bf16 widened exactly to fp32 (some packs store the MTP biases in fp16)
+    bias,
     /// fp16 or bf16, rounded to bf16 once (router gate, indexer weights_proj, Markov heads)
     half,
 
@@ -94,6 +96,7 @@ pub const Store = enum {
             .param => d == .bf16 or d == .f32 or d == .f16,
             .norm => d == .bf16 or d == .f32,
             .f32 => d == .f32,
+            .bias => d == .f32 or d == .f16 or d == .bf16,
             .half => d == .bf16 or d == .f16,
         };
     }
@@ -148,7 +151,7 @@ pub fn blockNatives(c: *const Config, layer: u32) !Natives {
     if (c.isBackbone(layer) and c.isIndexSource(layer)) try n.push(.m("attn.indexer.weights_proj.weight", .half, c.index_heads, c.hidden));
     const ex = c.expertsOf(layer);
     try n.push(.m("ffn.gate.weight", .half, ex.count, c.hidden));
-    try n.push(.v("ffn.gate.bias", .f32, ex.count));
+    try n.push(.v("ffn.gate.bias", .bias, ex.count));
     if (c.isEngram(layer)) {
         try n.push(.m("engram.q_weight", .param, hc, c.hidden));
         try n.push(.m("engram.k_weight", .param, hc, c.hidden));
@@ -235,4 +238,5 @@ test "natives and the ignore list" {
     try testing.expect(ignored("vision.blocks.3.mlp.w1.weight", Has{}));
     try testing.expect(ignored("layers.9.ffn.gate.bias_vl", Has{}));
     try testing.expect(Store.half.accepts(.f16) and !Store.f32.accepts(.bf16));
+    try testing.expect(Store.bias.accepts(.f16) and Store.bias.accepts(.bf16) and !Store.f32.accepts(.f16));
 }
