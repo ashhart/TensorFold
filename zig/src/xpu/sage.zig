@@ -37,6 +37,11 @@ pub const WINDOW = 16;
 pub const CHUNK = 512;
 /// Streams one runner holds (a stepMulti row each): K/V caches, GDN and convolution states of their own.
 pub const MAX_SLOTS = 8;
+
+/// A prompt piece's images (promptFeed): its rows' M-RoPE positions (t, h, w), and tower rows over placeholders.
+pub const Feed = struct { rope: ?[]const [3]i32 = null, rows: []const Rows = &.{} };
+/// Rows [at, at + n) of a piece from `src`: fp32 [n, hidden] on the device (vision.Tower.encode's output).
+pub const Rows = struct { at: u32, n: u32, src: *anyopaque };
 /// Query heads an attn_decode subgroup holds at Sage's shape (sage_config.sage_defines: Q27_QPG).
 const QPG = 4;
 
@@ -127,6 +132,7 @@ pub const Acts = struct {
     // MoE
     mt: *anyopaque, // u64 [layers, WINDOW, 8]: stepMulti's per-row state table (the 27B's acts.mt)
     mpos: *anyopaque, // i32 [WINDOW]: stepMulti's row positions
+    rope: *anyopaque, // i32 [CHUNK, 3]: a forward's M-RoPE positions (t, h, w) when its slots hold images
     mlog: *anyopaque, // fp32 [CHUNK, experts + 1]
     mids: *anyopaque, // u32 [CHUNK, top_k]
     mwts: *anyopaque, // fp32 [CHUNK, top_k]
@@ -173,6 +179,7 @@ pub const Acts = struct {
             .chain = try d.upload(std.mem.sliceAsBytes(&fwd.chainTable())),
             .mt = try d.alloc_(@as(usize, s.layers) * w * 8 * 8),
             .mpos = try d.alloc_(w * 4),
+            .rope = try d.alloc_(c * 3 * 4),
             .mlog = try d.alloc_(c * (s.experts + 1) * 4),
             .mids = try d.alloc_(c * s.top_k * 4),
             .mwts = try d.alloc_(c * s.top_k * 4),
@@ -346,6 +353,8 @@ pub const Runner = struct {
     spos: [MAX_SLOTS]u32 = @splat(0),
     slast: [MAX_SLOTS]i32 = @splat(-1),
     mt_host: []u64 = &.{},
+    shift: [MAX_SLOTS]i32 = @splat(0), // M-RoPE: a row past a slot's images turns at its index plus this
+    rope_host: [][3]i32 = &.{}, // a forward's rows' positions on their way to acts.rope
 
     /// `slots` streams (1 to MAX_SLOTS) of `ctx` positions each.
     pub fn init(dir: []const u8, ctx: u32, slots: u32) !*Runner {
@@ -377,6 +386,7 @@ pub const Runner = struct {
             _ = malloc_trim(0);
         }
         r.mt_host = try alloc.alloc(u64, z.s.layers * WINDOW * 8);
+        r.rope_host = try alloc.alloc([3]i32, CHUNK);
         q.prof.on = std.c.getenv("XPU_PROFILE") != null; // not during the load
         r.acts = try Acts.init(d, z, ctx);
         for (0..slots) |i| {
@@ -392,6 +402,7 @@ pub const Runner = struct {
         r.ckpt.deinit();
         alloc.free(r.model.layers);
         alloc.free(r.mt_host);
+        alloc.free(r.rope_host);
         alloc.destroy(r);
     }
 
@@ -462,6 +473,12 @@ pub const Runner = struct {
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mpos, &pos, T * 4, null, 0, null));
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, toks.ptr, T * 4, null, 0, null));
         errdefer d.settle();
+        var shifted = false;
+        for (slots, 0..) |slot, t| {
+            r.rope_host[t] = @splat(pos[t] + r.shift[slot]);
+            shifted = shifted or r.shift[slot] != 0;
+        }
+        const rope = if (shifted) try r.ropeRows(T) else null;
         try r.embed(T);
         const sp: i32 = @intCast(span(max_pos + 1));
         const ns: u32 = (max_pos + 1 + @as(u32, @intCast(sp)) - 1) / @as(u32, @intCast(sp));
@@ -470,7 +487,7 @@ pub const Runner = struct {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
             if (l.attn) {
-                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, zero, EPS, nul, mt, a.mpos, zero, r.cap });
+                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, zero, EPS, nul, mt, a.mpos, zero, r.cap, rope });
                 try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, zero, @as(i32, @intCast(ns)), sp, @as(f32, 1.0 / 16.0), mt, a.mpos, r.cap });
                 try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, zero, @as(i32, @intCast(ns)), sp, a.mpos });
                 try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
@@ -522,6 +539,7 @@ pub const Runner = struct {
         };
         r.pos = 0;
         r.last = -1;
+        r.shift[r.cur] = 0;
     }
 
     /// Feeds tokens in chunks of CHUNK rows (a tail of WINDOW rows or less as one decode forward); `last` afterwards
@@ -531,9 +549,16 @@ pub const Runner = struct {
         while (at < ids.len) {
             const n = @min(CHUNK, ids.len - at);
             const tail = at + n == ids.len;
-            r.last = if (n > WINDOW) try r.chunk(ids[at..][0..n], tail) else try r.forward(ids[at..][0..n], tail);
+            r.last = if (n > WINDOW) try r.chunk(ids[at..][0..n], tail, .{}) else try r.forward(ids[at..][0..n], tail, .{});
             at += n;
         }
+    }
+
+    /// One prompt piece of at most CHUNK rows with images: `f.rope` holds every row's M-RoPE positions and `f.rows`
+    /// the tower rows that replace placeholder embeddings. `last` afterwards is the greedy token after the piece.
+    pub fn promptFeed(r: *Runner, ids: []const i32, f: Feed) !void {
+        if (ids.len > CHUNK or (f.rope != null and f.rope.?.len != ids.len)) return error.BadWindow;
+        r.last = if (ids.len > WINDOW) try r.chunk(ids, true, f) else try r.forward(ids, true, f);
     }
 
     /// The fp16 logits of the last forward's final row (`out.len` is the vocabulary size).
@@ -545,11 +570,11 @@ pub const Runner = struct {
 
     /// One serial decode token.
     pub fn step(r: *Runner, token: i32) !void {
-        r.last = try r.forward(&.{token}, true);
+        r.last = try r.forward(&.{token}, true, .{});
     }
 
     /// One forward over at most WINDOW rows at r.pos; the last row's greedy token when `want`, else -1.
-    fn forward(r: *Runner, ids: []const i32, want: bool) !i32 {
+    fn forward(r: *Runner, ids: []const i32, want: bool, f: Feed) !i32 {
         if (ids.len == 0 or ids.len > WINDOW) return error.BadWindow;
         if (r.pos + ids.len > r.ctx) return error.ContextFull;
         const d = &r.d;
@@ -566,14 +591,16 @@ pub const Runner = struct {
         const zero: i32 = 0;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle();
+        const rope = try r.feedRope(f, T);
         try r.embed(T);
+        try r.inject(f);
         for (m.layers, 0..) |*l, i| {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
             if (l.attn) {
                 const sp = span(r.pos + T);
                 const ns: u32 = (r.pos + T + sp - 1) / sp;
-                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p0, EPS, nul, nul, nul, zero, r.cap });
+                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p0, EPS, nul, nul, nul, zero, r.cap, rope });
                 try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, p0, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), @as(f32, 1.0 / 16.0), nul, nul, r.cap });
                 try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, p0, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), nul });
                 try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
@@ -599,7 +626,7 @@ pub const Runner = struct {
 
     /// One prompt chunk of WINDOW < rows <= CHUNK at r.pos: norms, GEMMs, attention (attn_prompt) and the MoE over all
     /// rows, the GDN in windows of WINDOW rows.
-    fn chunk(r: *Runner, ids: []const i32, want: bool) !i32 {
+    fn chunk(r: *Runner, ids: []const i32, want: bool, f: Feed) !i32 {
         if (ids.len <= WINDOW or ids.len > CHUNK) return error.BadWindow;
         if (r.pos + ids.len > r.ctx) return error.ContextFull;
         const d = &r.d;
@@ -614,13 +641,15 @@ pub const Runner = struct {
         const zero: i32 = 0;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle();
+        const rope = try r.feedRope(f, T);
         try r.embed(T);
+        try r.inject(f);
         for (m.layers, 0..) |*l, i| {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
             if (l.attn) {
                 const p0: i32 = @intCast(r.pos);
-                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p0, EPS, nul, nul, nul, zero, r.cap });
+                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p0, EPS, nul, nul, nul, zero, r.cap, rope });
                 if (r.cap > 0)
                     try d.launch(d.k.attn_prompt8, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p0, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0), r.cap })
                 else
@@ -665,6 +694,31 @@ pub const Runner = struct {
         try d.launch(r.mk.sums, .{ .x = ff / 64, .y = pairs + T }, .{ a.mact, a.mas, ff });
         try d.launch(r.mk.tile_down, .{ .x = s.hidden / 32, .y = tb }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mas, a.morder, a.mtiles, a.mnt, a.my, s.hidden, ff, s.experts });
         try d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
+    }
+
+    /// The M-RoPE positions of a forward's T rows at r.pos: the feed's, else the slot's shift past its images, else
+    /// none (every axis at the row's index, the kernels' own rotary).
+    fn feedRope(r: *Runner, f: Feed, T: u32) !?*anyopaque {
+        if (f.rope) |rows| {
+            @memcpy(r.rope_host[0..T], rows);
+            return r.ropeRows(T);
+        }
+        const k = r.shift[r.cur];
+        if (k == 0) return null;
+        for (r.rope_host[0..T], 0..) |*p, t| p.* = @splat(@as(i32, @intCast(r.pos + t)) + k);
+        return r.ropeRows(T);
+    }
+
+    /// rope_host's first T rows to acts.rope.
+    fn ropeRows(r: *Runner, T: u32) !*anyopaque {
+        try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, r.acts.rope, r.rope_host.ptr, T * 3 * 4, null, 0, null));
+        return r.acts.rope;
+    }
+
+    /// The feed's tower rows over their placeholders' embeddings in acts.x.
+    fn inject(r: *Runner, f: Feed) !void {
+        const D: usize = r.z.s.hidden;
+        for (f.rows) |x| try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, off(r.acts.x, x.at * D * 4), x.src, x.n * D * 4, null, 0, null));
     }
 
     /// After a forward of `T` rows: the greedy token of the last row when `want`, else -1 (after a sync).
