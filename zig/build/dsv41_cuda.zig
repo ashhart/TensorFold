@@ -25,13 +25,17 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8,
     dk.addOptions("dsv41_kernel_options", opts);
     const empty = b.addWriteFiles().add("compile-only-dsv41.fatbin", "SYNTHETIC-COMPILE-ONLY");
     for (units.units ++ units.optional) |k| dk.addAnonymousImport(b.fmt("dsv41_fatbin_{s}", .{k.name}), .{ .root_source_file = empty });
-    const m = shared.module(b, target, file);
+    return assemble(b, target, .Debug, file, cuda, dk);
+}
+/// The family's root `file` over the runtime `cuda` and kernel module `dk`, every family module at `optimize`.
+pub fn assemble(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, file: []const u8, cuda: *std.Build.Module, dk: *std.Build.Module) *std.Build.Module {
+    const m = shared.moduleAt(b, target, optimize, file);
     m.addImport("cuda", cuda);
     m.addImport("dsv41_kernels", dk);
-    const tp = @import("tp.zig").module(b, target, .Debug, cuda);
+    const tp = @import("tp.zig").module(b, target, optimize, cuda);
     m.addImport("tp", tp);
-    m.addImport("kv", @import("dsv41_state.zig").kvModule(b, target, cuda, tp));
-    @import("dsv41_draft.zig").addImports(b, m, target);
+    m.addImport("kv", @import("dsv41_state.zig").kvModuleAt(b, target, optimize, cuda, tp));
+    @import("dsv41_draft.zig").addImportsAt(b, m, target, optimize);
     return m;
 }
 pub fn steps(b: *std.Build) void {

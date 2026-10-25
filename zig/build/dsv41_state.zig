@@ -1,7 +1,10 @@
 const std = @import("std");
 pub fn kvModule(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, tp: *std.Build.Module) *std.Build.Module {
-    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/kv/kv.zig"), .target = target, .optimize = .Debug, .link_libc = true });
-    m.addImport("sessions", @import("sessions.zig").module(b, target, .Debug));
+    return kvModuleAt(b, target, .Debug, cuda, tp);
+}
+pub fn kvModuleAt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, tp: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/kv/kv.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("sessions", @import("sessions.zig").module(b, target, optimize));
     m.addImport("cuda", cuda);
     m.addImport("tp", tp);
     return m;
