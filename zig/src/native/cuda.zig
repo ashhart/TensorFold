@@ -13,6 +13,7 @@ const family_options = @import("cuda_options.zig");
 pub const follow = @import("cuda_follow.zig").follow;
 const lfm2 = @import("lfm2.zig");
 const glm = @import("glm_cuda");
+const minimax_m3_vl = @import("minimax_m3_vl_cuda");
 const qwen35 = @import("qwen35");
 const kolibri1 = @import("kolibri1");
 const Allocator = std.mem.Allocator;
@@ -25,7 +26,7 @@ const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native };
+const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, minimax_m3_vl.native };
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
@@ -183,6 +184,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             return null;
         }
         return lfm2.open(a, gpa, io, o, problem);
+    }
+    if (std.mem.eql(u8, o.model_type, minimax_m3_vl.native.model_type)) {
+        return openWith(minimax_m3_vl, a, gpa, io, o, problem);
     }
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
@@ -490,6 +494,9 @@ test "every registered family and d1's decision engine are listed for capabiliti
     try std.testing.expectEqual(@as(usize, registry.len + 2), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
     try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
+    try std.testing.expectEqualStrings("fish_omni", families[registry.len + 1].model_type);
+    // minimax_m3_vl dispatches through the registry itself (stage 2), not the metadata table anymore
+    try std.testing.expectEqualStrings("minimax_m3_vl", families[registry.len - 1].model_type);
 }
 
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {

@@ -18,6 +18,7 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "gemma4_unified", .title = "Gemma 4 12B" },
     .{ .model_type = "step5_vl", .title = "Step-5-Preview" },
     .{ .model_type = "lfm2_moe", .title = "LFM2.5-24B-A2B" },
+    .{ .model_type = "minimax_m3_vl", .title = "MiniMax-M3.1-Flash VL" },
 };
 
 /// The family that serves `model_type` from the engine registry, or null when Zig cannot serve it (the 0.6 line may).
@@ -141,6 +142,55 @@ pub fn quantization(a: Allocator, io: std.Io, dir: []const u8) ?struct { bits: u
     return .{ .bits = @intCast(bits), .group = @intCast(group) };
 }
 
+/// An EXL3 checkpoint's format word, read from the quantization metadata itself (the
+/// glm/cuda_exl3.zig block() reading): config.json's inline `quantization_config` at the top
+/// level or inside `text_config`, else the standalone quantization_config.json — the second
+/// file an EXL3 pack ships when config.json's inline copy is absent. Returns "exl3/3.06bpw"
+/// (the metadata's avg_bits) or a plain "exl3" without it; null when the checkpoint carries no
+/// EXL3 metadata at all (MLX affine and other quantizations are read elsewhere).
+pub fn exl3Format(a: Allocator, io: std.Io, dir: []const u8) ?[]const u8 {
+    if (@import("checkpoint_config").optional(a, io, dir)) |text| {
+        if (std.json.parseFromSlice(std.json.Value, a, text, .{})) |inline_parsed| {
+            defer inline_parsed.deinit();
+            if (block(inline_parsed.value)) |q| return fmtExl3(a, q.object);
+            return inlineFallback(a, io, dir); // no EXL3 inline: maybe the standalone file has it
+        } else |_| return inlineFallback(a, io, dir); // a broken config.json: the standalone file still speaks
+    }
+    return inlineFallback(a, io, dir); // no config.json body: the standalone file is the metadata
+}
+
+/// The standalone quantization_config.json's EXL3 metadata, when config.json's inline copy did not name it.
+fn inlineFallback(a: Allocator, io: std.Io, dir: []const u8) ?[]const u8 {
+    const path = std.fs.path.join(a, &.{ dir, "quantization_config.json" }) catch return null;
+    const text = readSmall(a, io, path) orelse return null;
+    var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return null;
+    defer parsed.deinit();
+    const q = if (parsed.value == .object) parsed.value.object.get("quantization_config") orelse parsed.value else return null;
+    if (q != .object) return null;
+    return fmtExl3(a, q.object);
+}
+
+/// config.json's quantization_config: the top level's, else text_config's (a VL wrapper's own block).
+fn block(root: std.json.Value) ?std.json.Value {
+    if (root != .object) return null;
+    if (root.object.get("quantization_config")) |q| if (q == .object) return q;
+    if (root.object.get("text_config")) |t| if (t == .object) {
+        if (t.object.get("quantization_config")) |q| if (q == .object) return q;
+    };
+    return null;
+}
+
+fn fmtExl3(a: Allocator, q: std.json.ObjectMap) ?[]const u8 {
+    const m = q.get("quant_method") orelse return null;
+    if (m != .string or !std.mem.eql(u8, m.string, "exl3")) return null;
+    const avg = q.get("avg_bits") orelse return "exl3";
+    return switch (avg) {
+        .float => std.fmt.allocPrint(a, "exl3/{d}bpw", .{avg.float}) catch "exl3",
+        .integer => std.fmt.allocPrint(a, "exl3/{d}bpw", .{@as(f64, @floatFromInt(avg.integer))}) catch "exl3",
+        else => "exl3",
+    };
+}
+
 /// Bytes of the files under `dir`, symlinks followed, hidden ones left out (a download's .cache, --slide's snapshot).
 pub fn sizeOf(a: Allocator, io: std.Io, dir: []const u8) !u64 {
     var total: u64 = 0;
@@ -200,6 +250,34 @@ test "family detection matches the registry and refuses unknown types" {
     try std.testing.expectEqualStrings("Gemma 4 12B", family("gemma4_unified").?.title);
     try std.testing.expect(family("gemma3n") == null);
     try std.testing.expect(family("unknown") == null);
+}
+
+// The EXL3 format word an `info` line reports: inline at the top level, inline inside
+// text_config, or the standalone quantization_config.json when config.json carries none;
+// MLX `quantization` and absent metadata read null. Verbatim from the staged pack's bytes.
+test "exl3 format reads the quantization metadata wherever the pack carries it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    for ([_][]const u8{ "a", "b", "c", "e", "f" }) |name| try cwd.createDirPath(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{name}));
+    // inline top level, the pack's own avg_bits (the staged pack's shape)
+    try cwd.writeFile(io, .{ .sub_path = ".zig-cache/tmp/a/config.json", .data = "{\"quantization_config\":{\"quant_method\":\"exl3\",\"codebook\":\"mul1\",\"avg_bits\":3.06}}" });
+    try std.testing.expectEqualStrings("exl3/3.06bpw", exl3Format(a, io, ".zig-cache/tmp/a").?);
+    // inline inside text_config
+    try cwd.writeFile(io, .{ .sub_path = ".zig-cache/tmp/b/config.json", .data = "{\"text_config\":{\"quantization_config\":{\"quant_method\":\"exl3\",\"avg_bits\":3.5}}}" });
+    try std.testing.expectEqualStrings("exl3/3.5bpw", exl3Format(a, io, ".zig-cache/tmp/b").?);
+    // no inline copy: the standalone quantization_config.json speaks, exactly Mia-AiLab's
+    try cwd.writeFile(io, .{ .sub_path = ".zig-cache/tmp/c/config.json", .data = "{\"model_type\":\"minimax_m3_vl\"}" });
+    try cwd.writeFile(io, .{ .sub_path = ".zig-cache/tmp/c/quantization_config.json", .data = "{\"quant_method\":\"exl3\",\"version\":\"1.6.1\",\"head_bits\":8,\"out_scales\":\"always\",\"codebook\":\"mul1\",\"avg_bits\":3.06}" });
+    try std.testing.expectEqualStrings("exl3/3.06bpw", exl3Format(a, io, ".zig-cache/tmp/c").?);
+    // no EXL3 at all
+    try cwd.writeFile(io, .{ .sub_path = ".zig-cache/tmp/e/config.json", .data = "{\"quantization\":{\"bits\":4,\"group_size\":32}}" });
+    try std.testing.expect(exl3Format(a, io, ".zig-cache/tmp/e") == null);
+    // other quant methods read null (an eaq or modelopt checkpoint is not this format)
+    try cwd.writeFile(io, .{ .sub_path = ".zig-cache/tmp/f/config.json", .data = "{\"quantization_config\":{\"quant_method\":\"eaq\"}}" });
+    try std.testing.expect(exl3Format(a, io, ".zig-cache/tmp/f") == null);
 }
 
 test "cache layout helpers read a synthetic cache" {

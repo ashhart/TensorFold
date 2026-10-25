@@ -41,6 +41,8 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
     try out.print("family: {s} ({s})\n", .{ family.title, family.model_type });
     if (hub.quantization(a, io, dir)) |q| {
         try out.print("format: {d}-bit, group {d}\n", .{ q.bits, q.group });
+    } else if (hub.exl3Format(a, io, dir)) |f| {
+        try out.print("format: {s}\n", .{f}); // EXL3's own metadata speaks: the pack's packed words
     } else {
         try out.print("format: full precision\n", .{});
     }

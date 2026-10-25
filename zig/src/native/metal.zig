@@ -43,6 +43,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "gemma4", .formats = gemma4_widths },
     .{ .model_type = "gemma4_unified", .formats = gemma4_widths },
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
+    .{ .model_type = "minimax_m3_vl", .formats = &.{"exl3"} }, // stage-1 admission: no Metal reader yet
 };
 
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.

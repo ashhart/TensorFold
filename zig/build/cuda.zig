@@ -117,6 +117,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
     const glm_cuda = glmCuda(b, target, optimize, cuda, mods.core, mods.lanes, mods.heat);
     runner.addImport("glm_cuda", glm_cuda);
+    runner.addImport("minimax_m3_vl_cuda", minimaxM3Native(b, target, optimize, cuda, mods.core, mods.lanes));
     runner.addImport("kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes));
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
@@ -155,6 +156,15 @@ fn glmCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     m.addImport("canon", canon);
     m.addImport("lanes", lanes);
     m.addImport("heat", heat);
+    return m;
+}
+
+/// MiniMax-M3.1-Flash's family module: the openWith API, the pack's admission and the MSA contracts.
+fn minimaxM3Native(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3_vl/cuda_native.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("cuda", cuda);
+    m.addImport("core", core);
+    m.addImport("lanes", lanes);
     return m;
 }
 
@@ -205,6 +215,7 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "core", .module = core },
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision) },
             .{ .name = "glm_cuda", .module = glmCuda(b, target, optimize, cuda, core, lanes, heat) },
+            .{ .name = "minimax_m3_vl_cuda", .module = minimaxM3Native(b, target, optimize, cuda, core, lanes) },
             .{ .name = "qwen35", .module = qwen35 },
             .{ .name = "kolibri1", .module = kolibri1Module(b, target, optimize, cuda, core, lanes) },
         },
@@ -483,7 +494,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         @import("cortheon_fuzz.zig").add(b, host, native_modules.api, mods.tokenizer, template);
     }
     // the tokenizer's own tests (memo, steps, regex, unicode) run here: no other test binary reaches them
-    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, native_modules.api, native, minimaxM3Native(b, host, .debug, cuda, mods.core, mods.lanes), stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const selected = b.option([]const u8, "modelopt-host-filter", "One portable ModelOpt regression") orelse "modelopt host:";
     const run = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{selected} }));
     run.has_side_effects = true;

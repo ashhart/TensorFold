@@ -57,6 +57,7 @@ pub const moe_glue: []const u8 = if (available) &Blob("fatbin_moe_glue").bytes e
 pub const dense_rows: []const u8 = if (available) &Blob("fatbin_dense_rows").bytes else &.{};
 pub const modelopt_pack: []const u8 = if (available) &Blob("fatbin_modelopt_pack").bytes else &.{};
 pub const glm_glue: []const u8 = if (available) &Blob("fatbin_glm_glue").bytes else &.{};
+pub const minimax_m3: []const u8 = if (available) &Blob("fatbin_minimax_m3").bytes else &.{}; // the M3.1 MSA indexer
 pub const glm_ops: []const u8 = if (available) &Blob("fatbin_glm_ops").bytes else &.{};
 pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
 pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
