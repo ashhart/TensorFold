@@ -413,6 +413,7 @@ pub fn run(gpu: check.Gpu) !void {
     for (&q35s) |*x| try kernels.append(a, x.kernel());
     var window_fns = try cuda.window_attention.WindowAttention.load(gpu.d);
     defer window_fns.unload();
+    try window_fns.loadPages(gpu.d);
     var windows: [window_k.cfgs.len]window_k.Window = undefined;
     for (window_k.cfgs, &windows) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns };
     defer for (&windows) |*x| x.deinit();

@@ -16,7 +16,7 @@ const wa = cuda.window_attention;
 const WA = wa.WindowAttention;
 
 /// A planted fault, from contract_controls.cu (window_rows.cuh's Fault), or the served bf16-P kernel (p16).
-pub const Ctl = enum { none, edge, rescale, trunc, prompt_edge, last, p16, rescale512 };
+pub const Ctl = enum { none, edge, rescale, trunc, prompt_edge, last, p16, rescale512, swap, stale };
 
 /// A call's fixed heads, window and ring, and which kernels it runs.
 pub const Cfg = struct {
@@ -31,6 +31,8 @@ pub const Cfg = struct {
     p32: bool = false,
     image: bool = false,
     ctl: Ctl = .none,
+    /// Positions a page, when the caches are pages (tf_wrows_*_pg after tf_wrows_put placed them in a shuffled arena).
+    pages: usize = 0,
     served: []const c.Shape,
 };
 
@@ -66,7 +68,20 @@ pub const cfgs = [_]Cfg{
 } ++ ratio(12, 4) ++ ratio(20, 4) ++ ratio(32, 4) ++ ratio(32, 2) ++ [_]Cfg{
     .{ .name = "control: decode merge without each chunk's exp(m_c - M), 20/4 heads (GQA 5)", .h = 20, .hk = 4, .ctl = .rescale, .served = decodeAt(20) },
     .{ .name = "control: P32 prompt rows whose window starts a key early, 20/4 heads (GQA 5)", .h = 20, .hk = 4, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = promptAt(20) },
-} ++ @import("window_rows_shapes.zig").cases(Cfg);
+} ++ @import("window_rows_shapes.zig").cases(Cfg) ++ paged;
+
+const paged_decode = &[_]c.Shape{ .{ .rows = 4, .n = 16, .k = 32768 }, .{ .rows = 16, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 257 } };
+const paged_prompt = &[_]c.Shape{ .{ .rows = 256, .n = 16, .k = 0 }, .{ .rows = 128, .n = 16, .k = 4096 }, .{ .rows = 32, .n = 16, .k = 1000 } };
+
+/// Dory's full-attention layers (16 query heads over 4 of 256, no window): caches in pages of 256 or 1,024 positions.
+const paged = [_]Cfg{
+    .{ .name = "cuda window_pages decode tf_wrows_part_256_pg + tf_wrows_merge_256_pg, 16/4 heads, no window, pages of 256", .h = 16, .hk = 4, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .served = paged_decode },
+    .{ .name = "cuda window_pages decode tf_wrows_part_256_pg + tf_wrows_merge_256_pg, 16/4 heads, no window, pages of 1024", .h = 16, .hk = 4, .win = 0, .ring = 32768, .streams = 2, .pages = 1024, .served = paged_decode },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_256_pg (P as bf16), 16/4 heads, no window, pages of 256", .h = 16, .hk = 4, .win = 0, .ring = 0, .prompt = true, .pages = 256, .served = paged_prompt },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_256_pg (P as bf16), 16/4 heads, no window, pages of 1024", .h = 16, .hk = 4, .win = 0, .ring = 0, .prompt = true, .pages = 1024, .served = paged_prompt },
+    .{ .name = "control: paged decode whose first two streams' tables are swapped", .h = 16, .hk = 4, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .ctl = .swap, .served = paged_decode },
+    .{ .name = "control: paged prompt rows whose first page id is a later page's", .h = 16, .hk = 4, .win = 0, .ring = 0, .prompt = true, .pages = 256, .ctl = .stale, .served = paged_prompt },
+};
 
 fn decodeAt(comptime h: usize) []const c.Shape {
     return &[_]c.Shape{ .{ .rows = 16, .n = h, .k = 3000 }, .{ .rows = 1, .n = h, .k = 1100 } };
@@ -89,7 +104,7 @@ fn ratio(comptime h: usize, comptime hk: usize) [3]Cfg {
 /// The control kernel's symbol in contract_controls.cu, if it has one.
 pub fn symbol(ctl: Ctl) ?[:0]const u8 {
     return switch (ctl) {
-        .none, .p16 => null,
+        .none, .p16, .swap, .stale => null,
         .edge => "tf_ctl_wrows_part_edge",
         .rescale => "tf_ctl_wrows_merge_rescale",
         .rescale512 => "tf_ctl_wrows_merge_rescale_512",
@@ -121,6 +136,9 @@ pub const Rows = struct {
     call: wc.Call = undefined,
     fns: WA.Wide = undefined,
     dev: [6]u64 = @splat(0),
+    table: u64 = 0, // paged: the attention kernels' table (stream rows of `per` page ids)
+    per: usize = 0,
+    placed: ?[]const u8 = null, // paged: what tf_wrows_put got wrong, if anything
     scratch: u64 = 0,
     out: u64 = 0,
     half: []f64 = &.{},
@@ -139,7 +157,49 @@ pub const Rows = struct {
 
     fn win(self: *const Rows) wa.Window {
         const f = self.f;
-        return .{ .h = f.h, .hk = f.hk, .d = f.d, .win = f.win, .ring = f.ring, .scale = 1, .p32 = f.p32 and f.ctl != .p16 };
+        const pg: ?wa.Pages = if (f.pages > 0) .{ .table = self.table, .page_elems = 2 * f.pages * f.hk * f.d, .tokens = f.pages, .stride = self.per } else null;
+        return .{ .h = f.h, .hk = f.hk, .d = f.d, .win = f.win, .ring = f.ring, .scale = 1, .p32 = f.p32 and f.ctl != .p16, .pg = pg };
+    }
+
+    /// Paged: tf_wrows_put places the caches in a shuffled arena (bit for bit, or `placed` says); the kernels read it.
+    fn place(self: *Rows, a: std.mem.Allocator, rng: std.Random, kc: []const u16, vc: []const u16) !void {
+        const f = self.f;
+        const row = f.hk * f.d;
+        const n = kc.len / row;
+        const span = if (f.prompt) n else f.ring;
+        const streams = if (f.prompt) 1 else f.streams;
+        self.per = (span + f.pages - 1) / f.pages;
+        const ids = try a.alloc(i32, streams * self.per);
+        for (ids, 0..) |*x, i| x.* = @intCast(i);
+        rng.shuffle(i32, ids);
+        const pos = try a.alloc(i32, n);
+        const slot = try a.alloc(i32, n);
+        const elems = 2 * f.pages * row;
+        const want = try a.alloc(u16, ids.len * elems);
+        @memset(want, 0);
+        for (pos, slot, 0..) |*p, *sl, i| {
+            p.* = @intCast(i % span);
+            sl.* = @intCast(i / span);
+            const at = @as(usize, @intCast(ids[@as(usize, @intCast(sl.*)) * self.per + i % span / f.pages])) * elems + i % span % f.pages * row;
+            @memcpy(want[at..][0..row], kc[i * row ..][0..row]);
+            @memcpy(want[at + f.pages * row ..][0..row], vc[i * row ..][0..row]);
+        }
+        const arena = try self.rig.scratch(want.len * 2);
+        self.table = try self.rig.input(std.mem.sliceAsBytes(ids));
+        const dpos = try self.rig.input(std.mem.sliceAsBytes(pos));
+        const dslot = try self.rig.input(std.mem.sliceAsBytes(slot));
+        const vcache = arena + f.pages * row * 2;
+        try self.g.put(self.rig.s, self.dev[1], self.dev[2], arena, vcache, dpos, dslot, self.win(), n);
+        const got = try self.rig.bytes(arena, want.len * 2);
+        self.placed = if (std.mem.eql(u8, got, std.mem.sliceAsBytes(want))) null else "tf_wrows_put placed rows differently from the table's pages";
+        self.dev[1] = arena;
+        self.dev[2] = vcache;
+        switch (f.ctl) { // the attention reads a table that is not the one the rows were placed by
+            .swap => for (0..self.per) |i| std.mem.swap(i32, &ids[i], &ids[self.per + i]),
+            .stale => ids[0] = ids[1],
+            else => return,
+        }
+        self.table = try self.rig.input(std.mem.sliceAsBytes(ids));
     }
 
     /// The kernels a run launches: the served ones, one of them swapped for its control.
@@ -201,6 +261,8 @@ pub const Rows = struct {
             .stress => try self.stress(rng, kc, vc),
         }
         for ([_][]const u8{ std.mem.sliceAsBytes(q), std.mem.sliceAsBytes(kc), std.mem.sliceAsBytes(vc), std.mem.sliceAsBytes(pos), std.mem.sliceAsBytes(slot), std.mem.sliceAsBytes(hi) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
+        self.placed = null;
+        if (f.pages > 0) try self.place(a, rng, kc, vc);
         self.scratch = if (f.prompt) 0 else try self.rig.scratch(WA.scratchBytes(self.win(), n));
         self.out = try self.rig.output(n * f.h * f.d * 2);
         self.fns = try self.kernels();
@@ -273,6 +335,7 @@ pub const Rows = struct {
 
     /// Every output in its float64 range (gates 1 and 3); at gate 1 some, not all, of float64's outputs non-finite.
     pub fn check(self: *Rows, at: g.Gate) !?[]const u8 {
+        if (self.placed) |why_| return why_;
         const a = self.arena.allocator();
         const out = try a.alloc(u16, self.count());
         @memcpy(std.mem.sliceAsBytes(out), try self.rig.outputBytes());
@@ -328,7 +391,7 @@ fn mirrored(rng: std.Random, out: []f32) void {
 
 test "every control names a kernel of contract_controls.cu, or runs the served bf16-P kernel" {
     for (cfgs) |f| if (f.ctl != .none) {
-        try std.testing.expect(symbol(f.ctl) != null or f.ctl == .p16);
+        try std.testing.expect(symbol(f.ctl) != null or f.ctl == .p16 or f.pages > 0);
         try std.testing.expect(std.mem.startsWith(u8, f.name, "control: "));
     };
 }
