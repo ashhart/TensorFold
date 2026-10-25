@@ -252,6 +252,10 @@ const Model = struct {
     }
 };
 
+/// The drain's poll slice, and how long it waits with no bytes and no end before it fails the request.
+const drain_slice_ms = 50;
+const drain_idle_ms = 10_000;
+
 /// One POST /v1/slide/learn through the router, its whole event stream read.
 fn learnOne(srv: *Server, text: []const u8) !void {
     var pair: [2]platform.posix.socket_t = undefined;
@@ -279,9 +283,23 @@ fn learnOne(srv: *Server, text: []const u8) !void {
         wire: [128 * 1024]u8 = undefined,
         used: usize = 0,
         bad: bool = false,
+        // macOS can leave a read() blocked on a socketpair after its peer's shutdown: poll in slices, which rechecks
         fn run(d: *@This(), fd: platform.posix.socket_t) void {
             var buf: [4096]u8 = undefined;
+            var idle_ms: i32 = 0;
             while (true) {
+                var fds = [_]platform.posix.pollfd{.{ .fd = fd, .events = platform.posix.POLL.IN, .revents = 0 }};
+                const ready = platform.posix.poll(&fds, drain_slice_ms) catch {
+                    d.bad = true;
+                    return;
+                };
+                if (ready == 0) {
+                    idle_ms += drain_slice_ms;
+                    if (idle_ms < drain_idle_ms) continue;
+                    d.bad = true; // no bytes and no end for drain_idle_ms: fail rather than wait forever
+                    return;
+                }
+                idle_ms = 0;
                 const n = platform.posix.system.read(fd, &buf, buf.len);
                 if (n == 0) return;
                 if (n < 0) {
@@ -301,9 +319,11 @@ fn learnOne(srv: *Server, text: []const u8) !void {
     var drained: Drain = .{};
     const drain = try std.Thread.spawn(.{}, Drain.run, .{ &drained, pair[0] });
     routes.dispatch(srv, &conn, a);
-    _ = platform.posix.system.shutdown(pair[1], platform.posix.SHUT.WR);
-    _ = platform.posix.system.shutdown(pair[0], platform.posix.SHUT.WR);
+    const ended = platform.posix.system.shutdown(pair[1], platform.posix.SHUT.WR);
+    const closed = platform.posix.system.shutdown(pair[0], platform.posix.SHUT.WR);
     drain.join();
+    try testing.expectEqual(@as(@TypeOf(ended), 0), ended);
+    try testing.expectEqual(@as(@TypeOf(closed), 0), closed);
     try testing.expect(!drained.bad);
     try testing.expect(std.mem.indexOf(u8, drained.wire[0..drained.used], "200 OK") != null);
     try testing.expect(std.mem.indexOf(u8, drained.wire[0..drained.used], "data: [DONE]") != null);
