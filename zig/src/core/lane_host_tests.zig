@@ -14,6 +14,7 @@ test {
 
 test {
     _ = @import("lane_host_score_exit_test.zig");
+    _ = @import("lane_host_grammar_test.zig");
 }
 
 test {

@@ -26,7 +26,7 @@ pub fn whole(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, gone: a
 pub fn stream(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, first: chat.Prepared, sink: chat.Sink, gone: anytype) chat.Failure!chat.Reply {
     var prepared = first;
     if (t.research) {
-        chat.release(srv, prepared.preparing);
+        srv.release(prepared.preparing, prepared.request);
         try research.run(t, srv, cx, input, sink, gone);
         prepared = try prepare(srv, cx, input.*, gone);
     }

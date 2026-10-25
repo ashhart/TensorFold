@@ -322,3 +322,43 @@ test "qwen27 tool calls: required and named calls use the masked lane fake throu
         }
     };
 }
+
+// The server's compile is the engine's too: a request keeps the handle until release, and frees each one once.
+test "a request's compiled grammar is kept for the engine, freed once at release, and an overridden one at once" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    const fake = lanes.grammar_fake;
+    const old = fake.install();
+    defer _ = lanes.grammar.swapLibrary(old);
+    var compiler = fake.compiler();
+    var text: Text = .{};
+    var stub: Stub = .{};
+    const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    var cx: errors.Cx = .{ .a = g };
+    const offered = (try value(g, specs)).array;
+    var one: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+    try srv.checkFeatures(&cx, try value(g, "{\"response_format\":{\"type\":\"json_object\"}}"), false, false, &.{1}, &.{}, &one);
+    try std.testing.expect(one.structure.?.compiled != null);
+    try std.testing.expectEqual(@as(usize, 1), fake.compiles);
+    try std.testing.expectEqual(@as(usize, 0), fake.frees);
+    srv.release(false, one);
+    try std.testing.expectEqual(@as(usize, 1), fake.frees);
+    // a required tool's grammar, then response_format's: the first is freed when the second replaces it
+    var both: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+    const fields = try value(g, "{\"tool_call_required\":true,\"response_format\":{\"type\":\"json_object\"}}");
+    try srv.checkFeatures(&cx, fields, true, false, &.{1}, offered, &both);
+    try std.testing.expectEqual(@as(usize, 3), fake.compiles);
+    try std.testing.expectEqual(@as(usize, 2), fake.frees);
+    srv.release(false, both);
+    try std.testing.expectEqual(@as(usize, 3), fake.frees);
+    // a refused second grammar frees the first
+    var refused: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+    const bad = try value(g, "{\"tool_call_required\":true,\"guided_regex\":\"bad\"}");
+    try std.testing.expectError(error.Refused, srv.checkFeatures(&cx, bad, true, false, &.{1}, offered, &refused));
+    try std.testing.expectEqual(@as(usize, 4), fake.compiles);
+    try std.testing.expectEqual(@as(usize, 4), fake.frees);
+}

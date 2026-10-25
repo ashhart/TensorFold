@@ -392,6 +392,7 @@ pub const LaneHost = struct {
     /// A reply's grammar from the server's compiler (Info.structures engines get requests that carry one).
     pub fn constraint(h: *LaneHost, st: api.Structure) !*lanes.grammar.Constraint {
         const c = st.compiler orelse return error.NoGrammarCompiler;
+        if (st.compiled) |g| return c.constrained(h.gpa, g, st.after); // the server's compile, without the lock
         return c.constraint(h.gpa, h.io, @fromBackingInt(@intCast(@backingInt(st.kind))), st.text, st.after);
     }
 

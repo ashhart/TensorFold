@@ -520,7 +520,7 @@ const Run = struct {
             break :blk ready.prepared;
         };
         var handed = false; // generate gives the preparing count back from here on
-        defer if (!handed) chat.release(r.srv, prepared.preparing);
+        defer if (!handed) r.srv.release(prepared.preparing, prepared.request);
         var sink_state: StreamSink = .{ .run = r, .tools = tools, .prompt_len = prepared.prompt_len };
         handed = true;
         const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin };

@@ -50,6 +50,17 @@ fn load(io: std.Io, a: Allocator) ?Fns {
     return f;
 }
 
+/// libtfgrammar's entry points, for a test's stand-in library (lanes/grammar_fake.zig).
+pub const Library = Fns;
+
+/// Tests only: swap in a stand-in library and get back the one it replaces.
+pub fn swapLibrary(f: ?Fns) ?Fns {
+    comptime std.debug.assert(builtin.is_test);
+    const old = lib;
+    lib = f;
+    return old;
+}
+
 /// The library's file name, for the refusal when it cannot be loaded.
 pub const library = if (builtin.os.tag == .macos) "libtfgrammar.dylib" else "libtfgrammar.so";
 
@@ -89,6 +100,11 @@ pub const Compiler = struct {
         var err: [512]u8 = undefined;
         const g = try c.compile(io, kind, text, &err);
         defer g.free();
+        return c.constrained(gpa, g, after);
+    }
+
+    /// A fresh reply's grammar from one compiled already: no compile and no lock; `g` stays the caller's.
+    pub fn constrained(c: *const Compiler, gpa: Allocator, g: Compiled, after: ?u32) !*Constraint {
         const m = try g.matcher();
         errdefer m.free();
         const out = try gpa.create(Constraint);
@@ -481,4 +497,5 @@ test "a chain grows past its last kept row with the grammar's own drafts, never 
 
 test {
     _ = @import("grammar_error_test.zig");
+    _ = @import("grammar_handoff_test.zig");
 }

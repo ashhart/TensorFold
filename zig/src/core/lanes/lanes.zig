@@ -34,6 +34,7 @@ pub const drafted = @import("drafted.zig");
 pub const recorder = @import("recorder.zig");
 pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
+pub const grammar_fake = @import("grammar_fake.zig"); // a stand-in libtfgrammar for tests
 
 pub const Engine = engine.Engine;
 pub const Config = config.Config;
