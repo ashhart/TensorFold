@@ -228,7 +228,7 @@ pub fn main(init: std.process.Init) !void {
         defer r.deinit();
         return loop(r);
     }
-    const steps: usize = if (argv.len > 3) try std.fmt.parseInt(usize, argv[3], 10) else 32;
+    const steps: usize = if (argv.len > 3 and !std.mem.eql(u8, argv[3], "--nll")) try std.fmt.parseInt(usize, argv[3], 10) else 32;
     var ids: std.ArrayList(i32) = .empty;
     const path = try std.fmt.allocPrintSentinel(alloc, "{s}", .{argv[2]}, 0);
     const fd = open(path.ptr, 0);
@@ -241,6 +241,7 @@ pub fn main(init: std.process.Init) !void {
     const r = try sage.Runner.init(argv[1], ctx, slots);
     defer r.deinit();
     std.debug.print("loaded in {d:.1} s\n", .{now() - t_load});
+    if (argv.len > 3 and std.mem.eql(u8, argv[3], "--nll")) return nll(r, ids.items);
     if (slots > 1) return multiCheck(r, ids.items, steps);
     const t0 = now();
     try r.prompt(ids.items);
@@ -300,4 +301,30 @@ fn multiCheck(r: *sage.Runner, ids: []const i32, steps: usize) !void {
         }
         std.debug.print("slot {d}: {d}/{d} tokens as alone, first difference at {d}\n", .{ i, same, steps, first_diff });
     }
+}
+
+/// `--nll`: the mean negative log likelihood of each id given the ones before it, one decode step a token, from the
+/// fp16 logits: a check that two checkpoints of one model predict text alike.
+fn nll(r: *sage.Runner, ids: []const i32) !void {
+    const logits = try alloc.alloc(f16, r.z.s.vocab);
+    defer alloc.free(logits);
+    var sum: f64 = 0;
+    var top1: usize = 0;
+    try r.prompt(ids[0..1]);
+    for (1..ids.len) |i| {
+        if (i > 1) try r.step(ids[i - 1]);
+        try r.logits(logits);
+        var mx: f64 = -std.math.inf(f64);
+        var best: usize = 0;
+        for (logits, 0..) |l, j| if (@as(f64, l) > mx) {
+            mx = l;
+            best = j;
+        };
+        var z: f64 = 0;
+        for (logits) |l| z += @exp(@as(f64, l) - mx);
+        sum += mx + @log(z) - @as(f64, logits[@intCast(ids[i])]);
+        top1 += @intFromBool(best == @as(usize, @intCast(ids[i])));
+    }
+    const n: f64 = @floatFromInt(ids.len - 1);
+    std.debug.print("nll: {d} tokens, mean {d:.4}, top-1 {d:.3}\n", .{ ids.len - 1, sum / n, @as(f64, @floatFromInt(top1)) / n });
 }
