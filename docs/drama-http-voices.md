@@ -2,7 +2,7 @@
 
 `tensorfold-native serve MODEL --voices DIR --default-voice NAME` loads the catalog at startup. Without these flags the built-in voice and speech request lowering are unchanged. `--default-voice` defaults to `default`; a configured name must exist. A missing, malformed or unattested catalog file refuses startup rather than silently substituting a voice. Restart to reload files.
 
-`POST /v1/audio/speech` selects a catalog entry with `voice` (or the existing `speaker` alias). An absent, empty or case-insensitive `default` selects the configured default. Other names match exactly. Request-supplied reference arrays and paths remain unsupported. `GET /v1/voices` returns `{"voices": ["default", ...]}` with catalog names sorted, without transcripts, codes or attestation notes. Non-speech models return the existing unknown-route response.
+`POST /v1/audio/speech` selects a catalog entry with `voice` (or the existing `speaker` alias). An absent, empty or case-insensitive `default` selects the configured default. Other names match exactly. Request-supplied reference arrays and paths remain unsupported. `GET /v1/voices` returns `{"voices": ["default", ...], "details": [{"id": NAME, "description": TEXT}, ...]}` with catalog names sorted, without transcripts, codes or attestation notes; `description` is the file's optional one-line description (at most 200 bytes), else empty. Non-speech models return the existing unknown-route response.
 
 Each regular `NAME.json` file contains:
 
@@ -10,6 +10,7 @@ Each regular `NAME.json` file contains:
 {
   "format": "drama3-http-voice/1",
   "source": {"kind": "synthetic", "note": "Generated integer codes for a parser example, not recorded speech."},
+  "description": "Warm, even narrator.",
   "references": [{"text": "A small cloud passes.", "codes": [[7,1,2,3,4,5,6,7,8,9]]}]
 }
 ```
