@@ -28,6 +28,7 @@ pub const Slots = struct {
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     vision: ?*Vision = null, // --vision
+    depth: u32 = 1, // MTP drafts a lone round (XPU_SPEC; 1 keeps 80 % of drafts on chat text)
 
     fn of(ptr: *anyopaque) *Slots {
         return @ptrCast(@alignCast(ptr));
@@ -248,6 +249,42 @@ pub const Slots = struct {
         return error.NoDraftHead;
     }
 
+    /// A lone greedy stream on MTP drafts (Runner.specStep, `depth` a round) until it ends (false) or another stream
+    /// arrives (true). The lane core then decodes it beside the others, one row a round, with no drafts.
+    fn loneFn(ptr: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
+        const b = of(ptr);
+        const r = b.r;
+        try prefillFn(ptr, s);
+        const slot = b.slotOf(s).?;
+        var handed = false;
+        defer if (!handed) {
+            b.owners[slot] = null;
+        };
+        var pending = b.drawn[(b.next - 1) % ring];
+        _ = try s.commit(b.gpa, &.{pending}, &.{});
+        hooks.committed(hooks.ctx);
+        var out: [sage.WINDOW]i32 = undefined;
+        var landed: [sage.WINDOW]u32 = undefined;
+        while (!s.finished) {
+            if (hooks.yield(hooks.ctx)) {
+                s.cache_len = r.pos;
+                s.pending = pending;
+                handed = true;
+                return true;
+            }
+            if (s.isCancelled()) return error.Cancelled;
+            const n = try r.specStep(b.depth, &out);
+            for (landed[0..n], out[0..n]) |*d, t| d.* = @intCast(t);
+            s.rounds += 1;
+            s.drafted += b.depth;
+            s.accepted += n - 1;
+            _ = try s.commit(b.gpa, landed[0..n], &.{});
+            pending = landed[n - 1];
+            hooks.committed(hooks.ctx);
+        }
+        return false;
+    }
+
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const b = of(ptr);
         const slot = b.slotOf(s) orelse return;
@@ -393,7 +430,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     const slots: u32 = @min(@max(o.lanes, 1), sage.MAX_SLOTS);
-    const r = sage.Runner.init(o.dir, context, slots) catch |err| {
+    // --drafter: the AutoRound checkpoint whose MTP head drafts for a lone greedy stream
+    const mtp = if (o.drafts) o.drafter else null;
+    const r = sage.Runner.initMtp(o.dir, context, slots, mtp) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the XPU Sage engine could not load {s} with {d} streams of {d} tokens: {s}", .{ o.dir, slots, context, @errorName(err) });
         return null;
     };
@@ -404,14 +443,20 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer h.back.deinit();
     if (o.vision) |vo| h.back.vision = try Vision.open(gpa, io, a, r, o.dir, vo, problem) orelse return null;
     errdefer if (h.back.vision) |v| v.deinit(gpa);
+    if (std.c.getenv("XPU_SPEC")) |v| h.back.depth = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
+    if (h.back.depth == 0 or h.back.depth + 1 > sage.WINDOW) {
+        problem.* = try std.fmt.allocPrint(a, "XPU_SPEC: 1 to {d} MTP drafts a round, not {d}", .{ sage.WINDOW - 1, h.back.depth });
+        return null;
+    }
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), 2, 0);
     errdefer h.cfg.deinit(gpa);
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: Sage (qwen3_5_moe), {d} stream(s) of {d} tokens, {s} K/V, sampling on the host", .{ slots, context, if (r.cap > 0) "int8" else "bf16" });
+    h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: Sage (qwen3_5_moe), {d} stream(s) of {d} tokens, {s} K/V, sampling on the host{s}", .{ slots, context, if (r.cap > 0) "int8" else "bf16", if (r.mtp != null) ", MTP drafts for a lone greedy stream" else "" });
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "sage-xpu", .lanes = slots, .context_window = context, .context_fitted = true, .startup = h.startup, .prefill_step = 0, .structures = true });
     h.host.explain = .{ .text = lane.explain };
     if (h.back.vision) |v| h.host.info_.vision = v.offer(o.vision.?);
+    if (r.mtp != null) h.host.lone = .{ .ctx = &h.back, .run = Slots.loneFn };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Served.close, .ctx = h };
 }

@@ -487,6 +487,11 @@ pub const Runner = struct {
 
     /// `slots` streams (1 to MAX_SLOTS) of `ctx` positions each.
     pub fn init(dir: []const u8, ctx: u32, slots: u32) !*Runner {
+        return initMtp(dir, ctx, slots, if (std.c.getenv("XPU_MTP")) |md| std.mem.span(md) else null);
+    }
+
+    /// As init, with the MTP drafter from `mtp` (an AutoRound checkpoint directory; null: none).
+    pub fn initMtp(dir: []const u8, ctx: u32, slots: u32, mtp: ?[]const u8) !*Runner {
         if (slots == 0 or slots > MAX_SLOTS) return error.BadSlots;
         const z = Sizes.of(try readShape(dir));
         var ckpt: Checkpoint = .{};
@@ -508,7 +513,7 @@ pub const Runner = struct {
         }
         if (std.c.getenv("XPU_KV_INT8") != null) r.cap = @intCast(ctx);
         r.model = try load(d, &r.ckpt, z, ctx, slots, r.cap > 0);
-        if (std.c.getenv("XPU_MTP")) |md| r.mtp = try loadMtp(d, std.mem.span(md), z, ctx, slots, r.cap > 0);
+        if (mtp) |md| r.mtp = try loadMtp(d, md, z, ctx, slots, r.cap > 0);
         if (gptq) {
             // the converted host copies are on the device now; the conversion threads freed them into their own malloc
             // arenas, which keep the pages until a trim gives them back
