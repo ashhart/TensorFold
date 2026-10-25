@@ -83,7 +83,12 @@ pub fn run(h: *LaneHost) void {
         return;
     }
     // short prompts back to back, as a whole pass at admission went: a burst of them waits on no decode round
+    var burst: usize = 0; // a lane count of short prompts begun, then a round: replies ending with their prompt free lanes without end
     while (h.filling.items.len > 0 and short(h.filling.items[pick(h)])) {
+        if (!h.filling.items[pick(h)].fill_began) {
+            if (burst == h.info_.lanes and runnable(h) > 0) return;
+            burst += 1;
+        }
         h.fillAt(next(h));
         @import("lane_host_end.zig").takeCancels(h);
         while (h.admitOne()) {}
