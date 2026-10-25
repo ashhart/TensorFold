@@ -12,7 +12,7 @@ pub const close = reply_text.calls[3][1];
 const dsml_open = reply_text.calls[2][0];
 const dsml_close = reply_text.calls[2][1];
 
-/// `text` with each complete block of offered calls as DSML; while streaming (not `finished`) an open block is held.
+/// `text` with each complete block of offered calls as DSML; while streaming (not `finished`) each call as it ends.
 pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool) Allocator.Error![]const u8 {
     if (tools.len == 0) return text;
     var at = reply_text.findTag(text, 0, open) orelse return text;
@@ -23,12 +23,22 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
     var rewrote = false;
     while (true) {
         const e = reply_text.findTag(text, at + open.len, close) orelse {
-            if (!finished) end = at; // the stream's parser resumes where it stopped: it must meet the block as DSML
+            if (!finished) { // the stream's parser resumes where it stopped: it must meet the calls so far as DSML
+                end = at;
+                const early = try calls(a, text[at + open.len ..], &schemas);
+                if (early.list.items.len > 0) {
+                    try out.appendSlice(a, text[pos..at]);
+                    try each(a, &out, early.list.items);
+                    pos = at;
+                    rewrote = true;
+                }
+            }
             break;
         };
-        if (try block(a, text[at + open.len .. e], &schemas)) |b| {
+        const found = try calls(a, text[at + open.len .. e], &schemas);
+        if (found.whole or (!finished and found.list.items.len > 0)) {
             try out.appendSlice(a, text[pos..at]);
-            try out.appendSlice(a, b);
+            if (finished) try all(a, &out, found.list.items) else try each(a, &out, found.list.items);
             pos = e + close.len;
             rewrote = true;
         }
@@ -39,33 +49,64 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
     return out.items;
 }
 
-/// One block's list of calls as DSML, or null when it is not a list of calls to offered tools.
-fn block(a: Allocator, body: []const u8, schemas: *const tool_params.Schemas) Allocator.Error!?[]const u8 {
-    // DSML markup in a value would end the block early
-    if (std.mem.indexOf(u8, body, "\u{ff5c}DSML\u{ff5c}") != null) return null;
-    var out: std.ArrayList(u8) = .empty;
+/// The invokes as one DSML envelope.
+fn all(a: Allocator, out: *std.ArrayList(u8), invokes: []const []const u8) Allocator.Error!void {
     try out.appendSlice(a, dsml_open);
-    var p: Scanner = .{ .s = body };
-    if (!p.eat('[')) return null;
-    p.space();
-    if (p.i < p.s.len and p.s[p.i] == '{') {
-        if (!try jsonCalls(a, &out, body, schemas)) return null;
-    } else {
-        while (true) {
-            const name = p.name();
-            if (name.len == 0 or !p.eat('(')) return null;
-            const tool = schemas.get(try std.ascii.allocLowerString(a, name)) orelse return null;
-            const args = (try arguments(a, &p, schemas, name, tool.properties.keys())) orelse return null;
-            try invoke(a, &out, name, args);
-            if (p.eat(',')) continue;
-            if (p.eat(']')) break;
-            return null;
-        }
-        p.space();
-        if (p.i != p.s.len) return null;
-    }
+    for (invokes) |one| try out.appendSlice(a, one);
     try out.appendSlice(a, "\n" ++ dsml_close);
-    return out.items;
+}
+
+/// Each invoke as an envelope of its own, so a call is whole markup as soon as it ends.
+fn each(a: Allocator, out: *std.ArrayList(u8), invokes: []const []const u8) Allocator.Error!void {
+    for (invokes) |one| try all(a, out, &.{one});
+}
+
+/// A block's calls as DSML invokes: those complete so far, and whether the whole body is a valid list of calls.
+const Calls = struct { list: std.ArrayList([]const u8) = .empty, whole: bool = false };
+
+/// The offered calls of a block's body that are complete, in order, however much of the body has been written.
+fn calls(a: Allocator, body: []const u8, schemas: *const tool_params.Schemas) Allocator.Error!Calls {
+    var found: Calls = .{};
+    // DSML markup in a value would end the block early, so no call is made from where it begins
+    const markup = std.mem.indexOf(u8, body, "\u{ff5c}DSML\u{ff5c}") orelse body.len + 1;
+    var p: Scanner = .{ .s = body };
+    if (!p.eat('[')) return found;
+    p.space();
+    const listed = if (p.i < p.s.len and p.s[p.i] == '{')
+        try jsonCalls(a, &found.list, &p, schemas, markup)
+    else
+        try pythonCalls(a, &found.list, &p, schemas, markup);
+    found.whole = listed and markup > body.len;
+    return found;
+}
+
+/// A Pythonic list's calls up to the first that is not one; true when the list ends the body.
+fn pythonCalls(
+    a: Allocator,
+    list: *std.ArrayList([]const u8),
+    p: *Scanner,
+    schemas: *const tool_params.Schemas,
+    markup: usize,
+) Allocator.Error!bool {
+    while (true) {
+        const name = p.name();
+        if (name.len == 0 or !p.eat('(')) return false;
+        const tool = schemas.get(try std.ascii.allocLowerString(a, name)) orelse return false;
+        const args = (try arguments(a, p, schemas, name, tool.properties.keys())) orelse return false;
+        if (p.i <= markup) try push(a, list, name, args);
+        if (p.eat(',')) continue;
+        if (p.eat(']')) break;
+        return false;
+    }
+    p.space();
+    return p.i == p.s.len;
+}
+
+/// One call's invoke, added to `list`.
+fn push(a: Allocator, list: *std.ArrayList([]const u8), name: []const u8, args: *json.Object) Allocator.Error!void {
+    var out: std.ArrayList(u8) = .empty;
+    try invoke(a, &out, name, args);
+    try list.append(a, out.items);
 }
 
 /// One call as a DSML invoke, its arguments in order.
@@ -83,14 +124,20 @@ fn invoke(a: Allocator, out: *std.ArrayList(u8), name: []const u8, args: *json.O
 }
 
 /// A JSON list of `{"name", "arguments"}` calls (`parameters` for `arguments`, or a JSON string of them) as invokes.
-fn jsonCalls(a: Allocator, out: *std.ArrayList(u8), body: []const u8, schemas: *const tool_params.Schemas) Allocator.Error!bool {
-    const list = switch (try json.parseText(a, body)) {
-        .ok => |v| v,
-        .err => return false,
-    };
-    if (list != .array or list.array.len == 0) return false;
-    for (list.array) |call| {
-        if (call != .object) return false;
+fn jsonCalls(
+    a: Allocator,
+    list: *std.ArrayList([]const u8),
+    p: *Scanner,
+    schemas: *const tool_params.Schemas,
+    markup: usize,
+) Allocator.Error!bool {
+    for (p.s[0..p.i]) |c| if (c != '[' and !Scanner.jsonBlank(c)) return false; // only the blanks JSON allows
+    while (true) {
+        p.jsonSpace();
+        const call = switch (try json.parseText(a, p.object() orelse return false)) {
+            .ok => |v| v,
+            .err => return false,
+        };
         const name = call.get("name") orelse return false;
         if (name != .string or name.string.len == 0) return false;
         if (schemas.get(try std.ascii.allocLowerString(a, name.string)) == null) return false;
@@ -106,9 +153,14 @@ fn jsonCalls(a: Allocator, out: *std.ArrayList(u8), body: []const u8, schemas: *
             const raw = json.stringify(a, v, .{ .ascii = false }) catch return error.OutOfMemory;
             try args.put(a, k, try coerce(a, v, raw, try tool_params.schemaOf(schemas, name.string, k, a)));
         }
-        try invoke(a, out, name.string, args);
+        if (p.i <= markup) try push(a, list, name.string, args);
+        p.jsonSpace();
+        if (p.take(',')) continue;
+        if (p.take(']')) break;
+        return false;
     }
-    return true;
+    p.jsonSpace();
+    return p.i == p.s.len;
 }
 
 /// A call's arguments up to its `)`, positionals named in schema property order; null if Python would refuse them.
@@ -180,6 +232,45 @@ const Scanner = struct {
 
     fn space(p: *Scanner) void {
         while (p.i < p.s.len and reply_text.isSpaceByte(p.s[p.i])) p.i += 1;
+    }
+
+    fn jsonBlank(c: u8) bool {
+        return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+    }
+
+    fn jsonSpace(p: *Scanner) void {
+        while (p.i < p.s.len and jsonBlank(p.s[p.i])) p.i += 1;
+    }
+
+    /// `c` at the cursor, consumed, with no blanks skipped.
+    fn take(p: *Scanner, c: u8) bool {
+        if (p.i >= p.s.len or p.s[p.i] != c) return false;
+        p.i += 1;
+        return true;
+    }
+
+    /// The `{...}` at the cursor, braces matched outside strings, consumed; null when absent or not yet closed.
+    fn object(p: *Scanner) ?[]const u8 {
+        const start = p.i;
+        if (start >= p.s.len or p.s[start] != '{') return null;
+        var depth: usize = 0;
+        var j = start;
+        while (j < p.s.len) : (j += 1) switch (p.s[j]) {
+            '"' => {
+                j += 1;
+                while (j < p.s.len and p.s[j] != '"') j += if (p.s[j] == '\\') 2 else 1;
+            },
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) {
+                    p.i = j + 1;
+                    return p.s[start..p.i];
+                }
+            },
+            else => {},
+        };
+        return null;
     }
 
     fn eat(p: *Scanner, c: u8) bool {
@@ -367,9 +458,11 @@ test "tool_lfm2: the calls a stream sends at every byte boundary are the whole r
     const a = arena.allocator();
     const tools = (try json.parse(a, test_tools)).ok.array;
     const reply = "Checking. <|tool_call_start|>[lookup(query=\"fast\", limit=4), web-search('zig')]<|tool_call_end|>" ++
-        " then <|tool_call_start|>[lookup(filters={\"a\": [True, None]})]<|tool_call_end|>";
+        " then <|tool_call_start|>[lookup(filters={\"a\": [True, None]})]<|tool_call_end|>" ++
+        " and <|tool_call_start|>[{\"name\":\"lookup\",\"arguments\":{\"limit\":\"2\"}}, {\"name\":\"web-search\"}]<|tool_call_end|>" ++
+        " last <|tool_call_start|>[lookup(query=\"a\"), web-search(q=\"b\"), lookup(4)]<|tool_call_end|>";
     const want = try whole(a, reply, tools);
-    try std.testing.expectEqual(@as(usize, 3), want.len);
+    try std.testing.expectEqual(@as(usize, 8), want.len);
     const got = try streamed(a, reply, tools);
     try std.testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
