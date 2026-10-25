@@ -381,8 +381,8 @@ test "a shared round's drafts come out the same whichever depths its overhead wa
     try std.testing.expectEqualSlices(i64, &got[0], &got[1]);
 }
 
-/// FZ_PRICE_BATCHED=1: a batched head's extra drafts cost the deepest stream's steps, not every stream's (A/B switch).
+/// A batched head's extra drafts cost the deepest stream's steps; FZ_PRICE_BATCHED=0 prices each stream's.
 pub fn pricedBatched() bool {
-    const v = std.c.getenv("FZ_PRICE_BATCHED") orelse return false;
-    return v[0] == '1';
+    const v = std.c.getenv("FZ_PRICE_BATCHED") orelse return true;
+    return v[0] != '0';
 }
