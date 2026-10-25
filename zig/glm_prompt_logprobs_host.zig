@@ -132,6 +132,8 @@ const Heads = struct {
         e.m.packs = null;
         e.m.glue.bmm_decode = .{ .d = d, .handle = @ptrFromInt(1) };
         e.m.lane.clusters = true;
+        e.m.lane.half = @splat(@splat(@splat(.{ .d = d, .handle = @ptrFromInt(2) })));
+        e.m.lane.half_below = cuda.qmmf.half_below_default;
         for (&e.m.lane.fns) |*fns| for (fns) |*f| {
             f.* = .{ .d = d, .handle = @ptrFromInt(2) };
         };
