@@ -13,6 +13,7 @@ const Proposal = q.dflash.runtime_model.Model.Proposal;
 /// Each drafting slot proposes its next tree, up to eight in one drafter pass; a shared round's kept taps first.
 pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
     const b = Metal.self(ptr);
+    @import("qwen27_slots.zig").promoteDue(b); // a stream moves into a freed slot 0 before it drafts
     var batch: [8]Proposal = undefined;
     var owners: [8]u32 = undefined;
     var n: usize = 0;
