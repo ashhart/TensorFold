@@ -13,7 +13,7 @@ test "contract architecture: older SMs omit the standalone cluster kernels" {
             try std.testing.expectEqual((kind == .qmm_group or mm.verifyTile(kind) > 0), k == null);
             if (k != null) count += 1;
         }
-        try std.testing.expectEqual(@as(usize, 7), count);
+        try std.testing.expectEqual(@as(usize, 9), count);
     }
 }
 
@@ -25,9 +25,9 @@ test "contract architecture: SM90 and Blackwell retain every kernel and the GEMV
             const k = m.kernel().?;
             count += 1;
             const bits = kind == .verify32_bits or kind == .verify64_bits or kind == .verify128_bits;
-            try std.testing.expectEqual(kind == .lane_gemv or kind == .lane_gemv_split or kind == .lane_gemv_seg or bits, k.spec.replaces != null);
+            try std.testing.expectEqual(kind == .lane_gemv or kind == .lane_gemv_split or kind == .lane_gemv_seg or bits or mm.lean(kind), k.spec.replaces != null);
         }
-        try std.testing.expectEqual(@as(usize, 14), count);
+        try std.testing.expectEqual(@as(usize, 16), count);
     }
 }
 
@@ -38,6 +38,13 @@ test "contract architecture: legacy GEMV keeps every field except the unavailabl
         var want = modern.kernel().?.spec;
         want.replaces = null;
         try std.testing.expectEqualDeep(want, legacy.kernel().?.spec);
+    };
+}
+
+test "contract architecture: prompt_lean keeps the 128 x 128 tile as its replacement on every SM" {
+    for ([_]u32{ 80, 86, 89, 90, 120, 121 }) |sm| for ([_]mm.Kind{ .prompt16_lean, .prompt16_lean_f32 }) |kind| {
+        var m: mm.Mm = .{ .rig = undefined, .kind = kind, .sm = sm };
+        try std.testing.expect(m.kernel().?.spec.replaces != null);
     };
 }
 
