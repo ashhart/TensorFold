@@ -229,6 +229,66 @@ test "decoded spans and a planned family's chunk starts must match for a disk st
     }
 }
 
+/// A pass as `Fake.pass` whose request names no chunk starts: the store's grid places its marks and names its states.
+fn gridRequest(a: Allocator, s: *pc.Store, f: *Fake, p: []const u32, history: u32) !struct { from: u32, sum: u64 } {
+    f.prompt = p;
+    const plan = try s.begin(a, p, history, &.{}, &.{}, null, f.spans);
+    if (plan.from == 0) {
+        f.at = 0;
+        f.sum = 0;
+    }
+    var mi: usize = 0;
+    for (p[plan.from..]) |t| {
+        f.sum = f.sum *% 31 +% t;
+        f.at += 1;
+        while (mi < plan.marks.len and plan.marks[mi] < f.at) mi += 1;
+        if (mi < plan.marks.len and plan.marks[mi] == f.at) _ = s.keep(p, f.at, null, &.{}, f.spans);
+    }
+    return .{ .from = plan.from, .sum = f.sum };
+}
+
+test "a grid family's requests name no chunk starts: its states go to disk on the grid and resume after a restart" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    const dir = root(&buf, "grid");
+    defer rmTree(dir);
+    const grid: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1, .planned = true, .grid = 512 };
+    var o = options(dir);
+    o.planned = true;
+    o.grid = 512;
+    const p = try prompt(a, 0, 5, 1300); // the engine cuts its chunks on the grid: 512 and 1024
+    {
+        var f: Fake = .{ .gpa = gpa, .planned = true, .starts = &.{ 512, 1024 } };
+        const r = try rows.Rows.open(gpa, f.snapshots(), o);
+        defer r.deinit();
+        var s = pc.Store.init(gpa, f.snapshots(), grid, 1 << 30);
+        defer s.deinit();
+        s.disk = r;
+        _ = try gridRequest(a, &s, &f, p, 1200);
+        drain(r);
+        try std.testing.expect(r.states.items.len > 0);
+        for (r.states.items) |st| {
+            try std.testing.expectEqual(@as(u32, 0), st.at % 512);
+            try std.testing.expectEqualSlices(u32, if (st.at == 1024) &.{512} else &.{}, st.starts);
+        }
+    }
+    var f: Fake = .{ .gpa = gpa, .planned = true, .starts = &.{ 512, 1024 } };
+    const r = try rows.Rows.open(gpa, f.snapshots(), o);
+    defer r.deinit();
+    var s = pc.Store.init(gpa, f.snapshots(), grid, 1 << 30);
+    defer s.deinit();
+    s.disk = r;
+    const turn2 = try std.mem.concat(a, u32, &.{ p[0..1201], &[_]u32{ 9, 8, 7 } });
+    const got = try gridRequest(a, &s, &f, turn2, 1203);
+    try std.testing.expectEqual(@as(u32, 1024), got.from);
+    try std.testing.expect(f.restored_ok);
+    try std.testing.expectEqual(fresh(turn2), got.sum);
+    try std.testing.expectEqual(@as(u64, 1), r.counts.reads);
+}
+
 test "an entry evicted before its write leaves the queue; once written, an eviction costs nothing" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);

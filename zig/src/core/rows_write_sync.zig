@@ -39,9 +39,7 @@ pub const Job = struct {
 
 /// A newly kept entry joins the queue (the RAM store calls this on every new keep), with the request's chunk starts.
 pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
-    var n: usize = 0;
-    if (r.keying.planned) while (n < starts.len and starts[n] < e.at) : (n += 1) {};
-    const own = r.gpa.dupe(u32, starts[0..n]) catch return;
+    const own = rows_store.startsBelow(r, r.gpa, starts, e.at) catch return;
     r.queue.append(r.gpa, .{ .entry = e, .starts = own }) catch r.gpa.free(own);
 }
 
