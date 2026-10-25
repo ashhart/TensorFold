@@ -7,4 +7,5 @@ test {
     _ = @import("roce_guard.zig");
     _ = @import("bootstrap.zig");
     _ = @import("fate_test.zig");
+    _ = @import("fate_lifetime_test.zig");
 }

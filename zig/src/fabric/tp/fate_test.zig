@@ -74,6 +74,7 @@ test "rank 1's failure ends both ranks with its reason" {
     fates[1].fatal("prefill", error.OutOfMemory);
     const took = try waitExits(2);
     try std.testing.expect(took < grace + 500 * std.time.ns_per_ms);
+    for (&fates) |*f| f.close();
     try std.testing.expectEqual(@as(u32, 2), hooks.load(.acquire));
     try std.testing.expect(std.mem.indexOf(u8, fates[0].reason(), "rank 1 failed in prefill: OutOfMemory") != null);
 }

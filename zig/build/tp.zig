@@ -42,6 +42,10 @@ fn kernelModule(b: *std.Build, image: ?std.Build.LazyPath) *std.Build.Module {
 
 pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step, opts: @import("options.zig").Tp) void {
     const host = b.graph.host;
+    if (host.result.os.tag != .windows) {
+        const fate_host = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/fate_lifetime_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = runtime(b, host, .debug) }} });
+        b.step("test-tp-fate-host", "Failure hooks and their owners survive concurrent shutdown without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fate_host })).step);
+    }
     const cli_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/gpu_cli.zig"), .target = host, .optimize = optimize }) }));
     const cli_step = b.step("test-tp-cli", "TP runner command validation (no GPU)");
     cli_step.dependOn(&cli_tests.step);
