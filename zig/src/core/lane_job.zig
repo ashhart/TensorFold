@@ -36,6 +36,8 @@ pub const Job = struct {
     kept0: u64 = 0, // the store's kept count when the job looked it up
     seq: u64 = 0, // its admission's number
     waits_since: ?u64 = null, // the admissions count when it first waited at the head for pool room
+    reached: u32 = 0, // the furthest mark its prompt pass has stood at, kept or not
+    prefix: @import("lane_host_prefix.zig").Waiting = .{}, // its wait for another fill's cut, while queued
 
     /// Record first admission once, including a family planner and a background pass that later yields.
     pub fn noteAdmission(job: *Job) void {
@@ -50,6 +52,7 @@ pub const Job = struct {
     /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
     pub fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
         const job: *Job = @ptrCast(@alignCast(ptr));
+        job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
         if (job.host.cache) |store| _ = store.keepBorn(job.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request));
     }
