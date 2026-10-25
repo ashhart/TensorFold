@@ -12,7 +12,7 @@ test "w4a8 host: actual quantizer flags every nonfinite lane in every group befo
         const stride = k + 64;
         const x = try t.allocator.alloc(u16, 3 * stride);
         defer t.allocator.free(x);
-        const codes = try t.allocator.alloc(u8, 3 * k);
+        const codes = try t.allocator.alignedAlloc(u8, .@"16", 3 * k);
         defer t.allocator.free(codes);
         const scales = try t.allocator.alloc(f32, 3 * k / 64);
         defer t.allocator.free(scales);
@@ -37,7 +37,7 @@ test "w4a8 host: actual quantizer flags every nonfinite lane in every group befo
 }
 test "w4a8 host: finite normalization and sums retain their reference, while overflow flags instead" {
     var x: [64]u16 = undefined;
-    var codes: [64]u8 = undefined;
+    var codes: [64]u8 align(16) = undefined; // the quantizer stores code pairs, as the device buffer allows
     var scales: [1]f32 = undefined;
     var sums: [1]f32 = undefined;
     for ([_]f32{ 0, 1, 0x1p-133, 127, 65536 }) |scale| {
