@@ -9,7 +9,6 @@ const mtp_ops = @import("cuda_mtp_ops.zig");
 const lanes_draft = @import("cuda_lanes_draft.zig");
 const snap = @import("cuda_snap.zig");
 const ranks = @import("cuda_rank_engine.zig");
-const config = @import("cuda_config.zig");
 const Glue = @import("cuda_glue.zig").Glue;
 const living = @import("living");
 const slide_mod = @import("cuda_slide.zig");
@@ -40,6 +39,7 @@ pub fn Namespace(comptime Tri: type) type {
         pub const snap_save = snapSave;
         pub const snap_restore = snapRestore;
         pub const snap_drop = snapDrop;
+        pub const kept_disk = @import("cuda_disk.zig").Kept(@This()); // their disk image, as qwen3_5 declares its own
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
         pub const window_rows = kvl.window_rows;
         pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {

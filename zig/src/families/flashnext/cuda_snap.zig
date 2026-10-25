@@ -13,6 +13,9 @@ const state_bytes = wt.state_n * 4;
 const index_row = wt.index_dim * 2;
 const tail_bytes = wt.ple_tail_n * wt.wide * 2;
 
+/// A state's shape for its disk image (cuda_disk.zig): layer counts and each piece's bytes a row.
+pub const shape = .{ .linear = wt.linear_n, .attn = wt.attn_n, .conv = conv_bytes, .state = state_bytes, .kv_row = prompt.kv_row_bytes, .index_row = index_row, .ratio = wt.index_ratio, .tail = tail_bytes };
+
 /// One attention cache's first `at` key, value and indexer-key rows, and the pooled blocks they complete.
 fn attnBytes(at: usize) usize {
     return at * (2 * prompt.kv_row_bytes + index_row) + at / wt.index_ratio * index_row;

@@ -9,7 +9,7 @@ pub const kernels = catalog.kernels;
 pub const runtime = @import("cuda_runtime.zig").runtime;
 const stagger = @import("cuda_runtime.zig").stagger;
 
-fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, radio: *std.Build.Module, living: *std.Build.Module } {
+fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, radio: *std.Build.Module, living: *std.Build.Module, api: *std.Build.Module } {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
@@ -38,7 +38,7 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     qwen35.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} })); // core's prompt-cache types, the server's engine_api
     const qwen_vision = qwenVisionModule(b, target, optimize, cuda, core, lanes);
     qwen35.addImport("qwen_vision", qwen_vision);
-    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen35 = qwen35, .qwen_vision = qwen_vision, .tokenizer = tokenizer, .heat = heat, .radio = radio, .living = living };
+    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen35 = qwen35, .qwen_vision = qwen_vision, .tokenizer = tokenizer, .heat = heat, .radio = radio, .living = living, .api = qwen35.import_table.get("engine_api").? };
 }
 
 /// Linux targets: fatbins (-Dnvcc builds them, -Dfatbins embeds prebuilt ones), `tensorfold` and `tf-cuda-test`.
@@ -89,7 +89,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
     runner.addImport("qwen35", mods.qwen35);
-    runner.addImport("flashnext", flashnextModule(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision));
+    runner.addImport("flashnext", flashnextModule(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api));
     runner.addImport("lfm2", lfm2Module(b, target, optimize, cuda, mods.core));
     runner.addImport("radio", mods.radio);
     const exlr8 = exlr8_build.coreAlias(b, target, optimize, mods.core);
@@ -108,7 +108,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // tf-tp-watch-check: the ranks' lines with no GPU or NCCL; a failing or dying rank stops every rank
     b.installArtifact(b.addExecutable(.{ .name = "tf-tp-watch-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/tp_watch_check.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{.{ .name = "cuda", .module = cuda }} }) }));
     @import("living_dense.zig").target(b, target, optimize, cuda, mods.qwen35);
-    flashnextChecks(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision, opts);
+    flashnextChecks(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api, opts);
     b.step("compile-cuda-tests", "Compile CUDA runner without executing a GPU").dependOn(&runner_exe.step);
     const startup = b.addObject(.{ .name = "modelopt-startup", .root_module = b.createModule(.{ .root_source_file = b.path("zig/modelopt_startup_compile.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "native", .module = native.engines }} }) });
     _ = startup.getEmittedBin();
@@ -163,13 +163,14 @@ fn qwenVisionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 }
 
 /// Flash Next's CUDA family, sharing the maintained runtime and lane core.
-fn flashnextModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, qwen_vision: *std.Build.Module) *std.Build.Module {
+fn flashnextModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, qwen_vision: *std.Build.Module, api: *std.Build.Module) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_launch.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
     m.addImport("core", core);
     m.addImport("lanes", lanes);
     m.addImport("qwen_vision", qwen_vision);
     m.addImport("living", core.import_table.get("living").?);
+    m.addImport("engine_api", api); // its disk image (cuda_disk.zig) names the rows store's types: family()'s, the server's
     return m;
 }
 
@@ -189,7 +190,7 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "drama3", .module = @import("drama3_host.zig").module(b, target, optimize, cuda, core) },
             .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) },
             .{ .name = "core", .module = core },
-            .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision) },
+            .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision, api) },
             .{ .name = "glm_cuda", .module = glmCuda(b, target, optimize, cuda, core, lanes, heat) },
             .{ .name = "qwen35", .module = qwen35 },
             .{ .name = "kolibri1", .module = kolibri1Module(b, target, optimize, cuda, core, lanes) },
@@ -274,9 +275,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         exl3_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     }
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_arch_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } }) })).step);
-    @import("flashnext_glue_host.zig").steps(b, cuda, mods.core, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision), step);
-    @import("flashnext_scoring_host.zig").steps(b, cuda, mods.core, mods.lanes, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision), step);
-    b.step("test-pocket-device-host", "Actual pocket device hooks under CUDA ABI failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision), .filters = &.{"Learning persistence:"} })).step);
+    @import("flashnext_glue_host.zig").steps(b, cuda, mods.core, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), step);
+    @import("flashnext_scoring_host.zig").steps(b, cuda, mods.core, mods.lanes, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), step);
+    b.step("test-pocket-device-host", "Actual pocket device hooks under CUDA ABI failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), .filters = &.{"Learning persistence:"} })).step);
     b.step("test-living-host", "Family-neutral learner, saved form and commit gate on host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.living })).step);
     const shard_tests = b.createModule(.{ .root_source_file = b.path("zig/src/living_shards_test.zig"), .target = host, .optimize = .debug, .link_libc = true });
     shard_tests.addImport("living", mods.living);
@@ -347,7 +348,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, cuda_target, .debug, &.{});
     const check_mods = family(b, cuda_target, .debug, check_cuda, draft_ids);
-    @import("cuda_census.zig").steps(b, cuda_target, check_cuda, check_mods.qwen35, check_mods.core, flashnextModule(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.qwen_vision));
+    @import("cuda_census.zig").steps(b, cuda_target, check_cuda, check_mods.qwen35, check_mods.core, flashnextModule(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.qwen_vision, check_mods.api));
     const compile_bolt = b.addObject(.{ .name = "bolt_host_compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/bolt_compile.zig"),
         .target = cuda_target,
@@ -369,7 +370,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
-    @import("cuda_fault_host.zig").steps(b, cuda, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision), native);
+    @import("cuda_fault_host.zig").steps(b, cuda, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), native);
     @import("release_cuda_refusal.zig").tests(b, step, native_modules.api, mods.nemotron);
     @import("qwen_cost_open.zig").tests(b, mods, native_modules, step);
     const windows_port = @import("windows_host.zig").steps(b, cuda, native_modules.api);
@@ -481,7 +482,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         @import("cortheon_fuzz.zig").add(b, host, native_modules.api, mods.tokenizer, template);
     }
     // the tokenizer's own tests (memo, steps, regex, unicode) run here: no other test binary reaches them
-    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const selected = b.option([]const u8, "modelopt-host-filter", "One portable ModelOpt regression") orelse "modelopt host:";
     const run = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{selected} }));
     run.has_side_effects = true;
@@ -555,8 +556,8 @@ pub fn checkDistFatbins(b: *std.Build, dir: []const u8, privacy_tool: *std.Build
 }
 
 /// Explicit model diagnostics; these tools do not qualify a checkpoint merely by compiling.
-fn flashnextChecks(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, qwen_vision: *std.Build.Module, opts: @import("options.zig").Cuda) void {
-    const flashnext = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision);
+fn flashnextChecks(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, qwen_vision: *std.Build.Module, api: *std.Build.Module, opts: @import("options.zig").Cuda) void {
+    const flashnext = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision, api);
     // not installed: one embedding row through the captured _embed cubin
     const embed_check = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_embed_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     embed_check.addImport("cuda", cuda);
