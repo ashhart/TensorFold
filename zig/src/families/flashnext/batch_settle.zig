@@ -12,7 +12,7 @@ pub fn keep(b: anytype) !bool {
     return needed;
 }
 
-/// The copies at the head of `cb`, fenced before the compute encoder that follows them.
+/// The copies at the head of `cb`, fenced before the next compute encoder; encode before `outputs` repoints cs[1].
 pub fn encode(b: anytype, cb: mtl.CommandBuffer, fence: mtl.counters.Fence) void {
     const blit = cb.blit();
     for (b.sessions) |*s| if (s.used) s.normalizeGpu(blit);

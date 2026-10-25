@@ -384,7 +384,6 @@ pub const Backend = struct {
             s.m.pleIds(s.tokens[0..s.round.rows]);
             @memcpy(t.ids8.b.slice(u32, fz.MAXR)[row..][0..s.round.rows], s.tokens[0..s.round.rows]);
             @memcpy(t.ple_ids.b.slice(u32, fz.MAXR * 16)[row * 16 ..][0 .. s.round.rows * 16], s.m.t.ple_ids.b.slice(u32, s.round.rows * 16));
-            outputs(b, s, row);
             segs[i] = .{ .s = s, .row0 = row, .rows = s.round.rows };
             @memcpy(o.drafts, s.tokens[1..s.round.rows]);
         }
@@ -397,7 +396,9 @@ pub const Backend = struct {
             fz.vis_prompt.decodePositions(pos8[plan.starts[i]..][0..w.rows()], d);
         }
         const cb = b.e.r.queue.commandBuffer();
+        // The copies read the kept round's rows: encode them before outputs() repoints cs[1] at this round's.
         if (fold) batch_settle.encode(b, cb, b.fence.?);
+        for (segs[0..windows.len], 0..) |g, i| outputs(b, g.s, plan.starts[i]);
         b.e.r.enc = cb.compute(.serial);
         if (fold) b.fence.?.waitCompute(b.e.r.enc);
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);

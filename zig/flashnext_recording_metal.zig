@@ -10,6 +10,9 @@ pub var expected: [4]usize = .{ 4, 64, 4, 64 };
 pub var scale_calls: usize = 0;
 pub var first_blit: ?struct { offset: usize, bytes: usize } = null;
 pub var blits: usize = 0;
+pub const Copy = struct { id: usize, off: usize };
+pub var sources: [512]Copy = @splat(.{ .id = 0, .off = 0 }); // every copy's source buffer and offset, in order
+pub var source_count: usize = 0;
 pub var draws: usize = 0;
 pub var rotary_calls: usize = 0;
 pub const Buffer = struct {
@@ -163,11 +166,14 @@ pub const CommandBuffer = struct {
 };
 pub const BlitEncoder = struct {
     pub fn copy(_: BlitEncoder, a: Buffer, ao: usize, b: Buffer, bo: usize, n: usize) void {
-        _ = a;
         _ = b;
         _ = bo;
         if (first_blit == null) first_blit = .{ .offset = ao, .bytes = n };
         blits += 1;
+        if (source_count < sources.len) {
+            sources[source_count] = .{ .id = a.id, .off = ao };
+            source_count += 1;
+        }
     }
     pub fn end(_: BlitEncoder) void {}
 };
