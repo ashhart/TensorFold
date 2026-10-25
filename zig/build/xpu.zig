@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const exlr8_build = @import("exlr8.zig");
+const exl3_variants = @import("../src/xpu/exl3_variants.zig");
 
 /// ze.zig as its own module: the Qwen27 runner and the Nemotron runtime share one Level Zero table.
 fn zeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -148,7 +149,22 @@ const kernels = [_]Kernel{
     .{ .name = "nem_rows_r8", .src = "nem_rows", .options = cl3 ++ " -DMAXR=8" },
     .{ .name = "nem_prow", .options = cl3 },
     .{ .name = "nem_attn_dec", .options = cl3 },
-};
+    .{ .name = "exl3", .options = cl3 ++ " -DEXL3_ABS" },
+} ++ exl3Matvec() ++ exl3Moe();
+
+/// Fused routed MLP images: one a width of exl3_variants.moe.
+fn exl3Moe() [exl3_variants.moe.bits.len]Kernel {
+    var out: [exl3_variants.moe.bits.len]Kernel = undefined;
+    inline for (exl3_variants.moe.bits, &out) |b, *k| k.* = .{ .name = exl3_variants.moe.name(b), .src = "exl3", .options = exl3_variants.moe.options(b) };
+    return out;
+}
+
+/// EXL3 matvec images: one a (bits, rows, NS, HS) of src/xpu/exl3_variants.zig.
+fn exl3Matvec() [exl3_variants.all.len]Kernel {
+    var out: [exl3_variants.all.len]Kernel = undefined;
+    inline for (exl3_variants.all, &out) |v, *k| k.* = .{ .name = exl3_variants.name(v), .src = "exl3", .options = exl3_variants.options(v) };
+    return out;
+}
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).
 fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const std.Build.LazyPath, ze: *std.Build.Module) *std.Build.Module {
@@ -205,7 +221,7 @@ fn spirv(b: *std.Build, ocloc: []const u8, device: []const u8, k: Kernel) std.Bu
 
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64",
+    "panic", "exl3", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
