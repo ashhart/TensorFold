@@ -79,77 +79,139 @@ const Sampling = struct {
     }
 };
 
-/// `--loop`: one request a line on stdin, `MAX STOPS [s=TEMP,TOP_P,TOP_K,PRESENCE,SEED] ID ID ...` (STOPS: ids with
-/// commas, or `-`). Without `s=` the reply is greedy. The presence penalty counts the tokens of this reply only. For
-/// each request the runner starts a fresh sequence, feeds the ids, and writes `t ID` for each token as soon as it exists, then
-/// `end stop|length PROMPT_S DECODE_S N`. A stop token ends the reply and is not written. A front end (a server, a
-/// bench) drives it through a pipe and owns the tokenizer.
-fn loop(r: *sage.Runner) !void {
+/// `--loop`: one request a line on stdin, `REQ MAX STOPS [s=TEMP,TOP_P,TOP_K,PRESENCE,SEED] ID ID ...` (REQ: the front
+/// end's request number; STOPS: ids with commas, or `-`). Without `s=` the reply is greedy. The presence penalty counts
+/// the tokens of this reply only. Up to XPU_SLOTS requests run at once: each takes a free slot (a fresh sequence) and
+/// its prompt, then the running slots decode together, one stepMulti row a slot. The runner writes `t REQ ID` for each
+/// token as soon as it exists, then `end REQ stop|length|error PROMPT_S DECODE_S N`. A stop token ends the reply and is
+/// not written. A front end (a server, a bench) drives it through a pipe and owns the tokenizer.
+const Req = struct {
+    req: u64 = 0,
+    max: usize = 0,
+    stops: std.ArrayList(i32) = .empty,
+    ids: std.ArrayList(i32) = .empty,
+    sampling: ?Sampling = null,
+};
+
+const Slot = struct {
+    on: bool = false,
+    req: Req = .{},
+    out: std.ArrayList(i32) = .empty,
+    next: i32 = -1, // the token to check, write and feed
+    t0: f64 = 0,
+    t1: f64 = 0,
+};
+
+/// One request line into `q`, or false at the end of stdin.
+fn readReq(q: *std.ArrayList(Req)) !bool {
     var line: std.ArrayList(u8) = .empty;
-    var ids: std.ArrayList(i32) = .empty;
-    var stops: std.ArrayList(i32) = .empty;
-    var out: std.ArrayList(i32) = .empty;
+    defer line.deinit(alloc);
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const n = read(0, &byte, 1);
+        if (n <= 0) return false;
+        if (byte[0] == '\n') break;
+        try line.append(alloc, byte[0]);
+    }
+    var it = std.mem.tokenizeAny(u8, line.items, " ");
+    var r: Req = .{};
+    r.req = std.fmt.parseInt(u64, it.next() orelse return true, 10) catch return true;
+    r.max = std.fmt.parseInt(usize, it.next() orelse "", 10) catch {
+        say("end {d} error 0 0 0\n", .{r.req});
+        return true;
+    };
+    const sw = it.next() orelse "-";
+    var st = std.mem.tokenizeAny(u8, if (std.mem.eql(u8, sw, "-")) "" else sw, ",");
+    while (st.next()) |w| try r.stops.append(alloc, std.fmt.parseInt(i32, w, 10) catch 0);
+    while (it.next()) |w| {
+        if (std.mem.startsWith(u8, w, "s=")) {
+            r.sampling = Sampling.parse(w) catch null;
+            continue;
+        }
+        try r.ids.append(alloc, std.fmt.parseInt(i32, w, 10) catch 0);
+    }
+    try q.append(alloc, r);
+    return true;
+}
+
+fn stdinReady() bool {
+    var fds = [1]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
+    return (std.posix.poll(&fds, 0) catch 0) > 0;
+}
+
+fn loop(r: *sage.Runner) !void {
+    var q: std.ArrayList(Req) = .empty;
+    var slots: [sage.MAX_SLOTS]Slot = @splat(.{});
     const logits = try alloc.alloc(f16, r.z.s.vocab);
     defer alloc.free(logits);
-    var byte: [1]u8 = undefined;
+    var open_in = true;
     say("ready\n", .{});
     while (true) {
-        line.clearRetainingCapacity();
-        while (true) {
-            const n = read(0, &byte, 1);
-            if (n <= 0) return;
-            if (byte[0] == '\n') break;
-            try line.append(alloc, byte[0]);
+        var busy: usize = 0;
+        for (slots[0..r.slots]) |sl| busy += @intFromBool(sl.on);
+        if (busy == 0 and q.items.len == 0) {
+            if (!open_in or !try readReq(&q)) return;
         }
-        var it = std.mem.tokenizeAny(u8, line.items, " ");
-        const max = std.fmt.parseInt(usize, it.next() orelse continue, 10) catch {
-            say("end error 0 0 0\n", .{});
-            continue;
-        };
-        stops.clearRetainingCapacity();
-        const sw = it.next() orelse "-";
-        var st = std.mem.tokenizeAny(u8, if (std.mem.eql(u8, sw, "-")) "" else sw, ",");
-        while (st.next()) |w| try stops.append(alloc, try std.fmt.parseInt(i32, w, 10));
-        ids.clearRetainingCapacity();
-        var sampling: ?Sampling = null;
-        while (it.next()) |w| {
-            if (std.mem.startsWith(u8, w, "s=")) {
-                sampling = Sampling.parse(w) catch null;
+        while (open_in and stdinReady()) open_in = try readReq(&q);
+        // admit: a free slot takes the oldest request and its prompt
+        for (slots[0..r.slots], 0..) |*sl, i| {
+            if (sl.on or q.items.len == 0) continue;
+            const req = q.orderedRemove(0);
+            if (req.ids.items.len == 0 or req.ids.items.len + req.max > r.ctx) {
+                say("end {d} error 0 0 0\n", .{req.req});
                 continue;
             }
-            try ids.append(alloc, try std.fmt.parseInt(i32, w, 10));
-        }
-        if (ids.items.len == 0 or ids.items.len + max > r.ctx) {
-            say("end error 0 0 0\n", .{});
-            continue;
-        }
-        try r.reset();
-        out.clearRetainingCapacity();
-        const t0 = now();
-        try r.prompt(ids.items);
-        if (sampling) |*sp| {
-            try r.logits(logits);
-            r.last = sp.pick(logits, out.items);
-        }
-        const t1 = now();
-        var n: usize = 0;
-        var reason: []const u8 = "length";
-        while (n < max) {
-            if (std.mem.indexOfScalar(i32, stops.items, r.last) != null) {
-                reason = "stop";
-                break;
-            }
-            say("t {d}\n", .{r.last});
-            try out.append(alloc, r.last);
-            n += 1;
-            if (n == max) break;
-            try r.step(r.last);
-            if (sampling) |*sp| {
+            sl.* = .{ .on = true, .req = req, .t0 = now() };
+            try r.use(@intCast(i));
+            try r.reset();
+            try r.prompt(req.ids.items);
+            sl.next = r.last;
+            if (sl.req.sampling) |*sp| {
                 try r.logits(logits);
-                r.last = sp.pick(logits, out.items);
+                sl.next = sp.pick(logits, sl.out.items);
+            }
+            sl.t1 = now();
+        }
+        // check, write and count each running slot's token; the ones to feed go to one step
+        var feed: [sage.MAX_SLOTS]u32 = undefined;
+        var toks: [sage.MAX_SLOTS]i32 = undefined;
+        var nf: usize = 0;
+        for (slots[0..r.slots], 0..) |*sl, i| {
+            if (!sl.on) continue;
+            var reason: ?[]const u8 = null;
+            if (std.mem.indexOfScalar(i32, sl.req.stops.items, sl.next) != null) {
+                reason = "stop";
+            } else {
+                say("t {d} {d}\n", .{ sl.req.req, sl.next });
+                try sl.out.append(alloc, sl.next);
+                if (sl.out.items.len == sl.req.max) reason = "length";
+            }
+            if (reason) |why| {
+                say("end {d} {s} {d:.6} {d:.6} {d}\n", .{ sl.req.req, why, sl.t1 - sl.t0, now() - sl.t1, sl.out.items.len });
+                sl.req.stops.deinit(alloc);
+                sl.req.ids.deinit(alloc);
+                sl.out.deinit(alloc);
+                sl.* = .{};
+                continue;
+            }
+            feed[nf] = @intCast(i);
+            toks[nf] = sl.next;
+            nf += 1;
+        }
+        if (nf == 0) continue;
+        if (nf == 1) { // one stream: the single-row forward
+            try r.use(feed[0]);
+            try r.step(toks[0]);
+            toks[0] = r.last;
+        } else try r.stepMulti(feed[0..nf], toks[0..nf], toks[0..nf]);
+        for (feed[0..nf], 0..) |si, j| {
+            const sl = &slots[si];
+            sl.next = toks[j];
+            if (sl.req.sampling) |*sp| {
+                if (nf == 1) try r.logits(logits) else try r.rowLogits(@intCast(j), logits);
+                sl.next = sp.pick(logits, sl.out.items);
             }
         }
-        say("end {s} {d:.6} {d:.6} {d}\n", .{ reason, t1 - t0, now() - t1, n });
     }
 }
 
