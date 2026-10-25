@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const Proposer = @import("proposer.zig").Proposer;
 const Reader = @import("recall.zig").Reader;
 const Sampling = @import("sampling.zig").Sampling;
+const Penalties = @import("sampling.zig").Penalties;
 const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
 const long_loop = @import("long_loop.zig");
@@ -117,6 +118,7 @@ pub const Spec = struct {
     max_new: u32,
     eos: []const u32 = &.{},
     sampling: ?Sampling = null,
+    penalties: Penalties = .{}, // where the backend applies them (Backend.VTable.penalties)
     drafts: bool = true,
     proposer: ?Proposer = null,
     recall: ?*Reader = null, // copies and grafts from the record of earlier requests (lanes/recall.zig)
@@ -150,6 +152,7 @@ pub const Stream = struct {
     max_new: u32,
     eos: []const u32,
     sampling: ?Sampling,
+    penalties: Penalties = .{},
     drafts: bool,
     proposer: ?Proposer,
     recall: ?*Reader,
@@ -235,6 +238,7 @@ pub const Stream = struct {
             .max_new = spec.max_new,
             .eos = spec.eos,
             .sampling = spec.sampling,
+            .penalties = spec.penalties,
             .drafts = spec.drafts,
             .proposer = if (spec.drafts) spec.proposer else null,
             .recall = if (spec.drafts) spec.recall else null,

@@ -343,7 +343,7 @@ const Lanes = struct {
     }
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
     }
 
     /// A drafter ring's bytes in each lane's run (0: no DFlash2 drafter).
@@ -401,6 +401,10 @@ const Lanes = struct {
             .value => |v| v,
             .handle => |h| @intCast(h),
         };
+        if (stream.penalties.active()) {
+            try self.e.penalties.window(self.gpa, stream, cache.len, token);
+            try self.e.penalties.row(self.gpa, 0, stream.penalties, &.{});
+        }
         try self.e.forward(&.{.{ .cache = cache, .rows = 1 }}, &.{token}, .{ .draws = &.{pick(stream.sampling, position)} });
         cache.last = null;
         return self.e.tokens[0];
@@ -447,6 +451,7 @@ const Lanes = struct {
                 ids[total] = w.pending;
                 @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
                 for (w.positions, 0..) |p, r| picks[total + r] = pick(w.stream.sampling, p);
+                if (w.stream.penalties.active()) try self.e.penalties.stageWindow(self.gpa, w, parts[n].cache.len, total);
                 masked = masked or w.masks.len != 0;
                 total += w.rows();
             }

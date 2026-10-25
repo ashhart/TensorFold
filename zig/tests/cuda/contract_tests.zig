@@ -48,7 +48,7 @@ const glm_pages_k = @import("contract_glm_pages.zig");
 const glm_index_k = @import("contract_glm_index.zig");
 const glm_attn_k = @import("contract_glm_attn.zig");
 const glm = @import("glm_cuda");
-const embed_k = @import("contract_embed.zig");
+const elementwise_k = @import("contract_elementwise.zig");
 
 const tree_k = @import("contract_tree_attn.zig");
 const block_k = @import("contract_block_attn.zig");
@@ -433,12 +433,9 @@ pub fn run(gpu: check.Gpu) !void {
     for (&denses, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .tile = i, .g = &dense_fns };
     defer for (&denses) |*x| x.deinit();
     for (&denses) |*x| try kernels.append(a, x.kernel());
-    var embed_rows = try cuda.embed_rows.EmbedRows.load(gpu.d);
-    defer embed_rows.unload();
-    var embeds: [embed_k.entries.len]embed_k.Embed = undefined;
-    for (embed_k.entries, &embeds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .e = &embed_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_embed_affine") else null };
-    defer for (&embeds) |*x| x.deinit();
-    for (&embeds) |*x| try kernels.append(a, x.kernel());
+    var elementwise: elementwise_k.Set = .{};
+    defer elementwise.deinit();
+    try elementwise.add(gpu, s, mods[5], &kernels);
     var qkrs: [qkr_k.forms.len]qkr_k.Qk = undefined;
     for (&qkrs, qkr_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .ctl = if (f.keep != null) try mods[5].function("tf_ctl_qk_round") else null, .arena = .init(a) };
     defer for (&qkrs) |*x| x.deinit();

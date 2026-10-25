@@ -165,7 +165,7 @@ pub const Host = struct {
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft };
+        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties };
     }
 };
 const refusals = @import("cuda_refusal.zig");
@@ -461,6 +461,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
+        .penalties = served.backend.penalties,
         .structures = served.backend.vtable.first_masked != null,
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
         .admit = admit,
@@ -495,6 +496,9 @@ test "CUDA host preserves prefill_step and first-before-draft capability" {
     try std.testing.expect(!h.backend().first_before_draft);
     h.inner.first_before_draft = true;
     try std.testing.expect(h.backend().first_before_draft);
+    try std.testing.expect(!h.backend().penalties);
+    h.inner.penalties = true;
+    try std.testing.expect(h.backend().penalties);
 }
 
 test "every registered family and d1's decision engine are listed for capabilities" {

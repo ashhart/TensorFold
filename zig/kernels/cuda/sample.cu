@@ -596,5 +596,5 @@ extern "C" __global__ void __launch_bounds__(256) tf_grammar_mask(__nv_bfloat16*
         }
     }
 }
-
+#include "sample_penalties.cuh"
 #include "sample_slices.cuh"

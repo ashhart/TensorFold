@@ -133,6 +133,7 @@ pub const Server = struct {
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
     draining: std.atomic.Value(bool) = .init(false),
+    penalties_logged: std.atomic.Value(bool) = .init(false), // an engine without them was sent penalties: said once
     generating: std.atomic.Value(u32) = .init(0),
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
@@ -261,6 +262,20 @@ pub const Server = struct {
             .top_p = @floatCast(number(options.get("top_p")) orelse 1.0),
             .min_p = @floatCast(number(options.get("min_p")) orelse 0.0),
         };
+    }
+
+    /// The request's penalties over the configured defaults; none, and a log line once, where the engine ignores them.
+    pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value) errors.Refused!api.Penalties {
+        const options = try json.newObject(cx.a);
+        if (srv.config.default_sampling) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
+        try merge(options, cx, try fields.parseNumbers(cx, f));
+        const p: api.Penalties = .{
+            .presence = @floatCast(number(options.get("presence_penalty")) orelse 0),
+            .frequency = @floatCast(number(options.get("frequency_penalty")) orelse 0),
+        };
+        if (!p.active() or srv.info.penalties) return p;
+        if (!srv.penalties_logged.swap(true, .monotonic)) log.line("presence_penalty and frequency_penalty are ignored: {s} does not apply them", .{srv.backendName()});
+        return .{};
     }
 
     /// A specific engine name, or the server's backend identity when the shared host uses its default name.

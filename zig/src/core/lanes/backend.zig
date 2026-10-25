@@ -76,6 +76,8 @@ pub const Backend = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
     round_observer: ?RoundObserver = null,
     first_before_draft: bool = false,
+    /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
+    penalties: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 

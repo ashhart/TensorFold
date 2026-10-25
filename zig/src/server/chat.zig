@@ -162,6 +162,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .prompt = rendered.ids,
         .max_tokens = @intCast(@min(limit, std.math.maxInt(u32))),
         .sampling = sampling,
+        .penalties = try srv.resolvePenalties(cx, f),
         .eos = if (stops_opt.ignore_eos) &.{} else srv.eos,
         .drafts = drafts,
         .background = background,

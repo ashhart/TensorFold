@@ -61,7 +61,7 @@ pub fn parseNumbers(cx: *Cx, fields: Value) errors.Refused!Value {
     try requireObject(cx, fields);
     _ = try stopOptions(cx, fields);
     const parsed = try json.copyObject(cx.a, fields.object);
-    for (integer_fields ++ [_][]const u8{ "temperature", "top_p", "min_p" }) |name| {
+    for (integer_fields ++ [_][]const u8{ "temperature", "top_p", "min_p", "presence_penalty", "frequency_penalty" }) |name| {
         const value = fields.field(name) orelse continue;
         const integer = for (integer_fields) |f| {
             if (std.mem.eql(u8, f, name)) break true;
@@ -69,6 +69,7 @@ pub fn parseNumbers(cx: *Cx, fields: Value) errors.Refused!Value {
         const number: ?Value = if (integer) toInt(cx.a, value) catch null else toFloat(value);
         const n = number orelse return cx.fail(.request, "{s} must be {s} or null", .{ name, if (integer) "an integer" else "a finite number" });
         if (std.mem.eql(u8, name, "min_p") and !(n.float >= 0 and n.float <= 1)) return cx.refuse("min_p must be between 0 and 1, or null");
+        if (std.mem.endsWith(u8, name, "_penalty") and !(n.float >= -2 and n.float <= 2)) return cx.fail(.request, "{s} must be between -2 and 2, or null", .{name});
         const stored = if (std.mem.eql(u8, name, "top_k") and n.int[0] == '-') Value{ .int = "0" } else n;
         try parsed.put(cx.a, name, stored);
     }

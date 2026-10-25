@@ -146,6 +146,8 @@ pub const Engine = struct {
     host_logits: cuda.HostBuffer,
     /// The kept rows' device draws, when forward was given them.
     tokens: [most_verify]u32 = undefined,
+    /// presence and frequency penalties the next forward takes from its kept rows' logits (staged by the caller).
+    penalties: @import("cuda_penalties.zig").Rows = .{},
     /// The captured forwards by shape (`Shape.key`): the launches from the embedding to the head.
     graphs: std.AutoHashMapUnmanaged(u32, cuda.graph.Exec) = .empty,
     /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
@@ -192,6 +194,7 @@ pub const Engine = struct {
         e.window_rows = most_window;
         e.arena_at = 0;
         e.graphs = .empty;
+        e.penalties = .{};
         e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
         e.n_taps = 0;
         e.features = 0;
@@ -282,6 +285,7 @@ pub const Engine = struct {
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
+        e.penalties.deinit(e.gpa);
         e.host_logits.free();
         e.staged.free();
         e.tables.free();
@@ -510,6 +514,7 @@ pub const Engine = struct {
             try gop.value_ptr.launchOn(e.stream);
         }
         for (parts) |p| p.cache.advanced(p.rows, record);
+        if (keep == .draws or keep == .logits) try e.penalties.apply(e.d, &e.draws, e.stream, e.logits, g.vocab) else e.penalties.clear();
         switch (keep) {
             .hidden => try e.stream.synchronize(), // mapped layer inputs are ready before the learner reads them
             .draws => |pk| {

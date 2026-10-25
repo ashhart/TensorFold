@@ -19,6 +19,29 @@ pub const Sampling = struct {
     }
 };
 
+/// OpenAI's presence and frequency penalties: a reply's token loses presence + frequency * its count, greedy too.
+pub const Penalties = struct {
+    presence: f32 = 0,
+    frequency: f32 = 0,
+
+    pub fn active(p: Penalties) bool {
+        return p.presence != 0 or p.frequency != 0;
+    }
+
+    /// What a token held `count` times (at least once) loses from its logit.
+    pub fn of(p: Penalties, count: u32) f32 {
+        return p.presence + p.frequency * @as(f32, @floatFromInt(count));
+    }
+};
+
+test "penalties: off by default, presence once and frequency a count" {
+    try std.testing.expect(!(Penalties{}).active());
+    const p: Penalties = .{ .presence = 1.5, .frequency = 0.25 };
+    try std.testing.expect(p.active());
+    try std.testing.expectEqual(@as(f32, 1.75), p.of(1));
+    try std.testing.expectEqual(@as(f32, 2.5), p.of(4));
+}
+
 /// A reproducible seed from the prompt: sha256 of the ids joined by commas and "|salt", first 8 bytes, 63 bits.
 pub fn seedFor(tokens: []const u32, salt: i64) u64 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});

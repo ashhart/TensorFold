@@ -41,6 +41,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .max_new = r.max_tokens,
         .eos = r.eos,
         .sampling = r.sampling,
+        .penalties = r.penalties,
         .drafts = r.drafts,
         .proposer = job.custom orelse job.proposer.proposer(),
         .recall = recall,
