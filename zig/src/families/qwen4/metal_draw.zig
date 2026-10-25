@@ -1,6 +1,14 @@
 //! Sampling and greedy picks reuse the maintained Metal kernels; metadata copies follow the inference queue.
 const std = @import("std");
 const edit = @import("../flashnext/geometry_source.zig");
+pub fn source(a: std.mem.Allocator, index: usize, replay: []const u8) ![]u8 {
+    return switch (index) {
+        0 => a.dupe(u8, @embedFile("../../../kernels/metal/nemotron_sample.metal")),
+        1 => std.mem.concat(a, u8, &.{ "#include <metal_stdlib>\nusing namespace metal;\n", try edit.function(replay, "kernel void fz_argmax(") }),
+        2 => a.dupe(u8, @embedFile("../../../kernels/metal/core/grammar_mask.metal")),
+        else => error.Qwen4DrawSource,
+    };
+}
 pub fn Drawer(comptime M: type, comptime L: type, comptime B: type) type {
     const Tensor = @import("arena.zig").Arena(B).Tensor;
     return struct {
@@ -23,13 +31,11 @@ pub fn Drawer(comptime M: type, comptime L: type, comptime B: type) type {
             _ = try bytes(vocab, rows, streams);
             var out: Self = .{ .backend = b, .vocab = vocab, .rows = rows, .words = (vocab + 31) / 32 };
             errdefer out.deinitDrained();
-            const original = @import("core").replay_glue;
-            const greedy = try std.mem.concat(a, u8, &.{ "#include <metal_stdlib>\nusing namespace metal;\n", try edit.function(original, "kernel void fz_argmax(") });
-            defer a.free(greedy);
-            const sources = [_][]const u8{ @embedFile("../../../kernels/metal/nemotron_sample.metal"), greedy, @embedFile("../../../kernels/metal/core/grammar_mask.metal") };
             const names = [_][]const u8{ "tf_sample_full", "fz_argmax", "tf_grammar_mask" };
-            for (sources, names, 0..) |source, name, i| {
-                const lib = try M.Library.fromSource(b.device, source, M.CompileOptions.mlx());
+            for (names, 0..) |name, i| {
+                const text = try source(a, i, @import("core").replay_glue);
+                defer a.free(text);
+                const lib = try M.Library.fromSource(b.device, text, M.CompileOptions.mlx());
                 defer lib.deinit();
                 out.pipes[i] = try M.Pipeline.init(b.device, lib, name, false);
                 out.count += 1;

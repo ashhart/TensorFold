@@ -53,7 +53,7 @@ pub fn from(a: std.mem.Allocator, g: qsa.Geometry, texts: [6][]const u8) ![]u8 {
         .{ "m * 0.25f", "m / float(RATIO)" },      .{ "tf_rotary_scalar(i, 4 * b,", "tf_rotary_scalar(i, RATIO * b," },
     };
     for (pool_edits) |e| body[1] = try edit.once(mem, body[1], e[0], e[1]);
-    body[1] = try std.mem.concat(mem, u8, &.{ try std.fmt.allocPrint(mem, "constexpr int RATIO = {d};\n", .{g.ratio}), body[1] });
+    body[1] = try std.mem.concat(mem, u8, &.{ try std.fmt.allocPrint(mem, "constant constexpr int RATIO = {d};\n", .{g.ratio}), body[1] });
     body[2] = try integer(mem, body[2], "HI", 4, g.index_heads);
     body[2] = try integer(mem, body[2], "TOP", 512, g.top);
     body[3] = try integer(mem, body[3], "TOP", 512, g.top);
@@ -73,8 +73,10 @@ pub fn from(a: std.mem.Allocator, g: qsa.Geometry, texts: [6][]const u8) ![]u8 {
     body[4] = try edit.once(mem, body[4], "Kc + size_t(kvh) * cap * D + lane * PER", "Kc + size_t(kvh) * D + lane * PER");
     body[4] = try edit.once(mem, body[4], "Vc + size_t(kvh) * cap * D + lane * PER", "Vc + size_t(kvh) * D + lane * PER");
     body[4] = try edit.once(mem, body[4], "size_t(sparse ? ids[j] : j) * D", "size_t(sparse ? ids[j] : j) * KVH * D");
+    body[4] = try edit.once(mem, body[4], "  const size_t cap = size_t(Kc_shape[2]);\n", "");
     body[5] = try integer(mem, body[5], "H", 24, g.heads);
     body[5] = try integer(mem, body[5], "PW", 13952, g.projectionWidth());
+    body[5] = try edit.once(mem, body[5], try std.fmt.allocPrint(mem, "  constexpr int PW = {d};\n", .{g.projectionWidth()}), "");
     body[5] = try edit.once(mem, body[5], "  const float g = float(GP[r * PW + h * 2 * D + D + d]);\n  OUT[(size_t(r) * H + h) * D + d] = bfloat(float(bfloat(acc / total)) * bsig(g));", "  OUT[(size_t(r) * H + h) * D + d] = bfloat(acc / total);");
     // Output gating uses the same explicit rounding-policy operator on both backends.
     const rotary = try edit.once(mem, try edit.function(texts[0], "inline TF_RotaryScalar tf_rotary_scalar("), "(float(i) / 32.0f)", try std.fmt.allocPrint(mem, "(float(i) / {d}.0f)", .{@max(@as(usize, 1), g.rotary / 2)}));

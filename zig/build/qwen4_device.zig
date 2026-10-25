@@ -13,7 +13,9 @@ pub fn metal(b: *std.Build) void {
     const root = b.createModule(.{ .root_source_file = b.path("zig/qwen4_metal_device.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "qwen4", .module = @import("qwen4.zig").module(b, target, .Debug, core) }, .{ .name = "lanes", .module = lanes }, .{ .name = "metal", .module = device } } });
     const exe = b.addExecutable(.{ .name = "qwen4-metal-device", .root_module = root });
     b.step("compile-qwen4-metal-device", "Compile the real Qwen4 Metal device gate without executing it").dependOn(&exe.step);
+    const sources = @import("qwen4_metal_sources.zig").steps(b);
     const run = b.addRunArtifact(exe);
+    run.step.dependOn(sources);
     run.has_side_effects = true;
     b.step("test-qwen4-metal", "Run nonzero Qwen4 native Metal logits, picks and state exactness on a GPU").dependOn(&run.step);
 }

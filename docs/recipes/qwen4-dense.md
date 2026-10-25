@@ -77,3 +77,13 @@ zig build kernel-contract -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121
 The normal CUDA contract collects the Qwen4 operators and their planted controls, and resolves all four images
 for the 32 new launch registrations. Resource measurements are still required; pending records must fail limits.
 Synthetic device success does not qualify an unreleased checkpoint or establish cross-backend equality.
+
+Compile the generated runtime libraries and control variants before opening a device on a Mac with the Metal toolchain:
+
+```sh
+zig build test-qwen4-metal-sources -j8
+```
+
+This uses the runtime's Metal language and math settings and opens no GPU. The explicit `test-qwen4-metal` device gate
+also depends on this compiler check. `emit-qwen4-metal-sources` writes the exact source inputs under
+`zig-out/qwen4-metal/` for inspection without invoking a shader compiler.
