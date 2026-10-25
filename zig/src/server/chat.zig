@@ -129,7 +129,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     var limit: i64 = @max(1, if (input.max_tokens) |m| (if (m != 0) m else srv.config.default_max_tokens) else srv.config.default_max_tokens);
     const priority = f.get("priority");
     const background = prompt_mod.isTitle(input.messages, input.tools.len > 0) or
-        (priority != null and priority.? == .string and std.mem.eql(u8, priority.?.string, "background"));
+        (priority != null and priority.? == .string and std.mem.eql(u8, priority.?.string, "background")) or
+        (priority == null and @import("server.zig").namedBackground(srv.config, f));
     const preparing = !background;
     if (preparing) _ = srv.preparing.fetchAdd(1, .acq_rel);
     errdefer release(srv, preparing);

@@ -50,6 +50,7 @@ pub const flags = [_]Flag{
     .{ .name = "--default-voice", .native = true },
 } ++ @import("drama_cfg.zig").flags ++ [_]Flag{
     .{ .name = "--alias", .kind = .append, .native = true },
+    .{ .name = "--name-priority", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
     .{ .name = "--api-key-file", .native = true },
     .{ .name = "--metrics-open", .kind = .store_true, .native = true },
@@ -164,6 +165,7 @@ pub const Args = struct {
     voices: ?[]const u8 = null,
     default_voice: []const u8 = "default",
     alias: []const []const u8 = &.{},
+    name_priority: []const []const u8 = &.{},
     api_key: []const []const u8 = &.{},
     allowed_host: []const []const u8 = &.{},
     allowed_origin: []const []const u8 = &.{},
@@ -293,6 +295,15 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     if (out.idle_unload < 0 or out.idle_unload > std.math.maxInt(i64) / std.time.ns_per_s) return fail(u, a, "argument --idle-unload: expected a seconds count from 0 (off) under {d}: '{d}'", .{ std.math.maxInt(i64) / std.time.ns_per_s, out.idle_unload });
     out.alias = repeated.alias.items;
+    out.name_priority = repeated.priorities.items;
+    for (out.name_priority) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse
+            return fail(u, a, "argument --name-priority: takes ID=background, not '{s}'", .{entry});
+        const id = std.mem.trim(u8, entry[0..eq], " \t");
+        const word = std.mem.trim(u8, entry[eq + 1 ..], " \t");
+        if (id.len == 0 or !std.ascii.eqlIgnoreCase(word, "background"))
+            return fail(u, a, "argument --name-priority: takes ID=background, not '{s}'", .{entry});
+    }
     out.api_key = repeated.keys.items;
     if (repeated.hosts.items.len > 64 or repeated.origins.items.len > 64) return fail(u, a, "at most 64 --allowed-host and 64 --allowed-origin entries are allowed", .{});
     out.allowed_host = repeated.hosts.items;
@@ -315,7 +326,7 @@ fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, O
     return g;
 }
 
-const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty };
+const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, priorities: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty };
 
 fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usage, repeated: *Repeated) error{ Usage, OutOfMemory }!void {
     const v = value orelse "";
@@ -377,7 +388,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
+    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
     } else if (is(name, "--learn-min-free-gib")) {

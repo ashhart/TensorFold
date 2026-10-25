@@ -139,6 +139,14 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             if (std.mem.eql(u8, seen, id)) break;
         } else ids.append(a, id) catch return 1;
     };
+    var bad_id: []const u8 = "";
+    const backgrounds = namedBackgrounds(a, args.name_priority, ids.items, &bad_id) catch |err| switch (err) {
+        error.OutOfMemory => return 1,
+        error.UnknownId => {
+            std.debug.print("tensorfold: --name-priority names '{s}', not --name or an --alias\n", .{bad_id});
+            return 1;
+        },
+    };
     const salt = if (env(s, "TENSORFOLD_SEED_SALT")) |t| std.fmt.parseInt(i64, std.mem.trim(u8, t, " "), 10) catch {
         std.debug.print("tensorfold: TENSORFOLD_SEED_SALT={s}: an integer\n", .{t});
         return 1;
@@ -160,6 +168,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .voices_dir = args.voices,
         .default_voice = args.default_voice,
         .model_ids = ids.items,
+        .background_ids = backgrounds,
         .default_max_tokens = args.max_tokens,
         .enable_thinking = args.thinking,
         .reasoning_effort = args.reasoning_effort,
@@ -390,4 +399,28 @@ test "Failure boundaries: engine close waits for handlers and connections to lea
 
 test "idle deadline: a counted request waits for reload before its drain halt on every cycle" {
     try @import("idle_unload_deadline_test.zig").loadingDrain(drain);
+}
+
+/// --name-priority's ids that name a served id, in order; the first unknown one is named in `bad`.
+pub fn namedBackgrounds(allocator: std.mem.Allocator, entries: []const []const u8, ids: []const []const u8, bad: *[]const u8) error{ UnknownId, OutOfMemory }![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (entries) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse {
+            bad.* = entry;
+            return error.UnknownId;
+        };
+        const id = std.mem.trim(u8, entry[0..eq], " \t");
+        var known = false;
+        for (ids) |seen| if (std.mem.eql(u8, seen, id)) {
+            known = true;
+            break;
+        };
+        if (!known) {
+            bad.* = id;
+            return error.UnknownId;
+        }
+        try out.append(allocator, id);
+    }
+    return out.toOwnedSlice(allocator);
 }
