@@ -4,9 +4,11 @@ const api = @import("engine_api");
 
 /// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead and warm_quiet if declared.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
-    var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
+    var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0, .fork = true };
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
+    if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork;
+    if (@hasDecl(F, "snap_fork_disabled")) rules.fork = false;
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;
         rules.grid = F.snap_grid;
@@ -55,7 +57,11 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     const Headless = struct {
         pub const snap_lookahead: u32 = 0;
     };
+    const Fork = struct {
+        pub const snap_fork_disabled = true;
+    };
     try std.testing.expectEqual(@as(u32, 0), cacheRules(Headless).lookahead);
+    try std.testing.expect(cacheRules(Other).fork and !cacheRules(Fork).fork);
     const any = cacheRules(Other);
     try std.testing.expect(!any.planned and any.min_prompt == 0 and any.lookahead == 1 and any.warm == .off);
     try std.testing.expect(cacheRules(Warm).warm == .waits and cacheRules(Glm).warm == .off);
