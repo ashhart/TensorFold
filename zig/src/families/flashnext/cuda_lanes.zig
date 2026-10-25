@@ -36,6 +36,7 @@ pub fn Namespace(comptime Tri: type) type {
         pub const prompt_rows: u32 = @intCast(prompt.batch.default_chunk);
         /// The prompt cache's copies of a stream's state (cuda_snap.zig), called with `Loaded.target`.
         pub const snap_bytes = snapBytes;
+        pub const snap_repeat_min: u32 = 16;
         pub const snap_save = snapSave;
         pub const snap_restore = snapRestore;
         pub const snap_drop = snapDrop;
@@ -331,7 +332,6 @@ pub fn Namespace(comptime Tri: type) type {
                 return last;
             }
         };
-
         pub fn envUsize(name: [:0]const u8, default: usize) usize {
             const v = std.c.getenv(name) orelse return default;
             return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;

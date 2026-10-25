@@ -413,7 +413,10 @@ pub const LaneHost = struct {
         h.unlock();
         rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
         job.reported();
-        if (h.cache) |store| store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
+        if (h.cache) |store| {
+            store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
+            if (job.request.images.len == 0 and job.request.cache_key.len == 0) store.repeat_log.note(store.gpa, store.rules.repeat_min, job.request.prompt);
+        }
         emit(job, .{ .prefilled = job.stream.cached });
         if (job.stream.prompt_logprobs != null) emit(job, .{ .prompt_logprobs = job.stream.prompt_rows.items });
         recalls.prompted(h, job);

@@ -42,6 +42,11 @@ and `pread` selects positional reads explicitly. MLX tables retain the mapped pa
 prefix without changing a sequence history, issue on the caller and leave no borrowed worker after return.
 These I/O choices need cold-storage and served-token A/B gates before a performance claim.
 
+Raw completion prompts of at least 16 tokens gain a kept end mark after they have been served once, when the
+prompt-cache budget fits it. The first pass is unchanged; a second identical pass keeps near its end; later repeats
+resume there. Chat endpoints retain priority. `TF_FLASHNEXT_REPEAT_CACHE=0` disables this Flash Next CUDA policy.
+Other families keep their existing cache policy. Full token keys and frame identity still decide every resume.
+
 ## Run
 
 ```bash

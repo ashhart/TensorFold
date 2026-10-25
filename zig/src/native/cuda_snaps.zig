@@ -18,6 +18,7 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
 pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
     var rules = cacheRules(F);
     rules.chunk = prompt_rows;
+    if (@hasDecl(F, "snap_repeat_min")) rules.repeat_min = if (std.c.getenv("TF_FLASHNEXT_REPEAT_CACHE")) |v| (if (std.mem.eql(u8, std.mem.span(v), "0")) 0 else F.snap_repeat_min) else F.snap_repeat_min;
     rules.chunk_starts = false;
     return rules;
 }

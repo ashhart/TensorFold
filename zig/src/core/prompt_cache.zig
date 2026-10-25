@@ -100,6 +100,8 @@ pub const Rules = struct {
     page: u32 = 0,
     /// A paged store also keeps the prompt's last whole page, for a later turn whose history the request did not name.
     tail: bool = false,
+    /// Repeated raw prompts keep near their end; only families that allow any-row cuts opt in (0: off).
+    repeat_min: u32 = 0,
 };
 
 pub const Entry = struct {
@@ -147,6 +149,7 @@ pub const Store = struct {
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
 
+    repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
     const SHARED_KEYS = 64;
 
     pub fn init(gpa: Allocator, family: Snapshots, rules: Rules, budget: u64) Store {
@@ -157,6 +160,7 @@ pub const Store = struct {
         for (s.entries.items) |e| s.free(e);
         s.entries.deinit(s.gpa);
         s.shared_keys.deinit(s.gpa);
+        s.repeat_log.deinit(s.gpa);
         s.held = 0;
     }
 
@@ -419,7 +423,8 @@ pub const Store = struct {
         defer want.deinit(a);
         // a warm pass (its history the whole prompt) keeps where a state can be keyed, its lookahead before the end
         const warm_pass = s.rules.warm != .off and history_len == prompt.len and s.rules.lookahead > 0;
-        const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else history_len;
+        const repeat_at = s.repeat_log.mark(s.rules.repeat_min, prompt, from, s.rules.lookahead, s.rules.planned);
+        const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else if (history_len == 0) repeat_at else history_len;
         try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
         if (previous.len > 0 and !short) {
@@ -583,4 +588,8 @@ test {
     _ = @import("learned_fault_test.zig");
     _ = modes;
     _ = rows;
+}
+
+test {
+    _ = @import("prompt_cache_repeat_test.zig");
 }
