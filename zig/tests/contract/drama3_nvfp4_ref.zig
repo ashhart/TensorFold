@@ -182,6 +182,31 @@ pub fn upRange(gate: Interval, up: Interval) Interval {
     return fp32(g.mul(inverse)).mul(u).rounded();
 }
 
+pub const shared_gate_terms = 65;
+
+pub fn sharedGateStressTerm(i: usize) f32 {
+    return if (i < 16) 32768 else if (i < 48) 1 else if (i < 64) -32768 else if (i == 64) -31 else 0;
+}
+
+pub fn sharedGateOutput(dot: f64) f64 {
+    return bf(2 / (1 + @exp(-dot)));
+}
+
+test "shared gate stress remains discriminating after sigmoid and BF16 output" {
+    var terms: [2048]f64 = @splat(0);
+    for (terms[0..shared_gate_terms], 0..) |*v, i| v.* = sharedGateStressTerm(i);
+    const want = sharedGateOutput(1);
+    try std.testing.expectEqual(@as(f64, 1.4609375), want);
+    for ([_]rows.Order{ .sequential, .pairwise, .strided }) |order| {
+        try std.testing.expectEqual(@as(f64, 1), rows.sumIn(.f32, order, &terms));
+        for ([_]c.Accum{ .f16, .bf16 }) |acc| {
+            const got = sharedGateOutput(rows.sumIn(acc, order, &terms));
+            // Exact FP32 sums yield one stable BF16 value, so the stress interval has zero width.
+            try std.testing.expect(!std.math.isFinite(got) or got != want);
+        }
+    }
+}
+
 test "NVFP4 independent decoding includes signs, subnormal scales, signed zero and maximum finite scale" {
     try std.testing.expectEqual(@as(f64, 0.5), fp4(1));
     try std.testing.expectEqual(@as(f64, -6), fp4(15));
