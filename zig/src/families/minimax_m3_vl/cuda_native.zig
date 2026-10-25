@@ -22,6 +22,9 @@ pub const graph = @import("graph.zig"); // the launch graph this stage attaches 
 pub const model_type = "minimax_m3_vl";
 /// The checkpoints this family reads: Mia-AiLab's MiniMax-M3.1-Flash-EXL3-EAQ-v1-3.06-bpw and its line.
 pub const formats: []const []const u8 = &.{"exl3"};
+/// The server serves this stage's requests as fixed greedy: temperature at any value (or absent)
+/// serves, its other sampling fields refuse (SamplingNotAttached) — the keyed sampler is a later pass.
+pub const temperature_greedy = true;
 /// The pack's own window (max_position_embeddings 1,048,576) when a config.json names none.
 pub const default_context: i64 = 1048576;
 pub const max_segments: u32 = 1;
@@ -144,8 +147,8 @@ pub const serve_boundary = "minimax_m3_vl passed CUDA admission (every module's 
     "recipe: rank 0 layers 0-29 + embed + final norm + lm_head, rank 1 layers 30-59, NCCL handoffs) grade " ++
     "it — but this stage still refuses loudly rather than fake anything it does not have: draft rows and " ++
     "drafted verify windows refuse (error.LanesNotAttached: no draft head — the draft/spec-decode surface " ++
-    "is unimplemented), a sampled draw spec and grammar masks refuse (error.SamplingNotAttached: the keyed " ++
-    "sampler is not wired for this family's lanes), a second stream refuses while one is live " ++
+    "is unimplemented), a sampled draw spec that names more than temperature and grammar masks refuse (error.SamplingNotAttached: the keyed " ++
+    "sampler is not wired for this family's lanes; temperature alone serves as fixed greedy), a second stream refuses while one is live " ++
     "(error.LanesNotAttached: one stream at a time), tree keeps refuse (prefix rollbacks only), TP2 booted " ++
     "through open() now ATTACHES since Stage-11 — the TF_MINIMAXM3_RANK/TF_MINIMAXM3_WORLD env server " ++
     "boot serves when the place is the receipted world-2 split: rank 0 returns the Loaded the HTTP " ++
@@ -164,7 +167,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.ServeNotAttached => serve_boundary,
         error.LanesNotAttached => "minimax_m3_vl's lane surface serves one greedy stream through the attached graph (prefill/first/queue/read/verify/keep/release — the boundary tests grade a short prompt token-in token-out); the calls that refuse here are the ones this stage does not have: draft rows and drafted verify windows (no draft head — the draft/spec-decode surface is unimplemented), a second stream while one is live, a verify batch wider than one window, and tree keeps",
-        error.SamplingNotAttached => "minimax_m3_vl's lane surface serves greedy draws only in this stage: a Sampling spec (temperature/top_k/top_p) or a grammar mask refuses here rather than serve an ungraded draw — the keyed sampler is a later pass",
+        error.SamplingNotAttached => "minimax_m3_vl's lane surface serves greedy draws only in this stage: the server takes temperature as fixed greedy (any value or absent); a Sampling spec that names more than temperature (top_k/top_p/min_p/seed) or a grammar mask refuses here rather than serve an ungraded draw — the keyed sampler is a later pass",
         error.TpServingNotAttached => "minimax_m3_vl's TF_MINIMAXM3_RANK/TF_MINIMAXM3_WORLD env server boot attaches as the receipted world-2 split (rank 0 serves the lane surface, rank 1 mirrors rank 0's rows; NCCL_COMM_ID names rank 0's id host:port). What still refuses: an env place outside that split (one env var alone, a non-numeric rank/world, a rank at or past its world, a world other than 2), while TP2 serving receipts live at `tf-cuda-test minimax-m3-token <rank> <host:port> <pack>` (the Stage-6/7 token receipts) and openTP2's lane surface — `tf-cuda-test minimax-m3-lane-tp2 <rank> <host:port> <pack>` (the Stage-9 receipts: the same lane vtable answering over the split pack, rank 1 first)",
         error.NoCommId => "minimax_m3_vl's world-2 server boot meets its rank over NCCL: set NCCL_COMM_ID to rank 0's address:port on every rank (the receipted dance serves rank 0's fresh UniqueId there; rank 1 connects first)",
         error.ContextTooWide => "the launch graph's decode pool this stage is 4096 keys: give a context at or under it (the wide paged prompt path is a later stage)",
@@ -733,6 +736,7 @@ test "admission runs the whole checkpoint and open refuses exactly at the serve 
     try std.testing.expect(std.mem.indexOf(u8, words, "prefill/first/") != null); // the served rows are named
     try std.testing.expect(std.mem.indexOf(u8, words, "LanesNotAttached") != null); // drafts+second streams still refuse
     try std.testing.expect(std.mem.indexOf(u8, words, "SamplingNotAttached") != null); // sampled draws refuse
+    try std.testing.expect(temperature_greedy); // the server serves temperature as fixed greedy
     try std.testing.expect(std.mem.indexOf(u8, words, "TpServingNotAttached") != null); // and the TP2 server boot
     try std.testing.expect(std.mem.indexOf(u8, words, "ContextTooWide") != null); // and the pool's window
     try std.testing.expect(explain(null, error.LanesNotAttached) != null);

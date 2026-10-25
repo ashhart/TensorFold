@@ -516,6 +516,8 @@ const Generation = struct {
         try runtime.put(a, "prefill_raised", .{ .array = raised });
         try runtime.put(a, "time_to_first_token", if (g.first_ns) |t| .{ .float = seconds(t - received) } else .null);
         try runtime.put(a, "sampling", .{ .string = if (exact) "exact" else "greedy" });
+        if (g.srv.info.temperature_greedy and !exact)
+            try runtime.put(a, "tensorfold.sampling", .{ .string = "greedy-deterministic (keyed sampler not attached; temperature is served as fixed greedy)" });
         try runtime.put(a, "drafts", .{ .bool = drafts });
         const sha = @import("tokens.zig").tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });

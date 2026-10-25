@@ -173,6 +173,29 @@ fn seedSample(srv: *server.Server, a: std.mem.Allocator, body: []const u8) !?api
     return srv.resolveSampling(&cx, (try json.parse(a, body)).ok, 0, &.{ 1, 2, 3 });
 }
 
+test "done times: a temperature-greedy engine serves temperature-only requests greedy; other sampling fields refuse by name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    Clock.next = 42;
+    var script: Script = .{ .first = 10_384_000_000 };
+    var tt: helpers = .{};
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    defer srv.deinit();
+    srv.info.temperature_greedy = true;
+    try std.testing.expectEqual(@as(?api.Sampling, null), try seedSample(srv, a, "{}")); // absent temperature: fixed greedy
+    try std.testing.expectEqual(@as(?api.Sampling, null), try seedSample(srv, a, "{\"temperature\":0}"));
+    try std.testing.expectEqual(@as(?api.Sampling, null), try seedSample(srv, a, "{\"temperature\":0.7}"));
+    srv.config.default_sampling = (try json.parse(a, "{\"temperature\":0.7,\"top_k\":40,\"top_p\":0.95}")).ok;
+    try std.testing.expectEqual(@as(?api.Sampling, null), try seedSample(srv, a, "{}")); // defaults do not sample this engine
+    var cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0.7,\"top_k\":5}")).ok, 0, &.{1}));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "SamplingNotAttached") != null);
+    cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"seed\":7}")).ok, 0, &.{1}));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "SamplingNotAttached") != null);
+}
+
 fn seedControls(mode: enum { fresh, keyed, explicit, defaults, default_fresh, failed, log_drawn, log_given }) !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

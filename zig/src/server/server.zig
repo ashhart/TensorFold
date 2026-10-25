@@ -207,6 +207,14 @@ pub const Server = struct {
         if (defaults) |d| try merge(options, cx, d);
         const supplied = try fields.parseNumbers(cx, f);
         try merge(options, cx, supplied);
+        if (srv.info.temperature_greedy) {
+            inline for (.{ "top_k", "top_p", "min_p", "seed" }) |k| {
+                if (f.get(k)) |v| if (v != .null) return cx.refuse(
+                    "this engine serves temperature as fixed greedy (no keyed sampler is attached): its other sampling fields refuse (SamplingNotAttached) — send temperature only, or leave the sampling fields out",
+                );
+            }
+            return null; // temperature at any value, or absent: fixed greedy, annotated in the reply
+        }
         const temp = number(options.get("temperature")) orelse 0;
         if (temp <= 0) return null;
         if (srv.info.greedy_only) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)

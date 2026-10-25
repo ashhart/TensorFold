@@ -215,6 +215,9 @@ pub const Info = struct {
     vision: ?Vision = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
+    /// A request naming only temperature (or no sampling field) serves fixed greedy; its other sampling
+    /// fields (top_k/top_p/min_p/seed) refuse by their exact lane-surface name (SamplingNotAttached).
+    temperature_greedy: bool = false,
     /// The learner reads conversation prompts at any length through taps.
     slide_conversations: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
