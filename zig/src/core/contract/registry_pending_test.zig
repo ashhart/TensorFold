@@ -12,8 +12,15 @@ const TargetDecision = registry.TargetDecision;
 test "CUDA lane resources distinguish recorded launches from missing receipts" {
     for (cuda_pending) |r| {
         try std.testing.expect(r.launch.threads > 0);
-        const missing = std.meta.eql(none, r.usage);
-        try std.testing.expectEqual(if (missing) limits.sms.len else @as(usize, 0), try checkCuda(std.testing.allocator, &.{r}, true));
+        var missing: usize = 0;
+        for (limits.sms, r.usage) |sm, usage| {
+            if (usage.regs == 0) missing += 1 else {
+                var text: std.ArrayList(u8) = .empty;
+                defer text.deinit(std.testing.allocator);
+                try std.testing.expectEqual(@as(usize, 0), try limits.cuda(r.launch, usage, sm, &text, std.testing.allocator));
+            }
+        }
+        try std.testing.expectEqual(missing, try checkCuda(std.testing.allocator, &.{r}, true));
         for (cuda) |measured| try std.testing.expect(!std.mem.eql(u8, r.launch.symbol, measured.launch.symbol));
     }
 }
@@ -44,10 +51,11 @@ test "optional shared-memory variants are N/A while supported variants still req
     try std.testing.expect(try checkCuda(a, &.{unmeasured}, true) > 0);
 }
 
-test "Dory resources stay pending and cannot qualify without compiler receipts" {
+test "Dory resources qualify only the architecture with a compiler receipt" {
     for (@import("dory_cuda_records.zig").cuda) |r| {
-        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
-        for ([_]limits.Nvcc{ .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 2 }, .{ .major = 14, .minor = 0 } }) |version|
+        try std.testing.expectEqual(@as(usize, 4), try checkCuda(std.testing.allocator, &.{r}, true));
+        try std.testing.expectEqual(r.usage, registry.usageFor(r, .{ .major = 13, .minor = 0 }));
+        for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqual(none, registry.usageFor(r, version));
     }
 }

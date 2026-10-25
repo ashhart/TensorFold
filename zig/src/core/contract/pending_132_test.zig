@@ -23,12 +23,15 @@ test "compiler receipts: new 13.0 records preserve independent 13.2 selection" {
     try std.testing.expectEqualDeep(registry.none, registry.usageFor(unseen, .{ .major = 13, .minor = 2 }));
 }
 
-test "prompt int8: changed kernels stay unmeasured and decode receipts belong to exactly 13.3" {
+test "prompt int8: quantizer changes stay pending, prefill has one receipt, decode belongs to exactly 13.3" {
     for ([_][]const u8{ "w4a8_prefill tf_w4a8_quantize", "w4a8_prefill tf_w4a8_prefill" }) |name| {
         const row = for (registry.all_cuda) |r| {
             if (std.mem.eql(u8, r.launch.name, name)) break r;
         } else return error.MissingInt8Record;
-        for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
+        var want = registry.none;
+        if (std.mem.eql(u8, name, "w4a8_prefill tf_w4a8_prefill")) want[4] = .{ .regs = 165, .static = 0, .bound = 256 };
+        try std.testing.expectEqualDeep(want, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
+        for ([_]?limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
     }
     for (@import("measurements/qwen_lanes_133.zig").records) |receipt| {
@@ -48,8 +51,8 @@ test "compiler receipts: 13.0 additions cannot replace a different later measure
     } else return error.MissingLaneRecord;
     const old = registry.usageFor(row, .{ .major = 13, .minor = 0 });
     const later = registry.usageFor(row, .{ .major = 13, .minor = 2 });
-    try std.testing.expectEqual(@as(u32, 0), old[4].static);
-    try std.testing.expectEqual(@as(u32, 48), old[4].regs);
+    try std.testing.expectEqual(@as(u32, 4096), old[4].static);
+    try std.testing.expectEqual(@as(u32, 64), old[4].regs);
     try std.testing.expectEqual(@as(u32, 5120), later[4].static);
     try std.testing.expectEqual(@as(u32, 40), later[4].regs);
     var absent = row;
