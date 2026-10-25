@@ -61,6 +61,10 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
             try err.interface.writeAll(usage);
             return 2;
         };
+        if (comptime !plan.supported) {
+            try err.interface.writeAll("tensorfold plan: this build has no CUDA engines, and plan answers for the CUDA admission budget\n");
+            return 2;
+        }
         return plan.run(a, init.io, &out.interface, env, parsed.model, .{ .mem_gb = parsed.mem_gb, .ram = parsed.ram });
     }
     if (std.mem.eql(u8, args[0], "merge")) {

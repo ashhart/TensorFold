@@ -3,6 +3,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hub = @import("hub.zig");
 const engines = @import("native_engines");
+/// The CUDA admission budget: only CUDA engine sets carry it; elsewhere `plan` says so instead of answering.
+pub const supported = @hasDecl(engines, "budget");
 const budget = engines.budget;
 
 pub const GiB: u64 = 1 << 30;
@@ -184,6 +186,7 @@ fn written(a: Allocator, in: Inputs) ![]const u8 {
 }
 
 test "plan: a small checkpoint fits the default budget" {
+    if (comptime !supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -195,6 +198,7 @@ test "plan: a small checkpoint fits the default budget" {
 }
 
 test "plan: a big checkpoint refuses and names the need" {
+    if (comptime !supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -212,6 +216,7 @@ test "plan: a big checkpoint refuses and names the need" {
 }
 
 test "plan: the hint names the reserve that fits the weights" {
+    if (comptime !supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -222,6 +227,7 @@ test "plan: the hint names the reserve that fits the weights" {
 }
 
 test "plan: the hint names the cap when the limit refuses what the machine would grant" {
+    if (comptime !supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -234,6 +240,7 @@ test "plan: the hint names the cap when the limit refuses what the machine would
 }
 
 test "plan: no hint when even the least reserve cannot hold the weights" {
+    if (comptime !supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -249,6 +256,7 @@ test "plan: no hint when even the least reserve cannot hold the weights" {
 }
 
 test "plan: an unreadable host memory refuses with the startup report line" {
+    if (comptime !supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -260,6 +268,7 @@ test "plan: an unreadable host memory refuses with the startup report line" {
 }
 
 test "plan: a bad reserve variable is refused with the admission's own text" {
+    if (comptime !supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -270,6 +279,7 @@ test "plan: a bad reserve variable is refused with the admission's own text" {
 }
 
 test "plan: ram classes floor at 4 GiB and share a tenth above it" {
+    if (comptime !supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
