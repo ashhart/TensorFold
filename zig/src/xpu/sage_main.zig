@@ -96,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
     const t0 = now();
     try r.prompt(ids.items);
     const t1 = now();
+    @import("dev.zig").profReport("prompt");
     var out: std.ArrayList(i32) = .empty;
     try out.append(alloc, r.last);
     for (1..steps) |_| {
@@ -103,6 +104,7 @@ pub fn main(init: std.process.Init) !void {
         try out.append(alloc, r.last);
     }
     const t2 = now();
+    @import("dev.zig").profReport("decode");
     std.debug.print("prompt: {d} tokens in {d:.3} s ({d:.0} tok/s)\n", .{ ids.items.len, t1 - t0, @as(f64, @floatFromInt(ids.items.len)) / (t1 - t0) });
     std.debug.print("decode: {d} tokens in {d:.3} s ({d:.1} tok/s)\n", .{ steps - 1, t2 - t1, @as(f64, @floatFromInt(steps - 1)) / (t2 - t1) });
     std.debug.print("tokens:", .{});

@@ -9,6 +9,7 @@ const sl = @import("sage_load");
 const dev = @import("dev.zig");
 const loader = @import("load.zig");
 const fwd = @import("forward.zig");
+const q = @import("qwen27.zig"); // the profiler state (XPU_PROFILE) the Dev records into
 const Dev = dev.Dev;
 const Checkpoint = dev.Checkpoint;
 const Proj = loader.Proj;
@@ -280,7 +281,14 @@ pub const Runner = struct {
         errdefer d.g.close();
         d.list = try d.g.immediate(0, 0);
         try kernels(d, &r.mk);
+        if (std.c.getenv("XPU_PROFILE") != null) {
+            q.prof.events = try d.g.events(4096);
+            inline for (@typeInfo(@TypeOf(d.k)).@"struct".field_names, 0..) |n, i| q.prof.names[i] = .{ .k = @field(d.k, n), .name = n };
+            const base = @typeInfo(@TypeOf(d.k)).@"struct".field_names.len;
+            inline for (@typeInfo(MoeKernels).@"struct".field_names, 0..) |n, i| q.prof.names[base + i] = .{ .k = @field(r.mk, n), .name = "moe_" ++ n };
+        }
         r.model = try load(d, &r.ckpt, z, ctx);
+        q.prof.on = std.c.getenv("XPU_PROFILE") != null; // not during the load
         r.acts = try Acts.init(d, z, ctx);
         try r.reset();
         return r;
