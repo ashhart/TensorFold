@@ -531,7 +531,7 @@ KERNEL(16) void attn_decode_span(global const ushort *Q, global const ushort *KC
   float q[Q27_QPG][16], o[Q27_QPG][16], m[Q27_QPG], l[Q27_QPG];
   for (int a = 0; a < Q27_QPG; a++) {
     for (int i = 0; i < 16; i++) {
-      q[a][i] = bf2f(Q[((long)t * Q27_AQ + qh0 + a) * 256 + i * 16 + lane]) * scale;
+      q[a][i] = bf2f(Q[((long)t * Q27_AQ + qh0 + a) * 256 + lane * 16 + i]) * scale; // the lane's 16 dimensions
       o[a][i] = 0.0f;
     }
     m[a] = -INFINITY;
@@ -543,11 +543,13 @@ KERNEL(16) void attn_decode_span(global const ushort *Q, global const ushort *KC
     const long kr = (long)j * Q27_AKV + hk; // the cache row of key j
     float kv[16];
     if (cap) {
-      const global char *k8 = (const global char *)KC + kr * 256;
+      const char16 k8 = vload16(lane, (const global char *)KC + kr * 256);
       const float s = ks[kr];
-      for (int i = 0; i < 16; i++) kv[i] = (float)k8[i * 16 + lane] * s;
-    } else
-      for (int i = 0; i < 16; i++) kv[i] = bf2f(KC[kr * 256 + i * 16 + lane]);
+      for (int i = 0; i < 16; i++) kv[i] = (float)k8[i] * s;
+    } else {
+      const ushort16 kb = vload16(lane, KC + kr * 256);
+      for (int i = 0; i < 16; i++) kv[i] = bf2f(kb[i]);
+    }
     float sc[Q27_QPG];
     for (int a = 0; a < Q27_QPG; a++) {
       float d = 0.0f;
@@ -555,11 +557,13 @@ KERNEL(16) void attn_decode_span(global const ushort *Q, global const ushort *KC
       sc[a] = sub_group_reduce_add(d);
     }
     if (cap) {
-      const global char *v8 = (const global char *)VC + kr * 256;
+      const char16 v8 = vload16(lane, (const global char *)VC + kr * 256);
       const float s = vs[kr];
-      for (int i = 0; i < 16; i++) kv[i] = (float)v8[i * 16 + lane] * s;
-    } else
-      for (int i = 0; i < 16; i++) kv[i] = bf2f(VC[kr * 256 + i * 16 + lane]);
+      for (int i = 0; i < 16; i++) kv[i] = (float)v8[i] * s;
+    } else {
+      const ushort16 vb = vload16(lane, VC + kr * 256);
+      for (int i = 0; i < 16; i++) kv[i] = bf2f(vb[i]);
+    }
     for (int a = 0; a < Q27_QPG; a++) {
       const float mn = fmax(m[a], sc[a]);
       const float al = exp(m[a] - mn), p = exp(sc[a] - mn);
@@ -574,7 +578,7 @@ KERNEL(16) void attn_decode_span(global const ushort *Q, global const ushort *KC
       PM[base] = m[a];
       PL[base] = l[a];
     }
-    for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
+    for (int i = 0; i < 16; i++) PO[base * 256 + lane * 16 + i] = o[a][i];
   }
 }
 
