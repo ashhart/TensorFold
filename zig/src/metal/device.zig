@@ -69,6 +69,11 @@ pub const Device = struct {
         return objc.msg(u64, self.id, "recommendedMaxWorkingSetSize", .{});
     }
 
+    /// The longest buffer this device makes, in bytes.
+    pub fn maxBufferLength(self: Device) u64 {
+        return objc.msg(u64, self.id, "maxBufferLength", .{});
+    }
+
     /// Bytes of every buffer and texture this device holds now.
     pub fn allocated(self: Device) u64 {
         return objc.msg(u64, self.id, "currentAllocatedSize", .{});
