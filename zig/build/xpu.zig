@@ -93,6 +93,13 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const exe = b.addExecutable(.{ .name = "xpu-qwen27", .root_module = module });
     const install = b.addInstallArtifact(exe, .{});
     b.step("xpu-qwen27", "Build the Qwen3.8-27B XPU forward runner (needs ocloc, a C++17 compiler and nGEN headers)").dependOn(&install.step);
+    const sage_mod = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/sage_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    var sage_it = module.import_table.iterator();
+    while (sage_it.next()) |e| sage_mod.addImport(e.key_ptr.*, e.value_ptr.*);
+    sage_mod.addImport("sage_config", b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/sage_config.zig"), .target = target, .optimize = optimize }));
+    sage_mod.addImport("sage_load", b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/sage_load.zig"), .target = target, .optimize = optimize }));
+    const sage_install = b.addInstallArtifact(b.addExecutable(.{ .name = "xpu-sage", .root_module = sage_mod }), .{});
+    b.step("xpu-sage", "Build the Sage-A1.5 (qwen3_5_moe) XPU runner, first form (MLX 4/64, decode kernels)").dependOn(&sage_install.step);
     // device tests: a skip message and exit 0 without a Level Zero device or a model (`xpu-tests` is Nemotron's, -Dxpu)
     const tests_step = b.step("xpu-qwen27-tests", "Build the 27B XPU device tests (tf-xpu-qwen27-means-test, -seam-test, -close-test)");
     for ([_][2][]const u8{
