@@ -139,7 +139,28 @@ fn stdinReady() bool {
     return (std.posix.poll(&fds, 0) catch 0) > 0;
 }
 
+/// Checks, writes and counts one token of a running slot; true when the reply ended (the slot is free again).
+fn take(sl: *Slot, tok: i32) !bool {
+    var reason: ?[]const u8 = null;
+    if (std.mem.indexOfScalar(i32, sl.req.stops.items, tok) != null) {
+        reason = "stop";
+    } else {
+        say("t {d} {d}\n", .{ sl.req.req, tok });
+        try sl.out.append(alloc, tok);
+        if (sl.out.items.len == sl.req.max) reason = "length";
+    }
+    const why = reason orelse return false;
+    say("end {d} {s} {d:.6} {d:.6} {d}\n", .{ sl.req.req, why, sl.t1 - sl.t0, now() - sl.t1, sl.out.items.len });
+    sl.req.stops.deinit(alloc);
+    sl.req.ids.deinit(alloc);
+    sl.out.deinit(alloc);
+    sl.* = .{};
+    return true;
+}
+
+/// XPU_SPEC=k with XPU_MTP: a lone greedy stream decodes by Runner.specStep with k drafts a step.
 fn loop(r: *sage.Runner) !void {
+    const spec: u32 = if (std.c.getenv("XPU_SPEC")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 0;
     var q: std.ArrayList(Req) = .empty;
     var slots: [sage.MAX_SLOTS]Slot = @splat(.{});
     const logits = try alloc.alloc(f16, r.z.s.vocab);
@@ -178,27 +199,25 @@ fn loop(r: *sage.Runner) !void {
         var nf: usize = 0;
         for (slots[0..r.slots], 0..) |*sl, i| {
             if (!sl.on) continue;
-            var reason: ?[]const u8 = null;
-            if (std.mem.indexOfScalar(i32, sl.req.stops.items, sl.next) != null) {
-                reason = "stop";
-            } else {
-                say("t {d} {d}\n", .{ sl.req.req, sl.next });
-                try sl.out.append(alloc, sl.next);
-                if (sl.out.items.len == sl.req.max) reason = "length";
-            }
-            if (reason) |why| {
-                say("end {d} {s} {d:.6} {d:.6} {d}\n", .{ sl.req.req, why, sl.t1 - sl.t0, now() - sl.t1, sl.out.items.len });
-                sl.req.stops.deinit(alloc);
-                sl.req.ids.deinit(alloc);
-                sl.out.deinit(alloc);
-                sl.* = .{};
-                continue;
-            }
+            if (try take(sl, sl.next)) continue;
             feed[nf] = @intCast(i);
             toks[nf] = sl.next;
             nf += 1;
         }
         if (nf == 0) continue;
+        if (nf == 1 and spec > 0 and r.mtp != null and slots[feed[0]].req.sampling == null) { // one greedy stream: MTP drafts
+            const sl = &slots[feed[0]];
+            try r.use(feed[0]);
+            var got: [sage.WINDOW]i32 = undefined;
+            const n = try r.specStep(spec, &got);
+            var ended = false;
+            for (got[0 .. n - 1]) |tk| if (try take(sl, tk)) {
+                ended = true;
+                break;
+            };
+            if (!ended) sl.next = got[n - 1];
+            continue;
+        }
         if (nf == 1) { // one stream: the single-row forward
             try r.use(feed[0]);
             try r.step(toks[0]);
@@ -244,6 +263,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("loaded in {d:.1} s\n", .{now() - t_load});
     if (argv.len > 3 and std.mem.eql(u8, argv[3], "--nll")) return nll(r, ids.items);
     if (slots > 1) return multiCheck(r, ids.items, steps);
+    if (std.c.getenv("XPU_SPEC_CHECK")) |v| return specCheck(r, ids.items, steps, try std.fmt.parseInt(u32, std.mem.span(v), 10));
+    if (std.c.getenv("XPU_SPEC")) |v| return mtpCheck(r, ids.items, steps, try std.fmt.parseInt(u32, std.mem.span(v), 10));
     const t0 = now();
     try r.prompt(ids.items);
     const t1 = now();
@@ -367,4 +388,85 @@ fn tower(io: std.Io, dir: []const u8, image: []const u8, out: []const u8) !void 
         var done: usize = 0;
         while (done < data.len) done += @intCast(@max(1, write(fd, data.ptr + done, data.len - done)));
     }
+}
+
+/// XPU_SPEC_CHECK=k: `steps` greedy tokens by Runner.step, then the same by verify and commit blocks of k drafts taken
+/// from those tokens, one draft in a block wrong every third block. The tokens must be the same.
+fn specCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void {
+    if (k == 0 or k >= sage.WINDOW) return error.BadDrafts;
+    var want: std.ArrayList(i32) = .empty;
+    defer want.deinit(alloc);
+    try r.prompt(ids);
+    try want.append(alloc, r.last);
+    for (1..steps) |_| {
+        try r.step(r.last);
+        try want.append(alloc, r.last);
+    }
+    try r.reset();
+    try r.prompt(ids);
+    var got: std.ArrayList(i32) = .empty;
+    defer got.deinit(alloc);
+    try got.append(alloc, r.last);
+    var blocks: usize = 0;
+    var kept: usize = 0;
+    var blk: [sage.WINDOW]i32 = undefined;
+    while (got.items.len < steps) : (blocks += 1) {
+        const i = got.items.len - 1;
+        const n = @min(k, steps - 1 - i);
+        if (n == 0) break;
+        blk[0] = got.items[i];
+        for (1..n + 1) |j| blk[j] = want.items[i + j];
+        if (blocks % 3 == 1) blk[1 + blocks % n] +%= 1;
+        const g = try r.verify(blk[0 .. n + 1]);
+        var a: usize = 0;
+        while (a < n and blk[a + 1] == g[a]) a += 1;
+        try r.commit(@intCast(a + 1));
+        try got.appendSlice(alloc, g[0 .. a + 1]);
+        kept += a;
+    }
+    var same: usize = 0;
+    var first_diff: usize = steps;
+    for (0..steps) |j| {
+        if (got.items[j] == want.items[j]) same += 1 else if (first_diff == steps) first_diff = j;
+    }
+    std.debug.print("spec check k={d}: {d}/{d} tokens as step, first difference at {d}; {d} blocks, {d} drafts kept\n", .{ k, same, steps, first_diff, blocks, kept });
+}
+
+/// XPU_SPEC=k with XPU_MTP: `steps` greedy tokens by Runner.step (timed), then by specStep with k MTP drafts (timed);
+/// the tokens must be the same. Prints the drafts kept a step and both decode rates.
+fn mtpCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void {
+    var want: std.ArrayList(i32) = .empty;
+    defer want.deinit(alloc);
+    try r.prompt(ids);
+    try want.append(alloc, r.last);
+    const t0 = now();
+    for (1..steps) |_| {
+        try r.step(r.last);
+        try want.append(alloc, r.last);
+    }
+    const t1 = now();
+    try r.reset();
+    try r.prompt(ids);
+    var got: std.ArrayList(i32) = .empty;
+    defer got.deinit(alloc);
+    try got.append(alloc, r.last);
+    var buf: [sage.WINDOW]i32 = undefined;
+    var nsteps: usize = 0;
+    const t2 = now();
+    while (got.items.len < steps) : (nsteps += 1) {
+        const n = try r.specStep(k, &buf);
+        try got.appendSlice(alloc, buf[0..n]);
+    }
+    const t3 = now();
+    @import("dev.zig").profReport("spec decode");
+    var same: usize = 0;
+    var first_diff: usize = steps;
+    for (0..steps) |j| {
+        if (got.items[j] == want.items[j]) same += 1 else if (first_diff == steps) first_diff = j;
+    }
+    const made: f64 = @floatFromInt(got.items.len - 1);
+    const ns: f64 = @floatFromInt(nsteps);
+    std.debug.print("mtp k={d}: {d}/{d} tokens as step, first difference at {d}\n", .{ k, same, steps, first_diff });
+    std.debug.print("mtp k={d}: {d} steps, {d:.3} tokens a step, drafts kept {d:.3}\n", .{ k, nsteps, made / ns, (made - ns) / (ns * @as(f64, @floatFromInt(k))) });
+    std.debug.print("decode: plain {d:.1} tok/s, mtp {d:.1} tok/s\n", .{ @as(f64, @floatFromInt(steps - 1)) / (t1 - t0), made / (t3 - t2) });
 }
