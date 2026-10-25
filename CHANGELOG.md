@@ -12,6 +12,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.5 on Metal can keep its streams' keys and values in pages of the core pool with `TF_QWEN35_METAL_KV_PAGES=1`, planned under the load limit at load; the paged kernels' arithmetic is the contiguous ones', and the default path is unchanged (#1294).
 
+- Tests and builds: the f64 reference keeps signed zeros at interval endpoints, so x86_64 hosts accept an exact +0 (#1309, #1315); the memory HTTP test reads the fake server's port line without buffering past it (#1306, #1308); `zig build server-cpu` builds the CPU fake server and engine-less CLI through the shared build graph (#1305, #1314).
+
 ## 1.1.5
 
 - Flash Next on Macs without tensor units decodes faster with the same tokens: the hyper-connection act pair runs for windows of two rows and more, the HC down projection runs without staging or barriers at four outputs a threadgroup, rounds are gated on the GPU with a GPU-only event between them, drafts are gated at tau 0.4, the decode and draft argmaxes take two launches, and wide windows use grouped experts and exact tree windows. On an M3 Ultra with Qwen3.8 Flash Next MLX 4-bit MTP, the served sweep goes from 120.2 to 147.6 tokens/s on one stream (+22.7%), 129.7 to 155.3 at two (+19.8%), 143.8 to 167.0 at four (+16.2%) and 154.4 to 176.1 at eight (+14.1%); prefill is unchanged and every token is identical.
