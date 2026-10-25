@@ -105,3 +105,35 @@ test "a restored prompt stepped through the wrapper: partial and whole restores 
     try restoredSteps(8, true);
     try restoredSteps(long.len, true);
 }
+
+test "a drafted backend forwards optional prompt cancellation and its failure before release" {
+    const Cancel = struct {
+        calls: usize = 0,
+        fn call(ptr: *anyopaque, _: *sm.Stream) !void {
+            const target: *fake.Fake = @ptrCast(@alignCast(ptr));
+            const x: *@This() = @ptrCast(@alignCast(target.prefill_hook_ctx.?));
+            x.calls += 1;
+            return error.PeerFailed;
+        }
+    };
+    for ([_]bool{ false, true }) |stepped| for ([_]bool{ false, true }) |enabled| {
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var cancel: Cancel = .{};
+        target.prefill_hook_ctx = &cancel;
+        var table = (if (stepped) target.stepped() else target.backend()).vtable.*;
+        table.cancel_prefill = if (enabled) Cancel.call else null;
+        var head: FakeDrafter = .{};
+        defer head.deinit();
+        var wrapped = try Drafted.init(gpa, .{ .ptr = &target, .vtable = &table }, head.drafter());
+        defer wrapped.deinit();
+        const backend = wrapped.backend();
+        try std.testing.expectEqual(enabled, backend.vtable.cancel_prefill != null);
+        var s = try sm.Stream.init(gpa, .{ .id = "cancel", .prompt = &p1, .max_new = 8 });
+        defer s.deinit(gpa);
+        if (enabled) try std.testing.expectError(error.PeerFailed, backend.vtable.cancel_prefill.?(backend.ptr, &s));
+        try std.testing.expectEqual(@as(usize, @intFromBool(enabled)), cancel.calls);
+        try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
+        try std.testing.expectEqual(@as(u32, 0), head.releases);
+    };
+}

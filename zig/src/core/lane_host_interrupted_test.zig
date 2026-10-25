@@ -10,6 +10,7 @@ const Reply = struct {
     ids: std.ArrayList(u32) = .empty,
     cached: ?u32 = null,
     reason: api.Reason = .failed,
+    message: []const u8 = "",
     done: std.atomic.Value(bool) = .init(false),
     cancel_engine: ?api.Engine = null,
 
@@ -24,6 +25,7 @@ const Reply = struct {
             },
             .finished => |f| {
                 r.reason = f.reason;
+                r.message = f.message;
                 r.done.store(true, .release);
             },
             else => {},
@@ -61,6 +63,7 @@ const Driver = struct {
     steps: usize = 0,
     cancels: usize = 0,
     fail_prefill: bool = false,
+    cancel_before_failure: bool = false,
     fail_save: bool = false,
     fail_cancel: bool = false,
 
@@ -88,7 +91,10 @@ const Driver = struct {
             d.started_at = s.cached;
         }
         if (d.stop_at == h.items.len) {
-            if (d.fail_prefill) return error.GpuFailed;
+            if (d.fail_prefill) {
+                if (d.cancel_before_failure) d.engine.cancel(d.id);
+                return error.GpuFailed;
+            }
             d.engine.cancel(d.id);
         }
         if (s.isCancelled()) {
@@ -138,6 +144,7 @@ const snapshots: pc.Snapshots.VTable = .{
     .restore = Driver.restore,
     .drop = Driver.drop,
 };
+const long_prompt: [1024]u32 = @splat(3);
 const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3 };
 
 fn repeated(stepped: bool) !void {
@@ -213,14 +220,20 @@ test "interrupted prefill: cancellation between host steps retains progress and 
 }
 
 test "interrupted prefill: cache refusals, zero progress and backend failures leave clean retries" {
-    for (0..7) |mode| {
+    for ([_]bool{ false, true }) |stepped| for ([_][]const u32{ &prompt, &long_prompt }) |input| {
+        try cleanRetries(input, stepped);
+    };
+}
+
+fn cleanRetries(input: []const u32, stepped: bool) !void {
+    for (0..8) |mode| {
         var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
         defer cfg.deinit(a);
         var target: lanes.fake.Fake = .{ .gpa = a };
         defer target.deinit();
         var vt = target.backend().vtable.*;
         vt.prefill = Driver.prefill;
-        vt.prefill_step = if (mode >= 5) Driver.step else null;
+        vt.prefill_step = if (stepped or mode >= 5) Driver.step else null;
         vt.cancel_prefill = Driver.cancelPrefill;
         var clock: lanes.fake.FixedClock = .{};
         var core = lanes.Engine.init(a, &cfg, .{ .ptr = &target, .vtable = &vt }, clock.clock());
@@ -231,8 +244,9 @@ test "interrupted prefill: cache refusals, zero progress and backend failures le
             .engine = host.engine(),
             .stop_at = if (mode == 6) null else if (mode == 3) 0 else 4,
             .fail_save = mode == 2,
-            .fail_prefill = mode == 4,
-            .fail_cancel = mode >= 5,
+            .fail_prefill = mode == 4 or mode == 7,
+            .cancel_before_failure = mode == 7,
+            .fail_cancel = mode == 5 or mode == 6,
         };
         target.prefill_hook_ctx = &driver;
         var store = pc.Store.init(a, .{ .ptr = &driver, .vtable = &snapshots }, .{ .min_prompt = 0 }, if (mode == 1) 0 else 200);
@@ -240,11 +254,13 @@ test "interrupted prefill: cache refusals, zero progress and backend failures le
         if (mode != 0) host.cache = &store;
         try host.start();
         defer host.stop();
-        const request: api.Request = .{ .prompt = &prompt, .max_tokens = 12 };
+        const request: api.Request = .{ .prompt = input, .max_tokens = 12 };
         var stopped: Reply = .{ .cancel_engine = if (mode == 6) driver.engine else null };
         defer stopped.ids.deinit(a);
         try driver.submit(&request, &stopped);
-        try t.expectEqual(if (mode == 4 or mode == 5) api.Reason.failed else .cancelled, try stopped.wait());
+        try t.expectEqual(if (mode == 4 or mode == 5 or mode == 7) api.Reason.failed else .cancelled, try stopped.wait());
+        try t.expectEqualStrings(if (mode == 4 or mode == 7) "GpuFailed" else if (mode == 5) "PeerFailed" else "", stopped.message);
+        if (mode == 4 or mode == 5 or mode == 7) try t.expectEqual(@as(usize, @intFromBool(mode == 5)), driver.cancels);
         try t.expectEqual(@as(usize, 0), store.entries.items.len);
         try t.expectEqual(@as(usize, 0), driver.saves);
         driver.stop_at = null;
@@ -254,7 +270,7 @@ test "interrupted prefill: cache refusals, zero progress and backend failures le
         try driver.submit(&request, &retry);
         try t.expectEqual(api.Reason.length, try retry.wait());
         try t.expectEqual(@as(?u32, 0), retry.cached);
-        try retry.exact(&prompt);
+        try retry.exact(input);
     }
 }
 

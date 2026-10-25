@@ -69,12 +69,24 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
     }
 
-    fn vtableFor(planned: bool, steps: bool) *const be.Backend.VTable {
+    const cancellable: [4]be.Backend.VTable = blk: {
+        var tables = [_]be.Backend.VTable{ legacy_vtable, planned_vtable, stepped_legacy, stepped_planned };
+        for (&tables) |*v| v.cancel_prefill = cancelPrefill;
+        break :blk tables;
+    };
+
+    fn vtableFor(planned: bool, steps: bool, cancels: bool) *const be.Backend.VTable {
+        if (cancels) return &cancellable[@as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
         if (steps) return if (planned) &stepped_planned else &stepped_legacy;
         return if (planned) &planned_vtable else &legacy_vtable;
+    }
+
+    fn cancelPrefill(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const target = self(ptr).target;
+        try target.vtable.cancel_prefill.?(target.ptr, s);
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.

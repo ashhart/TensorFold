@@ -311,7 +311,7 @@ const Lanes = struct {
     }
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Lanes {
@@ -346,6 +346,11 @@ const Lanes = struct {
         };
         if (done) self.endFill(stream);
         return done;
+    }
+
+    /// The host cancels between iterations, while the last completed cut still owns its cache.
+    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        if (cast(ptr).fills.get(stream)) |f| stream.keepInterruptedPrefill(@intCast(f.at));
     }
 
     fn endFill(self: *Lanes, stream: *lanes.Stream) void {
@@ -568,3 +573,7 @@ const Lanes = struct {
         return seen;
     }
 };
+
+test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
+    try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
+}

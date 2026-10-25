@@ -85,6 +85,7 @@ pub fn run(h: *LaneHost) void {
     // short prompts back to back, as a whole pass at admission went: a burst of them waits on no decode round
     while (h.filling.items.len > 0 and short(h.filling.items[pick(h)])) {
         h.fillAt(next(h));
+        @import("lane_host_end.zig").takeCancels(h);
         while (h.admitOne()) {}
     }
     if (h.filling.items.len == 0 or !due(h)) return;
