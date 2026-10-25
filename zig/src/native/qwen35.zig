@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const q = tf.qwen35;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
+const metal_admit = @import("metal_admit.zig");
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -57,12 +58,19 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const chunk = 128;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
+    const served = try metal_admit.streams(a, "qwen3.5", q.state.cacheBytes(@intCast(window)), metal_admit.room(model.device), o, @intCast(window), problem) orelse {
+        h.metal.deinit();
+        model.deinit();
+        gpa.destroy(h);
+        return null;
+    };
+    h.metal.options.streams = @max(served, 2);
     h.config = try lanes.Config.init(gpa, h.metal.facts(), q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = chunk, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .structures = true });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     try mtl.resident.streams.hold(h, io, "qwen3.5");
     errdefer mtl.resident.streams.drop(h);

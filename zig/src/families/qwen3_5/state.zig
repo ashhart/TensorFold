@@ -166,3 +166,15 @@ pub const Scratch = struct {
         self.memory.deinit();
     }
 };
+
+/// Bytes a stream's Cache takes at `capacity` rows: its logits, delta layers' states, attention layers' KV.
+pub fn cacheBytes(capacity: usize) u64 {
+    var bytes: u64 = c.vocab * 2;
+    for (0..c.layers) |i| bytes += if (c.linear(i)) delta_bytes + conv_bytes else 2 * capacity * c.kv_heads * c.head_dim * 2;
+    return bytes;
+}
+
+test "a stream's cache bytes: about 19.5 MB of states and logits, and 12 KiB of keys and values a row" {
+    try std.testing.expectEqual(@as(u64, 18_874_368 + 663_552 + 496_640), cacheBytes(0));
+    try std.testing.expectEqual(@as(u64, 12_288), cacheBytes(1) - cacheBytes(0));
+}

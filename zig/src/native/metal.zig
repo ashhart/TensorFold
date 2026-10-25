@@ -14,6 +14,7 @@ const glm_dsa = @import("glm_dsa_host.zig");
 const slide_adapter = @import("slide_adapter.zig");
 const Slide = slide_adapter.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
+const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
 const nemo_disk = @import("nemotron_disk.zig");
 
@@ -418,6 +419,7 @@ test {
     _ = glm_dsa;
     _ = qwen27;
     _ = @import("cache_fit.zig");
+    _ = metal_admit;
     _ = @import("resident.zig");
     _ = @import("metal_identity.zig");
     _ = @import("qwen27_landing.zig");
