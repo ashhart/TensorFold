@@ -43,14 +43,20 @@ pub fn mix(v: u64) u64 {
 
 /// splitmix64 of (seed, position, id): the bits every keyed sampler starts from.
 pub fn keyBits(seed: u64, position: u64, id: u64) u64 {
-    var x = mix(seed +% 0x9E3779B97F4A7C15);
-    x = mix(x ^ (position *% 0xD1B54A32D192ED03));
-    return mix(x ^ id);
+    return mix(keyBase(seed, position) ^ id);
+}
+
+/// keyBits before the id, shared by every candidate of one draw.
+fn keyBase(seed: u64, position: u64) u64 {
+    return mix(mix(seed +% 0x9E3779B97F4A7C15) ^ (position *% 0xD1B54A32D192ED03));
 }
 
 /// Uniform (0, 1] double from the key's top 53 bits (Python `uniform`).
 pub fn uniform(seed: u64, position: u64, id: u64) f64 {
-    const x = keyBits(seed, position, id);
+    return uniformOf(keyBits(seed, position, id));
+}
+
+fn uniformOf(x: u64) f64 {
     return @as(f64, @floatFromInt(x >> 11)) * 0x1p-53 + 0x1p-54;
 }
 
@@ -90,7 +96,7 @@ pub fn choose(gpa: Allocator, values: []const f64, ids: []const u64, position: u
             defer gpa.free(selected);
             return chooseOrdered(gpa, selected, position, s);
         }
-    }
+    } else if (race(values, ids, position, s)) |id| return id;
     const order = try gpa.alloc(Candidate, width);
     defer gpa.free(order);
     for (order, values, ids) |*o, v, id| o.* = .{ .value = v, .id = id };
@@ -144,6 +150,57 @@ pub fn chooseOrdered(gpa: Allocator, order: []const Candidate, position: u64, s:
     return order[best].id;
 }
 
+const Lead = struct { value: f64, id: u64, score: f64 };
+
+/// ``chooseOrdered``'s winner over the sorted row in one pass when no rank cut applies; null leaves it to the sort.
+fn race(values: []const f64, ids: []const u64, position: u64, s: Sampling) ?u64 {
+    if (!(s.temperature > 0) or (s.top_k != 0 and s.top_k < ids.len) or (s.top_p > 0.0 and s.top_p < 1.0)) return null;
+    const t = @max(s.temperature, 1e-6);
+    var floor = -std.math.inf(f64);
+    if (s.min_p > 0.0) {
+        var top = -std.math.inf(f64);
+        for (values) |v| top = @max(top, v);
+        floor = top / t + s.minLog();
+    }
+    const base = keyBase(s.seed, position);
+    const bounds = skipBounds();
+    var lead: ?Lead = null;
+    for (values, ids) |v, id| {
+        const x = v / t;
+        if (!std.math.isFinite(x)) return null; // nonfinite rows keep the full sort
+        if (!(x >= floor)) continue; // min_p keeps a prefix of the sorted order, every x at or above the floor
+        const u = uniformOf(mix(base ^ id));
+        if (lead) |b| {
+            if (beneath(bounds, b.score - x, u, x, b.score)) continue;
+            const score = x + -log(-log(u));
+            if (score < b.score) continue;
+            const first = selection.byValueThenId({}, .{ .value = v, .id = id }, .{ .value = b.value, .id = b.id });
+            if (score == b.score and !first) continue; // a tied score goes to the earlier candidate in sorted order
+            lead = .{ .value = v, .id = id, .score = score };
+        } else lead = .{ .value = v, .id = id, .score = x + -log(-log(u)) };
+    }
+    if (lead) |b| return b.id;
+    return selection.greedy(values, ids); // min_p kept nothing: the sorted loop returns its first candidate
+}
+
+/// Score gaps d: a uniform below skipBounds()'s entry has Gumbel noise under d - 0.5, so it cannot close the gap.
+pub const skip_gaps = [_]f64{ 40, 32, 16, 8, 4, 2, 1 };
+
+pub fn skipBounds() [skip_gaps.len]f64 {
+    var bounds: [skip_gaps.len]f64 = undefined;
+    for (&bounds, skip_gaps) |*b, d| b.* = exp(-exp(-(d - 0.5)));
+    return bounds;
+}
+
+/// Whether a candidate `d` under the lead's score provably scores below it, before taking its logs.
+fn beneath(bounds: [skip_gaps.len]f64, d: f64, u: f64, x: f64, lead: f64) bool {
+    if (!(@abs(x) <= 1e6 and @abs(lead) <= 1e6)) return false; // rounding stays far inside the 0.5 margin
+    for (skip_gaps, bounds) |g, b| {
+        if (d >= g) return u < b;
+    }
+    return false;
+}
+
 test "seeds keep 63 bits and uniforms fall in (0, 1]" {
     try std.testing.expect(seedFor(&.{ 1, 2, 3 }, 0) < (@as(u64, 1) << 63));
     const u = uniform(7, 11, 13);
@@ -159,4 +216,5 @@ test "temperature 0 draws greedily, an exact tie going to the lower id" {
 
 test {
     _ = @import("sampling_selection_test.zig");
+    _ = @import("sampling_race_test.zig");
 }
