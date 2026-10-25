@@ -3,6 +3,10 @@
 const std = @import("std");
 
 pub const min_match = 8;
+/// A chain ranks its matches by how far before the 8 tokens they keep matching, counted up to this many.
+pub const max_back = 16;
+/// The latest matches a chain ranks.
+pub const candidates = 32;
 
 /// A match's length, and where the tokens that followed it start.
 pub const Match = struct { n: usize = 0, at: usize = 0 };
@@ -57,7 +61,7 @@ pub const CopyIndex = struct {
         return best;
     }
 
-    /// Up to `out.len` tokens that followed the latest earlier copy of the last 8 (none shorter than 8), copied out.
+    /// Up to `out.len` tokens (none under 8) after the copy of the last 8 that fills `out`, then reaches furthest back.
     pub fn chain(x: *const CopyIndex, out: []u32) []const u32 {
         const max_nodes = out.len;
         const ctx = x.ctx.items;
@@ -65,16 +69,22 @@ pub const CopyIndex = struct {
         const key = ctx[ctx.len - min_match ..];
         const list = x.seen.get(key[min_match - 1]) orelse return &.{};
         var best: []const u32 = &.{};
+        var score: Score = .{};
+        var seen: usize = 0;
         var i = list.items.len;
-        while (i > 0) {
+        while (i > 0 and seen < candidates) {
             i -= 1;
             const p: usize = list.items[i]; // the copy's last token
             if (p + 1 < min_match or p + 1 >= ctx.len) continue;
             if (!std.mem.eql(u32, ctx[p + 1 - min_match .. p + 1], key)) continue;
+            seen += 1;
             const cont = ctx[p + 1 .. @min(ctx.len, p + 1 + max_nodes)];
-            if (cont.len > best.len) {
+            if (cont.len < min_match) continue;
+            const here: Score = .{ .full = cont.len == max_nodes, .back = back(ctx, p + 1 - min_match), .len = cont.len };
+            if (here.above(score)) {
                 best = cont;
-                if (best.len == max_nodes) break;
+                score = here;
+                if (here.full and here.back == max_back) break;
             }
         }
         if (best.len < min_match) return &.{};
@@ -82,6 +92,26 @@ pub const CopyIndex = struct {
         return out[0..best.len];
     }
 };
+
+const Score = struct {
+    full: bool = false,
+    back: usize = 0,
+    len: usize = 0,
+
+    fn above(a: Score, b: Score) bool {
+        if (a.full != b.full) return a.full;
+        if (a.back != b.back) return a.back > b.back;
+        return a.len > b.len;
+    }
+};
+
+/// Tokens before the copy starting at `start` that equal those before the context's last 8, up to `max_back`.
+fn back(ctx: []const u32, start: usize) usize {
+    const tail = ctx.len - min_match;
+    var n: usize = 0;
+    while (n < max_back and n < start and ctx[start - 1 - n] == ctx[tail - 1 - n]) n += 1;
+    return n;
+}
 
 test "copies the continuation of the latest earlier match" {
     const a = std.testing.allocator;
@@ -94,6 +124,18 @@ test "copies the continuation of the latest earlier match" {
     try std.testing.expectEqual(@as(usize, 15), got.len);
     try std.testing.expectEqual(@as(u32, 0), got[0]);
     try std.testing.expectEqual(@as(usize, 0), x.chain(buf[0..0]).len);
+}
+
+test "copies the line a list repeats, not the line above it" {
+    const a = std.testing.allocator;
+    // two list lines share their last 9 tokens; the reply repeats the first line
+    const first = [_]u32{ 1, 2, 3, 4, 50, 51, 52, 53, 54, 55, 56, 57, 58, 60, 61, 62 };
+    const second = [_]u32{ 5, 6, 7, 8, 50, 51, 52, 53, 54, 55, 56, 57, 58, 70, 71, 72 };
+    var x = try CopyIndex.init(a, &(first ++ second ++ [_]u32{ 9, 1, 2, 3, 4, 50, 51, 52, 53, 54, 55, 56, 57 }));
+    defer x.deinit();
+    var buf: [8]u32 = undefined;
+    const got = x.chain(&buf);
+    try std.testing.expectEqualSlices(u32, &.{ 58, 60, 61, 62, 5, 6, 7, 8 }, got);
 }
 
 // Plain scans of the whole context: what `longest` and `chain` must return.
@@ -118,14 +160,21 @@ fn scanChain(ctx: []const u32, max_nodes: usize) []const u32 {
     if (ctx.len < 2 * min_match or max_nodes < 1) return &.{};
     const key = ctx[ctx.len - min_match ..];
     var best: []const u32 = &.{};
+    var score: Score = .{};
+    var seen: usize = 0;
     var s = ctx.len - min_match;
-    while (s > 0) {
+    while (s > 0 and seen < candidates) {
         s -= 1;
         if (!std.mem.eql(u32, ctx[s .. s + min_match], key)) continue;
+        seen += 1;
         const cont = ctx[s + min_match .. @min(ctx.len, s + min_match + max_nodes)];
-        if (cont.len > best.len) {
+        if (cont.len < min_match) continue;
+        var n: usize = 0;
+        while (n < max_back and n < s and ctx[s - 1 - n] == ctx[ctx.len - min_match - 1 - n]) n += 1;
+        const here: Score = .{ .full = cont.len == max_nodes, .back = n, .len = cont.len };
+        if (here.above(score)) {
             best = cont;
-            if (best.len == max_nodes) break;
+            score = here;
         }
     }
     return if (best.len < min_match) &.{} else best;
