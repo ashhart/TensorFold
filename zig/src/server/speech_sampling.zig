@@ -46,7 +46,7 @@ pub fn parse(cx: *errors.Cx, body: Value) errors.Refused!Options {
     return out;
 }
 
-/// Check the JSON range before narrowing, then reject positive values that would become zero.
+/// Check the parsed f64 range before narrowing, then reject positive values that would become zero.
 fn number(cx: *errors.Cx, value: Value, max: f64, message: []const u8) errors.Refused!f32 {
     if (value != .int and value != .float) return cx.refuse(message);
     const n = value.float64() orelse return cx.refuse(message);
