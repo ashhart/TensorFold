@@ -126,3 +126,27 @@ test "an arena past the device's longest buffer is refused before it is made" {
     const most = device.maxBufferLength();
     try std.testing.expectError(error.ArenaTooLarge, pages.Arena.init(device, 2, most / 2 + 1, mtl.ResourceOptions.shared));
 }
+
+test "pages over a family's own buffers leave them to the family" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = row_bytes, .page_tokens = pages.page_tokens, .snap_bytes = 0 };
+    const sized = pages.Pages.bytes(l, 2, 4, 2 * pages.page_tokens);
+    const arena = try device.buffer(sized.arena, mtl.ResourceOptions.shared);
+    defer arena.deinit();
+    const tables = try device.buffer(sized.tables, mtl.ResourceOptions.shared);
+    defer tables.deinit();
+    const small = try device.buffer(sized.arena - 1, mtl.ResourceOptions.shared);
+    defer small.deinit();
+    try std.testing.expectError(error.ArenaTooSmall, pages.Pages.initIn(std.testing.allocator, l, 2, 4, 2 * pages.page_tokens, small, tables));
+    const p = try pages.Pages.initIn(std.testing.allocator, l, 2, 4, 2 * pages.page_tokens, arena, tables);
+    try p.admit(1, 2);
+    try p.cover(1, pages.page_tokens + 1);
+    try std.testing.expectEqualSlices(u32, p.ids(1), tables.slice(u32, 4)[2..4]); // lane 1's table at its offset
+    p.finish(1);
+    try std.testing.expect(p.idle());
+    p.deinit();
+    @memset(arena.slice(u8, sized.arena), 1); // still the family's to use
+    try std.testing.expectEqual(sized.arena, arena.length());
+}
