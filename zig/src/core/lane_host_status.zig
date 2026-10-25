@@ -28,6 +28,7 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
         .preemptions = 0,
         .streams = n,
         .generation_tokens = h.live_generated,
+        .prompt_cache = h.cache_status,
     };
     fillTotals(h, out);
 }
@@ -81,6 +82,7 @@ pub fn noteLive(h: *LaneHost) void {
     defer h.mutex.unlock(h.io);
     h.live_tokens.clearRetainingCapacity();
     h.live_generated = 0;
+    h.cache_status = if (h.cache) |s| .{ .states = s.entries.items.len, .bytes = s.held + s.spare() } else null;
     for (h.admitted.items) |job| if (job.started) {
         h.live_tokens.append(h.gpa, @intCast(job.stream.context.items.len)) catch {};
         h.live_generated += @intCast(job.stream.emitted().len);

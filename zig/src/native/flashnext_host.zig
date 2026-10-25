@@ -364,7 +364,7 @@ pub const Host = struct {
         h.prompt = r.prompt; // a learned state read back in `begin` is named by these tokens
         job.key = if (r.images.len > 0) images.key(arena.allocator(), r) catch r.prompt else r.prompt; // a state fits its frame alone
         if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= h.eng.r.window.capacity) {
-            plan = store.beginRewind(arena.allocator(), job.key, r.history_len, r.rewind_len, r.shared_prefixes, &.{}, null, &.{}) catch .{};
+            plan = store.beginUser(arena.allocator(), job.key, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, &.{}, null, &.{}) catch .{};
         };
         var vis: ?*tf.flashnext_replay.vis_prompt.VisPrompt = null;
         defer images.release(h.eng, vis);

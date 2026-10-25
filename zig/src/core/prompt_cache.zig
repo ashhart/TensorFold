@@ -7,6 +7,7 @@ const learned = @import("prompt_learn.zig");
 const lifetime = @import("prompt_cache_lifetime.zig");
 const policy = @import("prompt_cache_policy.zig");
 const cuts = @import("prompt_cuts.zig");
+const interior = @import("prompt_interior.zig");
 pub const rows = @import("rows_store.zig");
 
 /// A family's copy of one state.
@@ -89,6 +90,10 @@ pub const Rules = struct {
     min_prompt: u32 = 4096,
     /// Rows an unplanned pass's chunk runs from its resume point or last cut (1: any row; 0: short prompts keep none).
     chunk: u32 = 0,
+    /// Unplanned passes also cut at Request.chunks and decoded-span edges (false: only their own grid and marks).
+    chunk_starts: bool = true,
+    /// Marks always end chunks; false when a backend may capture them inside a chunk without splitting it.
+    chunk_marks: bool = true,
     /// Background reply passes kept at their end: .on drops a history mark near the resume point, .waits keeps it.
     warm: enum { off, on, waits } = .off,
     /// A paged store (prompt_radix.zig): the tokens a page holds, where its marks and resumes sit (0: not paged).
@@ -255,7 +260,12 @@ pub const Store = struct {
 
     /// `begin`, also keeping a state before the latest user message (`rewind_len`, 0: none) that its edits resume.
     pub fn beginRewind(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
-        const l = try s.lookupRewind(a, prompt, @intCast(prompt.len), history_len, rewind_len, shared, starts, spans);
+        return s.beginUser(a, prompt, history_len, rewind_len, 0, shared, starts, owner, spans);
+    }
+
+    /// Begin with a known end of the latest user message, for its optional interior state (0: unknown).
+    pub fn beginUser(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
+        const l = try s.lookupUser(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans);
         const e = l.entry orelse return .{ .marks = l.marks };
         const failure: ?anyerror = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| null else |err| err;
         const from = if (failure == null) e.at else 0;
@@ -271,6 +281,11 @@ pub const Store = struct {
 
     /// `lookup` plus a rewind state on the starts or grid (or one under min_gap before it); `born` as in keepBorn.
     pub fn lookupRewind(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
+        return s.lookupUser(a, prompt, born, history_len, rewind_len, 0, shared, starts, spans);
+    }
+
+    /// `lookupRewind` with an explicit last-user end: history may also include later tool or assistant messages.
+    pub fn lookupUser(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
         s.collectExpired();
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
         const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
@@ -284,10 +299,15 @@ pub const Store = struct {
         const e = rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)));
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
-        const marks_ = if (s.active_rewind_at == 0)
+        const ordinary = if (s.active_rewind_at == 0)
             try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
         else
             try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
+        const known_end = if (user_end <= history_len) user_end else 0;
+        const marks_ = interior.add(s, a, prompt, from, known_end, rewind_len, starts, spans, ordinary, endpoint, endpoint_bytes, e) catch |err| {
+            a.free(ordinary);
+            return err;
+        };
         for (shared) |w| { // the shared cuts this pass keeps, and a short prompt's mark inside a shared block: other conversations resume them
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             for (marks_) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
@@ -346,42 +366,8 @@ pub const Store = struct {
         s.shared_keys.append(s.gpa, k) catch {};
     }
 
-    /// The marks whose state the budget can hold (a new slice in `a`); the rest are refused now, so no pass, nor a peer, copies them.
-    fn fitting(s: *Store, a: Allocator, marks_: []const u32) ![]const u32 {
-        defer a.free(marks_);
-        var out: std.ArrayList(u32) = .empty;
-        for (marks_) |at| {
-            const bytes = s.family.vtable.bytes(s.family.ptr, at);
-            if (bytes <= s.budget) try out.append(a, at) else {
-                s.counts.refused += 1;
-                note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
-            }
-        }
-        return out.toOwnedSlice(a);
-    }
-
-    /// Fitted marks that the budget holds together: the history's first, then the rewind, then the rest in order.
-    fn fittingRewind(s: *Store, a: Allocator, marks_: []const u32, endpoint: u32, rewind: u32, endpoint_bytes: u64) ![]const u32 {
-        defer a.free(marks_);
-        var out: std.ArrayList(u32) = .empty;
-        var used: u64 = 0;
-        if (endpoint_bytes <= s.budget and endpoint_bytes > 0) {
-            used = endpoint_bytes;
-            if (std.mem.indexOfScalar(u32, marks_, endpoint) != null) try out.append(a, endpoint);
-        }
-        if (s.active_rewind_at == rewind and std.mem.indexOfScalar(u32, marks_, rewind) != null) try out.append(a, rewind);
-        if (s.active_rewind_at == rewind) used += s.family.vtable.bytes(s.family.ptr, rewind);
-        for (marks_) |at| {
-            if (at == endpoint or at == rewind) continue;
-            const bytes = s.family.vtable.bytes(s.family.ptr, at);
-            if (bytes <= s.budget -| used) {
-                try out.append(a, at);
-                used += bytes;
-            }
-        }
-        std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
-        return out.toOwnedSlice(a);
-    }
+    const fitting = @import("prompt_cache_fit.zig").fitting;
+    const fittingRewind = @import("prompt_cache_fit.zig").fittingRewind;
 
     /// A looked-up entry's restore went through (it is now the prompt's), or failed (dropped: the pass ran from 0).
     pub fn resumed(s: *Store, e: *Entry, prompt: []const u32, ok: bool) void {
@@ -580,6 +566,7 @@ test {
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
+    _ = @import("prompt_cache_interior_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_give_test.zig");
     _ = @import("prompt_cache_lifetime_test.zig");

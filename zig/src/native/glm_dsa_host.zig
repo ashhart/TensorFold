@@ -43,7 +43,7 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 }
 
 /// Any chunk end may be a mark: every prompt row's arithmetic is the same whatever window it runs in.
-const cache_rules: api.prompt_cache.Rules = .{ .lookahead = 0, .planned = false, .min_prompt = 0 };
+const cache_rules: api.prompt_cache.Rules = .{ .lookahead = 0, .planned = false, .min_prompt = 0, .chunk = g.gpu.prompt_rows };
 
 /// GLM-5.3 on the pair named by `speed_up` (rank 0 or 1's settings), `window` tokens a stream, `streams` streams.
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: []const u8, streams: u32, limit: u64, cache_gib: ?f64) !*Host {

@@ -12,7 +12,7 @@ const Value = json.Value;
 const Cx = errors.Cx;
 
 /// With image input, `ids` holds each image's tokens, `images` the images and `cache_key` the prompt the cache matches.
-pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{} };
+pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, user_end: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{} };
 
 /// Where lessons decide to act on a reply: the row before the generation prompt's `<think>`, else before its last.
 pub fn decideOf(srv: *const Server, ids: []const u32) u32 {
@@ -118,7 +118,27 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
     const count = if (input.messages == .array) input.messages.array.len else 0;
     const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
-    return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len };
+    return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len, .user_end = userEnd(input.messages, history_len) };
+}
+
+/// The history ends the last user only when that user is the final input message. Other ends stay unknown.
+fn userEnd(messages: Value, history_len: usize) usize {
+    if (messages != .array or messages.array.len == 0) return 0;
+    const role = messages.array[messages.array.len - 1].strField("role") orelse return 0;
+    return if (std.mem.eql(u8, role, "user")) history_len else 0;
+}
+
+test "interior prompt: user end excludes later tool and assistant text" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "user", "tool", "assistant" }) |role| {
+        const m = try json.newObject(a);
+        defer a.destroy(m);
+        defer m.deinit(a);
+        try m.put(a, "role", .{ .string = role });
+        var list = [_]Value{.{ .object = m }};
+        try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, role, "user")) 131072 else 0), userEnd(.{ .array = &list }, 131072));
+    }
+    try std.testing.expectEqual(@as(usize, 0), userEnd(.null, 131072));
 }
 
 /// Where the latest user message's text starts (of the first `real_count`): the prompt and a probe there agree to it.

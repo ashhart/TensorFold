@@ -72,6 +72,8 @@ pub const Request = struct {
     shared_prefixes: []const u32 = &.{},
     /// Where the latest user message's text starts: a state kept before it lets an edit of that turn resume (0: none).
     rewind_len: u32 = 0,
+    /// End of the latest user message in this prompt (0: unknown); background reply passes leave it unknown.
+    user_end: u32 = 0,
     /// Prompt chunk starts after 0 (Python PrefillPlan); empty selects the engine's plan.
     chunks: []const u32 = &.{},
     /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.

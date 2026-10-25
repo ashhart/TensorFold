@@ -56,6 +56,7 @@ pub const LaneHost = struct {
     live_generated: u64 = 0,
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
+    cache_status: ?api.Status.PromptCache = null, // published under mutex; HTTP threads never read the store
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not

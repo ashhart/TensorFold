@@ -367,13 +367,18 @@ fn laterFootprint(h: *const Host) !u64 {
     return std.math.add(u64, try std.math.add(u64, laterBytes(h), tower), share);
 }
 
+/// The prompt bank may capture marks without splitting; only request starts are guaranteed cold cuts.
+pub fn cacheRules(chunk: u32) pc.Rules {
+    return .{ .warm = .on, .chunk = chunk, .chunk_marks = false };
+}
+
 /// Prompt reuse in up to 16 GiB of what 70% of RAM leaves once every slot has its memory; CacheOverCap: `why` says why.
 fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
     const later = try laterFootprint(h);
     const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
-    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .rows = &disk.image } }, .{ .warm = .on, .chunk = @intCast(h.back.chunk) }, plan.budget_bytes);
+    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
     h.host.cache = &h.cache.?;
     h.back.release_hook = .{ .ctx = h, .kept = Host.keepReply };
     h.host.info_.warm_turns = true;
@@ -404,4 +409,26 @@ pub fn close(ptr: *anyopaque) void {
 
 test {
     _ = @import("qwen27_share_fit.zig");
+}
+
+test "Qwen27 interior state uses a guaranteed cold request cut" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tokens = try a.alloc(u32, 128 * 1024 + 64);
+    @memset(tokens, 7);
+    var fake: FakeStates = .{};
+    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, cacheRules(2048), 32 << 30);
+    defer store.deinit();
+    var starts: std.ArrayList(u32) = .empty;
+    var at: u32 = 2048;
+    while (at < tokens.len) : (at += 2048) try starts.append(a, at);
+    const p = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
+    try std.testing.expectEqualSlices(u32, &.{ 16, 129024, @intCast(tokens.len - 8) }, p.marks);
+    for (p.marks) |m| try std.testing.expect(store.keep(tokens, m, null, starts.items, &.{}));
+    tokens[tokens.len - 512] += 1;
+    const followup = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
+    try std.testing.expectEqual(@as(u32, 129024), followup.from);
+    try std.testing.expect(store.held <= store.budget);
 }

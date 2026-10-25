@@ -15,3 +15,7 @@ test {
 test {
     _ = @import("lane_host_score_exit_test.zig");
 }
+
+test {
+    _ = @import("lane_host_interior_test.zig");
+}

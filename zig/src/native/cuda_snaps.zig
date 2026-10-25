@@ -14,6 +14,14 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     return rules;
 }
 
+/// Native CUDA families own their grid, independently of the server's template chunk starts.
+pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
+    var rules = cacheRules(F);
+    rules.chunk = prompt_rows;
+    rules.chunk_starts = false;
+    return rules;
+}
+
 /// The cache's bytes less what the family sets aside for its states (`snap_ready`, as Nemotron's spare buffers).
 pub fn cacheBudget(comptime F: type, target: anytype, cache: u64) !u64 {
     return if (@hasDecl(F, "snap_ready")) cache - try F.snap_ready(target, cache) else cache;

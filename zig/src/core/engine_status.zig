@@ -8,6 +8,8 @@ pub const HealthSource = struct {
 
 pub const Status = struct {
     healthy: bool = true,
+    /// Engine-thread publication; all retained states, including long-message interior cuts and spare storage.
+    prompt_cache: ?PromptCache = null,
     /// Requests in prefill or decode, and those waiting for a lane.
     running: u32 = 0,
     waiting: u32 = 0,
@@ -27,4 +29,6 @@ pub const Status = struct {
     fill_unknown: bool = false,
     /// Changes whenever the filling set does: a reader pairs its drain samples with one fill.
     fill_run: u64 = 0,
+
+    pub const PromptCache = struct { states: u64 = 0, bytes: u64 = 0 };
 };

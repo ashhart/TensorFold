@@ -57,6 +57,14 @@ The family plugs into the core's pieces and adds no scheduler:
 - The core's prompt cache keeps and resumes a stream's state at the marks it asks for. The family copies the state
   (`cuda_snap.zig`), with the MTP head's cache rows for a drafting stream; the head reads one token past a row, so
   states keep with a lookahead of 1, as Nemotron's do.
+- For a last user message of at least 8,192 tokens, the lane cache may also keep one state inside that message.
+  It chooses the latest existing cold chunk cut leaving at least 2,048 tokens outside the state's key, for a
+  replacement question after the same document. It uses the loaded prompt pass size and adds no chunk split.
+  Endpoint, rewind and shared states have priority; the extra copy is skipped if they cannot fit together under
+  the byte or snapshot-slot cap. Existing eviction rules still apply. `/metrics` includes it in
+  `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; a successful resume counts toward
+  `tensorfold:prompt_tokens_cached_total`. The chunk and budget host fixtures exercise this policy; real-model
+  resumed/fresh parity and TTFT for this interior state still need the GPU gate.
 - Shared row kernels: the token rows (`embed_rows.cu`, groups of 32 and a copy a hyper-connection stream), the MTP
   head's RMS rows with their group sums (`norms.cu`), the router logits and softmax top-k (`route_rows.cu`), and the
   routed experts over a window's or a chunk's rows on the core's plan (`cuda/grouped.zig`, `experts_rows.cu`).

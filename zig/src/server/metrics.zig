@@ -159,6 +159,10 @@ pub const Metrics = struct {
             try gauge(w, "prompt_cache_minimum_state_bytes", "gauge", "Smallest planned retained state, with the family's admission rounding.", c.minimum_state_bytes);
             try gauge(w, "prompt_cache_can_keep_state", "gauge", "Startup budget holds at least one planned state; not current occupancy.", @intFromBool(c.budget_bytes >= c.minimum_state_bytes));
         }
+        if (status.prompt_cache) |c| {
+            try gauge(w, "prompt_cache_states", "gauge", "All retained prompt states, including long-message interior cuts.", c.states);
+            try gauge(w, "prompt_cache_bytes", "gauge", "Storage held by retained prompt states and spare buffers, inside their budget.", c.bytes);
+        }
         const keeps = info.prompt_cache;
         if (keeps) try gauge(w, "prompt_tokens_cached_total", "counter", "Prompt tokens of finished requests restored from kept prompt states.", snap.cached);
         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
@@ -385,4 +389,16 @@ test "metrics expose cache budget, minimum and inability to retain a state" {
     const info: api.Info = .{ .prompt_cache = true, .prompt_cache_capacity = .{ .budget_bytes = 322122547, .minimum_state_bytes = 384 << 20 } };
     try m.render(std.testing.io, &out.writer, .{}, &.{}, info, null, 262144);
     for ([_][]const u8{ "tensorfold:prompt_cache_budget_bytes 322122547\n", "tensorfold:prompt_cache_minimum_state_bytes 402653184\n", "tensorfold:prompt_cache_can_keep_state 0\n" }) |line| try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
+}
+
+test "metrics count interior states in retained occupancy as well as restored tokens" {
+    var m: Metrics = .{ .gpa = std.testing.allocator };
+    defer m.deinit();
+    m.note(std.testing.io, 131072, 129024, 1, 0, 0, 1, 1, null, null, null, null);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try m.render(std.testing.io, &out.writer, .{ .prompt_cache = .{ .states = 3, .bytes = 300000 } }, &.{}, .{ .prompt_cache = true }, null, 262144);
+    for ([_][]const u8{ "tensorfold:prompt_cache_states 3\n", "tensorfold:prompt_cache_bytes 300000\n", "tensorfold:prompt_tokens_cached_total 129024\n", "tensorfold:prefix_cache_hits_total 129024\n" }) |line| {
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
+    }
 }

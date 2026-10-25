@@ -163,6 +163,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .background = background,
         .history_len = @intCast(rendered.history_len),
         .rewind_len = @intCast(rendered.rewind_len),
+        .user_end = @intCast(rendered.user_end),
         .shared_prefixes = shared.items,
         // a cut before the conversation's own text: fresh sessions resume their whole harness
         .chunks = try chunk_plan.withCut(a, try srv.chunks.starts(a, rendered.ids), if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0, rendered.ids.len, srv.chunks.min_chunk),

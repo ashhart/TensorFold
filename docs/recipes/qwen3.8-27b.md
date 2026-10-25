@@ -291,3 +291,14 @@ provenance object with `--source` to
 Kernel tests check rows alone and in windows, tree paths and committed state. Release checks must also
 compare drafted/serial, resumed/fresh and concurrent/solo requests with thinking on and off and tools.
 Decode rate, prefill, concurrency and peak-memory results are TBD [release-0.3.5].
+
+### Long-document prompt reuse
+
+The lane cache can keep one additional state inside a final user message of at least 8,192 tokens. It leaves
+at least 2,048 tokens outside the snapshot key for a different question following the same document. Qwen27
+Metal chooses an existing request chunk start, so the optional prompt bank and its fallback both already
+cut there. A direct caller supplying no chunk starts skips this optional state instead of guessing a cut.
+Endpoint, rewind and shared states have priority within the same byte and slot caps. Retained-state occupancy
+is published in `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; restored tokens also count
+in `tensorfold:prompt_tokens_cached_total`. Synthetic host checks cover the two-request pattern and exact
+output. Real-model parity and TTFT for this state still need the Metal gate.
