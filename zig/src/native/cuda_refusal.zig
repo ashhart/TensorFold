@@ -44,7 +44,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     }
-    if (o.learn_conversations and F != nemotron.native) return "--learn-conversations keeps conversation states on disk for Nemotron only on CUDA: serve this model without it";
+    if (o.learn_conversations and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron and the Qwen hybrids only on CUDA: serve this model without it";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
     if (o.loops != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "loops"))) return "--loops sets a looped model's recurrent passes (Dory's): this CUDA family has none; serve without it";
@@ -131,8 +131,12 @@ test "a family with no head of its own words its --drafter refusal" {
     try std.testing.expectEqualStrings("--drafter: none yet", family(Headless, .{ .dir = "d", .model_type = "m", .drafter = "x" }) orelse "");
 }
 
-test "--learn-conversations opens Nemotron only, the one CUDA family whose states have a disk image" {
+test "--learn-conversations opens Nemotron and a family whose states declare a disk image, no other" {
     const Other = struct {};
+    const Imaged = struct {
+        pub const kept_disk = struct {};
+    };
+    try std.testing.expect(family(Imaged, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) == null);
     try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
     try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
 }

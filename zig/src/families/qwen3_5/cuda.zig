@@ -29,6 +29,7 @@ test {
     _ = vision;
     _ = @import("cuda_vision_prompt.zig");
     _ = reuse;
+    _ = @import("cuda_disk.zig");
     _ = native;
     _ = @import("cuda_pages.zig");
     _ = @import("cuda_penalties.zig");
