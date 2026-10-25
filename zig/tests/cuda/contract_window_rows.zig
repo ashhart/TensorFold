@@ -179,8 +179,7 @@ pub const Rows = struct {
         const slot = try a.alloc(i32, n);
         const hi = try a.alloc(i32, n);
         for (pos, slot, hi, 0..) |*p, *sl, *x, i| {
-            // short histories, wrapped rings, the last position; gate 4: one stream's row at the bound, every row alike
-            p.* = @intCast(if (fill == .stress or i == n - 1) at -| 1 else if (i % 4 == 0) i % @min(40, shape.k) else (i * 7919) % shape.k);
+            p.* = @intCast(position(f.prompt, fill == .stress, shape.k, at, n, i));
             sl.* = @intCast(if (fill == .stress) 0 else i % f.streams);
             x.* = @intCast(at + i);
         }
@@ -350,4 +349,20 @@ test "wide branch registrations cover every admitted GQA ratio and prompt mode" 
         };
         try std.testing.expectEqual(@as(usize, 1), count);
     };
+}
+
+/// Row i: a prompt row at at + i as Call.at reads it (#1316: no modulo of an empty prefix); decode as before.
+fn position(prompt: bool, stress: bool, k: usize, at: usize, n: usize, i: usize) usize {
+    if (prompt) return at + i;
+    if (stress or i == n - 1) return at -| 1;
+    return if (i % 4 == 0) i % @min(40, k) else (i * 7919) % k;
+}
+
+test "window_rows fixture positions: prompts with an empty or a long prefix, decode rows unchanged" {
+    for (0..8) |i| try std.testing.expectEqual(i, position(true, false, 0, 0, 8, i));
+    for (0..8) |i| try std.testing.expectEqual(300 + i, position(true, false, 300, 300, 8, i));
+    try std.testing.expectEqual(@as(usize, 299), position(false, false, 300, 300, 8, 7));
+    try std.testing.expectEqual(@as(usize, 4), position(false, false, 300, 300, 8, 4));
+    try std.testing.expectEqual((5 * 7919) % 300, position(false, false, 300, 300, 8, 5));
+    try std.testing.expectEqual(@as(usize, 299), position(false, true, 300, 300, 8, 2));
 }
