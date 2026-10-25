@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const q = tf.lfm2_moe;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
+const metal_admit = @import("metal_admit.zig");
 
 const Host = struct {
     resident: ?mtl.resident.Resident = null,
@@ -64,12 +65,20 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const chunk = 2048;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = window, .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
+    const per_stream = q.state.cacheBytes(&model.config.attention, window);
+    const served = try metal_admit.streams(a, "lfm2", per_stream, metal_admit.room(model.device), o, window, problem) orelse {
+        h.metal.deinit();
+        model.deinit();
+        gpa.destroy(h);
+        return null;
+    };
+    h.metal.options.streams = @max(served, 2);
     h.config = try lanes.Config.init(gpa, h.metal.facts(), q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = chunk, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .structures = true });
     h.cache = null;
     var why: []const u8 = "";
     const dev = model.device;

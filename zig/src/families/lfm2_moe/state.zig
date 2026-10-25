@@ -207,3 +207,18 @@ test "the served window stays inside the attention's 131,072 positions" {
     try std.testing.expectEqual(@as(?usize, null), window(8192, 8193));
     try std.testing.expectEqual(@as(?usize, null), window(131072, 0));
 }
+
+/// Bytes a stream's Cache takes at `capacity` rows: its logits, conv layers' windows, attention layers' KV.
+pub fn cacheBytes(attention: *const [c.layers]bool, capacity: usize) u64 {
+    var bytes: u64 = c.vocab * 2;
+    for (attention) |a| bytes += if (a) 2 * capacity * c.kv_heads * c.head_dim * 2 else conv_bytes;
+    return bytes;
+}
+
+test "a stream's cache bytes: logits and conv windows at any length, keys and values a row on attention layers" {
+    var attention: [c.layers]bool = @splat(false);
+    try std.testing.expectEqual(@as(u64, c.vocab * 2 + c.layers * conv_bytes), cacheBytes(&attention, 4096));
+    attention[1] = true;
+    attention[3] = true;
+    try std.testing.expectEqual(@as(u64, 2 * 2 * c.kv_heads * c.head_dim * 2), cacheBytes(&attention, 1) - cacheBytes(&attention, 0));
+}

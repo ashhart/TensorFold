@@ -60,3 +60,15 @@ test "a window that fits no stream is refused with lower --context" {
     defer a.free(why);
     try std.testing.expect(std.mem.indexOf(u8, why, "lower --context") != null);
 }
+
+test "LFM2.5-24B-A2B (no weights here): its real layer pattern's streams at a full window, planned on the host" {
+    const tf = @import("tensorfold");
+    const config = try tf.lfm2_moe.config.parse(std.testing.allocator, tf.lfm2_moe.config.fixture);
+    const per = tf.lfm2_moe.state.cacheBytes(&config.attention, 131072);
+    try std.testing.expectEqual(@as(u64, 131072 * 20_480 + 245_760 + 256_000), per);
+    var why: []const u8 = "";
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(@as(?u32, 3), try streams(a, "lfm2", per, 3 * per + per / 2, .{ .dir = "", .model_type = "lfm2_moe" }, 131072, &why));
+    try std.testing.expectEqual(@as(?u32, null), try streams(a, "lfm2", per, 3 * per + per / 2, .{ .dir = "", .model_type = "lfm2_moe", .lanes = 4, .lanes_fixed = true }, 131072, &why));
+    a.free(why);
+}
