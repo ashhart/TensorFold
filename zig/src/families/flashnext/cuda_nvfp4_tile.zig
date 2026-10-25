@@ -18,7 +18,13 @@ pub fn size(n: usize) usize {
     return if (n >= factRows()) cuda.experts.promptTile(.nvfp4) else 16;
 }
 
-/// The experts' launch for a tile: the decode form at 16 pairs, else the prompt tiles with the decode form's sums.
-pub fn run(pt: usize) @TypeOf(&cuda.experts.Nvfp4Experts.run, &cuda.experts.Nvfp4Experts.runFact) {
-    return if (pt == 16) &cuda.experts.Nvfp4Experts.run else &cuda.experts.Nvfp4Experts.runFact;
+/// Prompt tiles may select the K32 pipeline; flag-off and decode calls retain their existing launch.
+pub fn run(k: anytype, pt: usize, s: cuda.Stream, epi: cuda.experts.Epi, in: cuda.experts.Rows, l: cuda.experts.Layer, p: cuda.grouped.Plan, out: u64, items: usize, skip: i32) !void {
+    if (pt != 16) if (k.expert_tile) |*tile| if (tile.takes(epi)) return tile.run(s, epi, in, l, p, out, items, skip);
+    const launch = if (pt == 16) &cuda.experts.Nvfp4Experts.run else &cuda.experts.Nvfp4Experts.runFact;
+    return launch(&k.nvfp4, s, epi, in, l, p, out, items, skip);
+}
+
+test {
+    _ = @import("cuda_nvfp4_tile_test.zig");
 }

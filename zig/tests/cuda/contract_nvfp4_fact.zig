@@ -38,6 +38,7 @@ pub const Experts = struct {
     rig: rig_.Rig,
     kind: Kind,
     k: *const fx,
+    tile: ?*const cuda.experts_tile.Tile = null,
     router: grouped.Router,
     shape: c.Shape = undefined,
     x: []u16 = &.{}, // bf16 rows: a token's for up, a pair's for down
@@ -75,7 +76,16 @@ pub const Experts = struct {
     }
 
     pub fn kernel(self: *Experts) g.Kernel {
-        return .{ .spec = spec(self.kind), .ctx = self, .vt = &vt, .control = if (self.kind == .control) .shapes else null };
+        var entry = spec(self.kind);
+        if (self.tile != null) {
+            entry.name = switch (self.kind) {
+                .up => "cuda nvfp4 K32 tile gate-up (decode sums)",
+                .down => "cuda nvfp4 K32 tile fp32 down (decode sums)",
+                .control => "control: scaled-code prompt posing as the K32 tile",
+            };
+            entry.tiles[1].size = 128;
+        }
+        return .{ .spec = entry, .ctx = self, .vt = &vt, .control = if (self.kind == .control) .shapes else null };
     }
 
     const vt = g.hooks(Experts);
@@ -223,6 +233,8 @@ pub const Experts = struct {
         const epi: cuda.experts.Epi = if (up) .up else .down_f32;
         if (fact and self.kind == .control) {
             try self.k.runPrompt(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
+        } else if (fact and self.tile != null) {
+            try self.tile.?.run(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
         } else if (fact) {
             try self.k.runFact(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
         } else try self.k.run(self.rig.s, epi, in, self.layer(), self.plan, out, grouped.maxItems(self.pairs(), experts, 16), -1);

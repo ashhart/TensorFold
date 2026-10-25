@@ -19,6 +19,21 @@ contract receipts. Compile success and host tests do not establish checkpoint fi
 limits must be measured with the exact checkpoint, binary, device topology and request settings. Prefix retention
 with MTP is outside this path's qualified scope; evaluate with `--prompt-cache-gib 0`.
 
+## Experimental K32 prompt experts
+
+`TF_FLASHNEXT_PROMPT_EXPERT_TILE=1` selects the K32 staging pipeline for NVFP4 prompt gate-up;
+`2` also selects its FP32 down projection. Unset or `0` keeps the existing kernels. Decode retains its existing
+16-pair form. `TF_FLASHNEXT_FACT_ROWS` retains its existing prompt threshold, including `0` to disable prompt tiles.
+The pipeline adapts MiaAI-Lab's MIT recipe patch0014 and retains the same packed weights, BF16 activations,
+16-term dots, scale-FMA order and epilogue. This is an unqualified opt-in pending the GPU gates.
+
+`tf-cuda-test nvfp4-fact` compares both prompt forms with the decode bytes on skewed routes, row and column tails,
+odd K32 groups and shared-expert skips. The normal CUDA kernel contract adds both replacement kernels and their
+rounding-order controls. Their compiler resource slots remain pending until measured for each served SM.
+Before enabling it for serving, run the full contract and compare main/candidate prompt-cut, resumed/fresh,
+drafted/plain and concurrent/solo tokens at the same checkpoint. Measure cold 4k, 16k and 128k prefill with cache
+disabled, alternating with the flag off. Host checks and compile-only checks do not establish GPU exactness or speed.
+
 ## Run
 
 ```bash
