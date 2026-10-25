@@ -70,6 +70,8 @@ pub const Metal = struct {
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
     landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
     vision: ?*@import("qwen27_images.zig").Vision = null, // --vision: the image tower and a prompt pass's image rows
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, slots.Fill) = .empty, // prompt passes the lane host runs by chunks
+    image_fill: ?*const lanes.Stream = null, // the pass whose images the vision rows hold, until it closes
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
@@ -106,6 +108,7 @@ pub const Metal = struct {
         b.dropRound();
         b.dropTree();
         b.freeContexts();
+        b.fills.deinit(b.gpa);
         b.kept.deinit();
         b.picks.deinit();
         b.ops.deinit();
@@ -121,7 +124,7 @@ pub const Metal = struct {
     const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
@@ -417,10 +420,7 @@ pub const Metal = struct {
         const b = self(ptr);
         b.settle() catch {};
         b.dropRound();
-        const slot = b.slotOf(s) orelse (b.freeSlot() orelse return error.NoFreeSlot);
-        try b.ready(slot, s);
-        b.dropTreeOf(slot);
-        b.owners[slot] = s;
+        const slot = try slots.bind(b, s);
         errdefer b.owners[slot] = null;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -575,6 +575,7 @@ pub const Metal = struct {
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
+        slots.endFill(self(ptr), s);
         self(ptr).unbind(s);
     }
 };
