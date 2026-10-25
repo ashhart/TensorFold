@@ -21,6 +21,7 @@ const fill = @import("prefill.zig");
 const prompt_gpu = @import("prefill_metal.zig");
 const RoundTimes = @import("round_times.zig").RoundTimes;
 const batch_settle = @import("batch_settle.zig");
+const batch_draft = @import("batch_draft.zig");
 
 /// A stream's images through the host's tower: its prompt pass's rows and frame (in `a`), then their release.
 pub const Images = struct { ctx: *anyopaque, build: *const fn (ctx: *anyopaque, a: std.mem.Allocator, images: []const lanes.stream.Image, prompt_len: usize, from: usize) anyerror!*fz.vis_prompt.VisPrompt, release: *const fn (ctx: *anyopaque, p: *fz.vis_prompt.VisPrompt) void };
@@ -50,6 +51,7 @@ pub const Backend = struct {
     grammar: grammar.Masks, // structured output: the rounds' mask rows and first rows
     times: RoundTimes = .{}, // FZ_ROUND_TIMES=1: a shared round's phases
     fence: ?mtl.counters.Fence = null, // orders a round's state copies before its forward in one command buffer
+    packed_drafts: batch_draft.State = .{}, // every stream's draft steps packed into one pass a step (FZ_BATCH_MTP_ROWS=0: off)
 
     /// Sessions of the given capacities (the first, the engine's own, holds its whole window whatever is given).
     pub fn init(gpa: std.mem.Allocator, e: *Engine, capacities: []const usize) !Backend {
@@ -480,10 +482,13 @@ pub const Backend = struct {
         var follows: [fz.MAXR][]const u32 = undefined;
         var hiddens: [fz.MAXR]Buf = undefined;
         var ones: [fz.MAXR][1]u32 = undefined;
+        var ss: [fz.MAXR]*Session = undefined;
+        var depths: [fz.MAXR]usize = undefined;
         if (requests.len > fz.MAXR) return error.DraftOutOfStep;
         for (requests, 0..) |r, k| {
             if (r.early or r.lanes != null or r.ranks or r.depth >= fz.MAXR) return error.DraftOutOfStep;
             const s = try b.session(r.stream);
+            ss[k], depths[k] = .{ s, r.depth };
             follows[k] = if (r.first) |f| blk: {
                 ones[k][0] = switch (f) {
                     .value => |v| v,
@@ -508,7 +513,12 @@ pub const Backend = struct {
         }
         const cb = b.e.r.queue.commandBuffer();
         b.e.r.enc = cb.compute(if (b.e.r.serial) .serial else .concurrent);
-        for (requests, 0..) |r, k| {
+        const n = requests.len;
+        const packed_ = batch_draft.encode(b, ss[0..n], follows[0..n], hiddens[0..n], depths[0..n]) catch |err| {
+            b.e.r.enc.end();
+            return err;
+        };
+        if (!packed_) for (requests, 0..) |r, k| {
             const s = try b.session(r.stream);
             const old = try b.bind(s);
             defer old.restore(b.e);
@@ -516,10 +526,11 @@ pub const Backend = struct {
                 b.e.r.enc.end();
                 return err;
             };
-        }
+        };
         b.times.commit();
         try b.primary.finish(cb);
         b.times.end(cb, true, 0, requests.len);
+        if (packed_) batch_draft.read(&b.packed_drafts);
         for (requests) |r| (try b.session(r.stream)).heldDrafts(r.depth);
         b.draft_waits += 1;
         b.draft_calls += requests.len;
