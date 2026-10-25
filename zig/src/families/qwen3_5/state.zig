@@ -2,11 +2,35 @@
 const std = @import("std");
 const mtl = @import("metal");
 const c = @import("config.zig");
+pub const kv = @import("../../core/kv_pool.zig");
+const kvp = @import("../../core/metal_kv_pages.zig");
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 pub const delta_bytes = c.linear_heads * c.linear_dim * c.linear_dim * 4;
 pub const conv_bytes = (c.conv_taps - 1) * c.conv_dim * 2;
 pub const window_rows = 16;
 pub const batch_rows = 32;
+
+/// Layers with a KV cache (every fourth): a page holds 256 positions of each.
+pub const attention_layers = c.layers / 4;
+comptime {
+    var n = 0;
+    for (0..c.layers) |i| n += @intFromBool(!c.linear(i));
+    if (n != attention_layers) @compileError("Qwen3.5's attention layers are every fourth");
+}
+
+/// Attention layer `a`'s keys in a page (its values the part after): [layer][keys, values][kv head][256][head_dim].
+pub fn pagePart(a: usize, values: bool) usize {
+    return (a * 2 + @intFromBool(values)) * c.kv_heads * kvp.page_tokens * c.head_dim * 2;
+}
+
+/// A paged stream: its fixed part the recurrences, conv windows and logits, its keys and values pages of the pool.
+pub fn pagedLayout() kv.Layout {
+    const fixed = c.vocab * 2 + (c.layers - attention_layers) * (delta_bytes + conv_bytes);
+    return .{ .fixed_bytes = fixed, .token_bytes = attention_layers * 2 * c.kv_heads * c.head_dim * 2, .page_tokens = kvp.page_tokens, .snap_bytes = 0 };
+}
+
+/// A stream whose keys and values are pages: the pool and the lane whose table maps them.
+pub const Paged = struct { pages: *kvp.Pages, lane: usize };
 
 pub const Storage = struct {
     residency: ?mtl.ResidencySet.Follow = null,
@@ -45,12 +69,18 @@ pub const Cache = struct {
     memory: Storage,
     capacity: usize,
     len: usize = 0,
+    paged: ?Paged = null, // its keys and values in the pool's pages (TF_QWEN35_METAL_KV_PAGES=1), not buffers of its own
     last: ?struct { start: usize, base: usize, rows: usize } = null,
     blocks: [c.layers]Mixer,
     logits: mtl.Buffer,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, capacity: usize) !Cache {
-        var out: Cache = .{ .memory = .{ .gpa = gpa, .device = device }, .capacity = capacity, .blocks = undefined, .logits = undefined };
+        return initPaged(gpa, device, capacity, null);
+    }
+
+    /// `paged`: the attention layers' keys and values name the pool's arena, which the stream's table pages.
+    pub fn initPaged(gpa: std.mem.Allocator, device: mtl.Device, capacity: usize, paged: ?Paged) !Cache {
+        var out: Cache = .{ .memory = .{ .gpa = gpa, .device = device }, .capacity = capacity, .paged = paged, .blocks = undefined, .logits = undefined };
         errdefer out.memory.deinit();
         out.logits = try out.memory.alloc(c.vocab * 2);
         for (&out.blocks, 0..) |*b, i| {
@@ -60,6 +90,9 @@ pub const Cache = struct {
                 @memset(r.contents()[0..delta_bytes], 0);
                 @memset(conv.contents()[0..conv_bytes], 0);
                 b.* = .{ .delta = .{ .recurrence = r, .conv = conv } };
+            } else if (paged) |p| {
+                const arena = p.pages.arena.buf orelse return error.QwenNoPages;
+                b.* = .{ .attention = .{ .keys = arena, .values = arena } }; // the pool's, not this cache's memory
             } else {
                 const bytes = capacity * c.kv_heads * c.head_dim * 2;
                 b.* = .{ .attention = .{ .keys = try out.memory.alloc(bytes), .values = try out.memory.alloc(bytes) } };

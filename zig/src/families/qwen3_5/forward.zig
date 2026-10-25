@@ -190,24 +190,28 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, layer: usize, segme
         e.setBuffer(s.queries, 0, 1);
         e.setValue([4]u32{ @intCast(seg.cache.len), @intCast(total), @intCast(base), 0 }, 2);
         enc.run(.{ c.head_dim, c.query_heads, seg.rows }, .{ 256, 1, 1 });
-        enc.pipe("qwen35_keys");
+        // paged: keys and values at this layer's part of the arena, and the stream's table to its pages
+        const part: [2]usize = if (seg.cache.paged != null) .{ st.pagePart(layer / 4, false), st.pagePart(layer / 4, true) } else .{ 0, 0 };
+        if (seg.cache.paged != null) enc.pipe("qwen35_keys_paged") else enc.pipe("qwen35_keys");
         e.setBuffer(s.knorm, 0, 0);
         e.setBuffer(s.v, 0, 1);
-        e.setBuffer(cache.keys, 0, 2);
-        e.setBuffer(cache.values, 0, 3);
+        e.setBuffer(cache.keys, part[0], 2);
+        e.setBuffer(cache.values, part[1], 3);
         e.setValue([4]u32{ @intCast(seg.cache.len), @intCast(seg.cache.capacity), @intCast(base), 0 }, 4);
+        if (seg.cache.paged) |p| paging(e, p, 5);
         enc.run(.{ c.head_dim, c.kv_heads, seg.rows }, .{ 256, 1, 1 });
         const nch = (seg.cache.len + seg.rows + 127) / 128;
         const dims = [8]i32{ @intCast(seg.cache.len), @intCast(seg.rows), @intCast(seg.cache.capacity), @intCast(nch), 0, @intCast(total), @intCast(base), 0 };
-        enc.pipe("attn_partial");
+        if (seg.cache.paged != null) enc.pipe("qwen35_attn_partial_paged") else enc.pipe("attn_partial");
         e.setBuffer(s.queries, 0, 0);
-        e.setBuffer(cache.keys, 0, 1);
-        e.setBuffer(cache.values, 0, 2);
+        e.setBuffer(cache.keys, part[0], 1);
+        e.setBuffer(cache.values, part[1], 2);
         e.setValue(@as(f32, 1.0 / 16.0), 3);
         e.setBytes(std.mem.asBytes(&dims), 4);
         e.setBuffer(s.pm, 0, 5);
         e.setBuffer(s.pl, 0, 6);
         e.setBuffer(s.po, 0, 7);
+        if (seg.cache.paged) |p| paging(e, p, 8);
         enc.run(.{ 512, nch, c.kv_heads * seg.rows }, .{ 512, 1, 1 });
         enc.pipe("attn_merge");
         e.setBuffer(s.pm, 0, 0);
@@ -224,4 +228,10 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, layer: usize, segme
     e.setBuffer(s.mix, 0, 2);
     enc.run(.{ c.hidden, total, 1 }, .{ 256, 1, 1 });
     enc.projection(a.out, s.mix, 0, s.r, 0, total);
+}
+
+/// A paged stream's table at `slot` and the page's bytes after it, for the paged kernels.
+fn paging(e: mtl.ComputeEncoder, p: st.Paged, slot: usize) void {
+    e.setBuffer(p.pages.tables.buf.?, p.pages.tables.offset(p.lane), slot);
+    e.setValue(@as(u64, p.pages.arena.page_bytes), slot + 1);
 }
