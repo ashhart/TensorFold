@@ -7,7 +7,7 @@ const g = core.contract.gates;
 const ref = @import("w4a8_ref.zig");
 const Rig = @import("contract_rig.zig").Rig;
 pub const Kind = enum { quantize, prefill };
-pub const Fault = enum { none, guard, wrong_code, wrong_scale, wrong_sum, narrow_sum, narrow_epilogue };
+pub const Fault = enum { none, guard, wrong_code, wrong_scale, wrong_sum, narrow_sum, narrow_epilogue, missed_flag };
 
 pub fn plantExceptional(x: []u16) void {
     const values = [_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) };
@@ -34,7 +34,7 @@ pub fn spec(kind: Kind) c.Spec {
         .depth = if (kind == .quantize) sumDepth else projectionDepth,
         .out = if (kind == .quantize) .f32 else .bf16,
         .ops = if (kind == .quantize) 0 else 8,
-        .nan = .{ .stated = "exceptional-input policy is unsettled; gate 1 deliberately fails closed" },
+        .nan = .{ .stated = "any nonfinite activation or nonfinite group scale/sum raises the chunk flag; int8 outputs are discarded and the engine recomputes in bf16" },
         .tiles = .{ .{ .size = 128 }, .{ .size = 128 }, .{ .size = 256, .step = 64, .min = 64 } },
         .served = &served,
     };
@@ -60,6 +60,8 @@ pub const Case = struct {
     ds: u64 = 0,
     out: u64 = 0,
     weight: cuda.qlinear.Affine4 = undefined,
+    flag: u64 = 0,
+    exception_failure: ?[]const u8 = "exceptional fixture has not run",
     msg: [200]u8 = undefined,
     pub fn deinit(self: *Case) void {
         self.rig.deinit();
@@ -69,6 +71,7 @@ pub const Case = struct {
         var registration = spec(self.kind);
         registration.name = switch (self.fault) {
             .none => registration.name,
+            .missed_flag => if (self.kind == .quantize) "cuda w4a8 CONTROL quantizer missed exceptional flag" else "cuda w4a8 CONTROL projection missed exceptional flag",
             .guard => "cuda w4a8 CONTROL changed guard byte",
             .wrong_code => if (self.kind == .quantize) "cuda w4a8 CONTROL changed quantized code" else "cuda w4a8 CONTROL changed weight code",
             .wrong_scale => "cuda w4a8 CONTROL changed group scale",
@@ -79,6 +82,7 @@ pub const Case = struct {
         return .{ .spec = registration, .ctx = self, .vt = &vt, .control = switch (self.fault) {
             .none => null,
             .guard => .repeat,
+            .missed_flag => .nonfinite,
             .narrow_sum, .narrow_epilogue => .sums,
             else => .shapes,
         } };
@@ -90,6 +94,8 @@ pub const Case = struct {
         _ = self.arena.reset(.retain_capacity);
         self.shape = shape;
         self.fill = fill;
+        self.exception_failure = "exceptional fixture has not run";
+        self.flag = try self.rig.scratch(4);
         const a = self.arena.allocator();
         const kg = shape.k / 64;
         self.x = try a.alloc(u16, shape.rows * (shape.k + 64));
@@ -118,8 +124,7 @@ pub const Case = struct {
             }
         };
         if (fill == .nonfinite) {
-            plantExceptional(self.x);
-            // No unsupported float-to-int conversion is executed before its policy is specified.
+            try @import("contract_w4a8_exception.zig").prepare(self);
             return true;
         }
         for (0..shape.rows) |row| for (0..kg) |j| {
@@ -180,12 +185,13 @@ pub const Case = struct {
         return true;
     }
     pub fn run(self: *Case) !void {
-        if (self.fill == .nonfinite) return;
+        if (self.fill == .nonfinite) return @import("contract_w4a8_exception.zig").run(self);
         const s = self.shape;
         var args: cuda.launch.Args = .{};
         if (self.kind == .quantize) {
-            inline for (.{ self.dx, self.dq, self.da, self.ds, @as(c_int, @intCast(s.k)), @as(c_int, @intCast(s.k + 64)) }) |v| args.add(v);
-            try cuda.launch.launch(self.kernels.quantize, .{ .grid = .{ .x = @intCast(s.rows), .y = @intCast((s.k / 64 + 3) / 4) }, .block = .{ .x = 128 } }, self.rig.s, &args);
+            var exceptional: u32 = 0;
+            try self.kernels.quantizeRows(self.rig.s, self.dx, self.dq, self.da, self.ds, s.rows, s.k, s.k + 64, self.flag, &exceptional);
+            if (exceptional != 0) return error.UnexpectedExceptionalFixture;
         } else {
             inline for (.{ self.dq, self.da, self.ds, self.weight.w, self.weight.s, self.weight.b, self.out }) |v| args.add(v);
             const group = @max(1, @min((s.rows + 127) / 128, (12 << 20) / (128 * s.k * 2)));
@@ -255,7 +261,7 @@ pub const Case = struct {
         }
     }
     pub fn check(self: *Case, at: g.Gate) !?[]const u8 {
-        if (at == .nonfinite) return "exceptional inputs planted; their quantization/fallback policy remains unspecified";
+        if (at == .nonfinite) return self.exception_failure;
         if (self.kind == .quantize) {
             const raw = try self.rig.bytes(self.dq, self.xq.len);
             for (raw, 0..) |got, i| {

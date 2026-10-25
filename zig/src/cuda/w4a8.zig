@@ -23,20 +23,26 @@ pub const Kernels = struct {
         return rows * k + 2 * rows * (k / 64) * 4;
     }
 
+    /// Quantize and read its verdict before any consumer, with the same seven-argument CUDA ABI for every caller.
+    pub fn quantizeRows(kk: Kernels, s: Stream, x: u64, codes: u64, scales: u64, sums: u64, rows: usize, k: usize, ldx: usize, flag: u64, exceptional: *u32) !void {
+        const width: c_int = @intCast(k);
+        const stride: c_int = @intCast(ldx);
+        // the mark starts clear, and the quantizer raises it for an exceptional group
+        try s.d.check(s.d.api.cuMemsetD8Async(flag, 0, 4, s.handle), "cuMemsetD8Async");
+        var a: launch_.Args = .{};
+        inline for (.{ x, codes, scales, sums, width, stride, flag }) |v| a.add(v);
+        try launch_.launch(kk.quantize, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((k / 64 + 3) / 4) }, .block = .{ .x = 128 } }, s, &a);
+        // the quantizer's verdict decides the chunk's precision
+        try s.d.check(s.d.api.cuMemcpyDtoHAsync_v2(exceptional, flag, 4, s.handle), "cuMemcpyDtoHAsync");
+        try s.synchronize();
+    }
+
     /// out (rows, q.n) bf16 = x (rows, q.k) bf16 through q: x quantized a 64-input group into `ws`, then the int8 mma.
     pub fn prompt(kk: Kernels, s: Stream, x: u64, q: Affine4, out: u64, rows: usize, ws: u64, flag: u64, exceptional: *u32) !void {
         const groups = q.k / 64;
         const xa = ws + rows * q.k;
         const xs = xa + rows * groups * 4;
-        const k: c_int = @intCast(q.k);
-        // the mark starts clear, and the quantizer raises it for an exceptional group
-        try s.d.check(s.d.api.cuMemsetD8Async(flag, 0, 4, s.handle), "cuMemsetD8Async");
-        var a: launch_.Args = .{};
-        inline for (.{ x, ws, xa, xs, k, k, flag }) |v| a.add(v);
-        try launch_.launch(kk.quantize, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((groups + 3) / 4) }, .block = .{ .x = 128 } }, s, &a);
-        // the quantizer's verdict decides the chunk's precision
-        try s.d.check(s.d.api.cuMemcpyDtoHAsync_v2(exceptional, flag, 4, s.handle), "cuMemcpyDtoHAsync");
-        try s.synchronize();
+        try kk.quantizeRows(s, x, ws, xa, xs, rows, q.k, q.k, flag, exceptional);
         if (exceptional.* != 0) return;
         const rows_t = (rows + 127) / 128;
         const band = (12 << 20) / (128 * q.k * 2); // the bf16 prompt GEMM's row bands

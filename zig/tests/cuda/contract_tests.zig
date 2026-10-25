@@ -128,11 +128,12 @@ pub fn run(gpu: check.Gpu) !void {
     defer w4a8_mod.unload();
     const w4a8_fns = try cuda.w4a8.Kernels.resolve(w4a8_mod);
     const w4a8_configs = [_]struct { kind: w4a8_k.Kind, fault: w4a8_k.Fault }{
-        .{ .kind = .quantize, .fault = .none },       .{ .kind = .prefill, .fault = .none },
-        .{ .kind = .quantize, .fault = .guard },      .{ .kind = .prefill, .fault = .guard },
-        .{ .kind = .quantize, .fault = .wrong_code }, .{ .kind = .quantize, .fault = .wrong_scale },
-        .{ .kind = .quantize, .fault = .wrong_sum },  .{ .kind = .quantize, .fault = .narrow_sum },
-        .{ .kind = .prefill, .fault = .wrong_code },  .{ .kind = .prefill, .fault = .narrow_epilogue },
+        .{ .kind = .quantize, .fault = .missed_flag }, .{ .kind = .prefill, .fault = .missed_flag },
+        .{ .kind = .quantize, .fault = .none },        .{ .kind = .prefill, .fault = .none },
+        .{ .kind = .quantize, .fault = .guard },       .{ .kind = .prefill, .fault = .guard },
+        .{ .kind = .quantize, .fault = .wrong_code },  .{ .kind = .quantize, .fault = .wrong_scale },
+        .{ .kind = .quantize, .fault = .wrong_sum },   .{ .kind = .quantize, .fault = .narrow_sum },
+        .{ .kind = .prefill, .fault = .wrong_code },   .{ .kind = .prefill, .fault = .narrow_epilogue },
     };
     var w4a8_cases: [w4a8_configs.len]w4a8_k.Case = undefined;
     for (&w4a8_cases, w4a8_configs) |*case, cfg| case.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = cfg.kind, .fault = cfg.fault, .kernels = w4a8_fns, .arena = .init(a) };

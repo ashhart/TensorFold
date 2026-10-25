@@ -16,12 +16,12 @@ pub fn group(x: []const u16) !Group {
     var mag: f64 = 0;
     for (x) |h| {
         const v = c.fromBf16(h);
-        if (!std.math.isFinite(v)) return error.ExceptionalEnvelopeUnspecified;
+        if (!std.math.isFinite(v)) return error.ExceptionalQuantization;
         top = @max(top, @abs(v));
         sum += v;
         mag += @abs(v);
     }
-    if (!std.math.isFinite(@as(f32, @floatCast(sum)))) return error.ExceptionalEnvelopeUnspecified;
+    if (!std.math.isFinite(@as(f32, @floatCast(sum)))) return error.ExceptionalQuantization;
     var out: Group = .{ .scale = if (top > 0) top / 127 else 1, .sum = sum, .magnitude = mag, .codes = undefined };
     const inv: f32 = if (top > 0) 127 / top else 1;
     for (x, &out.codes) |h, *code| {

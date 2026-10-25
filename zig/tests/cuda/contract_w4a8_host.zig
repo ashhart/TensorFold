@@ -58,7 +58,7 @@ test "w4a8 host: independent group reference covers zero, tiny, ties and signed 
     try T.expectEqual(@as(i8, 2), out.codes[3]);
     try T.expectEqual(@as(f64, 2), out.sum);
     x[0] = c.toBf16(std.math.nan(f32));
-    try T.expectError(error.ExceptionalEnvelopeUnspecified, ref.group(&x));
+    try T.expectError(error.ExceptionalQuantization, ref.group(&x));
 }
 
 test "w4a8 host: packed layout covers every input and zero-padded output column" {
@@ -90,7 +90,7 @@ test "w4a8 host: packed layout covers every input and zero-padded output column"
     }
 }
 
-test "w4a8 host: both real registrations expose row, column and group edges and block exceptional gate" {
+test "w4a8 host: both real registrations expose row, column and group edges and require an executed exceptional rule" {
     for (std.enums.values(cases.Kind)) |kind| {
         const s = cases.spec(kind);
         try T.expectEqual(c.Accum.f32, s.accum);
@@ -112,7 +112,7 @@ test "w4a8 host: both real registrations expose row, column and group edges and 
         const registration = case.kernel();
         try T.expect(registration.vt.simulate != null and registration.vt.bounds != null);
         try T.expect((try case.check(.nonfinite)) != null);
-        try T.expect(s.known == null); // the unresolved rule remains a gate failure, not a successful qualification
+        try T.expect(s.known == null); // the settled rule has no known waiver
     }
 }
 
@@ -249,4 +249,10 @@ fn stores(rows: usize, n: usize) !void {
     }
     for (all[0..128]) |v| try T.expectEqual(@as(u16, 0xa5a5), v);
     for (all[128 + out.len ..]) |v| try T.expectEqual(@as(u16, 0xa5a5), v);
+}
+comptime {
+    _ = @import("w4a8_exception_source_host.zig");
+}
+comptime {
+    _ = @import("w4a8_exception_gate_host.zig");
 }
