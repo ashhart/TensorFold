@@ -5,7 +5,8 @@ const q = @import("tensorfold").qwen27;
 const host = @import("qwen27_served");
 const Bank = q.gdn_pool_gpu.PromptMarks;
 
-fn read(a: std.mem.Allocator, r: *const q.decode_round.Runner, st: *const q.snapshot.State) ![]u8 {
+fn read(a: std.mem.Allocator, r: *const q.decode_round.Runner, st: *q.snapshot.State) ![]u8 {
+    try st.landed(); // a save's blit is not waited for: it lands before the copy reads it
     const buffer = try r.model.device.buffer(st.bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     defer buffer.deinit();
     const cb = r.model.queue.commandBuffer();
@@ -39,7 +40,7 @@ fn check(a: std.mem.Allocator, r: *q.decode_round.Runner, ids: []const u32, star
     defer r.gdn.marks = null; // clear the borrowed pointer before bank.deinit on every return
     try session.promptChunk(ids[start..end], false);
     // A cancelled or failed caller never seals the bank; even completed GPU words must not publish yet.
-    if (q.snapshot.saveSlot(a, r, 0, null, start + 1)) |unexpected| {
+    if (q.snapshot.saveSlot(a, r, 0, null, start + 1, null)) |unexpected| {
         q.snapshot.drop(a, unexpected);
         return error.PublishedUnsealedMark;
     } else |err| if (err != error.NotAtMark) return err;
@@ -48,16 +49,17 @@ fn check(a: std.mem.Allocator, r: *q.decode_round.Runner, ids: []const u32, star
     var count: usize = 0;
     defer for (kept[0..count]) |st| q.snapshot.drop(a, st);
     for (bank.position.rows) |row| {
-        kept[count] = try q.snapshot.saveSlot(a, r, 0, null, start + row);
+        kept[count] = try q.snapshot.saveSlot(a, r, 0, null, start + row, null);
         count += 1;
     }
     r.gdn.marks = null;
+    for (kept[0..count]) |st| try st.landed(); // the saves' blits land before the scratch is reused below
     // The cache copy owns its bytes: reusing the scratch cannot alter any captured prefix.
     @memset(bank.state.contents()[0..bank.state.length()], 0xa5);
     @memset(bank.conv.contents()[0..bank.conv.length()], 0x5a);
     try initial(r, ids, 0);
     try session.promptChunk(ids[0..finish], true);
-    const full = try q.snapshot.saveSlot(a, r, 0, null, finish);
+    const full = try q.snapshot.saveSlot(a, r, 0, null, finish, null);
     defer q.snapshot.drop(a, full);
     const want_final = try read(a, r, full);
     defer a.free(want_final);
@@ -66,7 +68,7 @@ fn check(a: std.mem.Allocator, r: *q.decode_round.Runner, ids: []const u32, star
     for (kept) |st| {
         try initial(r, ids, start);
         try session.promptChunk(ids[start..st.at], false);
-        const truncated = try q.snapshot.saveSlot(a, r, 0, null, st.at);
+        const truncated = try q.snapshot.saveSlot(a, r, 0, null, st.at, null);
         defer q.snapshot.drop(a, truncated);
         const want = try read(a, r, truncated);
         defer a.free(want);
@@ -75,7 +77,7 @@ fn check(a: std.mem.Allocator, r: *q.decode_round.Runner, ids: []const u32, star
         if (!std.mem.eql(u8, got, want)) return error.MarkStateOrConvDiffers;
         try q.snapshot.restoreSlot(a, r, 0, null, st);
         try session.promptChunk(ids[st.at..finish], true);
-        const final = try q.snapshot.saveSlot(a, r, 0, null, finish);
+        const final = try q.snapshot.saveSlot(a, r, 0, null, finish, null);
         defer q.snapshot.drop(a, final);
         const actual = try read(a, r, final);
         defer a.free(actual);

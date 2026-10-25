@@ -46,6 +46,7 @@ pub const Host = struct {
     warm: mtl.keepalive.Target,
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
+    spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -119,7 +120,21 @@ const Snaps = struct {
     }
     fn bytes(ptr: *anyopaque, at: u32) u64 {
         const h = host(ptr);
-        return q.snapshot.slotBytes(&h.runner, h.back.ringOf(0), at);
+        return q.snapshot.Spares.size(q.snapshot.slotBytes(&h.runner, h.back.ringOf(0), at)); // a new buffer's
+    }
+    fn charged(_: *anyopaque, saved: pc.Saved) u64 {
+        const st: *q.snapshot.State = @ptrCast(@alignCast(saved));
+        return if (st.spares != null) st.cap else st.bytes;
+    }
+    fn spare(ptr: *anyopaque) u64 {
+        return host(ptr).spares.spare();
+    }
+    fn trim(ptr: *anyopaque, left: u64) void {
+        host(ptr).spares.trim(left);
+    }
+    fn reuses(ptr: *anyopaque, at: u32) bool {
+        const h = host(ptr);
+        return h.spares.fits(q.snapshot.slotBytes(&h.runner, h.back.ringOf(0), at));
     }
     fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const h = host(ptr);
@@ -127,10 +142,12 @@ const Snaps = struct {
         const slot = h.back.slotOf(s) orelse return error.UnknownStream;
         // Scratch already occupies its bytes; do not let cache growth spend that same free room again.
         if (h.runner.gdn.marks != null) {
-            const need = q.snapshot.slotBytes(&h.runner, h.back.ringOf(slot), at);
+            const n = q.snapshot.slotBytes(&h.runner, h.back.ringOf(slot), at);
+            const need: usize = if (h.spares.fits(n)) 0 else q.snapshot.Spares.size(n);
             if (need > room(h.model) -| h.runner.gdn.missingBeforeBytes()) return error.LaneMemory;
         }
-        const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at);
+        h.spares.follow = h.runner.residency;
+        const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at, &h.spares);
         return @ptrCast(st);
     }
     fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
@@ -378,7 +395,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
     const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
-    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
+    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
     h.host.cache = &h.cache.?;
     h.back.release_hook = .{ .ctx = h, .kept = Host.keepReply };
     h.host.info_.warm_turns = true;
@@ -394,6 +411,7 @@ pub fn close(ptr: *anyopaque) void {
     h.host.stop();
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
+    h.spares.deinit();
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
     h.core.deinit();
     q.residency.drop(h);

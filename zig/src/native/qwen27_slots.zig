@@ -36,7 +36,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     s.cached = 0;
     var at: usize = 0;
     if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
-        const st: *const q.snapshot.State = @ptrCast(@alignCast(saved));
+        const st: *q.snapshot.State = @ptrCast(@alignCast(saved));
         if (st.at < ids.len) {
             if (restore(b, slot, st)) {
                 at = st.at;
@@ -66,6 +66,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
     const d = b.drafter(slot);
     b.runner.images = f.images;
     defer b.runner.images = null;
+    b.runner.settleSlot(slot); // a mark's kept state read the slot: its blit lands before this chunk writes it
     if (s.isCancelled()) return error.Cancelled;
     if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
         if (f.at > f.from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(f.at));
@@ -132,6 +133,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
         };
     }
     if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(end));
+    if (end == ids.len) b.runner.settleSlot(slot); // the stream's first round writes the slot next
     return end == ids.len;
 }
 
@@ -228,7 +230,7 @@ const TapGather = struct {
 };
 
 /// `slot` becomes a kept state: the drafter (slot 0) rebuilds its context from the restored taps.
-pub fn restore(b: *Metal, slot: u32, st: *const q.snapshot.State) !void {
+pub fn restore(b: *Metal, slot: u32, st: *q.snapshot.State) !void {
     if (b.drafter(slot)) |d| try d.model.reset();
     try clearContext(b, slot);
     try q.snapshot.restoreSlot(b.gpa, b.runner, slot, b.ringOf(slot), st);

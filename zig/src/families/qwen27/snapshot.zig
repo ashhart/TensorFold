@@ -11,6 +11,106 @@ pub const State = struct {
     bytes: usize,
     draft_end: u64,
     residency: ?mtl.ResidencySet.Follow = null,
+    cap: usize = 0, // the buffer's size when it came from (and goes back to) `spares`
+    spares: ?*Spares = null,
+    pending: ?mtl.CommandBuffer = null, // the save's blit, committed and not yet waited for
+    failed: bool = false,
+
+    /// The save's blit has landed (waited for only if it still runs); a failed one leaves the state unusable.
+    pub fn landed(st: *State) !void {
+        if (st.pending) |cb| {
+            st.pending = null;
+            cb.wait();
+            st.failed = cb.failure() != null;
+            cb.release();
+        }
+        if (st.failed) return error.SnapshotGpuFailure;
+    }
+};
+
+/// Kept states' buffers by size: a dropped state's buffer waits for a later save it fits, so that save makes none.
+pub const Spares = struct {
+    bufs: [4]?mtl.Buffer = @splat(null),
+    caps: [4]usize = @splat(0),
+    follow: ?mtl.ResidencySet.Follow = null, // the residency set a buffer stays in while it is spare
+
+    /// A new buffer's size for a state of `n` bytes: an eighth more in 32 MiB steps, so a later turn's fits it.
+    pub fn size(n: usize) usize {
+        return std.mem.alignForward(usize, n + n / 8, 32 << 20);
+    }
+
+    /// The smallest spare buffer that holds `n` bytes without wasting half again.
+    fn fitting(p: *const Spares, n: usize) ?usize {
+        var best: ?usize = null;
+        for (p.bufs, p.caps, 0..) |b, cap, i| if (b != null and cap >= n and cap <= size(n) + size(n) / 2 and (best == null or cap < p.caps[best.?])) {
+            best = i;
+        };
+        return best;
+    }
+
+    pub fn fits(p: *const Spares, n: usize) bool {
+        return p.fitting(n) != null;
+    }
+
+    pub fn spare(p: *const Spares) u64 {
+        var n: u64 = 0;
+        for (p.bufs, p.caps) |b, cap| if (b != null) {
+            n += cap;
+        };
+        return n;
+    }
+
+    /// Spare buffers go, the largest first, until at most `room` bytes stay spare.
+    pub fn trim(p: *Spares, room: u64) void {
+        while (p.spare() > room) {
+            var big: usize = 0;
+            for (p.bufs, p.caps, 0..) |b, cap, i| if (b != null and (p.bufs[big] == null or cap > p.caps[big])) {
+                big = i;
+            };
+            p.free(p.bufs[big].?);
+            p.bufs[big] = null;
+            p.caps[big] = 0;
+        }
+    }
+
+    pub fn deinit(p: *Spares) void {
+        p.trim(0);
+    }
+
+    fn free(p: *const Spares, buf: mtl.Buffer) void {
+        if (p.follow) |f| f.leave(f.ctx, buf);
+        buf.deinit();
+    }
+
+    /// A spare buffer that holds `n` bytes, else a new one of `size(n)` in the residency set.
+    fn take(p: *Spares, device: mtl.Device, n: usize) !struct { buf: mtl.Buffer, cap: usize } {
+        if (p.fitting(n)) |i| {
+            defer p.bufs[i] = null;
+            return .{ .buf = p.bufs[i].?, .cap = p.caps[i] };
+        }
+        const cap = size(n);
+        const buf = try device.buffer(cap, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
+        if (p.follow) |f| f.join(f.ctx, buf);
+        return .{ .buf = buf, .cap = cap };
+    }
+
+    /// A buffer back: into a free place, else in place of a smaller one, else freed.
+    fn give(p: *Spares, buf: mtl.Buffer, cap: usize) void {
+        var at: usize = 0; // a free place, else the smallest buffer's
+        for (p.bufs, p.caps, 0..) |b, c, i| {
+            if (b == null) {
+                at = i;
+                break;
+            }
+            if (c < p.caps[at]) at = i;
+        }
+        if (p.bufs[at]) |old| {
+            if (p.caps[at] >= cap) return p.free(buf);
+            p.free(old);
+        }
+        p.bufs[at] = buf;
+        p.caps[at] = cap;
+    }
 };
 
 pub fn blank(a: std.mem.Allocator, r: *const Runner, ring: ?Ring, at: u32) !*State {
@@ -63,8 +163,16 @@ pub fn slotBytes(r: *const Runner, ring: ?Ring, at: u32) usize {
     return gdn + kv + if (ring) |g| g.bytes(at) else 0;
 }
 
-/// Every part between a slot's live state and `st`, in one blit pass on the model's queue.
+/// Every part between a slot's live state and `st`, in one blit pass on the model's queue, waited for.
 fn copy(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, st: *const State, to_state: bool) !void {
+    const cb = try encode(a, r, slot, ring, st, to_state);
+    defer cb.release();
+    cb.wait();
+    if (cb.failure() != null) return error.SnapshotGpuFailure;
+}
+
+/// That blit pass committed and not waited for: the caller holds the returned (retained) command buffer.
+fn encode(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, st: *const State, to_state: bool) !mtl.CommandBuffer {
     var list: std.ArrayList(Part) = .empty;
     defer list.deinit(a);
     try parts(r, slot, ring, st.at, &list, a, to_state);
@@ -85,42 +193,55 @@ fn copy(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, st: *con
     }
     e.end();
     cb.commit();
-    cb.wait();
-    if (cb.failure() != null) return error.SnapshotGpuFailure;
+    return cb.retain();
 }
 
 /// The live state after `at` prompt tokens, copied once the prompt pass stands at `at` with its GPU work done.
-pub fn save(a: std.mem.Allocator, r: *const Runner, draft: ?*Draft, at: u32) !*State {
-    return saveSlot(a, r, 0, if (draft) |d| d.ring() else null, at);
+pub fn save(a: std.mem.Allocator, r: *Runner, draft: ?*Draft, at: u32) !*State {
+    return saveSlot(a, r, 0, if (draft) |d| d.ring() else null, at, null);
 }
 
-/// Slot `slot`'s state after `at` tokens, its taps ring standing there too when it has one.
-pub fn saveSlot(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, at: u32) !*State {
+/// Slot `slot`'s state after `at` tokens (and its taps ring), its blit not waited for: see settleSlot and landed.
+pub fn saveSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, at: u32, spares: ?*Spares) !*State {
     if (at == 0 or r.failed or r.active != null or slot >= r.ready) return error.NotAtMark;
     const marked = if (r.gdn.marks) |m| m.index(slot, at, r.offsets[slot]) != null else false;
     if ((r.offsets[slot] != at and !marked) or (ring != null and (marked or ring.?.end.* != at))) return error.NotAtMark;
     const n = slotBytes(r, ring, at);
-    const buf = try r.model.device.buffer(n, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
-    errdefer buf.deinit();
     const st = try a.create(State);
     errdefer a.destroy(st);
-    st.* = .{ .buf = buf, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0 };
-    try copy(a, r, slot, ring, st, true);
-    st.residency = r.residency;
-    if (st.residency) |f| f.join(f.ctx, st.buf);
+    if (spares) |p| {
+        const got = try p.take(r.model.device, n);
+        st.* = .{ .buf = got.buf, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0, .cap = got.cap, .spares = p };
+    } else {
+        const buf = try r.model.device.buffer(n, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
+        st.* = .{ .buf = buf, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0, .residency = r.residency };
+        if (st.residency) |f| f.join(f.ctx, st.buf);
+    }
+    errdefer giveBack(st);
+    const cb = try encode(a, r, slot, ring, st, true);
+    st.pending = cb;
+    r.readingSlot(slot, cb);
     return st;
 }
 
+/// A state's buffer to its spares, or out of the residency set and freed.
+fn giveBack(st: *State) void {
+    if (st.spares) |p| return p.give(st.buf, st.cap);
+    if (st.residency) |f| f.leave(f.ctx, st.buf);
+    st.buf.deinit();
+}
+
 /// The live state becomes `st`'s: the next chunk starts there, and the drafter rebuilds from the taps.
-pub fn restore(a: std.mem.Allocator, r: *Runner, draft: ?*Draft, st: *const State) !void {
+pub fn restore(a: std.mem.Allocator, r: *Runner, draft: ?*Draft, st: *State) !void {
     if (st.bytes != bytes(r, draft, st.at) or st.at > r.capacity) return error.SnapshotLayout;
     if (draft) |d| try d.reset();
     try restoreSlot(a, r, 0, if (draft) |d| d.ring() else null, st);
 }
 
 /// Slot `slot` (reset first) becomes `st`'s state; a ring takes its taps and end.
-pub fn restoreSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, st: *const State) !void {
+pub fn restoreSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, st: *State) !void {
     if (st.bytes != slotBytes(r, ring, st.at) or st.at > r.capacity) return error.SnapshotLayout;
+    try st.landed();
     try r.reset(slot);
     try copy(a, r, slot, ring, st, false);
     r.offsets[slot] = st.at;
@@ -130,6 +251,7 @@ pub fn restoreSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, st:
 /// Slot `from`'s state moves to slot `to` (reset first) in one blit pass: DeltaNet states, K/V rows and taps ring.
 pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, to: u32, to_ring: ?Ring) !void {
     const at = r.offsets[from];
+    r.settleSlot(from);
     if (from == to or r.failed or r.active != null or from >= r.slots or to >= r.slots or (from_ring == null) != (to_ring == null)) return error.BadSlotMove;
     if (from_ring) |g| if (g.end.* != at) return error.NotAtMark;
     try r.reset(to);
@@ -160,7 +282,7 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
 }
 
 pub fn drop(a: std.mem.Allocator, st: *State) void {
-    if (st.residency) |f| f.leave(f.ctx, st.buf);
-    st.buf.deinit();
+    st.landed() catch {};
+    giveBack(st);
     a.destroy(st);
 }
