@@ -282,6 +282,17 @@ pub const Pool = struct {
         if (table) |t| if (l.ids.items.len > old) try t.write(t.ctx, l.ids.items, old);
     }
 
+    /// `cover` for an empty table: n consecutive ids from a multiple of `step` when they are free, else as `cover`.
+    pub fn coverRun(p: *Pool, l: *Lease, n: usize, step: usize, table: ?Table) !void {
+        if (l.ids.items.len > 0 or n == 0 or l.promised < n) return p.cover(l, n, table);
+        try l.ids.ensureTotalCapacity(p.gpa, n);
+        const start = p.findAligned(n, step) orelse return p.cover(l, n, table);
+        p.claimAt(l, start, n);
+        for (0..n) |i| l.ids.appendAssumeCapacity(@intCast(start + i)); // held as `take` holds a page: `finish` frees them
+        errdefer p.shrink(l, 0);
+        if (table) |t| try t.write(t.ctx, l.ids.items, 0);
+    }
+
     /// Pages past `n` in `l`'s table go back to its promise, as they were before it took them.
     fn shrink(p: *Pool, l: *Lease, n: usize) void {
         while (l.ids.items.len > n) {
@@ -307,10 +318,26 @@ pub const Pool = struct {
         return null;
     }
 
+    /// The highest first id of `k` free consecutive pages at a multiple of `step` (> 0), or null.
+    pub fn findAligned(p: *const Pool, k: usize, step: usize) ?u32 {
+        if (k == 0 or k > p.refs.len) return null;
+        var start = (p.refs.len - k) / step * step;
+        while (true) : (start -= step) {
+            if (std.mem.allEqual(u32, p.refs[start..][0..k], 0)) return @intCast(start);
+            if (start < step) return null;
+        }
+    }
+
     /// `k` consecutive pages from `l`'s promise, held as one run until releaseRun; null: no such run is free now.
     pub fn claimRun(p: *Pool, l: *Lease, k: usize) ?u32 {
         if (l.promised < k) return null;
         const start = p.findRun(k) orelse return null;
+        p.claimAt(l, start, k);
+        return start;
+    }
+
+    /// Free pages [start, start + k) held by `l`, from its promise.
+    fn claimAt(p: *Pool, l: *Lease, start: u32, k: usize) void {
         var n: usize = 0;
         for (p.free[0..p.nfree]) |id| if (id < start or id >= start + k) {
             p.free[n] = id;
@@ -322,7 +349,6 @@ pub const Pool = struct {
         @memset(p.leased[start..][0..k], 1); // held as a lease holds its pages: never the store's to reclaim
         l.promised -= k;
         p.promised -= k;
-        return start;
     }
 
     /// A run claimed at `start` goes back to the free pages.
