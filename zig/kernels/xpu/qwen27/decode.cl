@@ -240,6 +240,8 @@ KERNEL(16) void exl3_gemv(global const ushort *TR, global const half *X, global 
 }
 
 // Prompt attention holds Q27_GQA query heads of one K/V head. GQA 6 is the 27B image. attn_prompt8 stays at GQA 6.
+
+// GQA 8 has its own attn_prompt8. The 27B image keeps the literal GQA 6 kernel.
 #if Q27_GQA == 6 || Q27_GQA == 8
 // Prompt attention (FlashAttention-2 on bf16 DPAS), causal, 256-wide heads; fixed key order, so a row's bits ignore T.
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
@@ -513,7 +515,162 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       dst[16] = f2bf(o[i][1][r] * inv);
     }
 }
-#endif // Q27_GQA == 6
+#elif Q27_GQA == 8
+// Prompt attention over the int8 cache: same partitioning as attn_prompt, int8 DPAS for S and fp16 for O += P*V.
+__attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(128, 1, 1)))
+kernel void attn_prompt8(global const ushort *Q, global const char *KC, global const char *VC, global ushort *O,
+                         int p0, int T, float scale, int cap) {
+  local ushort P[Q27_GQA * 8 * 128];
+  local uint QI[Q27_GQA / 2 * 8 * 8 * 16];                       // (group, 32 dimensions, word) × lane: Q in int8, 4 per word
+  local float MX[Q27_GQA / 2][2][16], SM[Q27_GQA / 2][2][16], A[Q27_GQA * 8], QS[Q27_GQA * 8];
+  const int t0 = get_group_id(0) * 8, hk = get_group_id(1), sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  const int nkeys = p0 + min(t0 + 7, T - 1) + 1;
+  const bool qk = sg < Q27_GQA;
+  const int g = sg / 2, kh = sg % 2;
+  const int tq = lane % 8, hq = 2 * g + lane / 8;
+  const int qpos = p0 + t0 + tq;
+  const bool qok = t0 + tq < T;
+  global const float *KS = (global const float *)(KC + (long)cap * Q27_KVROW), *VS = (global const float *)(VC + (long)cap * Q27_KVROW);
+  if (qk && kh == 0) {                                 // the lane's query, Q in int8
+    global const ushort *qrow = Q + ((long)(t0 + tq) * Q27_AQ + hk * Q27_GQA + hq) * 256;
+    float mq = 0.0f;
+    if (qok)
+      for (int e = 0; e < 16; e++) {
+        const ushort16 x = vload16(e, qrow);
+        for (int b = 0; b < 16; b++) mq = fmax(mq, fabs(bf2f(x[b])));
+      }
+    const float qs = mq > 0.0f ? mq / 127.0f : 1.0f, iq = 1.0f / qs;
+    for (int e = 0; e < 16; e++) {                     // 16 dimensions: 4 words
+      const ushort16 x = qok ? vload16(e, qrow) : (ushort16)(0);
+      for (int j = 0; j < 4; j++) {
+        uint u = 0;
+        for (int b = 0; b < 4; b++) u |= ((uint)(uchar)(char)rint(bf2f(x[j * 4 + b]) * iq)) << (8 * b);
+        const int w = e * 4 + j;
+        QI[((g * 8 + w / 8) * 8 + w % 8) * 16 + lane] = u;
+      }
+    }
+    QS[hq * 8 + tq] = qs;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const float qsl = qk ? QS[hq * 8 + tq] * scale * M_LOG2E_F : 0.0f;
+  float8 o[Q27_GQA][2];
+  for (int i = 0; i < Q27_GQA; i++) o[i][0] = o[i][1] = 0.0f;
+  float m = -INFINITY, l = 0.0f;
+  for (int k0 = 0; k0 < nkeys; k0 += 128) {
+    if (qk) {
+      const int kb = k0 + kh * 64;
+      int8 si[8];
+      for (int b = 0; b < 8; b++) si[b] = 0;
+      for (int ds = 0; ds < 8; ds++) {                 // steps of 32 dimensions
+        const int8 qb = as_int8(intel_sub_group_block_read8(QI + (g * 8 + ds) * 128));
+        __attribute__((opencl_unroll_hint))
+        for (int h2 = 0; h2 < 2; h2++) {
+          ushort ka[32];                               // 32 keys × 32 bytes: 4 A tiles of 8 keys
+          intel_sub_group_2d_block_read_16b_32r16x1c((global void *)(KC + hk * 256), 256, nkeys, Q27_AKV * 256,
+                                                     (int2)(ds * 16, kb + h2 * 32), ka);
+          __attribute__((opencl_unroll_hint))
+          for (int b = 0; b < 4; b++) {
+            short8 a;
+            for (int r = 0; r < 8; r++) a[r] = (short)ka[b * 8 + r];
+            si[h2 * 4 + b] = intel_sub_group_i8_i8_matrix_mad_k32(a, qb, si[h2 * 4 + b]);
+          }
+        }
+      }
+      float ksc[4];                                    // scales of the 64 keys, 4 per lane
+      for (int c = 0; c < 4; c++) {
+        const int key = kb + c * 16 + lane;
+        ksc[c] = key < nkeys ? KS[(long)key * Q27_AKV + hk] : 0.0f;
+      }
+      float8 s[8];
+      float mx = -INFINITY;
+      __attribute__((opencl_unroll_hint))
+      for (int b = 0; b < 8; b++)
+        __attribute__((opencl_unroll_hint))
+        for (int r = 0; r < 8; r++) {
+          const int kk = b * 8 + r;
+          const float ks = sub_group_broadcast(ksc[kk / 16], kk % 16);
+          const float x = kb + kk > qpos ? -INFINITY : (float)si[b][r] * ks * qsl;
+          s[b][r] = x;
+          mx = fmax(mx, x);
+        }
+      MX[g][kh][lane] = mx;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      const float mn = fmax(m, fmax(mx, MX[g][kh ^ 1][lane]));
+      const float alpha = mn == -INFINITY ? 1.0f : native_exp2(m - mn);
+      float vsc[4];
+      for (int c = 0; c < 4; c++) {
+        const int key = kb + c * 16 + lane;
+        vsc[c] = key < nkeys ? VS[(long)key * Q27_AKV + hk] : 0.0f;
+      }
+      float sum = 0.0f;
+      local ushort *pt = P + (hq * 8) * 128 + tq * 16;
+      __attribute__((opencl_unroll_hint))
+      for (int b = 0; b < 8; b++)
+        __attribute__((opencl_unroll_hint))
+        for (int r = 0; r < 8; r++) {
+          const int kk = b * 8 + r;
+          const float p = mn == -INFINITY ? 0.0f : native_exp2(s[b][r] - mn);
+          sum += p;
+          const int key = kh * 64 + kk;
+          pt[(key / 16) * 128 + key % 16] = as_ushort(convert_half(p * sub_group_broadcast(vsc[kk / 16], kk % 16)));
+        }
+      SM[g][kh][lane] = sum;
+      if (kh == 0) A[hq * 8 + tq] = alpha;
+      m = mn;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      l = l * alpha + SM[g][0][lane] + SM[g][1][lane];
+    } else {
+      barrier(CLK_LOCAL_MEM_FENCE);
+      barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    __attribute__((opencl_unroll_hint))
+    for (int i = 0; i < Q27_GQA; i++)
+      __attribute__((opencl_unroll_hint))
+      for (int r = 0; r < 8; r++) {
+        const float al = A[i * 8 + r];
+        o[i][0][r] *= al;
+        o[i][1][r] *= al;
+      }
+    for (int c2 = 0; c2 < 4; c2++) {                   // 32 keys at a time
+      if (k0 + c2 * 32 >= nkeys) break;
+      __attribute__((opencl_unroll_hint))
+      for (int dt = 0; dt < 2; dt++) {
+        uint w8[8];                                    // lane: dimension 16 (2 sg + dt) + lane; word j: keys 4j … 4j + 3
+        intel_sub_group_2d_block_read_transform_8b_32r16x1c((global void *)(VC + hk * 256), 256, nkeys, Q27_AKV * 256,
+                                                            (int2)((sg * 2 + dt) * 16, k0 + c2 * 32), w8);
+        __attribute__((opencl_unroll_hint))
+        for (int hc = 0; hc < 2; hc++) {               // 16 keys: 8 fp16 pairs (keys 2j, 2j + 1), int8 → fp16 exact
+          uint8 vw;
+          __attribute__((opencl_unroll_hint))
+          for (int j = 0; j < 4; j++) {
+            const half4 h = convert_half4(as_char4(w8[hc * 4 + j]));
+            vw[2 * j] = as_uint(h.s01);
+            vw[2 * j + 1] = as_uint(h.s23);
+          }
+          __attribute__((opencl_unroll_hint))
+          for (int i = 0; i < Q27_GQA; i++) {
+            const short8 pa = as_short8(intel_sub_group_block_read_us8(P + (i * 8 + c2 * 2 + hc) * 128));
+            o[i][dt] = intel_sub_group_f16_f16_matrix_mad_k16(pa, as_int8(vw), o[i][dt]);
+          }
+        }
+      }
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (qk && kh == 0) A[hq * 8 + tq] = 1.0f / l;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  __attribute__((opencl_unroll_hint))
+  for (int i = 0; i < Q27_GQA; i++)
+    __attribute__((opencl_unroll_hint))
+    for (int r = 0; r < 8; r++) {
+      if (t0 + r >= T) break;
+      const float inv = A[i * 8 + r];
+      global ushort *dst = O + ((long)(t0 + r) * Q27_AQ + hk * Q27_GQA + i) * 256 + sg * 32 + lane;
+      dst[0] = f2bf(o[i][0][r] * inv);
+      dst[16] = f2bf(o[i][1][r] * inv);
+    }
+}
+#endif // Q27_GQA == 8
 
 // Decode attention for long caches: as attn_decode, but a slice holds `span` keys (a launch argument), so the partials
 // stay few at any context. Rows: one stream each (MT, POS), or a window at p0 (row t at position p0 + t). Grid (NS,
