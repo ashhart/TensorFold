@@ -57,6 +57,8 @@ test "speech sampling: custom parameters and exact integer seeds reach whole and
         .{ .fields = "\"temperature\":0,\"top_p\":1,\"top_k\":1,\"seed\":0", .sampling = .{ .temperature = 0, .top_p = 1, .top_k = 1 }, .seed = 0 },
         .{ .fields = "\"seed\":18446744073709551615", .sampling = defaults, .seed = std.math.maxInt(u64) },
         .{ .fields = "\"temperature\":0.5", .sampling = .{ .temperature = 0.5, .top_p = 0.9, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
+        .{ .fields = "\"temperature\":1e-400", .sampling = .{ .temperature = 0, .top_p = 0.9, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
+        .{ .fields = "\"temperature\":-1e-400", .sampling = .{ .temperature = -0.0, .top_p = 0.9, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
         .{ .fields = "\"temperature\":3.4028234663852886e38,\"top_p\":1e-45", .sampling = .{ .temperature = std.math.floatMax(f32), .top_p = 1e-45, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
     };
     for (cases) |case| for ([_]bool{ false, true }) |stream| {
@@ -74,14 +76,23 @@ test "speech sampling: custom parameters and exact integer seeds reach whole and
 
 test "speech sampling: invalid controls fail before any engine submission" {
     const fields = [_][]const u8{
-        "\"temperature\":true",           "\"temperature\":\"1\"", "\"temperature\":[]",            "\"temperature\":{}",
-        "\"temperature\":-1",             "\"temperature\":NaN",   "\"temperature\":Infinity",      "\"temperature\":1e39",
-        "\"temperature\":1e-100",         "\"top_p\":false",       "\"top_p\":\"0.9\"",             "\"top_p\":0",
-        "\"top_p\":-0.1",                 "\"top_p\":1.00000001",  "\"top_p\":NaN",                 "\"top_p\":1e-100",
-        "\"top_p\":Infinity",             "\"top_k\":true",        "\"top_k\":\"30\"",              "\"top_k\":1.5",
-        "\"top_k\":30.0",                 "\"top_k\":0",           "\"top_k\":-1",                  "\"top_k\":65",
-        "\"top_k\":18446744073709551616", "\"seed\":true",         "\"seed\":\"1\"",                "\"seed\":1.5",
-        "\"seed\":1.0",                   "\"seed\":-1",           "\"seed\":18446744073709551616", "\"seed\":NaN",
+        "\"top_p\":1e-400",               "\"top_p\":-1e-400",
+        "\"temperature\":true",           "\"temperature\":\"1\"",
+        "\"temperature\":[]",             "\"temperature\":{}",
+        "\"temperature\":-1",             "\"temperature\":NaN",
+        "\"temperature\":Infinity",       "\"temperature\":1e39",
+        "\"temperature\":1e-100",         "\"top_p\":false",
+        "\"top_p\":\"0.9\"",              "\"top_p\":0",
+        "\"top_p\":-0.1",                 "\"top_p\":1.00000001",
+        "\"top_p\":NaN",                  "\"top_p\":1e-100",
+        "\"top_p\":Infinity",             "\"top_k\":true",
+        "\"top_k\":\"30\"",               "\"top_k\":1.5",
+        "\"top_k\":30.0",                 "\"top_k\":0",
+        "\"top_k\":-1",                   "\"top_k\":65",
+        "\"top_k\":18446744073709551616", "\"seed\":true",
+        "\"seed\":\"1\"",                 "\"seed\":1.5",
+        "\"seed\":1.0",                   "\"seed\":-1",
+        "\"seed\":18446744073709551616",  "\"seed\":NaN",
     };
     for (fields) |field| {
         const body = try std.fmt.allocPrint(gpa, "{{\"model\":\"m\",\"input\":\"hi\",{s}}}", .{field});

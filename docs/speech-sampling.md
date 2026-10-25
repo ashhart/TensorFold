@@ -17,6 +17,13 @@ use integer JSON syntax: `30.0` and `1e3` are refused. Seeds are parsed as exact
 whose JSON number type loses precision must preserve the integer when encoding
 the request. Invalid fields return HTTP 400 before submission to the engine.
 
+For `temperature` and `top_p`, the JSON parser first produces an `f64` value;
+the bounds above apply to that value and its conversion to `f32`. Extremely
+small floating literals such as `1e-400` and `-1e-400` already become zero in
+that parser, so both request temperature 0; they are refused for `top_p`.
+A positive parsed value such as `1e-100` is refused if it becomes zero only
+when narrowed to `f32`.
+
 ```sh
 curl http://127.0.0.1:8080/v1/audio/speech \
   -H 'Content-Type: application/json' \
