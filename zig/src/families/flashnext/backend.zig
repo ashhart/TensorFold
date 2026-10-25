@@ -46,6 +46,7 @@ pub const Backend = struct {
     paused: std.ArrayList(*Stream) = .empty, // streams that outgrew their session and wait for a larger one to free
     moves: u64 = 0,
     serial_drafts: bool = false, // FZ_BATCH_MTP_SERIAL=1: each stream's drafts in their own command buffers
+    overlap: bool = false, // FZ_VERIFY_OVERLAP=1: verify on a concurrent encoder, the streams' recurrences without barriers between them
     costs: ?batch_costs.Costs = null, // timeCosts: the lane allocator's prices
     images: ?Images = null, // --vision: the tower's rows for a stream's images; null: an image stream fails
     grammar: grammar.Masks, // structured output: the rounds' mask rows and first rows
@@ -72,7 +73,7 @@ pub const Backend = struct {
                 return if (std.c.getenv(name)) |v| v[0] == '1' else false;
             }
         };
-        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .times = RoundTimes.init(), .fence = if (std.c.getenv("FZ_SETTLE_SYNC") == null) mtl.counters.Fence.init(e.r.device) catch null else null };
+        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .overlap = env.on("FZ_VERIFY_OVERLAP"), .times = RoundTimes.init(), .fence = if (std.c.getenv("FZ_SETTLE_SYNC") == null) mtl.counters.Fence.init(e.r.device) catch null else null };
     }
 
     /// Times shared-round costs on the last free session, or leaves them unpriced when it cannot fit.
@@ -401,10 +402,14 @@ pub const Backend = struct {
         // The copies read the kept round's rows: encode them before outputs() repoints cs[1] at this round's.
         if (fold) batch_settle.encode(b, cb, b.fence.?);
         for (segs[0..windows.len], 0..) |g, i| outputs(b, g.s, plan.starts[i]);
-        b.e.r.enc = cb.compute(.serial);
+        b.e.r.enc = cb.compute(if (b.overlap) .concurrent else .serial);
         if (fold) b.fence.?.waitCompute(b.e.r.enc);
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);
-        try forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null);
+        const was = b.e.r.serial;
+        if (b.overlap) b.e.r.serial = false; // every launch then ends in a barrier, as the drafts' encoders do
+        const encoded = forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null);
+        b.e.r.serial = was;
+        try encoded;
         @memcpy(b.e.draw_at.b.slice(u32, fz.MAXR)[0..plan.total], plan.keys[0..plan.total]);
         var widths: [fz.MAXR]usize = undefined;
         var ps: [fz.MAXR]?lanes.Sampling = undefined;
