@@ -6,27 +6,36 @@ pub const preference_rounds = 8;
 
 /// After eight skipped choices, oldest wait wins; each fill runs within eight plus the admitted lane count.
 pub fn next(h: *const LaneHost) usize {
-    const at = pick(h);
+    return took(h, pick(h, .all).?);
+}
+
+/// Fill `at` taken: its wait starts over, every other one's grows.
+fn took(h: *const LaneHost, at: usize) usize {
     for (h.filling.items, 0..) |j, i| j.fill_wait = if (i == at) 0 else j.fill_wait +| 1;
     return at;
 }
 
-/// The fill `next` takes, its waits untouched.
-fn pick(h: *const LaneHost) usize {
-    var at: usize = 0;
+/// The fill `next` takes among `among`, its waits untouched; null when none waits.
+fn pick(h: *const LaneHost, among: enum { all, short, long }) ?usize {
+    var found: ?usize = null;
     for (h.filling.items, 0..) |j, i| {
+        if (among != .all and short(j) != (among == .short)) continue;
+        const at = found orelse {
+            found = i;
+            continue;
+        };
         const best = h.filling.items[at];
         const aged = j.fill_wait >= preference_rounds;
         const best_aged = best.fill_wait >= preference_rounds;
         if (aged != best_aged) {
-            if (aged) at = i;
+            if (aged) found = i;
         } else if (aged) {
-            if (j.fill_wait > best.fill_wait) at = i;
+            if (j.fill_wait > best.fill_wait) found = i;
         } else if (j.request.background != best.request.background) {
-            if (!j.request.background) at = i;
-        } else if (remaining(h, j) < remaining(h, best)) at = i;
+            if (!j.request.background) found = i;
+        } else if (remaining(h, j) < remaining(h, best)) found = i;
     }
-    return at;
+    return found;
 }
 
 fn remaining(h: *const LaneHost, j: *const LaneHost.Job) u64 {
@@ -84,20 +93,22 @@ pub fn run(h: *LaneHost) void {
     }
     // short prompts back to back, as a whole pass at admission went: a burst of them waits on no decode round
     var burst: usize = 0; // a lane count of short prompts begun, then a round: replies ending with their prompt free lanes without end
-    while (h.filling.items.len > 0 and short(h.filling.items[pick(h)])) {
-        if (!h.filling.items[pick(h)].fill_began) {
-            if (burst == h.info_.lanes and runnable(h) > 0) return;
+    // picked among the short ones alone: an aged long prompt's step waits on its debt, not they on it
+    while (pick(h, .short)) |at| {
+        if (!h.filling.items[at].fill_began) {
+            if (burst == h.info_.lanes and (runnable(h) > 0 or pick(h, .long) != null)) break;
             burst += 1;
         }
-        h.fillAt(next(h));
+        h.fillAt(took(h, at));
         @import("lane_host_end.zig").takeCancels(h);
         while (h.admitOne()) {}
     }
-    if (h.filling.items.len == 0 or !due(h)) return;
-    if (h.share.p >= 1) return h.fillAt(next(h));
+    const at = pick(h, .long) orelse return;
+    if (!due(h)) return;
+    if (h.share.p >= 1) return h.fillAt(took(h, at));
     const decoding = runnable(h) > 0;
     const t0 = std.Io.Clock.awake.now(h.io);
-    h.fillAt(next(h));
+    h.fillAt(took(h, at));
     h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);
 }
 
