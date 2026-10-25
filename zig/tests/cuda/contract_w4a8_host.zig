@@ -193,3 +193,60 @@ test "w4a8 host: gate four rejects narrow group and epilogue sums in all three o
     try T.expectEqual(@as(f64, 121920), terms[0]);
     try T.expect(terms[0] < 0x1p23); // the per-group int32 dot and its float-offset representation are exact
 }
+
+extern fn tf_w4a8_store_host([*]u16, c_int, f32, f32) c_int;
+
+test "w4a8 host: repeat row one column zero never issues a misaligned BF16 pair" {
+    // repeat clamps served[0] to 64 rows: N=129 puts row 1 at byte 258, still inside the payload.
+    const shape = cases.spec(.prefill).served[0];
+    try T.expectEqual(@as(usize, 129), shape.n);
+    try T.expectEqual(@as(usize, 256), shape.k);
+    var output: [64 * 129 + 256]u16 align(256) = @splat(0xa5a5);
+    const dst = output[128 + 129 ..].ptr;
+    try T.expectEqual(@as(usize, 2), @intFromPtr(dst) % 4);
+    try T.expectEqual(@as(c_int, 0), tf_w4a8_store_host(dst, 129, 1.00390625, -1.01171875));
+    try T.expectEqual(c.toBf16(1.00390625), dst[0]);
+    try T.expectEqual(c.toBf16(-1.01171875), dst[1]);
+    try T.expectEqual(@as(u16, 0xa5a5), dst[2]);
+}
+
+test "w4a8 host: actual epilogue stores cover every tile edge exactly once with intact guards" {
+    for (cases.spec(.prefill).served) |shape| try stores(shape.rows, shape.n);
+    // The repeat shape, the nonfinite shape (no GPU launch), and compute-sanitizer's prompt sizes.
+    try stores(64, 129);
+    try stores(8, 129);
+    for ([_]usize{ 5120, 17408, 6144, 200 }) |n| try stores(200, n);
+}
+
+fn value(row: usize, col: usize) f32 {
+    const edges = [_]f32{ 0, -0.0, 1.00390625, -1.01171875, 0x1p-133, -0x1p-133, 0x1.fffffep127, -0x1.fffffep127 };
+    return edges[(row + col) % edges.len];
+}
+
+fn stores(rows: usize, n: usize) !void {
+    const all = try T.allocator.alignedAlloc(u16, .fromByteUnits(256), rows * n + 256);
+    defer T.allocator.free(all);
+    @memset(all, 0xa5a5);
+    const out = all[128..][0 .. rows * n];
+    const seen = try T.allocator.alloc(u8, rows * n);
+    defer T.allocator.free(seen);
+    @memset(seen, 0);
+    // Enumerate the real 128x128, 2x4-warp MMA epilogue, independently of the store helper.
+    for (0..(rows + 127) / 128) |bm| for (0..(n + 127) / 128) |bn| {
+        for (0..256) |tid| for (0..4) |i| for (0..4) |j| for (0..2) |h| {
+            const warp = tid / 32;
+            const lane = tid % 32;
+            const row = bm * 128 + warp / 4 * 64 + i * 16 + lane / 4 + h * 8;
+            const col = bn * 128 + warp % 4 * 32 + j * 8 + lane % 4 * 2;
+            if (row >= rows or col >= n) continue;
+            try T.expectEqual(@as(c_int, 0), tf_w4a8_store_host(out[row * n + col ..].ptr, @intCast(n - col), value(row, col), value(row, col + 1)));
+            for (col..@min(col + 2, n)) |c_| seen[row * n + c_] += 1;
+        };
+    };
+    for (out, seen, 0..) |v, count, idx| {
+        try T.expectEqual(@as(u8, 1), count);
+        try T.expectEqual(c.toBf16(value(idx / n, idx % n)), v);
+    }
+    for (all[0..128]) |v| try T.expectEqual(@as(u16, 0xa5a5), v);
+    for (all[128 + out.len ..]) |v| try T.expectEqual(@as(u16, 0xa5a5), v);
+}

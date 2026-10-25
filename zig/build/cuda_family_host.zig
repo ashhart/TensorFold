@@ -44,6 +44,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     step.dependOn(&prompt_moe.step);
     const int8_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_w4a8_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     int8_contract.addCSourceFile(.{ .file = b.path("zig/tests/cuda/w4a8_normalize_host.c"), .flags = &.{ "-std=c11", "-ffp-contract=off" } });
+    int8_contract.addCSourceFile(.{ .file = b.path("zig/tests/cuda/w4a8_store_host.cpp"), .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti" } });
     const int8_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = int8_contract, .filters = &.{"w4a8 host:"} }));
     b.step("test-w4a8-contract-host", "Finite normalization, independent W4A8 references and numerical controls without CUDA").dependOn(&int8_contract_run.step);
     step.dependOn(&int8_contract_run.step);

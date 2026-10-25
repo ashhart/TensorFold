@@ -4,6 +4,7 @@
 
 #include "qmm_frag.cuh"
 #include "w4a8_normalize.h"
+#include "w4a8_store.cuh"
 
 namespace tf_w4a8 {
 using namespace qmm_frag;
@@ -188,8 +189,7 @@ __device__ __forceinline__ void prefill8_body(const uint8_t* __restrict__ xq, co
                 const int row = m0 + wm * (BM / WM) + i * 16 + (lane >> 2) + h * 8;
                 if (row >= M || col >= N) continue;
                 __nv_bfloat16* dst = out + (size_t)row * N + col;
-                if (col + 1 < N) *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(acc[i][j][2 * h], acc[i][j][2 * h + 1]);
-                else dst[0] = __float2bfloat16_rn(acc[i][j][2 * h]);
+                tf_w4a8_store(dst, N - col, acc[i][j][2 * h], acc[i][j][2 * h + 1]);
             }
         }
 }
