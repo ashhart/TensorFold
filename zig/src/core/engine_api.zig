@@ -232,6 +232,8 @@ pub const Info = struct {
     draft_sources: DraftSources = .{},
     /// The immutable retained-prefix plan applied at startup, not a process memory limit or current cache occupancy.
     prompt_cache_plan: ?PromptCachePlan = null,
+    /// --decode-share: the reply's share of a fill step's wall time beside live decoders; null: the engine's default.
+    decode_share: ?f64 = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
     decides: bool = false,
     /// Decisions may carry pictures (`Decision.pictures`).
@@ -341,6 +343,8 @@ pub const Open = struct {
     /// --mtp-drafts and --mtp-confidence; null: the engine's defaults.
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
+    /// --decode-share: the reply's share of a fill step's wall time beside live decoders; null: the engine's default.
+    decode_share: ?f64 = null,
     /// Kept prompt entries (--checkpoint-slots); null: the engine's plan.
     keep: ?i64 = null,
     /// Tensor parallelism: this process is `rank` of `tp`; rank 0 listens on `master`:`master_port` for the others.

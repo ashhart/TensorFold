@@ -146,7 +146,7 @@ fn overflow(capped: bool) !void {
         if (capped) _ = cuda.memory.setAllocationLimit(prior) catch unreachable;
     }
     const b = back.backend();
-    const result = b.vtable.prefill_step.?(b.ptr, &ss[2]);
+    const result = b.vtable.prefill_step.?(b.ptr, &ss[2], 0);
     if (result) |_| return error.ExpectedFailure else |err| {
         std.debug.print("all-on-pages third opening: capped={}, error={s}, allocations={d}->{d}, slots={d}\n", .{ capped, @errorName(err), before, F.allocs, f.e.seqs.items.len });
         try t.expectEqual(error.LaneMemory, err);
@@ -235,7 +235,7 @@ test "GLM pages: a failed begin packet cancels its lease and lane before a retry
     const b = back.backend();
     const before = F.allocs;
     for (0..2) |_| {
-        try t.expectError(error.TooManyIds, b.vtable.prefill_step.?(b.ptr, &stream));
+        try t.expectError(error.TooManyIds, b.vtable.prefill_step.?(b.ptr, &stream, 0));
         try t.expectEqual(@as(usize, 0), back.lanes.count());
         try t.expect(f.p.pool.idle());
         try t.expectEqual(@as(usize, 8), f.p.pool.census().free);

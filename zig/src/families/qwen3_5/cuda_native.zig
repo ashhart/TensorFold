@@ -400,8 +400,8 @@ const Lanes = struct {
         return prefill.run(cast(ptr), stream);
     }
 
-    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream) !bool {
-        return prefill.step(cast(ptr), stream);
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
+        return prefill.step(cast(ptr), stream, max_rows);
     }
 
     fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {

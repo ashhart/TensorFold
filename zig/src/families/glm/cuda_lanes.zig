@@ -225,7 +225,7 @@ pub const Lanes = struct {
     }
 
     /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
-    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
         const self = of(ptr);
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
         const from = if (going == null) try self.opening(s) else null;
@@ -243,6 +243,7 @@ pub const Lanes = struct {
             l.fill = null;
             return true;
         }
+        // its chunks sit on the 2048 grid (cuda_engine.zig): l.fill stays uncapped; the share still works by time.
         l.fill = at + engine.prompt_rows;
         if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
         return false;

@@ -78,6 +78,8 @@ pub const Backend = struct {
     first_before_draft: bool = false,
     /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
     penalties: bool = false,
+    /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
+    chunk_invariant: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -86,8 +88,8 @@ pub const Backend = struct {
         embedding: ?*const fn (*anyopaque, *Stream, []f32) anyerror!void = null,
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
-        /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
-        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// One prompt-pass chunk of at most `max_rows` rows when capped (0: uncapped); null: the pass runs whole.
+        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool = null,
         /// Keep a cancelled partial prompt before release, between prefill_step calls; no prompt work may run.
         cancel_prefill: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Several prompts in one pass, each as after `prefill`; false or an error leaves none prefilled.

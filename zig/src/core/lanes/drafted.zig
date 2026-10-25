@@ -71,7 +71,7 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -159,15 +159,14 @@ pub const Drafted = struct {
         try x.drafter.absorb(&.{.{ .stream = s, .features = f, .start = from, .follow = ids[from + 1 ..] }});
     }
 
-    /// A step of the target's prompt pass, then the drafter absorbs its rows (`take`); it opens after the first step.
-    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
+    /// A step of the target's prompt pass, then the drafter absorbs its rows (as `take`); it opens at the first step.
+    fn prefillStep(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
         const x = self(ptr);
         const step = x.target.vtable.prefill_step.?;
-        if (!s.drafts) return step(x.target.ptr, s);
+        if (!s.drafts) return step(x.target.ptr, s, max_rows);
         errdefer x.dropStream(s);
-        const done = try step(x.target.ptr, s);
-        // the target's lane is open now: a drafter that keeps its stream's rows in the lane's run finds it
-        if (!x.lanes.contains(s)) {
+        const done = try step(x.target.ptr, s, max_rows);
+        if (!x.lanes.contains(s)) { // the target's lane is open now: the drafter that keeps its stream's rows finds it
             try x.lanes.ensureUnusedCapacity(x.gpa, 1);
             try x.drafter.open(s);
             x.lanes.putAssumeCapacity(s, .{});

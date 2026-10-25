@@ -43,17 +43,17 @@ test "flashnext prefill: independent cursors retain restored prefixes, marks and
     var marks: Marks = .{};
     one.reuse.marks = &.{ 7, 16 };
     one.reuse.hook = .{ .ptr = &marks, .at = Marks.hit };
-    try std.testing.expect(!try fill.step(&f, &one));
+    try std.testing.expect(!try fill.step(&f, &one, 0));
     try std.testing.expectEqual(@as(u32, 3), one.cached);
     try std.testing.expectEqual(@as(u32, 5), one.fill_at.load(.monotonic));
     f.restored_at = 0;
-    try std.testing.expect(!try fill.step(&f, &two));
+    try std.testing.expect(!try fill.step(&f, &two, 0));
     try std.testing.expectEqual(@as(u32, 2), two.fill_at.load(.monotonic));
     var done_one = false;
     var done_two = false;
     while (!done_one or !done_two) {
-        if (!done_one) done_one = try fill.step(&f, &one);
-        if (!done_two) done_two = try fill.step(&f, &two);
+        if (!done_one) done_one = try fill.step(&f, &one, 0);
+        if (!done_two) done_two = try fill.step(&f, &two, 0);
     }
     try std.testing.expectEqualSlices(u32, &.{ 7, 16 }, marks.values[0..marks.n]);
     try std.testing.expectEqualDeep(recording.reference(&tokens), f.complete.get(&one).?);
@@ -75,7 +75,7 @@ test "flashnext prefill: whole and stepped drivers retain P minus one heads at e
         defer two.deinit(a);
         two.chunks = &.{ 1, 7, 17, 32, 64, 256 };
         try fill.Callbacks(Fake).whole(&f.target, &one);
-        while (!try fill.Callbacks(Fake).one(&f.target, &two)) {}
+        while (!try fill.Callbacks(Fake).one(&f.target, &two, 0)) {}
         try std.testing.expectEqualDeep(f.complete.get(&one).?, f.complete.get(&two).?);
         try std.testing.expectEqual(n - 1, f.complete.get(&two).?.pairs);
         try std.testing.expectEqual(@as(u32, 0), two.cached);
@@ -93,7 +93,7 @@ test "flashnext prefill: failed chunks, completion and cache marks never publish
         defer s.deinit(a);
         s.chunks = &.{ 17, 33 };
         s.reuse.marks = &.{33};
-        try std.testing.expect(!try fill.step(&f, &s));
+        try std.testing.expect(!try fill.step(&f, &s, 0));
         try std.testing.expectEqual(@as(u32, 17), s.fill_at.load(.monotonic));
         switch (fault) {
             0 => f.fail_chunk = true,
@@ -102,13 +102,13 @@ test "flashnext prefill: failed chunks, completion and cache marks never publish
             else => f.drop_lookahead = true,
         }
         if (fault == 2) {
-            try std.testing.expectError(error.MarkFailed, fill.step(&f, &s));
+            try std.testing.expectError(error.MarkFailed, fill.step(&f, &s, 0));
             try std.testing.expectEqual(@as(u32, 33), s.fill_at.load(.monotonic));
         } else if (fault == 3) {
-            try std.testing.expectError(error.LostPromptLookahead, fill.step(&f, &s));
+            try std.testing.expectError(error.LostPromptLookahead, fill.step(&f, &s, 0));
             try std.testing.expectEqual(@as(u32, 17), s.fill_at.load(.monotonic));
         } else {
-            try std.testing.expectError(error.GpuFailed, fill.step(&f, &s));
+            try std.testing.expectError(error.GpuFailed, fill.step(&f, &s, 0));
             try std.testing.expectEqual(@as(u32, 17), s.fill_at.load(.monotonic));
         }
         try std.testing.expectEqual(@as(usize, 0), f.filling.count());
@@ -126,13 +126,13 @@ test "flashnext prefill: a lane-memory retry and stale prefix do not reset anoth
     first.chunks = &.{17};
     var second = try stream(&tokens, "second");
     defer second.deinit(a);
-    try std.testing.expect(!try fill.step(&f, &first));
-    try std.testing.expectError(error.LaneMemory, fill.step(&f, &second));
+    try std.testing.expect(!try fill.step(&f, &first, 0));
+    try std.testing.expectError(error.LaneMemory, fill.step(&f, &second, 0));
     try std.testing.expectEqual(@as(u32, 17), first.fill_at.load(.monotonic));
-    while (!try fill.step(&f, &first)) {}
+    while (!try fill.step(&f, &first, 0)) {}
     f.abortPrompt(&first);
     f.restored_at = 99;
-    while (!try fill.step(&f, &second)) {}
+    while (!try fill.step(&f, &second, 0)) {}
     try std.testing.expect(second.reuse_failed);
     try std.testing.expectEqual(@as(u32, 0), second.cached);
     try std.testing.expectEqualDeep(recording.reference(&tokens), f.complete.get(&second).?);
@@ -159,15 +159,15 @@ test "flashnext prefill: cancellation at every seam frees its owner without affe
         var other = try stream(&tokens, "survivor");
         defer other.deinit(a);
         other.chunks = &.{17};
-        try std.testing.expect(!try fill.step(&f, &other));
-        for (0..seam) |_| try std.testing.expect(!try fill.step(&f, &s));
+        try std.testing.expect(!try fill.step(&f, &other, 0));
+        for (0..seam) |_| try std.testing.expect(!try fill.step(&f, &s, 0));
         const before = s.fill_at.load(.monotonic);
         c.stopped = true;
-        try std.testing.expectError(error.Cancelled, fill.step(&f, &s));
+        try std.testing.expectError(error.Cancelled, fill.step(&f, &s, 0));
         try std.testing.expectEqual(before, s.fill_at.load(.monotonic));
         try std.testing.expectEqual(@as(u32, 17), other.fill_at.load(.monotonic));
         try std.testing.expect(!f.filling.contains(&s));
-        while (!try fill.step(&f, &other)) {}
+        while (!try fill.step(&f, &other, 0)) {}
         try std.testing.expectEqualDeep(recording.reference(&tokens), f.complete.get(&other).?);
         try std.testing.expectEqual(f.owners, f.freed);
     }
@@ -182,7 +182,7 @@ fn allocationCase(gpa: std.mem.Allocator) !void {
         f.abortPrompt(&s);
         s.deinit(gpa);
     }
-    while (!try fill.step(&f, &s)) {}
+    while (!try fill.step(&f, &s, 0)) {}
     try std.testing.expectEqual(f.owners, f.freed);
 }
 
@@ -205,15 +205,15 @@ test "flashnext prefill: a failed image owner leaves the other prompt rows alive
     second.images = &images_b;
     first.chunks = &.{ 1, 17 };
     second.chunks = &.{17};
-    try std.testing.expect(!try fill.step(&f, &first));
+    try std.testing.expect(!try fill.step(&f, &first, 0));
     const owned = f.filling.get(&first).?.owner;
     f.fail_image = true;
-    try std.testing.expectError(error.ImageFailed, fill.step(&f, &second));
+    try std.testing.expectError(error.ImageFailed, fill.step(&f, &second, 0));
     try std.testing.expectEqual(owned, f.filling.get(&first).?.owner);
     try std.testing.expectEqual(@as(u32, 1), first.fill_at.load(.monotonic));
     f.fail_image = false;
-    while (!try fill.step(&f, &second)) {}
-    while (!try fill.step(&f, &first)) {}
+    while (!try fill.step(&f, &second, 0)) {}
+    while (!try fill.step(&f, &first, 0)) {}
     try std.testing.expectEqualDeep(recording.referenceImages(&tokens, &images_a), f.complete.get(&first).?);
     try std.testing.expectEqualDeep(recording.referenceImages(&tokens, &images_b), f.complete.get(&second).?);
     try std.testing.expect(f.complete.get(&first).?.hash != f.complete.get(&second).?.hash);
@@ -253,10 +253,10 @@ test "flashnext prefill: callback insertions can rehash the fill map without los
     var insert: Insert = .{ .fake = &f, .streams = &others };
     f.chunk_hook = Insert.chunk;
     f.chunk_ctx = &insert;
-    try std.testing.expect(!try fill.step(&f, &first));
+    try std.testing.expect(!try fill.step(&f, &first, 0));
     try std.testing.expect(insert.failed == null);
     try std.testing.expectEqual(@as(u32, 17), f.filling.get(&first).?.at);
-    while (!try fill.step(&f, &first)) {}
+    while (!try fill.step(&f, &first, 0)) {}
     try std.testing.expectEqualDeep(recording.reference(&tokens), f.complete.get(&first).?);
     for (&others) |*s| f.abortPrompt(s);
     try std.testing.expectEqual(f.owners, f.freed);

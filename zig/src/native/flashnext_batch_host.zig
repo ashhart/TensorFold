@@ -55,12 +55,12 @@ fn slotGrow() usize {
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch 8192;
 }
 
-pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, vision: ?api.VisionOpen, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
-    return openConfigured(gpa, io, dir, dump, window, streams, streams_fixed, cache_gib, over, vision, null, a, why, try tf.flashnext_replay.window_config.request(window, tf.flashnext_replay.TRAINED, fx.MARGIN, std.c.getenv("TF_FLASHNEXT_TP") != null, why));
+pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, decode_share: ?f64, vision: ?api.VisionOpen, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
+    return openConfigured(gpa, io, dir, dump, window, streams, streams_fixed, cache_gib, over, decode_share, vision, null, a, why, try tf.flashnext_replay.window_config.request(window, tf.flashnext_replay.TRAINED, fx.MARGIN, std.c.getenv("TF_FLASHNEXT_TP") != null, why));
 }
 
 /// `learn` is --spill-gib's disk store alone: shared sessions write a state to it only as RAM evicts it.
-pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, vision: ?api.VisionOpen, learn: ?Learn, a: std.mem.Allocator, why: *[]const u8, settings: tf.flashnext_replay.WindowSettings) !api.Opened {
+pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, decode_share: ?f64, vision: ?api.VisionOpen, learn: ?Learn, a: std.mem.Allocator, why: *[]const u8, settings: tf.flashnext_replay.WindowSettings) !api.Opened {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const capacity: usize = @intCast(@min(@as(i64, @intCast(settings.capacity)), window + fx.MARGIN));
@@ -139,7 +139,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     plan.room_bytes = final.room;
     plan.over_cap = final.over_cap;
     eng.snap_pool.max = plan.budget_bytes;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .decode_share = decode_share, .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     // FLASHNEXT_NO_LONE=1 keeps lone requests on shared rounds; image streams always (engine rounds: slot positions).
     if (eng.r.gdn_kept == null and std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun, .images = false };
     // The standard frame (buildImages): an image moves no row before it, so the cache keys carry no frame.
