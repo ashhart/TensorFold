@@ -16,7 +16,9 @@ const past = 2600;
 
 /// Every cache of every slot overwritten with 0xFF bytes (bf16 NaN): only what a restore writes back is read.
 fn wipe(m: *const dory.cuda_model.Model, s: cuda.Stream) !void {
+    if (m.paging) |p| try m.d.check(m.d.api.cuMemsetD8Async(p.arena, 0xFF, p.pool * p.pageBytes(), s.handle), "cuMemsetD8Async");
     for (m.k, m.v, 0..) |kc, vc, i| {
+        if (m.paging != null and m.sched.cache_kind[i] == .full) continue; // the arena above
         const bytes = m.slots * m.cacheLen(i) * m.c.kvDim() * 2;
         try m.d.check(m.d.api.cuMemsetD8Async(kc, 0xFF, bytes, s.handle), "cuMemsetD8Async");
         try m.d.check(m.d.api.cuMemsetD8Async(vc, 0xFF, bytes, s.handle), "cuMemsetD8Async");
