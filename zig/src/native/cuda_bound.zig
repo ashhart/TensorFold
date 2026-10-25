@@ -19,9 +19,9 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
             }
         }.f,
         .prefill_step = if (v.prefill_step != null) struct {
-            fn f(p: *anyopaque, s: *lanes.Stream) anyerror!bool {
+            fn f(p: *anyopaque, s: *lanes.Stream, max_rows: u32) anyerror!bool {
                 const x = H.bind(p);
-                return x.inner.vtable.prefill_step.?(x.inner.ptr, s);
+                return x.inner.vtable.prefill_step.?(x.inner.ptr, s, max_rows);
             }
         }.f else null,
         .cancel_prefill = if (v.cancel_prefill != null) struct {
@@ -191,7 +191,7 @@ test "each forwarded entry calls the family's entry of the same name, once" {
             }
         }.f,
         .prefill_step = struct {
-            fn f(p: *anyopaque, _: *S) anyerror!bool {
+            fn f(p: *anyopaque, _: *S, _: u32) anyerror!bool {
                 Rec.hit(p, "prefill_step");
                 return true;
             }
@@ -318,7 +318,7 @@ test "each forwarded entry calls the family's entry of the same name, once" {
     var out: [0]u32 = .{};
     try w.prefill(p, &s);
     try rec.once("prefill");
-    _ = try w.prefill_step.?(p, &s);
+    _ = try w.prefill_step.?(p, &s, 0);
     try rec.once("prefill_step");
     try std.testing.expect(w.cancel_prefill != null);
     const before_cancel = h.binds;

@@ -63,6 +63,12 @@ pub const Share = struct {
     pub const short_rows = 512;
     pub const min_share = 0.01; // below it a step's debt is minutes of decoding, and is no share
 
+    /// --decode-share's share x: the prompt's p is its complement, floored at min_share; 0 keeps whole prompts.
+    pub fn fromDecode(x: f64) Share {
+        if (!(x > 0 and x < 1)) return .{};
+        return .{ .p = @max(1 - x, min_share) };
+    }
+
     pub fn fromEnv() Share {
         var s: Share = if (std.c.getenv("TENSORFOLD_PREFILL_SHARE")) |text| fromText(std.mem.span(text)) else .{};
         if (std.c.getenv("TENSORFOLD_PREFILL_BUDGET")) |text| s.rows = budget(std.mem.span(text));
@@ -95,7 +101,10 @@ pub const Share = struct {
     }
 };
 
-/// Prompts before the next round: short ones go whole, then a long one's step when due; a row budget can end it sooner.
+/// --decode-share's chunk hint: the cap fires only where a family declares chunk_invariant; not `Share.short_rows`.
+pub const decode_cap_rows: u32 = 512;
+
+/// Prompts before the next round: none waiting is main's round; short ones go whole; then a long one's step when due.
 pub fn run(h: *LaneHost) void {
     if (h.filling.items.len == 0 or runnable(h) == 0) h.share.debt_ns = 0; // owed to streams that ended or paused: no one's
     if (h.filling.items.len == 0) return;
@@ -167,6 +176,12 @@ fn longStep(h: *LaneHost, at: usize) u64 {
 /// A prompt whose whole pass is at most `short_rows` rows (a long prompt's last rows are not).
 fn short(j: *const LaneHost.Job) bool {
     return j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
+}
+
+/// Fill chunks' cap: only the flag, a chunk-invariant family and live decoders together; else 0 (the engine's own cut).
+pub fn capRows(h: *const LaneHost) u32 {
+    if (!h.decode_cap or h.share.p >= 1 or !h.core.backend.chunk_invariant) return 0;
+    return if (runnable(h) > 0) decode_cap_rows else 0;
 }
 
 /// A long prompt's step runs now: none owed, or nothing decoding.

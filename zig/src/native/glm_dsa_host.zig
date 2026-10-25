@@ -46,7 +46,7 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 const cache_rules: api.prompt_cache.Rules = .{ .lookahead = 0, .planned = false, .min_prompt = 0, .chunk = g.gpu.prompt_rows };
 
 /// GLM-5.3 on the pair named by `speed_up` (rank 0 or 1's settings), `window` tokens a stream, `streams` streams.
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: []const u8, streams: u32, limit: u64, cache_gib: ?f64) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: []const u8, streams: u32, limit: u64, cache_gib: ?f64, decode_share: ?f64) !*Host {
     const e = try g.engine.Engine.load(gpa, io, dir, speed_up, null, true, window + g.engine.max_depth + 2 * g.gpu.max_rows, streams, limit);
     errdefer e.deinit();
     const h = try gpa.create(Host);
@@ -64,7 +64,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-dsa-zig", .lanes = streams, .context_window = window, .prefill_step = g.gpu.prompt_rows, .greedy_only = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-dsa-zig", .lanes = streams, .context_window = window, .prefill_step = g.gpu.prompt_rows, .decode_share = decode_share, .greedy_only = true });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.cache = null;

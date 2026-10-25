@@ -93,10 +93,10 @@ pub const Backend = struct {
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
-        while (!try prefillStep(ptr, s)) {}
+        while (!try prefillStep(ptr, s, 0)) {}
     }
-    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
-        return prompt_fill.step(self(ptr), s);
+    fn prefillStep(ptr: *anyopaque, s: *Stream, _: u32) anyerror!bool {
+        return prompt_fill.step(self(ptr), s, 0);
     }
 
     pub fn beginPrompt(b: *Backend, s: *Stream) !prompt_fill.State {

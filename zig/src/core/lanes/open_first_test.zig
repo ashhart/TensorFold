@@ -155,9 +155,9 @@ test "stepped prefill uses the same committed handoff only after its final chunk
     defer e.deinit();
     var s = try sm.Stream.init(a, .{ .id = "step", .prompt = &ids, .max_new = 8 });
     defer s.deinit(a);
-    try std.testing.expect(!try e.fillStreamCommitted(&s, true, .{ .ptr = &p, .call = Probe.hook }));
+    try std.testing.expect(!try e.fillStreamCommitted(&s, true, .{ .ptr = &p, .call = Probe.hook }, 0));
     try std.testing.expectEqual(@as(usize, 0), p.hooks);
-    while (!try e.fillStreamCommitted(&s, false, .{ .ptr = &p, .call = Probe.hook })) {}
+    while (!try e.fillStreamCommitted(&s, false, .{ .ptr = &p, .call = Probe.hook }, 0)) {}
     try std.testing.expectEqual(@as(usize, 1), p.hooks);
     try std.testing.expect(p.committed_in_draft and p.hook_in_draft);
     e.discard(&s);

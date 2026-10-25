@@ -256,7 +256,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.clock = .{ .b = h.metal, .wall = .{ .io = io } };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(@max(window, 0)), .prefill_step = step, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(@max(window, 0)), .prefill_step = step, .decode_share = o.decode_share, .structures = true });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.round = .{ .depth = 8 };
     h.cache = null;
@@ -378,7 +378,7 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     var why: []const u8 = "";
     const drafter = if (o.drafts) o.drafter else null;
     const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .spill = o.spill, .slots = spill.slots(o) } else null else null;
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .learn = learn, .vision = o.vision }, a, &why) catch |err| {
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision }, a, &why) catch |err| {
         problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };
@@ -419,7 +419,7 @@ pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, prob
     if (tf.flashnext_batch_meta.shared(o.lanes_fixed, o.lanes, paired, writes_behind)) {
         var why: []const u8 = "";
         const shared: ?api.Opened = shared: {
-            const opened = @import("flashnext_batch_host.zig").openConfigured(gpa, io, o.dir, dump, if (window > 0) @min(window, cap - margin) else cap - margin, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, o.vision, learn, a, &why, choice.settings) catch |err| {
+            const opened = @import("flashnext_batch_host.zig").openConfigured(gpa, io, o.dir, dump, if (window > 0) @min(window, cap - margin) else cap - margin, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, o.decode_share, o.vision, learn, a, &why, choice.settings) catch |err| {
                 problem.* = tf.flashnext_engine.quantizationProblem(err) orelse if (err == error.CacheOverCap or why.len > 0) why else if (err == error.BadLoadLimit) "FLASHNEXT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else if (err == error.OverMemoryLimit) "the native Flash Next batching engine cannot open (OverMemoryLimit): the sessions and the given prompt cache do not fit under the load limit (70% of RAM, or FLASHNEXT_LOAD_LIMIT_GB) past the loaded model; fewer streams, a smaller --context or --prompt-cache-gib, or a higher FLASHNEXT_LOAD_LIMIT_GB" else try std.fmt.allocPrint(a, "the native Flash Next batching engine cannot open ({s})", .{@errorName(err)});
                 return null;
             };
@@ -469,7 +469,7 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
         return null;
     }
     const learn: ?glm.Learn = if (o.learn) |root| .{ .root = root, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .conversations = o.learn_conversations, .spill = o.spill, .slots = spill.slots(o) } else null;
-    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, learn, o.vision) catch |e| {
+    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.decode_share, learn, o.vision) catch |e| {
         if (e == error.BadResidency) problem.* = mtl.residency_policy.invalid_flag else if (e == error.LearnConversationsOnPair) problem.* = "--learn-conversations keeps states on one Mac only: serve GLM-5.3-Flash without --speed-up, or without the flag" else if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
@@ -492,7 +492,7 @@ fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     if (platform.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm_dsa.open(gpa, io, o.dir, @intCast(window), settings, @max(1, @min(o.lanes, 16)), ram / 100 * 66, o.prompt_cache_gib) catch |e| {
+    const h = glm_dsa.open(gpa, io, o.dir, @intCast(window), settings, @max(1, @min(o.lanes, 16)), ram / 100 * 66, o.prompt_cache_gib, o.decode_share) catch |e| {
         problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };

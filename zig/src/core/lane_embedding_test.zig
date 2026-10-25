@@ -33,13 +33,13 @@ const Encoder = struct {
         cast(ptr).firsts += 1;
         return error.EmbeddingDrewToken;
     }
-    fn step(ptr: *anyopaque, s: *lanes.Stream) !bool {
+    fn step(ptr: *anyopaque, s: *lanes.Stream, max_rows: u32) !bool {
         const e = cast(ptr);
         while (!e.step_gate.load(.acquire)) std.Thread.yield() catch {};
         std.debug.assert(e.step_count < e.steps.len);
         e.steps[e.step_count] = s.prompt()[0];
         e.step_count += 1;
-        return e.base.stepped().vtable.prefill_step.?(ptr, s);
+        return e.base.stepped().vtable.prefill_step.?(ptr, s, max_rows);
     }
     fn embedding(ptr: *anyopaque, s: *lanes.Stream, out: []f32) !void {
         const e = cast(ptr);

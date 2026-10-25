@@ -233,8 +233,15 @@ On MLX, `--parallel auto` is the default: requests share rounds within the confi
 budget. Every admitted prompt prefills a chunk at a time beside the others. Each chunk goes to a foreground prompt
 before a background one, then to the prompt with the fewest tokens left, and a prompt passed over for 8 chunks takes
 the next one: a short request starts at the next chunk, and a long prompt still finishes. Running replies take rounds
-between chunks for `--decode-share` of each chunk's time (default 0.25). That flag is the Python 0.6.6 engine's, and the
-native binary refuses it. In that engine, `--decode-share 0` prefills each prompt whole
+between chunks for `--decode-share` of each chunk's time (0.25 is the Python engine's default). On a native server
+the flag is the reply's share, and the prompt owes its complement: it also offers a 512-row cap on a filling
+prompt's chunks to families that declare chunk-independent prompt arithmetic. That offer is gated per family
+behind device token-hash qualification; every native family is gated out today, so no native server caps chunk
+rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
+the prompt's share of a fill step's wall time, time only, never smaller chunks. The CUDA, qwen27 Metal and
+hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
+and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
+whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
 suppressed.

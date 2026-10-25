@@ -186,12 +186,12 @@ fn run(final: bool, rows: usize, world: usize, hook: bool, cancel_inside: bool) 
     // The engine polls only for one rank and a chunk of at least 512 rows, so only that combination stops.
     const stops = hook and cancel_inside and world == 1 and rows >= 512;
     if (stops) {
-        try T.expectError(error.Cancelled, step(fake_ptr(&fake), &s));
+        try T.expectError(error.Cancelled, step(fake_ptr(&fake), &s, 0));
         try T.expectEqual(@as(usize, 0), lane.fill.?.at);
         try T.expectEqual(@as(usize, 0), lane.fill.?.next);
         try T.expectEqual(@as(usize, 0), fake.kept);
     } else {
-        try T.expectEqual(final, try step(fake_ptr(&fake), &s));
+        try T.expectEqual(final, try step(fake_ptr(&fake), &s, 0));
         if (final) {
             try T.expect(lane.fill == null);
         } else {

@@ -27,6 +27,7 @@ pub const Options = struct {
     drafter_bits: u8 = 0,
     cache_gib: ?f64 = null,
     cache_over_cap: bool = false,
+    decode_share: ?f64 = null, // --decode-share: the reply's share of a fill step's wall time beside live decoders
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
@@ -367,7 +368,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .vision = offer });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off

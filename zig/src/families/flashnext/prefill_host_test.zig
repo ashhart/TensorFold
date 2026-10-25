@@ -330,3 +330,49 @@ test "flashnext prefill: thinking and both shared head dispatch modes retain com
         }
     };
 }
+
+test "flashnext prefill: an active flag share leaves a gated family's chunks exactly on the cold plan" {
+    const hostfill = @import("../../core/lane_host_fill.zig");
+    const tokens = try a.alloc(u32, 5000);
+    defer a.free(tokens);
+    for (tokens, 0..) |*t, i| t.* = @intCast((i * 5 + 1) % 97);
+    var cold_ends: [64]u32 = undefined;
+    var cold_n: usize = 0;
+    var cold: Fake = .{};
+    defer cold.deinit();
+    var c = try lanes.Stream.init(a, .{ .id = "cold", .prompt = tokens, .max_new = 4 });
+    defer c.deinit(a);
+    while (true) {
+        const done = try fill.step(&cold, &c, 0); // the cold plan: the engine's own cuts, no hint ever
+        cold_ends[cold_n] = @intCast(c.fill_at.load(.monotonic));
+        cold_n += 1;
+        if (done) break;
+    }
+    var f: Fake = .{ .decode_shrink = false }; // the CUDA shape: full-grid chunks even beside decoders
+    defer f.deinit();
+    var cfg = try config();
+    defer cfg.deinit(a);
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, f.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2, .decode_share = 0.5 }); // the flag is active
+    var dec = try lanes.Stream.init(a, .{ .id = "dec", .prompt = &.{ 3, 1, 4 }, .max_new = 8 });
+    defer dec.deinit(a);
+    try core.addStream(&dec); // a live decoder: runnable, so an opted-in cap would fire
+    defer core.backend.release(&dec);
+    var s = try lanes.Stream.init(a, .{ .id = "shared", .prompt = tokens, .max_new = 4 });
+    defer s.deinit(a);
+    var ends: [64]u32 = undefined;
+    var n: usize = 0;
+    while (true) {
+        const hint = hostfill.capRows(&host);
+        try std.testing.expectEqual(@as(u32, 0), hint); // gated out: the flag alone never caps this family
+        const done = try fill.step(&f, &s, hint);
+        ends[n] = @intCast(s.fill_at.load(.monotonic));
+        n += 1;
+        if (done) break;
+    }
+    try std.testing.expectEqualSlices(u32, cold_ends[0..cold_n], ends[0..n]); // exactness by construction: no drift
+    core.backend.chunk_invariant = true; // the knob is live: a qualified family's cap arrives
+    try std.testing.expectEqual(hostfill.decode_cap_rows, hostfill.capRows(&host));
+}

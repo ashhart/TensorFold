@@ -265,7 +265,7 @@ pub const Fx = struct {
     }
 
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
-        while (!try prefillStepFn(ptr, s)) {}
+        while (!try prefillStepFn(ptr, s, 0)) {} // whole prompts: the 512-row cap would cut where this driver never does
     }
 
     /// Whether a stream other than `s` holds cache slot `slot`.
@@ -327,8 +327,8 @@ pub const Fx = struct {
         return lane;
     }
 
-    /// One prompt chunk (64-row aligned cuts); the head absorbs its rows; the last chunk draws the first token.
-    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+    /// One prompt chunk on the 64-row grid; the head absorbs its rows; the last draws the first token. `_: u32`.
+    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
         const f = of(ptr);
         if (s.isCancelled()) return error.Cancelled;
         const lane = if (f.lanes.get(s)) |l| (if (l.fill != null) l else try f.begin(s)) else try f.begin(s);

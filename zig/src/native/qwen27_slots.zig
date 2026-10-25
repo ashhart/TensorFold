@@ -19,7 +19,7 @@ pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_ro
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     var f = try opening(b, s, slot);
     defer closing(b, s);
-    while (!try chunk(b, s, &f)) {}
+    while (!try chunk(b, s, &f, 0)) {}
 }
 
 /// A prompt pass begins in `slot`: its kept state restored and its images encoded (one image prompt fills at a time).
@@ -70,8 +70,8 @@ pub fn charge(b: *const Metal, s: *lanes.Stream, before: f64) void {
     if (b.runner.trace != null) s.chargeGpu(b.runner.gpu_seconds - before);
 }
 
-/// The pass's next chunk, its drafter's absorb before its marks; true once the prompt is in.
-pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
+/// The pass's next chunk, its drafter's absorb before its marks; true once the prompt is in. `_: u32` keeps its grid.
+pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     const paused = tf.gpu_profile.pause(b.runner.trace); // prompt passes run unprofiled: TF_Q27_PROFILE's rounds decode
     defer paused.end();
     const ids = s.prompt();
@@ -162,7 +162,7 @@ pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
 }
 
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
-pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const b: *Metal = @ptrCast(@alignCast(ptr));
     b.settle() catch {};
     b.dropRound();
@@ -178,7 +178,7 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
     }
     const f = b.fills.getPtr(s).?;
     const slot = f.slot;
-    const done = chunk(b, s, f) catch |err| {
+    const done = chunk(b, s, f, 0) catch |err| {
         endFill(b, s);
         b.owners[slot] = null;
         return err;

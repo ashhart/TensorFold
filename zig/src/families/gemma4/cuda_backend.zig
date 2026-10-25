@@ -144,7 +144,7 @@ pub const Gemma = struct {
         errdefer x.dropLane(s);
         while (true) {
             const at = l.fill.?;
-            const done = try x.chunk(s, l, true);
+            const done = try x.chunk(s, l, true, 0);
             try sink.take(sink.ptr, s, try x.featuresOf(l.tap, at, @intCast(l.tap.rows)), at);
             x.marked(s, at + l.tap.rows);
             if (done) return;
@@ -342,8 +342,8 @@ pub const Gemma = struct {
         return k.at;
     }
 
-    /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row's logits are written.
-    fn chunk(x: *Gemma, s: *Stream, l: *Lane, streamed: bool) !bool {
+    /// One chunk from `l.fill` to the next grid line, image or mark; true once the prompt's last row is in. `_: u32`.
+    fn chunk(x: *Gemma, s: *Stream, l: *Lane, streamed: bool, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
@@ -394,10 +394,10 @@ pub const Gemma = struct {
         const x = self(ptr);
         const l = try x.opening(s);
         errdefer x.dropLane(s);
-        while (!try x.chunk(s, l, false)) {}
+        while (!try x.chunk(s, l, false, 0)) {}
     }
 
-    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
+    fn prefillStep(ptr: *anyopaque, s: *Stream, _: u32) anyerror!bool {
         const x = self(ptr);
         const going = if (x.lanes.getPtr(s)) |l| l.fill != null else false;
         const l = if (going) x.lanes.getPtr(s).? else try x.opening(s);
@@ -405,7 +405,7 @@ pub const Gemma = struct {
         if (l.mark) |at| x.marked(s, at); // the drafter's wrapper absorbed the last step's rows: its context is kept too
         l.mark = null;
         const later = x.keeper != null and s.drafts;
-        const done = try x.chunk(s, l, later);
+        const done = try x.chunk(s, l, later, 0);
         if (later) {
             if (done) x.marked(s, s.prompt().len) else l.mark = l.fill;
         }

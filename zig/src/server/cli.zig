@@ -114,7 +114,7 @@ pub const flags = [_]Flag{
     .{ .name = "--snapshot-dir", .native = true, .native_values = &.{"none"} },
     .{ .name = "--max-snapshots", .native = true, .native_values = &.{"0"} },
     .{ .name = "--parallel", .native = true },
-    .{ .name = "--decode-share" },
+    .{ .name = "--decode-share", .native = true },
     .{ .name = "--prefill-pass" },
     .{ .name = "--pass-cache-gib" },
     .{ .name = "--mlx-cache-gib" },
@@ -185,6 +185,7 @@ pub const Args = struct {
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
+    decode_share: ?f64 = null, // the reply's share x: the prompt owes 1 - x and only the flag offers the chunk cap (null: env time share only)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
     learn_dir: ?[]const u8 = null,
@@ -256,7 +257,7 @@ fn find(name: []const u8) ?Flag {
     return null;
 }
 
-fn fail(u: *Usage, a: Allocator, comptime fmt: []const u8, args: anytype) error{ Usage, OutOfMemory } {
+pub fn fail(u: *Usage, a: Allocator, comptime fmt: []const u8, args: anytype) error{ Usage, OutOfMemory } {
     u.message = try std.fmt.allocPrint(a, fmt, args);
     return error.Usage;
 }
@@ -329,16 +330,16 @@ fn spills(args: Args) bool {
     return (args.spill_gib orelse 0) > 0;
 }
 
-fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!i64 {
+pub fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!i64 {
     return std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch fail(u, a, "argument {s}: invalid int value: '{s}'", .{ name, v });
 }
 
-fn float(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
+pub fn float(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
     return @import("fields.zig").pyFloat(v) orelse fail(u, a, "argument {s}: invalid float value: '{s}'", .{ name, v });
 }
 
 /// A finite GiB count from 0 (off) to below 2^34, whose bytes fit a u64.
-fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
+pub fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
     const g = try float(u, a, name, v);
     if (!std.math.isFinite(g) or g < 0 or g >= 1 << 34) return fail(u, a, "argument {s}: expected GiB from 0 (off) to below 2^34: '{s}'", .{ name, v });
     return g;
@@ -421,6 +422,9 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.learn_conversations = true;
     } else if (is(name, "--learn-daily-gib")) {
         out.learn_daily_gib = try gib(u, a, name, v);
+    } else if (is(name, "--decode-share")) {
+        out.decode_share = try float(u, a, name, v);
+        if (!(out.decode_share.? >= 0 and out.decode_share.? < 1)) return fail(u, a, "argument --decode-share: expected a share from 0 to under 1: '{s}'", .{v});
     } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
@@ -469,56 +473,6 @@ fn recallFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usa
         out.recall_read_only = true;
     } else if (!std.mem.eql(u8, name, "--recall")) return false;
     out.recall = true;
-    return true;
-}
-
-/// The CUDA build's --device, --segments and --precision; false for any other flag.
-fn cudaFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
-    if (std.mem.eql(u8, name, "--precision")) {
-        out.precision = std.meta.stringToEnum(api.Precision, v) orelse return fail(u, a, "argument --precision: checkpoint or full: '{s}'", .{v});
-    } else if (std.mem.eql(u8, name, "--device")) {
-        out.device = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --device: a GPU ordinal from 0: '{s}'", .{v});
-    } else if (std.mem.eql(u8, name, "--loops")) out.loops = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --loops: a count from 1: '{s}'", .{v}) else if (std.mem.eql(u8, name, "--segments")) {
-        const n = try int(u, a, name, v);
-        out.segments = if (n >= 1) @intCast(@min(n, std.math.maxInt(u32))) else return fail(u, a, "argument --segments: a count from 1: '{s}'", .{v});
-    } else return false;
-    return true;
-}
-
-/// A rank names one of the `tp` processes.
-fn ranks(u: *Usage, a: Allocator, out: Args) error{ Usage, OutOfMemory }!void {
-    if (out.rank >= out.tp) return fail(u, a, "argument --rank: {d} is not below --tp {d}", .{ out.rank, out.tp });
-}
-
-/// The GPU engine's tensor-parallel, MTP, kept-entry and policy flags; false for any other flag.
-fn gpuFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
-    const is = struct {
-        fn f(x: []const u8, y: []const u8) bool {
-            return std.mem.eql(u8, x, y);
-        }
-    }.f;
-    if (is(name, "--tp")) out.tp = @intCast(try int(u, a, name, v)) else if (is(name, "--rank")) {
-        out.rank = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --rank: a rank from 0: '{s}'", .{v});
-    } else if (is(name, "--master")) out.master = v else if (is(name, "--master-port")) {
-        const p = try int(u, a, name, v);
-        if (p < 0 or p > 65535) return fail(u, a, "argument --master-port: invalid port: '{s}'", .{v});
-        out.master_port = @intCast(p);
-    } else if (is(name, "--mtp-drafts")) {
-        const n = try int(u, a, name, v);
-        if (n < 0 or n > 64) return fail(u, a, "argument --mtp-drafts: a count from 0 to 64: '{s}'", .{v});
-        out.mtp_drafts = @intCast(n);
-    } else if (is(name, "--mtp-confidence")) {
-        const c = try float(u, a, name, v);
-        if (!(c >= 0 and c <= 1)) return fail(u, a, "argument --mtp-confidence: a probability in [0, 1]: '{s}'", .{v});
-        out.mtp_confidence = c;
-    } else if (is(name, "--checkpoint-slots")) {
-        const n = try int(u, a, name, v);
-        if (n < 0) return fail(u, a, "argument --checkpoint-slots: a count from 0: '{s}'", .{v});
-        out.checkpoint_slots = n;
-    } else if (is(name, "--spill-gib")) out.spill_gib = try gib(u, a, name, v) else if (is(name, "--policy")) {
-        if (std.mem.indexOfScalar(u8, v, '=') == null) return fail(u, a, "argument --policy: expected key=value: '{s}'", .{v});
-        out.policy = if (out.policy.len == 0) v else try std.fmt.allocPrint(a, "{s},{s}", .{ out.policy, v });
-    } else return false;
     return true;
 }
 
@@ -572,6 +526,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .precision = args.precision,
         .mtp_drafts = args.mtp_drafts,
         .mtp_confidence = args.mtp_confidence,
+        .decode_share = args.decode_share,
         .keep = args.checkpoint_slots,
         .tp = args.tp,
         .rank = args.rank,
@@ -585,6 +540,11 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
 /// ``capabilities --json`` (cli_capabilities.zig): the engine side, then the table's native flags and variables.
 pub const Engines = @import("cli_capabilities.zig").Engines;
 pub const capabilities = @import("cli_capabilities.zig").capabilities;
+
+/// The CUDA build's and GPU engine's flag parsers (cli_gpu_flags.zig).
+pub const cudaFlag = @import("cli_gpu_flags.zig").cudaFlag;
+pub const gpuFlag = @import("cli_gpu_flags.zig").gpuFlag;
+pub const ranks = @import("cli_gpu_flags.zig").ranks;
 
 const cli = @This();
 

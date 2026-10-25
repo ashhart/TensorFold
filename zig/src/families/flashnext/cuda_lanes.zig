@@ -306,7 +306,7 @@ pub fn Namespace(comptime Tri: type) type {
                 return l;
             }
             /// One prompt chunk, cut at the next cache mark; true once the last row's scores are in seq.logits.
-            fn step(self: *Cuda, s: *lanes.Stream, l: *Lane) !bool {
+            fn step(self: *Cuda, s: *lanes.Stream, l: *Lane, _: u32) !bool {
                 const ids = s.prompt();
                 const at = l.filled orelse return true;
                 if (s.isCancelled()) {
@@ -383,14 +383,14 @@ pub fn Namespace(comptime Tri: type) type {
         fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
             const self = of(ptr);
             const l = try self.open(s);
-            while (!try self.step(s, l)) {}
+            while (!try self.step(s, l, 0)) {}
         }
 
         /// One chunk of the stream's prompt between the other streams' rounds; the first call opens its caches.
-        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
             const self = of(ptr);
             const l = if (self.lanes.getPtr(s)) |x| (if (x.filled != null) x else try self.open(s)) else try self.open(s);
-            return self.step(s, l);
+            return self.step(s, l, 0);
         }
 
         fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) !void {

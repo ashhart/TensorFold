@@ -146,14 +146,15 @@ pub fn fills(e: *const Engine) bool {
 
 /// One chunk of a stream's prompt pass; true once the stream is opened and joins the next round.
 pub fn fillStream(e: *Engine, s: *Stream, first: bool) !bool {
-    return fillStreamCommitted(e, s, first, null);
+    return fillStreamCommitted(e, s, first, null, 0);
 }
 
-pub fn fillStreamCommitted(e: *Engine, s: *Stream, first: bool, hook: ?be.Committed) !bool {
+/// One chunk of a stream's prompt pass, at most `max_rows` rows (0: the engine's own cut); true once opened.
+pub fn fillStreamCommitted(e: *Engine, s: *Stream, first: bool, hook: ?be.Committed, max_rows: u32) !bool {
     _ = e.arena.reset(.retain_capacity);
     if (first) try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
     const chunk = e.backend.vtable.prefill_step orelse return error.NoPrefillSteps;
-    const done = chunk(e.backend.ptr, s) catch |err| {
+    const done = chunk(e.backend.ptr, s, max_rows) catch |err| {
         if (err == error.Cancelled) e.backend.release(s); // the host finishes a cancelled stream without the core
         return err;
     };

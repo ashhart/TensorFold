@@ -202,8 +202,8 @@ pub const Kolibri = struct {
         return k.at;
     }
 
-    /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row's logits are written.
-    fn chunk(x: *Kolibri, s: *Stream, l: *Lane) !bool {
+    /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row is in. `_: u32`.
+    fn chunk(x: *Kolibri, s: *Stream, l: *Lane, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) {
@@ -227,15 +227,15 @@ pub const Kolibri = struct {
         const x = self(ptr);
         const l = try x.opening(s);
         errdefer x.dropLane(s);
-        while (!try x.chunk(s, l)) {}
+        while (!try x.chunk(s, l, 0)) {}
     }
 
-    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
+    fn prefillStep(ptr: *anyopaque, s: *Stream, _: u32) anyerror!bool {
         const x = self(ptr);
         const going = if (x.lanes.getPtr(s)) |l| l.fill != null else false;
         const l = if (going) x.lanes.getPtr(s).? else try x.opening(s);
         errdefer x.dropLane(s);
-        return x.chunk(s, l);
+        return x.chunk(s, l, 0);
     }
 
     fn cancelPrefill(ptr: *anyopaque, s: *Stream) !void {

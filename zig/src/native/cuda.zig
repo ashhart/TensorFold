@@ -167,7 +167,7 @@ pub const Host = struct {
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties };
+        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant };
     }
 };
 const refusals = @import("cuda_refusal.zig");
@@ -479,6 +479,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .startup = h.startup,
         .policy = if (@hasField(@TypeOf(loaded), "policy")) loaded.policy else "",
         .prompt_cache = h.store != null,
+        .decode_share = o.decode_share,
         .prompt_cache_capacity = cache_capacity,
         .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
         .logprobs = served.backend.vtable.first_row != null,
@@ -510,7 +511,7 @@ test {
     _ = windows;
 }
 
-test "CUDA host preserves prefill_step and first-before-draft capability" {
+test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {
     var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
     defer target.deinit();
     var h: Host = undefined;
@@ -522,6 +523,9 @@ test "CUDA host preserves prefill_step and first-before-draft capability" {
     try std.testing.expect(!h.backend().penalties);
     h.inner.penalties = true;
     try std.testing.expect(h.backend().penalties);
+    try std.testing.expect(h.backend().chunk_invariant); // the fake declares it; the wrapper must carry it
+    h.inner.chunk_invariant = false;
+    try std.testing.expect(!h.backend().chunk_invariant);
 }
 
 test "every registered family and d1's decision engine are listed for capabilities" {
