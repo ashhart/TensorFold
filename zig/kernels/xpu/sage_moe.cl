@@ -289,3 +289,29 @@ __kernel void sage_tile_down(__global const uint *w, __global const ushort *ex_s
             y[(ulong)pr[i] * dim + col + 16] = acc[rb][1][r];
         }
 }
+
+// sage_router for prompt rows on XMX: 16 rows x 16 experts a sub-group, fp16 DPAS into fp32. Column n_experts is the
+// shared expert's gate. Grid ((n_experts + 16) / 16, (rows + 15) / 16), one sub-group a group.
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void sage_router_tile(__global const half *x, __global const half *gate, __global const half *shared_gate,
+                               __global float *logits, uint dim, uint n_experts, uint rows) {
+    const uint lane = get_sub_group_local_id(), e = get_group_id(0) * 16 + lane, r0 = get_group_id(1) * 16;
+    __global const uint *wr = (__global const uint *)(e == n_experts ? shared_gate : gate + (ulong)min(e, n_experts - 1) * dim);
+    __global const half *xr[16];
+    for (uint i = 0; i < 16; i++) xr[i] = x + (ulong)min(r0 + i, rows - 1) * dim;
+    float8 acc[2] = {0.0f, 0.0f};
+    for (uint k0 = 0; k0 < dim; k0 += 16) {
+        const int8 b = as_int8(vload8(0, wr + k0 / 2));
+        for (uint rb = 0; rb < 2; rb++) {
+            short8 a;
+            for (uint r = 0; r < 8; r++) a[r] = as_short(xr[rb * 8 + r][k0 + lane]);
+            acc[rb] = DPH(a, b, acc[rb]);
+        }
+    }
+    if (e > n_experts) return;
+    for (uint rb = 0; rb < 2; rb++)
+        for (uint r = 0; r < 8; r++) {
+            const uint row = r0 + rb * 8 + r;
+            if (row < rows) logits[(ulong)row * (n_experts + 1) + e] = acc[rb][r];
+        }
+}

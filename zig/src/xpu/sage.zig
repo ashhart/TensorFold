@@ -165,7 +165,7 @@ pub const Acts = struct {
 };
 
 /// sage_moe.cl's kernels (the Dev's table is the 27B runner's, filled from the Sage images).
-pub const MoeKernels = struct { router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
+pub const MoeKernels = struct { router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
 
 /// Rows of a grouped MoE tile (sage_moe.cl MC).
 const MC = 16;
@@ -502,7 +502,10 @@ pub const Runner = struct {
         const a = &r.acts;
         const s = r.z.s;
         const pairs = T * s.top_k;
-        try d.launch(r.mk.router, .{ .x = s.experts + 1, .y = T }, .{ a.h, l.router, l.shared_gate, a.mlog, s.hidden });
+        if (T > WINDOW)
+            try d.launch(r.mk.router_tile, .{ .x = (s.experts + 16) / 16, .y = (T + 15) / 16 }, .{ a.h, l.router, l.shared_gate, a.mlog, s.hidden, s.experts, T })
+        else
+            try d.launch(r.mk.router, .{ .x = s.experts + 1, .y = T }, .{ a.h, l.router, l.shared_gate, a.mlog, s.hidden });
         try d.launch(r.mk.route, .{ .x = T }, .{ a.mlog, a.mids, a.mwts, a.msw, s.experts, s.top_k });
         if (s.expert_ff != s.shared_ff) return error.SharedWidthNotWired; // one act stride for both (Sage: 512, 512)
         if (T > WINDOW) return r.moeTiles(l, T);
@@ -583,6 +586,7 @@ fn kernels(d: *Dev, mk: *MoeKernels) !void {
         .swiglu = try d.kernel(mo, "sage_expert_swiglu", 16),
         .down = try d.kernel(mo, "sage_expert_down", 16),
         .combine = try d.kernel(mo, "sage_moe_combine", 64),
+        .router_tile = try d.kernel(mo, "sage_router_tile", 16),
         .sums = try d.kernel(mo, "sage_group_sums", 16),
         .sort = try d.kernel(mo, "sage_moe_sort", 256),
         .tile_swiglu = try d.kernel(mo, "sage_tile_swiglu", 16),
