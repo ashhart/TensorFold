@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4 on CUDA with a drafter keeps its prompt-cache mark after the drafter absorbs a stepped prompt chunk, so a chat's next turn resumes instead of prefilling again: with Gemma 4 31B and its DFlash drafter on a GB10, a 30k-token chat's next turn starts after 3.6 s instead of 45 s, with the same reply (#1286).
+
 - New family: Spark-X2.5/2.6-4B on CUDA (`spark2_5`), from MLX affine checkpoints converted by `tools/zig/spark25_convert.py`, on the shared CUDA operators with an exact GELU and its head gate under the kernel contract (#1297). On a GB10 with Spark-X2.6-4B at 8 bits it prefills 5,800 tokens/s at 2k and decodes 160 tokens/s on one stream; repeats, concurrent streams and resumed chats equal their runs alone. Thanks to @BobClawblaw.
 
 - Metal: Qwen3.5, Nemotron, LFM2 and Gemma 4 admit their streams at load under the load limit: an unnamed `--parallel` is lowered to the count that fits, and a named one that does not fit is refused at startup instead of failing under load (#1302).
