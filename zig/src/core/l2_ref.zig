@@ -53,7 +53,6 @@ pub fn widen(r: Iv, u: f64) Iv {
     return .{ if (std.math.isFinite(r[0])) r[0] - m else r[0], if (std.math.isFinite(r[1])) r[1] + m else r[1] };
 }
 
-
 /// 1 / sqrt(sum(v^2) + eps) over every v in its interval, and the root's and quotient's spread `sp`.
 pub fn invL2(v: []const Iv, eps: f64, sums: anytype, sp: f64, small: []f64, big: []f64) Iv {
     for (v, small, big) |x, *s, *b| {
