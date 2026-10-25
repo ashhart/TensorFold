@@ -3,6 +3,7 @@ const std = @import("std");
 const models = @import("models.zig");
 const info = @import("info.zig");
 const pull = @import("pull.zig");
+const plan = @import("plan.zig");
 const pull_exlr8 = @import("pull_exlr8.zig");
 const lora_merge = @import("core").lora_merge;
 
@@ -11,6 +12,7 @@ const usage =
     \\       tensorfold info MODEL
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
+    \\       tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...
     \\       tensorfold merge MODEL ADAPTER OUT
     \\       tensorfold merge DENSE ADAPTER OUT --quantize SHIPPED
     \\
@@ -20,7 +22,7 @@ const usage =
 pub fn wants(args: []const []const u8) bool {
     if (args.len == 0) return false;
     const cmd = args[0];
-    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull") or std.mem.eql(u8, cmd, "merge");
+    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull") or std.mem.eql(u8, cmd, "merge") or std.mem.eql(u8, cmd, "plan");
 }
 
 /// Runs a checkpoint subcommand; `argv` is argv[1..] as in cluster.cli.main.
@@ -53,6 +55,13 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         };
         if (node) |o| return pull_exlr8.run(a, init.io, &out.interface, &err.interface, env, args[1], o);
         return pull.run(a, init.io, &out.interface, &err.interface, env, null, args[1]);
+    }
+    if (std.mem.eql(u8, args[0], "plan")) {
+        const parsed = plan.parseArgs(a, args[1..]) orelse {
+            try err.interface.writeAll(usage);
+            return 2;
+        };
+        return plan.run(a, init.io, &out.interface, env, parsed.model, .{ .mem_gb = parsed.mem_gb, .ram = parsed.ram });
     }
     if (std.mem.eql(u8, args[0], "merge")) {
         const m = lora_merge.parseArgs(args[1..]) orelse {
