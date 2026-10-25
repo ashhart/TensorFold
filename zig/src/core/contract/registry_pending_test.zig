@@ -43,3 +43,11 @@ test "optional shared-memory variants are N/A while supported variants still req
     unmeasured.usage = none;
     try std.testing.expect(try checkCuda(a, &.{unmeasured}, true) > 0);
 }
+
+test "Dory resources stay pending and cannot qualify without compiler receipts" {
+    for (@import("dory_cuda_records.zig").cuda) |r| {
+        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+        for ([_]limits.Nvcc{ .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 2 }, .{ .major = 14, .minor = 0 } }) |version|
+            try std.testing.expectEqual(none, registry.usageFor(r, version));
+    }
+}
