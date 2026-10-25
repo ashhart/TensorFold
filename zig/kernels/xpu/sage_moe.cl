@@ -261,6 +261,52 @@ __kernel void sage_expert_down8(__global const uint *w, __global const ushort *s
     if (lane < DROWS) y[(ulong)p * dim + r0 + lane] = out;
 }
 
+// One decode row: down of all its pairs and sage_moe_combine in one kernel. A sub-group takes CROWS output rows of
+// every pair (expert picks in order, then the shared expert) and adds them as the combine does, so no y round trip.
+// out[i] = fp16(bf16(sum_k wts[k] y[k][i] + shared_w y_shared[i])). Grid (dim / (sub-groups a group * CROWS)); ff == 512.
+#define CROWS 2
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void sage_down_combine(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
+                                __global const uint *sh_w, __global const ushort *sh_scales, __global const ushort *sh_biases,
+                                __global const half *act, __global const uint *ids, __global const float *wts,
+                                __global const float *shared_w, __global half *out, uint dim, uint top_k) {
+    const uint lane = get_sub_group_local_id();
+    const uint r0 = (get_group_id(0) * get_num_sub_groups() + get_sub_group_id()) * CROWS;
+    float sum = 0.0f;                                   // lane k < CROWS: output row r0 + k
+    for (uint p = 0; p <= top_k; p++) {
+        const bool shared = p == top_k;
+        __global const half *a = act + (ulong)(shared ? top_k : p) * 512;
+        __global const uint *wt = shared ? sh_w : w;
+        __global const ushort *st = shared ? sh_scales : scales, *bt = shared ? sh_biases : biases;
+        const ulong row0 = shared ? r0 : (ulong)ids[p] * dim + r0;
+        const float pw = shared ? shared_w[0] : wts[p];
+        float xv[32], sx = 0.0f;
+        for (uint q = 0; q < 4; q++) {
+            const float8 v = convert_float8(vload8(lane * 4 + q, a));
+            for (uint j = 0; j < 8; j++) {
+                xv[q * 8 + j] = v[j];
+                sx += v[j];
+            }
+        }
+        float yk = 0.0f;
+        __attribute__((opencl_unroll_hint))
+        for (uint k = 0; k < CROWS; k++) {
+            const ulong row = row0 + k;
+            const uint4 pk = vload4(lane, wt + row * (512 / 8));
+            const float sc = bf(st[row * 8 + lane / 2]), bi = bf(bt[row * 8 + lane / 2]);
+            float dot = 0.0f;
+            for (uint q = 0; q < 4; q++) {
+                const uint u = ((const uint *)&pk)[q];
+                for (uint j = 0; j < 8; j++) dot = fma(xv[q * 8 + j], (float)((u >> (4 * j)) & 15u), dot);
+            }
+            const float acc = sub_group_reduce_add(sc * dot + bi * sx);
+            if (lane == k) yk = acc;
+        }
+        sum = fma(yk, pw, sum);
+    }
+    if (lane < CROWS) out[r0 + lane] = convert_half_rte(bf(to_bf(sum)));
+}
+
 // out[row][i] = fp16(bf16(sum_k wts[k] * y[k][i] + shared_w * y_shared[i])), the sum in pick order. Grid (dim, rows).
 __kernel void sage_moe_combine(__global const float *y, __global const float *wts, __global const float *shared_w,
                                __global half *out, uint dim, uint top_k, uint n_pairs) {

@@ -188,12 +188,14 @@ pub const Acts = struct {
 
 /// sage_moe.cl's kernels and the long-cache attention pair of decode.cl (the Dev's table is the 27B runner's, filled from
 /// the Sage images).
-pub const MoeKernels = struct { attn_span: ze.H, merge_span: ze.H, down8: ze.H, swiglu4: ze.H, router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
+pub const MoeKernels = struct { attn_span: ze.H, merge_span: ze.H, down8: ze.H, swiglu4: ze.H, down_combine: ze.H, router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
 
 /// Sub-groups a work-group of the decode expert kernels (one sub-group a row).
 const MOE_SG = 4;
 /// Work-items on one sage_expert_swiglu row (its K split over them).
 const SWIGLU_WG = 32;
+/// Output rows a sub-group of sage_down_combine (sage_moe.cl CROWS).
+const DC_ROWS = 2;
 /// Rows of a grouped MoE tile (sage_moe.cl MC).
 const MC = 16;
 /// The most tiles `rows` rows can make: full tiles plus at most one partial tile an expert (the shared one too).
@@ -689,6 +691,8 @@ pub const Runner = struct {
             try d.launch(r.mk.swiglu4, .{ .x = s.expert_ff / 4, .y = pairs + T }, gu_args)
         else
             try d.launch(r.mk.swiglu, .{ .x = s.expert_ff, .y = pairs + T }, gu_args);
+        if (T == 1 and s.expert_ff == 512) // one row: down and the combine in one kernel
+            return d.launch(r.mk.down_combine, .{ .x = s.hidden / (MOE_SG * DC_ROWS) }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.mwts, a.msw, a.r, s.hidden, s.top_k });
         const dn_args = .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.my, s.hidden, s.expert_ff, pairs };
         if (s.expert_ff == 512) // Sage: act in registers, 8 rows a sub-group
             try d.launch(r.mk.down8, .{ .x = s.hidden / (MOE_SG * 8), .y = pairs + T }, dn_args)
@@ -769,6 +773,7 @@ fn kernels(d: *Dev, mk: *MoeKernels) !void {
         .down = try d.kernel(mo, "sage_expert_down", 16 * MOE_SG),
         .down8 = try d.kernel(mo, "sage_expert_down8", 16 * MOE_SG),
         .swiglu4 = try d.kernel(mo, "sage_expert_swiglu4", SWIGLU_WG),
+        .down_combine = try d.kernel(mo, "sage_down_combine", 16 * MOE_SG),
         .combine = try d.kernel(mo, "sage_moe_combine", 64),
         .attn_span = try d.kernel(md, "attn_decode_span", 16),
         .merge_span = try d.kernel(md, "attn_merge_span", 256),
