@@ -19,7 +19,7 @@ const Arena = union(enum) {
     device: cuda.DeviceBuffer,
     host: struct { buf: cuda.HostBuffer, ptr: u64 },
 
-    fn ptr(a: Arena) u64 {
+    pub fn ptr(a: Arena) u64 {
         return switch (a) {
             .device => |b| b.ptr,
             .host => |h| h.ptr,
