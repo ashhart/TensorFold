@@ -69,8 +69,7 @@ pub const Metal = struct {
         return self.caches.get(stream) orelse error.UnknownQwenStream;
     }
 
-    /// `lanes` streams over `pages` pages of the planned layout, each at most `most_tokens` rows: the arena and tables
-    /// are scratch buffers, so they join its residency set; the streams the lane engine admits become `lanes`.
+    /// `lanes_n` streams over `pages` pages of the planned layout, the arena and tables in the residency set.
     pub fn attachPages(self: *Metal, l: kv.Layout, lanes_n: u32, pages: usize, most_tokens: u64) !void {
         const sized = kvp.Pages.bytes(l, lanes_n, pages, most_tokens);
         if (sized.arena > self.model.device.maxBufferLength()) return error.ArenaTooLarge;

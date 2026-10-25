@@ -1,9 +1,4 @@
-// Qwen3.5-2B's KV in pages of the core pool (TF_QWEN35_METAL_KV_PAGES=1): layout.metal and core/kv_pages.h come first.
-// A page holds 256 positions of every attention layer as [layer][keys, values][kv head][256][256] bf16; `keys` and
-// `values` are bound at their layer's part of page 0, so a row is its page's offset, its head's part, its row there.
-// qwen35_keys_paged and qwen35_attn_partial_paged are qwen35_keys and attn_partial.metal with that address alone:
-// their positions, chunks of 128 (inside one page), splits and merge order, so their bits, are the same; a chunk
-// reads its page's table entry once.
+// Qwen3.5-2B's keys and attention over core-pool pages: the contiguous kernels with only the K/V address changed.
 
 inline ulong qwen35_page_row(device const uint* table, uint pos, ulong page_bytes, uint h) {
   return tf_page_offset(table, pos, page_bytes, 256 * 2) + ulong(h) * TF_PAGE_TOKENS * 256 * 2;
