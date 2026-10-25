@@ -40,6 +40,8 @@ pub fn of(declared: Declared, stored: Stored) Refusal!Format {
             .nvfp4_csf => f == .nvfp4_csf,
             .mxfp8 => f == .mxfp8,
             .fp8_pb_wo => f == .fp8_pb,
+            // per-tensor FP8 with a static input scale (#1145's Qwen recipe): GLM's lanes read no such projection
+            .fp8 => false,
         } else f == .bf16,
     };
     return if (ok) f else error.FormatMismatch;
@@ -313,6 +315,9 @@ test "a recipe the tensors do not hold is refused, and the refusal names the mod
     const pb = Stored{ .weight = meta(.f8_e4m3, &.{ 512, 4096 }), .scale = meta(.f32, &.{ 4, 1, 32, 1 }) };
     try testing.expectError(error.FormatMismatch, of(.{ .mixed = .mxfp8 }, pb));
     try testing.expectError(error.FormatMismatch, of(.nvfp4, pb));
+    // a per-tensor FP8 module is refused whatever its tensors hold
+    try testing.expectError(error.FormatMismatch, of(.{ .mixed = .fp8 }, pb));
+    try testing.expectError(error.FormatMismatch, of(.{ .mixed = .fp8 }, bf));
     var buf: [160]u8 = undefined;
     const why = describe(&buf, "model.language_model.layers.0.self_attn.q_proj", .{ .mixed = .mxfp8 }, bf);
     try testing.expect(std.mem.startsWith(u8, why, "model.language_model.layers.0.self_attn.q_proj: declared mxfp8, stored bf16"));
