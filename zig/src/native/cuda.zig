@@ -284,6 +284,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         fn read(p: *anyopaque) ?u64 {
             const self: *@This() = @ptrCast(@alignCast(p));
             const now = (pool(self.a, self.io, self.ctx, self.problem) catch return null) orelse return null;
+            family_memory.noteParked(now, "the room this rank reports");
             return now.room(cuda.usage(false).device - self.held);
         }
     };
@@ -336,6 +337,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     defer if (!opened) served.close(gpa);
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
+    family_memory.noteParked(after, "the CUDA memory budget");
     const L = @TypeOf(loaded); // a family's Loaded may leave out a learner and a lone driver
     const learn_bytes: usize = if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
     const host_cache = try kv_pages.placeHost(F, a, loaded, o, after.room(model), @intCast(window), served.stream_bytes, problem) orelse return null;

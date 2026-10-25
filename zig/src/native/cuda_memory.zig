@@ -1,6 +1,7 @@
 //! CUDA memory admission arithmetic, and the host pool read from /proc/meminfo and validated, without a device.
 const cuda = @import("cuda");
 const std = @import("std");
+const parked_pages = @import("parked_pages.zig");
 const gib: f64 = 1 << 30;
 
 /// Bytes of the checkpoint's safetensors (the weight map's files, else the folder's own), near enough to refuse early.
@@ -80,11 +81,18 @@ pub fn meminfo(text: []const u8) ?MemInfo {
     return if (t > 0 and a <= t) .{ .total = t, .available = a } else null;
 }
 
-/// --prompt-cache-gib in pinned host memory (8 GiB unasked), at most half of what /proc/meminfo has available.
+/// MemAvailable plus the free pages parked on the per-CPU lists (`zones`, read after it), at most MemTotal.
+pub fn counting(m: MemInfo, zones: ?[]const u8) MemInfo {
+    const parked = parked_pages.bytes(zones orelse return m, std.heap.pageSize());
+    return .{ .total = m.total, .available = @min(m.total, m.available +| parked) };
+}
+
+/// --prompt-cache-gib in pinned host memory (8 GiB unasked), at most half of what is available (`counting`).
 pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64) u64 {
     const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0) else 8 << 30;
     const text = procText(a, io, "/proc/meminfo") orelse return 0;
-    const m = meminfo(text) orelse return 0;
+    const zones = procText(a, io, "/proc/zoneinfo");
+    const m = counting(meminfo(text) orelse return 0, zones);
     return @min(want, m.available / 2);
 }
 
@@ -104,6 +112,7 @@ pub const Pool = struct {
     reserve: u64,
     limit: ?u64,
     unified: bool,
+    parked: u64 = 0, // the part of `free` parked on the per-CPU page lists
 
     /// Bytes the engine may still allocate on top of `held`.
     pub fn room(p: Pool, held: u64) u64 {
@@ -260,6 +269,21 @@ test "unified admission refuses missing or malformed host memory" {
     try std.testing.expectEqual(MemInfo{ .total = 131072 * 1024, .available = 65536 * 1024 }, try counts(true, card, "MemTotal: 131072 kB\nMemAvailable: 65536 kB\n"));
 }
 
+test "counting: the per-CPU lists' parked pages raise MemAvailable, at most MemTotal; nothing without them" {
+    const page = std.heap.pageSize();
+    const m: MemInfo = .{ .total = 128 << 30, .available = 96 << 30 };
+    const zones = try std.fmt.allocPrint(std.testing.allocator, "  pagesets\n    cpu: 0\n      count: {d}\n      high_min: 10\n", .{10 + (6 << 30) / page});
+    defer std.testing.allocator.free(zones);
+    try std.testing.expectEqual(MemInfo{ .total = 128 << 30, .available = 102 << 30 }, counting(m, zones));
+    try std.testing.expectEqual(MemInfo{ .total = 128 << 30, .available = 128 << 30 }, counting(.{ .total = 128 << 30, .available = 125 << 30 }, zones));
+    try std.testing.expectEqual(m, counting(m, null));
+    try std.testing.expectEqual(m, counting(m, "  pagesets\n    cpu: 0\n      count: x\n"));
+}
+
+test {
+    _ = parked_pages;
+}
+
 test "memory limit refuses an oversized finite value and the rounded u64 boundary" {
     try std.testing.expectError(error.Invalid, limitBytes("1e300"));
     try std.testing.expectError(error.Invalid, limitBytes("17179869184"));
@@ -273,10 +297,13 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
     const host_counts = hostCounts(unified, @import("sys").windows);
     const text = if (host_counts) procText(a, io, "/proc/meminfo") else null;
     defer if (text) |bytes| a.free(bytes);
-    const available = counts(host_counts, .{ .total = card.total, .available = card.free }, text) catch {
+    const zones = if (host_counts) procText(a, io, "/proc/zoneinfo") else null;
+    defer if (zones) |bytes| a.free(bytes);
+    const measured = counts(host_counts, .{ .total = card.total, .available = card.free }, text) catch {
         problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
         return null;
     };
+    const available = counting(measured, zones);
     const reserve_text = if (std.c.getenv("TENSORFOLD_MEMORY_RESERVE_GIB")) |p| std.mem.span(p) else null;
     const limit_text = if (std.c.getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) |p| std.mem.span(p) else null;
     const reserve = reserveBytes(reserve_text, available.total, unified) catch {
@@ -287,7 +314,7 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{limit_text orelse ""});
         return null;
     };
-    return .{ .free = available.available, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified };
+    return .{ .free = available.available, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified, .parked = available.available - measured.available };
 }
 
 test "the weights' bytes: each file the weight map names once, under a folder too; without an index the folder's own" {
@@ -352,4 +379,12 @@ test "an index allocation failure is reported instead of counting the flat direc
     var bytes: [0]u8 = .{};
     var fixed = std.heap.FixedBufferAllocator.init(&bytes);
     try std.testing.expectError(error.OutOfMemory, checkedWeightBytes(fixed.allocator(), io, dir));
+}
+
+test "a GB10's /proc files: its lists' parked pages raise MemAvailable and stay under MemTotal" {
+    const m = meminfo(@embedFile("fixtures/gb10_parked/meminfo_draining")) orelse return error.TestUnexpectedResult;
+    const parked = parked_pages.bytes(@embedFile("fixtures/gb10_parked/zoneinfo_draining"), 4096); // GB10's page size
+    try std.testing.expectEqual(@as(u64, 32813016 * 1024), m.available);
+    try std.testing.expect(parked > 0 and m.available + parked < m.total);
+    try std.testing.expect(meminfo(@embedFile("fixtures/gb10_parked/meminfo_at_budget")) != null);
 }
