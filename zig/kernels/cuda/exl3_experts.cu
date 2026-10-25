@@ -247,6 +247,11 @@ extern "C" __global__ void tf_exl3_experts_rot_in(const RotInArgs a) {
         const __nv_bfloat16* xv = reinterpret_cast<const __nv_bfloat16*>(xr);
 #pragma unroll
         for (int j = 0; j < 4; ++j) v[j] = __bfloat162float(xv[j]) * __half2float(suh[j]);
+    } else if (a.x_dtype == 2) {
+        // f32 input (the minimax engine's x32): element indexing must be 32-bit, not the 16-bit xr stride
+        const float* xv = reinterpret_cast<const float*>(a.x) + (size_t)row * a.x_stride + blk * 128 + 4 * lane;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) v[j] = xv[j] * __half2float(suh[j]);
     } else {
         const half* xv = reinterpret_cast<const half*>(xr);
 #pragma unroll

@@ -1,0 +1,8 @@
+{
+  "quant_method": "exl3",
+  "version": "1.6.1",
+  "head_bits": 8,
+  "out_scales": "always",
+  "codebook": "mul1",
+  "avg_bits": 3.06
+}
