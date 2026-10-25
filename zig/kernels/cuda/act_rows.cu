@@ -170,24 +170,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_head_gate_rows(const __nv_bf
                                                                    const __nv_bfloat16* __restrict__ g, long long g_ld,
                                                                    __nv_bfloat16* __restrict__ out,
                                                                    float* __restrict__ xs, int heads, int d) {
-    const int64_t r = blockIdx.x;
-    const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values, all of one head
-    const int n = heads * d;
-    const bool live = 8 * c < n;
-    float ov[8], y[8];
-    float gate = 0.f;
-    if (live) {
-        unpack8(*reinterpret_cast<const uint4*>(o + r * n + 8 * c), ov);
-        gate = __bfloat162float(__float2bfloat16_rn(sigmoid(__bfloat162float(g[r * g_ld + 8 * c / d]))));
-    }
-#pragma unroll
-    for (int i = 0; i < 8; ++i) y[i] = live ? __fmul_rn(ov[i], gate) : 0.f;
-    const uint4 yp = pack8(y);
-    if (live) *reinterpret_cast<uint4*>(out + r * n + 8 * c) = yp;
-    if (xs != nullptr) {
-        const float s = group_sum8(yp, live);
-        if (live && (c & 7) == 0) xs[r * (n / 64) + c / 8] = s;
-    }
+    tf_act_round::head_gate_rows(o, g, g_ld, out, xs, heads, d, tf_act_round::HEAD_GATE_ALL);
 }
 
 // out = bf16(bf16(gelu(gate)) * up), PyTorch's exact erf GELU in fp32 (Spark2.5's MLP); xs (or null) out's sums.
@@ -195,25 +178,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_gelu_erf_rows(const __nv_bfl
                                                                   const __nv_bfloat16* __restrict__ up, long long u_ld,
                                                                   __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
                                                                   int n) {
-    const int64_t r = blockIdx.x;
-    const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values
-    const bool live = 8 * c < n;
-    float g[8], u[8], o[8];
-    if (live) {
-        unpack8(*reinterpret_cast<const uint4*>(gate + r * g_ld + 8 * c), g);
-        unpack8(*reinterpret_cast<const uint4*>(up + r * u_ld + 8 * c), u);
-    }
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        const float gl = __fmul_rn(__fmul_rn(g[i], 0.5f), __fadd_rn(1.f, erff(__fmul_rn(g[i], 0.70710678118654752f))));
-        o[i] = live ? __fmul_rn(__bfloat162float(__float2bfloat16_rn(gl)), u[i]) : 0.f;
-    }
-    const uint4 op = pack8(o);
-    if (live) *reinterpret_cast<uint4*>(out + r * n + 8 * c) = op;
-    if (xs != nullptr) {
-        const float s = group_sum8(op, live);
-        if (live && (c & 7) == 0) xs[r * (n / 64) + c / 8] = s;
-    }
+    tf_act_round::gelu_erf_rows(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::GELU_ERF_ALL);
 }
 
 // Dory's nGPT activations (act_l2.cuh): a scaled sigmoid gate and a scaled SwiGLU, each row then L2-normed.

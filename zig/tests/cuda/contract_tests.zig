@@ -361,6 +361,8 @@ pub fn run(gpu: check.Gpu) !void {
     for (act_round_k.entries, &act_rounds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .act = &act_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_act_round") else null };
     defer for (&act_rounds) |*x| x.deinit();
     for (&act_rounds) |*x| try kernels.append(a, x.kernel());
+    const spark_acts = try @import("contract_spark_act.zig").Group.create(a, gpu, s, &act_rows, mods[5], &kernels);
+    defer spark_acts.destroy();
     var gemma_ops: @import("contract_gemma_ops.zig").Group = .{};
     defer gemma_ops.deinit();
     try gemma_ops.init(gpu, s, &act_rows, &vit, &round_fns, mods[5]);

@@ -46,6 +46,7 @@ The tokenizer needed `Digits` (`individual_digits`) in `core/tokenizer/steps.zig
 
 ## Not done
 
-The two new kernels are not yet registered in the CUDA contract runner (`zig/tests/cuda/contract_act*.zig`) or the
-launch-limit records, there is no fixture-based exactness test against dumped reference rows, and no drafter or
-structured output is served. Those are the gates `CONTRIBUTING.md` asks of a new family before it lands.
+The two new kernels are under the CUDA contract (`zig/tests/cuda/contract_spark_act.zig`, its float64 ends in
+`core/act_ref.zig`, a control for each kernel's rounding point) with launch records in
+`core/contract/spark_cuda_records.zig`. There is no fixture-based exactness test against dumped reference rows yet,
+and no drafter or structured output is served.

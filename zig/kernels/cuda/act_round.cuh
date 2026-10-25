@@ -16,6 +16,10 @@ constexpr int SWIGLU_ALL = 31;
 // MLX's logit soft cap cap * tanh(x / cap) as bf16 ops (Metal gemma4/glue.metal's gemma_softcap): its rounding points.
 enum : int { CAP_DIV = 1, CAP_TANH = 2 };
 constexpr int SOFTCAP_ALL = 3;
+// Spark2.5's head gate (the gate cast to bf16 before the product) and exact GELU (the gelu cast before the product).
+enum : int { HEAD_GATE = 1, GELU_ERF = 1 };
+constexpr int HEAD_GATE_ALL = 1;
+constexpr int GELU_ERF_ALL = 1;
 
 __device__ __forceinline__ float bf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
 
@@ -97,6 +101,59 @@ __device__ __forceinline__ void rows(const __nv_bfloat16* __restrict__ gate, lon
     if (live) *reinterpret_cast<uint4*>(out + r * n + 8 * c) = op;
     if (xs != nullptr) {
         const float s = group_sum8(op, live);
+        if (live && (c & 7) == 0) xs[r * (n / 64) + c / 8] = s;
+    }
+}
+
+// bf16(gelu(x)) * up, gelu PyTorch's exact form in fp32: x / 2 (1 + erf(x / sqrt 2)), erff within its 2 ulps.
+__device__ __forceinline__ float gelu_erf(float x, float up, int keep) {
+    const float gl = __fmul_rn(__fmul_rn(x, 0.5f), __fadd_rn(1.f, erff(__fmul_rn(x, 0.70710678118654752f))));
+    return __fmul_rn(point(gl, keep, GELU_ERF), up);
+}
+
+// out[r, i] = bf16(gelu_erf(gate[r * g_ld + i], up[r * u_ld + i])) for i < n (n % 64 == 0); xs (or null) its sums.
+__device__ __forceinline__ void gelu_erf_rows(const __nv_bfloat16* __restrict__ gate, long long g_ld,
+                                              const __nv_bfloat16* __restrict__ up, long long u_ld,
+                                              __nv_bfloat16* __restrict__ out, float* __restrict__ xs, int n, int keep) {
+    const int64_t r = blockIdx.x;
+    const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values
+    const bool live = 8 * c < n;
+    float g[8], u[8], o[8];
+    if (live) {
+        unpack8(*reinterpret_cast<const uint4*>(gate + r * g_ld + 8 * c), g);
+        unpack8(*reinterpret_cast<const uint4*>(up + r * u_ld + 8 * c), u);
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) o[i] = live ? gelu_erf(g[i], u[i], keep) : 0.f;
+    const uint4 op = pack8(o);
+    if (live) *reinterpret_cast<uint4*>(out + r * n + 8 * c) = op;
+    if (xs != nullptr) {
+        const float s = group_sum8(op, live);
+        if (live && (c & 7) == 0) xs[r * (n / 64) + c / 8] = s;
+    }
+}
+
+// out[r, h d + e] = bf16(o * bf16(1 / (1 + expf(-g[r * g_ld + h])))), o packed (d % 64 == 0); xs (or null) its sums.
+__device__ __forceinline__ void head_gate_rows(const __nv_bfloat16* __restrict__ o, const __nv_bfloat16* __restrict__ g,
+                                               long long g_ld, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
+                                               int heads, int d, int keep) {
+    const int64_t r = blockIdx.x;
+    const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values, all of one head
+    const int n = heads * d;
+    const bool live = 8 * c < n;
+    float ov[8], y[8];
+    float gate = 0.f;
+    if (live) {
+        unpack8(*reinterpret_cast<const uint4*>(o + r * n + 8 * c), ov);
+        const float x = __bfloat162float(g[r * g_ld + 8 * c / d]);
+        gate = point(__fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))), keep, HEAD_GATE);
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) y[i] = live ? __fmul_rn(ov[i], gate) : 0.f;
+    const uint4 yp = pack8(y);
+    if (live) *reinterpret_cast<uint4*>(out + r * n + 8 * c) = yp;
+    if (xs != nullptr) {
+        const float s = group_sum8(yp, live);
         if (live && (c & 7) == 0) xs[r * (n / 64) + c / 8] = s;
     }
 }
