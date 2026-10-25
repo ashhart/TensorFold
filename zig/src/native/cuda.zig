@@ -410,7 +410,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         const store = try gpa.create(pc.Store);
         errdefer gpa.destroy(store);
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
-        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else null; // its disk rows
+        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
         store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
         errdefer {
@@ -421,9 +421,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         }
         try kv_pages.store(F, store, loaded.target, kept); // its snapshot slots, before a disk probe takes one
         h.store = store;
-        if (F == nemotron.native and o.learn_conversations) {
-            if (o.learn) |root| try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
-        }
+        if (o.learn_conversations) if (o.learn) |root| {
+            if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
+            if (comptime cuda_disk.keptDisk(F)) |K| try cuda_disk.attachKept(K, F.model_type, a, io, &g.ctx, o, root, kernels, loaded, store);
+        };
     }
     errdefer if (h.store) |store| kv_pages.closeStore(gpa, store);
     var conversations = false;
