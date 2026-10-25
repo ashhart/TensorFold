@@ -21,12 +21,14 @@ extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
 
 pub const EPS: f32 = 1e-6;
 pub const SPLIT = 32; // keys per attention split (decode.cl)
-/// Decode attention slices at most (attn_decode_span): a slice holds a multiple of SPLIT keys.
+/// Decode attention slices at most (attn_decode_span): a slice holds a multiple of SPAN_STEP keys.
 const SLICES = 256;
+/// Short caches get short slices too, so that enough sub-groups share the keys.
+const SPAN_STEP = 8;
 
-/// Keys a slice of attn_decode_span holds for `keys` keys.
+/// Keys a slice of attn_decode_span holds for `keys` keys: at most SLICES slices.
 fn span(keys: u32) u32 {
-    return @max(1, (keys + SLICES * SPLIT - 1) / (SLICES * SPLIT)) * SPLIT;
+    return @max(1, (keys + SLICES * SPAN_STEP - 1) / (SLICES * SPAN_STEP)) * SPAN_STEP;
 }
 /// Rows of one forward: the decode kernels' limit (the chain table and the serial GDN).
 pub const WINDOW = 16;
@@ -141,7 +143,7 @@ pub const Acts = struct {
         const w: usize = WINDOW;
         const c: usize = CHUNK;
         const widest_in: usize = @max(s.hidden, @max(z.vd, z.od));
-        const ns: usize = (ctx + SPLIT - 1) / SPLIT;
+        const ns: usize = @max((ctx + SPLIT - 1) / SPLIT, SLICES);
         const pairs: usize = c * (s.top_k + 1);
         return .{
             .x = try d.alloc_(c * s.hidden * 4),
