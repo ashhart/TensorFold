@@ -183,15 +183,29 @@ fn pickRow(part: []const f32, bias: []const f32, r: usize, rows: usize, e: usize
     return total;
 }
 
-/// tf_nemo_topk: pickRow's picks, then the shared slots.
-pub fn topk(part: []const f32, bias: []const f32, idx: []i32, wt: []f32, rows: usize, scaling: f32, e: usize, sk: usize, top_k: usize, ns: usize, norm: bool) void {
-    var probs: [config.latent_max_picks]f32 = undefined;
-    var ids: [config.latent_max_picks]usize = undefined;
+/// tf_moe_topk_sigmoid_score_warp on logits [rows, e] in float64: sigmoid + bias ranked, then the shared slots.
+pub fn topk(logits: []const f32, bias: []const f32, idx: []i32, wt: []f64, rows: usize, scaling: f64, e: usize, top_k: usize, ns: usize, norm: bool) void {
+    var sel: [config.latent_max_experts]f64 = undefined;
+    var score: [config.latent_max_experts]f64 = undefined;
     for (0..rows) |r| {
-        const total = pickRow(part, bias, r, rows, e, sk, ids[0..top_k], probs[0..top_k]);
+        for (0..e) |ex| {
+            score[ex] = 1 / (1 + @exp(-@as(f64, logits[r * e + ex])));
+            sel[ex] = if (std.math.isNan(score[ex])) -std.math.inf(f64) else score[ex] + bias[ex];
+        }
+        var total: f64 = 0;
+        for (0..top_k) |k| {
+            var bi: usize = 0;
+            for (1..e) |ex| if (sel[ex] > sel[bi]) {
+                bi = ex;
+            };
+            idx[r * ns + k] = @intCast(bi);
+            wt[r * ns + k] = score[bi];
+            total += score[bi];
+            sel[bi] = -std.math.inf(f64);
+        }
         for (0..ns) |k| {
-            idx[r * ns + k] = @intCast(if (k < top_k) ids[k] else e + k - top_k);
-            wt[r * ns + k] = if (k >= top_k) 1.0 else if (norm) (probs[k] / (total + 1e-20)) * scaling else probs[k] * scaling;
+            if (k >= top_k) idx[r * ns + k] = @intCast(e + k - top_k);
+            wt[r * ns + k] = if (k >= top_k) 1 else if (norm) wt[r * ns + k] / total * scaling else wt[r * ns + k] * scaling;
         }
     }
 }
@@ -449,12 +463,12 @@ test "one key: every head's output is that key's value, and the partials say one
 }
 
 test "top-k picks by score plus bias, the lowest id on a tie, then the shared slots" {
-    var part: [8]f32 = .{ 0, 2, -1, 2, 0.5, -3, 1, 2 };
+    const part: [8]f32 = .{ 0, 2, -1, 2, 0.5, -3, 1, 2 };
     const bias: [8]f32 = .{ 0, 0, 0, 0, 0, 0, 3, 0 };
     var idx: [4]i32 = undefined;
-    var wt: [4]f32 = undefined;
-    topk(&part, &bias, &idx, &wt, 1, 2.0, 8, 1, 2, 4, false);
+    var wt: [4]f64 = undefined;
+    topk(&part, &bias, &idx, &wt, 1, 2.0, 8, 2, 4, false);
     try std.testing.expectEqualSlices(i32, &.{ 6, 1, 8, 9 }, &idx);
-    try std.testing.expectEqual(m.sigmoid(1) * 2.0, wt[0]);
+    try std.testing.expectEqual(2.0 / (1.0 + @exp(-1.0)), wt[0]);
     try std.testing.expectEqual(@as(f32, 1), wt[3]);
 }

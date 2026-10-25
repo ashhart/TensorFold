@@ -41,8 +41,8 @@ zig/kernels/cuda/nemotron_attention.cu	c04ad68bea1202e5c6f3d289af3745b824b89a8aa
 zig/kernels/cuda/nemotron_keyed.cu	ed8bdd7012970d9896ec703bd7c3d5ec83e02f41dba4ce1f896fc39c1ee349c9	raw
 zig/kernels/cuda/nemotron_latent.cu	04fba97043d0948f82a3b9477f448dd76b21f6d11d1a445e020bd41cacb85c2b	raw	commits e40bd6eae, 8a8ff3d64; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/nemotron_mamba.cu	dcaba12253d3931ae48c7ebd4e13dfb956f540ae19f4ab83130c3f21745be5ec	raw	commits fa2af585f, f0ef17e69; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/kernels/cuda/nemotron_ops.cu	b2b1a4441202229cc6989b2ae67259ea680c328b2d8cb2284985cece3c27d38b	raw
-zig/kernels/cuda/nemotron_route.cu	74cda9ea64addcc8b1288e1f0f0db296a5378dccfcbc7962c432c5cda32817fa	raw	commits 739c924de, 8cfdaa739, b77a33b08, 7f6f940eb, 05d0617af, bc76d90d6; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
+zig/kernels/cuda/nemotron_ops.cu	3d3e286298b4401ae6f0f6e9b637c8a0b1a33bd281089211470ddbf62b0d6a27	raw
+zig/kernels/cuda/nemotron_route.cu	d835d4d166f42c20fb1082d6aa0daddd3111f7d258b44197354dab30e92e01d3	raw	commits 739c924de, 8cfdaa739, b77a33b08, 7f6f940eb, 05d0617af, bc76d90d6; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/norms.cu	ed5a2dcb4dfc81ed048a422a707a4161a217c5b1aa06af82ec8b8e2d66bd6ae3	raw
 zig/kernels/cuda/nvfp4_experts.cu	ac07cf0a5799757b878b7add5e8bbe2673f8bc84af6c3c7ab6f52510e1c81b98	raw
 zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a2c328303d111	raw

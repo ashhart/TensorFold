@@ -17,19 +17,27 @@ fn noSums(_: c.Shape) usize {
 
 const pick_rule = "picks by fp32 logit + bias, larger first, ties to the lower id, a NaN never picked; weights sigmoid(logit)";
 
-/// A routing's fixed form; shape: rows, experts (n) and top-k (k).
-pub const Route = struct { name: []const u8, shared: bool, normalize: bool = false, scale: f32 = 1, warp: bool };
+const score_rule = "picks by fp32 sigmoid(logit) + bias, larger first, ties to the lower id, a NaN never picked; weights the score";
+
+/// A routing's fixed form; shape: rows, experts (n), top-k (k). score: sigmoid + bias ranked (plant: the logit form).
+pub const Route = struct { name: []const u8, shared: bool, normalize: bool = false, scale: f32 = 1, warp: bool, score: bool = false, shared_slots: usize = 1, plant: bool = false };
+
+const nemotron: []const c.Shape = &.{ .{ .rows = 16, .n = 128, .k = 6 }, .{ .rows = 300, .n = 128, .k = 6 } };
+const bolt: []const c.Shape = &.{ .{ .rows = 16, .n = 496, .k = 9 }, .{ .rows = 300, .n = 496, .k = 9 } };
 
 pub const routes = [_]Route{
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_warp (Kolibri: 384 experts, top 6 + shared)", .shared = true, .warp = true },
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_warp (256 experts, top 8 normalized x2.5)", .shared = false, .normalize = true, .scale = 2.5, .warp = true },
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid (block form, 513 to 4,096 experts)", .shared = true, .warp = false },
+    .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_warp (Nemotron: 128 experts, top 6 normalized x2.5 + 2 shared)", .shared = true, .shared_slots = 2, .normalize = true, .scale = 2.5, .warp = true, .score = true },
+    .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_warp (Bolt: 496 experts, top 9 normalized x2.5)", .shared = false, .normalize = true, .scale = 2.5, .warp = true, .score = true },
+    .{ .name = "control: score top-k ranking logit + bias (tf_moe_topk_sigmoid_warp)", .shared = false, .normalize = true, .scale = 2.5, .warp = true, .score = true, .plant = true },
 };
 
 pub fn topkSpec(r: Route) c.Spec {
-    const served: []const c.Shape = if (!r.warp) &.{ .{ .rows = 16, .n = 4096, .k = 64 }, .{ .rows = 33, .n = 513, .k = 6 } } else if (r.normalize) &.{ .{ .rows = 16, .n = 256, .k = 8 }, .{ .rows = 300, .n = 256, .k = 8 } } else &.{ .{ .rows = 16, .n = 384, .k = 6 }, .{ .rows = 300, .n = 384, .k = 6 } };
+    const served: []const c.Shape = if (r.score) (if (r.shared or r.plant) nemotron else bolt) else if (!r.warp) &.{ .{ .rows = 16, .n = 4096, .k = 64 }, .{ .rows = 33, .n = 513, .k = 6 } } else if (r.normalize) &.{ .{ .rows = 16, .n = 256, .k = 8 }, .{ .rows = 300, .n = 256, .k = 8 } } else &.{ .{ .rows = 16, .n = 384, .k = 6 }, .{ .rows = 300, .n = 384, .k = 6 } };
     const tiles: [3]c.Tile = if (r.warp) .{ .{ .size = 8 }, .{ .size = 32, .min = 8 }, .{} } else .{ .{}, .{ .size = 256, .min = 513 }, .{} };
-    return .{ .name = r.name, .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = pick_rule }, .tiles = tiles, .served = served };
+    return .{ .name = r.name, .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = if (r.score) score_rule else pick_rule }, .tiles = tiles, .served = served };
 }
 
 pub const TopK = struct {
@@ -49,17 +57,18 @@ pub const TopK = struct {
     }
 
     pub fn kernel(self: *TopK) g.Kernel {
-        return .{ .spec = topkSpec(self.route), .ctx = self, .vt = &vt };
+        return .{ .spec = topkSpec(self.route), .ctx = self, .vt = &vt, .control = if (self.route.plant) .shapes else null };
     }
 
     const vt = g.hooks(TopK);
 
     fn slots(self: *const TopK) usize {
-        return self.shape.k + @intFromBool(self.route.shared);
+        return self.shape.k + if (self.route.shared) self.route.shared_slots else 0;
     }
 
     fn form(self: *const TopK) glue.Route {
-        return .{ .experts = self.shape.n, .topk = self.shape.k, .shared = self.route.shared, .normalize = self.route.normalize, .scale = self.route.scale };
+        const r = self.route;
+        return .{ .experts = self.shape.n, .topk = self.shape.k, .shared = r.shared, .normalize = r.normalize, .scale = r.scale, .score = r.score and !r.plant, .shared_slots = r.shared_slots };
     }
 
     pub fn prepare(self: *TopK, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -108,6 +117,7 @@ pub const TopK = struct {
 
     /// Each row's picks by the stated rule exactly, weights within 2^-20 of float64, the shared slot last.
     pub fn check(self: *TopK, _: g.Gate) !?[]const u8 {
+        if (self.route.score) return self.checkScore();
         const a = self.rig.gpu.gpa;
         const out = try self.rig.outputBytes();
         const n = self.shape.rows * self.slots();
@@ -147,6 +157,54 @@ pub const TopK = struct {
         }
         return null;
     }
+
+    /// The score form's picks against float64 sigmoid + bias (near-ties within 2^-20 may swap), weights within 2^-20.
+    fn checkScore(self: *TopK) !?[]const u8 {
+        const a = self.rig.gpu.gpa;
+        const out = try self.rig.outputBytes();
+        const ns = self.slots();
+        const n = self.shape.rows * ns;
+        const ne = self.shape.n;
+        const k_ = self.shape.k;
+        const sel = try a.alloc(f64, ne);
+        defer a.free(sel);
+        const score = try a.alloc(f64, ne);
+        defer a.free(score);
+        const taken = try a.alloc(bool, ne);
+        defer a.free(taken);
+        for (0..self.shape.rows) |r| {
+            for (sel, score, 0..) |*v, *p, e| {
+                p.* = 1 / (1 + @exp(-@as(f64, self.logits.items[r * ne + e])));
+                v.* = if (std.math.isNan(p.*)) -std.math.inf(f64) else p.* + self.bias.items[e];
+            }
+            @memset(taken, false);
+            var w64: [64]f64 = undefined;
+            var sum: f64 = 0;
+            for (0..k_) |k| {
+                const id: usize = std.mem.readInt(u32, out[(r * ns + k) * 4 ..][0..4], .little);
+                if (id >= ne or taken[id]) return try std.fmt.bufPrint(&self.msg, "row {d} pick {d}: expert {d} out of range or repeated", .{ r, k, id });
+                var best: f64 = -std.math.inf(f64);
+                for (sel, taken) |v, t| if (!t) {
+                    best = @max(best, v);
+                };
+                if (!(sel[id] >= best - 0x1p-20 * (@abs(best) + 1)) and !(best == -std.math.inf(f64) and sel[id] == best))
+                    return try std.fmt.bufPrint(&self.msg, "row {d} pick {d}: expert {d} scores {d:.6}, an unpicked one {d:.6}", .{ r, k, id, sel[id], best });
+                for (0..id) |e| if (!taken[e] and sel[e] == sel[id])
+                    return try std.fmt.bufPrint(&self.msg, "row {d} pick {d}: expert {d} ahead of tied expert {d}", .{ r, k, id, e });
+                taken[id] = true;
+                w64[k] = score[id];
+                sum += score[id];
+            }
+            for (0..ns) |k| {
+                const id = std.mem.readInt(u32, out[(r * ns + k) * 4 ..][0..4], .little);
+                const got: f64 = @as(f32, @bitCast(std.mem.readInt(u32, out[(n + r * ns + k) * 4 ..][0..4], .little)));
+                if (k >= k_ and id != ne + k - k_) return try std.fmt.bufPrint(&self.msg, "row {d}: shared slot {d} holds {d}", .{ r, k, id });
+                const want = if (k >= k_) 1 else (if (self.route.normalize) w64[k] / sum else w64[k]) * self.route.scale;
+                if (!(@abs(got - want) <= @abs(want) * 0x1p-20 + 1e-30)) return try std.fmt.bufPrint(&self.msg, "row {d} slot {d}: weight {d:.8} where float64 gives {d:.8}", .{ r, k, got, want });
+            }
+        }
+        return null;
+    }
 };
 
 /// The combine's kinds: y in, out; Kolibri combines fp32 expert rows into bf16.
@@ -164,9 +222,9 @@ fn slotChain(s: c.Shape) usize {
     return s.k;
 }
 
-/// Shape: rows, dims (n) and slots (k): Kolibri's 6 + shared over 2,560, eight + shared over 7,168.
+/// Shape: rows, dims (n), slots (k): Kolibri's 6 + 1 over 2,560, 8 + 1 over 7,168, Bolt's latent sum of 9 over 1,024.
 pub fn combineSpec(x: Combo) c.Spec {
-    return .{ .name = x.name, .accum = .f32, .depth = slotChain, .out = x.elem, .tiles = .{ .{}, .{ .size = 256 }, .{ .size = 8 } }, .served = &.{ .{ .rows = 16, .n = 2560, .k = 7 }, .{ .rows = 300, .n = 2560, .k = 7 }, .{ .rows = 9, .n = 7168, .k = 9 } } };
+    return .{ .name = x.name, .accum = .f32, .depth = slotChain, .out = x.elem, .tiles = .{ .{}, .{ .size = 256 }, .{ .size = 8 } }, .served = &.{ .{ .rows = 16, .n = 2560, .k = 7 }, .{ .rows = 300, .n = 2560, .k = 7 }, .{ .rows = 9, .n = 7168, .k = 9 }, .{ .rows = 16, .n = 1024, .k = 9 }, .{ .rows = 300, .n = 1024, .k = 9 } } };
 }
 
 pub const Combine = struct {

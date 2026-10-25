@@ -19,8 +19,6 @@ pub const Fns = struct {
     router: cuda.Function,
     router_rows: cuda.Function,
     router_tiles: cuda.Function,
-    topk: cuda.Function,
-    topk_wide: cuda.Function, // past 256 experts or 8 picks
     conv: cuda.Function,
     conv_rows: cuda.Function,
     conv_commit: cuda.Function,
@@ -42,8 +40,6 @@ pub const Fns = struct {
             .router = try m[0].function("tf_nemo_router"),
             .router_rows = try m[0].function("tf_nemo_router_rows"),
             .router_tiles = try m[0].function("tf_nemo_router_tiles"),
-            .topk = try m[0].function("tf_nemo_topk"),
-            .topk_wide = try m[0].function("tf_nemo_topk_wide"),
             .conv = try m[1].function("tf_nemo_conv"),
             .conv_rows = try m[1].function("tf_nemo_conv_rows"),
             .conv_commit = try m[1].function("tf_nemo_conv_commit"),
@@ -109,6 +105,8 @@ pub const Glue = struct {
     s: cuda.Stream,
     emb: *const cuda.embed_rows.EmbedRows, // the shared token rows (embed_rows.cu)
     norms: *const cuda.norms.Norms, // the shared RMS norm rows (norms.cu)
+    moe: *const cuda.moe_glue.MoeGlue, // the shared expert combine and top-k (moe_glue.cu)
+    ones: u64 = 0, // fp32 1.0 a router slice (Buffers.ones): the combine's weights summing the slices
 
     fn tri(g: Glue) ?triton.Tri {
         return if (g.set) |x| .{ .set = x, .s = g.s } else null;
@@ -173,20 +171,17 @@ pub const Glue = struct {
         try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), sk }, 256, routerShared(per), &a);
     }
 
-    /// fp32 router logits over K slices, then each row's top-k and the shared halves' slots (`slots` past top-k).
+    /// fp32 router logits over K slices summed in order, then each row's top-k and the shared halves' slots.
     pub fn route(g: Glue, x: u64, w: u64, bias: u64, part: u64, ids: u64, wts: u64, rows: usize, d: usize, e: usize, top_k: usize, slots: usize, scaling: f32, norm: bool) !void {
         if (g.tri()) |t| return t.route(x, w, bias, part, ids, wts, rows, d, e, top_k, scaling, norm);
-        if (e > 512 or top_k > 16 or slots < top_k or slots > top_k + 2) return error.RouterTooWide; // the wide top-k kernel's MAXC
+        if (slots < top_k or slots > top_k + 2) return error.RouterTooWide;
         const shape = routerShape(d);
-        if (shape.sk > 8) return error.RouterTooWide; // topk's MAXSK
+        if (shape.sk > max_router_slices) return error.RouterTooWide; // Buffers.ones
         try g.logits(x, w, part, rows, d, e, shape.sk);
-        var b: cuda.Args = .{};
-        ptrs(&b, &.{ part, bias, ids, wts });
-        b.add(int(rows));
-        b.add(scaling);
-        ints(&b, &.{ e, shape.sk, top_k, slots });
-        b.add(@as(c_int, @intFromBool(norm)));
-        try g.go(if (e > 256 or top_k > 8) g.f.topk_wide else g.f.topk, .{ rows, 1, 1 }, 32, 0, &b);
+        // in place: a thread reads its slices before it writes
+        if (shape.sk > 1) try g.moe.combine(g.s, part, .f32, g.ones, part, .f32, 1, shape.sk, rows * e);
+        const r: cuda.moe_glue.Route = .{ .experts = e, .topk = top_k, .shared = slots > top_k, .shared_slots = slots - top_k, .normalize = norm, .scale = scaling, .score = true };
+        try g.moe.topk(g.s, part, bias, r, ids, wts, rows);
     }
 
     /// The Mamba conv of a window: the last window's kept rows replay from RAW, then the window's rows.

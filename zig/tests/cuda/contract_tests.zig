@@ -162,15 +162,12 @@ pub fn run(gpu: check.Gpu) !void {
     defer logits.deinit();
     var logits_tiles = router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .f = logits.f, .tiles = try mods[0].function("tf_nemo_router_tiles") };
     defer logits_tiles.deinit();
-    var topk = router_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[0].function("tf_nemo_topk") };
-    defer topk.deinit();
     var latent = try nemotron.latent.Fns.load(gpu.d);
     defer latent.unload();
     var latent_topk = router_k.LatentTopK{ .rig = .{ .gpu = gpu, .s = s }, .fns = &latent };
     defer latent_topk.deinit();
     try kernels.append(a, logits.kernel());
     try kernels.append(a, logits_tiles.kernel());
-    try kernels.append(a, topk.kernel());
     try kernels.append(a, latent_topk.kernel());
     var scan = scan_k.Scan{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[7].function("tf_nemo_scan"), .host = .init(a) };
     defer scan.deinit();
