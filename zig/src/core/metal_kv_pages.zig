@@ -1,19 +1,19 @@
 //! The core KV pool's pages on Metal: every page in one arena buffer, each stream's page table in one shared table buffer.
 const std = @import("std");
 const mtl = @import("metal");
-const kv = @import("kv_pool");
+const kv = @import("kv_pool.zig");
 const Allocator = std.mem.Allocator;
 
 /// Positions a page holds: a multiple of every Metal attention kernel's key tile (4 to 256), so no tile spans two pages.
 pub const page_tokens = 256;
 
-/// A position's byte offset in the arena through its stream's table, for the kernels that page (step 2 includes it).
-pub const address_msl = std.fmt.comptimePrint(
-    \\inline ulong tf_page_offset(device const uint* table, uint pos, ulong page_bytes, ulong row_bytes) {{
-    \\  return ulong(table[pos / {d}]) * page_bytes + ulong(pos % {d}) * row_bytes;
-    \\}}
-    \\
-, .{ page_tokens, page_tokens });
+/// A position's byte offset in the arena through its stream's table (kernels/metal/core/kv_pages.h), for the kernels that page.
+pub const address_msl = @import("kernel_sources").kv_pages;
+
+comptime {
+    const define = std.fmt.comptimePrint("#define TF_PAGE_TOKENS {d}\n", .{page_tokens});
+    if (std.mem.indexOf(u8, address_msl, define) == null) @compileError("kv_pages.h's TF_PAGE_TOKENS differs from page_tokens");
+}
 
 /// Every page in one buffer, page `id` at id x page_bytes: one binding and one residency entry, as CUDA's arena.
 pub const Arena = struct {
@@ -252,9 +252,9 @@ test "a page shared with the store's copy is written to the table" {
     try std.testing.expect(p.idle());
 }
 
-test "the kernels' address helper pages the same 256 rows" {
-    try std.testing.expect(std.mem.indexOf(u8, address_msl, "pos / 256") != null);
-    try std.testing.expect(std.mem.indexOf(u8, address_msl, "pos % 256") != null);
+test "the kernels' address helper pages by TF_PAGE_TOKENS" {
+    try std.testing.expect(std.mem.indexOf(u8, address_msl, "pos / TF_PAGE_TOKENS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, address_msl, "pos % TF_PAGE_TOKENS") != null);
 }
 
 test {

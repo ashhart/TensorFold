@@ -73,14 +73,13 @@ pub fn tileQmm(
 }
 
 /// The core KV pool's pages on Metal: an arena and the streams' tables, host checks and a device round trip.
-pub fn kvPages(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, test_step: *std.Build.Step) void {
-    const pool = b.createModule(.{ .root_source_file = b.path("zig/src/core/kv_pool.zig"), .target = target, .optimize = optimize });
+pub fn kvPages(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, test_step: *std.Build.Step) void {
     const pages = b.createModule(.{
         .root_source_file = b.path("zig/src/core/metal_kv_pages.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kv_pool", .module = pool } },
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } },
     });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = pages }));
     b.step("test-metal-kv-pages", "The KV pool's pages on Metal: leases into tables, a full pool, an idle pool, scattered pages on the GPU").dependOn(&run.step);

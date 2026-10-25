@@ -5,6 +5,8 @@ pub const nemotron = @import("nemotron/kernels.zig");
 
 pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
+/// The core KV pool's page address (core/metal_kv_pages.zig checks its page size).
+pub const kv_pages = @embedFile("core/kv_pages.h");
 /// Gemma 4 dense decode glue around the core lane projections (families/gemma4/kernels.zig).
 pub const gemma4_glue = @embedFile("gemma4/glue.metal");
 /// Gemma 4 decode glue as the reg lane kernel's prologues and epilogue (families/gemma4/weights.zig).

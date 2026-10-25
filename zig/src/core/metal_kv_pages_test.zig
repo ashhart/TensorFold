@@ -1,7 +1,7 @@
 //! The paged arena on the GPU: rows written through two streams' tables into scattered pages read back bit-equal.
 const std = @import("std");
 const mtl = @import("metal");
-const kv = @import("kv_pool");
+const kv = @import("kv_pool.zig");
 const pages = @import("metal_kv_pages.zig");
 
 const words = 16; // u32 words a row
