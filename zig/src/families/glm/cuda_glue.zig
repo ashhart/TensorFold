@@ -44,6 +44,7 @@ pub const Kernels = struct {
     index_write: cuda.Function,
     pool_keys: cuda.Function,
     select_rows: cuda.Function,
+    select_rows_wide: cuda.Function,
     bmm_decode: cuda.Function,
     bmm_rows: cuda.Function,
     bmm_tile: cuda.Function,

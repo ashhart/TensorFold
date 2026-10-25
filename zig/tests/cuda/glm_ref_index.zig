@@ -96,3 +96,68 @@ pub fn selection(r: *Rig, set: glm.glue.Set, ops: cuda.Module) !void {
     }
     check.pass("DSA indexer {d} rows at {d}: scores within float64 tolerance, top-{d} pools equal the host's rule exactly", .{ rows, pos, sp.topk_pools });
 }
+
+/// tf_glm_select_rows_wide against tf_glm_select_rows (bytes) and the host's rule, and both launches' times.
+pub fn selectionWide(r: *Rig, set: glm.glue.Set) !void {
+    var prng = std.Random.DefaultPrng.init(0x5e1ec7); // its own draws: r.rng's order stays the later checks'
+    const rng = prng.random();
+    var t0 = try cuda.Event.init(r.gpu.d, true);
+    defer t0.deinit();
+    var t1 = try cuda.Event.init(r.gpu.d, true);
+    defer t1.deinit();
+    const reps = 20;
+    const cases = [_][2]usize{ .{ 1500, 1 }, .{ 6000, 4 }, .{ 12000, 1 }, .{ 24000, 1 }, .{ 32768, 1 }, .{ 136000, 1 }, .{ 136000, 4 }, .{ 136000, 32 }, .{ 136000, 48 }, .{ 136000, 64 }, .{ 136000, 128 }, .{ 500000, 1 } };
+    for (cases) |c| {
+        const pos = c[0];
+        const rows = c[1];
+        const np = sp.poolBucket(pos, rows, 1 << 20);
+        const host = try r.a.alloc(f32, rows * np);
+        for (0..rows) |row| {
+            const vis = (pos + row + 1) / 4;
+            for (host[row * np ..][0..np], 0..) |*v, p| {
+                const level: f32 = @floatFromInt(@as(i32, @intCast(rng.uintLessThan(u32, 4096))) - 2048);
+                v.* = if (p >= vis) -std.math.inf(f32) else if (level == 0 and rng.boolean()) -0.0 else level * 0.25;
+            }
+        }
+        const scores = try r.dev(std.mem.sliceAsBytes(host));
+        const p0: i32 = @intCast(pos);
+        const at = try r.dev(std.mem.asBytes(&p0));
+        const outs = [2]u64{ try r.zeros(rows * sp.topk_pools * 8), try r.zeros(rows * sp.topk_pools * 8) };
+        var ms: [2]f64 = undefined;
+        for ([2]cuda.Function{ set.glue.select_rows, set.glue.select_rows_wide }, [2]u32{ 128, 1024 }, outs, 0..) |f, threads, out, i| {
+            var a: cuda.Args = .{};
+            inline for (.{ scores, out, @as(i64, @intCast(np)), at, @as(c_int, sp.topk_pools) }) |v| a.add(v);
+            const cfg: cuda.launch.Config = .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = threads } };
+            try cuda.launch.launch(f, cfg, r.s, &a);
+            try t0.record(r.s);
+            for (0..reps) |_| try cuda.launch.launch(f, cfg, r.s, &a);
+            try t1.record(r.s);
+            try t1.synchronize();
+            ms[i] = @as(f64, try cuda.Event.elapsedMs(t0, t1)) / reps;
+        }
+        const narrow = try r.back(outs[0], rows * sp.topk_pools * 8);
+        const wide = try r.back(outs[1], rows * sp.topk_pools * 8);
+        if (std.mem.indexOfDiff(u8, narrow, wide)) |b|
+            try check.expect(false, "select {d} rows at {d}: byte {d} of the wide kernel's differs from tf_glm_select_rows'", .{ rows, pos, b });
+        // the host's rule on the first and the last row
+        const picks = std.mem.bytesAsSlice(i64, wide);
+        for ([2]usize{ 0, rows - 1 }) |row| {
+            const vis = (pos + row + 1) / 4;
+            const limit = @min(np, @max(vis, sp.topk_pools));
+            const keys = try r.a.alloc(u32, limit);
+            for (keys, 0..) |*k, p| k.* = orderKey(host[row * np + p]);
+            const idx = try r.a.alloc(u32, limit);
+            for (idx, 0..) |*v, p| v.* = @intCast(p);
+            std.mem.sort(u32, idx, keys, struct {
+                fn lt(k: []const u32, x: u32, y: u32) bool {
+                    return k[x] > k[y] or (k[x] == k[y] and x < y);
+                }
+            }.lt);
+            const n = @min(limit, sp.topk_pools);
+            std.mem.sort(u32, idx[0..n], {}, std.sort.asc(u32));
+            for (idx[0..n], picks[row * sp.topk_pools ..][0..n], 0..) |want, have, i|
+                try check.expect(have == want, "select {d} rows at {d}, row {d} pick {d}: pool {d}, the host's rule gives {d}", .{ rows, pos, row, i, have, want });
+        }
+        check.pass("DSA select {d} rows at {d} ({d}-pool bucket): wide equals tf_glm_select_rows byte for byte and the host's rule; {d:.4} ms vs {d:.4} ms a launch", .{ rows, pos, np, ms[1], ms[0] });
+    }
+}

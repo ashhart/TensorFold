@@ -19,6 +19,14 @@ fn cdiv(a: usize, b: usize) usize {
     return (a + b - 1) / b;
 }
 
+/// At most wide_rows rows (one wave on 48 SMs) over wide_pools pools or more: 1,024 threads a row, the same bytes.
+const wide_rows = 48;
+const wide_pools = 4096;
+
+fn wideSelect(rows: usize, np: usize) bool {
+    return rows <= wide_rows and np >= wide_pools;
+}
+
 /// sparse.index_update: the window's LayerNormed index keys and gates into ik and ig at pos, completed pools into pk.
 pub fn indexUpdate(set: glue.Set, stream: cuda.Stream, k_raw: u64, k_stride: usize, gate: u64, ln_w: u64, ln_b: u64, ape: u64, ik: u64, ig: u64, pk: u64, t: latent.Table, pos: u64, rows: usize) !void {
     var a: cuda.Args = .{};
@@ -89,7 +97,8 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
         };
         var sel: cuda.Args = .{};
         inline for (.{ s.scores, s.pools + a * topk_pools * 8, @as(i64, @intCast(np_max)), at, @as(c_int, topk_pools) }) |v| sel.add(v);
-        try cuda.launch.launch(set.glue.select_rows, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 128 } }, stream, &sel);
+        const wide = wideSelect(n, np_max);
+        try cuda.launch.launch(if (wide) set.glue.select_rows_wide else set.glue.select_rows, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = if (wide) 1024 else 128 } }, stream, &sel);
         stamp.end();
     }
     const stamp = prof.span(profile, stream, .index_select);
