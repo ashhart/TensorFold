@@ -223,6 +223,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const ctx: u32 = if (std.c.getenv("XPU_CTX")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 4096;
     const slots: u32 = if (std.c.getenv("XPU_SLOTS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 1;
+    if (std.mem.eql(u8, argv[2], "--tower") and argv.len > 4) return tower(init.io, argv[1], argv[3], argv[4]);
     if (std.mem.eql(u8, argv[2], "--loop")) {
         const r = try sage.Runner.init(argv[1], ctx, slots);
         defer r.deinit();
@@ -327,4 +328,43 @@ fn nll(r: *sage.Runner, ids: []const i32) !void {
     }
     const n: f64 = @floatFromInt(ids.len - 1);
     std.debug.print("nll: {d} tokens, mean {d:.4}, top-1 {d:.3}\n", .{ ids.len - 1, sum / n, @as(f64, @floatFromInt(top1)) / n });
+}
+
+/// `--tower IMAGE OUT`: the image's patches through the vision tower, as a check against a reference: OUT.grid (gh gw),
+/// OUT.pixels (fp32 patches) and OUT.rows (fp32 [tokens, hidden]).
+fn tower(io: std.Io, dir: []const u8, image: []const u8, out: []const u8) !void {
+    const core = @import("core");
+    const vision = @import("vision.zig");
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const readFile = struct {
+        fn f(al: std.mem.Allocator, i: std.Io, d: []const u8, name: []const u8) ?[]const u8 {
+            const p = std.fs.path.join(al, &.{ d, name }) catch return null;
+            return std.Io.Dir.cwd().readFileAlloc(i, p, al, .limited(64 << 20)) catch null;
+        }
+    }.f;
+    const c = (try core.qwen_vl.Config.parse(a, readFile(a, io, dir, "config.json") orelse return error.NoConfig, readFile(a, io, dir, "preprocessor_config.json"), readFile(a, io, dir, "processor_config.json"))) orelse return error.NoVisionConfig;
+    const bytes = readFile(a, io, "", image) orelse return error.NoImage;
+    const p = try core.qwen_vl.geometry.prepare(io, a, bytes, c, 4096);
+    const r = try sage.Runner.init(dir, 4096, 1);
+    defer r.deinit();
+    const t = try vision.Tower.load(&r.d, &r.ckpt, "vision_tower.", .{ .hidden = c.hidden, .heads = c.heads, .depth = c.depth, .intermediate = c.intermediate, .out_hidden = c.out_hidden }, p.gh * p.gw);
+    defer t.deinit();
+    const rows = try a.alloc(f32, @as(usize, p.tokens) * c.out_hidden);
+    const dst = try r.d.alloc_(rows.len * 4);
+    const t0 = now();
+    try t.encode(&r.d, p.pixels, p.gh, p.gw, dst);
+    const t1 = now();
+    try @import("ze").check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, rows.ptr, dst, rows.len * 4, null, 0, null));
+    try r.d.sync();
+    std.debug.print("tower: {d} x {d} patches, {d} tokens in {d:.3} s\n", .{ p.gh, p.gw, p.tokens, t1 - t0 });
+    const grid = [2]u32{ p.gh, p.gw };
+    for ([_][]const u8{ "grid", "pixels", "rows" }, [_][]const u8{ std.mem.sliceAsBytes(&grid), std.mem.sliceAsBytes(p.pixels), std.mem.sliceAsBytes(rows) }) |ext, data| {
+        const path = try std.fmt.allocPrintSentinel(a, "{s}.{s}", .{ out, ext }, 0);
+        const fd = open(path.ptr, 0o1101, @as(c_int, 0o644)); // O_WRONLY | O_CREAT | O_TRUNC
+        if (fd < 0) return error.CannotWrite;
+        var done: usize = 0;
+        while (done < data.len) done += @intCast(@max(1, write(fd, data.ptr + done, data.len - done)));
+    }
 }

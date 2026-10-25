@@ -26,6 +26,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .{ "sage_glue", "zig/kernels/xpu/qwen27/glue.cl", " " ++ sage_config.sage_defines },
         .{ "sage_decode", "zig/kernels/xpu/qwen27/decode.cl", " " ++ sage_config.sage_defines },
         .{ "sage_moe", "zig/kernels/xpu/sage_moe.cl", "" },
+        .{ "qwen_vision", "zig/kernels/xpu/qwen_vision.cl", "" },
     }) |k| {
         const c = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
         c.addFileArg(b.path(k[1]));
@@ -77,6 +78,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         \\pub const sage_glue align(8) = @embedFile("sage_glue.bin").*;
         \\pub const sage_decode align(8) = @embedFile("sage_decode.bin").*;
         \\pub const sage_moe align(8) = @embedFile("sage_moe.bin").*;
+        \\pub const qwen_vision align(8) = @embedFile("qwen_vision.bin").*;
         \\
     ) });
     const ze_mod = zeModule(b, target, optimize);

@@ -567,6 +567,7 @@ pub const Runner = struct {
 pub const drafter = @import("drafter.zig");
 /// The Sage-A1.5 (qwen3_5_moe) runner on the same device layer and kernels.
 pub const sage = @import("sage.zig");
+pub const vision = @import("vision.zig");
 
 test "every open starts from the process's options, and a second runner is refused while one is open" {
     const before = options();
