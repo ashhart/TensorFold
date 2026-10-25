@@ -5,6 +5,7 @@ const contract = @import("contract");
 const bfr = contract.bf16_round;
 const rig_ = @import("rig.zig");
 const source = @import("metal_drama3.zig").source;
+const ref = @import("drama3_nvfp4_ref.zig");
 const c = contract.spec;
 const g = contract.gates;
 pub const Variant = enum { pairs, shared_gate };
@@ -132,9 +133,9 @@ pub const Combine = struct {
                 for (0..shape.rows) |row| for (terms, 0..) |v, slot|
                     @memset(t.down[(row * 8 + slot) * shape.k ..][0..shape.k], v * 8);
             } else {
-                // Exact sum 32, magnitude 2^20+32: FP16 overflows, BF16 loses the central ones in all orders.
-                for (0..shape.rows) |row| for (0..64) |i| {
-                    t.x[row * shape.k + i] = c.toBf16(if (i < 16) 32768 else if (i < 48) 1 else -32768);
+                // Exact dot 1 avoids sigmoid saturation hiding a reduced-precision sum's overflow.
+                for (0..shape.rows) |row| for (0..ref.shared_gate_terms) |i| {
+                    t.x[row * shape.k + i] = c.toBf16(ref.sharedGateStressTerm(i));
                 };
             }
         }
@@ -167,7 +168,7 @@ pub const Combine = struct {
         const p = t.rig.begin();
         p.e.setPipeline(t.pipe);
         p.e.setBuffer(t.out.buf, t.out.off, 0);
-        for (t.refs, 1..) |ref, slot| p.e.setBuffer(ref.buf, ref.off, slot);
+        for (t.refs, 1..) |buffer, slot| p.e.setBuffer(buffer.buf, buffer.off, slot);
         p.e.setValue(@as(u32, @intCast(t.shape.k)), 6);
         p.e.dispatchGroups(mtl.Size.of(t.shape.rows, 1, 1), mtl.Size.of(256, 1, 1));
         try t.rig.finish(p);
@@ -237,8 +238,8 @@ pub const Combine = struct {
 
     pub fn intervals(t: *Combine, low: []f64, high: []f64) !void {
         if (t.fill == .stress) {
-            // Integer sums/products are exact in FP32. sigmoid(32)*2 rounds to BF16 2, far from a boundary.
-            const exact: f64 = if (t.variant == .pairs) 6 else 2;
+            // Exact FP32 integer sums stay away from BF16 rounding boundaries after the sigmoid.
+            const exact: f64 = if (t.variant == .pairs) 6 else ref.sharedGateOutput(1);
             @memset(low, exact);
             @memset(high, exact);
             return;
