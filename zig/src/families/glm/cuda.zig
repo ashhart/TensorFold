@@ -70,6 +70,7 @@ test {
     _ = prompt_solo;
     _ = @import("cuda_l2pf.zig");
     _ = prompt_pair;
+    _ = @import("cuda_disk_image.zig");
     _ = experts;
     _ = exl3;
     _ = vision;
