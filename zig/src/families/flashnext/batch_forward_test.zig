@@ -93,7 +93,7 @@ pub fn check(verify: Verify, keep: Keep) !void {
         s.m.t.kvmeta = .{ .b = try r.device.buffer(64, fz.opts) };
         s.m.t.ple_ids = .{ .b = try r.device.buffer(1024, fz.opts) };
     }
-    var b: Backend = .{ .gpa = a, .e = &e, .primary = &m, .sessions = &sessions, .hidden = dummy, .grammar = .{ .pipe = .{}, .bits = dummy } };
+    var b: Backend = .{ .gpa = a, .e = &e, .primary = &m, .sessions = &sessions, .hidden = dummy, .grammar = .{ .pipe = .{}, .bits = dummy }, .fence = try mtl.counters.Fence.init(e.r.device) };
     // Null widths preserve the recorded 6/32 dispatch. Non-null widths include mixed routed/shared widths.
     for ([_][4]usize{ .{ 4, 64, 4, 64 }, .{ 6, 32, 6, 32 }, .{ 4, 32, 8, 128 } }) |w| {
         m.embed_w = if (w[0] == 6) null else .{ w[0], w[1] };
@@ -207,9 +207,15 @@ pub fn check(verify: Verify, keep: Keep) !void {
                 stream.dropHeld(a);
                 mtl.first_blit = null;
                 mtl.blits = 0;
+                mtl.source_count = 0;
                 try core.step();
                 try std.testing.expectEqual(@as(usize, if (drafted) fz.CS_ROW else 0), mtl.first_blit.?.offset);
                 try std.testing.expectEqual(fz.CS_ROW, mtl.first_blit.?.bytes);
+                // session 1's kept state sits at row 3; a copy encoded after outputs() would read row 1
+                if (drafted) {
+                    try std.testing.expectEqual(@as(usize, fz.CS_ROW), mtl.sources[0].off);
+                    if (mode >= 2) try std.testing.expectEqual(@as(usize, 3) * fz.CS_ROW, mtl.sources[72].off);
+                }
                 try std.testing.expectEqual(@as(u32, 7), stream.emitted()[stream.emitted().len - 1]);
             }
         }
