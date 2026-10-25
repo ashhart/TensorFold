@@ -131,3 +131,161 @@ __kernel void sage_moe_combine(__global const float *y, __global const float *wt
     acc = fma(y[(ulong)(n_pairs + row) * dim + i], shared_w[row], acc);
     out[(ulong)row * dim + i] = convert_half_rte(bf(to_bf(acc)));
 }
+
+// ---------------------------------------------------------------- grouped prompt MoE (XMX)
+// A prompt chunk's pairs sorted by expert into tiles of at most MC pairs, so a tile reads its expert's weights once.
+// The shared expert is expert n_experts, one pair a row (pair n_pairs + row). act and y keep the pair index, so
+// sage_moe_combine is the same as in decode.
+#define MC 16
+#define DPH(a, b, c) intel_sub_group_f16_f16_matrix_mad_k16(as_short8(a), as_int8(b), c)
+
+// sums[row][g] = the sum of src[row] over group g of 64 (the bias term of the affine dot). Grid (k / 64, rows).
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void sage_group_sums(__global const half *src, __global float *sums, uint k) {
+    const uint g = get_group_id(0), row = get_group_id(1), lane = get_sub_group_local_id();
+    __global const half *s = src + (ulong)row * k + g * 64;
+    const float v = (float)s[lane] + (float)s[lane + 16] + (float)s[lane + 32] + (float)s[lane + 48];
+    const float t = sub_group_reduce_add(v);
+    if (lane == 0) sums[(ulong)row * (k / 64) + g] = t;
+}
+
+// order: the pair indices grouped by expert (shared expert last); tiles: (expert, first slot, count) uint4 records;
+// ntiles[0]: the tile count. One work-group of 256 work-items.
+__kernel __attribute__((reqd_work_group_size(256, 1, 1)))
+void sage_moe_sort(__global const uint *ids, __global uint *order, __global uint4 *tiles, __global uint *ntiles,
+                   uint n_experts, uint n_pairs, uint rows) {
+    __local uint cnt[257], start[257], tbase[257], fill[257];
+    const uint lid = get_local_id(0);
+    for (uint e = lid; e <= n_experts; e += 256) cnt[e] = e == n_experts ? rows : 0;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint p = lid; p < n_pairs; p += 256) atomic_inc(&cnt[ids[p]]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (lid == 0) {
+        uint s = 0, t = 0;
+        for (uint e = 0; e <= n_experts; e++) {
+            start[e] = s;
+            tbase[e] = t;
+            fill[e] = s;
+            s += cnt[e];
+            t += (cnt[e] + MC - 1) / MC;
+        }
+        ntiles[0] = t;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint e = lid; e <= n_experts; e += 256)
+        for (uint i = 0; i * MC < cnt[e]; i++) tiles[tbase[e] + i] = (uint4)(e, start[e] + i * MC, min((uint)MC, cnt[e] - i * MC), 0);
+    for (uint p = lid; p < n_pairs; p += 256) order[atomic_inc(&fill[ids[p]])] = p;
+    for (uint r = lid; r < rows; r += 256) order[start[n_experts] + r] = n_pairs + r;
+}
+
+// The x row a pair reads: its token's row (routed) or row p - n_pairs (shared) for gate|up; the pair's own row for down.
+inline uint pair_row(uint p, uint n_pairs, uint top_k, bool own) { return own ? p : p >= n_pairs ? p - n_pairs : p / top_k; }
+
+// acc[rb][c] += x[tile rows] . W[col block c]ᵀ over in_dim, 4-bit affine (MLX 4/64): per group of 64, the DPAS dot of
+// x with the raw nibbles, then scale * dot + bias * sum(x). Lane l owns column cols[c] + l; rows of the tile past `n`
+// read the tile's first row and are not stored.
+#define TILE_DOT(NB)                                                                                                    \
+    for (uint g = 0; g < groups; g++) {                                                                                \
+        float8 t[2][NB];                                                                                               \
+        for (uint rb = 0; rb < 2; rb++)                                                                                \
+            for (uint c = 0; c < NB; c++) t[rb][c] = 0.0f;                                                             \
+        uint8 q[NB];                                                                                                   \
+        for (uint c = 0; c < NB; c++) q[c] = vload8(0, wt + (wrow[c] * words + g * 8));                                \
+        for (uint s = 0; s < 4; s++) {                                                                                 \
+            short8 a[2];                                                                                               \
+            for (uint rb = 0; rb < 2; rb++)                                                                            \
+                for (uint r = 0; r < 8; r++) a[rb][r] = as_short(xr[rb * 8 + r][g * 64 + s * 16 + lane]);              \
+            for (uint c = 0; c < NB; c++) {                                                                            \
+                const uint lo = ((uint *)&q[c])[2 * s], hi = ((uint *)&q[c])[2 * s + 1];                                \
+                int8 b;                                                                                                \
+                for (uint j = 0; j < 4; j++) {                                                                         \
+                    ((int *)&b)[j] = as_int((half2)((half)((lo >> (8 * j)) & 15u), (half)((lo >> (8 * j + 4)) & 15u))); \
+                    ((int *)&b)[4 + j] = as_int((half2)((half)((hi >> (8 * j)) & 15u), (half)((hi >> (8 * j + 4)) & 15u))); \
+                }                                                                                                      \
+                for (uint rb = 0; rb < 2; rb++) t[rb][c] = DPH(a[rb], b, t[rb][c]);                                    \
+            }                                                                                                          \
+        }                                                                                                              \
+        for (uint c = 0; c < NB; c++) {                                                                                \
+            const float sc = bf(scales[wrow[c] * groups + g]), bi = bf(biases[wrow[c] * groups + g]);                  \
+            for (uint rb = 0; rb < 2; rb++)                                                                            \
+                for (uint r = 0; r < 8; r++)                                                                           \
+                    acc[rb][c][r] += sc * t[rb][c][r] + bi * xs[rb * 8 + r][g];                                        \
+        }                                                                                                              \
+    }
+
+// Grouped gate|up and SwiGLU: act[p][r] as sage_expert_swiglu. Grid (ff / 16, tile bound), one sub-group a group.
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void sage_tile_swiglu(__global const uint *w, __global const ushort *ex_scales, __global const ushort *ex_biases,
+                               __global const uint *sh_w, __global const ushort *sh_scales, __global const ushort *sh_biases,
+                               __global const half *x, __global const float *x_sums, __global const uint *order,
+                               __global const uint4 *tiles, __global const uint *ntiles, __global half *act,
+                               uint dim, uint ff, uint top_k, uint n_pairs, uint n_experts) {
+    const uint tile = get_group_id(1), lane = get_sub_group_local_id();
+    if (tile >= ntiles[0]) return;
+    const uint4 tl = tiles[tile];
+    const bool shared = tl.x == n_experts;
+    __global const uint *wt = shared ? sh_w : w;
+    __global const ushort *scales = shared ? sh_scales : ex_scales;
+    __global const ushort *biases = shared ? sh_biases : ex_biases;
+    const uint words = dim / 8, groups = dim / 64;
+    const ulong base = shared ? 0 : (ulong)tl.x * 2 * ff;
+    const uint col = get_group_id(0) * 16 + lane;
+    const ulong wrow[2] = {base + col, base + ff + col};
+    __global const half *xr[MC];
+    __global const float *xs[MC];
+    uint pr[MC];
+    for (uint i = 0; i < MC; i++) {
+        pr[i] = order[tl.y + (i < tl.z ? i : 0)];
+        const uint row = pair_row(pr[i], n_pairs, top_k, false);
+        xr[i] = x + (ulong)row * dim;
+        xs[i] = x_sums + (ulong)row * groups;
+    }
+    float8 acc[2][2];
+    for (uint rb = 0; rb < 2; rb++) acc[rb][0] = acc[rb][1] = 0.0f;
+    TILE_DOT(2)
+    for (uint rb = 0; rb < 2; rb++)
+        for (uint r = 0; r < 8; r++) {
+            const uint i = rb * 8 + r;
+            if (i >= tl.z) break;
+            const float gb = bf(to_bf(acc[rb][0][r])), ub = bf(to_bf(acc[rb][1][r]));
+            act[(ulong)pr[i] * ff + col] = convert_half_rte(bf(to_bf(gb / (1.0f + exp(-gb)) * ub)));
+        }
+}
+
+// Grouped down to fp32: y[p][r] as sage_expert_down. Grid (dim / 32, tile bound), one sub-group a group.
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void sage_tile_down(__global const uint *w, __global const ushort *ex_scales, __global const ushort *ex_biases,
+                             __global const uint *sh_w, __global const ushort *sh_scales, __global const ushort *sh_biases,
+                             __global const half *a_in, __global const float *a_sums, __global const uint *order,
+                             __global const uint4 *tiles, __global const uint *ntiles, __global float *y,
+                             uint dim, uint ff, uint n_experts) {
+    const uint tile = get_group_id(1), lane = get_sub_group_local_id();
+    if (tile >= ntiles[0]) return;
+    const uint4 tl = tiles[tile];
+    const bool shared = tl.x == n_experts;
+    __global const uint *wt = shared ? sh_w : w;
+    __global const ushort *scales = shared ? sh_scales : ex_scales;
+    __global const ushort *biases = shared ? sh_biases : ex_biases;
+    const uint words = ff / 8, groups = ff / 64;
+    const ulong base = shared ? 0 : (ulong)tl.x * dim;
+    const uint col = get_group_id(0) * 32 + lane;
+    const ulong wrow[2] = {base + col, base + col + 16};
+    __global const half *xr[MC];
+    __global const float *xs[MC];
+    uint pr[MC];
+    for (uint i = 0; i < MC; i++) {
+        pr[i] = order[tl.y + (i < tl.z ? i : 0)];
+        xr[i] = a_in + (ulong)pr[i] * ff;
+        xs[i] = a_sums + (ulong)pr[i] * groups;
+    }
+    float8 acc[2][2];
+    for (uint rb = 0; rb < 2; rb++) acc[rb][0] = acc[rb][1] = 0.0f;
+    TILE_DOT(2)
+    for (uint rb = 0; rb < 2; rb++)
+        for (uint r = 0; r < 8; r++) {
+            const uint i = rb * 8 + r;
+            if (i >= tl.z) break;
+            y[(ulong)pr[i] * dim + col] = acc[rb][0][r];
+            y[(ulong)pr[i] * dim + col + 16] = acc[rb][1][r];
+        }
+}
