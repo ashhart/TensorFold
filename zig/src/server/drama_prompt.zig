@@ -73,36 +73,13 @@ fn speakerId(digits: []const u8) ?u8 {
     return if (n <= max_speaker_id) n else null;
 }
 
-/// Why input cannot be spoken, in the reference's words and order, or null.
+/// Why input cannot be spoken; canonical speaker tags 0..15 are accepted in requests and references.
 pub fn problem(a: Allocator, input: []const u8) Allocator.Error!?[]const u8 {
-    // speech_request.py: well-formed tags naming a speaker other than 0 (malformed ones are the builder's)
-    var others: u16 = 0;
-    var at: usize = 0;
-    while (std.mem.indexOfPos(u8, input, at, "<|speaker:")) |start| {
-        if (tagAt(input, start)) |tag| {
-            if (speakerId(tag.digits)) |n| if (n != 0) {
-                others |= @as(u16, 1) << @intCast(n);
-            };
-            at = tag.end;
-        } else at = start + 1;
-    }
-    if (others != 0) {
-        var list: std.ArrayList(u8) = .empty;
-        try list.appendSlice(a, error_prefix ++ " only speaker 0 is supported; got speaker tags [");
-        var first = true;
-        for (1..max_speaker_id + 1) |n| if (others & (@as(u16, 1) << @intCast(n)) != 0) {
-            if (!first) try list.appendSlice(a, ", ");
-            try list.print(a, "{d}", .{n});
-            first = false;
-        };
-        try list.append(a, ']');
-        return list.items;
-    }
     // prompt.py's validate_caller_text(text, "input")
     if (trimStart(input).len == 0) return error_prefix ++ " input: text must not be empty";
     for (structural_tokens) |token| if (std.mem.indexOf(u8, input, token) != null)
         return try std.fmt.allocPrint(a, error_prefix ++ " input: {s} is written by the prompt builder and must not appear in caller text", .{token});
-    at = 0;
+    var at: usize = 0;
     while (std.mem.indexOfPos(u8, input, at, "<|speaker")) |start| {
         const tag = tagAt(input, start);
         if (tag == null or speakerId(tag.?.digits) == null)
@@ -147,6 +124,7 @@ test "speaker 0 tags untagged text; a leading tag after white space is kept" {
         .{ "\n<|speaker:0|> hi", "\n<|speaker:0|> hi" },
         .{ "\u{3000}<|speaker:0|> hi", "\u{3000}<|speaker:0|> hi" },
         .{ "a <|speaker:0|> b", "<|speaker:0|> a <|speaker:0|> b" },
+        .{ "a <|speaker:15|> b", "<|speaker:0|> a <|speaker:15|> b" },
         .{ "\x1c<|speaker:0|> hi", "<|speaker:0|> \x1c<|speaker:0|> hi" },
         .{ "\x1f", "<|speaker:0|> \x1f" },
     };
@@ -154,20 +132,22 @@ test "speaker 0 tags untagged text; a leading tag after white space is kept" {
         try std.testing.expect(try problem(a, c[0]) == null);
         try std.testing.expectEqualStrings(c[1], try tagged(a, c[0]));
     }
+    for (0..16) |id| {
+        const dialogue = try std.fmt.allocPrint(a, "\u{3000}<|speaker:{d}|> First. <|speaker:0|> Reply.", .{id});
+        try std.testing.expect(try problem(a, dialogue) == null);
+        try std.testing.expectEqualStrings(dialogue, try tagged(a, dialogue));
+    }
 }
 
-test "input the reference refuses" {
+test "empty input, malformed speaker tags and structural tokens are refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const malformed = [_][]const u8{ "<|speaker:99|> x", "<|speaker:16|> x", "a <|speaker:99|> b", "<|speaker:01|> x", "<|speaker:00|> x", "<|speaker:|> x", "<|speaker0|> x", "hi <|speaker", "<|speaker:abc|> x", "<|speaker:0> x", "  <|speaker:abc|> hi" };
+    const malformed = [_][]const u8{ "<|speaker:99|> x", "<|speaker:16|> x", "a <|speaker:99|> b", "<|speaker:01|> x", "<|speaker:00|> x", "<|speaker:|> x", "<|speaker0|> x", "hi <|speaker", "<|speaker:abc|> x", "<|speaker:0> x", "  <|speaker:abc|> hi", "<|speaker:2|> x <|speaker:01|>" };
     for (malformed) |text| {
         const message = (try problem(a, text)) orelse return error.TestUnexpectedResult;
         try std.testing.expect(std.mem.startsWith(u8, message, "Drama 3 request: input: speaker tags must be written <|speaker:N|> with N in 0..15 and no leading zero; got "));
     }
-    try std.testing.expectEqualStrings("Drama 3 request: only speaker 0 is supported; got speaker tags [1, 15]", (try problem(a, "<|speaker:15|> a <|speaker:1|> b <|speaker:1|> c <|speaker:0|> d")).?);
-    // other speakers are refused before malformed tags, as speech_request.py checks them first
-    try std.testing.expectEqualStrings("Drama 3 request: only speaker 0 is supported; got speaker tags [2]", (try problem(a, "<|speaker:2|> x <|speaker:01|>")).?);
     for ([_][]const u8{ "", " ", "\u{3000}\u{2028}\t" }) |blank|
         try std.testing.expectEqualStrings("Drama 3 request: input: text must not be empty", (try problem(a, blank)).?);
     for (structural_tokens) |token| {
