@@ -153,6 +153,60 @@ __kernel void sage_expert_swiglu(__global const uint *w, __global const ushort *
     if (get_local_id(0) == 0) act[(ulong)p * ff + r] = convert_half_rte(bf(to_bf(gb / (1.0f + exp(-gb)) * ub)));
 }
 
+// sage_expert_swiglu with SROWS rows a work-group of 32 (dim == 2048): a work-item keeps its 64 values of x (its group
+// of 64) in registers for the gate and up rows of all SROWS rows. Grid (ff / SROWS, pairs).
+#define SROWS 4
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void sage_expert_swiglu4(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
+                                  __global const uint *sh_w, __global const ushort *sh_scales, __global const ushort *sh_biases,
+                                  __global const half *x, __global const uint *ids, __global half *act,
+                                  uint dim, uint ff, uint top_k, uint n_pairs) {
+    const uint r0 = get_group_id(0) * SROWS, p = get_group_id(1), lid = get_local_id(0);
+    const uint g = get_sub_group_id(), lane = get_sub_group_local_id();
+    const bool shared = p >= n_pairs;
+    const uint row = shared ? p - n_pairs : p / top_k;
+    const ulong base = shared ? 0 : (ulong)ids[p] * 2 * ff;
+    __global const uint *wt = shared ? sh_w : w;
+    __global const ushort *st = shared ? sh_scales : scales, *bt = shared ? sh_biases : biases;
+    __global const half *xr = x + (ulong)row * dim;
+    float xv[2][32], sx[2];
+    for (uint h = 0; h < 2; h++) {
+        sx[h] = 0.0f;
+        for (uint q = 0; q < 4; q++) {
+            const float8 v = convert_float8(vload8((2 * lid + h) * 4 + q, xr));
+            for (uint j = 0; j < 8; j++) {
+                xv[h][q * 8 + j] = v[j];
+                sx[h] += v[j];
+            }
+        }
+    }
+    local float part[2][2 * SROWS];
+    float res[2 * SROWS];
+    __attribute__((opencl_unroll_hint))
+    for (uint k = 0; k < 2 * SROWS; k++) {             // gate rows, then up rows
+        const ulong wrow = base + (k < SROWS ? r0 + k : ff + r0 + k - SROWS);
+        __global const uint *wr = wt + wrow * (2048 / 8);
+        const uint8 pk = vload8(lid, wr);               // the work-item's group of 64: quads 2 lid and 2 lid + 1
+        const float sc = bf(st[wrow * 32 + lid]), bi = bf(bt[wrow * 32 + lid]);
+        float dot = 0.0f;
+        __attribute__((opencl_unroll_hint))
+        for (uint h = 0; h < 2; h++)
+            for (uint q = 0; q < 4; q++) {
+                const uint u = ((const uint *)&pk)[h * 4 + q];
+                for (uint j = 0; j < 8; j++) dot = fma(xv[h][q * 8 + j], (float)((u >> (4 * j)) & 15u), dot);
+            }
+        const float acc = sc * dot + bi * (sx[0] + sx[1]);
+        res[k] = sub_group_reduce_add(acc);
+    }
+    if (lane == 0)
+        for (uint k = 0; k < 2 * SROWS; k++) part[g][k] = res[k];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (lid < SROWS) {
+        const float gb = bf(to_bf(part[0][lid] + part[1][lid])), ub = bf(to_bf(part[0][SROWS + lid] + part[1][SROWS + lid]));
+        act[(ulong)p * ff + r0 + lid] = convert_half_rte(bf(to_bf(gb / (1.0f + exp(-gb)) * ub)));
+    }
+}
+
 // down of one expert pair to fp32: y[p][r]. One sub-group a row; grid (dim / sub-groups a group, pairs).
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_expert_down(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
