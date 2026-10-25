@@ -22,6 +22,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Step-5-Preview | [Native Metal on one 256 GB Mac: 2-bit experts, MTP drafts, images](step-5-preview.md) |
 | Kolibri-1 | [Native CUDA, block FP8, research checkpoint](kolibri-1.md) |
 | Spark-X2.6-4B | [Native CUDA](spark-x2.6-4b-cuda.md), [native Metal, the bf16 release, contexts to 1M](spark-x2.6-4b-metal.md) |
+| Cosmos3-Edge reasoner | [Native Metal, MLX 8-bit, text and images](cosmos3-edge.md) |
 
 ## Capability floor
 

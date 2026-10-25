@@ -11,7 +11,7 @@ constant constexpr uint HD = 128;
 constant constexpr uint SEC_H = 20;
 constant constexpr uint SEC_W = 20;
 
-// Table row ids[r] as bf16 scale * q + bias (MLX's dequantize), 8-bit codes, one byte a thread.
+// Table row ids[r] as bf16(scale * q + bias) from fp32, rounded once, 8-bit codes, one byte a thread.
 [[kernel]] void cos3_embed_b8(const device uint* ids [[buffer(0)]], const device uint8_t* table [[buffer(1)]],
                               const device bfloat* scales [[buffer(2)]], const device bfloat* biases [[buffer(3)]],
                               device bfloat* out [[buffer(4)]], uint2 at [[thread_position_in_grid]]) {

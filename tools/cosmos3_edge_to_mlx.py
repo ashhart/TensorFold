@@ -3,7 +3,9 @@ every projection, bf16 norms, biases and the vision position grid. The generatio
 time embedder) and the VAE are left out. The vision MLP's 4304 columns are zero-padded to 4352 (a multiple of 64):
 gelu(0) is 0 and the padded fc2 columns are 0, so the padding changes nothing.
 
-    python convert.py SRC_DIR OUT_DIR [BITS]
+    python tools/cosmos3_edge_to_mlx.py SRC_DIR OUT_DIR [BITS]
+
+The tested revision, versions and output hashes are in docs/recipes/cosmos3-edge.md.
 """
 
 import json
