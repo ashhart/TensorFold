@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA takes KV pages from the core pool by default from two ranks, not only from three, and the plan funds the window (#1322, fixing #1313). At TP=2 on two GB10s with the NVFP4 checkpoint, tokens are identical; two streams serve 14% more tokens/s for chat and code, and prefill is flat to +17%. Thanks to @wojo.
+
 - GLM-5.3: a tool call that `max_tokens` cuts comes back in `tool_calls` with `finish_reason: "length"`, streamed and whole, instead of leaking its `<tool_call>` markup into the reply's text (#1298; thanks @Boscoeuk for the report).
 
 - `tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...` says, before any download or weight load, the memory CUDA admission would grant and whether the checkpoint's weights fit each budget, and which setting would make them fit (#1319, from Python #281; thanks @akol1).
