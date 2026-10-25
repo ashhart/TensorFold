@@ -323,6 +323,13 @@ pub const Runner = struct {
         }
     }
 
+    /// The fp16 logits of the last forward's final row (`out.len` is the vocabulary size).
+    pub fn logits(r: *Runner, out: []f16) !void {
+        if (out.len != r.z.s.vocab) return error.BadLength;
+        try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, out.ptr, r.acts.logits, out.len * 2, null, 0, null));
+        try r.d.sync();
+    }
+
     /// One serial decode token.
     pub fn step(r: *Runner, token: i32) !void {
         r.last = try r.forward(&.{token}, true);
