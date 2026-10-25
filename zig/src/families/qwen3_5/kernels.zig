@@ -5,7 +5,10 @@ const sources = @import("kernel_sources").qwen35;
 
 const layout_names = [_][:0]const u8{ "qwen35_embed", "qwen35_head_norm", "qwen35_queries", "qwen35_keys", "qwen35_attention_gate" };
 const layout = @import("kernel_sources").qwen35_layout;
-pub const total = sources.all.len + layout_names.len;
+/// The KV-page twins of qwen35_keys and attn_partial (TF_QWEN35_METAL_KV_PAGES=1), in their own library.
+const paged_names = [_][:0]const u8{ "qwen35_keys_paged", "qwen35_attn_partial_paged" };
+const paged = @import("kernel_sources").qwen35_paged;
+pub const total = sources.all.len + layout_names.len + paged_names.len;
 
 pub const Kernels = struct {
     pipelines: [total]mtl.Pipeline,
@@ -17,6 +20,7 @@ pub const Kernels = struct {
     pub fn byKey(self: *const Kernels, key: []const u8) ?mtl.Pipeline {
         inline for (sources.all, 0..) |s, i| if (std.mem.eql(u8, key, s.key)) return self.pipelines[i];
         for (layout_names, 0..) |s, i| if (std.mem.eql(u8, key, s)) return self.pipelines[sources.all.len + i];
+        for (paged_names, 0..) |s, i| if (std.mem.eql(u8, key, s)) return self.pipelines[sources.all.len + layout_names.len + i];
         return null;
     }
 
@@ -47,6 +51,7 @@ fn dimensions(comptime key: []const u8) [2]usize {
 fn index(comptime key: []const u8) usize {
     inline for (sources.all, 0..) |s, i| if (comptime std.mem.eql(u8, key, s.key)) return i;
     inline for (layout_names, 0..) |s, i| if (comptime std.mem.eql(u8, key, s)) return sources.all.len + i;
+    inline for (paged_names, 0..) |s, i| if (comptime std.mem.eql(u8, key, s)) return sources.all.len + layout_names.len + i;
     @compileError("no Qwen3.5 kernel " ++ key);
 }
 
@@ -64,6 +69,12 @@ pub fn load(device: mtl.Device) !Kernels {
     defer lib.deinit();
     for (layout_names, 0..) |name, i| {
         out.pipelines[sources.all.len + i] = try mtl.Pipeline.init(device, lib, name, false);
+        loaded += 1;
+    }
+    const paged_lib = try mtl.Library.fromSource(device, paged, mtl.CompileOptions.mlx());
+    defer paged_lib.deinit();
+    for (paged_names, 0..) |name, i| {
+        out.pipelines[sources.all.len + layout_names.len + i] = try mtl.Pipeline.init(device, paged_lib, name, false);
         loaded += 1;
     }
     return out;

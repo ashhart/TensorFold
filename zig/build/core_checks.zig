@@ -82,6 +82,17 @@ pub fn kvPages(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } },
     });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = pages }));
-    b.step("test-metal-kv-pages", "The KV pool's pages on Metal: leases into tables, a full pool, an idle pool, scattered pages on the GPU").dependOn(&run.step);
-    test_step.dependOn(&run.step);
+    // Qwen3.5-2B's paged kernels against its contiguous ones, the same bits through shuffled pages
+    const qwen = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3_5/paged_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } },
+    });
+    const qwen_run = b.addRunArtifact(b.addTest(.{ .root_module = qwen }));
+    const step = b.step("test-metal-kv-pages", "The KV pool's pages on Metal: leases into tables, a full pool, an idle pool, scattered pages on the GPU, Qwen3.5's paged kernels");
+    step.dependOn(&run.step);
+    step.dependOn(&qwen_run.step);
+    test_step.dependOn(step);
 }
