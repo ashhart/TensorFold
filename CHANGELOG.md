@@ -60,7 +60,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `--prompt-precision int8` (opt-in): a prompt chunk with a non-finite input now falls back to bf16 as intended; in 1.1.4 the quantizer never raised its fallback flag.
 
-- The CUDA kernel contract passes on a GB10 again (all registered kernels pass gates 1-4, every planted control is caught, every launch has measured nvcc 13.0.88 resources on sm 80/86/89/120/121).
+- The CUDA kernel contract's gates pass on a GB10 again (all 338 registered kernels pass gates 1-4 and all 92 planted controls are caught); its resource-limit check still reports 52 problems in Qwen3.5 lane kernels' records (stale or missing register counts), being completed.
 
 - Tensor-parallel ranks join their failure hooks before releasing the hooks' owners, fixing a rare crash at shutdown after a rank fails.
 
