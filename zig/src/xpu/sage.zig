@@ -64,6 +64,8 @@ pub const Layer = struct {
     dt: ?*anyopaque = null,
     gnorm: ?*anyopaque = null,
     rec: ?*anyopaque = null, // fp32 [GV, 128, 128]
+    rec_save: ?*anyopaque = null, // a verified block's state after all its rows (Runner.verify); rec keeps the entry
+    stash: ?*anyopaque = null, // the block's gdn_pre outputs and mixer rows, for Runner.commit's replay (stashAt)
     conv: [2]?*anyopaque = .{ null, null }, // fp16 [3, NCONV], ping-pong
     conv_cur: u1 = 0,
     // attention
@@ -76,7 +78,24 @@ pub const Layer = struct {
 };
 
 /// One slot's state in one layer.
-pub const SlotState = struct { kc: ?*anyopaque = null, vc: ?*anyopaque = null, rec: ?*anyopaque = null, conv: [2]?*anyopaque = .{ null, null }, conv_cur: u1 = 0 };
+pub const SlotState = struct { kc: ?*anyopaque = null, vc: ?*anyopaque = null, rec: ?*anyopaque = null, rec_save: ?*anyopaque = null, stash: ?*anyopaque = null, conv: [2]?*anyopaque = .{ null, null }, conv_cur: u1 = 0 };
+
+/// Byte offsets in a GDN layer's stash of WINDOW rows: q at 0, then k, v, g, beta and the mixer input rows p.
+pub const StashAt = struct {
+    k: usize,
+    v: usize,
+    g: usize,
+    b: usize,
+    p: usize,
+    end: usize,
+    pub fn of(z: Sizes) StashAt {
+        const qk = @as(usize, WINDOW) * z.s.gdn_k_heads * 128 * 2;
+        const v = @as(usize, WINDOW) * z.vd * 2;
+        const g = @as(usize, WINDOW) * z.s.gdn_v_heads * 4;
+        const p = @as(usize, WINDOW) * z.gdn_in * 2;
+        return .{ .k = qk, .v = 2 * qk, .g = 2 * qk + v, .b = 2 * qk + v + g, .p = 2 * qk + v + 2 * g, .end = 2 * qk + v + 2 * g + p };
+    }
+};
 
 pub const Model = struct {
     embed_w: *anyopaque,
@@ -320,11 +339,14 @@ pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32, slots: u32, kv8: 
             l.alog = try loader.bf16Tensor(d, c, name("{s}linear_attn.A_log", .{p}));
             l.dt = try loader.bf16Tensor(d, c, name("{s}linear_attn.dt_bias", .{p}));
             l.gnorm = try loader.bf16Tensor(d, c, name("{s}linear_attn.norm.weight", .{p}));
+            const rec_bytes = @as(usize, s.gdn_v_heads) * 128 * 128 * 4;
             for (l.st[0..slots]) |*st| {
-                st.* = .{ .rec = try d.alloc_(@as(usize, s.gdn_v_heads) * 128 * 128 * 4) };
+                st.* = .{ .rec = try d.alloc_(rec_bytes), .rec_save = try d.alloc_(rec_bytes), .stash = try d.alloc_(StashAt.of(z).end) };
                 for (&st.conv) |*cv| cv.* = try d.alloc_(3 * @as(usize, z.nconv) * 2);
             }
             l.rec = l.st[0].rec;
+            l.rec_save = l.st[0].rec_save;
+            l.stash = l.st[0].stash;
             l.conv = l.st[0].conv;
         }
         if (i % 8 == 7) std.debug.print("  layers loaded: {d}/{d}\n", .{ i + 1, s.layers });
@@ -333,6 +355,107 @@ pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32, slots: u32, kv8: 
     d.g.free(stage);
     d.allocated -= 800 << 20;
     return m;
+}
+
+// ---------------------------------------------------------------- the MTP head
+
+/// Sage's multi-token prediction head (mtp_num_hidden_layers 1), the drafter of Runner.specStep. A row at slot j reads
+/// the target's normed final hidden of row j and the token after it, and drafts the token after that:
+/// x = fc_e(norm_e(embed(token))) + fc_h(norm_h(hidden)), then one attention + MoE layer with its own K/V cache, then
+/// norm and the target's lm_head. A chained draft reads the row before's normed output as its hidden.
+pub const Mtp = struct {
+    layer: Layer,
+    fc_e: Proj, // fc [D, 2 D] split by input: the embedding half and the hidden half
+    fc_h: Proj,
+    norm_e: *anyopaque,
+    norm_h: *anyopaque,
+    norm: *anyopaque,
+    hin: *anyopaque, // fp16 [CHUNK, D]: the rows' hidden inputs
+    x2: *anyopaque, // fp32 [CHUNK, D]
+    r2: *anyopaque, // fp16 [CHUNK, D]
+    zeros: *anyopaque, // fp32 [CHUNK, D] of 0
+    state: *anyopaque, // fp16 [MAX_SLOTS, D]: each slot's newest row's normed output
+};
+
+/// The MTP head from the W4A16 AutoRound checkpoint in `dir` (the MLX export drops it): its projections and experts
+/// shown as MLX affine 4/64 with no requantization, fc quantized to 4/64 from bf16.
+pub fn loadMtp(d: *Dev, dir: []const u8, z: Sizes, ctx: u32, slots: u32, kv8: bool) !*Mtp {
+    const s = z.s;
+    const shard = try mtpShard(dir);
+    var c: Checkpoint = .{};
+    defer c.deinit();
+    try c.addShard(shard);
+    _ = try showAsMlx(&c, .mtp);
+    { // fc [D, 2 D] bf16: each half of its inputs as its own 4/64 projection
+        const fc = try c.get("mtp.fc.weight");
+        if (fc.rank != 2 or fc.shape[0] != s.hidden or fc.shape[1] != 2 * s.hidden) return error.UnexpectedShape;
+        const D: usize = s.hidden;
+        for ([_][]const u8{ "fc_e", "fc_h" }, 0..) |half, hi| {
+            const rows = try alloc.alloc(u8, D * D * 2);
+            defer alloc.free(rows);
+            for (0..D) |i| @memcpy(rows[i * D * 2 ..][0 .. D * 2], fc.bytes[(i * 2 * D + hi * D) * 2 ..][0 .. D * 2]);
+            const w = try alloc.alloc(u32, D * D / 8);
+            const sc = try alloc.alloc(u16, D * D / 64);
+            const bi = try alloc.alloc(u16, D * D / 64);
+            try sl.quantizeRows(rows, D, D, w, sc, bi);
+            try c.put(name("mtp.{s}.weight", .{half}), "U32", &.{ D, D / 8 }, std.mem.sliceAsBytes(w));
+            try c.put(name("mtp.{s}.scales", .{half}), "BF16", &.{ D, D / 64 }, std.mem.sliceAsBytes(sc));
+            try c.put(name("mtp.{s}.biases", .{half}), "BF16", &.{ D, D / 64 }, std.mem.sliceAsBytes(bi));
+        }
+    }
+    const stage = try d.alloc_(64 << 20);
+    defer {
+        d.g.free(stage);
+        d.allocated -= 64 << 20;
+    }
+    const p = "mtp.layers.0.";
+    const mt = try alloc.create(Mtp);
+    mt.layer = .{
+        .in_norm = try loader.bf16Tensor(d, &c, p ++ "input_layernorm.weight"),
+        .post_norm = try loader.bf16Tensor(d, &c, p ++ "post_attention_layernorm.weight"),
+        .attn = true,
+        .mixer_in = try loader.projection(d, &c, p ++ "self_attn.", &.{ "q_proj", "k_proj", "v_proj" }, true, false, stage),
+        .mixer_out = try loader.projection(d, &c, p ++ "self_attn.", &.{"o_proj"}, false, false, stage),
+        .router = try halfTensor(d, &c, p ++ "mlp.gate"),
+        .shared_gate = try halfTensor(d, &c, p ++ "mlp.shared_expert_gate"),
+        .experts = try experts(d, &c, p, s.experts, false, s.expert_ff, s.hidden),
+        .shared = try experts(d, &c, p, 1, true, s.shared_ff, s.hidden),
+        .qn = try loader.bf16Tensor(d, &c, p ++ "self_attn.q_norm.weight"),
+        .kn = try loader.bf16Tensor(d, &c, p ++ "self_attn.k_norm.weight"),
+    };
+    if (mt.layer.mixer_in.n != z.att_in) return error.UnexpectedShape;
+    const kv_bytes = @as(usize, ctx) * s.kv_heads * @as(usize, if (kv8) 256 + 4 else 256 * 2);
+    for (mt.layer.st[0..slots]) |*st| st.* = .{ .kc = try d.alloc_(kv_bytes), .vc = try d.alloc_(kv_bytes) };
+    mt.layer.kc = mt.layer.st[0].kc;
+    mt.layer.vc = mt.layer.st[0].vc;
+    mt.fc_e = try loader.projection(d, &c, "mtp.", &.{"fc_e"}, false, false, stage);
+    mt.fc_h = try loader.projection(d, &c, "mtp.", &.{"fc_h"}, false, false, stage);
+    mt.norm_e = try loader.bf16Tensor(d, &c, "mtp.pre_fc_norm_embedding.weight");
+    mt.norm_h = try loader.bf16Tensor(d, &c, "mtp.pre_fc_norm_hidden.weight");
+    mt.norm = try loader.bf16Tensor(d, &c, "mtp.norm.weight");
+    const rows: usize = @as(usize, CHUNK) * s.hidden;
+    mt.hin = try d.alloc_(rows * 2);
+    mt.x2 = try d.alloc_(rows * 4);
+    mt.r2 = try d.alloc_(rows * 2);
+    mt.zeros = try d.alloc_(rows * 4);
+    try d.fill(mt.zeros, @as(u32, 0), rows * 4);
+    mt.state = try d.alloc_(@as(usize, MAX_SLOTS) * s.hidden * 2);
+    try d.sync();
+    std.debug.print("  MTP head loaded from {s}\n", .{shard});
+    return mt;
+}
+
+/// The AutoRound shard that holds mtp.fc.weight, from the checkpoint's index.
+fn mtpShard(dir: []const u8) ![:0]const u8 {
+    const bytes = try readFile(name("{s}/model.safetensors.index.json", .{dir}));
+    defer alloc.free(bytes);
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch return error.BadIndex;
+    defer parsed.deinit();
+    const map = if (parsed.value == .object) parsed.value.object.get("weight_map") else null;
+    if (map == null or map.? != .object) return error.BadIndex;
+    const f = map.?.object.get("mtp.fc.weight") orelse return error.NoMtpHead;
+    if (f != .string) return error.BadIndex;
+    return std.fmt.allocPrintSentinel(alloc, "{s}/{s}", .{ dir, f.string }, 0);
 }
 
 // ---------------------------------------------------------------- the runner
@@ -355,6 +478,12 @@ pub const Runner = struct {
     mt_host: []u64 = &.{},
     shift: [MAX_SLOTS]i32 = @splat(0), // M-RoPE: a row past a slot's images turns at its index plus this
     rope_host: [][3]i32 = &.{}, // a forward's rows' positions on their way to acts.rope
+    mtp: ?*Mtp = null, // XPU_MTP: the drafter (an AutoRound checkpoint directory)
+    sdraft: [MAX_SLOTS]i32 = @splat(-1), // each slot's first draft, from its newest absorbed row
+    mpos: [MAX_SLOTS]u32 = @splat(0), // each slot's next MTP slot to absorb
+    verifying: bool = false, // forward runs a block for verify: every row's token, states kept for commit
+    block: [WINDOW]i32 = undefined, // the last verified block's greedy tokens, a row each
+    block_rows: u32 = 0,
 
     /// `slots` streams (1 to MAX_SLOTS) of `ctx` positions each.
     pub fn init(dir: []const u8, ctx: u32, slots: u32) !*Runner {
@@ -379,6 +508,7 @@ pub const Runner = struct {
         }
         if (std.c.getenv("XPU_KV_INT8") != null) r.cap = @intCast(ctx);
         r.model = try load(d, &r.ckpt, z, ctx, slots, r.cap > 0);
+        if (std.c.getenv("XPU_MTP")) |md| r.mtp = try loadMtp(d, std.mem.span(md), z, ctx, slots, r.cap > 0);
         if (gptq) {
             // the converted host copies are on the device now; the conversion threads freed them into their own malloc
             // arenas, which keep the pages until a trim gives them back
@@ -419,9 +549,15 @@ pub const Runner = struct {
                 l.vc = st.vc;
             } else {
                 l.rec = st.rec;
+                l.rec_save = st.rec_save;
+                l.stash = st.stash;
                 l.conv = st.conv;
                 l.conv_cur = st.conv_cur;
             }
+        }
+        if (r.mtp) |mt| {
+            mt.layer.kc = mt.layer.st[slot].kc;
+            mt.layer.vc = mt.layer.st[slot].vc;
         }
         r.cur = slot;
         r.pos = r.spos[slot];
@@ -540,6 +676,8 @@ pub const Runner = struct {
         r.pos = 0;
         r.last = -1;
         r.shift[r.cur] = 0;
+        r.mpos[r.cur] = 0;
+        r.sdraft[r.cur] = -1;
     }
 
     /// Feeds tokens in chunks of CHUNK rows (a tail of WINDOW rows or less as one decode forward); `last` afterwards
@@ -549,7 +687,14 @@ pub const Runner = struct {
         while (at < ids.len) {
             const n = @min(CHUNK, ids.len - at);
             const tail = at + n == ids.len;
+            const p0 = r.pos;
             r.last = if (n > WINDOW) try r.chunk(ids[at..][0..n], tail, .{}) else try r.forward(ids[at..][0..n], tail, .{});
+            if (r.mtp != null) { // the MTP reads each row with the token after it: the next prompt token or the greedy one
+                var follow: [CHUNK]i32 = undefined;
+                @memcpy(follow[0 .. n - 1], ids[at + 1 ..][0 .. n - 1]);
+                follow[n - 1] = if (tail) r.last else ids[at + n];
+                try r.absorb(follow[0..n], p0);
+            }
             at += n;
         }
     }
@@ -558,7 +703,114 @@ pub const Runner = struct {
     /// the tower rows that replace placeholder embeddings. `last` afterwards is the greedy token after the piece.
     pub fn promptFeed(r: *Runner, ids: []const i32, f: Feed) !void {
         if (ids.len > CHUNK or (f.rope != null and f.rope.?.len != ids.len)) return error.BadWindow;
+        const p0 = r.pos;
         r.last = if (ids.len > WINDOW) try r.chunk(ids, true, f) else try r.forward(ids, true, f);
+        if (r.mtp != null) { // as in prompt; a piece's last row reads the greedy token, the next piece's first id is not known here
+            var follow: [CHUNK]i32 = undefined;
+            @memcpy(follow[0 .. ids.len - 1], ids[1..]);
+            follow[ids.len - 1] = r.last;
+            try r.absorb(follow[0..ids.len], p0);
+        }
+    }
+
+    /// The MTP over the last forward's rows (their normed final hidden in acts.h) at slots p0..: `follow` holds the
+    /// token after each row. The slot's first draft becomes the last row's.
+    fn absorb(r: *Runner, follow: []const i32, p0: u32) !void {
+        const mt = r.mtp.?;
+        try dev.copy(&r.d, mt.hin, r.acts.h, follow.len * r.z.s.hidden * 2);
+        r.sdraft[r.cur] = try r.mtpForward(follow, p0);
+        r.mpos[r.cur] = p0 + @as(u32, @intCast(follow.len));
+    }
+
+    /// The MTP layer over rows `ids` (with mtp.hin their hidden) at slots p0..; the last row's normed output goes to
+    /// the slot's state, and its greedy draft is returned.
+    fn mtpForward(r: *Runner, ids: []const i32, p0: u32) !i32 {
+        const mt = r.mtp.?;
+        const l = &mt.layer;
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const s = r.z.s;
+        const T: u32 = @intCast(ids.len);
+        if (T == 0 or T > CHUNK) return error.BadWindow;
+        if (p0 + T > r.ctx) return error.ContextFull;
+        const D: i32 = @intCast(s.hidden);
+        const gs: i32 = 64;
+        const nul: ?*anyopaque = null;
+        const zero: i32 = 0;
+        const one: i32 = 1;
+        const p32: i32 = @intCast(p0);
+        const xb = T * s.hidden * 4;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
+        errdefer d.settle();
+        try d.launch(d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
+        try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, mt.norm_e, a.h, a.ahi, a.alo, D, EPS, zero, gs, nul, nul, zero, zero });
+        try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, mt.fc_e, mt.r2, T);
+        try dev.copy(d, mt.x2, mt.zeros, xb);
+        try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ mt.x2, mt.hin, mt.norm_h, a.h, a.ahi, a.alo, D, EPS, one, gs, nul, nul, zero, zero });
+        try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, mt.fc_h, a.r, T);
+        // the residual: fc_e(en) + fc_h(hn), in fp32 as the CUDA head adds them
+        try dev.copy(d, a.x, mt.zeros, xb);
+        try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, mt.r2, l.in_norm, a.h, a.ahi, a.alo, D, EPS, one, gs, nul, nul, zero, zero });
+        try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, one, gs, nul, nul, zero, zero });
+        try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
+        try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p32, EPS, nul, nul, nul, zero, r.cap, nul });
+        if (T <= WINDOW) {
+            const sp = span(p0 + T);
+            const ns: u32 = (p0 + T + sp - 1) / sp;
+            try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, p32, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), @as(f32, 1.0 / 16.0), nul, nul, r.cap });
+            try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, p32, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), nul });
+        } else if (r.cap > 0)
+            try d.launch(d.k.attn_prompt8, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p32, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0), r.cap })
+        else
+            try d.launch(d.k.attn_prompt, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p32, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0) });
+        try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
+        try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
+        try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, D, EPS, one, gs, nul, nul, zero, zero });
+        try r.moe(l, T);
+        const hgs: i32 = @intCast(m.head.gs);
+        try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, mt.norm, a.h, a.ahi, a.alo, D, EPS, one, hgs, nul, nul, zero, zero });
+        const last = T - 1;
+        const kg = s.hidden / m.head.gs;
+        try dev.copy(d, off(mt.state, r.cur * s.hidden * 2), off(a.h, last * s.hidden * 2), s.hidden * 2);
+        try fwd.gemm(d, a.pscr, off(a.h, last * s.hidden * 2), off(a.ahi, last * kg * 2), off(a.alo, last * kg * 2), m.head, a.logits, 1);
+        try d.launch(d.k.argmax_part, .{ .x = 256, .y = 1 }, .{ a.logits, @as(i32, @intCast(s.vocab)), a.pv, a.pi });
+        try d.launch(d.k.argmax, .{ .x = 1 }, .{ a.pv, a.pi, a.tok });
+        var tok: [1]i32 = undefined;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &tok, a.tok, 4, null, 0, null));
+        try d.sync();
+        return tok[0];
+    }
+
+    /// One speculative step of the current slot (greedy, MTP on): up to `k` drafts from the MTP, one verify block,
+    /// the kept rows committed and absorbed. The tokens it yields go to `out` (1 to k + 1 of them); r.last is the
+    /// newest, not yet fed.
+    pub fn specStep(r: *Runner, k: u32, out: []i32) !usize {
+        const mt = r.mtp orelse return error.NoMtpHead;
+        const s = r.z.s;
+        if (k == 0 or k + 1 > WINDOW or out.len < k + 1) return error.BadDrafts;
+        const n: u32 = @min(k, r.ctx - r.pos - 1);
+        if (n == 0) {
+            try r.step(r.last);
+            out[0] = r.last;
+            return 1;
+        }
+        var blk: [WINDOW]i32 = undefined;
+        blk[0] = r.last;
+        blk[1] = r.sdraft[r.cur];
+        var j: u32 = 1;
+        while (j < n) : (j += 1) { // chained drafts: the row before's output, at the next MTP slots
+            try dev.copy(&r.d, mt.hin, off(mt.state, r.cur * s.hidden * 2), s.hidden * 2);
+            blk[j + 1] = try r.mtpForward(blk[j .. j + 1], r.mpos[r.cur] + j - 1);
+        }
+        const p0 = r.pos;
+        const g = try r.verify(blk[0 .. n + 1]);
+        var a: usize = 0;
+        while (a < n and blk[a + 1] == g[a]) a += 1;
+        @memcpy(out[0 .. a + 1], g[0 .. a + 1]);
+        try r.commit(@intCast(a + 1));
+        try r.absorb(out[0 .. a + 1], p0);
+        return a + 1;
     }
 
     /// The fp16 logits of the last forward's final row (`out.len` is the vocabulary size).
@@ -571,6 +823,47 @@ pub const Runner = struct {
     /// One serial decode token.
     pub fn step(r: *Runner, token: i32) !void {
         r.last = try r.forward(&.{token}, true, .{});
+    }
+
+    /// Runs a block at r.pos (2 to WINDOW rows: the pending token, then drafts) and returns each row's greedy token,
+    /// with the same arithmetic a row as `step`. The position and states move only at `commit`.
+    pub fn verify(r: *Runner, ids: []const i32) ![]const i32 {
+        if (ids.len < 2 or ids.len > WINDOW) return error.BadBlock;
+        const p = r.pos;
+        r.verifying = true;
+        defer r.verifying = false;
+        _ = try r.forward(ids, true, .{});
+        r.pos = p;
+        r.block_rows = @intCast(ids.len);
+        return r.block[0..ids.len];
+    }
+
+    /// Keeps the first `keep` rows of the last verified block. All kept: the block's final GDN states are the states.
+    /// Else each GDN layer replays the kept rows from the entry state, and its convolution state is rebuilt. The K/V
+    /// rows past the kept ones are written again by later forwards.
+    pub fn commit(r: *Runner, keep: u32) !void {
+        if (keep == 0 or keep > r.block_rows) return error.BadCommit;
+        const d = &r.d;
+        const z = r.z;
+        const s = z.s;
+        const at = StashAt.of(z);
+        const nul: ?*anyopaque = null;
+        const k32: i32 = @intCast(keep);
+        for (r.model.layers) |*l| if (!l.attn) {
+            if (keep == r.block_rows) {
+                std.mem.swap(?*anyopaque, &l.rec, &l.rec_save);
+                l.st[r.cur].rec = l.rec;
+                l.st[r.cur].rec_save = l.rec_save;
+                continue;
+            }
+            const sb = l.stash.?;
+            try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ sb, off(sb, at.k), off(sb, at.v), off(sb, at.g), off(sb, at.b), l.rec.?, l.rec.?, r.acts.y, k32, nul, nul, nul, nul });
+            // the block's forward flipped conv_cur: conv[cur] holds the state after all rows, conv[1 - cur] the entry
+            try d.launch(d.k.conv_commit, .{ .x = z.nconv / 256 }, .{ l.conv[1 - l.conv_cur].?, off(sb, at.p), l.conv[l.conv_cur].?, k32, nul });
+        };
+        r.pos += keep;
+        r.last = r.block[keep - 1];
+        r.block_rows = 0;
     }
 
     /// One forward over at most WINDOW rows at r.pos; the last row's greedy token when `want`, else -1.
@@ -608,11 +901,22 @@ pub const Runner = struct {
                 const cin = l.conv[l.conv_cur].?;
                 const cout = l.conv[1 - l.conv_cur].?;
                 l.conv_cur = 1 - l.conv_cur;
-                if (T == 1) // one row: the three GDN kernels in one
+                if (T == 1 and !r.verifying) // one row: the three GDN kernels in one
                     try d.launch(r.mk.gdn_one, .{ .x = s.gdn_v_heads }, .{ a.p, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, l.rec.?, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs })
                 else {
                 try d.launch(d.k.gdn_pre, .{ .x = T, .y = z.nconv / 256 }, .{ a.p, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32, nul, nul });
-                try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, t32, nul, nul, nul, nul });
+                if (r.verifying) { // the inputs, for commit's replay of the kept rows
+                    const sb = l.stash.?;
+                    const at = StashAt.of(z);
+                    try dev.copy(d, sb, a.q, T * s.gdn_k_heads * 128 * 2);
+                    try dev.copy(d, off(sb, at.k), a.k, T * s.gdn_k_heads * 128 * 2);
+                    try dev.copy(d, off(sb, at.v), a.v, T * z.vd * 2);
+                    try dev.copy(d, off(sb, at.g), a.g, T * s.gdn_v_heads * 4);
+                    try dev.copy(d, off(sb, at.b), a.beta, T * s.gdn_v_heads * 4);
+                    try dev.copy(d, off(sb, at.p), a.p, T * z.gdn_in * 2);
+                }
+                // verify: the state after the block to rec_save, rec keeps the entry
+                try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, if (r.verifying) l.rec_save.? else l.rec.?, a.y, t32, nul, nul, nul, nul });
                 try d.launch(d.k.gated_norm, .{ .x = T }, .{ a.y, a.p, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs, zero, nul, nul, zero });
                 }
             }
@@ -749,12 +1053,24 @@ pub const Runner = struct {
         const nul: ?*anyopaque = null;
         const zero: i32 = 0;
         errdefer d.settle();
-        if (!want) {
+        if (!want and r.mtp == null) {
             try d.sync();
             return -1;
         }
         const hgs: i32 = @intCast(m.head.gs);
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, m.norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), hgs, nul, nul, zero, zero });
+        if (!want) { // MTP: the normed rows only, for the absorb
+            try d.sync();
+            return -1;
+        }
+        if (r.verifying) { // every row's token, into block
+            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, m.head, a.logits, T);
+            try d.launch(d.k.argmax_part, .{ .x = 256, .y = T }, .{ a.logits, @as(i32, @intCast(s.vocab)), a.pv, a.pi });
+            try d.launch(d.k.argmax, .{ .x = T }, .{ a.pv, a.pi, a.tok });
+            try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &r.block, a.tok, T * 4, null, 0, null));
+            try d.sync();
+            return r.block[T - 1];
+        }
         const first = T - 1;
         const kg = s.hidden / m.head.gs;
         try r.headRows(off(a.h, first * s.hidden * 2), off(a.ahi, first * kg * 2), off(a.alo, first * kg * 2), 1);
@@ -779,7 +1095,7 @@ pub const Runner = struct {
         try d.launch(r.mk.route, .{ .x = T }, .{ a.mlog, a.mids, a.mwts, a.msw, s.experts, s.top_k });
         if (s.expert_ff != s.shared_ff) return error.SharedWidthNotWired; // one act stride for both (Sage: 512, 512)
         if (T > WINDOW) return r.moeTiles(l, T);
-        if (T > 1) { // several rows: each expert's weights once for all its pairs
+        if (T > 1 and !r.verifying) { // several rows: each expert's weights once for all its pairs (verify: the rows' own kernels, as one row)
             try d.launch(r.mk.group_plan, .{ .x = 1 }, .{ a.mids, a.mplan, s.experts, pairs, T });
             try d.launch(r.mk.group_swiglu, .{ .x = s.expert_ff, .y = pairs + 1 }, .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, a.h, a.mplan, a.mact, s.hidden, s.expert_ff, s.top_k, pairs, s.experts });
             try d.launch(r.mk.group_down, .{ .x = s.hidden / 16, .y = pairs + 1 }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mplan, a.my, s.hidden, s.expert_ff, s.experts });
@@ -952,8 +1268,14 @@ const Job = struct {
 /// lm_head quantized to 4/64 as an MLX export has them, the RMSNorm weights as 1 + w. MTP and vision tensors are not
 /// read. False (and nothing changed) for other checkpoints. The checkpoint gets a name index either way.
 fn autoRound(c: *Checkpoint) !bool {
+    return showAsMlx(c, .main);
+}
+
+/// The tensors autoRound converts: `main`, the model less MTP and vision; `mtp`, the MTP head only (every norm as
+/// 1 + w, fc and the router gates left as stored, for loadMtp).
+fn showAsMlx(c: *Checkpoint, which: enum { main, mtp }) !bool {
     try c.buildIndex();
-    if (!c.has("layers.0.mlp.shared_expert.gate_proj.qweight")) return false;
+    if (which == .main and !c.has("layers.0.mlp.shared_expert.gate_proj.qweight")) return false;
     // the embedding and lm_head as 4/64, as MLX has them; XPU_SAGE_HEAD16=1 keeps fp16 copies of the bf16 ones (text
     // NLL 1.9933 against 2.0023 on 1499 tokens, decode about 19% slower: the head reads 1 GB a token)
     const head4 = std.c.getenv("XPU_SAGE_HEAD16") == null;
@@ -961,7 +1283,18 @@ fn autoRound(c: *Checkpoint) !bool {
     defer jobs.deinit(alloc);
     for (c.tensors.items[0..c.stored]) |t| {
         const n = t.name;
-        if (std.mem.indexOf(u8, n, "mtp.") != null or std.mem.indexOf(u8, n, "visual.") != null) continue;
+        const in_mtp = std.mem.startsWith(u8, n, "mtp.");
+        if (which == .mtp) {
+            if (!in_mtp) continue;
+            if (std.mem.endsWith(u8, n, ".qweight")) {
+                try jobs.append(alloc, .{ .kind = .gptq, .base = n[0 .. n.len - 8], .k = t.shape[0] * 8, .n = t.shape[1] });
+            } else if (std.mem.indexOf(u8, n, "norm") != null and std.mem.endsWith(u8, n, ".weight")) {
+                if (!std.mem.eql(u8, t.dtype, "BF16")) return error.UnexpectedDtype;
+                try jobs.append(alloc, .{ .kind = .plus_one, .base = n[0 .. n.len - 7], .k = t.shape[0], .n = 1 });
+            }
+            continue;
+        }
+        if (in_mtp or std.mem.indexOf(u8, n, "visual.") != null) continue;
         if (std.mem.endsWith(u8, n, ".qweight")) {
             try jobs.append(alloc, .{ .kind = .gptq, .base = n[0 .. n.len - 8], .k = t.shape[0] * 8, .n = t.shape[1] });
         } else if (head4 and (std.mem.endsWith(u8, n, "embed_tokens.weight") or std.mem.eql(u8, n, "lm_head.weight"))) {
@@ -998,7 +1331,7 @@ fn autoRound(c: *Checkpoint) !bool {
         try c.put(try std.fmt.bufPrint(&nb, "{s}.scales", .{j.base}), "BF16", &.{ j.n, j.k / 64 }, std.mem.sliceAsBytes(j.s));
         try c.put(try std.fmt.bufPrint(&nb, "{s}.biases", .{j.base}), "BF16", &.{ j.n, j.k / 64 }, std.mem.sliceAsBytes(j.b));
     }
-    std.debug.print("  AutoRound: {d} tensors shown as MLX affine 4/64\n", .{jobs.items.len});
+    std.debug.print("  AutoRound{s}: {d} tensors shown as MLX affine 4/64\n", .{ if (which == .mtp) " MTP" else "", jobs.items.len });
     return true;
 }
 
