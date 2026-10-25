@@ -196,6 +196,40 @@ test "done times: a temperature-greedy engine serves temperature-only requests g
     try std.testing.expect(std.mem.indexOf(u8, cx.message, "SamplingNotAttached") != null);
 }
 
+// POST /v1/chat/completions end to end (HTTP parser → chat.prepare): the path a live request takes
+// on the real serve pair, where the earlier temperature-greedy fix was wired but its registry alias
+// never carried the flag, so the parser resolved against the generation-config defaults and refused.
+test "done times: the HTTP chat parser serves temperature-only and absent-temperature bodies greedy, and temperature+top_k refuses by name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    Clock.next = 42;
+    var script: Script = .{ .first = 10_384_000_000 };
+    var tt: helpers = .{};
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    defer srv.deinit();
+    srv.info.temperature_greedy = true;
+    srv.config.default_sampling = (try json.parse(a, "{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":40}")).ok; // the live pack's generation_config defaults
+    const bodies = [_][]const u8{
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", // bare: any served body's shape
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":0.7}", // temperature-only, sampled value
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":0}",
+        "{\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":0.7}", // a stream:false body with max_tokens
+    };
+    for (bodies) |raw| {
+        var cx: Cx = .{ .a = a };
+        const input = try @import("openai.zig").chatInput(srv, &cx, (try json.parse(a, raw)).ok);
+        const prepared = try chat.prepare(srv, &cx, input, Gone{});
+        chat.release(srv, prepared.preparing);
+        try std.testing.expectEqual(@as(?api.Sampling, null), prepared.request.sampling); // fixed greedy, no keyed sampler
+        try std.testing.expect(!prepared.sampled);
+    }
+    var cx: Cx = .{ .a = a };
+    const refused = try @import("openai.zig").chatInput(srv, &cx, (try json.parse(a, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":0.7,\"top_k\":40}")).ok);
+    try std.testing.expectError(error.Refused, chat.prepare(srv, &cx, refused, Gone{}));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "SamplingNotAttached") != null); // refuses by the lane surface's exact name
+}
+
 fn seedControls(mode: enum { fresh, keyed, explicit, defaults, default_fresh, failed, log_drawn, log_given }) !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

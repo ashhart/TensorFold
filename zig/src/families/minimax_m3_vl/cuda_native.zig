@@ -72,6 +72,7 @@ pub const native = struct {
     pub const open = me.open;
     pub const explain = me.explain;
     pub const weightShare = me.weightShare; // the server's admission reads this rank's split share
+    pub const temperature_greedy = me.temperature_greedy; // openWith(F)'s Info reads this through the registry alias
 };
 
 /// Slots for `context` plus one whole block's reserve, a multiple of the 128-token key block.
@@ -737,6 +738,7 @@ test "admission runs the whole checkpoint and open refuses exactly at the serve 
     try std.testing.expect(std.mem.indexOf(u8, words, "LanesNotAttached") != null); // drafts+second streams still refuse
     try std.testing.expect(std.mem.indexOf(u8, words, "SamplingNotAttached") != null); // sampled draws refuse
     try std.testing.expect(temperature_greedy); // the server serves temperature as fixed greedy
+    try std.testing.expect(@hasDecl(native, "temperature_greedy") and native.temperature_greedy); // the registry alias carries it: openWith(F)'s Info reads the flag through F = native
     try std.testing.expect(std.mem.indexOf(u8, words, "TpServingNotAttached") != null); // and the TP2 server boot
     try std.testing.expect(std.mem.indexOf(u8, words, "ContextTooWide") != null); // and the pool's window
     try std.testing.expect(explain(null, error.LanesNotAttached) != null);
