@@ -11,4 +11,6 @@ pub fn host(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) void {
     all.dependOn(&run.step);
     const loader = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Dory loader:"} }));
     b.step("test-dory-loader-host", "Dory load refusals and device ownership under host allocation failure").dependOn(&loader.step);
+    const upload = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Dory queued upload:"} }));
+    b.step("test-dory-upload-host", "Queued Dory inputs outlive caller mutation without GPU work").dependOn(&upload.step);
 }

@@ -139,7 +139,7 @@ pub const Model = struct {
     }
 
     fn upload(m: *const Model, s: cuda.Stream, dst: u64, bytes: []const u8) !void {
-        try m.d.check(m.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, s.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(m.d, dst, bytes, s);
     }
 
     fn copy(m: *const Model, s: cuda.Stream, dst: u64, src: u64, bytes: usize) !void {
@@ -326,4 +326,15 @@ test "the forward's launches type-check against the shared operators" {
 test "a sliding ring holds a prompt chunk and its window in whole key blocks" {
     try std.testing.expectEqual(@as(usize, 3072), ringSize(prompt_rows, 1024));
     try std.testing.expectEqual(@as(usize, 1088), ringSize(window_rows, 1024));
+}
+
+test "Dory queued upload: Model inputs survive caller mutation until stream completion" {
+    const Send = struct {
+        fn send(d: *const cuda.Driver, s: cuda.Stream, bytes: []const u8) !void {
+            var x: Model = undefined;
+            x.d = d;
+            try x.upload(s, 0x1000, bytes);
+        }
+    };
+    try @import("cuda_upload_test.zig").check(Send.send);
 }

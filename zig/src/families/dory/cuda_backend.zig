@@ -111,7 +111,7 @@ pub const Dory = struct {
     }
 
     fn upload(x: *Dory, dst: u64, bytes: []const u8) !void {
-        try x.d.check(x.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, x.s.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(x.d, dst, bytes, x.s);
     }
 
     /// Rows [row0, row0 + rows) of fp32 `logits` drawn into tok[at..], row r at `position0 + r` (argmax when greedy).
@@ -348,4 +348,16 @@ test "a slot holds the window and a verify window past it, in whole 1,024s; a re
     try std.testing.expect(fits(physical, physical - reserve - 1, 1));
     try std.testing.expect(!fits(physical, physical - reserve, 1));
     try std.testing.expect(!fits(physical, physical + 1, 0));
+}
+
+test "Dory queued upload: Dory inputs survive caller mutation until stream completion" {
+    const Send = struct {
+        fn send(d: *const cuda.Driver, s: cuda.Stream, bytes: []const u8) !void {
+            var x: Dory = undefined;
+            x.d = d;
+            x.s = s;
+            try x.upload(0x1000, bytes);
+        }
+    };
+    try @import("cuda_upload_test.zig").check(Send.send);
 }
