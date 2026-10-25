@@ -147,6 +147,7 @@ const m = "model.";
 /// Every tensor checked against the admitted geometry and width. `layers` caps them (checks).
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, layers: ?usize) !Weights {
     const c = try cfg.Config.read(gpa, io, dir);
+    if (c.bits == cfg.bf16) return error.UnsupportedSparkQuantization; // the bf16 release: no CUDA kernels read it
     const geo = c.geo;
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();

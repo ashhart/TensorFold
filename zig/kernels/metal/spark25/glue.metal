@@ -267,3 +267,51 @@ inline bool sp_better(float a, uint ia, float b, uint ib) {
   }
   if (lane == 0) ids[0] = at;
 }
+
+// Row r of residual R = bf16 embedding row ids[r] (the release's table, [vocab, width]), held in fp32.
+[[kernel]] void sp_embed_bf16(const device uint* ids [[buffer(0)]], const device bfloat* E [[buffer(1)]],
+    constant sp_args& a [[buffer(2)]], device float* R [[buffer(3)]], uint2 p [[thread_position_in_grid]]) {
+  if (p.x >= a.width || p.y >= a.rows) return;
+  R[(size_t)p.y * a.width + p.x] = float(E[(size_t)ids[p.y] * a.width + p.x]);
+}
+
+struct sp_mv_args { uint rows, n, k, ldy; };
+
+// Y[r, j] = bf16(sum_i X[r, i] * W[j, i]) over bf16 W [n, k] in fp32 (torch's bf16 linear): a simdgroup a row j.
+template <uint ROWS>
+inline void sp_matvec_t(const device bfloat* X, const device bfloat* W, constant sp_mv_args& a, device bfloat* Y,
+    uint3 tg, uint sg, uint lane) {
+  constexpr uint SG = 8;
+  const uint j = tg.x * SG + sg;
+  if (j >= a.n) return;
+  const device bfloat* w = W + (size_t)j * a.k;
+  float acc[ROWS];
+  TF_UNROLL_4
+  for (uint r = 0; r < ROWS; ++r) acc[r] = 0.0f;
+  for (uint i = 8 * lane; i < a.k; i += 256) {
+    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4));
+    TF_UNROLL_4
+    for (uint r = 0; r < ROWS; ++r) {
+      const device bfloat* x = X + (size_t)r * a.k + i;
+      acc[r] += dot(w0, float4(*(const device bfloat4*)x)) + dot(w1, float4(*(const device bfloat4*)(x + 4)));
+    }
+  }
+  TF_UNROLL_4
+  for (uint r = 0; r < ROWS; ++r) {
+    const float s = simd_sum(acc[r]);
+    if (lane == 0 && r < a.rows) Y[(size_t)r * a.ldy + j] = bfloat(s);
+  }
+}
+
+#define SP_MATVEC(ROWS)                                                                                            \
+  [[kernel]] void sp_matvec_##ROWS(const device bfloat* X [[buffer(0)]], const device bfloat* W [[buffer(1)]],      \
+      constant sp_mv_args& a [[buffer(2)]], device bfloat* Y [[buffer(3)]], uint3 tg [[threadgroup_position_in_grid]], \
+      uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {                      \
+    sp_matvec_t<ROWS>(X, W, a, Y, tg, sg, lane);                                                                   \
+  }
+SP_MATVEC(1)
+SP_MATVEC(2)
+SP_MATVEC(4)
+SP_MATVEC(8)
+SP_MATVEC(16)
+SP_MATVEC(32)

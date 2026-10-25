@@ -16,6 +16,8 @@ const geo = cfg.spark4b;
 const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 = 0 };
 /// The q, k and v preparation's constants (glue.metal's sp_prep_args).
 const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, ring: u32, rot: u32, stride: u32 };
+/// The bf16 row projection's constants (glue.metal's sp_mv_args).
+const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 /// The decode attention's constants (glue.metal's sp_vec_args).
 const VArgs = extern struct { rows: u32, pos: u32, heads: u32, groups: u32, ring: u32, window: u32, blocks: u32, chunk: u32, first: u32, scale: f32 };
 
@@ -34,10 +36,14 @@ const Enc = struct {
         if (groups) x.e.dispatchGroups(g3, t3) else x.e.dispatchThreads(g3, t3);
     }
 
-    fn project(x: Enc, w: wts.Linear, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize) !void {
+    fn project(x: Enc, l: wts.Linear, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize) !void {
+        const w = switch (l) {
+            .bf16 => |d| return x.dense(d, in, out, out_off, n_rows, l.pitch()),
+            .affine => |a| a,
+        };
         if (n_rows > st.batch_rows) {
             // a prompt chunk: each group's row sums, then the tensor-unit product (each weight read once a chunk)
-            const p = x.m.mm;
+            const p = x.m.mm orelse return error.UnsupportedSparkWeights;
             affine_mm.rowSums(x.e, p, @intCast(w.group), b(in), b(x.s.sums), @intCast(n_rows), @intCast(w.k));
             affine_mm.dense(x.e, p, b(in), b(x.s.sums), mat(w), bo(out, out_off), @intCast(n_rows));
             return;
@@ -51,6 +57,35 @@ const Enc = struct {
         x.e.setValue(call.dims, 4);
         x.e.setBuffer(out, out_off, 5);
         x.e.dispatchGroups(mtl.Size.of(call.groups, 1, 1), mtl.Size.of(call.threads, 1, 1));
+    }
+
+    /// y [rows, d.n] (rows `ldy` apart) = x W^T over bf16 rows: gemm_nax for a prompt chunk, sp_matvec for a window.
+    fn dense(x: Enc, d: wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) !void {
+        const e = x.e;
+        if (n_rows <= st.batch_rows) {
+            // the variant holding the rows in registers: 1, 2, 4, 8, 16 or 32
+            const variant: Glue = if (n_rows <= 1) .matvec_1 else if (n_rows <= 2) .matvec_2 else if (n_rows <= 4) .matvec_4 else if (n_rows <= 8) .matvec_8 else if (n_rows <= 16) .matvec_16 else .matvec_32;
+            e.setPipeline(x.m.pipe(variant));
+            e.setBuffer(in, 0, 0);
+            e.setBuffer(d.buf, d.off, 1);
+            e.setValue(MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) }, 2);
+            e.setBuffer(out, out_off, 3);
+            e.dispatchGroups(mtl.Size.of((d.n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
+            return;
+        }
+        const g = x.m.gemm orelse return error.UnsupportedSparkWeights;
+        const M: usize = n_rows;
+        const tn = (d.n + 127) / 128;
+        const tm = (M + 63) / 64;
+        e.setPipeline(g[@intFromBool(M % 64 == 0)][@intFromBool(d.n % 128 == 0)]);
+        e.setBuffer(in, 0, 0);
+        e.setBuffer(d.buf, d.off, 1);
+        var p: [16]i32 = @splat(0);
+        const vals = [_]usize{ M, d.n, d.k, d.k, d.k, ldy, tn, tm, 2, d.k / 256, 0, 0, 0, 0, 0 };
+        for (vals, 0..) |v, i| p[i] = @intCast(v);
+        e.setBytes(std.mem.asBytes(&p), 2);
+        e.setBuffer(out, out_off, 3);
+        e.dispatchThreads(mtl.Size.of(@as(usize, tn << 2) * 32, (tm + 3) / 4 * 4, 2), mtl.Size.of(32, 4, 2));
     }
 };
 
@@ -67,7 +102,7 @@ fn t(x: wts.Tensor) B {
 const A = B{ .args = true };
 
 /// A matrix as affine_mm takes it.
-fn mat(w: wts.Linear) struct { w: B, s: B, b: B, n: u32, k: u32 } {
+fn mat(w: rows.Weights) struct { w: B, s: B, b: B, n: u32, k: u32 } {
     return .{ .w = bo(w.w, w.w_off), .s = bo(w.scales, w.s_off), .b = bo(w.biases, w.b_off), .n = @intCast(w.n), .k = @intCast(w.k) };
 }
 
@@ -189,9 +224,13 @@ fn pick(x: Enc, logits: mtl.Buffer, d: Draw) void {
 
 /// Embeddings of the token ids at `ids` (n of them) into the residual.
 fn embed(x: Enc, ids: B, n: usize) void {
-    const E = x.m.weights.embed;
-    const args = Args{ .rows = @intCast(n), .width = geo.hidden, .bits = E.bits, .group = @intCast(E.group) };
-    x.glue(.embed, args, &.{ ids, bo(E.w, E.w_off), bo(E.scales, E.s_off), bo(E.biases, E.b_off), A, b(x.s.resid) }, .{ geo.hidden, n, 1 }, .{ 256, 1, 1 }, false);
+    switch (x.m.weights.embed) {
+        .bf16 => |d| x.glue(.embed_bf16, Args{ .rows = @intCast(n), .width = geo.hidden }, &.{ ids, bo(d.buf, d.off), A, b(x.s.resid) }, .{ geo.hidden, n, 1 }, .{ 256, 1, 1 }, false),
+        .affine => |E| {
+            const args = Args{ .rows = @intCast(n), .width = geo.hidden, .bits = E.bits, .group = @intCast(E.group) };
+            x.glue(.embed, args, &.{ ids, bo(E.w, E.w_off), bo(E.scales, E.s_off), bo(E.biases, E.b_off), A, b(x.s.resid) }, .{ geo.hidden, n, 1 }, .{ 256, 1, 1 }, false);
+        },
+    }
 }
 
 /// Layer `i` on every segment's rows (s.x their input norm); its last add norms the residual by `next`.

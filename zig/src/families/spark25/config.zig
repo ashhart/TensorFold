@@ -15,6 +15,8 @@ pub const scale: f32 = 0.0625;
 
 /// The bits the affine kernels read, every linear and the tied embedding at one width.
 pub const bit_widths = [_]u8{ 2, 3, 4, 5, 6, 8 };
+/// `bits` of the release as published: bf16 weights, no quantization table (Metal serves them; CUDA refuses).
+pub const bf16: u8 = 16;
 
 pub const Geometry = struct {
     hidden: usize,
@@ -176,7 +178,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     const ropes = try object(try field(root, "rope_parameters"));
     try rope(ropes, "sliding_attention", sliding_theta, 1.0);
     try rope(ropes, "full_attention", full_theta, 0.25);
-    const bits = try width(root.get("quantization"));
+    const bits: u8 = if (root.get("quantization")) |q| try width(q) else bf16;
     if (root.get("quantization_config")) |q| if (try width(q) != bits) return error.UnsupportedSparkQuantization;
     const context = try integer(root, "max_position_embeddings");
     if (context < 1 or context > 1 << 20) return error.BadSparkContext;
@@ -194,6 +196,35 @@ test "the 8-bit 4B's config is admitted with its context and end token" {
     try std.testing.expectEqual(@as(u8, 8), c.bits);
     try std.testing.expectEqual(@as(usize, 1 << 20), c.context);
     try std.testing.expectEqualSlices(u32, &.{1}, c.eos[0..c.eos_count]);
+}
+
+test "the release's config, no quantization table, is admitted as bf16" {
+    const gpa = std.testing.allocator;
+    const tables =
+        \\,
+        \\  "quantization": {
+        \\    "group_size": 64,
+        \\    "bits": 8,
+        \\    "mode": "affine"
+        \\  },
+        \\  "quantization_config": {
+        \\    "group_size": 64,
+        \\    "bits": 8,
+        \\    "mode": "affine"
+        \\  }
+        \\}
+    ;
+    try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, fixture, "\n"), tables));
+    const stripped = try std.mem.replaceOwned(u8, gpa, fixture, tables, "\n}");
+    defer gpa.free(stripped);
+    const c = try parse(gpa, stripped);
+    try std.testing.expectEqual(bf16, c.bits);
+    // one table alone is a mismatch, as two tables that disagree are
+    const one = "  \"quantization\": {\n    \"group_size\": 64,\n    \"bits\": 8,\n    \"mode\": \"affine\"\n  },\n";
+    const lone = try std.mem.replaceOwned(u8, gpa, fixture, one, "");
+    defer gpa.free(lone);
+    try std.testing.expect(!std.mem.eql(u8, lone, fixture));
+    try std.testing.expectError(error.UnsupportedSparkQuantization, parse(gpa, lone));
 }
 
 test "other layouts are refused by name" {

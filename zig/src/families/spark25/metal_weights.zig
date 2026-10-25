@@ -1,4 +1,4 @@
-//! Spark2.5's MLX affine checkpoint on Metal as row-projection matrices: q|k|v|gate and gate|up stacked, bf16 norms.
+//! Spark2.5's checkpoint on Metal: the release's bf16 matrices as stored, or MLX affine ones; q|k|v|gate stacked.
 const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
@@ -7,11 +7,38 @@ const cfg = @import("config.zig");
 const st = @import("metal_state.zig");
 
 pub const Tensor = ck.Tensor;
-pub const Linear = rows.Weights;
 
 const geo = cfg.spark4b;
 
-/// q_k_v_proj and g_proj stacked (zero rows after the gates, to st.qkvg_rows), the output projection.
+/// A bf16 [n, k] matrix as the release stores it (torch's Linear weight), at `off` in `buf`.
+pub const Dense = struct { buf: mtl.Buffer, off: usize, n: usize, k: usize };
+
+/// A projection's weights: the release's bf16 rows, or one MLX affine width in groups of 64.
+pub const Linear = union(enum) {
+    bf16: Dense,
+    affine: rows.Weights,
+
+    pub fn n(l: Linear) usize {
+        return switch (l) {
+            .bf16 => |d| d.n,
+            .affine => |a| a.n,
+        };
+    }
+
+    pub fn k(l: Linear) usize {
+        return switch (l) {
+            .bf16 => |d| d.k,
+            .affine => |a| a.k,
+        };
+    }
+
+    /// The output row pitch in values: n to a whole 64 (the affine prompt matmul writes its padded rows).
+    pub fn pitch(l: Linear) usize {
+        return std.mem.alignForward(usize, l.n(), 64);
+    }
+};
+
+/// q_k_v_proj and g_proj stacked (q, k, v, then a gate a head), the output projection.
 pub const Attention = struct { qkvg: Linear, out: Linear };
 /// gate and up stacked into one matrix (rows gate | up).
 pub const Mlp = struct { gu: Linear, down: Linear };
@@ -56,9 +83,7 @@ fn norm(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8) !Tensor
 }
 
 /// An affine [n, k] matrix at the checkpoint's one width, groups of 64, words stored as u32.
-fn affine(c: *const ck.Checkpoint, bits: u8, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Linear {
-    var buf: [256]u8 = undefined;
-    const base = try name(&buf, prefix, suffix);
+fn affine(c: *const ck.Checkpoint, bits: u8, base: []const u8, n: usize, k: usize) !Linear {
     var b2: [256]u8 = undefined;
     const w = try c.get(try name(&b2, base, ".weight"));
     const s = try c.get(try name(&b2, base, ".scales"));
@@ -66,46 +91,81 @@ fn affine(c: *const ck.Checkpoint, bits: u8, prefix: []const u8, suffix: []const
     try require(w, .u32, &.{ n, k * bits / 32 });
     try require(s, .bf16, &.{ n, k / cfg.group });
     try require(z, .bf16, &.{ n, k / cfg.group });
-    const out = Linear{ .w = w.buffer, .w_off = w.offset, .scales = s.buffer, .s_off = s.offset, .biases = z.buffer, .b_off = z.offset, .n = n, .k = k, .group = cfg.group, .bits = bits };
+    const out = rows.Weights{ .w = w.buffer, .w_off = w.offset, .scales = s.buffer, .s_off = s.offset, .biases = z.buffer, .b_off = z.offset, .n = n, .k = k, .group = cfg.group, .bits = bits };
     try out.validate();
-    return out;
+    return .{ .affine = out };
 }
 
-/// `parts` (one format and input width) stacked in a new buffer, rows in order, zero rows after them to `total`.
+/// The release's bf16 [n, k] matrix in place: k whole 256s for the GEMM's steps, 16-byte aligned for the row kernel.
+fn dense(c: *const ck.Checkpoint, base: []const u8, n: usize, k: usize) !Linear {
+    var b2: [256]u8 = undefined;
+    const w = try c.get(try name(&b2, base, ".weight"));
+    try require(w, .bf16, &.{ n, k });
+    if (k % 256 != 0 or w.offset % 16 != 0) return error.UnexpectedSparkTensor;
+    return .{ .bf16 = .{ .buf = w.buffer, .off = w.offset, .n = n, .k = k } };
+}
+
+/// `base`'s matrix in the checkpoint's format.
+fn linear(c: *const ck.Checkpoint, bits: u8, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Linear {
+    var buf: [256]u8 = undefined;
+    const base = try name(&buf, prefix, suffix);
+    return if (bits == cfg.bf16) dense(c, base, n, k) else affine(c, bits, base, n, k);
+}
+
+/// `parts` (one format and width) stacked in a new buffer, rows in order; affine stacks pad with zero rows to `total`.
 fn stacked(gpa: std.mem.Allocator, device: mtl.Device, w: *Weights, parts: []const Linear, total: usize) !Linear {
-    const k = parts[0].k;
-    const words = k * parts[0].bits / 32;
-    const groups = k / parts[0].group;
+    const k = parts[0].k();
     var n: usize = 0;
     for (parts) |p| {
-        if (p.k != k or p.bits != parts[0].bits or p.group != parts[0].group) return error.UnexpectedSparkTensor;
-        n += p.n;
+        if (p.k() != k or std.meta.activeTag(p) != std.meta.activeTag(parts[0])) return error.UnexpectedSparkTensor;
+        n += p.n();
     }
     if (total < n) return error.UnexpectedSparkTensor;
-    const s_at = std.mem.alignForward(usize, total * words * 4, 256);
-    const b_at = std.mem.alignForward(usize, s_at + total * groups * 2, 256);
-    const buf = try device.buffer(b_at + total * groups * 2, mtl.ResourceOptions.shared);
-    errdefer buf.deinit();
-    const dst = buf.contents();
-    @memset(dst[0 .. b_at + total * groups * 2], 0); // padded rows: zero words, scales and biases, so zero outputs
-    var row: usize = 0;
-    for (parts) |p| {
-        @memcpy(dst[row * words * 4 ..][0 .. p.n * words * 4], (p.w.contents() + p.w_off)[0 .. p.n * words * 4]);
-        @memcpy(dst[s_at + row * groups * 2 ..][0 .. p.n * groups * 2], (p.scales.contents() + p.s_off)[0 .. p.n * groups * 2]);
-        @memcpy(dst[b_at + row * groups * 2 ..][0 .. p.n * groups * 2], (p.biases.contents() + p.b_off)[0 .. p.n * groups * 2]);
-        row += p.n;
+    switch (parts[0]) {
+        .bf16 => {
+            const buf = try device.buffer(n * k * 2, mtl.ResourceOptions.shared);
+            errdefer buf.deinit();
+            const dst = buf.contents();
+            var row: usize = 0;
+            for (parts) |p| {
+                const d = p.bf16;
+                @memcpy(dst[row * k * 2 ..][0 .. d.n * k * 2], (d.buf.contents() + d.off)[0 .. d.n * k * 2]);
+                row += d.n;
+            }
+            try w.stacked.append(gpa, buf);
+            return .{ .bf16 = .{ .buf = buf, .off = 0, .n = n, .k = k } };
+        },
+        .affine => |first| {
+            const words = k * first.bits / 32;
+            const groups = k / first.group;
+            const s_at = std.mem.alignForward(usize, total * words * 4, 256);
+            const b_at = std.mem.alignForward(usize, s_at + total * groups * 2, 256);
+            const buf = try device.buffer(b_at + total * groups * 2, mtl.ResourceOptions.shared);
+            errdefer buf.deinit();
+            const dst = buf.contents();
+            @memset(dst[0 .. b_at + total * groups * 2], 0); // padded rows: zero words, scales and biases, so zero outputs
+            var row: usize = 0;
+            for (parts) |p| {
+                const a = p.affine;
+                if (a.bits != first.bits or a.group != first.group) return error.UnexpectedSparkTensor;
+                @memcpy(dst[row * words * 4 ..][0 .. a.n * words * 4], (a.w.contents() + a.w_off)[0 .. a.n * words * 4]);
+                @memcpy(dst[s_at + row * groups * 2 ..][0 .. a.n * groups * 2], (a.scales.contents() + a.s_off)[0 .. a.n * groups * 2]);
+                @memcpy(dst[b_at + row * groups * 2 ..][0 .. a.n * groups * 2], (a.biases.contents() + a.b_off)[0 .. a.n * groups * 2]);
+                row += a.n;
+            }
+            try w.stacked.append(gpa, buf);
+            const out = rows.Weights{ .w = buf, .w_off = 0, .scales = buf, .s_off = s_at, .biases = buf, .b_off = b_at, .n = total, .k = k, .group = first.group, .bits = first.bits };
+            try out.validate();
+            return .{ .affine = out };
+        },
     }
-    try w.stacked.append(gpa, buf);
-    const out = Linear{ .w = buf, .w_off = 0, .scales = buf, .s_off = s_at, .biases = buf, .b_off = b_at, .n = total, .k = k, .group = parts[0].group, .bits = parts[0].bits };
-    try out.validate();
-    return out;
 }
 
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint, f: *const cfg.Config) !Weights {
     const h = geo.hidden;
     const b = f.bits;
     var w = Weights{
-        .embed = try affine(c, b, "model.", "embedding", cfg.vocab, h),
+        .embed = try linear(c, b, "model.", "embedding", cfg.vocab, h),
         .norm = try norm(c, "model.", "norm.weight"),
         .layers = try gpa.alloc(Layer, geo.layers),
     };
@@ -117,15 +177,15 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint,
         const a = try name(&ab, p, "self_attn");
         var mb: [96]u8 = undefined;
         const m = try name(&mb, p, "mlp");
-        const qkv = try affine(c, b, a, ".q_k_v_proj", geo.queryWidth() + 2 * geo.kvWidth(), h);
-        const gates = try affine(c, b, a, ".g_proj", geo.query_heads, h);
+        const qkv = try linear(c, b, a, ".q_k_v_proj", geo.queryWidth() + 2 * geo.kvWidth(), h);
+        const gates = try linear(c, b, a, ".g_proj", geo.query_heads, h);
         l.* = .{
             .input_norm = try norm(c, p, "input_layernorm.weight"),
             .post_norm = try norm(c, p, "post_attention_layernorm.weight"),
-            .attn = .{ .qkvg = try stacked(gpa, device, &w, &.{ qkv, gates }, st.qkvg_rows), .out = try affine(c, b, a, ".out_proj", h, geo.queryWidth()) },
+            .attn = .{ .qkvg = try stacked(gpa, device, &w, &.{ qkv, gates }, st.qkvg_rows), .out = try linear(c, b, a, ".out_proj", h, geo.queryWidth()) },
             .mlp = .{
-                .gu = try stacked(gpa, device, &w, &.{ try affine(c, b, m, ".gate_proj", geo.intermediate, h), try affine(c, b, m, ".up_proj", geo.intermediate, h) }, 2 * geo.intermediate),
-                .down = try affine(c, b, m, ".down_proj", h, geo.intermediate),
+                .gu = try stacked(gpa, device, &w, &.{ try linear(c, b, m, ".gate_proj", geo.intermediate, h), try linear(c, b, m, ".up_proj", geo.intermediate, h) }, 2 * geo.intermediate),
+                .down = try linear(c, b, m, ".down_proj", h, geo.intermediate),
             },
         };
     }

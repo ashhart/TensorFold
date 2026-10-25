@@ -172,6 +172,8 @@ pub const step5_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("ste
 pub const spark25_glue = @embedFile("spark25/glue.metal");
 /// Spark2.5's prompt attention on the tensor units (gemma4's prompt kernel; nax.h inlined at load).
 pub const spark25_attention_nax = @embedFile("spark25/attention_nax.metal");
+/// Spark2.5's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
+pub const spark25_gemm = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("spark25/gemm.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 

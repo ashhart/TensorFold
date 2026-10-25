@@ -19,8 +19,8 @@ fn sampler() ?ks.nemotron.Kernel {
     return null;
 }
 
-pub const glue_names = [_][:0]const u8{ "sp_embed", "sp_norm", "sp_add", "sp_add_norm", "sp_prep", "sp_gate", "sp_gelu_gu", "sp_decode_vec", "sp_merge_vec", "sp_argmax" };
-pub const Glue = enum { embed, norm, add, add_norm, prep, gate, gelu_gu, decode_vec, merge_vec, argmax };
+pub const glue_names = [_][:0]const u8{ "sp_embed", "sp_embed_bf16", "sp_norm", "sp_add", "sp_add_norm", "sp_prep", "sp_gate", "sp_gelu_gu", "sp_decode_vec", "sp_merge_vec", "sp_argmax", "sp_matvec_1", "sp_matvec_2", "sp_matvec_4", "sp_matvec_8", "sp_matvec_16", "sp_matvec_32" };
+pub const Glue = enum { embed, embed_bf16, norm, add, add_norm, prep, gate, gelu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32 };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -36,8 +36,9 @@ pub const Model = struct {
     /// A pipelined step's keyed draws (host twins: lanes' gpu_rule, gpu_full): top-k candidates, whole vocabulary.
     sample: mtl.Pipeline,
     sample_full: mtl.Pipeline,
-    /// The checkpoint's one width as prompt chunks' tensor-unit matmuls.
-    mm: affine_mm.Pipes,
+    /// Prompt chunks' tensor-unit matmuls: the affine width's, or the bf16 GEMM by whole M and N tiles.
+    mm: ?affine_mm.Pipes,
+    gemm: ?[2][2]mtl.Pipeline,
     /// RoPE's inverse frequencies by layer kind (sliding, full): fp32 [head_dim / 2], zero past the rotated dims.
     inv: [2]mtl.Buffer,
 
@@ -101,19 +102,39 @@ pub const Model = struct {
             m.sample_full = try mtl.Pipeline.init(m.device, lib, "tf_sample_full", false);
         }
         errdefer m.sample_full.deinit();
-        {
+        m.mm = null;
+        m.gemm = null;
+        if (m.config.bits == cfg.bf16) {
+            const body = try frags.source(m.device, gpa, ks.spark25_gemm);
+            defer gpa.free(body);
+            const lib = try mtl.Library.fromSource(m.device, body, mtl.CompileOptions.mlx());
+            defer lib.deinit();
+            var g: [2][2]mtl.Pipeline = undefined;
+            var made: usize = 0;
+            errdefer for (0..made) |i| g[i / 2][i % 2].deinit();
+            for (0..4) |i| {
+                var nm: [16]u8 = undefined;
+                const full = try std.fmt.bufPrintSentinel(&nm, "sp_gemm_{d}{d}", .{ i / 2, i % 2 }, 0);
+                g[i / 2][i % 2] = try mtl.Pipeline.init(m.device, lib, full, false);
+                made += 1;
+            }
+            m.gemm = g;
+        } else {
             const text = try affine_mm.source(m.device, gpa, .{ .bits = m.config.bits, .group = cfg.group });
             defer gpa.free(text);
             const lib = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
             defer lib.deinit();
+            var pipes: affine_mm.Pipes = undefined;
             var made: usize = 0;
-            errdefer for (m.mm[0..made]) |p| p.deinit();
+            errdefer for (pipes[0..made]) |p| p.deinit();
             for (affine_mm.names, 0..) |n, i| {
-                m.mm[i] = try mtl.Pipeline.init(m.device, lib, n, false);
+                pipes[i] = try mtl.Pipeline.init(m.device, lib, n, false);
                 made += 1;
             }
+            m.mm = pipes;
         }
-        errdefer for (m.mm) |p| p.deinit();
+        errdefer if (m.mm) |pipes| for (pipes) |p| p.deinit();
+        errdefer if (m.gemm) |g| for (g) |row| for (row) |p| p.deinit();
         var made: usize = 0;
         errdefer for (m.inv[0..made]) |b| b.deinit();
         for ([_]bool{ false, true }, 0..) |full, k| {
@@ -130,7 +151,8 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         for (m.inv) |b| b.deinit();
-        for (m.mm) |p| p.deinit();
+        if (m.mm) |pipes| for (pipes) |p| p.deinit();
+        if (m.gemm) |g| for (g) |row| for (row) |p| p.deinit();
         for (m.prompt_attn) |p| p.deinit();
         m.sample.deinit();
         m.sample_full.deinit();

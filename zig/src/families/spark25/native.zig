@@ -138,7 +138,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.StructuresUnsupported => "structured output is not built for Spark2.5 on CUDA yet",
         error.NonFiniteLogits => "the model's logits went non-finite at this row: the request is stopped rather than answered from them",
         error.CapturedKernels => "Spark2.5 runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
-        error.UnsupportedSparkQuantization => "Spark2.5 on CUDA reads MLX affine checkpoints, one width (2-6 or 8 bits) in groups of 64: convert the bf16 release with tools/zig/spark25_convert.py",
+        error.UnsupportedSparkQuantization => "Spark2.5 on CUDA reads MLX affine checkpoints, one width (2-6 or 8 bits) in groups of 64: convert the bf16 release with tools/zig/spark25_convert.py (the Metal engine serves it as published)",
         error.UnsupportedSparkGeometry, error.UnsupportedSparkRotary => "this spark2_5 checkpoint's geometry is not the 4B's this engine serves",
         error.ParallelPastRound => std.fmt.comptimePrint("--parallel: Spark2.5 on CUDA holds at most {d} streams (a round's rows): serve --parallel {d} or fewer, or auto", .{ be.round_rows, be.round_rows }),
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Spark2.5 streams than asked (each stream's caches are allocated at load): lower --parallel or --context, serve --parallel auto, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
