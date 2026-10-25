@@ -23,3 +23,5 @@ pub const nem_rows: []const u8 = if (available) &Blob("spv_nem_rows").bytes else
 pub const nem_rows_r: [4][]const u8 = if (available) .{ &Blob("spv_nem_rows_r1").bytes, &Blob("spv_nem_rows_r2").bytes, &Blob("spv_nem_rows_r4").bytes, &Blob("spv_nem_rows_r8").bytes } else .{ &.{}, &.{}, &.{}, &.{} };
 pub const nem_prow: []const u8 = if (available) &Blob("spv_nem_prow").bytes else &.{};
 pub const nem_attn_dec: []const u8 = if (available) &Blob("spv_nem_attn_dec").bytes else &.{};
+/// Sage-A1.5 (qwen3_5_moe): the first EXL3 projection form. Its MoE ops are in the qwen27 images.
+pub const sage_exl3: []const u8 = if (available) &Blob("spv_sage_exl3").bytes else &.{};

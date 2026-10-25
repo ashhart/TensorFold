@@ -163,6 +163,7 @@ const kernels = [_]Kernel{
     .{ .name = "nem_rows_r8", .src = "nem_rows", .options = cl3 ++ " -DMAXR=8" },
     .{ .name = "nem_prow", .options = cl3 },
     .{ .name = "nem_attn_dec", .options = cl3 },
+    .{ .name = "sage_exl3", .options = cl3 },
 };
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).
