@@ -50,6 +50,10 @@ pub fn moeCombine(g: *Gpu, r: u64, down: u64, w: u64, shared: u64, sp: u64, ss: 
     g.go(.d3_moe_combine, .{ t, 1, 1 }, 256, &.{ r, down, w, shared, sp }, A{ .ss = u(ss), .sg = u(sg_off), .D = u(dim) });
 }
 
+pub fn moeCombineNvfp4(g: *Gpu, residual: u64, down: u64, weights: u64, shared: u64, x: u64, gate: u64, dim: usize, rows: usize) void {
+    g.go(.d3_nvfp4_combine, .{ rows, 1, 1 }, 256, &.{ residual, down, weights, shared, x, gate }, u(dim));
+}
+
 pub const Mix = struct { lf: u64, lfs: usize, code_col: usize, inf: u64, with_shared: bool, table: u64, cb_emb: u64, h: u64, enorm: u64, hnorm: u64, out: u64 };
 
 pub fn towerMix(g: *Gpu, m: Mix, dim: usize, sem_begin: i32, sem_end: i32, cb: i32, eps: f32, t: usize) void {
@@ -89,6 +93,11 @@ pub fn router(g: *Gpu, sp: u64, ss: usize, r_off: usize, picks: u64, weights: u6
     g.go(.d3_router, .{ t, 1, 1 }, 256, &.{ sp, picks, weights }, A{ .ss = u(ss), .off = u(r_off) });
 }
 
+pub fn routerCompact(g: *Gpu, sp: u64, ss: usize, r_off: usize, picks: u64, weights: u64, slots: u64, t: usize) void {
+    const A = extern struct { ss: u32, off: u32 };
+    g.go(.d3_router_compact, .{ t, 1, 1 }, 256, &.{ sp, picks, weights, slots }, A{ .ss = u(ss), .off = u(r_off) });
+}
+
 /// x rows to FP8 values (kept in bf16) and their scales [rows, kdim / 128].
 pub fn actQuant(g: *Gpu, x: u64, xs: usize, q: u64, qs: usize, sc: u64, rows: usize, kdim: usize) void {
     const A = extern struct { xs: u32, qs: u32, groups: u32 };
@@ -100,14 +109,21 @@ pub fn plan(g: *Gpu, picks: u64, pairs: usize, counts: u64, members: u64, cap: u
     g.go(.d3_plan, .{ 1, 1, 1 }, 1024, &.{ picks, counts, members }, A{ .pairs = u(pairs), .cap = u(cap) });
 }
 
-pub const Route = struct { table: u64, picks: u64, counts: u64, members: u64, cap: usize, pairs: usize, prompt: bool };
+pub const Route = struct { table: u64, picks: u64, counts: u64, members: u64, cap: usize, pairs: usize, prompt: bool, experts: usize = 256 };
 
 /// Routed experts: `up` maps token rows (x) to SwiGLU pair rows, else pair rows to fp32 down rows.
 pub fn experts(g: *Gpu, up: bool, x: u64, xsc: u64, r: Route, kdim: usize, n: usize, out: u64) void {
     const A = extern struct { K: u32, N: u32, prompt: u32, cap: u32, slots: u32 };
     const a: A = .{ .K = u(kdim), .N = u(n), .prompt = @intFromBool(r.prompt), .cap = u(r.cap), .slots = 8 };
-    const gy: usize = if (r.prompt) 256 else r.pairs;
+    const gy: usize = if (r.prompt) r.experts else r.pairs;
     g.go(if (up) .d3_expert_up else .d3_expert_down, .{ n / @as(usize, if (up) 8 else 16), gy, 1 }, 128, &.{ x, xsc, r.table, r.picks, r.counts, r.members, out }, a);
+}
+
+/// NVFP4 reads BF16 activation rows directly and writes BF16 SwiGLU / FP32 down; no activation quantization.
+pub fn expertsNvfp4(g: *Gpu, up: bool, x: u64, r: Route, kdim: usize, n: usize, out: u64) void {
+    const A = extern struct { K: u32, N: u32, prompt: u32, cap: u32, slots: u32 };
+    const a: A = .{ .K = u(kdim), .N = u(n), .prompt = @intFromBool(r.prompt), .cap = u(r.cap), .slots = 8 };
+    g.go(if (up) .d3_nvfp4_up else .d3_nvfp4_down, .{ n / 4, if (r.prompt) r.experts else r.pairs, 1 }, 128, &.{ x, r.table, r.picks, r.counts, r.members, out }, a);
 }
 
 /// Greedy: cand_ids non-zero picks a main token (frame[0..2]), zero a code (frame[0]).

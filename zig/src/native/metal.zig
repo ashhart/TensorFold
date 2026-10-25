@@ -156,6 +156,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);
+    if (o.cfg_enabled or o.cfg_batched) {
+        problem.* = "--cfg-* guidance requires a Drama 3 speech model";
+        return null;
+    }
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
     if (try refusal(a, o, dense)) |why| {

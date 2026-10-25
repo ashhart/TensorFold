@@ -148,8 +148,7 @@ pub const flags = [_]Flag{
     .{ .name = "--recall-read-only", .kind = .store_true, .native = true },
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
-};
-
+} ++ @import("drama_cfg.zig").flags;
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
 pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "BRAVE_SEARCH_API_KEY" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB" } else [_][]const u8{});
@@ -173,6 +172,7 @@ pub const Args = struct {
     context: ?i64 = null,
     max_frames: ?u32 = null,
     silence: api.speech_guard.Config = .{},
+    cfg: @import("drama_cfg.zig").Flags = .{},
     redraw: @import("speech_redraw.zig").Policy = .{},
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
@@ -283,6 +283,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
         try apply(a, &out, name, value, u, &repeated);
     }
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
+    if ((out.cfg.batched or out.cfg.force_guided) and out.cfg.options() == null) return fail(u, a, "--cfg-batched and --cfg-force-guided need --cfg-gamma or --cfg-allow-request-gamma", .{});
     try ranks(u, a, out);
     out.silence.validate() catch |err|
         return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
@@ -349,6 +350,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     }
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (try recallFlag(a, out, name, v, u)) return;
+    if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
     if (is(name, "--voices")) {
         out.voices = v;
         return;
@@ -504,7 +506,7 @@ pub fn parallelFixed(text: []const u8) bool {
 
 /// What a server asks of its engine, from its flags.
 pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
-    return .{
+    return @import("drama_cfg.zig").withGuidance(args.cfg, .{
         .dir = dir,
         .model_type = model_type,
         .context = args.context,
@@ -541,7 +543,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .master_port = args.master_port,
         .policy = args.policy,
         .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .max_videos = args.vision_max_videos, .video_tokens = args.vision_video_tokens } else null,
-    };
+    });
 }
 
 /// What ``capabilities --json`` reports about the engine side: its version, chip, backends and families.

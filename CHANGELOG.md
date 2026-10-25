@@ -43,6 +43,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Desktop app: a question that passes its deadline now stops the agent loop before another tool-enabled model call.
 
 - Tensor-parallel ranks join their failure hooks before releasing the hooks' owners, fixing a rare crash at shutdown after a rank fails.
+- Drama 3 on Metal reads the pruned NVFP4 checkpoint's packed E2M1 experts, block-16 E4M3 scales and F32 global scales without requantizing or expanding the experts. Routing masks dropped original IDs before softmax and maps selected IDs to compact slots. The full FP8-expert path retains its existing arithmetic.
+- Metal Drama speech supports opt-in semantic classifier-free guidance with shared weights and independent conditional/unconditional backbone state. `--cfg-gamma`, `--cfg-allow-request-gamma`, `--cfg-force-guided` and `--cfg-batched` preserve builtin unguided voices, validate request gamma, and reset guidance on cancellation or reference changes. Paired mode submits both states in one command buffer, not a vectorized GEMM; admission includes the extra state. CUDA guidance is not enabled by this change.
 
 - Drama speech on Metal reuses a catalog voice's reference prefill across requests on the same lane, so a request with the same voice prefills only its own text. Audio is byte-identical to an uncached request. On an M3 Ultra with Drama 3 and a catalog voice, the first audio byte of a streamed reply comes 90% sooner (15.6 s to 1.5 s over four texts) and whole replies take about half as long; the default voice and the first request with a voice are unchanged (#1237).
 

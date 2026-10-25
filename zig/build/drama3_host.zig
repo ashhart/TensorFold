@@ -46,6 +46,11 @@ pub fn metal(b: *std.Build, core: *std.Build.Module, api: *std.Build.Module) voi
     const step = b.step("check-drama-metal-host", "Compile Drama's Metal host entry points without compiling shaders");
     compile(b, step, family, "drama_metal_host");
     native(b, step, family, core, api, null, "drama_metal_native_host");
+    const quant = b.addRunArtifact(b.addTest(.{
+        .root_module = family,
+        .filters = &.{ "NVFP4", "expert metadata", "independent scalar reference", "CFG" },
+    }));
+    b.step("test-drama-metal-quant-host", "Packed expert formats, pruning and CFG state without GPU execution").dependOn(&quant.step);
 }
 
 /// Drama's prompt plan on the host: the single-row default and the opt-in batched plan.

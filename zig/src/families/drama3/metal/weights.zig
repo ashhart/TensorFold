@@ -1,10 +1,11 @@
-//! Drama 3's checkpoint on Metal: bf16 projections copied and stacked, FP8 experts read in place from the shards.
+//! Drama 3 Metal weights: BF16 dense projections and packed FP8/NVFP4 experts with original-ID compaction.
 const std = @import("std");
 const mtl = @import("metal");
 const core = @import("core");
 const cfg = @import("../config.zig");
 const shards = @import("../shards.zig");
 const gpu = @import("gpu.zig");
+const quant = @import("quant_format.zig");
 
 const Gpu = gpu.Gpu;
 const Shards = shards.Shards;
@@ -20,7 +21,10 @@ pub const Layer = struct {
     attn: Attn = undefined,
     moe_in: u64, // [1288, 2048]
     shared_down: u64, // [2048, 512]
-    experts: u64, // [256] ExpertPtrs: gate, gate scales, up, up scales, down, down scales (GPU addresses)
+    experts: u64, // Compact slot table: 6 FP8 pointers or 9 NVFP4 pointers per held expert.
+    expert_slots: u64,
+    expert_count: usize,
+    nvfp4: bool,
 };
 
 pub const TowerLayer = struct {
@@ -118,30 +122,57 @@ fn mapShards(g: *Gpu, sh: *const Shards) ![]u64 {
     return out;
 }
 
-/// The 256 experts of layer li: FP8 [512, 2048] gate / up, [2048, 512] down and their fp32 block scales, checked.
-fn expertTable(l: *Loader, li: usize, maps: []const u64) !u64 {
-    const table = try l.g.alloc(cfg.experts * 6 * 8);
-    const ptrs = std.mem.bytesAsSlice(u64, l.g.host(table, cfg.experts * 6 * 8));
+/// Compact slots preserve ascending original IDs; each layer has one expert format, selected from tensor headers.
+fn expertTable(l: *Loader, li: usize, maps: []const u64, held: *const quant.Held) !void {
+    const layer = &l.w.layers[li];
+    const ids = held.ids[li][0..held.counts[li]];
+    layer.expert_count = ids.len;
+    layer.expert_slots = 0;
+    if (ids.len != cfg.experts) {
+        const slots = held.slots(li);
+        layer.expert_slots = try l.g.alloc(@sizeOf(@TypeOf(slots)));
+        @memcpy(l.g.host(layer.expert_slots, @sizeOf(@TypeOf(slots))), std.mem.asBytes(&slots));
+        l.w.bytes += @sizeOf(@TypeOf(slots));
+    }
     const n = cfg.expert_width;
     const k = cfg.hidden;
     const parts = [_]struct { []const u8, [2]usize }{ .{ "gate_proj", .{ n, k } }, .{ "up_proj", .{ n, k } }, .{ "down_proj", .{ k, n } } };
-    var nb: [160]u8 = undefined;
-    for (0..cfg.experts) |e| {
+    var nb: [3][192]u8 = undefined;
+    const first = try l.sh.get(fmt(&nb[0], "model.language_model.layers.{d}.mlp.experts.{d}.gate_proj.weight", .{ li, ids[0] }));
+    layer.nvfp4 = first.dtype == .u8;
+    if (!layer.nvfp4 and first.dtype != .f8_e4m3) return error.UnsupportedExpertDtype;
+    const stride: usize = if (layer.nvfp4) 9 else 6;
+    layer.experts = try l.g.alloc(ids.len * stride * 8);
+    const ptrs = std.mem.bytesAsSlice(u64, l.g.host(layer.experts, ids.len * stride * 8));
+    for (ids, 0..) |e, slot| {
         for (parts, 0..) |p, j| {
-            const wname = fmt(&nb, "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight", .{ li, e, p[0] });
-            try Loader.expect(try l.sh.get(wname), .f8_e4m3, &p[1], wname);
+            const wname = fmt(&nb[0], "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight", .{ li, e, p[0] });
+            const sname = fmt(&nb[1], "{s}{s}", .{ wname, if (layer.nvfp4) "_scale" else "_scale_inv" });
+            const wt = try l.sh.get(wname);
+            const sc = try l.sh.get(sname);
             const wl = try l.sh.locate(wname);
-            if (wl.offset % 8 != 0) return error.MisalignedExpert;
-            ptrs[e * 6 + 2 * j] = l.g.gpuAddress(maps[wl.file] + wl.offset);
-            const sname = fmt(&nb, "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight_scale_inv", .{ li, e, p[0] });
-            try Loader.expect(try l.sh.get(sname), .f32, &.{ p[1][0] / 128, p[1][1] / 128 }, sname);
             const sl = try l.sh.locate(sname);
-            if (sl.offset % 4 != 0) return error.MisalignedScale;
-            ptrs[e * 6 + 2 * j + 1] = l.g.gpuAddress(maps[sl.file] + sl.offset);
-            l.w.mapped += p[1][0] * p[1][1] + p[1][0] / 128 * p[1][1] / 128 * 4;
+            const base = slot * stride + j * (stride / 3);
+            if (layer.nvfp4) {
+                const gname = fmt(&nb[2], "{s}_scale_2", .{wname});
+                const gl = try l.sh.get(gname);
+                try quant.nvfp4(wt, sc, gl, p[1][0], p[1][1]);
+                const loc = try l.sh.locate(gname);
+                if (loc.offset % 4 != 0) return error.MisalignedScale;
+                ptrs[base + 2] = l.g.gpuAddress(maps[loc.file] + loc.offset);
+                l.w.mapped += gl.bytes.len;
+            } else {
+                try Loader.expect(wt, .f8_e4m3, &p[1], wname);
+                try Loader.expect(sc, .f32, &.{ p[1][0] / 128, p[1][1] / 128 }, sname);
+                if (wl.offset % 8 != 0) return error.MisalignedExpert;
+                if (sl.offset % 4 != 0) return error.MisalignedScale;
+            }
+            ptrs[base] = l.g.gpuAddress(maps[wl.file] + wl.offset);
+            ptrs[base + 1] = l.g.gpuAddress(maps[sl.file] + sl.offset);
+            l.w.mapped += wt.bytes.len + sc.bytes.len;
         }
     }
-    return table;
+    l.w.bytes += ids.len * stride * 8;
 }
 
 pub fn load(g: *Gpu, io: std.Io, dir: []const u8, c: cfg.Config) !*Weights {
@@ -152,8 +183,14 @@ pub fn load(g: *Gpu, io: std.Io, dir: []const u8, c: cfg.Config) !*Weights {
     w.mapped = 0;
     w.sh = try Shards.open(g.gpa, io, dir);
     errdefer w.sh.close(io);
+    const held = try quant.heldMetadata(w.sh.metadata);
+    try quant.checkNames(&held, w.sh.map.keyIterator());
     const first = g.bufs.items.len;
-    errdefer g.releaseFrom(first);
+    const indirect_first = g.indirect.items.len;
+    errdefer {
+        g.indirect.shrinkRetainingCapacity(indirect_first);
+        g.releaseFrom(first);
+    }
     const maps = try mapShards(g, &w.sh);
     defer g.gpa.free(maps);
     var l: Loader = .{ .g = g, .sh = &w.sh, .w = w };
@@ -201,7 +238,7 @@ pub fn load(g: *Gpu, io: std.Io, dir: []const u8, c: cfg.Config) !*Weights {
         }
         L.moe_in = try l.stack(&.{ fmt(&nb[0], pre ++ "mlp.shared_expert.gate_proj.weight", .{li}), fmt(&nb[1], pre ++ "mlp.shared_expert.up_proj.weight", .{li}), fmt(&nb[2], pre ++ "mlp.gate.weight", .{li}), fmt(&nb[3], pre ++ "mlp.shared_expert_gate.weight", .{li}) }, &.{ cfg.shared_width, cfg.shared_width, cfg.experts, 1 }, H, cfg.moe_proj);
         L.shared_down = try l.one(fmt(&nb[0], pre ++ "mlp.shared_expert.down_proj.weight", .{li}), &.{ H, cfg.shared_width });
-        L.experts = try expertTable(&l, li, maps);
+        try expertTable(&l, li, maps, &held);
     }
     for (0..cfg.tower_layers) |ti| {
         const shared = ti < cfg.shared_layers;
@@ -228,6 +265,6 @@ pub fn load(g: *Gpu, io: std.Io, dir: []const u8, c: cfg.Config) !*Weights {
         T.final_norm = try l.one(tn(&nb[0], p, idx, "final_layernorm.weight"), &.{H});
     }
     for (0..cfg.codebooks - 1) |hi| w.heads[hi] = try l.one(fmt(&nb[0], "audio_decoder_mtp.heads.{d}.weight", .{hi}), &.{ cfg.codebook_size, H });
-    std.log.info("drama3: {d:.2} GB of bf16 weights copied, {d:.2} GB of FP8 experts read in place", .{ @as(f64, @floatFromInt(w.bytes)) / 1e9, @as(f64, @floatFromInt(w.mapped)) / 1e9 });
+    std.log.info("drama3: {d:.2} GB of BF16/copied weights, {d:.2} GB of packed FP8/NVFP4 experts read in place", .{ @as(f64, @floatFromInt(w.bytes)) / 1e9, @as(f64, @floatFromInt(w.mapped)) / 1e9 });
     return w;
 }

@@ -38,6 +38,9 @@ pub const Script = struct {
     get_voices: bool = false,
     expected_rows: ?[]const [11]i32 = null,
     rows_equal: bool = false,
+    expected_unconditioned: []const [11]i32 = &.{},
+    unconditioned_equal: bool = false,
+    cfg_gamma: f32 = 1,
 
     fn engine(e: *Script) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .submit_speech = speech } };
@@ -49,6 +52,8 @@ pub const Script = struct {
     fn speech(ctx: *anyopaque, id: api.Id, request: *const api.SpeechRequest, sink: api.Sink) api.SpeechSubmitError!void {
         const e: *Script = @ptrCast(@alignCast(ctx));
         if (e.expected_rows) |expected| e.rows_equal = std.mem.eql(u8, std.mem.sliceAsBytes(expected), std.mem.sliceAsBytes(request.frames));
+        e.unconditioned_equal = std.mem.eql(u8, std.mem.sliceAsBytes(e.expected_unconditioned), std.mem.sliceAsBytes(request.unconditioned));
+        e.cfg_gamma = request.cfg_gamma;
         if (e.takes >= e.busy_from) return error.Busy;
         if (e.takes > 0 and e.busy_replies < e.busy_redraws) {
             e.busy_replies += 1;

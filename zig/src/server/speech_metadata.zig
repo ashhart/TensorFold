@@ -7,8 +7,13 @@ pub const Metadata = struct {
     register_on: bool = false,
     register_tripped: bool = false,
     register_redrawn: bool = false,
+    cfg_gamma: ?f32 = null,
 
     pub fn add(m: Metadata, c: *Conn) !void {
+        if (m.cfg_gamma) |gamma| {
+            var gamma_buf: [24]u8 = undefined;
+            try c.addHeader("X-Cfg-Gamma", std.fmt.bufPrint(&gamma_buf, "{d}", .{gamma}) catch unreachable);
+        }
         if (!m.enabled) return;
         var buf: [3]u8 = undefined;
         try c.addHeader("X-Silence-Redraws", std.fmt.bufPrint(&buf, "{d}", .{m.redraws}) catch unreachable);

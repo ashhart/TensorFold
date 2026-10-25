@@ -108,7 +108,7 @@ pub const Engine = struct {
         }
         e.state_start = e.g.bufs.items.len;
         errdefer e.g.releaseFrom(e.state_start);
-        try e.allocState();
+        try e.allocState(false);
         e.state_end = e.g.bufs.items.len;
         if (o.warmup) {
             var rows: [4][W]i32 = @splat(@splat(0));
@@ -131,13 +131,23 @@ pub const Engine = struct {
     }
 
     pub fn fork(base: *Engine) !*Engine {
+        return base.forkState(false);
+    }
+
+    /// CFG's independent backbone state, without codec tower caches, output frames or tower scratch.
+    pub fn forkBackbone(base: *Engine) !*Engine {
+        return base.forkState(true);
+    }
+
+    fn forkState(base: *Engine, backbone_only: bool) !*Engine {
         const e = try base.gpa.create(Engine);
         errdefer base.gpa.destroy(e);
         e.* = base.*;
         e.owns_model = false;
+        if (backbone_only) e.o.max_rows = 1;
         e.state_start = e.g.bufs.items.len;
         errdefer e.g.releaseFrom(e.state_start);
-        try e.allocState();
+        try e.allocState(backbone_only);
         e.state_end = e.g.bufs.items.len;
         return e;
     }
@@ -151,12 +161,12 @@ pub const Engine = struct {
         return e.g.alloc(bytes);
     }
 
-    fn allocState(e: *Engine) !void {
+    fn allocState(e: *Engine, backbone_only: bool) !void {
         const R = e.o.max_rows;
         const ctxn = e.o.max_ctx;
         const kvb = ctxn * cfg.kv_heads * cfg.head_dim * 2;
         for (0..cfg.layers) |li| e.kv_bb[li] = if (e.c.full_attention[li]) .{ try e.alloc(kvb), try e.alloc(kvb) } else .{ 0, 0 };
-        for (0..cfg.tower_layers) |ti| e.kv_tw[ti] = .{ try e.alloc(kvb), try e.alloc(kvb) };
+        for (0..cfg.tower_layers) |ti| e.kv_tw[ti] = if (backbone_only) .{ 0, 0 } else .{ try e.alloc(kvb), try e.alloc(kvb) };
         var n_gdn: usize = 0;
         for (e.c.full_attention) |f| n_gdn += @intFromBool(!f);
         const conv_b = cfg.conv_channels * 3 * 2;
@@ -176,13 +186,15 @@ pub const Engine = struct {
         }
         inline for (.{ "pos", "pos_bb", "step", "count" }) |f| @field(e, f) = try e.alloc(8);
         e.bb_input = try e.alloc(W * 4);
-        inline for (.{ "t_xn", "t_tmp", "x", "xn", "tmp", "shout", "hfin", "mixed" }) |f| @field(e, f) = try e.alloc(R * H * 2);
-        e.t_proj = try e.alloc(R * 2 * cfg.tower_ffn * 2);
-        inline for (.{ "t_y", "t_q", "y", "q" }) |f| @field(e, f) = try e.alloc(R * 4096 * 2);
+        inline for (.{ "t_xn", "t_tmp", "mixed" }) |f| @field(e, f) = if (backbone_only) 0 else try e.alloc(R * H * 2);
+        inline for (.{ "x", "xn", "tmp", "shout", "hfin" }) |f| @field(e, f) = try e.alloc(R * H * 2);
+        e.t_proj = if (backbone_only) 0 else try e.alloc(R * 2 * cfg.tower_ffn * 2);
+        inline for (.{ "t_y", "t_q" }) |f| @field(e, f) = if (backbone_only) 0 else try e.alloc(R * 4096 * 2);
+        inline for (.{ "y", "q" }) |f| @field(e, f) = try e.alloc(R * 4096 * 2);
         e.window = try e.alloc(16 * 4);
         e.cur_input = try e.alloc(W * 4);
-        e.frame = try e.alloc(W * 4);
-        e.frames_out = try e.alloc(e.o.max_frames * W * 4);
+        e.frame = if (backbone_only) 0 else try e.alloc(W * 4);
+        e.frames_out = if (backbone_only) 0 else try e.alloc(e.o.max_frames * W * 4);
         e.pframes = try e.alloc((ctxn + 1) * W * 4);
         e.proj = try e.alloc(R * cfg.gdn_proj * 2);
         e.conv_out = try e.alloc(R * cfg.conv_channels * 2);
@@ -199,12 +211,12 @@ pub const Engine = struct {
         e.gsc = try e.alloc(R * 8 * (cfg.expert_width / 128) * 4);
         e.counts = try e.alloc(cfg.experts * 4);
         e.members = try e.alloc(cfg.experts * R * 8 * 4);
-        e.th = .{ try e.alloc(R * H * 2), try e.alloc(R * H * 2) };
-        e.mix = try e.alloc(R * 2 * H * 2);
-        e.act = try e.alloc(R * cfg.tower_ffn * 2);
+        e.th = if (backbone_only) .{ 0, 0 } else .{ try e.alloc(R * H * 2), try e.alloc(R * H * 2) };
+        e.mix = if (backbone_only) 0 else try e.alloc(R * 2 * H * 2);
+        e.act = if (backbone_only) 0 else try e.alloc(R * cfg.tower_ffn * 2);
         e.hlast = try e.alloc(H * 2);
         e.cand_logits = try e.alloc(e.w.n_cand * 4);
-        e.code_logits = try e.alloc(cfg.codebook_size * 4);
+        e.code_logits = if (backbone_only) 0 else try e.alloc(cfg.codebook_size * 4);
     }
 
     pub fn flush(e: *Engine) !void {
@@ -260,8 +272,9 @@ pub const Engine = struct {
         try e.put(e.pframes, std.mem.sliceAsBytes(rows));
     }
 
-    pub fn promptChunk(e: *Engine, n: usize, c0: usize, t: usize, probe: ?Probe) !void {
-        if (t == 0 or t > e.o.max_rows or c0 >= n or t > n - c0) return error.BadPromptChunk;
+    /// Backbone-only prompt chunk for the unconditional CFG sequence; no codec tower work.
+    pub fn backboneChunk(e: *Engine, c0: usize, t: usize, probe: ?Probe) !void {
+        if (t == 0 or t > e.o.max_rows) return error.BadPromptChunk;
         const g = e.g;
         var nb: [64]u8 = undefined;
         try e.setPos(c0);
@@ -273,6 +286,12 @@ pub const Engine = struct {
         }
         k.rmsnorm(g, e.x, H, e.w.final_norm, e.hfin, H, t, H, cfg.eps, true);
         if (probe) |p| try p.f(p.ctx, "backbone_final_norm", e.hfin, t, H, false);
+    }
+
+    pub fn promptChunk(e: *Engine, n: usize, c0: usize, t: usize, probe: ?Probe) !void {
+        if (t == 0 or t > e.o.max_rows or c0 >= n or t > n - c0) return error.BadPromptChunk;
+        try e.backboneChunk(c0, t, probe);
+        const g = e.g;
         // the tower over this chunk's rows that have a next prompt row
         const tt = @min(c0 + t, n - 1) - c0;
         if (tt > 0) try e.tower(tt, c0, e.hfin, probe);

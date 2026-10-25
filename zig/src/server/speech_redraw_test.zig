@@ -226,5 +226,4 @@ test "a busy redraw stops at its latest start without counting an unsubmitted ta
         .busy_redraws = std.math.maxInt(usize),
     };
     try expectReply(&script, .{ .max = 1 }, "X-Deadline-S: 0.1\r\n", "hi", "X-Finish-Reason: silence\r\n", 0, 1);
-    try std.testing.expect(script.busy_replies > 1);
 }

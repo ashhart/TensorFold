@@ -11,6 +11,10 @@ const limits_k = @import("metal_limits.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
+const drama_nvfp4 = @import("metal_drama3_nvfp4.zig");
+const drama_router = @import("metal_drama_router.zig");
+const drama_combine = @import("metal_drama_combine.zig");
+const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const glm_rows_k = @import("metal_glm_rows.zig");
 
@@ -187,6 +191,42 @@ pub fn main(init: std.process.Init) !u8 {
     if (wanted(o, drama3_k.spec().name)) {
         d3norm = try drama3_k.Norm.init(a, device, queue);
         try kernels.append(a, d3norm.?.kernel());
+    }
+    var d3projections: [std.enums.values(drama_nvfp4.Variant).len]drama_nvfp4.Proj = undefined;
+    var d3projection_count: usize = 0;
+    defer for (d3projections[0..d3projection_count]) |*p| p.deinit();
+    for (std.enums.values(drama_nvfp4.Variant)) |v| {
+        if (!wanted(o, drama_nvfp4.spec(v).name)) continue;
+        d3projections[d3projection_count] = try drama_nvfp4.Proj.init(a, device, queue, v);
+        d3projection_count += 1;
+        try kernels.append(a, d3projections[d3projection_count - 1].kernel());
+    }
+    var d3routers: [std.enums.values(drama_router.Variant).len]drama_router.Router = undefined;
+    var d3router_count: usize = 0;
+    defer for (d3routers[0..d3router_count]) |*p| p.deinit();
+    for (std.enums.values(drama_router.Variant)) |v| {
+        if (!wanted(o, drama_router.spec(v).name)) continue;
+        d3routers[d3router_count] = try drama_router.Router.init(a, device, queue, v);
+        d3router_count += 1;
+        try kernels.append(a, d3routers[d3router_count - 1].kernel());
+    }
+    var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
+    var d3combine_count: usize = 0;
+    defer for (d3combines[0..d3combine_count]) |*p| p.deinit();
+    for (std.enums.values(drama_combine.Variant)) |v| {
+        if (!wanted(o, drama_combine.spec(v).name)) continue;
+        d3combines[d3combine_count] = try drama_combine.Combine.init(a, device, queue, v);
+        d3combine_count += 1;
+        try kernels.append(a, d3combines[d3combine_count - 1].kernel());
+    }
+    var d3mixes: [drama_cfg.gammas.len]drama_cfg.Mix = undefined;
+    var d3mix_count: usize = 0;
+    defer for (d3mixes[0..d3mix_count]) |*p| p.deinit();
+    for (drama_cfg.gammas) |gamma| {
+        if (!wanted(o, drama_cfg.spec(gamma).name)) continue;
+        d3mixes[d3mix_count] = try drama_cfg.Mix.init(a, device, queue, gamma);
+        d3mix_count += 1;
+        try kernels.append(a, d3mixes[d3mix_count - 1].kernel());
     }
     var glm_eh: ?glm_eh_k.Nax = null;
     defer if (glm_eh) |*n| n.deinit();

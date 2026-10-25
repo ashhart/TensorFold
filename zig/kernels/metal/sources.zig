@@ -178,6 +178,8 @@ pub const drama3 = struct {
     pub const gdn = @embedFile("drama3/gdn.metal");
     pub const attn = @embedFile("drama3/attn.metal");
     pub const moe = @embedFile("drama3/moe.metal");
+    pub const nvfp4 = @embedFile("drama3/nvfp4.metal");
+    pub const guidance = @embedFile("drama3/guidance.metal");
     pub const sample = @embedFile("drama3/sample.metal");
     pub const codec = @embedFile("drama3/codec.metal");
 };

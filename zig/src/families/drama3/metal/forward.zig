@@ -54,24 +54,35 @@ pub fn backboneLayer(e: *Engine, ln: Lane, li: usize, t: usize) void {
     moe(e, L, t);
 }
 
-/// The MoE block: router, gated shared expert and the routed FP8 experts, added to the residual stream.
+/// The MoE block: original-ID router, gated shared expert and packed FP8/NVFP4 experts, added to the residual.
 fn moe(e: *Engine, L: *const wts.Layer, t: usize) void {
     const g = e.g;
     const mp = cfg.moe_proj;
     k.linear(g, L.moe_in, e.xn, H, H, mp, e.sp, mp, t, false);
-    k.router(g, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, t);
+    if (L.expert_count == cfg.experts)
+        k.router(g, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, t)
+    else
+        k.routerCompact(g, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, L.expert_slots, t);
     k.swiglu(g, e.sp, mp, 0, cfg.shared_width, cfg.shared_width, e.sact, t);
     k.linear(g, L.shared_down, e.sact, cfg.shared_width, cfg.shared_width, H, e.shout, H, t, false);
     const pairs = t * cfg.top_k;
     const prompt = t > 1;
     if (prompt) k.plan(g, e.picks, pairs, e.counts, e.members, e.o.max_rows * cfg.top_k);
-    const r: k.Route = .{ .table = L.experts, .picks = e.picks, .counts = e.counts, .members = e.members, .cap = e.o.max_rows * cfg.top_k, .pairs = pairs, .prompt = prompt };
-    // activations to FP8 per row and 128 inputs before each expert projection, as the reference serves them
-    k.actQuant(g, e.xn, H, e.xq, H, e.xsc, t, H);
-    k.experts(g, true, e.xq, e.xsc, r, H, cfg.expert_width, e.gu);
-    k.actQuant(g, e.gu, cfg.expert_width, e.gq, cfg.expert_width, e.gsc, pairs, cfg.expert_width);
-    k.experts(g, false, e.gq, e.gsc, r, cfg.expert_width, H, e.down);
-    k.moeCombine(g, e.x, e.down, e.rw, e.shout, e.sp, mp, 2 * cfg.shared_width + cfg.experts, H, t);
+    const r: k.Route = .{ .table = L.experts, .picks = e.picks, .counts = e.counts, .members = e.members, .cap = e.o.max_rows * cfg.top_k, .pairs = pairs, .prompt = prompt, .experts = L.expert_count };
+    if (L.nvfp4) {
+        k.expertsNvfp4(g, true, e.xn, r, H, cfg.expert_width, e.gu);
+        k.expertsNvfp4(g, false, e.gu, r, cfg.expert_width, H, e.down);
+    } else {
+        // The legacy FP8 path retains its activation quantization and reduction arithmetic.
+        k.actQuant(g, e.xn, H, e.xq, H, e.xsc, t, H);
+        k.experts(g, true, e.xq, e.xsc, r, H, cfg.expert_width, e.gu);
+        k.actQuant(g, e.gu, cfg.expert_width, e.gq, cfg.expert_width, e.gsc, pairs, cfg.expert_width);
+        k.experts(g, false, e.gq, e.gsc, r, cfg.expert_width, H, e.down);
+    }
+    if (L.nvfp4)
+        k.moeCombineNvfp4(g, e.x, e.down, e.rw, e.shout, e.xn, L.moe_in + (2 * cfg.shared_width + cfg.experts) * H * 2, H, t)
+    else
+        k.moeCombine(g, e.x, e.down, e.rw, e.shout, e.sp, mp, 2 * cfg.shared_width + cfg.experts, H, t);
 }
 
 /// Tower layer ti over t rows: hidden hin -> hout; label frames lf (rows lfs ints apart), input frames inf.
@@ -96,14 +107,21 @@ fn probeName(buf: []u8, comptime f: []const u8, i: usize) []const u8 {
     return std.fmt.bufPrint(buf, f, .{i}) catch unreachable;
 }
 
+pub const Guidance = struct { unconditioned: u64, gamma: f32 };
+
 /// A frame step's dispatches: sample, the tower, record, then the backbone row at the next position.
 pub fn enqueueFrame(e: *Engine, smp: Sampling, probe: ?Probe, force: ?Engine.Force) !void {
+    return enqueueFrameGuided(e, smp, probe, force, null);
+}
+
+pub fn enqueueFrameGuided(e: *Engine, smp: Sampling, probe: ?Probe, force: ?Engine.Force, guidance: ?Guidance) !void {
     const g = e.g;
     const sem_begin = e.c.ids.sem_begin;
     const greedy = smp.greedy();
     const sp = k.sampling(smp);
     if (!greedy and (smp.top_k < 1 or smp.top_k > 64)) return error.TopKUnsupportedOnMetal;
     k.linear(g, e.w.cand_head, e.hlast, H, H, e.w.n_cand, e.cand_logits, e.w.n_cand, 1, true);
+    if (guidance) |guide| @import("guidance.zig").mix(e, guide.unconditioned, guide.gamma);
     if (probe) |p| try p.f(p.ctx, "tower_decode0.candidate_logits", e.cand_logits, 1, e.w.n_cand, true);
     if (force) |fc| {
         k.argmax(g, e.cand_logits, e.w.n_cand, e.w.cand_ids, fc.picks, sem_begin, cfg.codebook_size);

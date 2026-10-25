@@ -266,6 +266,10 @@ pub const Open = struct {
     context: ?i64 = null,
     max_frames: ?u32 = null,
     silence: speech_guard.Config = .{},
+    /// Allocate an independent backbone state per speech lane; Metal Drama only.
+    cfg_enabled: bool = false,
+    /// Submit the two independent CFG sequences in one Metal command buffer, not vectorized GEMM.
+    cfg_batched: bool = false,
     lanes: u32 = 8,
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,
