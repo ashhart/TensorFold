@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Drama speech accepts dialogue tags `<|speaker:0|>` through `<|speaker:15|>` in whole and streamed HTTP requests and catalog reference transcripts. Untagged text still uses speaker 0, and catalogs still allow at most four reference passages. See [dialogue speakers](docs/drama-http-voices.md#dialogue-speakers).
+
 - Flash Next on CUDA with NVFP4 checkpoints prefills 24-29% faster with the same tokens: NVFP4 experts on prompt tiles with the decode form's sums (#1143), no zero fills the one-rank ModelOpt pass reads back (#1147), the hyper-connection normalize over 256-column slices and the dense mix a warp a 32-column group (#1164), and half tiles for decode calls whose 64-column grid leaves SMs idle (#1171). On a GB10 with Qwen3.8 Flash Next FP4-Local, prefill at 16k goes from 1,357 to 1,748 tokens/s and decode gains 1-2%. Attention caches are readable through a page table and the streams beside the first take KV pages from the core pool (#1169, #1170).
 
 - GLM-5.3-Flash on Metal decodes faster with the same tokens by reading the weights once per decode window (#1130): on an M3 Ultra, +2.6% at one stream and +10.2%, +6.4% and +6.3% at two, four and eight.

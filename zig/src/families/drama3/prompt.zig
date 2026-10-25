@@ -226,3 +226,32 @@ test "reference cache: last reference code and equal-length changed tower lookah
     first.frames[saved_rows][0] += 1;
     try t.expect(!try prefix.begin(t.allocator, first.frames, saved_rows));
 }
+
+test "reference cache: a reference speaker change misses while request speaker changes reuse the prefix" {
+    const t = std.testing;
+    const cache = @import("reference_cache.zig");
+    var prefix: cache.Prefix = .{};
+    defer prefix.deinit(t.allocator);
+    const codes = [_][cfg.codebooks]i32{@splat(1)};
+    var refs = [_]Reference{
+        .{ .transcript = "<|speaker:1|> First.", .codes = &codes },
+        .{ .transcript = "<|speaker:15|> Second.", .codes = &codes },
+    };
+    const first = try build(t.allocator, ByteTokenizer{}, "<|speaker:1|> One.", &refs);
+    defer t.allocator.free(first.frames);
+    const saved_rows = cache.prefillRows(first.frames.len, first.reference_rows, 1);
+    try t.expect(!try prefix.begin(t.allocator, first.frames, saved_rows));
+    prefix.saved();
+
+    const request = try build(t.allocator, ByteTokenizer{}, "<|speaker:15|> Two. <|speaker:1|> Three.", &refs);
+    defer t.allocator.free(request.frames);
+    try t.expectEqual(first.reference_rows, request.reference_rows);
+    try t.expect(try prefix.begin(t.allocator, request.frames, saved_rows));
+
+    refs[0].transcript = "<|speaker:2|> First.";
+    const changed = try build(t.allocator, ByteTokenizer{}, "<|speaker:1|> One.", &refs);
+    defer t.allocator.free(changed.frames);
+    try t.expectEqual(first.frames.len, changed.frames.len);
+    try t.expectEqual(first.reference_rows, changed.reference_rows);
+    try t.expect(!try prefix.begin(t.allocator, changed.frames, saved_rows));
+}
