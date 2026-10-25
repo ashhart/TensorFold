@@ -45,7 +45,7 @@ pub const Built = struct {
 pub fn checks(r: *Rig, exp: *const exl3e.Experts, state: *Run) void {
     for (f64_ids, 0..) |id, i| {
         var ok = true;
-        f64Check(r, exp, &allBits(@intCast(i + 4))) catch |e| {
+        f64Check(r, exp, &allBits(@intCast(i + 4)), 1) catch |e| {
             state.fail(e, id);
             ok = false;
         };
@@ -53,11 +53,27 @@ pub fn checks(r: *Rig, exp: *const exl3e.Experts, state: *Run) void {
     }
     {
         var ok = true;
-        f64Check(r, exp, &.{ 4, 5, 6, 4, 5, 6, 4, 5, 6 }) catch |e| {
+        f64Check(r, exp, &.{ 4, 5, 6, 4, 5, 6, 4, 5, 6 }, 1) catch |e| {
             state.fail(e, f64_ids[2]);
             ok = false;
         };
         if (ok) check.pass("{s}", .{f64_ids[2]});
+    }
+    { // the GLM bf16 act mode (0), mixed widths — mode 1 (the engine's) is the bar above
+        var ok = true;
+        f64Check(r, exp, &.{ 4, 5, 6, 4, 5, 6, 4, 5, 6 }, 0) catch |e| {
+            state.fail(e, "exl3.experts.f64.act0");
+            ok = false;
+        };
+        if (ok) check.pass("exl3.experts.f64.act0", .{});
+    }
+    { // the engine's fp32 x contract (the minimax routed wave): mixed widths, the act fp32 mode
+        var ok = true;
+        f32xCheck(r, exp, &.{ 4, 5, 6, 4, 5, 6, 4, 5, 6 }) catch |e| {
+            state.fail(e, "exl3.experts.f32x");
+            ok = false;
+        };
+        if (ok) check.pass("exl3.experts.f32x", .{});
     }
 }
 
@@ -79,7 +95,7 @@ fn bf16r(v: f64) f64 {
     return bf(@intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16));
 }
 
-pub fn buildLayer(r: *Rig, bits: []const u32) !Built {
+pub fn buildLayer(r: *Rig, bits: []const u32, act: i32) !Built {
     var b: Built = .{
         .layer = undefined,
         .bits = bits,
@@ -152,7 +168,7 @@ pub fn buildLayer(r: *Rig, bits: []const u32) !Built {
         .width = I,
         .codebook = .mul1,
         .limit = LIMIT,
-        .act_mode = 0,
+        .act_mode = act, // 0: GLM's bf16 act, 1: the minimax engine's fp32 act — both are graded bars
     };
     b.x = try r.bfs(CAP * D, 0.5); // half-range x, with the small scales, keeps the SwiGLU inputs moderate
     b.pick = try picks(r, CAP);
@@ -210,10 +226,29 @@ pub fn runSlice(r: *Rig, exp: *const exl3e.Experts, layer: exl3e.Layer, x: u64, 
     return .{ .out = out, .y = sc.y };
 }
 
-fn f64Check(r: *Rig, exp: *const exl3e.Experts, bits: []const u32) !void {
-    const b = try buildLayer(r, bits);
+/// The same call with fp32 x rows — the minimax engine's exact contract (x32 with .f32); the rot path must branch on it.
+pub fn runSliceF32(r: *Rig, exp: *const exl3e.Experts, layer: exl3e.Layer, x: u64, pick: u64, wts: u64, rows_n: usize) !struct { out: u64, y: u64 } {
+    const sb = try r.zeros(try exl3e.scratchBytes(layer, rows_n, SLOTS));
+    const sc = try exl3e.scratch(sb, layer, rows_n, SLOTS);
+    const out = try r.zeros(rows_n * D * 4);
+    try exp.run(r.s, layer, x, D, .f32, pick, wts, rows_n, out, sc);
+    return .{ .out = out, .y = sc.y };
+}
+
+fn f64Check(r: *Rig, exp: *const exl3e.Experts, bits: []const u32, act: i32) !void {
+    const b = try buildLayer(r, bits, act);
     const want = try reference(r, &b, 128);
     for (rows) |m| try closeOut(r, b.bits, m, (try runRows(r, exp, &b, m)), want.want, want.tol);
+}
+
+/// The engine's fp32 x: the same bf16-quantized values carried exactly in fp32, so the f64 reference applies unchanged.
+fn f32xCheck(r: *Rig, exp: *const exl3e.Experts, bits: []const u32) !void {
+    const b = try buildLayer(r, bits, 1);
+    const fxs = try r.a.alloc(f32, CAP * D);
+    for (fxs, b.x) |*o, v| o.* = @floatCast(bf(v));
+    const dfx = try r.dev(std.mem.sliceAsBytes(fxs));
+    const want = try reference(r, &b, 128);
+    for (rows) |m| try closeOut(r, b.bits, m, (try runSliceF32(r, exp, b.layer, dfx, b.dpick, b.dwts, m)).out, want.want, want.tol);
 }
 
 /// fp32 outputs within the f64 reference's tolerance, with the exact FAIL line.
@@ -223,6 +258,10 @@ fn closeOut(r: *Rig, bits: []const u32, m: usize, ptr: u64, want: []const f64, t
     var at: usize = 0;
     for (want[0 .. m * D], tol[0 .. m * D], 0..) |wv, t, i| {
         const g: f64 = @floatCast(std.mem.bytesToValue(f32, raw[4 * i ..][0..4]));
+        if (g != g) {
+            std.debug.print("FAIL exl3.experts.f64.mul1.{d} m={d}: NaN at element {d}\n", .{ bits[0], m, i });
+            return error.TestFailed;
+        }
         const q = @abs(g - wv) / t;
         if (q > most) {
             most = q;
@@ -239,7 +278,7 @@ fn closeOut(r: *Rig, bits: []const u32, m: usize, ptr: u64, want: []const f64, t
 /// A 300-row chunk against the f64 reference (the mixed-width layer).
 pub fn prompt(r: *Rig, exp: *const exl3e.Experts) !void {
     var bits: [E]u32 = .{ 4, 5, 6, 4, 5, 6, 4, 5, 6 };
-    const b = try buildLayer(r, &bits);
+    const b = try buildLayer(r, &bits, 0); // the GLM bf16 act mode's 300-row chunk (mode 1 is graded in checks/f32x)
     const want = try reference(r, &b, 300);
     const res = try runRows(r, exp, &b, 300);
     const raw = try r.back(res, 300 * D * 4);
@@ -247,6 +286,10 @@ pub fn prompt(r: *Rig, exp: *const exl3e.Experts) !void {
     var at: usize = 0;
     for (want.want, want.tol, 0..) |wv, t, i| {
         const g: f64 = @floatCast(std.mem.bytesToValue(f32, raw[4 * i ..][0..4]));
+        if (g != g) {
+            std.debug.print("FAIL exl3.prompt.experts.f64: NaN at element {d}\n", .{i});
+            return error.TestFailed;
+        }
         const q = @abs(g - wv) / t;
         if (q > most) {
             most = q;
@@ -325,11 +368,13 @@ fn reference(r: *Rig, b: *const Built, rows_n: usize) !struct { want: []f64, tol
         for (0..p) |s0| {
             const ex: usize = @intCast(b.pick[s0]);
             const vg = zg[n * p + s0] * f16v(b.svh_g[ex * I + n]);
-            const gg = @min(bf16r(vg), @as(f64, LIMIT));
+            const a1 = b.layer.act_mode == 1;
+            const gg = @min(if (a1) vg else bf16r(vg), @as(f64, LIMIT));
             const vu = zu[n * p + s0] * f16v(b.svh_u[ex * I + n]);
-            const uu = @min(@max(bf16r(vu), -@as(f64, LIMIT)), @as(f64, LIMIT));
-            const inner = bf16r(gg / (1.0 + std.math.exp(-gg)));
-            const act = bf16r(inner * uu);
+            const uu = @min(@max(if (a1) vu else bf16r(vu), -@as(f64, LIMIT)), @as(f64, LIMIT));
+            const sil = gg / (1.0 + std.math.exp(-gg));
+            const inner = if (a1) sil else bf16r(sil);
+            const act = if (a1) inner * uu else bf16r(inner * uu);
             v[n * p + s0] = act * f16v(b.suh_d[ex * I + n]);
             const egk = eg[n * p + s0] * @abs(f16v(b.svh_g[ex * I + n])) + (@abs(vg) + @abs(gg)) / 256;
             const euk = eu[n * p + s0] * @abs(f16v(b.svh_u[ex * I + n])) + (@abs(vu) + @abs(uu)) / 256;

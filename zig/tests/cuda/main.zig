@@ -95,6 +95,9 @@ const kolibri_tests = @import("kolibri_tests.zig");
 const kolibri_layer_tests = @import("kolibri_layer_tests.zig");
 const aot_fallback_tests = @import("aot_fallback_tests.zig");
 const qwen_draft_frames = @import("qwen_draft_frames.zig");
+const minimax_m3_tests = @import("minimax_m3_tests.zig");
+const minimax_tp2_tests = @import("minimax_tp2_tests.zig");
+const minimax_graph_tests = @import("minimax_m3_graph_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -213,6 +216,41 @@ const usage =
     \\  kolibri-logits MODEL IDS OUT [PROMPTS]  Kolibri-1's teacher-forced fp32 logits of 2,048 prompt rows; each prompt's last
     \\  glm-synth <dir>          a synthetic GLM-5.3-Flash checkpoint (2 layers, 16 experts) and its dc.json for the lane checks
     \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
+    \\  minimax-m3                MiniMax M3.1's MSA indexer (scores/topk/decode/combine) and swigluoai
+    \\                            against the family's CPU references (synthetic); NB<=1024 and nsplit<=8 guards
+    \\  minimax-m3-tp2 <rank> <host:port> <pack dir>  MiniMax M3.1's TP2 weight plumbing on the real
+    \\                            pack: each rank's Stage-2-plan shard uploads to device buffers through
+    \\                            the mainline Uploader; the ranks' checkpoint bytes must tile the plan's
+    \\                            minimax-m3-smoke         MiniMax M3.1's launch graph on the 2-layer fixture (TP1): noise-poked
+    \\                            fixture, 8 context rows + 2 greedy steps on device, the router and
+    \\                            selection fingerprints, tokens + logits printed
+    \\                            minimax-m3-token <rank 0|1> <host:port|-> <pack dir|fixture> [ctx] [steps]
+    \\                            the launch graph's token smoke: TP1 ("-") or TP2 (rank 0 serves the
+    \\                            NCCL id; rank 1 first, rank 0 ~2 s later) over the pack or a locally built
+    \\                            deterministic fixture (TP1 vs TP2 tokens must match); rank 0 prints the
+    \\                            greedy tokens, wall times, RAM and device totals
+    \\  minimax-m3-grade <pack dir|fixture> [ctx] [steps] [layers]  the Stage-8 grade: the device
+    \\                            graph (TP1, the first [layers] REAL layers) against the f64 fork
+    \\                            composition over the pack's own decoded weights: every row's residual
+    \\                            and logits compared, greedy tokens must match EXACTLY
+    \\  minimax-m3-lanes <pack dir|fixture> [ctx] [steps] [layers]  the Stage-8 boundary: a real
+    \\                            open() Loaded handle serves token-in token-out through the lane surface
+    \\                            (prefill/first/queue/read/verify/keep/release), graded token-for-token
+    \\                            against the direct engine; draft/sample/second-stream/tree-keep refuse
+    \\  minimax-m3-lane-tp2 <rank 0|1> <host:port> <pack dir> [ctx] [steps]  the Stage-9 proof:
+    \\                            openTP2's lane vtable — the SAME lane surface open() serves for TP1 —
+    \\                            answering over the SPLIT real pack (rank 1 first over the NCCL id,
+    \\                            rank 0 serves the id and prints the served tokens; rank 1 lockstep)
+    \\  minimax-m3-serve <pack dir|fixture> <lcg|prompt file|text:UTF-8|textfile:PATH> [steps<=32] [layers] [tokdir]  Stages 9/10
+    \\                            front door: open()'s attached lane vtable answers one greedy
+    \\                            completion — token ids in ("lcg" = the receipted bar stream;
+    \\                            stream; a file = JSON {"tokens": [...]} / bare array / ids;
+    \\                            Stage-10: "text:" inline or "textfile:" PATH — encoded/decoded
+    \\                            through the pack's OWN tokenizer.json, the completion ALSO
+    \\                            printed as readable text with encode/decode round-trip bars),
+    \\                            token ids out, then exit; at the receipted fixture recipe the
+    \\                            completion must be EXACT 183 149 14; draft/second-stream/sampled
+    \\                            refuse truthfully
     \\
 ;
 
@@ -403,6 +441,14 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "kolibri-greedy")) return kolibri_tests.greedy(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);
     if (std.mem.eql(u8, cmd, "aot-fallback")) return aot_fallback_tests.run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "minimax-m3")) return minimax_m3_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "minimax-m3-tp2")) return minimax_tp2_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "");
+    if (std.mem.eql(u8, cmd, "minimax-m3-smoke")) return minimax_graph_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "minimax-m3-token")) return minimax_graph_tests.tokenRun(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "", if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 128, if (rest.len > 4) try std.fmt.parseInt(usize, rest[4], 10) else 2);
+    if (std.mem.eql(u8, cmd, "minimax-m3-grade")) return minimax_graph_tests.gradeRun(gpu, if (rest.len > 0) rest[0] else "", if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 32, if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 4, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 2);
+    if (std.mem.eql(u8, cmd, "minimax-m3-lanes")) return minimax_graph_tests.laneRun(gpu, if (rest.len > 0) rest[0] else "", if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 8, if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 3, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 0);
+    if (std.mem.eql(u8, cmd, "minimax-m3-lane-tp2")) return minimax_graph_tests.laneTp2Run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 32, if (rest.len > 4) try std.fmt.parseInt(usize, rest[4], 10) else 4);
+    if (std.mem.eql(u8, cmd, "minimax-m3-serve")) return minimax_graph_tests.serveRun(gpu, if (rest.len > 0) rest[0] else "", if (rest.len > 1) rest[1] else "", if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 3, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 2, if (rest.len > 4) rest[4] else "");
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;

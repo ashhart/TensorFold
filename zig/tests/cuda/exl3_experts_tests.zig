@@ -53,7 +53,7 @@ pub fn run(r: *Rig, state: *Run, dir: []const u8) !void {
 /// A row's output bytes are its own: solo, with 3 rows, in 64-row batches, shared or not.
 fn rowsInvariant(r: *Rig, exp: *const exl3e.Experts) !void {
     var bits: [ref.E]u32 = .{ 6, 4, 5, 6, 4, 5, 6, 4, 5 };
-    const b = try ref.buildLayer(r, &bits);
+    const b = try ref.buildLayer(r, &bits, 0); // the GLM bf16 act mode's rows-invariant bar
     const solo = try r.back(try ref.runRows(r, exp, &b, 1), ref.D * 4);
     // 3 rows: two more rows on the same picks as row 0
     const p3 = try r.a.alloc(i32, 3 * ref.SLOTS);
@@ -93,7 +93,7 @@ fn rowsInvariant(r: *Rig, exp: *const exl3e.Experts) !void {
 /// The same 300 rows as one call, split at 128 and at 37: a row's bytes never move.
 fn chunks(r: *Rig, exp: *const exl3e.Experts) !void {
     var bits: [ref.E]u32 = .{ 4, 5, 6, 4, 5, 6, 4, 5, 6 };
-    const b = try ref.buildLayer(r, &bits);
+    const b = try ref.buildLayer(r, &bits, 0); // the GLM bf16 act mode's chunking bar
     const whole = try r.back(try ref.runRows(r, exp, &b, 300), 300 * ref.D * 4);
     var at: usize = 0;
     while (at < 300) : (at += 128) {
