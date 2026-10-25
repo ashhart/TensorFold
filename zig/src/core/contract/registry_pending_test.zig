@@ -51,9 +51,9 @@ test "optional shared-memory variants are N/A while supported variants still req
     try std.testing.expect(try checkCuda(a, &.{unmeasured}, true) > 0);
 }
 
-test "Dory resources qualify only the architecture with a compiler receipt" {
+test "Dory resources qualify all five measured SMs and preserve pending later compilers" {
     for (@import("dory_cuda_records.zig").cuda) |r| {
-        try std.testing.expectEqual(@as(usize, 4), try checkCuda(std.testing.allocator, &.{r}, true));
+        try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{r}, true));
         try std.testing.expectEqual(r.usage, registry.usageFor(r, .{ .major = 13, .minor = 0 }));
         for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqual(none, registry.usageFor(r, version));

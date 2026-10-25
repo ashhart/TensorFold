@@ -23,13 +23,15 @@ test "compiler receipts: new 13.0 records preserve independent 13.2 selection" {
     try std.testing.expectEqualDeep(registry.none, registry.usageFor(unseen, .{ .major = 13, .minor = 2 }));
 }
 
-test "prompt int8: quantizer changes stay pending, prefill has one receipt, decode belongs to exactly 13.3" {
+test "prompt int8: five-SM receipts remain independent of later releases, decode belongs to exactly 13.3" {
     for ([_][]const u8{ "w4a8_prefill tf_w4a8_quantize", "w4a8_prefill tf_w4a8_prefill" }) |name| {
         const row = for (registry.all_cuda) |r| {
             if (std.mem.eql(u8, r.launch.name, name)) break r;
         } else return error.MissingInt8Record;
-        var want = registry.none;
-        if (std.mem.eql(u8, name, "w4a8_prefill tf_w4a8_prefill")) want[4] = .{ .regs = 165, .static = 0, .bound = 256 };
+        const want: [5]limits.Usage = if (std.mem.eql(u8, name, "w4a8_prefill tf_w4a8_prefill"))
+            .{ .{ .regs = 216, .static = 0, .bound = 256 }, .{ .regs = 216, .static = 0, .bound = 256 }, .{ .regs = 216, .static = 0, .bound = 256 }, .{ .regs = 165, .static = 0, .bound = 256 }, .{ .regs = 165, .static = 0, .bound = 256 } }
+        else
+            .{ .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 } };
         try std.testing.expectEqualDeep(want, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
         for ([_]?limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));

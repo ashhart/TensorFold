@@ -7,7 +7,7 @@ pub const records = blk: {
     const usage = [_][limits.sms.len]limits.Usage{
         .{ .{ .regs = 24, .static = 16448, .bound = 256 }, .{ .regs = 20, .static = 16448, .bound = 256 }, .{ .regs = 20, .static = 16448, .bound = 256 }, .{ .regs = 28, .static = 16448, .bound = 256 }, .{ .regs = 28, .static = 16448, .bound = 256 } },
         .{ .{ .regs = 24, .static = 64, .bound = 256 }, .{ .regs = 22, .static = 64, .bound = 256 }, .{ .regs = 22, .static = 64, .bound = 256 }, .{ .regs = 34, .static = 64, .bound = 256 }, .{ .regs = 36, .static = 64, .bound = 256 } },
-        .{ .{ .regs = 57, .static = 16416, .bound = 256 }, .{ .regs = 48, .static = 16416, .bound = 256 }, .{ .regs = 48, .static = 16416, .bound = 256 }, .{ .regs = 48, .static = 16416, .bound = 256 }, .{ .regs = 48, .static = 16416, .bound = 256 } },
+        .{ .{ .regs = 54, .static = 16416, .bound = 256 }, .{ .regs = 55, .static = 16416, .bound = 256 }, .{ .regs = 55, .static = 16416, .bound = 256 }, .{ .regs = 48, .static = 16416, .bound = 256 }, .{ .regs = 48, .static = 16416, .bound = 256 } },
         .{ .{ .regs = 32, .static = 0, .bound = 64 }, .{ .regs = 42, .static = 0, .bound = 64 }, .{ .regs = 40, .static = 0, .bound = 64 }, .{ .regs = 40, .static = 0, .bound = 64 }, .{ .regs = 40, .static = 0, .bound = 64 } },
         .{ .{ .regs = 22, .static = 64, .bound = 256 }, .{ .regs = 22, .static = 64, .bound = 256 }, .{ .regs = 22, .static = 64, .bound = 256 }, .{ .regs = 26, .static = 64, .bound = 256 }, .{ .regs = 26, .static = 64, .bound = 256 } },
         .{ .{ .regs = 28, .static = 0, .bound = 32 }, .{ .regs = 28, .static = 0, .bound = 32 }, .{ .regs = 28, .static = 0, .bound = 32 }, .{ .regs = 30, .static = 0, .bound = 32 }, .{ .regs = 30, .static = 0, .bound = 32 } },
