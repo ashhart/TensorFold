@@ -28,6 +28,10 @@ const Host = struct {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
         h.core.deinit();
+        if (h.metal.pages) |p| {
+            const n = p.pool.census();
+            std.log.info("qwen3.5: KV pages at close: {d} of {d} free, {d} leased, {d} promised ({s})", .{ n.free, n.total, n.leased, n.promised, if (p.idle()) "idle" else "NOT IDLE" });
+        }
         mtl.resident.streams.drop(h);
         h.config.deinit(h.gpa);
         h.metal.deinit();
@@ -35,6 +39,33 @@ const Host = struct {
         h.gpa.destroy(h);
     }
 };
+
+/// TF_QWEN35_METAL_KV_PAGES=1: the streams' keys and values in pages of the core KV pool.
+fn pagesOn() bool {
+    const v = std.c.getenv("TF_QWEN35_METAL_KV_PAGES") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
+}
+
+/// The pool beside the model under the load limit: kv_pool's plan of the streams and pages, made now; why not, or null.
+fn planPages(a: std.mem.Allocator, metal: *q.backend.Metal, device: mtl.Device, o: api.Open, window: u64) !?[]const u8 {
+    const kv = q.state.kv;
+    const l = q.state.pagedLayout();
+    const limit = (cache_fit.ceiling(cache_fit.ram() orelse 0, device.maxWorkingSet(), null) catch unreachable).bytes;
+    const used = @max(cache_fit.footprint() orelse 0, device.allocated());
+    const room = limit -| used;
+    const lanes_n: u32 = @max(o.lanes, 2);
+    const p = kv.plan(l, .{ .room = room, .engine = l.fixed_bytes, .lanes = lanes_n, .fixed = o.lanes_fixed, .window = window, .engine_paged = true }) catch |e| return switch (e) {
+        error.NoStream => try std.fmt.allocPrint(a, "TF_QWEN35_METAL_KV_PAGES: one stream's {d}-token window of KV pages ({d:.2} GiB) does not fit the {d:.2} GiB left under the load limit; lower --context", .{ window, gib(l.pages(window) * l.pageBytes()), gib(room) }),
+        error.TooMany => try std.fmt.allocPrint(a, "TF_QWEN35_METAL_KV_PAGES: --parallel {d} needs a fixed part and a page for each stream beside the first, more than the {d:.2} GiB left under the load limit", .{ lanes_n, gib(room) }),
+    };
+    try metal.attachPages(l, p.lanes, p.pages, window);
+    std.log.info("qwen3.5: KV in pages of the core pool: {d} streams over {d} pages of 256 rows ({d:.2} GiB, {d:.2} MiB a page), {d:.2} GiB left under the load limit", .{ p.lanes, p.pages, gib(p.pages * l.pageBytes()), @as(f64, @floatFromInt(l.pageBytes())) / (1 << 20), gib(room) });
+    return null;
+}
+
+fn gib(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1 << 30);
+}
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const pool = mtl.objc.Pool.push();
@@ -58,13 +89,22 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const chunk = 128;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
-    const served = try metal_admit.streams(a, "qwen3.5", q.state.cacheBytes(@intCast(window)), metal_admit.room(model.device), o, @intCast(window), problem) orelse {
+    // TF_QWEN35_METAL_KV_PAGES: the page plan sets the streams; otherwise each stream's whole cache is admitted at load
+    const paged = pagesOn();
+    const served: u32 = if (paged) o.lanes else try metal_admit.streams(a, "qwen3.5", q.state.cacheBytes(@intCast(window)), metal_admit.room(model.device), o, @intCast(window), problem) orelse {
         h.metal.deinit();
         model.deinit();
         gpa.destroy(h);
         return null;
     };
-    h.metal.options.streams = @max(served, 2);
+    if (paged) if (try planPages(a, h.metal, model.device, o, @intCast(window))) |fail| {
+        problem.* = fail;
+        h.metal.deinit();
+        model.deinit();
+        gpa.destroy(h);
+        return null;
+    };
+    if (!paged) h.metal.options.streams = @max(served, 2);
     h.config = try lanes.Config.init(gpa, h.metal.facts(), q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
