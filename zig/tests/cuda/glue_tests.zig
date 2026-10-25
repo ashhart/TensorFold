@@ -66,12 +66,12 @@ fn norms(r: *Rig) !void {
         const hn = try r.a.alloc(u16, rows * D);
         const out = try r.a.alloc(u16, rows * D);
         const xs = try r.a.alloc(f32, rows * D / 64);
-        try ref.addMoeNorm(r.a, x, if (f32_out) y32 else null, if (f32_out) null else y16, wt, w, hn, out, xs, rows, D, eps, top_k, NS);
+        try ref.addMoeNorm(r.a, x, if (f32_out) y32 else null, if (f32_out) null else y16, wt, w, hn, out, xs, rows, D, eps, NS);
         const hnd = try r.zeros(u16, rows * D);
         const outd = try r.zeros(u16, rows * D);
         const xsd = try r.zeros(f32, rows * D / 64);
         const yd = if (f32_out) try r.dev(f32, y32) else try r.dev(u16, y16);
-        try gl.addMoeNorm(try r.dev(u16, x), yd, f32_out, try r.dev(f32, wt), try r.dev(u16, w), hnd, outd, xsd, rows, D, eps, top_k, NS);
+        try gl.addMoeNorm(try r.dev(u16, x), yd, f32_out, try r.dev(f32, wt), try r.dev(u16, w), hnd, outd, xsd, try r.zeros(u16, rows * D), rows, D, eps, top_k, NS);
         try r.same("add_moe_norm h", u16, hnd, hn);
         try r.same("add_moe_norm y", u16, outd, out);
         try r.same("add_moe_norm xs", f32, xsd, xs);
@@ -505,10 +505,10 @@ pub fn run(gpu: Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
     const kk = cuda.kernels;
-    var mods: [5]cuda.Module = undefined;
+    var mods: [4]cuda.Module = undefined;
     var loaded: usize = 0;
     defer for (mods[0..loaded]) |*m| m.unload();
-    for ([_][]const u8{ kk.nemotron_norms, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed }, 0..) |img, i| {
+    for ([_][]const u8{ kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed }, 0..) |img, i| {
         mods[i] = try cuda.Module.load(gpu.d, img);
         loaded += 1;
     }
@@ -522,11 +522,13 @@ pub fn run(gpu: Gpu) !void {
         .f = try glue.Fns.resolve(&mods),
         .emb = try cuda.embed_rows.EmbedRows.load(gpu.d),
         .norms = try cuda.norms.Norms.load(gpu.d),
+        .moe = try cuda.moe_glue.MoeGlue.load(gpu.d),
         .rng = prng.random(),
     };
     defer {
         r.emb.unload();
         r.norms.unload();
+        r.moe.unload();
         r.s.deinit();
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);

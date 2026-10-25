@@ -164,9 +164,9 @@ fn slotChain(s: c.Shape) usize {
     return s.k;
 }
 
-/// Shape: rows, dims (n) and slots (k): Kolibri's 6 + shared over 2,560, eight + shared over 7,168.
+/// Shape: rows, dims (n), slots (k): Kolibri's 6 + 1 over 2,560, 8 + 1 over 7,168, Nemotron's 6 + 2 over 2,688.
 pub fn combineSpec(x: Combo) c.Spec {
-    return .{ .name = x.name, .accum = .f32, .depth = slotChain, .out = x.elem, .tiles = .{ .{}, .{ .size = 256 }, .{ .size = 8 } }, .served = &.{ .{ .rows = 16, .n = 2560, .k = 7 }, .{ .rows = 300, .n = 2560, .k = 7 }, .{ .rows = 9, .n = 7168, .k = 9 } } };
+    return .{ .name = x.name, .accum = .f32, .depth = slotChain, .out = x.elem, .tiles = .{ .{}, .{ .size = 256 }, .{ .size = 8 } }, .served = &.{ .{ .rows = 16, .n = 2560, .k = 7 }, .{ .rows = 300, .n = 2560, .k = 7 }, .{ .rows = 9, .n = 7168, .k = 9 }, .{ .rows = 16, .n = 2688, .k = 8 }, .{ .rows = 2048, .n = 2688, .k = 8 } } };
 }
 
 pub const Combine = struct {

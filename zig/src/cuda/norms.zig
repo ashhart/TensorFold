@@ -56,6 +56,7 @@ pub const Norms = struct {
     tail_fns: [2]Function, // each norm rounded once, MLX's bf16 steps
     l2_fn: Function,
     slerp_fn: Function,
+    parts_fns: [2]Function, // the tail's norm on strided parts of rows: rounded once, MLX's bf16 steps
 
     pub fn load(d: *const Driver) !Norms {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -74,6 +75,7 @@ pub const Norms = struct {
             .tail_fns = .{ try mod.function("tf_add_rms_rows_bf16h_tail"), try mod.function("tf_add_rms_rows_bf16h_tail_round") },
             .l2_fn = try mod.function("tf_l2_rows"),
             .slerp_fn = try mod.function("tf_slerp_rows"),
+            .parts_fns = .{ try mod.function("tf_rms_rows_bf16h_parts"), try mod.function("tf_rms_rows_bf16h_parts_round") },
         };
     }
 
@@ -170,6 +172,23 @@ pub const Norms = struct {
         a.add(eps);
         const f = n.tail_fns[@intFromBool(t.round)];
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+    }
+
+    /// The tail's output norm on part p of row i at x + i x_ld + p x_part (bf16 w + p w_part), y and xs alike.
+    pub fn rmsParts(n: *const Norms, s: Stream, x: u64, x_ld: usize, x_part: usize, w: u64, w_part: usize, y: u64, y_ld: usize, y_part: usize, xs: ?u64, rows: usize, parts: usize, width: usize, eps: f32, round: bool) !void {
+        if (width % 64 != 0 or !vectorOk(width, &.{ x, w, y }) or x_ld < width or y_ld < width or (x_ld | x_part | w_part | y_ld | y_part) % 8 != 0 or (y_ld | y_part) % 64 != 0) return error.RowShape;
+        if (rows == 0 or parts == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        for ([_]usize{ x_ld, x_part }) |v| a.add(@as(i64, @intCast(v)));
+        a.add(w);
+        a.add(@as(i64, @intCast(w_part)));
+        a.add(y);
+        for ([_]usize{ y_ld, y_part }) |v| a.add(@as(i64, @intCast(v)));
+        a.add(xs orelse 0);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        try launch_.launch(n.parts_fns[@intFromBool(round)], .{ .grid = .{ .x = @intCast(rows), .y = @intCast(parts), .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 
     /// nGPT rows: y = bf16(s / sqrt(sum(s^2) + eps)), s = x, or bf16(x + r) with r; width % 64, at most 8,192.
