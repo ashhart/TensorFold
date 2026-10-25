@@ -38,33 +38,48 @@ __kernel void sage_route(__global const float *logits, __global uint *ids, __glo
     const uint row = get_group_id(0), lane = get_sub_group_local_id();
     const uint stride = n_experts + 1, per = n_experts / SG;
     __global const float *l = logits + (ulong)row * stride;
+    // fixed trip counts, so v and picked stay in registers (runtime indexing put them in scratch memory)
     float v[MAX_PER_LANE];
     float m = -INFINITY;
-    for (uint j = 0; j < per; j++) {
-        v[j] = l[lane + SG * j];
+    __attribute__((opencl_unroll_hint))
+    for (uint j = 0; j < MAX_PER_LANE; j++) {
+        v[j] = j < per ? l[lane + SG * j] : -INFINITY;
         m = fmax(m, v[j]);
     }
     m = sub_group_reduce_max(m);
     // Renormalised top-k of a softmax only needs exp(l - max): the softmax's denominator cancels.
     float picked[MAX_TOPK];
+    uint chosen[MAX_TOPK];
     float total = 0.0f;
-    for (uint k = 0; k < top_k; k++) {
+    __attribute__((opencl_unroll_hint))
+    for (uint k = 0; k < MAX_TOPK; k++) {
+        picked[k] = 0.0f;
+        chosen[k] = 0;
+        if (k >= top_k) continue;
         float best = -INFINITY;
-        uint best_e = 0xffffffffu;
-        for (uint j = 0; j < per; j++)
-            if (v[j] > best) { best = v[j]; best_e = lane + SG * j; }
+        uint best_j = 0;
+        __attribute__((opencl_unroll_hint))
+        for (uint j = 0; j < MAX_PER_LANE; j++)
+            if (v[j] > best) { best = v[j]; best_j = j; }
         const float top = sub_group_reduce_max(best);
-        const uint winner = sub_group_reduce_min(best == top ? best_e : 0xffffffffu);
-        for (uint j = 0; j < per; j++)
+        const uint winner = sub_group_reduce_min(best == top ? lane + SG * best_j : 0xffffffffu);
+        __attribute__((opencl_unroll_hint))
+        for (uint j = 0; j < MAX_PER_LANE; j++)
             if (lane + SG * j == winner) v[j] = -INFINITY;
         picked[k] = exp(top - m);
+        chosen[k] = winner;
         total += picked[k];
-        if (lane == 0) ids[row * top_k + k] = winner;
     }
-    if (lane == 0) {
-        for (uint k = 0; k < top_k; k++) wts[row * top_k + k] = picked[k] / total;
-        shared_w[row] = 1.0f / (1.0f + exp(-l[n_experts]));
+    if (lane < top_k) {
+        float pw = 0.0f;
+        uint pe = 0;
+        __attribute__((opencl_unroll_hint))
+        for (uint k = 0; k < MAX_TOPK; k++)
+            if (k == lane) { pw = picked[k]; pe = chosen[k]; }
+        ids[row * top_k + lane] = pe;
+        wts[row * top_k + lane] = pw / total;
     }
+    if (lane == 0) shared_w[row] = 1.0f / (1.0f + exp(-l[n_experts]));
 }
 
 // 4-bit affine dot of row `row` of a stacked table with fp16 x; the sum is valid on every lane of the sub-group.
