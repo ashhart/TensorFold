@@ -17,9 +17,11 @@ pub const Pool = @import("pool.zig").Pool;
 pub const stop = @import("stop.zig");
 pub const decode = @import("decode.zig");
 pub const kernels = @import("kernels.zig");
+pub const exl3 = @import("exl3.zig");
 
 test {
     _ = context;
     _ = launch;
     _ = decode;
+    _ = exl3;
 }
