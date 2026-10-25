@@ -546,8 +546,13 @@ pub const Runner = struct {
         if (slot >= r.slots) return error.BadSlot;
         r.spos[r.cur] = r.pos;
         r.slast[r.cur] = r.last;
+        for (r.model.layers) |*l| l.st[r.cur].conv_cur = l.conv_cur;
+        r.enter(slot);
+    }
+
+    /// The layers' current fields, pos and last from `slot`'s state, with nothing stored first.
+    fn enter(r: *Runner, slot: u32) void {
         for (r.model.layers) |*l| {
-            l.st[r.cur].conv_cur = l.conv_cur;
             const st = l.st[slot];
             if (l.attn) {
                 l.kc = st.kc;
@@ -580,67 +585,16 @@ pub const Runner = struct {
         const m = &r.model;
         const z = r.z;
         const s = z.s;
-        var pos: [WINDOW]i32 = undefined;
-        var max_pos: u32 = 0;
         for (slots, 0..) |slot, t| {
             if (slot >= r.slots) return error.BadSlot;
             for (slots[0..t]) |o| if (o == slot) return error.SlotTwice;
-            if (r.spos[slot] + 1 > r.ctx) return error.ContextFull;
-            pos[t] = @intCast(r.spos[slot]);
-            max_pos = @max(max_pos, r.spos[slot]);
         }
-        for (m.layers, 0..) |*l, i| for (slots, 0..) |slot, t| {
-            const e = r.mt_host[(i * WINDOW + t) * 8 ..][0..8];
-            e.* = @splat(0);
-            e[6] = t;
-            e[7] = 1;
-            const st = l.st[slot];
-            if (l.attn) {
-                e[0] = @intFromPtr(st.kc.?);
-                e[1] = @intFromPtr(st.vc.?);
-            } else {
-                e[2] = @intFromPtr(st.conv[st.conv_cur].?);
-                e[3] = @intFromPtr(st.conv[1 - st.conv_cur].?);
-                e[4] = @intFromPtr(st.rec.?);
-                e[5] = @intFromPtr(st.rec.?);
-            }
-        };
+        const ones: [WINDOW]u32 = @splat(1);
+        try r.layersMulti(slots, ones[0..T], toks);
         const D: i32 = @intCast(s.hidden);
-        const gs: i32 = 64;
-        const t32: i32 = @intCast(T);
         const nul: ?*anyopaque = null;
         const zero: i32 = 0;
-        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mt, r.mt_host.ptr, r.mt_host.len * 8, null, 0, null));
-        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mpos, &pos, T * 4, null, 0, null));
-        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, toks.ptr, T * 4, null, 0, null));
         errdefer d.settle();
-        var shifted = false;
-        for (slots, 0..) |slot, t| {
-            r.rope_host[t] = @splat(pos[t] + r.shift[slot]);
-            shifted = shifted or r.shift[slot] != 0;
-        }
-        const rope = if (shifted) try r.ropeRows(T) else null;
-        try r.embed(T);
-        const sp: i32 = @intCast(span(max_pos + 1));
-        const ns: u32 = (max_pos + 1 + @as(u32, @intCast(sp)) - 1) / @as(u32, @intCast(sp));
-        for (m.layers, 0..) |*l, i| {
-            const mt = off(a.mt, i * WINDOW * 8 * 8);
-            try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
-            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
-            if (l.attn) {
-                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, zero, EPS, nul, mt, a.mpos, zero, r.cap, rope });
-                try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, zero, @as(i32, @intCast(ns)), sp, @as(f32, 1.0 / 16.0), mt, a.mpos, r.cap });
-                try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, zero, @as(i32, @intCast(ns)), sp, a.mpos });
-                try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
-            } else {
-                try d.launch(d.k.gdn_pre, .{ .x = T, .y = z.nconv / 256 }, .{ a.p, l.conv[0].?, l.conv[1].?, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32, nul, mt });
-                try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = T }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, t32, nul, nul, nul, mt });
-                try d.launch(d.k.gated_norm, .{ .x = T }, .{ a.y, a.p, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs, zero, nul, nul, zero });
-            }
-            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
-            try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), gs, nul, nul, zero, zero });
-            try r.moe(l, T);
-        }
         const hgs: i32 = @intCast(m.head.gs);
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, m.norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), hgs, nul, nul, zero, zero });
         try r.headRows(a.h, a.ahi, a.alo, T);
@@ -661,6 +615,94 @@ pub const Runner = struct {
         };
         r.pos = r.spos[r.cur];
         r.last = r.slast[r.cur];
+    }
+
+    /// The embedding and the layers over the windows of `slots` (distinct): slot i's window is wn[i] rows of `ids`, at
+    /// its positions spos.. Each window's first row reads the slot's GDN and convolution states, its last row writes
+    /// them (verifying: the GDN state to rec_save, the window's GDN inputs to the slot's stash). Leaves x and r.
+    fn layersMulti(r: *Runner, slots: []const u32, wn: []const u32, ids: []const i32) !void {
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const z = r.z;
+        const s = z.s;
+        var wf: [MAX_SLOTS]u32 = undefined;
+        var pos: [WINDOW]i32 = undefined;
+        var T: u32 = 0;
+        var max_pos: u32 = 0;
+        for (slots, wn, 0..) |slot, w, i| {
+            if (w == 0 or T + w > WINDOW) return error.BadWindow;
+            if (r.spos[slot] + w > r.ctx) return error.ContextFull;
+            wf[i] = T;
+            for (0..w) |j| pos[T + j] = @intCast(r.spos[slot] + j);
+            max_pos = @max(max_pos, r.spos[slot] + w - 1);
+            T += w;
+        }
+        if (ids.len != T) return error.BadWindow;
+        for (m.layers, 0..) |*l, li| for (slots, wn, 0..) |slot, w, i| for (0..w) |j| {
+            const e = r.mt_host[(li * WINDOW + wf[i] + j) * 8 ..][0..8];
+            e.* = @splat(0);
+            e[6] = wf[i];
+            e[7] = w;
+            const st = l.st[slot];
+            if (l.attn) {
+                e[0] = @intFromPtr(st.kc.?);
+                e[1] = @intFromPtr(st.vc.?);
+            } else {
+                e[2] = @intFromPtr(st.conv[st.conv_cur].?);
+                e[3] = @intFromPtr(st.conv[1 - st.conv_cur].?);
+                e[4] = @intFromPtr(st.rec.?);
+                e[5] = @intFromPtr(if (r.verifying) st.rec_save.? else st.rec.?);
+            }
+        };
+        const D: i32 = @intCast(s.hidden);
+        const gs: i32 = 64;
+        const t32: i32 = @intCast(T);
+        const nul: ?*anyopaque = null;
+        const zero: i32 = 0;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mt, r.mt_host.ptr, r.mt_host.len * 8, null, 0, null));
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mpos, &pos, T * 4, null, 0, null));
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, T * 4, null, 0, null));
+        errdefer d.settle();
+        var shifted = false; // M-RoPE: rows past a slot's images turn at their index plus its shift
+        for (slots, wn, 0..) |slot, w, i| for (0..w) |j| {
+            r.rope_host[wf[i] + j] = @splat(pos[wf[i] + j] + r.shift[slot]);
+            shifted = shifted or r.shift[slot] != 0;
+        };
+        const rope = if (shifted) try r.ropeRows(T) else null;
+        try r.embed(T);
+        const sp: i32 = @intCast(span(max_pos + 1));
+        const ns: u32 = (max_pos + 1 + @as(u32, @intCast(sp)) - 1) / @as(u32, @intCast(sp));
+        const at = StashAt.of(z);
+        for (m.layers, 0..) |*l, i| {
+            const mt = off(a.mt, i * WINDOW * 8 * 8);
+            try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
+            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
+            if (l.attn) {
+                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, zero, EPS, nul, mt, a.mpos, zero, r.cap, rope });
+                try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, zero, @as(i32, @intCast(ns)), sp, @as(f32, 1.0 / 16.0), mt, a.mpos, r.cap });
+                try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, zero, @as(i32, @intCast(ns)), sp, a.mpos });
+                try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
+            } else {
+                try d.launch(d.k.gdn_pre, .{ .x = T, .y = z.nconv / 256 }, .{ a.p, l.conv[0].?, l.conv[1].?, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32, nul, mt });
+                if (r.verifying) for (slots, wn, 0..) |slot, w, wi| { // each window's inputs, for commitMulti's replay
+                    const sb = l.st[slot].stash.?;
+                    const f = wf[wi];
+                    const qk = s.gdn_k_heads * 128 * 2;
+                    try dev.copy(d, sb, off(a.q, f * qk), w * qk);
+                    try dev.copy(d, off(sb, at.k), off(a.k, f * qk), w * qk);
+                    try dev.copy(d, off(sb, at.v), off(a.v, f * z.vd * 2), w * z.vd * 2);
+                    try dev.copy(d, off(sb, at.g), off(a.g, f * s.gdn_v_heads * 4), w * s.gdn_v_heads * 4);
+                    try dev.copy(d, off(sb, at.b), off(a.beta, f * s.gdn_v_heads * 4), w * s.gdn_v_heads * 4);
+                    try dev.copy(d, off(sb, at.p), off(a.p, f * z.gdn_in * 2), w * z.gdn_in * 2);
+                };
+                try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = T }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, t32, nul, nul, nul, mt });
+                try d.launch(d.k.gated_norm, .{ .x = T }, .{ a.y, a.p, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs, zero, nul, nul, zero });
+            }
+            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
+            try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), gs, nul, nul, zero, zero });
+            try r.moe(l, T);
+        }
     }
 
     /// The fp16 logits of row `row` of the last stepMulti.
@@ -739,15 +781,50 @@ pub const Runner = struct {
         const T: u32 = @intCast(ids.len);
         if (T == 0 or T > CHUNK) return error.BadWindow;
         if (p0 + T > r.ctx) return error.ContextFull;
+        const nul: ?*anyopaque = null;
+        const zero: i32 = 0;
+        const p32: i32 = @intCast(p0);
+        errdefer d.settle();
+        try r.mtpFront(ids);
+        try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p32, EPS, nul, nul, nul, zero, r.cap, nul });
+        if (T <= WINDOW) {
+            const sp = span(p0 + T);
+            const ns: u32 = (p0 + T + sp - 1) / sp;
+            try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, p32, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), @as(f32, 1.0 / 16.0), nul, nul, r.cap });
+            try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, p32, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), nul });
+        } else if (r.cap > 0)
+            try d.launch(d.k.attn_prompt8, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p32, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0), r.cap })
+        else
+            try d.launch(d.k.attn_prompt, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p32, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0) });
+        try r.mtpBack(T);
+        const last = T - 1;
+        const kg = s.hidden / m.head.gs;
+        try dev.copy(d, off(mt.state, r.cur * s.hidden * 2), off(a.h, last * s.hidden * 2), s.hidden * 2);
+        try fwd.gemm(d, a.pscr, off(a.h, last * s.hidden * 2), off(a.ahi, last * kg * 2), off(a.alo, last * kg * 2), m.head, a.logits, 1);
+        try d.launch(d.k.argmax_part, .{ .x = 256, .y = 1 }, .{ a.logits, @as(i32, @intCast(s.vocab)), a.pv, a.pi });
+        try d.launch(d.k.argmax, .{ .x = 1 }, .{ a.pv, a.pi, a.tok });
+        var tok: [1]i32 = undefined;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &tok, a.tok, 4, null, 0, null));
+        try d.sync();
+        return tok[0];
+    }
+
+    /// The MTP layer up to its attention: the rows' input (embedding of `ids` and mtp.hin) to a.p.
+    fn mtpFront(r: *Runner, ids: []const i32) !void {
+        const mt = r.mtp.?;
+        const l = &mt.layer;
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const s = r.z.s;
+        const T: u32 = @intCast(ids.len);
         const D: i32 = @intCast(s.hidden);
         const gs: i32 = 64;
         const nul: ?*anyopaque = null;
         const zero: i32 = 0;
         const one: i32 = 1;
-        const p32: i32 = @intCast(p0);
         const xb = T * s.hidden * 4;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
-        errdefer d.settle();
         try d.launch(d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, mt.norm_e, a.h, a.ahi, a.alo, D, EPS, zero, gs, nul, nul, zero, zero });
         try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, mt.fc_e, mt.r2, T);
@@ -759,32 +836,26 @@ pub const Runner = struct {
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, mt.r2, l.in_norm, a.h, a.ahi, a.alo, D, EPS, one, gs, nul, nul, zero, zero });
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, one, gs, nul, nul, zero, zero });
         try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
-        try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p32, EPS, nul, nul, nul, zero, r.cap, nul });
-        if (T <= WINDOW) {
-            const sp = span(p0 + T);
-            const ns: u32 = (p0 + T + sp - 1) / sp;
-            try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, p32, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), @as(f32, 1.0 / 16.0), nul, nul, r.cap });
-            try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, p32, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), nul });
-        } else if (r.cap > 0)
-            try d.launch(d.k.attn_prompt8, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p32, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0), r.cap })
-        else
-            try d.launch(d.k.attn_prompt, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p32, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0) });
+    }
+
+    /// The MTP layer after its attention (a.y): gate, o_proj, MoE and the final norm, the rows' normed output in a.h.
+    fn mtpBack(r: *Runner, T: u32) !void {
+        const mt = r.mtp.?;
+        const l = &mt.layer;
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const D: i32 = @intCast(r.z.s.hidden);
+        const gs: i32 = 64;
+        const nul: ?*anyopaque = null;
+        const zero: i32 = 0;
+        const one: i32 = 1;
         try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
         try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, D, EPS, one, gs, nul, nul, zero, zero });
         try r.moe(l, T);
         const hgs: i32 = @intCast(m.head.gs);
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, mt.norm, a.h, a.ahi, a.alo, D, EPS, one, hgs, nul, nul, zero, zero });
-        const last = T - 1;
-        const kg = s.hidden / m.head.gs;
-        try dev.copy(d, off(mt.state, r.cur * s.hidden * 2), off(a.h, last * s.hidden * 2), s.hidden * 2);
-        try fwd.gemm(d, a.pscr, off(a.h, last * s.hidden * 2), off(a.ahi, last * kg * 2), off(a.alo, last * kg * 2), m.head, a.logits, 1);
-        try d.launch(d.k.argmax_part, .{ .x = 256, .y = 1 }, .{ a.logits, @as(i32, @intCast(s.vocab)), a.pv, a.pi });
-        try d.launch(d.k.argmax, .{ .x = 1 }, .{ a.pv, a.pi, a.tok });
-        var tok: [1]i32 = undefined;
-        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &tok, a.tok, 4, null, 0, null));
-        try d.sync();
-        return tok[0];
     }
 
     /// One speculative step of the current slot (greedy, MTP on): up to `k` drafts from the MTP, one verify block,
