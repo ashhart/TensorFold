@@ -21,6 +21,13 @@ extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
 
 pub const EPS: f32 = 1e-6;
 pub const SPLIT = 32; // keys per attention split (decode.cl)
+/// Decode attention slices at most (attn_decode_span): a slice holds a multiple of SPLIT keys.
+const SLICES = 256;
+
+/// Keys a slice of attn_decode_span holds for `keys` keys.
+fn span(keys: u32) u32 {
+    return @max(1, (keys + SLICES * SPLIT - 1) / (SLICES * SPLIT)) * SPLIT;
+}
 /// Rows of one forward: the decode kernels' limit (the chain table and the serial GDN).
 pub const WINDOW = 16;
 /// Rows of one prompt chunk: norms, GEMMs and MoE take the whole chunk, the mixers WINDOW rows at a time.
@@ -177,8 +184,9 @@ pub const Acts = struct {
     }
 };
 
-/// sage_moe.cl's kernels (the Dev's table is the 27B runner's, filled from the Sage images).
-pub const MoeKernels = struct { router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
+/// sage_moe.cl's kernels and the long-cache attention pair of decode.cl (the Dev's table is the 27B runner's, filled from
+/// the Sage images).
+pub const MoeKernels = struct { attn_span: ze.H, merge_span: ze.H, router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
 
 /// Sub-groups a work-group of the decode expert kernels (one sub-group a row).
 const MOE_SG = 4;
@@ -425,15 +433,16 @@ pub const Runner = struct {
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, toks.ptr, T * 4, null, 0, null));
         errdefer d.settle();
         try d.launch(d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
-        const ns: u32 = (max_pos + 1 + SPLIT - 1) / SPLIT;
+        const sp: i32 = @intCast(span(max_pos + 1));
+        const ns: u32 = (max_pos + 1 + @as(u32, @intCast(sp)) - 1) / @as(u32, @intCast(sp));
         for (m.layers, 0..) |*l, i| {
             const mt = off(a.mt, i * WINDOW * 8 * 8);
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
             if (l.attn) {
                 try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, zero, EPS, nul, mt, a.mpos, zero, zero });
-                try d.launch(d.k.attn_decode, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, zero, @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), nul, mt, a.mpos, zero });
-                try d.launch(d.k.attn_merge, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, zero, @as(i32, @intCast(ns)), a.chain, a.mpos });
+                try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, zero, @as(i32, @intCast(ns)), sp, @as(f32, 1.0 / 16.0), mt, a.mpos, zero });
+                try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, zero, @as(i32, @intCast(ns)), sp, a.mpos });
                 try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
             } else {
                 try d.launch(d.k.gdn_pre, .{ .x = T, .y = z.nconv / 256 }, .{ a.p, l.conv[0].?, l.conv[1].?, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32, nul, mt });
@@ -532,10 +541,11 @@ pub const Runner = struct {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
             if (l.attn) {
-                const ns: u32 = (r.pos + T + SPLIT - 1) / SPLIT;
+                const sp = span(r.pos + T);
+                const ns: u32 = (r.pos + T + sp - 1) / sp;
                 try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p0, EPS, nul, nul, nul, zero, zero });
-                try d.launch(d.k.attn_decode, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, p0, @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), a.chain, nul, nul, zero });
-                try d.launch(d.k.attn_merge, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, p0, @as(i32, @intCast(ns)), a.chain, nul });
+                try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, p0, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), @as(f32, 1.0 / 16.0), nul, nul, zero });
+                try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, p0, @as(i32, @intCast(ns)), @as(i32, @intCast(sp)), nul });
                 try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
             } else {
                 const cin = l.conv[l.conv_cur].?;
@@ -743,6 +753,8 @@ fn kernels(d: *Dev, mk: *MoeKernels) !void {
         .swiglu = try d.kernel(mo, "sage_expert_swiglu", SWIGLU_WG),
         .down = try d.kernel(mo, "sage_expert_down", 16 * MOE_SG),
         .combine = try d.kernel(mo, "sage_moe_combine", 64),
+        .attn_span = try d.kernel(md, "attn_decode_span", 16),
+        .merge_span = try d.kernel(md, "attn_merge_span", 256),
         .group_plan = try d.kernel(mo, "sage_group_plan", 256),
         .group_swiglu = try d.kernel(mo, "sage_group_swiglu", 16),
         .group_down = try d.kernel(mo, "sage_group_down", 16),

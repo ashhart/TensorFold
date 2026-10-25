@@ -514,3 +514,100 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
     }
 }
 #endif // Q27_GQA == 6
+
+// Decode attention for long caches: as attn_decode, but a slice holds `span` keys (a launch argument), so the partials
+// stay few at any context. Rows: one stream each (MT, POS), or a window at p0 (row t at position p0 + t). Grid (NS,
+// Q27_AKV * Q27_QPARTS, rows). cap > 0: int8 cache.
+KERNEL(16) void attn_decode_span(global const ushort *Q, global const ushort *KC, global const ushort *VC,
+                                 global float *PM, global float *PL, global float *PO, int p0, int NS, int span,
+                                 float scale, global const ulong *MT, global const int *POS, int cap) {
+  const int sp = get_group_id(0), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(2), lane = get_sub_group_local_id();
+  const int qh0 = hk * Q27_GQA + (get_group_id(1) % Q27_QPARTS) * Q27_QPG;
+  if (MT) {
+    KC = (global const ushort *)MT[t * 8];
+    VC = (global const ushort *)MT[t * 8 + 1];
+  }
+  const int last = MT ? POS[t] : p0 + t, j0 = sp * span, j1 = min(j0 + span, last + 1);
+  float q[Q27_QPG][16], o[Q27_QPG][16], m[Q27_QPG], l[Q27_QPG];
+  for (int a = 0; a < Q27_QPG; a++) {
+    for (int i = 0; i < 16; i++) {
+      q[a][i] = bf2f(Q[((long)t * Q27_AQ + qh0 + a) * 256 + i * 16 + lane]) * scale;
+      o[a][i] = 0.0f;
+    }
+    m[a] = -INFINITY;
+    l[a] = 0.0f;
+  }
+  const global float *ks = (const global float *)((const global char *)KC + (long)cap * Q27_KVROW);
+  const global float *vs = (const global float *)((const global char *)VC + (long)cap * Q27_KVROW);
+  for (int j = j0; j < j1; j++) {
+    const long kr = (long)j * Q27_AKV + hk; // the cache row of key j
+    float kv[16];
+    if (cap) {
+      const global char *k8 = (const global char *)KC + kr * 256;
+      const float s = ks[kr];
+      for (int i = 0; i < 16; i++) kv[i] = (float)k8[i * 16 + lane] * s;
+    } else
+      for (int i = 0; i < 16; i++) kv[i] = bf2f(KC[kr * 256 + i * 16 + lane]);
+    float sc[Q27_QPG];
+    for (int a = 0; a < Q27_QPG; a++) {
+      float d = 0.0f;
+      for (int i = 0; i < 16; i++) d += q[a][i] * kv[i];
+      sc[a] = sub_group_reduce_add(d);
+    }
+    if (cap) {
+      const global char *v8 = (const global char *)VC + kr * 256;
+      const float s = vs[kr];
+      for (int i = 0; i < 16; i++) kv[i] = (float)v8[i * 16 + lane] * s;
+    } else
+      for (int i = 0; i < 16; i++) kv[i] = bf2f(VC[kr * 256 + i * 16 + lane]);
+    for (int a = 0; a < Q27_QPG; a++) {
+      const float mn = fmax(m[a], sc[a]);
+      const float al = exp(m[a] - mn), p = exp(sc[a] - mn);
+      l[a] = l[a] * al + p;
+      for (int i = 0; i < 16; i++) o[a][i] = o[a][i] * al + p * kv[i];
+      m[a] = mn;
+    }
+  }
+  for (int a = 0; a < Q27_QPG; a++) {
+    const long base = ((long)t * Q27_AQ + qh0 + a) * NS + sp;
+    if (lane == 0) {
+      PM[base] = m[a];
+      PL[base] = l[a];
+    }
+    for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
+  }
+}
+
+// Merge of attn_decode_span slices: O bf16 [T, Q27_AQ, 256]. One work-group of 16 subgroups per (head, row), each
+// subgroup takes every 16th slice, then the work-group adds the 16 partials.
+KERNEL(256) void attn_merge_span(global const float *PM, global const float *PL, global const float *PO,
+                                 global ushort *O, int p0, int NS, int span, global const int *POS) {
+  const int hh = get_group_id(0), t = get_group_id(1), g = get_sub_group_id(), lane = get_sub_group_local_id();
+  const int used = (POS ? POS[t] : p0 + t) / span + 1;
+  const long base = ((long)t * Q27_AQ + hh) * NS;
+  local float lm[16], ll[16], lo[16][256];
+  float m = -INFINITY;
+  for (int s = g; s < used; s += 16) m = fmax(m, PM[base + s]);
+  m = sub_group_reduce_max(m);
+  if (lane == 0) lm[g] = m;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  m = -INFINITY;
+  for (int i = 0; i < 16; i++) m = fmax(m, lm[i]);
+  float l = 0.0f, o[16];
+  for (int i = 0; i < 16; i++) o[i] = 0.0f;
+  for (int s = g; s < used; s += 16) {
+    const float w = exp(PM[base + s] - m);
+    l += PL[base + s] * w;
+    for (int i = 0; i < 16; i++) o[i] += PO[(base + s) * 256 + i * 16 + lane] * w;
+  }
+  if (lane == 0) ll[g] = l;
+  for (int i = 0; i < 16; i++) lo[g][i * 16 + lane] = o[i];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const int e = get_local_id(0);
+  float sl = 0.0f, so = 0.0f;
+  for (int i = 0; i < 16; i++) {
+    sl += ll[i];
+    so += lo[i][e];
+  }
+  O[((long)t * Q27_AQ + hh) * 256 + e] = f2bf(so / sl);
+}
