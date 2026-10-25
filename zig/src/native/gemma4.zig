@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const g = tf.gemma4;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
+const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
 
 /// The context a stream gets without --context: attention's per-call scratch grows with it (pass --context for more).
@@ -115,6 +116,8 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     const drafter: ?lanes.drafter.Drafter = if (h.draft) |d| d.drafter() else if (h.assist) |d| d.drafter() else null;
     if (drafter) |d| h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d);
     errdefer if (h.wrap) |*w| w.deinit();
+    const served = try metal_admit.streams(a, "gemma4", g.state.cacheBytes(model.config.geo, @intCast(window)), metal_admit.room(model.device), o, @intCast(window), problem) orelse return error.Refused;
+    h.metal.options.streams = @max(served, 2);
     const facts = if (h.wrap) |*w| w.facts(h.metal.facts()) else h.metal.facts();
     h.config = try lanes.Config.init(gpa, facts, g.state.max_rows, g.state.max_rows - 1);
     errdefer h.config.deinit(gpa);
@@ -122,16 +125,16 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.core = lanes.Engine.init(gpa, &h.config, if (h.wrap) |*w| w.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = g.image.decoderProblem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .structures = true, .vision = vis });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .structures = true, .vision = vis });
     h.cache = null;
-    try enableCache(h, a, o, @intCast(window), problem);
+    try enableCache(h, a, o, served, @intCast(window), problem);
     errdefer if (h.cache) |*store| store.deinit();
     h.warm = .{ .queue = model.queue };
     g.residency.hold(h) catch |err| std.log.warn("gemma4: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     errdefer g.residency.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start(); // the host's lists are empty until its thread runs, so a failed start leaves nothing to free
-    std.log.info("gemma4: Gemma 4 {s}, context {d} tokens, {d} streams{s}{s}", .{ model.config.geo.name, window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else if (h.assist != null) ", MTP assistant drafts" else "", if (vis != null) ", images" else "" });
+    std.log.info("gemma4: Gemma 4 {s}, context {d} tokens, {d} streams{s}{s}", .{ model.config.geo.name, window, @max(served, 2), if (h.draft != null) ", DFlash drafts" else if (h.assist != null) ", MTP assistant drafts" else "", if (vis != null) ", images" else "" });
     return h;
 }
 
@@ -163,8 +166,8 @@ const Snaps = struct {
 };
 
 /// Prompt reuse in what 70% of RAM leaves beside the streams' caches (16 GiB by default), at planned chunk starts.
-fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, window: usize, problem: *[]const u8) !void {
-    const later = @as(u64, @max(o.lanes, 2)) * g.state.cacheBytes(h.model.config.geo, window);
+fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, served: u32, window: usize, problem: *[]const u8) !void {
+    const later = @as(u64, @max(served, 2)) * g.state.cacheBytes(h.model.config.geo, window);
     const room = h.model.device.maxWorkingSet() -| h.model.device.allocated() -| (8 << 30) -| later;
     var why: []const u8 = "";
     const plan = cache_fit.budgetBeside(o.prompt_cache_gib, o.prompt_cache_over_cap, room, later, a, &why, "") catch |err| switch (err) {
