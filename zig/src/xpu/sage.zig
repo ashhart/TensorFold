@@ -889,6 +889,143 @@ pub const Runner = struct {
         return a + 1;
     }
 
+    /// One speculative step of several greedy slots (MTP on, `slots` distinct): each slot's drafts (up to `k`, fewer
+    /// when all the blocks would pass WINDOW rows), one forward of every slot's block as a window, each slot's kept
+    /// rows committed, and all kept rows absorbed in one MTP forward. Slot i's tokens go to out[i][0..n[i]]; the
+    /// newest of them is its last, not yet fed.
+    pub fn specMulti(r: *Runner, slots: []const u32, k: u32, out: [][WINDOW]i32, n: []usize) !void {
+        const mt = r.mtp orelse return error.NoMtpHead;
+        const S: u32 = @intCast(slots.len);
+        if (S == 0 or S > MAX_SLOTS or out.len < S or n.len < S) return error.BadWindow;
+        if (k == 0 or k + 1 > WINDOW) return error.BadDrafts;
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const z = r.z;
+        const s = z.s;
+        const home = r.cur;
+        try r.use(r.cur); // store the current slot's fields
+        const kk = @min(k, WINDOW / S - 1);
+        var ids: [WINDOW]i32 = undefined;
+        var wf: [MAX_SLOTS]u32 = undefined;
+        var wn: [MAX_SLOTS]u32 = undefined;
+        var p0: [MAX_SLOTS]u32 = undefined;
+        var T: u32 = 0;
+        for (slots, 0..) |slot, i| {
+            if (slot >= r.slots) return error.BadSlot;
+            for (slots[0..i]) |o| if (o == slot) return error.SlotTwice;
+            if (r.spos[slot] + 1 > r.ctx) return error.ContextFull;
+            const nd = @min(kk, r.ctx - r.spos[slot] - 1);
+            wf[i] = T;
+            wn[i] = nd + 1;
+            p0[i] = r.spos[slot];
+            ids[T] = r.slast[slot];
+            if (nd > 0) ids[T + 1] = r.sdraft[slot];
+            if (nd > 1) { // chained drafts on the slot's own MTP cache, as specStep
+                try r.use(slot);
+                var j: u32 = 1;
+                while (j < nd) : (j += 1) {
+                    try dev.copy(d, mt.hin, off(mt.state, slot * s.hidden * 2), s.hidden * 2);
+                    ids[T + j + 1] = try r.mtpForward(ids[T + j .. T + j + 1], r.mpos[slot] + j - 1);
+                }
+            }
+            T += nd + 1;
+        }
+        try r.use(home);
+        // the blocks: the per-row kernels of verify, every row's greedy token into block
+        r.verifying = true;
+        defer r.verifying = false;
+        try r.layersMulti(slots, wn[0..S], ids[0..T]);
+        _ = try r.head(T, true);
+        for (m.layers) |*l| if (!l.attn) for (slots) |slot| {
+            l.st[slot].conv_cur = 1 - l.st[slot].conv_cur;
+        };
+        // each slot's kept rows: its drafts while they match, then the token after them
+        const at = StashAt.of(z);
+        const nul: ?*anyopaque = null;
+        var mids: [WINDOW]i32 = undefined;
+        var mpos: [WINDOW]i32 = undefined;
+        var mlast: [MAX_SLOTS]u32 = undefined;
+        var Tm: u32 = 0;
+        for (slots, 0..) |slot, i| {
+            const blk = r.block[wf[i]..][0..wn[i]];
+            var kept: u32 = 0;
+            while (kept + 1 < wn[i] and ids[wf[i] + kept + 1] == blk[kept]) kept += 1;
+            const keep = kept + 1;
+            @memcpy(out[i][0..keep], blk[0..keep]);
+            n[i] = keep;
+            const k32: i32 = @intCast(keep);
+            for (m.layers) |*l| if (!l.attn) {
+                const st = &l.st[slot];
+                if (keep == wn[i]) {
+                    std.mem.swap(?*anyopaque, &st.rec, &st.rec_save);
+                    continue;
+                }
+                const sb = st.stash.?;
+                try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ sb, off(sb, at.k), off(sb, at.v), off(sb, at.g), off(sb, at.b), st.rec.?, st.rec.?, a.y, k32, nul, nul, nul, nul });
+                try d.launch(d.k.conv_commit, .{ .x = z.nconv / 256 }, .{ st.conv[1 - st.conv_cur].?, off(sb, at.p), st.conv[st.conv_cur].?, k32, nul });
+            };
+            r.spos[slot] += keep;
+            r.slast[slot] = blk[keep - 1];
+            // the MTP rows: the kept rows' hidden with the token after each
+            try dev.copy(d, off(mt.hin, Tm * s.hidden * 2), off(a.h, wf[i] * s.hidden * 2), keep * s.hidden * 2);
+            for (0..keep) |j| {
+                mids[Tm + j] = blk[j];
+                mpos[Tm + j] = @intCast(p0[i] + j);
+            }
+            Tm += keep;
+            mlast[i] = Tm - 1;
+        }
+        r.enter(home);
+        try r.mtpMulti(slots, mids[0..Tm], mpos[0..Tm], n[0..S], mlast[0..S]);
+        for (slots, 0..) |slot, i| r.mpos[slot] = p0[i] + @as(u32, @intCast(n[i]));
+    }
+
+    /// The MTP layer over the kept rows of several slots (mtp.hin their hidden), row t at position pos[t] of its
+    /// slot's MTP cache: slot i has n[i] rows, its last at row mlast[i]. Each slot's state and first draft become its
+    /// last row's.
+    fn mtpMulti(r: *Runner, slots: []const u32, ids: []const i32, pos: []const i32, n: []const usize, mlast: []const u32) !void {
+        const mt = r.mtp.?;
+        const l = &mt.layer;
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const s = r.z.s;
+        const T: u32 = @intCast(ids.len);
+        const nul: ?*anyopaque = null;
+        const zero: i32 = 0;
+        var t: usize = 0;
+        var max_pos: u32 = 0;
+        for (slots, n) |slot, c| for (0..c) |_| { // the rows' MTP caches, in the first layer's part of the table
+            const e = r.mt_host[t * 8 ..][0..8];
+            e.* = @splat(0);
+            e[0] = @intFromPtr(l.st[slot].kc.?);
+            e[1] = @intFromPtr(l.st[slot].vc.?);
+            e[6] = t;
+            e[7] = 1;
+            max_pos = @max(max_pos, @as(u32, @intCast(pos[t])));
+            t += 1;
+        };
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mt, r.mt_host.ptr, T * 8 * 8, null, 0, null));
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mpos, pos.ptr, T * 4, null, 0, null));
+        errdefer d.settle();
+        try r.mtpFront(ids);
+        const sp: i32 = @intCast(span(max_pos + 1));
+        const ns: u32 = (max_pos + 1 + @as(u32, @intCast(sp)) - 1) / @as(u32, @intCast(sp));
+        try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, zero, EPS, nul, a.mt, a.mpos, zero, r.cap });
+        try d.launch(r.mk.attn_span, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, zero, @as(i32, @intCast(ns)), sp, @as(f32, 1.0 / 16.0), a.mt, a.mpos, r.cap });
+        try d.launch(r.mk.merge_span, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, zero, @as(i32, @intCast(ns)), sp, a.mpos });
+        try r.mtpBack(T);
+        for (slots, mlast) |slot, ml| try dev.copy(d, off(mt.state, slot * s.hidden * 2), off(a.h, ml * s.hidden * 2), s.hidden * 2);
+        try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, m.head, a.logits, T);
+        try d.launch(d.k.argmax_part, .{ .x = 256, .y = T }, .{ a.logits, @as(i32, @intCast(s.vocab)), a.pv, a.pi });
+        try d.launch(d.k.argmax, .{ .x = T }, .{ a.pv, a.pi, a.tok });
+        var tok: [WINDOW]i32 = undefined;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &tok, a.tok, T * 4, null, 0, null));
+        try d.sync();
+        for (slots, mlast) |slot, ml| r.sdraft[slot] = tok[ml];
+    }
+
     /// The fp16 logits of the last forward's final row (`out.len` is the vocabulary size).
     pub fn logits(r: *Runner, out: []f16) !void {
         if (out.len != r.z.s.vocab) return error.BadLength;

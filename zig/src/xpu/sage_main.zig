@@ -158,7 +158,8 @@ fn take(sl: *Slot, tok: i32) !bool {
     return true;
 }
 
-/// XPU_SPEC=k with XPU_MTP: a lone greedy stream decodes by Runner.specStep with k drafts a step.
+/// XPU_SPEC=k with XPU_MTP: a lone greedy stream decodes by Runner.specStep with k drafts a step, several greedy
+/// streams by Runner.specMulti.
 fn loop(r: *sage.Runner) !void {
     const spec: u32 = if (std.c.getenv("XPU_SPEC")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 0;
     var q: std.ArrayList(Req) = .empty;
@@ -218,6 +219,23 @@ fn loop(r: *sage.Runner) !void {
             if (!ended) sl.next = got[n - 1];
             continue;
         }
+        var greedy = spec > 0 and r.mtp != null;
+        for (feed[0..nf]) |si| greedy = greedy and slots[si].req.sampling == null;
+        if (greedy) { // greedy streams: MTP drafts, one block a stream
+            var got: [sage.MAX_SLOTS][sage.WINDOW]i32 = undefined;
+            var n: [sage.MAX_SLOTS]usize = undefined;
+            try r.specMulti(feed[0..nf], spec, got[0..nf], n[0..nf]);
+            for (feed[0..nf], 0..) |si, j| {
+                const sl = &slots[si];
+                var ended = false;
+                for (got[j][0 .. n[j] - 1]) |tk| if (try take(sl, tk)) {
+                    ended = true;
+                    break;
+                };
+                if (!ended) sl.next = got[j][n[j] - 1];
+            }
+            continue;
+        }
         if (nf == 1) { // one stream: the single-row forward
             try r.use(feed[0]);
             try r.step(toks[0]);
@@ -262,6 +280,7 @@ pub fn main(init: std.process.Init) !void {
     defer r.deinit();
     std.debug.print("loaded in {d:.1} s\n", .{now() - t_load});
     if (argv.len > 3 and std.mem.eql(u8, argv[3], "--nll")) return nll(r, ids.items);
+    if (slots > 1) if (std.c.getenv("XPU_SPEC")) |v| return specMultiCheck(r, ids.items, steps, try std.fmt.parseInt(u32, std.mem.span(v), 10));
     if (slots > 1) return multiCheck(r, ids.items, steps);
     if (std.c.getenv("XPU_SPEC_CHECK")) |v| return specCheck(r, ids.items, steps, try std.fmt.parseInt(u32, std.mem.span(v), 10));
     if (std.c.getenv("XPU_SPEC")) |v| return mtpCheck(r, ids.items, steps, try std.fmt.parseInt(u32, std.mem.span(v), 10));
@@ -387,6 +406,56 @@ fn tower(io: std.Io, dir: []const u8, image: []const u8, out: []const u8) !void 
         if (fd < 0) return error.CannotWrite;
         var done: usize = 0;
         while (done < data.len) done += @intCast(@max(1, write(fd, data.ptr + done, data.len - done)));
+    }
+}
+
+/// XPU_SLOTS > 1 with XPU_MTP and XPU_SPEC=k: slot i takes the prompt less its last 7 i tokens; specMulti rounds until
+/// each slot has `steps` tokens, timed, then each slot again alone (Runner.step) on slot 0, and whether its tokens match.
+fn specMultiCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void {
+    const n = r.slots;
+    var slots: [sage.MAX_SLOTS]u32 = undefined;
+    var got: [sage.MAX_SLOTS]std.ArrayList(i32) = @splat(.empty);
+    defer for (&got) |*g| g.deinit(alloc);
+    for (0..n) |i| {
+        slots[i] = @intCast(i);
+        try r.use(@intCast(i));
+        try r.reset();
+        try r.prompt(ids[0 .. ids.len - 7 * i]);
+        try got[i].append(alloc, r.last);
+    }
+    var buf: [sage.MAX_SLOTS][sage.WINDOW]i32 = undefined;
+    var cnt: [sage.MAX_SLOTS]usize = undefined;
+    var rounds: usize = 0;
+    var short = true;
+    const t0 = now();
+    while (short) : (rounds += 1) {
+        try r.specMulti(slots[0..n], k, buf[0..n], cnt[0..n]);
+        short = false;
+        for (0..n) |i| {
+            try got[i].appendSlice(alloc, buf[i][0..cnt[i]]);
+            short = short or got[i].items.len < steps;
+        }
+    }
+    const dt = now() - t0;
+    @import("dev.zig").profReport("spec decode");
+    var made: usize = 0;
+    for (0..n) |i| made += got[i].items.len - 1;
+    const rf: f64 = @floatFromInt(rounds);
+    const mf: f64 = @floatFromInt(made);
+    std.debug.print("spec multi k={d}: {d} slots, {d} rounds in {d:.3} s, {d:.3} tokens a slot a round, {d:.1} tok/s aggregate\n", .{ k, n, rounds, dt, mf / (rf * @as(f64, @floatFromInt(n))), mf / dt });
+    try r.use(0);
+    for (0..n) |i| {
+        try r.reset();
+        try r.prompt(ids[0 .. ids.len - 7 * i]);
+        var same: usize = 0;
+        var first_diff: usize = steps;
+        for (0..steps) |j| {
+            if (j > 0) try r.step(r.last);
+            if (r.last == got[i].items[j]) same += 1 else if (first_diff == steps) {
+                first_diff = j;
+            }
+        }
+        std.debug.print("slot {d}: {d}/{d} tokens as alone, first difference at {d}\n", .{ i, same, steps, first_diff });
     }
 }
 
