@@ -45,6 +45,14 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const nvfp4 = b.addRunArtifact(b.addTest(.{ .root_module = nvfp4_module }));
     b.step("test-drama-nvfp4-reference-host", "NVFP4 scalar reference and reduced-accumulator discrimination").dependOn(&nvfp4.step);
     step.dependOn(&nvfp4.step);
+    const cosmos3 = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/cosmos3_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = module(b, b.graph.host, .debug) }},
+    }) }));
+    b.step("test-cosmos3-reference-host", "Cosmos3's float64 references and fp32 ranges without shaders").dependOn(&cosmos3.step);
+    step.dependOn(&cosmos3.step);
     const shared_gate = b.addRunArtifact(b.addTest(.{ .root_module = nvfp4_module, .filters = &.{"shared gate stress"} }));
     b.step("test-drama-combine-stress-host", "Shared-gate stress remains discriminating after nonlinear output").dependOn(&shared_gate.step);
 }

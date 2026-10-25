@@ -17,6 +17,9 @@ const drama_combine = @import("metal_drama_combine.zig");
 const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const glm_rows_k = @import("metal_glm_rows.zig");
+const cos3 = @import("metal_cosmos3.zig");
+const cos3_qk = @import("metal_cosmos3_qk.zig");
+const cos3_attn = @import("metal_cosmos3_attn.zig");
 
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
@@ -228,6 +231,30 @@ pub fn main(init: std.process.Init) !u8 {
         d3mix_count += 1;
         try kernels.append(a, d3mixes[d3mix_count - 1].kernel());
     }
+    var c3: [std.enums.values(cos3.Which).len]cos3.Probe = undefined;
+    var c3_n: usize = 0;
+    defer for (c3[0..c3_n]) |*p| p.deinit();
+    for (std.enums.values(cos3.Which)) |w| if (wanted(o, cos3.spec(w).name)) {
+        c3[c3_n] = try cos3.Probe.init(a, device, queue, w);
+        c3_n += 1;
+    };
+    for (c3[0..c3_n]) |*p| try kernels.append(a, p.kernel());
+    var c3_qk: [2]cos3_qk.Probe = undefined;
+    var c3_qk_n: usize = 0;
+    defer for (c3_qk[0..c3_qk_n]) |*p| p.deinit();
+    for (std.enums.values(cos3_qk.Which)) |w| if (wanted(o, cos3_qk.spec(w).name)) {
+        c3_qk[c3_qk_n] = try cos3_qk.Probe.init(a, device, queue, w);
+        c3_qk_n += 1;
+    };
+    for (c3_qk[0..c3_qk_n]) |*p| try kernels.append(a, p.kernel());
+    var c3_attn: [std.enums.values(cos3_attn.Which).len]cos3_attn.Probe = undefined;
+    var c3_attn_n: usize = 0;
+    defer for (c3_attn[0..c3_attn_n]) |*p| p.deinit();
+    for (std.enums.values(cos3_attn.Which)) |w| if (wanted(o, cos3_attn.spec(w).name)) {
+        c3_attn[c3_attn_n] = try cos3_attn.Probe.init(a, device, queue, w);
+        c3_attn_n += 1;
+    };
+    for (c3_attn[0..c3_attn_n]) |*p| try kernels.append(a, p.kernel());
     var glm_eh: ?glm_eh_k.Nax = null;
     defer if (glm_eh) |*n| n.deinit();
     if (wanted(o, glm_eh_k.spec().name)) {

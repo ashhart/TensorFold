@@ -131,6 +131,12 @@ Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), a
 formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
 prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
+Cosmos3-Edge's glue (`cosmos3.metal`): its RMS and layer norms, relu^2, the bias with both GELUs, the bf16 adds, 8-bit
+embedding rows, image rows, the interleaved M-RoPE with its cache write, the decode attention and both flash attentions
+(text, head dim 128; tower, 72), each output within float64's range at its bf16 points over the spread its fp32 steps
+and Metal's fast exp allow; eight controls each plant one fault (a rounding point moved or dropped, a row's last output
+unwritten, NaN dropped by `max`, a scale of the wrong group, M-RoPE's axes swapped, a block's rescale skipped, a key
+dropped).
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and
