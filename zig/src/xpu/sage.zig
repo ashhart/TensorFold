@@ -15,6 +15,7 @@ const Checkpoint = dev.Checkpoint;
 const Proj = loader.Proj;
 const off = dev.off;
 const alloc = std.heap.c_allocator;
+extern "c" fn malloc_trim(pad: usize) c_int;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
@@ -369,7 +370,12 @@ pub const Runner = struct {
         }
         if (std.c.getenv("XPU_KV_INT8") != null) r.cap = @intCast(ctx);
         r.model = try load(d, &r.ckpt, z, ctx, slots, r.cap > 0);
-        if (gptq) r.ckpt.dropPut();
+        if (gptq) {
+            // the converted host copies are on the device now; the conversion threads freed them into their own malloc
+            // arenas, which keep the pages until a trim gives them back
+            r.ckpt.dropPut();
+            _ = malloc_trim(0);
+        }
         r.mt_host = try alloc.alloc(u64, z.s.layers * WINDOW * 8);
         q.prof.on = std.c.getenv("XPU_PROFILE") != null; // not during the load
         r.acts = try Acts.init(d, z, ctx);
