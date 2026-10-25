@@ -55,6 +55,13 @@ pub const Pool = struct {
         try list.append(gpa, self.tree);
     }
 
+    /// Bytes Pool.init's conv, ssm and replay buffers take at `slots` slots and `streams` replay ids (its tree aside).
+    pub fn bytes(c: cfg.Config, slots: usize, streams: usize) u64 {
+        const slot: u64 = (c.conv_kernel - 1) * c.convDim() * 2 + c.mamba_heads * c.mamba_head_dim * c.state * 4;
+        const replay: u64 = 2 * replay_rows * (c.convDim() * 2 + c.mamba_heads * 2);
+        return c.count(.mamba) * (slots * slot + streams * replay);
+    }
+
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, c: cfg.Config, slots: usize, streams: usize) !Pool {
         var p = Pool{ .layers = c.count(.mamba), .slots = slots, .gpa = gpa };
         const conv_bytes = slots * (c.conv_kernel - 1) * c.convDim() * 2;
@@ -387,6 +394,18 @@ test "Cache.bytes matches the Metal buffers Cache.init allocates" {
         if (cache.mtp) |m| actual += m.k.length() + m.v.length();
         try std.testing.expectEqual(actual, Cache.bytes(c, 4096, head));
     }
+}
+
+test "Pool.bytes matches the Metal buffers Pool.init allocates, its tree aside" {
+    var why: cfg.Why = .{};
+    const c = try cfg.parse(std.testing.allocator, cfg.lightning, &why);
+    var device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var pool = try Pool.init(std.testing.allocator, device, c, 7, 3);
+    defer pool.deinit();
+    var actual: u64 = 0;
+    for (0..pool.layers) |m| actual += pool.conv[m].length() + pool.ssm[m].length() + pool.raw[m].length() + pool.dtraw[m].length();
+    try std.testing.expectEqual(actual, Pool.bytes(c, 7, 3));
 }
 
 test "a pool of poolSlots holds every stream's state and pending forward, a lone round's third, and one spare" {
