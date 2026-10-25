@@ -2148,10 +2148,13 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           return
         }
         if (call.function.name === 'ask_user') send({ type: 'status', status: 'awaiting' })
-        const toolSignal = call.function.name === 'ask_user' && deadlineAt ? AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.ceil(deadlineAt - Date.now())))]) : signal
+        const questionDeadline = call.function.name === 'ask_user' && deadlineAt ? AbortSignal.timeout(Math.max(1, Math.ceil(deadlineAt - Date.now()))) : undefined
+        const toolSignal = questionDeadline ? AbortSignal.any([signal, questionDeadline]) : signal
         dispatchedMutation = !isReadOnlyTool(call.function.name, deps.toolContext?.mcpTools, deps.approvalMode)
         if (dispatchedMutation) recovery.markMutating(`tool:${call.id}`)
         const result = await executeRuntimeTool(pluginRuntime, call.function.name, toolArgs, { cwd, ...deps.toolContext, currentThread: thread, signal: toolSignal, userQuestionRunId: runId, userQuestionItemId: item.id }, turnBuiltinToolNames)
+        // The timeout is authoritative even when the wall clock is still before its deadline.
+        if (questionDeadline?.aborted && !signal.aborted) budgetStop = 'time budget'
         toolConfirmed = true
         const confirmedControlledCommand = call.function.name === 'run_command' && turnBuiltinToolNames.has(call.function.name) && ['read-only', 'git-read', 'test', 'build'].includes(commandClass(String(toolArgs.command ?? ''))) && /^exit -?\d+(?:\s|·|$)/.test(result.meta ?? '')
         const uncertainFailure = dispatchedMutation && !result.ok && (!turnBuiltinToolNames.has(call.function.name) || !!externalEffectApprovalReason(call.function.name, toolArgs) || call.function.name === 'run_command' && !confirmedControlledCommand && (deps.toolContext?.allowSandboxNetwork === true || deps.toolContext?.backend?.kind === 'ssh'))
@@ -2302,14 +2305,15 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           if (result) thread.apiMessages.push(result)
         },
         MAX_PARALLEL_READ_TOOLS,
-        () => signal.aborted || uncertainActionStop,
+        () => signal.aborted || uncertainActionStop || !!budgetStop,
       )
       // Providers require one tool result per call in the assistant's source order.
       // Parallel completion order affects only live timeline updates. Each batch is
       // committed in source order before the next ordering barrier executes.
       send({ type: 'lifecycle', phase: 'turn_end', ts: Date.now(), step })
+      if (budgetStop) thread.apiMessages = reconcileOrphanedToolCalls(thread.apiMessages)
       persist()
-      if (repeatedActionStop || uncertainActionStop) break
+      if (repeatedActionStop || uncertainActionStop || budgetStop) break
     }
 
     // Budget exhausted gets a bounded summary; uncertain action delivery requires user review.
