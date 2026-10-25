@@ -338,6 +338,7 @@ pub const Runner = struct {
         var ckpt: Checkpoint = .{};
         errdefer ckpt.deinit();
         try addShards(&ckpt, dir);
+        const gptq = try autoRound(&ckpt);
         const r = try alloc.create(Runner);
         errdefer alloc.destroy(r);
         r.* = .{ .d = .{ .g = try ze.Gpu.open(0xe223), .list = undefined, .k = undefined }, .mk = undefined, .z = z, .model = undefined, .acts = undefined, .ckpt = ckpt, .ctx = ctx, .slots = slots };
@@ -353,6 +354,7 @@ pub const Runner = struct {
         }
         if (std.c.getenv("XPU_KV_INT8") != null) r.cap = @intCast(ctx);
         r.model = try load(d, &r.ckpt, z, ctx, slots, r.cap > 0);
+        if (gptq) r.ckpt.dropPut();
         r.mt_host = try alloc.alloc(u64, z.s.layers * WINDOW * 8);
         q.prof.on = std.c.getenv("XPU_PROFILE") != null; // not during the load
         r.acts = try Acts.init(d, z, ctx);
@@ -820,6 +822,88 @@ fn readShape(dir: []const u8) !cfgm.Shape {
     // the images were built with sage_defines: a checkpoint of another shape would run the wrong kernels
     if (!std.mem.eql(u8, try cfgm.kernelDefines(&buf, s, QPG), cfgm.sage_defines)) return error.ShapeNotBuilt;
     return s;
+}
+
+/// One tensor to convert for the MLX loader: a GPTQ projection, a bf16 matrix to quantize, or a norm to shift.
+const Job = struct {
+    kind: enum { gptq, quantize, plus_one },
+    base: []const u8, // the stored name less `.qweight` or `.weight`
+    k: usize,
+    n: usize,
+    w: []u32 = &.{},
+    s: []u16 = &.{},
+    b: []u16 = &.{},
+    fn run(j: *Job, c: *const Checkpoint) !void {
+        var nb: [256]u8 = undefined;
+        switch (j.kind) {
+            .gptq => {
+                const qw = try c.get(try std.fmt.bufPrint(&nb, "{s}.qweight", .{j.base}));
+                const qz = try c.get(try std.fmt.bufPrint(&nb, "{s}.qzeros", .{j.base}));
+                const sc = try c.get(try std.fmt.bufPrint(&nb, "{s}.scales", .{j.base}));
+                try sl.gptqAsMlx(qw.bytes, qz.bytes, sc.bytes, j.k, j.n, j.w, j.s, j.b);
+            },
+            .quantize => try sl.quantizeRows((try c.get(try std.fmt.bufPrint(&nb, "{s}.weight", .{j.base}))).bytes, j.n, j.k, j.w, j.s, j.b),
+            .plus_one => sl.plusOne((try c.get(try std.fmt.bufPrint(&nb, "{s}.weight", .{j.base}))).bytes, j.s),
+        }
+    }
+    fn some(jobs: []Job, c: *const Checkpoint, failed: *std.atomic.Value(bool)) void {
+        for (jobs) |*j| j.run(c) catch {
+            failed.store(true, .release);
+            return;
+        };
+    }
+};
+
+/// A W4A16 AutoRound (GPTQ symmetric 4 bit) checkpoint, shown to the MLX loader as an MLX export: each quantized
+/// projection as MLX affine 4/64 words, scales and biases (sl.gptqAsMlx: no requantization), the bf16 embedding and
+/// lm_head quantized to 4/64 as an MLX export has them, the RMSNorm weights as 1 + w. MTP and vision tensors are not
+/// read. False (and nothing changed) for other checkpoints. The checkpoint gets a name index either way.
+fn autoRound(c: *Checkpoint) !bool {
+    try c.buildIndex();
+    if (!c.has("layers.0.mlp.shared_expert.gate_proj.qweight")) return false;
+    var jobs: std.ArrayList(Job) = .empty;
+    defer jobs.deinit(alloc);
+    for (c.tensors.items[0..c.stored]) |t| {
+        const n = t.name;
+        if (std.mem.indexOf(u8, n, "mtp.") != null or std.mem.indexOf(u8, n, "visual.") != null) continue;
+        if (std.mem.endsWith(u8, n, ".qweight")) {
+            try jobs.append(alloc, .{ .kind = .gptq, .base = n[0 .. n.len - 8], .k = t.shape[0] * 8, .n = t.shape[1] });
+        } else if (std.mem.endsWith(u8, n, "embed_tokens.weight") or std.mem.eql(u8, n, "lm_head.weight")) {
+            if (!std.mem.eql(u8, t.dtype, "BF16")) return error.UnexpectedDtype;
+            try jobs.append(alloc, .{ .kind = .quantize, .base = n[0 .. n.len - 7], .k = t.shape[1], .n = t.shape[0] });
+        } else if (std.mem.endsWith(u8, n, "layernorm.weight") or std.mem.endsWith(u8, n, "_norm.weight") or std.mem.eql(u8, Checkpoint.keyOf(n), "norm.weight")) {
+            if (!std.mem.eql(u8, t.dtype, "BF16")) return error.UnexpectedDtype;
+            try jobs.append(alloc, .{ .kind = .plus_one, .base = n[0 .. n.len - 7], .k = t.shape[0], .n = 1 });
+        }
+    }
+    for (jobs.items) |*j| {
+        if (j.kind != .plus_one) j.w = try alloc.alloc(u32, j.n * (j.k / 8));
+        j.s = try alloc.alloc(u16, if (j.kind == .plus_one) j.k else j.n * (j.k / 64));
+        if (j.kind != .plus_one) j.b = try alloc.alloc(u16, j.n * (j.k / 64));
+    }
+    // the conversion in threads: contiguous slices of the job list
+    var failed = std.atomic.Value(bool).init(false);
+    const nt: usize = @min(16, @max(1, std.Thread.getCpuCount() catch 1));
+    var threads: [16]std.Thread = undefined;
+    const per = (jobs.items.len + nt - 1) / nt;
+    for (0..nt) |i| {
+        const lo = @min(i * per, jobs.items.len);
+        threads[i] = try std.Thread.spawn(.{}, Job.some, .{ jobs.items[lo..@min(lo + per, jobs.items.len)], c, &failed });
+    }
+    for (threads[0..nt]) |t| t.join();
+    if (failed.load(.acquire)) return error.AutoRoundConversion;
+    var nb: [256]u8 = undefined;
+    for (jobs.items) |j| {
+        if (j.kind == .plus_one) {
+            try c.put(try std.fmt.bufPrint(&nb, "{s}.weight", .{j.base}), "BF16", &.{j.k}, std.mem.sliceAsBytes(j.s));
+            continue;
+        }
+        try c.put(try std.fmt.bufPrint(&nb, "{s}.weight", .{j.base}), "U32", &.{ j.n, j.k / 8 }, std.mem.sliceAsBytes(j.w));
+        try c.put(try std.fmt.bufPrint(&nb, "{s}.scales", .{j.base}), "BF16", &.{ j.n, j.k / 64 }, std.mem.sliceAsBytes(j.s));
+        try c.put(try std.fmt.bufPrint(&nb, "{s}.biases", .{j.base}), "BF16", &.{ j.n, j.k / 64 }, std.mem.sliceAsBytes(j.b));
+    }
+    std.debug.print("  AutoRound: {d} tensors shown as MLX affine 4/64\n", .{jobs.items.len});
+    return true;
 }
 
 fn addShards(c: *Checkpoint, dir: []const u8) !void {

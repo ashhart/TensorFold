@@ -21,6 +21,49 @@ pub const Checkpoint = struct {
     tensors: std.ArrayList(Tensor) = .empty,
     maps: std.ArrayList([]const u8) = .empty, // the shards, mapped as long as the tensors' bytes are read
     headers: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty, // the tensors' names live in them
+    /// Optional (buildIndex): tensor index by name without its model prefix. With it, get and has look names up
+    /// instead of scanning, and `put` tensors (converted at load) take the place of the stored ones.
+    index: std.StringHashMapUnmanaged(usize) = .empty,
+    owned: std.ArrayList([]u8) = .empty, // the put tensors' bytes and names
+    stored: usize = 0, // tensors from the shards; the put ones follow
+
+    /// A name without the prefixes of a multimodal or MLX export: `model.language_model.layers.0.x` is `layers.0.x`.
+    pub fn keyOf(n: []const u8) []const u8 {
+        var s = n;
+        for ([_][]const u8{ "model.language_model.", "language_model.model.", "language_model.", "model." }) |p| {
+            if (std.mem.startsWith(u8, s, p)) s = s[p.len..];
+        }
+        return s;
+    }
+
+    pub fn buildIndex(c: *Checkpoint) !void {
+        c.stored = c.tensors.items.len;
+        for (c.tensors.items, 0..) |t, i| try c.index.put(alloc, keyOf(t.name), i);
+    }
+
+    /// A tensor converted at load (`bytes` from `alloc`, now owned here): later gets of `name` return it.
+    pub fn put(c: *Checkpoint, name: []const u8, dtype: []const u8, shape: []const u64, bytes: []u8) !void {
+        try c.owned.ensureUnusedCapacity(alloc, 2);
+        const n = try alloc.dupe(u8, name);
+        c.owned.appendAssumeCapacity(n);
+        c.owned.appendAssumeCapacity(bytes);
+        var t: Tensor = .{ .name = n, .dtype = dtype, .shape = @splat(1), .rank = shape.len, .bytes = bytes };
+        @memcpy(t.shape[0..shape.len], shape);
+        try c.tensors.append(alloc, t);
+        try c.index.put(alloc, keyOf(n), c.tensors.items.len - 1);
+    }
+
+    /// Frees the put tensors (after the load copied them to the device); stored ones keep their index entries.
+    pub fn dropPut(c: *Checkpoint) void {
+        for (c.owned.items) |b| alloc.free(b);
+        c.owned.clearAndFree(alloc);
+        c.tensors.shrinkRetainingCapacity(c.stored);
+        c.index.clearAndFree(alloc);
+        for (c.tensors.items, 0..) |t, i| c.index.put(alloc, keyOf(t.name), i) catch {
+            c.index.clearAndFree(alloc);
+            return;
+        };
+    }
 
     pub fn addShard(c: *Checkpoint, path: [:0]const u8) !void {
         const fd = open(path.ptr, 0);
@@ -40,6 +83,9 @@ pub const Checkpoint = struct {
     }
 
     pub fn deinit(c: *Checkpoint) void {
+        for (c.owned.items) |b| alloc.free(b);
+        c.owned.deinit(alloc);
+        c.index.deinit(alloc);
         for (c.headers.items) |h| h.deinit();
         for (c.maps.items) |m| _ = munmap(@ptrCast(@constCast(m.ptr)), m.len);
         c.tensors.deinit(alloc);
@@ -49,12 +95,14 @@ pub const Checkpoint = struct {
     }
 
     pub fn get(c: *const Checkpoint, name: []const u8) !Tensor {
+        if (c.index.count() > 0) if (c.index.get(keyOf(name))) |i| return c.tensors.items[i];
         for (c.tensors.items) |t| if (std.mem.endsWith(u8, t.name, name) and
             (t.name.len == name.len or std.mem.startsWith(u8, t.name, "language_model.") or std.mem.startsWith(u8, t.name, "model.language_model."))) return t;
         std.debug.print("missing tensor: {s}\n", .{name});
         return error.MissingTensor;
     }
     pub fn has(c: *const Checkpoint, name: []const u8) bool {
+        if (c.index.count() > 0) return c.index.contains(keyOf(name));
         for (c.tensors.items) |t| if (std.mem.endsWith(u8, t.name, name)) return true;
         return false;
     }

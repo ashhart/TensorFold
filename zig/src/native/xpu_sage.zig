@@ -272,7 +272,7 @@ const Served = struct {
     }
 };
 
-/// Sage from `o.dir` (MLX affine 4/64): --parallel slots (1 to 8) of --context tokens each, int8 K/V with XPU_KV_INT8.
+/// Sage from `o.dir` (MLX affine 4/64, or AutoRound GPTQ 4/128 shown as MLX at load): --parallel slots (1 to 8) of --context tokens each, int8 K/V with XPU_KV_INT8.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const context: u32 = std.math.cast(u32, o.context orelse 32768) orelse 0;
     if (context == 0) {

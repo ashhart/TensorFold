@@ -125,6 +125,118 @@ pub fn packExperts(c: anytype, p: []const u8, count: u32, shared: bool, ff: u32,
     }
 }
 
+// ---------------------------------------------------------------- GPTQ (AutoRound) to MLX affine 4/64
+
+/// bf16 bits of `x`, rounded to nearest even.
+pub fn toBf16(x: f32) u16 {
+    const u: u32 = @bitCast(x);
+    if (std.math.isNan(x)) return @intCast((u >> 16) | 0x40);
+    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+}
+
+/// GPTQ symmetric 4 bit (auto_round:auto_gptq, v1 zeros) as MLX affine 4/64, with no requantization.
+/// qweight I32 [K/8, N] packs 8 values along K, low bits first: the MLX word [N, K/8] is the same word, transposed.
+/// Each GPTQ group of g (a multiple of 64) along K gives g/64 MLX groups: scale s, bias -s * (qzero + 1). The scale
+/// goes from fp16 to bf16, so w = bf16(s) * (q - zero) differs from the GPTQ value by the scale rounding only.
+pub fn gptqAsMlx(qweight: []const u8, qzeros: []const u8, scales: []const u8, k: usize, n: usize, out_w: []u32, out_s: []u16, out_b: []u16) !void {
+    if (k % 64 != 0 or n % 8 != 0 or qweight.len != k / 8 * n * 4) return error.UnexpectedShape;
+    const groups = scales.len / 2 / n;
+    if (groups == 0 or k % groups != 0 or (k / groups) % 64 != 0 or qzeros.len != groups * (n / 8) * 4) return error.UnexpectedShape;
+    if (out_w.len != n * (k / 8) or out_s.len != n * (k / 64) or out_b.len != out_s.len) return error.UnexpectedShape;
+    const g = k / groups;
+    const words = k / 8;
+    for (0..words) |kw| for (0..n) |c| {
+        out_w[c * words + kw] = std.mem.readInt(u32, qweight[4 * (kw * n + c) ..][0..4], .little);
+    };
+    const per = g / 64;
+    for (0..groups) |gi| for (0..n) |c| {
+        const h: f16 = @bitCast(std.mem.readInt(u16, scales[2 * (gi * n + c) ..][0..2], .little));
+        const sb = toBf16(@floatCast(h));
+        const s: f32 = @bitCast(@as(u32, sb) << 16);
+        const zw = std.mem.readInt(u32, qzeros[4 * (gi * (n / 8) + c / 8) ..][0..4], .little);
+        const zero: f32 = @floatFromInt(((zw >> @intCast(4 * (c % 8))) & 15) + 1);
+        const bias = toBf16(-s * zero);
+        for (0..per) |j| {
+            out_s[c * (k / 64) + gi * per + j] = sb;
+            out_b[c * (k / 64) + gi * per + j] = bias;
+        }
+    };
+}
+
+/// bf16 rows [r, k] quantized to MLX affine 4/64 by rounding to the nearest level: scale (max - min) / 15 and bias
+/// min, both rounded to bf16 first, as an MLX export of the same rows.
+pub fn quantizeRows(rows: []const u8, r: usize, k: usize, out_w: []u32, out_s: []u16, out_b: []u16) !void {
+    if (k % 64 != 0 or rows.len != r * k * 2 or out_w.len != r * (k / 8) or out_s.len != r * (k / 64) or out_b.len != out_s.len) return error.UnexpectedShape;
+    for (0..r) |i| for (0..k / 64) |gi| {
+        var lo: f32 = std.math.inf(f32);
+        var hi: f32 = -std.math.inf(f32);
+        for (0..64) |j| {
+            const v = bf16At(rows, i * k + gi * 64 + j);
+            lo = @min(lo, v);
+            hi = @max(hi, v);
+        }
+        const sb = toBf16((hi - lo) / 15.0);
+        const bb = toBf16(lo);
+        const s: f32 = @bitCast(@as(u32, sb) << 16);
+        const b: f32 = @bitCast(@as(u32, bb) << 16);
+        out_s[i * (k / 64) + gi] = sb;
+        out_b[i * (k / 64) + gi] = bb;
+        for (0..8) |wi| {
+            var word: u32 = 0;
+            for (0..8) |j| {
+                const v = bf16At(rows, i * k + gi * 64 + wi * 8 + j);
+                const qf = if (s > 0) @round((v - b) / s) else 0;
+                const qv: u32 = @intFromFloat(std.math.clamp(qf, 0, 15));
+                word |= qv << @intCast(4 * j);
+            }
+            out_w[i * (k / 8) + gi * 8 + wi] = word;
+        }
+    };
+}
+
+/// bf16 weights plus one: an MLX export stores Sage's RMSNorm weights (layer, q and k norms, the final norm) as 1 + w,
+/// and the kernels read them that way. The gated GDN norm is stored as is.
+pub fn plusOne(in: []const u8, out: []u16) void {
+    for (out, 0..) |*o, i| o.* = toBf16(bf16At(in, i) + 1.0);
+}
+
+test "GPTQ words transpose to MLX words, groups of 128 split in two, bias is -scale * zero" {
+    // K 128, N 8: q(k, c) = (k + c) % 16, scale(c) = 0.5 + c, stored zero 7 (zero 8)
+    const k = 128;
+    const n = 8;
+    var qw: [k / 8 * n]u32 = @splat(0);
+    for (0..k) |kk| for (0..n) |c| {
+        qw[(kk / 8) * n + c] |= @as(u32, @intCast((kk + c) % 16)) << @intCast(4 * (kk % 8));
+    };
+    var sc: [n]f16 = undefined;
+    for (&sc, 0..) |*x, c| x.* = 0.5 + @as(f16, @floatFromInt(c));
+    const qz = [_]u32{0x77777777};
+    var w: [n * k / 8]u32 = undefined;
+    var s: [n * 2]u16 = undefined;
+    var b: [n * 2]u16 = undefined;
+    try gptqAsMlx(std.mem.sliceAsBytes(&qw), std.mem.sliceAsBytes(&qz), std.mem.sliceAsBytes(&sc), k, n, &w, &s, &b);
+    const ww = try mlxRows(std.testing.allocator, std.mem.sliceAsBytes(&w), std.mem.sliceAsBytes(&s), std.mem.sliceAsBytes(&b), n, k / 8);
+    defer std.testing.allocator.free(ww);
+    for (0..n) |c| for (0..k) |kk| {
+        const want = (0.5 + @as(f32, @floatFromInt(c))) * (@as(f32, @floatFromInt((kk + c) % 16)) - 8);
+        try std.testing.expectEqual(want, @as(f32, ww[c * k + kk]));
+    };
+}
+
+test "quantized rows come back within half a step" {
+    const k = 64;
+    var rows: [k]u16 = undefined;
+    for (&rows, 0..) |*x, j| x.* = toBf16(@as(f32, @floatFromInt(j)) * 0.03 - 1.0);
+    var w: [8]u32 = undefined;
+    var s: [1]u16 = undefined;
+    var b: [1]u16 = undefined;
+    try quantizeRows(std.mem.sliceAsBytes(&rows), 1, k, &w, &s, &b);
+    const back = try mlxRows(std.testing.allocator, std.mem.sliceAsBytes(&w), std.mem.sliceAsBytes(&s), std.mem.sliceAsBytes(&b), 1, 8);
+    defer std.testing.allocator.free(back);
+    const step: f32 = @bitCast(@as(u32, s[0]) << 16);
+    for (back, 0..) |v, j| try std.testing.expect(@abs(@as(f32, v) - bf16At(std.mem.sliceAsBytes(&rows), j)) <= step * 0.51 + 1e-3);
+}
+
 const TestTensor = struct { dtype: []const u8, shape: []const i64, bytes: []const u8 };
 const TestCkpt = struct {
     names: []const []const u8,
