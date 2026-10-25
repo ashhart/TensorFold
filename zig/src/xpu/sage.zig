@@ -80,6 +80,8 @@ pub const Model = struct {
     norm: *anyopaque,
     head: Proj,
     invf: *anyopaque,
+    embed_h: ?*anyopaque = null, // fp16 [vocab, D]: a bf16 embedding (AutoRound), read by embed_dense
+    head_h: ?*anyopaque = null, // fp16 [vocab, D]: a bf16 lm_head (AutoRound), read by dense_rows
 };
 
 /// The sizes derived from the shape, as the kernels compiled with sage_defines see them.
@@ -255,11 +257,24 @@ pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32, slots: u32, kv8: 
     if (c.has("in_proj_qkv.qweight") or c.has("in_proj_qkv.trellis")) return error.OnlyMlxInThisForm;
     const stage = try d.alloc_(800 << 20);
     var m: Model = undefined;
-    m.embed_w = try d.upload((try c.get("embed_tokens.weight")).bytes);
-    m.embed_s = try loader.bf16Tensor(d, c, "embed_tokens.scales");
-    m.embed_b = try loader.bf16Tensor(d, c, "embed_tokens.biases");
+    m.embed_h = null;
+    m.head_h = null;
+    if (std.mem.eql(u8, (try c.get("embed_tokens.weight")).dtype, "BF16")) {
+        m.embed_h = try halfTensor(d, c, "embed_tokens");
+        m.embed_w = m.embed_h.?;
+        m.embed_s = m.embed_h.?;
+        m.embed_b = m.embed_h.?;
+    } else {
+        m.embed_w = try d.upload((try c.get("embed_tokens.weight")).bytes);
+        m.embed_s = try loader.bf16Tensor(d, c, "embed_tokens.scales");
+        m.embed_b = try loader.bf16Tensor(d, c, "embed_tokens.biases");
+    }
     m.norm = try loader.bf16Tensor(d, c, "model.norm.weight");
-    m.head = try loader.projection(d, c, "lm_head", &.{""}, true, false, stage);
+    if (std.mem.eql(u8, (try c.get("lm_head.weight")).dtype, "BF16")) {
+        if (s.vocab % 16 != 0) return error.UnexpectedShape;
+        m.head_h = try halfTensor(d, c, "lm_head");
+        m.head = .{ .w = m.head_h.?, .s = m.head_h.?, .bg = m.head_h.?, .n = s.vocab, .k = s.hidden, .wide = true };
+    } else m.head = try loader.projection(d, c, "lm_head", &.{""}, true, false, stage);
     var invf: [32]f32 = undefined;
     const half_dims: f64 = @floatFromInt(s.rope_dims / 2);
     for (&invf, 0..) |*f, i| f.* = @floatCast(std.math.pow(f64, 1e7, -@as(f64, @floatFromInt(i)) / half_dims));
@@ -441,7 +456,7 @@ pub const Runner = struct {
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mpos, &pos, T * 4, null, 0, null));
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, toks.ptr, T * 4, null, 0, null));
         errdefer d.settle();
-        try d.launch(d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
+        try r.embed(T);
         const sp: i32 = @intCast(span(max_pos + 1));
         const ns: u32 = (max_pos + 1 + @as(u32, @intCast(sp)) - 1) / @as(u32, @intCast(sp));
         for (m.layers, 0..) |*l, i| {
@@ -464,7 +479,7 @@ pub const Runner = struct {
         }
         const hgs: i32 = @intCast(m.head.gs);
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, m.norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), hgs, nul, nul, zero, zero });
-        try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, m.head, a.logits, T);
+        try r.headRows(a.h, a.ahi, a.alo, T);
         try d.launch(d.k.argmax_part, .{ .x = 256, .y = T }, .{ a.logits, @as(i32, @intCast(s.vocab)), a.pv, a.pi });
         try d.launch(d.k.argmax, .{ .x = T }, .{ a.pv, a.pi, a.tok });
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, out.ptr, a.tok, T * 4, null, 0, null));
@@ -545,7 +560,7 @@ pub const Runner = struct {
         const zero: i32 = 0;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle();
-        try d.launch(d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
+        try r.embed(T);
         for (m.layers, 0..) |*l, i| {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
@@ -593,7 +608,7 @@ pub const Runner = struct {
         const zero: i32 = 0;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle();
-        try d.launch(d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
+        try r.embed(T);
         for (m.layers, 0..) |*l, i| {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
@@ -647,6 +662,24 @@ pub const Runner = struct {
     }
 
     /// After a forward of `T` rows: the greedy token of the last row when `want`, else -1 (after a sync).
+    /// The embeddings of the T ids at acts.ids into acts.x: MLX 4/64 rows, or an fp16 table.
+    fn embed(r: *Runner, T: u32) !void {
+        const m = &r.model;
+        const a = &r.acts;
+        const D: i32 = @intCast(r.z.s.hidden);
+        if (m.embed_h) |e| return r.d.launch(r.d.k.embed_dense, .{ .x = T }, .{ a.ids, e, a.x, D });
+        try r.d.launch(r.d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
+    }
+
+    /// T rows of h (fp16 [T, D], with their group sums for the 4/64 head) to logits: the GEMM, or fp16 rows.
+    fn headRows(r: *Runner, h: *anyopaque, ahi: *anyopaque, alo: *anyopaque, T: u32) !void {
+        const m = &r.model;
+        const a = &r.acts;
+        const v: i32 = @intCast(r.z.s.vocab);
+        if (m.head_h) |w| return r.d.launch(r.d.k.dense_rows, .{ .x = (T + 15) / 16, .y = r.z.s.vocab / 16 }, .{ h, w, a.logits, @as(i32, @intCast(T)), v, @as(i32, 0) });
+        try fwd.gemm(&r.d, a.pscr, h, ahi, alo, m.head, a.logits, T);
+    }
+
     fn head(r: *Runner, T: u32, want: bool) !i32 {
         const d = &r.d;
         const a = &r.acts;
@@ -664,7 +697,7 @@ pub const Runner = struct {
         try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, m.norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), hgs, nul, nul, zero, zero });
         const first = T - 1;
         const kg = s.hidden / m.head.gs;
-        try fwd.gemm(d, a.pscr, off(a.h, first * s.hidden * 2), off(a.ahi, first * kg * 2), off(a.alo, first * kg * 2), m.head, a.logits, 1);
+        try r.headRows(off(a.h, first * s.hidden * 2), off(a.ahi, first * kg * 2), off(a.alo, first * kg * 2), 1);
         try d.launch(d.k.argmax_part, .{ .x = 256, .y = 1 }, .{ a.logits, @as(i32, @intCast(s.vocab)), a.pv, a.pi });
         try d.launch(d.k.argmax, .{ .x = 1 }, .{ a.pv, a.pi, a.tok });
         var tok: [1]i32 = undefined;
@@ -861,6 +894,9 @@ const Job = struct {
 fn autoRound(c: *Checkpoint) !bool {
     try c.buildIndex();
     if (!c.has("layers.0.mlp.shared_expert.gate_proj.qweight")) return false;
+    // the embedding and lm_head as 4/64, as MLX has them; XPU_SAGE_HEAD16=1 keeps fp16 copies of the bf16 ones (text
+    // NLL 1.9933 against 2.0023 on 1499 tokens, decode about 19% slower: the head reads 1 GB a token)
+    const head4 = std.c.getenv("XPU_SAGE_HEAD16") == null;
     var jobs: std.ArrayList(Job) = .empty;
     defer jobs.deinit(alloc);
     for (c.tensors.items[0..c.stored]) |t| {
@@ -868,7 +904,7 @@ fn autoRound(c: *Checkpoint) !bool {
         if (std.mem.indexOf(u8, n, "mtp.") != null or std.mem.indexOf(u8, n, "visual.") != null) continue;
         if (std.mem.endsWith(u8, n, ".qweight")) {
             try jobs.append(alloc, .{ .kind = .gptq, .base = n[0 .. n.len - 8], .k = t.shape[0] * 8, .n = t.shape[1] });
-        } else if (std.mem.endsWith(u8, n, "embed_tokens.weight") or std.mem.eql(u8, n, "lm_head.weight")) {
+        } else if (head4 and (std.mem.endsWith(u8, n, "embed_tokens.weight") or std.mem.eql(u8, n, "lm_head.weight"))) {
             if (!std.mem.eql(u8, t.dtype, "BF16")) return error.UnexpectedDtype;
             try jobs.append(alloc, .{ .kind = .quantize, .base = n[0 .. n.len - 7], .k = t.shape[1], .n = t.shape[0] });
         } else if (std.mem.endsWith(u8, n, "layernorm.weight") or std.mem.endsWith(u8, n, "_norm.weight") or std.mem.eql(u8, Checkpoint.keyOf(n), "norm.weight")) {
