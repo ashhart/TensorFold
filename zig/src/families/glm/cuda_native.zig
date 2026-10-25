@@ -433,12 +433,10 @@ test "a checkpoint refused for its format, at the entry or by the loader, is exp
     for ([_]anyerror{ error.NotModelOpt, error.UnsupportedQuant, error.UnreadableFormat }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
-test "TF_KV_PAGES: auto pages from three ranks, off and 0 give windows, all and other values page like on" {
-    for ([_]usize{ 1, 2 }) |w| {
-        try std.testing.expect(!try paging(null, w, false));
-        try std.testing.expect(!try paging("auto", w, false));
-    }
-    for ([_]usize{ 3, 16 }) |w| {
+test "TF_KV_PAGES: auto pages from two ranks, off and 0 give windows, all and other values page like on" {
+    try std.testing.expect(!try paging(null, 1, false));
+    try std.testing.expect(!try paging("auto", 1, false));
+    for ([_]usize{ 2, 3, 16 }) |w| {
         try std.testing.expect(try paging(null, w, false));
         try std.testing.expect(try paging("auto", w, false));
     }

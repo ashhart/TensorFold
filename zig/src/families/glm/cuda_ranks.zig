@@ -304,7 +304,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .rank => "a rank number given twice or out of order",
         .world => "the ranks were started with different world sizes",
         .kv8 => "--kv-cache fp8",
-        .pages => "TF_KV_PAGES (unset or auto pages from three ranks)",
+        .pages => "TF_KV_PAGES (unset or auto pages from two ranks)",
         .prompt_fixed_k => "TF_GLM_PROMPT_K",
         .tiled => "TF_GLM_MM",
         .split => "TF_GLM_PREFILL_REDUCE",
