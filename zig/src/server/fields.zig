@@ -219,6 +219,10 @@ pub fn thinkingFields(cx: *Cx, body: Value, levels: []const []const u8) errors.R
         out.enable = on.truthy();
         if (out.enable.? and out.effort != null and std.mem.eql(u8, out.effort.?, "none")) out.effort = null;
     };
+    // the body's own enable_thinking where kwargs names no switch (kwargs wins): the field is honored, not ignored
+    if (enable == null) if (body.field("enable_thinking")) |own| if (own != .null) {
+        out.enable = own.truthy();
+    };
     return out;
 }
 

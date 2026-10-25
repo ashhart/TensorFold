@@ -25,6 +25,8 @@ pub const formats: []const []const u8 = &.{"exl3"};
 /// The server serves this stage's requests as fixed greedy: temperature at any value (or absent)
 /// serves, its other sampling fields refuse (SamplingNotAttached) — the keyed sampler is a later pass.
 pub const temperature_greedy = true;
+/// This stage serves chat with thinking off: an explicit thinking request refuses by exact name (ThinkingNotAttached).
+pub const thinking_off = true;
 /// The pack's own window (max_position_embeddings 1,048,576) when a config.json names none.
 pub const default_context: i64 = 1048576;
 pub const max_segments: u32 = 1;
@@ -73,6 +75,7 @@ pub const native = struct {
     pub const explain = me.explain;
     pub const weightShare = me.weightShare; // the server's admission reads this rank's split share
     pub const temperature_greedy = me.temperature_greedy; // openWith(F)'s Info reads this through the registry alias
+    pub const thinking_off = me.thinking_off; // as temperature_greedy: openWith(F)'s Info reads this through the registry alias
 };
 
 /// Slots for `context` plus one whole block's reserve, a multiple of the 128-token key block.
@@ -739,6 +742,8 @@ test "admission runs the whole checkpoint and open refuses exactly at the serve 
     try std.testing.expect(std.mem.indexOf(u8, words, "SamplingNotAttached") != null); // sampled draws refuse
     try std.testing.expect(temperature_greedy); // the server serves temperature as fixed greedy
     try std.testing.expect(@hasDecl(native, "temperature_greedy") and native.temperature_greedy); // the registry alias carries it: openWith(F)'s Info reads the flag through F = native
+    try std.testing.expect(thinking_off); // this stage serves the chat lane with thinking off
+    try std.testing.expect(@hasDecl(native, "thinking_off") and native.thinking_off); // the registry alias carries it: openWith(F)'s Info reads the flag through F = native
     try std.testing.expect(std.mem.indexOf(u8, words, "TpServingNotAttached") != null); // and the TP2 server boot
     try std.testing.expect(std.mem.indexOf(u8, words, "ContextTooWide") != null); // and the pool's window
     try std.testing.expect(explain(null, error.LanesNotAttached) != null);

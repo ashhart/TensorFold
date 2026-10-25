@@ -312,7 +312,7 @@ pub const HfText = struct {
             var it = t.specials.object.iterator();
             while (it.next()) |e| try globals.put(a, e.key_ptr.*, e.value_ptr.*);
         }
-        try globals.put(a, "thinking_mode", .{ .string = if (options.enable_thinking) "thinking" else "chat" });
+        try globals.put(a, "thinking_mode", .{ .string = thinkingModeValue(t.source, options.enable_thinking) });
         var context: std.json.ObjectMap = .empty;
         try context.put(a, "enable_thinking", .{ .bool = options.enable_thinking });
         if (options.reasoning_effort) |e| try context.put(a, "reasoning_effort", .{ .string = e });
@@ -326,6 +326,27 @@ pub const HfText = struct {
         return .{ .text = out.s, .spans = out.spans };
     }
 };
+
+/// The thinking_mode value the template's own dialect reads; see the stage receipts for the inert-switch bug.
+pub fn thinkingModeValue(source: []const u8, enable: bool) []const u8 {
+    const dialect = std.mem.indexOf(u8, source, "\"adaptive\"") != null and
+        std.mem.indexOf(u8, source, "\"disabled\"") != null and
+        std.mem.indexOf(u8, source, "\"enabled\"") != null;
+    return if (dialect)
+        (if (enable) "enabled" else "disabled")
+    else
+        (if (enable) "thinking" else "chat");
+}
+
+test "thinking mode value speaks the template's own dialect, keeping the generic spellings elsewhere" {
+    const source = "{{ 'enabled' if thinking_mode == \"enabled\" elif thinking_mode == \"disabled\" else \"adaptive\" }}";
+    try std.testing.expectEqualStrings("enabled", thinkingModeValue(source, true));
+    try std.testing.expectEqualStrings("disabled", thinkingModeValue(source, false));
+    try std.testing.expectEqualStrings("thinking", thinkingModeValue("{{ enable_thinking }}", true));
+    try std.testing.expectEqualStrings("chat", thinkingModeValue("{{ enable_thinking }}", false));
+    try std.testing.expectEqualStrings("thinking", thinkingModeValue("", true)); // no dialect markers: unchanged
+    try std.testing.expectEqualStrings("chat", thinkingModeValue("disabled only", false)); // all three words must name the dialect
+}
 
 test "model EOS does not hide a different tokenizer chat end" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

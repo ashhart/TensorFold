@@ -230,6 +230,50 @@ test "done times: the HTTP chat parser serves temperature-only and absent-temper
     try std.testing.expect(std.mem.indexOf(u8, cx.message, "SamplingNotAttached") != null); // refuses by the lane surface's exact name
 }
 
+// The thinking-off stage knob (temperature-greedy's mirror): bare bodies run header-free; explicit thinking refuses.
+test "done times: the HTTP chat parser runs a thinking-off engine without the reasoning header and refuses explicit thinking requests by name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    Clock.next = 42;
+    var script: Script = .{ .first = 10_384_000_000 };
+    var tt: helpers = .{};
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"} }, null);
+    defer srv.deinit();
+    srv.info.thinking_off = true;
+    var bcx: Cx = .{ .a = a };
+    const bare = try @import("openai.zig").chatInput(srv, &bcx, (try json.parse(a, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")).ok);
+    var pcx: Cx = .{ .a = a };
+    const prepared = try chat.prepare(srv, &pcx, bare, Gone{});
+    chat.release(srv, prepared.preparing);
+    try std.testing.expect(!prepared.thinking); // the stage default: thinking off without any switch
+    for ([_][]const u8{
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"chat_template_kwargs\":{\"enable_thinking\":true}}",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"enable_thinking\":true}", // the body's own field refuses too
+    }) |raw| {
+        var rcx: Cx = .{ .a = a };
+        const thinking_body = try @import("openai.zig").chatInput(srv, &rcx, (try json.parse(a, raw)).ok);
+        var ecx: Cx = .{ .a = a };
+        try std.testing.expectError(error.Refused, chat.prepare(srv, &ecx, thinking_body, Gone{}));
+        try std.testing.expect(std.mem.indexOf(u8, ecx.message, "ThinkingNotAttached") != null); // by exact name
+    }
+    // false anywhere serves: the stage's own default, said back in the echo
+    var off: Cx = .{ .a = a };
+    const off_body = try @import("openai.zig").chatInput(srv, &off, (try json.parse(a, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"enable_thinking\":false}")).ok);
+    var opcx: Cx = .{ .a = a };
+    const off_prepared = try chat.prepare(srv, &opcx, off_body, Gone{});
+    chat.release(srv, off_prepared.preparing);
+    try std.testing.expect(!off_prepared.thinking);
+    // a thinking-capable engine (no thinking_off) honors the body's own enable_thinking false.
+    srv.info.thinking_off = false;
+    var gcx: Cx = .{ .a = a };
+    const glm_like = try @import("openai.zig").chatInput(srv, &gcx, (try json.parse(a, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"enable_thinking\":false}")).ok);
+    var gpcx: Cx = .{ .a = a };
+    const glm_prepared = try chat.prepare(srv, &gpcx, glm_like, Gone{});
+    chat.release(srv, glm_prepared.preparing);
+    try std.testing.expect(!glm_prepared.thinking); // the body's own switch: false honored, not ignored
+}
+
 fn seedControls(mode: enum { fresh, keyed, explicit, defaults, default_fresh, failed, log_drawn, log_given }) !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

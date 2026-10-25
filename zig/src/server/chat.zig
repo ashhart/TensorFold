@@ -132,8 +132,16 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (preparing) _ = srv.preparing.fetchAdd(1, .acq_rel);
     errdefer release(srv, preparing);
     if (gone.check()) return error.Cancelled;
-    var thinking = flag(f, "enable_thinking") orelse srv.config.enable_thinking;
+    const thinking_switch = flag(f, "enable_thinking");
+    var thinking = thinking_switch orelse srv.config.enable_thinking;
     if (input.prompt != null) thinking = false;
+    if (srv.info.thinking_off) {
+        // the stage's thinking-off default: every body runs without the reasoning header; explicit on refuses above
+        if (thinking_switch == true) return cx.refuse(
+            "this engine serves chat with thinking off (no thinking reserve is attached): explicit thinking requests refuse (ThinkingNotAttached) - leave enable_thinking out, or send chat_template_kwargs {\"enable_thinking\": false}",
+        );
+        thinking = false;
+    }
     const effort = srv.effortFor(if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null);
     const rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
     if (gone.check()) return error.Cancelled;

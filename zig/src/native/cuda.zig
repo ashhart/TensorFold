@@ -460,6 +460,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .admit = admit,
         .slide_conversations = conversations,
         .temperature_greedy = comptime @hasDecl(F, "temperature_greedy") and F.temperature_greedy,
+        .thinking_off = comptime @hasDecl(F, "thinking_off") and F.thinking_off,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {

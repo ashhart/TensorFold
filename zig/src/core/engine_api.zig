@@ -218,6 +218,8 @@ pub const Info = struct {
     /// A request naming only temperature (or no sampling field) serves fixed greedy; its other sampling
     /// fields (top_k/top_p/min_p/seed) refuse by their exact lane-surface name (SamplingNotAttached).
     temperature_greedy: bool = false,
+    /// The engine serves chat with thinking off: an explicit thinking request refuses (ThinkingNotAttached).
+    thinking_off: bool = false,
     /// The learner reads conversation prompts at any length through taps.
     slide_conversations: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
