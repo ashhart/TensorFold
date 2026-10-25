@@ -269,3 +269,22 @@ test "prompt K experiment is explicit and all ranks must agree" {
     all[0].prompt_fixed_k = 1;
     try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
 }
+
+test "TF_GLM_INDEX_SPLIT: never by default, a position, and a refusal naming a value that is not one" {
+    const Reader = struct {
+        fn absent(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
+        fn from(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "65536" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "64k" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expectEqual(@as(u32, 0), (try Settings.read(Reader.absent, &problem)).index_split);
+    try std.testing.expectEqual(@as(u32, 65536), (try Settings.read(Reader.from, &problem)).index_split);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_INDEX_SPLIT: the position a prompt chunk's indexer rows split from, or 0 for never", problem);
+}

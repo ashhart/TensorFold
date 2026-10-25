@@ -57,20 +57,32 @@ pub fn headScale(heads: usize) f32 {
 /// The scratch of one selectTokens: scores fp32 [min(rows, 512)][np], and with np past select_list the list rows.
 pub const Scratch = struct { scores: u64, ls: u64, li: u64, pools: u64, at: u64 };
 
-/// sparse.select_tokens: rows' tokens (i32 [rows][width], ascending, -1 padded; on pages their rows); count 0 if dense.
-pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64) !void {
-    return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, t, pos, host_pos, rows, heads, d, np_max_cap, s, tokens, counts, null);
+/// A prompt chunk's indexer rows split across the ranks (TF_GLM_INDEX_SPLIT): a block each, the picks all-gathered.
+pub const Split = struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize };
+
+/// Whether rank 0 splits a prompt chunk's indexer rows at `start`: from `from` on (0: never), over two ranks or more.
+pub fn splitAt(start: usize, from: usize, world: usize) bool {
+    return from > 0 and world > 1 and start >= from;
 }
 
-pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64, profile: ?*@import("cuda_prof.zig").Prof) !void {
+/// sparse.select_tokens: rows' tokens (i32 [rows][width], ascending, -1 padded; on pages their rows); count 0 if dense.
+pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64) !void {
+    return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, t, pos, host_pos, rows, heads, d, np_max_cap, s, tokens, counts, null, null);
+}
+
+/// With `split`, this rank picks for its block of rows only (as one pass would, block by block) and gathers the rest.
+pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64, split: ?Split, profile: ?*@import("cuda_prof.zig").Prof) !void {
     const prof = @import("cuda_prof.zig");
     const np_max = poolBucket(host_pos, rows, np_max_cap);
     const b = @min(rows, select_rows);
     const loop: usize = if (rows >= score_loop_from) score_loop else 1;
     const add = try ops.function("tf_glm_add_i32");
-    var a: usize = 0;
-    while (a < rows) : (a += b) {
-        const n = @min(b, rows - a);
+    const per = if (split) |x| cdiv(rows, x.world) else rows;
+    const lo = if (split) |x| @min(rows, x.rank * per) else 0;
+    const hi = @min(rows, lo + per);
+    var a: usize = lo;
+    while (a < hi) : (a += b) {
+        const n = @min(b, hi - a);
         var at = pos;
         if (a > 0) {
             var args: cuda.Args = .{};
@@ -103,6 +115,10 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
     }
     const stamp = prof.span(profile, stream, .index_select);
     defer stamp.end();
+    if (split) |x| { // in place: each rank's equal block (the prefill buffers' pools hold world rows more), rank order
+        const bytes = per * topk_pools * 8;
+        try x.lib.check(x.lib.api.ncclAllGather(s.pools + x.rank * bytes, s.pools, bytes, .u8, x.comm, stream.handle), "ncclAllGather");
+    }
     const assemble = try ops.function("tf_glm_dsa_tokens");
     var args: cuda.Args = .{};
     args.add(s.pools);
@@ -122,4 +138,11 @@ test "sparse.py's sizing rules" {
     try std.testing.expectEqual(@as(usize, 1250), scoreColumns(5000, 1, 2048));
     try std.testing.expectEqual(@as(usize, 2051), width);
     try std.testing.expectEqual(@as(f32, @floatCast(1.0 / 5.656854249492381)), headScale(32));
+}
+
+test "rank 0 splits a prompt chunk's indexer rows from TF_GLM_INDEX_SPLIT's position on, over two ranks or more" {
+    try std.testing.expect(!splitAt(65536, 0, 3)); // 0: never
+    try std.testing.expect(splitAt(65536, 65536, 3));
+    try std.testing.expect(!splitAt(63488, 65536, 3));
+    try std.testing.expect(!splitAt(65536, 65536, 1)); // one rank holds every row
 }
