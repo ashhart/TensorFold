@@ -72,3 +72,16 @@ test "LFM2.5-24B-A2B (no weights here): its real layer pattern's streams at a fu
     try std.testing.expectEqual(@as(?u32, null), try streams(a, "lfm2", per, 3 * per + per / 2, .{ .dir = "", .model_type = "lfm2_moe", .lanes = 4, .lanes_fixed = true }, 131072, &why));
     a.free(why);
 }
+
+test "Gemma 4 31B and 12B (no weights here): streams at a 131072-token window, planned on the host" {
+    const g = @import("tensorfold").gemma4;
+    const a = std.testing.allocator;
+    for ([_]g.config.Geometry{ g.config.dense31b, g.config.unified12b }) |geo| {
+        const per = g.state.cacheBytes(geo, 131072);
+        try std.testing.expect(per > g.state.cacheBytes(geo, 4096));
+        var why: []const u8 = "";
+        try std.testing.expectEqual(@as(?u32, 2), try streams(a, "gemma4", per, 2 * per + (1 << 20), .{ .dir = "", .model_type = "gemma4" }, 131072, &why));
+        try std.testing.expectEqual(@as(?u32, null), try streams(a, "gemma4", per, per - 1, .{ .dir = "", .model_type = "gemma4", .lanes = 1 }, 131072, &why));
+        a.free(why);
+    }
+}
