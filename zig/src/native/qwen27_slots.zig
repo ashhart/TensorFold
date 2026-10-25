@@ -12,11 +12,22 @@ const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
 const max_rows = lb.max_rows;
 
+/// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
+pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images };
+
 /// A stream's prompt into `slot`, from its kept state: chunks cut as a fresh pass cuts, decoded spans as decoded.
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
+    var f = try opening(b, s, slot);
+    defer closing(b, s);
+    while (!try chunk(b, s, &f)) {}
+}
+
+/// A prompt pass begins in `slot`: its kept state restored and its images encoded (one image prompt fills at a time).
+pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     const ids = s.prompt();
     if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
+    if (b.vision != null and s.images.len > 0 and b.image_fill != null and b.image_fill != s) return error.LaneMemory;
     try recover(b, s);
     b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);
@@ -37,77 +48,136 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
             }
         } else s.reuse_failed = true;
     }
-    const from = at;
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
-    b.runner.images = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
+    const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
+    if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
+    return .{ .slot = slot, .at = at, .from = at, .images = encoded };
+}
+
+/// The pass is over (done, failed or cancelled): its images' rows are free for the next image prompt.
+pub fn closing(b: *Metal, s: *const lanes.Stream) void {
+    if (b.image_fill == s) b.image_fill = null;
+}
+
+/// The pass's next chunk, its drafter's absorb before its marks; true once the prompt is in.
+pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
+    const ids = s.prompt();
+    const slot = f.slot;
+    const d = b.drafter(slot);
+    b.runner.images = f.images;
     defer b.runner.images = null;
-    while (at < ids.len) {
-        if (s.isCancelled()) return error.Cancelled;
-        if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
-            if (at > from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
-            return error.Yielded;
-        }
-        var end = @min(ids.len, at + b.chunk);
-        for (s.chunks) |cut| if (cut > at and cut < end) {
+    if (s.isCancelled()) return error.Cancelled;
+    if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
+        if (f.at > f.from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(f.at));
+        return error.Yielded;
+    }
+    const at = f.at;
+    var end = @min(ids.len, at + b.chunk);
+    for (s.chunks) |cut| if (cut > at and cut < end) {
+        end = cut;
+    };
+    var decoded = false;
+    for (s.decode_spans) |span| {
+        for (span) |cut| if (cut > at and cut < end) {
             end = cut;
         };
-        var decoded = false;
-        for (s.decode_spans) |span| {
-            for (span) |cut| if (cut > at and cut < end) {
-                end = cut;
-            };
-            decoded = decoded or (at >= span[0] and at < span[1]);
-        }
-        var mark_bank: ?q.gdn_pool_gpu.PromptMarks = null;
-        defer {
-            if (mark_bank) |*m| {
-                b.runner.gdn.marks = null;
-                m.deinit();
-            }
-        }
-        const shape = b.runner.gdn.budget.shape;
-        if (s.reuse.hook != null and d == null and !decoded and !b.runner.capture_taps and b.runner.images == null and shape.c.dk == 128 and shape.c.dv % 4 == 0) {
-            const picked = try q.prompt_marks.select(@intCast(at), @intCast(end), s.reuse.marks);
-            if (picked.count > 0) if (b.grow) |g| {
-                const budget = b.runner.gdn.budget;
-                const size = try q.prompt_marks.layout(budget.layers, shape.state, shape.conv);
-                if (g.room(g.ctx, size.total, s)) {
-                    if (b.runner.gdn.marks != null) return error.RoundNotReady;
-                    mark_bank = q.gdn_pool_gpu.PromptMarks.init(b.runner.model.device, budget, b.runner.gdn.kernels, slot, @intCast(at), picked.end, picked.rows, b.runner.residency) catch |err| switch (err) {
-                        error.NoBuffer, error.UnsupportedGdnPipeline => null,
-                        else => return err,
-                    };
-                    if (mark_bank) |*m| {
-                        end = picked.end;
-                        b.runner.gdn.marks = m;
-                    }
-                }
-            };
-        }
-        if (mark_bank == null) for (s.reuse.marks) |mark| if (mark > at and mark < end) {
-            end = mark;
-        };
-        const part = ids[at..end];
-        const last = end == ids.len;
-        if (d) |x| {
-            if (decoded) try x.decodeChunk(part, last) else try x.promptChunk(part, last);
-        } else {
-            const session = q.session.Session{ .runner = b.runner, .slot = slot };
-            if (decoded) try session.decodeChunk(part, last) else try session.promptChunk(part, last);
-            if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
-        }
-        at = end;
-        s.fill_at.store(@intCast(at), .monotonic); // a prompt chunk waits: `at` is landed progress
-        if (s.isCancelled()) return error.Cancelled;
-        if (mark_bank) |*m| {
-            try m.complete(slot, @intCast(at));
-            if (s.reuse.hook) |k| for (m.position.rows) |row| {
-                if (s.isCancelled()) return error.Cancelled;
-                if (row != 0) k.at(k.ptr, s, m.position.start + row);
-            };
-        }
-        if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
+        decoded = decoded or (at >= span[0] and at < span[1]);
     }
+    var mark_bank: ?q.gdn_pool_gpu.PromptMarks = null;
+    defer {
+        if (mark_bank) |*m| {
+            b.runner.gdn.marks = null;
+            m.deinit();
+        }
+    }
+    const shape = b.runner.gdn.budget.shape;
+    if (s.reuse.hook != null and d == null and !decoded and !b.runner.capture_taps and b.runner.images == null and shape.c.dk == 128 and shape.c.dv % 4 == 0) {
+        const picked = try q.prompt_marks.select(@intCast(at), @intCast(end), s.reuse.marks);
+        if (picked.count > 0) if (b.grow) |g| {
+            const budget = b.runner.gdn.budget;
+            const size = try q.prompt_marks.layout(budget.layers, shape.state, shape.conv);
+            if (g.room(g.ctx, size.total, s)) {
+                if (b.runner.gdn.marks != null) return error.RoundNotReady;
+                mark_bank = q.gdn_pool_gpu.PromptMarks.init(b.runner.model.device, budget, b.runner.gdn.kernels, slot, @intCast(at), picked.end, picked.rows, b.runner.residency) catch |err| switch (err) {
+                    error.NoBuffer, error.UnsupportedGdnPipeline => null,
+                    else => return err,
+                };
+                if (mark_bank) |*m| {
+                    end = picked.end;
+                    b.runner.gdn.marks = m;
+                }
+            }
+        };
+    }
+    if (mark_bank == null) for (s.reuse.marks) |mark| if (mark > at and mark < end) {
+        end = mark;
+    };
+    const part = ids[at..end];
+    const last = end == ids.len;
+    if (d) |x| {
+        if (decoded) try x.decodeChunk(part, last) else try x.promptChunk(part, last);
+    } else {
+        const session = q.session.Session{ .runner = b.runner, .slot = slot };
+        if (decoded) try session.decodeChunk(part, last) else try session.promptChunk(part, last);
+        if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
+    }
+    f.at = end;
+    s.fill_at.store(@intCast(end), .monotonic); // a prompt chunk waits: `at` is landed progress
+    if (s.isCancelled()) return error.Cancelled;
+    if (mark_bank) |*m| {
+        try m.complete(slot, @intCast(end));
+        if (s.reuse.hook) |k| for (m.position.rows) |row| {
+            if (s.isCancelled()) return error.Cancelled;
+            if (row != 0) k.at(k.ptr, s, m.position.start + row);
+        };
+    }
+    if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(end));
+    return end == ids.len;
+}
+
+/// `s` in its slot, or a free one taken: its memory ready and its held tree dropped.
+pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
+    const slot = b.slotOf(s) orelse (free(b) orelse return error.NoFreeSlot);
+    try ready(b, slot, s);
+    b.dropTreeOf(slot);
+    b.owners[slot] = s;
+    return slot;
+}
+
+/// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
+pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+    const b: *Metal = @ptrCast(@alignCast(ptr));
+    b.settle() catch {};
+    b.dropRound();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    if (!b.fills.contains(s)) {
+        const slot = try bind(b, s);
+        errdefer b.owners[slot] = null;
+        const f = try opening(b, s, slot);
+        errdefer closing(b, s);
+        try b.fills.put(b.gpa, s, f);
+    }
+    const f = b.fills.getPtr(s).?;
+    const slot = f.slot;
+    const done = chunk(b, s, f) catch |err| {
+        endFill(b, s);
+        b.owners[slot] = null;
+        return err;
+    };
+    if (done) endFill(b, s);
+    return done;
+}
+
+/// The host cancels between chunks: the last landed chunk's state is kept while the slot still holds it.
+pub fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
+    const b: *Metal = @ptrCast(@alignCast(ptr));
+    if (b.fills.get(s)) |f| s.keepInterruptedPrefill(@intCast(f.at));
+}
+
+/// A stepped pass is over, or its stream left mid-pass.
+pub fn endFill(b: *Metal, s: *lanes.Stream) void {
+    if (b.fills.remove(s)) closing(b, s);
 }
 
 /// After a GPU failure whose streams have all left, the runner and drafter take rounds again; `s` takes its slot now.
@@ -217,7 +287,7 @@ pub fn promote(b: *Metal) void {
     if (b.owners[0] != null or b.round != null) return;
     for (1..b.runner.slots) |k| {
         const s = b.owners[k] orelse continue;
-        if (s.finished) continue;
+        if (s.finished or b.fills.contains(s)) continue; // a prompt pass under way stays in its slot until it is in
         const from: u32 = @intCast(k);
         d.model.reset() catch return;
         const pool = mtl.objc.Pool.push();
