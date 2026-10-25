@@ -110,6 +110,8 @@ fn fullKernels(d: *cuda.Driver) modelopt.Kernels {
     for (&out.lane.fns) |*set| for (set) |*f| {
         f.* = function(d, 5);
     };
+    out.lane.half = @splat(@splat(@splat(function(d, 5))));
+    out.lane.half_below = 0; // the released launch parameters: the 64-column tile's
     out.prompt.fp4 = function(d, 6);
     out.prompt.fp8 = function(d, 6);
     out.embed.bf16_copies_fn = function(d, 2);
