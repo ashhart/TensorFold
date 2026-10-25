@@ -40,7 +40,14 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
     // EXL3 and BF16 matrices use their own row kernels at every width.
     switch (l) {
         .x3 => |q| return if (prompt and rows > 16) e.kit.?.dense.prompt(e.stream, q, x, .bf16, rows, out, .bf16) else e.kit.?.dense.decode(e.stream, q, x, .bf16, rows, out, .bf16),
-        .bf => |q| return e.kit.?.b16.denseRows(e.stream, x, q.w, out, rows, q.n, q.k),
+        .bf => |q| {
+            // The small BF16 row kernel accepts at most 128 rows, including during a full prompt pass.
+            var at: usize = 0;
+            while (at < rows) : (at += 128) {
+                try e.kit.?.b16.denseRows(e.stream, x + at * q.k * 2, q.w, out + at * q.n * 2, @min(rows - at, 128), q.n, q.k);
+            }
+            return;
+        },
         else => {},
     }
     if (prompt and e.int8.on) switch (l) {

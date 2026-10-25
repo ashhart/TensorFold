@@ -178,3 +178,78 @@ test "format coexistence: all projection tags retain their dimensions and BF16 i
         try t.expectEqual(@as(u64, 0x8000), Recorded.first[0]);
     };
 }
+
+const PromptTrace = struct {
+    const Call = struct { grid: [3]u32, block: [3]u32, shared: u32, stream: usize, ptrs: [3]u64, n: i32, k: i32 };
+    var calls: [64]Call = undefined;
+    var count: usize = 0;
+    fn launch(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, shared: c_uint, s: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+        std.debug.assert(@intFromPtr(f) == 4 and count < calls.len);
+        var ptrs: [3]u64 = undefined;
+        for (&ptrs, 0..) |*p, i| p.* = @as(*const u64, @ptrCast(@alignCast(args.?[i].?))).*;
+        calls[count] = .{ .grid = .{ gx, gy, gz }, .block = .{ bx, by, bz }, .shared = shared, .stream = @intFromPtr(s), .ptrs = ptrs, .n = @as(*const i32, @ptrCast(@alignCast(args.?[3].?))).*, .k = @as(*const i32, @ptrCast(@alignCast(args.?[4].?))).* };
+        count += 1;
+        return 0;
+    }
+};
+
+fn bf16Prompt(rows: usize) !void {
+    const c = try config(exl3, true, false);
+    defer t.allocator.free(c);
+    const g = try geo.parse(t.allocator, c);
+    try t.expect(g.exl3 and g.moe());
+    try t.expectEqual(@as(usize, 2048), g.hidden);
+    try t.expectEqual(@as(usize, 32), g.v_heads);
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = PromptTrace.launch;
+    var kit: Kit = undefined;
+    kit.b16.dense_fn = function(&d, 4);
+    var e: Engine = undefined;
+    e.stream = .{ .d = &d, .handle = @ptrFromInt(0x1800) };
+    e.g = g;
+    e.kit = &kit;
+    e.affine.split = null;
+    e.xs = 0;
+    e.tables.ptr = 0x100000;
+    const x = 0x10000;
+    const outs = [_]u64{ 0x2000000, 0x3000000 };
+    const weights = [_]u64{ 0x4000000, 0x5000000 };
+    // The loader stores both linear_attn.in_proj_a and in_proj_b as BF16 [value_heads, hidden].
+    const ab = [_]Proj{
+        .{ .bf = .{ .w = weights[0], .n = g.v_heads, .k = g.hidden } },
+        .{ .bf = .{ .w = weights[1], .n = g.v_heads, .k = g.hidden } },
+    };
+    PromptTrace.count = 0;
+    try e.projMany(&ab, x, &outs, rows, true);
+    var at: usize = 0;
+    for (outs, weights) |out, weight| {
+        var covered: usize = 0;
+        while (covered < rows) {
+            try t.expect(at < PromptTrace.count);
+            const call = PromptTrace.calls[at];
+            try t.expectEqual([3]u32{ @intCast(g.v_heads), @intCast(@min(rows - covered, 128)), 1 }, call.grid);
+            try t.expectEqual([3]u32{ 256, 1, 1 }, call.block);
+            try t.expectEqual(@as(u32, 0), call.shared);
+            try t.expectEqual(@as(usize, 0x1800), call.stream);
+            try t.expectEqual([3]u64{ x + covered * g.hidden * 2, weight, out + covered * g.v_heads * 2 }, call.ptrs);
+            try t.expectEqual(@as(i32, @intCast(g.v_heads)), call.n);
+            try t.expectEqual(@as(i32, @intCast(g.hidden)), call.k);
+            covered += call.grid[1];
+            at += 1;
+        }
+        try t.expectEqual(rows, covered);
+    }
+    try t.expectEqual(at, PromptTrace.count);
+}
+
+test "format coexistence: EXL3 BF16 prompt: 2048 rows reach both GDN scalar projections without RowShape" {
+    try bf16Prompt(2048);
+}
+
+test "format coexistence: EXL3 BF16 prompt: 4096 rows reach both GDN scalar projections without RowShape" {
+    try bf16Prompt(4096);
+}
+
+test "format coexistence: EXL3 BF16 prompt: existing rows and partial final slices keep every argument and row" {
+    for ([_]usize{ 0, 1, 16, 17, 127, 128, 129, 2049, 4095 }) |rows| try bf16Prompt(rows);
+}
