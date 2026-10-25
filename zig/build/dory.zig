@@ -9,4 +9,6 @@ pub fn host(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
     b.step("test-dory-host", "Dory config, weight map, sublayer schedule and memory without a GPU").dependOn(&run.step);
     all.dependOn(&run.step);
+    const loader = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Dory loader:"} }));
+    b.step("test-dory-loader-host", "Dory load refusals and device ownership under host allocation failure").dependOn(&loader.step);
 }

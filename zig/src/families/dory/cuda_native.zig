@@ -144,6 +144,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.StructuresUnsupported => "structured output is not built for Dory on CUDA yet",
         error.CapturedKernels => "Dory runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.BuiltWithoutKernels => "this build carries no CUDA kernel images: build with -Dnvcc",
+        error.UnsupportedDoryCudaQuantization => "Dory on CUDA requires ModelOpt W4A16 NVFP4 weights; BF16 and MXFP8 maps are host-only",
         error.BadLoops => std.fmt.comptimePrint("--loops: passes over Dory's recurrent block, 1 to {d}", .{config.max_loops}),
         error.UnsupportedKvMode => "this checkpoint asks for last_loop KV, whose output depends on chunk boundaries: Dory serves per_loop only",
         error.ParallelPastRound => std.fmt.comptimePrint("--parallel: Dory on CUDA holds at most {d} streams (a round's rows over 16-row windows): serve --parallel {d} or fewer, or auto", .{ be.round_rows / be.max_window, be.round_rows / be.max_window }),
@@ -169,7 +170,7 @@ test "the prompt cache's hooks compile against the store's vtable" {
 }
 
 test "every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.BadLoops, error.UnsupportedKvMode, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.UnsupportedDoryCudaQuantization, error.BadLoops, error.UnsupportedKvMode, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);

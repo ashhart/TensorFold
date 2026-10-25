@@ -50,7 +50,8 @@ pub const Weights = struct {
     }
 
     fn upload(w: *Weights, d: *const cuda.Driver, bytes: []const u8) !u64 {
-        const b = try DeviceBuffer.fromHost(d, bytes);
+        var b = try DeviceBuffer.fromHost(d, bytes);
+        errdefer b.free();
         try w.buffers.append(w.gpa, b);
         w.bytes += bytes.len;
         return b.ptr;
@@ -109,6 +110,7 @@ const Times = struct {
 /// config.json, every tensor mapped and checked, then sublayer by sublayer onto the GPU; `loops` overrides the count.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, loops: ?usize) !Weights {
     var c = try Config.read(gpa, io, dir);
+    if (c.quant != .nvfp4) return error.UnsupportedDoryCudaQuantization;
     if (loops) |l| c = try c.withLoops(l);
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
@@ -142,4 +144,64 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     w.head = try w.upload(d, m.head.bytes);
     w.logit = try w.vector(d, m.logit_scale, Times{ .f = f.logit });
     return w;
+}
+
+const UploadTest = struct {
+    var live: usize = 0;
+    fn alloc(p: *u64, _: usize) callconv(.c) cuda.abi.Result {
+        p.* = 0x10000;
+        live += 1;
+        return 0;
+    }
+    fn free(_: u64) callconv(.c) cuda.abi.Result {
+        live -= 1;
+        return 0;
+    }
+    fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return 0;
+    }
+    fn copy(_: u64, _: ?*const anyopaque, _: usize) callconv(.c) cuda.abi.Result {
+        return 0;
+    }
+};
+
+test "Dory loader: a host ownership-list failure refunds the uploaded device buffer" {
+    var d: cuda.Driver = undefined;
+    d.api.cuMemAlloc_v2 = UploadTest.alloc;
+    d.api.cuMemFree_v2 = UploadTest.free;
+    d.api.cuMemcpyHtoD_v2 = UploadTest.copy;
+    d.api.cuStreamSynchronize = UploadTest.sync;
+    UploadTest.live = 0;
+    // The control's leaked fake buffer is still reclaimed after the assertion, so memory accounting stays valid.
+    defer if (UploadTest.live != 0) {
+        var leaked: DeviceBuffer = .{ .d = &d, .ptr = 0x10000, .len = 16 };
+        leaked.free();
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var w: Weights = .{ .gpa = failing.allocator(), .config = undefined };
+    defer w.deinit();
+    try std.testing.expectError(error.OutOfMemory, w.upload(&d, &@as([16]u8, @splat(0))));
+    try std.testing.expectEqual(@as(usize, 0), UploadTest.live);
+    try std.testing.expectEqual(@as(usize, 0), w.buffers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), w.bytes);
+}
+
+test "Dory loader: host-only BF16 and MXFP8 maps refuse before opening weights or touching a driver" {
+    const a = std.testing.allocator;
+    const text = try config.pinnedText(a);
+    defer a.free(text);
+    const at = std.mem.indexOf(u8, text, "\"quantization_config\"").?;
+    const end = std.mem.indexOf(u8, text, "\"head_dim\"").?;
+    const mx = "\"quantization_config\":{\"quant_method\":\"compressed-tensors\",\"config_groups\":{\"g\":{\"format\":\"mxfp8-quantized\",\"weights\":{\"num_bits\":8,\"type\":\"float\",\"group_size\":32}}}},";
+    for ([_][]const u8{ "", mx }) |quant| {
+        const candidate = try std.mem.concat(a, u8, &.{ text[0..at], quant, text[end..] });
+        defer a.free(candidate);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = candidate });
+        const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        defer a.free(path);
+        var d: cuda.Driver = undefined;
+        try std.testing.expectError(error.UnsupportedDoryCudaQuantization, load(a, std.testing.io, &d, path, null));
+    }
 }
