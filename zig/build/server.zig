@@ -66,9 +66,7 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
 }
 
-/// The CPU-only fake server and the engine-less CLI into zig-out/server/ (zig build server-cpu):
-/// the module graph the real binaries get, without native engines, so zig/tests/server/build.sh
-/// stays a wrapper instead of a second copy of it.
+/// The CPU-only fake server and the engine-less CLI into zig-out/server/ (zig build server-cpu), for build.sh.
 pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options) void {
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
