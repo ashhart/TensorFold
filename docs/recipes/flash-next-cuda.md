@@ -34,6 +34,9 @@ Before enabling it for serving, run the full contract and compare main/candidate
 drafted/plain and concurrent/solo tokens at the same checkpoint. Measure cold 4k, 16k and 128k prefill with cache
 disabled, alternating with the flag off. Host checks and compile-only checks do not establish GPU exactness or speed.
 
+NVFP4 PLE gathers sort requested row IDs, dequantize each distinct row once through the parked worker pool,
+and copy duplicate BF16 rows after the readers join. Hash history and FP32 row sums retain their existing order.
+
 ## Run
 
 ```bash

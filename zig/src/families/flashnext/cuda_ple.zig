@@ -428,7 +428,7 @@ pub const Ngram = struct {
     }
 
     /// Rows [lo, hi) of a chunk's token-major row ids `ids`, each dequantized into its head's slice of `out`.
-    fn fill(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize) !void {
+    pub fn fill(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize) !void {
         const dh = g.hash.dh;
         for (lo..hi) |i| {
             const loc = try g.hash.locate(ids[i]);
@@ -470,7 +470,9 @@ pub const Ngram = struct {
             hist[history.len - 1] = token;
         }
         const n_threads = @min(ple_pool.max_parts, items / 4);
-        if (n_threads <= 1 or g.pool == null) {
+        if (g.format == .nvfp4 and items > 1) {
+            try @import("cuda_ple_gather.zig").run(g, ids, out);
+        } else if (n_threads <= 1 or g.pool == null) {
             try g.fill(ids, out, 0, items);
         } else {
             const split: Split = .{ .g = g, .ids = ids, .out = out, .per = (items + n_threads - 1) / n_threads };
@@ -518,4 +520,8 @@ test {
     _ = @import("cuda_ple_nvfp4_test.zig");
     _ = @import("cuda_ple_pool.zig");
     _ = @import("cuda_ple_pool_gather_test.zig");
+}
+
+test {
+    _ = @import("cuda_ple_gather.zig");
 }
