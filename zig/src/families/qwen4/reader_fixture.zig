@@ -90,6 +90,9 @@ pub fn writeF32Vectors(tmp: std.testing.TmpDir, a: std.mem.Allocator, c: *const 
     return writeOptions(tmp, a, c, false, true, true);
 }
 fn writeOptions(tmp: std.testing.TmpDir, a: std.mem.Allocator, c: *const cfg.Config, broken: bool, nonzero: bool, f32_vectors: bool) !void {
+    return writeDir(tmp.dir, std.testing.io, a, c, broken, nonzero, f32_vectors);
+}
+pub fn writeDir(dir: std.Io.Dir, io: std.Io, a: std.mem.Allocator, c: *const cfg.Config, broken: bool, nonzero: bool, f32_vectors: bool) !void {
     var sink: Sink = .{ .a = a, .c = c, .broken = broken, .nonzero = nonzero, .f32_vectors = f32_vectors };
     var p: cfg.Problem = .{};
     try weights.walk(c, .causal, &sink, &p);
@@ -112,5 +115,5 @@ fn writeOptions(tmp: std.testing.TmpDir, a: std.mem.Allocator, c: *const cfg.Con
         @memcpy(image[at..][0..item.bytes.len], item.bytes);
         at += item.bytes.len;
     }
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "model.safetensors", .data = image });
+    try dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
 }

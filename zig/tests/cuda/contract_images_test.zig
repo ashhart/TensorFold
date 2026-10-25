@@ -29,3 +29,18 @@ test "contract image: every registered DeepSeek image selects distinct matching 
     }
     try std.testing.expectEqual(@as(usize, 32), names.count());
 }
+
+test "contract image: all 32 Qwen4 launches select their own embedded images" {
+    const registry = @import("core").contract.registry;
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    defer names.deinit(std.testing.allocator);
+    var count: usize = 0;
+    for (registry.all_cuda) |r| {
+        if (!std.mem.startsWith(u8, r.launch.image, "qwen4_")) continue;
+        try std.testing.expectEqualStrings(r.launch.image, try resolve(r.launch.image));
+        try names.put(std.testing.allocator, r.launch.image, {});
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 32), count);
+    try std.testing.expectEqual(@as(usize, 4), names.count());
+}

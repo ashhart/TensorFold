@@ -18,6 +18,8 @@ pub const metal_draw = @import("metal_draw.zig");
 pub const metal_gpu = @import("metal_gpu.zig");
 pub const cuda_gpu = @import("cuda_gpu.zig");
 pub const reader = @import("reader.zig");
+pub const device_gate = @import("device_gate.zig");
+pub const device_fixture = @import("device_fixture.zig");
 pub const device_weights = @import("device_weights.zig");
 pub const cuda_storage = @import("cuda_storage.zig");
 pub const metal_storage = @import("metal_storage.zig");
@@ -57,6 +59,7 @@ test {
     _ = @import("engine_test.zig");
     _ = @import("numeric_engine_test.zig");
     _ = @import("numeric_lanes_test.zig");
+    _ = @import("device_gate_test.zig");
     _ = @import("lanes_adapter_test.zig");
     _ = @import("lane_snapshots_test.zig");
     _ = @import("native_host_test.zig");

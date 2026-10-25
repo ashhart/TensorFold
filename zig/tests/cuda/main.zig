@@ -112,6 +112,7 @@ const qwen_draft_frames = @import("qwen_draft_frames.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
+    \\  qwen4                     synthetic native Qwen4: binary64 logits/tokens, state seams, lanes and copied drafts
     \\  qwen-draft-frames MODEL DRAFTER IDS OUT  native 27B DFlash frames: raw bytes equal across partitions, controls red
     \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
     \\  route-rows                route_rows.cu's router logits and softmax top-k against float64 (synthetic rows)
@@ -295,6 +296,10 @@ fn compileContractGlue() !void {
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+    if (std.mem.eql(u8, cmd, "qwen4")) {
+        if (rest.len != 0) return error.Qwen4DeviceArguments;
+        return @import("qwen4_tests.zig").run(gpu);
+    }
     if (std.mem.eql(u8, cmd, "compile-contract-glue")) return compileContractGlue();
     if (std.mem.eql(u8, cmd, "qwen-draft-frames")) {
         if (rest.len != 4) return error.FrameGateArguments;

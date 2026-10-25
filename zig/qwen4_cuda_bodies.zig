@@ -1,5 +1,9 @@
 //! Compile-only native CUDA placement and contract bodies on both supported Linux architectures.
 const std = @import("std");
+export fn qwen4CudaDeviceGate(gpu: *const @import("tests/cuda/check.zig").Gpu) bool {
+    @import("tests/cuda/qwen4_tests.zig").execute(gpu.*) catch return false;
+    return true;
+}
 const cuda = @import("cuda");
 const core = @import("core");
 const family = @import("qwen4").family;

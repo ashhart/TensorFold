@@ -1,4 +1,4 @@
-//! Dense Qwen4 host tests and explicit module ownership never select a shader producer or device runtime.
+//! Dense Qwen4 host checks and a separate opt-in Metal device gate.
 const std = @import("std");
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
     const graph = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/forward_graph.zig"), .target = target, .optimize = optimize });
@@ -35,6 +35,8 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     ple_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 PLE native contract"} })).step);
     const qsa_step = b.step("test-qwen4-qsa-host", "Generated native QSA bodies against independent scalar references");
     qsa_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{ "Qwen4 QSA native contract", "Qwen4 QSA scores", "Qwen4 QSA selection" } })).step);
+    const device_host = b.step("test-qwen4-device-host", "The full native device gate under numeric host instruments and refusal controls");
+    device_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 device gate:"} })).step);
     parent.dependOn(step);
     const cu = @import("cuda_runtime.zig").runtime(b, b.graph.host, .debug, &.{});
     const gdn_host = b.createModule(.{ .root_source_file = b.path("zig/qwen4_gdn_host.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "cuda", .module = cu }, .{ .name = "qwen4", .module = family } } });
@@ -66,6 +68,7 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     body_step.dependOn(&object.step);
     parent.dependOn(body_step);
     crossBodies(b, parent);
+    @import("qwen4_device.zig").metal(b);
 }
 
 pub fn crossBodies(b: *std.Build, parent: *std.Build.Step) void {

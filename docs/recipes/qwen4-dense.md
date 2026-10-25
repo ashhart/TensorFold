@@ -50,3 +50,30 @@ New CUDA launch records retain pending measurements until actual compiler receip
 Before advertising a released checkpoint, check its config and tensor names, run the complete backend contract,
 and run fresh/drafted/concurrent/resumed/prompt-cut model comparisons with its actual tokenizer and weights.
 Measure cold prefill, decode and memory on each claimed GPU; no rate or memory-fit claim is established here.
+
+The explicit synthetic device gates generate the same nonzero safetensors through the real checkpoint writer.
+They load the serving native engine and compare all 384 BF16 logits and 12 GPU greedy picks with the binary64 fixture.
+They require byte equality for five repeats, every prompt cut, saved-state resume, concurrent streams,
+partial acceptance and abort/retry. The shared lane adapter also checks copied proposals against plain decoding.
+A learned MTP head is not declared by this fixture and remains refused by config admission.
+
+On a Mac with the Metal toolchain:
+
+```sh
+zig build test-qwen4-metal
+```
+
+This step compiles the production shaders at runtime and executes the GPU. It is separate from default host tests.
+`zig build compile-qwen4-metal-device` emits the same executable without executing it or producing shaders.
+For CUDA on a GB10, build the runner and embedded images, then run both gates:
+
+```sh
+zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121
+./zig-out/bin/tf-cuda-test qwen4
+zig build kernel-contract -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121
+```
+
+`zig build compile-cuda-tests` with the same options emits the runner without installing or executing it.
+The normal CUDA contract collects the Qwen4 operators and their planted controls, and resolves all four images
+for the 32 new launch registrations. Resource measurements are still required; pending records must fail limits.
+Synthetic device success does not qualify an unreleased checkpoint or establish cross-backend equality.
