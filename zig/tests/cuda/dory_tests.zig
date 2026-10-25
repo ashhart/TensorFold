@@ -20,6 +20,10 @@ pub const Rig = struct {
     }
 
     pub fn initSlots(r: *Rig, gpu: Gpu, model: []const u8, loops: usize, context: usize, slots: usize) !void {
+        return r.initMode(gpu, model, loops, context, slots, paged());
+    }
+
+    pub fn initMode(r: *Rig, gpu: Gpu, model: []const u8, loops: usize, context: usize, slots: usize, pages: bool) !void {
         r.gpu = gpu;
         r.w = try dory.cuda_weights.load(gpu.gpa, gpu.io, gpu.d, model, loops);
         errdefer r.w.deinit();
@@ -27,7 +31,26 @@ pub const Rig = struct {
         errdefer r.k.deinit();
         r.s = try cuda.Stream.init(gpu.d, false);
         errdefer r.s.deinit();
-        r.m = try fwd.Model.init(gpu.gpa, gpu.d, r.s, &r.w, &r.k, context, slots);
+        r.m = if (pages) try fwd.Model.initPaged(gpu.gpa, gpu.d, r.s, &r.w, &r.k, context) else try fwd.Model.init(gpu.gpa, gpu.d, r.s, &r.w, &r.k, context, slots);
+    }
+
+    /// DORY_PAGED=1: the full caches are pages (the tests' other arguments stay the same).
+    pub fn paged() bool {
+        const v = std.c.getenv("DORY_PAGED") orelse return false;
+        return !std.mem.eql(u8, std.mem.span(v), "0");
+    }
+
+    /// A paged model's arena for `slots` slots, each slot's pages a shuffled run of the pool (no lease: a fixed map).
+    pub fn mapStatic(r: *Rig, slots: usize, seed: u64) !void {
+        if (!r.m.paged) return;
+        const per = dory.cuda_pages.pagesOf(r.m.context);
+        try r.m.attach(r.s, slots - 1, slots * per);
+        const ids = try r.gpu.gpa.alloc(u32, slots * per);
+        defer r.gpu.gpa.free(ids);
+        for (ids, 0..) |*id, i| id.* = @intCast(i);
+        var prng = std.Random.DefaultPrng.init(seed);
+        prng.random().shuffle(u32, ids);
+        for (0..slots) |s| try r.m.mapPages(r.s, s, ids[s * per ..][0..per], 0);
     }
 
     pub fn deinit(r: *Rig) void {
@@ -53,7 +76,7 @@ pub const Rig = struct {
     }
 };
 
-fn argmax(x: []const f32) u32 {
+pub fn argmax(x: []const f32) u32 {
     var best: usize = 0;
     for (x, 0..) |v, i| if (v > x[best]) {
         best = i;
@@ -77,6 +100,7 @@ pub fn greedy(gpu: Gpu, model: []const u8, loops_text: []const u8, count_text: [
     var rig: Rig = undefined;
     try rig.init(gpu, model, loops, 4096);
     defer rig.deinit();
+    try rig.mapStatic(1, 1);
     const v = rig.w.config.vocab;
     std.debug.print("INFO dory: {d} loops, {d} prompt tokens, {d} weight bytes on the GPU\n", .{ loops, prompt.items.len, rig.w.bytes });
     const n0 = prompt.items.len;

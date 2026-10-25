@@ -57,7 +57,7 @@ pub fn lanesRun(gpu: Gpu, db: *be.Dory, cases: []const Case, count: u32) !Run {
 }
 
 /// TEXT's tokens after <s>, repeated until `need` of them.
-fn tokens(gpu: Gpu, model: []const u8, path: []const u8, need: usize) ![]u32 {
+pub fn tokens(gpu: Gpu, model: []const u8, path: []const u8, need: usize) ![]u32 {
     const gpa = gpu.gpa;
     var tok = try core.tokenizer.loadTokenizer(gpu.io, gpa, model);
     defer tok.deinit();
@@ -83,6 +83,13 @@ pub fn setup(x: *Setup, gpu: Gpu, rest: []const []const u8, need: usize, slots: 
     try x.rig.initSlots(gpu, rest[0], x.loops, try be.capacity(need + x.count), slots);
     errdefer x.rig.deinit();
     x.db = try be.Dory.init(gpu.gpa, gpu.d, &x.rig.m, &x.rig.k, x.rig.s);
+    errdefer x.db.deinit();
+    if (x.rig.m.paged) { // slots lease their pages from a shuffled pool (DORY_POOL pages: else a window each)
+        const per = dory.cuda_pages.pagesOf(x.rig.m.context);
+        const pool = if (std.c.getenv("DORY_POOL")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else slots * per;
+        try x.db.attach(slots - 1, pool);
+        x.db.shufflePages(7);
+    }
 }
 
 pub fn teardown(x: *Setup, gpa: std.mem.Allocator) void {
@@ -96,11 +103,13 @@ pub fn run(gpu: Gpu, cmd: []const u8, rest: []const []const u8) !void {
     if (std.mem.eql(u8, cmd, "dory-serve")) return serve(gpu, rest);
     if (std.mem.eql(u8, cmd, "dory-states")) return @import("dory_states_tests.zig").states(gpu, rest);
     if (std.mem.eql(u8, cmd, "dory-bench")) return bench(gpu, rest);
+    if (std.mem.eql(u8, cmd, "dory-prefill")) return prefill(gpu, rest);
+    if (std.mem.eql(u8, cmd, "dory-pages")) return @import("dory_pages_tests.zig").pages(gpu, rest);
     return error.UnknownCommand;
 }
 
 /// Eight mixed prompts (short, past the window, past a chunk; greedy and sampled; a repeating one for copy drafts).
-fn mixed(ids: []const u32, buf: *[8]Case, rep: []u32) []const Case {
+pub fn mixed(ids: []const u32, buf: *[8]Case, rep: []u32) []const Case {
     const sp: lanes.Sampling = .{ .seed = 11, .temperature = 0.8, .top_k = 40, .top_p = 0.95 };
     const sq: lanes.Sampling = .{ .seed = 5, .temperature = 1.0, .top_k = 0, .top_p = 0.95 };
     @memcpy(rep[0 .. rep.len / 2], ids[0 .. rep.len / 2]);
@@ -177,6 +186,15 @@ fn roundLogits(x: *Setup, cases: []const Case) !usize {
     const gpa = x.rig.gpu.gpa;
     var chains: [8]fwd.Chain = undefined;
     var rows: usize = 0;
+    if (x.rig.m.paged) { // no stream is live: slot i takes a window of pool pages for these direct forwards
+        const per = dory.cuda_pages.pagesOf(x.rig.m.context);
+        const ids = try gpa.alloc(u32, per);
+        defer gpa.free(ids);
+        for (0..cases.len) |s| {
+            for (ids, 0..) |*id, j| id.* = @intCast(s * per + j);
+            try x.rig.m.mapPages(x.rig.s, s, ids, 0);
+        }
+    }
     for (cases, 0..) |c, i| {
         const n = 1 + i % 3; // windows of 1 to 3 rows: the prompt's own last tokens, refed past its end
         var at: usize = 0;
@@ -221,5 +239,24 @@ fn bench(gpu: Gpu, rest: []const []const u8) !void {
         defer freeRun(gpa, r);
         const rate = @as(f64, @floatFromInt(r.tokens - p.tokens)) / (r.secs - p.secs);
         std.debug.print("RESULT dory bench L={d} streams {d}: {d:.1} tok/s decode together, {d:.1} a stream, {d:.2} ms a round ({d} tokens; prompts {d:.3} s)\n", .{ x.loops, k, rate, rate / @as(f64, @floatFromInt(k)), 1e3 * @as(f64, @floatFromInt(k)) / rate, r.tokens, p.secs });
+    }
+}
+
+/// Prompt time alone (one reply token) at 512, 2k, 8k and 16k rows: the best of three after a warm pass.
+fn prefill(gpu: Gpu, rest: []const []const u8) !void {
+    const gpa = gpu.gpa;
+    var x: Setup = undefined;
+    try setup(&x, gpu, rest[0..4], 16384 + 1, 1);
+    defer teardown(&x, gpa);
+    for ([_]usize{ 512, 2048, 8192, 16384 }) |n| {
+        freeRun(gpa, try lanesRun(gpu, &x.db, &.{.{ .prompt = x.ids[0..n] }}, 1));
+        var best: f64 = std.math.inf(f64);
+        for (0..3) |_| {
+            const t0 = check.now(gpu.io); // admission runs the prompt pass, before lanesRun's own clock starts
+            const r = try lanesRun(gpu, &x.db, &.{.{ .prompt = x.ids[0..n] }}, 1);
+            defer freeRun(gpa, r);
+            best = @min(best, @as(f64, @floatFromInt(check.now(gpu.io) - t0)) / 1e9);
+        }
+        std.debug.print("RESULT dory prefill L={d} paged={any} {d} rows: {d:.1} ms\n", .{ x.loops, x.rig.m.paged, n, best * 1e3 });
     }
 }

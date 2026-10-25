@@ -7,6 +7,8 @@ const fwd = @import("cuda_model.zig");
 const be = @import("cuda_backend.zig");
 const snap = @import("cuda_snap.zig");
 const config = @import("config.zig");
+const pages = @import("cuda_pages.zig");
+const kv = @import("core").kv_pool;
 
 pub const model_type = "dory";
 pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
@@ -33,6 +35,10 @@ pub const Loaded = struct {
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
     target: *be.Dory, // the prompt cache keeps this backend's states (snap_*)
+    /// The full-attention caches as pages of the core pool (null: every stream allocated at open).
+    layout: ?kv.Layout = null,
+    /// With a layout: the first stream's rows are pages too, a window of them set aside by the plan.
+    engine_paged: bool = true,
 };
 
 const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: fwd.Kernels, s: cuda.Stream, m: fwd.Model, db: be.Dory };
@@ -49,6 +55,11 @@ fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
     return n;
 }
 
+/// TENSORFOLD_DORY_KV_PAGES=0 keeps every stream's caches contiguous and allocated at open.
+fn pagesOn() bool {
+    return !envOff("TENSORFOLD_DORY_KV_PAGES");
+}
+
 /// The device bytes `n` streams take: their caches by loop count and context, the scratch, the backend's buffers.
 const Plan = struct {
     own: *const Owned,
@@ -57,9 +68,28 @@ const Plan = struct {
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
+        if (pagesOn()) return try fwd.Model.openBytesPaged(o.gpa, p.d, o.s, &o.w, &o.k, p.context) + be.Dory.openBytes(o.w.config.vocab, pages.max_slots);
         return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, &o.k, p.context, n) + be.Dory.openBytes(o.w.config.vocab, n);
     }
 };
+
+/// Paged: the first stream's rings and scratch must fit; the pool is planned by the host after.
+fn fitFirst(room: u64, plan: anytype) !usize {
+    if (try plan.bytes(1) > room) return error.NoStreamFits;
+    return 1;
+}
+
+/// The pool: `streams` more slots beside the first (rings made now) and an arena of `n` pages.
+pub fn attach(p: *anyopaque, streams: u32, n: usize) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    try own.db.attach(streams, n);
+}
+
+/// Whether a request's caches could start now (the lane host's admission, on its engine thread).
+pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
+    const own: *const Owned = @ptrCast(@alignCast(p));
+    return own.db.admits(prompt, max_tokens);
+}
 
 /// The checkpoint at its loop count, the shared kernels and every stream's caches.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -80,18 +110,20 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.s.deinit();
     const plan: Plan = .{ .own = own, .d = ctx.d, .context = context };
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    const n = fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
+    const n = if (pagesOn()) try fitFirst(room, plan) else fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
         if (e == error.ParallelPastMemory) {
             const most = fit(room, o.lanes, false, plan) catch 0;
             std.log.err("--parallel {d} needs {d:.2} GiB at a {d}-token window and {d} loops, and the CUDA memory budget leaves {d:.2} GiB after the weights: {d} stream{s} fit", .{ o.lanes, gib(try plan.bytes(o.lanes)), context, own.w.config.loops, gib(room), most, if (most == 1) "" else "s" });
         }
         return e;
     };
-    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n);
+    own.m = if (pagesOn()) try fwd.Model.initPaged(gpa, ctx.d, own.s, &own.w, &own.k, context) else try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n);
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_DORY_GRAPHS"); // =0: every decode forward eager
     own.db = try be.Dory.init(gpa, ctx.d, &own.m, &own.k, own.s);
-    std.log.info("Dory at {d} loops (per_loop KV): {d} caches a stream, {d} streams, CUDA graphs {s}", .{ own.w.config.loops, own.m.sched.caches, n, if (own.m.graphed) "on" else "off" });
+    if (own.m.paged) {
+        std.log.info("Dory at {d} loops (per_loop KV): {d} caches a stream, the full ones ({d}) in pages of {d} positions, CUDA graphs {s}", .{ own.w.config.loops, own.m.sched.caches, own.m.sched.cacheCount(.full), pages.tokens, if (own.m.graphed) "on" else "off" });
+    } else std.log.info("Dory at {d} loops (per_loop KV): {d} caches a stream, {d} streams, CUDA graphs {s}", .{ own.w.config.loops, own.m.sched.caches, n, if (own.m.graphed) "on" else "off" });
     return .{
         .backend = own.db.backend(),
         .facts = own.db.facts(),
@@ -101,6 +133,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = own,
         .deinit = release,
         .target = &own.db,
+        .layout = if (own.m.paged) own.m.layout() else null,
     };
 }
 

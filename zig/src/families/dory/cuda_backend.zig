@@ -4,6 +4,8 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const fwd = @import("cuda_model.zig");
 const snap = @import("cuda_snap.zig");
+const pages = @import("cuda_pages.zig");
+const kv = @import("core").kv_pool;
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -29,6 +31,7 @@ const Lane = struct {
     rule: u64, // sample.cu's Rule, when the stream samples
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
+    lease: kv.Lease = .{}, // a paged slot's pages
 };
 
 /// The physical positions a slot holds for a served window: the window, the verify reserve, in whole 1,024s.
@@ -55,6 +58,7 @@ pub const Dory = struct {
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
+    pool: ?kv.Pool = null, // the pages every slot leases (attach)
 
     /// The device bytes `init` allocates: bf16 logits, the token ring, metas, each slot's last row and rule.
     pub fn openBytes(vocab: usize, slots: usize) usize {
@@ -63,7 +67,7 @@ pub const Dory = struct {
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model, k: *const Kernels, s: cuda.Stream) !Dory {
         const v = m.c.vocab;
-        const free = try gpa.alloc(bool, m.slots);
+        const free = try gpa.alloc(bool, m.slotCap());
         errdefer gpa.free(free);
         @memset(free, true);
         var logits16 = try cuda.DeviceBuffer.alloc(d, round_rows * v * 2);
@@ -72,7 +76,7 @@ pub const Dory = struct {
         errdefer tok.free();
         var meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
         errdefer meta.free();
-        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
+        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slotCap());
         errdefer gpa.free(bufs);
         var made: usize = 0;
         errdefer for (bufs[0..made]) |*b| b.free();
@@ -83,9 +87,25 @@ pub const Dory = struct {
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .logits16 = logits16, .tok = tok, .meta = meta, .slot_bufs = bufs };
     }
 
+    /// Makes a paged model's arena of `pool_pages` pages for `extra + 1` slots, and the pool that leases them.
+    pub fn attach(x: *Dory, extra: usize, pool_pages: usize) !void {
+        if (x.m.paging == null) try x.m.attach(x.s, extra, pool_pages); // a check may have attached it already
+        x.pool = try kv.Pool.init(x.gpa, x.m.paging.?.pool, x.m.paging.?.pageBytes());
+    }
+
+    /// The pool's free pages in a seeded random order, so tables are not ascending (a check's hook).
+    pub fn shufflePages(x: *Dory, seed: u64) void {
+        var prng = std.Random.DefaultPrng.init(seed);
+        if (x.pool) |*p| prng.random().shuffle(u32, p.free[0..p.nfree]);
+    }
+
     pub fn deinit(x: *Dory) void {
         var it = x.lanes.valueIterator();
-        while (it.next()) |l| l.rows.deinit(x.gpa);
+        while (it.next()) |l| {
+            if (x.pool) |*p| p.finish(&l.lease);
+            l.rows.deinit(x.gpa);
+        }
+        if (x.pool) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
@@ -103,7 +123,7 @@ pub const Dory = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Dory) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Dory {
@@ -147,7 +167,41 @@ pub const Dory = struct {
     }
 
     fn freeSlot(x: *const Dory) ?usize {
-        return std.mem.indexOfScalar(bool, x.free, true);
+        return std.mem.indexOfScalar(bool, x.free[0..x.m.slots], true);
+    }
+
+    /// Pages a request of this prompt and reply holds.
+    fn pagesFor(prompt: usize, max_new: usize) usize {
+        return pages.need(prompt, max_new, reserve);
+    }
+
+    /// Whether a request could start now: a free slot and (paged) its pages; one that never fits passes.
+    pub fn admits(x: *const Dory, prompt: usize, max_new: usize) bool {
+        if (!fits(x.m.context, prompt, max_new)) return true;
+        const p = x.pool orelse return x.freeSlot() != null;
+        return x.freeSlot() != null and p.fits(pagesFor(prompt, max_new));
+    }
+
+    const Map = struct {
+        x: *Dory,
+        slot: usize,
+        fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
+            const m: *const Map = @ptrCast(@alignCast(ctx));
+            try m.x.m.mapPages(m.x.s, m.slot, ids[from..], from);
+        }
+    };
+
+    /// A free slot for the request, its pages leased now when paged.
+    fn takeSlot(x: *Dory, lease: *kv.Lease, prompt: usize, max_new: usize) !usize {
+        const slot = x.freeSlot() orelse return error.NoFreeSlot;
+        if (x.pool == null) return slot;
+        const p = &x.pool.?;
+        const n = pagesFor(prompt, max_new);
+        try p.promise(lease, n);
+        errdefer p.finish(lease);
+        var map: Map = .{ .x = x, .slot = slot };
+        try p.cover(lease, n, .{ .ctx = &map, .write = Map.write });
+        return slot;
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
@@ -157,12 +211,13 @@ pub const Dory = struct {
         if (!fits(x.m.context, p.len, @as(usize, s.max_new))) return error.PastContext;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (!got.found_existing) {
-            const slot = x.freeSlot() orelse {
+            var lease: kv.Lease = .{};
+            const slot = x.takeSlot(&lease, p.len, s.max_new) catch |e| {
                 x.lanes.removeByPtr(got.key_ptr);
-                return error.NoFreeSlot;
+                return e;
             };
             x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr };
+            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .lease = lease };
         }
         const l = got.value_ptr;
         l.sampled = false;
@@ -327,8 +382,12 @@ pub const Dory = struct {
     }
 
     fn dropLane(x: *Dory, s: *const Stream) void {
-        if (x.lanes.fetchRemove(s)) |kv| {
-            var l = kv.value;
+        if (x.lanes.fetchRemove(s)) |entry| {
+            var l = entry.value;
+            if (x.pool) |*p| {
+                p.finish(&l.lease);
+                x.m.unmapPages(l.slot);
+            }
             x.free[l.slot] = true;
             l.rows.deinit(x.gpa);
         }

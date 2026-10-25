@@ -37,6 +37,7 @@ pub const Kernels = struct {
         errdefer k.dense.unload();
         k.win = try cuda.window_attention.WindowAttention.load(d);
         errdefer k.win.unload();
+        try k.win.loadPages(d);
         if (!cuda.kernels.available) return k;
         const kk = cuda.kernels;
         const images = [_][]const u8{ kk.sample, kk.torch_argmax, kk.torch_pointwise };

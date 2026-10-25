@@ -5,6 +5,7 @@ const config = @import("config.zig");
 const schedule = @import("schedule.zig");
 const memory = @import("memory.zig");
 const wts = @import("cuda_weights.zig");
+const pages = @import("cuda_pages.zig");
 
 const Config = config.Config;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -40,7 +41,10 @@ pub const Model = struct {
     ring: usize,
     slots: usize,
     k: []u64 = &.{}, // per cache: [slots, len, HK, D] bf16 (len: context for full caches, the ring for sliding ones)
-    v: []u64 = &.{},
+    v: []u64 = &.{}, // paged: a full cache's K and V blocks in page 0 of the arena (the pages' table maps the rest)
+    paged: bool = false, // full caches live in pages (attach makes them); sliding rings stay a buffer a slot
+    paging: ?pages.Paging = null,
+    rings: std.ArrayList(DeviceBuffer) = .empty, // the sliding caches' buffers, made again for the slots attach names
     inv: [2]u64 = .{ 0, 0 }, // fp32 [D / 2] inverse frequencies: sliding, full
     s: Scratch = undefined,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
@@ -71,6 +75,19 @@ pub const Model = struct {
         return p;
     }
 
+    /// A zeroed buffer for a sliding cache (paged models make these again for the slots attach names).
+    fn ringZeros(m: *Model, s: cuda.Stream, bytes: usize) !u64 {
+        if (m.planned) |*p| {
+            p.* += @max(bytes, 256);
+            return 0;
+        }
+        var b = try DeviceBuffer.alloc(m.d, @max(bytes, 256));
+        errdefer b.free();
+        try m.d.check(m.d.api.cuMemsetD8Async(b.ptr, 0, bytes, s.handle), "cuMemsetD8Async");
+        try m.rings.append(m.gpa, b);
+        return b.ptr;
+    }
+
     /// Cache `i`'s positions a slot: the context (full) or the ring (sliding).
     pub fn cacheLen(m: *const Model, i: usize) usize {
         return if (m.sched.cache_kind[i] == .full) m.context else m.ring;
@@ -86,6 +103,85 @@ pub const Model = struct {
         errdefer m.deinit();
         try m.build(s, k);
         return m;
+    }
+
+    /// A model whose full caches are pages: one slot's rings now; `attach` makes the arena, the other slots' rings.
+    pub fn initPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const Kernels, context: usize) !Model {
+        var m = blank(gpa, d, w, context, 1);
+        m.paged = true;
+        errdefer m.deinit();
+        try m.build(s, k);
+        return m;
+    }
+
+    /// The device bytes `initPaged` allocates.
+    pub fn openBytesPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const Kernels, context: usize) !usize {
+        var m = blank(gpa, d, w, context, 1);
+        defer m.deinit();
+        m.paged = true;
+        m.planned = 0;
+        try m.build(s, k);
+        return m.planned.?;
+    }
+
+    /// What the host's pool plans for this model's pages (see cuda_pages.layout).
+    pub fn layout(m: *const Model) @import("core").kv_pool.Layout {
+        return pages.layout(m.c, m.sched.cacheCount(.full), m.sched.cacheCount(.sliding), m.context, m.ring);
+    }
+
+    /// Slots a backend holds: the model's now, or (paged) as many as a round takes.
+    pub fn slotCap(m: *const Model) usize {
+        return if (m.paged) pages.max_slots else m.slots;
+    }
+
+    /// Makes the arena of `pool` pages to lease, the tables and the rings of `extra + 1` slots.
+    pub fn attach(m: *Model, s: cuda.Stream, extra: usize, pool: usize) !void {
+        if (!m.paged or m.paging != null or extra >= pages.max_slots) return error.BadAttach;
+        const c = m.c;
+        const per_slot = pages.pagesOf(m.context);
+        const elems = pages.pageElems(c, m.sched.cacheCount(.full));
+        const ids = try m.gpa.alloc(u32, pages.max_slots * per_slot);
+        errdefer m.gpa.free(ids);
+        @memset(ids, 0);
+        for (m.rings.items) |*b| b.free();
+        m.rings.clearRetainingCapacity();
+        m.slots = extra + 1;
+        try m.rings.ensureTotalCapacity(m.gpa, 2 * m.sched.caches);
+        var p: pages.Paging = .{ .pool = pool, .per_slot = per_slot, .page_elems = elems, .arena = 0, .table = 0, .ids = ids };
+        p.arena = try m.alloc(pool * elems * 2);
+        p.table = try m.alloc(pages.max_slots * per_slot * 4);
+        try m.d.check(m.d.api.cuMemsetD8Async(p.arena, 0, pool * elems * 2, s.handle), "cuMemsetD8Async");
+        try m.upload(s, p.table, std.mem.sliceAsBytes(ids));
+        var block: usize = 0;
+        for (m.sched.cache_kind[0..m.sched.caches], m.k, m.v) |kind, *kc, *vc| {
+            if (kind == .full) {
+                kc.* = p.arena + block * pages.tokens * c.kvDim() * 2;
+                vc.* = kc.* + pages.tokens * c.kvDim() * 2;
+                block += 2;
+            } else {
+                const bytes = m.slots * m.ring * c.kvDim() * 2;
+                kc.* = try m.ringZeros(s, bytes);
+                vc.* = try m.ringZeros(s, bytes);
+            }
+        }
+        m.paging = p;
+        m.dropGraphs();
+        try s.synchronize();
+    }
+
+    /// Slot `slot`'s pages are `ids` (arena page numbers, in position order from entry `from`): table and host copy.
+    pub fn mapPages(m: *Model, s: cuda.Stream, slot: usize, ids: []const u32, from: usize) !void {
+        const p = if (m.paging) |*x| x else return error.NotPaged;
+        if (slot >= m.slots or from + ids.len > p.per_slot) return error.BadChain;
+        const at = slot * p.per_slot + from;
+        @memcpy(p.ids[at..][0..ids.len], ids);
+        try m.upload(s, p.table + at * 4, std.mem.sliceAsBytes(ids));
+        p.caps[slot] = (from + ids.len) * pages.tokens;
+    }
+
+    /// Slot `slot` holds no pages (its table entries stay; no forward may reach them).
+    pub fn unmapPages(m: *Model, slot: usize) void {
+        if (m.paging) |*p| p.caps[slot] = 0;
     }
 
     /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
@@ -106,10 +202,13 @@ pub const Model = struct {
         const c = m.c;
         m.k = try m.gpa.alloc(u64, m.sched.caches);
         m.v = try m.gpa.alloc(u64, m.sched.caches);
+        @memset(m.k, 0);
+        @memset(m.v, 0);
         for (m.k, m.v, 0..) |*kc, *vc, i| {
+            if (m.paged and m.sched.cache_kind[i] == .full) continue;
             const bytes = m.slots * m.cacheLen(i) * c.kvDim() * 2;
-            kc.* = try m.zeros(s, bytes);
-            vc.* = try m.zeros(s, bytes);
+            kc.* = if (m.paged) try m.ringZeros(s, bytes) else try m.zeros(s, bytes);
+            vc.* = if (m.paged) try m.ringZeros(s, bytes) else try m.zeros(s, bytes);
         }
         for ([_]f64{ c.theta_sliding, c.theta_full }, &m.inv) |theta, *p| {
             var inv: [256]f32 = undefined; // vLLM's inv_freq in fp32: 1 / theta^(2j / D)
@@ -126,6 +225,9 @@ pub const Model = struct {
         for (&m.graphs) |*g| if (g.*) |*e| e.deinit();
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
+        for (m.rings.items) |*b| b.free();
+        m.rings.deinit(m.gpa);
+        if (m.paging) |p| m.gpa.free(p.ids);
         m.gpa.free(m.k);
         m.gpa.free(m.v);
     }
@@ -146,9 +248,14 @@ pub const Model = struct {
         try m.d.check(m.d.api.cuMemcpyDtoDAsync_v2(dst, src, bytes, s.handle), "cuMemcpyDtoDAsync");
     }
 
-    fn window(m: *const Model, full: bool) cuda.window_attention.Window {
+    /// A call's window; full caches of a paged model read through the table (a prompt's slot: its own row).
+    fn window(m: *const Model, full: bool, prompt_slot: ?usize) cuda.window_attention.Window {
         const c = m.c;
-        return .{ .h = c.heads, .hk = c.kv_heads, .d = c.head_dim, .win = if (full) 0 else c.window, .ring = if (full) m.context else m.ring, .scale = c.factors().attn };
+        var w: cuda.window_attention.Window = .{ .h = c.heads, .hk = c.kv_heads, .d = c.head_dim, .win = if (full) 0 else c.window, .ring = if (full) m.context else m.ring, .scale = c.factors().attn };
+        if (full) if (m.paging) |p| {
+            w.pg = .{ .table = p.table + (prompt_slot orelse 0) * p.per_slot * 4, .page_elems = p.page_elems, .tokens = pages.tokens, .stride = p.per_slot };
+        };
+        return w;
     }
 
     fn scratch(m: *Model, k: *const Kernels) !void {
@@ -164,7 +271,7 @@ pub const Model = struct {
                 part = @max(part, k.lane.partBytes(rows, q.nvfp4));
             },
         };
-        const win = @max(WindowAttention.scratchBytes(m.window(true), attend_rows), WindowAttention.scratchBytes(m.window(false), attend_rows));
+        const win = @max(WindowAttention.scratchBytes(m.window(true, null), attend_rows), WindowAttention.scratchBytes(m.window(false, null), attend_rows));
         m.s = .{
             .ids = try m.alloc(r * 4),
             .pos = try m.alloc(r * 4),
@@ -197,6 +304,7 @@ pub const Model = struct {
         var rows: usize = 0;
         for (chains) |ch| {
             if (ch.tokens.len == 0 or ch.slot >= m.slots or ch.p0 + ch.tokens.len > m.context) return error.BadChain;
+            if (m.paging) |p| if (ch.p0 + ch.tokens.len > p.caps[ch.slot]) return error.PastPages;
             if (!prompt and ch.tokens.len > window_rows) return error.WindowTooWide;
             rows += ch.tokens.len;
         }
@@ -295,10 +403,13 @@ pub const Model = struct {
         const src: cuda.qk_rows.Src = .{ .q = x.q, .q_ld = @intCast(c.qDim()), .q_hs = dh, .k = x.kk, .k_ld = @intCast(c.kvDim()), .k_hs = dh, .v = x.vv, .v_ld = @intCast(c.kvDim()), .v_hs = dh };
         const shape: cuda.qk_rows.Shape = .{ .l2 = true, .q_scale = a.qs, .inv = m.inv[@intFromBool(full)], .rot = c.head_dim, .eps = eps };
         const len = m.cacheLen(cache);
-        try k.qk.rowsFrom(s, src, .{ .h = c.heads, .hk = c.kv_heads, .dim = c.head_dim }, shape, x.pos, x.slot, .{ .q = x.qn, .k = x.kn, .v = x.vn, .kc = m.k[cache], .vc = m.v[cache], .len = len }, n);
-        const w = m.window(full);
+        const pg = full and m.paging != null; // written by `put` into the pages, not by the rows kernel
+        const out: cuda.qk_rows.Out = .{ .q = x.qn, .k = x.kn, .v = x.vn, .kc = if (pg) null else m.k[cache], .vc = if (pg) null else m.v[cache], .len = len };
+        try k.qk.rowsFrom(s, src, .{ .h = c.heads, .hk = c.kv_heads, .dim = c.head_dim }, shape, x.pos, x.slot, out, n);
+        const w = m.window(full, slot);
+        if (pg) try k.win.put(s, x.kn, x.vn, m.k[cache], m.v[cache], x.pos, x.slot, m.window(true, null), n); // the whole table
         if (prompt) {
-            const off = slot * len * c.kvDim() * 2;
+            const off = if (pg) 0 else slot * len * c.kvDim() * 2;
             try k.win.promptRows(s, x.qn, m.k[cache] + off, m.v[cache] + off, x.att, p0, n, w, null);
         } else {
             const qw = c.qDim() * 2;
