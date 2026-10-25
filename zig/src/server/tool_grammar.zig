@@ -5,6 +5,7 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
+const lfm2 = @import("tool_grammar_lfm2.zig");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -42,7 +43,7 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
         error.Refused => "",
     };
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
-    const text = try build(cx.a, s, tools, parallel);
+    const text = if (lfm2.isStyle(rendered, probe, key)) try lfm2.build(cx.a, tools, parallel) else try build(cx.a, s, tools, parallel);
     const field = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
     return srv.compiledStructure(cx, .structural_tag, text, field, thinking);
 }

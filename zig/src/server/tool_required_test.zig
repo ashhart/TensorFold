@@ -14,7 +14,7 @@ const a = std.testing.allocator;
 const specs = "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"now\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]";
 
 const Text = struct {
-    form: enum { xml, json, gemma, unknown } = .json,
+    form: enum { xml, json, gemma, lfm2, unknown } = .json,
     fn text(t: *Text) mt.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocab, .eos_ids = eos, .render = render, .template_source = source } };
     }
@@ -49,6 +49,7 @@ const Text = struct {
             .xml => "<tool_call><function=tfprobe_fn><parameter=tfprobe_k>v</parameter></function></tool_call>",
             .json => "<tool_call>{\"name\":\"tfprobe_fn\",\"arguments\":{\"tfprobe_k\":\"v\"}}</tool_call>",
             .gemma => "<|tool_call>call:tfprobe_fn{tfprobe_k:<|\"|>v<|\"|>}<tool_call|>",
+            .lfm2 => "<|tool_call_start|>[tfprobe_fn(tfprobe_k='v')]<|tool_call_end|>",
             .unknown => "prompt",
         })) };
     }
@@ -134,6 +135,32 @@ test "required tools: Gemma and unknown templates can constrain required calls o
         try srv.checkFeatures(&cx, try value(g, "{\"tool_call_required\":true}"), true, false, &.{1}, (try value(g, specs)).array, &request);
         try std.testing.expect(request.structure != null);
     }
+}
+
+test "required tools: an LFM2 template gets the Pythonic grammar, one call or several, and other forms do not" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    var stub: Stub = .{};
+    var compile: Compile = .{};
+    var compiler = compile.compiler();
+    for ([_]@FieldType(Text, "form"){ .json, .lfm2 }) |form| for ([_]bool{ false, true }) |single| {
+        var text: Text = .{ .form = form };
+        const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+        defer srv.deinit();
+        srv.info.structures = true;
+        srv.grammars = &compiler;
+        var cx: errors.Cx = .{ .a = g };
+        const fields = try value(g, if (single) "{\"tool_call_required\":true,\"tool_call_single\":true}" else "{\"tool_call_required\":true}");
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+        try srv.checkFeatures(&cx, fields, true, false, &.{1}, (try value(g, specs)).array, &request);
+        const structure = request.structure.?;
+        try std.testing.expectEqualStrings("structural_tag", @tagName(structure.kind));
+        const python = std.mem.indexOf(u8, structure.text, "<|tool_call_start|>") != null;
+        try std.testing.expectEqual(form == .lfm2, python);
+        try std.testing.expectEqual(form == .lfm2 and !single, std.mem.indexOf(u8, structure.text, "(\\\", \\\" call)*") != null);
+        if (form == .lfm2) try std.testing.expect(std.mem.indexOf(u8, structure.text, "q=\\\" (py_str)") != null);
+    };
 }
 
 fn body(cx: *errors.Cx, response: bool, choice: []const u8) !json.Value {
