@@ -10,6 +10,7 @@ const openai = @import("openai.zig");
 const pyrepr = @import("pyrepr.zig");
 const reply_text = @import("reply_text.zig");
 const drama_prompt = @import("drama_prompt.zig");
+const speech_sampling = @import("speech_sampling.zig");
 const speech_redraw = @import("speech_redraw.zig");
 const speech_register = @import("speech_register_log.zig");
 const drama_cfg = @import("drama_cfg.zig");
@@ -30,7 +31,7 @@ pub const max_input_chars = 4096;
 const served_fields = [_][]const u8{ "model", "input", "voice", "speaker", "response_format" };
 
 /// The rest of the speech protocol's fields: synthesis modifiers and references this route does not honor.
-const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "temperature", "top_p", "top_k", "repetition_penalty", "seed", "stage_params" };
+const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "repetition_penalty", "stage_params" };
 
 pub const Format = enum {
     wav,
@@ -44,7 +45,7 @@ pub const Format = enum {
     }
 };
 
-const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, seed: u64, format: Format, stream: bool, budget_s: ?f64 = null };
+const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, budget_s: ?f64 = null };
 
 /// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
 const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false, trip: bool = false, jump: ?f64 = null };
@@ -89,6 +90,8 @@ fn checkFields(cx: *Cx, body: Value) errors.Refused!void {
             if (value == .null or (value == .string and std.mem.eql(u8, value.string, "audio"))) continue;
             if (value == .string and std.mem.eql(u8, value.string, "sse")) return cx.refuse("stream_format sse is not supported by this model");
             return cx.refuse("stream_format must be one of: audio, sse");
+        } else if (speech_sampling.isField(key)) {
+            continue; // validated together before building the prompt
         } else if (listed(&modifier_fields, key)) {
             if (value != .null) return cx.fail(.request, "{s} is not supported by this model", .{key});
         } else return cx.fail(.request, "unknown speech request field: {s}", .{key});
@@ -107,6 +110,7 @@ fn responseFormat(cx: *Cx, value: []const u8) errors.Refused!Format {
 fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused!Plan {
     if (raw != .object) return cx.refuse("speech request body must be a JSON object");
     try checkFields(cx, raw);
+    const sampling = try speech_sampling.parse(cx, raw);
     const model = raw.strField("model") orelse return cx.fail(.request, "model is required: send {s}", .{srv.config.served_name});
     if (!listed(srv.config.model_ids, model))
         return cx.fail(.request, "model {s} is not served here: send {s}", .{ try pyrepr.repr(cx.a, .{ .string = model }), srv.config.served_name });
@@ -125,9 +129,9 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
             return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
         return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
     };
-    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .seed = api.seedFor(made.prompt, srv.config.seed_salt), .format = format, .stream = stream };
+    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream };
     const prompt = try promptOf(srv, cx, sp, input);
-    return .{ .input = input, .prompt = prompt, .seed = api.seedFor(prompt, srv.config.seed_salt), .format = format, .stream = stream };
+    return .{ .input = input, .prompt = prompt, .sampling = sampling, .format = format, .stream = stream };
 }
 
 /// The prompt ids of a valid UTF-8 input, refused when it cannot be spoken or is too long.
@@ -167,11 +171,11 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         .frames = frames,
         .pcm = pcm,
         .result = &result,
-        .seed = plan.seed,
+        .seed = plan.sampling.seedFor(plan.prompt, srv.config.seed_salt, 0),
         .max_frames = sp.max_frames,
-        .temperature = drama_prompt.temperature,
-        .top_p = drama_prompt.top_p,
-        .top_k = drama_prompt.top_k,
+        .temperature = plan.sampling.temperature,
+        .top_p = plan.sampling.top_p,
+        .top_k = plan.sampling.top_k,
         .stream = plan.stream,
         .reference_rows = plan.reference_rows,
         .unconditioned = guided.rows,
@@ -250,7 +254,7 @@ fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, p
         const preserved = if (held) |h| h.pcm.ptr else take.pcm.ptr;
         next.pcm = if (preserved == first.pcm.ptr) spare.* else first.pcm;
         next.result = &result;
-        next.seed = api.seedFor(next.prompt, srv.config.seed_salt +% @as(i64, @intCast(k)));
+        next.seed = plan.sampling.seedFor(next.prompt, srv.config.seed_salt, k);
         var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
         defer box.deinit();
         const engine_id = srv.next_id.fetchAdd(1, .monotonic);
@@ -540,7 +544,6 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": \"yes\"}", "stream must be a boolean" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream_format\": \"sse\"}", "stream_format sse is not supported by this model" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream_format\": \"mp3\"}", "stream_format must be one of: audio, sse" },
-        .{ "{\"model\": \"m\", \"input\": \"hi\", \"temperature\": 0.7}", "temperature is not supported by this model" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"ref_audio\": \"x.wav\"}", "ref_audio is not supported by this model" },
         .{ "{\"model\": \"m\", \"input\": 3}", "input must be a string" },
         .{ "{\"model\": null, \"input\": \"hi\"}", "model must be a string" },

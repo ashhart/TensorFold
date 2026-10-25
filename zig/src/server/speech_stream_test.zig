@@ -9,6 +9,7 @@ const Conn = @import("http_conn.zig").Conn;
 
 pub const frame = 2048;
 const gpa = std.testing.allocator;
+pub const Sampling = struct { temperature: f32, top_p: f32, top_k: u32 };
 
 /// Publishes steps of 0.5 / (take + 1), then finishes: inside submit (`inline_`), else on a thread that may `hold`.
 pub const Script = struct {
@@ -32,6 +33,7 @@ pub const Script = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     seeds: [4]u64 = undefined,
+    sampling: [4]Sampling = undefined,
     reference_rows: [4]u32 = undefined,
     takes: usize = 0,
     voices: []const @import("drama_voice.zig").Voice = &.{},
@@ -61,6 +63,7 @@ pub const Script = struct {
         }
         const take = e.takes;
         e.seeds[take] = request.seed;
+        e.sampling[take] = .{ .temperature = request.temperature, .top_p = request.top_p, .top_k = request.top_k };
         e.reference_rows[take] = request.reference_rows;
         e.takes += 1;
         if (e.inline_) return run(e, id, request, sink, take);
