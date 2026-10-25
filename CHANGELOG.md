@@ -4,6 +4,26 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- New family: Nemotron-Labs Dory 1.0 4B on CUDA (`dory`), served at 1 to 4 loops with kept prompt states, from ModelOpt W4A16 NVFP4 checkpoints (#1256-#1261). On a GB10 at 2 loops it decodes 44 tokens/s on one stream and 299 aggregate at eight, with exact repeats and resumed == fresh.
+
+- Qwen3.8-27B on CUDA: the streams beside the first take KV pages from the core pool (`TF_QWEN_KV_PAGES`), with flat batches keeping the contiguous tensor-core attention; tokens and speed are unchanged (#1170).
+
+- Lane host: prompt steps share wall time with decoding streams, and the Qwen CUDA prompt pass runs a cut at a time, so a long prompt no longer stalls the streams already decoding; short prompts still go in whole (#1188).
+
+- GLM-5.3-Flash on CUDA: rank 0's NCCL id goes over the ranks' own lines, so a /32 ring's followers bootstrap (#1178); the RoCE transport serves 2 to 16 ranks (#1209); a request waits in the queue when the shared context pool is momentarily full instead of failing (#1263).
+
+- Gemma 4 on CUDA: admission counts the vision workspace and the drafter, a failed start frees all its buffers, and a malformed DFlash config is refused instead of crashing (#1245).
+
+- `--prompt-precision int8` (opt-in): a prompt chunk with a non-finite input now falls back to bf16 as intended; in 1.1.4 the quantizer never raised its fallback flag.
+
+- LFM2 tool calls: arguments take the type the schema names, the JSON list form is parsed, each call streams as soon as it ends, and required or named calls work through a grammar (#1265).
+
+- Drama voice catalogs can carry a description, listed by `/v1/voices` (#1270); the docs explain why Drama 3 needs the silence guard, with a starting configuration (#1276).
+
+- The desktop app stops an agent run cleanly when a question passes its deadline.
+
+- The CUDA kernel contract passes on a GB10 again (all registered kernels pass gates 1-4, every planted control is caught, every launch has measured nvcc 13.0.88 resources on sm 80/86/89/120/121).
+
 - Flash Next on CUDA with NVFP4 checkpoints prefills 24-29% faster with the same tokens: NVFP4 experts on prompt tiles with the decode form's sums (#1143), no zero fills the one-rank ModelOpt pass reads back (#1147), the hyper-connection normalize over 256-column slices and the dense mix a warp a 32-column group (#1164), and half tiles for decode calls whose 64-column grid leaves SMs idle (#1171). On a GB10 with Qwen3.8 Flash Next FP4-Local, prefill at 16k goes from 1,357 to 1,748 tokens/s and decode gains 1-2%. Attention caches are readable through a page table and the streams beside the first take KV pages from the core pool (#1169, #1170).
 
 - GLM-5.3-Flash on Metal decodes faster with the same tokens by reading the weights once per decode window (#1130): on an M3 Ultra, +2.6% at one stream and +10.2%, +6.4% and +6.3% at two, four and eight.
