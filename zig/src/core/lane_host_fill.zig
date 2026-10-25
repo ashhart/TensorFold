@@ -87,10 +87,8 @@ pub const Share = struct {
 
 /// Prompts before the next round: none waiting is main's round; short ones go whole; then a long one's step when due.
 pub fn run(h: *LaneHost) void {
-    if (h.filling.items.len == 0) {
-        h.share.debt_ns = 0;
-        return;
-    }
+    if (h.filling.items.len == 0 or runnable(h) == 0) h.share.debt_ns = 0; // owed to streams that ended or paused: no one's
+    if (h.filling.items.len == 0) return;
     // short prompts back to back, as a whole pass at admission went: a burst of them waits on no decode round
     var burst: usize = 0; // a lane count of short prompts begun, then a round: replies ending with their prompt free lanes without end
     // picked among the short ones alone: an aged long prompt's step waits on its debt, not they on it
