@@ -155,6 +155,9 @@ output within float64's range over the spread its fp32 steps and tensor-core sum
 seven controls, each one planted fault).
 CUDA also checks Dory's nGPT rows: the L2 norm rows with and without their bf16 add, and the normalized lerp residual
 (`norms_l2.cuh`), each output within float64's range at its bf16 points (three controls, each dropping one point).
+CUDA also checks Dory's paged caches (`window_pages.cu`): `tf_wrows_put` places rows in a shuffled arena bit for bit, and the
+head dim 256 decode and prompt kernels read them through a page table, each output within float64's range (two controls:
+swapped stream tables, a stale page id).
 CUDA also checks Dory's attention inputs (`qk_l2.cuh`): RoPE first, each head's L2 norm, q times its scale vector, v as is, at
 head dim 256 and positions past 199,800 (two controls, each dropping one rounding point).
 CUDA also checks Dory's activation rows (`act_l2.cuh`): the scaled sigmoid output gate over all heads and the scaled SwiGLU,
