@@ -54,10 +54,24 @@ pub const records = [_]CudaRecord{
     .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8", .symbol = "tf_q35_attn_partial8", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
 };
 
-test "five-SM receipts qualify every CUDA lane while preserving later compiler selections" {
+test "five-SM receipts qualify measured CUDA lanes and keep awaiting launches failing closed" {
     const std = @import("std");
     const reg = @import("registry.zig");
+    const awaiting = std.StaticStringMap(void).initComptime(.{
+        .{ "tf_q35_attn_partial_legacy", {} },
+        .{ "tf_q35_attn_partial8_legacy", {} },
+        .{ "tf_q35_attn_partial_paged", {} },
+        .{ "tf_q35_attn_partial8_paged", {} },
+        .{ "tf_q35_attn_partial_contiguous", {} },
+        .{ "tf_q35_attn_partial8_contiguous", {} },
+        .{ "tf_q35_attn_partial", {} },
+        .{ "tf_q35_attn_partial8", {} },
+    });
     for (records) |r| {
+        if (awaiting.has(r.launch.symbol) and std.meta.eql(none, r.usage)) {
+            try std.testing.expectEqual(r.usage.len, try reg.checkCuda(std.testing.allocator, &.{r}, true));
+            continue;
+        }
         try std.testing.expectEqual(@as(usize, 0), try reg.checkCuda(std.testing.allocator, &.{r}, true));
         if (std.mem.eql(u8, r.launch.symbol, "tf_w4a8_quantize") or
             std.mem.eql(u8, r.launch.symbol, "tf_q35_attn_rows") or

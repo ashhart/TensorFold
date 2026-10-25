@@ -10,7 +10,8 @@ pub const window_costs = @import("cuda_window_costs.zig");
 pub const cost_adapter = @import("cuda_cost_adapter.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
-const vision_prompt = @import("cuda_vision_prompt.zig");
+const prefill = @import("cuda_prefill.zig");
+const Fill = prefill.Fill;
 const reuse = @import("cuda_reuse.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
 const pages_mod = @import("cuda_pages.zig");
@@ -240,35 +241,6 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
-/// Where a prompt pass from `at` cuts its chunk: max_rows rows on, or the request's next chunk start before that.
-fn nextCut(len: usize, chunks: []const u32, at: usize) usize {
-    var end: usize = @min(len, at + E.max_rows);
-    for (chunks) |boundary| if (boundary > at) {
-        end = @min(end, boundary);
-        break;
-    };
-    return end;
-}
-
-/// Whether a cold pass over `len` rows (from 0) cuts a chunk at `pos`.
-fn coldCut(len: usize, chunks: []const u32, pos: usize) bool {
-    var at: usize = 0;
-    while (at < pos and at < len) at = nextCut(len, chunks, at);
-    return at == pos;
-}
-
-test "a pass resumes only where a cold pass cuts: every max_rows rows from 0 or from the request's chunk starts" {
-    const m = E.max_rows;
-    const len = 10 * m;
-    const start = m + m / 2; // a request chunk start between the first two cuts
-    try std.testing.expect(coldCut(len, &.{}, m * 3));
-    try std.testing.expect(!coldCut(len, &.{}, m * 3 + 1));
-    try std.testing.expect(coldCut(len, &.{start}, start));
-    try std.testing.expect(coldCut(len, &.{start}, start + m));
-    try std.testing.expect(!coldCut(len, &.{start}, 2 * m)); // cut at the start instead, then max_rows on
-    try std.testing.expectEqual(@as(usize, start), nextCut(len, &.{start}, m));
-}
-
 fn release(p: *anyopaque) void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     l.deinit();
@@ -343,7 +315,7 @@ const Lanes = struct {
     }
 
     /// A cache for a new stream: a pooled one reset, a pool lane with its pages, else one more window.
-    fn take(self: *Lanes, prompt: usize, max_new: usize) !*E.Cache {
+    pub fn take(self: *Lanes, prompt: usize, max_new: usize) !*E.Cache {
         if (!self.paged_only) if (self.pool.pop()) |cache| {
             try cache.reset(self.e);
             return cache;
@@ -355,7 +327,7 @@ const Lanes = struct {
         return cache;
     }
 
-    fn give(self: *Lanes, cache: *E.Cache) void {
+    pub fn give(self: *Lanes, cache: *E.Cache) void {
         if (self.pages) |p| if (p.close(cache)) return;
         if (cache.owner != null) {
             cache.last = null;
@@ -390,121 +362,24 @@ const Lanes = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn cacheOf(self: *Lanes, stream: *lanes.Stream) !*E.Cache {
+    pub fn cacheOf(self: *Lanes, stream: *lanes.Stream) !*E.Cache {
         return self.caches.get(stream) orelse error.UnknownQwenStream;
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        const self = cast(ptr);
-        var f = try self.opening(stream);
-        defer f.deinit();
-        while (!try self.chunk(stream, &f)) {}
+        return prefill.run(cast(ptr), stream);
     }
 
-    /// One cut of the prompt pass a call (prefillFn's forwards, in order): the lane host runs rounds between them.
     fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream) !bool {
-        const self = cast(ptr);
-        const got = try self.fills.getOrPut(self.gpa, stream);
-        if (!got.found_existing) {
-            got.value_ptr.* = self.opening(stream) catch |err| {
-                self.fills.removeByPtr(got.key_ptr);
-                return err;
-            };
-        }
-        const f = self.fills.getPtr(stream).?;
-        const done = self.chunk(stream, f) catch |err| {
-            self.endFill(stream);
-            return err;
-        };
-        if (done) self.endFill(stream);
-        return done;
+        return prefill.step(cast(ptr), stream);
     }
 
-    /// The host cancels between iterations, while the last completed cut still owns its cache.
     fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        if (cast(ptr).fills.get(stream)) |f| stream.keepInterruptedPrefill(@intCast(f.at));
+        return prefill.cancel(cast(ptr), stream);
     }
 
     fn endFill(self: *Lanes, stream: *lanes.Stream) void {
-        if (self.fills.fetchRemove(stream)) |kv| {
-            var f = kv.value;
-            f.deinit();
-        }
-    }
-
-    /// A prompt pass under way: where its next cut starts, and an image prompt's encoded images.
-    const Fill = struct {
-        at: usize,
-        media: ?vision_prompt.Media,
-
-        fn deinit(f: *Fill) void {
-            if (f.media) |*m| m.deinit();
-        }
-    };
-
-    /// A prompt pass begins: its images encoded, a cache, a kept state restored where a cold pass cuts.
-    fn opening(self: *Lanes, stream: *lanes.Stream) !Fill {
-        const ids = stream.prompt();
-        if (ids.len == 0 or ids.len + stream.max_new > self.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
-        // an image prompt: its images through the tower first, then every chunk at its t, h, w positions
-        var media: ?vision_prompt.Media = null;
-        if (stream.images.len > 0) {
-            const v = self.vision orelse return error.QwenServedWithoutVision;
-            media = try vision_prompt.Media.init(self.gpa, v, ids, stream.images);
-        }
-        errdefer if (media) |*m| m.deinit();
-        const seen = try self.seenOf(stream.images);
-        self.seen.put(self.gpa, stream, seen) catch |err| {
-            self.gpa.free(seen);
-            return err;
-        };
-        errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
-        const cache = try self.take(ids.len, stream.max_new);
-        errdefer self.give(cache);
-        // the stream's cache is found by a save at a mark (cuda_reuse.zig) while its pass runs
-        try self.caches.put(self.gpa, stream, cache);
-        errdefer _ = self.caches.remove(stream);
-        // a kept state resumes only where a cold pass cuts a chunk, so the chunks after it keep a cold pass's bits
-        var at: usize = 0;
-        stream.cached = 0;
-        if (stream.reuse.saved) |saved| {
-            if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at)) {
-                if (reuse.restoreCache(self.e, cache, saved, seen)) {
-                    at = stream.reuse.at;
-                    stream.cached = stream.reuse.at;
-                } else |_| {
-                    try cache.reset(self.e);
-                    stream.reuse_failed = true;
-                }
-            } else stream.reuse_failed = true;
-        }
-        cache.untaught = stream.untaught;
-        stream.fill_at.store(@intCast(at), .monotonic);
-        return .{ .at = at, .media = media };
-    }
-
-    /// The pass's next cut; true once the prompt is in.
-    fn chunk(self: *Lanes, stream: *lanes.Stream, f: *Fill) !bool {
-        const ids = stream.prompt();
-        // cancel between cuts and retain the last complete prefix before releasing the cache (#1228)
-        if (stream.isCancelled()) {
-            stream.keepInterruptedPrefill(@intCast(f.at));
-            return error.Cancelled;
-        }
-        const cache = try self.cacheOf(stream);
-        var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
-        const end = nextCut(ids.len, stream.chunks, f.at);
-        try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
-        f.at = end;
-        stream.fill_at.store(@intCast(end), .monotonic);
-        // a mark the store asked for, where this pass cut anyway: the lane host copies the state here
-        if (end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
-            if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
-        }
-        if (end < ids.len) return false;
-        // the reply's rows rotate past the image prompt's positions (rope_delta)
-        if (f.media) |m| cache.delta = m.delta;
-        return true;
+        prefill.endFill(self, stream);
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -639,7 +514,7 @@ const Lanes = struct {
     }
 
     /// Each image's first placeholder row and identity: a kept state resumes only the same images.
-    fn seenOf(self: *Lanes, images: []const lanes.stream.Image) ![]reuse.Seen {
+    pub fn seenOf(self: *Lanes, images: []const lanes.stream.Image) ![]reuse.Seen {
         const seen = try self.gpa.alloc(reuse.Seen, images.len);
         for (seen, images) |*s, im| s.* = .{ .at = im.at, .id = im.hash };
         return seen;
