@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const xq = @import("xpu_qwen27");
 const lane = @import("xpu_lane.zig");
 const sage = xq.sage;
+const vl = @import("core").qwen_vl;
 const be = lanes.backend;
 const Allocator = std.mem.Allocator;
 
@@ -26,6 +27,7 @@ pub const Slots = struct {
     fed: [sage.MAX_SLOTS]u32 = @splat(1), // rows the last verify fed each slot
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
+    vision: ?*Vision = null, // --vision
 
     fn of(ptr: *anyopaque) *Slots {
         return @ptrCast(@alignCast(ptr));
@@ -135,14 +137,17 @@ pub const Slots = struct {
         errdefer b.owners[slot] = null;
         try r.use(slot);
         try r.reset();
+        const v: ?*Vision = if (s.images.len == 0) null else b.vision orelse return error.NoVision;
+        const layout = if (v) |x| try x.encode(r, s) else vl.rope.Layout{};
         var at: usize = 0;
         while (at < ids.len) {
             if (s.isCancelled()) return error.Cancelled;
             const n = @min(sage.CHUNK, ids.len - at);
             for (b.ids[0..n], ids[at..][0..n]) |*d, t| d.* = @intCast(t);
-            try r.prompt(b.ids[0..n]);
+            if (v) |x| try r.promptFeed(b.ids[0..n], x.feed(r, &layout, @intCast(at), @intCast(n))) else try r.prompt(b.ids[0..n]);
             at += n;
         }
+        r.shift[slot] = layout.shift;
         if (s.grammar != null) {
             const keep = b.first_rows[slot] orelse try b.gpa.alloc(f32, b.row.len);
             b.first_rows[slot] = keep;
@@ -250,6 +255,113 @@ pub const Slots = struct {
     }
 };
 
+/// --vision: the checkpoint's image tower, its processor, and the rows one prompt's images take.
+const Vision = struct {
+    io: std.Io,
+    c: vl.Config,
+    tower: *xq.vision.Tower,
+    rows: *anyopaque, // fp32 [image_tokens, hidden]: a prompt's image rows, image after image
+    image_tokens: u32,
+    per_image: u32, // tokens one image takes at most: the tower's scratch
+    markers: [3]u32, // vision_start, image_pad, vision_end: text that spells one stays text
+    spans: [vl.rope.max_images]struct { at: u32, n: u32, row: u32 } = undefined,
+    count: u32 = 0,
+    rope: [sage.CHUNK][3]i32 = undefined,
+    pieces: [vl.rope.max_images]sage.Rows = undefined,
+
+    /// The tower of the checkpoint in `dir` on the runner's card; null with `why` set when it has none it reads.
+    fn open(gpa: Allocator, io: std.Io, a: Allocator, r: *sage.Runner, dir: []const u8, o: api.VisionOpen, why: *[]const u8) !?*Vision {
+        const read = struct {
+            fn f(al: Allocator, i: std.Io, d: []const u8, name: []const u8) ?[]const u8 {
+                const path = std.fs.path.join(al, &.{ d, name }) catch return null;
+                return std.Io.Dir.cwd().readFileAlloc(i, path, al, .limited(16 << 20)) catch null;
+            }
+        }.f;
+        const config = read(a, io, dir, "config.json") orelse return error.NoConfig;
+        const c = (vl.Config.parse(a, config, read(a, io, dir, "preprocessor_config.json"), read(a, io, dir, "processor_config.json")) catch null) orelse {
+            why.* = "--vision: this checkpoint names no image tower the XPU engine reads (config.json vision_config)";
+            return null;
+        };
+        if (c.out_hidden != r.z.s.hidden or c.patch != xq.vision.patch or c.temporal != xq.vision.temporal or c.merge != xq.vision.merge or c.positions != xq.vision.grid_side * xq.vision.grid_side or !textRope(a, config)) {
+            why.* = "--vision: the image tower or the text's M-RoPE (interleaved 11, 11, 10) is not the Qwen3.5 one the XPU engine runs";
+            return null;
+        }
+        const per_image: u32 = @intCast(@min(@as(u64, o.image_tokens), c.max_pixels / (@as(u64, c.factor()) * c.factor())));
+        const prefix = if (r.ckpt.has("vision_tower.patch_embed.proj.weight")) "vision_tower." else "model.visual.";
+        const tower = xq.vision.Tower.load(&r.d, &r.ckpt, prefix, .{ .hidden = c.hidden, .heads = c.heads, .depth = c.depth, .intermediate = c.intermediate, .out_hidden = c.out_hidden }, per_image * c.merge * c.merge) catch |err| {
+            why.* = try std.fmt.allocPrint(a, "--vision: the XPU engine reads the tower in bf16 and could not load this one: {s}", .{@errorName(err)});
+            return null;
+        };
+        errdefer tower.deinit();
+        const v = try gpa.create(Vision);
+        v.* = .{ .io = io, .c = c, .tower = tower, .rows = try r.d.alloc_(@as(usize, o.image_tokens) * c.out_hidden * 4), .image_tokens = o.image_tokens, .per_image = per_image, .markers = .{ c.vision_start, c.image_token, c.vision_end } };
+        return v;
+    }
+
+    fn deinit(v: *Vision, gpa: Allocator) void {
+        v.tower.deinit();
+        gpa.destroy(v);
+    }
+
+    /// Info.vision's prepare: an image's bytes to the tower's patches (core/qwen_vl geometry), on the HTTP thread.
+    fn prepare(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+        const v: *Vision = @ptrCast(@alignCast(ctx));
+        const p = try vl.geometry.prepare(v.io, a, bytes, v.c, @min(max_tokens, v.per_image));
+        return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
+    }
+
+    fn offer(v: *Vision, o: api.VisionOpen) api.Vision {
+        // the template writes Qwen's vision_start and vision_end around the image token itself
+        return .{ .ctx = v, .prepare = prepare, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.image_tokens, .max_images = @min(o.max_images, vl.rope.max_images) };
+    }
+
+    /// `s`'s images through the tower into `rows`, and its prompt's M-RoPE layout.
+    fn encode(v: *Vision, r: *sage.Runner, s: *const lanes.Stream) !vl.rope.Layout {
+        const layout = try vl.rope.Layout.init(s.prompt(), s.images, .{ .start = v.c.vision_start, .image = v.c.image_token, .end = v.c.vision_end }, v.c.merge);
+        const D: usize = v.c.out_hidden;
+        var row: u32 = 0;
+        v.count = 0;
+        for (s.images) |img| {
+            if (row + img.tokens > v.image_tokens or img.tokens > v.per_image) return error.ImageTooLarge;
+            try v.tower.encode(&r.d, img.pixels, img.gh, img.gw, off(v.rows, row * D * 4));
+            v.spans[v.count] = .{ .at = img.at, .n = img.tokens, .row = row };
+            v.count += 1;
+            row += img.tokens;
+        }
+        return layout;
+    }
+
+    /// Prompt rows [at, at + n): their positions and the image rows among them.
+    fn feed(v: *Vision, r: *const sage.Runner, layout: *const vl.rope.Layout, at: u32, n: u32) sage.Feed {
+        const D: usize = r.z.s.hidden;
+        for (v.rope[0..n], 0..) |*p, i| p.* = layout.position(at + @as(u32, @intCast(i)));
+        var k: usize = 0;
+        for (v.spans[0..v.count]) |sp| {
+            const lo = @max(sp.at, at);
+            const hi = @min(sp.at + sp.n, at + n);
+            if (lo >= hi) continue;
+            v.pieces[k] = .{ .at = lo - at, .n = hi - lo, .src = off(v.rows, (sp.row + lo - sp.at) * D * 4) };
+            k += 1;
+        }
+        return .{ .rope = v.rope[0..n], .rows = v.pieces[0..k] };
+    }
+};
+
+/// The text's rotary is Qwen3.5's interleaved M-RoPE over sections 11, 11 and 10 (attn_prep's ROPE).
+fn textRope(a: Allocator, config_json: []const u8) bool {
+    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, config_json, .{}) catch return false;
+    if (doc != .object) return false;
+    const tc = doc.object.get("text_config");
+    const text = if (tc != null and tc.? == .object) tc.?.object else doc.object;
+    const rope = text.get("rope_parameters") orelse return false;
+    if (rope != .object) return false;
+    const inter = rope.object.get("mrope_interleaved") orelse return false;
+    const sec = rope.object.get("mrope_section") orelse return false;
+    if (inter != .bool or !inter.bool or sec != .array or sec.array.items.len != 3) return false;
+    for (sec.array.items, [_]i64{ 11, 11, 10 }) |x, want| if (x != .integer or x.integer != want) return false;
+    return true;
+}
+
 const Served = struct {
     gpa: Allocator,
     back: Slots,
@@ -265,6 +377,7 @@ const Served = struct {
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         const r = h.back.r;
+        if (h.back.vision) |v| v.deinit(h.gpa);
         h.back.deinit();
         r.deinit(); // the card's memory, after the engine has stopped
         h.gpa.free(h.startup);
@@ -289,6 +402,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .back = try Slots.init(gpa, r), .cfg = undefined, .wall = .{ .io = io }, .core = undefined, .host = undefined };
     errdefer h.back.deinit();
+    if (o.vision) |vo| h.back.vision = try Vision.open(gpa, io, a, r, o.dir, vo, problem) orelse return null;
+    errdefer if (h.back.vision) |v| v.deinit(gpa);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), 2, 0);
     errdefer h.cfg.deinit(gpa);
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
@@ -296,6 +411,11 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: Sage (qwen3_5_moe), {d} stream(s) of {d} tokens, {s} K/V, sampling on the host", .{ slots, context, if (r.cap > 0) "int8" else "bf16" });
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "sage-xpu", .lanes = slots, .context_window = context, .context_fitted = true, .startup = h.startup, .prefill_step = 0, .structures = true });
     h.host.explain = .{ .text = lane.explain };
+    if (h.back.vision) |v| h.host.info_.vision = v.offer(o.vision.?);
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Served.close, .ctx = h };
+}
+
+fn off(p: *anyopaque, bytes: usize) *anyopaque {
+    return @ptrFromInt(@intFromPtr(p) + bytes);
 }
