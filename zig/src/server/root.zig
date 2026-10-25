@@ -26,6 +26,7 @@ test {
     _ = @import("keepalive_test.zig");
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
+    _ = @import("name_priority_http_test.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");

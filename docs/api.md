@@ -205,6 +205,11 @@ request yields when a foreground request needs its lane or memory, then restarts
 suppressed.
 Session-title requests are also treated as background work.
 
+`--name-priority ID=background` gives one served id (`--name` or an `--alias`) a default priority: a request that
+asks for it and sends no `priority` of its own is treated as `priority: "background"`. The request's own `priority`
+field always wins over the default. This lets one server answer to several ids at their usual priority while a
+background-only client (a batch extractor, say) gets one id that always yields, without sending the field itself.
+
 The native CUDA build serves Nemotron, and its concurrent requests share each round. The rest of this paragraph
 describes the Python 0.6.6 engine's CUDA families.
 On CUDA, `--parallel auto` serves one request at a time. An explicit `--parallel N` above one shares rounds

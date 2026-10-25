@@ -47,6 +47,8 @@ pub const Config = struct {
     default_voice: []const u8 = "default",
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
+    /// Ids a request may name for background priority by default (--name-priority); each is in model_ids.
+    background_ids: []const []const u8 = &.{},
     default_max_tokens: i64 = 4096,
     enable_thinking: bool = true,
     reasoning_effort: ?[]const u8 = null,
@@ -95,6 +97,16 @@ pub const Config = struct {
     /// The process environment GET /v1/benchmark/manifest reads (rank count, revision, the hardware probe); null: none.
     environ: ?*const std.process.Environ.Map = null,
 };
+
+/// --name-priority: background by default when the id the request names is configured (openai.replyModel parity).
+pub fn namedBackground(config: Config, f: Value) bool {
+    var asked = config.served_name;
+    if (f.get("model")) |m| if (m == .string) for (config.model_ids) |known| {
+        if (std.mem.eql(u8, known, m.string)) asked = m.string;
+    };
+    for (config.background_ids) |id| if (std.mem.eql(u8, id, asked)) return true;
+    return false;
+}
 
 pub const Server = struct {
     gpa: Allocator,
