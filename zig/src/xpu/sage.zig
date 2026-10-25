@@ -25,6 +25,8 @@ pub const SPLIT = 32; // keys per attention split (decode.cl)
 pub const WINDOW = 16;
 /// Rows of one prompt chunk: norms, GEMMs and MoE take the whole chunk, the mixers WINDOW rows at a time.
 pub const CHUNK = 512;
+/// Streams one runner holds (a stepMulti row each): K/V caches, GDN and convolution states of their own.
+pub const MAX_SLOTS = 8;
 /// Query heads an attn_decode subgroup holds at Sage's shape (sage_config.sage_defines: Q27_QPG).
 const QPG = 4;
 
@@ -54,7 +56,12 @@ pub const Layer = struct {
     kn: ?*anyopaque = null,
     kc: ?*anyopaque = null, // bf16 [ctx, AKV, 256]
     vc: ?*anyopaque = null,
+    // every slot's: the fields above are the current slot's (Runner.use)
+    st: [MAX_SLOTS]SlotState = undefined,
 };
+
+/// One slot's state in one layer.
+pub const SlotState = struct { kc: ?*anyopaque = null, vc: ?*anyopaque = null, rec: ?*anyopaque = null, conv: [2]?*anyopaque = .{ null, null }, conv_cur: u1 = 0 };
 
 pub const Model = struct {
     embed_w: *anyopaque,
@@ -106,6 +113,8 @@ pub const Acts = struct {
     ids: *anyopaque,
     chain: *anyopaque,
     // MoE
+    mt: *anyopaque, // u64 [layers, WINDOW, 8]: stepMulti's per-row state table (the 27B's acts.mt)
+    mpos: *anyopaque, // i32 [WINDOW]: stepMulti's row positions
     mlog: *anyopaque, // fp32 [CHUNK, experts + 1]
     mids: *anyopaque, // u32 [CHUNK, top_k]
     mwts: *anyopaque, // fp32 [CHUNK, top_k]
@@ -149,6 +158,8 @@ pub const Acts = struct {
             .pi = try d.alloc_(w * 1024),
             .ids = try d.alloc_(w * 4),
             .chain = try d.upload(std.mem.sliceAsBytes(&fwd.chainTable())),
+            .mt = try d.alloc_(@as(usize, s.layers) * w * 8 * 8),
+            .mpos = try d.alloc_(w * 4),
             .mlog = try d.alloc_(c * (s.experts + 1) * 4),
             .mids = try d.alloc_(c * s.top_k * 4),
             .mwts = try d.alloc_(c * s.top_k * 4),
@@ -224,7 +235,7 @@ fn experts(d: *Dev, c: *const Checkpoint, p: []const u8, count: u32, shared: boo
 
 /// MLX affine 4/64 only in this form; the scales of the experts must be BF16 (sage_moe.cl reads bf16). Checked on the
 /// Sage MLX-4bit checkpoint by tools/xpu/sage_mlx_check.py: stacked switch_mlp experts, 8 bit router, conv1d [NCONV, 4, 1].
-pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32) !Model {
+pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32, slots: u32) !Model {
     const s = z.s;
     if (c.has("in_proj_qkv.qweight") or c.has("in_proj_qkv.trellis")) return error.OnlyMlxInThisForm;
     const stage = try d.alloc_(800 << 20);
@@ -260,8 +271,9 @@ pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32) !Model {
             if (l.mixer_in.n != z.att_in) return error.UnexpectedShape;
             l.qn = try loader.bf16Tensor(d, c, name("{s}self_attn.q_norm.weight", .{p}));
             l.kn = try loader.bf16Tensor(d, c, name("{s}self_attn.k_norm.weight", .{p}));
-            l.kc = try d.alloc_(kv_bytes);
-            l.vc = try d.alloc_(kv_bytes);
+            for (l.st[0..slots]) |*st| st.* = .{ .kc = try d.alloc_(kv_bytes), .vc = try d.alloc_(kv_bytes) };
+            l.kc = l.st[0].kc;
+            l.vc = l.st[0].vc;
         } else {
             l.mixer_in = try loader.projection(d, c, name("{s}linear_attn.", .{p}), &.{ "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b" }, true, false, stage);
             l.mixer_out = try loader.projection(d, c, name("{s}linear_attn.", .{p}), &.{"out_proj"}, false, false, stage);
@@ -270,8 +282,12 @@ pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32) !Model {
             l.alog = try loader.bf16Tensor(d, c, name("{s}linear_attn.A_log", .{p}));
             l.dt = try loader.bf16Tensor(d, c, name("{s}linear_attn.dt_bias", .{p}));
             l.gnorm = try loader.bf16Tensor(d, c, name("{s}linear_attn.norm.weight", .{p}));
-            l.rec = try d.alloc_(@as(usize, s.gdn_v_heads) * 128 * 128 * 4);
-            for (&l.conv) |*cv| cv.* = try d.alloc_(3 * @as(usize, z.nconv) * 2);
+            for (l.st[0..slots]) |*st| {
+                st.* = .{ .rec = try d.alloc_(@as(usize, s.gdn_v_heads) * 128 * 128 * 4) };
+                for (&st.conv) |*cv| cv.* = try d.alloc_(3 * @as(usize, z.nconv) * 2);
+            }
+            l.rec = l.st[0].rec;
+            l.conv = l.st[0].conv;
         }
         if (i % 8 == 7) std.debug.print("  layers loaded: {d}/{d}\n", .{ i + 1, s.layers });
     }
@@ -293,15 +309,22 @@ pub const Runner = struct {
     ctx: u32,
     pos: u32 = 0,
     last: i32 = -1, // the greedy token after the last fed row
+    slots: u32 = 1,
+    cur: u32 = 0, // the slot pos, last and the layers' current fields are
+    spos: [MAX_SLOTS]u32 = @splat(0),
+    slast: [MAX_SLOTS]i32 = @splat(-1),
+    mt_host: []u64 = &.{},
 
-    pub fn init(dir: []const u8, ctx: u32) !*Runner {
+    /// `slots` streams (1 to MAX_SLOTS) of `ctx` positions each.
+    pub fn init(dir: []const u8, ctx: u32, slots: u32) !*Runner {
+        if (slots == 0 or slots > MAX_SLOTS) return error.BadSlots;
         const z = Sizes.of(try readShape(dir));
         var ckpt: Checkpoint = .{};
         errdefer ckpt.deinit();
         try addShards(&ckpt, dir);
         const r = try alloc.create(Runner);
         errdefer alloc.destroy(r);
-        r.* = .{ .d = .{ .g = try ze.Gpu.open(0xe223), .list = undefined, .k = undefined }, .mk = undefined, .z = z, .model = undefined, .acts = undefined, .ckpt = ckpt, .ctx = ctx };
+        r.* = .{ .d = .{ .g = try ze.Gpu.open(0xe223), .list = undefined, .k = undefined }, .mk = undefined, .z = z, .model = undefined, .acts = undefined, .ckpt = ckpt, .ctx = ctx, .slots = slots };
         const d = &r.d;
         errdefer d.g.close();
         d.list = try d.g.immediate(0, 0);
@@ -312,10 +335,15 @@ pub const Runner = struct {
             const base = @typeInfo(@TypeOf(d.k)).@"struct".field_names.len;
             inline for (@typeInfo(MoeKernels).@"struct".field_names, 0..) |n, i| q.prof.names[base + i] = .{ .k = @field(r.mk, n), .name = "moe_" ++ n };
         }
-        r.model = try load(d, &r.ckpt, z, ctx);
+        r.model = try load(d, &r.ckpt, z, ctx, slots);
+        r.mt_host = try alloc.alloc(u64, z.s.layers * WINDOW * 8);
         q.prof.on = std.c.getenv("XPU_PROFILE") != null; // not during the load
         r.acts = try Acts.init(d, z, ctx);
-        try r.reset();
+        for (0..slots) |i| {
+            try r.use(@intCast(i));
+            try r.reset();
+        }
+        try r.use(0);
         return r;
     }
 
@@ -323,7 +351,124 @@ pub const Runner = struct {
         r.d.deinit();
         r.ckpt.deinit();
         alloc.free(r.model.layers);
+        alloc.free(r.mt_host);
         alloc.destroy(r);
+    }
+
+    /// Makes `slot` current: prompt, step, reset and logits act on it.
+    pub fn use(r: *Runner, slot: u32) !void {
+        if (slot >= r.slots) return error.BadSlot;
+        r.spos[r.cur] = r.pos;
+        r.slast[r.cur] = r.last;
+        for (r.model.layers) |*l| {
+            l.st[r.cur].conv_cur = l.conv_cur;
+            const st = l.st[slot];
+            if (l.attn) {
+                l.kc = st.kc;
+                l.vc = st.vc;
+            } else {
+                l.rec = st.rec;
+                l.conv = st.conv;
+                l.conv_cur = st.conv_cur;
+            }
+        }
+        r.cur = slot;
+        r.pos = r.spos[slot];
+        r.last = r.slast[slot];
+    }
+
+    /// One decode token for each slot in `slots` (distinct, at most WINDOW), fed `toks`: one forward of a row a slot.
+    /// Each slot's greedy next token goes to `out`; logits row i (rowLogits) is slot i's.
+    pub fn stepMulti(r: *Runner, slots: []const u32, toks: []const i32, out: []i32) !void {
+        const T: u32 = @intCast(slots.len);
+        if (T == 0 or T > WINDOW or toks.len != T or out.len != T) return error.BadWindow;
+        try r.use(r.cur); // store the current slot's fields
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const z = r.z;
+        const s = z.s;
+        var pos: [WINDOW]i32 = undefined;
+        var max_pos: u32 = 0;
+        for (slots, 0..) |slot, t| {
+            if (slot >= r.slots) return error.BadSlot;
+            for (slots[0..t]) |o| if (o == slot) return error.SlotTwice;
+            if (r.spos[slot] + 1 > r.ctx) return error.ContextFull;
+            pos[t] = @intCast(r.spos[slot]);
+            max_pos = @max(max_pos, r.spos[slot]);
+        }
+        for (m.layers, 0..) |*l, i| for (slots, 0..) |slot, t| {
+            const e = r.mt_host[(i * WINDOW + t) * 8 ..][0..8];
+            e.* = @splat(0);
+            e[6] = t;
+            e[7] = 1;
+            const st = l.st[slot];
+            if (l.attn) {
+                e[0] = @intFromPtr(st.kc.?);
+                e[1] = @intFromPtr(st.vc.?);
+            } else {
+                e[2] = @intFromPtr(st.conv[st.conv_cur].?);
+                e[3] = @intFromPtr(st.conv[1 - st.conv_cur].?);
+                e[4] = @intFromPtr(st.rec.?);
+                e[5] = @intFromPtr(st.rec.?);
+            }
+        };
+        const D: i32 = @intCast(s.hidden);
+        const gs: i32 = 64;
+        const t32: i32 = @intCast(T);
+        const nul: ?*anyopaque = null;
+        const zero: i32 = 0;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mt, r.mt_host.ptr, r.mt_host.len * 8, null, 0, null));
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.mpos, &pos, T * 4, null, 0, null));
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, toks.ptr, T * 4, null, 0, null));
+        errdefer d.settle();
+        try d.launch(d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
+        const ns: u32 = (max_pos + 1 + SPLIT - 1) / SPLIT;
+        for (m.layers, 0..) |*l, i| {
+            const mt = off(a.mt, i * WINDOW * 8 * 8);
+            try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
+            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
+            if (l.attn) {
+                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, zero, EPS, nul, mt, a.mpos, zero, zero });
+                try d.launch(d.k.attn_decode, .{ .x = ns, .y = s.kv_heads * (s.q_heads / s.kv_heads / QPG), .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, zero, @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), nul, mt, a.mpos, zero });
+                try d.launch(d.k.attn_merge, .{ .x = s.q_heads, .y = T }, .{ a.pm, a.pl, a.po, a.y, zero, @as(i32, @intCast(ns)), a.chain, a.mpos });
+                try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
+            } else {
+                try d.launch(d.k.gdn_pre, .{ .x = T, .y = z.nconv / 256 }, .{ a.p, l.conv[0].?, l.conv[1].?, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32, nul, mt });
+                try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = T }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, t32, nul, nul, nul, mt });
+                try d.launch(d.k.gated_norm, .{ .x = T }, .{ a.y, a.p, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs, zero, nul, nul, zero });
+            }
+            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
+            try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), gs, nul, nul, zero, zero });
+            try r.moe(l, T);
+        }
+        const hgs: i32 = @intCast(m.head.gs);
+        try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, m.norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), hgs, nul, nul, zero, zero });
+        try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, m.head, a.logits, T);
+        try d.launch(d.k.argmax_part, .{ .x = 256, .y = T }, .{ a.logits, @as(i32, @intCast(s.vocab)), a.pv, a.pi });
+        try d.launch(d.k.argmax, .{ .x = T }, .{ a.pv, a.pi, a.tok });
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, out.ptr, a.tok, T * 4, null, 0, null));
+        try d.sync();
+        for (m.layers) |*l| if (!l.attn) for (slots) |slot| {
+            l.st[slot].conv_cur = 1 - l.st[slot].conv_cur;
+        };
+        for (slots, out) |slot, o| {
+            r.spos[slot] += 1;
+            r.slast[slot] = o;
+        }
+        // the current slot's fields again (its conv_cur and position may have moved)
+        for (m.layers) |*l| if (!l.attn) {
+            l.conv_cur = l.st[r.cur].conv_cur;
+        };
+        r.pos = r.spos[r.cur];
+        r.last = r.slast[r.cur];
+    }
+
+    /// The fp16 logits of row `row` of the last stepMulti.
+    pub fn rowLogits(r: *Runner, row: u32, out: []f16) !void {
+        if (out.len != r.z.s.vocab) return error.BadLength;
+        try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, out.ptr, off(r.acts.logits, @as(usize, row) * out.len * 2), out.len * 2, null, 0, null));
+        try r.d.sync();
     }
 
     /// A fresh sequence: zero GDN and convolution states, position 0 (the K/V rows are overwritten as they are fed).

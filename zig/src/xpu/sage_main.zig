@@ -160,8 +160,9 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     const ctx: u32 = if (std.c.getenv("XPU_CTX")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 4096;
+    const slots: u32 = if (std.c.getenv("XPU_SLOTS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 1;
     if (std.mem.eql(u8, argv[2], "--loop")) {
-        const r = try sage.Runner.init(argv[1], ctx);
+        const r = try sage.Runner.init(argv[1], ctx, slots);
         defer r.deinit();
         return loop(r);
     }
@@ -175,9 +176,10 @@ pub fn main(init: std.process.Init) !void {
     var it = std.mem.tokenizeAny(u8, text[0..size], " \n,[]");
     while (it.next()) |w| try ids.append(alloc, try std.fmt.parseInt(i32, w, 10));
     const t_load = now();
-    const r = try sage.Runner.init(argv[1], ctx);
+    const r = try sage.Runner.init(argv[1], ctx, slots);
     defer r.deinit();
     std.debug.print("loaded in {d:.1} s\n", .{now() - t_load});
+    if (slots > 1) return multiCheck(r, ids.items, steps);
     const t0 = now();
     try r.prompt(ids.items);
     const t1 = now();
@@ -195,4 +197,45 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("tokens:", .{});
     for (out.items) |t| std.debug.print(" {d}", .{t});
     std.debug.print("\n", .{});
+}
+
+/// XPU_SLOTS > 1: slot i takes the prompt less its last 7 i tokens; `steps` stepMulti rounds over all slots, timed,
+/// then each slot again alone (Runner.step) on slot 0, and whether its tokens match.
+fn multiCheck(r: *sage.Runner, ids: []const i32, steps: usize) !void {
+    const n = r.slots;
+    var slots: [sage.MAX_SLOTS]u32 = undefined;
+    var toks: [sage.MAX_SLOTS]i32 = undefined;
+    const got = try alloc.alloc(i32, n * steps);
+    defer alloc.free(got);
+    for (0..n) |i| {
+        slots[i] = @intCast(i);
+        try r.use(@intCast(i));
+        try r.reset();
+        try r.prompt(ids[0 .. ids.len - 7 * i]);
+        toks[i] = r.last;
+        got[i * steps] = r.last;
+    }
+    @import("dev.zig").profReport("prompts");
+    const t0 = now();
+    for (1..steps) |k| {
+        try r.stepMulti(slots[0..n], toks[0..n], toks[0..n]);
+        for (0..n) |i| got[i * steps + k] = toks[i];
+    }
+    const dt = now() - t0;
+    @import("dev.zig").profReport("decode");
+    std.debug.print("multi: {d} slots, {d} steps in {d:.3} s ({d:.1} tok/s a slot, {d:.1} aggregate)\n", .{ n, steps - 1, dt, @as(f64, @floatFromInt(steps - 1)) / dt, @as(f64, @floatFromInt(n * (steps - 1))) / dt });
+    try r.use(0);
+    for (0..n) |i| {
+        try r.reset();
+        try r.prompt(ids[0 .. ids.len - 7 * i]);
+        var same: usize = 0;
+        var first_diff: usize = steps;
+        for (0..steps) |k| {
+            if (k > 0) try r.step(r.last);
+            if (r.last == got[i * steps + k]) same += 1 else if (first_diff == steps) {
+                first_diff = k;
+            }
+        }
+        std.debug.print("slot {d}: {d}/{d} tokens as alone, first difference at {d}\n", .{ i, same, steps, first_diff });
+    }
 }
