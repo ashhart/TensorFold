@@ -67,6 +67,7 @@ pub const Config = struct {
     seed_salt: i64 = 0,
     silence_mid: bool = false,
     silence_guard: bool = false,
+    cfg: ?@import("drama_cfg.zig").Options = null,
     /// --prompt-seed keeps historical prompt-keyed sampling when a request omits its seed.
     prompt_seed: bool = false,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.

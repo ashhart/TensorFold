@@ -25,6 +25,16 @@ pub const top_k: u32 = 30;
 /// The segments one prompt is encoded from, in order.
 pub const segment_count = 7;
 
+/// One frame row a prompt token, the token in the text column.
+pub fn rows(a: Allocator, prompt: []const u32) error{ OutOfMemory, InvalidToken }![]const [11]i32 {
+    const frames = try a.alloc([11]i32, prompt.len);
+    for (frames, prompt) |*row, token| {
+        row.* = @splat(0);
+        row[0] = std.math.cast(i32, token) orelse return error.InvalidToken;
+    }
+    return frames;
+}
+
 /// The Unicode White_Space property (``UNICODE_WHITE_SPACE``); U+001C..U+001F are not in it.
 pub fn isWhiteSpace(cp: u21) bool {
     return switch (cp) {

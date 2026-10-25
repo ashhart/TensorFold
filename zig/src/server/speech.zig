@@ -12,6 +12,7 @@ const reply_text = @import("reply_text.zig");
 const drama_prompt = @import("drama_prompt.zig");
 const speech_redraw = @import("speech_redraw.zig");
 const speech_register = @import("speech_register_log.zig");
+const drama_cfg = @import("drama_cfg.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
 const clock = @import("clock.zig");
@@ -62,6 +63,8 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     var metadata: Metadata = .{ .enabled = srv.config.redraw.count() > 0, .register_on = srv.config.redraw.register.on() };
     const raw = http_body.readJson(c, &cx) catch |e| return refuse(c, &cx, id, metadata, e);
     var plan = prepare(srv, &cx, sp, raw) catch |e| return refuse(c, &cx, id, metadata, e);
+    metadata.cfg_gamma = if (srv.config.cfg) |options| drama_cfg.gamma(options, c.header("X-Cfg-Gamma")) orelse
+        return fail(c, &cx, id, metadata, .request, "X-Cfg-Gamma must be a number from 1 (unguided) to 5") else null;
     // only chunked framing tells a client that a stream which ends early is incomplete
     if (plan.stream and !std.mem.eql(u8, c.version, "HTTP/1.1")) return fail(c, &cx, id, metadata, .request, "stream=true requires HTTP/1.1");
     if (srv.config.redraw.count() > 0 or srv.config.redraw.register.on())
@@ -139,16 +142,6 @@ fn promptOf(srv: *Server, cx: *Cx, sp: api.SpeechInfo, input: []const u8) errors
     return prompt;
 }
 
-/// One frame row a prompt token, the token in the text column.
-fn rows(a: Allocator, prompt: []const u32) error{ OutOfMemory, InvalidToken }![]const [11]i32 {
-    const frames = try a.alloc([11]i32, prompt.len);
-    for (frames, prompt) |*row, token| {
-        row.* = @splat(0);
-        row[0] = std.math.cast(i32, token) orelse return error.InvalidToken;
-    }
-    return frames;
-}
-
 /// One synthesis: submit, then send the whole audio after the finished event, or stream it as the engine publishes it.
 fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, metadata: *Metadata) void {
     var held = srv.speech_inflight.load(.acquire);
@@ -163,10 +156,12 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     const pcm = srv.gpa.alloc(f32, pcm_len) catch return fail(c, cx, id, metadata.*, .server, "out of memory");
     defer srv.gpa.free(pcm);
     var result: api.SpeechResult = .{};
-    const frames = plan.frames orelse rows(cx.a, plan.prompt) catch |e| return switch (e) {
+    const frames = plan.frames orelse drama_prompt.rows(cx.a, plan.prompt) catch |e| return switch (e) {
         error.OutOfMemory => fail(c, cx, id, metadata.*, .server, "out of memory"),
         error.InvalidToken => fail(c, cx, id, metadata.*, .request, "invalid speech token"),
     };
+    const guided = drama_cfg.guide(cx.a, srv.text, srv.config.cfg, metadata.cfg_gamma orelse 1, plan.input, plan.refs.len > 0) catch
+        return fail(c, cx, id, metadata.*, .server, "the tokenizer cannot encode the unconditional prompt");
     const request: api.SpeechRequest = .{
         .prompt = plan.prompt,
         .frames = frames,
@@ -179,6 +174,8 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         .top_k = drama_prompt.top_k,
         .stream = plan.stream,
         .reference_rows = plan.reference_rows,
+        .unconditioned = guided.rows,
+        .cfg_gamma = guided.gamma,
     };
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
@@ -226,8 +223,12 @@ fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, p
                         next.reference_rows = voice.reference_rows;
                     } else {
                         next.prompt = promptOf(srv, cx, sp, input) catch |e| return unused(id, k, fallback, if (e == error.OutOfMemory) "out of memory" else cx.message);
-                        next.frames = rows(cx.a, next.prompt) catch |e| return unused(id, k, fallback, @errorName(e));
+                        next.frames = drama_prompt.rows(cx.a, next.prompt) catch |e| return unused(id, k, fallback, @errorName(e));
                     }
+                    const guided = drama_cfg.guide(cx.a, srv.text, srv.config.cfg, metadata.cfg_gamma orelse 1, input, plan.refs.len > 0) catch
+                        return unused(id, k, fallback, "the tokenizer cannot encode the unconditional prompt");
+                    next.unconditioned = guided.rows;
+                    next.cfg_gamma = guided.gamma;
                 }
             };
         } else {

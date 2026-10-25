@@ -12,7 +12,7 @@ const rows = contract.rows;
 /// A drama3 source with d3_common.h inlined, by the file its gate 5 label names ("drama3 <file> <function>").
 pub fn source(a: std.mem.Allocator, label: []const u8) ![]u8 {
     const d = sources.drama3;
-    const files = .{ .{ "dense", d.dense }, .{ "gdn", d.gdn }, .{ "attn", d.attn }, .{ "moe", d.moe }, .{ "sample", d.sample }, .{ "codec", d.codec } };
+    const files = .{ .{ "dense", d.dense }, .{ "gdn", d.gdn }, .{ "attn", d.attn }, .{ "moe", d.moe }, .{ "nvfp4", d.nvfp4 }, .{ "guidance", d.guidance }, .{ "sample", d.sample }, .{ "codec", d.codec } };
     var it = std.mem.tokenizeScalar(u8, label, ' ');
     _ = it.next();
     const file = it.next() orelse return error.UnknownLaunch;

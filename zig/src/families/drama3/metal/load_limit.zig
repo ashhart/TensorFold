@@ -60,6 +60,11 @@ pub fn cacheBytes(c: cfg.Config, context: u32) u64 {
 
 /// The bytes a load needs: the checkpoint's tensors (read in place, the bf16 ones copied too) and the caches.
 pub fn planBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, context: u32) !u64 {
+    return planBytesStates(gpa, io, dir, context, 1);
+}
+
+pub fn planBytesStates(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, context: u32, states: u32) !u64 {
+    if (states == 0) return error.BadStateCount;
     const c = try cfg.Config.load(gpa, io, dir);
     var sh = try shards.Shards.open(gpa, io, dir);
     defer sh.close(io);
@@ -67,9 +72,9 @@ pub fn planBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, context: u
     for (sh.files) |f| for (f.names.values()) |e| {
         const bytes: u64 = e.end - e.begin;
         resident += bytes;
-        if (e.dtype == .bf16) resident += bytes; // copied to the device beside the mapped pages
+        if (e.dtype == .bf16) resident += bytes;
     };
-    return resident + cacheBytes(c, context);
+    return resident + cacheBytes(c, context) * states;
 }
 
 /// A plan past the limit is refused before a weight is read.
@@ -79,10 +84,15 @@ pub fn admitUnder(plan: u64, limit: Limit) error{OverMemoryLimit}!void {
 
 /// This Mac's ceiling and the load's plan: a load that does not fit is refused before a weight is read.
 pub fn admit(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, context: u32) !void {
+    return admitStates(gpa, io, dir, context, 1);
+}
+
+/// Independent guidance/serving states share weights, but each owns its caches and row scratch.
+pub fn admitStates(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, context: u32, states: u32) !void {
     const device = try mtl.Device.init();
     defer device.deinit();
     const limit = try loadLimit(device);
-    const plan = try planBytes(gpa, io, dir, context);
+    const plan = try planBytesStates(gpa, io, dir, context, states);
     if (plan > limit.bytes) {
         std.log.err("drama3: {d:.1} GB of weights and caches pass this Mac's {d:.1} GB load limit ({s}); free memory, or set DRAMA_LOAD_LIMIT_GB (past 70% of RAM a load risks a watchdog panic)", .{ toGb(plan), toGb(limit.bytes), limit.source() });
         return error.OverMemoryLimit;

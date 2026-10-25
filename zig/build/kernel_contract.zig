@@ -36,6 +36,14 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     }) }));
     b.step("test-delta-slots-contract-host", "FP64 DeltaNet and slot corruption controls without shaders").dependOn(&delta.step);
     step.dependOn(&delta.step);
+    const nvfp4 = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/drama3_nvfp4_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = module(b, b.graph.host, .debug) }},
+    }) }));
+    b.step("test-drama-nvfp4-reference-host", "NVFP4 scalar reference and reduced-accumulator discrimination").dependOn(&nvfp4.step);
+    step.dependOn(&nvfp4.step);
 }
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
