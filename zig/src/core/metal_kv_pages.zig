@@ -20,6 +20,7 @@ pub const Arena = struct {
     buf: ?mtl.Buffer, // null: no pages, or a host test without a device
     pages: usize,
     page_bytes: u64,
+    owned: bool = true, // false: the family's buffer (Pages.initIn), which it releases
 
     /// `pages` pages of `page_bytes` in one buffer; ArenaTooLarge past the device's longest buffer.
     pub fn init(device: ?mtl.Device, pages: usize, page_bytes: u64, options: usize) !Arena {
@@ -31,7 +32,7 @@ pub const Arena = struct {
     }
 
     pub fn deinit(a: *Arena) void {
-        if (a.buf) |b| b.deinit();
+        if (a.owned) if (a.buf) |b| b.deinit();
         a.* = undefined;
     }
 
@@ -47,6 +48,7 @@ pub const Tables = struct {
     host: []u32,
     at: []At,
     most: usize,
+    owned: bool = true, // false: the family's buffer (Pages.initIn), which it releases
 
     /// A stream's table, the context kv_pool.Table writes through.
     const At = struct { entries: []u32 };
@@ -57,14 +59,19 @@ pub const Tables = struct {
         errdefer if (buf) |b| b.deinit();
         const host: []u32 = if (buf) |b| b.slice(u32, n) else try gpa.alloc(u32, n);
         errdefer if (buf == null) gpa.free(host);
+        return on(gpa, buf, host, lanes, most, true);
+    }
+
+    /// The tables over `host` (`buf`'s contents, or host memory when it is null), zeroed.
+    fn on(gpa: Allocator, buf: ?mtl.Buffer, host: []u32, lanes: usize, most: usize, owned: bool) !Tables {
         @memset(host, 0);
         const at = try gpa.alloc(At, lanes);
         for (at, 0..) |*a, i| a.* = .{ .entries = host[i * most ..][0..most] };
-        return .{ .buf = buf, .host = host, .at = at, .most = most };
+        return .{ .buf = buf, .host = host, .at = at, .most = most, .owned = owned };
     }
 
     pub fn deinit(t: *Tables, gpa: Allocator) void {
-        if (t.buf) |b| b.deinit() else gpa.free(t.host);
+        if (!t.owned) {} else if (t.buf) |b| b.deinit() else gpa.free(t.host);
         gpa.free(t.at);
         t.* = undefined;
     }
@@ -119,6 +126,30 @@ pub const Pages = struct {
         const leases = try gpa.alloc(kv.Lease, lanes);
         @memset(leases, .{});
         p.* = .{ .gpa = gpa, .layout = l, .pool = pool, .arena = arena, .tables = tables, .leases = leases };
+        return p;
+    }
+
+    /// The bytes initIn's two buffers take: the arena's pages and every lane's table.
+    pub fn bytes(l: kv.Layout, lanes: usize, pages: usize, most_tokens: u64) struct { arena: u64, tables: u64 } {
+        return .{ .arena = pages * l.pageBytes(), .tables = @max(lanes * l.pages(most_tokens), 1) * 4 };
+    }
+
+    /// As init, over a family's own buffers (sized by `bytes`, in its residency set): it keeps and releases them.
+    pub fn initIn(gpa: Allocator, l: kv.Layout, lanes: usize, pages: usize, most_tokens: u64, arena: ?mtl.Buffer, tables: mtl.Buffer) !*Pages {
+        if (l.page_tokens != page_tokens) return error.PageTokens;
+        const sized = bytes(l, lanes, pages, most_tokens);
+        if (pages > 0 and (arena == null or arena.?.length() < sized.arena)) return error.ArenaTooSmall;
+        if (tables.length() < sized.tables) return error.TablesTooSmall;
+        const p = try gpa.create(Pages);
+        errdefer gpa.destroy(p);
+        var pool = try kv.Pool.init(gpa, pages, l.pageBytes());
+        errdefer pool.deinit();
+        const most = l.pages(most_tokens);
+        var t = try Tables.on(gpa, tables, tables.slice(u32, lanes * most), lanes, most, false);
+        errdefer t.deinit(gpa);
+        const leases = try gpa.alloc(kv.Lease, lanes);
+        @memset(leases, .{});
+        p.* = .{ .gpa = gpa, .layout = l, .pool = pool, .arena = .{ .buf = arena, .pages = pages, .page_bytes = l.pageBytes(), .owned = false }, .tables = t, .leases = leases };
         return p;
     }
 
