@@ -55,6 +55,8 @@ pub const Runner = struct {
     rope: [attn.planning.max_streams]mrope.Layout = @splat(.{}),
     /// A prompt pass's image rows, while it runs.
     images: ?image_rows.Images = null,
+    /// A kept state's blit still reading a slot, by slot: the slot's next write waits for it (settleSlot).
+    reading: [attn.planning.max_streams]?mtl.CommandBuffer = @splat(null),
 
     pub fn init(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32) !Runner {
         return initReady(a, m, slots, capacity, slots);
@@ -163,6 +165,7 @@ pub const Runner = struct {
     }
 
     pub fn deinit(r: *Runner) void {
+        for (0..r.slots) |slot| r.settleSlot(@intCast(slot));
         r.setResident(null);
         r.taps.deinit();
         r.gdn.deinit();
@@ -346,7 +349,22 @@ pub const Runner = struct {
         if (r.active == null) r.gdn.releaseBefore();
     }
 
+    /// A kept state's blit reading `slot` lands before the slot is written: its reset, next chunk or first round.
+    pub fn settleSlot(r: *Runner, slot: u32) void {
+        const cb = r.reading[slot] orelse return;
+        r.reading[slot] = null;
+        cb.wait();
+        cb.release();
+    }
+
+    /// `cb` reads `slot` (committed, not waited): the slot's next write settles it first.
+    pub fn readingSlot(r: *Runner, slot: u32, cb: mtl.CommandBuffer) void {
+        r.settleSlot(slot);
+        r.reading[slot] = cb.retain();
+    }
+
     pub fn reset(r: *Runner, slot: u32) !void {
+        r.settleSlot(slot);
         if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();

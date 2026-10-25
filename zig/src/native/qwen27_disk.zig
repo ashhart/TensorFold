@@ -37,7 +37,8 @@ const staged = q.residency.stage;
 /// Ranges of a kept state's image into `out`: one blit pass on the model's queue (the engine thread's, while it idles).
 fn gather(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, out: []u8) anyerror!void {
     const h = host(ptr);
-    const st: *const State = @ptrCast(@alignCast(saved));
+    const st: *State = @ptrCast(@alignCast(saved));
+    try st.landed(); // a fresh save's blit wrote it: it lands before this one reads it
     const stage = try staged(h, out.len);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -100,7 +101,7 @@ fn probe(h: *Host, io: std.Io) !struct { hash: u64, rate: f64 } {
         fn at(ptr: *anyopaque, s: *lanes.Stream, mark: u32) void {
             const p: *@This() = @ptrCast(@alignCast(ptr));
             const slot = p.h.back.slotOf(s) orelse return;
-            p.saved = q.snapshot.saveSlot(p.h.gpa, &p.h.runner, slot, p.h.back.ringOf(slot), mark) catch |e| {
+            p.saved = q.snapshot.saveSlot(p.h.gpa, &p.h.runner, slot, p.h.back.ringOf(slot), mark, null) catch |e| {
                 p.failed = e;
                 return;
             };
