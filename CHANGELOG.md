@@ -4,6 +4,26 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA with NVFP4 checkpoints prefills 24-29% faster with the same tokens: NVFP4 experts on prompt tiles with the decode form's sums (#1143), no zero fills the one-rank ModelOpt pass reads back (#1147), the hyper-connection normalize over 256-column slices and the dense mix a warp a 32-column group (#1164), and half tiles for decode calls whose 64-column grid leaves SMs idle (#1171). On a GB10 with Qwen3.8 Flash Next FP4-Local, prefill at 16k goes from 1,357 to 1,748 tokens/s and decode gains 1-2%. Attention caches are readable through a page table and the streams beside the first take KV pages from the core pool (#1169, #1170).
+
+- GLM-5.3-Flash on Metal decodes faster with the same tokens by reading the weights once per decode window (#1130): on an M3 Ultra, +2.6% at one stream and +10.2%, +6.4% and +6.3% at two, four and eight.
+
+- GLM-5.3-Flash on CUDA loads nvidia/GLM-5.3-Flash-FP4-Local as stored (#1050), takes its streams' KV pages from the core pool with kept prompt states sized by their position (#1163), and puts the engine's own sequence on pages too (#1211). Tokens and speed at TP=2 are unchanged.
+
+- Qwen3.8-27B on CUDA serves ModelOpt and compressed-tensors NVFP4/FP8 exports such as nvidia/Qwen3.8-27B-NVFP4, with bf16 activations against the stored weights (#1145), and ExLlamaV3 (EXL3) Qwen3.5-MoE checkpoints such as Ornith-1.5-122B (#1150). A checkpoint-math mode that would quantize activations is not included.
+
+- Gemma 4 runs on Macs before the M5, with its dense projections on the row path; the first token comes from the last prompt row.
+
+- Flash Next on CUDA: a lone stream's copy window widens to 31 drafts after a copy that lands whole (#1252).
+
+- Tokenizer calls start their scratch on the stack, recovering a small one-stream decode loss in 1.1.4 (#1248).
+
+- experts3 CUDA has a split decode pair form (#1139); radio CUDA reuses one pinned pixel stage for every image (#1140).
+
+- Desktop app: a question that passes its deadline now stops the agent loop before another tool-enabled model call.
+
+- Tensor-parallel ranks join their failure hooks before releasing the hooks' owners, fixing a rare crash at shutdown after a rank fails.
+
 - Drama speech on Metal reuses a catalog voice's reference prefill across requests on the same lane, so a request with the same voice prefills only its own text. Audio is byte-identical to an uncached request. On an M3 Ultra with Drama 3 and a catalog voice, the first audio byte of a streamed reply comes 90% sooner (15.6 s to 1.5 s over four texts) and whole replies take about half as long; the default voice and the first request with a voice are unchanged (#1237).
 
 - Flash Next on Macs without tensor units decodes faster with the same tokens: the hyper-connection act pair runs for windows of two rows and more, the HC down projection runs without staging or barriers at four outputs a threadgroup, rounds are gated on the GPU with a GPU-only event between them, drafts are gated at tau 0.4, the decode and draft argmaxes take two launches, and wide windows use grouped experts and exact tree windows. On an M3 Ultra with Qwen3.8 Flash Next MLX 4-bit MTP, the served sweep goes from 120.2 to 147.6 tokens/s on one stream (+22.7%), 129.7 to 155.3 at two (+19.8%), 143.8 to 167.0 at four (+16.2%) and 154.4 to 176.1 at eight (+14.1%); prefill is unchanged and every token is identical.
