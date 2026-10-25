@@ -15,6 +15,7 @@ const clock = @import("clock.zig");
 const Server = @import("server.zig").Server;
 const chunk_plan = @import("chunk_plan.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
+const StopHook = @import("stop_hook.zig").StopHook;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -528,7 +529,7 @@ const Generation = struct {
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         const sha256 = @import("tokens.zig").tokenSha256(g.collected.items);
         try runtime.put(a, "token_sha256", .{ .string = try a.dupe(u8, &sha256) });
-        // "return_token_ids": the reply's tokens, the same slice the shas above hash, so the ids and the sha cannot disagree
+        // "return_token_ids": the reply's tokens, the same slice the shas above hash, so ids and sha cannot disagree
         if (g.token_ids) {
             const reply_ids = try a.alloc(Value, g.collected.items.len);
             for (g.collected.items, reply_ids) |t, *slot| slot.* = try json.intValue(a, t);
@@ -582,22 +583,6 @@ const Generation = struct {
         const rate = if (decode_log_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_log_s else 0;
         log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
         return reply;
-    }
-};
-
-/// The request's stop strings as the engine checks them after each token: the newest tokens' text holds one.
-const StopHook = struct {
-    srv: *Server,
-    stops: reply_text.Stops,
-
-    fn check(ctx: *anyopaque, emitted: []const u32) bool {
-        const h: *StopHook = @ptrCast(@alignCast(ctx));
-        var arena: std.heap.ArenaAllocator = .init(h.srv.gpa);
-        defer arena.deinit();
-        const tail = emitted[emitted.len -| h.stops.tail()..];
-        const text = h.srv.text.decode(arena.allocator(), tail) catch return false;
-        for (h.stops.strings) |stop| if (std.mem.indexOf(u8, text, stop) != null) return true;
-        return false;
     }
 };
 
