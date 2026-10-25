@@ -221,8 +221,8 @@ pub const Prof = struct {
     events: [4096]ze.H = @splat(null),
     kernel: [4096]ze.H = @splat(null),
     used: usize = 0,
-    names: [64]struct { k: ze.H = null, name: []const u8 = "" } = @splat(.{}),
-    total: [64]f64 = @splat(0),
+    names: [80]struct { k: ze.H = null, name: []const u8 = "" } = @splat(.{}),
+    total: [80]f64 = @splat(0),
 };
 
 pub fn profReport(label: []const u8) void {

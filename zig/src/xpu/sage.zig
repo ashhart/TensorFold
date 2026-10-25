@@ -188,7 +188,7 @@ pub const Acts = struct {
 
 /// sage_moe.cl's kernels and the long-cache attention pair of decode.cl (the Dev's table is the 27B runner's, filled from
 /// the Sage images).
-pub const MoeKernels = struct { attn_span: ze.H, merge_span: ze.H, router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
+pub const MoeKernels = struct { attn_span: ze.H, merge_span: ze.H, down8: ze.H, router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
 
 /// Sub-groups a work-group of the decode expert kernels (one sub-group a row).
 const MOE_SG = 4;
@@ -685,7 +685,11 @@ pub const Runner = struct {
             return d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
         }
         try d.launch(r.mk.swiglu, .{ .x = s.expert_ff, .y = pairs + T }, .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, a.h, a.mids, a.mact, s.hidden, s.expert_ff, s.top_k, pairs });
-        try d.launch(r.mk.down, .{ .x = s.hidden / MOE_SG, .y = pairs + T }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.my, s.hidden, s.expert_ff, pairs });
+        const dn_args = .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.my, s.hidden, s.expert_ff, pairs };
+        if (s.expert_ff == 512) // Sage: act in registers, 8 rows a sub-group
+            try d.launch(r.mk.down8, .{ .x = s.hidden / (MOE_SG * 8), .y = pairs + T }, dn_args)
+        else
+            try d.launch(r.mk.down, .{ .x = s.hidden / MOE_SG, .y = pairs + T }, dn_args);
         try d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
     }
 };
@@ -759,6 +763,7 @@ fn kernels(d: *Dev, mk: *MoeKernels) !void {
         .route = try d.kernel(mo, "sage_route", 16),
         .swiglu = try d.kernel(mo, "sage_expert_swiglu", SWIGLU_WG),
         .down = try d.kernel(mo, "sage_expert_down", 16 * MOE_SG),
+        .down8 = try d.kernel(mo, "sage_expert_down8", 16 * MOE_SG),
         .combine = try d.kernel(mo, "sage_moe_combine", 64),
         .attn_span = try d.kernel(md, "attn_decode_span", 16),
         .merge_span = try d.kernel(md, "attn_merge_span", 256),
