@@ -125,6 +125,7 @@ pub const Acts = struct {
     morder: *anyopaque, // u32 [CHUNK (top_k + 1)]: pair indices by expert
     mtiles: *anyopaque, // u32x4 [tileBound(CHUNK)]
     mnt: *anyopaque, // u32: the tile count
+    mplan: *anyopaque, // u32: sage_group_plan's groups of a decode step of up to WINDOW rows
     mxs: *anyopaque, // fp32 [CHUNK, D / 64]: group sums of h
     mas: *anyopaque, // fp32 [CHUNK (top_k + 1), ff / 64]: group sums of act
 
@@ -169,6 +170,7 @@ pub const Acts = struct {
             .morder = try d.alloc_(pairs * 4),
             .mtiles = try d.alloc_(tileBound(s, CHUNK) * 16),
             .mnt = try d.alloc_(4),
+            .mplan = try d.alloc_((1 + (w * s.top_k + 1) * (2 + 16)) * 4),
             .mxs = try d.alloc_(c * (s.hidden / 64) * 4),
             .mas = try d.alloc_(pairs * (@max(s.expert_ff, s.shared_ff) / 64) * 4),
         };
@@ -176,7 +178,7 @@ pub const Acts = struct {
 };
 
 /// sage_moe.cl's kernels (the Dev's table is the 27B runner's, filled from the Sage images).
-pub const MoeKernels = struct { router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
+pub const MoeKernels = struct { router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
 
 /// Sub-groups a work-group of the decode expert kernels (one sub-group a row).
 const MOE_SG = 4;
@@ -658,6 +660,12 @@ pub const Runner = struct {
         try d.launch(r.mk.route, .{ .x = T }, .{ a.mlog, a.mids, a.mwts, a.msw, s.experts, s.top_k });
         if (s.expert_ff != s.shared_ff) return error.SharedWidthNotWired; // one act stride for both (Sage: 512, 512)
         if (T > WINDOW) return r.moeTiles(l, T);
+        if (T > 1) { // several rows: each expert's weights once for all its pairs
+            try d.launch(r.mk.group_plan, .{ .x = 1 }, .{ a.mids, a.mplan, s.experts, pairs, T });
+            try d.launch(r.mk.group_swiglu, .{ .x = s.expert_ff, .y = pairs + 1 }, .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, a.h, a.mplan, a.mact, s.hidden, s.expert_ff, s.top_k, pairs, s.experts });
+            try d.launch(r.mk.group_down, .{ .x = s.hidden / 16, .y = pairs + 1 }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mplan, a.my, s.hidden, s.expert_ff, s.experts });
+            return d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
+        }
         try d.launch(r.mk.swiglu, .{ .x = s.expert_ff, .y = pairs + T }, .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, a.h, a.mids, a.mact, s.hidden, s.expert_ff, s.top_k, pairs });
         try d.launch(r.mk.down, .{ .x = s.hidden / MOE_SG, .y = pairs + T }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.my, s.hidden, s.expert_ff, pairs });
         try d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
@@ -735,6 +743,9 @@ fn kernels(d: *Dev, mk: *MoeKernels) !void {
         .swiglu = try d.kernel(mo, "sage_expert_swiglu", SWIGLU_WG),
         .down = try d.kernel(mo, "sage_expert_down", 16 * MOE_SG),
         .combine = try d.kernel(mo, "sage_moe_combine", 64),
+        .group_plan = try d.kernel(mo, "sage_group_plan", 256),
+        .group_swiglu = try d.kernel(mo, "sage_group_swiglu", 16),
+        .group_down = try d.kernel(mo, "sage_group_down", 16),
         .router_tile = try d.kernel(mo, "sage_router_tile", 16),
         .sums = try d.kernel(mo, "sage_group_sums", 16),
         .sort = try d.kernel(mo, "sage_moe_sort", 256),

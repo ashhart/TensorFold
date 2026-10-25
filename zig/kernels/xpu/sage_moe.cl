@@ -348,3 +348,153 @@ __kernel void sage_router_tile(__global const half *x, __global const half *gate
             if (row < rows) logits[(ulong)row * (n_experts + 1) + e] = acc[rb][r];
         }
 }
+
+// ---------------------------------------------------------------- grouped decode MoE (several streams)
+// A decode step of `rows` rows (one a stream, at most MAX_G). sage_group_plan groups the step's pairs by expert, and
+// the group kernels do every pair of a group, so a step reads each expert's weights once. The shared expert is a
+// group of all rows. act and y keep the pair index, as in decode.
+#define MAX_G 16
+#define GREC (2 + MAX_G) // a group record: expert (n_experts: the shared one), count, pair indices
+
+// plan[0]: the group count; record g at plan + 1 + g * GREC. One work-group of 256 work-items, n_pairs <= 255.
+__kernel __attribute__((reqd_work_group_size(256, 1, 1)))
+void sage_group_plan(__global const uint *ids, __global uint *plan, uint n_experts, uint n_pairs, uint rows) {
+    __local uint e_of[256];
+    __local uint count;
+    const uint k = get_local_id(0);
+    if (k == 0) count = 0;
+    e_of[k] = k < n_pairs ? ids[k] : 0xffffffffu;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    bool lead = k < n_pairs;
+    for (uint j = 0; j < k && lead; j++)
+        if (e_of[j] == e_of[k]) lead = false;
+    if (k == n_pairs) lead = true; // the shared expert's group
+    if (lead) {
+        __global uint *rec = plan + 1 + atomic_inc(&count) * GREC;
+        uint n = 0;
+        if (k == n_pairs) {
+            for (uint i = 0; i < rows; i++) rec[2 + n++] = n_pairs + i;
+            rec[0] = n_experts;
+        } else {
+            for (uint j = k; j < n_pairs; j++)
+                if (e_of[j] == e_of[k] && n < MAX_G) rec[2 + n++] = j;
+            rec[0] = e_of[k];
+        }
+        rec[1] = n;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (k == 0) plan[0] = count;
+}
+
+// Group k's pairs (in pr) and its expert; 0 past the last group.
+inline uint group_of(__global const uint *plan, uint k, uint *e, uint *pr) {
+    if (k >= plan[0]) return 0;
+    __global const uint *rec = plan + 1 + k * GREC;
+    *e = rec[0];
+    const uint n = rec[1];
+    for (uint i = 0; i < MAX_G; i++) pr[i] = i < n ? rec[2 + i] : 0;
+    return n;
+}
+
+// The 32 values of quad c of a row (4 words), as fp32.
+inline void unpack32(uint4 pk, float *v) {
+    for (uint q = 0; q < 4; q++) {
+        const uint u = ((const uint *)&pk)[q];
+        for (uint j = 0; j < 8; j++) v[q * 8 + j] = (float)((u >> (4 * j)) & 15u);
+    }
+}
+
+// gate|up and SwiGLU for every pair of a group: act[p][r] as sage_expert_swiglu. Grid (ff, n_pairs + 1: the most groups).
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void sage_group_swiglu(__global const uint *w, __global const ushort *ex_scales, __global const ushort *ex_biases,
+                                __global const uint *sh_w, __global const ushort *sh_scales, __global const ushort *sh_biases,
+                                __global const half *x, __global const uint *plan, __global half *act,
+                                uint dim, uint ff, uint top_k, uint n_pairs, uint n_experts) {
+    const uint r = get_group_id(0), k = get_group_id(1), lane = get_sub_group_local_id();
+    uint pr[MAX_G], e;
+    const uint n = group_of(plan, k, &e, pr);
+    if (n == 0) return;
+    const bool shared = e == n_experts;
+    __global const uint *wt = shared ? sh_w : w;
+    __global const ushort *scales = shared ? sh_scales : ex_scales;
+    __global const ushort *biases = shared ? sh_biases : ex_biases;
+    const ulong base = shared ? 0 : (ulong)e * 2 * ff, r0 = base + r, r1 = base + ff + r;
+    const uint quads = dim / 32, groups = dim / 64;
+    float a0[MAX_G], a1[MAX_G];
+    for (uint i = 0; i < MAX_G; i++) a0[i] = a1[i] = 0.0f;
+    for (uint c = lane; c < quads; c += SG) {
+        float v0[32], v1[32];
+        unpack32(vload4(c, wt + r0 * (dim / 8)), v0);
+        unpack32(vload4(c, wt + r1 * (dim / 8)), v1);
+        const float s0 = bf(scales[r0 * groups + c / 2]), b0 = bf(biases[r0 * groups + c / 2]);
+        const float s1 = bf(scales[r1 * groups + c / 2]), b1 = bf(biases[r1 * groups + c / 2]);
+        __attribute__((opencl_unroll_hint))
+        for (uint i = 0; i < MAX_G; i++) {
+            if (i >= n) break;
+            __global const half *xr = x + (ulong)(pr[i] >= n_pairs ? pr[i] - n_pairs : pr[i] / top_k) * dim;
+            float d0 = 0.0f, d1 = 0.0f, sx = 0.0f;
+            for (uint q = 0; q < 4; q++) {
+                const float8 xv = convert_float8(vload8(c * 4 + q, xr));
+                for (uint j = 0; j < 8; j++) {
+                    d0 = fma(xv[j], v0[q * 8 + j], d0);
+                    d1 = fma(xv[j], v1[q * 8 + j], d1);
+                    sx += xv[j];
+                }
+            }
+            a0[i] += s0 * d0 + b0 * sx;
+            a1[i] += s1 * d1 + b1 * sx;
+        }
+    }
+    __attribute__((opencl_unroll_hint))
+    for (uint i = 0; i < MAX_G; i++) {
+        if (i >= n) break;
+        const float gb = bf(to_bf(sub_group_reduce_add(a0[i]))), ub = bf(to_bf(sub_group_reduce_add(a1[i])));
+        if (lane == 0) act[(ulong)pr[i] * ff + r] = convert_half_rte(bf(to_bf(gb / (1.0f + exp(-gb)) * ub)));
+    }
+}
+
+// down for every pair of a group to fp32: y[p][r] as sage_expert_down. A lane owns one output row and reads all of it,
+// and the act values are the same for the whole sub-group. Grid (dim / 16, n_pairs + 1: the most groups).
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void sage_group_down(__global const uint *w, __global const ushort *ex_scales, __global const ushort *ex_biases,
+                              __global const uint *sh_w, __global const ushort *sh_scales, __global const ushort *sh_biases,
+                              __global const half *a_in, __global const uint *plan, __global float *y,
+                              uint dim, uint ff, uint n_experts) {
+    const uint k = get_group_id(1), lane = get_sub_group_local_id(), r = get_group_id(0) * SG + lane;
+    uint pr[MAX_G], e;
+    const uint n = group_of(plan, k, &e, pr);
+    if (n == 0) return;
+    const bool shared = e == n_experts;
+    __global const uint *wt = shared ? sh_w : w;
+    __global const ushort *scales = shared ? sh_scales : ex_scales;
+    __global const ushort *biases = shared ? sh_biases : ex_biases;
+    const ulong row = (shared ? 0 : (ulong)e * dim) + r;
+    const uint quads = ff / 32, groups = ff / 64;
+    __global const uint *wr = wt + row * (ff / 8);
+    float acc[MAX_G];
+    for (uint i = 0; i < MAX_G; i++) acc[i] = 0.0f;
+    for (uint c = 0; c < quads; c++) {
+        float v[32];
+        unpack32(vload4(c, wr), v);
+        const float sc = bf(scales[row * groups + c / 2]), bi = bf(biases[row * groups + c / 2]);
+        __attribute__((opencl_unroll_hint))
+        for (uint i = 0; i < MAX_G; i++) {
+            if (i >= n) break;
+            __global const half *ar = a_in + (ulong)pr[i] * ff;
+            float d = 0.0f, sx = 0.0f;
+            for (uint u = 0; u < 4; u++) {
+                const float8 xv = convert_float8(vload8(c * 4 + u, ar));
+                for (uint j = 0; j < 8; j++) {
+                    d = fma(xv[j], v[u * 8 + j], d);
+                    sx += xv[j];
+                }
+            }
+            acc[i] += sc * d + bi * sx;
+        }
+    }
+    __attribute__((opencl_unroll_hint))
+    for (uint i = 0; i < MAX_G; i++) {
+        if (i >= n) break;
+        y[(ulong)pr[i] * dim + r] = acc[i];
+    }
+}
