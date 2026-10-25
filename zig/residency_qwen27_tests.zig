@@ -271,7 +271,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
             try record.check();
             mtl.keepalive.Target.tick(&h.warm);
             try std.testing.expect(record.copies > 0 and record.uses > 0);
-            const saved = try snapshot.saveSlot(a, &h.runner, 0, null, 1);
+            const saved = try snapshot.saveSlot(a, &h.runner, 0, null, 1, null);
             defer snapshot.drop(a, saved);
             const restored = try snapshot.blank(a, &h.runner, null, 1);
             h.resident.?.held.flush();
