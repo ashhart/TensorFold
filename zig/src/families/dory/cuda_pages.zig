@@ -1,4 +1,4 @@
-//! Dory's full-attention caches in pages: one arena of the pool's pages and a table of page ids a slot.
+//! Dory's full-attention caches in pages: an arena (each cache's K, then V, over every page) and a table of ids a slot.
 const std = @import("std");
 const kv = @import("core").kv_pool;
 const config = @import("config.zig");
@@ -18,18 +18,26 @@ pub const Paging = struct {
     table: u64,
     ids: []u32, // the table on the host, [max_slots * per_slot]
     caps: [max_slots]usize = @splat(0), // positions the slot's pages cover
+    wins: [max_slots]?u32 = @splat(null), // w when the slot's pages are ids from w * per_slot on (contiguous slot w)
 
     pub fn pageBytes(p: Paging) usize {
         return p.page_elems * 2;
     }
 };
 
+/// w when `ids` are consecutive from w * per (a contiguous slot of the arena's caches), else null.
+pub fn windowOf(ids: []const u32, per: usize) ?u32 {
+    if (ids.len == 0 or ids[0] % per != 0) return null;
+    for (ids, ids[0]..) |id, want| if (id != want) return null;
+    return @intCast(ids[0] / per);
+}
+
 /// Pages that hold `positions`.
 pub fn pagesOf(positions: usize) usize {
     return (positions + tokens - 1) / tokens;
 }
 
-/// bf16 elements of a page across `full` caches: each cache's K block, then its V block, of `tokens` rows of `kv_dim`.
+/// bf16 elements a page holds across `full` caches: `tokens` rows of `kv_dim` in each cache's K and V.
 pub fn pageElems(c: config.Config, full: usize) usize {
     return 2 * full * tokens * c.kvDim();
 }
@@ -60,4 +68,13 @@ test "a page holds 256 positions of every full cache: 9, 14 and 24 MiB at 1, 2 a
     }
     try std.testing.expectEqual(@as(usize, 129), pagesOf(32768 + 1));
     try std.testing.expectEqual(@as(usize, 1), need(1, 1, 16));
+}
+
+test "a window: consecutive ids from a multiple of the slot's pages; a gap, a step back, an offset or none is not" {
+    try std.testing.expectEqual(@as(?u32, 2), windowOf(&.{ 8, 9, 10 }, 4));
+    try std.testing.expectEqual(@as(?u32, 0), windowOf(&.{0}, 4));
+    try std.testing.expectEqual(@as(?u32, null), windowOf(&.{ 7, 8 }, 4));
+    try std.testing.expectEqual(@as(?u32, null), windowOf(&.{ 8, 10 }, 4));
+    try std.testing.expectEqual(@as(?u32, null), windowOf(&.{ 9, 8 }, 4));
+    try std.testing.expectEqual(@as(?u32, null), windowOf(&.{}, 4));
 }

@@ -84,11 +84,12 @@ pub fn setup(x: *Setup, gpu: Gpu, rest: []const []const u8, need: usize, slots: 
     errdefer x.rig.deinit();
     x.db = try be.Dory.init(gpu.gpa, gpu.d, &x.rig.m, &x.rig.k, x.rig.s);
     errdefer x.db.deinit();
-    if (x.rig.m.paged) { // slots lease their pages from a shuffled pool (DORY_POOL pages: else a window each)
+    if (x.rig.m.paged) { // slots lease from a shuffled pool (DORY_POOL pages: else a window each; DORY_SCATTER=0: runs)
         const per = dory.cuda_pages.pagesOf(x.rig.m.context);
         const pool = if (std.c.getenv("DORY_POOL")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else slots * per;
         try x.db.attach(slots - 1, pool);
-        x.db.shufflePages(7);
+        const runs = if (std.c.getenv("DORY_SCATTER")) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
+        if (!runs) x.db.shufflePages(7);
     }
 }
 
