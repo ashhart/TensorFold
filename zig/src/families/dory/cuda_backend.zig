@@ -59,6 +59,7 @@ pub const Dory = struct {
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
     pool: ?kv.Pool = null, // the pages every slot leases (attach)
+    scatter: bool = false, // a check's: leases take the free pages in their order, never a run
 
     /// The device bytes `init` allocates: bf16 logits, the token ring, metas, each slot's last row and rule.
     pub fn openBytes(vocab: usize, slots: usize) usize {
@@ -93,8 +94,9 @@ pub const Dory = struct {
         x.pool = try kv.Pool.init(x.gpa, x.m.paging.?.pool, x.m.paging.?.pageBytes());
     }
 
-    /// The pool's free pages in a seeded random order, so tables are not ascending (a check's hook).
+    /// The pool's free pages in a seeded random order, leased in that order, so tables are not runs (a check's hook).
     pub fn shufflePages(x: *Dory, seed: u64) void {
+        x.scatter = true;
         var prng = std.Random.DefaultPrng.init(seed);
         if (x.pool) |*p| prng.random().shuffle(u32, p.free[0..p.nfree]);
     }
@@ -191,7 +193,7 @@ pub const Dory = struct {
         }
     };
 
-    /// A free slot for the request, its pages leased now when paged.
+    /// A free slot for the request, its pages leased now when paged: a window's run (contiguous) when one is free.
     fn takeSlot(x: *Dory, lease: *kv.Lease, prompt: usize, max_new: usize) !usize {
         const slot = x.freeSlot() orelse return error.NoFreeSlot;
         if (x.pool == null) return slot;
@@ -200,7 +202,8 @@ pub const Dory = struct {
         try p.promise(lease, n);
         errdefer p.finish(lease);
         var map: Map = .{ .x = x, .slot = slot };
-        try p.cover(lease, n, .{ .ctx = &map, .write = Map.write });
+        const table: kv.Table = .{ .ctx = &map, .write = Map.write };
+        try (if (x.scatter) p.cover(lease, n, table) else p.coverRun(lease, n, x.m.paging.?.per_slot, table));
         return slot;
     }
 

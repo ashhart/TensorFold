@@ -53,14 +53,23 @@ pub fn pages(gpu: Gpu, rest: []const []const u8) !void {
     defer b.deinit();
     const per = dory.cuda_pages.pagesOf(context);
     try b.attach(a.s, slots - 1, slots * per);
-    var mapped: [slots][]u32 = undefined; // slots 0..3 on shuffled runs of the pool; the rest idle
+    // slots 0 and 1 on windows 5 and 2 of the arena (contiguous kernels), slots 2 and 3 on the other pages shuffled
     const all = try gpa.alloc(u32, slots * per);
     defer gpa.free(all);
-    for (all, 0..) |*id, i| id.* = @intCast(i);
+    var next: usize = 2 * per;
+    for (all[0..per], all[per .. 2 * per], 0..) |*w5, *w2, i| {
+        w5.* = @intCast(5 * per + i);
+        w2.* = @intCast(2 * per + i);
+    }
+    for (0..slots * per) |id| if (id / per != 5 and id / per != 2) {
+        all[next] = @intCast(id);
+        next += 1;
+    };
     var prng = std.Random.DefaultPrng.init(3);
-    prng.random().shuffle(u32, all);
-    for (&mapped, 0..) |*mp, i| mp.* = all[i * per ..][0..per];
-    for (0..4) |s| try b.mapPages(a.s, s, mapped[s], 0);
+    prng.random().shuffle(u32, all[2 * per ..]);
+    for (0..4) |s| try b.mapPages(a.s, s, all[s * per ..][0..per], 0);
+    const wins = b.paging.?.wins;
+    try check.expect(wins[0] == 5 and wins[1] == 2 and wins[2] == null and wins[3] == null, "dory pages: slots 0, 1 on windows 5, 2", .{});
     var bad: usize = 0;
     var rows_checked: usize = 0;
     for (waves, 0..) |wave, wv| {
@@ -86,9 +95,23 @@ pub fn pages(gpu: Gpu, rest: []const []const u8) !void {
             }
             try both(&a, &b, &chains, false, 0, rows, "decode round", &bad);
             rows_checked += rows;
+            const s = r % 4; // one stream alone: slots 0, 1 on their windows, 2, 3 through the table
+            const w = 1 + (r * 5 + wv) % fwd.window_rows;
+            const from = (pos[s] * 11 + r) % 3000;
+            try both(&a, &b, &.{.{ .slot = s, .p0 = pos[s], .tokens = ids[from..][0..w] }}, false, 0, w, "lone decode", &bad);
+            pos[s] += w;
+            rows_checked += w;
+            var two: [2]fwd.Chain = undefined; // slots 0 and 1 together: both on windows, the contiguous kernels
+            for (&two, 0..) |*ch, t| {
+                const v = 1 + (r * 3 + t * 5 + wv) % fwd.window_rows;
+                ch.* = .{ .slot = t, .p0 = pos[t], .tokens = ids[(pos[t] * 7 + r) % 3000 ..][0..v] };
+                pos[t] += v;
+                rows_checked += v;
+            }
+            try both(&a, &b, &two, false, 0, two[0].tokens.len + two[1].tokens.len, "windowed pair", &bad);
         }
     }
-    std.debug.print("RESULT dory L={d} paged == contiguous: {d} rows' fp32 logits over 4 slots (prompts to 3100, {d} rounds of 1-16 rows, page edges at 255/256/257), {d} rounds differ\n", .{ loops, rows_checked, 2 * count, bad });
+    std.debug.print("RESULT dory L={d} paged == contiguous: {d} rows' fp32 logits over 4 slots (slots 0, 1 on windows, prompts to 3100, {d} rounds each of 4 mixed, 1 alone and 2 windowed streams, page edges at 255/256/257), {d} rounds differ\n", .{ loops, rows_checked, 2 * count, bad });
     try check.expect(bad == 0, "dory L={d} pages: {d} forwards differ from contiguous", .{ loops, bad });
     var da = try be.Dory.init(gpa, gpu.d, &a.m, &a.k, a.s);
     defer da.deinit();
@@ -97,11 +120,14 @@ pub fn pages(gpu: Gpu, rest: []const []const u8) !void {
     try db.attach(slots - 1, slots * per);
     db.shufflePages(9);
     var buf: [8]serve.Case = undefined;
+    var flat: usize = 0;
     const rep = try gpa.alloc(u32, 1800);
     defer gpa.free(rep);
     const cases = serve.mixed(ids, &buf, rep);
     var differ: usize = 0;
-    for ([_]bool{ false, true }) |drafts| for ([_]usize{ 1, 3, 8 }) |k| {
+    for ([_]bool{ true, false }) |scatter| for ([_]bool{ false, true }) |drafts| for ([_]usize{ 1, 3, 8 }) |k| {
+        db.scatter = scatter; // scattered tables, then each lease one run of pages (the first stream's on an idle pool)
+        if (!scatter and !drafts and k == 1) db.m.dropGraphs(); // from here windowed streams capture flat graphs
         var cs: [8]serve.Case = undefined;
         for (cs[0..k], cases[0..k]) |*o, c| {
             o.* = c;
@@ -114,9 +140,10 @@ pub fn pages(gpu: Gpu, rest: []const []const u8) !void {
         var n: usize = 0;
         for (ra.out, rb.out) |oa, ob| n += @intFromBool(!std.mem.eql(u32, oa, ob));
         differ += n;
-        std.debug.print("RESULT dory L={d} paged == contiguous replies: {d} streams{s}, {d} of {d} differ ({d} tokens)\n", .{ loops, k, if (drafts) " drafted" else "", n, k, ra.tokens });
+        std.debug.print("RESULT dory L={d} paged == contiguous replies: {d} streams{s}, {s}, {d} of {d} differ ({d} tokens)\n", .{ loops, k, if (drafts) " drafted" else "", if (scatter) "scattered pages" else "windows of pages", n, k, ra.tokens });
     };
+    for (db.m.flat_graphs) |g| flat += @intFromBool(g != null);
     const pool = db.pool.?;
-    try check.expect(differ == 0 and pool.idle(), "dory L={d} pages: {d} replies differ or the pool is not idle", .{ loops, differ });
-    check.pass("dory L={d} pages: paged == contiguous, logits bit-equal and replies equal (greedy, sampled, drafted, 1/3/8 streams); pool idle", .{loops});
+    try check.expect(differ == 0 and pool.idle() and flat > 0, "dory L={d} pages: {d} replies differ, the pool is not idle or no windowed round ran ({d})", .{ loops, differ, flat });
+    check.pass("dory L={d} pages: paged == contiguous, logits bit-equal and replies equal (greedy, sampled, drafted, 1/3/8 streams, scattered and windowed leases); pool idle", .{loops});
 }

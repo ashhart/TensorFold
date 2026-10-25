@@ -41,7 +41,7 @@ pub const Model = struct {
     ring: usize,
     slots: usize,
     k: []u64 = &.{}, // per cache: [slots, len, HK, D] bf16 (len: context for full caches, the ring for sliding ones)
-    v: []u64 = &.{}, // paged: a full cache's K and V blocks in page 0 of the arena (the pages' table maps the rest)
+    v: []u64 = &.{}, // paged: a full cache's K and V regions of the arena, page id p at rows [p * tokens, (p + 1) * tokens)
     paged: bool = false, // full caches live in pages (attach makes them); sliding rings stay a buffer a slot
     paging: ?pages.Paging = null,
     rings: std.ArrayList(DeviceBuffer) = .empty, // the sliding caches' buffers, made again for the slots attach names
@@ -51,9 +51,11 @@ pub const Model = struct {
     planned: ?usize = null, // a plan: the bytes counted, nothing allocated
     /// Decode forwards of n rows as CUDA graphs at this model's loop count, captured at first use ([n]).
     graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
+    /// Paged: decode forwards of n rows whose streams all hold a window of pages (the contiguous kernels).
+    flat_graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
     graphed: bool = true,
 
-    const Scratch = struct { ids: u64, pos: u64, slot: u64, h: u64, h2: u64, state: u64, input: u64, out: u64, q: u64, kk: u64, vv: u64, g: u64, qn: u64, kn: u64, vn: u64, att: u64, gated: u64, mg: u64, mu: u64, m: u64, part: u64, win: u64, logits: u64 };
+    const Scratch = struct { ids: u64, pos: u64, slot: u64, fslot: u64, h: u64, h2: u64, state: u64, input: u64, out: u64, q: u64, kk: u64, vv: u64, g: u64, qn: u64, kn: u64, vn: u64, att: u64, gated: u64, mg: u64, mu: u64, m: u64, part: u64, win: u64, logits: u64 };
 
     fn alloc(m: *Model, bytes: usize) !u64 {
         if (m.planned) |*p| {
@@ -152,11 +154,12 @@ pub const Model = struct {
         p.table = try m.alloc(pages.max_slots * per_slot * 4);
         try m.d.check(m.d.api.cuMemsetD8Async(p.arena, 0, pool * elems * 2, s.handle), "cuMemsetD8Async");
         try m.upload(s, p.table, std.mem.sliceAsBytes(ids));
+        const region = pool * pages.tokens * c.kvDim() * 2; // one full cache's K (or V) rows over every page
         var block: usize = 0;
         for (m.sched.cache_kind[0..m.sched.caches], m.k, m.v) |kind, *kc, *vc| {
             if (kind == .full) {
-                kc.* = p.arena + block * pages.tokens * c.kvDim() * 2;
-                vc.* = kc.* + pages.tokens * c.kvDim() * 2;
+                kc.* = p.arena + block * region;
+                vc.* = kc.* + region;
                 block += 2;
             } else {
                 const bytes = m.slots * m.ring * c.kvDim() * 2;
@@ -177,11 +180,15 @@ pub const Model = struct {
         @memcpy(p.ids[at..][0..ids.len], ids);
         try m.upload(s, p.table + at * 4, std.mem.sliceAsBytes(ids));
         p.caps[slot] = (from + ids.len) * pages.tokens;
+        p.wins[slot] = pages.windowOf(p.ids[slot * p.per_slot ..][0 .. from + ids.len], p.per_slot);
     }
 
     /// Slot `slot` holds no pages (its table entries stay; no forward may reach them).
     pub fn unmapPages(m: *Model, slot: usize) void {
-        if (m.paging) |*p| p.caps[slot] = 0;
+        if (m.paging) |*p| {
+            p.caps[slot] = 0;
+            p.wins[slot] = null;
+        }
     }
 
     /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
@@ -222,7 +229,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
-        for (&m.graphs) |*g| if (g.*) |*e| e.deinit();
+        m.dropGraphs();
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
         for (m.rings.items) |*b| b.free();
@@ -235,6 +242,10 @@ pub const Model = struct {
     /// Every captured graph dropped (the next decode forward of each row count captures again).
     pub fn dropGraphs(m: *Model) void {
         for (&m.graphs) |*g| if (g.*) |*e| {
+            e.deinit();
+            g.* = null;
+        };
+        for (&m.flat_graphs) |*g| if (g.*) |*e| {
             e.deinit();
             g.* = null;
         };
@@ -253,7 +264,7 @@ pub const Model = struct {
         const c = m.c;
         var w: cuda.window_attention.Window = .{ .h = c.heads, .hk = c.kv_heads, .d = c.head_dim, .win = if (full) 0 else c.window, .ring = if (full) m.context else m.ring, .scale = c.factors().attn };
         if (full) if (m.paging) |p| {
-            w.pg = .{ .table = p.table + (prompt_slot orelse 0) * p.per_slot * 4, .page_elems = p.page_elems, .tokens = pages.tokens, .stride = p.per_slot };
+            w.pg = .{ .table = p.table + (prompt_slot orelse 0) * p.per_slot * 4, .page_elems = pages.tokens * c.kvDim(), .tokens = pages.tokens, .stride = p.per_slot };
         };
         return w;
     }
@@ -276,6 +287,7 @@ pub const Model = struct {
             .ids = try m.alloc(r * 4),
             .pos = try m.alloc(r * 4),
             .slot = try m.alloc(r * 4),
+            .fslot = if (m.paged) try m.alloc(r * 4) else 0, // a row's window of pages, as a contiguous slot
             .h = try m.alloc(r * d * 2),
             .h2 = try m.alloc(r * d * 2),
             .state = try m.alloc(r * d * 2),
@@ -310,7 +322,11 @@ pub const Model = struct {
         }
         if (rows == 0 or rows > @as(usize, if (prompt) prompt_rows else round_rows) or (prompt and chains.len != 1)) return error.TooManyRows;
         if (heads > round_rows or head0 + heads > rows) return error.TooManyRows;
-        const ids = try m.gpa.alloc(i32, 3 * rows);
+        // paged: when every stream holds a window of pages, its full caches are main's contiguous slot of that window
+        const flat = if (m.paging) |p| for (chains) |ch| {
+            if (p.wins[ch.slot] == null) break false;
+        } else true else false;
+        const ids = try m.gpa.alloc(i32, 4 * rows);
         defer m.gpa.free(ids);
         var at: usize = 0;
         for (chains) |ch| {
@@ -318,25 +334,29 @@ pub const Model = struct {
                 ids[at + i] = @intCast(t);
                 ids[rows + at + i] = @intCast(ch.p0 + i);
                 ids[2 * rows + at + i] = @intCast(ch.slot);
+                if (flat) ids[3 * rows + at + i] = @intCast(m.paging.?.wins[ch.slot].?);
             }
             at += ch.tokens.len;
         }
         try m.upload(s, m.s.ids, std.mem.sliceAsBytes(ids[0..rows]));
         try m.upload(s, m.s.pos, std.mem.sliceAsBytes(ids[rows .. 2 * rows]));
-        try m.upload(s, m.s.slot, std.mem.sliceAsBytes(ids[2 * rows ..]));
+        try m.upload(s, m.s.slot, std.mem.sliceAsBytes(ids[2 * rows .. 3 * rows]));
+        if (flat) try m.upload(s, m.s.fslot, std.mem.sliceAsBytes(ids[3 * rows ..]));
         const p0 = if (prompt) chains[0].p0 else 0;
         const slot = if (prompt) chains[0].slot else 0;
-        // a decode forward's launches depend on its row count only (positions and slots are read on the device)
-        if (prompt or !m.graphed or head0 != 0 or heads != rows) return m.launch(k, s, rows, prompt, p0, slot, head0, heads);
-        if (m.graphs[rows] == null) m.graphs[rows] = try m.capture(k, s, rows);
-        try m.graphs[rows].?.launchOn(s);
+        const fslot = if (flat and prompt) m.paging.?.wins[slot].? else slot;
+        // a decode forward's launches depend on its row count and `flat` only (the rest is read on the device)
+        if (prompt or !m.graphed or head0 != 0 or heads != rows) return m.launch(k, s, rows, prompt, p0, slot, fslot, flat, head0, heads);
+        const g = if (flat) &m.flat_graphs[rows] else &m.graphs[rows];
+        if (g.* == null) g.* = try m.capture(k, s, rows, flat);
+        try g.*.?.launchOn(s);
     }
 
     /// A decode forward of `rows` rows, every row's logits, captured as a graph.
-    fn capture(m: *Model, k: *const Kernels, s: cuda.Stream, rows: usize) !cuda.graph.Exec {
+    fn capture(m: *Model, k: *const Kernels, s: cuda.Stream, rows: usize, flat: bool) !cuda.graph.Exec {
         try s.synchronize();
         try cuda.graph.beginCapture(s, .thread_local);
-        m.launch(k, s, rows, false, 0, 0, 0, rows) catch |e| {
+        m.launch(k, s, rows, false, 0, 0, 0, flat, 0, rows) catch |e| {
             if (cuda.graph.endCapture(s)) |g| {
                 var gg = g;
                 gg.deinit();
@@ -349,7 +369,7 @@ pub const Model = struct {
     }
 
     /// The forward's launches over staged ids, positions and slots: no host copies, so a graph can hold them.
-    fn launch(m: *Model, k: *const Kernels, s: cuda.Stream, n: usize, prompt: bool, p0: usize, slot: usize, head0: usize, heads: usize) !void {
+    fn launch(m: *Model, k: *const Kernels, s: cuda.Stream, n: usize, prompt: bool, p0: usize, slot: usize, fslot: usize, flat: bool, head0: usize, heads: usize) !void {
         const c = m.c;
         const lin: cuda.qlinear.Linear = .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt };
         const d = c.hidden;
@@ -368,7 +388,7 @@ pub const Model = struct {
             }
             const alpha = switch (m.w.subs[step.sub]) {
                 .attn => |a| blk: {
-                    try m.attention(k, s, lin, a, step, h, n, prompt, p0, slot);
+                    try m.attention(k, s, lin, a, step, h, n, prompt, p0, slot, fslot, flat);
                     break :blk a.alpha;
                 },
                 .mlp => |p| blk: {
@@ -390,7 +410,7 @@ pub const Model = struct {
         try k.dense.rowsScaled(s, h + head0 * d * 2, d, m.w.head, m.w.logit, x.logits, c.vocab, heads, c.vocab, d);
     }
 
-    fn attention(m: *Model, k: *const Kernels, s: cuda.Stream, lin: cuda.qlinear.Linear, a: wts.Attn, step: schedule.Step, h: u64, n: usize, prompt: bool, p0: usize, slot: usize) !void {
+    fn attention(m: *Model, k: *const Kernels, s: cuda.Stream, lin: cuda.qlinear.Linear, a: wts.Attn, step: schedule.Step, h: u64, n: usize, prompt: bool, p0: usize, slot: usize, fslot: usize, flat: bool) !void {
         const c = m.c;
         const x = m.s;
         try m.proj(lin, s, a.q, h, x.q, n, prompt);
@@ -403,20 +423,23 @@ pub const Model = struct {
         const src: cuda.qk_rows.Src = .{ .q = x.q, .q_ld = @intCast(c.qDim()), .q_hs = dh, .k = x.kk, .k_ld = @intCast(c.kvDim()), .k_hs = dh, .v = x.vv, .v_ld = @intCast(c.kvDim()), .v_hs = dh };
         const shape: cuda.qk_rows.Shape = .{ .l2 = true, .q_scale = a.qs, .inv = m.inv[@intFromBool(full)], .rot = c.head_dim, .eps = eps };
         const len = m.cacheLen(cache);
-        const pg = full and m.paging != null; // written by `put` into the pages, not by the rows kernel
+        const flat_full = full and flat; // a full cache's window of pages w is main's slot w: its kernels and addresses
+        const pg = full and m.paging != null and !flat; // written by `put` into the pages, not by the rows kernel
+        const sl = if (flat_full) x.fslot else x.slot;
         const out: cuda.qk_rows.Out = .{ .q = x.qn, .k = x.kn, .v = x.vn, .kc = if (pg) null else m.k[cache], .vc = if (pg) null else m.v[cache], .len = len };
-        try k.qk.rowsFrom(s, src, .{ .h = c.heads, .hk = c.kv_heads, .dim = c.head_dim }, shape, x.pos, x.slot, out, n);
-        const w = m.window(full, slot);
+        try k.qk.rowsFrom(s, src, .{ .h = c.heads, .hk = c.kv_heads, .dim = c.head_dim }, shape, x.pos, sl, out, n);
+        var w = m.window(full, slot);
+        if (flat_full) w.pg = null;
         if (pg) try k.win.put(s, x.kn, x.vn, m.k[cache], m.v[cache], x.pos, x.slot, m.window(true, null), n); // the whole table
         if (prompt) {
-            const off = if (pg) 0 else slot * len * c.kvDim() * 2;
+            const off = if (pg) 0 else (if (flat_full) fslot else slot) * len * c.kvDim() * 2;
             try k.win.promptRows(s, x.qn, m.k[cache] + off, m.v[cache] + off, x.att, p0, n, w, null);
         } else {
             const qw = c.qDim() * 2;
             var r: usize = 0;
             while (r < n) : (r += attend_rows) {
                 const rows = @min(attend_rows, n - r);
-                try k.win.decode(s, x.qn + r * qw, m.k[cache], m.v[cache], x.att + r * qw, x.pos + r * 4, x.slot + r * 4, w, x.win, rows);
+                try k.win.decode(s, x.qn + r * qw, m.k[cache], m.v[cache], x.att + r * qw, x.pos + r * 4, sl + r * 4, w, x.win, rows);
             }
         }
         try k.act.gateL2(s, x.att, x.g, c.qDim(), a.sg, x.gated, n, c.qDim(), eps);

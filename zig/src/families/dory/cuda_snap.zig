@@ -42,13 +42,14 @@ fn each(m: *const fwd.Model, slot: usize, at: usize, ctx: anytype, comptime f: f
     for (0..m.sched.caches) |i| for ([_][]u64{ m.k, m.v }) |cache| {
         const full = m.sched.cache_kind[i] == .full;
         const len = m.cacheLen(i);
-        if (full) if (m.paging) |pg| { // a full cache's positions, a run in each page they lie in
+        if (full) if (m.paging) |pg| { // a full cache's positions: one copy a run of consecutive page ids
             var q: usize = 0;
             while (q < at) {
-                const row = q % pages.tokens;
-                const run = @min(at - q, pages.tokens - row);
                 const id = pg.ids[slot * pg.per_slot + q / pages.tokens];
-                try f(ctx, cache[i] + @as(usize, id) * pg.pageBytes() + row * rb, off, run * rb);
+                var end = (q / pages.tokens + 1) * pages.tokens;
+                while (end < at and pg.ids[slot * pg.per_slot + end / pages.tokens] == id + (end - q) / pages.tokens) end += pages.tokens;
+                const run = @min(at, end) - q;
+                try f(ctx, cache[i] + (@as(usize, id) * pages.tokens + q % pages.tokens) * rb, off, run * rb);
                 off += run * rb;
                 q += run;
             }
