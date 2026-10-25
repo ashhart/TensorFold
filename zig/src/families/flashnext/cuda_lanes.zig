@@ -304,7 +304,6 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 return l;
             }
-
             /// One prompt chunk, cut at the next cache mark; true once the last row's scores are in seq.logits.
             fn step(self: *Cuda, s: *lanes.Stream, l: *Lane) !bool {
                 const ids = s.prompt();
@@ -319,6 +318,7 @@ pub fn Namespace(comptime Tri: type) type {
                     break;
                 };
                 const last = stop == ids.len;
+                self.engine.ngram.warmAhead(ids, stop, @min(ids.len, stop + self.engine.chunk));
                 if (l.draft) |*d| {
                     try self.ops().prefillChunk(&l.seq, d, ids, at, stop);
                 } else if (self.ranks) |r| {

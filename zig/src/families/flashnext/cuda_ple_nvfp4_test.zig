@@ -141,3 +141,34 @@ test "PLE gather: NVFP4 pool and caller preserve every output byte at partition 
         for (actual[n * 32 ..]) |v| try std.testing.expectEqual(@as(u16, 0xdead), v);
     }
 }
+
+test "PLE positional reads: mapped bytes, pool callers and short reads preserve history and destination" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try fixture(tmp.dir, true);
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    var g = try ple.Ngram.init(a, io, path);
+    defer g.deinit();
+    const tokens = [_]u32{ 7, 7, 12, 7, 3, 9, 12, 7, 1 };
+    var want: [tokens.len * 32]u16 = undefined;
+    var got: [tokens.len * 32]u16 = undefined;
+    var want_xs: [tokens.len]f32 = undefined;
+    var got_xs: [tokens.len]f32 = undefined;
+    var first = [_]i64{99};
+    var second = first;
+    g.read_mode = .mmap;
+    try g.rows(&first, &tokens, &want, &want_xs);
+    g.read_mode = .pread;
+    try g.rows(&second, tokens[0..3], got[0 .. 3 * 32], got_xs[0..3]);
+    try g.rows(&second, tokens[3..], got[3 * 32 ..], got_xs[3..]);
+    try std.testing.expectEqualSlices(u16, &want, &got);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&want_xs), std.mem.sliceAsBytes(&got_xs));
+    try std.testing.expectEqualSlices(i64, &first, &second);
+    const before = second;
+    for (g.readers[0..g.hash.shards]) |*reader| reader.codes_at = 1 << 60;
+    @memset(&got, 0xbeef);
+    try std.testing.expectError(error.PleShortRead, g.rows(&second, &tokens, &got, &got_xs));
+    try std.testing.expectEqualSlices(i64, &before, &second);
+    for (got) |v| try std.testing.expectEqual(@as(u16, 0xbeef), v);
+}
