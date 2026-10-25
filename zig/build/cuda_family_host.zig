@@ -48,6 +48,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const int8_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = int8_contract, .filters = &.{"w4a8 host:"} }));
     b.step("test-w4a8-contract-host", "Finite normalization, independent W4A8 references and numerical controls without CUDA").dependOn(&int8_contract_run.step);
     step.dependOn(&int8_contract_run.step);
+    const attn_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_attn_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    const attn_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = attn_contract, .filters = &.{"q35 contract host:"} }));
+    b.step("test-qwen35-attn-contract-host", "Actual short and long TC attention adapter launches without devices").dependOn(&attn_contract_run.step);
+    step.dependOn(&attn_contract_run.step);
     const int8_prompt = b.createModule(.{ .root_source_file = b.path("zig/qwen35_prompt_int8_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 } } });
     const int8_run = b.addRunArtifact(b.addTest(.{ .root_module = int8_prompt, .filters = &.{"prompt int8:"} }));
     b.step("test-qwen35-prompt-int8-host", "Prompt int8 allocation and actual projection recording without devices").dependOn(&int8_run.step);

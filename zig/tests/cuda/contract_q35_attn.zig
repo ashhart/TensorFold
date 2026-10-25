@@ -1,4 +1,4 @@
-//! qwen35's decode attention under the contract: tf_q35_attn_partial (or _partial8), then tf_q35_attn_merge.
+//! Qwen35 decode attention: short and long TC entries for bf16 or fp8 caches, then the shared merge.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -16,6 +16,7 @@ const maxch = 64;
 const qh = 24;
 const kvh = 4;
 const group = qh / kvh;
+const attn_tiles = 4 * 32 * hd * 2;
 const scale: f32 = 1.0 / 16.0;
 /// A stream's drafted window here (DFlash2's verify rows); past 64 rows the call is one prompt chunk's chain.
 const width = 16;
@@ -49,7 +50,7 @@ pub fn spec(f: Form) c.Spec {
         .fp8 => "cuda qwen35 decode attention, fp8 cache (tf_q35_attn_partial8, tf_q35_attn_merge)",
     };
     // a DFlash2 window past 2,048 keys, four streams' windows, a 128-row prompt chunk, 256-key chunks past 8,192
-    const served: []const c.Shape = &.{ .{ .rows = 16, .n = qh, .k = 2100 }, .{ .rows = 64, .n = qh, .k = 700 }, .{ .rows = 128, .n = qh, .k = 300 }, .{ .rows = 16, .n = qh, .k = 9000 } };
+    const served: []const c.Shape = &.{ .{ .rows = 16, .n = qh, .k = 2100 }, .{ .rows = 64, .n = qh, .k = 700 }, .{ .rows = 128, .n = qh, .k = 300 }, .{ .rows = 16, .n = qh, .k = 9000 }, .{ .rows = 64, .n = qh, .k = 9000 } };
     return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 3, .out = .bf16, .replaces = "the chunk-major grid (each row alone)", .tiles = .{ .{ .size = width }, .{}, .{ .size = 128 } }, .served = served, .sums = .{ .why = attn.why }, .known = .{ .gate = .nonfinite, .finding = nan_key } };
 }
 
@@ -57,6 +58,7 @@ pub const Q35 = struct {
     rig: rig_.Rig,
     form: Form,
     partial: cuda.Function,
+    long_rows: cuda.Function,
     merge: cuda.Function,
     r: ?attn.Ref = null,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -72,6 +74,16 @@ pub const Q35 = struct {
     base: [4]u64 = @splat(0),
     out: u64 = 0,
     chunks: usize = 0,
+
+    pub fn init(rig: rig_.Rig, form: Form, bf16: cuda.Module, fp8: cuda.Module) !Q35 {
+        const partial = try if (form.cache == .fp8) fp8.function("tf_q35_attn_partial8") else bf16.function("tf_q35_attn_partial");
+        const long_rows = try if (form.cache == .fp8) fp8.function("tf_q35_attn_rows8") else bf16.function("tf_q35_attn_rows");
+        if (form.cache == .bf16) {
+            try partial.allowDynamicShared(attn_tiles);
+            try long_rows.allowDynamicShared(attn_tiles);
+        }
+        return .{ .rig = rig, .form = form, .partial = partial, .long_rows = long_rows, .merge = try bf16.function("tf_q35_attn_merge") };
+    }
 
     pub fn deinit(self: *Q35) void {
         const a = self.rig.gpu.gpa;
@@ -283,9 +295,8 @@ pub const Q35 = struct {
         try self.rig.s.synchronize();
     }
 
-    /// Rows [m0, m0 + n) through the partial kernel, rows fastest, into partials `p` (row m0's slots at m0).
+    /// Both engine TC paths over rows [m0, m0 + n), into row m0's slots. Device lengths select the path.
     fn launchPartial(self: *Q35, n: usize, m0: usize, z: usize, p: [3]u64) !void {
-        const fn_ = self.partial;
         var args: cuda.Args = .{};
         args.add(Geo{});
         args.add(self.dev[0] + m0 * qh * hd * 2);
@@ -295,11 +306,18 @@ pub const Q35 = struct {
         args.add(@as(c_int, 0));
         args.add(@as(u64, 0));
         args.add(scale);
+        var rows_args = args;
+        rows_args.add(@as(c_int, @intCast(n)));
         const slots = m0 * qh * maxch;
-        args.add(p[0] + slots * 4);
-        args.add(p[1] + slots * 4);
-        args.add(p[2] + slots * hd * 4);
-        try cuda.launch.launch(fn_, .{ .grid = .{ .x = @intCast(n), .y = kvh, .z = @intCast(z) }, .block = .{ .x = 32 * group } }, self.rig.s, &args);
+        const dst = [3]u64{ p[0] + slots * 4, p[1] + slots * 4, p[2] + slots * hd * 4 };
+        for (dst) |ptr| {
+            args.add(ptr);
+            rows_args.add(ptr);
+        }
+        const shared: u32 = if (self.form.cache == .bf16) attn_tiles else 0;
+        try cuda.launch.launch(self.partial, .{ .grid = .{ .x = @intCast(n), .y = @intCast(z), .z = kvh }, .block = .{ .x = 128 }, .shared = shared }, self.rig.s, &args);
+        const groups = (n + 64 / group - 1) / (64 / group);
+        try cuda.launch.launch(self.long_rows, .{ .grid = .{ .x = @intCast(groups), .y = @intCast(z), .z = kvh }, .block = .{ .x = 256 }, .shared = shared }, self.rig.s, &rows_args);
     }
 
     fn launchMerge(self: *Q35, p: [3]u64, out: u64) !void {

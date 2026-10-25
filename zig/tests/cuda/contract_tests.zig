@@ -404,7 +404,7 @@ pub fn run(gpu: check.Gpu) !void {
     var q35_kv8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
     defer q35_kv8.unload();
     var q35s: [q35_k.forms.len]q35_k.Q35 = undefined;
-    for (q35_k.forms, &q35s) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .partial = try if (f.cache == .fp8) q35_kv8.function("tf_q35_attn_partial8") else q35_mod.function("tf_q35_attn_partial"), .merge = try q35_mod.function("tf_q35_attn_merge") };
+    for (q35_k.forms, &q35s) |f, *x| x.* = try q35_k.Q35.init(.{ .gpu = gpu, .s = s }, f, q35_mod, q35_kv8);
     defer for (&q35s) |*x| x.deinit();
     for (&q35s) |*x| try kernels.append(a, x.kernel());
     var window_fns = try cuda.window_attention.WindowAttention.load(gpu.d);
