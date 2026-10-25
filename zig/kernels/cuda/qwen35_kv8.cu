@@ -54,6 +54,17 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope8(Geo geo, __nv_bfl
 
 #include "qwen35_attn_tc.cuh"
 
+// Eight e4m3 values as floats.
+__device__ __forceinline__ void widen8(uint2 w, float (&f)[8]) {
+    const __nv_fp8x2_storage_t* p = reinterpret_cast<const __nv_fp8x2_storage_t*>(&w);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(p[i], __NV_E4M3)));
+        f[2 * i] = v.x;
+        f[2 * i + 1] = v.y;
+    }
+}
+
 // Decode attention over e4m3 rows on tensor cores: a short stream's rows a block each, a long stream's in groups.
 
 
