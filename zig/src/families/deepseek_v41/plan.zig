@@ -9,6 +9,7 @@ const names = @import("names.zig");
 const Pack = @import("pack.zig").Pack;
 const Info = @import("pack.zig").Info;
 const partition = @import("partition.zig");
+const testing = std.testing;
 
 /// One EXL3 group of the rank: its stored name and the rank's part.
 pub const GroupPlan = struct {
@@ -318,3 +319,33 @@ pub const CheckpointPlan = struct {
         p.* = undefined;
     }
 };
+
+test "an F16 router bias plans as its stored slice; an F16 sink is still refused" {
+    const a = testing.allocator;
+    const c: Config = .{};
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const count = c.expertsOf(42).count;
+    const data = try @import("pack.zig").image(a, &.{
+        .{ .name = "mtp.0.ffn.gate.bias", .dtype = "F16", .shape = &.{count} },
+        .{ .name = "mtp.0.attn.attn_sink", .dtype = "F16", .shape = &.{c.heads} },
+    });
+    defer a.free(data);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors", .data = data });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    defer a.free(dir);
+    var p = try Pack.open(a, testing.io, dir);
+    defer p.deinit();
+    var b: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = 0, .world = 1 } };
+    var bias: ?names.NativeSpec = null;
+    var sink: ?names.NativeSpec = null;
+    for ((try names.blockNatives(&c, 42)).items()) |s| {
+        if (std.mem.eql(u8, s.suffix, "ffn.gate.bias")) bias = s;
+        if (std.mem.eql(u8, s.suffix, "attn.attn_sink")) sink = s;
+    }
+    const v = try b.native("mtp.0.ffn.gate.bias", bias.?);
+    try testing.expectEqual(@as(u64, 2 * count), v.bytes);
+    try testing.expectError(error.UnexpectedTensor, b.native("mtp.0.attn.attn_sink", sink.?));
+}
