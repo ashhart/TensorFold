@@ -14,7 +14,7 @@ inline ushort to_bf(float f) {
 #define MAX_TOPK 8
 
 // logits[row][e] = x[row] . gate[e] in fp32 (gate fp16 [n_experts, dim]); slot n_experts is the shared expert's gate.
-// Grid (n_experts + 1, rows), one sub-group a work-group.
+// Grid (n_experts + 1, rows), one sub-group a work-group; dim: a multiple of 8.
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_router(__global const half *x, __global const half *gate, __global const half *shared_gate,
                           __global float *logits, uint dim) {
@@ -22,7 +22,10 @@ __kernel void sage_router(__global const half *x, __global const half *gate, __g
     const uint lane = get_sub_group_local_id();
     __global const half *w = e + 1 == n ? shared_gate : gate + (ulong)e * dim;
     float acc = 0.0f;
-    for (uint i = lane; i < dim; i += SG) acc = fma((float)x[row * dim + i], vload_half(i, w), acc);
+    for (uint i = lane; i < dim / 8; i += SG) {
+        const float8 xv = convert_float8(vload8(i, x + (ulong)row * dim)), wv = convert_float8(vload8(i, w));
+        for (uint j = 0; j < 8; j++) acc = fma(xv[j], wv[j], acc);
+    }
     acc = sub_group_reduce_add(acc);
     if (lane == 0) logits[row * n + e] = acc;
 }
