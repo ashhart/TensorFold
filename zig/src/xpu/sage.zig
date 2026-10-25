@@ -1,5 +1,5 @@
 //! Sage-A1.5 (qwen3_5_moe, 35B-A3B) on Intel Xe2 over Level Zero, first form: MLX affine 4/64 weights, decode kernels
-//! only (prompts go through in windows of at most 16 rows), one sequence. It reuses the 27B's device layer, loaders and
+//! plus prompt chunks (norms, GEMMs and MoE over the chunk), one sequence. It reuses the 27B's device layer, loaders and
 //! kernels, built at Sage's shape (shape.h, sage_glue and sage_decode), plus the MoE ops of sage_moe.cl.
 const std = @import("std");
 const ze = @import("ze");
@@ -23,6 +23,8 @@ pub const EPS: f32 = 1e-6;
 pub const SPLIT = 32; // keys per attention split (decode.cl)
 /// Rows of one forward: the decode kernels' limit (the chain table and the serial GDN).
 pub const WINDOW = 16;
+/// Rows of one prompt chunk: norms, GEMMs and MoE take the whole chunk, the mixers WINDOW rows at a time.
+pub const CHUNK = 512;
 /// Query heads an attn_decode subgroup holds at Sage's shape (sage_config.sage_defines: Q27_QPG).
 const QPG = 4;
 
@@ -81,12 +83,12 @@ pub const Sizes = struct {
 };
 
 pub const Acts = struct {
-    x: *anyopaque, // fp32 [WINDOW, D]
-    h: *anyopaque, // fp16 [WINDOW, widest GEMM input]
+    x: *anyopaque, // fp32 [CHUNK, D]
+    h: *anyopaque, // fp16 [CHUNK, widest GEMM input]
     ahi: *anyopaque,
     alo: *anyopaque,
-    r: *anyopaque, // fp16 [WINDOW, D]
-    p: *anyopaque, // fp16 [WINDOW, widest mixer input projection]
+    r: *anyopaque, // fp16 [CHUNK, D]
+    p: *anyopaque, // fp16 [CHUNK, widest mixer input projection]
     q: *anyopaque,
     k: *anyopaque,
     v: *anyopaque,
@@ -104,46 +106,47 @@ pub const Acts = struct {
     ids: *anyopaque,
     chain: *anyopaque,
     // MoE
-    mlog: *anyopaque, // fp32 [WINDOW, experts + 1]
-    mids: *anyopaque, // u32 [WINDOW, top_k]
-    mwts: *anyopaque, // fp32 [WINDOW, top_k]
-    msw: *anyopaque, // fp32 [WINDOW]: the shared expert's gate
-    mact: *anyopaque, // fp16 [WINDOW (top_k + 1), ff]
-    my: *anyopaque, // fp32 [WINDOW (top_k + 1), D]
+    mlog: *anyopaque, // fp32 [CHUNK, experts + 1]
+    mids: *anyopaque, // u32 [CHUNK, top_k]
+    mwts: *anyopaque, // fp32 [CHUNK, top_k]
+    msw: *anyopaque, // fp32 [CHUNK]: the shared expert's gate
+    mact: *anyopaque, // fp16 [CHUNK (top_k + 1), ff]
+    my: *anyopaque, // fp32 [CHUNK (top_k + 1), D]
 
     pub fn init(d: *Dev, z: Sizes, ctx: u32) !Acts {
         const s = z.s;
         const w: usize = WINDOW;
+        const c: usize = CHUNK;
         const widest_in: usize = @max(s.hidden, @max(z.vd, z.od));
         const ns: usize = (ctx + SPLIT - 1) / SPLIT;
-        const pairs: usize = w * (s.top_k + 1);
+        const pairs: usize = c * (s.top_k + 1);
         return .{
-            .x = try d.alloc_(w * s.hidden * 4),
-            .h = try d.alloc_(w * widest_in * 2),
-            .ahi = try d.alloc_(w * (widest_in / 64) * 2),
-            .alo = try d.alloc_(w * (widest_in / 64) * 2),
-            .r = try d.alloc_(w * s.hidden * 2),
-            .p = try d.alloc_(w * @max(z.gdn_in, z.att_in) * 2),
-            .q = try d.alloc_(w * @max(s.q_heads * 256, s.gdn_k_heads * 128) * 2),
+            .x = try d.alloc_(c * s.hidden * 4),
+            .h = try d.alloc_(c * widest_in * 2),
+            .ahi = try d.alloc_(c * (widest_in / 64) * 2),
+            .alo = try d.alloc_(c * (widest_in / 64) * 2),
+            .r = try d.alloc_(c * s.hidden * 2),
+            .p = try d.alloc_(c * @max(z.gdn_in, z.att_in) * 2),
+            .q = try d.alloc_(c * @max(s.q_heads * 256, s.gdn_k_heads * 128) * 2),
             .k = try d.alloc_(w * s.gdn_k_heads * 128 * 2),
             .v = try d.alloc_(w * z.vd * 2),
             .g = try d.alloc_(w * s.gdn_v_heads * 4),
             .beta = try d.alloc_(w * s.gdn_v_heads * 4),
-            .y = try d.alloc_(w * @max(z.vd, z.od) * 2),
+            .y = try d.alloc_(c * @max(z.vd, z.od) * 2),
             .pm = try d.alloc_(w * s.q_heads * ns * 4),
             .pl = try d.alloc_(w * s.q_heads * ns * 4),
             .po = try d.alloc_(w * s.q_heads * ns * 256 * 4),
-            .pscr = try d.alloc_(w * s.hidden * 4),
+            .pscr = try d.alloc_(c * s.hidden * 4),
             .logits = try d.alloc_(w * s.vocab * 2),
             .tok = try d.alloc_(w * 4),
             .pv = try d.alloc_(w * 1024),
             .pi = try d.alloc_(w * 1024),
             .ids = try d.alloc_(w * 4),
             .chain = try d.upload(std.mem.sliceAsBytes(&fwd.chainTable())),
-            .mlog = try d.alloc_(w * (s.experts + 1) * 4),
-            .mids = try d.alloc_(w * s.top_k * 4),
-            .mwts = try d.alloc_(w * s.top_k * 4),
-            .msw = try d.alloc_(w * 4),
+            .mlog = try d.alloc_(c * (s.experts + 1) * 4),
+            .mids = try d.alloc_(c * s.top_k * 4),
+            .mwts = try d.alloc_(c * s.top_k * 4),
+            .msw = try d.alloc_(c * 4),
             .mact = try d.alloc_(pairs * @max(s.expert_ff, s.shared_ff) * 2),
             .my = try d.alloc_(pairs * s.hidden * 4),
         };
@@ -313,12 +316,14 @@ pub const Runner = struct {
         r.last = -1;
     }
 
-    /// Feeds tokens in windows of WINDOW rows; `last` afterwards is the greedy token after the final one.
+    /// Feeds tokens in chunks of CHUNK rows (a tail of WINDOW rows or less as one decode forward); `last` afterwards
+    /// is the greedy token after the final one.
     pub fn prompt(r: *Runner, ids: []const i32) !void {
         var at: usize = 0;
         while (at < ids.len) {
-            const n = @min(WINDOW, ids.len - at);
-            r.last = try r.forward(ids[at..][0..n], at + n == ids.len);
+            const n = @min(CHUNK, ids.len - at);
+            const tail = at + n == ids.len;
+            r.last = if (n > WINDOW) try r.chunk(ids[at..][0..n], tail) else try r.forward(ids[at..][0..n], tail);
             at += n;
         }
     }
@@ -376,6 +381,70 @@ pub const Runner = struct {
             try r.moe(l, T);
         }
         r.pos += T;
+        return r.head(T, want);
+    }
+
+    /// One prompt chunk of WINDOW < rows <= CHUNK at r.pos: norms, GEMMs, attention (attn_prompt) and the MoE over all
+    /// rows, the GDN in windows of WINDOW rows.
+    fn chunk(r: *Runner, ids: []const i32, want: bool) !i32 {
+        if (ids.len <= WINDOW or ids.len > CHUNK) return error.BadWindow;
+        if (r.pos + ids.len > r.ctx) return error.ContextFull;
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const z = r.z;
+        const s = z.s;
+        const T: u32 = @intCast(ids.len);
+        const D: i32 = @intCast(s.hidden);
+        const gs: i32 = 64;
+        const nul: ?*anyopaque = null;
+        const zero: i32 = 0;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
+        errdefer d.settle();
+        try d.launch(d.k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x, D });
+        for (m.layers, 0..) |*l, i| {
+            try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
+            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
+            if (l.attn) {
+                const p0: i32 = @intCast(r.pos);
+                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p0, EPS, nul, nul, nul, zero, zero });
+                try d.launch(d.k.attn_prompt, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p0, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0) });
+                try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
+            }
+            const pin = l.mixer_in.n;
+            const hk = l.mixer_out.k;
+            var j: u32 = 0;
+            while (!l.attn and j < T) : (j += WINDOW) {
+                const w = @min(WINDOW, T - j);
+                const w32: i32 = @intCast(w);
+                const pj = off(a.p, @as(usize, j) * pin * 2);
+                const hj = off(a.h, @as(usize, j) * hk * 2);
+                const hij = off(a.ahi, @as(usize, j) * (hk / 64) * 2);
+                const loj = off(a.alo, @as(usize, j) * (hk / 64) * 2);
+                const cin = l.conv[l.conv_cur].?;
+                const cout = l.conv[1 - l.conv_cur].?;
+                l.conv_cur = 1 - l.conv_cur;
+                try d.launch(d.k.gdn_pre, .{ .x = w, .y = z.nconv / 256 }, .{ pj, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, w32, nul, nul });
+                try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, w32, nul, nul, nul, nul });
+                try d.launch(d.k.gated_norm, .{ .x = w }, .{ a.y, pj, l.gnorm.?, hj, hij, loj, EPS, gs, zero, nul, nul, zero });
+            }
+            try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
+            try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), gs, nul, nul, zero, zero });
+            try r.moe(l, T);
+        }
+        r.pos += T;
+        return r.head(T, want);
+    }
+    /// After a forward of `T` rows: the greedy token of the last row when `want`, else -1 (after a sync).
+    fn head(r: *Runner, T: u32, want: bool) !i32 {
+        const d = &r.d;
+        const a = &r.acts;
+        const m = &r.model;
+        const s = r.z.s;
+        const D: i32 = @intCast(s.hidden);
+        const nul: ?*anyopaque = null;
+        const zero: i32 = 0;
+        errdefer d.settle();
         if (!want) {
             try d.sync();
             return -1;
@@ -408,8 +477,8 @@ pub const Runner = struct {
     }
 };
 
-/// The Dev's kernel table from the Sage images; the 27B's prompt attention (6 query heads a K/V head) has no Sage
-/// build, so its two slots hold attn_decode and this runner never launches them.
+/// The Dev's kernel table from the Sage images; attn_prompt8 (int8 cache, 6 query heads a K/V head) has no Sage build,
+/// so its slot holds attn_decode and this runner never launches it.
 fn kernels(d: *Dev, mk: *MoeKernels) !void {
     const mg = try d.g.module(&kb.sage_glue);
     const md = try d.g.module(&kb.sage_decode);
@@ -444,8 +513,8 @@ fn kernels(d: *Dev, mk: *MoeKernels) !void {
         .kv_move = try d.kernel(md, "kv_move", 16),
         .exl3_gemv = try d.kernel(md, "exl3_gemv", 16),
         .rot_heads = try d.kernel(mg, "rot_heads", 16),
-        .attn_prompt = attn_decode, // not built at Sage's shape, never launched here
-        .attn_prompt8 = attn_decode,
+        .attn_prompt = try d.kernel(md, "attn_prompt", 128),
+        .attn_prompt8 = attn_decode, // the int8 cache: not built at Sage's shape, never launched here
         .embed_dense = try d.kernel(mg, "embed_dense", 256),
         .dense_rows = try d.kernel(mg, "dense_rows", 256),
         .repack_gptq = try d.kernel(mg, "repack_gptq", 16),
