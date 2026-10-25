@@ -65,3 +65,55 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
 }
+
+/// The CPU-only fake server and the engine-less CLI into zig-out/server/ (zig build server-cpu):
+/// the module graph the real binaries get, without native engines, so zig/tests/server/build.sh
+/// stays a wrapper instead of a second copy of it.
+pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options) void {
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize });
+    const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = optimize });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const none = b.createModule(.{ .root_source_file = b.path("zig/src/native/none.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "engine_api", .module = api }} });
+
+    // the fake server: the server module with no native engines, so addTo takes the plain drama prompt
+    const server_mod = b.createModule(.{ .root_source_file = b.path("zig/src/server/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{
+        .{ .name = "engine_api", .module = api },
+        .{ .name = "tokenizer", .module = tokenizer },
+        .{ .name = "template", .module = template },
+    } });
+    _ = addTo(b, server_mod, target, optimize);
+    const fake = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/server/fake_serve.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "server", .module = server_mod }, .{ .name = "engine_api", .module = api } },
+    }) });
+    const server_install = b.addInstallArtifact(fake, .{ .dest_dir = .{ .override = .{ .custom = "server" } } });
+
+    // the engine-less CLI: main.zig over the none engines, the checkpoint subcommands' own module included
+    const cli = @import("cuda.zig").checkpointCli(b, target, optimize, null, none, core);
+    const exe = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+            .{ .name = "engine_api", .module = api },
+            .{ .name = "tokenizer", .module = tokenizer },
+            .{ .name = "template", .module = template },
+            .{ .name = "native_engines", .module = none },
+            .{ .name = "checkpoint_cli", .module = cli },
+        },
+    }) });
+    exe.root_module.addOptions("build_options", build_options);
+    _ = addTo(b, exe.root_module, target, optimize);
+    const cli_install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "server" } } });
+
+    const step = b.step("server-cpu", "The CPU-only fake server and engine-less CLI into zig-out/server");
+    step.dependOn(&server_install.step);
+    step.dependOn(&cli_install.step);
+}
