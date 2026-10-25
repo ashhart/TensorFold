@@ -3,6 +3,8 @@ const std = @import("std");
 const cuda_build = @import("cuda.zig");
 const list = @import("dsv41_units.zig");
 pub const Images = struct { units: [list.units.len]std.Build.LazyPath, optional: [list.optional.len]?std.Build.LazyPath };
+/// The images `images` resolved in this build, for the installable pair (dsv41_serve.zig); null without a source.
+pub var built: ?*const Images = null;
 pub fn images(b: *std.Build, nvcc: ?[]const u8, prebuilt: ?[]const u8) ?*const Images {
     const step = b.step("fatbins-dsv41", "Build or install the complete family images, sm_121 only");
     const result = b.allocator.create(Images) catch @panic("OOM");
@@ -31,6 +33,7 @@ pub fn images(b: *std.Build, nvcc: ?[]const u8, prebuilt: ?[]const u8) ?*const I
     for (list.optional, result.optional) |unit, path| if (path) |file| {
         step.dependOn(&b.addInstallFile(file, b.fmt("fatbin/{s}.fatbin", .{unit.name})).step);
     };
+    built = result;
     return result;
 }
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, embedded: ?*const Images) *std.Build.Module {
