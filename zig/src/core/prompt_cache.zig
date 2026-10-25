@@ -115,6 +115,8 @@ pub const Entry = struct {
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
+    ext: std.ArrayList(*Entry) = .empty, // entries extending its tokens, born later (policy.link): `extended` reads them
+    own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
 };
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
@@ -143,6 +145,7 @@ pub const Store = struct {
     imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
     disk: ?*rows.Rows = null, // --learn-conversations: every kept state written behind to disk, read back where it pays
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
+    links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
 
     const SHARED_KEYS = 64;
 
@@ -160,15 +163,17 @@ pub const Store = struct {
     fn free(s: *Store, e: *Entry) void {
         if (s.disk) |r| rows.write.dropped(r, e);
         s.family.vtable.drop(s.family.ptr, e.saved);
-        s.gpa.free(e.tokens);
+        s.gpa.free(if (e.own.len > 0) e.own else e.tokens);
         s.gpa.free(e.decode_spans);
-        s.gpa.free(e.last);
+        if (e.own.len == 0 or e.last.ptr != e.own.ptr) s.gpa.free(e.last);
+        e.ext.deinit(s.gpa);
         s.gpa.destroy(e);
     }
 
     pub fn remove(s: *Store, i: usize) void {
         std.debug.assert(s.entries.items[i].borrowers == 0);
         const e = s.entries.orderedRemove(i);
+        policy.unlink(s, e);
         s.held -= e.bytes;
         if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: an evicted state is written before it goes
         s.free(e);
@@ -396,7 +401,7 @@ pub const Store = struct {
         e.branched = e.branched or s.extended(e); // a turn several continuations share (a re-sent, edited or forked one)
         s.counts.hits += 1;
         const last = s.gpa.dupe(u32, prompt) catch return;
-        s.gpa.free(e.last);
+        if (e.own.len == 0 or e.last.ptr != e.own.ptr) s.gpa.free(e.last); // the first `last` is the tokens' copy
         e.last = last;
     }
 
@@ -479,28 +484,23 @@ pub const Store = struct {
         }
         if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
         const e = s.gpa.create(Entry) catch return s.fail(at, error.OutOfMemory);
-        const tokens = s.gpa.dupe(u32, prompt[0..n]) catch {
-            s.gpa.destroy(e);
-            return s.fail(at, error.OutOfMemory);
-        };
-        const last = s.gpa.dupe(u32, prompt) catch {
-            s.gpa.free(tokens);
+        const last = s.gpa.dupe(u32, prompt) catch { // one copy: the state's tokens are its prefix
             s.gpa.destroy(e);
             return s.fail(at, error.OutOfMemory);
         };
         const saved = s.family.vtable.save(s.family.ptr, owner, at) catch |err| {
             s.gpa.free(last);
-            s.gpa.free(tokens);
             s.gpa.destroy(e);
             return s.fail(at, err);
         };
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = tokens, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared };
+        e.* = .{ .tokens = last[0..n], .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .own = last };
         owns_decoded = false;
         s.entries.append(s.gpa, e) catch {
             s.free(e);
             return s.fail(at, error.OutOfMemory);
         };
+        policy.link(s, e);
         s.held += charged;
         s.counts.kept += 1;
         if (shared) learned.learn(s, e, starts);
@@ -533,6 +533,7 @@ pub const Store = struct {
         };
         im.touch(key);
         s.entries.append(s.gpa, e) catch return s.drop(e, have, true);
+        policy.link(s, e);
         s.held += bytes;
         if (!@import("builtin").is_test) std.log.info("prompt cache: read {d} learned tokens from disk", .{m.at});
         return e;
@@ -578,6 +579,7 @@ test {
     _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_give_test.zig");
     _ = @import("prompt_cache_lifetime_test.zig");
+    _ = @import("prompt_cache_scan_test.zig");
     _ = @import("learned_fault_test.zig");
     _ = modes;
     _ = rows;

@@ -127,6 +127,7 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
         s.family.vtable.drop(s.family.ptr, e.saved);
         return have;
     };
+    @import("prompt_cache_policy.zig").link(s, e);
     ok = true;
     s.held += e.bytes;
     return e;
