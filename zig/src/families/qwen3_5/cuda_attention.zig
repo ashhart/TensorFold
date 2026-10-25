@@ -1,6 +1,7 @@
 //! Contiguous attention has its own entry point and graph key; mixed batches retain per-block page selection.
 const std = @import("std");
 const Round = @import("cuda_round.zig");
+const geometry = @import("cuda_geometry.zig");
 
 pub fn hasPages(segs: anytype) bool {
     for (segs) |sg| if (sg.pt != 0) return true;
@@ -8,9 +9,15 @@ pub fn hasPages(segs: anytype) bool {
 }
 
 pub fn partial(e: anytype, shape: anytype, layer: c_int) !void {
+    return partialRows(e, shape, layer, 0, shape.total);
+}
+
+/// `partial` for the `rows` rows from `first`: the partials hold most_verify rows, a paged prompt chunk up to max_rows.
+pub fn partialRows(e: anytype, shape: anytype, layer: c_int, first: usize, rows: usize) !void {
     const f = if (e.kv8) (if (shape.paged) e.fp8.attn_partial_paged else e.fp8.attn_partial_contiguous) else (if (shape.paged) e.fns.attn_partial_paged else e.fns.attn_partial_contiguous);
     const t = e.tables.ptr;
-    try e.run(f, .{ 64, e.g.kv_heads, shape.total }, .{ 32 * (e.g.q_heads / e.g.kv_heads), 1, 1 }, .{ e.geo, e.qn, t + Round.segs_at, t + Round.rowseg_at, t + Round.rowanc_at, layer, t + Round.params_at, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
+    const q = e.qn + first * e.g.q_heads * geometry.head_dim * 2;
+    try e.run(f, .{ 64, e.g.kv_heads, rows }, .{ 32 * (e.g.q_heads / e.g.kv_heads), 1, 1 }, .{ e.geo, q, t + Round.segs_at, t + Round.rowseg_at + first * 4, t + Round.rowanc_at + first * @sizeOf(Round.Ancestor), layer, t + Round.params_at, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
 }
 
 test "Qwen attention path: unpaged, paged and mixed segment tables" {
