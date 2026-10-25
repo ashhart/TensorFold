@@ -141,6 +141,55 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_warp(const
     if (shared && lane == 0) pick[r * slots + topk] = ne, wts[r * slots + topk] = 1.f;
 }
 
+// The warp form ranking sigmoid(logit) + bias (Nemotron's routing): weights the scores, `shared` slots ne, ne + 1, ...
+extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp(const float* logits, const float* bias,
+                                                                                int* pick, float* wts, int rows, int ne,
+                                                                                int topk, int shared, int normalize,
+                                                                                float scale) {
+    const int lane = threadIdx.x & 31;
+    const int64_t r = static_cast<int64_t>(blockIdx.x) * 8 + (threadIdx.x >> 5);
+    if (r >= rows) return;
+    const float* lg = logits + r * ne;
+    float v[PER], x[PER];
+#pragma unroll
+    for (int j = 0; j < PER; ++j) {
+        const int e = lane + 32 * j;
+        x[j] = e < ne ? __fdiv_rn(1.f, __fadd_rn(1.f, expf(-lg[e]))) : 0.f;
+        v[j] = e < ne ? __fadd_rn(x[j], bias != nullptr ? bias[e] : 0.f) : -INFINITY;
+    }
+    const int slots = topk + shared;
+    float xk = 0.f; // lane k's pick's score
+    int pk = 0;     // lane k's pick
+    for (int k = 0; k < topk; ++k) {
+        float bv = -INFINITY;
+        int bi = ne;
+#pragma unroll
+        for (int j = 0; j < PER; ++j) {
+            const int e = lane + 32 * j;
+            if (e < ne && beats(v[j], e, bv, bi)) bv = v[j], bi = e;
+        }
+        { // the warp's best: the largest value (redux on an order-keeping key), then the lowest id among equals
+            const unsigned key = ordered(bv);
+            const unsigned top = __reduce_max_sync(0xFFFFFFFFu, key);
+            bi = static_cast<int>(__reduce_min_sync(0xFFFFFFFFu, key == top ? static_cast<unsigned>(bi) : 0xFFFFFFFFu));
+        }
+        float xb = 0.f;
+#pragma unroll
+        for (int j = 0; j < PER; ++j)
+            if (lane + 32 * j == bi) v[j] = -INFINITY, xb = x[j];
+        xb = __shfl_sync(0xFFFFFFFFu, xb, bi & 31);
+        if (lane == k) xk = xb, pk = bi;
+    }
+    // the weights in their lanes; the sum in pick order
+    float sum = 0.f;
+    for (int k = 0; k < topk; ++k) sum = __fadd_rn(sum, __shfl_sync(0xFFFFFFFFu, xk, k));
+    if (lane < topk) {
+        pick[r * slots + lane] = pk;
+        wts[r * slots + lane] = __fmul_rn(normalize ? __fdiv_rn(xk, sum) : xk, scale);
+    }
+    if (lane < shared) pick[r * slots + topk + lane] = ne + lane, wts[r * slots + topk + lane] = 1.f;
+}
+
 // out[r, d] = sum over the row's slots, in slot order, of w[r, k] * y[r, k, d] (fp32 fma), rounded once to out's kind.
 template <int YK, int OK>
 __device__ __forceinline__ void combine_row(const void* y, const float* w, void* out, int slots, int dims, int64_t r, int d) {

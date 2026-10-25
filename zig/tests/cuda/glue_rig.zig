@@ -15,6 +15,8 @@ pub const Rig = struct {
     f: glue.Fns,
     emb: cuda.embed_rows.EmbedRows,
     norms: cuda.norms.Norms,
+    moe: cuda.moe_glue.MoeGlue,
+    ones: u64 = 0, // fp32 1.0 a router slice, the route's slice-sum weights
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
@@ -22,7 +24,7 @@ pub const Rig = struct {
     sparsest: f64 = 1, // the smallest share of nonzero elements in any reference: none may be all zeros
 
     pub fn g(r: *Rig) glue.Glue {
-        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms };
+        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms, .moe = &r.moe, .ones = r.ones };
     }
 
     /// A device copy of host values, landed before any kernel on the rig's stream reads it.
@@ -79,6 +81,17 @@ pub const Rig = struct {
             if (first == null) first = i;
         };
         std.debug.print("DIFFER {s}: {d} of {d} elements, first at {d}: got {any}, want {any}\n", .{ what, n, want.len, first.?, got[first.?], want[first.?] });
+    }
+
+    /// Device values at `ptr` within 2^-20 of float64's `want` (relative), one case; a miss names its first element.
+    pub fn near(r: *Rig, what: []const u8, ptr: u64, want: []const f64) !void {
+        const got = try r.get(f32, ptr, want.len);
+        r.cases += 1;
+        for (got, want, 0..) |x, w, i| if (!(@abs(x - w) <= @abs(w) * 0x1p-20 + 1e-30)) {
+            r.bad += 1;
+            std.debug.print("DIFFER {s}: element {d} is {d}, float64 gives {d}\n", .{ what, i, x, w });
+            return;
+        };
     }
 
     /// n elements of the device bytes at `ptr`, once the rig's stream is done.

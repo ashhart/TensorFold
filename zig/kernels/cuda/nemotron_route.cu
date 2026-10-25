@@ -1,4 +1,4 @@
-// Nemotron's router: fp32 logits in K slices (one fma chain a slice), then each row's top-k and the shared slots.
+// Nemotron's router: fp32 logits in K slices (one fma chain a slice); moe_glue.cu sums them and ranks the top-k.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -183,92 +183,4 @@ tf_nemo_router_rows(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __
         xa = xn, wa = wn;
     }
     PART[(static_cast<int64_t>(s) * R + rr) * E + e0 + ee] = acc;
-}
-
-namespace {
-
-constexpr int MAXSK = 8;  // router slices topk sums (routerShape takes at most 6)
-
-// The larger of two (value, index) picks: a higher value, or the lower index on a tie (values are never NaN).
-__device__ __forceinline__ bool beats(float v, int i, float bv, int bi) { return v > bv || (v == bv && i < bi); }
-
-}  // namespace
-
-// Sum logits' slices in order; rank sigmoid scores plus bias before adding the shared slots. MAXC: a lane's experts.
-template <int MAXC>
-__device__ __forceinline__ void nemo_topk(const float* __restrict__ PART, const float* __restrict__ BIAS, int* __restrict__ IDX,
-                                          float* __restrict__ WT, int R, float scaling, int E, int SK, int TOPK, int NS, int norm) {
-    const int64_t r = blockIdx.x;
-    const int lane = threadIdx.x;
-    float score[MAXC], sel[MAXC];
-    float part[MAXC][MAXSK], bias[MAXC];  // every slice's and bias's load issued before the sums
-#pragma unroll
-    for (int c = 0; c < MAXC; ++c) {
-        const int e = lane + 32 * c;
-        bias[c] = e < E ? BIAS[e] : 0.0f;
-#pragma unroll
-        for (int s = 0; s < MAXSK; ++s) part[c][s] = e < E && s < SK ? PART[(s * R + r) * E + e] : 0.0f;
-    }
-#pragma unroll
-    for (int c = 0; c < MAXC; ++c) {
-        const int e = lane + 32 * c;
-        score[c] = 0.0f;
-        sel[c] = -INFINITY;
-        if (e >= E) continue;
-        float logit = 0.0f;
-#pragma unroll
-        for (int s = 0; s < MAXSK; ++s)
-            if (s < SK) logit = __fadd_rn(logit, part[c][s]);
-        score[c] = tf_sigmoid(logit);
-        const float v = __fadd_rn(score[c], bias[c]);
-        sel[c] = v != v ? -INFINITY : v;  // a NaN logit is never picked ahead of a number
-    }
-    float total = 0.0f;
-    float probs[MAXC];
-    int ids[MAXC];
-    for (int k = 0; k < TOPK; ++k) {
-        float bv = -INFINITY;
-        int bi = 0x7fffffff;
-#pragma unroll
-        for (int c = 0; c < MAXC; ++c)
-            if (lane + 32 * c < E && beats(sel[c], lane + 32 * c, bv, bi)) bv = sel[c], bi = lane + 32 * c;
-#pragma unroll
-        for (int off = 16; off > 0; off >>= 1) {
-            const float ov = __shfl_xor_sync(0xffffffffu, bv, off);
-            const int oi = __shfl_xor_sync(0xffffffffu, bi, off);
-            if (beats(ov, oi, bv, bi)) bv = ov, bi = oi;
-        }
-        float p = 0.0f;
-#pragma unroll
-        for (int c = 0; c < MAXC; ++c)
-            if (bi == lane + 32 * c) p = score[c], sel[c] = -INFINITY;
-        p = __shfl_sync(0xffffffffu, p, bi % 32);
-        if (k < MAXC) probs[k] = p, ids[k] = bi;
-        total = __fadd_rn(total, p);
-    }
-    if (lane != 0) return;
-    for (int k = 0; k < NS; ++k) {
-        float w = 1.0f;
-        int id = E + (k - TOPK);
-        if (k < TOPK) {
-            id = ids[k];
-            w = norm ? __fmul_rn(__fdiv_rn(probs[k], __fadd_rn(total, 1e-20f)), scaling) : __fmul_rn(probs[k], scaling);
-        }
-        IDX[r * NS + k] = id;
-        WT[r * NS + k] = w;
-    }
-}
-
-// Up to 256 experts and 8 picks a row (Lightning, Super): the released kernel.
-extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk(const float* __restrict__ PART, const float* __restrict__ BIAS,
-                                                               int* __restrict__ IDX, float* __restrict__ WT, int R, float scaling, int E,
-                                                               int SK, int TOPK, int NS, int norm) {
-    nemo_topk<8>(PART, BIAS, IDX, WT, R, scaling, E, SK, TOPK, NS, norm);
-}
-
-// Up to 512 experts and 16 picks a row (Bolt's 496 experts, 9 picks).
-extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk_wide(const float* __restrict__ PART, const float* __restrict__ BIAS,
-                                                                    int* __restrict__ IDX, float* __restrict__ WT, int R, float scaling,
-                                                                    int E, int SK, int TOPK, int NS, int norm) {
-    nemo_topk<16>(PART, BIAS, IDX, WT, R, scaling, E, SK, TOPK, NS, norm);
 }

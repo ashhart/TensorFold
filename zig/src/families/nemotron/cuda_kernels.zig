@@ -49,6 +49,7 @@ pub const Kernels = struct {
     glue: glue.Fns,
     emb: cuda.embed_rows.EmbedRows,
     norms: cuda.norms.Norms,
+    moe: cuda.moe_glue.MoeGlue, // the shared top-k and combine
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
     router: cuda.grouped.Router,
     experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
@@ -61,7 +62,6 @@ pub const Kernels = struct {
     pocket_in: [2]cuda.Function, // the pocket's two halves a block row a row, then tiled for a prompt chunk's rows
     pocket_out: [2]cuda.Function,
     add_row: cuda.Function,
-    latent_sum: cuda.Function, // LatentMoE: a row's routed latent outputs weighted and summed (Bolt)
     add_bf16: cuda.Function,
     splice_rows: cuda.Function, // an image prompt's rows take the vision tower's features (Bolt)
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
@@ -99,7 +99,6 @@ pub const Kernels = struct {
         k.pocket_in = .{ try k.mods[7].function("tf_pocket_in"), try k.mods[7].function("tf_pocket_in_rows") };
         k.pocket_out = .{ try k.mods[7].function("tf_pocket_out"), try k.mods[7].function("tf_pocket_out_rows") };
         k.add_row = try k.mods[7].function("tf_add_row");
-        k.latent_sum = try k.mods[7].function("tf_latent_sum");
         k.add_bf16 = try k.mods[7].function("tf_add_bf16");
         k.splice_rows = try k.mods[7].function("tf_splice_rows");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
@@ -109,6 +108,8 @@ pub const Kernels = struct {
         errdefer k.emb.unload();
         k.norms = try cuda.norms.Norms.load(d);
         errdefer k.norms.unload();
+        k.moe = try cuda.moe_glue.MoeGlue.load(d);
+        errdefer k.moe.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
         k.latent = null;
@@ -132,6 +133,7 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         k.emb.unload();
         k.norms.unload();
+        k.moe.unload();
         if (k.latent) |*x| x.unload();
         if (k.ck) |*x| x.unload();
         if (k.modelopt) |*m| {
@@ -263,15 +265,9 @@ pub const Ops = struct {
         return .{ .affine4 = &o.k.experts, .nvfp4 = if (o.k.modelopt) |*x| &x.experts else null, .iq2xxs = if (o.k.ggml) |*g| g else null };
     }
 
-    /// LatentMoE: z[r] = sum_k wt[r, k] y[r * k_slots + k], rows of `l` bf16 from fp32 pair rows (tf_latent_sum).
+    /// LatentMoE: z[r] = sum_k wt[r, k] y[r * k_slots + k], rows of `l` bf16 from fp32 pair rows (the shared combine).
     pub fn latentSum(o: Ops, y: u64, wt: u64, z: u64, rows: usize, k_slots: usize, l: usize) !void {
-        var a: cuda.Args = .{};
-        a.add(y);
-        a.add(wt);
-        a.add(z);
-        a.add(int(k_slots));
-        a.add(int(l));
-        try o.go(o.k.latent_sum, .{ rows, 1, 1 }, 256, 0, &a);
+        try o.k.moe.combine(o.s, y, .f32, wt, z, .bf16, rows, k_slots, l);
     }
 
     /// Rows of h whose src (i32, one a row) names a feature row take that row of `features` ([*, d] bf16).
