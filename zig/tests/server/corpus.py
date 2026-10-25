@@ -66,7 +66,7 @@ def chat_cases() -> list[tuple[str, str, list[Any]]]:
 
 def tool_cases() -> list[tuple[str, str, list[Any]]]:
     out: list[tuple[str, str, list[Any]]] = []
-    for s in ("qwen_tool", "qwen_tool_think", "xml_tool", "two_tools", "glm_tool", "gemma_tool", "dsml_tool", "lfm2_tool", "lfm2_json", "lfm2_typed", "bare_json", "bad_tool", "plain"):
+    for s in ("qwen_tool", "qwen_tool_think", "xml_tool", "two_tools", "glm_tool", "gemma_tool", "dsml_tool", "lfm2_tool", "lfm2_json", "lfm2_typed", "lfm2_two", "bare_json", "bad_tool", "plain"):
         for stream in (False, True):
             out.append(("tools", f"{s}{'-stream' if stream else ''}", [post("/v1/chat/completions", chat(s, tools=TOOLS, stream=stream))]))
         out.append(("tools", f"{s}-single", [post("/v1/chat/completions", chat(s, tools=TOOLS, parallel_tool_calls=False))]))

@@ -397,6 +397,25 @@
    ]
   ]
  },
+ "lfm2_two": {
+  "chunks": [
+   [
+    "<|tool_call_start|>[lookup(",
+    "query=\"ok\", limit=4)",
+    ", lookup("
+   ],
+   [
+    "query=\"no\")]",
+    "<|tool_call_end"
+   ],
+   [
+    "|>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
  "bare_json": {
   "chunks": [
    [
