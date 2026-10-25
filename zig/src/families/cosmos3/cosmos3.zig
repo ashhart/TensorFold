@@ -1,4 +1,4 @@
-//! Native Metal Cosmos3-Edge (NVIDIA's reasoner tower): dense GQA with interleaved M-RoPE and relu^2, a SigLIP2 image tower.
+//! Native Metal Cosmos3-Edge (NVIDIA's reasoner): dense GQA with interleaved M-RoPE and relu^2, a SigLIP2 image tower.
 pub const config = @import("config.zig");
 pub const weights = @import("weights.zig");
 pub const kernels = @import("kernels.zig");

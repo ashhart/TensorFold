@@ -1,6 +1,4 @@
-//! The image tower on Metal: SigLIP2 patch embedding plus the learned 16 x 16 position grid resized to the image's,
-//! 27 pre-norm encoder blocks with bidirectional attention over the image's patches, then the projector: LayerNorm,
-//! four neighbouring patches (block-major order) as one 4608-wide row, two linears with an exact GELU between.
+//! The image tower on Metal: SigLIP2 patches, resized 16 x 16 grid, 27 encoder blocks, LayerNorm, 2 x 2 merge, MLP.
 const std = @import("std");
 const mtl = @import("metal");
 const Model = @import("model.zig").Model;
@@ -60,7 +58,7 @@ pub const Tower = struct {
         t.memory.setResident(hook);
     }
 
-    /// One image's patches (f32 [gh * gw, 768] block-major, HWC within a patch) to its text rows ([gh * gw / 4, 2048] at `out`).
+    /// One image's patches (f32 [gh * gw, 768], block-major, HWC in a patch) to its text rows ([gh * gw / 4, 2048]).
     pub fn encode(t: *Tower, m: *Model, pixels: []const f32, gh: u32, gw: u32, out: Ref) !void {
         const P: usize = @as(usize, gh) * gw;
         if (gh % c.merge != 0 or gw % c.merge != 0 or P == 0) return error.CosmosImageGrid;
@@ -138,8 +136,7 @@ pub fn bf16(x: f32) u16 {
     return @truncate(rounded >> 16);
 }
 
-/// torch's antialiased bilinear weights (F.interpolate(..., mode="bilinear", align_corners=False, antialias=True)) for
-/// one axis from `in` to `out` samples: each output's first input and its weights, normalized, in f32 as on the CPU.
+/// torch's antialiased bilinear weights (F.interpolate, antialias=True) for one axis: first input, normalized weights.
 const Taps = struct { first: []usize, count: []usize, weights: []f32, width: usize };
 
 fn taps(gpa: std.mem.Allocator, in: usize, out: usize) !Taps {

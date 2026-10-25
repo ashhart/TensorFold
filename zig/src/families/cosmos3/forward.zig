@@ -1,5 +1,4 @@
-//! The text model, one command buffer a call: segments of rows (one stream each) at their M-RoPE positions, image rows
-//! placed over their placeholders, causal GQA attention over each segment's cache.
+//! The text model, a command buffer a call: per-stream row segments at M-RoPE positions, image rows, causal GQA.
 const std = @import("std");
 const mtl = @import("metal");
 const Model = @import("model.zig").Model;

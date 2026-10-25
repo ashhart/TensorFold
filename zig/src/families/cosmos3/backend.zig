@@ -1,5 +1,4 @@
-//! Cosmos3 streams behind the lane engine's backend interface: per-stream caches with their M-RoPE layout, the image
-//! tower's rows placed over each image's placeholders in the prompt pass, keyed draws.
+//! Cosmos3 streams behind the lane backend: per-stream M-RoPE caches, image rows over their placeholders, keyed draws.
 const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");

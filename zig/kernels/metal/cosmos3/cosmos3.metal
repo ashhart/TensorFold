@@ -1,5 +1,4 @@
-// Cosmos3-Edge's reasoner beside the core row projections: the text model's glue (M-RoPE, relu^2, attention) and the
-// SigLIP2 image tower's (layer norms, biases, GELU, bidirectional attention over one image's patches).
+// Cosmos3-Edge reasoner kernels: text glue (M-RoPE, relu^2, attention) and the SigLIP2 tower's norms, GELU, attention.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -83,8 +82,7 @@ inline void cos3_rotate(const device bfloat* src, const thread int* pos, float l
   }
 }
 
-// A simdgroup a (head, row): queries rotated into `queries`; keys rotated and values copied into the [KVH, cap, HD]
-// caches at slot slots[r] (the row's place in its stream), positions pos[r] = (t, h, w).
+// A simdgroup a (head, row): rotate queries; rotate keys, copy values into the caches at slots[r], positions pos[r].
 struct cos3_qk_args { uint cap; float log2_theta; };
 [[kernel]] void cos3_qk(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
                         const device int* pos [[buffer(3)]], const device uint* slots [[buffer(4)]], constant cos3_qk_args& p [[buffer(5)]],
@@ -109,9 +107,7 @@ struct cos3_qk_args { uint cap; float log2_theta; };
   x[i] = static_cast<bfloat>(v * v);
 }
 
-// Attention, one simdgroup a (head, row): queries [rows, heads, HDT] (rows q_row apart), keys and values at
-// key j of kv head kh: base + kh * k_head + j * k_row; a causal row r sees keys [0, first + r], else all `keys`.
-// Each 32-key block: a lane's key scored, the block's softmax folded in, then every lane's dims take the block's values.
+// Attention, a simdgroup a (head, row), 32-key blocks with an online softmax; a causal row r sees keys [0, first + r].
 struct cos3_attn_args { uint first, keys, causal, group, q_row, k_row, k_head, o_row; float scale; };
 template <int HDT>
 [[kernel]] void cos3_attn(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
@@ -164,8 +160,7 @@ template <int HDT>
 template [[host_name("cos3_attn_128")]] [[kernel]] decltype(cos3_attn<128>) cos3_attn<128>;
 template [[host_name("cos3_attn_72")]] [[kernel]] decltype(cos3_attn<72>) cos3_attn<72>;
 
-// cos3_attn over 8 query rows a threadgroup (one simdgroup each, one head): each 32-key block of keys and values is
-// staged once in threadgroup memory (keys padded to an odd stride) for all 8 rows. Causal rows mask past their own.
+// cos3_attn over 8 query rows a threadgroup (a simdgroup each, one head); each 32-key block staged once for all 8.
 constant constexpr uint TR = 8;
 template <int HDT>
 [[kernel]] void cos3_attn_tile(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
@@ -232,9 +227,7 @@ template <int HDT>
 template [[host_name("cos3_attn_tile_128")]] [[kernel]] decltype(cos3_attn_tile<128>) cos3_attn_tile<128>;
 template [[host_name("cos3_attn_tile_72")]] [[kernel]] decltype(cos3_attn_tile<72>) cos3_attn_tile<72>;
 
-// Flash attention on simdgroup matrices: a threadgroup a (head, 32 query rows), a simdgroup 8 of them. Each 32-key block
-// of keys and values is staged in threadgroup memory; S = Q K^T on 8 x 8 bf16 tiles (fp32 sums), the block's online
-// softmax by rows (4 lanes a row), P rounded to bf16 as the eager attention's weights are, then O += P V.
+// Flash attention on simdgroup matrices: S = Q K^T on 8 x 8 bf16 tiles (fp32 sums), online softmax, bf16 P, O += P V.
 constant constexpr uint FQ = 32;  // query rows a threadgroup
 constant constexpr uint FK = 32;  // keys a block
 template <int HDT>

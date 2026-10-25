@@ -1,5 +1,4 @@
-//! Cosmos3-Edge's image processor (Glm4v's geometry, temporal patch 1): sides multiples of 32 inside 65,536 to 16M pixels,
-//! torch's antialiased bicubic, (x - 127.5) / 127.5, 16-pixel patches in 2 x 2 block order, HWC inside a patch.
+//! Cosmos3-Edge's image processor: sides multiples of 32, antialiased bicubic, (x - 127.5) / 127.5, 2 x 2 blocks.
 const std = @import("std");
 const picture = @import("../../core/picture/picture.zig");
 const geometry = @import("../../core/qwen_vl/geometry.zig");

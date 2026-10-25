@@ -1,4 +1,4 @@
-//! Admission for Cosmos3-Edge's reasoner as tools/cosmos3_edge_to_mlx.py writes it: pinned geometry, MLX affine groups of 64.
+//! Admission for Cosmos3-Edge's reasoner as tools/cosmos3_edge_to_mlx.py writes it: pinned geometry, MLX groups of 64.
 const std = @import("std");
 
 // The text model (cosmos3_edge_text): dense GQA, relu^2 MLP, interleaved M-RoPE over [24, 20, 20] pairs.
