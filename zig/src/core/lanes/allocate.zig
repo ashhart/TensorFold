@@ -56,7 +56,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         drafts += 1;
         deepest = @max(deepest, counts[s]);
         expected += pick_p;
-        const steps: f64 = @floatFromInt(if (head.batched) deepest else drafts - (if (head.free_first) firsts else 0));
+        const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
         const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps);
         if (now > best or (!timed and head.step_ms == 0)) {
             best = now;

@@ -308,7 +308,7 @@ pub const Engine = struct {
         if (e.cfg.timed) {
             // the drafts budgets priced past each stream's first are no part of the round's overhead
             var steps: i64 = 0;
-            for (budgets) |d| steps += @max(0, d - 1);
+            for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
             const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
             try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));

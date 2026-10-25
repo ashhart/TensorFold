@@ -232,7 +232,7 @@ pub const Rule = struct {
         @memset(ones, 1);
         const head: alloc.HeadCost = .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads };
         const counts = if (r.draft_step_ms != 0)
-            try alloc.allocatePriced(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), @max(whos.len, r.batch_rows), r.draft_step_ms)
+            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), @max(whos.len, r.batch_rows), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true })
         else
             try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), @max(whos.len, r.batch_rows), head);
         defer r.gpa.free(counts);
@@ -379,4 +379,10 @@ test "a shared round's drafts come out the same whichever depths its overhead wa
         try rule.budgets(&whos, probe, false, out);
     }
     try std.testing.expectEqualSlices(i64, &got[0], &got[1]);
+}
+
+/// FZ_PRICE_BATCHED=1: a batched head's extra drafts cost the deepest stream's steps, not every stream's (A/B switch).
+pub fn pricedBatched() bool {
+    const v = std.c.getenv("FZ_PRICE_BATCHED") orelse return false;
+    return v[0] == '1';
 }
