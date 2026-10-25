@@ -1,13 +1,13 @@
-//! The core KV pool's pages on Metal: every page in one arena buffer, each stream's page table in one shared table buffer.
+//! The core KV pool on Metal: every page in one arena buffer, each stream's page table in one shared buffer.
 const std = @import("std");
 const mtl = @import("metal");
 const kv = @import("kv_pool.zig");
 const Allocator = std.mem.Allocator;
 
-/// Positions a page holds: a multiple of every Metal attention kernel's key tile (4 to 256), so no tile spans two pages.
+/// Positions a page holds: a multiple of every Metal attention key tile (4 to 256), so no tile spans two pages.
 pub const page_tokens = 256;
 
-/// A position's byte offset in the arena through its stream's table (kernels/metal/core/kv_pages.h), for the kernels that page.
+/// A position's byte offset in the arena through its stream's table (kernels/metal/core/kv_pages.h).
 pub const address_msl = @import("kernel_sources").kv_pages;
 
 comptime {
