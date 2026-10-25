@@ -99,6 +99,9 @@ fn fullKernels(d: *cuda.Driver) modelopt.Kernels {
     out.lane.half_below = 0; // the released launch parameters: the 64-column tile's
     out.prompt.fp4 = function(d, 3);
     out.prompt.fp8 = function(d, 3);
+    out.prompt.lean = function(d, 3);
+    out.prompt.lean_f32 = function(d, 3);
+    out.prompt.sms = 48;
     out.pack.fp8_lane = function(d, 1);
     return out;
 }

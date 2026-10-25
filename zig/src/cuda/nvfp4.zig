@@ -5,6 +5,7 @@ const module = @import("module.zig");
 const launch_ = @import("launch.zig");
 const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
+const abi = @import("abi.zig");
 const qmmf = @import("qmmf.zig");
 
 const Driver = driver.Driver;
@@ -59,12 +60,17 @@ pub fn weight(words: u64, scales: u64, global_scale: f32, n: usize, k: usize) qm
     return .{ .mode = .fp4, .codes = words, .scales = scales, .scale = global_scale, .n = @intCast(n), .k = @intCast(k), .npad = @intCast(padded(n)) };
 }
 
-/// prompt16.cu at linear.py's PROMPT_TILE 4, FP4 and per-tensor FP8: 128 x 128 tiles, 4 warps, one fp32 chain over K.
+/// prompt16.cu's PROMPT_TILE 4 (FP4, per-tensor FP8; 128 x 128) and prompt_lean, FP4's tile with the same bits.
 pub const Prompt = struct {
     mod: Module,
     fp4: Function,
     fp8: Function,
     fp4_f32: Function, // FP4 writing the fp32 sums unrounded
+    lean: Function, // prompt_lean FP4, bf16 out
+    lean_f32: Function, // and fp32 out
+    sms: usize, // the current device's multiprocessors: prompt_lean's blocks (one a multiprocessor, tiles in turn)
+
+    pub const Tile = enum { lean, classic };
 
     const bm = 128;
     const bn = 128;
@@ -76,6 +82,19 @@ pub const Prompt = struct {
         std.fmt.comptimePrint(name, .{ 1, 0 }),
         std.fmt.comptimePrint(name, .{ 0, 1 }),
     };
+    const lean_bm = 128;
+    const lean_bn = 256;
+    const lean_threads = 256;
+    const lean_stages = 3;
+    const lean_name = "_ZN11tf_prompt1611prompt_leanILi0ELi128ELi256ELi1ELi8ELi3ELb{d}" ++
+        "EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
+    pub const lean_symbols = [2][:0]const u8{ std.fmt.comptimePrint(lean_name, .{0}), std.fmt.comptimePrint(lean_name, .{1}) };
+
+    /// prompt16.cu LeanTile<FP4, 128, 256, 1, 8, 3>::SMEM: three stages, then a full and an empty barrier each.
+    pub fn leanSharedBytes() u32 {
+        const stage: u32 = (lean_bm * group * 2 + lean_bn * group / 2 + lean_bn * 4 + 127) / 128 * 128;
+        return lean_stages * stage + 2 * lean_stages * 8;
+    }
 
     /// prompt16.cu Tile<MODE, 128, 128, 2, 2, 2>::SMEM.
     pub fn sharedBytes(mode: qmmf.Mode) u32 {
@@ -94,7 +113,15 @@ pub const Prompt = struct {
         try fp8.allowDynamicShared(sharedBytes(.fp8));
         const fp4_f32 = try mod.function(symbols[2]);
         try fp4_f32.allowDynamicShared(sharedBytes(.fp4));
-        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32 };
+        const lean = try mod.function(lean_symbols[0]);
+        try lean.allowDynamicShared(leanSharedBytes());
+        const lean_f32 = try mod.function(lean_symbols[1]);
+        try lean_f32.allowDynamicShared(leanSharedBytes());
+        var dev: abi.Device = 0;
+        try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
+        var sms: c_int = 0;
+        try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
+        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .lean = lean, .lean_f32 = lean_f32, .sms = @intCast(@max(sms, 1)) };
     }
 
     pub fn unload(p: *Prompt) void {
@@ -108,13 +135,31 @@ pub const Prompt = struct {
 
     /// matmul() writing y as `out` says: bf16, or fp32 (FP4 only).
     pub fn matmulOut(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, out: qmmf.Out) !void {
+        return p.matmulTile(s, x, ldx, m, w, y, out, .lean);
+    }
+
+    /// matmulOut() on a chosen FP4 tile (FP8 has the classic one only); both write the same bits.
+    pub fn matmulTile(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, out: qmmf.Out, tile: Tile) !void {
+        if (w.mode == .fp4 and tile == .lean) return run(s, x, ldx, m, w, y, if (out == .f32) p.lean_f32 else p.lean, .{
+            .bm = lean_bm,
+            .bn = lean_bn,
+            .threads = lean_threads,
+            .shared = leanSharedBytes(),
+            .blocks = p.sms,
+        });
         const f = switch (w.mode) {
             .fp4 => if (out == .f32) p.fp4_f32 else p.fp4,
             .fp8 => if (out == .f32) return error.EpilogueNotBuilt else p.fp8,
             else => return error.FormatMismatch,
         };
-        const rows_t = (m + bm - 1) / bm;
-        const band = @max(1, @min(rows_t, (12 << 20) / (@as(usize, bm) * w.k * 2)));
+        return run(s, x, ldx, m, w, y, f, .{ .bm = bm, .bn = bn, .threads = threads, .shared = sharedBytes(w.mode) });
+    }
+
+    const Shape = struct { bm: usize, bn: usize, threads: u32, shared: u32, blocks: usize = std.math.maxInt(usize) };
+
+    fn run(s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, f: Function, t: Shape) !void {
+        const rows_t = (m + t.bm - 1) / t.bm;
+        const band = @max(1, @min(rows_t, (12 << 20) / (t.bm * w.k * 2)));
         var args: launch_.Args = .{};
         args.add(x);
         args.add(w.codes);
@@ -128,15 +173,17 @@ pub const Prompt = struct {
         args.add(@as(i32, @intCast(if (m == 1) w.k else ldx)));
         args.add(@as(i32, @intCast(band)));
         try launch_.launch(f, .{
-            .grid = .{ .x = @intCast(rows_t * ((w.n + bn - 1) / bn)), .y = 1, .z = 1 },
-            .block = .{ .x = threads, .y = 1, .z = 1 },
-            .shared = sharedBytes(w.mode),
+            .grid = .{ .x = @intCast(@min(t.blocks, rows_t * ((w.n + t.bn - 1) / t.bn))), .y = 1, .z = 1 },
+            .block = .{ .x = t.threads, .y = 1, .z = 1 },
+            .shared = t.shared,
         }, s, &args);
     }
 };
 
 test "the prompt tile's shared bytes and instance names" {
     try std.testing.expectEqual(@as(u32, 41984), Prompt.sharedBytes(.fp4));
+    try std.testing.expectEqual(@as(u32, 76848), Prompt.leanSharedBytes()); // 3 x (16384 + 8192 + 1024) + 48
+    try std.testing.expectEqualStrings("_ZN11tf_prompt1611prompt_leanILi0ELi128ELi256ELi1ELi8ELi3ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.lean_symbols[0]);
     try std.testing.expectEqual(@as(u32, 49152), Prompt.sharedBytes(.fp8)); // 2 x (16384 + 8192): no scale tile
     try std.testing.expectEqualStrings("_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.symbols[0]);
     try std.testing.expectEqualStrings(
