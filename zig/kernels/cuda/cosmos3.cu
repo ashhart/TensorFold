@@ -1,6 +1,4 @@
-// Cosmos3-Edge's reasoner glue on CUDA, cosmos3.metal's kernels at the same rounding points: 8-bit embedding rows,
-// image rows over their placeholders, RMS norms, interleaved M-RoPE with the cache write, relu^2, causal GQA attention
-// over a stream's cache, the projections' 64-input group sums, and the image tower's 8-bit weights widened to bf16.
+// Cosmos3-Edge reasoner glue on CUDA at cosmos3.metal's rounding points: embeddings, norms, M-RoPE, relu^2, GQA.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -84,8 +82,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_cos3_place(__nv_bfloat16* _
     if (src >= 0) h[static_cast<int64_t>(r) * D + c] = rows[static_cast<int64_t>(src) * D + c];
 }
 
-// h += r (bf16) when `add`, then x = w * bf16(h * rsqrt(mean(h^2) + eps)): a block of 256 a row, 8 values a thread.
-// XS [row, D / 64]: x's 64-value group sums (the 8-bit projections' bias term), from x as stored.
+// h += r (bf16) if add, then x = w * bf16(h * rsqrt(mean(h^2) + eps)); xs gets x's 64-value group sums as stored.
 extern "C" __global__ void __launch_bounds__(256) tf_cos3_norm(__nv_bfloat16* __restrict__ h, const __nv_bfloat16* __restrict__ r,
                                                               const __nv_bfloat16* __restrict__ w, float eps, int add,
                                                               __nv_bfloat16* __restrict__ x, float* __restrict__ xs) {
@@ -123,9 +120,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_cos3_norm(__nv_bfloat16* __
     if (threadIdx.x < D / 64) xs[static_cast<int64_t>(blockIdx.x) * (D / 64) + threadIdx.x] = group64(row + 64 * threadIdx.x);
 }
 
-// A warp a (head, row): queries rotated into `queries`; keys rotated and values copied into the [KVH, cap, HD] caches
-// at slot slots[r], positions pos[r] = (t, h, w).
-// qkv [rows, (QH + 2 KVH) HD]: the fused projection's rows, queries then keys then values.
+// A warp a (head, row): rotate queries; rotate keys, copy values into the caches at slots[r], positions pos[r].
 extern "C" __global__ void __launch_bounds__(32) tf_cos3_qk(const __nv_bfloat16* __restrict__ qkv, const int* __restrict__ pos,
                                                            const int* __restrict__ slots, int cap, float log2_theta,
                                                            __nv_bfloat16* __restrict__ queries, __nv_bfloat16* __restrict__ keys,
@@ -144,8 +139,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_cos3_qk(const __nv_bfloat16*
     for (int d = lane; d < HD; d += 32) values[dst + d] = v[d];
 }
 
-// x = bf16(relu(x)^2) in place over rows of `width` (a multiple of 256), a block a row's 256 values; xs the rows'
-// 64-value group sums of the result.
+// x = bf16(relu(x)^2) in place, a block a row's 256 values; xs gets the result's 64-value group sums.
 extern "C" __global__ void __launch_bounds__(256) tf_cos3_relu2(__nv_bfloat16* __restrict__ x, int width, float* __restrict__ xs) {
     __shared__ float vals[256];
     const int64_t i = static_cast<int64_t>(blockIdx.x) * width + blockIdx.y * 256 + threadIdx.x;
@@ -157,9 +151,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_cos3_relu2(__nv_bfloat16* _
     if (threadIdx.x < 4) xs[static_cast<int64_t>(blockIdx.x) * (width / 64) + blockIdx.y * 4 + threadIdx.x] = group64(vals + 64 * threadIdx.x);
 }
 
-// Causal GQA over one stream's cache, eight query rows (a warp each) of one head a block: each 32-key block of keys and
-// values staged once in shared memory for the eight rows; row r sees keys [0, first + r]. queries [rows, QH, HD],
-// keys and values [KVH, cap, HD], out [rows, QH, HD].
+// Causal GQA over a stream's cache, 8 query rows (a warp each) of one head a block; each 32-key block staged once.
 constexpr int TR = 8;
 constexpr int KS = HD + 2;  // a key row's stride in halves: 65 words, odd, so lane j's row starts in its own bank
 // xs [rows, QH * HD / 64]: out's 64-value group sums (two a head).
@@ -230,9 +222,7 @@ extern "C" __global__ void __launch_bounds__(32 * TR) tf_cos3_attn(const __nv_bf
     if (lane < HD / 64) xs[static_cast<int64_t>(r) * (QH * HD / 64) + (HD / 64) * head + lane] = group64(row + 64 * lane);
 }
 
-// tf_cos3_attn for one query row (a decode step), a block a head: the eight warps take every eighth 32-key block of the
-// row's keys, each with its own online softmax, then warp 0 folds the eight; xs as tf_cos3_attn's. A lane holds four
-// consecutive dims: each key's row is read whole by the warp (8 bytes a lane) and its score is a warp sum.
+// Decode attention, a block a head: 8 warps take every 8th 32-key block with online softmaxes; warp 0 folds them.
 extern "C" __global__ void __launch_bounds__(256) tf_cos3_attn1(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ keys,
                                                                const __nv_bfloat16* __restrict__ values, __nv_bfloat16* __restrict__ out,
                                                                const int* __restrict__ slots, int cap, float scale, float* __restrict__ xs) {
@@ -255,7 +245,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_cos3_attn1(const __nv_bfloa
     for (int j0 = 32 * warp; j0 < n; j0 += 32 * 8) {
         const int count = min(32, n - j0);
         float mine = -INFINITY;  // lane t's: key j0 + t's score
-        // every one of the 32 keys read (past the last: the last again, its score dropped), so the loads go out together
+        // all 32 keys load (past the last: the last again, score dropped), so the loads go out together
 #pragma unroll
         for (int t = 0; t < 32; ++t) {
             const uint2 w = *reinterpret_cast<const uint2*>(kb + static_cast<int64_t>(min(j0 + t, n - 1)) * HD);

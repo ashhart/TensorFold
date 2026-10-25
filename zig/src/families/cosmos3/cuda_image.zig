@@ -1,6 +1,4 @@
-//! image.zig and vision.zig's host half for the CUDA build (its module reads the core through `core`): Cosmos3-Edge's
-//! processor (sides multiples of 32, torch's antialiased bicubic, (x - 127.5) / 127.5, 16-pixel patches in 2 x 2 block
-//! order, HWC in a patch) and the learned 16 x 16 position grid resized as torch's antialiased bilinear.
+//! The CUDA build's image host: Cosmos3-Edge's processor and the resized 16 x 16 position grid, as on Metal.
 const std = @import("std");
 const core = @import("core");
 const c = @import("config.zig");
@@ -64,8 +62,7 @@ pub fn bf16(x: f32) u16 {
     return @truncate(rounded >> 16);
 }
 
-/// torch's antialiased bilinear weights for one axis from `in` to `out` samples: each output's first input and its
-/// weights, normalized, in f32 as on the CPU.
+/// torch's antialiased bilinear weights for one axis, `in` to `out` samples: first input and normalized f32 weights.
 const Taps = struct { first: []usize, count: []usize, weights: []f32, width: usize };
 
 fn taps(gpa: std.mem.Allocator, in: usize, out: usize) !Taps {

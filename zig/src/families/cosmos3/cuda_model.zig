@@ -1,6 +1,4 @@
-//! Cosmos3-Edge's reasoner on CUDA: the text model's projections on the MLX 8-bit tiles (qlinear's AffineN: one-row
-//! decode and prompt GEMMs), cosmos3.cu's glue, and the SigLIP2 image tower on cuBLASLt with its 8-bit weights widened
-//! to bf16 at load (vit.cu's LayerNorm and activations, prefill_attention's 72-dim full attention).
+//! Cosmos3-Edge's reasoner on CUDA: text projections on MLX 8-bit tiles, cosmos3.cu's glue, SigLIP2 on cuBLASLt.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -156,8 +154,7 @@ pub const Model = struct {
         return (try ck.expect(try std.fmt.bufPrint(&buf, fmt, args), dtype, shape)).bytes;
     }
 
-    /// 8-bit MLX projections of k inputs, `parts` (name, rows) stacked in order as one, staged at `stage` and packed
-    /// into the tiles.
+    /// 8-bit MLX projections of k inputs: `parts` (name, rows) stacked as one, staged at `stage`, packed as tiles.
     fn affine(m: *Model, ck: *core.Checkpoint, stage: u64, parts: []const struct { []const u8, usize }, k: usize) !AffineN {
         var n: usize = 0;
         for (parts) |p| n += p[1];
@@ -232,8 +229,7 @@ pub const Model = struct {
         try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) }, .block = .{ .x = @intCast(block) } }, m.stream, &a);
     }
 
-    /// y [rows, n] = x [rows, k] . W^T on the tiles: one-row decode up to 16 rows on x's group sums `xs` (written by
-    /// the kernel that wrote x), else the prompt GEMM.
+    /// y [rows, n] = x [rows, k] . W^T on the tiles: decode up to 16 rows on x's group sums `xs`, else the GEMM.
     fn project(m: *Model, w: AffineN, x: u64, xs: u64, y: u64, rows: usize) !void {
         if (rows > decode_rows) return m.wide.prompt(m.stream, x, w, y, rows);
         try m.wide.decode(m.stream, x, xs, w, y, rows);
@@ -247,9 +243,7 @@ pub const Model = struct {
     /// The tower's rows for a call's images, and for each row of the call the image row it takes (-1: its token's).
     pub const Images = struct { rows: u64, map: []const i32 };
 
-    /// `ids` through the layers: `segments` of rows (each its own cache, positions and slots in `pos`, `slots`), image
-    /// rows from `images` over the rows `map` names (-1 none); the logits of the last row (`.last`, one segment) or
-    /// every row (`.all`) left bf16 in `m.logits`.
+    /// `ids` through the layers per segment (cache, `pos`, `slots`), image rows over `map`; bf16 logits in `m.logits`.
     pub fn run(m: *Model, segments: []const Segment, ids: []const u32, pos: []const [3]i32, slots: []const u32, head: Head, images: ?Images) !void {
         const total = ids.len;
         if (total == 0 or total > m.rows or (head == .all and total > batch_rows)) return error.CosmosRowsExceeded;
@@ -315,8 +309,7 @@ pub const Model = struct {
     }
 };
 
-/// The image tower: SigLIP2's patch embedding plus the learned 16 x 16 grid resized to the image's, 27 pre-norm blocks
-/// of full attention over the image's patches, then the projector (LayerNorm, four neighbours as one row, two Linears).
+/// The image tower: SigLIP2 patches plus the resized 16 x 16 grid, 27 pre-norm blocks, then the 2 x 2 projector.
 pub const Tower = struct {
     k: vit.Kernels,
     at: vit.Attention,

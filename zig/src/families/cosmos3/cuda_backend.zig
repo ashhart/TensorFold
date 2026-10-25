@@ -1,5 +1,4 @@
-//! Cosmos3 streams behind the lane engine's backend on CUDA (backend.zig's Metal streams): per-stream caches with
-//! their M-RoPE layout, the image tower's rows placed over each image's placeholders in the prompt pass, keyed draws.
+//! Cosmos3 streams behind the lane backend on CUDA, as backend.zig on Metal: per-stream M-RoPE caches, image rows.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");

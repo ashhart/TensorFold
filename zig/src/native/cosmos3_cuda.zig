@@ -33,7 +33,7 @@ const Host = struct {
 
 const cannot = "the native Cosmos3-Edge engine cannot load this checkpoint ({s})";
 
-/// The served window: --context, else the checkpoint's, never past the engine's most; null when --context is outside it.
+/// The served window: --context, else the checkpoint's, capped at the engine's; null when --context is outside it.
 fn window(checkpoint: usize, requested: ?i64) ?usize {
     const most = @min(checkpoint, q.model.max_context);
     const w = requested orelse return most;
