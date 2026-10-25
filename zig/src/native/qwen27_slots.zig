@@ -151,6 +151,7 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
     const b: *Metal = @ptrCast(@alignCast(ptr));
     b.settle() catch {};
     b.dropRound();
+    promoteDue(b);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     if (!b.fills.contains(s)) {
@@ -277,10 +278,17 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     if (b.release_hook) |hook| if (s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
     b.owners[slot] = null;
     b.runner.rope[slot] = .{};
-    if (slot == 0) promote(b);
+    if (slot == 0) b.promote_due = b.draft != null; // the next backend call moves a stream in, after this reply is out
     var live: usize = 0;
     for (b.owners[0..b.runner.slots]) |owner| live += @intFromBool(owner != null);
     if (live <= 1) b.runner.trimBefore();
+}
+
+/// A promote unbind left for later, once no round is pending: a stream still in slot 0 or none to move ends it.
+pub fn promoteDue(b: *Metal) void {
+    if (!b.promote_due or b.round != null) return;
+    b.promote_due = false;
+    promote(b);
 }
 
 /// Slot 0 freed while other streams decode: the lowest one moves there and drafts from its next round on.
