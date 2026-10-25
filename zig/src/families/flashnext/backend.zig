@@ -46,7 +46,7 @@ pub const Backend = struct {
     paused: std.ArrayList(*Stream) = .empty, // streams that outgrew their session and wait for a larger one to free
     moves: u64 = 0,
     serial_drafts: bool = false, // FZ_BATCH_MTP_SERIAL=1: each stream's drafts in their own command buffers
-    overlap: bool = false, // FZ_VERIFY_OVERLAP=1: verify on a concurrent encoder, the streams' recurrences without barriers between them
+    overlap: bool = true, // FZ_VERIFY_OVERLAP=0: verify on a serial encoder; else a concurrent one, the streams' recurrences without barriers between them
     costs: ?batch_costs.Costs = null, // timeCosts: the lane allocator's prices
     images: ?Images = null, // --vision: the tower's rows for a stream's images; null: an image stream fails
     grammar: grammar.Masks, // structured output: the rounds' mask rows and first rows
@@ -73,7 +73,7 @@ pub const Backend = struct {
                 return if (std.c.getenv(name)) |v| v[0] == '1' else false;
             }
         };
-        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .overlap = env.on("FZ_VERIFY_OVERLAP"), .times = RoundTimes.init(), .fence = if (std.c.getenv("FZ_SETTLE_SYNC") == null) mtl.counters.Fence.init(e.r.device) catch null else null };
+        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .overlap = if (std.c.getenv("FZ_VERIFY_OVERLAP")) |v| v[0] != '0' else true, .times = RoundTimes.init(), .fence = if (std.c.getenv("FZ_SETTLE_SYNC") == null) mtl.counters.Fence.init(e.r.device) catch null else null };
     }
 
     /// Times shared-round costs on the last free session, or leaves them unpriced when it cannot fit.
