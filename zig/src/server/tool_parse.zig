@@ -164,23 +164,27 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
 
 /// What closes the call ``text`` ends inside (the model's end token came before its ``
 pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator.Error![]const u8 {
-    var pos: usize = 0;
-    var dsml = find(text, dsml_open, 0); // as in ``envelopes``
-    // the opener ``envelopes`` leaves without a closer, so the one appended pairs with it
-    const start = while (findCI(text, "<tool_call>", pos)) |s| {
-        if (dsml != null and dsml.? < pos) dsml = find(text, dsml_open, pos);
-        if (dsml) |outer| if (outer < s) {
-            pos = (find(text, dsml_close, outer + dsml_open.len) orelse return "") + dsml_close.len;
-            continue;
-        };
-        pos = (findCI(text, "</tool_call>", s + 11) orelse break s) + 12;
-    } else return "";
+    const start = openCall(text) orelse return "";
     const block = text[start + 11 ..];
     const tail = try argumentsClose(a, strip(block));
     const closed = try std.mem.concat(a, u8, &.{ "<tool_call>", block, tail, "</tool_call>" });
     // the strict reading: one whole call to an offered tool, nothing but its markup
     if ((try parse(a, closed, tools, 1)).calls == null) return "";
     return std.mem.concat(a, u8, &.{ tail, "</tool_call>" });
+}
+
+/// Where the reply's open call starts: the opener ``envelopes`` leaves without a closer, so one appended pairs with it.
+pub fn openCall(text: []const u8) ?usize {
+    var pos: usize = 0;
+    var dsml = find(text, dsml_open, 0); // as in ``envelopes``
+    return while (findCI(text, "<tool_call>", pos)) |s| {
+        if (dsml != null and dsml.? < pos) dsml = find(text, dsml_open, pos);
+        if (dsml) |outer| if (outer < s) {
+            pos = (find(text, dsml_close, outer + dsml_open.len) orelse return null) + dsml_close.len;
+            continue;
+        };
+        pos = (findCI(text, "</tool_call>", s + 11) orelse break s) + 12;
+    } else null;
 }
 
 /// What a call's arguments lack to close: XML's ``
