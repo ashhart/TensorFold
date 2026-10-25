@@ -100,10 +100,11 @@ struct cos3_qk_args { uint cap; float log2_theta; };
   for (uint d = lane; d < HD; d += 32) values[dst + d] = v[(size_t(r) * KVH + kh) * HD + d];
 }
 
-// x = bf16(relu(x)^2) in place.
+// x = bf16(relu(x)^2) in place; NaN stays NaN (max alone would drop it, as fmax does).
 [[kernel]] void cos3_relu2(device bfloat* x [[buffer(0)]], constant uint& count [[buffer(1)]], uint i [[thread_position_in_grid]]) {
   if (i >= count) return;
-  const float v = max(float(x[i]), 0.0f);
+  const float f = float(x[i]);
+  const float v = isnan(f) ? f : max(f, 0.0f);
   x[i] = static_cast<bfloat>(v * v);
 }
 
@@ -158,74 +159,6 @@ template <int HDT>
   }
 }
 template [[host_name("cos3_attn_128")]] [[kernel]] decltype(cos3_attn<128>) cos3_attn<128>;
-template [[host_name("cos3_attn_72")]] [[kernel]] decltype(cos3_attn<72>) cos3_attn<72>;
-
-// cos3_attn over 8 query rows a threadgroup (a simdgroup each, one head); each 32-key block staged once for all 8.
-constant constexpr uint TR = 8;
-template <int HDT>
-[[kernel]] void cos3_attn_tile(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
-                               constant cos3_attn_args& p [[buffer(3)]], device bfloat* o [[buffer(4)]], constant uint& rows [[buffer(5)]],
-                               uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                               uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-  constexpr int NS = (HDT + 31) / 32;
-  constexpr int KS = HDT + 1;  // odd: lane j's key row starts in its own bank
-  threadgroup bfloat ks[32 * KS];  // bf16 values as the caches hold them: staged exactly
-  threadgroup bfloat vs[32 * HDT];
-  threadgroup float qs[TR][HDT];
-  const uint head = tg.x, r0 = tg.y * TR, kh = head / p.group;
-  const uint r = r0 + sg;
-  const bool live = r < rows;
-  const uint rr = live ? r : rows - 1;
-  for (uint d = lane; d < uint(HDT); d += 32) qs[sg][d] = float(q[size_t(rr) * p.q_row + head * HDT + d]);
-  const uint n = p.causal != 0 ? p.first + rr + 1 : p.keys;
-  const uint top = p.causal != 0 ? p.first + min(r0 + TR, rows) : p.keys;  // the most keys a row here sees
-  const device bfloat* kb = k + size_t(kh) * p.k_head;
-  const device bfloat* vb = v + size_t(kh) * p.k_head;
-  float m = -INFINITY, l = 0.0f;
-  float acc[NS];
-  for (int i = 0; i < NS; ++i) acc[i] = 0.0f;
-  for (uint j0 = 0; j0 < top; j0 += 32) {
-    const uint count = min(32u, top - j0);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint e = tid; e < 32 * uint(HDT); e += TR * 32) {
-      const uint kj = e / HDT, d = e % HDT;
-      const bool in = kj < count;
-      ks[kj * KS + d] = in ? kb[size_t(j0 + kj) * p.k_row + d] : bfloat(0.0f);
-      vs[kj * HDT + d] = in ? vb[size_t(j0 + kj) * p.k_row + d] : bfloat(0.0f);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const uint j = j0 + lane;
-    float s = -INFINITY;
-    if (j < n) {
-      float dot = 0.0f;
-      for (int d = 0; d < HDT; ++d) dot += qs[sg][d] * float(ks[lane * KS + d]);
-      s = dot * p.scale;
-    }
-    const float mb = simd_max(s);
-    if (mb == -INFINITY) continue;  // every key of this block is past this row
-    const float mn = max(m, mb);
-    const float pj = j < n ? metal::exp(s - mn) : 0.0f;
-    const float alpha = m == -INFINITY ? 0.0f : metal::exp(m - mn);
-    l = l * alpha + simd_sum(pj);
-    for (int i = 0; i < NS; ++i) acc[i] *= alpha;
-    const uint upto = min(count, n > j0 ? n - j0 : 0u);
-    for (uint t = 0; t < upto; ++t) {
-      const float pt = simd_shuffle(pj, ushort(t));
-      for (int i = 0; i < NS; ++i) {
-        const uint d = lane + 32 * i;
-        if (d < uint(HDT)) acc[i] += pt * float(vs[t * HDT + d]);
-      }
-    }
-    m = mn;
-  }
-  if (!live) return;
-  for (int i = 0; i < NS; ++i) {
-    const uint d = lane + 32 * i;
-    if (d < uint(HDT)) o[size_t(r) * p.o_row + head * HDT + d] = static_cast<bfloat>(acc[i] / l);
-  }
-}
-template [[host_name("cos3_attn_tile_128")]] [[kernel]] decltype(cos3_attn_tile<128>) cos3_attn_tile<128>;
-template [[host_name("cos3_attn_tile_72")]] [[kernel]] decltype(cos3_attn_tile<72>) cos3_attn_tile<72>;
 
 // Flash attention on simdgroup matrices: S = Q K^T on 8 x 8 bf16 tiles (fp32 sums), online softmax, bf16 P, O += P V.
 constant constexpr uint FQ = 32;  // query rows a threadgroup
