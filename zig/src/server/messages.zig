@@ -300,3 +300,29 @@ test "a conversation keeps its shape when the template does not need the rule" {
     try std.testing.expectEqualStrings("assistant", out.array[0].get("role").?.string);
     try std.testing.expectEqualStrings("tool", out.array[1].get("role").?.string);
 }
+
+test "a call's arguments become objects: blank text is no arguments, bad text is kept under _invalid_arguments" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a,
+        \\[{"role": "assistant", "content": null, "tool_calls": [
+        \\ {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{\"q\": 1}"}},
+        \\ {"id": "b", "type": "function", "function": {"name": "f", "arguments": ""}},
+        \\ {"id": "c", "type": "function", "function": {"name": "f", "arguments": " \n"}},
+        \\ {"id": "d", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+        \\ {"id": "e", "type": "function", "function": {"name": "f", "arguments": "[1"}},
+        \\ {"id": "g", "type": "function", "function": {"name": "f"}}]},
+        \\ {"role": "tool", "tool_call_id": "a", "content": "one"}, {"role": "tool", "tool_call_id": "b", "content": "two"}]
+    )).ok;
+    const out = try toolArguments(&cx, messages);
+    const calls = out.array[0].get("tool_calls").?.array;
+    const want = [_][]const u8{ "{\"q\": 1}", "{}", "{}", "{}", "{\"_invalid_arguments\": \"[1\"}" };
+    for (want, calls[0..5]) |w, call| {
+        const args = call.get("function").?.get("arguments").?;
+        try std.testing.expectEqualStrings(w, try json.stringify(cx.a, args, .{ .ascii = false }));
+    }
+    try std.testing.expect(calls[5].get("function").?.get("arguments") == null); // none sent, none added
+    try std.testing.expectEqual(@as(usize, 3), out.array.len); // the tool results stay as they were, in order
+    try std.testing.expectEqualStrings("two", out.array[2].get("content").?.string);
+}
