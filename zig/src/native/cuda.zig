@@ -34,10 +34,12 @@ pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const serves: []const []const u8 = &.{ "--mtp-drafts", "--mtp-confidence", "--policy" };
 pub const families: []const api.Family = blk: {
-    var out: [registry.len + 2]api.Family = undefined;
+    var out: [registry.len + 4]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
     out[registry.len] = lfm2.family;
     out[registry.len + 1] = .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} };
+    out[registry.len + 2] = .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats };
+    out[registry.len + 3] = .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats };
     const final = out;
     break :blk &final;
 };
@@ -178,6 +180,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
     inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
         if (refusals.lfm2(o)) |why| {

@@ -84,6 +84,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("cuda", cuda);
     runner.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     runner.addImport("core", mods.core);
+    runner.addImport("qwen4", native.engines.import_table.get("qwen4").?);
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
     runner.addImport("qwen35", mods.qwen35);
@@ -196,6 +197,7 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "dory", .module = @import("dory.zig").module(b, target, optimize, cuda, core, lanes) },
         },
     });
+    mod.addImport("qwen4", @import("qwen4.zig").module(b, target, optimize, core));
     return .{ .api = api, .engines = mod };
 }
 

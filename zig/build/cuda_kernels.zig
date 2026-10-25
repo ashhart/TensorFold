@@ -16,6 +16,10 @@ const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };
 const glue = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true" };
 
 pub const kernels = [_]Kernel{
+    .{ .name = "qwen4_projection", .flags = glue },
+    .{ .name = "qwen4_gdn", .flags = glue },
+    .{ .name = "qwen4_hc", .flags = glue },
+    .{ .name = "qwen4_ple", .flags = glue },
     .{ .name = "attn_train", .flags = &.{"-O3"} },
     .{ .name = "qwen27_train", .flags = &.{"-O3"} },
     .{ .name = "gdn_train", .flags = &.{ "-O3", "--fmad=false" } },

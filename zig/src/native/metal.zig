@@ -36,6 +36,8 @@ const affine_widths = blk: {
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
 
 pub const families: []const api.Family = &.{
+    .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats },
+    .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} },
     .{ .model_type = "nemotron_h", .formats = affine_widths },
     .{ .model_type = "qwen4_exp", .formats = affine_widths },
@@ -165,6 +167,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
+    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_metal.zig").open(a, gpa, io, o, problem);
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;

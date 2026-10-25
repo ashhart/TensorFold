@@ -193,3 +193,9 @@ pub const drama3 = struct {
     pub const sample = @embedFile("drama3/sample.metal");
     pub const codec = @embedFile("drama3/codec.metal");
 };
+
+pub const core_weight_only_body = @embedFile("core/weight_only.h");
+pub const core_weight_only = @embedFile("core/weight_only.metal");
+pub const core_hc_activation_body = @embedFile("core/hc_activation.h");
+pub const core_hc_activation = @embedFile("core/hc_activation.metal");
+pub const core_hc_pointwise = @embedFile("core/hc_pointwise.metal");

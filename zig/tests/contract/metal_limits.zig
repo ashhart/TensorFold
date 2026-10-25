@@ -31,6 +31,22 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
+        const body = try @import("qwen4").family.limits_sources.source(a, d.name);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "hc-pointwise ")) {
+        const body = try @import("metal_hc_pointwise.zig").text(a);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "hc-activation ")) {
+        const body = try @import("metal_hc_activation.zig").text(a);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "weight-only ")) {
+        const body = try @import("metal_weight_only.zig").text(a);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "flashnext vision ") or std.mem.startsWith(u8, d.name, "flashnext rotary ")) {
         const w: tf.flashnext_vision_contract.Which = if (std.mem.eql(u8, fun, "fz_mask_rows")) .mask else if (std.mem.eql(u8, fun, "fn_attn_prep_mrope")) .mrope else if (std.mem.indexOf(u8, d.name, " target ") != null) .target else if (std.mem.indexOf(u8, d.name, " mtp ") != null) .mtp else if (std.mem.indexOf(u8, d.name, " absolute ") != null) .absolute else if (std.mem.indexOf(u8, d.name, " positioned ") != null) .positioned else .pooled;
         text = tf.flashnext_vision_contract.source(w);

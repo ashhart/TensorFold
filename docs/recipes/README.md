@@ -12,6 +12,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
 | Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md) |
+| Qwen4 dense | [Native preparation, device qualification pending](qwen4-dense.md) |
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md), [native CUDA](glm-5.3-flash-cuda.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |

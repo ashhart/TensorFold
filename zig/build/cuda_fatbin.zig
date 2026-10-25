@@ -43,6 +43,14 @@ pub fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: K
     _ = run.addDepFileOutputArg2(b.fmt("{s}.d", .{k.name}), .{});
     run.addArg("-o");
     const out = run.addOutputFileArg(b.fmt("{s}.fatbin", .{k.name}));
-    run.addFileArg(b.path(b.fmt("zig/kernels/cuda/{s}.cu", .{k.src orelse k.name})));
+    if (std.mem.eql(u8, k.name, "qwen4_gdn")) {
+        const text = @import("../src/families/flashnext/hybrid_sources.zig").Gdn.cuda(b.allocator, @embedFile("../kernels/cuda/flashnext_gdn.cu")) catch @panic("Flash Next GDN source changed; regenerate Qwen4 specialization");
+        const controlled = @import("../src/families/qwen4/gdn_control_source.zig").cuda(b.allocator, text) catch @panic("Qwen4 GDN control boundaries changed");
+        run.addFileArg(b.addWriteFiles().add("qwen4_gdn.cu", controlled));
+    } else if (std.mem.eql(u8, k.name, "qwen4_ple")) {
+        const text = @import("../src/families/flashnext/hybrid_ple_source.zig").cuda(b.allocator) catch @panic("Flash Next PLE source changed; update Qwen4 geometry adapter");
+        const controlled = @import("../src/families/qwen4/ple_control_source.zig").cuda(b.allocator, text) catch @panic("Qwen4 PLE controls changed");
+        run.addFileArg(b.addWriteFiles().add("qwen4_ple.cu", controlled));
+    } else run.addFileArg(b.path(b.fmt("zig/kernels/cuda/{s}.cu", .{k.src orelse k.name})));
     return out;
 }
