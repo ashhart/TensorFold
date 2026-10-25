@@ -535,9 +535,9 @@ pub fn run(gpu: check.Gpu) !void {
     var glm_pool = glm_pages_k.PoolKeys{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.pool_keys };
     defer glm_pool.deinit();
     try kernels.append(a, glm_pool.kernel());
-    var glm_scores = glm_index_k.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.scores };
-    defer glm_scores.deinit();
-    try kernels.append(a, glm_scores.kernel());
+    var glm_index = glm_index_k.Index.init(gpu, s, glm_fns);
+    defer glm_index.deinit();
+    try glm_index.append(a, &kernels);
     const glm_fast = try @import("contract_glm_pools.zig").Fast.create(a, gpu, s, glm_fns, &kernels);
     defer glm_fast.destroy(a);
     var glm_ops = try cuda.Module.load(gpu.d, kk.glm_ops);

@@ -182,7 +182,9 @@ CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: t
 (`tf_glm_lat_write`, `tf_glm_pool_keys`), the index scores and the selected tokens' rows (`tf_glm_scores`,
 `tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
 sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
-`tf_glm_select_rows`; the pools' stated rule ranks any NaN above +inf, as the GPU's `s + 0` makes every NaN one positive NaN.
+`tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) to
+`tf_glm_select_rows`; both stated rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one
+positive NaN.
 
 GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 and 8 bits, plus both gathered paths.
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
@@ -203,7 +205,7 @@ and FP32-output paths, FP8G's 32-row cluster tile with FP32 output, the common E
 decode-sized latent top-k and NVFP4 up experts, the Mamba scan and Super's NVFP4 prompt down kernels, three of
 GLM-5.3-Flash's packed matmuls and three of its DFlash2 launches, and the training launches it compiles differently,
 and nvcc 13.3 keeps 13.2's and changes `tf_nemo_topk` on sm_120 and sm_121, four of GLM-5.3-Flash's KV page
-launches and its two prompt-indexer launches. `kernel-contract` and
+launches, its two prompt-indexer launches and its wide decode select. `kernel-contract` and
 `kernel-contract-limits` read the release from each image's `.note.nv.tkinfo`, check the image against the newest set
 at or below that release (13.0's when an image names none), and print which set they used. A release with no set of
 its own is checked against the one below it, so its differences show as stale records: re-derive them with
