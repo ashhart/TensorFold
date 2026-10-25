@@ -249,6 +249,8 @@ pub const PreTokenizer = union(enum) {
             return .{ .metaspace = .{ .replacement = replacement, .scheme = try scheme(v), .split = flag(v, "split", true) } };
         }
         if (std.mem.eql(u8, kind, "WhitespaceSplit")) return .whitespace_split;
+        // tokenizers' Digits splits on char::is_numeric (\p{N}): each digit isolated, or runs kept contiguous
+        if (std.mem.eql(u8, kind, "Digits")) return .{ .split = .{ .pattern = .{ .regex = try regex.Regex.compile(a, "\\p{N}") }, .behavior = if (flag(v, "individual_digits", false)) .isolated else .contiguous, .invert = false } };
         return error.UnsupportedPreTokenizer;
     }
 
@@ -536,6 +538,25 @@ test "split behaviors match tokenizers" {
     for (cases) |case| {
         var out: std.ArrayList(Piece) = .empty;
         try splitPiece(&ctx, &out, .{ .text = "the-final--countdown", .first = true }, &.{ .literal = "-" }, case[0], false);
+        try std.testing.expectEqual(case[1].len, out.items.len);
+        for (case[1], out.items) |want, got| try std.testing.expectEqualStrings(want, got.text);
+    }
+}
+
+test "Digits splits as tokenizers' does: each digit, or each run of them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = Context{ .a = a, .matcher = .{ .a = a } };
+    const cases = [_]struct { []const u8, []const []const u8 }{
+        .{ "{\"type\": \"Digits\", \"individual_digits\": true}", &.{ "a", "1", "2", "3", "b", "4" } },
+        .{ "{\"type\": \"Digits\", \"individual_digits\": false}", &.{ "a", "123", "b", "4" } },
+    };
+    for (cases) |case| {
+        const v = try std.json.parseFromSliceLeaky(Value, a, case[0], .{});
+        const p = try PreTokenizer.parse(a, v);
+        var out: std.ArrayList(Piece) = .empty;
+        try splitPiece(&ctx, &out, .{ .text = "a123b4", .first = true }, &p.split.pattern, p.split.behavior, false);
         try std.testing.expectEqual(case[1].len, out.items.len);
         for (case[1], out.items) |want, got| try std.testing.expectEqualStrings(want, got.text);
     }
