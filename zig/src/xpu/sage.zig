@@ -167,6 +167,10 @@ pub const Acts = struct {
 /// sage_moe.cl's kernels (the Dev's table is the 27B runner's, filled from the Sage images).
 pub const MoeKernels = struct { router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
 
+/// Sub-groups a work-group of the decode expert kernels (one sub-group a row).
+const MOE_SG = 4;
+/// Work-items on one sage_expert_swiglu row (its K split over them).
+const SWIGLU_WG = 32;
 /// Rows of a grouped MoE tile (sage_moe.cl MC).
 const MC = 16;
 /// The most tiles `rows` rows can make: full tiles plus at most one partial tile an expert (the shared one too).
@@ -510,7 +514,7 @@ pub const Runner = struct {
         if (s.expert_ff != s.shared_ff) return error.SharedWidthNotWired; // one act stride for both (Sage: 512, 512)
         if (T > WINDOW) return r.moeTiles(l, T);
         try d.launch(r.mk.swiglu, .{ .x = s.expert_ff, .y = pairs + T }, .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, a.h, a.mids, a.mact, s.hidden, s.expert_ff, s.top_k, pairs });
-        try d.launch(r.mk.down, .{ .x = s.hidden, .y = pairs + T }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.my, s.hidden, s.expert_ff, pairs });
+        try d.launch(r.mk.down, .{ .x = s.hidden / MOE_SG, .y = pairs + T }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.my, s.hidden, s.expert_ff, pairs });
         try d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
     }
 };
@@ -583,8 +587,8 @@ fn kernels(d: *Dev, mk: *MoeKernels) !void {
     mk.* = .{
         .router = try d.kernel(mo, "sage_router", 16),
         .route = try d.kernel(mo, "sage_route", 16),
-        .swiglu = try d.kernel(mo, "sage_expert_swiglu", 16),
-        .down = try d.kernel(mo, "sage_expert_down", 16),
+        .swiglu = try d.kernel(mo, "sage_expert_swiglu", SWIGLU_WG),
+        .down = try d.kernel(mo, "sage_expert_down", 16 * MOE_SG),
         .combine = try d.kernel(mo, "sage_moe_combine", 64),
         .router_tile = try d.kernel(mo, "sage_router_tile", 16),
         .sums = try d.kernel(mo, "sage_group_sums", 16),
