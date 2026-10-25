@@ -57,7 +57,7 @@ pub fn Kernels(comptime metal: type) type {
             }
             try layout.validateMetal(k.geometry, p, op, ranges[0..views.len]);
             e.setPipeline(k.pipes[@backingInt(op)]);
-            if (k.control == .repeat) e.setBytes(std.mem.asBytes(&repeat), 31);
+            if (k.control == .repeat) @import("metal_control.zig").bind(e, repeat);
             const d = k.geometry.hidden;
             const wide = d * k.geometry.streams;
             switch (op) {

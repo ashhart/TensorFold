@@ -30,7 +30,7 @@ pub fn metal(a: std.mem.Allocator, production: []const u8, control: Control) ![]
         const helper = if (control == .nan) "inline float qwen4_ple_control(float x, uint r) { return isnan(x) ? 0.0f : x; }\n" else "inline float qwen4_ple_control(float x, uint r) { return x + float(r); }\n";
         text = try edit.once(mem, text, "using namespace metal;\n", try std.mem.concat(mem, u8, &.{ "using namespace metal;\n", helper }));
     }
-    return a.dupe(u8, text);
+    return if (control == .repeat) @import("metal_control.zig").pack(a, text) else a.dupe(u8, text);
 }
 pub fn cuda(a: std.mem.Allocator, production: []const u8) ![]u8 {
     var arena: std.heap.ArenaAllocator = .init(a);

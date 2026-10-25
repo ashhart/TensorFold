@@ -100,6 +100,7 @@ test "Qwen4 GDN launch: CUDA ABI and refusal before launch, failed drain retains
     try T.expectEqual(@as(usize, 0), Trace.live);
 }
 const Recording = struct {
+    var repeat_value: ?u32 = null;
     pub const Size = struct {
         width: usize,
         height: usize,
@@ -171,6 +172,10 @@ const Recording = struct {
             calls += 1;
         }
         pub fn setBytes(_: ComputeEncoder, bytes: []const u8, i: usize) void {
+            if (i == family.metal_control.slot) {
+                std.debug.assert(bytes.len == @sizeOf(family.metal_control.Params));
+                repeat_value = std.mem.bytesToValue(family.metal_control.Params, bytes).repeat;
+            }
             if (i == 7) epsilon = std.mem.bytesToValue(f32, bytes[0..4]);
             if (i == 8) rows = std.mem.bytesToValue(c_int, bytes[0..4]);
             if (i == 14) std.debug.assert(std.mem.bytesToValue(u64, bytes[0..8]) == expected_stride);
@@ -200,6 +205,11 @@ test "Qwen4 GDN launch: Metal binding layout and cross-device refusal before bin
     var views: [10]M.View = undefined;
     for (&views, needs) |*view, n| view.* = .{ .buffer = .{ .bytes = (try a.alignedAlloc(u8, .@"16", n)) }, .len = n };
     try kernels.encode(.{}, p, views);
+    try T.expectEqual(@as(?u32, null), Recording.repeat_value);
+    kernels.control = .repeat;
+    try kernels.testEncode(.{}, p, views, 9);
+    try T.expectEqual(@as(?u32, 9), Recording.repeat_value);
+    kernels.control = .production;
     var f32_norm = p;
     f32_norm.weight_flags = 7;
     Recording.expected_norm_round = 0;

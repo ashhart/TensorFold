@@ -9,7 +9,8 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
 }
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll(@import("../src/families/qwen4/metal_control.zig").declaration);
     for ([_]bool{ false, true }, 0..) |sigmoid, gate| for (std.enums.values(ctl.Control), 0..) |control, index| {
         const production = try gen.Gdn.metal(a, @embedFile("../kernels/metal/decode/fn_gdn.metal"), @embedFile("../kernels/metal/flashnext/q4_gdn_step_af87f500308a9afb.metal"), 1, 2, sigmoid);
         var text = try ctl.metal(a, production, control);
@@ -30,7 +31,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
         }
         try out.writer.print("namespace g{d}c{d} {{\n{s}\n", .{ gate, index, text });
         try out.writer.print(
-            \\static void run(const unsigned char* const* input,unsigned char* out,unsigned char* state,unsigned char* tail_out,int rows,int flags,uint repeat) {{
+            \\static void run(const unsigned char* const* input,unsigned char* out,unsigned char* state,unsigned char* tail_out,int rows,int flags,uint repeat) {{const Qwen4Control control_params{{repeat}};
             \\  const auto* p=reinterpret_cast<const bfloat*>(input[0]);
             \\  const auto* cs=reinterpret_cast<const bfloat*>(input[1]);
             \\  const auto* cw=reinterpret_cast<const float*>(input[2]);
@@ -49,7 +50,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
             \\}}
             \\}}
             \\
-        , .{if (control == .repeat) "repeat," else ""});
+        , .{if (control == .repeat) "control_params," else ""});
     };
     try out.writer.writeAll("extern \"C\" void tf_q4_gdn_native_cpu(int gate,int control,const unsigned char* const* input,unsigned char* out,unsigned char* state,unsigned char* tail_out,int rows,int flags,unsigned repeat) {\n  switch(gate*5+control) {\n");
     for (0..2) |gate| for (0..5) |control| try out.writer.print("  case {d}:g{d}c{d}::run(input,out,state,tail_out,rows,flags,repeat);return;\n", .{ gate * 5 + control, gate, control });

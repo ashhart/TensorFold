@@ -10,7 +10,8 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
 }
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll(@import("../src/families/qwen4/metal_control.zig").declaration);
     for ([_]usize{ 256, 5120 }, [_]usize{ 2, 4 }, 0..) |h, s, geometry| {
         var problem: cfg.Problem = .{};
         var c = try cfg.parse(a, @embedFile("../src/families/qwen4/fixtures/tiny-dense.json"), &problem);
@@ -34,7 +35,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
             }
             try out.writer.print("namespace p{d}c{d} {{\n{s}\n", .{ geometry, index, text });
             try out.writer.print(
-                \\static void run(const unsigned char* const* input,unsigned char* gated_out,unsigned char* normed_out,unsigned char* hidden_out,unsigned char* tail_out,int rows,unsigned repeat) {{
+                \\static void run(const unsigned char* const* input,unsigned char* gated_out,unsigned char* normed_out,unsigned char* hidden_out,unsigned char* tail_out,int rows,unsigned repeat) {{const Qwen4Control control_params{{repeat}};
                 \\ const auto* kv=reinterpret_cast<const bfloat*>(input[0]);const auto* h=reinterpret_cast<const bfloat*>(input[1]);
                 \\ const auto* ks=reinterpret_cast<const float*>(input[2]);const auto* qs=reinterpret_cast<const float*>(input[3]);const auto* cs=reinterpret_cast<const float*>(input[4]);
                 \\ const auto* cw=reinterpret_cast<const float*>(input[5]);const auto* prior=reinterpret_cast<const bfloat*>(input[6]);
@@ -47,7 +48,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
                 \\}}
                 \\}}
                 \\
-            , .{ h * s, s, if (control == .repeat) "repeat," else "", if (control == .repeat) "repeat," else "" });
+            , .{ h * s, s, if (control == .repeat) "control_params," else "", if (control == .repeat) "control_params," else "" });
         }
     }
     try out.writer.writeAll("extern \"C\" void tf_q4_ple_native_cpu(int geometry,int control,const unsigned char* const* input,unsigned char* gated,unsigned char* normed,unsigned char* hidden,unsigned char* tail,int rows,unsigned repeat){switch(geometry*5+control){\n");

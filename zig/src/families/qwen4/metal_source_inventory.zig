@@ -3,6 +3,7 @@ const std = @import("std");
 const cfg = @import("config.zig");
 pub const Entry = struct { name: []const u8, text: []const u8 };
 fn add(a: std.mem.Allocator, list: *std.ArrayList(Entry), name: []const u8, text: []const u8) !void {
+    try @import("metal_control.zig").audit(text);
     for (list.items) |item| if (std.mem.eql(u8, item.text, text)) return;
     try list.append(a, .{ .name = name, .text = text });
 }

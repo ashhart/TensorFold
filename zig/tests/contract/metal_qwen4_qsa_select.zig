@@ -20,7 +20,7 @@ const Backend = struct {
         const pass = r.begin();
         const e = pass.e;
         e.setPipeline(b.pipe);
-        if (b.control == .repeat) e.setBytes(std.mem.asBytes(&repeat), 31);
+        if (b.control == .repeat) family.metal_control.bind(e, repeat);
         for (b.input, [_]usize{ 0, 2, 3 }) |ref, i| e.setBuffer(ref.buf, ref.off, i);
         const shape = [_]i32{ @intCast(f.rows), @intCast(f.stride) };
         e.setBytes(std.mem.sliceAsBytes(&shape), 1);

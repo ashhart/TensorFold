@@ -87,3 +87,8 @@ zig build test-qwen4-metal-sources -j8
 This uses the runtime's Metal language and math settings and opens no GPU. The explicit `test-qwen4-metal` device gate
 also depends on this compiler check. `emit-qwen4-metal-sources` writes the exact source inputs under
 `zig-out/qwen4-metal/` for inspection without invoking a shader compiler.
+
+The source inventory rejects buffer indices outside Metal's 0–30 range before emission. Operator repeat controls
+share a four-byte constant struct at slot 17, after GDN's production bindings through slot 16. The CPU Metal
+instruments also require explicit float-to-bfloat construction, so the generated HC control stores are type-checked
+without a GPU; this supplements the actual Metal compiler check.

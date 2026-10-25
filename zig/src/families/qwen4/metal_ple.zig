@@ -90,7 +90,7 @@ pub fn Kernels(comptime metal: type) type {
             };
             var e = try session.encoder();
             e.setPipeline(k.pipes[0]);
-            if (k.control == .repeat) e.setBytes(std.mem.asBytes(&repeat), 31);
+            if (k.control == .repeat) @import("metal_control.zig").bind(e, repeat);
             for (v[0..5], 0..) |view, i| e.setBuffer(view.buffer, view.offset, i);
             e.setBytes(std.mem.asBytes(&c.eps), 5);
             e.setBuffer(v[5].buffer, v[5].offset, 6);
@@ -101,7 +101,7 @@ pub fn Kernels(comptime metal: type) type {
             try session.copy(v[7].buffer, v[7].offset + tail, v[6].buffer, v[6].offset, rows * wide * 2);
             e = try session.encoder();
             e.setPipeline(k.pipes[1]);
-            if (k.control == .repeat) e.setBytes(std.mem.asBytes(&repeat), 31);
+            if (k.control == .repeat) @import("metal_control.zig").bind(e, repeat);
             const bind = [_]View{ v[7], v[8], v[5], v[1], v[1] };
             for (bind, 0..) |view, i| e.setBuffer(view.buffer, view.offset, i);
             e.dispatchThreads(metal.Size.of(wide, rows, 1), metal.Size.of(256, 1, 1));

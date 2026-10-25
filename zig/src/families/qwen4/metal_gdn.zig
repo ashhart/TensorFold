@@ -70,7 +70,7 @@ pub fn Kernels(comptime metal: type) type {
                 if (overlap) return error.Qwen4GdnAlias;
             };
             encoder.setPipeline(self.pipe);
-            if (self.control == .repeat) encoder.setBytes(std.mem.asBytes(&repeat), 31);
+            if (self.control == .repeat) @import("metal_control.zig").bind(encoder, repeat);
             for (views[0..7], 0..) |view, i| encoder.setBuffer(view.buffer, view.offset, i);
             encoder.setBytes(std.mem.asBytes(&p.eps), 7);
             const rows: c_int = @intCast(p.rows);

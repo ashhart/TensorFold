@@ -163,6 +163,7 @@ test "Qwen4 native resource sources: every registered launch resolves its actual
     for (registry.all_metal) |record| if (std.mem.startsWith(u8, record.name, "qwen4-native ")) {
         const text = try @import("limits_sources.zig").source(a, record.name);
         defer a.free(text);
+        try @import("metal_control.zig").audit(text);
         const symbol = record.name[std.mem.lastIndexOfScalar(u8, record.name, ' ').? + 1 ..];
         try std.testing.expect(std.mem.indexOf(u8, text, symbol) != null);
         var buf: [96]u8 = undefined;

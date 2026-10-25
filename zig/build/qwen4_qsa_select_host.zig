@@ -11,7 +11,8 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     const production = try gen.source(a, .{ .heads = 24, .kv = 4, .index_heads = 4, .index_dim = 128, .rotary = 64, .ratio = 8, .top = 128 });
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll(@import("../src/families/qwen4/metal_control.zig").declaration);
     for (std.enums.values(ctl.Control)[0..4], 0..) |control, i| {
         const all = try ctl.selection(a, production, control);
         const cut = try edit.function(all, "inline void cut_bin(");
@@ -35,7 +36,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
             const end = (std.mem.indexOfPos(u8, text, at, "]]") orelse return error.QsaAttribute) + 2;
             text = try std.mem.concat(a, u8, &.{ text[0..at], text[end..] });
         }
-        try out.writer.print("namespace sl{d} {{\n{s}\nstatic void run(const float* scores,const int32_t* complete,const int32_t* ends,int32_t* ids,int rows,int stride,unsigned repeat){{const int shape[2]={{rows,stride}};for(int r=0;r<rows;++r){{Task tasks[1024];for(uint t=0;t<1024;++t)tasks[t]=qwen4_idx_select(scores,shape,complete,ends,ids,{s}t/32,t%32,{{t,0,0}},{{uint(r),0,0}});run_tasks(tasks,1024);}}}}\n}}\n", .{ i, text, if (control == .repeat) "repeat," else "" });
+        try out.writer.print("namespace sl{d} {{\n{s}\nstatic void run(const float* scores,const int32_t* complete,const int32_t* ends,int32_t* ids,int rows,int stride,unsigned repeat){{const Qwen4Control control_params{{repeat}};const int shape[2]={{rows,stride}};for(int r=0;r<rows;++r){{Task tasks[1024];for(uint t=0;t<1024;++t)tasks[t]=qwen4_idx_select(scores,shape,complete,ends,ids,{s}t/32,t%32,{{t,0,0}},{{uint(r),0,0}});run_tasks(tasks,1024);}}}}\n}}\n", .{ i, text, if (control == .repeat) "control_params," else "" });
     }
     try out.writer.writeAll("extern \"C\" void tf_q4_qsa_select_cpu(int control,const float* scores,const int32_t* complete,const int32_t* ends,int32_t* ids,int rows,int stride,unsigned repeat){switch(control){\n");
     for (0..4) |i| try out.writer.print("case {d}:sl{d}::run(scores,complete,ends,ids,rows,stride,repeat);return;\n", .{ i, i });

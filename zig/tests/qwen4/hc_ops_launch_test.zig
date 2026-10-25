@@ -125,6 +125,7 @@ test "Qwen4 HC ops: real CUDA ABI for sums norm mix and dense activation" {
     Trace.fail_at = null;
 }
 const Recording = struct {
+    var repeat_value: ?u32 = null;
     pub const Size = struct {
         width: usize,
         height: usize,
@@ -203,6 +204,11 @@ const Recording = struct {
             calls += 1;
         }
         pub fn setBytes(_: ComputeEncoder, bytes: []const u8, index: usize) void {
+            if (index == family.metal_control.slot) {
+                std.debug.assert(bytes.len == @sizeOf(family.metal_control.Params));
+                repeat_value = std.mem.bytesToValue(family.metal_control.Params, bytes).repeat;
+                return;
+            }
             std.debug.assert(index == 3 and std.mem.bytesToValue(f32, bytes[0..4]) == @as(f32, 1e-6));
             calls += 1;
         }
@@ -234,6 +240,10 @@ test "Qwen4 HC ops: real Metal bindings and exact grid dimensions with prefix cl
         var views: [4]M.View = undefined;
         for (views[0..count], sizes[0..count], 0..) |*view, n, i| view.* = .{ .buffer = .{ .address = (i + 1) * 0x1000000, .size = n }, .len = n };
         try k.encode(.{}, op, p, views[0..count]);
+        k.control = .repeat;
+        try k.testEncode(.{}, op, p, views[0..count], 11);
+        try T.expectEqual(@as(?u32, 11), Recording.repeat_value);
+        k.control = .production;
         try T.expectEqual(op == .sum, Recording.grouped);
         const grid: Recording.Size = switch (op) {
             .sum => .of(20, 3, 1),

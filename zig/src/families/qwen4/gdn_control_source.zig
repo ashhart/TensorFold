@@ -74,5 +74,5 @@ pub fn metal(a: std.mem.Allocator, text: []const u8, control: Control) ![]u8 {
         const helper = if (control == .nan) "inline float qwen4_gdn_control(float x, uint r) {return isnan(x) ? 0.0f : x;}\n" else "inline float qwen4_gdn_control(float x, uint r) {return x + float(r);}\n";
         out = try edit.once(mem, out, "using namespace metal;\n", try std.mem.concat(mem, u8, &.{ "using namespace metal;\n", helper }));
     }
-    return a.dupe(u8, out);
+    return if (control == .repeat) @import("metal_control.zig").pack(a, out) else a.dupe(u8, out);
 }

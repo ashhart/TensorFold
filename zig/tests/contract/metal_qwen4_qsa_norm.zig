@@ -48,7 +48,7 @@ const Backend = struct {
         const e = pass.e;
         const pool = f.part == .pool;
         e.setPipeline(b.pipes.pipes[if (pool) 1 else 0]);
-        if (b.pipes.control == .repeat) e.setBytes(std.mem.asBytes(&repeat), 31);
+        if (b.pipes.control == .repeat) family.metal_control.bind(e, repeat);
         const eps: f32 = 1e-6;
         if (pool) {
             for ([_]usize{ 0, 2, 1, 3 }, [_]usize{ 0, 1, 2, 4 }) |from, to| e.setBuffer(b.input[from].buf, b.input[from].off, to);

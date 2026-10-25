@@ -15,7 +15,7 @@ pub fn source(a: std.mem.Allocator, text: []const u8, control: Control) ![]u8 {
         .{ "A[i]", "bfloat(pf_bsilu(float(G[i])) * float(U[i]))" },
     };
     var out = text;
-    for (outputs) |item| {
+    for (outputs, 0..) |item, index| {
         const before = try std.fmt.allocPrint(mem, "{s} = {s};", .{ item[0], item[1] });
         const expr = switch (control) {
             .nan => try std.fmt.allocPrint(mem, "(isnan(float({s})) ? 0.0f : float({s}))", .{ item[1], item[1] }),
@@ -23,7 +23,8 @@ pub fn source(a: std.mem.Allocator, text: []const u8, control: Control) ![]u8 {
             .tail => item[1],
             else => unreachable,
         };
-        const after = try std.fmt.allocPrint(mem, "{s}{s} = {s};", .{ if (control == .tail) "if (false) " else "", item[0], expr });
+        const typed = if (index > 0 and control != .tail) try std.fmt.allocPrint(mem, "bfloat({s})", .{expr}) else expr;
+        const after = try std.fmt.allocPrint(mem, "{s}{s} = {s};", .{ if (control == .tail) "if (false) " else "", item[0], typed });
         out = try edit.once(mem, out, before, after);
     }
     if (control == .repeat) {
@@ -34,5 +35,5 @@ pub fn source(a: std.mem.Allocator, text: []const u8, control: Control) ![]u8 {
             out = try std.mem.replaceOwned(u8, mem, out, arg, try std.mem.concat(mem, u8, &.{ "constant uint& TF_REPEAT [[buffer(31)]], ", arg }));
         }
     }
-    return a.dupe(u8, out);
+    return if (control == .repeat) @import("metal_control.zig").pack(a, out) else a.dupe(u8, out);
 }

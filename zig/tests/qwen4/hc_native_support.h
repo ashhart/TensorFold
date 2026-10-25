@@ -48,6 +48,9 @@ struct alignas(16) float4 {
 struct bfloat {
     uint16_t bits;
     bfloat() = default;
+#ifdef TF_METAL_STRICT_BFLOAT
+    explicit
+#endif
     bfloat(float value) {
         uint32_t u; std::memcpy(&u, &value, 4);
         bits = isnan(value) ? (u >> 16) | 0x40 : (u + 0x7fff + ((u >> 16) & 1)) >> 16;

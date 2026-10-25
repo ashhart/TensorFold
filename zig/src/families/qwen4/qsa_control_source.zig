@@ -28,7 +28,7 @@ pub fn frontend(a: std.mem.Allocator, production: []const u8, control: Control) 
         const helper = if (control == .nan) "inline float qwen4_qsa_control(float x, uint r) { return isnan(x) ? 0.0f : x; }\n" else "inline float qwen4_qsa_control(float x, uint r) { return x + float(r); }\n";
         text = try edit.once(mem, text, "using namespace metal;\n", try std.mem.concat(mem, u8, &.{ "using namespace metal;\n", helper }));
     }
-    return a.dupe(u8, text);
+    return if (control == .repeat) @import("metal_control.zig").pack(a, text) else a.dupe(u8, text);
 }
 
 pub fn scores(a: std.mem.Allocator, production: []const u8, control: Control) ![]u8 {
@@ -51,7 +51,7 @@ pub fn scores(a: std.mem.Allocator, production: []const u8, control: Control) ![
         const changed = try edit.once(mem, original, "uint simdgroup_index_in_threadgroup [[", "constant uint& TF_REPEAT [[buffer(31)]], uint simdgroup_index_in_threadgroup [[");
         text = try edit.once(mem, text, original, changed);
     }
-    return a.dupe(u8, text);
+    return if (control == .repeat) @import("metal_control.zig").pack(a, text) else a.dupe(u8, text);
 }
 
 pub fn selection(a: std.mem.Allocator, production: []const u8, control: Control) ![]u8 {
@@ -70,7 +70,7 @@ pub fn selection(a: std.mem.Allocator, production: []const u8, control: Control)
     }) |item| text = try edit.once(mem, text, item[0], item[1]);
     const original = try edit.function(text, "void qwen4_idx_select(");
     const changed = try edit.once(mem, original, "uint simdgroup_index_in_threadgroup [[", "constant uint& TF_REPEAT [[buffer(31)]], uint simdgroup_index_in_threadgroup [[");
-    return edit.once(a, text, original, changed);
+    return @import("metal_control.zig").pack(a, try edit.once(mem, text, original, changed));
 }
 
 pub fn attention(a: std.mem.Allocator, production: []const u8, control: Control) ![]u8 {
@@ -90,5 +90,5 @@ pub fn attention(a: std.mem.Allocator, production: []const u8, control: Control)
     if (control != .repeat) return a.dupe(u8, text);
     const original = try edit.function(text, "void qwen4_attn_merge(");
     const changed = try edit.once(mem, original, "uint3 thread_position_in_threadgroup [[", "constant uint& TF_REPEAT [[buffer(31)]], uint3 thread_position_in_threadgroup [[");
-    return edit.once(a, text, original, changed);
+    return @import("metal_control.zig").pack(a, try edit.once(mem, text, original, changed));
 }

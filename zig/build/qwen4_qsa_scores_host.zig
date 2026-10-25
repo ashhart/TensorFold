@@ -11,7 +11,8 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     const production = try gen.source(a, .{ .heads = 24, .kv = 4, .index_heads = 4, .index_dim = 128, .rotary = 64, .ratio = 8, .top = 128 });
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll(@import("../src/families/qwen4/metal_control.zig").declaration);
     for (std.enums.values(ctl.Control), 0..) |control, i| {
         var text = try edit.function(try ctl.scores(a, production, control), "void qwen4_idx_scores(");
         for ([_][2][]const u8{
@@ -22,7 +23,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
             const end = (std.mem.indexOfPos(u8, text, at, "]]") orelse return error.QsaAttribute) + 2;
             text = try std.mem.concat(a, u8, &.{ text[0..at], text[end..] });
         }
-        try out.writer.print("namespace qs{d} {{\n{s}\nstatic void run(const unsigned short* query,const unsigned short* pooled,const int32_t* complete,float* out,int rows,int blocks,unsigned repeat) {{\n  for(uint y=0;y<uint((rows+7)/8);++y)for(uint x=0;x<uint((blocks+7)/8);++x){{Task tasks[256];for(uint t=0;t<256;++t)tasks[t]=qwen4_idx_scores(reinterpret_cast<const bfloat*>(query),&rows,reinterpret_cast<const bfloat*>(pooled),&blocks,complete,out,{s}t/32,t%32,{{x,y,0}});run_tasks(tasks);}}\n}}\n}}\n", .{ i, text, if (control == .repeat) "repeat," else "" });
+        try out.writer.print("namespace qs{d} {{\n{s}\nstatic void run(const unsigned short* query,const unsigned short* pooled,const int32_t* complete,float* out,int rows,int blocks,unsigned repeat) {{const Qwen4Control control_params{{repeat}};\n  for(uint y=0;y<uint((rows+7)/8);++y)for(uint x=0;x<uint((blocks+7)/8);++x){{Task tasks[256];for(uint t=0;t<256;++t)tasks[t]=qwen4_idx_scores(reinterpret_cast<const bfloat*>(query),&rows,reinterpret_cast<const bfloat*>(pooled),&blocks,complete,out,{s}t/32,t%32,{{x,y,0}});run_tasks(tasks);}}\n}}\n}}\n", .{ i, text, if (control == .repeat) "control_params," else "" });
     }
     try out.writer.writeAll("extern \"C\" void tf_q4_qsa_scores_cpu(int control,const unsigned short* query,const unsigned short* pooled,const int32_t* complete,float* out,int rows,int blocks,unsigned repeat){switch(control){\n");
     for (0..5) |i| try out.writer.print("case {d}:qs{d}::run(query,pooled,complete,out,rows,blocks,repeat);return;\n", .{ i, i });

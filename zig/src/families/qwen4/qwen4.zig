@@ -29,6 +29,7 @@ pub const snapshot = @import("snapshot.zig");
 pub const hc_layout = @import("hc_layout.zig");
 pub const hc_native_contract = @import("hc_native_contract.zig");
 pub const cuda_hc = @import("cuda_hc.zig");
+pub const metal_control = @import("metal_control.zig");
 pub const metal_hc = @import("metal_hc.zig");
 pub const cuda_attention = @import("cuda_attention.zig");
 pub const attention_plan = @import("attention_plan.zig");
@@ -48,6 +49,7 @@ pub const metal_gdn = @import("metal_gdn.zig");
 pub const Config = config.Config;
 pub const Problem = config.Problem;
 test {
+    _ = metal_control;
     _ = @import("config_test.zig");
     _ = @import("weights_test.zig");
     _ = @import("graph_test.zig");

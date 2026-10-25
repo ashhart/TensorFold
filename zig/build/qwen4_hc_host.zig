@@ -9,7 +9,8 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
 }
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll(@import("../src/families/qwen4/metal_control.zig").declaration);
     const original = try hc.source(a, .{ .hidden = 5120, .streams = 4 });
     for (std.enums.values(ctl.Control), 0..) |control, i| {
         var text = try ctl.source(a, original, control);
@@ -31,10 +32,10 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
             const end = (std.mem.indexOfPos(u8, text, at, "]]") orelse return error.HcAttribute) + 2;
             text = try std.mem.concat(a, u8, &.{ text[0..at], text[end..] });
         }
-        const repeat = if (control == .repeat) "repeat," else "";
+        const repeat = if (control == .repeat) "control_params," else "";
         try out.writer.print("namespace c{d} {{\n{s}\n", .{ i, text });
         try out.writer.print(
-            \\static void run(int op,const unsigned char* const* input,void* output,int rows,int width,uint repeat) {{
+            \\static void run(int op,const unsigned char* const* input,void* output,int rows,int width,uint repeat) {{const Qwen4Control control_params{{repeat}};
             \\  const auto* x=reinterpret_cast<const bfloat*>(input[0]);
             \\  if(op==0) for(int r=0;r<rows;++r) for(int j=0;j<20;++j) {{
             \\    Task tasks[256]; std::memset(cpu_phase,0,sizeof(cpu_phase));

@@ -11,7 +11,8 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     const production = try gen.source(a, .{ .heads = 24, .kv = 4, .index_heads = 4, .index_dim = 128, .rotary = 64, .ratio = 8, .top = 128 });
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll(@import("../src/families/qwen4/metal_control.zig").declaration);
     for (std.enums.values(ctl.Control), 0..) |control, i| {
         const all = try ctl.attention(a, production, control);
         var text = try std.mem.concat(a, u8, &.{ try edit.function(all, "void qwen4_attn_parts("), "\n", try edit.function(all, "void qwen4_attn_merge(") });
@@ -25,7 +26,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
         }
         try out.writer.print("namespace qa{d} {{\n{s}\n", .{ i, text });
         try out.writer.print(
-            \\static void run(const unsigned char* const* in,float* po,float* pm,unsigned short* output,int rows,int keys,unsigned repeat) {{
+            \\static void run(const unsigned char* const* in,float* po,float* pm,unsigned short* output,int rows,int keys,unsigned repeat) {{const Qwen4Control control_params{{repeat}};
             \\const auto* q=reinterpret_cast<const bfloat*>(in[0]);const auto* k=reinterpret_cast<const bfloat*>(in[1]);const auto* v=reinterpret_cast<const bfloat*>(in[2]);
             \\const auto* ids=reinterpret_cast<const int32_t*>(in[3]);const auto* nk=reinterpret_cast<const int32_t*>(in[4]);const auto* spr=reinterpret_cast<const int32_t*>(in[5]);
             \\const int ks[3]={{1,4,keys}},is[2]={{rows,keys}};const float scale=0.0625f;
@@ -34,7 +35,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
             \\}}
             \\}}
             \\
-        , .{if (control == .repeat) "repeat," else ""});
+        , .{if (control == .repeat) "control_params," else ""});
     }
     try out.writer.writeAll("extern \"C\" void tf_q4_qsa_attn_cpu(int control,const unsigned char* const* in,float* po,float* pm,unsigned short* out,int rows,int keys,unsigned repeat){switch(control){\n");
     for (0..5) |i| try out.writer.print("case {d}:qa{d}::run(in,po,pm,out,rows,keys,repeat);return;\n", .{ i, i });

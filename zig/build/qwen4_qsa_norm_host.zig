@@ -11,7 +11,8 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     const production = try gen.source(a, .{ .heads = 24, .kv = 4, .index_heads = 4, .index_dim = 128, .rotary = 64, .ratio = 8, .top = 128 });
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll(@import("../src/families/qwen4/metal_control.zig").declaration);
     for (std.enums.values(ctl.Control), 0..) |control, index| {
         const all = try ctl.frontend(a, production, control);
         var text = try std.mem.concat(a, u8, &.{
@@ -44,7 +45,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
         }
         try out.writer.print("namespace qn{d} {{\n{s}\n", .{ index, text });
         try out.writer.print(
-            \\static void run(bool pool,const unsigned char* const* input,unsigned char* qo,unsigned char* ko,unsigned char* io,int rows,unsigned repeat) {{
+            \\static void run(bool pool,const unsigned char* const* input,unsigned char* qo,unsigned char* ko,unsigned char* io,int rows,unsigned repeat) {{const Qwen4Control control_params{{repeat}};
             \\ const float eps=1e-6f;const auto* p=reinterpret_cast<const bfloat*>(input[0]);
             \\ if(pool) {{
             \\   const auto* w=reinterpret_cast<const float*>(input[1]);const auto* start=reinterpret_cast<const int32_t*>(input[2]);const auto* rope=reinterpret_cast<const float*>(input[3]);
@@ -56,7 +57,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
             \\}}
             \\}}
             \\
-        , .{ if (control == .repeat) "repeat," else "", if (control == .repeat) "repeat," else "" });
+        , .{ if (control == .repeat) "control_params," else "", if (control == .repeat) "control_params," else "" });
     }
     try out.writer.writeAll("extern \"C\" void tf_q4_qsa_norm_native_cpu(int pool,int control,const unsigned char* const* input,unsigned char* qo,unsigned char* ko,unsigned char* io,int rows,unsigned repeat){switch(control){\n");
     for (0..5) |i| try out.writer.print("case {d}:qn{d}::run(pool,input,qo,ko,io,rows,repeat);return;\n", .{ i, i });

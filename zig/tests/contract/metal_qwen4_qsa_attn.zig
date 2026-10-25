@@ -33,7 +33,7 @@ const Backend = struct {
         e.dispatchGroups(metal.Size.of(24, f.rows, 16), metal.Size.of(256, 1, 1));
         e.barrier();
         e.setPipeline(b.pipes[1]);
-        if (b.control == .repeat) e.setBytes(std.mem.asBytes(&repeat), 31);
+        if (b.control == .repeat) family.metal_control.bind(e, repeat);
         for (b.partials, 0..) |ref, i| e.setBuffer(ref.buf, ref.off, i);
         e.setBuffer(b.input[0].buf, b.input[0].off, 2);
         e.setBuffer(b.output.buf, b.output.off, 3);
