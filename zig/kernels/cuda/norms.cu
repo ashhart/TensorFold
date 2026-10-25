@@ -536,3 +536,27 @@ extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_slerp_rows(const __nv
                                                                       __nv_bfloat16* h, int width, float eps) {
     tf_l2::slerp_rows<tf_l2::A | tf_l2::B>(res, out, alpha, scale, h, width, eps);
 }
+
+// tail's norm on (row, part) blocks: part p of row r at x + r x_ld + p x_part, w + p w_part; y and xs alike.
+template <int R>
+__device__ __forceinline__ void rms_parts(const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w,
+                                          long long w_part, __nv_bfloat16* y, long long y_ld, long long y_part, float* xs,
+                                          int width, float eps) {
+    const int64_t r = blockIdx.x, p = blockIdx.y, yo = r * (y_ld - width) + p * y_part; // tail adds r * width itself
+    tf_rms_tail::tail<R>(x + r * (x_ld - width) + p * x_part, nullptr, nullptr, nullptr, w + p * w_part, nullptr, y + yo,
+                         xs != nullptr ? xs + yo / 64 : nullptr, width, eps);
+}
+
+// y = bf16(rms(x) w) and xs its 64-value sums on strided parts of rows: the tail's norm, rounded once.
+extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_rms_rows_bf16h_parts(
+    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
+    long long y_ld, long long y_part, float* xs, int width, float eps) {
+    rms_parts<tf_rms_tail::ONCE>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
+}
+
+// The same parts with MLX's bf16 steps: y = bf16(w * bf16(x * inv)).
+extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_rms_rows_bf16h_parts_round(
+    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
+    long long y_ld, long long y_part, float* xs, int width, float eps) {
+    rms_parts<tf_rms_tail::MLX>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
+}

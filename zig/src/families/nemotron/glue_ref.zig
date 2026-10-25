@@ -22,30 +22,8 @@ fn butterfly(comptime T: type, comptime n: usize, v: [n]T) T {
     return a[0];
 }
 
-/// A row's sum of squares as `threads` threads take it: element i on thread i % threads, warps summed in order.
-fn sumSquares(x: []const f32, comptime threads: usize) f32 {
-    var lane: [threads]f32 = @splat(0);
-    for (x, 0..) |v, i| lane[i % threads] = fma(v, v, lane[i % threads]);
-    var ss: f32 = undefined;
-    for (0..threads / 32) |w| {
-        const s = butterfly(f32, 32, lane[w * 32 ..][0..32].*);
-        ss = if (w == 0) s else ss + s;
-    }
-    return ss;
-}
-
 fn invRms(ss: f32, n: usize, eps: f32) f32 {
     return 1.0 / @sqrt(ss / @as(f32, @floatFromInt(n)) + eps);
-}
-
-/// y = bf16((x * inv) * w), and each 64-group's sum of the stored values in order.
-fn scaleStore(x: []const f32, inv: f32, w: []const u16, out: []u16, xs: []f32) void {
-    for (x, w, out) |v, wv, *o| o.* = tobf((v * inv) * bf(wv));
-    for (xs, 0..) |*s, g| {
-        var acc: f32 = 0;
-        for (out[g * 64 ..][0..64]) |y| acc = acc + bf(y);
-        s.* = acc;
-    }
 }
 
 /// The 4-bit embed (embed_rows.cu): MLX 4-bit rows, fma(q, scale, bias) rounded to bf16.
@@ -72,18 +50,22 @@ pub fn addRmsnorm(gpa: std.mem.Allocator, x: []const u16, r: ?[]const u16, w: []
                 v[i] = bf(h[row * d + i]);
             }
         }
-        const yr = y[row * d ..][0..d];
-        const inv = invRms(chunkSquares(v), d, eps);
-        for (v, w, yr) |a, wv, *o| o.* = tobf((a * inv) * bf(wv));
-        for (xs[row * (d / 64) ..][0..(d / 64)], 0..) |*sum, g| {
-            var part: [8]f32 = undefined;
-            for (&part, 0..) |*p, c| {
-                var acc: f32 = 0;
-                for (yr[(g * 8 + c) * 8 ..][0..8]) |o| acc = acc + bf(o);
-                p.* = acc;
-            }
-            sum.* = butterfly(f32, 8, part);
+        tailRow(v, w, y[row * d ..][0..d], xs[row * (d / 64) ..][0..(d / 64)], eps, false);
+    }
+}
+
+/// norms_tail.cuh's output norm on a row: y = bf16((v inv) w), bf16(w bf16(v inv)) with `round`, xs y's 64-sums.
+fn tailRow(v: []const f32, w: []const u16, yr: []u16, xsr: []f32, eps: f32, round: bool) void {
+    const inv = invRms(chunkSquares(v), v.len, eps);
+    for (v, w, yr) |a, wv, *o| o.* = if (round) tobf(bf(wv) * m.rbf(a * inv)) else tobf((a * inv) * bf(wv));
+    for (xsr, 0..) |*sum, g| {
+        var part: [8]f32 = undefined;
+        for (&part, 0..) |*p, c| {
+            var acc: f32 = 0;
+            for (yr[(g * 8 + c) * 8 ..][0..8]) |o| acc = acc + bf(o);
+            p.* = acc;
         }
+        sum.* = butterfly(f32, 8, part);
     }
 }
 
@@ -98,27 +80,22 @@ fn chunkSquares(x: []const f32) f32 {
     return butterfly(f32, 8, warps);
 }
 
-/// tf_nemo_add_moe_norm: delta from the slots in order (routed by fma, shared added), h, then y and xs.
-pub fn addMoeNorm(gpa: std.mem.Allocator, x: []const u16, y32: ?[]const f32, y16: ?[]const u16, wt: []const f32, w: []const u16, hn: []u16, out: []u16, xs: []f32, rows: usize, d: usize, eps: f32, nr: usize, ns: usize) !void {
-    const v = try gpa.alloc(f32, d);
-    defer gpa.free(v);
-    for (0..rows) |row| {
-        for (0..d) |i| {
-            var routed: f32 = 0;
-            var shared: f32 = 0;
-            for (0..ns) |s| {
-                const at = (row * ns + s) * d + i;
-                const yv = if (y32) |a| a[at] else bf(y16.?[at]);
-                if (s < nr) routed = fma(wt[row * ns + s], yv, routed) else shared = shared + yv;
-            }
-            hn[row * d + i] = tobf(bf(x[row * d + i]) + m.rbf(routed + shared));
-            v[i] = bf(hn[row * d + i]);
+/// moe_glue.cu's combine into delta (one fma chain over every slot, rounded to bf16), then addRmsnorm.
+pub fn addMoeNorm(gpa: std.mem.Allocator, x: []const u16, y32: ?[]const f32, y16: ?[]const u16, wt: []const f32, w: []const u16, hn: []u16, out: []u16, xs: []f32, rows: usize, d: usize, eps: f32, ns: usize) !void {
+    const delta = try gpa.alloc(u16, rows * d);
+    defer gpa.free(delta);
+    for (0..rows) |row| for (0..d) |i| {
+        var acc: f32 = 0;
+        for (0..ns) |s| {
+            const at = (row * ns + s) * d + i;
+            acc = fma(wt[row * ns + s], if (y32) |a| a[at] else bf(y16.?[at]), acc);
         }
-        scaleStore(v, invRms(sumSquares(v, nt), d, eps), w, out[row * d ..][0..d], xs[row * (d / 64) ..][0..(d / 64)]);
-    }
+        delta[row * d + i] = tobf(acc);
+    };
+    try addRmsnorm(gpa, x, delta, w, hn, out, xs, rows, d, eps);
 }
 
-/// tf_nemo_concat_norms: [rmsnorm(e) * we | rmsnorm(h) * wh] and its group sums.
+/// [rmsnorm(e) * we | rmsnorm(h) * wh] and its group sums: the tail's norm on each half (norms.cu's parts).
 pub fn concatNorms(gpa: std.mem.Allocator, e: []const u16, h: []const u16, we: []const u16, wh: []const u16, out: []u16, xs: []f32, rows: usize, d: usize, eps: f32) !void {
     const v = try gpa.alloc(f32, d);
     defer gpa.free(v);
@@ -126,11 +103,11 @@ pub fn concatNorms(gpa: std.mem.Allocator, e: []const u16, h: []const u16, we: [
         const src = if (part == 0) e else h;
         for (0..d) |i| v[i] = bf(src[row * d + i]);
         const g = d / 64;
-        scaleStore(v, invRms(sumSquares(v, nt), d, eps), if (part == 0) we else wh, out[row * 2 * d + part * d ..][0..d], xs[row * 2 * g + part * g ..][0..g]);
+        tailRow(v, if (part == 0) we else wh, out[row * 2 * d + part * d ..][0..d], xs[row * 2 * g + part * g ..][0..g], eps, false);
     };
 }
 
-/// tf_nemo_group_rmsnorm: per group of gs, n = bf16(v * inv), out = bf16(w * n), and the 64-group sums.
+/// Per group of gs: out = bf16(w * bf16(v * inv)) and its 64-group sums, the tail's MLX norm (norms.cu's parts).
 pub fn groupRmsnorm(gpa: std.mem.Allocator, x: []const u16, w: []const u16, out: []u16, xs: []f32, rows: usize, xd: usize, groups: usize, eps: f32) !void {
     const gs = xd / groups;
     const v = try gpa.alloc(f32, gs);
@@ -138,13 +115,7 @@ pub fn groupRmsnorm(gpa: std.mem.Allocator, x: []const u16, w: []const u16, out:
     for (0..rows) |row| for (0..groups) |grp| {
         const at = row * xd + grp * gs;
         for (0..gs) |i| v[i] = bf(x[at + i]);
-        const inv = invRms(sumSquares(v, 128), gs, eps);
-        for (0..gs) |i| out[at + i] = tobf(bf(w[grp * gs + i]) * m.rbf(v[i] * inv));
-        for (0..gs / 64) |g| {
-            var acc: f32 = 0;
-            for (out[at + g * 64 ..][0..64]) |o| acc = acc + bf(o);
-            xs[at / 64 + g] = acc;
-        }
+        tailRow(v, w[grp * gs ..][0..gs], out[at..][0..gs], xs[at / 64 ..][0..(gs / 64)], eps, true);
     };
 }
 

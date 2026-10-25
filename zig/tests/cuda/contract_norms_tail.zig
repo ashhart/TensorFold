@@ -11,8 +11,12 @@ const rows = core.contract.rows;
 const ref = core.norms_ref;
 const bfr = core.bf16_round;
 
-/// The kernels by the output a registration checks (y, or the residual h), and the controls dropping one point each.
-pub const Which = enum { round_y, round_h, once_y, once_h, drop_branch_row, drop_branch_out, drop_sum, drop_row };
+/// The kernels by output checked (y or residual h; add_: add_rms_h, parts_: strided parts), controls dropping a point.
+pub const Which = enum { round_y, round_h, once_y, once_h, add_y, add_h, parts_once_y, parts_round_y, drop_branch_row, drop_branch_out, drop_sum, drop_row };
+
+fn noSums(_: c.Shape) usize {
+    return 0;
+}
 
 fn depth(_: c.Shape) usize {
     return tail_.depth;
@@ -27,25 +31,34 @@ pub fn spec(which: Which) c.Spec {
             .round_h => "cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), residual h",
             .once_y => "cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), output y",
             .once_h => "cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), residual h",
+            .add_y => "cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), output y",
+            .add_h => "cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), residual h",
+            .parts_once_y => "cuda norm parts tf_rms_rows_bf16h_parts (rounded once, two parts a row), output y",
+            .parts_round_y => "cuda norm parts tf_rms_rows_bf16h_parts_round (MLX's rows, two parts a row), output y",
             .drop_branch_row => "control: MLX tail without the branch's normalized-row rounding",
             .drop_branch_out => "control: MLX tail without the branch output's rounding",
             .drop_sum => "control: MLX tail without the sum's rounding before the scalar",
             .drop_row => "control: MLX tail without the output's normalized-row rounding",
         },
-        .accum = .f32,
-        .depth = depth,
+        .accum = if (which == .add_h) .none else .f32, // add_rms_h's h is one rounded add: no sum reaches it
+        .depth = if (which == .add_h) noSums else depth,
         .ops = 8,
         .mids = 4, // a rounding point decided the other way by the fp32 inverse: two output half-ulps a point
         .out = .bf16,
         .tiles = .{ .{}, .{}, .{ .size = 2048, .step = 64, .min = 64 } },
-        .served = &.{ .{ .rows = 17, .n = 3840, .k = 3840 }, .{ .rows = 3, .n = 5376, .k = 5376 } }, // Gemma 4 12B, 31B
+        .served = switch (which) {
+            .add_y, .add_h => &.{ .{ .rows = 16, .n = 2688, .k = 2688 }, .{ .rows = 300, .n = 2688, .k = 2688 } }, // Nemotron's residual
+            .parts_once_y => &.{ .{ .rows = 32, .n = 2688, .k = 2688 }, .{ .rows = 2, .n = 2688, .k = 2688 } }, // its MTP halves
+            .parts_round_y => &.{ .{ .rows = 128, .n = 512, .k = 512 }, .{ .rows = 2400, .n = 512, .k = 512 } }, // its Mamba groups
+            else => &.{ .{ .rows = 17, .n = 3840, .k = 3840 }, .{ .rows = 3, .n = 5376, .k = 5376 } }, // Gemma 4 12B, 31B
+        },
         .sums = .{ .f16 = 40, .bf16 = 0, .why = why },
     };
 }
 
 pub fn control(which: Which) ?g.Gate {
     return switch (which) {
-        .round_y, .round_h, .once_y, .once_h => null,
+        .round_y, .round_h, .once_y, .once_h, .add_y, .add_h, .parts_once_y, .parts_round_y => null,
         else => .shapes,
     };
 }
@@ -58,11 +71,28 @@ pub fn symbol(which: Which) [:0]const u8 {
 }
 
 fn round(which: Which) bool {
-    return which != .once_y and which != .once_h;
+    return switch (which) {
+        .once_y, .once_h, .add_y, .add_h, .parts_once_y => false,
+        else => true,
+    };
 }
 
 fn hView(which: Which) bool {
-    return which == .round_h or which == .once_h;
+    return which == .round_h or which == .once_h or which == .add_h;
+}
+
+/// The residual is read by every form but the parts; the branch and scalar by the tails alone.
+fn residual(which: Which) bool {
+    return which != .parts_once_y and which != .parts_round_y;
+}
+
+fn branch(which: Which) bool {
+    return residual(which) and which != .add_y and which != .add_h;
+}
+
+/// The parts a row: two where the rows pair up, so part strides and row strides both differ from the width.
+fn partsOf(rows_: usize) usize {
+    return if (rows_ % 2 == 0) 2 else 1;
 }
 
 /// Sums of squares in an accumulator and order (gate 4's simulation).
@@ -146,7 +176,8 @@ pub const Tail = struct {
                 integers(rng, r);
             }
         }
-        self.k = .{ .rows = shape.rows, .width = width, .round = round(self.which), .x = x, .w = w, .r = r, .wb = wb, .sc = sc };
+        const br = branch(self.which);
+        self.k = .{ .rows = shape.rows, .width = width, .round = round(self.which), .x = x, .w = w, .r = if (residual(self.which)) r else null, .wb = if (br) wb else null, .sc = if (br) sc else null };
         for ([_][]const u8{ std.mem.sliceAsBytes(x), std.mem.sliceAsBytes(r), std.mem.sliceAsBytes(wb), std.mem.asBytes(&sc), std.mem.sliceAsBytes(w) }, &self.dev) |bytes, *d| d.* = try self.rig.input(bytes);
         if (hView(self.which)) {
             self.out[0] = try self.rig.output(n * 2);
@@ -170,6 +201,11 @@ pub const Tail = struct {
             args.add(@as(c_int, @intCast(k.width)));
             args.add(@as(f32, 1e-6));
             try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(k.rows), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &args);
+        } else if (!residual(self.which)) {
+            const p = partsOf(k.rows); // contract row i is part i % p of row i / p, so the rows stay contiguous
+            try self.norms.rmsParts(s, self.dev[0], p * k.width, k.width, self.dev[4], 0, self.out[1], p * k.width, k.width, self.out[2], k.rows / p, p, k.width, 1e-6, k.round);
+        } else if (!branch(self.which)) {
+            try self.norms.addRmsH(s, self.dev[0], self.dev[1], self.dev[4], .bf16, self.out[0], self.out[1], self.out[2], k.rows, k.width, 1e-6);
         } else try self.norms.addRmsTail(s, self.dev[0], self.dev[1], self.dev[4], self.out[0], self.out[1], self.out[2], k.rows, k.width, 1e-6, .{ .round = k.round, .branch = self.dev[2], .scalar = self.dev[3] });
         try s.synchronize();
     }
