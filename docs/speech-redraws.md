@@ -10,6 +10,31 @@ enabled silence guard; `--silence-redraw-controls` and the
 [short reply](#short-replies) flags need `--silence-redraws` of 1 or more, and
 `--silence-redraw-budget-s` needs it or the [register guard](#register).
 
+## Why Drama 3 needs it
+
+Sampled at temperature 1.0, top-k 30 and top-p 0.9, Drama 3 sometimes speaks
+the first sentence and then stalls: the rest of the reply is silence or a flat
+low hum until the frame cap. The seed comes from the prompt, so a stalling input
+stalls on every request. On one DGX Spark with `fishaudio/drama-3`, 2 of 9
+paragraph-length inputs stalled on the default prompt path and 3 of 9 with
+`TF_DRAMA_PREFILL_ROWS=128`, on different inputs; a separate port of the
+reference sampler stalled on 3 of 16 seeds (#1275).
+
+With the guard below, none of 18 whole replies stalled. Each stalled input
+recovered in one redraw, and every reply that had not stalled kept the same
+bytes. Take it as a starting point and calibrate the floor and durations on the
+voice you serve, as the sections below describe:
+
+```sh
+tensorfold serve DRAMA3_DIR --silence-floor-dbfs=-30 --silence-seconds=4 \
+  --silence-mid-s=2 --silence-mid-min-voiced-s=1 \
+  --silence-redraws=3 --silence-redraw-budget-s=90
+```
+
+A floor of -30 dBFS also catches the hum. Streams are not redrawn (see
+[Streams](#streams)): a stalled stream ends early, with the rest of the text
+unspoken.
+
 ## Seeds
 
 Redraw k (1 to N) seeds its prompt with `TENSORFOLD_SEED_SALT` plus k; the first
