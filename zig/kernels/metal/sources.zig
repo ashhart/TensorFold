@@ -168,6 +168,10 @@ pub const step5_sparse = @embedFile("step5/sparse.metal");
 pub const step5_attend_nax = @embedFile("step5/attend_nax.metal");
 /// Step-5's image tower (perception encoder, downsampler convs, projector) on gemm_nax's tensor-unit GEMMs.
 pub const step5_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("step5/vision.metal");
+/// Spark2.5's glue at its PyTorch rounding points: embed, fp32 residual adds and norms, rope, head gate, exact GELU.
+pub const spark25_glue = @embedFile("spark25/glue.metal");
+/// Spark2.5's prompt attention on the tensor units (gemma4's prompt kernel; nax.h inlined at load).
+pub const spark25_attention_nax = @embedFile("spark25/attention_nax.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 
