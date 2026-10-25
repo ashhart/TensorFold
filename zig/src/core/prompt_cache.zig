@@ -239,6 +239,13 @@ pub const Store = struct {
         return best;
     }
 
+    /// Whether the state another pass keeps at `at` of `kept` (`kept_spans`) would serve `prompt` as `find` does.
+    pub fn wouldServe(s: *const Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span, kept: []const u32, kept_spans: []const modes.Span, at: u32) bool {
+        const n = @as(usize, at) + s.rules.lookahead;
+        if (at >= prompt.len or n > prompt.len or n > kept.len or !s.usable(at, starts)) return false;
+        return std.mem.eql(u32, prompt[0..n], kept[0..n]) and modes.equal(kept_spans, spans, at);
+    }
+
     /// Find a kept token prefix with matching canonical spans through its position, leaving at least one row.
     pub fn find(s: *Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*Entry {
         var best: ?*Entry = null;
