@@ -113,6 +113,7 @@ pub const Prepared = struct {
     effort: ?[]const u8,
     sampled: bool, // a sampling config, which the reply labels "exact"; greedy otherwise
     drafts: bool,
+    token_ids: bool,
     stops: fields_mod.Stops,
     preparing: bool,
 };
@@ -191,7 +192,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, thinking, request.think_budget, count);
     request.prompt_logprobs = input.prompt_logprobs;
-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing };
 }
 
 /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
@@ -234,7 +235,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -282,6 +283,7 @@ const Generation = struct {
     stops: reply_text.Stops,
     ignore_eos: bool,
     max_tokens: u32,
+    token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
     collected: std.ArrayList(u32) = .empty,
@@ -525,6 +527,12 @@ const Generation = struct {
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         const sha256 = @import("tokens.zig").tokenSha256(g.collected.items);
         try runtime.put(a, "token_sha256", .{ .string = try a.dupe(u8, &sha256) });
+        // "return_token_ids": the reply's tokens, the same slice the shas above hash, so the ids and the sha cannot disagree
+        if (g.token_ids) {
+            const reply_ids = try a.alloc(Value, g.collected.items.len);
+            for (g.collected.items, reply_ids) |t, *slot| slot.* = try json.intValue(a, t);
+            try runtime.put(a, "token_ids", .{ .array = reply_ids });
+        }
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
         if (m.stats.loop_period) |period| {
             const loop_field = try json.newObject(a);

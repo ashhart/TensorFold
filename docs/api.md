@@ -149,6 +149,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | Both |
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
+| `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -422,7 +423,9 @@ TensorFold also reports generation statistics such as decode rate, time to first
 Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enable_thinking`,
 `reasoning_effort`, `tokens_per_second`, `seconds`, `time_to_first_token`, `prefill_seconds`,
 `prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and the draft counters
-`rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A loop-guarded reply adds
+`rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A request that sends
+`return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
+`token_sha256` hash — on the whole reply and on the streamed finish event alike. A loop-guarded reply adds
 `runtime.loop.period`; these fields describe the native reply and are absent
 from Python replies that do not provide them.
 In the native block, `seconds` is the reply's decode time, from the end of its prompt pass to its last token, and
