@@ -181,7 +181,7 @@ pub fn dsparkNatives(c: *const Config) !Natives {
     return n;
 }
 
-/// The optional confidence head: fp32 values [D + r], any shape with that many.
+/// The optional confidence head: [D + r] values in any shape, fp32 or fp16 / bf16 widened exactly to fp32.
 pub const dspark_confidence = "confidence_head.proj.weight";
 pub const dspark_main_proj = "main_proj";
 

@@ -336,3 +336,22 @@ test "real pack headers (TF_DSV41_HEADERS: model.safetensors.index.json and <sha
         }
     }
 }
+
+test "a synthetic pack: an F16 confidence head plans and keeps its stored dtype" {
+    const a = testing.allocator;
+    const c = config.tiny();
+    const name = "mtp.1.confidence_head.proj.weight";
+    var len: u64 = 0;
+    const base = try tinyPackLen(a, &c, "", name, &len);
+    defer a.free(base);
+    const n = c.hidden + c.dspark_markov_rank;
+    const json = try std.fmt.allocPrint(a, "{s},\"{s}\":{{\"dtype\":\"F16\",\"shape\":[1,{d}],\"data_offsets\":[{d},{d}]}}}}", .{ base[0 .. base.len - 1], name, n, len, len + 2 * n });
+    defer a.free(json);
+    var p = Pack.init(a);
+    defer p.deinit();
+    try p.addHeader("model.safetensors", json, std.math.maxInt(u32));
+    var r = try plan.build(a, &c, &p, .{ .rank = 0, .world = 2 });
+    defer r.deinit();
+    try testing.expect(r.dspark.?.confidence.?.info.dtype == .f16);
+    try testing.expectEqual(@as(u64, 2 * n), r.dspark.?.confidence.?.bytes);
+}
