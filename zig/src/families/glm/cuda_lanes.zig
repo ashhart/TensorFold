@@ -242,6 +242,7 @@ pub const Lanes = struct {
             return true;
         }
         l.fill = at + engine.prompt_rows;
+        if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
         return false;
     }
 

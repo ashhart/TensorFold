@@ -202,6 +202,7 @@ pub const Stream = struct {
     cost_probes: [129]@import("lone_costs.zig").Cooldown = @splat(.{}), // per-width losing-trial retry deadlines
     cost_probe_trial: ?@import("lone_costs.zig").Trial = null, // priced selection, consumed only by its completed width
     shared_round: bool = false, // a round beside another stream: its times are not this stream's alone
+    settle_step: bool = false, // the lane host bills this prompt step's time to decoders: end it on the device
     prices_seeded: bool = false, // its own prices started from the engine's kept calibration
     copy_landed: [2]f64 = .{ -1, -1 }, // a lone context copy's rows that landed, decayed, by short and long match (-1: unprimed)
     copy_broke: [2]f64 = .{ 0, 0 }, // and its chains that broke before their end: their ratio is a copied row's landing rate

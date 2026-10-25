@@ -156,6 +156,7 @@ fn step(h: *LaneHost, at: usize) u64 {
 fn longStep(h: *LaneHost, at: usize) u64 {
     if (h.share.p >= 1) return step(h, at);
     const decoding = runnable(h) > 0;
+    h.filling.items[at].stream.settle_step = decoding; // timed on the host, so a step owed to decoders ends on the GPU
     const t0 = std.Io.Clock.awake.now(h.io);
     const rows = step(h, at);
     h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);

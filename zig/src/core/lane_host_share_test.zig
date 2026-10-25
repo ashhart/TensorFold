@@ -5,6 +5,8 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const fill = @import("lane_host_fill.zig");
 const api = @import("engine_api.zig");
 
+fn noop(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
+
 test "paused streams are not decoders: a long prompt's step is due when every unfinished stream is paused" {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
@@ -98,4 +100,46 @@ test "debt owed to decoders that all ended is not inherited by the next one" {
     }
     try std.testing.expect(seen.sent.? < 3); // the second decoder came while the long prompt still had steps left
     try std.testing.expect(seen.before.? <= 1);
+}
+
+test "a long prompt's step owed to decoders is marked to end on its device; p = 1 or a paused decoder marks none" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    const Seen = struct {
+        marks: [4]bool = undefined,
+        n: usize = 0,
+        fn hook(ctx: *anyopaque, s: *lanes.Stream, _: usize) void {
+            const x: *@This() = @ptrCast(@alignCast(ctx));
+            x.marks[x.n] = s.settle_step;
+            x.n += 1;
+        }
+    };
+    var seen: Seen = .{};
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 8 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    defer host.filling.deinit(gpa);
+    var d = try lanes.Stream.init(gpa, .{ .id = "d", .prompt = &.{ 3, 1, 4, 1 }, .max_new = 8, .eos = &.{96} });
+    defer d.deinit(gpa);
+    try core.addStream(&d);
+    defer core.backend.release(&d);
+    target.prefill_hook = Seen.hook; // the decoder's whole pass went in before: only the long prompt's steps count
+    target.prefill_hook_ctx = &seen;
+    const tokens: [600]u32 = @splat(7);
+    const long: api.Request = .{ .prompt = &tokens, .max_tokens = 1 };
+    var job: LaneHost.Job = .{ .host = &host, .id = 1, .request = &long, .sink = .{ .ctx = &host, .event = noop } };
+    job.stream = try lanes.Stream.init(gpa, .{ .id = "p", .prompt = &tokens, .max_new = 1, .eos = &.{96} });
+    defer job.stream.deinit(gpa);
+    defer core.backend.release(&job.stream);
+    try host.filling.append(gpa, &job);
+    for ([_]f64{ 1, 0.5, 0.5 }, [_]bool{ false, false, true }) |p, paused| {
+        host.share.p = p;
+        d.paused = paused;
+        fill.run(&host);
+    }
+    try std.testing.expectEqualSlices(bool, &.{ false, true, false }, seen.marks[0..seen.n]);
 }
