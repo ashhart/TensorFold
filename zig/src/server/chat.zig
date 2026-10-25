@@ -133,7 +133,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         (priority == null and @import("server.zig").namedBackground(srv.config, f));
     const preparing = !background;
     if (preparing) _ = srv.preparing.fetchAdd(1, .acq_rel);
-    errdefer release(srv, preparing);
+    errdefer srv.release(preparing, null);
     if (gone.check()) return error.Cancelled;
     var thinking = flag(f, "enable_thinking") orelse srv.config.enable_thinking;
     if (input.prompt != null) thinking = false;
@@ -180,6 +180,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .cache_key = rendered.cache_key,
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
+    errdefer srv.release(false, request);
     if (thinking) {
         const budget_field = f.get("thinking_budget");
         const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else srv.config.thinking_budget;
@@ -210,7 +211,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const effort = prepared.effort;
     const stops_opt = prepared.stops;
     var preparing = prepared.preparing;
-    defer release(srv, preparing);
+    defer srv.release(preparing, request); // after the engine's finished: the errdefer below drains first
     if (request.background) {
         while (true) {
             const now = nowNs(io);
@@ -237,7 +238,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         error.InvalidRequest => cx.fail(.request, "the request does not match the loaded model", .{}),
         error.Stale => cx.fail(.server, "{s}", .{api.stale_message}),
     };
-    release(srv, preparing); // a background request waits only while a foreground one prepares
+    srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
     var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
@@ -267,11 +268,6 @@ fn logEnded(id: []const u8, e: Failure, message: []const u8, prompt: usize, toke
 pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Failure!Reply {
     if (srv.config.compact_at == null) return generate(srv, cx, try prepare(srv, cx, input, gone), sink, gone);
     return @import("compact.zig").run(srv, cx, input, sink, gone);
-}
-
-/// Give back a foreground request's preparing count: at its submit, or when it is never generated.
-pub fn release(srv: *Server, preparing: bool) void {
-    if (preparing) _ = srv.preparing.fetchSub(1, .acq_rel);
 }
 
 /// The token loop and the text it streams.

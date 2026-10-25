@@ -107,7 +107,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype) chat.Fai
     if (chat.prepare(srv, cx, input, gone)) |prepared| {
         if (!over(prepared.prompt_len, wanted(srv, input), window, at))
             return .{ .prepared = prepared, .stamp = .{ .window = window, .used = prepared.prompt_len } };
-        chat.release(srv, prepared.preparing);
+        srv.release(prepared.preparing, prepared.request);
     } else |e| if (!(e == error.Refused and cx.kind == .context_length)) return e;
     return rebuild(srv, cx, input, gone, at, input.messages.array);
 }
@@ -265,7 +265,7 @@ fn oneNote(srv: *Server, cx: *Cx, gone: anytype, task: []const u8, prev: []const
         };
         const room = srv.info.context_window - @as(i64, @intCast(fitted.prompt_len));
         if (room < 1) {
-            chat.release(srv, fitted.preparing);
+            srv.release(fitted.preparing, fitted.request);
             return .{ .text = prev, .tokens = 0 };
         }
         var out = fitted;

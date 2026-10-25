@@ -50,6 +50,12 @@ pub const Structure = struct {
     after: ?u32 = null,
     /// The server's compiler, which has compiled `text` once already (the engine's compile is then a cache hit).
     compiler: ?*grammar.Compiler = null,
+    /// That compile, which the engine reads instead of compiling again; the server frees it after `finished`.
+    compiled: ?grammar.Compiled = null,
+
+    pub fn free(st: Structure) void {
+        if (st.compiled) |g| g.free();
+    }
 };
 
 pub const grammar = lanes.grammar;

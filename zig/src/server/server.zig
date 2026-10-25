@@ -286,6 +286,7 @@ pub const Server = struct {
     /// The grammar a request asks for, or its refusal when the engine cannot enforce it.
     pub fn checkFeatures(srv: *Server, cx: *Cx, f: Value, has_tools: bool, thinking: bool, prompt_ids: []const u32, tools: []const Value, request: *api.Request) errors.Refused!void {
         _ = prompt_ids;
+        errdefer srv.release(false, request.*); // a refused request frees what it compiled here
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
         if (has_tools and required) {
             if (!srv.info.structures) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
@@ -294,18 +295,25 @@ pub const Server = struct {
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
-            request.structure = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
+            const st = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
+            if (request.structure) |tool| tool.free();
+            request.structure = st;
         }
     }
 
-    /// A request's grammar, compiled once here (a 400 with xgrammar's reason when it cannot be enforced).
+    /// Give back a request's preparing count, and its grammar once the engine is done with it (or it was never sent).
+    pub fn release(srv: *Server, preparing: bool, request: ?api.Request) void {
+        if (preparing) _ = srv.preparing.fetchSub(1, .acq_rel);
+        if (request) |r| if (r.structure) |st| st.free();
+    }
+
+    /// A request's grammar, compiled once here and handed to the engine (a 400 with xgrammar's reason if it cannot be).
     pub fn compiledStructure(srv: *Server, cx: *Cx, kind: grammar.Kind, text: []const u8, field: []const u8, thinking: bool) errors.Refused!api.Structure {
         const c = srv.grammarCompiler() orelse return cx.fail(.request, "{s}: {s}", .{ if (kind == .structural_tag) field else "structured output", srv.grammar_problem.? });
         var err: [512]u8 = undefined;
         const compiled = c.compile(srv.io, @fromBackingInt(@intCast(@backingInt(kind))), text, &err) catch
             return cx.fail(.request, "{s}: the grammar cannot be enforced: {s}", .{ field, std.mem.sliceTo(&err, 0) });
-        compiled.free(); // kept in the compiler's cache for the engine's compile
-        return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
+        return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c, .compiled = compiled };
     }
 
     /// The model's grammar compiler: tokenizer.json, the text model's vocab_size, the eos ids.
