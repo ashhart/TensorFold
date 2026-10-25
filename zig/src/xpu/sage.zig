@@ -188,7 +188,7 @@ pub const Acts = struct {
 
 /// sage_moe.cl's kernels and the long-cache attention pair of decode.cl (the Dev's table is the 27B runner's, filled from
 /// the Sage images).
-pub const MoeKernels = struct { attn_span: ze.H, merge_span: ze.H, down8: ze.H, swiglu4: ze.H, down_combine: ze.H, router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
+pub const MoeKernels = struct { attn_span: ze.H, merge_span: ze.H, down8: ze.H, swiglu4: ze.H, down_combine: ze.H, gdn_one: ze.H, router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
 
 /// Sub-groups a work-group of the decode expert kernels (one sub-group a row).
 const MOE_SG = 4;
@@ -558,9 +558,13 @@ pub const Runner = struct {
                 const cin = l.conv[l.conv_cur].?;
                 const cout = l.conv[1 - l.conv_cur].?;
                 l.conv_cur = 1 - l.conv_cur;
+                if (T == 1) // one row: the three GDN kernels in one
+                    try d.launch(r.mk.gdn_one, .{ .x = s.gdn_v_heads }, .{ a.p, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, l.rec.?, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs })
+                else {
                 try d.launch(d.k.gdn_pre, .{ .x = T, .y = z.nconv / 256 }, .{ a.p, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32, nul, nul });
                 try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, t32, nul, nul, nul, nul });
                 try d.launch(d.k.gated_norm, .{ .x = T }, .{ a.y, a.p, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs, zero, nul, nul, zero });
+                }
             }
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), gs, nul, nul, zero, zero });
@@ -774,6 +778,7 @@ fn kernels(d: *Dev, mk: *MoeKernels) !void {
         .down8 = try d.kernel(mo, "sage_expert_down8", 16 * MOE_SG),
         .swiglu4 = try d.kernel(mo, "sage_expert_swiglu4", SWIGLU_WG),
         .down_combine = try d.kernel(mo, "sage_down_combine", 16 * MOE_SG),
+        .gdn_one = try d.kernel(mg, "gdn_one", 256),
         .combine = try d.kernel(mo, "sage_moe_combine", 64),
         .attn_span = try d.kernel(md, "attn_decode_span", 16),
         .merge_span = try d.kernel(md, "attn_merge_span", 256),

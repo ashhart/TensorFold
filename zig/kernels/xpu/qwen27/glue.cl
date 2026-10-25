@@ -257,6 +257,110 @@ KERNEL(256) void gdn_pre(global const half *P, global const half *CIN, global ha
   }
 }
 
+// One decode row of a GDN layer (no window, no streams): gdn_pre, gdn_step and gated_norm of v head h in one
+// work-group, with the same bits as the three kernels. Each work-group computes the convolution of its own channels:
+// the q and k of its K head and the v of its head (the first V head of a K head writes the q, k state). Sub-group sg
+// then holds rows 8 sg ... 8 sg + 7 of the head's state, as gdn_step. S: the state, read and written in place.
+// Grid (Q27_GV); gs: AHI, ALO groups, 16 to 128.
+KERNEL(256) void gdn_one(global const half *P, global const half *CIN, global half *COUT, global const ushort *CW,
+                         global const ushort *ALOG, global const ushort *DT, global float *S, global const ushort *WN,
+                         global half *H, global half *AHI, global half *ALO, float eps, int gs) {
+  local float cq[128], ck[128], cv[128], yb[128], gb[2];
+  local half hl[128];
+  const int h = get_group_id(0), kh = h / Q27_GVK, lid = get_local_id(0), sg = get_sub_group_id();
+  const int lane = get_sub_group_local_id();
+  for (int idx = lid; idx < 384; idx += 256) {          // the convolution, as gdn_pre for T = 1
+    const int part = idx / 128, i = idx % 128;
+    const int c = part == 0 ? kh * 128 + i : part == 1 ? NQK + kh * 128 + i : 2 * NQK + h * 128 + i;
+    float s = 0.0f;
+    for (int j = 0; j < 4; j++) s += (j < 3 ? (float)CIN[j * NCONV + c] : (float)P[c]) * bf2f(CW[c * 4 + j]);
+    const float o = rbf(silu(s));
+    if (part == 0) cq[i] = o; else if (part == 1) ck[i] = o; else cv[i] = o;
+    if (part == 2 || h % Q27_GVK == 0) {                 // the state keeps the last 3 inputs
+      COUT[c] = CIN[NCONV + c];
+      COUT[NCONV + c] = CIN[2 * NCONV + c];
+      COUT[2 * NCONV + c] = P[c];
+    }
+  }
+  if (lid == 0) {
+    const float a = (float)P[Q27_GA + h], b = (float)P[Q27_GB + h];
+    const float sp = a + bf2f(DT[h]);
+    const float soft = sp > 20.0f ? sp : log1p(exp(sp));
+    gb[0] = exp(-exp(bf2f(ALOG[h])) * soft);
+    gb[1] = sigmoid_f(b);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (sg < 2) {                                         // l2 norm of q (sub-group 0) and k (1), stored as bf16
+    local float *src = sg == 0 ? cq : ck;
+    float v[8], ss = 0.0f;
+    for (int i = 0; i < 8; i++) {
+      v[i] = src[i * 16 + lane];
+      ss += v[i] * v[i];
+    }
+    const float inv = rsqrt(sub_group_reduce_add(ss) / 128.0f + 1e-6f);
+    const float scale = sg == 0 ? 1.0f / 128.0f : rsqrt(128.0f);
+    for (int i = 0; i < 8; i++) src[i * 16 + lane] = rbf(v[i] * inv * scale);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  {                                                     // the step, as gdn_step: rows 8 sg + r
+    const int vb = sg;
+    float s[8][8], q[8], k[8];
+    for (int r = 0; r < 8; r++)
+      for (int i = 0; i < 8; i++) s[r][i] = S[((long)h * 128 + vb * 8 + r) * 128 + i * 16 + lane];
+    for (int i = 0; i < 8; i++) {
+      q[i] = cq[i * 16 + lane];
+      k[i] = ck[i * 16 + lane];
+    }
+    const float g = gb[0], beta = gb[1];
+    for (int r = 0; r < 8; r++) {
+      float mem = 0.0f;
+      for (int i = 0; i < 8; i++) {
+        s[r][i] *= g;
+        mem += s[r][i] * k[i];
+      }
+      mem = sub_group_reduce_add(mem);
+      const float u = (cv[vb * 8 + r] - mem) * beta;
+      float y = 0.0f;
+      for (int i = 0; i < 8; i++) {
+        s[r][i] += k[i] * u;
+        y += s[r][i] * q[i];
+      }
+      y = sub_group_reduce_add(y);
+      if (lane == 0) yb[vb * 8 + r] = rbf(y);
+    }
+    for (int r = 0; r < 8; r++)
+      for (int i = 0; i < 8; i++) S[((long)h * 128 + vb * 8 + r) * 128 + i * 16 + lane] = s[r][i];
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (sg == 0) {                                        // gated_norm of the head
+    float v[8], ss = 0.0f;
+    for (int i = 0; i < 8; i++) {
+      v[i] = yb[i * 16 + lane];
+      ss += v[i] * v[i];
+    }
+    const float inv = rsqrt(sub_group_reduce_add(ss) / 128.0f + eps);
+    for (int i = 0; i < 8; i++) {
+      const int e = i * 16 + lane;
+      const float yn = v[i] * inv * bf2f(WN[e]);
+      const half o = convert_half_rte(rbf(silu((float)P[Q27_NCONV + h * 128 + e]) * yn));
+      H[h * 128 + e] = o;
+      hl[e] = o;
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const int per = gs / 16;                              // rowsums of the head's groups, as out_rows
+  for (int g = sg; g < 128 / gs; g += get_num_sub_groups()) {
+    float s = 0.0f;
+    for (int k = 0; k < per; k++) s += (float)hl[g * gs + lane * per + k];
+    s = sub_group_reduce_add(s) * (1.0f / gs);
+    if (lane == 0) {
+      const half hi = convert_half_rte(s * ASC);
+      AHI[h * (128 / gs) + g] = hi;
+      ALO[h * (128 / gs) + g] = convert_half_rte(s * ASC - (float)hi);
+    }
+  }
+}
+
 // Same computation, one row per group of 256 (all the token's channels): better for long prompt chunks.
 KERNEL(256) void gdn_pre_rows(global const half *P, global const half *CIN, global half *COUT, global const ushort *CW,
                               global const ushort *ALOG, global const ushort *DT, global ushort *Q, global ushort *K,
