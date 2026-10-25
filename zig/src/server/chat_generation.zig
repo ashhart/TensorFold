@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json");
 const chat = @import("chat.zig");
 const reply_text = @import("reply_text.zig");
+const recipient_reply = @import("recipient_reply.zig");
 const tool_stream = @import("tool_stream.zig");
 const tool_parse = @import("tool_parse.zig");
 const tool_lfm2 = @import("tool_lfm2.zig");
@@ -154,7 +155,7 @@ pub const Generation = struct {
         if (g.thinking) {
             const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
             const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
-            const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
+            const split = if (g.srv.recipients) try recipient_reply.split(g.a, text, false) else try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
             thought = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
             if (thought.len > 0) try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), thought);
             answer = split.answer;
@@ -307,7 +308,7 @@ pub const Generation = struct {
             const r = reply_text.pyStrip(n.reasoning);
             reasoning = if (r.len > 0) r else null;
         } else if (g.thinking) {
-            const split = try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at.?);
+            const split = if (g.srv.recipients) try recipient_reply.split(a, text, true) else try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at.?);
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;
             content = split.answer;
@@ -335,7 +336,7 @@ pub const Generation = struct {
                 const final_text = if (g.thinking) content else text;
                 if (std.mem.eql(u8, reason, "length")) {
                     try c.finishCut(final_text, &out);
-                } else if (close.len > 0 or c.streamed) {
+                } else if (close.len > 0 or c.streamed or g.srv.recipients) {
                     try c.finish(final_text, &out);
                 }
                 for (out.items) |d| try g.emit(sink, d);
