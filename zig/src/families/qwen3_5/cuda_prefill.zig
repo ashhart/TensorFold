@@ -149,7 +149,10 @@ fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill) !bool {
     // a mark the store asked for, where this pass cut anyway: the lane host copies the state here
     if (f.kept) |k| {
         if (end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(end)) != null)
-            self.prefix.?.keep(cache, ids, end) catch |err| std.log.warn("qwen3_5: prompt pages not kept: {s}", .{@errorName(err)});
+            self.prefix.?.keep(cache, ids, end) catch |err| {
+                if (err == error.QwenLaneTable) return err; // its table maps pages it may not hold
+                std.log.warn("qwen3_5: prompt pages not kept: {s}", .{@errorName(err)});
+            };
     } else if (end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
         if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
     }

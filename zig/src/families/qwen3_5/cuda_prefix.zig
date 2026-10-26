@@ -85,7 +85,11 @@ pub const Prefix = struct {
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(x.gpa);
         var plan = try x.store.begin(x.gpa, ids, history_len, shared, &owner, &adopt);
-        plan.marks = try x.onGrid(plan);
+        // the adopted pages are held for this call until openWith takes them
+        plan.marks = x.onGrid(plan) catch |err| {
+            for (adopt.items) |id| x.pages.pool.release(id);
+            return err;
+        };
         errdefer x.gpa.free(plan.marks);
         // released if the lane cannot open: the request waits and asks again
         owner.cache = try x.pages.openWith(ids.len, max_new, adopt.items);
