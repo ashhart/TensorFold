@@ -1,9 +1,19 @@
 """ITL, round gaps and prefill rates follow the definitions in docs/cache-benchmarks.md."""
+import contextlib
+import io
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import bench_concurrent
 import bench_metrics as metrics
+import bench_openai
+
+FIGURES = ("prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
+           "tokens_per_chunk")
 
 
 def run(times, tokens, **fields):
@@ -63,6 +73,84 @@ class Definitions(unittest.TestCase):
         self.assertAlmostEqual(got["aggregate_prefill_tps"], 2000 / 2.0)
         self.assertIsNone(metrics.pooled([a, {**b, "cache_state": "reused"}])["aggregate_prefill_tps"])
         self.assertEqual(metrics.pooled([a, {**b, "complete": False}])["streams_timed"], 1)
+
+
+def response(texts=("H", "ell", "o", " world"), completion=4, cached=0):
+    chunks = [{"choices": [{"text": t}]} for t in texts]
+    chunks.append({"choices": [], "usage": {"prompt_tokens": 8, "completion_tokens": completion,
+                                            "prompt_tokens_details": {"cached_tokens": cached}},
+                   "tensorfold": {"token_sha": "a" * 12, "token_sha256": "a" * 64}})
+    return io.BytesIO(b"".join(b"data: " + json.dumps(c).encode() + b"\n\n" for c in chunks) + b"data: [DONE]\n\n")
+
+
+def clock(*times):
+    """perf_counter replaced by these times in order, then the last one forever."""
+    it = iter(times)
+    last = [times[-1]]
+
+    def now():
+        last[0] = next(it, last[0])
+        return last[0]
+    return now
+
+
+class Clients(unittest.TestCase):
+    def test_bench_openai_times_each_chunk(self):
+        with patch.object(bench_openai.urllib.request, "urlopen", return_value=response(completion=7)), \
+                patch.object(bench_openai.time, "perf_counter", clock(0.0, 0.5, 0.6, 0.8, 0.9)):
+            got = bench_openai.stream("http://unused", "fixture", bench_openai.PROMPTS[0], 7, 0, 1)
+        self.assertEqual(len(got["pieces"]), 4)
+        self.assertAlmostEqual(got["ttft_s"], 0.5)
+        self.assertAlmostEqual(got["prefill_tps"], 8 / 0.5)
+        self.assertAlmostEqual(got["itl_mean_ms"], 400 / 6)  # 3 chunk gaps and 3 zeros
+        self.assertEqual(got["itl_p50_ms"], 0)
+        self.assertAlmostEqual(got["round_gap_p50_ms"], 100)
+        self.assertAlmostEqual(got["tokens_per_chunk"], 7 / 4)
+
+    def test_bench_concurrent_times_each_chunk(self):
+        with patch.object(bench_concurrent.urllib.request, "urlopen", return_value=response(cached=8)), \
+                patch.object(bench_concurrent.time, "perf_counter", clock(0.0, 0.5, 0.6, 0.8, 0.9, 1.0)):
+            got = bench_concurrent.stream("http://unused", "fixture", bench_concurrent.PROMPTS[0], 4, 0, 1)
+        self.assertIsNone(got["prefill_tps"])  # 8 cached tokens: not a cold request
+        self.assertAlmostEqual(got["itl_mean_ms"], 400 / 3)
+        self.assertAlmostEqual(got["itl_p95_ms"], 200)
+        self.assertEqual(got["tokens_per_chunk"], 1)
+
+    def test_bench_openai_rows_add_medians_and_keep_their_fields(self):
+        argv = ["bench_openai.py", "http://unused", "fixture", "--reps", "2", "--temperatures", "0"]
+        with patch.object(sys, "argv", argv), \
+                patch.object(bench_openai.urllib.request, "urlopen", side_effect=lambda *a, **k: response()), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            bench_openai.main()
+        rows = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(len(rows), len(bench_openai.PROMPTS))
+        for row in rows:
+            for key in ("label", "prompt", "temperature", "decode_tps_median", "decode_tps_all", "ttft_s_median"):
+                self.assertIn(key, row)
+            self.assertEqual({k + "_median" for k in FIGURES} - set(row), set())
+            self.assertEqual(row["tokens_per_chunk_median"], 1)
+
+    def test_bench_concurrent_cells_add_request_and_pooled_figures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.json"
+            argv = ["bench_concurrent.py", "http://unused", "fixture", "--levels", "2", "--reps", "2",
+                    "--temperatures", "0", "--output", str(output)]
+            with patch.object(sys, "argv", argv), \
+                    patch.object(bench_concurrent.urllib.request, "urlopen", side_effect=lambda *a, **k: response()), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                bench_concurrent.main()
+            report = json.loads(output.read_text())
+        printed = [json.loads(line) for line in out.getvalue().splitlines()]
+        for cell, line in zip(report["cells"], printed):
+            for key in ("aggregate_tps", "per_stream_tps", "ttft_s_max", "timing_valid", "failed", "unmeasured"):
+                self.assertIn(key, line)
+            self.assertEqual(set(cell["request"]), {"ttft_s", "decode_tps", *FIGURES})
+            self.assertEqual(cell["request"]["tokens_per_chunk"], 1)
+            self.assertEqual(cell["pooled"]["tokens_per_chunk"], 1)
+            self.assertIsNotNone(cell["pooled"]["aggregate_prefill_tps"])
+            for rep in cell["reps"]:
+                self.assertEqual(len(rep["requests"]), 2)
+                self.assertEqual(rep["pooled"]["streams_timed"], 2)
 
 
 if __name__ == "__main__":

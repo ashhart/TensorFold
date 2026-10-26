@@ -14,6 +14,8 @@ prompt cache off (mlx_lm: ``--prompt-cache-size 0``): a cached reply can arrive 
 the reply's usage. A request that fails to connect or errors counts in ``failed``; one whose text came in fewer than
 ``MIN_PIECES`` pieces counts in ``unmeasured``; neither enters the rates. ``--stagger-ms`` spaces the starts (a
 server with a small listen backlog resets simultaneous connections; those resets are reported, not hidden).
+Each request also carries bench_metrics' figures (prefill tok/s, ITL, round gaps; docs/cache-benchmarks.md defines
+them); each rep pools them over its streams, and each cell gives medians ("request" and "pooled").
 Standard library only.
 
   python3 tools/bench_concurrent.py http://127.0.0.1:8080 MODEL --levels 1,2,4,8 --alone --output out.json
@@ -29,6 +31,7 @@ import urllib.request
 
 from bench_evidence import Evidence, token_equal
 from bench_auth import authorize, read_api_key, redact
+import bench_metrics
 import bench_timing
 
 if sys.version_info < (3, 11):
@@ -125,7 +128,7 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
             out["unmeasured"] = True
     else:
         out["unmeasured"] = True
-    return {**out, **bench_timing.request(out)}
+    return {**out, **bench_timing.request(out), **bench_metrics.request(out)}
 
 
 def together(base: str, model: str, specs: list[tuple[dict, int | None]], tokens: int, temperature: float,
@@ -176,6 +179,18 @@ def aggregates(runs: list[dict]) -> dict:
             share += r["tokens"] * sum(c for t, c in r["pieces"] if lo <= t <= hi) / chars
         out["steady_tps"] = share / (hi - lo)
     return out
+
+
+METRICS = ("prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
+           "tokens_per_chunk")
+POOLED = ("aggregate_prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
+          "tokens_per_chunk")
+
+
+def median(values) -> float | None:
+    """The median of the values that are not None, rounded to 3 places; None when there are none."""
+    got = [v for v in values if v is not None]
+    return round(statistics.median(got), 3) if got else None
 
 
 def main() -> None:
@@ -236,6 +251,9 @@ def main() -> None:
                     rep["per_stream_tps"] = [round(r["decode_tps"], 1) for r in runs if r["decode_tps"] is not None]
                     rep["ttft_s"] = [round(r["ttft_s"], 2) if r["ttft_s"] is not None else None for r in runs]
                     rep["errors"] = [r["error"] for r in runs if r.get("error")]
+                    rep["requests"] = [{k: r.get(k) for k in ("prompt_tokens", "ttft_s", "decode_tps", *METRICS)}
+                                       for r in runs]
+                    rep["pooled"] = bench_metrics.pooled(runs)
                     rep["evidence"] = [{k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "tokens",
                                        "cache_state", "complete", "token_sha", "token_sha256", "output_sha256")}
                                        for r in runs]
@@ -258,6 +276,10 @@ def main() -> None:
                         "aggregate_tps": round(statistics.median(r["aggregate_tps"] for r in reps), 1),
                         "per_stream_tps": round(statistics.median([v for r in reps for v in r["per_stream_tps"]] or [0.0]), 1),
                         "ttft_s_max": max((t for r in reps for t in r["ttft_s"] if t is not None), default=None)}
+                # request: medians over every request of every rep; pooled: medians of the reps' pooled figures
+                asked = [q for r in reps for q in r["requests"]]
+                cell["request"] = {k: median(q.get(k) for q in asked) for k in ("ttft_s", "decode_tps", *METRICS)}
+                cell["pooled"] = {k: median(r["pooled"].get(k) for r in reps) for k in POOLED}
                 valid = all(r["timing_valid"] for r in reps)
                 cell["timing_valid"] = valid
                 for key in ("end_to_end_tps", "makespan_s"):
