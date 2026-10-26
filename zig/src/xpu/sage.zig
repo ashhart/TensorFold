@@ -1332,7 +1332,7 @@ pub const Runner = struct {
                     const cin = l.conv[l.conv_cur].?;
                     const cout = l.conv[1 - l.conv_cur].?;
                     l.conv_cur = 1 - l.conv_cur;
-                    try d.launch(d.k.gdn_pre, .{ .x = 1, .y = z.nconv / 256 }, .{ pj, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, 1, nul, nul });
+                    try d.launch(d.k.gdn_pre, .{ .x = 1, .y = z.nconv / 256 }, .{ pj, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, @as(i32, 1), nul, nul });
                     if (r.verifying) {
                         const sb = l.stash.?;
                         try dev.copy(d, sb, a.q, s.gdn_k_heads * 128 * 2);
@@ -1342,7 +1342,7 @@ pub const Runner = struct {
                         try dev.copy(d, off(sb, at.b), a.beta, s.gdn_v_heads * 4);
                         try dev.copy(d, off(sb, at.p), pj, pin * 2);
                     }
-                    try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, if (r.verifying) l.rec_save.? else l.rec.?, a.y, 1, nul, nul, nul, nul });
+                    try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, if (r.verifying) l.rec_save.? else l.rec.?, a.y, @as(i32, 1), nul, nul, nul, nul });
                     try d.launch(d.k.gated_norm, .{ .x = 1 }, .{ a.y, pj, l.gnorm.?, hj, hij, loj, EPS, gs, zero, nul, nul, zero });
                 }
             }
@@ -1395,8 +1395,8 @@ pub const Runner = struct {
                     const cin = l.conv[l.conv_cur].?;
                     const cout = l.conv[1 - l.conv_cur].?;
                     l.conv_cur = 1 - l.conv_cur;
-                    try d.launch(d.k.gdn_pre, .{ .x = 1, .y = z.nconv / 256 }, .{ pj, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, 1, nul, nul });
-                    try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, 1, nul, nul, nul, nul });
+                    try d.launch(d.k.gdn_pre, .{ .x = 1, .y = z.nconv / 256 }, .{ pj, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, @as(i32, 1), nul, nul });
+                    try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, @as(i32, 1), nul, nul, nul, nul });
                     try d.launch(d.k.gated_norm, .{ .x = 1 }, .{ a.y, pj, l.gnorm.?, hj, hij, loj, EPS, gs, zero, nul, nul, zero });
                 }
             }
