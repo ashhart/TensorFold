@@ -348,3 +348,28 @@ test "Engram qk decodes stored F32 BF16 F16 before an independently widened prod
         try testing.expect(pending == null);
     }
 }
+
+test "an F16 router bias and confidence head reach the forward as exactly widened fp32" {
+    const a = testing.allocator;
+    const values = [_]f16{ 0.333251953125, -2.5, 65504, 0x1p-24, -0.0 };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try @import("pack.zig").image(a, &.{.{ .name = "b", .dtype = "F16", .shape = &.{values.len} }});
+    defer a.free(data);
+    for (values, 0..) |v, i| std.mem.writeInt(u16, data[data.len - 2 * values.len ..][2 * i ..][0..2], @bitCast(v), .little);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors", .data = data });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    defer a.free(dir);
+    var p = try Pack.open(a, testing.io, dir);
+    defer p.deinit();
+    var b: Builder = .{ .gpa = a, .io = testing.io, .pack = &p };
+    defer b.deinit();
+    var none: ?[]f32 = null;
+    const tensor: plan.NativePlan = .{ .name = "b", .info = p.get("b").?, .slice = .whole, .bytes = 2 * values.len };
+    try b.native("L0.moe.bias", rules.get("ffn.gate.bias").?, tensor, 0, 1, &none);
+    try b.native("dspark.conf", .{ .name = "dspark.conf", .out = .f32 }, tensor, 0, 1, &none);
+    for (b.out.items) |n| {
+        try testing.expectEqual(Kind.f32, n.kind);
+        for (values, 0..) |v, i| try testing.expectEqual(@as(u32, @bitCast(@as(f32, v))), std.mem.readInt(u32, n.bytes[4 * i ..][0..4], .little));
+    }
+}
