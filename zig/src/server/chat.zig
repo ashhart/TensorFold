@@ -362,7 +362,7 @@ const Generation = struct {
         if (g.visible.pending()) return; // a character still split across tokens
         var answer = text;
         if (g.thinking or g.recipient != null) {
-            const split = if (g.recipient) |r| try r.split(g.a, text, .streaming) else try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id));
+            const split = if (g.recipient) |*r| try r.split(g.a, text, .streaming) else try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id));
             const piece = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
             if (piece.len > 0) {
                 try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), piece);
@@ -487,7 +487,7 @@ const Generation = struct {
         var reasoning: ?[]const u8 = null;
         const read = g.thinking or g.recipient != null; // the reply's split text is its content
         if (read) {
-            const split = if (g.recipient) |r| try r.split(a, text, if (std.mem.eql(u8, reason, "length")) .cut else if (g.stops.matched(raw) != null) .stopped else .ended) else try reply_text.splitThinkingTokens(a, reply_text.decodeText, g.srv.text, text, true, g.srv.markers, content_tokens, g.srv.close_id);
+            const split = if (g.recipient) |*r| try r.split(a, text, if (std.mem.eql(u8, reason, "length")) .cut else if (g.stops.matched(raw) != null) .stopped else .ended) else try reply_text.splitThinkingTokens(a, reply_text.decodeText, g.srv.text, text, true, g.srv.markers, content_tokens, g.srv.close_id);
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;
             content = split.answer;

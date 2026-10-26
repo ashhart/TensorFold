@@ -243,7 +243,7 @@ test "recipient replies: a split while streaming only grows, holds calls back, a
     defer arena.deinit();
     const a = arena.allocator();
     const reply = call_reply[0 .. call_reply.len - "<|eot|>".len];
-    const reading: recipient_reply.Reading = .{ .lead = "assistant", .tools = (try json.parse(a, weather[",\"tools\":".len..])).ok.array };
+    var reading: recipient_reply.Reading = .{ .lead = "assistant", .tools = (try json.parse(a, weather[",\"tools\":".len..])).ok.array };
     const done = try reading.split(a, reply, .ended);
     try std.testing.expectEqualStrings("Two forecasts are needed.", done.reasoning);
     const xml = "<tool_call>\n<function=get_weather>\n<parameter=city>\n{s}\n</parameter>\n<parameter=days>\n{s}\n</parameter>\n" ++
@@ -382,4 +382,48 @@ test "recipient replies: thinking off keeps self messages out of the reply and t
     var high = try send(.{}, chat_reply, 4096, ask ++ ",\"reasoning_effort\":\"high\"}");
     defer high.deinit();
     try std.testing.expectEqualStrings("xhigh", high.effort[0..high.effort_len]);
+}
+
+test "recipient replies: a streamed read goes on from the last call and equals a fresh read at every length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, weather[",\"tools\":".len..])).ok.array;
+    for ([_][]const u8{ chat_reply, call_reply, " to=self<|message|>x<|eo" }) |reply| for ([_][]const u8{ "assistant", "assistant to=self<|message|>" }) |lead| {
+        var going: recipient_reply.Reading = .{ .lead = lead, .tools = tools };
+        for (1..reply.len + 1) |n| {
+            var fresh: recipient_reply.Reading = .{ .lead = lead, .tools = tools };
+            const want = try fresh.split(a, reply[0..n], .streaming);
+            const got = try going.split(a, reply[0..n], .streaming);
+            try std.testing.expectEqualStrings(want.reasoning, got.reasoning);
+            try std.testing.expectEqualStrings(want.answer, got.answer);
+        }
+        for ([_]recipient_reply.End{ .ended, .cut }) |end| {
+            var fresh: recipient_reply.Reading = .{ .lead = lead, .tools = tools };
+            var done = going;
+            const want = try fresh.split(a, reply, end);
+            const got = try done.split(a, reply, end);
+            try std.testing.expectEqualStrings(want.reasoning, got.reasoning);
+            try std.testing.expectEqualStrings(want.answer, got.answer);
+        }
+    };
+}
+
+test "recipient replies: a reply with no markup streams as it comes; one that may still be a header waits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var r: recipient_reply.Reading = .{ .lead = "assistant" };
+    const reply = " Blue sky, mostly. ";
+    var last: []const u8 = "";
+    for (1..reply.len + 1) |n| {
+        const s = (try r.split(a, reply[0..n], .streaming)).answer;
+        try std.testing.expect(std.mem.startsWith(u8, s, last) and std.mem.startsWith(u8, "Blue sky, mostly.", s));
+        last = s;
+    }
+    try std.testing.expectEqualStrings("Blue sky, mostly", (try r.split(a, reply[0 .. reply.len - 2], .streaming)).answer);
+    try std.testing.expectEqualStrings("Blue sky, mostly.", (try r.split(a, reply, .ended)).answer);
+    var h: recipient_reply.Reading = .{ .lead = "assistant" };
+    for ([_][]const u8{ " t", " to", " to=se", " <" }) |p| try std.testing.expectEqualStrings("", (try h.split(a, p, .streaming)).answer);
+    try std.testing.expectEqualStrings("hi", (try h.split(a, " to=user<|message|>hi", .streaming)).answer);
 }
