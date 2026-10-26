@@ -596,4 +596,5 @@ test "the drafter wrapper sees the committed callback before its first hold" {
 test {
     _ = @import("drafted_role_test.zig");
     _ = @import("drafted_step_test.zig");
+    _ = @import("drafted_held_test.zig");
 }

@@ -29,6 +29,8 @@ pub const Drafted = struct {
     absorbs: std.ArrayList(dr.Absorb) = .empty,
     holds: std.ArrayList(dr.Hold) = .empty,
     firsts: std.ArrayList(u32) = .empty,
+    /// The target reads held drafts from the drafter itself (Window.held), so windows without fillers pass as they are.
+    held_on_target: bool = false,
 
     /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
@@ -217,11 +219,13 @@ pub const Drafted = struct {
             lane.tree_first = null;
         };
         var total: usize = 0;
+        var through = x.held_on_target;
         for (windows) |w| {
             if (w.held > 0 and w.tokens.len != 0) return error.MixedDrafts;
             total += w.held;
+            if (through and w.held > 0 and (x.lanes.getPtr(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
         }
-        if (total == 0) return x.target.verify(x.windows.items, out);
+        if (total == 0 or through) return x.target.verify(x.windows.items, out);
         try x.tokens.resize(x.gpa, total);
         x.streams.clearRetainingCapacity();
         x.outs.clearRetainingCapacity();
