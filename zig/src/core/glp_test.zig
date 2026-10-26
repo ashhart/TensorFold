@@ -505,3 +505,24 @@ test "the container keeps every value type it is given" {
     try std.testing.expectEqual(@as(i64, -(1 << 40)), parsed.file.find("a.i64").?.i64v);
     try std.testing.expectEqual(@as(f64, 0.25), parsed.file.find("a.f64").?.f64v);
 }
+
+test "a conversion of the vector's model takes the vector" {
+    const bytes = try writeFixture(.{});
+    defer std.testing.allocator.free(bytes);
+    var read = try readOk(bytes);
+    defer read.deinit();
+    const v = read.vector;
+    var why: glp.Why = .{};
+    try glp.checkModel(v, 8, "TensorFold/Qwen3.8-27B-MLX-4bit", &why);
+    try glp.checkModel(v, 8, "Qwen/Qwen3.8-27B", &why);
+}
+
+test "a different model of the same size is refused" {
+    const bytes = try writeFixture(.{});
+    defer std.testing.allocator.free(bytes);
+    var read = try readOk(bytes);
+    defer read.deinit();
+    const v = read.vector;
+    var why: glp.Why = .{};
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(v, 8, "Qwen/Qwen3.5-2B", &why));
+}

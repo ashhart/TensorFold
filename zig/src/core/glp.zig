@@ -195,9 +195,24 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
 /// Check the vector against the model it would steer: its width and the checkpoint it came from.
 pub fn checkModel(v: Vector, hidden: usize, base_model: []const u8, why: *Why) Error!void {
     if (v.width != hidden) return refuse(why, "the vector's directions are {d} wide; the model is {d}", .{ v.width, hidden });
-    if (base_model.len > 0 and v.base_model.len > 0 and !std.mem.eql(u8, base_model, v.base_model)) {
+    if (base_model.len > 0 and v.base_model.len > 0 and !sameModel(v.base_model, base_model)) {
         return refuse(why, "the vector is for {s}; the model is {s}", .{ v.base_model, base_model });
     }
+}
+
+/// The served checkpoint is the vector's model when it is that model or a conversion of it.
+///
+/// A checkpoint is often a quantization of another repo's model under a new name, so the
+/// names are compared without their owners, and the served one may carry a suffix.
+fn sameModel(base: []const u8, served: []const u8) bool {
+    if (std.mem.eql(u8, base, served)) return true;
+    return std.mem.startsWith(u8, nameOf(served), nameOf(base));
+}
+
+/// A repo id's model name: what follows its owner.
+fn nameOf(repo: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, repo, '/')) |i| return repo[i + 1 ..];
+    return repo;
 }
 
 /// The container's metadata and tensor headers; the arena keeps every allocation.
