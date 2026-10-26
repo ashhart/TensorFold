@@ -7,6 +7,9 @@ const G = F.cuda_gpu.Gpu(C);
 const B = G.Storage;
 const D = F.cuda_draw.Drawer(C, @import("lanes"), B);
 const Loader = struct {
+    pub const reference = F.device_fixture.cuda_reference;
+    pub const node_reference = @import("qwen4").family.node_gate.cuda_reference;
+    pub const node_profile = "CUDA scalar nodes and BF16 unnormalized exponentials";
     pub fn load(_: @This(), a: std.mem.Allocator, b: *B, c: *const F.Config, p: *F.Problem) !G {
         return G.load(a, b, c, p, .{ .projection = C.kernels.qwen4_projection, .hc_scalar = C.kernels.qwen4_hc, .hc = C.kernels.flashnext_hc, .gdn = C.kernels.qwen4_gdn, .attention = C.kernels.flashnext_attn, .batch = C.kernels.flashnext_batch, .ple = C.kernels.qwen4_ple }, .hf);
     }
@@ -26,6 +29,8 @@ pub fn execute(gpu: check.Gpu) !void {
     var d = try D.load(&b, 32, 32, 2, C.kernels.sample, C.kernels.torch_argmax);
     var closed = false;
     defer if (!closed) d.close() catch {};
+    const nodes = try F.node_gate.run(G, read, gpu.gpa, gpu.io, &b, Loader{}, true);
+    if (nodes.different != 0) return error.Qwen4NodeMismatch;
     try F.device_gate.Gate(G, D, @import("lanes"), read).runAll(gpu.gpa, gpu.io, &b, Loader{}, &d);
     try d.close();
     closed = true;

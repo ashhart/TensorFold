@@ -4,6 +4,7 @@ const tap = @import("node_trace.zig");
 const quant = @import("core").quant.convert;
 pub const Node = struct { name: []const u8, position: usize, kind: tap.Kind, values: []const f64 };
 pub const Oracle = struct { nodes: []const Node };
+pub const cuda_reference = @embedFile("fixtures/native-cuda-nodes.json");
 pub const reference = @embedFile("fixtures/native-metal-nodes.json");
 pub const Summary = struct { different: usize = 0, checked: usize = 0, first: [32]?usize = @splat(null) };
 pub fn Capture(comptime B: type, comptime read: anytype) type {

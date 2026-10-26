@@ -109,7 +109,8 @@ class Oracle:
             inv = 1 / math.sqrt(sum(v * v for v in x[start:start + group]) / group + self.eps)
             if self.native_scalars:
                 mean = f32(f32(sum(v * v for v in x[start:start + group])) / group)
-                inv = f32(1 / math.sqrt(f32(mean + f32(self.eps))))
+                root = math.sqrt(f32(mean + f32(self.eps)))
+                inv = f32(1 / (f32(root) if self.probability == "cuda" else root))
                 out.extend(bf(f32(f32(x[i] * inv) * f32(1 + gamma[i] if gemma else gamma[i])))
                            for i in range(start, start + group))
             else:
@@ -240,6 +241,8 @@ class Oracle:
               for h in range(ih)]
         self.record(name + '.query', sum(q, []))
         self.record(name + '.key', sum(k, []))
+        if self.probability == 'cuda':
+            self.record(name + '.value', vraw)
         self.record(name + '.index_query', sum(iq, []))
         blocks = (pos + 1) // ratio
         scores = []
@@ -262,7 +265,10 @@ class Oracle:
             maximum = max(logits)
             weights = [math.exp(v - maximum) for v in logits]
             total = sum(weights)
-            probability = [bf(v / total) if self.probability == 'bf16' else v / total for v in weights]
+            if self.probability == "cuda":
+                probability = [bf(v) / total for v in weights]
+            else:
+                probability = [bf(v / total) if self.probability == "bf16" else v / total for v in weights]
             for d in range(hd):
                 attended = bf(sum(p * state['values'][i][kh * hd + d] for i, p in zip(ids, probability)))
                 attended_rows.append(attended)
@@ -359,8 +365,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--tokens', default='3,5,8,2,13,21,7,9,11,4,6,15')
-    parser.add_argument('--probability', choices=('bf16', 'f32'), default='bf16',
-                        help='BF16 tensor-core probabilities or FP32 split-softmax probabilities; sums remain binary64')
+    parser.add_argument('--probability', choices=('bf16', 'f32', 'cuda'), default='bf16',
+                        help='Legacy normalized BF16, Metal FP32, or CUDA BF16 exponential weights before division; binary64 sums')
     parser.add_argument('--native-scalars', action='store_true', help='Declare FP32 RMS and rotary scalar nodes')
     parser.add_argument('--nodes', action='store_true', help='Include every observable storage node')
     args = parser.parse_args()
@@ -373,6 +379,8 @@ def main():
                       'trace': oracle.trace}
     if args.native_scalars:
         result['oracle'] += '; FP32 RMS and rotary scalar nodes'
+    if args.probability == 'cuda':
+        result['oracle'] += '; BF16 unnormalized exponentials before PV, separate denominator'
     if args.probability == 'f32':
         result['oracle'] += '; unrounded split-softmax probabilities'
     if args.nodes:

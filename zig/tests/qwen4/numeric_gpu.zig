@@ -104,6 +104,9 @@ pub const G = struct {
     }
 };
 pub const Loader = struct {
+    pub const reference = @import("../../src/families/qwen4/device_fixture.zig").cuda_reference;
+    pub const node_reference = @import("../../src/families/qwen4/node_capture.zig").cuda_reference;
+    pub const node_profile = "CUDA scalar nodes and BF16 unnormalized exponentials";
     pub fn load(_: Loader, _: std.mem.Allocator, b: *B, c: *const cfg.Config, _: *cfg.Problem) !G {
         return .{ .b = b, .c = c };
     }

@@ -114,4 +114,23 @@ python3 tools/zig/qwen4_reference.py --config zig/src/families/qwen4/fixtures/na
   --probability f32 --native-scalars
 ```
 
-Add `--tokens 3,5 --nodes` for the two-row node ledger. The default generator profile and CUDA fixtures are unchanged.
+Add `--tokens 3,5 --nodes` for the two-row node ledger. `--probability bf16` retains the legacy normalized-weight diagnostic.
+
+CUDA's `tf-cuda-test qwen4` also runs the queued two-row node capture before the complete exactness gate. It prints
+its rotary frequency view, position base, GDN snapshots, KV keys and values, QSA partial numerators and denominators,
+and all shared graph storage nodes. The CUDA oracle declares BF16 exponential weights before the PV product and a
+separate denominator, matching the existing CUDA tensor-core kernel. Rounding normalized probabilities is a
+labelled legacy diagnostic profile. Metal retains its existing FP32 probability profile and reference files.
+
+Regenerate the explicit CUDA reference with:
+
+```sh
+python3 tools/zig/qwen4_reference.py --config zig/src/families/qwen4/fixtures/native-dense.json \
+  --probability cuda --native-scalars
+```
+
+Add `--tokens 3,5 --nodes` for its node ledger. `test-qwen4-cuda-exact-host` executes the real CUDA probability-store
+statements and merge body under a CPU instrument; its matrix products are scalar substitutes for MMA instructions.
+`test-qwen4-cuda-nodes-host` checks 129 BF16 nodes exactly, records 13 FP32 diagnostics, and catches the old-profile error.
+QK/PV products and denominator reductions are scalar CPU instruments, with a host exponential surrogate.
+These host instruments supplement the real CUDA device gate; they do not qualify GPU instruction rounding.

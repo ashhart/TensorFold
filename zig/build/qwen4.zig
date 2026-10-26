@@ -28,6 +28,7 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     @import("qwen4_qsa_select_host.zig").wire(b, m);
     @import("qwen4_qsa_attn_host.zig").wire(b, m);
     @import("qwen4_node_attention_host.zig").wire(b, m);
+    @import("qwen4_cuda_attention_host.zig").wire(b, m);
     const step = b.step("test-qwen4-host", "Qwen4 explicit config admission and synthetic graph contracts");
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const mixer_step = b.step("test-qwen4-native-mixers-host", "Actual native mixer bodies under CPU collective instruments");
@@ -40,6 +41,10 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     device_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 device gate:"} })).step);
     const reference_step = b.step("test-qwen4-reference-host", "Qwen4 reference precision, rotary inputs and queued capture fault controls");
     reference_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{ "Qwen4 rotary table:", "Qwen4 node capture:", "Qwen4 device gate: Metal profile preserves" } })).step);
+    const cuda_exact = b.step("test-qwen4-cuda-exact-host", "CUDA probability stores and merge retain exact native graph logits without a device");
+    cuda_exact.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 device gate: same capture"} })).step);
+    const cuda_nodes = b.step("test-qwen4-cuda-nodes-host", "CUDA first-node ledger and probability-boundary counterexample without a device");
+    cuda_nodes.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 CUDA nodes:"} })).step);
     parent.dependOn(step);
     const cu = @import("cuda_runtime.zig").runtime(b, b.graph.host, .debug, &.{});
     const gdn_host = b.createModule(.{ .root_source_file = b.path("zig/qwen4_gdn_host.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "cuda", .module = cu }, .{ .name = "qwen4", .module = family } } });

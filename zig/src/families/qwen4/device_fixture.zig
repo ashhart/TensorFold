@@ -4,7 +4,9 @@ const cfg = @import("config.zig");
 pub const Oracle = struct { schema: u32, oracle: []const u8, tokens: []const u32, logits: [][]f64, picks: []const u32, trace: std.json.Value };
 pub const config = @embedFile("fixtures/native-dense.json");
 pub const metal_reference = @embedFile("fixtures/native-metal-binary64.json");
-pub const reference = @embedFile("fixtures/native-binary64.json");
+pub const cuda_reference = @embedFile("fixtures/native-cuda-binary64.json");
+pub const legacy_reference = @embedFile("fixtures/native-binary64.json");
+pub const reference = cuda_reference;
 pub const Fixture = struct {
     path: []const u8,
     a: std.mem.Allocator,

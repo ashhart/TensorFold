@@ -30,6 +30,7 @@ pub fn Gpu(comptime C: type) type {
         attention: ?Attention = null,
         lexical: ?Ple = null,
         rope: ?C.DeviceBuffer = null,
+        trace: ?@import("node_trace.zig").Sink(B) = null,
         pub fn load(a: std.mem.Allocator, b: *B, c: *const cfg.Config, p: *cfg.Problem, images: Images, rounding: core.hc_pointwise.Rounding) !Self {
             try b.enter();
             if (b.stream.d != b.driver) return error.Qwen4DeviceContext;
@@ -115,6 +116,12 @@ pub fn Gpu(comptime C: type) type {
             if (offset > b.len or len > b.len - offset) return error.Qwen4StateRange;
             return .{ .address = try std.math.add(usize, @intCast(b.ptr), offset), .len = len };
         }
+        fn note(g: *Self, layer: usize, scope: []const u8, node: []const u8, v: anytype, rows: usize, width: usize, element: @import("node_trace.zig").Kind, first: usize) !void {
+            const sink = g.trace orelse return;
+            var key: [192]u8 = undefined;
+            const buffer = if (@TypeOf(v.buffer) == C.DeviceBuffer) v.buffer else v.buffer.*;
+            try sink.view(try @import("node_trace.zig").label(&key, layer, scope, node), .{ .buffer = buffer, .offset = v.offset }, rows, width, element, first);
+        }
         pub fn delta(g: *Self, w: Model.Linear, state: anytype, layer: usize, x: Tensor, y: Tensor, sums: Tensor) !void {
             const l = state.layout.layers[layer];
             const cs = try state.current(l.conv);
@@ -127,6 +134,12 @@ pub fn Gpu(comptime C: type) type {
                 try g.range(sums.buffer, sums.offset, try sums.bytes()), try g.range(out.buffer, out.offset, out.len),
             });
             try @import("cuda_gdn.zig").saveConv(g.backend, p, try state.rowSpan(l.conv), .{ .buffer = x.buffer, .offset = x.offset, .len = try x.bytes() }, cs);
+            if (g.trace != null) for (0..x.rows) |r| {
+                const conv = try state.row(r, l.conv);
+                const recurrent = try state.row(r, l.recurrent);
+                try g.note(layer, "linear_attn", "conv_tail", conv, 1, conv.len / 2, .bf16, r);
+                try g.note(layer, "linear_attn", "recurrent", recurrent, 1, recurrent.len / 4, .f32, r);
+            };
         }
         fn stateView(v: anytype) Tensor {
             return .{ .buffer = v.buffer, .offset = v.offset, .rows = 1, .width = (v.len + 3) / 4, .kind = .f32 };
@@ -162,6 +175,33 @@ pub fn Gpu(comptime C: type) type {
             const start: i32 = @intCast(state.base_pos);
             try g.backend.write(buffers[1], views[1].offset, std.mem.asBytes(&start));
             try g.attention.?.encode(g.backend.stream, geometry, p, views);
+            if (g.trace != null) {
+                try g.note(layer, "self_attn", "rotary_frequencies", views[6], 1, @max(@as(usize, 1), g.c.rotary / 2), .f32, 0);
+                try g.note(layer, "self_attn", "position_base", views[1], 1, 1, .i32, 0);
+                try g.note(layer, "self_attn", "query", views[7], x.rows, g.c.heads * 256, .bf16, 0);
+                var key = views[8];
+                key.offset += state.base_pos * g.c.kv_heads * 256 * 2;
+                try g.note(layer, "self_attn", "key", key, x.rows, g.c.kv_heads * 256, .bf16, 0);
+                var value = views[9];
+                value.offset += state.base_pos * g.c.kv_heads * 256 * 2;
+                try g.note(layer, "self_attn", "value", value, x.rows, g.c.kv_heads * 256, .bf16, 0);
+                try g.note(layer, "self_attn", "index_query", views[10], x.rows, g.c.index_heads * g.c.index_dim, .bf16, 0);
+                const plan = try @import("attention_plan.zig").Plan.init(geometry, p);
+                for (0..plan.pool_count) |i| {
+                    var pooled = views[12];
+                    pooled.offset += (plan.first_pool + i) * g.c.index_dim * 2;
+                    try g.note(layer, "self_attn", "pooled", pooled, 1, g.c.index_dim, .bf16, (plan.first_pool + i + 1) * g.c.index_ratio - 1);
+                }
+                for (0..x.rows) |r| if (plan.complete[r] > 0) {
+                    var scores = views[13];
+                    scores.offset += r * z.score_stride * 4;
+                    try g.note(layer, "self_attn", "scores", scores, 1, @intCast(plan.complete[r]), .f32, r);
+                };
+                try g.note(layer, "self_attn", "parts_output", views[17], x.rows, g.c.heads * z.chunks * 256, .f32, 0);
+                try g.note(layer, "self_attn", "parts_max", views[18], x.rows, g.c.heads * z.chunks, .f32, 0);
+                try g.note(layer, "self_attn", "parts_denominator", views[19], x.rows, g.c.heads * z.chunks, .f32, 0);
+                try g.note(layer, "self_attn", "attention", views[20], x.rows, y.width, .bf16, 0);
+            }
             try g.pointwise.?.encode(g.backend.stream, .{ .rows = @intCast(x.rows), .hidden = @intCast(y.width), .streams = 1, .op = .output_gate, .round_mid = g.rounding, .gate_stride = @intCast(x.width), .gate_dim = 256 }, .{ .{ .buffer = views[20].buffer, .offset = views[20].offset, .len = views[20].len }, try view(Pointwise.View, &x), raw(Pointwise.View, &w.qn.buffer), try view(Pointwise.View, &y) });
         }
         pub fn ple(g: *Self, scratch: *Scratch, w: Model.Ple, state: anytype, layer: usize, projections: Tensor, h: Tensor, gated: Tensor, normed: Tensor, cin: Tensor) !void {

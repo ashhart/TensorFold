@@ -53,6 +53,7 @@ test {
     _ = metal_control;
     _ = @import("rotary_table.zig");
     _ = @import("node_capture_test.zig");
+    _ = @import("cuda_node_test.zig");
     _ = @import("config_test.zig");
     _ = @import("weights_test.zig");
     _ = @import("graph_test.zig");

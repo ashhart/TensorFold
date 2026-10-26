@@ -3,6 +3,7 @@ const std = @import("std");
 const n = @import("numeric_gpu.zig");
 const m = @import("math.zig");
 const trace = @import("numeric_trace.zig");
+extern fn tf_q4_cuda_node_attention([*]const u16, [*]const u16, [*]const u16, [*]const i32, c_int, [*]u16, c_int) void;
 extern fn tf_q4_node_attention([*]const u16, [*]const u16, [*]const u16, [*]const i32, c_int, [*]u16) void;
 pub fn delta(g: *n.G, w: n.Model.Linear, state: anytype, layer: usize, x: n.Tensor, y: n.Tensor) !void {
     const c = g.c;
@@ -97,6 +98,7 @@ pub fn indexed(g: *n.G, w: n.Model.Indexed, state: anytype, layer: usize, x: n.T
         for (0..c.kv_heads) |head| @memcpy(keys[pos * kw + head * hd ..][0..hd], try normalized(g, kr[head * hd ..][0..hd], w.kn, pos));
         try trace.note(g, layer, "self_attn", "key", keys[pos * kw ..][0..kw], .bf16, r);
         @memcpy(values[pos * kw ..][0..kw], vr);
+        if (g.probability_bf16) try trace.note(g, layer, "self_attn", "value", values[pos * kw ..][0..kw], .bf16, r);
         @memcpy(raw[pos * di ..][0..di], ir[c.index_heads * di ..]);
         const blocks = (pos + 1) / c.index_ratio;
         if ((pos + 1) % c.index_ratio == 0) {
@@ -149,27 +151,11 @@ pub fn indexed(g: *n.G, w: n.Model.Indexed, state: anytype, layer: usize, x: n.T
                 for (0..hd) |d| n.row(y, r)[d] = m.bf(m.f(attended[d]) * m.round(m.sig(m.f(qr[hd + d]))));
                 continue;
             }
-            const kh = head / (c.heads / c.kv_heads);
-            const logits = try g.a.alloc(f32, ids.items.len);
-            var maximum: f32 = -std.math.inf(f32);
-            for (ids.items, logits) |id, *logit| {
-                var dot: f32 = 0;
-                for (q, keys[id * kw + kh * hd ..][0..hd]) |qv, k| dot += m.f(qv) * m.f(k);
-                logit.* = dot / @sqrt(@as(f32, @floatFromInt(hd)));
-                maximum = @max(maximum, logit.*);
-            }
-            var sum: f32 = 0;
-            for (logits) |*v| {
-                v.* = @exp(v.* - maximum);
-                sum += v.*;
-            }
-            for (logits) |*v| v.* = if (g.probability_bf16) m.round(v.* / sum) else v.* / sum;
-            for (0..hd) |d| {
-                var value: f32 = 0;
-                for (logits, ids.items) |prob, id| value += prob * m.f(values[id * kw + kh * hd + d]);
-                attended[head * hd + d] = m.bf(value);
-                n.row(y, r)[head * hd + d] = m.bf(m.round(value) * m.round(m.sig(m.f(qr[head * 2 * hd + hd + d]))));
-            }
+            if (c.heads != 1 or c.kv_heads != 1 or hd != 256 or ids.items.len > 32) return error.NumericCudaGeometry;
+            const selected = try g.a.alloc(i32, ids.items.len);
+            for (selected, ids.items) |*id, source| id.* = @intCast(source);
+            tf_q4_cuda_node_attention(q.ptr, keys.ptr, values.ptr, selected.ptr, @intCast(selected.len), attended.ptr, 0);
+            for (0..hd) |d| n.row(y, r)[d] = m.bf(m.f(attended[d]) * m.round(m.sig(m.f(qr[hd + d]))));
         }
         try trace.note(g, layer, "self_attn", "query", query_rows, .bf16, r);
         try trace.note(g, layer, "self_attn", "attention", attended, .bf16, r);

@@ -68,7 +68,7 @@ test "Qwen4 device gate: full Metal storage-node diagnostic" {
 
 test "Qwen4 device gate: Metal profile preserves the reported probability precision counterexample" {
     const a = std.testing.allocator;
-    const old = try std.json.parseFromSlice(f.Oracle, a, f.reference, .{});
+    const old = try std.json.parseFromSlice(f.Oracle, a, f.legacy_reference, .{});
     defer old.deinit();
     const metal = try std.json.parseFromSlice(f.Oracle, a, f.metal_reference, .{});
     defer metal.deinit();

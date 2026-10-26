@@ -37,7 +37,7 @@ pub const Fixture = struct {
         b.* = .{};
         const e = try E.open(a, std.testing.io, path, b, .{ .capacity = 32, .window = 16, .streams = 2, .budget = std.math.maxInt(u64) }, &p, n.Loader{});
         errdefer e.close() catch unreachable;
-        const doc = try std.json.parseFromSlice(Oracle, mem, @embedFile("fixtures/native-binary64.json"), .{});
+        const doc = try std.json.parseFromSlice(Oracle, mem, @import("device_fixture.zig").cuda_reference, .{});
         return .{ .arena = arena, .tmp = tmp, .b = b, .e = e, .doc = doc };
     }
     pub fn deinit(f: *Fixture) void {
