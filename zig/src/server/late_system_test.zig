@@ -437,6 +437,10 @@ const lookup_reply = "<tool_call>{\"name\":\"lookup\",\"arguments\":{}}</tool_ca
 const vault_reply = "<tool_call>{\"name\":\"vault_list\",\"arguments\":{}}</tool_call>";
 
 fn expectStreamMatchesWhole(reply: []const u8) !void {
+    try expectStreamMatchesWholeCalls(reply, null);
+}
+
+fn expectStreamMatchesWholeCalls(reply: []const u8, expected_call_count: ?usize) !void {
     var text: DropLate = .{};
     var backend: Capture = .{ .reply = reply };
     defer std.testing.allocator.free(backend.prompt);
@@ -455,6 +459,7 @@ fn expectStreamMatchesWhole(reply: []const u8) !void {
     try std.testing.expectEqual(@as(u16, 200), whole.status);
     const message = (try json.parse(a, whole.body)).ok.get("choices").?.array[0].get("message").?;
     const expected_calls = if (message.get("tool_calls")) |calls| calls.array else &.{};
+    if (expected_call_count) |count| try std.testing.expectEqual(count, expected_calls.len);
     const got = try exchange(srv, "/v1/chat/completions", prose_chat ++ ",\"stream\":true}");
     defer std.testing.allocator.free(got.body);
     try std.testing.expectEqual(@as(u16, 200), got.status);
@@ -504,6 +509,10 @@ test "stream retained envelope precedes later prose with the leading newline" {
 test "stream replays an offered call once before retained envelopes and later prose" {
     try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ vault_reply ++ "Tail.");
     try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ "<tool_call>{invalid}</tool_call>Tail.");
+}
+
+test "stream replay with leading whitespace retains malformed envelope and later prose" {
+    try expectStreamMatchesWholeCalls("\nChecking." ++ lookup_reply ++ "<tool_call>{invalid}</tool_call>Tail.", 1);
 }
 
 test "stream retains a malformed closed envelope with whitespace and later prose" {
