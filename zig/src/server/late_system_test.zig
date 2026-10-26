@@ -497,6 +497,19 @@ test "stream retained envelope preserves the leading newline" {
     try expectStreamMatchesWhole("\nChecking." ++ vault_reply);
 }
 
+test "stream retained envelope precedes later prose with the leading newline" {
+    try expectStreamMatchesWhole("\nChecking." ++ vault_reply ++ "Tail.");
+}
+
+test "stream replays an offered call once before retained envelopes and later prose" {
+    try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ vault_reply ++ "Tail.");
+    try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ "<tool_call>{invalid}</tool_call>Tail.");
+}
+
+test "stream retains a malformed closed envelope with whitespace and later prose" {
+    try expectStreamMatchesWhole(" \n\t<tool_call>{invalid}</tool_call>Tail.");
+}
+
 test "stream content and tool calls occur exactly once across all chunks" {
     try expectStreamMatchesWhole(lookup_reply);
     try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ vault_reply);
