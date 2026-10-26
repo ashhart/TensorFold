@@ -25,6 +25,7 @@ const gemma = @import("metal_gemma4.zig");
 const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const lfm2_argmax = @import("metal_lfm2_argmax.zig");
+const lfm2_streams = @import("metal_lfm2_streams.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
 
@@ -159,6 +160,15 @@ pub fn main(init: std.process.Init) !u8 {
         argmax = try lfm2_argmax.Probe.init(a, device, queue);
         try kernels.append(a, argmax.?.kernel());
     }
+    var streams_list: [2]lfm2_streams.Probe = undefined;
+    var streams_made: usize = 0;
+    defer for (streams_list[0..streams_made]) |*p| p.deinit();
+    for (std.enums.values(lfm2_streams.Which)) |w| {
+        if (!wanted(o, lfm2_streams.spec(w).name)) continue;
+        streams_list[streams_made] = try lfm2_streams.Probe.init(a, device, queue, w);
+        streams_made += 1;
+    }
+    for (streams_list[0..streams_made]) |*p| try kernels.append(a, p.kernel());
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
     defer for (rows_list.items) |r| r.deinit();
@@ -346,6 +356,7 @@ pub fn main(init: std.process.Init) !u8 {
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
         lim += try lfm2_argmax.limits(a, device, o.only);
+        lim += try lfm2_streams.limits(a, device, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

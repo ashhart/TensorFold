@@ -144,6 +144,10 @@ pub const Scratch = struct {
     /// Each head row's greedy pick and nonfinite flag (u32 pairs), from a forward whose head takes every row.
     best: mtl.Buffer,
     snapshots: [c.layers]?mtl.Buffer = @splat(null),
+    /// A recorded call's streams at every layer, each row's stream and the attention's row tiles (segments.zig).
+    segs: mtl.Buffer,
+    rowseg: mtl.Buffer,
+    tiles: mtl.Buffer,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, rows: usize) !Scratch {
         var out: Scratch = undefined;
@@ -159,8 +163,7 @@ pub const Scratch = struct {
         out.bcx = try mem.alloc(rows * 3 * c.hidden * 2);
         out.k = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
         out.v = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
-        const slice_rows: usize = @min(rows, attn_slice);
-        const partials = @max(slice_rows, split_rows * subs) * c.query_heads * chunks;
+        const partials = partialCount(rows);
         out.pm = try mem.alloc(partials * 4);
         out.pl = try mem.alloc(partials * 4);
         out.po = try mem.alloc(partials * c.head_dim * 4);
@@ -182,6 +185,9 @@ pub const Scratch = struct {
         const logit_rows: usize = @min(rows, batch_rows);
         out.logits = try mem.alloc(logit_rows * c.vocab * 2);
         out.best = try mem.alloc(logit_rows * 2 * 4);
+        out.segs = try mem.alloc(c.layers * batch_rows * @sizeOf(@import("segments.zig").Seg));
+        out.rowseg = try mem.alloc(batch_rows * 4);
+        out.tiles = try mem.alloc(batch_rows * 4);
         for (&out.snapshots, attention) |*s, a| if (!a) { // a recorded window's rows, or a prompt call's last row
             s.* = try mem.alloc(logit_rows * conv_bytes);
         };
@@ -193,11 +199,26 @@ pub const Scratch = struct {
     }
 };
 
+/// Attention partials a scratch of `rows` holds: a prompt slice's, and a recorded call's streams kept apart.
+pub fn partialCount(rows: usize) usize {
+    const slice_rows: usize = @min(rows, attn_slice);
+    // usize: @min with a constant narrows its type, and `most * subs` would overflow it.
+    const most: usize = @min(rows, batch_rows);
+    return @max(slice_rows, split_rows * subs, most * subs) * c.query_heads * chunks;
+}
+
 /// The served window: --context, else the checkpoint's, never past `max_context`; null when --context is outside it.
 pub fn window(checkpoint: usize, requested: ?i64) ?usize {
     const most = @min(checkpoint, max_context);
     const w = requested orelse return most;
     return if (w >= 1 and w <= most) @as(usize, @intCast(w)) else null;
+}
+
+test "a shared round's 32 rows keep their attention partials apart" {
+    // 32 rows of 8 sub-spans each, every row's 32 heads over 32 chunks; a prompt chunk's rows hold more.
+    try std.testing.expectEqual(@as(usize, 32 * subs * c.query_heads * chunks), partialCount(32));
+    try std.testing.expectEqual(@as(usize, split_rows * subs * c.query_heads * chunks), partialCount(1));
+    try std.testing.expectEqual(@as(usize, 2048 * c.query_heads * chunks), partialCount(2048));
 }
 
 test "the served window stays inside the attention's 131,072 positions" {

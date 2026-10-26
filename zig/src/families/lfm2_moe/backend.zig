@@ -313,6 +313,10 @@ fn factsFor(width: u32, streams: u32, costs: []const lanes.config.Cost) lanes.Mo
     };
 }
 
+test {
+    _ = @import("segments.zig"); // a shared round's table, with the family's tests
+}
+
 test "after a failed wider-lanes check every forward is one stream's one row, so no window or by-expert twin runs" {
     const gpa = std.testing.allocator;
     var one = try lanes.Config.init(gpa, factsFor(1, 8, &.{}), st.window_rows, st.window_rows - 1);

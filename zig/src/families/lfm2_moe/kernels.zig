@@ -23,6 +23,10 @@ const names = [_][:0]const u8{
     "lfm2_sort",
     "lfm2_combine_sorted",
     "lfm2_argmax",
+    "lfm2_conv_segs",
+    "lfm2_qk_segs",
+    "lfm2_attn_segs",
+    "lfm2_attn_merge_segs",
 };
 
 pub const Kernels = struct {

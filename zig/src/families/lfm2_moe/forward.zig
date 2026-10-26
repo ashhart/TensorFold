@@ -8,6 +8,7 @@ const c = @import("config.zig");
 const row = @import("../../core/row_projection.zig");
 const tile = @import("../../core/tile_qmm.zig");
 const am = @import("../../core/affine_mm.zig");
+const segs = @import("segments.zig");
 const Buffer = mtl.Buffer;
 pub const Segment = struct { cache: *st.Cache, rows: usize };
 /// GPU seconds of every call so far (the bench reports a chunk's GPU time beside its wall time).
@@ -30,6 +31,8 @@ const Encoder = struct {
     prompt: bool,
     /// A recorded window: every row's conv state is kept for a later keep.
     record: bool,
+    /// A recorded window of several streams: their conv and attention kernels run once a layer over every row.
+    plan: ?segs.Plan = null,
 
     fn pipe(self: Encoder, comptime key: []const u8) void {
         self.e.setPipeline(self.m.kernels.get(key));
@@ -129,8 +132,9 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     defer pool.pop();
     const cb = m.queue.commandBuffer();
     const prompt = (!record and head == .last) or total >= tile_rows;
-    const enc = Encoder{ .e = cb.compute(.serial), .m = m, .s = s, .prompt = prompt, .record = record };
-    const e = enc.e;
+    const e = cb.compute(.serial);
+    const plan = if (segs.batched(record, segments.len)) segs.prepare(e, s, segments) else null;
+    const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan };
     const embedding = m.weights.embedding;
     e.setPipeline(m.kernels.embed(embedding.bits));
     e.setBuffer(s.ids, 0, 0);
@@ -186,6 +190,17 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
 fn conv(enc: Encoder, s: *st.Scratch, cv: wts.Conv, layer: usize, segments: []const Segment, total: usize) void {
     const e = enc.e;
     enc.projection(cv.in, s.x, 0, s.bcx, 0, total);
+    if (enc.plan != null) {
+        enc.pipe("lfm2_conv_segs");
+        e.setBuffer(s.bcx, 0, 0);
+        e.setBuffer(s.segs, layer * segs.table_bytes, 1);
+        enc.tensor(cv.weight, 2);
+        e.setBuffer(s.y, 0, 3);
+        e.setBuffer(s.snapshots[layer].?, 0, 4);
+        e.setBuffer(s.rowseg, 0, 5);
+        enc.threads(.{ c.hidden, total, 1 }, .{ 256, 1, 1 });
+        return enc.projection(cv.out, s.y, 0, s.r, 0, total);
+    }
     var base: usize = 0;
     for (segments) |seg| {
         enc.pipe("lfm2_conv");
@@ -206,6 +221,10 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Co
     enc.projection(a.q, s.x, 0, s.q, 0, total);
     enc.projection(a.k, s.x, 0, s.k, 0, total);
     enc.projection(a.v, s.x, 0, s.v, 0, total);
+    if (enc.plan) |plan| {
+        attentionSegs(enc, s, a, config, layer, total, plan);
+        return enc.projection(a.out, s.y, 0, s.r, 0, total);
+    }
     var base: usize = 0;
     for (segments) |seg| {
         const cache = seg.cache.blocks[layer].attention;
@@ -257,6 +276,42 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Co
         base += seg.rows;
     }
     enc.projection(a.out, s.y, 0, s.r, 0, total);
+}
+
+/// A recorded call's attention over every stream in one dispatch a kernel: qk, the 8-row tiles, the merge.
+fn attentionSegs(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Config, layer: usize, total: usize, plan: segs.Plan) void {
+    const e = enc.e;
+    const table = layer * segs.table_bytes;
+    enc.pipe("lfm2_qk_segs");
+    e.setBuffer(s.q, 0, 0);
+    e.setBuffer(s.k, 0, 1);
+    e.setBuffer(s.v, 0, 2);
+    enc.tensor(a.q_norm, 3);
+    enc.tensor(a.k_norm, 4);
+    e.setBytes(std.mem.asBytes(&QkArgs{ .len = 0, .cap = 0, .eps = c.eps, .log2_theta = std.math.log2(config.theta) }), 5);
+    e.setBuffer(s.queries, 0, 6);
+    e.setBuffer(s.segs, table, 7);
+    e.setBuffer(s.rowseg, 0, 8);
+    enc.groups(.{ c.query_heads + c.kv_heads, total, 1 }, .{ 32, 1, 1 });
+    const args = AttnArgs{ .len = 0, .cap = 0, .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = 0 };
+    enc.pipe("lfm2_attn_segs");
+    e.setBuffer(s.queries, 0, 0);
+    e.setBuffer(s.segs, table, 1);
+    e.setBuffer(s.tiles, 0, 2);
+    e.setBytes(std.mem.asBytes(&args), 3);
+    e.setBuffer(s.pm, 0, 4);
+    e.setBuffer(s.pl, 0, 5);
+    e.setBuffer(s.po, 0, 6);
+    enc.groups(.{ plan.tiles, c.kv_heads, plan.used }, .{ 128, 1, 1 });
+    enc.pipe("lfm2_attn_merge_segs");
+    e.setBuffer(s.pm, 0, 0);
+    e.setBuffer(s.pl, 0, 1);
+    e.setBuffer(s.po, 0, 2);
+    e.setBytes(std.mem.asBytes(&args), 3);
+    e.setBuffer(s.y, 0, 4);
+    e.setBuffer(s.segs, table, 5);
+    e.setBuffer(s.rowseg, 0, 6);
+    enc.groups(.{ c.query_heads, total, 1 }, .{ 32, 1, 1 });
 }
 
 /// True when the picks' combine is left to the next norm (decode rows).
