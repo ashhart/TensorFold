@@ -66,7 +66,7 @@ pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
     constexpr bool causal = true;
     constexpr int skip = 0;
     constexpr bool F8 = false, HM = false;  // bf16 keys, row-major
-    constexpr int CAP = 0;
+    constexpr int CAP = 0, PTOK = 1;
     const float *ks = nullptr, *vs = nullptr;
     const int HO = H;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
@@ -82,6 +82,7 @@ pattn_rows(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict_
     constexpr bool causal = true;
     constexpr const int* PT = nullptr;  // contiguous keys
     constexpr long long PS = 0;
+    constexpr int PTOK = 1;
     constexpr bool F8 = false, HM = false;  // bf16 keys, row-major
     constexpr int CAP = 0;
     const float *ks = nullptr, *vs = nullptr;
@@ -116,6 +117,7 @@ full_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__ o
     constexpr bool causal = false;
     constexpr const int* PT = nullptr;  // contiguous keys
     constexpr long long PS = 0;
+    constexpr int PTOK = 1;
     constexpr bool F8 = false, HM = false;  // bf16 keys, row-major
     constexpr int CAP = 0;
     const float *ks = nullptr, *vs = nullptr;
@@ -127,32 +129,28 @@ full_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__ o
 #include "prefill_attention_rows.cuh"
 }
 
-// A head-major cache (qwen35.cu's: a layer's key heads each CAP rows in a run), the W query rows at positions p0 on.
+// A head-major cache (qwen35.cu's: each key head's CAP rows in a run, or PT's pages of PTOK rows a head, PS apart).
 template <int D, int WARPS, int HPC, int NS>
 __global__ void __launch_bounds__(32 * WARPS, 1)
 hpattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
               const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
-              int G, float scale, int CAP) {
+              int G, float scale, int CAP, const int* __restrict__ PT, long long PS, int PTOK) {
     constexpr bool causal = true, F8 = false, HM = true;
     constexpr int skip = 0;
-    constexpr const int* PT = nullptr;
-    constexpr long long PS = 0;
     const int HO = H;
     const float *ks = nullptr, *vs = nullptr;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
 #include "prefill_attention_rows.cuh"
 }
 
-// hpattn_kernel over e4m3 rows with an fp32 scale a (key head, row) (qwen35_kv8.cu's layout); staging widens them.
+// hpattn_kernel over e4m3 rows with an fp32 scale a (key head, row) (qwen35_kv8.cu's layout, PS in bytes).
 template <int D, int WARPS, int HPC, int NS>
 __global__ void __launch_bounds__(32 * WARPS, 1)
 hpattn8_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restrict__ kc, const uint8_t* __restrict__ vc,
                const float* __restrict__ ks, const float* __restrict__ vs, __nv_bfloat16* __restrict__ out, int p0,
-               int W, int H, int HK, int G, float scale, int CAP) {
+               int W, int H, int HK, int G, float scale, int CAP, const int* __restrict__ PT, long long PS, int PTOK) {
     constexpr bool causal = true, F8 = true, HM = true;
     constexpr int skip = 0;
-    constexpr const int* PT = nullptr;
-    constexpr long long PS = 0;
     const int HO = H;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
 #include "prefill_attention_rows.cuh"
@@ -305,7 +303,7 @@ template __global__ void tf_prefill_attention::vision_kernel<80, 8>(const __nv_b
 // Head dim 256, eight warps, two query heads a block, two staging slots (Qwen3.8-27B's prompt chunks, bf16 and fp8).
 template __global__ void tf_prefill_attention::hpattn_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
-    int, float, int);
+    int, float, int, const int* __restrict__, long long, int);
 template __global__ void tf_prefill_attention::hpattn8_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
-    __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);
+    __nv_bfloat16* __restrict__, int, int, int, int, int, float, int, const int* __restrict__, long long, int);
