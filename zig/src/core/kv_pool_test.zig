@@ -331,6 +331,38 @@ test "a run: consecutive pages from the top, from the stream's promise, back who
     try expectEqual(@as(usize, 10), p.available());
 }
 
+test "coverRun: a lease's pages as one run from a multiple of the alignment while one is free, else scattered" {
+    const a = std.testing.allocator;
+    var p = try Pool.init(a, 10, 1);
+    defer p.deinit();
+    var x: Lease = .{};
+    try p.promise(&x, 3);
+    try p.coverRun(&x, 3, 4, null);
+    try expect(std.mem.eql(u32, x.ids.items, &.{ 4, 5, 6 })); // 8 + 3 is past the pool: the window at 4
+    try expectEqual(@as(usize, 0), x.promised);
+    var y: Lease = .{};
+    try p.promise(&y, 2);
+    try p.coverRun(&y, 2, 4, null);
+    try expect(std.mem.eql(u32, y.ids.items, &.{ 8, 9 }));
+    var z: Lease = .{};
+    try p.promise(&z, 1);
+    try p.cover(&z, 1, null); // page 0: no window of 4 is free now
+    var w: Lease = .{};
+    try p.promise(&w, 2);
+    try p.coverRun(&w, 2, 4, null);
+    try expect(std.mem.eql(u32, w.ids.items, &.{ 1, 2 })); // from the free stack
+    p.finish(&w);
+    p.finish(&x);
+    try p.promise(&w, 4);
+    try p.coverRun(&w, 4, 1, null); // align 1: any run, the highest
+    try expect(std.mem.eql(u32, w.ids.items, &.{ 4, 5, 6, 7 }));
+    p.finish(&w);
+    p.finish(&y);
+    p.finish(&z);
+    try expect(p.idle());
+    try expectEqual(@as(usize, 10), p.available());
+}
+
 test "the plan with a run: each stream pays its run's pages beside its first page, the window bound adds them" {
     const g: u64 = 1 << 30;
     var l = nemotron;

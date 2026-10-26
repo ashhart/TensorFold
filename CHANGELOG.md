@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Host sampling with no rank cut (`top_k: 0`, `top_p: 1`) finds the sampled token by a keyed race over the candidates instead of sorting the whole vocabulary (#1337). The draw is the same: a host test compares it with the full sort over 483,840 sampler settings, ties and extreme values included, and on M3 Ultras with Qwen3.8-27B and Nemotron sampled replies equal the previous build's token for token. Thanks to @ajensenwaud.
+
+- Dory on CUDA can keep its full-attention caches in pages of the core pool with `TENSORFOLD_DORY_KV_PAGES=1` (#1284); off by default. On a GB10 with Dory 1.0 4B NVFP4, pages give the same tokens as the contiguous cache, the shared window kernels compile to identical machine code, and the default path is unchanged. Thanks to @jschmied.
+
 - GLM-5.3-Flash images: a chat's later turns no longer run the vision tower again for images the kept prompt state already holds (Metal), and the engine reads the vision tower of MLX conversions that name it `vision_tower.` with channels-last convolution kernels, which it used to refuse with `NoVisionTower`. On an M3 Ultra with the oQ4 checkpoint, a follow-up image turn's first token comes about 90 ms sooner (0.13 s instead of 0.22 s on the second turn), and every reply equals a fresh server's. `tools/image_cache_turns.py` measures multi-turn image chats' cached tokens, first-token times and replies against a served model.
 
 - Drama speech: `POST /v1/audio/speech` takes per-request `temperature`, `top_p`, `top_k` (1 to 64) and an exact 64-bit `seed`, whole and streamed (#1277, fixing #1273), and accepts dialogue with speaker tags `<|speaker:0|>` through `<|speaker:15|>` (#1278, fixing #1274). A request without them sounds exactly as before: on an M3 Ultra with Drama 3, default requests give the same PCM as the previous build byte for byte, repeats and concurrent requests included. Thanks to @krunkosaurus.
@@ -21,8 +25,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Spark-X2.5/2.6-4B also runs on Metal, from the bf16 release as published (#1320). On an M3 Ultra it prefills 2,840 tokens/s at 2k and decodes 69 tokens/s on one stream; repeats and concurrent streams equal their runs alone, and its tokens match the CUDA engine's on the same prompt. Thanks to @BobClawblaw.
 
 - GLM-5.3: a tool call that `max_tokens` cuts comes back in `tool_calls` with `finish_reason: "length"`, streamed and whole, instead of leaking its `<tool_call>` markup into the reply's text (#1298; thanks @Boscoeuk for the report).
-
-- `--spill-gib N` on Macs writes a prompt state the cache evicts from RAM to disk, up to N GiB, and a later turn whose prefix matches reads it back and resumes exactly as a fresh prompt pass; `--checkpoint-slots N` sets how many states stay in RAM beside it. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash take them, on `--learn-conversations`' disk store; both are off by default, and without them nothing changes (from Python #68; thanks @gilby).
 
 - `tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...` says, before any download or weight load, the memory CUDA admission would grant and whether the checkpoint's weights fit each budget, and which setting would make them fit (#1319, from Python #281; thanks @akol1).
 
