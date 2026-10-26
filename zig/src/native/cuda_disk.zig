@@ -180,14 +180,15 @@ fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_ca
             return @intFromFloat(g * (1 << 30));
         }
     }.bytes;
-    const r = try api.prompt_cache.rows.Rows.open(store.gpa, store.family, .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid });
+    // --spill-gib: evicted states only (or with --learn-conversations, both); --checkpoint-slots bounds RAM beside it
+    const r = try api.prompt_cache.rows.attach(store.gpa, store, .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid, .spill = o.spill, .slots = @import("disk_spill.zig").slots(o) });
     r.prefill_rate = rate;
-    store.disk = r;
     std.log.info("{s}: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ name, r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
 }
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("disk_spill.zig");
 }
 
 test "a disk module that declares attach opens the store itself" {

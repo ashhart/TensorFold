@@ -637,14 +637,23 @@ Older queued saves cannot evict states saved earlier in that close. States that 
 daily budget or free-disk floor are skipped; unfinished writes are cancelled at the deadline.
 Past N GiB other models' spilled sets go first, then the state this server used least recently. A damaged file is
 deleted and its tokens are prefilled, and a write cut off midway leaves nothing a later turn or a restart reads.
-`--checkpoint-slots N` sets how many states stay in RAM beside the store, so the next one sends the oldest to disk; on a
-Mac it needs `--spill-gib` or `--learn-conversations`. With `--learn-conversations` too, every state is still written
+`--checkpoint-slots N` sets how many states stay in RAM beside the store, so the next one sends the oldest to disk; it
+needs `--spill-gib` or `--learn-conversations`. With `--learn-conversations` too, every state is still written
 behind, a staged write survives eviction of its RAM entry, and the cap is the smaller of `--learn-gib` and
 `--spill-gib`. `--learn-min-free-gib` and `--learn-daily-gib` apply to spilled states as well. The same four Mac
-families take both flags and the others refuse them at startup; without either flag nothing changes, and the routes
-below stay off. `TENSORFOLD_ROWS_SYNC=1` selects the previous synchronous writer for comparisons; its block and state
-files have the same bytes. That comparison writer retains blocking I/O; the bounded disk wait uses the threaded writer.
-`TF_IMPRINT_VERIFY=1` reads threaded writes back against their owned staging before publication.
+families take both flags, and so do three CUDA ones; the others refuse them at startup. Without either flag nothing
+changes, and the routes below stay off. `TENSORFOLD_ROWS_SYNC=1` selects the previous synchronous writer for
+comparisons; its block and state files have the same bytes. That comparison writer retains blocking I/O; the bounded
+disk wait uses the threaded writer. `TF_IMPRINT_VERIFY=1` reads threaded writes back against their owned staging before
+publication.
+
+On CUDA, Nemotron, the Qwen3.5 hybrids and Flash Next take `--spill-gib` and `--checkpoint-slots` with the same store
+and cap as a Mac. At an eviction the engine thread stages a copy of the state into host memory, waiting for the GPU
+work that produced it, then releases its RAM entry and goes on; the I/O thread writes and fsyncs the copy while the
+engine decodes. Staging holds at most 1 GiB and eight jobs: a state whose new bytes (rows not already on disk) do not
+fit what is free is not saved, so one past 1 GiB never is, and a later request for it prefills. When the engine closes, at a planned stop (SIGTERM or SIGINT) or an idle unload, it
+saves the states still in RAM, newest first, within the same disk cap and 20-second stop budget. While other streams
+run, a queued request whose state is on disk has it read ahead on an I/O thread, as described below.
 
 Three routes let a client such as the Mac app ask about a conversation. Each takes the body of a chat completion
 (`messages`, `tools`, `chat_template_kwargs`), renders it as that request would be rendered, and answers on the engine's
