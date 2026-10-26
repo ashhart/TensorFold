@@ -233,12 +233,15 @@ fn all(s: *Sink, ck: *core.Checkpoint) !void {
     const g = e.g;
     const kit = e.kit;
     const m = "model.language_model.";
-    // embeddings stay bf16 rows (embedRows); the head is an EXL3 projection
-    const embed = try plain(s, ck, "{s}embed_tokens.weight", .{m}, .bf16, &.{ g.vocab, g.hidden });
+    // embeddings stay bf16 rows (embedRows) in mapped host memory; the head is an EXL3 projection
+    var ebuf: [200]u8 = undefined;
+    const et = try ck.expect(try name(&ebuf, "{s}embed_tokens.weight", .{m}), .bf16, &.{ g.vocab, g.hidden });
     const head = try dense(s, kit, ck, "", "lm_head", g.vocab, g.hidden);
     const final = try norm1(s, ck, "{s}norm.weight", .{m}, g.hidden);
     if (!s.measure) {
-        e.embed_w = embed;
+        e.host_embed = try cuda.HostBuffer.allocMapped(e.d, et.bytes.len);
+        @memcpy(e.host_embed.?.bytes, et.bytes);
+        e.embed_w = try e.host_embed.?.device();
         e.embed_s = 0;
         e.embed_b = 0;
         e.embed_bits = 16;

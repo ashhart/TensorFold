@@ -105,6 +105,7 @@ pub const Engine = struct {
     embed_s: u64,
     embed_b: u64,
     embed_bits: u8, // the embedding's rows' width: 4 or 8 (16: bf16 rows, an EXL3 checkpoint's)
+    host_embed: ?cuda.HostBuffer = null, // pinned device-mapped host storage for uncompressed bf16 embeddings
     kit: ?*x3w.Kit = null, // an EXL3 checkpoint's kernels (g.exl3)
     head: Proj,
     final_norm: u64,
@@ -183,6 +184,7 @@ pub const Engine = struct {
         e.learning = null;
         e.mlp = null;
         e.taught = 0;
+        e.host_embed = null;
         e.kit = null;
         e.d = d;
         e.g = g;
@@ -278,6 +280,7 @@ pub const Engine = struct {
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
         if (e.kit) |k| k.deinit(e.gpa);
+        if (e.host_embed) |*he| he.free();
         e.pockets.deinit();
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
@@ -340,16 +343,30 @@ pub const Engine = struct {
         const R = max_rows;
         const wide = @max(g.valueWidth(), g.attnWidth(), g.hidden); // y and mix: either mixer's rows
         inline for (.{ "h", "x", "r" }) |name| @field(e, name) = try t.alloc(R * g.hidden * 2);
+        e.xs = try t.alloc(R * (@max(g.intermediate, wide) / 64) * 4);
+        // DeltaNet mixer, full-attention mixer, and dense MLP run sequentially on e.stream and never overlap:
+        const union_total = total;
+        const union_at = e.arena_at;
         inline for (.{ "y", "mix", "z", "v" }) |name| @field(e, name) = try t.alloc(R * wide * 2);
         inline for (.{ "q", "k" }) |name| @field(e, name) = try t.alloc(R * g.k_heads * geometry.dk * 2);
         e.qkv = try t.alloc(R * g.convWidth() * 2);
-        inline for (.{ "gate", "up", "act" }) |name| @field(e, name) = try t.alloc(R * g.intermediate * 2);
-        e.xs = try t.alloc(R * (@max(g.intermediate, wide) / 64) * 4);
         inline for (.{ "a", "b", "beta" }) |name| @field(e, name) = try t.alloc(R * g.v_heads * 2);
         e.g_ = try t.alloc(R * g.v_heads * 4);
+        const delta_total = total;
+        const delta_at = e.arena_at;
+        total = union_total;
+        e.arena_at = union_at;
+        inline for (.{ 0, 1 }) |_| _ = try t.alloc(R * wide * 2); // y and mix
         e.qraw = try t.alloc(R * 2 * g.attnWidth() * 2);
         e.qn = try t.alloc(R * g.attnWidth() * 2);
         inline for (.{ "kraw", "vraw", "kn" }) |name| @field(e, name) = try t.alloc(R * g.kv_heads * head_dim * 2);
+        const attn_total = total;
+        const attn_at = e.arena_at;
+        total = union_total;
+        e.arena_at = union_at;
+        inline for (.{ "gate", "up", "act" }) |name| @field(e, name) = try t.alloc(R * g.intermediate * 2);
+        total = @max(total, @max(delta_total, attn_total));
+        e.arena_at = @max(e.arena_at, @max(delta_at, attn_at));
         // the decode partials: verify rows only (a prompt chunk's attention runs cuda_prompt_attention's tiles)
         e.pm = try t.alloc(most_verify * g.q_heads * max_chunks * 4);
         e.pl = try t.alloc(most_verify * g.q_heads * max_chunks * 4);
