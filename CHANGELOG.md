@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Flash Next on Macs: concurrent chats share each round's work more fully (#1338, #1339, #1340, #1341, #1342, #1343). A shared round samples every sampled stream's draft and target rows in one dispatch, drafts every stream in one packed MTP pass, copies kept states in the verify command buffer, runs the sessions' recurrences in one verify without barriers between them, and prices a batched head's extra drafts as the deepest stream's steps. On an M3 Ultra with the 4-bit MTP checkpoint, decode across 2, 4 and 8 concurrent streams rises 6.9%, 8.8% and 11.8% (4.5% and 10.7% at 2 and 4 streams on an M5 Ultra); one stream and prefill are unchanged, and prompt tokens equal the previous build's. `FZ_VERIFY_OVERLAP=0`, `FZ_PRICE_BATCHED=0` and `FZ_KEYED_DRAFTS=0` restore the previous paths. Thanks to @gilby.
+
 ## 1.1.6
 
 - DeepSeek-V4.1 (experimental): a tool call in the model's spaced DSML spelling now comes back in `tool_calls`, streamed and whole, instead of in the reply's text, and a lone DSML opener inside a `<tool_call>` no longer crashes the parser; the `TF_DSV41_ASSETS` refusal names the file boot actually opens (`engram-token-map.bin`) (#1324).
