@@ -310,7 +310,7 @@ pub const Rows = struct {
         const a = self.arena.allocator();
         const f = self.f;
         const kv = f.hk * f.d;
-        for (0..kc.len / kv) |i| @memcpy(kc[i * kv ..][0..kv], kc[0..kv]);
+        for (1..kc.len / kv) |i| @memcpy(kc[i * kv ..][0..kv], kc[0..kv]); // the rows after the first take its keys
         @memset(vc, 0);
         const n = self.call.rows;
         const lo = self.call.first(self.call.at(n - 1).p);
