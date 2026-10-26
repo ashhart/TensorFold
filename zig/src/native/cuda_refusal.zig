@@ -55,11 +55,14 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.tp != 1 and !ranked) return no_ranks;
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
+    // a live-half keep holds one KDA half, and GLM's disk image holds both (cuda_disk_image.zig)
+    if (F == @import("glm_cuda").native and o.learn_conversations and @import("glm_cuda").snapshots.layout.liveHalfEnabled())
+        return "--learn-conversations and TF_GLM_KV_LIVE_HALF=1: GLM-5.3-Flash's disk image holds both KDA halves and a live-half keep one; serve without one of them";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     }
-    if (o.learn_conversations and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
+    if (o.learn_conversations and F != nemotron.native and F != @import("glm_cuda").native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, GLM-5.3-Flash, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
     if (o.learn_conversations and o.tp > 1) if (@import("cuda_disk.zig").keptDisk(F)) |K| if (@hasDecl(K, "one_rank") and K.one_rank) return "--learn-conversations keeps one rank's states on disk for this CUDA family: serve without --tp or without --learn-conversations";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
@@ -180,7 +183,7 @@ test "a family with no head of its own words its --drafter refusal" {
     try std.testing.expectEqualStrings("--drafter: none yet", family(Headless, .{ .dir = "d", .model_type = "m", .drafter = "x" }) orelse "");
 }
 
-test "--learn-conversations opens Nemotron and a family whose states declare a disk image, no other" {
+test "--learn-conversations opens Nemotron, GLM-5.3-Flash and a family whose states declare a disk image, no other" {
     const Other = struct {};
     const Imaged = struct {
         pub const kept_disk = struct {};
@@ -205,6 +208,7 @@ test "--learn-conversations opens Nemotron and a family whose states declare a d
     try std.testing.expect(family(AllRanks, .{ .dir = "d", .model_type = "m", .tp = 2, .learn_conversations = true }) == null);
     try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
     try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
+    try std.testing.expect(family(@import("glm_cuda").native, .{ .dir = "d", .model_type = "glm5_next", .learn_conversations = true }) == null);
 }
 
 test "CUDA MTP controls respect window and probability bounds" {
@@ -273,14 +277,18 @@ test "--spill-gib and --checkpoint-slots open the families with a disk image; th
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "m" }) == null);
 }
 
-test "GLM keeps its prompt states in the process: no disk image, so --spill-gib and --learn-conversations refuse" {
+test "GLM keeps its prompt states on disk with --learn-conversations alone, and refuses it with TF_GLM_KV_LIVE_HALF=1" {
     // TF_GLM_KV_LIVE_HALF's keeps omit the dead KDA half; they must never reach a store a server without the flag reads
     const glm = @import("glm_cuda").native;
     try std.testing.expect(@import("cuda_disk.zig").keptDisk(glm) == null);
     const spill: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .spill = .evicted };
     try std.testing.expectStringStartsWith(family(glm, spill) orelse "", "--spill-gib keeps evicted states");
     const learn: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true };
-    try std.testing.expectStringStartsWith(family(glm, learn) orelse "", "--learn-conversations keeps");
+    try std.testing.expect(family(glm, learn) == null);
+    const env = @import("sys").env;
+    try std.testing.expectEqual(@as(c_int, 0), env.setenv("TF_GLM_KV_LIVE_HALF", "1", 1));
+    defer _ = env.unsetenv("TF_GLM_KV_LIVE_HALF");
+    try std.testing.expectStringStartsWith(family(glm, learn) orelse "", "--learn-conversations and TF_GLM_KV_LIVE_HALF=1");
 }
 
 /// The scopes this open's startup check covers, from its flags and model type.
