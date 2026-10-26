@@ -3,9 +3,15 @@ const std = @import("std");
 const kv = @import("core").kv_pool;
 const config = @import("config.zig");
 const memory = @import("memory.zig");
+const fwd = @import("cuda_model.zig");
 
-/// Slots a round holds: its rows over the widest window (cuda_model's round_rows / window_rows).
-pub const max_slots = 8;
+/// Slots a round of `round` rows holds over windows of `window` rows.
+pub fn slotsOf(round: usize, window: usize) usize {
+    return round / window;
+}
+
+/// Slots a round holds: its rows over the widest window.
+pub const max_slots = slotsOf(fwd.round_rows, fwd.window_rows);
 /// Positions a page holds: window_rows.cu's decode chunk, so a chunk and a prompt tile stay inside one page.
 pub const tokens = 256;
 
@@ -30,6 +36,13 @@ pub fn windowOf(ids: []const u32, per: usize) ?u32 {
     if (ids.len == 0 or ids[0] % per != 0) return null;
     for (ids, ids[0]..) |id, want| if (id != want) return null;
     return @intCast(ids[0] / per);
+}
+
+/// Table entries a slot of `context` positions takes: whole pages only, else error.BadAttach.
+pub fn perSlot(context: usize) !usize {
+    const n = pagesOf(context);
+    if (n == 0 or n * tokens != context) return error.BadAttach;
+    return n;
 }
 
 /// Pages that hold `positions`.
@@ -77,4 +90,22 @@ test "a window: consecutive ids from a multiple of the slot's pages; a gap, a st
     try std.testing.expectEqual(@as(?u32, null), windowOf(&.{ 8, 10 }, 4));
     try std.testing.expectEqual(@as(?u32, null), windowOf(&.{ 9, 8 }, 4));
     try std.testing.expectEqual(@as(?u32, null), windowOf(&.{}, 4));
+}
+
+test "a round's slots are its rows over the widest window, not a number kept beside them" {
+    try std.testing.expectEqual(@as(usize, 8), slotsOf(128, 16));
+    try std.testing.expectEqual(@as(usize, 4), slotsOf(128, 32));
+    try std.testing.expectEqual(@as(usize, 16), slotsOf(256, 16));
+    try std.testing.expectEqual(fwd.round_rows / fwd.window_rows, max_slots);
+    try std.testing.expect(max_slots * fwd.window_rows <= fwd.round_rows);
+}
+
+test "a slot's table is whole pages: a context off the page size refuses to attach" {
+    try std.testing.expectEqual(@as(usize, 132), try perSlot(33792));
+    try std.testing.expectEqual(@as(usize, 4), try perSlot(1024));
+    try std.testing.expectError(error.BadAttach, perSlot(33793));
+    try std.testing.expectError(error.BadAttach, perSlot(1000));
+    try std.testing.expectError(error.BadAttach, perSlot(255));
+    try std.testing.expectError(error.BadAttach, perSlot(0));
+    for (1..200) |k| try std.testing.expectEqual(k, try perSlot(k * tokens));
 }

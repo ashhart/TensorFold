@@ -49,6 +49,22 @@ pub fn pages(gpu: Gpu, rest: []const []const u8) !void {
     var a: Rig = undefined;
     try a.initMode(gpu, rest[0], loops, context, slots, false);
     defer a.deinit();
+    // paging off loads no window_pages module, and a paged model refuses kernels without it; paging on loads it
+    try check.expect(a.k.win.pages == null, "dory window_pages: paging off loaded the module", .{});
+    var refused = true;
+    if (fwd.Model.initPaged(gpa, gpu.d, a.s, &a.w, &a.k, context)) |opened| {
+        var m = opened;
+        m.deinit();
+        refused = false;
+    } else |e| if (e != error.PagesNotLoaded) return e;
+    try check.expect(refused, "dory window_pages: a paged model opened over kernels without the module", .{});
+    {
+        var on = try fwd.Kernels.load(gpu.ctx, true);
+        defer on.deinit();
+        try check.expect(on.win.pages != null, "dory window_pages: paging on did not load the module", .{});
+    }
+    check.pass("dory window_pages: paging off loads no module and a paged model refuses it; paging on loads it", .{});
+    try a.k.win.loadPages(gpu.d);
     var b = try fwd.Model.initPaged(gpa, gpu.d, a.s, &a.w, &a.k, context);
     defer b.deinit();
     const per = dory.cuda_pages.pagesOf(context);

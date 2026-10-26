@@ -104,7 +104,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.w = try wts.load(gpa, io, ctx.d, dir, if (o.loops) |l| @as(usize, l) else null);
     errdefer own.w.deinit();
     if (context > own.w.config.positions + 1024) return error.PastContext;
-    own.k = try fwd.Kernels.load(ctx);
+    own.k = try fwd.Kernels.load(ctx, pagesOn());
     errdefer own.k.deinit();
     if (!own.k.served) return error.BuiltWithoutKernels;
     own.s = try cuda.Stream.init(ctx.d, false);
