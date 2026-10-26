@@ -77,3 +77,14 @@ test "raw bits at the edges: signed zeros from underflow, subnormal ties, the no
     try std.testing.expect(std.math.isNan(value(bitsOf(bf16(-std.math.nan(f64))))));
     try std.testing.expectEqual(@as(u16, 0x8000), bits(-0x1p-135)); // fp32's path agrees
 }
+
+test "fp32 to bf16 bits: NaN, infinities, signed zero, and a quiet NaN the integer add path keeps" {
+    try std.testing.expect(std.math.isNan(value(bits(std.math.nan(f32)))));
+    try std.testing.expect(std.math.isInf(value(bits(std.math.inf(f32)))));
+    try std.testing.expect(std.math.isInf(value(bits(-std.math.inf(f32)))));
+    try std.testing.expectEqual(@as(u16, 0x8000), bits(-0.0));
+    const quiet: f32 = @bitCast(@as(u32, 0x7fc00001));
+    try std.testing.expect(std.math.isNan(quiet));
+    try std.testing.expect(std.math.isNan(value(bits(quiet))));
+    try std.testing.expectEqual(@as(u16, 0x7fc0), bits(quiet));
+}
