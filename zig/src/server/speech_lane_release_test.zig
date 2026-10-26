@@ -107,3 +107,73 @@ test "the speech lane is free while an error reply body is still being written" 
     try std.testing.expect(std.mem.indexOf(u8, rest, message[0..80]) != null);
     try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
 }
+
+test "a completed non-empty stream releases the lane before its first write" {
+    var script: Script = .{ .steps = &.{frame}, .inline_ = true };
+    var probe: LaneProbe = .{};
+    defer probe.first_bytes.deinit(gpa);
+    var s: Served = undefined;
+    try s.openProbed(&script, .{ .served_name = "m", .model_ids = &.{"m"} }, "", "HTTP/1.1", harness.stream_body, 2000, &probe);
+    defer s.deinit();
+    s.join(&script);
+    try std.testing.expect(probe.writes >= 1);
+    try std.testing.expect(std.mem.startsWith(u8, probe.first_bytes.items, "HTTP/1.1 200"));
+    try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
+    std.debug.print("completed stream: first-write inflight={d}\n", .{probe.first_inflight});
+    try std.testing.expectEqual(@as(u32, 0), probe.first_inflight);
+}
+
+test "the speech lane is free while a completed stream's body is still being written" {
+    var script: Script = .{ .steps = &.{3072 * frame}, .max_frames = 3072, .inline_ = true };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", harness.stream_body, 30000);
+    defer s.deinit();
+    var joined = false;
+    defer if (!joined) {
+        _ = std.c.shutdown(s.client, 2); // unblock the writer when an assertion fails before draining
+        s.join(&script);
+    };
+    const head = try s.readHead();
+    try expectHeader(head, "200 OK");
+    try expectHeader(head, "Transfer-Encoding: chunked");
+    while (s.got.items.len - s.read_at < 1024 * 1024) {
+        try std.testing.expect(try s.more(2000));
+    }
+    // At least 11 MB remains unwritten, so the route's deferred release cannot have run.
+    try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
+    const rest = try s.readRest();
+    s.join(&script);
+    joined = true;
+    try std.testing.expect(std.mem.startsWith(u8, rest, "c00000\r\n") and std.mem.endsWith(u8, rest, "\r\n0\r\n\r\n"));
+    const audio = rest["c00000\r\n".len .. rest.len - "\r\n0\r\n\r\n".len];
+    try std.testing.expectEqual(@as(usize, 2 * frame * 3072), audio.len);
+    var at: usize = 0;
+    while (at < audio.len) : (at += 2) {
+        try std.testing.expectEqualSlices(u8, &.{ 0xff, 0x3f }, audio[at .. at + 2]);
+    }
+    try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
+}
+
+test "a stream the engine is still writing holds its lane at its first audio write" {
+    var script: Script = .{ .steps = &.{ frame, 3 * frame }, .hold = 1 };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", harness.stream_body, 2000);
+    defer s.deinit();
+    var joined = false;
+    defer if (!joined) {
+        _ = std.c.shutdown(s.client, 2); // unblock the writer when an assertion fails before draining
+        s.join(&script);
+    };
+    const head = try s.readHead();
+    try expectHeader(head, "HTTP/1.1 200");
+    while (s.got.items.len - s.read_at < "1000\r\n".len + 2 * frame + 2) {
+        try std.testing.expect(try s.more(2000));
+    }
+    try std.testing.expectEqual(@as(u32, 1), s.srv.speech_inflight.load(.acquire));
+    script.release.store(true, .release);
+    const rest = try s.readRest();
+    s.join(&script);
+    joined = true;
+    try std.testing.expect(std.mem.startsWith(u8, rest, "1000\r\n") and std.mem.endsWith(u8, rest, "\r\n0\r\n\r\n"));
+    try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
+}
