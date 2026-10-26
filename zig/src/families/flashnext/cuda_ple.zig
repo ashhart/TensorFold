@@ -347,7 +347,7 @@ pub const Ngram = struct {
     tables: [max_shards]core.nvfp4_rows.Table = undefined,
     readers: [max_shards]ple_reader.Reader = undefined,
     read_mode: ple_reader.Mode = .mmap,
-    warm_ahead: bool = true,
+    warm_ahead: bool = false,
     pool: ?*ple_pool.Pool = null, // the gather's parked workers (null: every row on the caller's thread)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !Ngram {
@@ -376,7 +376,7 @@ pub const Ngram = struct {
         const modelopt = wm.contains(first);
         g.format = if (modelopt) .nvfp4 else .mlx;
         if (modelopt) g.read_mode = try ple_reader.mode(if (std.c.getenv("TF_FLASHNEXT_PLE_IO")) |v| std.mem.span(v) else null);
-        g.warm_ahead = if (std.c.getenv("TF_FLASHNEXT_WARM_AHEAD")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
+        g.warm_ahead = @import("cuda_ple_ahead.zig").enabled(if (std.c.getenv("TF_FLASHNEXT_WARM_AHEAD")) |v| std.mem.span(v) else null);
         g.scale = if (modelopt)
             try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale_2", true)
         else

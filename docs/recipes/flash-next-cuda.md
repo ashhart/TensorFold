@@ -38,7 +38,7 @@ NVFP4 PLE gathers sort requested row IDs, dequantize each distinct row once thro
 and copy duplicate BF16 rows after the readers join. Hash history and FP32 row sums retain their existing order.
 On Linux these rows use positional reads by default; `TF_FLASHNEXT_PLE_IO=mmap` retains the mapped reader,
 and `pread` selects positional reads explicitly. MLX tables retain the mapped path.
-`TF_FLASHNEXT_WARM_AHEAD=0` disables the default next-chunk file hints. Hints derive IDs from the future token
+`TF_FLASHNEXT_WARM_AHEAD=1` enables next-chunk file hints; unset or `0` leaves them off. Hints derive IDs from the future token
 prefix without changing a sequence history, issue on the caller and leave no borrowed worker after return.
 These I/O choices need cold-storage and served-token A/B gates before a performance claim.
 
