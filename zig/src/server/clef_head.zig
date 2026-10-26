@@ -356,10 +356,17 @@ fn linear(x: []const f32, n: usize, l: Lin, out: []f32) !void {
     }
 }
 
+/// Rows in blocks of `tile`: each weight row is read once a block; every output is `dot`'s own sum, so bits match.
 fn linearRows(x: []const f32, l: Lin, out: []f32, lo: usize, hi: usize) void {
-    for (lo..hi) |r| {
-        const xr = x[r * l.in ..][0..l.in];
-        for (0..l.out) |o| out[r * l.out + o] = dot(xr, l.w[o * l.in ..][0..l.in]) + if (l.b) |b| b[o] else 0;
+    const tile = 8;
+    var r0 = lo;
+    while (r0 < hi) : (r0 += tile) {
+        const r1 = @min(hi, r0 + tile);
+        for (0..l.out) |o| {
+            const w = l.w[o * l.in ..][0..l.in];
+            const b = if (l.b) |bias| bias[o] else 0;
+            for (r0..r1) |r| out[r * l.out + o] = dot(x[r * l.in ..][0..l.in], w) + b;
+        }
     }
 }
 
@@ -374,19 +381,42 @@ fn attention(a: Allocator, m: *const Mha, q: []const f32, nq: usize, kv: []const
     try linear(kv, nk, m.k, kp);
     try linear(kv, nk, m.v, vp);
     const ctx = try a.alloc(f32, nq * W);
-    const s = try a.alloc(f32, nk);
-    const scale = 1 / @sqrt(@as(f32, @floatFromInt(dh)));
-    for (0..nq) |i| for (0..heads) |hh| {
-        const qi = qp[i * W + hh * dh ..][0..dh];
-        for (s, 0..) |*x, j| x.* = dot(qi, kp[j * W + hh * dh ..][0..dh]) * scale;
+    const threads = @min(std.Thread.getCpuCount() catch 1, 32, @max(1, nq));
+    const scores = try a.alloc(f32, threads * nk);
+    const ar: Attend = .{ .qp = qp, .kp = kp, .vp = vp, .ctx = ctx, .w = W, .dh = dh, .nk = nk, .heads = heads };
+    if (threads <= 1) {
+        attendRows(ar, scores, 0, nq);
+    } else {
+        var pool: [32]std.Thread = undefined;
+        const per = (nq + threads - 1) / threads;
+        var started: usize = 0;
+        defer for (pool[0..started]) |t| t.join();
+        for (0..threads) |t| {
+            const lo = t * per;
+            const hi = @min(nq, lo + per);
+            if (lo >= hi) break;
+            pool[started] = try std.Thread.spawn(.{}, attendRows, .{ ar, scores[t * nk ..][0..nk], lo, hi });
+            started += 1;
+        }
+    }
+    try linear(ctx, nq, m.o, out);
+}
+
+const Attend = struct { qp: []const f32, kp: []const f32, vp: []const f32, ctx: []f32, w: usize, dh: usize, nk: usize, heads: usize };
+
+/// Query rows lo..hi of `attention`, each row's heads as one thread computes them; `s` is this thread's score row.
+fn attendRows(ar: Attend, s: []f32, lo: usize, hi: usize) void {
+    const scale = 1 / @sqrt(@as(f32, @floatFromInt(ar.dh)));
+    for (lo..hi) |i| for (0..ar.heads) |hh| {
+        const qi = ar.qp[i * ar.w + hh * ar.dh ..][0..ar.dh];
+        for (s, 0..) |*x, j| x.* = dot(qi, ar.kp[j * ar.w + hh * ar.dh ..][0..ar.dh]) * scale;
         softmax(s);
-        const o = ctx[i * W + hh * dh ..][0..dh];
+        const o = ar.ctx[i * ar.w + hh * ar.dh ..][0..ar.dh];
         @memset(o, 0);
-        for (s, 0..) |p, j| for (o, vp[j * W + hh * dh ..][0..dh]) |*x, y| {
+        for (s, 0..) |p, j| for (o, ar.vp[j * ar.w + hh * ar.dh ..][0..ar.dh]) |*x, y| {
             x.* += p * y;
         };
     };
-    try linear(ctx, nq, m.o, out);
 }
 
 fn feedForward(a: Allocator, f1: Lin, f2: Lin, x: []const f32, n: usize, out: []f32) !void {
