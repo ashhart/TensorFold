@@ -9,6 +9,7 @@ pub const State = struct {
     buf: ?cuda.DeviceBuffer = null, // the quantized inputs, taken only when int8 is on
     flag: ?cuda.DeviceBuffer = null, // the quantizer's mark for an exceptional group
     ws: u64 = 0,
+    fallbacks: u64 = 0, // prompt chunks that took bf16 instead: a non-finite input or a scale overflow in a group
 
     pub fn resolve(s: *State, m: cuda.Module) !void {
         s.kernels = try cuda.w4a8.Kernels.resolve(m);
@@ -60,4 +61,17 @@ pub fn Allocation(comptime Engine: type) type {
             return e;
         }
     };
+}
+
+/// An int8 prompt chunk of `rows` rows returned to bf16 (a non-finite input or a scale overflow): counted and logged.
+pub fn fellBack(e: anytype, rows: usize) void {
+    e.int8.fallbacks += 1;
+    std.log.info("int8 prompt: a chunk of {d} rows took bf16 (a non-finite input or a group's scale overflow); {d} so far", .{ rows, e.int8.fallbacks });
+}
+
+test "a chunk's return to bf16 is counted" {
+    var e: struct { int8: State } = .{ .int8 = .{} };
+    fellBack(&e, max_rows);
+    fellBack(&e, 16);
+    try std.testing.expectEqual(@as(u64, 2), e.int8.fallbacks);
 }

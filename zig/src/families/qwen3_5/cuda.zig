@@ -17,6 +17,7 @@ test {
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
+    _ = prompt_int8;
     _ = native;
     _ = native_moe;
     _ = mtp;
