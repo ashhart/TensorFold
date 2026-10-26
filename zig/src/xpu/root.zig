@@ -25,5 +25,6 @@ test {
     _ = decode;
     _ = exl3;
     _ = @import("exl3_activation.zig");
+    _ = @import("exl3_contract.zig");
     _ = @import("../core/bf16_round.zig");
 }
