@@ -515,7 +515,8 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       dst[16] = f2bf(o[i][1][r] * inv);
     }
 }
-#elif Q27_GQA == 8
+#endif
+#if Q27_GQA == 8
 // Prompt attention over the int8 cache: same partitioning as attn_prompt, int8 DPAS for S and fp16 for O += P*V.
 __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(128, 1, 1)))
 kernel void attn_prompt8(global const ushort *Q, global const char *KC, global const char *VC, global ushort *O,
@@ -672,6 +673,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
 }
 #endif // Q27_GQA == 8
 
+#if Q27_GQA == 8
 // Decode attention for long caches: as attn_decode, but a slice holds `span` keys (a launch argument), so the partials
 
 // stay few at any context. Rows: one stream each (MT, POS), or a window at p0 (row t at position p0 + t). Grid (NS,
@@ -775,3 +777,4 @@ KERNEL(256) void attn_merge_span(global const float *PM, global const float *PL,
   }
   O[((long)t * Q27_AQ + hh) * 256 + e] = f2bf(so / sl);
 }
+#endif
