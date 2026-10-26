@@ -5,6 +5,7 @@ const trail = @import("trail.zig");
 
 /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
 pub fn adopt(e: *Engine, s: *Stream) !void {
+    @import("open.zig").greedyDrafts(e, s);
     try e.live.append(e.gpa, s);
 }
 
