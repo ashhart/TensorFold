@@ -23,6 +23,7 @@ pub const Script = struct {
     audio: []const []const f32 = &.{},
     busy_from: usize = std.math.maxInt(usize),
     busy_redraws: usize = 0,
+    submit_error: ?api.SpeechSubmitError = null,
     busy_replies: usize = 0,
     message: []const u8 = "",
     hold: usize = 0,
@@ -53,6 +54,7 @@ pub const Script = struct {
     }
     fn speech(ctx: *anyopaque, id: api.Id, request: *const api.SpeechRequest, sink: api.Sink) api.SpeechSubmitError!void {
         const e: *Script = @ptrCast(@alignCast(ctx));
+        if (e.submit_error) |err| return err;
         if (e.expected_rows) |expected| e.rows_equal = std.mem.eql(u8, std.mem.sliceAsBytes(expected), std.mem.sliceAsBytes(request.frames));
         e.unconditioned_equal = std.mem.eql(u8, std.mem.sliceAsBytes(e.expected_unconditioned), std.mem.sliceAsBytes(request.unconditioned));
         e.cfg_gamma = request.cfg_gamma;
@@ -138,6 +140,23 @@ pub const Bytes = struct {
     }
 };
 
+pub const LaneProbe = struct {
+    srv: *server.Server = undefined,
+    first_inflight: u32 = undefined,
+    first_bytes: std.ArrayList(u8) = .empty,
+    writes: usize = 0,
+
+    fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
+        const p: *LaneProbe = @ptrCast(@alignCast(ctx));
+        const inflight = p.srv.speech_inflight.load(.acquire);
+        if (p.writes == 0) {
+            p.first_inflight = inflight;
+            p.first_bytes.appendSlice(gpa, bytes) catch return error.Closed;
+        }
+        p.writes += 1;
+    }
+};
+
 /// One request served on its own thread; the test reads the reply from the client end as it arrives.
 pub const Served = struct {
     srv: *server.Server,
@@ -150,17 +169,23 @@ pub const Served = struct {
     read_at: usize = 0,
     eof: bool = false,
     client_open: bool = true,
+    probe: ?*LaneProbe = null,
 
-    fn start(s: *Served, script: *Script, version: []const u8, body: []const u8, write_ms: i32) !void {
+    pub fn start(s: *Served, script: *Script, version: []const u8, body: []const u8, write_ms: i32) !void {
         return s.open(script, .{ .served_name = "m", .model_ids = &.{"m"}, .silence_mid = script.mid_enabled }, "", version, body, write_ms);
     }
 
     /// Serves `body` under `config`, with `headers` (each ending in CRLF) after Host.
     pub fn open(s: *Served, script: *Script, config: server.Config, headers: []const u8, version: []const u8, body: []const u8, write_ms: i32) !void {
+        return s.openProbed(script, config, headers, version, body, write_ms, null);
+    }
+
+    pub fn openProbed(s: *Served, script: *Script, config: server.Config, headers: []const u8, version: []const u8, body: []const u8, write_ms: i32, probe: ?*LaneProbe) !void {
         var pair: [2]std.c.fd_t = undefined;
         if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
-        s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined, .write_ms = write_ms };
+        s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined, .write_ms = write_ms, .probe = probe };
         s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), config, null);
+        if (probe) |p| p.srv = s.srv;
         s.srv.voices = script.voices;
         if (script.output_full) s.srv.speech_inflight.store(s.srv.info.lanes, .release);
         var head: [256]u8 = undefined;
@@ -173,6 +198,7 @@ pub const Served = struct {
     fn serve(s: *Served) void {
         var conn = Conn.init(gpa, s.route_fd, "test") catch return;
         defer conn.deinit();
+        if (s.probe) |p| conn.write_hooks = .{ .ctx = p, .write = LaneProbe.write };
         conn.timeouts = .{ .idle_ms = 2000, .read_ms = 2000, .write_ms = s.write_ms };
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
@@ -196,7 +222,7 @@ pub const Served = struct {
     }
 
     /// Reads more of the reply; false at EOF or after `wait_ms` of silence.
-    fn more(s: *Served, wait_ms: i32) !bool {
+    pub fn more(s: *Served, wait_ms: i32) !bool {
         if (s.eof) return false;
         var fds = [_]std.posix.pollfd{.{ .fd = s.client, .events = std.posix.POLL.IN, .revents = 0 }};
         if (try std.posix.poll(&fds, wait_ms) == 0) return false;
