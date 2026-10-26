@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Requests that arrive together on a new shared prefix no longer each prefill it when prompts fill a chunk a step: a request whose prefix another prompt is still filling waits in the queue for that prompt's cut, then resumes it (#1321, fixing #1310). `TENSORFOLD_PREFIX_WAIT_MS` bounds the wait (60000 by default, 0 turns it off). On a GB10 with eight chat requests arriving together on a new 28k-token system prompt, the last first token comes after 31 s instead of 201 s with Qwen3.8-27B, and after 25 s instead of 146 s with Flash Next FP4. Prefill and decode speeds are unchanged on the GB10 and on an M3 Ultra, and every reply equals its run alone. Thanks to @wojo.
+
 - DeepSeek-V4.1 (experimental native engine): `zig build dsv41-serve` installs runnable `tensorfold-dsv41` and `tf-dsv41` binaries on real CUDA images (#1325), and packs that store the router bias or the DSpark confidence head in F16 load them widened exactly to F32 (#1326). Thanks to @ecohash-co.
 
 - CUDA on unified memory (GB10): the start-up budget counts the free pages the kernel parks on its per-CPU lists, which MemAvailable leaves out, so a start sized right after another process freed memory admits what actually fits (#1323, fixing #1311). Measured on a GB10 right after a 30B model freed its memory: about 690 MiB parked, still about 180 MiB 30 s later. Thanks to @wojo.
