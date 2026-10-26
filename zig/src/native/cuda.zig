@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
+const glm = @import("glm_cuda");
 const family_memory = @import("cuda_family_memory.zig");
 const pool = family_memory.pool;
 const family_options = @import("cuda_options.zig");
@@ -399,7 +400,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         const store = try gpa.create(pc.Store);
         errdefer gpa.destroy(store);
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
-        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
+        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (F == glm.native) &@import("cuda_glm_disk.zig").image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
         var rules = snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded));
         if (o.tp != 1) rules.warm = .off; // no warm passes across ranks: the cache keeps as without warm turns
@@ -413,7 +414,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         try kv_pages.store(F, store, loaded, kept); // its snapshot slots, before a disk probe takes one
         h.store = store;
         if (o.learn_conversations) if (o.learn) |root| {
-            if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
+            if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store) else if (F == glm.native) try @import("cuda_glm_disk.zig").attach(a, io, &g.ctx, o, root, kernels, loaded, store);
             if (comptime cuda_disk.keptDisk(F)) |K| try cuda_disk.attachKept(K, F.model_type, a, io, &g.ctx, o, root, kernels, loaded, store);
         };
     }
@@ -556,6 +557,7 @@ test {
     _ = kv_pages;
     _ = drafted;
     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
+    _ = @import("cuda_glm_disk.zig");
     _ = @import("cuda_disk_identity_test.zig");
     _ = cuda_witness;
     _ = @import("cuda_pool_after_warmup.zig");
