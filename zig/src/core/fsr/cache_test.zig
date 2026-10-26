@@ -66,3 +66,17 @@ test "FSR correct and wrong forecasts use safe capacity and demand joins its own
     for ([_]usize{ 3, 4, 5 }) |key| try std.testing.expect(c.map[key] >= 0);
     c.release();
 }
+
+test "FSR publishes into the borrowed GPU map and never frees its owner" {
+    var map: [8]i32 = undefined;
+    var c = try Cache.initMap(std.testing.allocator, &map, 2);
+    try c.protect(&.{5});
+    const ticket = (try c.reserve(5, false)).?;
+    try std.testing.expectEqual(absent, map[5]);
+    try c.publish(ticket);
+    try std.testing.expectEqual(@as(i32, @intCast(ticket.slot)), map[5]);
+    c.release();
+    c.deinit();
+    map[0] = 17;
+    try std.testing.expectEqual(@as(i32, 17), map[0]);
+}

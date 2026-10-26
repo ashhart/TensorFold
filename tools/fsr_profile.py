@@ -51,6 +51,9 @@ def analyze(lines, budgets, ssd_bytes_per_second=None):
                 raise TraceError("duplicate window")
             seen.add(wid)
             current = {"id": wid, "mode": event["mode"], "routes": []}
+            for key in ("rows", "streams"):
+                if key in event:
+                    current[key] = integer(event[key], key, 1)
         elif kind == "route":
             if current is None or event.get("window") != current["id"]:
                 raise TraceError("route outside its window")
@@ -86,7 +89,8 @@ def analyze(lines, budgets, ssd_bytes_per_second=None):
             active.update((layer, eid) for eid in ids)
             max_union = max(max_union, len(ids))
         growth.append({"window": window["id"], "mode": window["mode"],
-                       "experts": len(active), "bytes": len(active) * stride})
+                       "experts": len(active), "bytes": len(active) * stride,
+                       **{key: window[key] for key in ("rows", "streams") if key in window}})
     frontier = []
     for budget in budgets:
         budget = integer(budget, "budget bytes", 1)

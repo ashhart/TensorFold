@@ -21,5 +21,5 @@ pub fn patch(a: std.mem.Allocator, original: []const u8, kind: Kind) ![]const u8
     } else {
         text = try once(a, text, "(DW, DS, DB, size_t(PICK[r * TOPK + k]) * D + d0, x, lane, out)", "(DW + size_t(FSR_MAP[PICK[r * TOPK + k]]) * FSR_STRIDES[6], DS + size_t(FSR_MAP[PICK[r * TOPK + k]]) * FSR_STRIDES[7], DB + size_t(FSR_MAP[PICK[r * TOPK + k]]) * FSR_STRIDES[8], size_t(d0), x, lane, out)");
     }
-    return text;
+    return once(a, text, "[[kernel]]", "[[max_total_threads_per_threadgroup(64)]] [[kernel]]");
 }

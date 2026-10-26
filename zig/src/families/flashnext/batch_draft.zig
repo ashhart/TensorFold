@@ -236,8 +236,7 @@ fn tail(m: *fz.Model, x: *Scratch, g: []const Row, md1: Buf, p0: usize, j: usize
     try m.mtpLane(h.out, "mtp:lane_qmm_bytes_grouped@mtp.att.o", t.aout, md1, n, 6144, t.branch);
     try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
     try m.mtpProject(h.h[0], h.mhc, "mtp:qa_hc_down@mtp.mhc", "mtp:qa_hc_up@mtp.mhc", t.inj_m, md1);
-    try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, md1, t.lg, n);
-    if (h.xw) |w| try variants.experts(r, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown, w) else try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown);
+    try experts(m, md1, n);
     const out = x.chain.at(p0 * WIDE * 2);
     try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
     try m.mtpProject(out, h.mix, "mtp:qa_hc_down@mtp.mix", "mtp:qa_hc_up@mtp.mix", t.inj_a, md1);
@@ -265,4 +264,14 @@ fn tail(m: *fz.Model, x: *Scratch, g: []const Row, md1: Buf, p0: usize, j: usize
         r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
     }
     if (!r.serial) r.enc.barrier();
+}
+
+/// The packed tail admits every routed row before reading the MTP expert slots.
+pub fn experts(m: *fz.Model, md1: Buf, n: usize) !void {
+    const r = m.r;
+    const t = &m.t;
+    const h = &m.mtp;
+    try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, md1, t.lg, n);
+    if (r.fsr) |stream| try stream.prepare(r, fz.LAYERS, t.lg, md1, t.pick, t.wts, n, t.mixed, null, @import("fsr_runtime.zig").guarded(h.xw));
+    if (h.xw) |w| try variants.experts(r, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown, w) else try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown);
 }

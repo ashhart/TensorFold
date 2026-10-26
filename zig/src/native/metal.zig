@@ -17,6 +17,7 @@ const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
 const nemo_disk = @import("nemotron_disk.zig");
+const fsr_options = @import("fsr_options.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib" };
@@ -157,6 +158,7 @@ const Host = struct {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (fsr_options.refuse(o, problem)) return null;
     if (o.prompt_int8) {
         problem.* = prompt_int8_refusal;
         return null;
@@ -386,6 +388,7 @@ fn gibBytes(g: f64) u64 {
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
 pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (fsr_options.refuse(o, problem)) return null;
     const dump: ?[]const u8 = if (platform.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
@@ -397,7 +400,7 @@ pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, prob
         return null;
     }
     const paired = o.speed_up != null or std.c.getenv("TF_FLASHNEXT_TP") != null;
-    const choice = try fz.window_config.plan(window, native, margin, paired);
+    const choice = fsr_options.apply(o, try fz.window_config.plan(window, native, margin, paired));
     if (choice.refusal) |text| {
         problem.* = text;
         return null;

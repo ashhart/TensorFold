@@ -190,7 +190,8 @@ fn copy(e: *Engine, buf: mtl.Buffer, at: usize, to_buf: bool, passed: ?Engine.Pa
     var list: [MAX_PARTS]Part = undefined;
     const n = parts(e.m, at, passed, &list);
     const cb = r.queue.commandBuffer();
-    r.enc = cb.compute(.serial);
+    r.begin(cb, .serial);
+    errdefer if (r.fsr != null) r.abort();
     var off: usize = 0;
     for (list[0..n]) |p| {
         if (p.len == 0) continue;

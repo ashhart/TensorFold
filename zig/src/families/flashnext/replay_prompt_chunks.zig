@@ -31,6 +31,7 @@ const bytesOf = Prompt.bytesOf;
 const Hooks = Prompt.Hooks;
 
 pub fn classes(p: *Prompt, m: *Model, rows: usize) !void {
+    if (p.r.fsr != null) return error.FsrProfileNeedsActualRoutes;
     const r = p.r;
     const b = &p.b;
     const L0 = &m.layers[0];
@@ -39,7 +40,8 @@ pub fn classes(p: *Prompt, m: *Model, rows: usize) !void {
     const names = [_][]const u8{ "router", "top-k+offsets+sort", "row gather+scatter", "expert gate+up gathers", "expert act", "expert down gather", "shared expert", "hyper-connection", "DeltaNet in+out projections", "DeltaNet pre", "DeltaNet scan", "DeltaNet post", "attention proj+o", "attention (tensor units)", "hc norms (3)" };
     for (names, 0..) |name, which| {
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        r.begin(cb, if (r.serial) .serial else .concurrent);
+        errdefer if (r.fsr != null) r.abort();
         for (0..48) |_| {
             switch (which) {
                 0 => {
@@ -187,7 +189,7 @@ pub fn chunkMarked(ps: []const *Prompt, m: *Model, gpa: std.mem.Allocator, token
     const cin_old = m.ple.cin.b.contents()[m.ple.cin.off..];
     @memcpy(ps[0].b.cin.b.contents()[0 .. PLE_TAIL * WIDE * 2], cin_old[0 .. PLE_TAIL * WIDE * 2]);
     var hooks: Hooks = .{ .m = m, .segs = segs[0..N] };
-    m.gpu_seconds += try segments.run(r.device, queues[0..N], LAYERS, if (r.serial) .serial else .concurrent, &hooks);
+    if (r.fsr != null) try @import("fsr_prompt.zig").run(m, segs[0..N]) else m.gpu_seconds += try segments.run(r.device, queues[0..N], LAYERS, if (r.serial) .serial else .concurrent, &hooks);
     if (ps[0].wide) |wd| try wd.check(); // a weight the load left out of the width table fails the pass
     const sl = &segs[N - 1];
     m.state = if (N % 2 == 0) a else 1 - a; // each segment flipped it once
@@ -257,7 +259,8 @@ pub fn chunkPair(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const 
         const rows1 = n - rows0;
         const pos1 = m.pos + rows0;
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        r.begin(cb, if (r.serial) .serial else .concurrent);
+        errdefer if (r.fsr != null) r.abort();
         for (0..LAYERS) |i| {
             const L = &m.layers[i];
             const slot = tpm.layerSlot(i);
@@ -303,7 +306,8 @@ pub fn pairMtp(p: *Prompt, m: *Model, tp: *Tp2, mine: [2]usize, theirs: [2]usize
     if (theirs[1] == 0) return;
     const w = tp.window();
     const cb = r.queue.commandBuffer();
-    r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+    r.begin(cb, if (r.serial) .serial else .concurrent);
+    errdefer if (r.fsr != null) r.abort();
     for (0..2) |hd| {
         p.copyWords(.{ .b = w, .off = tpm.MTP + hd * tpm.KV_HEAD }, .{ .b = h.keys.b, .off = h.keys.off + (hd * m.cap + theirs[0]) * 512 }, theirs[1] * 128);
         p.copyWords(.{ .b = w, .off = tpm.MTP + (2 + hd) * tpm.KV_HEAD }, .{ .b = h.vals.b, .off = h.vals.off + (hd * m.cap + theirs[0]) * 512 }, theirs[1] * 128);
@@ -326,7 +330,8 @@ pub fn mtpKeys(p: *Prompt, m: *Model, start: usize, nexts: []const u32, streams:
     kvm[0], kvm[1], kvm[2] = .{ @intCast(start), @intCast(m.cap), @intCast(n) };
     b.n_add.b.slice(u32, 1)[0] = @intCast(n * WIDE);
     const cb = r.queue.commandBuffer();
-    r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+    r.begin(cb, if (r.serial) .serial else .concurrent);
+    errdefer if (r.fsr != null) r.abort();
     var ce: [2]variants.Const = undefined;
     try r.callRows("mtp:qa_embed_rows@embed", n, &.{ b.mids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.emb}, try variants.oneRow(r, "mtp:qa_embed_rows@embed", variants.width(&ce, "BITS", "GS", m.embed_w)));
     try r.callRows("mtp:q4_rms_rows@mtp.enorm", n, &.{ b.emb, h.enorm, t.eps }, &.{b.branch}, null);

@@ -118,8 +118,9 @@ pub const flags = [_]Flag{
     .{ .name = "--prefill-pass" },
     .{ .name = "--pass-cache-gib" },
     .{ .name = "--mlx-cache-gib" },
-    .{ .name = "--ssd-experts" },
-    .{ .name = "--ple-on-ssd", .kind = .store_true },
+    .{ .name = "--ssd-experts", .native = builtin.os.tag == .macos },
+    .{ .name = "--ple-on-ssd", .kind = .store_true, .native = builtin.os.tag == .macos },
+    .{ .name = "--fsr-route-trace", .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
     .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
@@ -180,6 +181,9 @@ pub const Args = struct {
     redraw: @import("speech_redraw.zig").Policy = .{},
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
+    ssd_experts_gib: ?f64 = null,
+    ple_on_ssd: bool = false,
+    fsr_trace: ?[]const u8 = null,
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
     learn_dir: ?[]const u8 = null,
@@ -375,6 +379,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (try recallFlag(a, out, name, v, u)) return;
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
+    if (@import("cli_fsr.zig").apply(out, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
     if (is(name, "--voices")) {
         out.voices = v;
         return;
@@ -547,6 +552,9 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .speed_up = args.speed_up,
         .prompt_cache_gib = args.prompt_cache_gib,
         .prompt_cache_over_cap = args.prompt_cache_over_cap,
+        .ssd_experts_gib = args.ssd_experts_gib,
+        .ple_on_ssd = args.ple_on_ssd,
+        .fsr_trace = args.fsr_trace,
         .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else if (spills(args)) try api.prompt_cache.rows.spillRoot(a) else null,
         .learn_gib = if (spills(args)) @min(args.spill_gib.?, if (args.learn) args.learn_gib else std.math.inf(f64)) else args.learn_gib,
         .learn_min_free_gib = args.learn_min_free_gib,

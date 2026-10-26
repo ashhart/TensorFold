@@ -4,6 +4,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const prompt_w = fz.prompt_w;
+const variants = fz.variants;
 const frags = fz.frags;
 const D = fz.D;
 const WIDE = fz.WIDE;
@@ -31,6 +32,7 @@ pub const Prompt = struct {
     last: Buf = undefined, // the last chunk's streams before the final mixer (each segment's own)
     gu32: mtl.Pipeline,
     wide: ?*prompt_w.Wide = null, // weights at other widths than 6/32 (prompt_w.zig)
+    fsr_width: variants.Experts = .{ .gu = .{ 6, 32, 6, 32 }, .down = .{ 6, 32, 6, 32 } },
     fused_gu: bool = true, // the experts' gate and up products and activation in one pass (same bits)
     expert_bm: usize = 0, // expert tile rows (0: by the average rows an expert)
     mtp_w: ?[3][3]Buf = null, // the MTP head's attention projection, fce, fch in MLX layout (pack_mtp_mlx.safetensors)
@@ -59,6 +61,7 @@ pub const Prompt = struct {
     pub fn init(r: *Run, dir: []const u8, header: []const u8) !Prompt {
         var p: Prompt = undefined; // every field is set below: `undefined` skips the declared defaults
         p.r = r;
+        p.fsr_width = .{ .gu = .{ 6, 32, 6, 32 }, .down = .{ 6, 32, 6, 32 } };
         p.wide = null;
         p.skip = 0;
         p.sel = null;
@@ -71,7 +74,8 @@ pub const Prompt = struct {
         const alib = try r.ownResource(try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, ks.flashnext_attn), mtl.CompileOptions.mlx()));
         p.sattn = try r.ownResource(try mtl.Pipeline.init(r.device, alib, "tf_sattn_nax", false));
         p.scores_nax = try r.ownResource(try mtl.Pipeline.init(r.device, alib, "tf_idx_scores_nax", false));
-        const qlib = try r.ownResource(try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, ks.flashnext_qmm6), mtl.CompileOptions.mlx()));
+        const qtext = if (r.window.ssd_experts != null) try @import("fsr_prompt_source.zig").patch(r.arena, ks.flashnext_qmm6, false) else ks.flashnext_qmm6;
+        const qlib = try r.ownResource(try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, qtext), mtl.CompileOptions.mlx()));
         p.qmm6 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax", false));
         p.gather64 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_64", false));
         p.gather32 = try r.ownResource(try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_32", false));
@@ -184,6 +188,7 @@ pub const Prompt = struct {
         if (p.skip & 1 != 0) return;
         // tiles of 32, 64 or 128 rows as experts average 32 and 128 rows (128: FZ prompt chunks of thousands of rows)
         const bm: usize = if (p.expert_bm != 0) p.expert_bm else if (p.tall_tiles and pairs >= 512 * 128) 128 else if (pairs >= 512 * 32) 64 else 32;
+        if (p.r.fsr) |stream| if (stream.pool != null) return @import("fsr_gather.zig").gather(p, stream, bm, x, w, k, n, pairs, y);
         if (p.wide) |wd| if (wd.wide(w[0])) |ww| return prompt_w.gather(p, wd.of(ww.bits, ww.group), bm, x, w, k, n, pairs, y);
         p.bind(if (bm == 128) p.gather128 else if (bm == 64) p.gather64 else p.gather32, &.{ x, w[0], w[1], w[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
@@ -197,6 +202,7 @@ pub const Prompt = struct {
     pub fn gatherGU(p: *Prompt, x: Buf, wg: []const Buf, wu: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
         if (p.skip & 1 != 0) return;
         const bm: usize = if (p.expert_bm == 32 or p.expert_bm == 64) p.expert_bm else if (pairs >= 512 * 32) 64 else 32;
+        if (p.r.fsr) |stream| if (stream.pool != null) return @import("fsr_gather.zig").gate(p, stream, bm, x, wg, wu, k, n, pairs, y);
         if (p.wide) |wd| if (wd.wide(wg[0])) |ww| return prompt_w.gatherGU(p, wd.of(ww.bits, ww.group), bm, x, wg, wu, k, n, pairs, y);
         p.bind(if (bm == 64) p.gu64 else p.gu32, &.{ x, wg[0], wg[1], wg[2], wu[0], wu[1], wu[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
@@ -243,7 +249,8 @@ pub const Prompt = struct {
     }
 
     /// Routed experts by expert over the chunk's pairs, the shared expert dense; outputs in the combine's layout.
-    pub fn moe(p: *Prompt, L: *Layer, rows: usize) void {
+    pub fn moe(p: *Prompt, L: *Layer, rows: usize, layer: usize) !void {
+        p.fsr_width = L.xw orelse .{ .gu = .{ 6, 32, 6, 32 }, .down = .{ 6, 32, 6, 32 } };
         const b = &p.b;
         const r = p.r;
         const pairs = rows * 10;
@@ -272,6 +279,7 @@ pub const Prompt = struct {
             r.enc.dispatchThreads(mtl.Size.of(pairs, 1, 1), mtl.Size.of(256, 1, 1));
             p.barrier();
         }
+        if (r.fsr) |stream| try stream.prompt(r, layer, b.pick, rows);
         if (p.skip & 256 == 0) {
             p.bind(p.pl[7], &.{ b.mixed, b.row_of, b.xs });
             r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));

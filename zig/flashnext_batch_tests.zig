@@ -54,3 +54,7 @@ test {
 test {
     _ = @import("src/families/flashnext/vis_prompt.zig");
 }
+
+test {
+    _ = @import("flashnext_fsr_tests.zig");
+}

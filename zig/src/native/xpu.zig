@@ -162,6 +162,10 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (o.fsrRefusal("xpu")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "qwen3_5")) {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) and Nemotron-H (nemotron_h, MLX 4/64), not {s}", .{o.model_type});

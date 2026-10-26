@@ -131,7 +131,8 @@ pub fn compileGlue(r: *Run) !void {
 pub fn compileXnew(r: *Run, text: []const u8) !void {
     const cut = std.mem.indexOf(u8, text, "[[kernel]]") orelse return error.NoKernel;
     const define: []const u8 = if (r.xpack) "#define FZ_PACKED 1\n" else "#define FZ_PACKED 0\n";
-    const full = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut], xnew_source });
+    const expert_source = if (r.window.ssd_experts != null) try @import("fsr_xnew_source.zig").patch(r.arena, xnew_source) else xnew_source;
+    const full = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut], expert_source });
     r.xnew_header = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut] });
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, full, mtl.CompileOptions.mlx()));
     r.xgu_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_xgu", false));

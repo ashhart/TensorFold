@@ -27,7 +27,8 @@ pub fn mtpRun(m: *Model, nexts: []const u32, streams: Buf) !u32 {
     const ids = h.slots[0].ids8.b.slice(u32, MAXR);
     for (0..MAXR) |i| ids[i] = if (i < rows) nexts[i] else 0;
     const cb = r.queue.commandBuffer();
-    r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+    r.begin(cb, if (r.serial) .serial else .concurrent);
+    errdefer if (r.fsr != null) r.abort();
     try m.mtpEncode(0, rows, h.slots[0].ids8, streams, h.pick);
     try m.finish(cb);
     h.pos += rows;
@@ -140,6 +141,7 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
     try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
     try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, md1);
     try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, md1, t.lg, 1);
+    if (r.fsr) |stream| try stream.prepare(r, fz.LAYERS, t.lg, md1, t.pick, t.wts, 1, t.mixed, null, @import("fsr_runtime.zig").guarded(h.xw));
     if (h.xw) |w| try variants.experts(r, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown, w) else try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown);
     try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
     h.last = h.h[1];

@@ -16,26 +16,40 @@ pub const Cache = struct {
     map: []i32,
     slots: []Slot,
     demand: []bool,
+    current: []usize,
+    current_count: usize = 0,
     hand: usize = 0,
+    owns_map: bool = true,
 
     pub fn init(a: std.mem.Allocator, keys: usize, capacity: usize) !Cache {
         if (keys == 0 or capacity == 0 or capacity > std.math.maxInt(i32)) return error.InvalidPoolCapacity;
         const map = try a.alloc(i32, keys);
         errdefer a.free(map);
-        const demand = try a.alloc(bool, keys);
+        var out = try initMap(a, map, capacity);
+        out.owns_map = true;
+        return out;
+    }
+
+    /// Borrow a persistent shared GPU map; the buffer owner outlives the cache and all submitted consumers.
+    pub fn initMap(a: std.mem.Allocator, map: []i32, capacity: usize) !Cache {
+        if (map.len == 0 or capacity == 0 or capacity > std.math.maxInt(i32)) return error.InvalidPoolCapacity;
+        const demand = try a.alloc(bool, map.len);
         errdefer a.free(demand);
         const slots = try a.alloc(Slot, capacity);
+        errdefer a.free(slots);
+        const current = try a.alloc(usize, capacity);
         @memset(map, absent);
         @memset(demand, false);
         @memset(slots, .{});
-        return .{ .a = a, .map = map, .slots = slots, .demand = demand };
+        return .{ .a = a, .map = map, .slots = slots, .demand = demand, .current = current, .owns_map = false };
     }
 
     pub fn deinit(c: *Cache) void {
         for (c.slots) |s| std.debug.assert(!s.reading and !s.leased);
-        c.a.free(c.map);
+        if (c.owns_map) c.a.free(c.map);
         c.a.free(c.demand);
         c.a.free(c.slots);
+        c.a.free(c.current);
     }
 
     pub fn resident(c: *Cache, key: usize) !?usize {
@@ -50,28 +64,37 @@ pub const Cache = struct {
 
     /// Protect every hit before choosing any victim, including hits late in the incoming union.
     pub fn protect(c: *Cache, keys: []const usize) !void {
-        for (c.demand) |held| if (held) return error.DemandStillLeased;
+        if (c.current_count != 0) return error.DemandStillLeased;
         for (keys) |key| if (key >= c.map.len) return error.InvalidExpert;
-        @memset(c.demand, false);
-        var unique: usize = 0;
         for (keys) |key| if (!c.demand[key]) {
+            if (c.current_count == c.current.len) {
+                c.release();
+                return error.ActiveUnionExceedsPool;
+            }
             c.demand[key] = true;
-            unique += 1;
+            c.current[c.current_count] = key;
+            c.current_count += 1;
         };
-        if (unique > c.slots.len) {
-            @memset(c.demand, false);
-            return error.ActiveUnionExceedsPool;
-        }
-        for (c.slots) |*s| if (s.key) |key| if (c.demand[key]) {
+        for (c.current[0..c.current_count]) |key| if (c.slotFor(key)) |s| {
             s.leased = true;
             s.referenced = true;
         };
     }
 
-    /// Call only after the GPU consumers of this demand have completed, including an error/cancel drain.
+    fn slotFor(c: *Cache, key: usize) ?*Slot {
+        const at = c.map[key];
+        if (at >= 0) return &c.slots[@intCast(at)];
+        if (c.pending(key)) |ticket_| return &c.slots[ticket_.slot];
+        return null;
+    }
+
+    /// Drain consumers first; warm demand touches only its own keys, rather than scanning the whole pool.
     pub fn release(c: *Cache) void {
-        @memset(c.demand, false);
-        for (c.slots) |*s| s.leased = false;
+        for (c.current[0..c.current_count]) |key| {
+            c.demand[key] = false;
+            if (c.slotFor(key)) |slot| slot.leased = false;
+        }
+        c.current_count = 0;
     }
 
     pub fn pending(c: *const Cache, key: usize) ?Ticket {

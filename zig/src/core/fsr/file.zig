@@ -11,9 +11,14 @@ pub const File = struct {
         const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
         if (fd < 0) return error.OpenFailed;
         errdefer _ = platform.c.close(fd);
+        return borrow(fd);
+    }
+
+    /// The checkpoint owner closes borrowed descriptors only after every arena reader has joined.
+    pub fn borrow(fd: platform.c.fd_t) !File {
+        if (builtin.os.tag != .macos) return error.FsrNeedsMacOS;
         try bypass(platform.c, fd);
-        const size = try sizeOf(fd);
-        return .{ .fd = fd, .size = size };
+        return .{ .fd = fd, .size = try sizeOf(fd) };
     }
 
     pub fn close(f: File) void {

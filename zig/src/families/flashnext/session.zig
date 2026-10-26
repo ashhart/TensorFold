@@ -140,9 +140,10 @@ pub const Session = struct {
         h.pooled_n = @min(h.pooled_n, h.pos / 4);
         @memcpy(h.slots[0].ids8.b.slice(u32, follow.len), follow);
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        r.begin(cb, if (r.serial) .serial else .concurrent);
+        errdefer if (r.fsr != null) r.abort();
         var ended = false;
-        errdefer if (!ended) r.enc.end();
+        errdefer if (!ended) r.abort();
         for (0..depth) |i| {
             r.sel = s.draft_select[i];
             const rows = if (i == 0) follow.len else 1;

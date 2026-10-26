@@ -498,6 +498,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     };
     errdefer if (h.learned) |*m| m.deinit();
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
+    if (eng.r.fsr) |stream| stream.trace_enabled = true;
     try h.start();
     return h;
 }

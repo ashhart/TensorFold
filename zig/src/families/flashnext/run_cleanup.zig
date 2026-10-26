@@ -8,10 +8,19 @@ pub fn drop(r: anytype) void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     if (r.tp) |t| t.stopService();
+    if (comptime @hasField(@TypeOf(r.*), "fsr")) {
+        if (r.fsr) |s| if (s.commands.active != null or s.commands.pending != null) s.commands.abort(r.enc);
+    }
     r.objects.drain();
     const cb = r.queue.commandBuffer();
     cb.commit();
     cb.wait();
+    if (comptime @hasField(@TypeOf(r.*), "fsr")) {
+        if (r.fsr) |s| {
+            s.deinit();
+            r.fsr = null;
+        }
+    }
     while (r.held.items.len > 0) {
         const b = r.held.items[r.held.items.len - 1];
         r.held.items.len -= 1;

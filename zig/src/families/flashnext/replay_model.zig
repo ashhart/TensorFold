@@ -168,22 +168,24 @@ pub const Model = struct {
         for (0..MAXR) |i| ids[i] = if (i < rows) tokens[i] else 0;
         m.pleIds(tokens);
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        r.begin(cb, if (r.serial) .serial else .concurrent);
+        errdefer if (r.fsr != null) r.abort();
         try m.windowEncode(rows, t.ids8);
         try m.finish(cb);
         @memcpy(picks[0..rows], t.picks.b.slice(u32, rows));
     }
 
     pub fn finish(m: *Model, cb: mtl.CommandBuffer) !void {
-        m.r.enc.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| {
+        const final = try m.r.finishEncoding(cb);
+        final.commit();
+        final.wait();
+        if (m.r.fsr) |stream| m.gpu_seconds += try stream.commands.completed();
+        if (final.failure()) |msg| {
             std.log.err("command buffer failed: {s}", .{msg});
             return error.GpuFailed;
         }
         if (m.r.tp) |tp| if (tp.failed.load(.acquire)) return error.TpLinkFailed;
-        m.gpu_seconds += cb.gpuSeconds();
+        m.gpu_seconds += final.gpuSeconds();
     }
 
     /// The n-gram ids of the window in `ids` hashed on the GPU (the window's drafts never reach the host).
@@ -240,6 +242,9 @@ pub const Model = struct {
                 tabs[0] = t.ple_ids;
                 tabs[1] = p.starts;
                 for (0..3 * GROUPS) |j| tabs[2 + j] = p.tables[j];
+                if (r.fsr) |stream| if (try stream.tables(r, t.ple_ids, rows)) |staged| {
+                    tabs = staged;
+                };
                 var cp: [2]variants.Const = undefined;
                 try variants.callAs(r, "qa_ple_lookup@ple", rows, &tabs, &.{t.emb}, variants.width(&cp, "BITS", "GS", p.w));
                 if (p.scale) |sc| sc.apply(r.enc, t.emb, rows * D, r.serial);
@@ -341,9 +346,11 @@ pub const Model = struct {
             r.touch(L.router);
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
             try r.router("q4_router_float@moe", t.mixed, L.router, t.rows, t.lg, rows);
+            if (r.fsr) |stream| try stream.prepare(r, i, t.lg, t.rows, t.pick, t.wts, rows, t.mixed, if (i + 1 < LAYERS) m.layers[i + 1].router else null, @import("fsr_runtime.zig").guarded(L.xw));
             r.tp_layer = true;
             const by_expert = if (r.gx) |g| rows >= g.min_rows and r.tp == null and L.xw != null and gx_mod.applies(L.xw.?) else false;
             if (by_expert) r.gx.?.encode(r, t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, rows) else if (L.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+            if (r.fsr) |stream| try stream.after(r);
             r.tp_layer = false;
             if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);

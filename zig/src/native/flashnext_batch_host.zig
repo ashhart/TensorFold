@@ -172,6 +172,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     var line: [640]u8 = undefined;
     var startup: std.Io.Writer = .fixed(&line);
     try budgets.startup(&startup, slots, w.buffered(), sizing, h.back.serial_drafts, h.host.lone != null);
+    if (eng.r.fsr) |stream| stream.trace_enabled = true;
     try h.host.start();
     std.log.info("{s}", .{startup.buffered()});
     return .{ .engine = h.host.engine(), .close = close, .ctx = h };

@@ -402,7 +402,8 @@ pub const Backend = struct {
         // The copies read the kept round's rows: encode them before outputs() repoints cs[1] at this round's.
         if (fold) batch_settle.encode(b, cb, b.fence.?);
         for (segs[0..windows.len], 0..) |g, i| outputs(b, g.s, plan.starts[i]);
-        b.e.r.enc = cb.compute(if (b.overlap) .concurrent else .serial);
+        b.e.r.begin(cb, if (b.overlap) .concurrent else .serial);
+        errdefer if (b.e.r.fsr != null) b.e.r.abort();
         if (fold) b.fence.?.waitCompute(b.e.r.enc);
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);
         const was = b.e.r.serial;
@@ -519,10 +520,11 @@ pub const Backend = struct {
             }
         }
         const cb = b.e.r.queue.commandBuffer();
-        b.e.r.enc = cb.compute(if (b.e.r.serial) .serial else .concurrent);
+        b.e.r.begin(cb, if (b.e.r.serial) .serial else .concurrent);
+        errdefer if (b.e.r.fsr != null) b.e.r.abort();
         const n = requests.len;
         const packed_ = batch_draft.encode(b, ss[0..n], follows[0..n], hiddens[0..n], depths[0..n], draws[0..n], lands[0..n]) catch |err| {
-            b.e.r.enc.end();
+            if (b.e.r.fsr == null) b.e.r.enc.end();
             return err;
         };
         if (!packed_) for (requests, 0..) |r, k| {
@@ -530,7 +532,7 @@ pub const Backend = struct {
             const old = try b.bind(s);
             defer old.restore(b.e);
             s.encodeDrafts(follows[k], hiddens[k], r.depth) catch |err| {
-                b.e.r.enc.end();
+                if (b.e.r.fsr == null) b.e.r.enc.end();
                 return err;
             };
         };

@@ -37,6 +37,7 @@ pub const Run = struct {
     fused_xsum: bool = false,
     serial: bool = false,
     enc: mtl.ComputeEncoder = undefined,
+    fsr: ?*@import("fsr_runtime.zig").Runtime = null,
     rotary_pipe: ?mtl.Pipeline = null,
     rotary_enabled: bool = false,
     rotary_buffer: ?mtl.Buffer = null,
@@ -129,6 +130,25 @@ pub const Run = struct {
     maps: std.ArrayList(mtl.MappedFile) = .empty,
     rows_cleanup: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
     closed: bool = false,
+
+    pub fn begin(r: *Run, cb: mtl.CommandBuffer, mode: mtl.DispatchType) void {
+        r.enc = if (r.fsr) |s| s.commands.begin(cb, mode) else cb.compute(mode);
+    }
+
+    pub fn finishEncoding(r: *Run, cb: mtl.CommandBuffer) !mtl.CommandBuffer {
+        if (r.fsr) |s| return s.commands.end(r.enc);
+        r.enc.end();
+        return cb;
+    }
+
+    pub fn abort(r: *Run) void {
+        if (r.fsr) |s| {
+            s.commands.abort(r.enc);
+            const drain = r.queue.commandBuffer();
+            drain.commit();
+            drain.wait();
+        } else r.enc.end();
+    }
 
     pub const deinit = @import("run_cleanup.zig").drop;
 
@@ -412,12 +432,14 @@ pub const Run = struct {
         const pairs = (rows_own[1] - rows_own[0]) * 11;
         if (r.tp != null and r.tp_layer and r.xsx) return error.TpNeedsPlainExperts;
         r.enc.setPipeline(if (r.xsx) r.xgu_sx_pipe else r.xgu_pipe);
+        if (r.fsr) |stream| if (stream.pool != null) stream.bind(r, 18, 19, 0);
         const gu = [_]Buf{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], act, pick, wts };
         for (gu, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.setBytes(std.mem.asBytes(&own), 17);
         r.enc.dispatchThreads(mtl.Size.of(128, 80, pairs), mtl.Size.of(128, 1, 1));
         if (!r.serial) r.enc.barrier();
         r.enc.setPipeline(if (r.xsx) r.xdown_sx_pipe else r.xdown_pipe);
+        if (r.fsr) |stream| if (stream.pool != null) stream.bind(r, 11, 12, 0);
         const dn = [_]Buf{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf, y };
         for (dn, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.setBytes(std.mem.asBytes(&own), 10);

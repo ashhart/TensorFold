@@ -34,6 +34,18 @@ class LocalityTests(unittest.TestCase):
         self.assertNotIn("misses", refused)
         self.assertEqual(pressure["storage_seconds_lower_bound"], 12)
 
+    def test_native_batch_rows_and_streams_remain_visible(self):
+        events = fixture()
+        events[1].update(rows=8, streams=3)
+        result = run(events)
+        self.assertEqual(result["growth"][0]["rows"], 8)
+        self.assertEqual(result["growth"][0]["streams"], 3)
+        for key, bad in (("rows", True), ("streams", 0)):
+            events = fixture()
+            events[1][key] = bad
+            with self.subTest(key=key), self.assertRaises(TraceError):
+                run(events)
+
     def test_truncation_missing_layer_duplicate_and_false_close_refuse(self):
         cases = [fixture()[:-1], fixture()[0:1] + fixture()[2:],
                  fixture()[:3] + fixture()[2:3] + fixture()[3:],

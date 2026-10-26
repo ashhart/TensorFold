@@ -45,6 +45,8 @@ pub fn check(verify: Verify, keep: Keep) !void {
     const a = arena.allocator();
     mtl.allocator = a;
     var r: fz.Run = .{ .arena = a, .device = .{}, .queue = .{}, .serial = true, .xnew = true, .fused_xsum = true, .skip = 0xff & ~@as(u32, (1 << 2) | (1 << 6)), .argmax_pipe = .{ .name = "argmax" } };
+    const fsr = try @import("fsr_runtime.zig").Runtime.init(&r, "mtp", null, 42);
+    defer fsr.deinit();
     try site(&r, "qa_embed_rows@embed");
     try site(&r, "qa_ple_lookup@ple");
     try site(&r, "q4_ple_gate@ple");
@@ -100,6 +102,7 @@ pub fn check(verify: Verify, keep: Keep) !void {
         m.ple.w = m.embed_w;
         m.ple.scale = .{ .pipe = .{ .name = "scale" }, .value = 0.5 };
         for (&m.layers) |*l| l.xw = if (w[0] == 6) null else .{ .gu = w, .down = w };
+        r.fsr = null;
         mtl.expected = w;
         mtl.wrong = 0;
         mtl.calls = @splat(0);
@@ -145,6 +148,8 @@ pub fn check(verify: Verify, keep: Keep) !void {
                     fn draft(_: *anyopaque, _: []const be.DraftRequest) anyerror!void {}
                     fn release(_: *anyopaque, _: *lanes.Stream) void {}
                 };
+                r.fsr = if (mode >= 2) fsr else null;
+                b.overlap = mode % 2 != 0;
                 var bridge: Bridge = .{ .back = &b, .verify_ = verify, .keep_fn = keep };
                 var core = lanes.Engine.init(a, &cfg, .{ .ptr = &bridge, .vtable = &.{ .prefill = Bridge.nofill, .first = Bridge.first, .queue = Bridge.queue, .read = Bridge.read, .verify = Bridge.check_, .keep = Bridge.keep_, .draft = Bridge.draft, .release = Bridge.release } }, clock.clock());
                 defer core.deinit();
@@ -185,6 +190,10 @@ pub fn check(verify: Verify, keep: Keep) !void {
                 mtl.calls = @splat(0);
                 mtl.rotary_calls = 0;
                 try core.step();
+                if (r.fsr) |f| {
+                    try std.testing.expectEqual(if (b.overlap) mtl.DispatchType.concurrent else .serial, f.commands.mode);
+                    try std.testing.expect(f.commands.active == null and f.commands.pending == null);
+                }
                 try std.testing.expectEqual(@as(usize, 1), mtl.rotary_calls);
                 try std.testing.expect(stream.emitted().len > 0);
                 try std.testing.expectEqual(legacy, stream.emitted()[0]);

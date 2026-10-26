@@ -119,7 +119,8 @@ pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const
         if (at + c.rows == prompt.len) if (out.sampling) |p| { // the first token, from the last row
             e.draw_at.b.slice(u32, MAXR)[0] = @intCast(prompt.len);
             const cb = r.queue.commandBuffer();
-            r.enc = cb.compute(.serial);
+            r.begin(cb, .serial);
+            errdefer if (r.fsr != null) r.abort();
             sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, 1, VOCAB, p);
             try m.finish(cb);
             pick = m.t.picks.b.slice(u32, 1)[0];
@@ -161,7 +162,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     if (m.state == 1) { // the state into the rounds' state buffers
         ar[0] = 1;
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(.serial);
+        r.begin(cb, .serial);
+        errdefer if (r.fsr != null) r.abort();
         e.statesCopy(true);
         try m.finish(cb);
         m.state = 0;
@@ -203,7 +205,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     const T: i32 = @intCast(m.pos);
     if (long) { // selection on the GPU: every complete block the target and the head hold, pooled
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(.serial);
+        r.begin(cb, .serial);
+        errdefer if (r.fsr != null) r.abort();
         try r.sel.?.catchUp(r, m, m.pos / 4);
         try m.finish(cb);
         e.tsel.sel.b.slice(i32, 128)[fz.SEL_POOLED] = @intCast(m.pos / 4);
@@ -257,7 +260,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         const wr = widths[round % 4];
         const cb = r.queue.commandBuffer();
         if (round > 0) cb.waitForEvent(r.event, base + round);
-        r.enc = cb.compute(.serial);
+        r.begin(cb, .serial);
+        errdefer if (r.fsr != null) r.abort();
         m.t.rows = if (gt) |g| g.rows() else e.rows_w[wr];
         m.t.mdims = e.mdims_w[wr];
         if (round > 0) {
@@ -334,10 +338,10 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             r.enc.setBuffer(verified.b, verified.off, 7);
             r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
         }
-        r.enc.end();
-        cb.signalEvent(r.event, base + round + 1);
-        cb.commit();
-        cbs[round % 4] = cb;
+        const final = try r.finishEncoding(cb);
+        final.signalEvent(r.event, base + round + 1);
+        final.commit();
+        cbs[round % 4] = final;
         round += 1;
         if (round < 2) continue;
         const prev = cbs[done % 4].?;

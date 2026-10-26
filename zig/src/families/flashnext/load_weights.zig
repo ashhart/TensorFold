@@ -11,6 +11,9 @@ pub const Inventory = struct {
     decode: u64 = 0,
     prompt: u64 = 0,
     tensors: u64 = 0,
+    routed: u64 = 0,
+    ple: u64 = 0,
+    expert_parts: [9]u64 = @splat(0),
 
     /// Source pages, one retained output phase and operation-local fusion/regroup/gather/tile storage.
     pub fn building(p: Inventory) !u64 {
@@ -29,7 +32,16 @@ pub const Inventory = struct {
     pub fn includeWidth(p: *Inventory, name: []const u8, e: anytype, width: Width) !void {
         const bytes: u64 = e.end - e.begin;
         if (!packedTensor(name)) {
-            if (rawTensor(name)) p.raw = try add(u64, p.raw, bytes);
+            if (rawTensor(name)) {
+                p.raw = try add(u64, p.raw, bytes);
+                if (expertPart(name)) |part| {
+                    if (bytes == 0 or bytes % 512 != 0) return error.BadExpertTensor;
+                    p.routed = try add(u64, p.routed, bytes);
+                    p.expert_parts[part] = @max(p.expert_parts[part], bytes / 512);
+                }
+                if (std.mem.indexOf(u8, name, ".ngram_embedding.") != null)
+                    p.ple = try add(u64, p.ple, bytes);
+            }
             return;
         }
         const bound: u64 = switch (e.dtype) {
@@ -44,6 +56,16 @@ pub const Inventory = struct {
         p.tensors = try add(u64, p.tensors, 1);
     }
 };
+
+/// Stored routed components; shared experts and projection packs stay resident.
+fn expertPart(name: []const u8) ?usize {
+    const bases = [_][]const u8{ ".mlp.switch_mlp.gate_proj.", ".mlp.switch_mlp.up_proj.", ".mlp.switch_mlp.down_proj." };
+    for (bases, 0..) |base, i| if (std.mem.indexOf(u8, name, base) != null) {
+        for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, j|
+            if (std.mem.endsWith(u8, name, suffix)) return i * 3 + j;
+    };
+    return null;
+}
 
 fn rawTensor(name: []const u8) bool {
     const payload = std.mem.endsWith(u8, name, ".weight") or std.mem.endsWith(u8, name, ".scales") or std.mem.endsWith(u8, name, ".biases");

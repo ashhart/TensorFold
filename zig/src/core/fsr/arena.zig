@@ -3,12 +3,13 @@ const std = @import("std");
 const cache = @import("cache.zig");
 const reader = @import("reader.zig");
 pub const components = 9;
+pub const worker_stack_bytes = 256 * 1024;
 pub const Expert = [components]reader.Span;
 
 pub fn Arena(comptime Reader: type) type {
     return struct {
         const Self = @This();
-        const Job = struct { ticket: cache.Ticket, failure: ?anyerror = null };
+        pub const Job = struct { ticket: cache.Ticket, failure: ?anyerror = null };
         a: std.mem.Allocator,
         source: Reader,
         experts: []const Expert,
@@ -21,6 +22,10 @@ pub fn Arena(comptime Reader: type) type {
 
         /// Slabs belong to the GPU owner. No separate selected-expert weight table or staging copy is made.
         pub fn init(a: std.mem.Allocator, source: Reader, experts: []const Expert, strides: [components]usize, slabs: [components][]u8) !Self {
+            return initMapped(a, source, experts, strides, slabs, null);
+        }
+
+        pub fn initMapped(a: std.mem.Allocator, source: Reader, experts: []const Expert, strides: [components]usize, slabs: [components][]u8, map: ?[]i32) !Self {
             if (experts.len == 0) return error.NoExperts;
             if (strides[0] == 0 or slabs[0].len % strides[0] != 0) return error.InvalidSlab;
             const capacity = slabs[0].len / strides[0];
@@ -31,7 +36,8 @@ pub fn Arena(comptime Reader: type) type {
                 if (span.length > stride) return error.InvalidSlab;
                 try reader.validate(span, try source.fileSize(span.file), span.length);
             };
-            var clock = try cache.Cache.init(a, experts.len, capacity);
+            if (map) |m| if (m.len != experts.len) return error.InvalidPoolShape;
+            var clock = if (map) |m| try cache.Cache.initMap(a, m, capacity) else try cache.Cache.init(a, experts.len, capacity);
             errdefer clock.deinit();
             const jobs = try a.alloc(Job, capacity);
             return .{ .a = a, .source = source, .experts = experts, .strides = strides, .slabs = slabs, .clock = clock, .jobs = jobs };
@@ -110,7 +116,7 @@ pub fn Arena(comptime Reader: type) type {
                 else => return err,
             };
             if (s.job_count == 0) return;
-            s.worker = std.Thread.spawn(.{}, execute, .{s}) catch |err| {
+            s.worker = std.Thread.spawn(.{ .stack_size = worker_stack_bytes }, execute, .{s}) catch |err| {
                 for (s.jobs[0..s.job_count]) |job| try s.clock.abort(job.ticket);
                 s.job_count = 0;
                 return err;

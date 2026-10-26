@@ -50,7 +50,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal fills prompts a chunk at a time with the other streams' rounds between chunks, so streams already decoding keep going while a long prompt fills (#1303), and kept states reuse spare buffers with their save blits off the engine thread (#1304). On an M3 Ultra, with an 8.7k-token prompt arriving while two streams decode, the decoding streams' longest pause goes from 28.6 s to 0.47 s; the long prompt's first token comes 7.9% later (28.6 s to 30.9 s), and every reply is unchanged.
 
-- Document exact Fluid Subgraph Residency and add host cache/reader foundations following EdgeMoE, MoE-Infinity, Fiddler and Fate; slotstream is an outside comparison only. Native streamed inference still needs integration and device qualification.
+- Add opt-in exact Fluid Subgraph Residency for Flash Next on Metal: SSD expert slots, PLE row streaming, locality traces and bounded next-layer prefetch, following EdgeMoE, MoE-Infinity, Fiddler and Fate; slotstream is an outside comparison only. Device memory tiers require qualification.
 
 - Gemma 4 on CUDA with a drafter keeps its prompt-cache mark after the drafter absorbs a stepped prompt chunk, so a chat's next turn resumes instead of prefilling again: with Gemma 4 31B and its DFlash drafter on a GB10, a 30k-token chat's next turn starts after 3.6 s instead of 45 s, with the same reply (#1286).
 

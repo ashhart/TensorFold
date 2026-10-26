@@ -14,6 +14,10 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
     const m = e.m;
     const t = &m.t;
     if (r.tp != null or r.gpu_round) return error.BatchModeUnsupported;
+    if (r.fsr) |stream| stream.trace_streams = segs.len;
+    defer if (r.fsr) |stream| {
+        stream.trace_streams = 1;
+    };
     r.rows = rows;
     try @import("rotary_cache.zig").prepare(r, t.log2base, t.pos8, rows);
     var cur: usize = 0;
@@ -29,6 +33,9 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
             tabs[0] = t.ple_ids;
             tabs[1] = p.starts;
             for (p.tables, 0..) |b, j| tabs[2 + j] = b;
+            if (r.fsr) |stream| if (try stream.tables(r, t.ple_ids, rows)) |staged| {
+                tabs = staged;
+            };
             var cp: [2]variants.Const = undefined;
             try variants.callAs(r, "qa_ple_lookup@ple", rows, &tabs, &.{t.emb}, variants.width(&cp, "BITS", "GS", p.w));
             if (p.scale) |sc| sc.apply(r.enc, t.emb, rows * fz.D, r.serial);
@@ -82,7 +89,9 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
         r.touch(l.router);
         try m.hcProject(t.h[cur], l.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
         try r.router("q4_router_float@moe", t.mixed, l.router, t.rows, t.lg, rows);
+        if (r.fsr) |stream| try stream.prepare(r, i, t.lg, t.rows, t.pick, t.wts, rows, t.mixed, if (i + 1 < fz.LAYERS) m.layers[i + 1].router else null, @import("fsr_runtime.zig").guarded(l.xw));
         if (l.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+        if (r.fsr) |stream| try stream.after(r);
     }
     try m.grouped(t.h[cur], t.h[1 - cur]);
     cur = 1 - cur;

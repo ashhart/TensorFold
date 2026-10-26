@@ -37,7 +37,8 @@ pub fn encodeAll(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, logits: fz.Buf, po
 pub fn first(e: *Engine, model: *fz.Model, p: lanes.Sampling, position: u32) !u32 {
     e.draw_at.b.slice(u32, fz.MAXR)[0] = position;
     const cb = e.r.queue.commandBuffer();
-    e.r.enc = cb.compute(.serial);
+    e.r.begin(cb, .serial);
+    errdefer if (e.r.fsr != null) e.r.abort();
     encode(e.r.enc, e.r.draw_pipe, model.t.logits, e.draw_at, model.t.picks, 0, 1, p);
     try model.finish(cb);
     return model.t.picks.b.slice(u32, 1)[0];

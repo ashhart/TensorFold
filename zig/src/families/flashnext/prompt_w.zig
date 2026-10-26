@@ -59,7 +59,8 @@ fn key(b: Buf) Key {
 /// qmmw_nax at `bits`/`group` with nax.h inlined for this GPU.
 pub fn compile(r: *Run, bits: u8, group: u16) !Pipes {
     const head = try std.fmt.allocPrint(r.arena, "#define WB {d}\n#define WG {d}\n", .{ bits, group });
-    const text = try frags.source(r.device, r.arena, try std.mem.concat(r.arena, u8, &.{ head, ks.flashnext_qmmw }));
+    const body = if (r.window.ssd_experts != null) try @import("fsr_prompt_source.zig").patch(r.arena, ks.flashnext_qmmw, true) else ks.flashnext_qmmw;
+    const text = try frags.source(r.device, r.arena, try std.mem.concat(r.arena, u8, &.{ head, body }));
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const p = struct {
         fn of(rr: *Run, l: mtl.Library, name: [:0]const u8) !mtl.Pipeline {
@@ -118,7 +119,9 @@ pub fn attach(p: *Prompt, m: *const Model) !void {
         try hc(w, r, L.mhc);
         const x = L.xw orelse variants.Experts{ .gu = .{ 6, 32, 6, 32 }, .down = .{ 6, 32, 6, 32 } };
         for ([_]usize{ 0, 3, 6, 9, 12, 15 }, [_][2]usize{ .{ x.gu[0], x.gu[1] }, .{ x.gu[0], x.gu[1] }, .{ x.gu[2], x.gu[3] }, .{ x.gu[2], x.gu[3] }, .{ x.down[0], x.down[1] }, .{ x.down[2], x.down[3] } }) |j, v|
-            try put(w, r, L.ex[j], width(v)); // routed gate and up (one fused pass or two), shared, then the downs
+            if (r.fsr != null and r.fsr.?.pool != null and (j == 0 or j == 3 or j == 12)) {
+                if (v[0] != 6 or v[1] != 32) try need(w, r, @intCast(v[0]), @intCast(v[1]));
+            } else try put(w, r, L.ex[j], width(v)); // routed gate and up (one fused pass or two), shared, then the downs
         const kind = if (L.linear) "gdn" else "att";
         for ([_][]const u8{ if (L.linear) "in" else "proj", if (L.linear) "out" else "o" }, [_]Buf{ p.proj[i][0], p.out[i][0] }) |n, b| {
             try put(w, r, b, if (try parts(r, try std.fmt.allocPrint(r.arena, "L{d}.{s}.{s}", .{ i, kind, n }))) |ps| uniformOr(ps) else six);
