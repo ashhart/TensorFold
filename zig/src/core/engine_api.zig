@@ -400,6 +400,8 @@ pub const Engine = struct {
         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
         /// One logit per label at the row after `prompt`, and the vocabulary logsumexp when `mass` (else 0).
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 = null,
+        /// Every row's final normed state (bf16 bits, rows x hidden) of `prompt`; null: not given.
+        hidden: ?*const fn (ctx: *anyopaque, prompt: []const u32, out: []u16) error{Failed}!void = null,
         /// Each branch's label logits at its last row after the decision's shared trunk.
         decide: ?*const fn (ctx: *anyopaque, d: *Decision) error{ Failed, Refused }!void = null,
         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
@@ -462,6 +464,12 @@ pub const Engine = struct {
     /// Finishes the engine's disk writes before the process ends; a no-op where it keeps none.
     pub fn drain(e: Engine) void {
         if (e.vtable.drain) |f| f(e.ctx);
+    }
+
+    /// The prompt's final normed rows, or Unsupported when this engine does not give them.
+    pub fn hidden(e: Engine, prompt: []const u32, out: []u16) error{ Failed, Unsupported }!void {
+        const f = e.vtable.hidden orelse return error.Unsupported;
+        return f(e.ctx, prompt, out);
     }
 
     /// The decision hook, or Unsupported when this engine does not score.

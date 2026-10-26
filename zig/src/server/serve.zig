@@ -207,6 +207,14 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         return 1;
     };
     defer srv.deinit();
+    defer if (srv.clef) |c| c.close(gpa, io);
+    if (args.clef) |dir| {
+        srv.clef = @import("clef_serve.zig").Clef.open(gpa, io, dir) catch |err| {
+            std.debug.print("tensorfold: --clef: cannot load {s}: {s}\n", .{ dir, @errorName(err) });
+            return 1;
+        };
+        log.line("--clef: /v1/systemone answers through Clef's joint head ({s})", .{dir});
+    }
     srv.recall = s.recall;
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
         .disabled, .enabled => {},

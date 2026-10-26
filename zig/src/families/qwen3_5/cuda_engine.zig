@@ -538,6 +538,12 @@ pub const Engine = struct {
         recurrent.completed(e);
     }
 
+    /// The last prompt forward's final-norm rows (bf16, `rows` x hidden) into `out`.
+    pub fn finalRows(e: *Engine, rows: usize, out: []u16) !void {
+        if (out.len != rows * e.g.hidden or rows > max_rows) return error.InvalidQwenSegments;
+        try e.d.check(e.d.api.cuMemcpyDtoH_v2(out.ptr, e.x, out.len * 2), "cuMemcpyDtoH");
+    }
+
     pub const Shape = @import("cuda_shapes.zig").Shape;
 
     /// The same scan selected by body, exposed for host launch-contract fixtures.

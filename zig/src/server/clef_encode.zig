@@ -1,7 +1,6 @@
 //! Clef's record encoder (Cloudflare `joint_schema_model.encode_record`): the prompt and each question's spans.
 const std = @import("std");
 const json = @import("json");
-const tokenizer = @import("tokenizer");
 const Allocator = std.mem.Allocator;
 const Value = json.Value;
 
@@ -22,8 +21,6 @@ pub const Record = struct {
     questions: []const Question,
     state_rows: u32, // the state's rows kept after truncation
 };
-
-pub const Error = error{ OutOfMemory, BadRecord, SchemaTooLong } || tokenizer.Error;
 
 /// `json.dumps(v, ensure_ascii=False, separators=(",", ":"), sort_keys=True)`, a string as itself (Clef's `render`).
 pub fn render(a: Allocator, v: Value) Allocator.Error![]const u8 {
@@ -83,7 +80,7 @@ fn byId(_: void, l: Opt, r: Opt) bool {
 }
 
 /// `question_options`: noul's true/false (criteria may override them), choice's ids sorted, score's levels by index.
-fn options(a: Allocator, kind: Kind, q: Value) Error![]Opt {
+fn options(a: Allocator, kind: Kind, q: Value) ![]Opt {
     const criteria = q.get("criteria");
     switch (kind) {
         .noul => {
@@ -116,13 +113,13 @@ fn options(a: Allocator, kind: Kind, q: Value) Error![]Opt {
     }
 }
 
-fn add(a: Allocator, tok: *const tokenizer.Tokenizer, ids: *std.ArrayList(u32), text: []const u8) Error!void {
-    const t = try tok.encode(a, text);
+fn add(a: Allocator, tok: anytype, ids: *std.ArrayList(u32), text: []const u8) !void {
+    const t = try tok.ids(a, text);
     try ids.appendSlice(a, t);
 }
 
-/// The record's prompt (system, STATE, the state cut to fit `max_length`, the schema, the answer opening) and spans.
-pub fn encode(a: Allocator, tok: *const tokenizer.Tokenizer, record: Value, max_length: u32) Error!Record {
+/// The record's prompt and spans: `tok.ids(a, text)` gives text's ids, special-token text as its token.
+pub fn encode(a: Allocator, tok: anytype, record: Value, max_length: u32) !Record {
     const qs = record.get("questions") orelse return error.BadRecord;
     if (qs != .object or qs.object.count() == 0) return error.BadRecord;
     const state = record.get("state") orelse return error.BadRecord;

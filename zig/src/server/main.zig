@@ -25,7 +25,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
     " [--thinking-budget THINKING_BUDGET] [--thinking-reserve THINKING_RESERVE] [--loop-guard] [--no-drafts]" ++
     " [--drafter DRAFTER]" ++
-    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--idle-unload SECONDS]" ++
+    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--clef DIR] [--idle-unload SECONDS]" ++
     " [--silence-floor-dbfs DBFS] [--silence-seconds SECONDS]" ++
     " [--silence-onset-s SECONDS] [--silence-onset-voiced-s SECONDS]" ++
     " [--silence-mid-s SECONDS] [--silence-mid-min-voiced-s SECONDS] [--silence-redraws N]" ++

@@ -343,7 +343,23 @@ const Lanes = struct {
     }
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .hidden = hiddenFn, .release = releaseFn } };
+    }
+
+    /// Clef decisions: `ids` through a fresh cache in max_rows pieces, every row's final normed state kept.
+    fn hiddenFn(ptr: *anyopaque, ids: []const u32, out: []u16) anyerror!void {
+        const self: *Lanes = @ptrCast(@alignCast(ptr));
+        const width = self.e.g.hidden;
+        if (ids.len == 0 or ids.len > self.capacity or out.len != ids.len * width) return error.InvalidQwenPrompt;
+        var cache = try E.Cache.init(self.gpa, self.e, ids.len);
+        defer cache.deinit(self.gpa);
+        var at: usize = 0;
+        while (at < ids.len) {
+            const end = @min(ids.len, at + E.max_rows);
+            try self.e.forward(&.{.{ .cache = &cache, .rows = end - at }}, ids[at..end], .last);
+            try self.e.finalRows(end - at, out[at * width ..][0 .. (end - at) * width]);
+            at = end;
+        }
     }
 
     /// A drafter ring's bytes in each lane's run (0: no DFlash2 drafter).

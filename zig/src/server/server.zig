@@ -136,6 +136,8 @@ pub const Server = struct {
     generating: std.atomic.Value(u32) = .init(0),
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
+    /// Cloudflare Clef's head (--clef): /v1/systemone answers through it and the engine's final rows.
+    clef: ?*@import("clef_serve.zig").Clef = null,
     /// The idle-unload manager (--idle-unload); null when off. Its thread parks the engine; a wake reloads it.
     idle_manager: ?*idle_unload.Manager = null,
     preparing: std.atomic.Value(i64) = .init(0),

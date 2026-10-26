@@ -8,6 +8,7 @@ pub const Ask = struct {
     labels: []const u32,
     logits: []f64,
     mass: bool,
+    hidden: ?[]u16 = null, // a hidden-rows ask: the final normed rows go here instead of label logits
     logsumexp: f64 = 0,
     failed: bool = false,
     done: bool = false,
@@ -32,6 +33,20 @@ pub fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: 
     return ask.logsumexp;
 }
 
+/// Engine.hidden: the prompt's final normed rows, queued for the engine thread as scores are.
+pub fn hidden(ctx: *anyopaque, prompt: []const u32, out: []u16) error{Failed}!void {
+    var logits: [0]f64 = .{};
+    var ask: Ask = .{ .prompt = prompt, .labels = &.{}, .logits = &logits, .mass = false, .hidden = out };
+    const h: *LaneHost = @ptrCast(@alignCast(ctx));
+    h.lock();
+    defer h.unlock();
+    if (h.closing) return error.Failed;
+    h.scores.asks.append(h.gpa, &ask) catch return error.Failed;
+    h.wake.broadcast(h.io);
+    while (!ask.done) h.wake.waitUncancelable(h.io, &h.mutex);
+    if (ask.failed) return error.Failed;
+}
+
 /// Every queued question answered by the backend (engine thread, between rounds).
 pub fn answer(h: *LaneHost) void {
     h.lock();
@@ -47,6 +62,17 @@ pub fn answer(h: *LaneHost) void {
     defer h.gpa.free(list);
     const backend = h.core.backend;
     for (list) |a| {
+        if (a.hidden) |out| {
+            const rows = backend.vtable.hidden orelse {
+                a.failed = true;
+                continue;
+            };
+            rows(backend.ptr, a.prompt, out) catch |err| {
+                std.log.warn("lane host: a decision's hidden rows failed ({s})", .{@errorName(err)});
+                a.failed = true;
+            };
+            continue;
+        }
         const run = backend.vtable.score orelse {
             a.failed = true;
             continue;

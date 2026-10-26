@@ -35,7 +35,7 @@ const Question = struct {
 const Code = struct { text: []const u8, id: u32 };
 
 pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
-    if (srv.engine.vtable.score == null) { // an engine that does not decide serves no such path
+    if (srv.engine.vtable.score == null and srv.clef == null) { // an engine that does not decide serves no such path
         _ = http_body.read(conn, a, http_body.limit) catch {};
         return routes.unknown(conn, a);
     }
@@ -46,7 +46,8 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
             _ = cx.refuse("request body must be an object") catch {};
             break :blk null;
         }
-        break :blk reply(srv, &cx, raw) catch |e| {
+        const answered = if (srv.clef) |c| @import("clef_serve.zig").reply(srv, c, &cx, raw) else reply(srv, &cx, raw);
+        break :blk answered catch |e| {
             if (e == error.OutOfMemory) {
                 cx.kind = .server;
                 cx.message = "out of memory";

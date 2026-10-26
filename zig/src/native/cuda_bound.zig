@@ -121,6 +121,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.first_masked.?(x.inner.ptr, s, position, mask);
             }
         }.f else null,
+        .hidden = if (v.hidden != null) struct {
+            fn f(p: *anyopaque, prompt: []const u32, out: []u16) anyerror!void {
+                const x = H.bind(p);
+                return x.inner.vtable.hidden.?(x.inner.ptr, prompt, out);
+            }
+        }.f else null,
         .score = if (v.score != null) struct {
             fn f(p: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 {
                 const x = H.bind(p);

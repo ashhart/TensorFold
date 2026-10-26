@@ -5,44 +5,11 @@ const tokenizer = @import("tokenizer");
 const enc = @import("clef_encode.zig");
 const head = @import("clef_head.zig");
 
-/// A safetensors file mapped read-only: `get(name)` as clef_head's loader reads it.
-const Tensors = struct {
-    map: std.Io.File.MemoryMap,
-    file: std.Io.File,
-    data: usize,
-    header: std.json.Parsed(std.json.Value),
-
-    const T = struct {
-        dtype: enum { bf16, other },
-        bytes: []const u8,
-        n: usize,
-        pub fn numel(t: T) usize {
-            return t.n;
-        }
-    };
-
-    fn open(a: std.mem.Allocator, io: std.Io, path: []const u8) !Tensors {
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        const len: usize = @intCast(try file.length(io));
-        const map = try std.Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
-        const hl: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
-        const header = try std.json.parseFromSlice(std.json.Value, a, map.memory[8..][0..hl], .{});
-        return .{ .map = map, .file = file, .data = 8 + hl, .header = header };
-    }
-    fn close(t: *Tensors, io: std.Io) void {
-        t.header.deinit();
-        t.map.destroy(io);
-        t.file.close(io);
-    }
-    pub fn get(t: *const Tensors, name: []const u8) ?T {
-        const e = t.header.value.object.get(name) orelse return null;
-        const off = e.object.get("data_offsets").?.array.items;
-        const lo: usize = @intCast(off[0].integer);
-        const hi: usize = @intCast(off[1].integer);
-        var n: usize = 1;
-        for (e.object.get("shape").?.array.items) |d| n *= @intCast(d.integer);
-        const bf = std.mem.eql(u8, e.object.get("dtype").?.string, "BF16");
-        return .{ .dtype = if (bf) .bf16 else .other, .bytes = t.map.memory[t.data + lo .. t.data + hi], .n = n };
+/// The tokenizer as clef_encode asks: ids of text, special-token text as its token.
+const Ids = struct {
+    t: *const tokenizer.Tokenizer,
+    pub fn ids(s: Ids, a: std.mem.Allocator, text: []const u8) ![]u32 {
+        return s.t.encode(a, text);
     }
 };
 
@@ -68,11 +35,11 @@ test "Clef: records encode and score as Cloudflare's Python does (TF_CLEF_DIR, T
     defer arena.deinit();
     const a = arena.allocator();
     const tok = try tokenizer.loadTokenizer(io, a, try std.fs.path.join(a, &.{ dir, "tokenizer.json" }));
-    var weights = try Tensors.open(a, io, try std.fs.path.join(a, &.{ dir, "joint_head.safetensors" }));
+    var weights = try head.Files.open(a, io, try std.fs.path.join(a, &.{ dir, "joint_head.safetensors" }));
     defer weights.close(io);
     var h = try head.Head.load(std.heap.page_allocator, &weights, .{});
     defer h.deinit();
-    var rows = try Tensors.open(a, io, try std.fs.path.join(a, &.{ dir, "lm_head_rows.safetensors" }));
+    var rows = try head.Files.open(a, io, try std.fs.path.join(a, &.{ dir, "lm_head_rows.safetensors" }));
     defer rows.close(io);
     const table = rows.get("lm_head.weight").?;
     const lex: head.Lexical = .{ .table = table.bytes, .rows = table.n / 5120, .width = 5120 };
@@ -83,7 +50,7 @@ test "Clef: records encode and score as Cloudflare's Python does (TF_CLEF_DIR, T
         const g_text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fmt.allocPrint(a, "{s}/gold{d}.json", .{ gold, i }), a, .unlimited);
         const record = (try json.parseText(a, rec_text)).ok;
         const g = try std.json.parseFromSliceLeaky(std.json.Value, a, g_text, .{});
-        const r = try enc.encode(a, &tok, record, 16384);
+        const r = try enc.encode(a, Ids{ .t = &tok }, record, 16384);
         const want = g.object.get("input_ids").?.array.items;
         try std.testing.expectEqual(want.len, r.ids.len);
         for (want, r.ids) |w, got| try std.testing.expectEqual(@as(u32, @intCast(w.integer)), got);

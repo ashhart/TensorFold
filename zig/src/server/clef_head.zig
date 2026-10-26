@@ -3,6 +3,47 @@ const std = @import("std");
 const enc = @import("clef_encode.zig");
 const Allocator = std.mem.Allocator;
 
+/// A safetensors file mapped read-only: `get(name)` as clef_head's loader reads it.
+pub const Files = struct {
+    map: std.Io.File.MemoryMap,
+    file: std.Io.File,
+    data: usize,
+    header: std.json.Parsed(std.json.Value),
+
+    pub const T = struct {
+        dtype: enum { bf16, other },
+        bytes: []const u8,
+        n: usize,
+        pub fn numel(t: T) usize {
+            return t.n;
+        }
+    };
+
+    pub fn open(a: std.mem.Allocator, io: std.Io, path: []const u8) !Files {
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        const len: usize = @intCast(try file.length(io));
+        const map = try std.Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
+        const hl: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
+        const header = try std.json.parseFromSlice(std.json.Value, a, map.memory[8..][0..hl], .{});
+        return .{ .map = map, .file = file, .data = 8 + hl, .header = header };
+    }
+    pub fn close(t: *Files, io: std.Io) void {
+        t.header.deinit();
+        t.map.destroy(io);
+        t.file.close(io);
+    }
+    pub fn get(t: *const Files, name: []const u8) ?T {
+        const e = t.header.value.object.get(name) orelse return null;
+        const off = e.object.get("data_offsets").?.array.items;
+        const lo: usize = @intCast(off[0].integer);
+        const hi: usize = @intCast(off[1].integer);
+        var n: usize = 1;
+        for (e.object.get("shape").?.array.items) |d| n *= @intCast(d.integer);
+        const bf = std.mem.eql(u8, e.object.get("dtype").?.string, "BF16");
+        return .{ .dtype = if (bf) .bf16 else .other, .bytes = t.map.memory[t.data + lo .. t.data + hi], .n = n };
+    }
+};
+
 pub const Config = struct { hidden: usize = 5120, width: usize = 1024, routing: usize = 2, layers: usize = 4, heads: usize = 16, ff: usize = 4096 };
 
 const Lin = struct { w: []const f32, b: ?[]const f32, out: usize, in: usize };

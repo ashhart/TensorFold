@@ -119,8 +119,21 @@ pub const LaneHost = struct {
 
     pub fn engine(h: *LaneHost) Engine {
         // decisions' label scores only when the backend gives them, so the route refuses as before otherwise
-        return .{ .ctx = h, .vtable = if (h.core.backend.vtable.score != null) &scored_vtable else &plain_vtable };
+        const s = h.core.backend.vtable.score != null;
+        const rows = h.core.backend.vtable.hidden != null;
+        return .{ .ctx = h, .vtable = if (s and rows) &both_vtable else if (s) &scored_vtable else if (rows) &hidden_vtable else &plain_vtable };
     }
+
+    const hidden_vtable: Engine.VTable = blk: {
+        var v = plain_vtable;
+        v.hidden = scoring.hidden;
+        break :blk v;
+    };
+    const both_vtable: Engine.VTable = blk: {
+        var v = scored_vtable;
+        v.hidden = scoring.hidden;
+        break :blk v;
+    };
 
     const plain_vtable: Engine.VTable = .{
         .info = infoFn,
