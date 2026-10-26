@@ -220,11 +220,15 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
 
 /// With tools, a stream holds trailing whitespace back until more text comes: a reply with a call does not show it.
 pub fn heldBack(text: []const u8, tools: bool) []const u8 {
+    // Only final call acceptance decides whether leading whitespace survives.
+    if (tools and pyLstrip(text).len != text.len) return text[0..0];
     return if (tools) text[0..pyRstrip(text).len] else text; // a prefix, so the stream's pointer checks still hold
 }
 
 /// Prose safe to send before final parsing settles the first hidden closed envelope.
 pub fn finishedProse(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    // attachCalls has not yet decided whether to strip the reply's content.
+    if (pyLstrip(text).len != text.len) return text[0..0];
     var out: std.ArrayList(u8) = .empty;
     const prose = try hideInto(a, &out, text, true, true);
     return if (prose.len != text.len) prose[0..pyRstrip(prose).len] else prose;
