@@ -129,7 +129,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .backend = l.backend(),
         .facts = blk: {
             var facts = laneFacts(@intCast(e.window_rows), @intCast(e.verify_rows));
-            facts.root_copies = e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0;
+            if (e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0) {
+                facts.root_copies = true;
+                facts.copy_match = lanes.windows.long_match;
+            }
             break :blk facts;
         },
         .rows = @intCast(e.window_rows),
@@ -176,6 +179,7 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
 pub fn openMtp(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
     if (bits != 4) return error.DrafterBitsUnsupported;
     const l: *Lanes = @ptrCast(@alignCast(p));
+    if (l.e.g.exl3) return error.Exl3DrafterUnsupported;
     if (l.caches.count() != 0 or l.pool.items.len != 0) return error.TapsAfterStreams;
     const d = try Mtp.init(gpa, io, l.e, dir, l.capacity);
     errdefer d.deinit();
