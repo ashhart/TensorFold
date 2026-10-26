@@ -35,6 +35,11 @@ pub const Geometry = struct {
         return std.mem.eql(u8, g.name, unified12b.name);
     }
 
+    /// The layers that own a cache (the first ones; the trailing `shared_layers` read `cacheOwner`'s).
+    pub fn cacheLayers(g: Geometry) usize {
+        return g.layers - g.shared_layers;
+    }
+
     /// Layer `index`'s key heads.
     pub fn kvHeads(g: Geometry, index: usize) usize {
         return if (global(index)) g.global_kv_heads else g.sliding_kv_heads;
@@ -178,10 +183,12 @@ fn isTrue(o: std.json.ObjectMap, key: []const u8) bool {
 }
 
 /// The widths of `quantization`, and of `quantization_config` when present, which must name the same ones.
-fn quantization(gpa: std.mem.Allocator, root: std.json.ObjectMap, layers: usize) Error!widths.Widths {
-    const w = try widths.read(gpa, try object(root.get("quantization") orelse return error.UnsupportedGemmaQuantization), layers);
+fn quantization(gpa: std.mem.Allocator, root: std.json.ObjectMap, geo: Geometry) Error!widths.Widths {
+    const layer_input = geo.layer_input != 0;
+    const values = !geo.keys_are_values;
+    const w = try widths.read(gpa, try object(root.get("quantization") orelse return error.UnsupportedGemmaQuantization), geo.layers, layer_input, values);
     if (root.get("quantization_config")) |q| {
-        if (!std.meta.eql(w, try widths.read(gpa, try object(q), layers))) return error.UnsupportedGemmaQuantization;
+        if (!std.meta.eql(w, try widths.read(gpa, try object(q), geo.layers, layer_input, values))) return error.UnsupportedGemmaQuantization;
     }
     return w;
 }
@@ -246,7 +253,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     const ropes = try object(try field(text, "rope_parameters"));
     try rope(ropes, "sliding_attention", "default", sliding_theta, null);
     try rope(ropes, "full_attention", "proportional", global_theta, 0.25);
-    const ws = try quantization(gpa, root, geo.layers);
+    const ws = try quantization(gpa, root, geo);
     const context = try integer(text, "max_position_embeddings");
     if (context < 1 or context > 262144) return error.BadGemmaContext;
     var c: Config = .{ .geo = geo, .widths = ws, .context = @intCast(context) };
@@ -406,6 +413,13 @@ test "malformed E-series geometries are refused, and well-formed other sizes are
     }
 }
 
+test "the E4B's caches belong to its first 24 layers, every other geometry's to all" {
+    try std.testing.expectEqual(@as(usize, 24), e4b.cacheLayers());
+    try std.testing.expectEqual(@as(usize, 60), dense31b.cacheLayers());
+    try std.testing.expectEqual(@as(usize, 48), unified12b.cacheLayers());
+    for (e4b.cacheLayers()..e4b.layers) |i| try std.testing.expect(cacheOwner(i, e4b.cacheLayers()).? < e4b.cacheLayers());
+}
+
 test "the cache a shared layer reads is the last layer of its kind before the shared ones" {
     try std.testing.expectEqual(@as(?usize, 5), cacheOwner(5, 24));
     try std.testing.expectEqual(@as(?usize, 22), cacheOwner(24, 24));
@@ -487,6 +501,16 @@ test "other widths are admitted per module, and quantization_config must agree" 
     const c = try parse(gpa, both);
     try std.testing.expectEqual(@as(u8, 8), c.widths.of(0, .down).bits);
     try std.testing.expectEqual(@as(u8, 4), c.widths.of(1, .down).bits);
+}
+
+test "the E4B's global layers store a v_proj, so an entry for it is read" {
+    const gpa = std.testing.allocator;
+    const entry = "\"group_size\": 64, \"language_model.model.layers.5.self_attn.v_proj\": {\"bits\": 8, \"group_size\": 64},";
+    const bytes = try editedE4b(gpa, "\"group_size\": 64,", entry);
+    defer gpa.free(bytes);
+    const c = try parse(gpa, bytes);
+    try std.testing.expectEqual(@as(u8, 8), c.widths.of(5, .v).bits);
+    try std.testing.expectEqual(@as(u8, 4), c.widths.of(4, .v).bits);
 }
 
 test "layer kinds, head dims and the proportional RoPE table" {
