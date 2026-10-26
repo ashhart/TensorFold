@@ -85,6 +85,7 @@ pub const Model = struct {
         m.vision = null;
         m.mm = @splat(null);
         m.config = try cfg.Config.read(gpa, io, dir);
+        try m.config.requireDense();
         m.projections = .{ .geo = m.config.geo };
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
