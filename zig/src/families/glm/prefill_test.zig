@@ -376,6 +376,41 @@ test "glm prefill: an image handoff failure invalidates the old owner before cha
     try input.prepare(&io, &first, 0);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
 }
+test "glm prefill: a resumed image prompt sends the tower only the images its restored state does not hold" {
+    const Images = struct {
+        image_owner: ?*Stream = null,
+        sent: []const lanes.stream.Image = &.{},
+        writes: usize = 0,
+        pub fn endImages(_: *@This()) void {}
+        pub fn encodeImages(i: *@This(), _: u32, imgs: []const lanes.stream.Image) !void {
+            i.writes += 1;
+            i.sent = imgs;
+        }
+    };
+    var s = try Stream.init(a, .{ .id = "a", .prompt = &.{ 1, 9, 9, 2, 9, 9, 3, 4 }, .max_new = 1 });
+    defer s.deinit(a);
+    var other = try Stream.init(a, .{ .id = "b", .prompt = &.{1}, .max_new = 1 });
+    defer other.deinit(a);
+    const images = [_]lanes.stream.Image{ .{ .pixels = &.{}, .gh = 0, .gw = 0, .at = 1, .tokens = 2 }, .{ .pixels = &.{}, .gh = 0, .gw = 0, .at = 4, .tokens = 2 } };
+    s.images = &images;
+    const input = @import("prompt_images.zig");
+    // fresh, kept through the first image, kept inside the second: whole images from the first one not held
+    for ([_]u32{ 0, 3, 5 }, [_]usize{ 2, 1, 1 }) |cached, n| {
+        var io: Images = .{};
+        s.cached = cached;
+        try input.prepare(&io, &s, 0);
+        try std.testing.expectEqual(@as(usize, 1), io.writes);
+        try std.testing.expectEqual(n, io.sent.len);
+        try std.testing.expectEqual(images[2 - n].at, io.sent[0].at);
+        try std.testing.expect(io.image_owner == &s);
+    }
+    // kept past every image: no tower run, and another prompt's rows stay its own
+    var io: Images = .{ .image_owner = &other };
+    s.cached = 7;
+    try input.prepare(&io, &s, 0);
+    try std.testing.expectEqual(@as(usize, 0), io.writes);
+    try std.testing.expect(io.image_owner == &other);
+}
 test "glm prefill: GLM advertises one-chunk prompt work to the shared lane core" {
     if (comptime !mac) return error.SkipZigTest;
     var b: Backend = undefined;

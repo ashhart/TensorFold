@@ -121,10 +121,7 @@ pub const Backend = struct {
         try mirror.send(e, .begin, b.words.items);
         try b.sl.begin(i, prompt, s.drafts);
         s.cached = 0;
-        if (s.images.len > 0) { // the images through the tower first: the chunks inject their rows
-            if (e.ep != null) return error.VisionOnPair;
-            try @import("prompt_images.zig").prepare(b, s, i);
-        }
+        if (s.images.len > 0 and e.ep != null) return error.VisionOnPair;
         var at: u32 = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
@@ -141,6 +138,8 @@ pub const Backend = struct {
                 s.reuse_error = if (snap.at >= prompt.len) error.SnapshotNotPrefix else if (snap.stale) error.SnapshotStale else error.SnapshotMissing;
             }
         }
+        // the images the restored state does not hold through the tower: the chunks inject their rows
+        if (s.images.len > 0) try @import("prompt_images.zig").prepare(b, s, i);
         s.fill_at.store(at, .monotonic);
         return .{ .stream = s, .slot = i, .at = at };
     }
