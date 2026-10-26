@@ -441,13 +441,17 @@ fn expectStreamMatchesWhole(reply: []const u8) !void {
 }
 
 fn expectStreamMatchesWholeCalls(reply: []const u8, expected_call_count: ?usize) !void {
+    try expectStreamMatchesWholeOptions(reply, expected_call_count, false, null);
+}
+
+fn expectStreamMatchesWholeOptions(reply: []const u8, expected_call_count: ?usize, thinking: bool, expected_content: ?[]const u8) !void {
     var text: DropLate = .{};
     var backend: Capture = .{ .reply = reply };
     defer std.testing.allocator.free(backend.prompt);
     const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
         .served_name = "m",
         .model_ids = &.{"m"},
-        .enable_thinking = false,
+        .enable_thinking = thinking,
         .use_drafts = false,
     }, null);
     defer srv.deinit();
@@ -460,6 +464,7 @@ fn expectStreamMatchesWholeCalls(reply: []const u8, expected_call_count: ?usize)
     const message = (try json.parse(a, whole.body)).ok.get("choices").?.array[0].get("message").?;
     const expected_calls = if (message.get("tool_calls")) |calls| calls.array else &.{};
     if (expected_call_count) |count| try std.testing.expectEqual(count, expected_calls.len);
+    if (expected_content) |content| try std.testing.expectEqualStrings(content, textOf(message, "content"));
     const got = try exchange(srv, "/v1/chat/completions", prose_chat ++ ",\"stream\":true}");
     defer std.testing.allocator.free(got.body);
     try std.testing.expectEqual(@as(u16, 200), got.status);
@@ -467,6 +472,8 @@ fn expectStreamMatchesWholeCalls(reply: []const u8, expected_call_count: ?usize)
     var arguments: std.ArrayList(u8) = .empty;
     var names: std.ArrayList(u8) = .empty;
     var calls: usize = 0;
+    var role_seen = false;
+    var reasoning: std.ArrayList(u8) = .empty;
     var lines = std.mem.splitScalar(u8, got.body, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "data: ")) continue;
@@ -475,7 +482,15 @@ fn expectStreamMatchesWholeCalls(reply: []const u8, expected_call_count: ?usize)
         const choices = (try json.parse(a, data)).ok.get("choices").?.array;
         if (choices.len == 0) continue;
         const delta = choices[0].get("delta").?;
-        if (delta.get("content")) |content| try prose.appendSlice(a, content.string);
+        if (delta.get("content")) |content| {
+            if (expected_content != null and content.string.len > 0) try std.testing.expect(role_seen);
+            try prose.appendSlice(a, content.string);
+        }
+        if (delta.get("role")) |role| {
+            try std.testing.expectEqualStrings("assistant", role.string);
+            role_seen = true;
+        }
+        if (delta.get("reasoning_content")) |content| try reasoning.appendSlice(a, content.string);
         if (delta.get("tool_calls")) |tc| for (tc.array) |call| {
             try std.testing.expectEqual(@as(i64, 0), call.get("index").?.int64().?);
             if (call.get("id")) |id| {
@@ -492,6 +507,7 @@ fn expectStreamMatchesWholeCalls(reply: []const u8, expected_call_count: ?usize)
     try std.testing.expectEqualStrings(if (expected_calls.len > 0) expected_calls[0].get("function").?.get("name").?.string else "", names.items);
     try std.testing.expectEqualStrings(if (expected_calls.len > 0) expected_calls[0].get("function").?.get("arguments").?.string else "", arguments.items);
     try std.testing.expectEqualStrings(textOf(message, "content"), prose.items);
+    if (thinking) try std.testing.expectEqualStrings("Plan.", reasoning.items);
 }
 
 test "stream replay retains the unoffered envelope after an offered call" {
@@ -517,6 +533,14 @@ test "stream replay with leading whitespace retains malformed envelope and later
 
 test "stream retains a malformed closed envelope with whitespace and later prose" {
     try expectStreamMatchesWhole(" \n\t<tool_call>{invalid}</tool_call>Tail.");
+}
+
+test "stream without accepted calls preserves a space after streamed reasoning" {
+    try expectStreamMatchesWholeOptions("Plan.</think> ", 0, true, " ");
+}
+
+test "stream without accepted calls sends the role before deferred leading-whitespace prose" {
+    try expectStreamMatchesWholeOptions("\nPlain prose", 0, false, "\nPlain prose");
 }
 
 test "stream content and tool calls occur exactly once across all chunks" {
