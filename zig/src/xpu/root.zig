@@ -22,4 +22,5 @@ test {
     _ = context;
     _ = launch;
     _ = decode;
+    _ = @import("sage_contract.zig");
 }
