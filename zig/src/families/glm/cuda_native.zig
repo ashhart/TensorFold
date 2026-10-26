@@ -267,6 +267,8 @@ fn finishRank(a: OpenArgs) !Loaded {
     }
     try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_bytes); // both ranks bring it up or neither does
     errdefer if (own.group.fast) |f| f.deinit();
+    try @import("cuda_roce_multi.zig").open(gpa, io, ctx.d, &own.group, set.roce_multi); // three ranks or more, likewise
+    errdefer if (own.group.multi) |m| m.deinit(m.ctx);
     own.e.group = &own.group;
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();

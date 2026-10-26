@@ -100,6 +100,11 @@ pub const Settings = struct {
             problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
             return error.BadSetting;
         }
+        // refused here, before the weights load: the wire's bootstrap meets at rank 0, its kernel comes from the image
+        if (s.roce_multi and (get("TF_TP_MASTER") == null or get("TF_TP_KERNEL_IMAGE") == null)) {
+            problem.* = "TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE";
+            return error.BadSetting;
+        }
         return s;
     }
 };

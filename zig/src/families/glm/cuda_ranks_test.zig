@@ -293,12 +293,18 @@ test "TF_GLM_INDEX_SPLIT: 2048 by default, 0 for never, a position, and a refusa
     try std.testing.expectEqualStrings("TF_GLM_INDEX_SPLIT: the position a prompt chunk's indexer rows split from, or 0 for never", problem);
 }
 
-test "TF_GLM_ROCE_MULTI: off by default, 1 and 0, and a refusal naming a value that is not one" {
+test "TF_GLM_ROCE_MULTI: off by default, 1 and 0, and refusals naming a bad value or what the wire needs" {
     const Reader = struct {
         fn absent(_: [:0]const u8) ?[]const u8 {
             return null;
         }
         fn on(key: [:0]const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_TP_MASTER")) return "10.0.0.1";
+            if (std.mem.eql(u8, key, "TF_TP_KERNEL_IMAGE")) return "tp_mailbox.fatbin";
+            return if (std.mem.eql(u8, key, "TF_GLM_ROCE_MULTI")) "1" else null;
+        }
+        fn lone(key: [:0]const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_TP_MASTER")) return "10.0.0.1";
             return if (std.mem.eql(u8, key, "TF_GLM_ROCE_MULTI")) "1" else null;
         }
         fn off(key: [:0]const u8) ?[]const u8 {
@@ -314,6 +320,8 @@ test "TF_GLM_ROCE_MULTI: off by default, 1 and 0, and a refusal naming a value t
     try std.testing.expect(!(try Settings.read(Reader.off, &problem)).roce_multi);
     try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
     try std.testing.expectEqualStrings("TF_GLM_ROCE_MULTI: 0 or 1", problem);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.lone, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE", problem);
     const h: [32]u8 = @splat(0);
     try std.testing.expectEqual(@as(u32, 1), Fingerprint.of(3, 0, .{ .roce_multi = true }, 8192, true, h, h, h).roce_multi);
 }

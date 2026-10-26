@@ -47,6 +47,7 @@ test {
     _ = @import("cuda_images_interleave_test.zig");
     _ = @import("cuda_pages_test.zig");
     _ = @import("cuda_ranks_test.zig");
+    _ = @import("cuda_roce_multi.zig");
     _ = experts;
     _ = exl3;
     _ = vision;
