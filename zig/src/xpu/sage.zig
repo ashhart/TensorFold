@@ -1320,7 +1320,7 @@ pub const Runner = struct {
         for (m.layers, 0..) |*l, i| {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
-            if (l.attn) try r.attnWindow(l, &m, 0, T, p0, rope) else {
+            if (l.attn) try r.attnWindow(l, m, 0, T, p0, rope) else {
                 const pin = l.mixer_in.n;
                 const hk = l.mixer_out.k;
                 const at = StashAt.of(z);
@@ -1381,7 +1381,7 @@ pub const Runner = struct {
                 const p0_base: i32 = @intCast(r.pos);
                 while (j < T) {
                     const w = @min(WINDOW, T - j);
-                    try r.attnWindow(l, &m, j, w, p0_base + @as(i32, @intCast(j)), rope);
+                    try r.attnWindow(l, m, j, w, p0_base + @as(i32, @intCast(j)), rope);
                     j += w;
                 }
             } else {
