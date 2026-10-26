@@ -74,6 +74,21 @@ Every time is the client's clock, so each includes HTTP and queueing.
 Percentiles (`_p50`, `_p95`) are nearest-rank. A stream with fewer than two chunks, more chunks than tokens,
 an incomplete reply or an unknown token count gives null ITL and round-gap figures.
 
+## Distinct prompts on concurrent streams
+
+Every stream of a default `tools/bench_concurrent.py` cell sends the same prompt; greedy streams also get the same
+reply. A mixture-of-experts model then routes every stream to the same experts, which can flatter multi-stream rates.
+`--prompts FILE` runs one `distinct` cell instead, where request i sends item i of a JSON list (modulo its length):
+
+```sh
+python3 tools/bench_concurrent.py http://127.0.0.1:8080 MODEL \
+  --prompts tools/bench_prompts.json --levels 1,4,8 --temperatures 0 --alone --serial --output distinct.json
+```
+
+`tools/bench_prompts.json` holds 16 public prompts: code completions, chat code, arithmetic and prose.
+Each item has a unique `name`, a `kind` (`chat` or `completion`) and a `prompt`. `--alone` and `--serial` check
+each request against its own prompt's solo and `"draft": false` runs. `--prompts` and `--mixed` are exclusive.
+
 ## Model-free checks
 
 ```sh

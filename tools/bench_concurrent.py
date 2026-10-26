@@ -16,6 +16,9 @@ the reply's usage. A request that fails to connect or errors counts in ``failed`
 server with a small listen backlog resets simultaneous connections; those resets are reported, not hidden).
 Each request also carries bench_metrics' figures (prefill tok/s, ITL, round gaps; docs/cache-benchmarks.md defines
 them); each rep pools them over its streams, and each cell gives medians ("request" and "pooled").
+Every stream of a default cell sends the same prompt (greedy: and gets the same reply), so a mixture-of-experts
+model routes all of them to the same experts, which can flatter multi-stream rates. ``--prompts FILE`` (for example
+tools/bench_prompts.json) runs one "distinct" cell instead, where request i sends the file's item i (modulo its length).
 Standard library only.
 
   python3 tools/bench_concurrent.py http://127.0.0.1:8080 MODEL --levels 1,2,4,8 --alone --output out.json
@@ -193,6 +196,18 @@ def median(values) -> float | None:
     return round(statistics.median(got), 3) if got else None
 
 
+def distinct(path: str) -> list[dict]:
+    """``--prompts``' file: a JSON list of {"name", "kind", "prompt"} items with unique names."""
+    with open(path, encoding="utf-8") as f:
+        items = json.load(f)
+    ok = isinstance(items, list) and len(items) > 0 and all(
+        isinstance(x, dict) and isinstance(x.get("name"), str) and x.get("kind") in ("chat", "completion")
+        and isinstance(x.get("prompt"), str) and len(x["prompt"]) > 0 for x in items)
+    if not ok or len({x["name"] for x in items}) != len(items):
+        raise ValueError("--prompts: expected a JSON list of {name, kind, prompt} items with unique names")
+    return [{"name": x["name"], "kind": x["kind"], "prompt": x["prompt"]} for x in items]
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("base")
@@ -208,6 +223,8 @@ def main() -> None:
     p.add_argument("--serial", action="store_true", help="check the alone runs against \"draft\": false")
     p.add_argument("--no-seed", action="store_true", help="sampled requests without a seed (standards; no checks)")
     p.add_argument("--stagger-ms", type=float, default=0.0, help="start request i this many ms after request i - 1")
+    p.add_argument("--prompts", metavar="FILE",
+                   help="one cell where request i sends item i %% len of this JSON list (tools/bench_prompts.json)")
     p.add_argument("--label", default="")
     p.add_argument("--output")
     p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key from this environment variable")
@@ -219,12 +236,24 @@ def main() -> None:
         args.alone = args.serial = False
     levels = [int(x) for x in args.levels.split(",")]
     temps = [1.0] if args.mixed else [float(t) for t in args.temperatures.split(",")]
-    cells = [None] if args.mixed else PROMPTS
+    if args.prompts and args.mixed:
+        p.error("--prompts and --mixed are exclusive")
+    pool = PROMPTS
+    if args.prompts:
+        try:
+            pool = distinct(args.prompts)
+        except (OSError, ValueError) as exc:
+            p.error(str(exc))
+    cells = [None] if args.mixed or args.prompts else PROMPTS
     report: dict = {"label": args.label, "tokens": args.tokens, "mixed": args.mixed, "cells": []}
+    if args.prompts:
+        report["prompts"] = [q["name"] for q in pool]
     for temp in temps:
         for item in cells:
             specs: list[tuple[dict, int | None]]
-            if args.mixed or item is None:
+            if args.prompts:
+                specs = [(pool[i % len(pool)], args.seed + i if temp > 0 else args.seed) for i in range(max(levels))]
+            elif args.mixed or item is None:
                 specs = [(PROMPTS[i % 2], args.seed + i // 2) for i in range(max(levels))]
             else:
                 specs = [(item, args.seed + i if temp > 0 else args.seed) for i in range(max(levels))]
@@ -239,7 +268,7 @@ def main() -> None:
                         alone[key] = stream(args.base, args.model, spec[0], args.tokens, temp, spec[1], api_key=api_key)
             if args.serial:
                 for key, ref in alone.items():
-                    serial = stream(args.base, args.model, next(q for q in PROMPTS if q["name"] == key[0]),
+                    serial = stream(args.base, args.model, next(q for q in pool if q["name"] == key[0]),
                                     args.tokens, temp, key[1], draft=False, api_key=api_key)
                     ref["serial_equal"] = token_equal(serial, ref)
                     ref["serial_run"] = serial
@@ -270,7 +299,8 @@ def main() -> None:
                             pair = {"concurrent": r, "alone": ref, "serial": ref.get("serial_run", {})}
                             rep["comparisons"].append({k: {f: v.get(f) for f in fields} for k, v in pair.items()})
                     reps.append(rep)
-                cell = {"prompt": "mixed" if args.mixed or item is None else item["name"], "temperature": temp,
+                name = "distinct" if args.prompts else "mixed" if args.mixed or item is None else item["name"]
+                cell = {"prompt": name, "temperature": temp,
                         "streams": n, "failed": sum(r["failed"] for r in reps),
                         "unmeasured": sum(r["unmeasured"] for r in reps),
                         "aggregate_tps": round(statistics.median(r["aggregate_tps"] for r in reps), 1),

@@ -1,0 +1,18 @@
+[
+ {"name": "quicksort-raw", "kind": "completion", "prompt": "def quicksort(xs):\n    \"\"\"Sort a list with quicksort.\"\"\"\n"},
+ {"name": "rust-reverse-words", "kind": "chat", "prompt": "Write a Rust function that reverses the words of a sentence, with a unit test."},
+ {"name": "multiply-17-23", "kind": "chat", "prompt": "What is 17 times 23? Show the steps."},
+ {"name": "sleep-tips", "kind": "chat", "prompt": "Give me three tips for sleeping better."},
+ {"name": "js-debounce-raw", "kind": "completion", "prompt": "// A JavaScript debounce helper with a cancel method\nfunction debounce(fn, ms) {\n"},
+ {"name": "linear-equation", "kind": "chat", "prompt": "Solve for x: 3x + 7 = 31, then check the answer by substitution, and explain each step to a student who is new to algebra."},
+ {"name": "fishing-village", "kind": "chat", "prompt": "Describe a quiet morning in a small fishing village."},
+ {"name": "sql-left-join", "kind": "chat", "prompt": "Explain what a SQL LEFT JOIN returns compared with an INNER JOIN, with a tiny example table."},
+ {"name": "rectangle", "kind": "chat", "prompt": "A rectangle is 12 cm by 7 cm. Find its area, its perimeter and the length of its diagonal."},
+ {"name": "dinner-idea", "kind": "chat", "prompt": "Hi! What should I cook tonight with rice, eggs and spinach?"},
+ {"name": "c-primes-raw", "kind": "completion", "prompt": "#include <stdio.h>\n\n/* Print the first n prime numbers. */\nint main(void) {\n"},
+ {"name": "prime-221", "kind": "chat", "prompt": "Is 221 a prime number? Explain."},
+ {"name": "heist-story", "kind": "chat", "prompt": "Summarize the plot of a heist story you invent, in five sentences, ending with a twist that the reader could have guessed from the second sentence."},
+ {"name": "bash-line-count", "kind": "chat", "prompt": "Write a bash one-liner that counts the lines of every .py file under the current directory and prints the total."},
+ {"name": "sum-1-250", "kind": "chat", "prompt": "Compute the sum of the integers from 1 to 250."},
+ {"name": "blue-sky", "kind": "chat", "prompt": "Why is the sky blue? Answer for a ten-year-old."}
+]
