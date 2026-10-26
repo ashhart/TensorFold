@@ -133,6 +133,8 @@ pub const Server = struct {
     close_id: ?u32 = null, // the close marker's own token, when the marker is one token
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
+    /// The effort a recipient template hears with thinking off: it has no switch, so its lowest level, not its default.
+    off_effort: ?[]const u8 = null,
     thinking_switch: bool = false,
     eos: []const u32 = &.{},
     think_close: []const u32 = &.{},
@@ -205,6 +207,7 @@ pub const Server = struct {
         srv.recipients = recipient_reply.detect(text);
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
+        if (srv.recipients and srv.effort_levels.len > 0) srv.off_effort = fields.coerceEffort("minimal", srv.effort_levels);
         // MiniMax-M3's template decides on its own; thinking off closes the block in the prompt (prompt.zig)
         srv.thinking_switch = minimax or std.mem.indexOf(u8, source, "enable_thinking") != null or
             std.mem.indexOf(u8, source, "thinking_mode") != null;
