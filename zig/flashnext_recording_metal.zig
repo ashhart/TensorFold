@@ -34,6 +34,7 @@ pub const Buffer = struct {
 };
 pub const Device = struct {
     id: usize = 0,
+    tensor_units: bool = true,
     pub fn allocated(_: Device) u64 {
         return 0;
     }
@@ -45,8 +46,8 @@ pub const Device = struct {
     pub fn event(_: Device) !Event {
         return .{};
     }
-    pub fn tensorUnits(_: Device) bool {
-        return true;
+    pub fn tensorUnits(d: Device) bool {
+        return d.tensor_units;
     }
     pub fn generation(_: Device) u32 {
         return 14;

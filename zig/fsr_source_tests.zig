@@ -60,3 +60,7 @@ test "FSR prompt and six-bit variants retain resident arithmetic and reject sour
     for ([_][]const u8{ "fma(", "fz_group(", "simd_shuffle_xor(", "bsilu(", "metal::exp(", "simd_topk<" }) |expr|
         try std.testing.expectEqual(std.mem.count(u8, xnew, expr), std.mem.count(u8, slotted, expr));
 }
+
+test {
+    _ = @import("fsr_prompt_tests.zig");
+}

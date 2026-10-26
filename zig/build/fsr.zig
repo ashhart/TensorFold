@@ -5,7 +5,8 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
     b.step("test-fsr-host", "Exact FSR cache ownership and bounded reader fixtures without devices").dependOn(&run.step);
     all.dependOn(&run.step);
-    const source = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/fsr_source_tests.zig"), .target = b.graph.host, .optimize = .debug }) }));
+    const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
+    const source = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/fsr_source_tests.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "kernel_sources", .module = sources }} }) }));
     b.step("test-fsr-source-host", "Recorded expert source address patch and refusal controls without shaders").dependOn(&source.step);
     all.dependOn(&source.step);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });

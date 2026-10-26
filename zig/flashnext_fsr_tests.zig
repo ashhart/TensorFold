@@ -203,3 +203,47 @@ test "FSR native corrupt checkpoint headers refuse before device allocation" {
     try std.testing.expectError(error.BadSafetensors, r.indexFile(try std.fmt.allocPrintSentinel(a, "{s}", .{path}, 0)));
     try std.testing.expectEqual(@as(usize, 0), r.held.items.len);
 }
+
+test "FSR native prompt emits every actual stored width on both fragment paths" {
+    const ks = @import("kernel_sources");
+    const Spec = @import("src/families/flashnext/spec.zig").Spec;
+    const prompt = @import("src/families/flashnext/prompt_w.zig");
+    const frags = @import("src/core/frags.zig");
+    const source = @import("src/families/flashnext/fsr_prompt_source.zig");
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const a = memory.allocator();
+    mtl.allocator = a;
+    for ([_]bool{ false, true }) |tensor_units| {
+        var r: fz.Run = .{ .arena = a, .device = .{ .tensor_units = tensor_units }, .queue = .{} };
+        const six = try source.patch(a, ks.flashnext_qmm6, false);
+        const assembled = try frags.source(r.device, a, six);
+        try std.testing.expect(std.mem.endsWith(u8, assembled, @embedFile("kernels/metal/prefill/qmm6_nax_b.metal")));
+        try std.testing.expectEqual(!tensor_units, std.mem.startsWith(u8, assembled, "#define TF_SIMD_FRAGS 1\n"));
+        for ([_]usize{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| {
+            const recipe = try Spec.init(bits, group);
+            // Both routed gate/up K2560 and down K640 are served with every admitted recipe.
+            _ = try recipe.words(fz.D);
+            _ = try recipe.words(640);
+            r.window.ssd_experts = null;
+            const resident = try prompt.compile(&r, @intCast(bits), @intCast(group));
+            r.window.ssd_experts = 1;
+            const slotted = try prompt.compile(&r, @intCast(bits), @intCast(group));
+            const plain = resident.qmm.text;
+            const patched = slotted.qmm.text;
+            const head = try std.fmt.allocPrint(a, "#define WB {d}\n#define WG {d}\n", .{ bits, group });
+            try std.testing.expect(std.mem.indexOf(u8, patched, head) != null);
+            try std.testing.expect(std.mem.indexOf(u8, patched, "#include \"../nax.h\"") == null);
+            try std.testing.expectEqual(!tensor_units, std.mem.startsWith(u8, patched, "#define TF_SIMD_FRAGS 1\n"));
+            const marker = "// y[r] = x[r] W_e^T for rows sorted";
+            const before = std.mem.indexOf(u8, plain, marker).?;
+            const after = std.mem.indexOf(u8, patched, marker).?;
+            try std.testing.expectEqualStrings(plain[0..before], patched[0..after]);
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, patched, "FSR_MAP [[buffer(27)]]"));
+            for ([_][]const u8{ "k_loop", "fma(", "store_act<", "frag<float>", "expert_tile<BM>", "row + tm + SM <= M" }) |expr|
+                try std.testing.expectEqual(std.mem.count(u8, plain, expr), std.mem.count(u8, patched, expr));
+            for (resident.gather, slotted.gather) |old, new| try std.testing.expectEqualStrings(old.name, new.name);
+            for (resident.gu, slotted.gu) |old, new| try std.testing.expectEqualStrings(old.name, new.name);
+        };
+    }
+}
