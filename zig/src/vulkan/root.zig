@@ -18,9 +18,14 @@ pub const upload = commands.upload;
 pub const download = commands.download;
 pub const orExit = commands.orExit;
 pub const dispatch = @import("dispatch.zig");
+pub const params = @import("stage1_params");
+pub const tensor = @import("tensor.zig");
+pub const arena = @import("arena.zig");
+pub const ops = @import("ops.zig");
+pub const ops_q4 = @import("ops_q4.zig");
 
 test {
     const std = @import("std");
-    inline for (.{ runtime, Runtime, device, Device, memory, Buffer, commands, Commands, dispatch, dispatch.Pipeline }) |T|
+    inline for (.{ runtime, Runtime, device, Device, memory, Buffer, commands, Commands, dispatch, dispatch.Pipeline, params, tensor, tensor.View, arena, ops, ops_q4 }) |T|
         std.testing.refAllDecls(T);
 }
