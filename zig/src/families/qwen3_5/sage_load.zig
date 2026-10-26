@@ -24,7 +24,13 @@ pub fn halfRows(gpa: std.mem.Allocator, c: anytype, prefix: []const u8) ![]f16 {
     }
     if (std.mem.eql(u8, t.dtype, "BF16")) {
         const out = try gpa.alloc(f16, t.bytes.len / 2);
-        for (out, 0..) |*o, i| o.* = @floatCast(bf16At(t.bytes, i));
+        errdefer gpa.free(out);
+        const fp16_max: f32 = 65504.0;
+        for (out, 0..) |*o, i| {
+            const v = bf16At(t.bytes, i);
+            if (!std.math.isFinite(v) or @abs(v) > fp16_max) return error.StoredPrecision;
+            o.* = @floatCast(v);
+        }
         return out;
     }
     if (!std.mem.eql(u8, t.dtype, "U32")) return error.UnexpectedDtype;
@@ -286,13 +292,13 @@ test "expert tables: gate rows then up rows, down after, for each stacked expert
     const Sink = struct {
         out: [6][2 * 4096]u8 = undefined,
         fn put(s: *@This(), part: Part, at: usize, b: []const u8) !void {
-            @memcpy(s.out[@intFromEnum(part)][at..][0..b.len], b);
+            @memcpy(s.out[@backingInt(part)][at..][0..b.len], b);
         }
     };
     var s: Sink = .{};
     try packExperts(c, "", 2, false, 64, 64, &s);
     // expert 1's gate|up weight row block: gate bytes (16*0 + 0 + 2) then up bytes (16*1 + 0 + 2)
-    try std.testing.expectEqual(@as(u8, 2), s.out[@intFromEnum(Part.gu_w)][z.gu_w]);
-    try std.testing.expectEqual(@as(u8, 18), s.out[@intFromEnum(Part.gu_w)][z.gu_w + z.gu_w / 2]);
-    try std.testing.expectEqual(@as(u8, 33 + 4), s.out[@intFromEnum(Part.dn_s)][0]);
+    try std.testing.expectEqual(@as(u8, 2), s.out[@backingInt(Part.gu_w)][z.gu_w]);
+    try std.testing.expectEqual(@as(u8, 18), s.out[@backingInt(Part.gu_w)][z.gu_w + z.gu_w / 2]);
+    try std.testing.expectEqual(@as(u8, 33 + 4), s.out[@backingInt(Part.dn_s)][0]);
 }
