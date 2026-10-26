@@ -10,6 +10,7 @@ const glm_checks = @import("zig/build/glm_checks.zig");
 const merge_build = @import("zig/build/merge.zig");
 const flashnext_checks = @import("zig/build/flashnext_checks.zig");
 const hip_build = @import("zig/build/hip.zig");
+const vulkan_build = @import("zig/build/vulkan.zig");
 const xpu_build = @import("zig/build/xpu.zig");
 const grammar_build = @import("zig/build/grammar.zig");
 const counters_build = @import("zig/build/metal_counters.zig");
@@ -179,6 +180,9 @@ pub fn build(b: *std.Build) void {
     const hip_options = hip_build.options(b); // declared on every target (#1165), used only with -Dhip=true
     hip_build.loaderTests(b, test_step);
     if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step, hip_options);
+    const with_vulkan = b.option(bool, "vulkan", "Enable the opt-in Vulkan backend and its host/device targets") orelse false;
+    const vulkan_options = vulkan_build.options(b); // declared on every target, used only with -Dvulkan=true
+    if (with_vulkan) vulkan_build.steps(b, target, optimize, test_step, vulkan_options);
     exlr8_build.hostTests(b, target, test_step);
     xpu_build.steps(b, target, optimize, build_options);
     video_build.steps(b, target, test_step);

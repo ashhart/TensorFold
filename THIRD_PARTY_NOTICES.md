@@ -16,6 +16,14 @@ The native engine carries that adaptation. `zig/kernels/metal/qwen3_5/gdn_pre.me
 `zig/kernels/metal/core/deltanet.metal` and Flash Next's `zig/kernels/metal/flashnext/q4_gdn_*.metal` run the same
 model math.
 
+## Vulkan affine projections
+
+`zig/kernels/vulkan/qmm.comp` adapts the GLSL shader from
+[mlx-omarchy](https://github.com/joshuaswarren/omarchy-mlx), MIT License,
+Copyright © 2026 Joshua Warren and mlx-omarchy contributors.
+Its arithmetic is unchanged; the native Vulkan path does not link MLX.
+See [the license text](LICENSES/mlx-omarchy-MIT.txt).
+
 ## Qwen Flash Next
 
 The n-gram ID helpers translate Hugging Face transformers' `models/qwen4_exp/modeling_qwen4_exp.py` with renamed
