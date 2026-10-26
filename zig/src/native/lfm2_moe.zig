@@ -35,6 +35,19 @@ const Host = struct {
 
 const cannot = "the native LFM2 engine cannot load this checkpoint ({s})";
 
+/// The first GPU generation served: applegpu_g15 (M3); M1 is 13 and M2 is 14.
+const first_generation = 15;
+
+/// Whether a GPU of this generation (0: not reported) serves; on M1 and M2 a pipeline's threads fall as registers rise.
+fn generationServed(generation: u32) bool {
+    return generation == 0 or generation >= first_generation;
+}
+
+test "M1 and M2 are refused, M3 and later are served" {
+    try std.testing.expect(!generationServed(13) and !generationServed(14));
+    try std.testing.expect(generationServed(15) and generationServed(16) and generationServed(17) and generationServed(0));
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -57,6 +70,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     errdefer model.deinit();
+    if (!generationServed(model.device.generation())) {
+        problem.* = "LFM2.5-24B-A2B needs an M3 or later GPU: M1 and M2 are not qualified for its shared rounds";
+        return null;
+    }
+    if (model.device.generation() == first_generation) std.log.info("lfm2: an M3 is not yet tested with shared rounds", .{});
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
