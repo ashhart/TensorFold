@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 (experimental native engine): `zig build dsv41-serve` installs runnable `tensorfold-dsv41` and `tf-dsv41` binaries on real CUDA images (#1325), and packs that store the router bias or the DSpark confidence head in F16 load them widened exactly to F32 (#1326). Thanks to @ecohash-co.
+
 - CUDA on unified memory (GB10): the start-up budget counts the free pages the kernel parks on its per-CPU lists, which MemAvailable leaves out, so a start sized right after another process freed memory admits what actually fits (#1323, fixing #1311). Measured on a GB10 right after a 30B model freed its memory: about 690 MiB parked, still about 180 MiB 30 s later. Thanks to @wojo.
 
 - GLM-5.3-Flash on CUDA takes KV pages from the core pool by default from two ranks, not only from three, and the plan funds the window (#1322, fixing #1313). At TP=2 on two GB10s with the NVFP4 checkpoint, tokens are identical; two streams serve 14% more tokens/s for chat and code, and prefill is flat to +17%. Thanks to @wojo.
