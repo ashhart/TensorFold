@@ -196,7 +196,9 @@ pub const Rows = struct {
         self.dev[2] = vcache;
         switch (f.ctl) { // the attention reads a table that is not the one the rows were placed by
             .swap => for (0..self.per) |i| std.mem.swap(i32, &ids[i], &ids[self.per + i]),
-            .stale => ids[0] = ids[1],
+            .stale => if (ids.len > 1) { // one page has no later page: planted from the next shape on
+                ids[0] = ids[1];
+            } else return,
             else => return,
         }
         self.table = try self.rig.input(std.mem.sliceAsBytes(ids));
