@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- On Macs, `--spill-gib N` writes a conversation state that the prompt cache pushes out of memory to disk (under `~/.cache/tensorfold/spilled`, at most N GiB, least recently used first), and reads it back when the conversation returns; `--checkpoint-slots N` bounds how many states stay in memory (#840, from Python #68). Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash take both; neither is on by default. With one slot in memory and a second 16k-token conversation in between, a returning conversation's next turn starts after 2.6 s instead of 56 s with Qwen3.8-27B on an M3 Ultra (1.8 s instead of 31 s with GLM-5.3-Flash), with the same reply as a fresh pass. Thanks to @gilby.
+
 - Requests that arrive together on a new shared prefix no longer each prefill it when prompts fill a chunk a step: a request whose prefix another prompt is still filling waits in the queue for that prompt's cut, then resumes it (#1321, fixing #1310). `TENSORFOLD_PREFIX_WAIT_MS` bounds the wait (60000 by default, 0 turns it off). On a GB10 with eight chat requests arriving together on a new 28k-token system prompt, the last first token comes after 31 s instead of 201 s with Qwen3.8-27B, and after 25 s instead of 146 s with Flash Next FP4. Prefill and decode speeds are unchanged on the GB10 and on an M3 Ultra, and every reply equals its run alone. Thanks to @wojo.
 
 - DeepSeek-V4.1 (experimental native engine): `zig build dsv41-serve` installs runnable `tensorfold-dsv41` and `tf-dsv41` binaries on real CUDA images (#1325), and packs that store the router bias or the DSpark confidence head in F16 load them widened exactly to F32 (#1326). Thanks to @ecohash-co.
