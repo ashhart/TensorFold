@@ -8,6 +8,7 @@ pub const Kernels = struct {
     affine: cuda.qlinear.Affine4Kernels,
     wide: cuda.qlinear.AffineNKernels,
     draws: cuda.sample.Draws,
+    grammar_mask: cuda.Function, // sample.cu's tf_grammar_mask: structured output's disallowed tokens to -inf
     round: cuda.tree_round.Kernels,
     embed: cuda.embed_rows.EmbedRows,
     norms: cuda.norms.Norms,
@@ -34,6 +35,7 @@ pub const Kernels = struct {
         k.wide = try cuda.qlinear.AffineNKernels.resolve(d, k.mods[6], k.mods[7], k.mods[3], sms, gb10);
         errdefer k.wide.deinit();
         k.draws = try cuda.sample.Draws.resolve(k.mods[4]);
+        k.grammar_mask = try k.mods[4].function("tf_grammar_mask");
         k.round = try cuda.tree_round.Kernels.resolve(k.mods[5]);
         k.embed = try cuda.embed_rows.EmbedRows.load(d);
         errdefer k.embed.unload();
