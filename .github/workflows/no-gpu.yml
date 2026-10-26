@@ -56,6 +56,9 @@ jobs:
       # Every build option is declared for every target, so one build script fits every OS.
       - name: build options
         run: python3 -m unittest discover -s tools/zig -p build_options_test.py
+      # Stock Qwen3.5's f32 GDN norms rewritten as bf16 for the CUDA family, which refuses rather than rounds them.
+      - name: Qwen3.5 bf16 norm conversion
+        run: python3 -m unittest discover -s tools/zig -p qwen35_bf16_norms_test.py
       # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
       - name: lean check
         env:
