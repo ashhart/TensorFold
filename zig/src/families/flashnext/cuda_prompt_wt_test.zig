@@ -52,7 +52,7 @@ test "released expert planes reuse two indexed shards without invalidating held 
     const first = try store.hold("x");
     const address = first.bytes.ptr;
     store.release();
-    try std.testing.expectEqual(@as(usize, 0), store.nheld);
+    try std.testing.expectEqual(@as(usize, 0), store.held.items.len);
     try std.testing.expectEqual(@as(usize, 1), store.nreleased);
     // Removing the path proves the next borrow uses the existing mapping and parsed header.
     try tmp.dir.deleteFile(io, "a");

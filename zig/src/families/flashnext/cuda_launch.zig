@@ -436,6 +436,7 @@ test {
     _ = @import("cuda_rank_memory.zig");
     _ = @import("cuda_rank_wire.zig");
     _ = @import("cuda_modelopt_experts.zig");
+    _ = @import("cuda_modelopt_threads.zig");
     _ = row_path;
     _ = @import("cuda_mtp_check.zig");
     _ = @import("cuda_draft_affine.zig");
