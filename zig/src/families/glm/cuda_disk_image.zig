@@ -49,6 +49,8 @@ pub const Shape = struct {
     pooled_row: u32,
     capacity: u32,
     head: bool, // the MTP head's caches are kept (drafting)
+    window: u64, // the prefix's bytes before a verify window's rows (its KDA projections and saves, read by its keep)
+    draft: u64, // the tail's bytes before the first-draft row (written at a prompt pass's end)
 
     pub fn of(st: *const State, c: *const Config, capacity: usize, head: bool) !Shape {
         if (st.rings.len == 0) return error.SnapshotShape;
@@ -56,8 +58,11 @@ pub const Shape = struct {
         const first = if (st.table != 0) st.rings[0] else if (st.caches.len > 0) st.caches[0].lc else st.mtp_caches.lc;
         const end = if (st.table != 0) st.table else base + st.arena.buf.len;
         if (first < base or st.mtp_pos_dev < first or end < st.mtp_pos_dev) return error.SnapshotShape;
+        if (st.proj < base or first < st.proj or st.prompt_hidden < st.mtp_pos_dev or end < st.prompt_hidden) return error.SnapshotShape;
         const fp8 = st.mtp_caches.ls != 0;
         return .{
+            .window = st.proj - base,
+            .draft = st.prompt_hidden - st.mtp_pos_dev,
             .prefix = first - base,
             .tail = end - st.mtp_pos_dev,
             .layers = @intCast(st.caches.len),
@@ -112,13 +117,10 @@ pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: s
     var img: u64 = Words.bytes;
     var lease: u64 = 0;
     try out.append(a, .{ .img = 0, .len = Words.bytes, .from = .words });
-    var front: u64 = sh.prefix; // the prefix and every DSA layer's parts sit in the lease as in the image
-    for (0..sh.layers) |_| for (cache(sh, at)) |n| {
-        front += n;
-    };
-    try out.append(a, .{ .img = img, .len = front, .from = .{ .lease = 0 } });
-    img += front;
-    lease += front;
+    const f = front(sh, at);
+    try out.append(a, .{ .img = img, .len = f, .from = .{ .lease = 0 } });
+    img += f;
+    lease += f;
     if (sh.head) for (cache(sh, sh.headRows(at)), cache(sh, mtp_len)) |full, held| {
         if (held > 0) try out.append(a, .{ .img = img, .len = held, .from = .{ .lease = lease } });
         if (full > held) try out.append(a, .{ .img = img + held, .len = full - held, .from = .zeros });
@@ -126,6 +128,15 @@ pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: s
         lease += held;
     };
     if (sh.tail > 0) try out.append(a, .{ .img = img, .len = sh.tail, .from = .{ .lease = lease } });
+}
+
+/// The image bytes after the words that sit in the lease as in the image: the prefix and every DSA layer's parts.
+pub fn front(sh: Shape, at: u32) u64 {
+    var n: u64 = sh.prefix;
+    for (0..sh.layers) |_| for (cache(sh, at)) |x| {
+        n += x;
+    };
+    return n;
 }
 
 /// The lease bytes of a state at `at` whose head holds `mtp_len` rows (layout.Plan's length for it).
@@ -138,6 +149,86 @@ pub fn leaseBytes(sh: Shape, at: u32, mtp_len: u64) u64 {
         n += x;
     };
     return n;
+}
+
+/// Rank 0's image bytes at `at` (its head counted at a verify window past `at`).
+pub fn imageBytes(sh: Shape, at: u32) u64 {
+    var n: u64 = Words.bytes + front(sh, at) + sh.tail;
+    if (sh.head) for (cache(sh, sh.headRows(at))) |x| {
+        n += x;
+    };
+    return n;
+}
+
+/// `len` bytes at `off` of rank `rank`'s image; `shared`: past rank 0's prefix, the same bytes every rank holds.
+pub const Piece = struct { rank: u32, off: u64, len: u64, shared: bool };
+
+/// The store's image at `at`: rank 0's, then each other rank's prefix (rank 0's bytes stand for all the rest).
+pub fn storeParts(sh: Shape, prefixes: []const u64, at: u32, out: *std.ArrayList(Part), a: std.mem.Allocator) !void {
+    try parts(sh, at, out, a);
+    for (prefixes[1..]) |p| try out.append(a, .{ .bytes = p });
+}
+
+/// Store image bytes [off, off + len) split by rank: rank 0's image, then rank r's prefix after its words.
+pub fn route(sh: Shape, prefixes: []const u64, at: u32, off: u64, len: u64, out: *std.ArrayList(Piece), a: std.mem.Allocator) !void {
+    const own = Words.bytes + sh.prefix; // rank 0's bytes no other rank holds
+    var start: u64 = 0; // the section's first store byte
+    for (prefixes, 0..) |p, r| {
+        const size = if (r == 0) imageBytes(sh, at) else p;
+        defer start += size;
+        const lo = @max(off, start);
+        const hi = @min(off + len, start + size);
+        if (lo >= hi) continue;
+        if (r > 0) {
+            try out.append(a, .{ .rank = @intCast(r), .off = Words.bytes + lo - start, .len = hi - lo, .shared = false });
+            continue;
+        }
+        if (lo < own) try out.append(a, .{ .rank = 0, .off = lo, .len = @min(hi, own) - lo, .shared = false });
+        if (hi > own) try out.append(a, .{ .rank = 0, .off = @max(lo, own), .len = hi - @max(lo, own), .shared = true });
+    }
+    if (off + len > start) return error.SnapshotShape;
+}
+
+/// `len` store image bytes at `off`.
+pub const Span = struct { off: u64, len: u64 };
+
+/// Store image bytes no prompt pass to `at` writes: each rank's window rows, pools past the whole ones, the draft row.
+pub fn unwritten(sh: Shape, prefixes: []const u64, windows: []const u64, at: u32, mtp_len: u64, out: *std.ArrayList(Span), a: std.mem.Allocator) !void {
+    if (windows.len != prefixes.len or windows.len == 0 or windows[0] != sh.window) return error.SnapshotShape;
+    if (sh.head and mtp_len > sh.headRows(at)) return error.SnapshotShape;
+    var img: u64 = Words.bytes + sh.prefix;
+    try out.append(a, .{ .off = Words.bytes + sh.window, .len = sh.prefix - sh.window });
+    for (0..sh.layers) |_| {
+        const c = cache(sh, at);
+        const whole = at / sparse.pool * sh.pooled_row;
+        img += c[0] + c[1] + c[2] + c[3];
+        try out.append(a, .{ .off = img + whole, .len = c[4] - whole });
+        img += c[4];
+    }
+    if (sh.head) {
+        const full = cache(sh, sh.headRows(at));
+        const held = cache(sh, mtp_len)[4];
+        const whole = mtp_len / sparse.pool * sh.pooled_row;
+        img += full[0] + full[1] + full[2] + full[3];
+        try out.append(a, .{ .off = img + whole, .len = held - whole }); // past `held`, the image's zeros
+        img += full[4];
+    }
+    try out.append(a, .{ .off = img + sh.draft, .len = sh.tail - sh.draft });
+    img += sh.tail;
+    for (prefixes[1..], windows[1..]) |p, w| {
+        if (w > p) return error.SnapshotShape;
+        try out.append(a, .{ .off = img + w, .len = p - w }); // a rank's section is its prefix alone
+        img += p;
+    }
+}
+
+/// Zeros `spans` of `bytes`, store image bytes from `from`, where they overlap.
+pub fn clear(spans: []const Span, from: u64, bytes: []u8) void {
+    for (spans) |s| {
+        const lo = @max(s.off, from);
+        const hi = @min(s.off + s.len, from + bytes.len);
+        if (lo < hi) @memset(bytes[@intCast(lo - from)..@intCast(hi - from)], 0);
+    }
 }
 
 /// Copies between `host` and image bytes [off, off + host.len) of a lease: out (lease to host) or in.
