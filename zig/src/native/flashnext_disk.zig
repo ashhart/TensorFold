@@ -49,6 +49,11 @@ pub fn image(comptime H: type) rows.Image {
     return .{ .parts = parts, .gather = gather, .blank = Blank(H).blank, .scatter = scatter };
 }
 
+/// The same image for a shared session's kept state, the bare snapshot (Backend.snapSave); B holds `e` and `gpa`.
+pub fn stateImage(comptime B: type) rows.Image {
+    return .{ .parts = parts, .gather = gatherState, .blank = BlankState(B).blank, .scatter = scatterState };
+}
+
 const hist = 16;
 
 /// The history, the DeltaNet states, each layer's key heads, value heads and indexer keys by row, the tail.
@@ -65,11 +70,19 @@ fn parts(_: *anyopaque, at: u32, out: *std.ArrayList(rows.image.Part), a: Alloca
 
 fn gather(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, out: []u8) anyerror!void {
     const k: *const Kept = @ptrCast(@alignCast(saved));
-    const buf = k.st.buf.contents();
+    copyOut(k.st, ranges, out);
+}
+
+fn gatherState(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, out: []u8) anyerror!void {
+    copyOut(@ptrCast(@alignCast(saved)), ranges, out);
+}
+
+fn copyOut(st: *const snap.State, ranges: []const rows.image.Range, out: []u8) void {
+    const buf = st.buf.contents();
     var o: usize = 0;
     for (ranges) |g| {
         const len: usize = @intCast(g.len);
-        if (g.off < hist) @memcpy(out[o..][0..len], std.mem.asBytes(&k.st.hist)[@intCast(g.off)..][0..len]) else @memcpy(out[o..][0..len], buf[@intCast(g.off - hist)..][0..len]);
+        if (g.off < hist) @memcpy(out[o..][0..len], std.mem.asBytes(&st.hist)[@intCast(g.off)..][0..len]) else @memcpy(out[o..][0..len], buf[@intCast(g.off - hist)..][0..len]);
         o += len;
     }
 }
@@ -87,13 +100,31 @@ fn Blank(comptime H: type) type {
     };
 }
 
+fn BlankState(comptime B: type) type {
+    return struct {
+        /// A pool buffer for `at` tokens, filled by `scatterState`, kept bare as Backend.snapSave keeps its states.
+        fn blank(ptr: *anyopaque, at: u32) anyerror!api.prompt_cache.Saved {
+            const b: *B = @ptrCast(@alignCast(ptr));
+            return try snap.blank(b.e, b.gpa, at);
+        }
+    };
+}
+
 fn scatter(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, in: []const u8) anyerror!void {
     const k: *Kept = @ptrCast(@alignCast(saved));
-    const buf = k.st.buf.contents();
+    copyIn(k.st, ranges, in);
+}
+
+fn scatterState(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, in: []const u8) anyerror!void {
+    copyIn(@ptrCast(@alignCast(saved)), ranges, in);
+}
+
+fn copyIn(st: *snap.State, ranges: []const rows.image.Range, in: []const u8) void {
+    const buf = st.buf.contents();
     var o: usize = 0;
     for (ranges) |g| {
         const len: usize = @intCast(g.len);
-        if (g.off < hist) @memcpy(std.mem.asBytes(&k.st.hist)[@intCast(g.off)..][0..len], in[o..][0..len]) else @memcpy(buf[@intCast(g.off - hist)..][0..len], in[o..][0..len]);
+        if (g.off < hist) @memcpy(std.mem.asBytes(&st.hist)[@intCast(g.off)..][0..len], in[o..][0..len]) else @memcpy(buf[@intCast(g.off - hist)..][0..len], in[o..][0..len]);
         o += len;
     }
 }
