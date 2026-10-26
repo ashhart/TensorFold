@@ -14,7 +14,7 @@ const muse_markers = [_][]const u8{ "<|start|>", "<|message|>", "<|eom|>", "<|eo
 const harmony_markers = [_][]const u8{ "<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>" };
 const muse_eos = [_]u32{303}; // <|eot|>
 const harmony_eos = [_]u32{304}; // <|return|>
-const muse_template = "{{- '<|start|>assistant to=self<|message|>' -}}";
+const muse_template = "{%- set reasoning_effort_map = {'low': 8, 'xhigh': 512} -%}{{- '<|start|>assistant to=self<|message|>' -}}";
 const harmony_template = "{{- '<|start|>assistant<|channel|>commentary to=functions.' ~ name ~ '<|message|>' -}}";
 const all_bytes = blk: {
     var all: [256]u8 = undefined;
@@ -22,9 +22,10 @@ const all_bytes = blk: {
     break :blk all;
 };
 
-/// Bytes as tokens and each marker of the format as one token from 300; every prompt renders as "prompt".
-const Text = struct {
+/// Bytes as tokens and each marker of the format as one token from 300; every prompt renders as `prompt`.
+pub const Text = struct {
     harmony: bool = false,
+    prompt: []const u8 = "prompt<|start|>assistant", // rendered after `effort=E;`, the effort the template heard
 
     fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
@@ -39,7 +40,7 @@ const Text = struct {
     }
 
     /// The reply's tokens: each marker the text spells is its token, every other byte its own.
-    fn tokens(t: *const Text, a: std.mem.Allocator, s: []const u8) ![]const u32 {
+    pub fn tokens(t: *const Text, a: std.mem.Allocator, s: []const u8) ![]const u32 {
         var out: std.ArrayList(u32) = .empty;
         var i: usize = 0;
         next: while (i < s.len) {
@@ -54,10 +55,9 @@ const Text = struct {
         return out.items;
     }
 
-    fn encode(_: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
-        const ids = try a.alloc(u32, input.len);
-        for (input, ids) |byte, *id| id.* = byte;
-        return ids;
+    fn encode(ctx: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
+        const t: *Text = @ptrCast(@alignCast(ctx));
+        return @constCast(try t.tokens(a, input));
     }
 
     fn decode(ctx: *anyopaque, a: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
@@ -86,8 +86,9 @@ const Text = struct {
         return if (t.harmony) &harmony_eos else &muse_eos;
     }
 
-    fn render(_: *anyopaque, a: std.mem.Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
-        return .{ .text = try (a.dupe(u8, "prompt")) };
+    fn render(ctx: *anyopaque, a: std.mem.Allocator, _: json.Value, o: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        const t: *Text = @ptrCast(@alignCast(ctx));
+        return .{ .text = try std.mem.concat(a, u8, &.{ "effort=", o.reasoning_effort orelse "none", ";", t.prompt }) };
     }
 
     fn templateSource(ctx: *anyopaque) []const u8 {
@@ -97,10 +98,12 @@ const Text = struct {
 };
 
 /// Answers `reply` in chunks of `stride` tokens.
-const Script = struct {
+pub const Script = struct {
     reply: []const u32,
     stride: usize,
     eos: u32,
+    effort: [8]u8 = undefined, // the effort the submitted prompt was rendered with
+    effort_len: usize = 0,
 
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -110,8 +113,11 @@ const Script = struct {
         return .{ .context_window = 4096 };
     }
 
-    fn submit(ctx: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+    fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e: *Script = @ptrCast(@alignCast(ctx));
+        const named = request.prompt["effort=".len..];
+        e.effort_len = std.mem.indexOfScalar(u32, named, ';').?;
+        for (named[0..e.effort_len], e.effort[0..e.effort_len]) |t, *b| b.* = @intCast(t);
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         var at: usize = 0;
         while (at < e.reply.len) : (at = @min(at + e.stride, e.reply.len)) {
@@ -133,23 +139,28 @@ const Script = struct {
 };
 
 /// What a reply showed its client, whole or streamed: reasoning, content, the calls begun and their arguments.
-const Shown = struct {
+pub const Shown = struct {
     reasoning: std.ArrayList(u8) = .empty,
     content: std.ArrayList(u8) = .empty,
     arguments: std.ArrayList(u8) = .empty,
     calls: usize = 0,
     status: u16 = 0,
+    length: bool = false, // finish_reason "length"
+    effort: [8]u8 = undefined,
+    effort_len: usize = 0,
 
     fn out(s: *Shown) openai.Out {
         return .{ .ctx = s, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
 
-    fn deinit(s: *Shown) void {
+    pub fn deinit(s: *Shown) void {
         for ([_]*std.ArrayList(u8){ &s.reasoning, &s.content, &s.arguments }) |l| l.deinit(std.testing.allocator);
     }
 
     /// One message or delta object: its text fields appended, each call with an id counted, arguments appended.
-    fn take(s: *Shown, m: json.Value) !void {
+    fn take(s: *Shown, choice: json.Value, key: []const u8) !void {
+        if (choice.strField("finish_reason")) |f| s.length = s.length or std.mem.eql(u8, f, "length");
+        const m = choice.get(key) orelse return;
         const g = std.testing.allocator;
         if (m.get("reasoning_content")) |v| if (v == .string) try s.reasoning.appendSlice(g, v.string);
         if (m.get("content")) |v| if (v == .string) try s.content.appendSlice(g, v.string);
@@ -169,8 +180,7 @@ const Shown = struct {
         const p = payload orelse return;
         const choices = p.get("choices") orelse return;
         if (choices != .array or choices.array.len == 0) return;
-        const delta = choices.array[0].get("delta") orelse return;
-        s.take(delta) catch return error.Closed;
+        s.take(choices.array[0], "delta") catch return error.Closed;
     }
 
     fn reply(ctx: *anyopaque, status: u16, payload: json.Value) void {
@@ -178,11 +188,12 @@ const Shown = struct {
         s.status = status;
         const choices = payload.get("choices") orelse return;
         if (choices != .array or choices.array.len == 0) return;
-        s.take(choices.array[0].get("message") orelse return) catch return;
+        s.take(choices.array[0], "message") catch return;
     }
 };
 
-fn send(settings: Text, reply: []const u8, stride: usize, body: []const u8) !Shown {
+/// `body` answered with `reply`'s tokens, `stride` at a time; the engine stops at the end token or after the reply.
+pub fn send(settings: Text, reply: []const u8, stride: usize, body: []const u8) !Shown {
     var text = settings;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -191,7 +202,7 @@ fn send(settings: Text, reply: []const u8, stride: usize, body: []const u8) !Sho
     var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
         .served_name = "test-model",
         .model_ids = &.{"test-model"},
-        .enable_thinking = false,
+        .enable_thinking = true,
         .use_drafts = false,
     }, null);
     defer srv.deinit();
@@ -199,10 +210,13 @@ fn send(settings: Text, reply: []const u8, stride: usize, body: []const u8) !Sho
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
     var shown: Shown = .{};
     openai.run(srv, a, shown.out(), .{ .conn = &conn }, true, raw);
+    @memcpy(shown.effort[0..backend.effort_len], backend.effort[0..backend.effort_len]);
+    shown.effort_len = backend.effort_len;
     return shown;
 }
 
 const ask = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1024";
+const no_thinking = ",\"chat_template_kwargs\":{\"enable_thinking\":false}";
 const weather = ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"parameters\":{\"type\":\"object\"," ++
     "\"properties\":{\"city\":{\"type\":\"string\"},\"days\":{\"type\":\"integer\"}}}}}]";
 
@@ -229,7 +243,8 @@ test "recipient replies: a split while streaming only grows, holds calls back, a
     defer arena.deinit();
     const a = arena.allocator();
     const reply = call_reply[0 .. call_reply.len - "<|eot|>".len];
-    const done = try recipient_reply.split(a, reply, true);
+    const reading: recipient_reply.Reading = .{ .lead = "assistant", .tools = (try json.parse(a, weather[",\"tools\":".len..])).ok.array };
+    const done = try reading.split(a, reply, .ended);
     try std.testing.expectEqualStrings("Two forecasts are needed.", done.reasoning);
     const xml = "<tool_call>\n<function=get_weather>\n<parameter=city>\n{s}\n</parameter>\n<parameter=days>\n{s}\n</parameter>\n" ++
         "</function>\n</tool_call>";
@@ -237,7 +252,7 @@ test "recipient replies: a split while streaming only grows, holds calls back, a
     try std.testing.expectEqualStrings(want, done.answer);
     var last: reply_text.Split = .{ .reasoning = "", .answer = "" };
     for (1..reply.len + 1) |n| {
-        const s = try recipient_reply.split(a, reply[0..n], false);
+        const s = try reading.split(a, reply[0..n], .streaming);
         try std.testing.expect(std.mem.startsWith(u8, s.reasoning, last.reasoning));
         try std.testing.expect(std.mem.startsWith(u8, s.answer, last.answer));
         try std.testing.expect(std.mem.indexOf(u8, s.answer, "<|") == null and std.mem.indexOf(u8, s.answer, "atem") == null);
@@ -245,7 +260,7 @@ test "recipient replies: a split while streaming only grows, holds calls back, a
         last = s;
     }
     try std.testing.expect(std.mem.indexOf(u8, last.answer, "Oslo") == null); // the open call waits for the reply's end
-    try std.testing.expectEqualStrings("plain", (try recipient_reply.split(a, " plain ", true)).answer);
+    try std.testing.expectEqualStrings("plain", (try reading.split(a, " plain ", .ended)).answer);
 }
 
 test "recipient replies: atem calls become OpenAI calls with schema-typed arguments" {
@@ -254,14 +269,15 @@ test "recipient replies: atem calls become OpenAI calls with schema-typed argume
     const a = arena.allocator();
     const tools = (try json.parse(a, weather[",\"tools\":".len..])).ok.array;
     const body = atem("Rio de Janeiro", "4");
-    const parsed = try tool_parse.parse(a, (try recipient_reply.calls(a, body)).?, tools, null);
+    const parsed = try tool_parse.parse(a, (try recipient_reply.calls(a, body, "get_weather", tools, .ended)).?, tools, null);
     try std.testing.expectEqualStrings("", parsed.content);
     const f = parsed.calls.?[0].get("function").?;
     try std.testing.expectEqualStrings("get_weather", f.strField("name").?);
     try std.testing.expectEqualStrings("{\"city\":\"Rio de Janeiro\",\"days\":4}", f.strField("arguments").?);
-    const named = (try recipient_reply.calls(a, "<atem:invoke name=\"a&amp;b\">\n</atem:invoke>")).?;
+    const amp = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"a&b\"}}]")).ok.array;
+    const named = (try recipient_reply.calls(a, "<atem:function_calls>\n<atem:invoke name=\"a&amp;b\">\n</atem:invoke>", "a&b", amp, .ended)).?;
     try std.testing.expectEqualStrings("<tool_call>\n<function=a&b>\n</function>\n</tool_call>", named);
-    try std.testing.expect((try recipient_reply.calls(a, "no calls here")) == null);
+    try std.testing.expect((try recipient_reply.calls(a, "no calls here", "get_weather", tools, .ended)) == null);
 }
 
 test "recipient replies: whole and streamed chats show the same reasoning, answer and calls" {
@@ -289,12 +305,81 @@ test "recipient replies: whole and streamed chats show the same reasoning, answe
 }
 
 test "recipient replies: a Harmony reply keeps its final channel as content and analysis as reasoning" {
-    var whole = try send(.{ .harmony = true }, harmony_reply, 4096, ask ++ "}");
+    var whole = try send(.{ .harmony = true }, harmony_reply, 4096, ask ++ no_thinking ++ "}");
     defer whole.deinit();
-    var streamed = try send(.{ .harmony = true }, harmony_reply, 1, ask ++ ",\"stream\":true}");
+    var streamed = try send(.{ .harmony = true }, harmony_reply, 1, ask ++ no_thinking ++ ",\"stream\":true}");
     defer streamed.deinit();
     for ([_]*const Shown{ &whole, &streamed }) |s| {
         try std.testing.expectEqualStrings("Blue sky.", s.content.items);
         try std.testing.expectEqualStrings("Think.", s.reasoning.items);
     }
+}
+
+test "recipient replies: a prompt that opened the self message keeps the reasoning that follows it" {
+    const opened: Text = .{ .prompt = "prompt<|start|>assistant to=self<|message|>" };
+    const reply = "The sky question is simple.<|eom|><|start|>assistant to=user<|message|>Blue sky.<|eot|>";
+    var whole = try send(opened, reply, 4096, ask ++ "}");
+    defer whole.deinit();
+    for ([_]usize{ 1, 7, 4096 }) |stride| {
+        var streamed = try send(opened, reply, stride, ask ++ ",\"stream\":true}");
+        defer streamed.deinit();
+        for ([_]*const Shown{ &whole, &streamed }) |s| {
+            try std.testing.expectEqualStrings("Blue sky.", s.content.items);
+            try std.testing.expectEqualStrings("The sky question is simple.", s.reasoning.items);
+        }
+        // cut while it still reasons: the reasoning so far, no answer
+        var cut = try send(opened, "Still weighing the sky", stride, ask ++ ",\"stream\":true}");
+        defer cut.deinit();
+        try std.testing.expectEqualStrings("Still weighing the sky", cut.reasoning.items);
+        try std.testing.expectEqualStrings("", cut.content.items);
+    }
+}
+
+test "recipient replies: a call to no offered tool stays as the model wrote it, never as other markup" {
+    const time = ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"parameters\":{\"type\":\"object\"}}}]";
+    const want = comptime "Checking both.\n\n" ++ atem("Paris", "3") ++ "\n\n" ++ atem("Oslo", "1");
+    for ([_][]const u8{ "", time }) |tools| {
+        const body = try std.mem.concat(std.testing.allocator, u8, &.{ ask, tools, "}" });
+        defer std.testing.allocator.free(body);
+        var whole = try send(.{}, call_reply, 4096, body);
+        defer whole.deinit();
+        for ([_]usize{ 1, 7, 4096 }) |stride| {
+            const streamed_body = try std.mem.concat(std.testing.allocator, u8, &.{ ask, tools, ",\"stream\":true}" });
+            defer std.testing.allocator.free(streamed_body);
+            var streamed = try send(.{}, call_reply, stride, streamed_body);
+            defer streamed.deinit();
+            for ([_]*const Shown{ &whole, &streamed }) |s| {
+                try std.testing.expectEqualStrings(want, s.content.items);
+                try std.testing.expectEqual(@as(usize, 0), s.calls);
+            }
+        }
+    }
+}
+
+test "recipient replies: thinking off keeps self messages out of the reply and the template at its lowest effort" {
+    for ([_][]const u8{ no_thinking, ",\"reasoning_effort\":\"none\"" }) |off| {
+        const body = try std.mem.concat(std.testing.allocator, u8, &.{ ask, off, "}" });
+        defer std.testing.allocator.free(body);
+        var whole = try send(.{}, chat_reply, 4096, body);
+        defer whole.deinit();
+        const streamed_body = try std.mem.concat(std.testing.allocator, u8, &.{ ask, off, ",\"stream\":true}" });
+        defer std.testing.allocator.free(streamed_body);
+        for ([_]usize{ 1, 7 }) |stride| {
+            var streamed = try send(.{}, chat_reply, stride, streamed_body);
+            defer streamed.deinit();
+            for ([_]*const Shown{ &whole, &streamed }) |s| {
+                try std.testing.expectEqualStrings("Blue sky.", s.content.items);
+                try std.testing.expectEqualStrings("", s.reasoning.items);
+                try std.testing.expectEqualStrings("low", s.effort[0..s.effort_len]);
+            }
+        }
+    }
+    // thinking on: the template's default effort, or the named level nearest the request's
+    var on = try send(.{}, chat_reply, 4096, ask ++ "}");
+    defer on.deinit();
+    try std.testing.expectEqualStrings("none", on.effort[0..on.effort_len]);
+    try std.testing.expectEqualStrings("The sky question is simple.", on.reasoning.items);
+    var high = try send(.{}, chat_reply, 4096, ask ++ ",\"reasoning_effort\":\"high\"}");
+    defer high.deinit();
+    try std.testing.expectEqualStrings("xhigh", high.effort[0..high.effort_len]);
 }
