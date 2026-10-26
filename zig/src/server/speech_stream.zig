@@ -33,8 +33,8 @@ pub fn why(box: *const Mailbox, samples: usize, capacity: usize) ?[]const u8 {
 
 /// An error reply when synthesis ends before any audio; else the chunks, and the terminator only after a complete one.
 pub fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, box: *Mailbox, engine_id: api.Id, pcm: []f32, result: *const api.SpeechResult, metadata: Metadata, lane_released: *bool) void {
-    const sent = streamAudio(srv, c, sp, box, engine_id, pcm, metadata) orelse return left(srv, c, id, plan.prompt.len, received);
-    // The engine is finished: release before final output, including an error reply or an empty stream's head.
+    const sent = streamAudio(srv, c, sp, box, engine_id, pcm, metadata, lane_released) orelse return left(srv, c, id, plan.prompt.len, received);
+    // streamAudio releases on observed completion before further head/audio writes; keep this exactly-once safety net.
     speech.releaseLane(srv, lane_released);
     const mismatch: ?[]const u8 = if (result.samples != sent.samples) "the finished synthesis does not match the audio it published" else null;
     const problem = why(box, result.samples, pcm.len) orelse mismatch;
@@ -72,11 +72,13 @@ pub fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.Spee
 const Sent = struct { samples: usize = 0, first_ready: i96 = 0, first_written: i96 = 0 };
 
 /// Sends everything published since the last send as one chunk, converted in place; null: the client left.
-fn streamAudio(srv: *Server, c: *Conn, sp: api.SpeechInfo, box: *Mailbox, engine_id: api.Id, pcm: []f32, metadata: Metadata) ?Sent {
+fn streamAudio(srv: *Server, c: *Conn, sp: api.SpeechInfo, box: *Mailbox, engine_id: api.Id, pcm: []f32, metadata: Metadata, lane_released: *bool) ?Sent {
     var sent: Sent = .{};
     var size: [20]u8 = undefined;
     while (true) {
-        const now = settle(srv, c, box, engine_id, sent.samples) orelse return null;
+        const seen = settle(srv, c, box, engine_id, sent.samples) orelse return null;
+        if (seen.finished) speech.releaseLane(srv, lane_released);
+        const now = seen.published;
         if (now == sent.samples) return sent; // finished, and everything published is sent
         const first = sent.samples == 0;
         if (first) {
@@ -105,8 +107,10 @@ fn abandon(srv: *Server, box: *Mailbox, engine_id: api.Id) ?Sent {
     return null;
 }
 
-/// Waits for `finished` or (with `sent`) samples past it, cancelling if the client leaves; samples so far, or null.
-pub fn settle(srv: *Server, c: *Conn, box: *Mailbox, engine_id: api.Id, sent: ?usize) ?usize {
+pub const Observed = struct { published: usize, finished: bool };
+
+/// Observes audio or completion; streamAudio releases on completion before further head/audio writes; null if left.
+pub fn settle(srv: *Server, c: *Conn, box: *Mailbox, engine_id: api.Id, sent: ?usize) ?Observed {
     while (true) {
         box.mutex.lockUncancelable(box.io);
         const idle = if (sent) |n| box.audio == n else true;
@@ -114,7 +118,7 @@ pub fn settle(srv: *Server, c: *Conn, box: *Mailbox, engine_id: api.Id, sent: ?u
         const finished = box.finished;
         const published = box.audio;
         box.mutex.unlock(box.io);
-        if (finished or (if (sent) |n| published > n else false)) return published;
+        if (finished or (if (sent) |n| published > n else false)) return .{ .published = published, .finished = finished };
         if (c.peerGone()) {
             _ = abandon(srv, box, engine_id);
             return null;

@@ -146,7 +146,7 @@ fn promptOf(srv: *Server, cx: *Cx, sp: api.SpeechInfo, input: []const u8) errors
     return prompt;
 }
 
-/// Acquired errors (including CFG guide failure) and final replies must not hold the lane behind client writes.
+/// Acquired errors, final replies and completed stream observations release the lane before client writes.
 pub fn releaseLane(srv: *Server, released: *bool) void {
     if (released.*) return;
     released.* = true;
