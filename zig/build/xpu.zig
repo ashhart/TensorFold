@@ -125,7 +125,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     _ = @import("server.zig").addTo(b, server.root_module, target, .ReleaseSafe);
     const install_server = b.addInstallArtifact(server, .{ .dest_dir = .{ .override = .{ .custom = "xpu/bin" } } });
     b.step("xpu-native", "tensorfold-native with the XPU engines into zig-out/xpu/bin").dependOn(&install_server.step);
-    nemotronSteps(b, target, optimize, nem);
+    nemotronSteps(b, target, optimize, ocloc, device, ze_mod, lanes, nem);
 }
 
 /// One SPIR-V image: the .cl in zig/kernels/xpu (`src`, else `name`) and its ocloc options (dot/matrix kernels: CL3.0).
@@ -133,8 +133,8 @@ const Kernel = struct { name: []const u8, src: ?[]const u8 = null, options: []co
 
 const cl3 = "-cl-std=CL3.0";
 
-/// An explicit list: other files in the folder never join the build. The SPIR-V is device independent.
-const kernels = [_]Kernel{
+/// Nemotron SPIR-V images: every kernel the Nemotron family embeds (no EXL3).
+const nemotron_kernels = [_]Kernel{
     .{ .name = "attn", .options = cl3 },
     .{ .name = "basic", .options = cl3 },
     .{ .name = "moe", .options = cl3 },
@@ -149,35 +149,47 @@ const kernels = [_]Kernel{
     .{ .name = "nem_rows_r8", .src = "nem_rows", .options = cl3 ++ " -DMAXR=8" },
     .{ .name = "nem_prow", .options = cl3 },
     .{ .name = "nem_attn_dec", .options = cl3 },
-    .{ .name = "exl3", .options = cl3 ++ " -DEXL3_ABS" },
+};
+
+const exl3_kernels = [_]Kernel{
+    .{ .name = "exl3", .src = "exl3", .options = cl3 ++ " -DEXL3_ABS", .include = true },
 } ++ exl3Matvec() ++ exl3Moe();
 
 /// Fused routed MLP images: one a width of exl3_variants.moe.
 fn exl3Moe() [exl3_variants.moe.bits.len]Kernel {
     var out: [exl3_variants.moe.bits.len]Kernel = undefined;
-    inline for (exl3_variants.moe.bits, &out) |b, *k| k.* = .{ .name = exl3_variants.moe.name(b), .src = "exl3", .options = exl3_variants.moe.options(b) };
+    inline for (exl3_variants.moe.bits, &out) |b, *k| k.* = .{ .name = exl3_variants.moe.name(b), .src = "exl3", .options = exl3_variants.moe.options(b), .include = true };
     return out;
 }
 
-/// EXL3 matvec images: one a (bits, rows, NS, HS) of src/xpu/exl3_variants.zig.
+/// EXL3 matvec images: one a (bits, rows, NS) of src/xpu/exl3_variants.zig.
 fn exl3Matvec() [exl3_variants.all.len]Kernel {
     var out: [exl3_variants.all.len]Kernel = undefined;
-    inline for (exl3_variants.all, &out) |v, *k| k.* = .{ .name = exl3_variants.name(v), .src = "exl3", .options = exl3_variants.options(v) };
+    inline for (exl3_variants.all, &out) |v, *k| k.* = .{ .name = exl3_variants.name(v), .src = "exl3", .options = exl3_variants.options(v), .include = true };
     return out;
 }
 
-/// The runtime module; `with_kernels` false builds it host-only (empty images).
-fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const std.Build.LazyPath, ze: *std.Build.Module) *std.Build.Module {
+/// The runtime module; `with_kernels` false builds it host-only (no Nemotron images).
+fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nem_images: []const std.Build.LazyPath, exl3_images: []const std.Build.LazyPath, ze: *std.Build.Module) *std.Build.Module {
     const options = b.addOptions();
-    options.addOption(bool, "with_kernels", images.len == kernels.len);
+    options.addOption(bool, "with_kernels", nem_images.len == nemotron_kernels.len);
+    options.addOption(bool, "with_exl3", exl3_images.len == exl3_kernels.len);
     const xpu = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     xpu.addOptions("kernel_options", options);
     xpu.addImport("ze", ze);
-    if (images.len == kernels.len) for (kernels, images) |k, image| xpu.addAnonymousImport(b.fmt("spv_{s}", .{k.name}), .{ .root_source_file = image });
+    if (nem_images.len == nemotron_kernels.len) for (nemotron_kernels, nem_images) |k, image| xpu.addAnonymousImport(b.fmt("spv_{s}", .{k.name}), .{ .root_source_file = image });
+    if (exl3_images.len == exl3_kernels.len) for (exl3_kernels, exl3_images) |k, image| xpu.addAnonymousImport(b.fmt("spv_{s}", .{k.name}), .{ .root_source_file = image });
     return xpu;
 }
 
-const Modules = struct { xpu: *std.Build.Module, core: *std.Build.Module, nemotron: *std.Build.Module, images: [kernels.len]std.Build.LazyPath = undefined };
+const Modules = struct {
+    xpu: *std.Build.Module,
+    core: *std.Build.Module,
+    nemotron: *std.Build.Module,
+    nemotron_images: [nemotron_kernels.len]std.Build.LazyPath = undefined,
+    exl3_images: [exl3_kernels.len]std.Build.LazyPath = undefined,
+    has_exl3: bool = false,
+};
 
 fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, xpu: *std.Build.Module, lanes: *std.Build.Module) Modules {
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -191,10 +203,23 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 
 /// Nemotron's SPIR-V images (built only when a step needs them), its runtime and its family module.
 fn nemotronModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, ze: *std.Build.Module, lanes: *std.Build.Module) Modules {
-    var images: [kernels.len]std.Build.LazyPath = undefined;
-    for (kernels, &images) |k, *image| image.* = spirv(b, ocloc, device, k);
-    var m = family(b, target, optimize, runtime(b, target, optimize, &images, ze), lanes);
-    m.images = images;
+    var images: [nemotron_kernels.len]std.Build.LazyPath = undefined;
+    for (nemotron_kernels, &images) |k, *image| image.* = spirv(b, ocloc, device, k);
+    var m = family(b, target, optimize, runtime(b, target, optimize, &images, &.{}, ze), lanes);
+    m.nemotron_images = images;
+    return m;
+}
+
+/// Nemotron plus every EXL3 SPIR-V image (the tf-xpu-exl3-test module only).
+fn exl3Modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, ze: *std.Build.Module, lanes: *std.Build.Module) Modules {
+    var nem: [nemotron_kernels.len]std.Build.LazyPath = undefined;
+    for (nemotron_kernels, &nem) |k, *image| image.* = spirv(b, ocloc, device, k);
+    var exl: [exl3_kernels.len]std.Build.LazyPath = undefined;
+    for (exl3_kernels, &exl) |k, *image| image.* = spirv(b, ocloc, device, k);
+    var m = family(b, target, optimize, runtime(b, target, optimize, &nem, &exl, ze), lanes);
+    m.nemotron_images = nem;
+    m.exl3_images = exl;
+    m.has_exl3 = true;
     return m;
 }
 
@@ -225,11 +250,11 @@ const test_programs = [_][]const u8{
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
-fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, mods: Modules) void {
+fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, ze: *std.Build.Module, lanes: *std.Build.Module, mods: Modules) void {
     const enabled = b.option(bool, "xpu", "Build Nemotron on the Intel GPU into the install step (needs ocloc)") orelse false;
     if (!enabled or target.result.os.tag != .linux) return;
     const spirv_step = b.step("xpu-spirv", "Compile the Intel GPU kernels to SPIR-V and install them");
-    for (kernels, mods.images) |k, image| spirv_step.dependOn(&b.addInstallFile(image, b.fmt("spirv/{s}.spv", .{k.name})).step);
+    for (nemotron_kernels, mods.nemotron_images) |k, image| spirv_step.dependOn(&b.addInstallFile(image, b.fmt("spirv/{s}.spv", .{k.name})).step);
     const xpu = mods.xpu;
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold-xpu", .root_module = cliModule(b, target, optimize, xpu, mods) }));
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/xpu/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -238,9 +263,11 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     runner.addImport("nemotron_xpu", mods.nemotron);
     b.installArtifact(b.addExecutable(.{ .name = "tf-xpu-test", .root_module = runner }));
     const tests_step = b.step("xpu-tests", "Build the standalone Intel GPU op and model tests (tf-xpu-<name>-test)");
+    const exl3_mods = exl3Modules(b, target, optimize, ocloc, device, ze, lanes);
     for (test_programs) |name| {
         const mod = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/xpu/{s}.zig", .{name})), .target = target, .optimize = optimize, .link_libc = true });
-        mod.addImport("xpu", xpu);
+        const xpu_test = if (std.mem.eql(u8, name, "exl3")) exl3_mods.xpu else xpu;
+        mod.addImport("xpu", xpu_test);
         mod.addImport("core", mods.core);
         mod.addImport("nemotron_xpu", mods.nemotron);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = b.fmt("tf-xpu-{s}-test", .{name}), .root_module = mod }), .{}).step);
@@ -250,7 +277,7 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 /// Host unit tests of the Intel GPU runtime, the Nemotron family on it and its CLI (no GPU, no ocloc), on any host.
 pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const host = b.graph.host;
-    const xpu = runtime(b, host, .debug, &.{}, zeModule(b, host, .debug));
+    const xpu = runtime(b, host, .debug, &.{}, &.{}, zeModule(b, host, .debug));
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const mods = family(b, host, .debug, xpu, lanes);
     for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods), zeModule(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
