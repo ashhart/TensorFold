@@ -93,7 +93,12 @@ fn records(what: []const u8, rel: ?limits.Nvcc, set: limits.Nvcc) void {
     } else std.debug.print("INFO limits {s}: the images name no nvcc release; checked against nvcc {d}.{d}'s records\n", .{ what, set.major, set.minor });
 }
 
-/// tf-cuda-test kernel-contract-limits DIR: each record against the fatbins in DIR, every SM image they hold.
+/// kernel-contract-limits DIR: each record against DIR's fatbins; a RECORD line keeps the record for SMs not built.
+fn keep(a: std.mem.Allocator, line: *std.ArrayList(u8), r: registry.CudaRecord, compiler: ?limits.Nvcc, i: usize) !void {
+    const u = registry.usageFor(r, compiler)[i];
+    try line.print(a, ".{{ .regs = {d}, .static = {d}, .bound = {d} }}, ", .{ u.regs, u.static, u.bound });
+}
+
 pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
     const a = gpu.gpa;
     var n: usize = 0;
@@ -113,6 +118,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         defer a.free(bytes);
         const imgs = try contract.cubin.images(a, bytes);
         defer contract.cubin.freeImages(a, imgs);
+        const compiler: ?limits.Nvcc = if (imgs.len > 0) try contract.cubin.release(a, imgs[0].elf) else null;
         var red: usize = 0;
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(a);
@@ -120,6 +126,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
             const decision = registry.targetDecision(r, t, r.usage[i]);
             if (!control and decision != .applicable) {
                 std.debug.print("N/A limits {s} sm_{d}: {t}\n", .{ r.launch.name, t.sm, decision });
+                try keep(a, &line, r, compiler, i);
                 continue;
             }
             const img = for (imgs) |im| {
@@ -127,6 +134,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
             } else {
                 std.debug.print("FAIL limits {s}: {s} holds no sm_{d} image (build with -Dsm=80,86,89,120,121)\n", .{ r.launch.name, path, t.sm });
                 n += 1;
+                try keep(a, &line, r, compiler, i);
                 continue;
             };
             const ks = try contract.cubin.kernels(a, img.elf, t.sm);
@@ -143,6 +151,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
             const measured = registry.targetDecision(r, t, k.usage);
             if (!control and measured != .applicable) {
                 std.debug.print("N/A limits {s} sm_{d}: {t}\n", .{ r.launch.name, t.sm, measured });
+                try keep(a, &line, r, compiler, i);
                 continue;
             }
             red += try limits.cuda(r.launch, k.usage, t, &out, a);
