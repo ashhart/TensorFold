@@ -37,15 +37,27 @@ pub const Snap = struct {
 
 const Way = enum { save, restore };
 
-const Piece = struct { bufs: []cuda.DeviceBuffer, n: usize };
+/// A piece `move` copies: `layers` buffers of `n` bytes, rows of `row` bytes (0: whole) a `per`-position block each.
+pub const Piece = struct { layers: usize, n: usize, row: usize = 0, per: usize = 1 };
+
+/// `move`'s pieces in its order at `at` (the disk image names the same): DeltaNet, attention, PLE tail, `head`'s four.
+pub fn order(at: usize, head: bool) struct { p: [11]Piece, len: usize } {
+    var o: [11]Piece = undefined;
+    o[0] = .{ .layers = wt.linear_n, .n = conv_bytes };
+    o[1] = .{ .layers = wt.linear_n, .n = state_bytes };
+    o[2..6].* = attnOrder(wt.attn_n, at);
+    o[6] = .{ .layers = 1, .n = tail_bytes };
+    if (head) o[7..11].* = attnOrder(1, at);
+    return .{ .p = o, .len = if (head) 11 else 7 };
+}
 
 /// An attention cache's pieces for `at` rows: complete pooled blocks only (the rest pool again as later rows land).
-fn attnPieces(kc: []cuda.DeviceBuffer, vc: []cuda.DeviceBuffer, ikc: []cuda.DeviceBuffer, pooled: []cuda.DeviceBuffer, at: usize) [4]Piece {
+fn attnOrder(layers: usize, at: usize) [4]Piece {
     return .{
-        .{ .bufs = kc, .n = at * prompt.kv_row_bytes },
-        .{ .bufs = vc, .n = at * prompt.kv_row_bytes },
-        .{ .bufs = ikc, .n = at * index_row },
-        .{ .bufs = pooled, .n = at / wt.index_ratio * index_row },
+        .{ .layers = layers, .n = at * prompt.kv_row_bytes, .row = prompt.kv_row_bytes },
+        .{ .layers = layers, .n = at * prompt.kv_row_bytes, .row = prompt.kv_row_bytes },
+        .{ .layers = layers, .n = at * index_row, .row = index_row },
+        .{ .layers = layers, .n = at / wt.index_ratio * index_row, .row = index_row, .per = wt.index_ratio },
     };
 }
 
@@ -53,42 +65,40 @@ fn attnPieces(kc: []cuda.DeviceBuffer, vc: []cuda.DeviceBuffer, ikc: []cuda.Devi
 fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize, way: Way) !void {
     const dr = stream.d;
     var off: u64 = 0;
-    var pieces: [11]Piece = undefined;
-    pieces[0] = .{ .bufs = seq.conv, .n = conv_bytes };
-    pieces[1] = .{ .bufs = seq.state, .n = state_bytes };
-    pieces[2..6].* = attnPieces(seq.kc, seq.vc, seq.ikc, seq.pooled, at);
-    pieces[6] = .{ .bufs = (&seq.tail)[0..1], .n = tail_bytes };
-    var count: usize = 7;
-    if (d) |h| {
-        pieces[7..11].* = attnPieces((&h.kc)[0..1], (&h.vc)[0..1], (&h.ikc)[0..1], (&h.pooled)[0..1], at);
-        count = 11;
+    const o = order(at, d != null);
+    var bufs: [11][]cuda.DeviceBuffer = undefined;
+    bufs[0..7].* = .{ seq.conv, seq.state, seq.kc, seq.vc, seq.ikc, seq.pooled, (&seq.tail)[0..1] };
+    if (d) |h| bufs[7..11].* = .{ (&h.kc)[0..1], (&h.vc)[0..1], (&h.ikc)[0..1], (&h.pooled)[0..1] };
+    for (o.p[0..o.len], bufs[0..o.len], 0..) |p, layers, pi| {
+        if (layers.len != p.layers) return error.SnapShape;
+        for (layers, 0..) |b, layer| {
+            if (p.n == 0) continue;
+            // the model's caches on the stream's pages; the head's too in a pool lane (the layer after the model's)
+            const head = pi >= 7 and d != null and d.?.pg.pt != 0;
+            if ((pi >= 2 and pi < 6) or head) if (seq.paged) |*pg| {
+                // the same bytes in the same order as a contiguous cache's, a run a page
+                const part: pages.Part = @fromBackingInt(@intCast(if (head) pi - 7 else pi - 2));
+                const at_layer = if (head) wt.attn_n else layer;
+                const row = pages.rowBytes(part);
+                if (row != p.row) return error.SnapShape;
+                const per = pages.rows(part, pg.tokens);
+                const n = p.n / row;
+                var r: usize = 0;
+                while (r < n) {
+                    const run = @min(per - r % per, n - r);
+                    const at_row = pg.rowAt(at_layer, part, r);
+                    const dst, const src = if (way == .save) .{ base + off, at_row } else .{ at_row, base + off };
+                    try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
+                    off += run * row;
+                    r += run;
+                }
+                continue;
+            };
+            const dst, const src = if (way == .save) .{ base + off, b.ptr } else .{ b.ptr, base + off };
+            try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, p.n, stream.handle), "cuMemcpyDtoDAsync");
+            off += p.n;
+        }
     }
-    for (pieces[0..count], 0..) |p, pi| for (p.bufs, 0..) |b, layer| {
-        if (p.n == 0) continue;
-        // the model's caches on the stream's pages; the head's too in a pool lane (the layer after the model's)
-        const head = pi >= 7 and d != null and d.?.pg.pt != 0;
-        if ((pi >= 2 and pi < 6) or head) if (seq.paged) |*pg| {
-            // the same bytes in the same order as a contiguous cache's, a run a page
-            const part: pages.Part = @fromBackingInt(@intCast(if (head) pi - 7 else pi - 2));
-            const at_layer = if (head) wt.attn_n else layer;
-            const row = pages.rowBytes(part);
-            const per = pages.rows(part, pg.tokens);
-            const n = p.n / row;
-            var r: usize = 0;
-            while (r < n) {
-                const run = @min(per - r % per, n - r);
-                const at_row = pg.rowAt(at_layer, part, r);
-                const dst, const src = if (way == .save) .{ base + off, at_row } else .{ at_row, base + off };
-                try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
-                off += run * row;
-                r += run;
-            }
-            continue;
-        };
-        const dst, const src = if (way == .save) .{ base + off, b.ptr } else .{ b.ptr, base + off };
-        try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, p.n, stream.handle), "cuMemcpyDtoDAsync");
-        off += p.n;
-    };
     std.debug.assert(off == bytes(at, d != null));
 }
 
