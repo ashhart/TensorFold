@@ -71,11 +71,11 @@ pub const Slots = struct {
 
     // A prompt above 16 rows uses tiled MoE and attn_prompt. Inside one kernel a row's K order ignores the batch.
 
-    // The kernel changes with the width, so a near tie can pick another token.
+    // Shared rounds use that 2 to 16 row launch. streams_exact stays true so those rounds run as one forward.
 
     pub fn facts(b: *const Slots) lanes.Model {
-        if (b.r.mtp != null) return .{ .exact_width = b.depth + 1, .copy_drafts = false, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .sampled_drafts = b.sampled_drafts, .drafts = b.depth, .draft_streams = true, .hidden_rows = true, .streams_exact = false, .batch_rows = sage.WINDOW, .max_streams = b.r.slots };
-        return .{ .exact_width = 2, .copy_drafts = false, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .hidden_rows = true, .streams_exact = false, .batch_rows = b.r.slots, .max_streams = b.r.slots };
+        if (b.r.mtp != null) return .{ .exact_width = b.depth + 1, .copy_drafts = false, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .sampled_drafts = b.sampled_drafts, .drafts = b.depth, .draft_streams = true, .hidden_rows = true, .streams_exact = true, .batch_rows = sage.WINDOW, .max_streams = b.r.slots };
+        return .{ .exact_width = 2, .copy_drafts = false, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .hidden_rows = true, .streams_exact = true, .batch_rows = b.r.slots, .max_streams = b.r.slots };
     }
 
     fn push(b: *Slots, token: u32) u64 {
