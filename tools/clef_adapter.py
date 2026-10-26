@@ -15,7 +15,8 @@ convention, every module's shape and rank), extract_report.json (per projection:
 bf16 rounding floor of the merge), the head files and SHA256SUMS.json. --check compares the reconstructed deltas
 B A with another adapter directory (factors may differ in sign and order; the products may not).
 
-Needs torch and safetensors; CPU only, one projection in memory at a time.
+Needs torch and safetensors; CPU only, one projection in memory at a time. Its unit tests
+(tools/tests/test_clef_adapter.py) need them too and are skipped without them.
 """
 
 from __future__ import annotations
@@ -110,11 +111,18 @@ def factor(wb, wm, rank: int):
         s = ev.flip(0).clamp_min(0).sqrt()
     else:
         ev, u = torch.linalg.eigh(d @ d.T)
-        ev, u = ev.flip(0).clamp_min(0), u.flip(1)[:, :r]
+        ev, u = ev.flip(0).clamp_min(0), u.flip(1)
         s = ev.sqrt()
+        # a rank-deficient wide delta: only the nonzero singular values divide; the factor keeps the delta's rank
+        r = min(r, int((s > s[0] * 1e-7).sum().item()) if s.numel() and s[0] > 0 else 0)  # above fp64 Gram eig noise
+        if r == 0:
+            raise SystemExit(f"a {out_dim}x{in_dim} delta is zero: nothing to factor")
+        u = u[:, :r]
         b = u * s[:r]
         a = (u.T @ d) / s[:r, None]
     ab, bb = a.to(torch.bfloat16).contiguous(), b.to(torch.bfloat16).contiguous()
+    if not (torch.isfinite(ab).all() and torch.isfinite(bb).all()):
+        raise SystemExit(f"a {out_dim}x{in_dim} delta factored to non-finite values at rank {r}")
     norm = d.norm().item()
     resid = (d - bb.double() @ ab.double()).norm().item() / norm if norm else 0.0
     floor = (ulp_bf16(wm).square().sum() / 12).sqrt().item() / norm * max(0.0, 1 - r / min(out_dim, in_dim)) ** 0.5
@@ -128,6 +136,8 @@ def head_rows(merged: dict, base: dict):
     """The base's output embedding, which the head scores against; the merge must hold the same bytes."""
     for name in ("lm_head.weight", "model.language_model.embed_tokens.weight", "model.embed_tokens.weight"):
         if name in base:
+            if name not in merged:
+                raise SystemExit(f"{name} is in the base but not in the merge: the head needs the output embedding")
             if raw(base[name]) != raw(merged[name]):
                 raise SystemExit(f"{name} differs between the merge and the base")
             return name, load(base[name])

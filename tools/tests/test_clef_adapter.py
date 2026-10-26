@@ -31,6 +31,7 @@ class ClefAdapterTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         p = "model.language_model."
         self.base = {p + "layers.0.mlp.up_proj.weight": torch.randn(48, 32).bfloat16(),
+                     p + "layers.0.mlp.down_proj.weight": torch.randn(16, 48).bfloat16(),
                      p + "layers.1.self_attn.q_proj.weight": torch.randn(32, 32).bfloat16(),
                      p + "embed_tokens.weight": torch.randn(64, 32).bfloat16(),
                      p + "layers.1.input_layernorm.weight": torch.ones(32).bfloat16(),
@@ -65,6 +66,37 @@ class ClefAdapterTest(unittest.TestCase):
         self.assertTrue((self.tmp / "o" / "joint_head_config.json").exists())
         self.assertTrue((self.tmp / "o" / "lm_head_rows.safetensors").exists())
         self.assertIn("adapter.safetensors", json.loads((self.tmp / "o" / "SHA256SUMS.json").read_text()))
+
+    def test_a_rank_deficient_wide_delta_keeps_its_rank_and_stays_finite(self):
+        import torch
+        from safetensors import safe_open
+
+        p = "model.language_model.layers.0.mlp.down_proj.weight"
+        # only two rows change, by small integers exact in bf16: the delta's other singular values are exactly zero
+        self.base[p] = torch.randint(-4, 5, (16, 48)).bfloat16()
+        delta = torch.zeros(16, 48, dtype=torch.float64)
+        delta[:2] = torch.randint(-3, 4, (2, 48)).double()
+        self.merged[p] = (self.base[p].double() + delta).bfloat16()
+        write(self.tmp / "m", self.merged)
+        write(self.tmp / "b", self.base)
+        r = run("--merged", str(self.tmp / "m"), "--base", str(self.tmp / "b"), "--out", str(self.tmp / "o"), "--rank", "8")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        key = "layers.0.mlp.down_proj"
+        with safe_open(str(self.tmp / "o" / "adapter.safetensors"), "pt") as f:
+            a, b = f.get_tensor(key + ".lora_A").double(), f.get_tensor(key + ".lora_B").double()
+        self.assertTrue(torch.isfinite(a).all() and torch.isfinite(b).all())
+        self.assertLessEqual(a.shape[0], 8)
+        want = self.merged[p].double() - self.base[p].double()
+        self.assertLess(((b @ a - want).norm() / want.norm()).item(), 0.02)
+
+    def test_a_merge_without_the_embedding_says_so(self):
+        p = "model.language_model.embed_tokens.weight"
+        del self.merged[p]
+        write(self.tmp / "m", self.merged)
+        write(self.tmp / "b", self.base)
+        r = run("--merged", str(self.tmp / "m"), "--base", str(self.tmp / "b"), "--out", str(self.tmp / "o"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not in the merge", r.stderr + r.stdout)
 
     def test_a_changed_norm_is_refused(self):
         import torch
