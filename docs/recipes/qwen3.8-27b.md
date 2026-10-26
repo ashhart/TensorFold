@@ -3,8 +3,8 @@
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
 `zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
 the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
-4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
-`--kv-cache fp8`; it reads no NVFP4 or EXL3 checkpoint yet.
+4, 5, 6 and 8 bits in groups of 64) and turboderp's EXL3 packs ([native EXL3](#native-exl3-checkpoints)) from
+`zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and `--kv-cache fp8`; it reads no NVFP4 checkpoint yet.
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
@@ -90,9 +90,24 @@ quality comparisons are TBD [release-0.3.5].
 
 ## CUDA
 
-This section is the Python engine's (0.6.6). The native CUDA engine reads only MLX affine checkpoints so far: the
-NVFP4 and EXL3 readers below have not been ported to it (1.1.0 carries the shared EXL3 module of #832, which the
-27B does not read through yet).
+### Native EXL3 checkpoints
+
+The native CUDA engine reads turboderp's EXL3 packs of the model (`turboderp/Qwen3.8-27B-exl3`, a branch per size,
+Apache-2.0 like the base model) through the shared EXL3 module ([EXL3 weights](exl3.md)), on one GPU, and drafts
+with `z-lab/Qwen3.8-27B-DFlash2` (Apache-2.0) at `--drafter-bits 4`:
+
+```bash
+python -c "from huggingface_hub import snapshot_download as d; d('turboderp/Qwen3.8-27B-exl3', revision='3.50bpw', local_dir='qwen27b-exl3-3.50bpw')"
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve qwen27b-exl3-3.50bpw --drafter z-lab/Qwen3.8-27B-DFlash2 --kv-cache fp8
+```
+
+Every projection, the dense MLP's included, is an EXL3 linear; the embeddings stay bf16 rows and the head is the
+pack's EXL3 matrix. Prompt and verify rows take the row-invariant EXL3 linear, so drafted replies equal
+`"draft": false` ones. The drafter reads the head over its draft vocabulary as two column views of the stored
+matrix, whole 128-column blocks: rows 0-98,303 and 247,936-248,319, of which it keeps the last 288.
+
+The sections below are the Python engine's (0.6.6): the native engine has not taken its NVFP4 reader.
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks

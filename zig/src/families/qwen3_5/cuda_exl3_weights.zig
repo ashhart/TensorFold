@@ -31,12 +31,14 @@ pub const Kit = struct {
         k.b16 = try b16.Kernels.load(d);
         errdefer k.b16.unload();
         k.grouped = .{ .d = d, .kernels = &k.experts };
-        // the grouped experts' scratch grows on first use: allocate it before any graph capture, for the widest call
-        const pairs = engine.max_rows * g.slots();
-        const items = cuda.grouped.maxItems(pairs, g.experts + 1, 16);
-        const up = try cuda.exl3_grouped.Grouped.bytes(g.hidden, g.intermediate, items, try ex.plan(g.hidden, g.intermediate, true), 2);
-        const down = try cuda.exl3_grouped.Grouped.bytes(g.intermediate, g.hidden, items, try ex.plan(g.intermediate, g.hidden, false), 1);
-        k.grouped.storage = try cuda.DeviceBuffer.alloc(d, @max(up, down));
+        if (g.moe()) {
+            // grouped-expert scratch grows on first use: allocate it before graph capture, for the widest call
+            const pairs = engine.max_rows * g.slots();
+            const items = cuda.grouped.maxItems(pairs, g.experts + 1, 16);
+            const up = try cuda.exl3_grouped.Grouped.bytes(g.hidden, g.intermediate, items, try ex.plan(g.hidden, g.intermediate, true), 2);
+            const down = try cuda.exl3_grouped.Grouped.bytes(g.intermediate, g.hidden, items, try ex.plan(g.intermediate, g.hidden, false), 1);
+            k.grouped.storage = try cuda.DeviceBuffer.alloc(d, @max(up, down));
+        }
         return k;
     }
 
@@ -276,7 +278,14 @@ fn all(s: *Sink, ck: *core.Checkpoint) !void {
                 .k_norm = try norm1(s, ck, "{s}self_attn.k_norm.weight", .{p}, geometry.head_dim),
             } };
         }
-        l.mlp = .{ .moe = .{ .router = try router(s, ck, p), .experts = try experts(s, ck, p) } };
+        l.mlp = if (g.moe())
+            .{ .moe = .{ .router = try router(s, ck, p), .experts = try experts(s, ck, p) } }
+        else
+            .{ .dense = .{
+                .gate = try dense(s, kit, ck, p, "mlp.gate_proj", g.intermediate, g.hidden),
+                .up = try dense(s, kit, ck, p, "mlp.up_proj", g.intermediate, g.hidden),
+                .down = try dense(s, kit, ck, p, "mlp.down_proj", g.hidden, g.intermediate),
+            } };
     }
 }
 
