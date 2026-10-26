@@ -127,7 +127,7 @@ pub const Fixture = struct {
         const mag = try a.alloc(f64, want.len);
         errdefer a.free(mag);
         try q.reference(want, mag);
-        for (want) |v| if (!std.math.isFinite(v)) return error.NonFiniteReference;
+        for (want, mag) |expected, magnitude| if (!std.math.isFinite(expected) or !std.math.isFinite(magnitude) or magnitude < 0) return error.NonFiniteReference;
         return .{ .a = a, .case = case, .q = q, .x = x, .w = w, .scales = scales, .biases = biases, .out = out, .want = want, .mag = mag };
     }
 
@@ -186,7 +186,9 @@ pub const Fixture = struct {
         for (got[f.case.at.out..][0..f.want.len], f.want, f.mag, 0..) |g, w, m, i| {
             const d = @abs(@as(f64, g) - w);
             const e = if (std.math.isNan(d)) std.math.inf(f64) else d;
-            const ratio = e / c.bound(spec, f.case.shape, w, m);
+            const bound = c.bound(spec, f.case.shape, w, m);
+            const valid = std.math.isFinite(m) and m >= 0 and std.math.isFinite(bound) and bound > 0;
+            const ratio = if (valid) e / bound else std.math.inf(f64);
             r.max_abs = @max(r.max_abs, e);
             if (ratio > r.worst) {
                 r.worst = ratio;
@@ -347,6 +349,12 @@ test "vulkan qmm fixture: rounded float64 passes; poison, past the bound, NaN, I
         try testing.expectError(error.OutOfBound, f.check(got));
     }
     got[at + i] = keep;
+    const keep_mag = f.mag[i];
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), -1 }) |m| {
+        f.mag[i] = m;
+        try testing.expectError(error.OutOfBound, f.check(got));
+    }
+    f.mag[i] = keep_mag;
     got[at + f.want.len] = 0;
     try testing.expectError(error.GuardClobbered, f.check(got));
     try testing.expectError(error.LengthMismatch, f.check(got[1..]));

@@ -79,11 +79,10 @@ pub const Commands = struct {
     }
 };
 
-/// Only out-of-memory leaves nothing queued, by the spec; any other failed submit may leave work in flight.
+/// Any failed submit may leave work in flight; terminate conservatively instead of freeing its resources.
 fn submitted(result: c.VkResult) Error!void {
     return switch (result) {
         c.VK_SUCCESS => {},
-        c.VK_ERROR_OUT_OF_HOST_MEMORY, c.VK_ERROR_OUT_OF_DEVICE_MEMORY => error.OutOfMemory,
         else => error.InFlight,
     };
 }
@@ -169,10 +168,10 @@ pub fn download(cmds: *Commands, src: Buffer, offset: u64, staging: Buffer, out:
     }
 }
 
-test "only a signalled fence or an out-of-memory submit lets the caller free a submission's resources" {
+test "only a successful submit and a signalled fence let the caller free a submission's resources" {
     try submitted(c.VK_SUCCESS);
-    try std.testing.expectError(error.OutOfMemory, submitted(c.VK_ERROR_OUT_OF_HOST_MEMORY));
-    try std.testing.expectError(error.OutOfMemory, submitted(c.VK_ERROR_OUT_OF_DEVICE_MEMORY));
+    try std.testing.expectError(error.InFlight, submitted(c.VK_ERROR_OUT_OF_HOST_MEMORY));
+    try std.testing.expectError(error.InFlight, submitted(c.VK_ERROR_OUT_OF_DEVICE_MEMORY));
     try std.testing.expectError(error.InFlight, submitted(c.VK_ERROR_DEVICE_LOST));
     try std.testing.expectError(error.InFlight, submitted(c.VK_ERROR_UNKNOWN));
     try waited(c.VK_SUCCESS);
