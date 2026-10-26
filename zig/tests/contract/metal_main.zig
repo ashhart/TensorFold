@@ -194,11 +194,21 @@ pub fn main(init: std.process.Init) !u8 {
             try kernels.append(a, p.kernel());
         }
     }
-    var tap: ?lfm2_tap.Probe = null;
-    defer if (tap) |*p| p.deinit();
-    if (wanted(o, lfm2_tap.name)) {
-        tap = try lfm2_tap.Probe.init(a, device, queue);
-        try kernels.append(a, tap.?.kernel());
+    var tap_list: std.ArrayList(*lfm2_tap.Probe) = .empty;
+    defer {
+        for (tap_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        tap_list.deinit(a);
+    }
+    for ([_]lfm2_controls.Mutation{ .none, .tap_packed_rows, .tap_clobbers_column }) |m| {
+        if (!wanted(o, if (m == .none) lfm2_tap.name else m.name())) continue;
+        const p = try a.create(lfm2_tap.Probe);
+        errdefer a.destroy(p);
+        p.* = try lfm2_tap.Probe.init(a, device, queue, m);
+        try tap_list.append(a, p);
+        try kernels.append(a, p.kernel());
     }
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
@@ -423,7 +433,6 @@ pub fn main(init: std.process.Init) !u8 {
         lim += try gemma.limits(a, device, o.only);
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
-        lim += try lfm2_tap.limits(a, device, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

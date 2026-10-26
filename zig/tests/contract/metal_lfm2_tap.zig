@@ -6,6 +6,7 @@ const sources = @import("kernel_sources");
 const c = contract.spec;
 const g = contract.gates;
 const rig_ = @import("rig.zig");
+const controls = @import("metal_lfm2_controls.zig");
 
 const hidden = 2048;
 const taps = 5;
@@ -41,14 +42,17 @@ pub const Probe = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
+    mutation: controls.Mutation,
     rows: usize = 0,
     src: []u16 = &.{}, // H rows
     prior: []u16 = &.{}, // the taps rows as the call finds them (the other taps' columns must stay)
     args: [2]rig_.Ref = undefined,
     y: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !Probe {
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, sources.lfm2, "lfm2_tap") };
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mutation: controls.Mutation) !Probe {
+        const text = try controls.source(a, mutation);
+        defer if (mutation != .none) a.free(text);
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, text, "lfm2_tap"), .mutation = mutation };
     }
 
     fn drop(p: *Probe) void {
@@ -67,7 +71,9 @@ pub const Probe = struct {
 
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .ctx = p, .vt = &vt, .spec = spec() };
+        var s = spec();
+        if (p.mutation != .none) s.name = p.mutation.name();
+        return .{ .ctx = p, .vt = &vt, .spec = s, .control = p.mutation.gate() };
     }
 
     fn fill(out: []u16, seed: u64, f: g.Fill) void {
@@ -129,15 +135,3 @@ pub const Probe = struct {
         return null;
     }
 };
-
-/// Gate 5 for the tap's launch of 256 threads and no threadgroup memory: every Apple chip we serve, then this GPU.
-pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usize {
-    if (only) |s| if (std.mem.indexOf(u8, name, s) == null) return 0;
-    const d = contract.limits.MetalLaunch{ .name = name, .threads = 256, .tg_memory = 0, .offline = false };
-    var notes: std.ArrayList(u8) = .empty;
-    defer notes.deinit(a);
-    var problems: usize = 0;
-    for (contract.limits.apple) |chip| problems += try contract.limits.metal(d, chip, &notes, a);
-    std.debug.print("{s}", .{notes.items});
-    return problems + try @import("metal_limits.zig").onThisGpu(a, device, .{ .decl = d, .function = "lfm2_tap", .here = sources.lfm2, .pre_m5 = "" }, false);
-}
