@@ -141,6 +141,8 @@ pub const Scratch = struct {
     /// A projection's input rows' group sums for the tiles and their twin (f32 [rows, k / 64]).
     sums: mtl.Buffer,
     logits: mtl.Buffer,
+    /// Each head row's greedy pick and nonfinite flag (u32 pairs), from a forward whose head takes every row.
+    best: mtl.Buffer,
     snapshots: [c.layers]?mtl.Buffer = @splat(null),
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, rows: usize) !Scratch {
@@ -179,6 +181,7 @@ pub const Scratch = struct {
         out.sums = try mem.alloc(@max(rows * (c.intermediate / 64), slots * (c.hidden / 64)) * 4);
         const logit_rows: usize = @min(rows, batch_rows);
         out.logits = try mem.alloc(logit_rows * c.vocab * 2);
+        out.best = try mem.alloc(logit_rows * 2 * 4);
         for (&out.snapshots, attention) |*s, a| if (!a) { // a recorded window's rows, or a prompt call's last row
             s.* = try mem.alloc(logit_rows * conv_bytes);
         };

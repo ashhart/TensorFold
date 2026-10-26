@@ -33,6 +33,16 @@ fn prompt(m: *q.Model, scratch: *st.Scratch, cache: *st.Cache, ids: []const u32)
     }
 }
 
+/// Each of a forward's `rows` head rows: the GPU's greedy pick equals the host's draw on its logits.
+fn picks(m: *q.Model, s: *st.Scratch, rows: usize) !void {
+    const best = s.best.slice(u32, 2 * rows);
+    for (0..rows) |r| {
+        const want = try q.backend.draw(m.gpa, s.logits.slice(u16, rows * c.vocab)[r * c.vocab ..][0..c.vocab], null, 0, &.{});
+        try std.testing.expectEqual(want, best[2 * r]);
+        try std.testing.expectEqual(@as(u32, 0), best[2 * r + 1]);
+    }
+}
+
 /// A prompt of `prefix` rows, then plain decode to `len`: what a window's kept rows equal.
 fn decoded(m: *q.Model, solo: *st.Scratch, cache: *st.Cache, ids: []const u32, prefix: usize, len: usize) !void {
     try prompt(m, solo, cache, ids[0..prefix]);
@@ -48,6 +58,7 @@ fn window(m: *q.Model, wide: *st.Scratch, solo: *st.Scratch, ids: []const u32, p
     try prompt(m, solo, &b, ids[0..prefix]);
     try equal(&a, &b);
     try fwd.run(m, wide, &.{.{ .cache = &a, .rows = rows }}, ids[prefix..][0..rows], true, .all);
+    try picks(m, wide, rows);
     for (0..rows) |r| {
         try fwd.run(m, solo, &.{.{ .cache = &b, .rows = 1 }}, ids[prefix + r ..][0..1], false, .all);
         const want = solo.logits.contents()[0 .. c.vocab * 2];
@@ -124,6 +135,7 @@ fn round(
         total += r;
     }
     try fwd.run(m, wide, segs[0..n], tokens[0..total], true, .all);
+    try picks(m, wide, total);
     var base: usize = 0;
     for (caches, prompts, lens, rows) |*cache, start, len, r| {
         if (r == 0) continue;

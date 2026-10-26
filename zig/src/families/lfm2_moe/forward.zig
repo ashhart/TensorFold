@@ -12,6 +12,7 @@ const Buffer = mtl.Buffer;
 pub const Segment = struct { cache: *st.Cache, rows: usize };
 /// GPU seconds of every call so far (the bench reports a chunk's GPU time beside its wall time).
 pub var gpu_seconds: f64 = 0;
+/// `all`: every row's logits and greedy pick (Scratch.best); `last`: the last row's logits alone.
 pub const Head = enum { last, all };
 /// Rows from which a call takes the tiles (the twin's bits, each weight read once for every row).
 const tile_rows = 33;
@@ -157,9 +158,14 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         }
     }
     enc.norm(s, m.weights.norm, false, total, combine);
-    if (head == .all) enc.projection(embedding, s.x, 0, s.logits, 0, total) else {
-        enc.projection(embedding, s.x, (total - 1) * c.hidden * 2, s.logits, 0, 1);
-    }
+    if (head == .all) {
+        enc.projection(embedding, s.x, 0, s.logits, 0, total);
+        enc.pipe("lfm2_argmax");
+        e.setBuffer(s.logits, 0, 0);
+        e.setValue(@as(u32, c.vocab), 1);
+        e.setBuffer(s.best, 0, 2);
+        enc.groups(.{ total, 1, 1 }, .{ 1024, 1, 1 });
+    } else enc.projection(embedding, s.x, (total - 1) * c.hidden * 2, s.logits, 0, 1);
     e.end();
     cb.commit();
     cb.wait();

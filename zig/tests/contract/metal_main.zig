@@ -24,6 +24,7 @@ const fsr = @import("metal_fsr.zig");
 const gemma = @import("metal_gemma4.zig");
 const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
+const lfm2_argmax = @import("metal_lfm2_argmax.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
 
@@ -151,6 +152,12 @@ pub fn main(init: std.process.Init) !u8 {
     if (wanted(o, mixed.kernel().spec.name)) {
         if (!tensor) return error.TensorUnitsRequired;
         try kernels.append(a, mixed.kernel());
+    }
+    var argmax: ?lfm2_argmax.Probe = null;
+    defer if (argmax) |*p| p.deinit();
+    if (wanted(o, lfm2_argmax.name)) {
+        argmax = try lfm2_argmax.Probe.init(a, device, queue);
+        try kernels.append(a, argmax.?.kernel());
     }
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
@@ -338,6 +345,7 @@ pub fn main(init: std.process.Init) !u8 {
         lim += try gemma.limits(a, device, o.only);
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
+        lim += try lfm2_argmax.limits(a, device, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

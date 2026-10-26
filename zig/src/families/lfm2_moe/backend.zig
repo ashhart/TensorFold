@@ -193,11 +193,18 @@ pub const Metal = struct {
         }
         try fwd.run(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all);
         const logits = self.scratch.logits.slice(u16, total * c.vocab);
+        const best = self.scratch.best.slice(u32, 2 * total);
         var base: usize = 0;
         for (windows, out) |w, o| {
             if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidLfmOutputs;
             for (o.sampled, w.positions, 0..) |*t, p, r| {
                 const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
+                // A greedy row takes the GPU's pick, the host's draw on the same logits; a nonfinite row errors there.
+                const greedy = if (w.stream.sampling) |s| s.temperature <= 0 else true;
+                if (greedy and mask.len == 0 and best[2 * (base + r) + 1] == 0) {
+                    t.* = best[2 * (base + r)];
+                    continue;
+                }
                 t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
             }
             @memcpy(o.drafts, w.tokens);
