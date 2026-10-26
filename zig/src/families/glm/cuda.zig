@@ -48,6 +48,7 @@ test {
     _ = experts;
     _ = exl3;
     _ = vision;
+    _ = @import("vision_names.zig");
     _ = mm;
     _ = image_core;
     _ = glue;

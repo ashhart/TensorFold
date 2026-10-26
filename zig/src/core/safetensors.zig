@@ -173,6 +173,10 @@ pub const File = struct {
         return openPrefix(gpa, io, path, null);
     }
     pub fn openPrefix(gpa: std.mem.Allocator, io: Io, path: []const u8, prefix: ?[]const u8) !File {
+        return openPrefixes(gpa, io, path, if (prefix) |p| &.{p} else &.{});
+    }
+    /// The file with only names under `prefixes` indexed (an empty list: every name).
+    pub fn openPrefixes(gpa: std.mem.Allocator, io: Io, path: []const u8, prefixes: []const []const u8) !File {
         var file = try Io.Dir.cwd().openFile(io, path, .{});
         errdefer file.close(io);
         const len = std.math.cast(usize, try file.length(io)) orelse return error.BadSafetensors;
@@ -182,7 +186,7 @@ pub const File = struct {
         const header_len = try headerSize(std.mem.readInt(u64, map.memory[0..8], .little), len);
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
-        const names = try parseHeaderPrefix(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len, prefix);
+        const names = try parseHeaderPrefixes(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len, prefixes);
         const own = try arena.allocator().dupeSentinel(u8, path, 0);
         return .{ .path = own, .file = file, .map = map, .data = 8 + header_len, .names = names, .arena = arena };
     }

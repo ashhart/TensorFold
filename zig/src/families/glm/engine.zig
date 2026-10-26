@@ -181,7 +181,7 @@ pub const Engine = struct {
         e.limit = try load_plan.loadLimit(e.device);
         const limit = e.limit.bytes;
         // --vision: the image tower and its rows count against the limit beside the weights and caches
-        const tower = if (vision) |lim| try vision_mod.planBytes(gpa, lim, e.c.hidden) else 0;
+        const tower = if (vision) |lim| vision_mod.planBytes(lim, e.c.hidden) else 0;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
         if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
             var lean = e.c;

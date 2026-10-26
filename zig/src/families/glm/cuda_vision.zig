@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const formats = @import("cuda_formats.zig");
 const projection = @import("cuda_proj.zig");
+const tower_names = @import("vision_names.zig");
 
 const H: i64 = 1024; // hidden
 const HEADS: i64 = 16;
@@ -146,16 +147,19 @@ pub const Tower = struct {
     bytes: u64 = 0,
     stages: ?[]f32 = null, // checks: the fp32 stream after the patch embedding and after every block, read back
 
-    /// The tower's tensors (model.visual.*) in one allocation: bf16 as stored, MXFP8 and NVFP4 packed for ``ql``.
+    /// The tower's tensors (either prefix) in one allocation: bf16 as stored, MXFP8 and NVFP4 packed for ``ql``.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, ql: cuda.qlinear.Linear) !Tower {
-        var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "model.visual.");
+        var ck = try core.Checkpoint.openModelPrefixes(gpa, io, dir, &tower_names.prefixes);
         defer ck.close();
+        var tally: tower_names.Tally = .{};
+        for (ck.files.items) |f| for (f.names.keys()) |name| tally.add(name);
+        const pre = try tally.tower();
         var recipes = try formats.readRecipes(gpa, io, dir);
         defer if (recipes) |*r| r.deinit();
         var plans: std.ArrayList(Plan) = .empty;
         defer plans.deinit(gpa);
         var total: u64 = 0;
-        for (ck.files.items) |f| for (f.names.keys()) |name| if (std.mem.startsWith(u8, name, "model.visual.")) {
+        for (ck.files.items) |f| for (f.names.keys()) |name| if (std.mem.startsWith(u8, name, pre)) {
             if (quantOf(&recipes, name)) |q| {
                 if (!std.mem.endsWith(u8, name, ".weight")) continue; // its scales are packed with its weight
                 const p = try plan(&ck, q);
@@ -172,32 +176,28 @@ pub const Tower = struct {
         defer names.deinit();
         var quant = std.StringHashMap(cuda.qlinear.Weight).init(gpa);
         defer quant.deinit();
-        for (plans.items) |p| try quant.put(p.module, try t.pack(&ck, p, &at));
-        for (ck.files.items) |f| for (f.names.keys()) |name| if (std.mem.startsWith(u8, name, "model.visual.") and quantOf(&recipes, name) == null) {
+        for (plans.items) |p| try quant.put(p.module[pre.len..], try t.pack(&ck, p, &at));
+        for (ck.files.items) |f| for (f.names.keys()) |name| if (std.mem.startsWith(u8, name, pre) and quantOf(&recipes, name) == null) {
             const ten = try ck.get(name);
             if (ten.dtype != .bf16) return error.UnsupportedVisionDType;
             var bytes = ten.bytes;
             var perm: []u16 = &.{};
             defer gpa.free(perm);
-            if (std.mem.eql(u8, name, "model.visual.downsample.weight")) { // [o, c, 2, 2] -> [o, 2, 2, c]
-                if (ten.rank != 4 or ten.dim(0) != OUT or ten.dim(1) != H) return error.BadVisionShape;
+            if (try tower_names.arrangement(name[pre.len..], ten.shape[0..ten.rank])) |ab| { // a conv kernel as the tower reads it
                 const src = std.mem.bytesAsSlice(u16, @as([]align(1) const u8, bytes));
                 perm = try gpa.alloc(u16, src.len);
-                const c_n: usize = @intCast(H);
-                for (0..@intCast(OUT)) |o| for (0..c_n) |c| for (0..2) |kh| for (0..2) |kw| {
-                    perm[((o * 2 + kh) * 2 + kw) * c_n + c] = src[((o * c_n + c) * 2 + kh) * 2 + kw];
-                };
+                tower_names.transposeRows(perm, src, ab[0], ab[1]);
                 bytes = std.mem.sliceAsBytes(perm);
             }
             const ptr = t.mem.ptr + at;
             try cuda.copy_source.synchronousCopy(d, ptr, bytes, std.heap.page_allocator);
-            try names.put(name, ptr);
+            try names.put(name[pre.len..], ptr); // by the name after the prefix
             at += std.mem.alignForward(u64, bytes.len, 256);
         };
         const get = struct {
             fn f(m: *const std.StringHashMap(u64), comptime fmt: []const u8, args: anytype) !u64 {
                 var nb: [128]u8 = undefined;
-                const name = try std.fmt.bufPrint(&nb, "model.visual." ++ fmt, args);
+                const name = try std.fmt.bufPrint(&nb, fmt, args);
                 return m.get(name) orelse {
                     std.log.err("glm vision: no tensor {s}", .{name});
                     return error.MissingVisionTensor;
@@ -207,7 +207,7 @@ pub const Tower = struct {
         const lin = struct {
             fn f(m: *const std.StringHashMap(u64), qm: *const std.StringHashMap(cuda.qlinear.Weight), comptime fmt: []const u8, args: anytype) !Lin {
                 var nb: [128]u8 = undefined;
-                const module = try std.fmt.bufPrint(&nb, "model.visual." ++ fmt, args);
+                const module = try std.fmt.bufPrint(&nb, fmt, args);
                 if (qm.get(module)) |q| return .{ .q = q };
                 var wb: [136]u8 = undefined;
                 const name = try std.fmt.bufPrint(&wb, "{s}.weight", .{module});
