@@ -93,7 +93,7 @@ pub fn reply(srv: *Server, c: *const Clef, cx: *Cx, body: Value) errors.Refused!
     const width = c.head.cfg.hidden;
     const bits = try a.alloc(u16, rec.ids.len * width);
     srv.engine.hidden(rec.ids, bits) catch |e| return switch (e) {
-        error.Unsupported => cx.refuse("this engine gives no final rows: Clef needs a Qwen3.8-27B CUDA engine"),
+        error.Unsupported => cx.refuse("this engine gives no final rows: Clef needs the qwen3_5 CUDA family's native engine"),
         error.Failed => cx.fail(.server, "the record's prompt pass failed", .{}),
     };
     const hidden = try a.alloc(f32, bits.len);

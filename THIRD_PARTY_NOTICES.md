@@ -193,6 +193,16 @@ The Zig tensor-parallel fabric's RoCE path (`zig/src/fabric/tp/mailbox.cu`, `roc
 the same one-shot all-gather protocol of b12x's RoCEnante (`b12x/comm/roce/`, PRs #295 and #315) for any family that
 runs tensor parallelism over it, under the same copyright and Apache License 2.0 terms.
 
+## Cloudflare Clef
+
+`zig/src/server/clef_encode.zig`, `clef_head.zig` and `clef_serve.zig` port Cloudflare's Clef release code,
+`joint_schema_model.py` in [Cloudflare/clef](https://huggingface.co/Cloudflare/clef) and
+[Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash): the record rendering and encoding
+(`render`, `question_options`, `encode_record`), the verbatim system prompt, the joint schema head
+(`JointSchemaHead`, `EvidenceRoutingLayer`) and the SystemOne answer shape (`systemone_answer`). Copyright Cloudflare,
+Inc., Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt). `tools/clef_tiny_golden.py` runs that
+file to write the test fixture `zig/src/server/fixtures/clef_tiny.json` (random weights, no Cloudflare data).
+
 ## Vendored code and weights
 
 In the Python engine, frozen at 0.6.6, `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified
