@@ -89,3 +89,19 @@ jobs:
         run: zig build test-golden
       - name: zig build fuzz-cortheon
         run: zig build fuzz-cortheon
+  zig-macos-dev-tools:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      # Xcode 26 ships the Metal compiler as a separate component, which the image does not always carry.
+      - name: Metal toolchain
+        run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
+      # Every tf-* developer tool compiled and linked, none installed or run: an engine API change that breaks one fails.
+      - name: zig build dev-tools
+        run: zig build dev-tools

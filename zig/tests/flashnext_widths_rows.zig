@@ -37,6 +37,7 @@ fn launchWindows(
     m: usize,
     y: mtl.Buffer,
     sums: mtl.Buffer,
+    limit: Buf,
 ) !void {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
@@ -55,6 +56,7 @@ fn launchWindows(
             .{ .b = sums },
             .auto,
             false,
+            limit,
         );
     }
     try lib.commit(cb, e);
@@ -122,6 +124,7 @@ fn matrix(
     device: mtl.Device,
     queue: mtl.Queue,
     cache: *rows_w.Cache,
+    limit: Buf,
     n: usize,
     k: usize,
     bits: u8,
@@ -136,7 +139,7 @@ fn matrix(
     const x = try lib.Inputs.init(device, wide, k, seed ^ 0x5eed);
     const sums = try device.buffer(rows_w.sumsBytes(k, bits, wide), lib.opts);
     const all = try lib.poisoned(device, wide * n * 2);
-    try launchWindows(device, queue, cache, p, x, wide, all, sums);
+    try launchWindows(device, queue, cache, p, x, wide, all, sums, limit);
     const got = all.slice(u16, wide * n);
     const terms = rows_w.vpt(bits) + k / (32 * rows_w.vpt(bits)) + 16;
     var worst = lib.Worst{};
@@ -159,7 +162,7 @@ fn matrix(
     for (windows) |w| {
         const y = try lib.poisoned(device, wide * n * 2);
         defer y.deinit();
-        try launchWindows(device, queue, cache, p, x, w, y, sums);
+        try launchWindows(device, queue, cache, p, x, w, y, sums, limit);
         same = lib.sameRows(
             t,
             label,
@@ -185,6 +188,7 @@ fn stack(
     device: mtl.Device,
     queue: mtl.Queue,
     cache: *rows_w.Cache,
+    limit: Buf,
     widths: []const [3]usize,
     k: usize,
     seed: u64,
@@ -195,6 +199,8 @@ fn stack(
         .a = a,
         .device = device,
         .sums = .{ .{ .b = try device.buffer(sums, lib.opts) }, .{ .b = try device.buffer(sums, lib.opts) } },
+        .no_limit = limit,
+        .limit = limit,
     };
     const members = try a.alloc(rows_w.Member, widths.len);
     var label: std.ArrayList(u8) = .empty;
@@ -226,6 +232,7 @@ fn stack(
             .{ .b = sb },
             .auto,
             false,
+            limit,
         );
         try lib.commit(cb, e);
     }
@@ -267,11 +274,12 @@ fn stack(
 
 pub fn run(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue) !void {
     var cache: rows_w.Cache = .empty;
+    const limit: Buf = .{ .b = try lib.noLimit(device) };
     var seed: u64 = 0x2a0e;
     for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| {
         for ([_][2]usize{ .{ 256, 2560 }, .{ 64, 6144 }, .{ 48, 2560 }, .{ 8, 512 } }) |shape| {
             seed += 16;
-            try matrix(t, device, queue, &cache, shape[0], shape[1], bits, group, seed);
+            try matrix(t, device, queue, &cache, limit, shape[0], shape[1], bits, group, seed);
         }
     };
     // the decode shapes at the widths the public checkpoints give them; head and draft rows at 8/64
@@ -282,7 +290,7 @@ pub fn run(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue) !void {
     };
     for (real) |c| {
         seed += 16;
-        try matrix(t, device, queue, &cache, c[0], c[1], @intCast(c[2]), c[3], seed);
+        try matrix(t, device, queue, &cache, limit, c[0], c[1], @intCast(c[2]), c[3], seed);
     }
     // the public checkpoints' mixed stacks (rows cut down), two lane steps sharing scratch, and a 64-row window
     const stacks = [_][]const [3]usize{
@@ -292,7 +300,7 @@ pub fn run(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue) !void {
     };
     for (stacks) |st| {
         seed += 16;
-        try stack(t, device, queue, &cache, st, 2560, seed);
+        try stack(t, device, queue, &cache, limit, st, 2560, seed);
     }
 }
 
@@ -323,12 +331,13 @@ const Case = struct {
     y: Buf,
     sums: Buf,
     md: Buf,
+    limit: Buf,
     rows: usize,
     mode: rows_w.Mode = .auto,
 
     fn rowsOne(c: *const Case, e: mtl.ComputeEncoder, i: usize) !void {
         const p = c.prods[i];
-        try rows_w.encode(e, a, c.device, c.rows_cache, p, c.x, c.rows, c.y, p.n, c.sums, c.mode, false);
+        try rows_w.encode(e, a, c.device, c.rows_cache, p, c.x, c.rows, c.y, p.n, c.sums, c.mode, false, c.limit);
     }
 
     fn laneOne(c: *const Case, e: mtl.ComputeEncoder, i: usize) !void {
@@ -340,6 +349,7 @@ const Case = struct {
 pub fn time(device: mtl.Device, queue: mtl.Queue) !void {
     var rows_cache: rows_w.Cache = .empty;
     var lane_cache: lane_w.Cache = .empty;
+    const limit: Buf = .{ .b = try lib.noLimit(device) };
     const cases = [_][4]usize{
         .{ 10240, 2560, 4, 32 }, .{ 6240, 2560, 5, 128 },  .{ 2560, 6144, 5, 128 }, .{ 13952, 2560, 6, 64 },
         .{ 2560, 6144, 6, 64 },  .{ 16480, 2560, 6, 32 },  .{ 2560, 6144, 6, 32 },  .{ 13952, 2560, 3, 64 },
@@ -379,6 +389,7 @@ pub fn time(device: mtl.Device, queue: mtl.Queue) !void {
                 .y = .{ .b = y },
                 .sums = .{ .b = sums },
                 .md = try lanes.mdims(device, rows),
+                .limit = limit,
                 .rows = rows,
             };
             const tl = try timed(queue, copies, &case, Case.laneOne);

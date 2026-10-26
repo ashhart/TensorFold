@@ -204,6 +204,7 @@ pub fn build(b: *std.Build) void {
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
     @import("zig/build/save_guard.zig").wire(b);
+    @import("zig/build/dev_tools.zig").wire(b, target);
 }
 
 /// The native Metal server build is owned by the shared Metal target module.
