@@ -3,6 +3,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Table = @import("table.zig").Table;
 
+/// A batched head's extra drafts cost the deepest stream's steps; FZ_PRICE_BATCHED=0 prices each stream's.
+pub fn pricedBatched() bool {
+    const v = std.c.getenv("FZ_PRICE_BATCHED") orelse return true;
+    return v[0] != '0';
+}
+
 pub const Cost = struct { width: u32, ms: f64 };
 
 /// Draft prefixes per stream with the most expected tokens a ms; fixed rows always run. Caller frees.
