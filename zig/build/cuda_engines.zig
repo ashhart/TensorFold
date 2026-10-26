@@ -10,6 +10,7 @@ pub fn glmCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     m.addImport("canon", canon);
     m.addImport("lanes", lanes);
     m.addImport("heat", heat);
+    m.addImport("tp", @import("tp.zig").module(b, target, optimize, cuda)); // over the engine's own cuda module
     return m;
 }
 
