@@ -90,3 +90,15 @@ test "a cut GLM call keeps the one-call policy, and one not yet named or not off
     const unoffered = "<tool_call>launch<arg_key>x</arg_key><arg_value>1";
     try expectGlmCut(unoffered, 0, "", unoffered, "");
 }
+
+test "a chunked XML cut drops only the pending framing newline" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = "<tool_call>\n<function=write_file>\n<parameter=path>\nnotes.txt\n</parameter>\n<parameter=content>";
+    for ([_][]const u8{ "", "\n" }) |framing| {
+        const cut = try std.mem.concat(a, u8, &.{ before, framing, "The histor" });
+        try expectCut(cut, 1, "{\"path\":\"notes.txt\",\"content\":\"The histor", "", "");
+    }
+    try expectCut(before ++ "\n\nThe histor", 1, "{\"path\":\"notes.txt\",\"content\":\"\\nThe histor", "", "");
+}

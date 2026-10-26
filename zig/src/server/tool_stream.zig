@@ -308,7 +308,9 @@ pub const Streamer = struct {
     pub fn finishCut(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
         try s.feed(text, out);
         if (s.state != .value) return;
-        const cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
+        var cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
+        if (s.lead and cut.len > 0 and cut[0] == '\n') cut = cut[1..];
+        s.lead = false;
         s.pos = text.len;
         s.held = "";
         s.buffer.clearRetainingCapacity();
