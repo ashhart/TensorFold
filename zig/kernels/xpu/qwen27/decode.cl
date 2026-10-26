@@ -72,15 +72,18 @@ KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global 
       for (int i = 0; i < 8; i++) SO[((long)h * 128 + vb * 8 + r) * 128 + i * 16 + lane] = s[r][i];
 }
 
-// Decode attention by key slices: one subgroup per (slice, K/V head and query part, row) handles Q27_QPG query heads
-// (27B: 6, all of the K/V head's); partials PM, PL, PO. Grid (slices, Q27_AKV * Q27_QPARTS, rows).
+// Decode attention by key slices: one subgroup per (slice, K/V head, query part, row). Grid y is AKV * QPARTS.
 #define SPLIT 32
 KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
                             global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
                             global const ulong *MT, global const int *POS, int cap) {
   // MT (if non-null): several streams, one row each; with TREE, tree windows; cap > 0: int8 cache (256 bytes per row).
+#if Q27_QPARTS == 1
+  const int sp = get_group_id(0), hk = get_group_id(1), t = get_group_id(2), lane = get_sub_group_local_id();
+#else
   const int sp = get_group_id(0), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(2), lane = get_sub_group_local_id();
   const int qh0 = hk * Q27_GQA + (get_group_id(1) % Q27_QPARTS) * Q27_QPG; // the first query head held
+#endif
   int base = p0, wf = 0;
   if (MT) {
     KC = (global const ushort *)MT[t * 8];
@@ -92,7 +95,11 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
   float q[Q27_QPG][16], o[Q27_QPG][16], m[Q27_QPG], l[Q27_QPG];
   for (int a = 0; a < Q27_QPG; a++) {
     for (int i = 0; i < 16; i++) {
+#if Q27_QPARTS == 1
+      q[a][i] = bf2f(Q[((long)t * Q27_AQ + hk * Q27_GQA + a) * 256 + i * 16 + lane]);
+#else
       q[a][i] = bf2f(Q[((long)t * Q27_AQ + qh0 + a) * 256 + i * 16 + lane]);
+#endif
       o[a][i] = 0.0f;
     }
     m[a] = -INFINITY;
@@ -128,7 +135,11 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
     }
   }
   for (int a = 0; a < Q27_QPG; a++) {
+#if Q27_QPARTS == 1
+    const long base = ((long)t * Q27_AQ + hk * Q27_GQA + a) * NS + sp;
+#else
     const long base = ((long)t * Q27_AQ + qh0 + a) * NS + sp;
+#endif
     if (lane == 0) {
       PM[base] = m[a];
       PL[base] = l[a];
@@ -228,8 +239,7 @@ KERNEL(16) void exl3_gemv(global const ushort *TR, global const half *X, global 
   }
 }
 
-// The prompt attention kernels hold the Q27_GQA query heads of a K/V head (groups of 2), one QK subgroup for each
-// half of a group's 128-key block: GQA 6 (the 27B) or 8 (Sage-A1.5) for attn_prompt, 6 only for attn_prompt8.
+// Prompt attention holds Q27_GQA query heads of one K/V head. GQA 6 is the 27B image. attn_prompt8 stays at GQA 6.
 #if Q27_GQA == 6 || Q27_GQA == 8
 // Prompt attention (FlashAttention-2 on bf16 DPAS), causal, 256-wide heads; fixed key order, so a row's bits ignore T.
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
@@ -237,7 +247,11 @@ __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_si
 kernel void attn_prompt(global const ushort *Q, global const ushort *KC, global const ushort *VC, global ushort *O,
                         int p0, int T, float scale) {
   local ushort P[Q27_GQA * 8 * 128];                         // A tiles: (tile of 8 queries, 16 keys), r × 16 + lane
+#if Q27_GQA == 6
+  local float MX[3][2][16], SM[3][2][16], A[48];
+#elif Q27_GQA == 8
   local float MX[Q27_GQA / 2][2][16], SM[Q27_GQA / 2][2][16], A[Q27_GQA * 8];
+#endif
   const int t0 = get_group_id(0) * 8, hk = get_group_id(1), sg = get_sub_group_id(), lane = get_sub_group_local_id();
   const int nkeys = p0 + min(t0 + 7, T - 1) + 1;
   const bool qk = sg < Q27_GQA;
