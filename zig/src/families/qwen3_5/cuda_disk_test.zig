@@ -23,8 +23,9 @@ const HostFake = struct {
         std.c.free(p);
         return cuda.abi.success;
     }
+    var fail_sync = false;
     fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
-        return cuda.abi.success;
+        return if (fail_sync) cuda.abi.error_not_ready else cuda.abi.success;
     }
 };
 
@@ -221,5 +222,59 @@ test "kept states written to disk read back byte-equal after a restart, sharing 
             } else |err| try std.testing.expect(err == error.RowsRead or err == error.RowsHash or err == error.RowsMissing);
             try std.testing.expect(r.states.items.len < before);
         }
+    }
+}
+
+/// A target whose prompt pass fails or not, counting its releases.
+const ProbeTarget = struct {
+    fail: bool = false,
+    releases: usize = 0,
+
+    fn of(p: *anyopaque) *ProbeTarget {
+        return @ptrCast(@alignCast(p));
+    }
+    fn prefill(p: *anyopaque, _: *Stream) anyerror!void {
+        if (of(p).fail) return error.Injected;
+    }
+    fn release(p: *anyopaque, _: *Stream) void {
+        of(p).releases += 1;
+    }
+    fn first(_: *anyopaque, _: *Stream, _: u64) anyerror!u64 {
+        return error.Unexpected;
+    }
+    fn queue(_: *anyopaque, _: *Stream, _: backend.Feed, _: u64) anyerror!u64 {
+        return error.Unexpected;
+    }
+    fn read(_: *anyopaque, _: u64) anyerror!u32 {
+        return error.Unexpected;
+    }
+    fn verify(_: *anyopaque, _: []const backend.Window, _: []backend.Verified) anyerror!void {
+        return error.Unexpected;
+    }
+    fn keep(_: *anyopaque, _: []const backend.Window, _: []const []const u32) anyerror!void {
+        return error.Unexpected;
+    }
+    fn draft(_: *anyopaque, _: []const backend.DraftRequest) anyerror!void {
+        return error.Unexpected;
+    }
+    const vtable: backend.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release };
+};
+const Stream = @import("lanes").Stream;
+const backend = @import("lanes").backend;
+
+test "the probe releases its stream once whether its prompt pass, its wait or its mark fails" {
+    var f: Fixture = undefined;
+    f.init(false);
+    const io = std.testing.io;
+    for ([_]struct { fail: bool, sync: bool, err: anyerror }{
+        .{ .fail = true, .sync = false, .err = error.Injected },
+        .{ .fail = false, .sync = true, .err = error.NotReady },
+        .{ .fail = false, .sync = false, .err = error.ProbeUnmarked }, // the pass kept no state at the mark
+    }) |c| {
+        var target: ProbeTarget = .{ .fail = c.fail };
+        HostFake.fail_sync = c.sync;
+        defer HostFake.fail_sync = false;
+        try std.testing.expectError(c.err, disk.probe(std.testing.allocator, io, .{ .ptr = &target, .vtable = &ProbeTarget.vtable }, &f.t));
+        try std.testing.expectEqual(@as(usize, 1), target.releases);
     }
 }
