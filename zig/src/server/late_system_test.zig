@@ -539,6 +539,11 @@ test "stream without accepted calls preserves a space after streamed reasoning" 
     try expectStreamMatchesWholeOptions("Plan.</think> ", 0, true, " ");
 }
 
+test "stream retains an unoffered closed envelope promoted from unclosed reasoning" {
+    const content = "<tool_call>{\"name\": \"other\", \"arguments\": {}}</tool_call> done";
+    try expectStreamMatchesWholeOptions("Plan." ++ content, 0, true, content);
+}
+
 test "stream without accepted calls sends the role before deferred leading-whitespace prose" {
     try expectStreamMatchesWholeOptions("\nPlain prose", 0, false, "\nPlain prose");
 }
