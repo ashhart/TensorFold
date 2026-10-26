@@ -157,6 +157,26 @@ A script reads `"result": "IMPROVED"` from `compare --json`, not the exit code.
 Attach every attempt, failed ones included; after updating the commits and builds as needed, a later attempt starts again from the `mkdir` line with the next number, reusing the same `$WORK`.
 On a checkpoint whose count prompt ends before 400 tokens, `portable-v1` cannot finish its captures; rerun all three with `--workload baseline-v2`, which fixes exactly 400 output tokens, and note the workload with the receipt.
 `baseline-v2` is defined in the Grill repo's [workload JSON](https://github.com/plotarmordev/thegrill/blob/a551fdf2b63059f56df6287e72ed573ca06cca2f/crates/grill-perf/examples/baseline-v2.json) and described in its [default scope and budget](https://github.com/plotarmordev/thegrill/blob/a551fdf2b63059f56df6287e72ed573ca06cca2f/docs/performance/README.md#default-scope-and-budget), not in the install guide.
+
+A real receipt, from The Grill 0.11.0 on a DGX Spark (GB10), measuring a CUDA window-cost change with `baseline-v2` (deployment lines shortened):
+
+```text
+INCONCLUSIVE: no direction established; this does not mean equivalent performance
+Scope: structured C1 (one concurrent request), exactly 400 output tokens per request.
+Complete acquisitions: baseline 8/8; candidate 8/8
+Baseline deployment: model_revision mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3 (MLX 4-bit); runtime TensorFold aa6fbd89030b4ffa776cc5fd06a4fa916d293fc1; hardware NVIDIA GB10, 6144 GPU cores, 130663170048 bytes; settings serve --context 8192 --no-thinking --prompt-cache-gib 0; collector 0.11.0
+Candidate deployment: same, runtime TensorFold 14ae735699bd9becafd3a3e0c663680cb15ba486
+Reference: A2
+Candidate against the reference period: observed +0.29%; uncertainty range (model-based, nominal 95%) [-0.30%, +0.88%]
+Reference against the baseline period (baseline drift): observed +0.03%; uncertainty range (model-based, nominal 95%) [-0.59%, +0.66%]
+Selected declaration change: runtime
+Observed throughput change between capture periods: +0.33%
+Uncertainty range (model-based, nominal 95%) for the measured change: [-0.49%, +1.15%]
+candidate is not directional against both baseline capture periods
+Serving identity is declared, not attested.
+```
+
+Both ranges for B cross zero, so this receipt supports no speed claim; `outputs A B` reported 24 of 24 measured outputs identical.
 New code pushed after measuring needs a new receipt.
 The Grill measures request throughput on its count prompt, prompt processing included, so its receipt sits beside the decode speed from `tools/bench_openai.py` and does not replace it.
 Drafting stays on as shipped, and the count prompt favors it, so a drafting claim also keeps the prose and code numbers from `tools/bench_openai.py`.
