@@ -224,7 +224,7 @@ fn loop(r: *sage.Runner) !void {
         if (greedy) { // greedy streams: MTP drafts, one block a stream
             var got: [sage.MAX_SLOTS][sage.WINDOW]i32 = undefined;
             var n: [sage.MAX_SLOTS]usize = undefined;
-            try r.specMulti(feed[0..nf], spec, got[0..nf], n[0..nf]);
+            try r.specMulti(feed[0..nf], spec, got[0..nf], n[0..nf], null);
             for (feed[0..nf], 0..) |si, j| {
                 const sl = &slots[si];
                 var ended = false;
@@ -264,6 +264,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, argv[2], "--loop")) {
         const r = try sage.Runner.init(argv[1], ctx, slots);
         defer r.deinit();
+        try sage.Runner.finishContext(r);
         return loop(r);
     }
     const steps: usize = if (argv.len > 3 and !std.mem.eql(u8, argv[3], "--nll")) try std.fmt.parseInt(usize, argv[3], 10) else 32;
@@ -278,6 +279,7 @@ pub fn main(init: std.process.Init) !void {
     const t_load = now();
     const r = try sage.Runner.init(argv[1], ctx, slots);
     defer r.deinit();
+    try sage.Runner.finishContext(r);
     std.debug.print("loaded in {d:.1} s\n", .{now() - t_load});
     if (argv.len > 3 and std.mem.eql(u8, argv[3], "--nll")) return nll(r, ids.items);
     if (slots > 1) if (std.c.getenv("XPU_SPEC")) |v| return specMultiCheck(r, ids.items, steps, try std.fmt.parseInt(u32, std.mem.span(v), 10));
@@ -389,6 +391,7 @@ fn tower(io: std.Io, dir: []const u8, image: []const u8, out: []const u8) !void 
     const p = try core.qwen_vl.geometry.prepare(io, a, bytes, c, 4096);
     const r = try sage.Runner.init(dir, 4096, 1);
     defer r.deinit();
+    try sage.Runner.finishContext(r);
     const t = try vision.Tower.load(&r.d, &r.ckpt, "vision_tower.", .{ .hidden = c.hidden, .heads = c.heads, .depth = c.depth, .intermediate = c.intermediate, .out_hidden = c.out_hidden }, p.gh * p.gw);
     defer t.deinit();
     const rows = try a.alloc(f32, @as(usize, p.tokens) * c.out_hidden);
@@ -429,7 +432,7 @@ fn specMultiCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void
     var short = true;
     const t0 = now();
     while (short) : (rounds += 1) {
-        try r.specMulti(slots[0..n], k, buf[0..n], cnt[0..n]);
+        try r.specMulti(slots[0..n], k, buf[0..n], cnt[0..n], null);
         short = false;
         for (0..n) |i| {
             try got[i].appendSlice(alloc, buf[i][0..cnt[i]]);

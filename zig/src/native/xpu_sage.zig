@@ -30,6 +30,9 @@ pub const Slots = struct {
     vision: ?*Vision = null, // --vision
     depth: u32 = 1, // MTP drafts a lone round (XPU_SPEC; 1 keeps 80 % of drafts on chat text)
     held: [sage.MAX_SLOTS]u32 = @splat(0), // drafts a slot holds for its next window (specMulti makes them then)
+    sampled_drafts: bool = true, // sampled streams take MTP drafts too (XPU_SAMPLED_DRAFTS=0: one row a round)
+    draft_q: bool = true, // a sampled stream's first draft is drawn from the MTP's filtered row (XPU_SAMPLED_Q=0: its argmax)
+    spec: ?*Spec = null, // speculative sampling's host buffers, made at the first sampled window
 
     fn of(ptr: *anyopaque) *Slots {
         return @ptrCast(@alignCast(ptr));
@@ -45,6 +48,7 @@ pub const Slots = struct {
     }
 
     pub fn deinit(b: *Slots) void {
+        if (b.spec) |x| x.deinit(b.gpa);
         b.gpa.free(b.half);
         b.gpa.free(b.row);
         b.gpa.free(b.ids);
@@ -62,7 +66,7 @@ pub const Slots = struct {
     /// forward only for a width of 2 or more, so the width is 2 with copy drafts off: every window is one row.
     /// stepMulti's grouped expert kernels add in another order than step, so a near-tie can pick another token.
     pub fn facts(b: *const Slots) lanes.Model {
-        if (b.r.mtp != null) return .{ .exact_width = b.depth + 1, .copy_drafts = false, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .sampled_drafts = false, .drafts = b.depth, .draft_streams = true, .hidden_rows = true, .streams_exact = true, .batch_rows = sage.WINDOW, .max_streams = b.r.slots };
+        if (b.r.mtp != null) return .{ .exact_width = b.depth + 1, .copy_drafts = false, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .sampled_drafts = b.sampled_drafts, .drafts = b.depth, .draft_streams = true, .hidden_rows = true, .streams_exact = true, .batch_rows = sage.WINDOW, .max_streams = b.r.slots };
         return .{ .exact_width = 2, .copy_drafts = false, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .hidden_rows = true, .streams_exact = true, .batch_rows = b.r.slots, .max_streams = b.r.slots };
     }
 
@@ -157,7 +161,9 @@ pub const Slots = struct {
             b.first_rows[slot] = keep;
             @memcpy(keep, try b.fetchRow(null));
         }
-        _ = b.push(try b.draw(s, r.last, null, ids.len));
+        const first = try b.draw(s, r.last, null, ids.len);
+        if (b.sampled_drafts and s.drafts and s.grammar == null and first != r.last) try r.refollow(@intCast(first));
+        _ = b.push(first);
     }
 
     fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
@@ -245,10 +251,11 @@ pub const Slots = struct {
             var n: usize = 0;
             for (windows, 0..) |w, i| if (w.held == depth) {
                 if (w.parents != null or w.masks.len > 0 or w.tokens.len > 0) return error.WindowTooWide;
-                if (w.stream.sampling) |sp| if (sp.temperature > 0) return error.SampledDrafts;
                 const slot = b.slotOf(w.stream) orelse return error.UnknownStream;
                 if (b.held[slot] < depth) return error.NoHeldDrafts;
                 if (w.positions[0] != r.spos[slot] + 1 and !(slot == r.cur and w.positions[0] == r.pos + 1)) return error.PositionMismatch;
+                // specMulti feeds the slot's last token: the runner's greedy one, which a sampled pending token replaces
+                if (slot == r.cur) r.last = @intCast(w.pending) else r.slast[slot] = @intCast(w.pending);
                 slots[n] = slot;
                 at[n] = i;
                 n += 1;
@@ -256,7 +263,15 @@ pub const Slots = struct {
             if (n == 0) continue;
             var toks: [sage.MAX_SLOTS][sage.WINDOW]i32 = undefined;
             var kept: [sage.MAX_SLOTS]usize = undefined;
-            try r.specMulti(slots[0..n], depth, toks[0..n], kept[0..n]);
+            var judge: ?sage.Runner.Judge = null;
+            for (at[0..n]) |wi| if (sampledOf(windows[wi].stream) != null) {
+                const x = b.spec orelse try Spec.init(b.gpa, r.z.s.vocab);
+                b.spec = x;
+                for (at[0..n], slots[0..n], 0..) |wj, slot, i| x.of[i] = .{ .s = windows[wj].stream, .slot = slot, .position = windows[wj].positions[0] };
+                judge = .{ .ctx = b, .keep = keepSampled, .draft = draftSampled };
+                break;
+            };
+            try r.specMulti(slots[0..n], depth, toks[0..n], kept[0..n], judge);
             for (slots[0..n], at[0..n], toks[0..n], kept[0..n]) |slot, wi, t, k| {
                 const o = out[wi];
                 b.held[slot] = 0;
@@ -265,6 +280,52 @@ pub const Slots = struct {
                 for (o.drafts, 0..) |*x, j| x.* = if (j + 1 < k) @intCast(t[j]) else @intCast(t[k - 1] ^ 1);
             }
         }
+    }
+
+    /// Judge.keep: speculative sampling of a sampled slot's block. Row j's draft x (from q) is kept with chance
+    /// min(1, p(x) / q(x)), p and q both filtered by the stream's sampling. The first rejected row draws from
+    /// max(0, p - q) normalized and ends the block; with every draft kept, the last row draws from p. A draft from
+    /// the MTP's argmax has q one at x. The kept tokens then have the one-row path's distribution.
+    fn keepSampled(ptr: *anyopaque, i: usize, row: u32, ids: []const i32, out: *[sage.WINDOW]i32) anyerror!?u32 {
+        const b = of(ptr);
+        const x = b.spec.?;
+        const o = &x.of[i];
+        const sp = sampledOf(o.s) orelse return null;
+        const v = b.r.z.s.vocab;
+        const rows: u32 = @intCast(ids.len);
+        try b.r.logitRows(row, rows, x.rows[0 .. rows * v]);
+        var j: u32 = 0;
+        while (j + 1 < rows) : (j += 1) {
+            const pos = o.position + j;
+            const p = try x.dist(x.rows[j * v ..][0..v], sp, &x.p);
+            const draft: u32 = @intCast(ids[j + 1]);
+            const q: ?*const Dist = if (j == 0 and b.r.sdrawn[o.slot]) &x.q[o.slot] else null;
+            const qx = if (q) |d| d.chance(draft) else 1.0;
+            if (lanes.sampling.uniform(sp.seed, pos, salt_accept) * qx <= p.chance(draft)) {
+                out[j] = @intCast(draft);
+                continue;
+            }
+            out[j] = @intCast(p.residual(q, draft, lanes.sampling.uniform(sp.seed, pos, salt_residual)));
+            o.position += j + 1;
+            return j + 1;
+        }
+        const p = try x.dist(x.rows[j * v ..][0..v], sp, &x.p);
+        out[j] = @intCast(p.pick(lanes.sampling.uniform(sp.seed, o.position + j, salt_bonus)));
+        o.position += rows;
+        return rows;
+    }
+
+    /// Judge.draft: a sampled slot's next first draft, drawn from the MTP row's filtered distribution (kept as its q).
+    fn draftSampled(ptr: *anyopaque, i: usize, row: u32) anyerror!?i32 {
+        const b = of(ptr);
+        const x = b.spec.?;
+        const o = &x.of[i];
+        const sp = sampledOf(o.s) orelse return null;
+        if (!b.draft_q) return null;
+        const v = b.r.z.s.vocab;
+        try b.r.logitRows(row, 1, x.rows[0..v]);
+        const q = try x.dist(x.rows[0..v], sp, &x.q[o.slot]);
+        return @intCast(q.pick(lanes.sampling.uniform(sp.seed, o.position, salt_draft)));
     }
 
     /// Row `j` of window `w` drawn: masked when the window has grammar masks, else greedy or sampled.
@@ -346,6 +407,163 @@ pub const Slots = struct {
         const slot = b.slotOf(s) orelse return;
         b.owners[slot] = null;
         b.held[slot] = 0;
+    }
+};
+
+/// A sampled stream's sampling, or null for a greedy one.
+fn sampledOf(s: *const lanes.Stream) ?lanes.Sampling {
+    const sp = s.sampling orelse return null;
+    return if (sp.temperature > 0) sp else null;
+}
+
+// Keys of the speculative sampler's uniforms at a position, apart from the one-row draw's token ids.
+const salt_accept: u64 = 0xFFFF_0000_0000_0001;
+const salt_residual: u64 = 0xFFFF_0000_0000_0002;
+const salt_bonus: u64 = 0xFFFF_0000_0000_0003;
+const salt_draft: u64 = 0xFFFF_0000_0000_0004;
+
+/// A filtered next-token distribution: the candidates chooseOrdered keeps (top_k, top_p, min_p after temperature),
+/// in its order, with their softmax chances.
+const Dist = struct {
+    ids: []u32 = &.{},
+    p: []f64 = &.{},
+    n: usize = 0,
+
+    fn chance(d: *const Dist, id: u32) f64 {
+        for (d.ids[0..d.n], d.p[0..d.n]) |t, c| if (t == id) return c;
+        return 0;
+    }
+
+    /// The candidate at uniform `u` of the cumulative chances.
+    fn pick(d: *const Dist, u: f64) u32 {
+        var cum: f64 = 0;
+        for (d.ids[0..d.n], d.p[0..d.n]) |t, c| {
+            cum += c;
+            if (u <= cum) return t;
+        }
+        return d.ids[d.n - 1];
+    }
+
+    /// A draw from max(0, p - q) normalized, with q the draft's distribution (null: one at `draft`).
+    fn residual(p: *const Dist, q: ?*const Dist, draft: u32, u: f64) u32 {
+        var total: f64 = 0;
+        for (p.ids[0..p.n], p.p[0..p.n]) |t, c| total += @max(0, c - qOf(q, draft, t));
+        if (!(total > 0)) return p.pick(u);
+        var cum: f64 = 0;
+        var last: u32 = p.ids[0];
+        for (p.ids[0..p.n], p.p[0..p.n]) |t, c| {
+            const w = @max(0, c - qOf(q, draft, t));
+            if (w <= 0) continue;
+            cum += w / total;
+            last = t;
+            if (u <= cum) return t;
+        }
+        return last;
+    }
+
+    fn qOf(q: ?*const Dist, draft: u32, t: u32) f64 {
+        if (q) |d| return d.chance(t);
+        return if (t == draft) 1 else 0;
+    }
+};
+
+/// The host side of speculative sampling: a block's logit rows, p's scratch, each slot's q.
+const Spec = struct {
+    rows: []f16,
+    vals: []f64, // a row's top candidates, by value then the lower id
+    order: []u32,
+    p: Dist,
+    q: [sage.MAX_SLOTS]Dist,
+    of: [sage.MAX_SLOTS]struct { s: *const lanes.Stream, slot: u32, position: u64 } = undefined, // specMulti's slot i
+
+    fn init(gpa: Allocator, vocab: usize) !*Spec {
+        const x = try gpa.create(Spec);
+        errdefer gpa.destroy(x);
+        x.* = .{ .rows = try gpa.alloc(f16, sage.WINDOW * vocab), .vals = try gpa.alloc(f64, vocab), .order = try gpa.alloc(u32, vocab), .p = try newDist(gpa, vocab), .q = undefined };
+        for (&x.q) |*d| d.* = try newDist(gpa, vocab);
+        return x;
+    }
+
+    fn newDist(gpa: Allocator, vocab: usize) !Dist {
+        return .{ .ids = try gpa.alloc(u32, vocab), .p = try gpa.alloc(f64, vocab) };
+    }
+
+    fn deinit(x: *Spec, gpa: Allocator) void {
+        gpa.free(x.rows);
+        gpa.free(x.vals);
+        gpa.free(x.order);
+        gpa.free(x.p.ids);
+        gpa.free(x.p.p);
+        for (x.q) |d| {
+            gpa.free(d.ids);
+            gpa.free(d.p);
+        }
+        gpa.destroy(x);
+    }
+
+    /// `row`'s distribution under `sp` into `d`, with chooseOrdered's candidates and cutoffs.
+    fn dist(x: *Spec, row: []const f16, sp: lanes.Sampling, d: *Dist) !*const Dist {
+        const width = row.len;
+        const k: usize = if (sp.top_k == 0) width else @min(width, sp.top_k);
+        var filled: usize = 0;
+        if (k == width) {
+            for (x.order[0..width], 0..) |*o, id| o.* = @intCast(id);
+            const Ctx = struct {
+                r: []const f16,
+                fn lt(c: @This(), a: u32, b: u32) bool {
+                    return c.r[a] > c.r[b] or (c.r[a] == c.r[b] and a < b);
+                }
+            };
+            std.mem.sort(u32, x.order[0..width], Ctx{ .r = row }, Ctx.lt);
+            for (x.vals[0..width], x.order[0..width]) |*v, id| v.* = row[id];
+            filled = width;
+        } else for (row, 0..) |h, id| { // insertion into the k best; an equal value stays behind the lower id
+            const v: f64 = h;
+            if (filled == k and v <= x.vals[k - 1]) continue;
+            var at = @min(filled, k - 1);
+            while (at > 0 and v > x.vals[at - 1]) : (at -= 1) {
+                x.vals[at] = x.vals[at - 1];
+                x.order[at] = x.order[at - 1];
+            }
+            x.vals[at] = v;
+            x.order[at] = @intCast(id);
+            filled = @min(filled + 1, k);
+        }
+        for (x.vals[0..filled]) |v| if (!std.math.isFinite(v)) return error.NonfiniteLogits;
+        const t = @max(sp.temperature, 1e-6);
+        const top = x.vals[0] / t;
+        var keep = filled;
+        if (sp.top_p > 0.0 and sp.top_p < 1.0) {
+            var total: f64 = 0;
+            for (x.vals[0..filled], d.p[0..filled]) |v, *c| {
+                c.* = @exp(v / t - top);
+                total += c.*;
+            }
+            var cum: f64 = 0;
+            var below: usize = 0;
+            for (d.p[0..filled]) |c| {
+                cum += c / total;
+                if (cum < sp.top_p) below += 1;
+            }
+            keep = @min(keep, below + 1);
+        }
+        if (sp.min_p > 0.0) {
+            const floor = top + @log(sp.min_p);
+            var n: usize = 0;
+            for (x.vals[0..keep]) |v| {
+                if (v / t >= floor) n += 1;
+            }
+            keep = n;
+        }
+        var total: f64 = 0;
+        for (x.vals[0..keep], d.p[0..keep], d.ids[0..keep], x.order[0..keep]) |v, *c, *id, o| {
+            c.* = @exp(v / t - top);
+            total += c.*;
+            id.* = o;
+        }
+        for (d.p[0..keep]) |*c| c.* /= total;
+        d.n = keep;
+        return d;
     }
 };
 
@@ -490,6 +708,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     // --drafter: the AutoRound checkpoint whose MTP head drafts for a lone greedy stream
     const mtp = if (o.drafts) o.drafter else null;
     const r = sage.Runner.initMtp(o.dir, context, slots, mtp) catch |err| {
+        if (err == error.StoredPrecision) {
+            problem.* = try std.fmt.allocPrint(a, "this build has no kernel for stored fp16 GPTQ scales or a stored bf16 MTP fc; set XPU_SAGE_AS_MLX=1 to serve those tensors as MLX affine 4/64, with fp16 scales rounded to bf16 and bf16 embedding, head, and MTP fc quantized to 4/64", .{});
+            return null;
+        }
         problem.* = try std.fmt.allocPrint(a, "the XPU Sage engine could not load {s} with {d} streams of {d} tokens: {s}", .{ o.dir, slots, context, @errorName(err) });
         return null;
     };
@@ -501,22 +723,23 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (o.vision) |vo| h.back.vision = try Vision.open(gpa, io, a, r, o.dir, vo, problem) orelse return null;
     errdefer if (h.back.vision) |v| v.deinit(gpa);
     if (std.c.getenv("XPU_SPEC")) |v| h.back.depth = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
+    if (std.c.getenv("XPU_SAMPLED_DRAFTS")) |v| h.back.sampled_drafts = !std.mem.eql(u8, std.mem.span(v), "0");
+    if (std.c.getenv("XPU_SAMPLED_Q")) |v| h.back.draft_q = !std.mem.eql(u8, std.mem.span(v), "0");
     if (h.back.depth == 0 or h.back.depth + 1 > sage.WINDOW) {
         problem.* = try std.fmt.allocPrint(a, "XPU_SPEC: 1 to {d} MTP drafts a round, not {d}", .{ sage.WINDOW - 1, h.back.depth });
         return null;
     }
-    if (!try fitsCard(a, r, slots, context, problem)) {
-        if (h.back.vision) |v| v.deinit(gpa);
-        h.back.deinit();
-        gpa.destroy(h);
-        r.deinit();
+    if (std.c.getenv("XPU_KV_INT8") != null) r.cap = @intCast(context);
+    if (!try fitsCard(a, r, slots, context, problem)) return null;
+    sage.Runner.finishContext(r) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "the XPU Sage engine could not set up {d} streams of {d} tokens: {s}", .{ slots, context, @errorName(err) });
         return null;
-    }
+    };
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), if (r.mtp != null) h.back.depth + 1 else 2, if (r.mtp != null) h.back.depth else 0);
     errdefer h.cfg.deinit(gpa);
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: Sage (qwen3_5_moe), {d} stream(s) of {d} tokens, {s} K/V, sampling on the host{s}", .{ slots, context, if (r.cap > 0) "int8" else "bf16", if (r.mtp != null) ", MTP drafts for a lone greedy stream" else "" });
+    h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: Sage (qwen3_5_moe), {d} stream(s) of {d} tokens, {s} K/V, sampling on the host{s}", .{ slots, context, if (r.cap > 0) "int8" else "bf16", if (r.mtp == null) "" else if (h.back.sampled_drafts) ", MTP drafts for greedy and sampled streams" else ", MTP drafts for greedy streams" });
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "sage-xpu", .lanes = slots, .context_window = context, .context_fitted = true, .startup = h.startup, .prefill_step = 0, .structures = true });
     h.host.explain = .{ .text = lane.explain };
     if (h.back.vision) |v| h.host.info_.vision = v.offer(o.vision.?);
@@ -541,12 +764,14 @@ fn fitsCard(a: Allocator, r: *sage.Runner, slots: u32, context: u32, problem: *[
         return true;
     };
     const room = mem.size -| card_reserve;
-    const need: u64 = r.d.allocated -| counted_not_held;
-    std.log.info("XPU: the load holds {d:.2} GB of the card's {d:.2} GB ({d:.2} GB kept free)", .{ gb(need), gb(mem.size), gb(card_reserve) });
-    if (need <= room) return true;
     const per: u64 = r.kvBytesPerToken();
     const state: u64 = r.slotStateBytes();
-    const fixed = need -| slots * (state + per * context); // weights, activations, the tower: what fewer slots leave
+    const held: u64 = r.d.allocated -| counted_not_held;
+    const acts = sage.actsBytes(r.z, context);
+    const need: u64 = held + acts + slots * (state + per * context);
+    std.log.info("XPU: the load holds {d:.2} GB of the card's {d:.2} GB ({d:.2} GB kept free)", .{ gb(need), gb(mem.size), gb(card_reserve) });
+    if (need <= room) return true;
+    const fixed = held + acts; // weights and the prompt buffers: what fewer slots leave
     const left = room -| fixed;
     const max_context = (left / slots -| state) / per;
     const max_slots = left / (state + per * context);

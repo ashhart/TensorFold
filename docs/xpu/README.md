@@ -80,6 +80,12 @@ Options through environment variables:
 | `XPU_FP64_REF=1` | `xpu-qwen27` runner only: on the prompt's real activations, each int4 GEMM of layers 0, 1, 31, 63 and the head (decode on 1 and 8 rows, prompt) against FP64 references of the same int4 weights (`core/quant` MLX affine; GPTQ as affine with bias −8·scale), worst column and error over the outputs' rms (`zig/src/xpu/fp64_ref.zig`) |
 | `XPU_FIDELITY=1` | `xpu-qwen27` runner only: teacher-forced top tokens of the prompt and decode paths at every position of the IDS file against the same forward with every GEMM in FP64, all differences and margins (`XPU_FIDELITY_CACHE=FILE` keeps the FP64 forward's tokens) |
 
+For **Sage-A1.5** (`sage-xpu`), a native MLX checkpoint loads as stored. A GPTQ or AutoRound checkpoint needs kernels for its stored fp16 scales and bf16 MTP `fc`; without them, open refuses unless `XPU_SAGE_AS_MLX=1`, which serves those tensors as MLX affine 4/64 (fp16 scales rounded to bf16, bf16 embedding, `lm_head`, and MTP `fc` quantized to 4/64). `XPU_SAGE_HEAD16=1` still keeps fp16 copies of the bf16 embedding and head with that conversion. `XPU_SAMPLED_DRAFTS=0` decodes sampled streams one row a round instead of MTP drafts.
+
+## Licences
+
+Sage-A1.5 and the base model **InternScience/Sage-A1.5** (InternScience / Shanghai AI Laboratory) are **Apache-2.0**. An AutoRound GPTQ checkpoint is a **changed copy** of that base (Intel AutoRound, `auto_round:auto_gptq`, group 128), also under Apache-2.0. If you redistribute a quantized checkpoint, include the licence text, keep upstream copyright and `NOTICE` content, and state what you changed. TensorFold is Apache-2.0 ([LICENSE](../../LICENSE), [NOTICE](../../NOTICE)). This is a reminder, not legal advice.
+
 ## Numbers (B70 at 230 W, server `--parallel 8 --context 16384`, validation of 2026-10-13)
 
 | | MLX g64 | GPTQ g128 | GPTQ g128 + W4A8 | Rotated RTN + W4A4 |
