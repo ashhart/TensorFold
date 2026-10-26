@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- A streamed tool call cut by `max_tokens` while an XML value's opening newline was still held no longer sends that framing newline as an extra `\n` in the argument; the stream now matches the whole reply (#1408, item 3 of #1396). Thanks to @Maxrio9.
+
 - Qwen3.8-27B and Qwen3.5-MoE on CUDA apply `presence_penalty` and `frequency_penalty` (-2 to 2; 400 outside), which the server used to ignore silently, as the Qwen3.8 model card's thinking-off settings use (#1346). A drafted row is penalized exactly as the plain step at its position, so drafted replies equal undrafted ones; engines that don't apply them say so once in the log. On a GB10 with Qwen3.8-27B, requests without penalties give the same tokens as before, and prefill and decode are unchanged. Thanks to @BobClawblaw.
 
 - A request's grammar compiles once: the lane thread builds its matcher from the HTTP thread's compiled handle instead of compiling the same text again under the compiler lock (#1362). Replies are unchanged; on M3 Ultras with Qwen3.8-27B, decode at 1 to 8 streams is unchanged. Thanks to @jschmied.
