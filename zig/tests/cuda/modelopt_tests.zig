@@ -68,6 +68,7 @@ pub fn run(gpu: Gpu) !void {
     defer gemm.unload();
     const lin: cuda.qlinear.Linear = .{ .lane = &lane, .nvfp4_prompt = &gemm };
     for ([_]qmmf.Mode{ .fp8, .bf16 }) |mode| try lanes(gpu, rng, &pack, lin, stream, mode);
+    try adapterRows(gpu, rng, &pack, &lane, stream);
     try experts(gpu, rng, &pack, stream);
     if (capability / 10 < 12) {
         std.debug.print("SKIP modelopt checkpoint experts: the block-scaled FP4 mma needs sm_120a\n", .{});
@@ -237,6 +238,51 @@ fn lanes(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, lin: cuda.qlinear
     };
     try check.expect(worst[0] <= 1 and worst[1] <= 1, "{t} rows within 1% of fp64: decode {d:.3}, prompt {d:.3} of the bound", .{ mode, worst[0], worst[1] });
     check.pass("{t} lane: rows 1-16 byte-equal, 300 prompt rows chunk-invariant, worst |err| / (1% of max(|ref|, 1)): decode {d:.3}, prompt {d:.3}", .{ mode, worst[0], worst[1] });
+}
+
+/// A runtime LoRA's two products on the bf16 lane (cuda_lora_lane.zig): a row's bits the same at any chunking.
+fn adapterRows(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, lane: *const qmmf.Lane, s: cuda.Stream) !void {
+    const a = gpu.gpa;
+    const m = 600;
+    // A (rank 64 by k 4096) to bf16, then B (4096 by rank 64) to fp32, as the adapter calls them
+    for ([_][2]usize{ .{ 64, 4096 }, .{ 4096, 64 } }, [_]qmmf.Out{ .bf16, .f32 }) |shape, out| {
+        const n = shape[0];
+        const k = shape[1];
+        const w16 = try bf16s(a, rng, n * k, 0.25);
+        defer a.free(w16);
+        var src = try dev(gpu, std.mem.sliceAsBytes(w16));
+        defer src.free();
+        var packed_w = try cuda.DeviceBuffer.alloc(gpu.d, modelopt.padded(n) * k * 2);
+        defer packed_w.free();
+        try p.bf16Lane(s, src.ptr, packed_w.ptr, n, k);
+        const w = modelopt.bf16Weight(packed_w.ptr, n, k);
+        const x = try bf16s(a, rng, m * k, 4);
+        defer a.free(x);
+        var dx = try dev(gpu, std.mem.sliceAsBytes(x));
+        defer dx.free();
+        const width: usize = if (out == .f32) 4 else 2;
+        var y = try cuda.DeviceBuffer.alloc(gpu.d, m * n * width);
+        defer y.free();
+        var y2 = try cuda.DeviceBuffer.alloc(gpu.d, m * n * width);
+        defer y2.free();
+        var part = try cuda.DeviceBuffer.alloc(gpu.d, @max(4, lane.partBytes(m, w), lane.partBytes(255, w)));
+        defer part.free();
+        try lane.matmulOut(s, dx.ptr, k, m, w, y.ptr, out, part.ptr);
+        try s.synchronize();
+        const whole = try check.download(gpu, y);
+        defer a.free(whole);
+        try y2.fill8(0xff, s.handle);
+        var at: usize = 0;
+        var i: usize = 0;
+        while (at < m) : (i += 1) {
+            const rows = @min(m - at, ([_]usize{ 1, 15, 37, 192, 255, 100 })[i % 6]);
+            try lane.matmulOut(s, dx.ptr + at * k * 2, k, rows, w, y2.ptr + at * n * width, out, part.ptr);
+            at += rows;
+        }
+        try s.synchronize();
+        try same(gpu, "adapter rows in pieces of 1 to 255", y2, whole);
+    }
+    check.pass("bf16 lane at the adapter's shapes: 600 rows at once byte-equal to pieces of 1-255", .{});
 }
 
 /// relu^2 NVFP4 experts, decode and staged prompt forms, against fp64 (odd K groups, part-filled column tiles).

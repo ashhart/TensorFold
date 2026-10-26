@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const geometry = @import("cuda_geometry.zig");
 const E = @import("cuda_engine.zig");
 const layers_mod = @import("cuda_layers.zig");
+const lane_mod = @import("cuda_lora_lane.zig");
 
 const Slot = geometry.Slot;
 const Allocator = std.mem.Allocator;
@@ -11,8 +12,12 @@ const Allocator = std.mem.Allocator;
 /// Rows a factor product takes at once; DenseRows keeps each row's bits at any row count.
 const block = 256;
 
-/// One projection's factors on the device: A [rank][k] and B [n][rank], bf16, the scale folded into B.
-pub const Factor = struct { a: u64, b: u64, rank: usize, n: usize, k: usize };
+test {
+    _ = lane_mod;
+}
+
+/// One projection's factors on the device: A [rank][k] and B [n][rank], bf16, the scale folded into B; `lane` packed.
+pub const Factor = struct { a: u64, b: u64, rank: usize, n: usize, k: usize, lane: ?lane_mod.Pair = null };
 
 pub const Lora = struct {
     gpa: Allocator,
@@ -24,6 +29,8 @@ pub const Lora = struct {
     t32: u64,
     t16: u64,
     d32: u64,
+    part: u64 = 0, // the lane's slice partials (lane factors only)
+    part_buf: ?cuda.DeviceBuffer = null,
     at: []std.EnumArray(Slot, ?Factor),
 
     pub fn factor(l: *const Lora, layer: usize, s: Slot) ?Factor {
@@ -31,6 +38,7 @@ pub const Lora = struct {
     }
 
     pub fn deinit(l: *Lora) void {
+        if (l.part_buf) |*q| q.free();
         l.buf.free();
         l.mod.unload();
         l.dense.unload();
@@ -66,6 +74,7 @@ pub const Lora = struct {
             most_rank = @max(most_rank, rank);
         };
         if (total == 0) return error.LoraEmpty;
+        if (e.mo) |*mo| return openLane(gpa, e, mo, &f, at, dir, most_n, most_rank);
         const scratch = aligned(block * most_rank * 4) + aligned(block * most_rank * 2) + aligned(block * most_n * 4);
         var buf = try cuda.DeviceBuffer.alloc(e.d, total + scratch);
         errdefer buf.free();
@@ -90,6 +99,7 @@ pub const Lora = struct {
 
     /// y [rows][n] bf16 += (bf16(x A^T)) B^T for one projection, `block` rows at a time.
     fn apply(l: *const Lora, e: *E.Engine, f: Factor, x: u64, y: u64, rows: usize) !void {
+        if (f.lane) |p| return lane_mod.apply(e, e.mo.?.lane, l.add, p, x, y, rows, l.t16, l.d32, l.part);
         var at: usize = 0;
         while (at < rows) : (at += block) {
             const m = @min(block, rows - at);
@@ -101,6 +111,43 @@ pub const Lora = struct {
         }
     }
 };
+
+/// Factors packed for the engine's bf16 lane GEMM, with scratch for max_rows rows reserved here, before any request.
+fn openLane(gpa: Allocator, e: *E.Engine, mo: anytype, f: *const Tensors, at: []std.EnumArray(Slot, ?Factor), dir: []const u8, most_n: usize, most_rank: usize) !*Lora {
+    var name: [160]u8 = undefined;
+    var total: usize = 0;
+    var stage: usize = 0;
+    for (at) |row| for (std.enums.values(Slot)) |s| if (row.get(s)) |x| {
+        total += lane_mod.pairBytes(x.rank, x.n, x.k);
+        stage = @max(stage, lane_mod.stageBytes(x.rank, x.n, x.k));
+    };
+    const rp = lane_mod.padRank(most_rank);
+    const t16_bytes = aligned(E.max_rows * rp * 2);
+    const d32_bytes = aligned(E.max_rows * most_n * 4);
+    var buf = try cuda.DeviceBuffer.alloc(e.d, total + aligned(stage) + t16_bytes + d32_bytes);
+    errdefer buf.free();
+    var part_most: usize = 0;
+    var off: usize = 0;
+    for (at, 0..) |*row, i| for (std.enums.values(Slot)) |s| {
+        const x = row.get(s) orelse continue;
+        const a = f.get(try std.fmt.bufPrint(&name, "layers.{d}.{s}.lora_A", .{ i, geometry.slot_modules.get(s) })).?;
+        const b = f.get(try std.fmt.bufPrint(&name, "layers.{d}.{s}.lora_B", .{ i, geometry.slot_modules.get(s) })).?;
+        const p = try lane_mod.pack(gpa, e, &mo.pack, buf, off, total, a.bytes, b.bytes, x.rank, x.n, x.k);
+        part_most = @max(part_most, lane_mod.partBytes(mo.lane, p, E.max_rows));
+        row.set(s, .{ .a = 0, .b = 0, .rank = x.rank, .n = x.n, .k = x.k, .lane = p });
+        off += lane_mod.pairBytes(x.rank, x.n, x.k);
+    };
+    var part: ?cuda.DeviceBuffer = if (part_most > 0) try cuda.DeviceBuffer.alloc(e.d, part_most) else null;
+    errdefer if (part) |*q| q.free();
+    var mod = try cuda.Module.load(e.d, cuda.kernels.qwen27_train);
+    errdefer mod.unload();
+    var dense = try cuda.dense_rows.DenseRows.load(e.d);
+    errdefer dense.unload();
+    const l = try gpa.create(Lora);
+    const t16 = buf.ptr + total + aligned(stage);
+    l.* = .{ .gpa = gpa, .dir = try gpa.dupe(u8, dir), .buf = buf, .mod = mod, .add = try mod.function("tf_q27_add_bf16"), .dense = dense, .t32 = 0, .t16 = t16, .d32 = t16 + t16_bytes, .part = if (part) |q| q.ptr else 0, .part_buf = part, .at = at };
+    return l;
+}
 
 /// Each adapted projection of `slots` adds its term to its output in `ys`, read from `x`; nothing without a LoRA on.
 pub fn after(e: *E.Engine, layer: usize, slots: []const Slot, x: u64, ys: []const u64, rows: usize) !void {
