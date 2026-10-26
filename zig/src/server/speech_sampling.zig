@@ -53,5 +53,5 @@ fn number(cx: *errors.Cx, value: Value, max: f64, message: []const u8) errors.Re
     if (!std.math.isFinite(n) or n < 0 or n > max) return cx.refuse(message);
     const narrowed: f32 = @floatCast(n);
     if (n > 0 and narrowed == 0) return cx.refuse(message);
-    return narrowed;
+    return if (narrowed == 0) 0 else narrowed;
 }

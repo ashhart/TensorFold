@@ -58,7 +58,8 @@ test "speech sampling: custom parameters and exact integer seeds reach whole and
         .{ .fields = "\"seed\":18446744073709551615", .sampling = defaults, .seed = std.math.maxInt(u64) },
         .{ .fields = "\"temperature\":0.5", .sampling = .{ .temperature = 0.5, .top_p = 0.9, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
         .{ .fields = "\"temperature\":1e-400", .sampling = .{ .temperature = 0, .top_p = 0.9, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
-        .{ .fields = "\"temperature\":-1e-400", .sampling = .{ .temperature = -0.0, .top_p = 0.9, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
+        .{ .fields = "\"temperature\":-1e-400", .sampling = .{ .temperature = 0, .top_p = 0.9, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
+        .{ .fields = "\"temperature\":-0", .sampling = .{ .temperature = 0, .top_p = 0.9, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
         .{ .fields = "\"temperature\":3.4028234663852886e38,\"top_p\":1e-45", .sampling = .{ .temperature = std.math.floatMax(f32), .top_p = 1e-45, .top_k = 30 }, .seed = try promptSeed("hi", 0) },
     };
     for (cases) |case| for ([_]bool{ false, true }) |stream| {
@@ -71,6 +72,7 @@ test "speech sampling: custom parameters and exact integer seeds reach whole and
         if (stream) try harness.expectHeader(reply, "Transfer-Encoding: chunked");
         try std.testing.expectEqual(@as(usize, 1), script.takes);
         try expectDraw(&script, 0, case.sampling, case.seed);
+        try std.testing.expect(!std.math.signbit(script.sampling[0].temperature));
     };
 }
 
