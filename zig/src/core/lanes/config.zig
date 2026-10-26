@@ -29,7 +29,7 @@ pub const Model = struct {
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
     mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
     draft_step_ms: f64 = 0.0, // a shared round's draft past a stream's first, as the backend's head runs it (0: priced free)
-    streams_exact: bool = true, // shared forwards keep each stream's bits
+    streams_exact: bool = true, // a bit claim only. hidden_rows decides a shared forward.
     hidden_rows: bool = false, // the backend runs several streams' windows in one forward
     batch_rows: u32 = 0, // a shared forward's rows at most (0: 32)
     max_streams: u32 = 0, // a shared forward's streams at most (0: 32)
@@ -105,7 +105,8 @@ pub const Config = struct {
         const first_rows: i64 = if (m.first_copy_rows != 0) m.first_copy_rows else width;
         const first_copy: u32 = @intCast(@max(1, @min(@as(i64, max_copy), first_rows - 1)));
         const prior = if (m.draft_prior.len > 0) m.draft_prior else &default_prior;
-        const streams = width >= 2 and m.streams_exact and m.hidden_rows;
+        // hidden_rows shares a forward. streams_exact is the bit claim and does not gate it.
+        const streams = width >= 2 and m.hidden_rows;
         const batch_rows: u32 = if (m.batch_rows != 0) m.batch_rows else 32;
         var family_costs: Table = .{};
         errdefer family_costs.deinit(gpa);
@@ -185,4 +186,12 @@ test "setup derives widths like Python" {
     var steady = try Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .drafts = 4, .depth_rate = 0.08 }, 16, 15);
     defer steady.deinit(gpa);
     try std.testing.expectEqual(@as(f64, 0.08), steady.k.depth_rate);
+}
+
+test "streams_exact false still shares rounds" {
+    const gpa = std.testing.allocator;
+    var c = try Config.init(gpa, .{ .exact_width = 16, .hidden_rows = true, .streams_exact = false, .batch_rows = 16, .max_streams = 8 }, 16, 15);
+    defer c.deinit(gpa);
+    try std.testing.expect(c.family_streams);
+    try std.testing.expectEqual(@as(u32, 8), c.batch_streams);
 }

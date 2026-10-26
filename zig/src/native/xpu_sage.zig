@@ -71,11 +71,17 @@ pub const Slots = struct {
 
     // A prompt above 16 rows uses tiled MoE and attn_prompt. Inside one kernel a row's K order ignores the batch.
 
-    // Shared rounds use that 2 to 16 row launch. streams_exact stays true so those rounds run as one forward.
+    // streams_exact is false. One row and a shared row differ by 3509 bytes (gdn_one, down_combine).
+
+    // A prompt piece of 8 rows and the first 8 of 17 differ by 24800 bytes (grouped vs tiled MoE).
+
+    // Nine rows after those 8 and the last 9 of 17 differ by 28240 bytes.
+
+    // Same rows in one width match. A repeat of 2, the first 2 of 16, and swapped streams differ by 0.
 
     pub fn facts(b: *const Slots) lanes.Model {
-        if (b.r.mtp != null) return .{ .exact_width = b.depth + 1, .copy_drafts = false, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .sampled_drafts = b.sampled_drafts, .drafts = b.depth, .draft_streams = true, .hidden_rows = true, .streams_exact = true, .batch_rows = sage.WINDOW, .max_streams = b.r.slots };
-        return .{ .exact_width = 2, .copy_drafts = false, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .hidden_rows = true, .streams_exact = true, .batch_rows = b.r.slots, .max_streams = b.r.slots };
+        if (b.r.mtp != null) return .{ .exact_width = b.depth + 1, .copy_drafts = false, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .sampled_drafts = b.sampled_drafts, .drafts = b.depth, .draft_streams = true, .hidden_rows = true, .streams_exact = false, .batch_rows = sage.WINDOW, .max_streams = b.r.slots };
+        return .{ .exact_width = 2, .copy_drafts = false, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .hidden_rows = true, .streams_exact = false, .batch_rows = b.r.slots, .max_streams = b.r.slots };
     }
 
     fn push(b: *Slots, token: u32) u64 {
