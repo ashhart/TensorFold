@@ -228,3 +228,7 @@ credited here.
   ([#120](https://github.com/ashhart/TensorFold/pull/120)).
 
 - @tpischke requested fresh per-request sampling keys and reproducible done-line seeds in [#1026](https://github.com/ashhart/TensorFold/issues/1026).
+
+## Fluid Subgraph Residency
+
+TensorFold's exact residency implementation follows published techniques: EdgeMoE's storage-backed weights and memory index, MoE-Infinity and Fiddler's expert locality/popularity caching and prefetch, and Fate's cross-layer gate prefetch. These are re-implementations of proven techniques, with no novelty claim. The frozen TensorFold Python engine provides the implementation ancestry for native expert slots and PLE row streaming. Slotstream is an outside comparison for published SSD streaming memory/speed trade-offs, not the design or code source. See [the exact residency design](design/fluid-subgraph-residency.md) for scope and qualification.
