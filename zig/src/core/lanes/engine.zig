@@ -344,9 +344,7 @@ pub const Engine = struct {
                 for (path[1..]) |r| own_kept += @intFromBool(r < own_end);
                 const own: usize = own_end - 1;
                 if (p.kind == .copy) {
-                    if (p.recalled) {
-                        if (s.recall) |r| r.observe(@intCast(own), @intCast(own_kept), s.rounds);
-                    } else if (s.proposer) |pr| pr.observe(@intCast(own), @intCast(own_kept));
+                    win.observeCopied(e, s, p.recalled, own_kept, own);
                     if (e.alone) {
                         const width = s.copy_width orelse e.cfg.first_copy;
                         s.copy_width = if (own_kept == own) @min(e.cfg.max_copy, 2 * width + 1) else e.cfg.first_copy;

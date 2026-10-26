@@ -14,6 +14,7 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 pub const Model = struct {
     root_copies: bool = false, // verified context copies precede head drafts and skip their proposal pass
     copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
+    own_copy_rates: bool = false, // a copy window is priced by its stream's own copies, not copy_rate's prior
 
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
@@ -52,6 +53,7 @@ pub const Config = struct {
     root_copies: bool = false,
     family_width: u32,
     max_copy: u32,
+    own_copy_rates: bool = false, // Model.own_copy_rates
     first_copy: u32,
     base_width: u32,
     family_mtp: bool,
@@ -134,6 +136,7 @@ pub const Config = struct {
             .lone_cost_tile = m.lone_cost_tile,
             .family_width = width,
             .max_copy = max_copy,
+            .own_copy_rates = m.own_copy_rates,
             .first_copy = first_copy,
             .base_width = @min(width, first_copy + 1),
             .family_mtp = m.mtp and width >= 2 and m.speculate,
