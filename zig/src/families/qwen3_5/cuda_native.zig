@@ -130,11 +130,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
         .backend = l.backend(),
-        .facts = blk: {
-            var facts = laneFacts(@intCast(e.window_rows), @intCast(e.verify_rows));
-            facts.root_copies = e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0;
-            break :blk facts;
-        },
+        .facts = modelFacts(@intCast(e.window_rows), @intCast(e.verify_rows), e.g),
         .rows = @intCast(e.window_rows),
         .stream_bytes = try cacheBytes(e, o.context, page_test),
         .ctx = l,
@@ -149,6 +145,16 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     const l: *Lanes = @ptrCast(@alignCast(p));
     return .{ .e = l.e, .dir = dir, .lay = slide.layout(l.e.g.hidden, l.e.g.layers, l.e.g.intermediate, 0) catch unreachable };
+}
+
+/// A checkpoint's facts: the dense 27B copies from the root after long_match (20) tokens, leaving short ones to drafts.
+pub fn modelFacts(window: u32, verify: u32, g: anytype) lanes.Model {
+    var facts = laneFacts(window, verify);
+    if (g.hidden == 5120 and g.layers == 64 and g.experts == 0) {
+        facts.root_copies = true;
+        facts.copy_match = lanes.windows.long_match;
+    }
+    return facts;
 }
 
 /// The CUDA hybrids use the shared lane planner for five-token context copies, alone and without a draft model.

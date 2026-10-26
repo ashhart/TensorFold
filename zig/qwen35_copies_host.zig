@@ -29,6 +29,20 @@ test "Suffix copies: CUDA facts enable five-token copies on the shared core" {
     if (comptime @hasField(lanes.Config, "context_copies")) try std.testing.expect(cfg.context_copies);
 }
 
+test "Suffix copies: the dense 27B copies from the root after 20 matching tokens, other shapes after 5" {
+    const Shape = struct { hidden: usize, layers: usize, experts: usize };
+    const dense27: Shape = .{ .hidden = 5120, .layers = 64, .experts = 0 };
+    const moe: Shape = .{ .hidden = 2048, .layers = 40, .experts = 256 };
+    const f27 = qwen.native.modelFacts(16, 32, dense27);
+    try std.testing.expect(f27.root_copies);
+    var cfg = try lanes.Config.init(a, f27, 16, 15);
+    defer cfg.deinit(a);
+    try std.testing.expectEqual(@as(i64, lanes.windows.long_match), cfg.enter_match);
+    const fm = qwen.native.modelFacts(16, 32, moe);
+    try std.testing.expect(!fm.root_copies);
+    try std.testing.expectEqual(@as(i64, 5), fm.copy_match);
+}
+
 test "Suffix copies: draft tails never enter the suffix index and result storage may be the next tail" {
     try std.testing.expect(@hasDecl(lanes.SuffixLookup, "proposeAfter"));
     if (comptime @hasDecl(lanes.SuffixLookup, "proposeAfter")) {
