@@ -1,5 +1,6 @@
 //! The Qwen3.5 CUDA disk image's tests: it covers a host copy, goes to disk and back byte-equal, refuses what differs.
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 const api = @import("engine_api");
 const disk = @import("cuda_disk.zig");
@@ -140,7 +141,7 @@ test "gather and scatter give back the copy byte for byte; a copy kept with imag
 }
 
 fn dir(buf: []u8, tag: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/tf-qwen-disk-{s}-{d}", .{ tag, std.c.getpid() }) catch unreachable;
+    return std.fmt.bufPrint(buf, "/tmp/tf-qwen-disk-{s}-{d}", .{ tag, platform.c.getpid() }) catch unreachable;
 }
 
 fn rmTree(path: []const u8) void {
@@ -167,6 +168,7 @@ fn writeBoth(a: std.mem.Allocator, f: *Fixture, o: rows.Options, prompt: []u32, 
 }
 
 test "kept states written to disk read back byte-equal after a restart, sharing blocks; a cut or flipped file is refused" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the test edits files through a POSIX shell
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
