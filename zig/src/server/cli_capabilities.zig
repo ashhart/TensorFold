@@ -1,8 +1,20 @@
-//! The native capabilities document: the table's native flags and the honoured variables.
+//! ``capabilities --json``: the engine's version, chip, backends and families, then the native flags and variables.
 const std = @import("std");
+const api = @import("engine_api");
 const cli = @import("cli.zig");
 
-pub fn capabilities(w: *std.Io.Writer, e: cli.Engines) !void {
+/// What ``capabilities --json`` reports about the engine side: its version, chip, backends and families.
+pub const Engines = struct {
+    version: []const u8,
+    chip: ?[]const u8 = null,
+    optional_libraries: []const @import("sys").optional_libraries.Status = &.{},
+    backends: []const []const u8 = &.{},
+    /// model_type to the weight formats it reads, as gate entries name them.
+    families: []const api.Family = &.{},
+};
+
+/// The native capabilities document: the table's native flags and the honoured variables.
+pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.print("{{\"schema\": 1, \"engine\": \"zig\", \"version\": \"{s}\", \"chip\": ", .{e.version});
     if (e.chip) |c| try w.print("\"{s}\"", .{c}) else try w.writeAll("null");
     try w.writeAll(", \"backends\": [");

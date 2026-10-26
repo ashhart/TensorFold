@@ -571,17 +571,8 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
     });
 }
 
-/// What ``capabilities --json`` reports about the engine side: its version, chip, backends and families.
-pub const Engines = struct {
-    version: []const u8,
-    chip: ?[]const u8 = null,
-    optional_libraries: []const @import("sys").optional_libraries.Status = &.{},
-    backends: []const []const u8 = &.{},
-    /// model_type to the weight formats it reads, as gate entries name them.
-    families: []const api.Family = &.{},
-};
-
-/// The native capabilities document: the table's native flags and the honoured variables.
+/// ``capabilities --json`` (cli_capabilities.zig): the engine side, then the table's native flags and variables.
+pub const Engines = @import("cli_capabilities.zig").Engines;
 pub const capabilities = @import("cli_capabilities.zig").capabilities;
 
 const cli = @This();
