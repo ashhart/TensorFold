@@ -42,6 +42,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (@hasField(F.Options, "prompt_int8")) opts.prompt_int8 = o.prompt_int8;
     if (@hasField(F.Options, "loops")) opts.loops = o.loops;
     if (@hasField(F.Options, "decision_rows")) opts.decision_rows = o.decision_rows;
+    if (@hasField(F.Options, "decision_adapter")) opts.decision_adapter = o.decision_adapter;
     return true;
 }
 

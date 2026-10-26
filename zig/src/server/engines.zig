@@ -38,7 +38,11 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         return null;
     }
     var req = try cli.request(a, dir, model_type, args);
-    if (args.clef != null) req.decision_rows = @import("clef_serve.zig").max_length;
+    if (args.clef) |clef| {
+        req.decision_rows = @import("clef_serve.zig").max_length;
+        const lora = try std.fs.path.join(a, &.{ clef, "adapter.safetensors" });
+        if (std.Io.Dir.cwd().access(io, lora, .{})) |_| req.decision_adapter = clef else |_| {}
+    }
     return native.open(a, gpa, io, req, problem);
 }
 

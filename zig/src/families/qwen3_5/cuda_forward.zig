@@ -3,6 +3,7 @@ const E = @import("cuda_engine.zig");
 const cuda = @import("cuda");
 const sig = @import("cuda_signatures.zig");
 const hooks = @import("cuda_learn_hooks.zig");
+const lora = @import("cuda_lora.zig");
 const geometry = @import("cuda_geometry.zig");
 const head_dim = geometry.head_dim;
 const max_chunks = 64;
@@ -54,6 +55,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             .delta => |m| {
                 const layer: c_int = @intCast(di);
                 try e.projMany(&.{ m.qkv, m.z, m.a, m.b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total, prompt);
+                try lora.after(e, i, &.{ .qkv, .z, .a, .b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total);
                 if (e.learning) |k| try k.delta(i, e.qkv, e.z, e.b, e.a, total);
                 try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
                 // one recorded window of 2+ rows: gdn_pre logged its tails, conv_commit would only return
@@ -61,11 +63,13 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 if (prompt and nseg == 1) try @import("cuda_prompt.zig").delta(e, di, total) else try e.deltaScan(record, shape.slots, nseg, layer);
                 try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
                 try e.projAgain(m.out, e.mix, e.r, total, prompt);
+                try lora.after(e, i, &.{.out}, e.mix, &.{e.r}, total);
                 di += 1;
             },
             .attention => |m| {
                 const aw = g.attnWidth();
                 try e.projMany(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
+                try lora.after(e, i, &.{ .q, .k, .v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
                 try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                 try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
@@ -92,6 +96,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 try launch(e, e.fns.attn_gate, sig.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params, sums });
                 if (e.learning) |k| try k.gated(i, e.mix, total);
                 try e.projAgain(m.o, e.mix, e.r, total, prompt);
+                try lora.after(e, i, &.{.o}, e.mix, &.{e.r}, total);
                 ai += 1;
             },
         }
@@ -101,10 +106,12 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             .dense => |m| {
                 try e.projAgain(m.gate, e.x, e.gate, total, prompt);
                 try e.projAgain(m.up, e.x, e.up, total, prompt);
+                try lora.after(e, i, &.{ .gate, .up }, e.x, &.{ e.gate, e.up }, total);
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
                 const n: c_longlong = @intCast(total * g.intermediate);
                 try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)), sums });
                 try e.projAgain(m.down, e.act, e.r, total, prompt);
+                try lora.after(e, i, &.{.down}, e.act, &.{e.r}, total);
                 if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.add(e.stream, i, e.x, e.r, total, e.taught);
             },
             .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, promptMoe(prompt, total), t_params),

@@ -74,6 +74,8 @@ pub const Engine = struct {
     pockets: pocket.Pockets,
     learning: ?*const hooks.Keep = null,
     mlp: ?hooks.MlpAdd = null,
+    /// Clef's runtime adapter, set only around a decision's prompt passes (cuda_lora.zig); chat never runs with it.
+    lora: ?*const @import("cuda_lora.zig").Lora = null,
     taught: u64 = 0,
     d: *const cuda.Driver,
     g: Geometry,
@@ -181,6 +183,7 @@ pub const Engine = struct {
         e.pockets = try pocket.Pockets.init(gpa, d, g.hidden, g.layers);
         errdefer e.pockets.deinit();
         e.learning = null;
+        e.lora = null;
         e.mlp = null;
         e.taught = 0;
         e.kit = null;

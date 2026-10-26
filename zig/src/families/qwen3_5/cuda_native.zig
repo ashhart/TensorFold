@@ -9,6 +9,7 @@ pub const reservation = @import("cuda_reserve.zig");
 pub const window_costs = @import("cuda_window_costs.zig");
 pub const cost_adapter = @import("cuda_cost_adapter.zig");
 const draws = @import("draw.zig");
+const lora_mod = @import("cuda_lora.zig");
 const Draft = @import("cuda_draft.zig").Draft;
 const prefill = @import("cuda_prefill.zig");
 const Fill = prefill.Fill;
@@ -45,7 +46,7 @@ pub const snap_grid: u32 = E.max_rows;
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, decision_rows: usize = 0 };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, decision_rows: usize = 0, decision_adapter: ?[]const u8 = null };
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -125,6 +126,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     // --clef: one decision cache made and touched now, so the startup budget counts it
     if (o.decision_rows > 0) l.decision = try reserveDecision(gpa, e, o.decision_rows);
+    // Clef's adapter on the device now too, inside the budget; decisions turn it on, chat never does
+    if (o.decision_adapter) |adapter| l.lora = try lora_mod.Lora.open(gpa, io, e, adapter);
     return .{
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
@@ -269,6 +272,8 @@ const Lanes = struct {
     timing_on: bool = false,
     /// --clef: the reserved cache decisions' prompt pieces run on, reset at a decision's first piece.
     decision: ?*E.Cache = null,
+    /// Clef's runtime adapter (cuda_lora.zig), opened at startup; on only while a decision's piece runs.
+    lora: ?*lora_mod.Lora = null,
     trace: ?*round_timing.Trace = null,
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -301,6 +306,10 @@ const Lanes = struct {
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, Fill) = .empty,
 
     fn deinit(self: *Lanes) void {
+        if (self.lora) |l| {
+            l.deinit();
+            self.gpa.destroy(l);
+        }
         if (self.decision) |d| {
             d.deinit(self.gpa);
             self.gpa.destroy(d);
@@ -371,6 +380,8 @@ const Lanes = struct {
         const width = self.e.g.hidden;
         if (ids.len == 0 or ids.len > cache.cap or at >= ids.len or out.len != ids.len * width) return error.InvalidQwenPrompt;
         if (at == 0) try cache.reset(self.e);
+        self.e.lora = self.lora;
+        defer self.e.lora = null;
         const end = @min(ids.len, at + E.max_rows);
         try self.e.forward(&.{.{ .cache = cache, .rows = end - at }}, ids[at..end], .last);
         try self.e.finalRows(end - at, out[at * width ..][0 .. (end - at) * width]);
@@ -554,4 +565,8 @@ const Lanes = struct {
 
 test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
+}
+
+test {
+    _ = lora_mod;
 }
