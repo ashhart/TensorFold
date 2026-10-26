@@ -32,6 +32,7 @@ pub const prompt_sink = @import("cuda_prompt_sink.zig");
 pub const prompt_solo = @import("cuda_prompt_solo.zig");
 pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
+pub const prompt_pair = @import("cuda_prompt_pair.zig");
 pub const pages = @import("cuda_pages.zig");
 pub const share = @import("cuda_share.zig");
 pub const open_owner = @import("cuda_open_owner.zig");
@@ -58,6 +59,7 @@ test {
     _ = @import("dflash_load.zig");
     _ = prompt_solo;
     _ = @import("cuda_l2pf.zig");
+    _ = prompt_pair;
     _ = experts;
     _ = exl3;
     _ = vision;
