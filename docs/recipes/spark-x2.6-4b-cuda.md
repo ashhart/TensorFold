@@ -2,7 +2,8 @@
 
 This recipe covers text generation with [`XHToken/Spark-X2.6-4B`](https://huggingface.co/XHToken/Spark-X2.6-4B),
 revision `66e3ae7bee54e0a523d692cb8ef841f35409807b` (model_type `spark2_5`, the same architecture as Spark-X2.5-4B),
-on the CUDA engine. It was brought up on an RTX 4090 (`sm_89`) under Windows; other CUDA GPUs are untested.
+on the CUDA engine. It was brought up on an RTX 4090 (`sm_89`) under Windows and measured again on an RTX 5090
+(`sm_120`) under Linux; other CUDA GPUs are untested.
 
 ## Convert, build, serve
 
@@ -43,6 +44,22 @@ The tokenizer needed `Digits` (`individual_digits`) in `core/tokenizer/steps.zig
 - One stream: 136 tokens/s on prose, 144 on code, greedy or sampled. Four streams: 414 tokens/s in all, each reply
   equal to its solo run.
 - Time to first token: 0.24 s at 2k tokens, 0.93 s at 8k, 1.93 s at 16k, 4.65 s at 29k.
+
+## Measured (RTX 5090, 8-bit, Linux, 26 Oct 2026)
+
+Main at 31a864f13, `zig build native -Dsm=120` (CUDA 13.3, driver 615), the 8-bit conversion above, served with
+`--context 32768 --parallel 4`; the server reports 9.47 GiB for the model and 1.23 GiB a stream at the 32k window.
+Decode rates are medians of three 256-token greedy replies a prompt, through the recipe harness
+(`github.com/BobClawblaw/recipe-harness`, target `spark-x26-4b-5090`).
+
+- One stream: 199 tokens/s on prose, 191 on code, 203 on JSON and 204 on a list; the same after a 28k prompt
+  (199, 198, 197 and 200). Two streams: 375-389 tokens/s in all; four streams: 716-729, time to first token
+  0.03-0.06 s on these short prompts.
+- Exactness: 12 of 12 greedy replies beside three other streams equal their solo runs, and 12 of 12 with the lane
+  core's copy drafts off equal the drafted ones.
+- Prompt reading, cold, thinking off: 2,381 tokens in 0.233 s, 9,391 in 0.818 s, 18,512 in 1.704 s (10,864
+  tokens/s); thinking on, 2,394 in 0.234 s, 9,350 in 0.814 s, 18,687 in 1.706 s. The plan's 30,720-token point
+  tokenizes past the 32k window with this tokenizer and was refused.
 
 ## Not done
 
