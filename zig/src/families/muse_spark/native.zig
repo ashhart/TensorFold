@@ -9,6 +9,7 @@ const engine = @import("engine.zig");
 const dflash2 = @import("dflash2.zig");
 const kept = @import("kept.zig");
 const prompt_ = @import("prompt.zig");
+const rounds = @import("rounds.zig");
 const be = lanes.backend;
 const Engine = engine.Engine;
 
@@ -43,13 +44,13 @@ pub const Loaded = struct {
 const draft_prior = [_]f64{ 0.80, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78 };
 const first_copy_rows = 6; // a lone stream's first copy window beside the drafter
 
-const Lane = struct { slot: u32, held: [16]u32 = undefined, nheld: u32 = 0, filled: u32 = 0 }; // filled: the prompt pass's rows so far
+const Lane = rounds.Lane;
 const ring = 1024;
 
 pub const Lanes = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
-    lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
+    lanes: rounds.Map = .empty,
     free: u32, // slot bits
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
@@ -280,13 +281,6 @@ pub const Lanes = struct {
         return error.NotPipelined;
     }
 
-    fn value(l: *const Lanes, feed: be.Feed) u32 {
-        return switch (feed) {
-            .handle => |h| l.drawn[h % ring],
-            .value => |v| v,
-        };
-    }
-
     fn readFn(p: *anyopaque, handle: u64) anyerror!u32 {
         const l = of(p);
         if (handle >= l.next or l.next - handle > ring) return error.NoSuchToken;
@@ -297,77 +291,51 @@ pub const Lanes = struct {
     fn verifyFn(p: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const l = of(p);
         var rows: [fwd.DECODE_ROWS]fwd.Row = undefined;
-        var n: usize = 0;
-        for (windows) |w| {
-            if (w.parents != null) return error.TreesNotBuilt;
-            const lane = l.lanes.getPtr(w.stream) orelse return error.UnknownStream;
-            if (n + w.rows() > rows.len) return error.WindowTooWide;
-            if (w.held > lane.nheld) return error.NoHeldDrafts;
-            lane.filled = 0; // decoding: no prompt mark stands
-            for (0..w.rows()) |r| {
-                const tok: u32 = if (r == 0) w.pending else if (w.held > 0) lane.held[r - 1] else w.tokens[r - 1];
-                rows[n] = .{ .slot = lane.slot, .pos = @intCast(w.positions[r] - 1), .token = tok };
-                n += 1;
-            }
-        }
-        var all_greedy = true;
-        for (windows) |w| if (w.stream.sampling) |sm| if (sm.temperature > 0) {
-            all_greedy = false;
-        };
+        const n = try rounds.verifyRows(&l.lanes, windows, &rows);
+        const all_greedy = rounds.allGreedy(windows);
         try l.e.forward(rows[0..n], if (all_greedy) .ids else .logits);
         var r0: usize = 0;
         for (windows, out) |w, *o| {
-            const lane = l.lanes.getPtr(w.stream).?;
             for (0..w.rows()) |r| o.sampled[r] = if (all_greedy) @intCast(l.e.ids[r0 + r]) else try draw(l.gpa, l.rowOf(r0 + r), w.stream.sampling, w.positions[r]);
-            if (w.held > 0) @memcpy(o.drafts, lane.held[0..w.held]) else @memcpy(o.drafts, w.tokens);
+            rounds.verifiedDrafts(l.lanes.getPtr(w.stream).?, w, o.drafts);
             r0 += w.rows();
         }
     }
 
     fn keepFn(_: *anyopaque, _: []const be.Window, paths: []const []const u32) anyerror!void {
-        for (paths) |path| {
-            if (path.len == 0) return error.EmptyPath;
-            for (path, 0..) |r, i| if (r != i) return error.TreesNotBuilt;
-        }
+        try rounds.checkPaths(paths);
     }
 
     /// One draft pass a 16 streams for the requests that want drafts (their contexts came with the target's taps).
     fn draftFn(p: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const l = of(p);
+        const head: ?usize = if (l.e.dr) |dr| dr.block else null;
+        var batch: [dflash2.MAX_STREAMS]rounds.Entry = undefined;
+        var n: usize = 0;
+        for (requests) |r| {
+            batch[n] = try rounds.draftEntry(&l.lanes, r, head, &l.drawn) orelse continue;
+            n += 1;
+            if (n == batch.len) {
+                try l.draftBatch(batch[0..n]);
+                n = 0;
+            }
+        }
+        if (n > 0) try l.draftBatch(batch[0..n]);
+    }
+
+    fn draftBatch(l: *Lanes, batch: []const rounds.Entry) !void {
         const M = dflash2.MAX_STREAMS;
         var toks: [M]i64 = undefined;
         var pos0: [M]u32 = undefined;
         var sl: [M]u32 = undefined;
-        var who: [M]*Lane = undefined;
-        var depth: [M]u32 = undefined;
-        var n: usize = 0;
-        for (requests) |r| {
-            const lane = l.lanes.getPtr(r.stream) orelse return error.UnknownStream;
-            lane.nheld = 0;
-            if (r.depth == 0) continue;
-            const dr = l.e.dr orelse return error.NoDraftHead;
-            toks[n] = if (r.follow.len > 0) r.follow[r.follow.len - 1] else l.value(r.first orelse return error.NoFirstToken);
-            pos0[n] = @intCast(r.position - 1);
-            sl[n] = lane.slot;
-            who[n] = lane;
-            depth[n] = @min(r.depth, @as(u32, @intCast(dr.block - 1)));
-            n += 1;
-            if (n == M) {
-                try l.draftBatch(toks[0..n], pos0[0..n], sl[0..n], who[0..n], depth[0..n]);
-                n = 0;
-            }
+        for (batch, 0..) |e, i| {
+            toks[i] = e.token;
+            pos0[i] = e.pos0;
+            sl[i] = e.slot;
         }
-        if (n > 0) try l.draftBatch(toks[0..n], pos0[0..n], sl[0..n], who[0..n], depth[0..n]);
-    }
-
-    fn draftBatch(l: *Lanes, toks: []const i64, pos0: []const u32, sl: []const u32, who: []const *Lane, depth: []const u32) !void {
-        const P = l.e.dr.?.block - 1;
-        var out: [dflash2.MAX_STREAMS * 16]i32 = undefined;
-        try l.e.draft(toks, pos0, sl, &out);
-        for (who, depth, 0..) |lane, dp, i| {
-            for (0..dp) |j| lane.held[j] = @intCast(out[i * P + j]);
-            lane.nheld = dp;
-        }
+        var out: [M * 16]i32 = undefined;
+        try l.e.draft(toks[0..batch.len], pos0[0..batch.len], sl[0..batch.len], &out);
+        rounds.hold(batch, &out, l.e.dr.?.block - 1);
     }
 
     fn releaseFn(p: *anyopaque, s: *lanes.Stream) void {
