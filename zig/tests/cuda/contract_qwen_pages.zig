@@ -14,9 +14,9 @@ pub const kv_heads = 4;
 const e4m3 = core.quant.fp8.e4m3;
 
 // qwen35.cuh's Geo, Seg, Ancestor and Path (src/families/qwen3_5/cuda_cache.zig mirrors them for the engine)
-const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
-const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0 };
-const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
+pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
+pub const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0 };
+pub const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
 const Path = extern struct { n: c_int, rows: [64]c_int };
 
 /// bf16 rows (qwen35.cu), or e4m3 rows with an fp32 scale each (qwen35_kv8.cu, --kv-cache fp8).
@@ -70,7 +70,7 @@ pub const Fixture = struct {
         return blockBytes(f.format, f.cap, attentions);
     }
 
-    fn pageBytes(f: Fixture) usize {
+    pub fn pageBytes(f: Fixture) usize {
         return blockBytes(f.format, f.c.ptok, attentions);
     }
 
@@ -85,7 +85,7 @@ pub const Fixture = struct {
         return r;
     }
 
-    fn make(a: std.mem.Allocator, c: Case, format: Format, seed: u64) !Fixture {
+    pub fn make(a: std.mem.Allocator, c: Case, format: Format, seed: u64) !Fixture {
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         const most = @max(c.lens[0], c.lens[1]) + c.rows;
@@ -124,7 +124,7 @@ pub const Fixture = struct {
     }
 
     /// The arena holding both streams' logical caches at their pages under `ids`; spare pages random.
-    fn arena(f: Fixture, a: std.mem.Allocator, rng: std.Random, ids: [2][]const u32) ![]u8 {
+    pub fn arena(f: Fixture, a: std.mem.Allocator, rng: std.Random, ids: [2][]const u32) ![]u8 {
         const out = try a.alloc(u8, f.pages * f.pageBytes());
         rng.bytes(out);
         for (0..2) |st| for (0..attentions) |at| for (0..2) |s| for (0..kv_heads) |h| for (0..f.cap) |pos| {
@@ -367,4 +367,5 @@ pub fn run(gpu: check.Gpu) !void {
         try check.expect(red_table and red_bound, "qwen35 pages {t}: a control never fired", .{format});
         std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row)\n", .{format});
     }
+    try @import("contract_qwen_page_slices.zig").run(gpu, false); // a paged prompt chunk's slices
 }
