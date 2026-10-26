@@ -26,5 +26,4 @@ test {
     _ = exl3;
     _ = @import("exl3_activation.zig");
     _ = @import("exl3_contract.zig");
-    _ = @import("bf16_round");
 }

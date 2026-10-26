@@ -177,12 +177,6 @@ fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     const xpu = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     xpu.addOptions("kernel_options", options);
     xpu.addImport("ze", ze);
-    const bf16_round = b.createModule(.{
-        .root_source_file = b.path("zig/src/core/bf16_round.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    xpu.addImport("bf16_round", bf16_round);
     if (nem_images.len == nemotron_kernels.len) for (nemotron_kernels, nem_images) |k, image| xpu.addAnonymousImport(b.fmt("spv_{s}", .{k.name}), .{ .root_source_file = image });
     if (exl3_images.len == exl3_kernels.len) for (exl3_kernels, exl3_images) |k, image| xpu.addAnonymousImport(b.fmt("spv_{s}", .{k.name}), .{ .root_source_file = image });
     return xpu;
