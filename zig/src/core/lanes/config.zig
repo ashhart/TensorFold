@@ -46,6 +46,7 @@ pub const Model = struct {
     context_copies: bool = false, // a lone head window shares its agreeing copy path and appends the rest
     copy_match: i64 = 8, // matching history tokens a copy needs
     lone_copies: bool = true, // a lone stream proposes copies (false: only streams in shared rounds do)
+    sampled_drafts: bool = true, // the head drafts for sampled streams (false: temperature above 0 takes no drafts)
 };
 
 pub const Config = struct {
@@ -92,6 +93,7 @@ pub const Config = struct {
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
     copy_rate: f64 = 0.94, // a copied token's chance of landing in allocation
     lone_copies: bool = true, // Model.lone_copies
+    sampled_drafts: bool = true, // Model.sampled_drafts
     k: Constants = .{},
 
     pub fn init(gpa: Allocator, m: Model, max_rows: u32, max_draft: u32) !Config {
@@ -131,6 +133,7 @@ pub const Config = struct {
             .context_copies = m.context_copies and m.copy_drafts,
             .enter_match = @max(1, m.copy_match),
             .lone_copies = m.lone_copies,
+            .sampled_drafts = m.sampled_drafts,
             .lone_cost_tile = m.lone_cost_tile,
             .family_width = width,
             .max_copy = max_copy,
