@@ -12,20 +12,22 @@ pub const smem: u32 = 98304;
 const hpc = 2;
 const block_rows = 16 * (8 / hpc);
 
-pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, chain: cuda.Function };
+pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_paged: cuda.Function, fp8_paged: cuda.Function, chain: cuda.Function };
 
 pub const symbols = struct {
     pub const bf16 = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi";
     pub const fp8 = "_ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifi";
+    /// The same tiles over the pool's pages (hpattn_paged_kernel, hpattn8_paged_kernel): the contiguous kernels' bits.
+    pub const bf16_paged = "_ZN20tf_prefill_attention19hpattn_paged_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKix";
+    pub const fp8_paged = "_ZN20tf_prefill_attention20hpattn8_paged_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKix";
     pub const chain = "_ZN14tf_gdn_prefill12chain_kernelI13__nv_bfloat16S1_Li64ELi32EEEvPKT_S4_PKS1_PKfPKT0_S8_PfPS1_iii";
 };
 /// gdn_prefill.cu's value rows a block (two threads a row).
 const chain_rows = 64;
 
 pub fn resolve(attention: cuda.Module, gdn: cuda.Module) !Fns {
-    const f: Fns = .{ .bf16 = try attention.function(symbols.bf16), .fp8 = try attention.function(symbols.fp8), .chain = try gdn.function(symbols.chain) };
-    try f.bf16.allowDynamicShared(smem);
-    try f.fp8.allowDynamicShared(smem);
+    const f: Fns = .{ .bf16 = try attention.function(symbols.bf16), .fp8 = try attention.function(symbols.fp8), .bf16_paged = try attention.function(symbols.bf16_paged), .fp8_paged = try attention.function(symbols.fp8_paged), .chain = try gdn.function(symbols.chain) };
+    for ([_]cuda.Function{ f.bf16, f.fp8, f.bf16_paged, f.fp8_paged }) |x| try x.allowDynamicShared(smem);
     return f;
 }
 
@@ -33,8 +35,9 @@ pub fn resolve(attention: cuda.Module, gdn: cuda.Module) !Fns {
 pub fn run(e: *E.Engine, layer: usize, rows: usize) !void {
     const g = e.g;
     const sg = std.mem.bytesToValue(Seg, e.staged.bytes[E.Engine.segs_at..][0..@sizeOf(Seg)]);
+    const paged = sg.pt != 0; // a page holds ptok rows a key head as a cache of cap ptok does (qwen35.cuh kv_row)
     const kvh: u64 = g.kv_heads;
-    const cap: u64 = @intCast(sg.cap);
+    const cap: u64 = @intCast(if (paged) sg.ptok else sg.cap);
     const heads = kvh * cap; // rows of one layer's keys (or values)
     const group = g.q_heads / g.kv_heads;
     var a: cuda.Args = .{};
@@ -51,8 +54,13 @@ pub fn run(e: *E.Engine, layer: usize, rows: usize) !void {
     for ([_]usize{ @intCast(sg.len), rows, g.q_heads, g.kv_heads, group }) |v| a.add(@as(c_int, @intCast(v)));
     a.add(@as(f32, 1.0 / 16.0));
     a.add(@as(c_int, @intCast(cap)));
+    if (paged) {
+        a.add(sg.pt);
+        a.add(@as(c_longlong, @intCast(sg.ps)));
+    }
     const cfg: cuda.Config = .{ .grid = .{ .x = @intCast((rows + block_rows - 1) / block_rows), .y = @intCast(g.kv_heads * (group / hpc)) }, .block = .{ .x = 256 }, .shared = smem };
-    try cuda.launch.launch(if (e.kv8) e.prompt_attn.fp8 else e.prompt_attn.bf16, cfg, e.stream, &a);
+    const f = if (paged) (if (e.kv8) e.prompt_attn.fp8_paged else e.prompt_attn.bf16_paged) else (if (e.kv8) e.prompt_attn.fp8 else e.prompt_attn.bf16);
+    try cuda.launch.launch(f, cfg, e.stream, &a);
 }
 
 /// Linear layer `layer`'s delta rule: e.q, e.k, e.v, e.g_, e.beta into e.y, the stream's recurrence updated in place.
