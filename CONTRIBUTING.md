@@ -112,10 +112,10 @@ Maintainers' own A/B measurements on Macs and GB10s decide whether a speed chang
 [The Grill](https://github.com/plotarmordev/thegrill) is one optional way to produce an A/B/A2 receipt, alongside the `tools/bench_*` instructions above; contributors need not install it.
 The receipt measures `main` at your branch point (A), your pull request (B), then the same `main` again (A2), on one machine with one checkpoint and the same serve flags.
 To use this route, install The Grill 0.11.0 with its [install guide](https://github.com/plotarmordev/thegrill/blob/a551fdf2b63059f56df6287e72ed573ca06cca2f/docs/performance/INSTALL.md), including the checksum and release receipt checks; it sets `GRILL_PERF`.
-Then run this from your pull request's checkout, with the model pulled and `origin` pointing at this repository.
+Then run this from your pull request's checkout, with the model pulled and `origin` pointing at this repository; the block is Bash, not `sh`, because `FLAGS` is an array.
 On Linux, leave out `-Dcpu=apple_m1`.
 
-```sh
+```bash
 WORK=$(mktemp -d)
 MODEL=mlx-community/Qwen3.5-2B-MLX-4bit QUANT="MLX 4-bit"
 FLAGS=(--context 8192 --no-thinking --prompt-cache-gib 0)
@@ -141,7 +141,10 @@ down; sleep 60; up "$WORK/main" A2
 down
 "$GRILL_PERF" compare A B --reference A2 | tee compare.txt
 "$GRILL_PERF" outputs A B | tee outputs.txt
-tar -czf ../attempt-1.tgz A B A2 a.json b.json manifest-*.json compare.txt outputs.txt
+case "$(tar --version)" in
+  *GNU*) tar -czf ../attempt-1.tgz --owner=0 --group=0 --numeric-owner --sort=name --mtime=@0 A B A2 a.json b.json manifest-*.json compare.txt outputs.txt ;;
+  *) tar -czf ../attempt-1.tgz --uid 0 --gid 0 --uname '' --gname '' A B A2 a.json b.json manifest-*.json compare.txt outputs.txt ;;
+esac
 ```
 
 For a later attempt, reuse the same `$WORK` and move its worktree with `git -C "$WORK/main" checkout --detach "$A"` instead of a second `git worktree add`; remove it at the end with `git worktree remove "$WORK/main"`.
@@ -150,6 +153,10 @@ For a new opt-in flag, serve all three runs from your build, so `a.json` and `b.
 Before measuring, fill in any field that came out `unknown` or `null` in `a.json` and `b.json`.
 A concurrency claim uses `--workload portable-c2-v1`, `portable-c4-v1` or `portable-c8-v1` and gives all three captures the same `--seconds` from the install guide's table.
 Keep both `sleep 60` lines: `check` accepts a shorter gap, but `compare` then refuses the three captures.
+A plain `tar -czf` records your local owner and group names, so the block above picks ownership-neutral flags by `tar --version`: GNU tar on Linux takes `--owner=0 --group=0 --numeric-owner`, plus `--sort=name --mtime=@0` for stable member order and timestamps, while `tar` on Apple Silicon is bsdtar and takes `--uid 0 --gid 0 --uname '' --gname ''`.
+
+Keep the attempt's private originals under `$WORK`; before attaching, inspect the archive with `tar -tvzf ../attempt-1.tgz` and attach it only when the listing shows just the expected relative receipt files, uid/gid 0 with no owner or group names, and nothing private: no credentials, username, private host, address, path or logs.
+
 Attach the archive and paste `compare.txt`; the server logs stay out of the archive.
 `MEASURED FASTER` means B beat both A and A2; quote the smaller of the two changes.
 A script reads `"result": "IMPROVED"` from `compare --json`, not the exit code.
@@ -158,8 +165,9 @@ Attach every attempt, failed ones included; after updating the commits and build
 On a checkpoint whose count prompt ends before 400 tokens, `portable-v1` cannot finish its captures; rerun all three with `--workload baseline-v2`, which fixes exactly 400 output tokens, and note the workload with the receipt.
 `baseline-v2` is defined in the Grill repo's [workload JSON](https://github.com/plotarmordev/thegrill/blob/a551fdf2b63059f56df6287e72ed573ca06cca2f/crates/grill-perf/examples/baseline-v2.json) and described in its [default scope and budget](https://github.com/plotarmordev/thegrill/blob/a551fdf2b63059f56df6287e72ed573ca06cca2f/docs/performance/README.md#default-scope-and-budget), not in the install guide.
 
-An abridged excerpt of a real receipt's `compare.txt`, from The Grill 0.11.0 on a DGX Spark (GB10), measuring a CUDA window-cost change with `baseline-v2`.
-The deployment lines are shortened (endpoint, CPU, client placement, collector source and prompt length left out), and the `Model:` line and the per-run `Baseline:`/`Candidate:` request and ceiling accounting are omitted, as is the `Report:` path; a real receipt pastes `compare.txt` whole.
+An abridged excerpt of a real receipt's `compare.txt`, from The Grill 0.11.0 on a DGX Spark (GB10), comparing the builds on either side of a CUDA window-cost change with `baseline-v2`.
+I ran the recipe on the change and its parent, but the window-cost table is only built when a drafter is attached, and this checkpoint served with none, so the changed path was never exercised; the receipt is `INCONCLUSIVE`, and I make no speed claim from it.
+The deployment lines are shortened (the deployment `model grill`, endpoint, CPU, client placement, the collector's source and `aarch64-unknown-linux-gnu` target, and prompt length left out), and the `Model:` line and the per-run `Baseline:`/`Candidate:` request and ceiling accounting are omitted, as is the `Report:` path; a real receipt pastes `compare.txt` whole.
 
 ```text
 INCONCLUSIVE: no direction established; this does not mean equivalent performance
