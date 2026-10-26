@@ -74,6 +74,7 @@ test {
     _ = @import("images_video_marker_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
+    _ = @import("image_reuse_test.zig");
     _ = @import("media_fetch.zig");
     _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");

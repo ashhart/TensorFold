@@ -88,6 +88,8 @@ pub const Fake = struct {
     drafts_most: usize = 0,
     fail_runs: usize = 0, // the next this many `pieces` calls fail with error.Unbound (`runBackend`)
     runs: usize = 0, // `pieces` calls that ran
+    image_words: bool = false, // an image row feeds a word of its image's identity, as a tower's row would
+    image_rows: usize = 0, // image rows fed (`image_words`): the rows a tower had to make
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -185,7 +187,7 @@ pub const Fake = struct {
         }
         const h = &x.lane(s).history;
         if (h.items.len != start or end + 1 > s.prompt_len) return error.PositionMismatch;
-        try h.appendSlice(x.gpa, s.prompt()[start..end]);
+        for (start..end) |at| try h.append(x.gpa, x.word(s, at));
         x.pieces_run += 1;
     }
 
@@ -193,7 +195,17 @@ pub const Fake = struct {
         const x = self(ptr);
         const h = &x.lane(s).history;
         if (h.items.len + 1 != s.prompt_len) return error.PositionMismatch;
-        try h.append(x.gpa, s.prompt()[s.prompt_len - 1]);
+        try h.append(x.gpa, x.word(s, s.prompt_len - 1));
+    }
+
+    /// What prompt row `at` feeds: its token, or with `image_words` inside an image a word of that image and row.
+    fn word(x: *Fake, s: *const Stream, at: usize) u32 {
+        if (x.image_words) for (s.images) |img| if (at >= img.at and at < @as(usize, img.at) + img.tokens) {
+            x.image_rows += 1;
+            const row: u64 = at - img.at;
+            return 0x4000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(img.hash, std.mem.asBytes(&row)) & 0x3fff_ffff));
+        };
+        return s.prompt()[at];
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -335,8 +347,9 @@ pub const Fake = struct {
     fn grow(x: *Fake, l: *Lane, s: *Stream, to: usize) !void {
         const h = &l.history;
         if (to <= h.items.len) return;
-        for (s.prompt()[h.items.len..to], h.items.len + 1..) |t, at| {
-            try h.append(x.gpa, t);
+        for (h.items.len..to) |row| {
+            try h.append(x.gpa, x.word(s, row));
+            const at = row + 1;
             if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
         }
     }
