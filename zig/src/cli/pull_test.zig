@@ -433,7 +433,7 @@ test "an EXLR8 node's whole files land in a relative directory, small files and 
         .{ .path = "config.json", .size = FakeHub.config_body.len, .git_sha1 = git_sha1 },
         .{ .path = "weights.safetensors", .size = FakeHub.weights_body.len, .sha256 = sha256 },
     };
-    var client: std.http.Client = .{ .allocator = a, .io = io };
+    var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(a);
     var err_out: std.Io.Writer.Allocating = .init(a);
@@ -455,7 +455,7 @@ test "security: a hub response cannot write beyond the manifest file size" {
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const url = try std.fmt.allocPrint(a, "{s}{s}", .{ try fake.endpoint(a), FakeHub.weights_path });
-    var client: std.http.Client = .{ .allocator = a, .io = io };
+    var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(a);
     try std.testing.expectError(error.SizeMismatch, single.downloadRetrying(a, io, &client, &out.writer, url, dir, .{

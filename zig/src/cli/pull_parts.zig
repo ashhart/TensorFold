@@ -89,7 +89,7 @@ pub fn discard(a: Allocator, io: std.Io, f: File, bytes: u64) void {
 
 fn worker(s: *Shared, failure: *?anyerror) void {
     defer _ = s.running.fetchSub(1, .acq_rel);
-    var client: std.http.Client = .{ .allocator = std.heap.page_allocator, .io = s.io };
+    var client = @import("pull_http.zig").client(std.heap.page_allocator, s.io);
     defer client.deinit();
     while (!s.stop.load(.acquire)) {
         const i = s.next.fetchAdd(1, .monotonic);

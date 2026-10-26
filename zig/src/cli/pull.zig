@@ -33,7 +33,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     }
     const endpoint = envValue(env, "HF_ENDPOINT") orelse "https://huggingface.co";
     const root = try hub.cacheDir(a, env, override);
-    var client: std.http.Client = .{ .allocator = a, .io = io };
+    var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
 
     const sha = resolveRevision(a, &client, out, endpoint, repo, revision) catch |e| switch (e) {
