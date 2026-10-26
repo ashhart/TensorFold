@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-//! EXL3 through the Level Zero host (xpu/exl3.zig): runs one case file from tools/xpu/exl3_zig_check.py and
-//! writes the fp32 outputs. The Python side checks them against the numpy reference (gate 3, route check).
-//! Usage: tf-xpu-exl3-test <case.bin> <out.bin> [reps]
-//! With reps: the same call queued reps times back to back, then the wall time a call and the weight GB/s
-//! (launch gaps included). Routed: every slot counts its expert's weight once.
-//! Case: u32 magic "EXL3", mode (0 project, 1 routed, 2 fused MLP), count (groups or experts), k, n, halves, rows
-//! (or tokens), topk, x_per_slot (fused MLP: 1 if the last expert is the shared expert), formats (output in the low
-//! byte: 0 bf16, 1 fp32, 2 fp16; input in the next: 0 bf16, 1 fp16); then per group or
-//! expert trellis, suh, svh (fused MLP: gate and up [k, n], then down [n, k]); then u32 ids [tokens][topk] (routed,
-//! fused MLP); then bf16 x. Project groups each read their own x [rows][k]. Fused MLP: y [slots][k].
+
+//! EXL3 Level Zero host: one case file in, fp32 outputs out. Python checks the reference.
+
+//! Usage: tf-xpu-exl3-test case.bin out.bin [reps]. Reps print the median call time.
+
+//! Case header: magic EXL3, mode, count, k, n, halves, rows, topk, x_per_slot, formats.
+
+//! Then trellis, suh, svh, ids when routed, then bf16 x. Fused MLP writes y [slots][k].
 
 const std = @import("std");
 const xpu = @import("xpu");

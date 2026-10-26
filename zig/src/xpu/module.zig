@@ -56,8 +56,7 @@ pub const Kernel = struct {
     ctx: *const Context,
     handle: ze.H,
 
-    /// Lets the kernel use device memory it reaches through pointers in its buffers (descriptor tables), not
-    /// only its arguments: without it, the driver need not make those allocations resident.
+    /// Indirect access: the kernel may use device memory reached through pointers in its buffers.
     pub fn indirect(self: Kernel) Error!void {
         const d = self.ctx.d;
         try d.check(d.api.zeKernelSetIndirectAccess(self.handle, 1 << 1), "zeKernelSetIndirectAccess"); // DEVICE
