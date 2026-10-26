@@ -34,9 +34,7 @@ const latent_k = @import("contract_latent.zig");
 const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
 const f32w_k = @import("contract_glm_f32w.zig");
-
 const w4a8_k = @import("contract_w4a8.zig");
-
 const round_k = @import("contract_tree_round.zig");
 
 const act_k = @import("contract_act.zig");
@@ -303,6 +301,9 @@ pub fn run(gpu: check.Gpu) !void {
     var d3_norm = try drama3_k.Norm.init(gpu, s, d3_mod);
     defer d3_norm.deinit();
     try kernels.append(a, d3_norm.kernel());
+    var cosmos3: @import("contract_cosmos3.zig").Group = .{};
+    defer cosmos3.deinit();
+    try cosmos3.add(gpu, s, mods[5], &kernels);
     var ck: ?cuda.ck.Ck = null;
     var ck_reduce: ?cuda.ck.Ck = null; // no clusters: the FP8 slices meet in tf_ck8_reduce
     if (cap >= 120) {

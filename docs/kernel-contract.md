@@ -184,6 +184,10 @@ CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair 
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
+CUDA also checks Cosmos3-Edge's glue (`cosmos3.cu`): its 8-bit embedding rows and the tower's widening bit-equal to
+float64 at MLX's points, the image rows' placement, the RMS norm rows within the spread their fp32 steps allow, relu^2
+(NaN kept), the interleaved M-RoPE and cache writes, and the prompt and decode attention within float64's range
+(`core/attention_range.zig`), every 64-value group sum replayed bit for bit (eleven controls, one dropped point or fault each).
 
 ## CUDA records per nvcc release
 

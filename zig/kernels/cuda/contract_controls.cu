@@ -342,3 +342,65 @@ TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_gs, tf_act_l2::US | tf_act_l2::PROD)
 TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_us, tf_act_l2::GS | tf_act_l2::PROD)
 TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_prod, tf_act_l2::GS | tf_act_l2::US)
 #undef TF_CTL_SWIGLU_L2
+
+// Gate 3: cosmos3.cu's glue with one rounding point dropped or one fault planted each; their checks must go red.
+#include "cosmos3.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_cos3_embed_drop_sq(const int* ids, const uint8_t* table, const __nv_bfloat16* scales,
+                                                                           const __nv_bfloat16* biases, __nv_bfloat16* out) {
+    tf_cos3::embed<tf_cos3::ALL & ~tf_cos3::SQ>(ids, table, scales, biases, out);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_cos3_widen8_drop_sq(const uint8_t* codes, const __nv_bfloat16* scales,
+                                                                            const __nv_bfloat16* biases, __nv_bfloat16* out, int k, int64_t count) {
+    tf_cos3::widen8<tf_cos3::ALL & ~tf_cos3::SQ>(codes, scales, biases, out, k, count);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_cos3_place_all(__nv_bfloat16* h, const __nv_bfloat16* rows, const int* map) {
+    tf_cos3::place<1>(h, rows, map);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_cos3_norm_drop_inner(__nv_bfloat16* h, const __nv_bfloat16* r, const __nv_bfloat16* w,
+                                                                             float eps, int add, __nv_bfloat16* x, float* xs) {
+    tf_cos3::norm<tf_cos3::ALL & ~tf_cos3::INNER>(h, r, w, eps, add, x, xs);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_cos3_norm_drop_add(__nv_bfloat16* h, const __nv_bfloat16* r, const __nv_bfloat16* w,
+                                                                           float eps, int add, __nv_bfloat16* x, float* xs) {
+    tf_cos3::norm<tf_cos3::ALL & ~tf_cos3::ADD>(h, r, w, eps, add, x, xs);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_cos3_relu2_fp32_sums(__nv_bfloat16* x, int width, float* xs) {
+    tf_cos3::relu2<tf_cos3::ALL & ~tf_cos3::SUMS>(x, width, xs);
+}
+
+// Gate 1: relu^2 by fmaxf alone, which turns a NaN input into 0.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_cos3_relu2_drop_nan(__nv_bfloat16* x, int width, float* xs) {
+    tf_cos3::relu2<tf_cos3::ALL & ~tf_cos3::NAN_KEPT>(x, width, xs);
+}
+
+extern "C" __global__ void __launch_bounds__(32) tf_ctl_cos3_qk_t_only(const __nv_bfloat16* qkv, const int* pos, const int* slots, int cap,
+                                                                      float log2_theta, __nv_bfloat16* queries, __nv_bfloat16* keys,
+                                                                      __nv_bfloat16* values) {
+    tf_cos3::qk<tf_cos3::ALL & ~tf_cos3::AXES>(qkv, pos, slots, cap, log2_theta, queries, keys, values);
+}
+
+#define TF_CTL_COS3_ATTN(NAME, FAULT)                                                                                              \
+    extern "C" __global__ void __launch_bounds__(32 * tf_cos3::TR) NAME(const __nv_bfloat16* q, const __nv_bfloat16* keys,          \
+                                                                        const __nv_bfloat16* values, __nv_bfloat16* out,            \
+                                                                        const int* slots, int rows, int cap, float scale, float* xs) { \
+        tf_cos3::attn<FAULT>(q, keys, values, out, slots, rows, cap, scale, xs);                                                    \
+    }
+TF_CTL_COS3_ATTN(tf_ctl_cos3_attn_late, tf_cos3::LATE)
+TF_CTL_COS3_ATTN(tf_ctl_cos3_attn_stale, tf_cos3::STALE)
+#undef TF_CTL_COS3_ATTN
+
+#define TF_CTL_COS3_ATTN1(NAME, FAULT)                                                                                   \
+    extern "C" __global__ void __launch_bounds__(256) NAME(const __nv_bfloat16* q, const __nv_bfloat16* keys,              \
+                                                           const __nv_bfloat16* values, __nv_bfloat16* out,                \
+                                                           const int* slots, int cap, float scale, float* xs) {            \
+        tf_cos3::attn1<FAULT>(q, keys, values, out, slots, cap, scale, xs);                                               \
+    }
+TF_CTL_COS3_ATTN1(tf_ctl_cos3_attn1_merge, tf_cos3::MERGE)
+TF_CTL_COS3_ATTN1(tf_ctl_cos3_attn1_short, tf_cos3::SHORT)
+#undef TF_CTL_COS3_ATTN1
