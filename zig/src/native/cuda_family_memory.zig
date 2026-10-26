@@ -66,6 +66,15 @@ pub fn room(comptime F: type, ptr: *anyopaque, local: u64) !u64 {
     return local;
 }
 
+/// `o` with the family's own prompt-cache budget (`prompt_cache_gib`) when --prompt-cache-gib is not given.
+pub fn familyOpen(comptime F: type, o: api.Open) api.Open {
+    if (comptime !@hasDecl(F, "prompt_cache_gib")) return o;
+    if (o.prompt_cache_gib != null) return o;
+    var q = o;
+    q.prompt_cache_gib = F.prompt_cache_gib;
+    return q;
+}
+
 pub fn read(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     const u = cuda.usage(reset_peak);
     return .{ .active = u.device, .cache = 0, .peak = u.peak, .pinned = u.host };
@@ -90,6 +99,18 @@ test "rank room is agreed before stream admission and preserves a single-rank fa
     try std.testing.expectEqual(@as(u64, 30), try room(Single, &context, 30));
     try std.testing.expectEqual(@as(u64, 19), try room(Pair, &context, 30));
     try std.testing.expectEqual(@as(u64, 7), try room(Pair, &context, 7));
+}
+
+test "a family's own prompt-cache budget applies only where the operator set none" {
+    const Plain = struct {};
+    const Own = struct {
+        pub const prompt_cache_gib: f64 = 1;
+    };
+    const unset: api.Open = .{ .dir = "d", .model_type = "m" };
+    try std.testing.expectEqual(@as(?f64, null), familyOpen(Plain, unset).prompt_cache_gib);
+    try std.testing.expectEqual(@as(?f64, 1), familyOpen(Own, unset).prompt_cache_gib);
+    const off: api.Open = .{ .dir = "d", .model_type = "m", .prompt_cache_gib = 0 };
+    try std.testing.expectEqual(@as(?f64, 0), familyOpen(Own, off).prompt_cache_gib);
 }
 
 test {

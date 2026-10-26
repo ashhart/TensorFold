@@ -117,6 +117,12 @@ pub const kernels = [_]Kernel{
     .{ .name = "torch_indexing", .src = "torch_ops/indexing", .flags = torch_ops },
     .{ .name = "torch_movement", .src = "torch_ops/movement", .flags = torch_ops },
     .{ .name = "torch_nemotron_constants", .src = "torch_ops/nemotron_constants", .flags = torch_ops },
+    .{ .name = "muse_dflash", .src = "muse_spark/dflash", .flags = glue }, // Muse Spark: DFlash2 drafter glue
+    .{ .name = "muse_glue", .src = "muse_spark/glue", .flags = glue }, // Muse Spark: norms, gates, router, expert sums, head
+    .{ .name = "muse_attention", .src = "muse_spark/attention", .flags = &.{"-O3"} }, // Muse Spark: head_dim 64 decode attention
+    .{ .name = "muse_dflash2", .src = "muse_spark/dflash2", .flags = glue }, // Muse Spark: DFlash2 convs, top-k, selector walk
+    .{ .name = "muse_experts2", .src = "muse_spark/experts2", .flags = &.{"-O3"} }, // Muse Spark: 32-member expert tiles
+    .{ .name = "muse_linear", .src = "muse_spark/linear_multi", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // Muse Spark: q/k/v/gate in one launch
     .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, two ranks
     .{ .name = "drama3_staged_gemv", .flags = glue },
     .{ .name = "drama3", .flags = &.{"-O3"} },
