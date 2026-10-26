@@ -37,7 +37,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     const assets = std.mem.span(std.c.getenv("TF_DSV41_ASSETS") orelse {
-        problem.* = "TF_DSV41_ASSETS: the dir with rope.bin, engram-host.bin and aot/ (model.zig)";
+        problem.* = model.asset_names.unset;
         return null;
     });
     const s = Served.open(gpa, io, o.dir, assets, o.drafts, o.context) catch |e| {
