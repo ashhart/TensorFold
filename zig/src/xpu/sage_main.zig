@@ -263,12 +263,18 @@ fn loop(r: *sage.Runner) !void {
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     if (argv.len < 3) {
-        std.debug.print("usage: xpu-sage MODEL_DIR IDS_FILE [STEPS]\n       xpu-sage MODEL_DIR --loop\n", .{});
+        std.debug.print("usage: xpu-sage MODEL_DIR IDS_FILE [STEPS]\n       xpu-sage MODEL_DIR --loop\n       xpu-sage MODEL_DIR --row-eq\n", .{});
         return;
     }
     const ctx: u32 = if (std.c.getenv("XPU_CTX")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 4096;
     const slots: u32 = if (std.c.getenv("XPU_SLOTS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 1;
     if (std.mem.eql(u8, argv[2], "--tower") and argv.len > 4) return tower(init.io, argv[1], argv[3], argv[4]);
+    if (std.mem.eql(u8, argv[2], "--row-eq")) {
+        const r = try sage.Runner.init(argv[1], ctx, 2);
+        defer r.deinit();
+        try sage.Runner.finishContext(r);
+        return @import("sage_row_eq.zig").run(r);
+    }
     if (std.mem.eql(u8, argv[2], "--loop")) {
         const r = try sage.Runner.init(argv[1], ctx, slots);
         defer r.deinit();

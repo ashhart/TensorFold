@@ -550,6 +550,7 @@ pub const Runner = struct {
     sdrawn: [MAX_SLOTS]bool = @splat(false), // the slot's first draft is a Judge.draft draw (else the MTP's argmax)
     mpos: [MAX_SLOTS]u32 = @splat(0), // each slot's next MTP slot to absorb
     verifying: bool = false, // forward runs a block for verify: every row's token, states kept for commit
+    hold_hidden: bool = false, // row check: leave the main hidden in acts.h and skip the MTP absorb
     block: [WINDOW]i32 = undefined, // the last verified block's greedy tokens, a row each
     block_rows: u32 = 0,
     live: bool = false, // K/V caches and acts are allocated for ctx
@@ -842,6 +843,14 @@ pub const Runner = struct {
         }
     }
 
+    /// fp16 hidden row `row` of the last forward. One row is `hidden * 2` bytes.
+    pub fn copyHidden(r: *Runner, row: u32, dst: []u8) !void {
+        const n = r.z.s.hidden * 2;
+        if (dst.len < n) return error.BadLength;
+        try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, dst.ptr, off(r.acts.h, @as(usize, row) * n), n, null, 0, null));
+        try r.d.sync();
+    }
+
     /// The fp16 logits of row `row` of the last stepMulti.
     pub fn rowLogits(r: *Runner, row: u32, out: []f16) !void {
         if (out.len != r.z.s.vocab) return error.BadLength;
@@ -876,7 +885,7 @@ pub const Runner = struct {
             const tail = at + n == ids.len;
             const p0 = r.pos;
             r.last = if (n > WINDOW) try r.chunk(ids[at..][0..n], tail, .{}) else try r.forward(ids[at..][0..n], tail, .{});
-            if (r.mtp != null) { // the MTP reads each row with the token after it: the next prompt token or the greedy one
+            if (r.mtp != null and !r.hold_hidden) { // the MTP reads each row with the token after it: the next prompt token or the greedy one
                 var follow: [CHUNK]i32 = undefined;
                 @memcpy(follow[0 .. n - 1], ids[at + 1 ..][0 .. n - 1]);
                 follow[n - 1] = if (tail) r.last else ids[at + n];
@@ -1321,29 +1330,26 @@ pub const Runner = struct {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
             if (l.attn) try r.attnWindow(l, m, 0, T, p0, rope) else {
-                const pin = l.mixer_in.n;
-                const hk = l.mixer_out.k;
-                const at = StashAt.of(z);
-                for (0..T) |row| {
-                    const pj = off(a.p, @as(usize, row) * pin * 2);
-                    const hj = off(a.h, @as(usize, row) * hk * 2);
-                    const hij = off(a.ahi, @as(usize, row) * (hk / 64) * 2);
-                    const loj = off(a.alo, @as(usize, row) * (hk / 64) * 2);
-                    const cin = l.conv[l.conv_cur].?;
-                    const cout = l.conv[1 - l.conv_cur].?;
-                    l.conv_cur = 1 - l.conv_cur;
-                    try d.launch(d.k.gdn_pre, .{ .x = 1, .y = z.nconv / 256 }, .{ pj, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, @as(i32, 1), nul, nul });
+                const t32: i32 = @intCast(T);
+                const cin = l.conv[l.conv_cur].?;
+                const cout = l.conv[1 - l.conv_cur].?;
+                l.conv_cur = 1 - l.conv_cur;
+                if (T == 1 and !r.verifying)
+                    try d.launch(r.mk.gdn_one, .{ .x = s.gdn_v_heads }, .{ a.p, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, l.rec.?, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs })
+                else {
+                    try d.launch(d.k.gdn_pre, .{ .x = T, .y = z.nconv / 256 }, .{ a.p, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32, nul, nul });
                     if (r.verifying) {
                         const sb = l.stash.?;
-                        try dev.copy(d, sb, a.q, s.gdn_k_heads * 128 * 2);
-                        try dev.copy(d, off(sb, at.k), a.k, s.gdn_k_heads * 128 * 2);
-                        try dev.copy(d, off(sb, at.v), a.v, z.vd * 2);
-                        try dev.copy(d, off(sb, at.g), a.g, s.gdn_v_heads * 4);
-                        try dev.copy(d, off(sb, at.b), a.beta, s.gdn_v_heads * 4);
-                        try dev.copy(d, off(sb, at.p), pj, pin * 2);
+                        const at = StashAt.of(z);
+                        try dev.copy(d, sb, a.q, T * s.gdn_k_heads * 128 * 2);
+                        try dev.copy(d, off(sb, at.k), a.k, T * s.gdn_k_heads * 128 * 2);
+                        try dev.copy(d, off(sb, at.v), a.v, T * z.vd * 2);
+                        try dev.copy(d, off(sb, at.g), a.g, T * s.gdn_v_heads * 4);
+                        try dev.copy(d, off(sb, at.b), a.beta, T * s.gdn_v_heads * 4);
+                        try dev.copy(d, off(sb, at.p), a.p, T * z.gdn_in * 2);
                     }
-                    try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, if (r.verifying) l.rec_save.? else l.rec.?, a.y, @as(i32, 1), nul, nul, nul, nul });
-                    try d.launch(d.k.gated_norm, .{ .x = 1 }, .{ a.y, pj, l.gnorm.?, hj, hij, loj, EPS, gs, zero, nul, nul, zero });
+                    try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, if (r.verifying) l.rec_save.? else l.rec.?, a.y, t32, nul, nul, nul, nul });
+                    try d.launch(d.k.gated_norm, .{ .x = T }, .{ a.y, a.p, l.gnorm.?, a.h, a.ahi, a.alo, EPS, gs, zero, nul, nul, zero });
                 }
             }
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
@@ -1354,7 +1360,7 @@ pub const Runner = struct {
         return r.head(T, want);
     }
 
-    /// Prompt chunk at r.pos. Attention is attnWindow on pieces of at most WINDOW rows.
+    /// Prompt chunk at r.pos. Attention is attn_prompt. GDN is windows of WINDOW rows. MoE is the tiled path.
     fn chunk(r: *Runner, ids: []const i32, want: bool, f: Feed) !i32 {
         if (ids.len <= WINDOW or ids.len > CHUNK) return error.BadWindow;
         if (r.pos + ids.len > r.ctx) return error.ContextFull;
@@ -1377,28 +1383,30 @@ pub const Runner = struct {
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, if (i == 0) 0 else 1), gs, nul, nul, zero, zero });
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_in, a.p, T);
             if (l.attn) {
-                var j: u32 = 0;
-                const p0_base: i32 = @intCast(r.pos);
-                while (j < T) {
-                    const w = @min(WINDOW, T - j);
-                    try r.attnWindow(l, m, j, w, p0_base + @as(i32, @intCast(j)), rope);
-                    j += w;
-                }
-            } else {
-                const pin = l.mixer_in.n;
-                const hk = l.mixer_out.k;
-                for (0..T) |row| {
-                    const pj = off(a.p, @as(usize, row) * pin * 2);
-                    const hj = off(a.h, @as(usize, row) * hk * 2);
-                    const hij = off(a.ahi, @as(usize, row) * (hk / 64) * 2);
-                    const loj = off(a.alo, @as(usize, row) * (hk / 64) * 2);
-                    const cin = l.conv[l.conv_cur].?;
-                    const cout = l.conv[1 - l.conv_cur].?;
-                    l.conv_cur = 1 - l.conv_cur;
-                    try d.launch(d.k.gdn_pre, .{ .x = 1, .y = z.nconv / 256 }, .{ pj, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, @as(i32, 1), nul, nul });
-                    try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, @as(i32, 1), nul, nul, nul, nul });
-                    try d.launch(d.k.gated_norm, .{ .x = 1 }, .{ a.y, pj, l.gnorm.?, hj, hij, loj, EPS, gs, zero, nul, nul, zero });
-                }
+                const p0: i32 = @intCast(r.pos);
+                try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p0, EPS, nul, nul, nul, zero, r.cap, rope });
+                if (r.cap > 0)
+                    try d.launch(d.k.attn_prompt8, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p0, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0), r.cap })
+                else
+                    try d.launch(d.k.attn_prompt, .{ .x = (T + 7) / 8, .y = s.kv_heads }, .{ a.q, l.kc.?, l.vc.?, a.y, p0, @as(i32, @intCast(T)), @as(f32, 1.0 / 16.0) });
+                try d.launch(d.k.attn_gate, .{ .x = T }, .{ a.y, a.p, a.h, a.ahi, a.alo, gs, zero, nul, nul, zero });
+            }
+            const pin = l.mixer_in.n;
+            const hk = l.mixer_out.k;
+            var j: u32 = 0;
+            while (!l.attn and j < T) : (j += WINDOW) {
+                const w = @min(WINDOW, T - j);
+                const w32: i32 = @intCast(w);
+                const pj = off(a.p, @as(usize, j) * pin * 2);
+                const hj = off(a.h, @as(usize, j) * hk * 2);
+                const hij = off(a.ahi, @as(usize, j) * (hk / 64) * 2);
+                const loj = off(a.alo, @as(usize, j) * (hk / 64) * 2);
+                const cin = l.conv[l.conv_cur].?;
+                const cout = l.conv[1 - l.conv_cur].?;
+                l.conv_cur = 1 - l.conv_cur;
+                try d.launch(d.k.gdn_pre, .{ .x = w, .y = z.nconv / 256 }, .{ pj, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, w32, nul, nul });
+                try d.launch(d.k.gdn_step, .{ .x = 16, .y = s.gdn_v_heads, .z = 1 }, .{ a.q, a.k, a.v, a.g, a.beta, l.rec.?, l.rec.?, a.y, w32, nul, nul, nul, nul });
+                try d.launch(d.k.gated_norm, .{ .x = w }, .{ a.y, pj, l.gnorm.?, hj, hij, loj, EPS, gs, zero, nul, nul, zero });
             }
             try fwd.gemm(d, a.pscr, a.h, a.ahi, a.alo, l.mixer_out, a.r, T);
             try d.launch(d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, D, EPS, @as(i32, 1), gs, nul, nul, zero, zero });
@@ -1494,41 +1502,54 @@ pub const Runner = struct {
         return tok[0];
     }
 
-    /// The MoE block of `T` rows: h (the post-attention norm) to r (its output, the residual's next addend).
-    fn moe(r: *Runner, l: *const Layer, T: u32) !void {
-        if (r.z.s.expert_ff != r.z.s.shared_ff) return error.SharedWidthNotWired;
-        for (0..T) |row| try r.moeRow(l, @intCast(row));
-    }
-
-    /// One row of `moe`: the same launches as `T == 1`.
-    fn moeRow(r: *Runner, l: *const Layer, row: u32) !void {
+    /// Prompt MoE: pairs sorted into per-expert tiles, then gate|up and down one tile at a time.
+    fn moeTiles(r: *Runner, l: *const Layer, T: u32) !void {
         const d = &r.d;
         const a = &r.acts;
         const s = r.z.s;
-        const pairs = s.top_k;
-        const D = s.hidden;
-        const h = off(a.h, @as(usize, row) * D * 2);
-        const mlog = off(a.mlog, @as(usize, row) * (s.experts + 1) * 4);
-        const mids = off(a.mids, @as(usize, row) * pairs * 4);
-        const mwts = off(a.mwts, @as(usize, row) * pairs * 4);
-        const msw = off(a.msw, @as(usize, row) * 4);
-        const rout = off(a.r, @as(usize, row) * D * 2);
-        const mact = off(a.mact, @as(usize, row) * (pairs + 1) * s.expert_ff * 2);
-        const my = off(a.my, @as(usize, row) * (pairs + 1) * D * 4);
-        try d.launch(r.mk.router, .{ .x = s.experts + 1, .y = 1 }, .{ h, l.router, l.shared_gate, mlog, s.hidden });
-        try d.launch(r.mk.route, .{ .x = 1 }, .{ mlog, mids, mwts, msw, s.experts, s.top_k });
-        const gu_args = .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, h, mids, mact, s.hidden, s.expert_ff, s.top_k, pairs };
-        if (s.hidden == 2048)
-            try d.launch(r.mk.swiglu4, .{ .x = s.expert_ff / 4, .y = pairs + 1 }, gu_args)
+        const pairs = T * s.top_k;
+        const ff = s.expert_ff;
+        const tb = tileBound(s, T);
+        try d.launch(r.mk.sums, .{ .x = s.hidden / 64, .y = T }, .{ a.h, a.mxs, s.hidden });
+        try d.launch(r.mk.sort, .{ .x = 1 }, .{ a.mids, a.morder, a.mtiles, a.mnt, s.experts, pairs, T });
+        try d.launch(r.mk.tile_swiglu, .{ .x = ff / 16, .y = tb }, .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, a.h, a.mxs, a.morder, a.mtiles, a.mnt, a.mact, s.hidden, ff, s.top_k, pairs, s.experts });
+        try d.launch(r.mk.sums, .{ .x = ff / 64, .y = pairs + T }, .{ a.mact, a.mas, ff });
+        try d.launch(r.mk.tile_down, .{ .x = s.hidden / 32, .y = tb }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mas, a.morder, a.mtiles, a.mnt, a.my, s.hidden, ff, s.experts });
+        try d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
+    }
+
+    /// The MoE block of `T` rows. T above WINDOW uses tiles. Several decode rows use the grouped kernels.
+    fn moe(r: *Runner, l: *const Layer, T: u32) !void {
+        const d = &r.d;
+        const a = &r.acts;
+        const s = r.z.s;
+        const pairs = T * s.top_k;
+        if (T > WINDOW)
+            try d.launch(r.mk.router_tile, .{ .x = (s.experts + 16) / 16, .y = (T + 15) / 16 }, .{ a.h, l.router, l.shared_gate, a.mlog, s.hidden, s.experts, T })
         else
-            try d.launch(r.mk.swiglu, .{ .x = s.expert_ff, .y = pairs + 1 }, gu_args);
-        if (s.expert_ff == 512)
-            try d.launch(r.mk.down_combine, .{ .x = s.hidden / (MOE_SG * DC_ROWS) }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, mact, mids, mwts, msw, rout, s.hidden, s.top_k })
-        else {
-            const dn_args = .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, mact, mids, my, s.hidden, s.expert_ff, pairs };
-            try d.launch(r.mk.down, .{ .x = s.hidden / MOE_SG, .y = pairs + 1 }, dn_args);
-            try d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = 1 }, .{ my, mwts, msw, rout, s.hidden, s.top_k, pairs });
+            try d.launch(r.mk.router, .{ .x = s.experts + 1, .y = T }, .{ a.h, l.router, l.shared_gate, a.mlog, s.hidden });
+        try d.launch(r.mk.route, .{ .x = T }, .{ a.mlog, a.mids, a.mwts, a.msw, s.experts, s.top_k });
+        if (s.expert_ff != s.shared_ff) return error.SharedWidthNotWired;
+        if (T > WINDOW) return r.moeTiles(l, T);
+        if (T > 1 and !r.verifying) {
+            try d.launch(r.mk.group_plan, .{ .x = 1 }, .{ a.mids, a.mplan, s.experts, pairs, T });
+            try d.launch(r.mk.group_swiglu, .{ .x = s.expert_ff, .y = pairs + 1 }, .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, a.h, a.mplan, a.mact, s.hidden, s.expert_ff, s.top_k, pairs, s.experts });
+            try d.launch(r.mk.group_down, .{ .x = s.hidden / 16, .y = pairs + 1 }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mplan, a.my, s.hidden, s.expert_ff, s.experts });
+            return d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
         }
+        const gu_args = .{ l.experts.gu_w, l.experts.gu_s, l.experts.gu_b, l.shared.gu_w, l.shared.gu_s, l.shared.gu_b, a.h, a.mids, a.mact, s.hidden, s.expert_ff, s.top_k, pairs };
+        if (s.hidden == 2048)
+            try d.launch(r.mk.swiglu4, .{ .x = s.expert_ff / 4, .y = pairs + T }, gu_args)
+        else
+            try d.launch(r.mk.swiglu, .{ .x = s.expert_ff, .y = pairs + T }, gu_args);
+        if (T == 1 and s.expert_ff == 512)
+            return d.launch(r.mk.down_combine, .{ .x = s.hidden / (MOE_SG * DC_ROWS) }, .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.mwts, a.msw, a.r, s.hidden, s.top_k });
+        const dn_args = .{ l.experts.dn_w, l.experts.dn_s, l.experts.dn_b, l.shared.dn_w, l.shared.dn_s, l.shared.dn_b, a.mact, a.mids, a.my, s.hidden, s.expert_ff, pairs };
+        if (s.expert_ff == 512)
+            try d.launch(r.mk.down8, .{ .x = s.hidden / (MOE_SG * 8), .y = pairs + T }, dn_args)
+        else
+            try d.launch(r.mk.down, .{ .x = s.hidden / MOE_SG, .y = pairs + T }, dn_args);
+        try d.launch(r.mk.combine, .{ .x = s.hidden / 64, .y = T }, .{ a.my, a.mwts, a.msw, a.r, s.hidden, s.top_k, pairs });
     }
 };
 

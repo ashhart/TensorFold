@@ -23,4 +23,5 @@ test {
     _ = launch;
     _ = decode;
     _ = @import("sage_contract.zig");
+    _ = @import("sage_row_order.zig");
 }
