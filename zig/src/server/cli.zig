@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("engine_api");
+const glp_startup = @import("glp_startup.zig");
 const Allocator = std.mem.Allocator;
 pub const Kind = enum {
     value, // --flag VALUE or --flag=VALUE
@@ -103,6 +104,8 @@ pub const flags = [_]Flag{
     .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
     .{ .name = "--rope-yarn", .native = cuda_build },
     .{ .name = "--record", .native = true },
+    .{ .name = "--glp", .native = true },
+    .{ .name = "--glp-alpha", .native = true },
     .{ .name = "--kv-cache", .choices = &.{ "bf16", "fp8" }, .native = true },
     .{ .name = "--prompt-precision", .choices = &.{ "bf16", "int8" }, .native = true },
     .{ .name = "--mtp-drafts", .native = served("--mtp-drafts") },
@@ -222,6 +225,7 @@ pub const Args = struct {
     drafter_bits: u8 = 4,
     rope_yarn: ?f64 = null, // YaRN with this factor over the checkpoint's trained window (Qwen3.5/3.6 on CUDA)
     record: ?[]const u8 = null, // drafter training rows written under this folder
+    glp: ?glp_startup.Vec = null, // --glp: the control vector file and the strength in force
     kv_cache: []const u8 = "bf16", // fp8: e4m3 attention caches with a scale a row, about twice the context
     prompt_precision: []const u8 = "bf16", // int8: prompt matmuls quantize their inputs to int8 a 64-input group
     slide: bool = false, // Sliding Weights learns what /v1/slide/learn is told into the served weights, live
@@ -320,6 +324,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.allowed_host = repeated.hosts.items;
     out.allowed_origin = repeated.origins.items;
     try spillWith(u, a, out);
+    if (try glp_startup.read(a, &out.glp)) |why| return fail(u, a, "{s}", .{why});
     return out;
 }
 
@@ -460,7 +465,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.redraw.budget_s = try float(u, a, name, v);
     } else if (is(name, "--short-reply-ratio")) out.redraw.short_ratio = try float(u, a, name, v) else if (is(name, "--short-reply-chars-per-s")) out.redraw.short_chars_per_s = try float(u, a, name, v) else if (is(name, "--silence-redraw-controls")) {
         out.redraw.controls = @import("drama_allow.zig").parse(v) catch return fail(u, a, "argument --silence-redraw-controls: expected comma-separated UTF-8 names without square brackets, or an empty list: '{s}'", .{v});
-    } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v);
+    } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v) else if (is(name, "--glp")) out.glp = glp_startup.withPath(out.glp, v) else if (is(name, "--glp-alpha")) out.glp = glp_startup.withAlpha(out.glp, glp_startup.strength(v) orelse return fail(u, a, "argument --glp-alpha: expected a finite strength above 0: '{s}'", .{v}));
 }
 
 /// --recall and the flags that imply it; false for any other flag.
@@ -507,6 +512,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .drafter_bits = args.drafter_bits,
         .rope_yarn = args.rope_yarn,
         .record = args.record,
+        .glp = try glp_startup.engine(a, dir, model_type, args.backend, args.glp),
         .kv8 = std.mem.eql(u8, args.kv_cache, "fp8"),
         .prompt_int8 = std.mem.eql(u8, args.prompt_precision, "int8"),
         .speed_up = args.speed_up,

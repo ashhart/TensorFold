@@ -102,6 +102,7 @@ pub const Stages = struct {
         e.barrier();
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
+            try s.steer(lane, index - 1);
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
         }
     }
@@ -215,6 +216,7 @@ pub const Stages = struct {
         try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
+        try s.steer(lane, m.config.layers - 1);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
@@ -239,6 +241,14 @@ pub const Stages = struct {
             }
         }
         if (s.tail) |tail| try tail.encode(tail.ptr, e);
+    }
+
+    /// The control vector's direction for the layer whose residual just landed; none in force means nothing done.
+    fn steer(s: *Stages, lane: *@import("core").segments.Lane, layer: usize) !void {
+        const plan = s.model.steer orelse return;
+        const dir = plan.dir(@intCast(layer)) orelse return;
+        try s.model.kernels.steer(lane.enc, s.hidden, dir, plan.alpha, @intFromEnum(plan.mode), plan.hidden, s.rows);
+        lane.enc.barrier();
     }
 };
 

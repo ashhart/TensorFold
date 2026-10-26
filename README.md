@@ -295,6 +295,8 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--drafter DRAFTER` | An external drafter, as a directory or a repo id in the Hugging Face cache, for models that take one: Qwen3.8-27B uses DFlash2 and Gemma 4 31B the drafter named in its recipe. Without one they decode plain. |
 | `--drafter-bits 0\|4` | Drafter weight precision where the model offers a choice: 4 bits (the default), or 0 to keep bf16. Qwen3.8-27B on CUDA takes 4 only. |
 | `--record DIR` | Write each stream's committed tokens, positions and tapped rows under DIR, for drafter training. CUDA Nemotron only; a single stream runs through the lane rounds, and recording stops below 25 GiB free disk. |
+| `--glp FILE` | A GLP control vector to apply to the residual stream, one direction per layer. Qwen3.8-27B on Metal takes one; the file's width and base model must match the checkpoint, and a Gemma checkpoint is never steered. |
+| `--glp-alpha ALPHA` | The strength the vector applies with, above 0; the file's own `glp.alpha_default` by default. |
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
 | `--cfg-gamma GAMMA` | Metal Drama speech: semantic guidance strength, finite 1–5; 0/default disables it. Only reference-conditioned requests are guided. Enabled replies report `X-Cfg-Gamma`; codec heads stay conditional. |
 | `--cfg-allow-request-gamma` | Metal Drama speech: allow a finite 1–5 `X-Cfg-Gamma` request header; invalid values return 400 before engine submission. Without this opt-in, the server's gamma is fixed. |
@@ -346,6 +348,10 @@ when the prompt cache holds nothing as far: the turn reads only its new tokens, 
 a long conversation. Where the cache cannot keep a whole context, the server also keeps that slot's DeltaNet states
 at each prompt's history end, so a turn whose template drops the last reply's reasoning resumes there. Replies are
 the same tokens as a fresh prompt pass; `TF_QWEN27_SLOT_RESUME=0` turns both off.
+
+`--glp` reads its file once at startup, and the startup line reports the mode (`project` removes the component along the
+direction, `add` adds it), the strength in force, the layers the file names, the checkpoint the vector was derived from and
+whether the file's own digest matched; a vector derived at another site is reported as a warning, not refused.
 
 Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.

@@ -4,6 +4,7 @@ const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 pub const tfvideo = @import("tfvideo.zig");
 pub const DraftSources = @import("draft_sources.zig").Sources;
+pub const glp = @import("glp.zig");
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -262,6 +263,14 @@ pub const Family = struct { model_type: []const u8, formats: []const []const u8,
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
 
+/// The control vector a serve applies to the residual stream (--glp).
+pub const Glp = struct {
+    /// The file's vector: one direction per layer, the mode and the checkpoint it was derived from.
+    vector: glp.Vector,
+    /// The strength in force: --glp-alpha, or the file's own alpha_default.
+    alpha: f32,
+};
+
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
     pub const slideRefusal = @import("engine_slide.zig").refusal;
@@ -294,6 +303,8 @@ pub const Open = struct {
     rope_yarn: ?f64 = null, // --rope-yarn: YaRN over the checkpoint's trained window; families without it refuse
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
+    /// --glp: the control vector the engine applies to the residual stream (null: none).
+    glp: ?Glp = null,
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,

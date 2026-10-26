@@ -5,6 +5,7 @@ pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
 pub const rows = @import("contract/rows.zig");
 pub const affine = @import("contract/affine.zig");
+pub const steer = @import("contract/steer.zig");
 pub const dense = @import("contract/dense.zig");
 pub const bf16_round = @import("bf16_round.zig");
 pub const attention_range = @import("attention_range.zig");

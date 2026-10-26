@@ -60,6 +60,9 @@ pub const Kernels = struct {
     long_prompt: bool = false,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
+    /// The control vector's kernel, once compiled for the hidden width it serves.
+    steer_pipeline: ?mtl.Pipeline = null,
+    steer_hidden: u32 = 0,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -88,6 +91,7 @@ pub const Kernels = struct {
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
         k.cache.deinit(k.allocator);
+        if (k.steer_pipeline) |p| p.deinit();
     }
 
     fn get(k: *Kernels, key: Key) !mtl.Pipeline {
@@ -341,6 +345,41 @@ pub const Kernels = struct {
         if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
         e.dispatchGroups(mtl.Size.of(1, padded(rows), 1), mtl.Size.of(width / 16, 1, 1));
         try span.end();
+    }
+
+    /// The control vector's direction on the residual rows: one threadgroup a row, so the padded rows stay as they are.
+    pub fn steer(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dir: mtl.Buffer, alpha: f32, mode: u32, hidden: u32, rows: u32) !void {
+        if (rows == 0) return;
+        var span = profile.begin(k.profiler, input_encoder, .copy);
+        errdefer span.cancel();
+        const e = span.encoder;
+
+        e.setPipeline(try k.steerPipeline(hidden));
+        e.setBuffer(x.buffer, x.offset, 0);
+        e.setBuffer(dir, 0, 1);
+        e.setValue(alpha, 2);
+        e.setValue(mode, 3);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        try span.end();
+    }
+
+    /// The control vector's kernel, compiled for the hidden width it serves.
+    fn steerPipeline(k: *Kernels, hidden: u32) !mtl.Pipeline {
+        if (k.steer_pipeline) |p| {
+            if (k.steer_hidden == hidden) return p;
+            p.deinit();
+            k.steer_pipeline = null;
+        }
+        const define = try std.fmt.allocPrint(k.allocator, "#define Q27_HIDDEN {d}\n", .{hidden});
+        defer k.allocator.free(define);
+        const source = try std.mem.concat(k.allocator, u8, &.{ define, sources.steer });
+        defer k.allocator.free(source);
+        const library = try mtl.Library.fromSource(k.device, source, mtl.CompileOptions.mlx());
+        defer library.deinit();
+        const p = try mtl.Pipeline.init(k.device, library, "custom_kernel_qwen27_steer_bfloat16_t_float_float_float", false);
+        k.steer_pipeline = p;
+        k.steer_hidden = hidden;
+        return p;
     }
 
     /// Prompt rows [base, base + 128) into the Neural Engine's fp16 input planes [hidden][128].
