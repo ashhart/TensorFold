@@ -104,4 +104,4 @@ jobs:
         run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
       # Every tf-* developer tool compiled and linked, none installed or run: an engine API change that breaks one fails.
       - name: zig build dev-tools
-        run: zig build dev-tools
+        run: zig build dev-tools -Doptimize=Debug  # compile and link only: Debug builds about 30% faster
