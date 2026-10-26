@@ -8,15 +8,16 @@ pub const think_markers: Markers = .{ .open = "", .close = "</think>" };
 /// The opener a reply writes itself when its template leaves the think block to it (Kolibri 1's does).
 const think_open = "<think>";
 pub const channel_markers: Markers = .{ .open = "<|channel>thought", .close = "<channel|>" };
-/// (opener, closer) of a tool call's markup: Qwen's, Gemma 4's, DeepSeek-V4's DSML block, LFM2's.
+/// (opener, closer) of a tool call's markup: Qwen's, Gemma 4's, DeepSeek-V4's DSML block, LFM2's, V4.1's spaced DSML.
 pub const calls = [_][2][]const u8{
     .{ "<tool_call>", "</tool_call>" },
     .{ "<|tool_call>", "<tool_call|>" },
     .{ "<\u{ff5c}DSML\u{ff5c}tool_calls>", "</\u{ff5c}DSML\u{ff5c}tool_calls>" },
     .{ "<|tool_call_start|>", "<|tool_call_end|>" },
+    .{ "<\u{ff5c}DSML\u{ff5c} calls>", "</\u{ff5c}DSML\u{ff5c} calls>" },
 };
 /// Each opener's payload lead: Gemma 4's ``call:`` (26B: ``:``), DSML's invoke; ``<tool_call>`` and LFM2 have none.
-const leads = [calls.len][]const []const u8{ &.{}, &.{ "call:", ":" }, &.{"<\u{ff5c}DSML\u{ff5c}invoke"}, &.{} };
+const leads = [calls.len][]const []const u8{ &.{}, &.{ "call:", ":" }, &.{"<\u{ff5c}DSML\u{ff5c}invoke"}, &.{}, &.{"<\u{ff5c}DSML\u{ff5c} invoke"} };
 
 /// Whether the text after an opener is a call's payload, may still become one, or is prose that names the opener.
 fn payloadOf(rest: []const u8, which: usize, finished: bool) enum { call, wait, prose } {
@@ -495,7 +496,11 @@ test "an opener the reply names in prose keeps the text after it, streamed and w
     try std.testing.expectEqualStrings(prose, try finishedProse(a, prose));
     const named = "Gemma opens a call with <|tool_call> and DSML with <\u{ff5c}DSML\u{ff5c}tool_calls> too.";
     try std.testing.expectEqualStrings(named, try hideToolCalls(a, named, false));
-    for ([_][]const u8{ prose, named, "a <tool_call>{\"name\"", "a <|tool_call>call:f{x:1}<tool_call|>b" }) |reply| {
+    const spaced = "DeepSeek-V4.1 opens its block with <\u{ff5c}DSML\u{ff5c} calls> instead.";
+    try std.testing.expectEqualStrings(spaced, try hideToolCalls(a, spaced, false));
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <\u{ff5c}DSML\u{ff5c} calls>\n<\u{ff5c}DSML\u{ff5c} inv", false));
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <\u{ff5c}DSML\u{ff5c} ca", false));
+    for ([_][]const u8{ prose, named, spaced, "a <tool_call>{\"name\"", "a <|tool_call>call:f{x:1}<tool_call|>b" }) |reply| {
         const whole = try hideToolCalls(a, reply, true);
         for (0..reply.len + 1) |n| try std.testing.expect(std.mem.startsWith(u8, whole, try hideToolCalls(a, reply[0..n], false)));
     }
