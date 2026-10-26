@@ -27,8 +27,11 @@ struct suspend_always {
 }
 namespace {
 using uint = unsigned;
-inline bool isnan(float x) { return __builtin_isnan(x); }
-inline bool isfinite(float x) { return __builtin_isfinite(x); }
+// By bits: MinGW's and glibc's math.h define these as macros, which would rename the functions themselves.
+#undef isnan
+#undef isfinite
+inline bool isnan(float x) { uint32_t u; memcpy(&u, &x, 4); return (u & 0x7fffffffu) > 0x7f800000u; }
+inline bool isfinite(float x) { uint32_t u; memcpy(&u, &x, 4); return (u & 0x7f800000u) != 0x7f800000u; }
 struct uint2 { uint x, y; };
 struct uint3 { uint x, y, z; };
 using ulong = unsigned long;

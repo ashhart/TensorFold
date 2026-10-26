@@ -74,7 +74,8 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     const object = b.addObject(.{ .name = "qwen4-projection-bodies", .root_module = bodies });
     _ = object.getEmittedBin();
     body_step.dependOn(&object.step);
-    parent.dependOn(body_step);
+    // COFF cannot link the module's objects into one; the Linux and macOS jobs emit these bodies.
+    if (b.graph.host.result.os.tag != .windows) parent.dependOn(body_step);
     crossBodies(b, parent);
     @import("qwen4_device.zig").metal(b);
 }
