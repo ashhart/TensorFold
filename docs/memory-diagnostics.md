@@ -43,6 +43,7 @@ device gauges retain their backend scope and reset behavior. Process and device 
 unified memory: do not add them. RSS, allocator peaks and physical footprint are different measurements.
 The Darwin structure follows Apple's `sys/resource.h` `rusage_info_v4` layout; host tests check its size
 and both footprint offsets, and exercise the kernel reader on macOS.
+`tensorfold:open_connections` gauges admitted client TCP connections until close, including the scrape itself and idle keep-alive connections; rejected-over-limit connections are excluded.
 
 Linux has no physical footprint count, so the footprint gauges stay macOS only. On Linux, `/metrics` reads
 `/proc/self/status` at scrape time and reports the resident set: `tensorfold:process_resident_bytes` (`VmRSS`),
