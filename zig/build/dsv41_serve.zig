@@ -4,8 +4,9 @@ const family = @import("dsv41_cuda.zig");
 const images = @import("dsv41_images.zig");
 
 /// `dsv41-serve` installs both over the CUDA runtime `cuda`; family images come from -Ddsv41-nvcc or -Ddsv41-fatbins.
-pub fn install(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module) void {
+pub fn install(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, runtime_images: bool) void {
     const step = b.step("dsv41-serve", "Install tensorfold-dsv41 and tf-dsv41 over the CUDA runtime and family images");
+    if (!runtime_images) return step.dependOn(&b.addFail("dsv41-serve needs the CUDA runtime's images: -Dnvcc=PATH or -Dfatbins=DIR").step);
     const im = images.built orelse {
         step.dependOn(&b.addFail("dsv41-serve needs -Ddsv41-nvcc=PATH or -Ddsv41-fatbins=DIR").step);
         return;
