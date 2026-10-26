@@ -153,6 +153,10 @@ CUDA also checks `window_attention`'s rows at head dims 256 and 512 (`window_row
 prompt tiles with P as bf16 or in two halves, a row's last key, windows over a ring or none over a linear cache), each
 output within float64's range over the spread its fp32 steps and tensor-core sums allow (`core/attention_range.zig`;
 seven controls, each one planted fault).
+CUDA also checks the Qwen3.5 prompt tiles at head dim 256 (`prefill_attention.cu`: `hpattn_kernel` and `hpattn8_kernel`
+over a bf16 or e4m3 cache, each output within float64's attention bound), and their paged twins (`hpattn_paged_kernel`,
+`hpattn8_paged_kernel`, the pool's pages shuffled, 256 and 48 positions a page), each bit-equal to its contiguous kernel
+over the same rows (one control: a table whose first page id is a later page's).
 CUDA also checks Dory's nGPT rows: the L2 norm rows with and without their bf16 add, and the normalized lerp residual
 (`norms_l2.cuh`), each output within float64's range at its bf16 points (three controls, each dropping one point).
 CUDA also checks Dory's paged caches (`window_pages.cu`): `tf_wrows_put` places rows in a shuffled arena bit for bit, and the

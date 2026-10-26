@@ -314,7 +314,7 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "latent tf_super_topk_few", .usage = .{ .{ .regs = 32, .static = 4352, .bound = 1024 }, .{ .regs = 38, .static = 4352, .bound = 1024 }, .{ .regs = 38, .static = 4352, .bound = 1024 }, .{ .regs = 32, .static = 4352, .bound = 1024 }, .{ .regs = 32, .static = 4352, .bound = 1024 } } },
         .{ .name = "ck tf_ck4_up_relu2_few", .usage = .{ .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 124, .static = 0, .bound = 128 }, .{ .regs = 124, .static = 0, .bound = 128 } } },
         .{ .name = "mamba tf_nemo_scan", .usage = .{ .{ .regs = 138, .static = 41088, .bound = 128 }, .{ .regs = 144, .static = 41088, .bound = 128 }, .{ .regs = 144, .static = 41088, .bound = 128 }, .{ .regs = 118, .static = 41088, .bound = 128 }, .{ .regs = 118, .static = 41088, .bound = 128 } } },
-    } ++ learning.cuda_132 ++ @import("paging_pending.zig").cuda_132 ++ @import("nemotron_prompt_records.zig").cuda_132 ++ @import("glm_cuda_records.zig").cuda_132 ++ @import("qwen_served_records.zig").cuda_132 ++ @import("flashnext_tile_records.zig").cuda_132) },
+    } ++ learning.cuda_132 ++ @import("paging_pending.zig").cuda_132 ++ @import("nemotron_prompt_records.zig").cuda_132 ++ @import("glm_cuda_records.zig").cuda_132 ++ @import("qwen_served_records.zig").cuda_132 ++ @import("flashnext_tile_records.zig").cuda_132 ++ @import("prompt_pages_records.zig").cuda_132) },
     .{ .release = .{ .major = 13, .minor = 3 }, .usage = &([_]Override{
         .{ .name = "router tf_nemo_topk", .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
         .{ .name = "flashnext_batch fn_qsa_select", .usage = .{ .{ .regs = 32, .static = 1168, .bound = 1024 }, .{ .regs = 50, .static = 1168, .bound = 1024 }, .{ .regs = 50, .static = 1168, .bound = 1024 }, .{ .regs = 44, .static = 1168, .bound = 1024 }, .{ .regs = 44, .static = 1168, .bound = 1024 } } },
@@ -571,7 +571,7 @@ const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
 pub const glm_pending = @import("glm_sampling_pending.zig");
-pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling ++ @import("glm_kv_pending.zig").records ++ @import("proposal_sampling_records.zig").records ++ @import("flashnext_pages_pending.zig").records ++ @import("glm_f32w_pending.zig").records ++ @import("penalty_sampling_records.zig").records;
+pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling ++ @import("glm_kv_pending.zig").records ++ @import("proposal_sampling_records.zig").records ++ @import("flashnext_pages_pending.zig").records ++ @import("glm_f32w_pending.zig").records ++ @import("penalty_sampling_records.zig").records ++ @import("prompt_pages_records.zig").records;
 test {
     _ = learning;
 }
@@ -583,6 +583,7 @@ test {
     _ = @import("glm_f32w_pending.zig");
     _ = @import("registry_pending_test.zig");
     _ = @import("flashnext_pages_pending.zig");
+    _ = @import("prompt_pages_records.zig");
 }
 test "unmeasured CUDA records cannot pass a compiled resource check" {
     for (cuda_pending) |r| {

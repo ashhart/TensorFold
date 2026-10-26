@@ -10,7 +10,7 @@
     const int row0 = first_row(), last = min(row0 + 16 * RB, W) - 1;
     const int head = hk * G + hg * HPC + warp % HPC, wrow = row0 + (warp / HPC) * 16;
     const int tiles = (p0 + (causal ? last : W - 1)) / BN + 1, items = 4 * tiles, limit = p0 + W;
-    // HM: head-major caches (each key head's CAP rows in a run); else a row's key heads side by side, paged by PT
+    // HM: each key head's CAP rows in a run (with PT a run a page, PS elements apart); else a row's heads side by side
     auto row_of = [&](int row) -> int64_t { return HM ? (int64_t)hk * CAP + row : (int64_t)row * HK + hk; };
     static_assert(!F8 || (NB == C && CS == C), "an fp8 cache: whole 16-dim steps");
     // F8: fetch loads an item's e4m3 words and scales a step ahead, put widens them into its slot, hiding the loads
@@ -22,15 +22,21 @@
             const uint8_t* src = reinterpret_cast<const uint8_t*>(item % 4 < 2 ? kc : vc);
             const float* sc = item % 4 < 2 ? ks : vs;
             const int key0 = (item / 4) * BN + (item % 2) * HALF;
+            // PT: the item's first page, looked up once (a CAP multiple of HALF holds the whole item)
+            const int lo = HM && PT ? min(key0, limit - 1) / CAP * CAP : 0;
+            const int64_t first = HM && PT ? PT[lo / CAP] : 0;
 #pragma unroll
             for (int j = 0; j < PER; ++j) {
                 const int i = threadIdx.x + j * THREADS, key = key0 + i / C;
                 pre[j] = make_uint2(0u, 0u);
                 pre_s[j] = 0.0f;
                 if (i < HALF * C && key < limit) {
-                    const int64_t r = row_of(key + (key < p0 ? 0 : skip));
-                    pre[j] = __ldg(reinterpret_cast<const uint2*>(src + r * D + (i % C) * 8));
-                    pre_s[j] = __ldg(sc + r);
+                    const int row = key + (key < p0 ? 0 : skip);
+                    const bool near = PT ? row >= lo && row - lo < CAP : false;
+                    const int64_t r = row_of(PT ? (near ? row - lo : row % CAP) : row);
+                    const int64_t page = PT ? (near ? first : (int64_t)PT[row / CAP]) : 0;
+                    pre[j] = __ldg(reinterpret_cast<const uint2*>(src + page * PS + r * D + (i % C) * 8));
+                    pre_s[j] = __ldg(sc + page * (PS / 4) + r);  // a page's bytes hold whole fp32 scales
                 }
             }
         }
@@ -62,12 +68,17 @@
             const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(item % 4 < 2 ? kc : vc);
             const int key0 = (item / 4) * BN + (item % 2) * HALF;
             uint4* dst = slots + (item % NS) * HALF * CS;
+            // HM with PT: the item's first page, looked up once (a CAP multiple of HALF holds the whole item)
+            const int lo = HM && PT ? min(key0, limit - 1) / CAP * CAP : 0;
+            const int64_t first = HM && PT ? (int64_t)PT[lo / CAP] * PS : 0;
             for (int i = threadIdx.x; i < HALF * NB; i += THREADS) {
                 const int key = key0 + i / NB, chunk = i % NB;
                 const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
                 const int row = in ? key + (key < p0 ? 0 : skip) : 0;
                 if constexpr (HM) {
-                    cp16z(dst + sw<8 * CS>(i / NB, chunk), src + row_of(row) * D + chunk * 8, in);
+                    const bool near = PT ? row >= lo && row - lo < CAP : false;
+                    const int64_t at = !PT ? row_of(row) * D : near ? first + row_of(row - lo) * D : (int64_t)PT[row / CAP] * PS + row_of(row % CAP) * D;
+                    cp16z(dst + sw<8 * CS>(i / NB, chunk), src + at + chunk * 8, in);
                 } else {
                     // a page's rows are contiguous: PT names each 512-row page, PS elements apart (null PT: one run)
                     const int64_t at = PT ? (int64_t)PT[row / 512] * PS + (int64_t)(row % 512) * HK * D : (int64_t)row * HK * D;

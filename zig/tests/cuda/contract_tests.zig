@@ -34,9 +34,7 @@ const latent_k = @import("contract_latent.zig");
 const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
 const f32w_k = @import("contract_glm_f32w.zig");
-
 const w4a8_k = @import("contract_w4a8.zig");
-
 const round_k = @import("contract_tree_round.zig");
 
 const act_k = @import("contract_act.zig");
@@ -570,6 +568,8 @@ pub fn run(gpu: check.Gpu) !void {
     for (&contiguous) |*x| try kernels.append(a, x.kernel());
     const weight_only = try @import("contract_weight_only_suite.zig").Suite.create(a, gpu, s, &kernels);
     defer weight_only.destroy(a);
+    const prompts = try @import("contract_prompt_pages.zig").Set.create(gpu, s, &kernels);
+    defer prompts.destroy();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

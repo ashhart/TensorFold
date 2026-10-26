@@ -158,6 +158,33 @@ hpattn8_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restrict__ 
 #include "prefill_attention_rows.cuh"
 }
 
+// hpattn_kernel over pages of CAP rows a key head (qwen35.cuh kv_row), PT a row's page, PS elements apart: its bits.
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+hpattn_paged_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                    const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
+                    int G, float scale, int CAP, const int* __restrict__ PT, long long PS) {
+    constexpr bool causal = true, F8 = false, HM = true;
+    constexpr int skip = 0;
+    const int HO = H;
+    const float *ks = nullptr, *vs = nullptr;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#include "prefill_attention_rows.cuh"
+}
+
+// hpattn8_kernel over paged caches (qwen35_kv8.cu row8): PS a page's bytes, ks and vs the layer's scales in page 0.
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+hpattn8_paged_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restrict__ kc, const uint8_t* __restrict__ vc,
+                     const float* __restrict__ ks, const float* __restrict__ vs, __nv_bfloat16* __restrict__ out, int p0,
+                     int W, int H, int HK, int G, float scale, int CAP, const int* __restrict__ PT, long long PS) {
+    constexpr bool causal = true, F8 = true, HM = true;
+    constexpr int skip = 0;
+    const int HO = H;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#include "prefill_attention_rows.cuh"
+}
+
 // full_kernel's row arithmetic, one barrier a 64-key tile: two buffers of odd-padded rows, the next tile loading.
 template <int D, int WARPS>
 __global__ void __launch_bounds__(32 * WARPS)
@@ -309,3 +336,10 @@ template __global__ void tf_prefill_attention::hpattn_kernel<256, 8, 2, 2>(const
 template __global__ void tf_prefill_attention::hpattn8_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
     __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);
+// The same two over the qwen3_5 pool's pages (TF_QWEN_KV_PAGES): hpattn_kernel's and hpattn8_kernel's bits.
+template __global__ void tf_prefill_attention::hpattn_paged_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
+    int, float, int, const int* __restrict__, long long);
+template __global__ void tf_prefill_attention::hpattn8_paged_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+    const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
+    __nv_bfloat16* __restrict__, int, int, int, int, int, float, int, const int* __restrict__, long long);

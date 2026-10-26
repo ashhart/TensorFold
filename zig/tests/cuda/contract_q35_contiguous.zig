@@ -367,7 +367,7 @@ pub const Q35 = struct {
 };
 
 /// Gate 4's fp8 codes: odd integers to 15 (odd keys scaled by 1024), the second half cancelling the first.
-fn mirroredE4m3(rng: std.Random, out: []f32) void {
+pub fn mirroredE4m3(rng: std.Random, out: []f32) void {
     const h = out.len / 2;
     for (0..h) |i| {
         const v: f32 = @floatFromInt(1 + 2 * rng.uintLessThan(u32, 8));
@@ -378,7 +378,7 @@ fn mirroredE4m3(rng: std.Random, out: []f32) void {
 }
 
 /// The e4m3 code of an integer in [-15, 15].
-fn toCode(v: f32) u8 {
+pub fn toCode(v: f32) u8 {
     var code: u8 = 0;
     while (code < 0x7f) : (code += 1) if (e4m3(code) == @abs(v)) break;
     return code | @as(u8, if (v < 0) 0x80 else 0);
