@@ -217,4 +217,5 @@ test "temperature 0 draws greedily, an exact tie going to the lower id" {
 test {
     _ = @import("sampling_selection_test.zig");
     _ = @import("sampling_race_test.zig");
+    _ = @import("sampling_identity_test.zig");
 }
