@@ -149,26 +149,45 @@ fn narrow(contexts: []const *draft.Ctx) bool {
 /// The rows' draft logits over the spans' columns, packed in d.logits after the two projections (null: not this head).
 fn head(d: anytype, rows: usize) !?u64 {
     const e = d.e;
-    const q = switch (e.head) {
-        .a4 => |q| q,
-        .an, .ql => return full(d, rows),
-        .x3, .bf => return full(d, rows),
-    };
-    if (q.n != spans[1][1] or q.k % 64 != 0) return full(d, rows);
-    const first: cuda.qlinear.Affine4 = .{ .w = q.w, .s = q.s, .b = q.b, .n = spans[0][1], .k = q.k, .npad = q.npad };
-    const tail: cuda.qlinear.Affine4 = .{ .w = q.w + tail_tile * q.k / 2, .s = q.s + tail_tile * 2, .b = q.b + tail_tile * 2, .n = q.n - tail_tile, .k = q.k, .npad = q.npad };
-    const a = d.logits; // rows x 98,304, then rows x 320, then the packed rows x 98,592
-    const b = a + rows * first.n * 2;
-    const out = b + rows * tail.n * 2;
-    try draft.precision.project(e, layers.Proj{ .a4 = first }, d.x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
-    try draft.precision.project(e, layers.Proj{ .a4 = tail }, d.x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
-    const skip = spans[1][0] - tail_tile;
-    const copies = [2]cuda.abi.Memcpy2D{
-        .{ .src = a, .src_pitch = first.n * 2, .dst = out, .dst_pitch = span_width * 2, .width = first.n * 2, .height = rows },
-        .{ .src = b + skip * 2, .src_pitch = tail.n * 2, .dst = out + first.n * 2, .dst_pitch = span_width * 2, .width = (tail.n - skip) * 2, .height = rows },
-    };
-    for (&copies) |*m| try e.d.check(e.d.api.cuMemcpy2DAsync_v2(m, e.stream.handle), "cuMemcpy2DAsync");
-    return out;
+    switch (e.head) {
+        .a4 => |q| {
+            if (q.n != spans[1][1] or q.k % 64 != 0) return full(d, rows);
+            const first: cuda.qlinear.Affine4 = .{ .w = q.w, .s = q.s, .b = q.b, .n = spans[0][1], .k = q.k, .npad = q.npad };
+            const tail: cuda.qlinear.Affine4 = .{ .w = q.w + tail_tile * q.k / 2, .s = q.s + tail_tile * 2, .b = q.b + tail_tile * 2, .n = q.n - tail_tile, .k = q.k, .npad = q.npad };
+            const a = d.logits; // rows x 98,304, then rows x 320, then the packed rows x 98,592
+            const b = a + rows * first.n * 2;
+            const out = b + rows * tail.n * 2;
+            try draft.precision.project(e, layers.Proj{ .a4 = first }, d.x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+            try draft.precision.project(e, layers.Proj{ .a4 = tail }, d.x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+            const skip = spans[1][0] - tail_tile;
+            const copies = [2]cuda.abi.Memcpy2D{
+                .{ .src = a, .src_pitch = first.n * 2, .dst = out, .dst_pitch = span_width * 2, .width = first.n * 2, .height = rows },
+                .{ .src = b + skip * 2, .src_pitch = tail.n * 2, .dst = out + first.n * 2, .dst_pitch = span_width * 2, .width = (tail.n - skip) * 2, .height = rows },
+            };
+            for (&copies) |*m| try e.d.check(e.d.api.cuMemcpy2DAsync_v2(m, e.stream.handle), "cuMemcpy2DAsync");
+            return out;
+        },
+        .x3 => |q| {
+            const tail_x3 = spans[1][0] / 128 * 128;
+            if (q.n != spans[1][1] or q.k % 128 != 0 or spans[0][1] % 128 != 0 or (q.n - tail_x3) % 128 != 0) return full(d, rows);
+            const first: cuda.exl3.Weight = .{ .trellis = q.trellis, .suh = q.suh, .svh = q.svh, .bias = q.bias, .k = q.k, .n = @intCast(spans[0][1]), .halves = q.halves, .codebook = q.codebook, .stride_k = q.stride_k, .stride_nb = q.stride_nb };
+            const tail_n: usize = q.n - tail_x3;
+            const tail: cuda.exl3.Weight = .{ .trellis = q.trellis + (tail_x3 / 128) * q.stride_nb * 4, .suh = q.suh, .svh = q.svh + tail_x3 * 2, .bias = if (q.bias != 0) q.bias + tail_x3 * 2 else 0, .k = q.k, .n = @intCast(tail_n), .halves = q.halves, .codebook = q.codebook, .stride_k = q.stride_k, .stride_nb = q.stride_nb };
+            const a = d.logits;
+            const b = a + rows * spans[0][1] * 2;
+            const out = b + rows * tail_n * 2;
+            try draft.precision.project(e, layers.Proj{ .x3 = first }, d.x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+            try draft.precision.project(e, layers.Proj{ .x3 = tail }, d.x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+            const skip = spans[1][0] - tail_x3;
+            const copies = [2]cuda.abi.Memcpy2D{
+                .{ .src = a, .src_pitch = spans[0][1] * 2, .dst = out, .dst_pitch = span_width * 2, .width = spans[0][1] * 2, .height = rows },
+                .{ .src = b + skip * 2, .src_pitch = tail_n * 2, .dst = out + spans[0][1] * 2, .dst_pitch = span_width * 2, .width = (tail_n - skip) * 2, .height = rows },
+            };
+            for (&copies) |*m| try e.d.check(e.d.api.cuMemcpy2DAsync_v2(m, e.stream.handle), "cuMemcpy2DAsync");
+            return out;
+        },
+        .an, .ql, .bf => return full(d, rows),
+    }
 }
 
 /// The rows' draft logits over the whole vocabulary, in d.logits.

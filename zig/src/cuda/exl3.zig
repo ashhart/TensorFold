@@ -219,8 +219,28 @@ pub const Dense = struct {
     /// Grow every scratch buffer to what 128 rows of `w` need, so a call inside a graph capture allocates nothing.
     pub fn reserve(de: *Dense, w: Weight) !void {
         if (plan(w.k, w.n, 192, 8).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128));
-        _ = try de.scratch(&de.counters, Linear.counterBytes(w));
+        _ = try de.zeroedCounters(Linear.counterBytes(w));
         _ = try de.scratch(&de.xh, 128 * w.k * 2);
+        if (candidateWeight(w)) |_| {
+            if (de.candidate_k == null or de.candidate_k.?.k_max < w.k) {
+                if (kernels.available) {
+                    var mod = try Module.load(de.d, kernels.exl3_candidate);
+                    errdefer mod.unload();
+                    const replacement = try candidate.Kernels.resolve(de.d, mod, w.k);
+                    if (de.candidate_k) |*k| k.deinit();
+                    if (de.candidate_mod) |*old| old.unload();
+                    de.candidate_mod = mod;
+                    de.candidate_k = replacement;
+                }
+            }
+        } else |_| {}
+    }
+
+    fn zeroedCounters(de: *Dense, bytes: usize) !u64 {
+        if (de.counters != null and de.counters.?.len >= bytes) return de.counters.?.ptr;
+        const ptr = try de.scratch(&de.counters, bytes);
+        try de.counters.?.fill8(0, null);
+        return ptr;
     }
 
     /// Decode rows: one call (the kernel takes 1..128), any count above in 128-row blocks.
@@ -229,16 +249,18 @@ pub const Dense = struct {
         return de.blocks(s, w, x, x_dtype, rows, y, y_dtype);
     }
 
-    /// Prompt rows: 128-row blocks of `matmul`, so a row's bits never depend on where its chunk starts.
+    /// Prompt rows: 64-row tensor-core prompt tiles when compatible, else 128-row blocks of `matmul`.
     pub fn prompt(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
-        if (de.implementation == .tiles) return de.tiles(s, w, x, x_dtype, rows, y, y_dtype, true);
+        if (de.implementation == .tiles or (rows > 16 and x_dtype == .bf16 and y_dtype != .f16 and (candidateWeight(w) catch null) != null))
+            return de.tiles(s, w, x, x_dtype, rows, y, y_dtype, true);
         return de.blocks(s, w, x, x_dtype, rows, y, y_dtype);
     }
     pub fn candidateWeight(w: Weight) !candidate.Matrix {
         const st = strides(w.k, w.n, w.halves, false);
-        if (w.halves % 2 != 0 or w.bias != 0 or w.stride_k != st.k or w.stride_nb != st.nb)
+        const word_row = @as(u64, w.halves) * 4;
+        if (w.halves % 2 != 0 or w.bias != 0 or word_row == 0 or w.stride_k % word_row != 0 or w.stride_k < st.k or w.stride_nb != st.nb)
             return error.CandidateFormat;
-        const m: candidate.Matrix = .{ .trellis = w.trellis, .suh = w.suh, .svh = w.svh, .k = w.k, .n = w.n, .bits = w.halves / 2, .codebook = @fromBackingInt(@intCast(@backingInt(w.codebook))) };
+        const m: candidate.Matrix = .{ .trellis = w.trellis, .suh = w.suh, .svh = w.svh, .k = w.k, .n = w.n, .bits = w.halves / 2, .codebook = @fromBackingInt(@intCast(@backingInt(w.codebook))), .tiles_n = @intCast(w.stride_k / word_row) };
         try m.check();
         return m;
     }
@@ -264,14 +286,13 @@ pub const Dense = struct {
     fn blocks(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
         const p = plan(w.k, w.n, 192, 8);
         const z: u64 = if (p.sk > 1) try de.scratch(&de.z, Linear.zBytes(w, 128)) else 0;
-        const counters = try de.scratch(&de.counters, Linear.counterBytes(w));
+        const counters: u64 = if (p.sk > 1) try de.zeroedCounters(Linear.counterBytes(w)) else 0;
         const xe: u64 = if (x_dtype == .f32) 4 else 2;
         const ye: u64 = if (y_dtype == .f32) 4 else 2;
         var r: usize = 0;
         while (r < rows) : (r += 128) {
             const m = @min(rows - r, 128);
             const xh = try de.scratch(&de.xh, m * w.k * 2);
-            try de.counters.?.fill8(0, s.handle);
             try de.lin.matmul(s, w, x + @as(u64, r) * w.k * xe, x_dtype, m, y + @as(u64, r) * w.n * ye, y_dtype, xh, z, counters);
         }
     }
@@ -331,10 +352,13 @@ test "a failed scratch allocation keeps the old scratch owned" {
     try std.testing.expectEqual(@as(usize, 16), slot.?.len);
 }
 
-test "candidate selection refuses layouts it cannot represent" {
+test "candidate selection admits sliced column spans and refuses layouts it cannot represent" {
     const st = strides(128, 256, 8, false);
     var w: Weight = .{ .trellis = 1, .suh = 2, .svh = 3, .k = 128, .n = 256, .halves = 8, .codebook = .mcg, .stride_k = st.k, .stride_nb = st.nb };
     try std.testing.expectEqual(@as(u32, 4), (try Dense.candidateWeight(w)).bits);
+    w.n = 128; // column-sliced span sharing the parent matrix's stride_k
+    try std.testing.expectEqual(@as(usize, 16), (try Dense.candidateWeight(w)).tiles_n);
+    w.n = 256;
     w.halves = 7;
     try std.testing.expectError(error.CandidateFormat, Dense.candidateWeight(w));
     w.halves = 8;

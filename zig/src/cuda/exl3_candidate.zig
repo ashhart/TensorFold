@@ -22,6 +22,7 @@ pub const Matrix = struct {
     n: usize,
     bits: u32,
     codebook: Codebook,
+    tiles_n: usize = 0,
 
     /// Whole widths 1-8 over whole 128-blocks; exl3.cu takes no half widths and no partial blocks.
     pub fn check(m: Matrix) !void {
@@ -33,7 +34,8 @@ pub const Matrix = struct {
     }
 
     fn args(m: Matrix) MatrixArgs {
-        return .{ .k = @intCast(m.k), .n = @intCast(m.n), .bits = m.bits, .tiles_n = @intCast(m.n / 16), .split = @intCast(split(m.k, m.n)) };
+        const tn = if (m.tiles_n != 0) m.tiles_n else m.n / 16;
+        return .{ .k = @intCast(m.k), .n = @intCast(m.n), .bits = m.bits, .tiles_n = @intCast(tn), .split = @intCast(split(m.k, m.n)) };
     }
 };
 
