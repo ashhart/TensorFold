@@ -126,6 +126,23 @@ Unauthenticated endpoint:
 
 - `GET /health`
 
+### `/v1` is not an OpenAI-compatible API
+
+The Orchestrator's `/v1` routes are TensorFold's remote-control API for paired apps and browsers. It has no
+`/v1/models`, `/v1/chat/completions` or `/v1/responses`, and a chat app cannot use it.
+Every path outside the web client, `/health` and `/v1/auth/pair` needs the owner token or a paired device token,
+so OpenAI-style paths also answer `401 {"error":"unauthorized"}`; that is not a request for a model API key.
+Do not paste the owner token or a device token into a chat app: they control this host, not a model.
+
+- **TensorFold from a phone or another browser:** open the Orchestrator's URL and paste a pairing link or code from
+  `Settings -> Orchestrator -> Paired devices`. Each pairing is a separate device the host can revoke.
+- **An OpenAI-compatible chat app:** point it at a `tensorfold-native serve` endpoint, with base URL
+  `http(s)://<host>[:port]/v1`, the key from `--api-key-file` and the model ID from `/v1/models`.
+  [Remote engine](linux-port/REMOTE-ENGINE.md) covers the setup, and the
+  [API reference](../../docs/api.md#browser-request-headers) covers `--allowed-host` behind a proxy.
+  The app's built-in engine listens on a random loopback port with a new key each launch, so it is not an external
+  endpoint. A separate `serve` loads its own copy of the model; stop the app's engine first if both would not fit.
+
 ## Global mode: run everything on the Orchestrator
 
 `Settings -> Orchestrator -> Run everything on an Orchestrator` turns the whole machine
