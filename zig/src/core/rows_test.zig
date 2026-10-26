@@ -481,3 +481,68 @@ test "a learn dir that is a regular file is refused, and open frees what it made
     var f: Fake = .{ .gpa = gpa };
     try std.testing.expectError(error.RowsDir, rows.Rows.open(gpa, f.snapshots(), options(path)));
 }
+
+/// One request of a grid family through a fresh store over the disk at `o`: explicit chunk starts, or none (null).
+fn startsRequest(a: Allocator, o: rows.Options, p: []const u32, history: u32, starts: ?[]const u32) !struct { from: u32, sum: u64, ok: bool, states: usize } {
+    const gpa = std.testing.allocator;
+    const grid: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1, .planned = true, .grid = 512 };
+    // the engine's cuts: the request's starts, else the grid's below the prompt's end
+    var f: Fake = .{ .gpa = gpa, .planned = true, .starts = starts orelse &.{ 512, 1024 } };
+    const r = try rows.Rows.open(gpa, f.snapshots(), o);
+    defer r.deinit();
+    var s = pc.Store.init(gpa, f.snapshots(), grid, 1 << 30);
+    defer s.deinit();
+    s.disk = r;
+    const from: u32, const sum: u64 = if (starts == null) blk: {
+        const g = try gridRequest(a, &s, &f, p, history);
+        break :blk .{ g.from, g.sum };
+    } else blk: {
+        const g = try request(a, &s, &f, p, history);
+        break :blk .{ g.from, g.sum };
+    };
+    drain(r);
+    return .{ .from = from, .sum = sum, .ok = f.restored_ok, .states = r.states.items.len };
+}
+
+test "a grid family's disk states pass between requests that name chunk starts and requests that name none" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    const p = try prompt(a, 0, 6, 1300);
+    const turn2 = try std.mem.concat(a, u32, &.{ p[0..1201], &[_]u32{ 9, 8, 7 } });
+    // each writes one state, the deepest chunk start at or below 1100: the grid's 1024, or the request's own
+    const Case = struct { write: ?[]const u32, read: ?[]const u32, from: u32 };
+    const cases = [_]Case{
+        // starts named on the grid, then none: the state at 1024 is a grid pass's
+        .{ .write = &.{ 512, 1024, 1200 }, .read = null, .from = 1024 },
+        // starts named off the grid, then none: the state at 1000 is no grid pass's
+        .{ .write = &.{ 500, 1000, 1200 }, .read = null, .from = 0 },
+        // a state on the grid whose chunks below were cut elsewhere, then none
+        .{ .write = &.{ 300, 1024, 1200 }, .read = null, .from = 0 },
+        // none, then starts naming the grid's below 1024 and 1024
+        .{ .write = null, .read = &.{ 512, 1024, 1200 }, .from = 1024 },
+        // none, then starts where 1024 is no start
+        .{ .write = null, .read = &.{ 512, 1100 }, .from = 0 },
+        // none, then starts off the grid below 1024
+        .{ .write = null, .read = &.{ 500, 1024 }, .from = 0 },
+        // none, then none; named, then the same named
+        .{ .write = null, .read = null, .from = 1024 },
+        .{ .write = &.{ 500, 1000, 1200 }, .read = &.{ 500, 1000, 1200 }, .from = 1000 },
+    };
+    for (cases, 0..) |c, i| {
+        const dir = root(&buf, try std.fmt.allocPrint(a, "starts{d}", .{i}));
+        defer rmTree(dir);
+        var o = options(dir);
+        o.planned = true;
+        o.grid = 512;
+        const w = try startsRequest(a, o, p, 1100, c.write);
+        try std.testing.expectEqual(@as(usize, 1), w.states);
+        try std.testing.expectEqual(fresh(p), w.sum);
+        const got = try startsRequest(a, o, turn2, 1203, c.read); // a restart: the RAM store is new, the disk's is read
+        try std.testing.expectEqual(c.from, got.from);
+        try std.testing.expect(got.ok);
+        try std.testing.expectEqual(fresh(turn2), got.sum);
+    }
+}
