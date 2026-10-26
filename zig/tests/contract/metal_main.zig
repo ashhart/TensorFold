@@ -26,6 +26,7 @@ const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const lfm2_argmax = @import("metal_lfm2_argmax.zig");
 const lfm2_streams = @import("metal_lfm2_streams.zig");
+const lfm2_controls = @import("metal_lfm2_controls.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
 
@@ -154,21 +155,42 @@ pub fn main(init: std.process.Init) !u8 {
         if (!tensor) return error.TensorUnitsRequired;
         try kernels.append(a, mixed.kernel());
     }
-    var argmax: ?lfm2_argmax.Probe = null;
-    defer if (argmax) |*p| p.deinit();
-    if (wanted(o, lfm2_argmax.name)) {
-        argmax = try lfm2_argmax.Probe.init(a, device, queue);
-        try kernels.append(a, argmax.?.kernel());
+    var lfm2_list: std.ArrayList(*lfm2_argmax.Probe) = .empty;
+    var lfm2_streams_list: std.ArrayList(*lfm2_streams.Probe) = .empty;
+    defer {
+        for (lfm2_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        for (lfm2_streams_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        lfm2_list.deinit(a);
+        lfm2_streams_list.deinit(a);
     }
-    var streams_list: [2]lfm2_streams.Probe = undefined;
-    var streams_made: usize = 0;
-    defer for (streams_list[0..streams_made]) |*p| p.deinit();
-    for (std.enums.values(lfm2_streams.Which)) |w| {
-        if (!wanted(o, lfm2_streams.spec(w).name)) continue;
-        streams_list[streams_made] = try lfm2_streams.Probe.init(a, device, queue, w);
-        streams_made += 1;
+    for (std.enums.values(lfm2_controls.Mutation)) |m| {
+        const argmax_side = m == .none or m == .argmax_last_tie or m == .argmax_no_flag;
+        if (argmax_side) {
+            if (!wanted(o, if (m == .none) lfm2_argmax.name else m.name())) continue;
+            const p = try a.create(lfm2_argmax.Probe);
+            errdefer a.destroy(p);
+            p.* = try lfm2_argmax.Probe.init(a, device, queue, m);
+            try lfm2_list.append(a, p);
+            try kernels.append(a, p.kernel());
+            if (m != .none) continue;
+        }
+        for (std.enums.values(lfm2_streams.Which)) |w| {
+            const control_for = (m == .conv_first_state and w == .conv) or (m == .attention_first_cache and w == .attention);
+            if (m != .none and !control_for) continue;
+            if (!wanted(o, if (m == .none) lfm2_streams.spec(w).name else m.name())) continue;
+            const p = try a.create(lfm2_streams.Probe);
+            errdefer a.destroy(p);
+            p.* = try lfm2_streams.Probe.init(a, device, queue, w, m);
+            try lfm2_streams_list.append(a, p);
+            try kernels.append(a, p.kernel());
+        }
     }
-    for (streams_list[0..streams_made]) |*p| try kernels.append(a, p.kernel());
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
     defer for (rows_list.items) |r| r.deinit();
@@ -355,8 +377,6 @@ pub fn main(init: std.process.Init) !u8 {
         lim += try gemma.limits(a, device, o.only);
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
-        lim += try lfm2_argmax.limits(a, device, o.only);
-        lim += try lfm2_streams.limits(a, device, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

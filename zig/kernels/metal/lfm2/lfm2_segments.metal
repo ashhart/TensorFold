@@ -37,7 +37,7 @@ constant constexpr size_t SEG_PART = size_t(QH) * CHUNKS * SUBS;
 }
 
 // lfm2_attn_mma over the streams' 8-row tiles: tile tg.x is tiles[tg.x] = (stream << 16) | the stream's tile.
-[[kernel]] void lfm2_attn_segs(const device bfloat* queries [[buffer(0)]], const device lfm2_seg* segs [[buffer(1)]],
+[[max_total_threads_per_threadgroup(128)]] [[kernel]] void lfm2_attn_segs(const device bfloat* queries [[buffer(0)]], const device lfm2_seg* segs [[buffer(1)]],
                                const device uint* tiles [[buffer(2)]], constant lfm2_attn_args& a [[buffer(3)]],
                                device float* pm [[buffer(4)]], device float* pl [[buffer(5)]],
                                device float* po [[buffer(6)]], uint3 tg [[threadgroup_position_in_grid]],

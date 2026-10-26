@@ -6,6 +6,7 @@ const sources = @import("kernel_sources");
 const c = contract.spec;
 const g = contract.gates;
 const rig_ = @import("rig.zig");
+const controls = @import("metal_lfm2_controls.zig");
 
 const vocab = 128000;
 pub const name = "metal lfm2 argmax";
@@ -33,13 +34,16 @@ pub const Probe = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
+    mutation: controls.Mutation,
     rows: usize = 0,
     x: []u16 = &.{},
     args: [2]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !Probe {
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, sources.lfm2, "lfm2_argmax") };
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mutation: controls.Mutation) !Probe {
+        const text = try controls.source(a, mutation);
+        defer if (mutation != .none) a.free(text);
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, text, "lfm2_argmax"), .mutation = mutation };
     }
 
     fn drop(p: *Probe) void {
@@ -56,7 +60,9 @@ pub const Probe = struct {
 
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .ctx = p, .vt = &vt, .spec = spec() };
+        var s = spec();
+        if (p.mutation != .none) s.name = p.mutation.name();
+        return .{ .ctx = p, .vt = &vt, .spec = s, .control = p.mutation.gate() };
     }
 
     pub fn prepare(p: *Probe, s: c.Shape, f: g.Fill, seed: u64) !bool {
@@ -117,9 +123,3 @@ pub const Probe = struct {
         return null;
     }
 };
-
-/// Gate 5 for the launch on this GPU: 1,024 threads, 32 simdgroups' best values, ids and flags.
-pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usize {
-    if (only) |s| if (std.mem.indexOf(u8, name, s) == null) return 0;
-    return @import("metal_limits.zig").onThisGpu(a, device, .{ .decl = .{ .name = name, .threads = 1024, .tg_memory = 384, .offline = false }, .function = "lfm2_argmax", .here = sources.lfm2, .pre_m5 = "" }, false);
-}

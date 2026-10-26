@@ -58,6 +58,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
+    if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
     if (std.mem.startsWith(u8, d.name, "drama3 ")) {
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
         return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };

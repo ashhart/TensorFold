@@ -131,6 +131,11 @@ Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), a
 formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
 prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
+LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
+stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
+to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
+Their launches are in `lfm2_records.zig` with the M1 and M2 limits from `--offline`; `lfm2_attn_segs` reserves its 128
+threads in its source, as Metal cannot build it for M1 or M2 at another count.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and

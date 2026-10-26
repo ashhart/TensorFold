@@ -6,6 +6,7 @@ const sources = @import("kernel_sources");
 const c = contract.spec;
 const g = contract.gates;
 const rig_ = @import("rig.zig");
+const controls = @import("metal_lfm2_controls.zig");
 
 const d = 2048;
 const qh = 32;
@@ -47,6 +48,7 @@ pub const Probe = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     which: Which,
+    mutation: controls.Mutation,
     pipes: [8]mtl.Pipeline,
     made: usize = 0,
     rows: usize = 0,
@@ -64,15 +66,17 @@ pub const Probe = struct {
     golden: []u8 = &.{},
     snap: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, w: Which) !Probe {
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, w: Which, mutation: controls.Mutation) !Probe {
         const list: []const [:0]const u8 = switch (w) {
             .attention => &.{ "lfm2_qk_segs", "lfm2_attn_segs", "lfm2_attn_merge_segs", "lfm2_qk", "lfm2_attn_mma", "lfm2_attn_mma_r2", "lfm2_attn_merge" },
             .conv => &.{ "lfm2_conv_segs", "lfm2_conv" },
         };
-        var p: Probe = .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = w, .pipes = undefined };
+        var p: Probe = .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = w, .mutation = mutation, .pipes = undefined };
+        const text = try controls.source(a, mutation);
+        defer if (mutation != .none) a.free(text);
         errdefer for (p.pipes[0..p.made]) |x| x.deinit();
         for (list) |n| {
-            p.pipes[p.made] = try rig_.pipeline(device, sources.lfm2, n);
+            p.pipes[p.made] = try rig_.pipeline(device, text, n);
             p.made += 1;
         }
         return p;
@@ -96,7 +100,9 @@ pub const Probe = struct {
 
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .ctx = p, .vt = &vt, .spec = spec(p.which) };
+        var s = spec(p.which);
+        if (p.mutation != .none) s.name = p.mutation.name();
+        return .{ .ctx = p, .vt = &vt, .spec = s, .control = p.mutation.gate() };
     }
 
     fn len(p: *const Probe, j: usize) usize {
@@ -469,20 +475,4 @@ pub const Probe = struct {
 fn same(x: u16, y: u16) bool {
     const nx = std.math.isNan(c.fromBf16(x));
     return if (nx) std.math.isNan(c.fromBf16(y)) else x == y;
-}
-
-/// Gate 5 for the shared-round launches on this GPU.
-pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usize {
-    var problems: usize = 0;
-    const launches = [_]struct { []const u8, []const u8, u32, u32 }{
-        .{ names[1], "lfm2_conv_segs", 256, 0 },
-        .{ names[0] ++ " qk", "lfm2_qk_segs", 32, 0 },
-        .{ names[0], "lfm2_attn_segs", 128, 18688 },
-        .{ names[0] ++ " merge", "lfm2_attn_merge_segs", 32, 0 },
-    };
-    for (launches) |l| {
-        if (only) |s| if (std.mem.indexOf(u8, l[0], s) == null) continue;
-        problems += try @import("metal_limits.zig").onThisGpu(a, device, .{ .decl = .{ .name = l[0], .threads = l[2], .tg_memory = l[3], .offline = false }, .function = l[1], .here = sources.lfm2, .pre_m5 = "" }, false);
-    }
-    return problems;
 }
