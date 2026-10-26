@@ -52,7 +52,7 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
     }
     if (prompt and e.int8.on) switch (l) {
         // every prompt row of an int8 request takes int8; an exceptional chunk returns to the default precision
-        .a4 => |q| if (try int8_prompt.projectRows(e, q, x, xs, out, rows, sums, params, k)) return else int8_prompt.fellBack(e, rows),
+        .a4 => |q| if (try int8_prompt.projectRows(e, q, x, xs, out, rows, sums, params, k)) return else int8_prompt.fellBack(e),
         .an, .x3, .bf => {},
         .ql => unreachable,
     };

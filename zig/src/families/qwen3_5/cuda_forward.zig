@@ -39,6 +39,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const geo = e.geo;
     const group = g.q_heads / g.kv_heads;
 
+    if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkStart(e);
     try e.embed(t_ids, e.h, total, t_params);
     // the producers of the out, o and down inputs write their group sums; a prompt GEMM past 16 rows needs none
     const sums: u64 = if (prompt and total > 16) 0 else e.xs;
@@ -113,6 +114,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
         };
     }
+    if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
     try finish(e, total, heads, shape.hidden);
 }
 
