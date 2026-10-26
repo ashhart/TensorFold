@@ -18,6 +18,7 @@ const mm_mod = @import("cuda_mm.zig");
 const dflash = @import("dflash.zig");
 const prof_mod = @import("cuda_prof.zig");
 const pages_mod = @import("cuda_pages.zig");
+const prompt_pair = @import("cuda_prompt_pair.zig");
 pub const Options = @import("cuda_engine_types.zig").Options;
 
 /// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
@@ -71,6 +72,7 @@ pub const Engine = struct {
     pieces: fw.Pieces,
     w: weights.Weights,
     bp: fw.Buffers, // prompt chunks
+    pair: ?prompt_pair.Pair = null, // TF_GLM_PROMPT_PAIR: a paired prompt step's second chunk
     bd: fw.Buffers, // verify windows
     bm: fw.Buffers, // the MTP head's rows
     bs: ?fw.Buffers = null, // shared verify windows (with the MTP head, as the lane core shares only then)
@@ -141,7 +143,7 @@ pub const Engine = struct {
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
         var m = try fw.Modules.load(d, ctx);
         errdefer m.deinit();
-        var pieces = try fw.Pieces.init(d, o.settings.pieces);
+        var pieces = try fw.Pieces.init(d, o.settings.pieces, o.settings.pair);
         errdefer pieces.deinit();
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
@@ -180,6 +182,8 @@ pub const Engine = struct {
         e.bp = try fw.Buffers.init(d, &e.w, prompt_solo.bufferRows(o.settings.solo), true, o.capacity);
         errdefer e.bp.deinit();
         if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
+        if (o.settings.pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
+        errdefer if (e.pair) |*p| p.deinit();
         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
         errdefer e.bd.deinit();
         e.bm = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
@@ -227,6 +231,7 @@ pub const Engine = struct {
         if (e.bs) |*b| b.deinit();
         e.bm.deinit();
         e.bd.deinit();
+        if (e.pair) |*p| p.deinit();
         e.bp.deinit();
         if (e.pages) |p| p.deinit();
         for (0..e.seqs.items.len) |i| e.free(i);
@@ -246,10 +251,11 @@ pub const Engine = struct {
         return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .group = e.group } };
     }
 
-    fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
+    pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = if (b == &e.bp) &e.pieces else null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null };
+        const twin = if (e.pair) |*p| (if (b == &p.bp) &p.pieces else null) else null;
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = if (b == &e.bp) &e.pieces else twin, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -342,6 +348,7 @@ pub const Engine = struct {
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
         if (start >= len or start % fw.prefill_rows != 0) return error.BadChunk;
         const rows = @min(len - start, @as(usize, if (part.len > fw.prefill_rows + 1) fw.solo_rows else fw.prefill_rows));
+        if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks);
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
         var one: [1]fw.Rank = undefined;
@@ -513,6 +520,7 @@ pub const Engine = struct {
     }
 
     pub const holdPrompt = @import("cuda_prompt_hold.zig").save;
+    pub const pairedAt = prompt_pair.pairedAt;
     pub const prefillMany = @import("cuda_prompts.zig").prefillMany;
 
     /// forward.commit of the last window's first `n` rows (the KDA replay when fewer than it ran).

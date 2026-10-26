@@ -167,16 +167,25 @@ pub const Buffers = struct {
     part: u64, // fp32 [rows][dims]: this rank's partial rows a split exchange sends from
 
     pub fn init(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize) !Buffers {
-        return make(d, w, rows, prefill, capacity, rows);
+        return make(d, w, rows, prefill, capacity, rows, null);
     }
 
     /// A shared window's scratch: `rows` rows of several streams, each one's attention and KDA chain on `window_rows`.
     pub fn initShared(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, capacity: usize) !Buffers {
-        return make(d, w, rows, false, capacity, window_rows);
+        return make(d, w, rows, false, capacity, window_rows, null);
     }
 
+    /// A paired step's second chunk: its own rows across sites and streams, and `of`'s scratch for one site's work.
+    pub fn initTwin(d: *const cuda.Driver, w: *const weights.Weights, of: *const Buffers, capacity: usize) !Buffers {
+        return make(d, w, of.rows, of.prefill, capacity, of.rows, of);
+    }
+
+    /// The fields a twin holds apart: make's sizes by index, then their names.
+    const twin_sizes = [_]usize{ 0, 1, 2, 3, 4, 5, 6, 7, 62, 63, 64, 65, 70 };
+    const twin_fields = .{ "ids", "x", "normed", "xs", "post", "comb", "hcpart", "gathered", "hidden", "fnormed", "fxs", "logits", "part" };
+
     /// `seg`: the most rows one stream's attention takes (a decode window's rows, or a shared window's segment).
-    fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize) !Buffers {
+    fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize, twin: ?*const Buffers) !Buffers {
         const c = &w.config;
         const s = &w.share;
         const D: usize = c.hidden;
@@ -242,8 +251,12 @@ pub const Buffers = struct {
             x3[0], x3[1], x3[2], x3[3], // EXL3 experts: 8-slot picks, rotated inputs, a decode window's partials
             if (split) rows * @max(3 * n, kw - 3 * n) * 2 else 4, // a split KDA stack's part rows
         };
+        var held = sizes;
+        if (twin != null) for (&held, 0..) |*bytes, i| { // a twin allocates its own rows only
+            if (std.mem.indexOfScalar(usize, &twin_sizes, i) == null) bytes.* = 0;
+        };
         var p: [sizes.len]u64 = undefined;
-        const a = try arena(d, &sizes, &p);
+        const a = try arena(d, &held, &p);
         var out: Buffers = .{
             .arena = a,
             .rows = rows,
@@ -296,6 +309,12 @@ pub const Buffers = struct {
         };
         out.moe.x3 = .{ .picks = p[71], .xg = p[72], .xu = p[73], .z = p[74] };
         out.kda.tmp = p[75];
+        if (twin) |of| {
+            var t = of.*;
+            t.arena = out.arena;
+            inline for (twin_fields) |f| @field(t, f) = @field(out, f);
+            return t;
+        }
         return out;
     }
 

@@ -1,7 +1,8 @@
-//! The lane backend's slots: chosen before a stream's map entry exists, and none left behind by a failed insertion.
+//! The lane backend's slots, chosen and given back, and when a prompt step may pair.
 const std = @import("std");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
+const fw = @import("cuda_forward.zig");
 const Lanes = @import("cuda_lanes.zig").Lanes;
 const fw = @import("cuda_forward.zig");
 const solo = @import("cuda_prompt_solo.zig");
