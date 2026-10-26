@@ -13,8 +13,9 @@ pub const Device = struct {
     pub var fail_wait = false;
     pub var fail_fill = false;
     pub var freed_pending: usize = 0;
+    pub var fail_wait_in: usize = 0; // > 0: the stream wait this many waits on fails, once
+    pub var hosts: usize = 0; // pinned buffers held
     var next: u64 = 0x10000;
-    var host: ?[]align(16) u8 = null;
     fn alloc(out: *u64, len: usize) callconv(.c) c_int {
         out.* = next;
         next += len + 256;
@@ -46,6 +47,10 @@ pub const Device = struct {
     }
     fn wait(_: abi.Stream) callconv(.c) c_int {
         if (fail_wait) return abi.error_not_ready;
+        if (fail_wait_in > 0) {
+            fail_wait_in -= 1;
+            if (fail_wait_in == 0) return abi.error_not_ready;
+        }
         proof();
         return 0;
     }
@@ -57,15 +62,23 @@ pub const Device = struct {
         pending = true;
         return 0;
     }
-    fn hostAlloc(out: *?*anyopaque, len: usize, _: c_uint) callconv(.c) c_int {
-        host = t.allocator.alignedAlloc(u8, .@"16", len) catch return abi.error_not_ready;
-        out.* = host.?.ptr;
+    fn copyOut(_: ?*anyopaque, _: u64, _: usize, _: abi.Stream) callconv(.c) c_int {
+        pending = true;
         return 0;
     }
-    fn hostFree(_: ?*anyopaque) callconv(.c) c_int {
+    // each buffer's length in the 16 bytes before it
+    fn hostAlloc(out: *?*anyopaque, len: usize, _: c_uint) callconv(.c) c_int {
+        const all = t.allocator.alignedAlloc(u8, .@"16", len + 16) catch return abi.error_not_ready;
+        std.mem.writeInt(usize, all[0..@sizeOf(usize)], len, .little);
+        out.* = all.ptr + 16;
+        hosts += 1;
+        return 0;
+    }
+    fn hostFree(ptr: ?*anyopaque) callconv(.c) c_int {
         freed_pending += @intFromBool(pending);
-        t.allocator.free(host.?);
-        host = null;
+        const at: [*]align(16) u8 = @ptrCast(@alignCast(@as([*]u8, @ptrCast(ptr.?)) - 16));
+        t.allocator.free(at[0 .. std.mem.readInt(usize, at[0..@sizeOf(usize)], .little) + 16]);
+        hosts -= 1;
         return 0;
     }
     fn eventCreate(out: *abi.Event, _: c_uint) callconv(.c) c_int {
@@ -90,8 +103,9 @@ pub const Device = struct {
         fail_wait = false;
         fail_fill = false;
         freed_pending = 0;
+        fail_wait_in = 0;
+        hosts = 0;
         next = 0x10000;
-        host = null;
         var d: Driver = .{ .lib = undefined, .api = undefined };
         d.api.cuMemAlloc_v2 = alloc;
         d.api.cuMemFree_v2 = free;
@@ -100,6 +114,7 @@ pub const Device = struct {
         d.api.cuStreamSynchronize = wait;
         d.api.cuCtxSynchronize = context;
         d.api.cuMemcpyHtoDAsync_v2 = copy;
+        d.api.cuMemcpyDtoHAsync_v2 = copyOut;
         d.api.cuMemHostAlloc = hostAlloc;
         d.api.cuMemFreeHost = hostFree;
         d.api.cuEventCreate = eventCreate;

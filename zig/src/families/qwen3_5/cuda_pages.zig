@@ -168,19 +168,18 @@ pub const Pages = struct {
         return true;
     }
 
-    /// The lane's first pages become `path`'s, the prompt cache's copies of the same rows; swapped-out ones go back.
+    /// The lane's first pages become `path`'s (the store's), table first; QwenLaneTable: it failed, end the stream.
     pub fn swap(p: *Pages, cache: *Cache, path: []const u32) !void {
         const x = for (p.lanes) |*x| {
             if (x.cache == cache) break x;
         } else return error.UnknownQwenLane;
-        var changed = false;
-        for (path, 0..) |id, i| if (x.lease.ids.items[i] != id) {
-            p.pool.share(&x.lease, i, id);
-            changed = true;
-        };
-        if (!changed) return;
+        if (std.mem.eql(u32, x.lease.ids.items[0..path.len], path)) return;
         var up: Upload = .{ .p = p, .cache = cache };
-        try Upload.write(&up, x.lease.ids.items[0..path.len], 0);
+        Upload.write(&up, path, 0) catch |err| {
+            std.log.warn("qwen3_5: a lane's table did not take the kept pages: {s}", .{@errorName(err)});
+            return error.QwenLaneTable;
+        };
+        for (path, 0..) |id, i| p.pool.share(&x.lease, i, id);
     }
 
     /// TF_QWEN_POOL_LOG=1: the pool's census after a prompt pass (the agent replay's memory readings).
