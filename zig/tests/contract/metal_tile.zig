@@ -19,7 +19,8 @@ fn tileDepth(s: c.Shape) usize {
 
 /// LFM2.5-24B-A2B's expert projections, which #822 will run on the tiles: gate or up, 1,536 from 2,048, and down.
 const prompt_rows = [_]c.Shape{ .{ .rows = 64, .n = 1536, .k = 2048 }, .{ .rows = 33, .n = 2048, .k = 1536 } };
-const decode_rows = [_]c.Shape{ .{ .rows = 32, .n = 1536, .k = 2048 }, .{ .rows = 5, .n = 2048, .k = 1536 } };
+/// The twin's rows: those projections, and the short conv's 6,144 from 2,048 at 16 rows (the twin's MMA window).
+const decode_rows = [_]c.Shape{ .{ .rows = 32, .n = 1536, .k = 2048 }, .{ .rows = 5, .n = 2048, .k = 1536 }, .{ .rows = 16, .n = 6144, .k = 2048 } };
 
 pub fn spec(kind: Kind, name: []const u8) c.Spec {
     const k_tile = c.Tile{ .size = 128, .step = 64, .min = 64 };
