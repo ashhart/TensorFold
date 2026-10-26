@@ -13,6 +13,11 @@ pub fn refusal(o: api.Open) ?[]const u8 {
     return null;
 }
 
+/// Whether a disk store writes states behind (--learn, --learn-conversations), not only those RAM evicts (--spill-gib).
+pub fn writesBehind(o: api.Open) bool {
+    return o.learn != null and o.spill != .evicted;
+}
+
 /// The flag a family without the disk store names in its refusal: --spill-gib when that alone asked for the store.
 pub fn flag(o: api.Open) []const u8 {
     return if (o.spill == .evicted) "--spill-gib" else "--learn-conversations";
@@ -28,4 +33,11 @@ test "--checkpoint-slots on a Mac takes the disk store's company, and a refusal 
     try std.testing.expectEqual(@as(?usize, null), slots(.{ .dir = "d", .model_type = "nemotron_h" }));
     try std.testing.expectEqualStrings("--spill-gib", flag(spilled));
     for ([_]api.prompt_cache.rows.Spill{ .off, .finish }) |m| try std.testing.expectEqualStrings("--learn-conversations", flag(.{ .dir = "d", .model_type = "t", .spill = m }));
+}
+
+test "--spill-gib alone writes nothing behind, so Flash Next's shared sessions may open with it" {
+    try std.testing.expect(!writesBehind(.{ .dir = "d", .model_type = "qwen4_exp" }));
+    try std.testing.expect(!writesBehind(.{ .dir = "d", .model_type = "qwen4_exp", .learn = "/s", .learn_conversations = true, .spill = .evicted }));
+    try std.testing.expect(writesBehind(.{ .dir = "d", .model_type = "qwen4_exp", .learn = "/s", .learn_conversations = true, .spill = .finish }));
+    try std.testing.expect(writesBehind(.{ .dir = "d", .model_type = "qwen4_exp", .learn = "/s" }));
 }

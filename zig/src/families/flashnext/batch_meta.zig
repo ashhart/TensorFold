@@ -67,7 +67,7 @@ pub fn shared(fixed: bool, streams: u32, paired: bool, learning: bool) bool {
 pub fn refusal(fixed: bool, streams: u32, paired: bool, learning: bool) ?[]const u8 {
     if (!fixed or streams <= 1) return null;
     if (paired) return "Flash Next shared sessions are single-Mac only; use --parallel 1 with --speed-up";
-    if (learning) return "Flash Next shared sessions do not keep states on disk yet (--learn, --spill-gib); use --parallel 1 with them";
+    if (learning) return "Flash Next shared sessions spill evicted states (--spill-gib) but do not write states behind (--learn, --learn-conversations) yet; use --parallel 1 with those";
     return null;
 }
 
