@@ -103,10 +103,20 @@ pub fn reply(srv: *Server, c: *const Clef, cx: *Cx, body: Value) errors.Refused!
         else => cx.fail(.server, "the head failed ({s})", .{@errorName(e)}),
     };
     const answers = try json.newObject(a);
+    const raw = try json.newObject(a); // `"raw": true`: unrounded probabilities in encoder order (our extension)
     for (rec.questions, logits) |q, lg| {
         const probs = try a.alloc(f64, lg.len);
         softmax(lg, probs);
         try answers.put(a, q.id, try answer(a, qs.object.get(q.id).?, q, probs));
+        const r = try json.newObject(a);
+        try r.put(a, "type", .{ .string = @tagName(q.kind) });
+        const names = try a.alloc(Value, q.option_ids.len);
+        for (names, q.option_ids) |*n, o| n.* = .{ .string = o };
+        try r.put(a, "options", .{ .array = names });
+        const ps = try a.alloc(Value, probs.len);
+        for (ps, probs) |*v, p| v.* = .{ .float = p };
+        try r.put(a, "probs", .{ .array = ps });
+        try raw.put(a, q.id, .{ .object = r });
     }
     const usage = try json.newObject(a);
     try usage.put(a, "input_tokens", try json.intValue(a, rec.ids.len));
@@ -115,6 +125,7 @@ pub fn reply(srv: *Server, c: *const Clef, cx: *Cx, body: Value) errors.Refused!
     try out.put(a, "model", model);
     try out.put(a, "answers", .{ .object = answers });
     try out.put(a, "usage", .{ .object = usage });
+    if (body.get("raw")) |r| if (r == .bool and r.bool) try out.put(a, "raw", .{ .object = raw });
     return .{ .object = out };
 }
 
