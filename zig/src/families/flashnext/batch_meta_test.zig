@@ -82,4 +82,5 @@ test "an explicit --parallel above one refuses pairs and learning alike, auto an
     try std.testing.expect(std.mem.indexOf(u8, meta.refusal(true, 4, true, false).?, "--speed-up") != null);
     try std.testing.expect(std.mem.indexOf(u8, meta.refusal(true, 4, true, true).?, "--speed-up") != null);
     try std.testing.expect(std.mem.indexOf(u8, meta.refusal(true, 4, false, true).?, "--learn") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta.refusal(true, 4, false, true).?, "--spill-gib") != null);
 }
