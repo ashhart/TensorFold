@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Table = @import("table.zig").Table;
 const alloc = @import("allocate.zig");
+pub const pricedBatched = alloc.pricedBatched;
 
 pub const Constants = struct {
     depth_rate: f64 = 0.15, // weight of the newest round in a depth's acceptance
@@ -379,10 +380,4 @@ test "a shared round's drafts come out the same whichever depths its overhead wa
         try rule.budgets(&whos, probe, false, out);
     }
     try std.testing.expectEqualSlices(i64, &got[0], &got[1]);
-}
-
-/// A batched head's extra drafts cost the deepest stream's steps; FZ_PRICE_BATCHED=0 prices each stream's.
-pub fn pricedBatched() bool {
-    const v = std.c.getenv("FZ_PRICE_BATCHED") orelse return true;
-    return v[0] != '0';
 }
