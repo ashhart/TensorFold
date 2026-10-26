@@ -39,5 +39,6 @@
     "docs": 6,
     "tests": 7,
     "app": 8
-  }
+  },
+  "maxClaimsPerUser": 8
 }
