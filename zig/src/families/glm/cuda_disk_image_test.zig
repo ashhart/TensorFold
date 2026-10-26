@@ -12,7 +12,7 @@ const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
 
 /// Device addresses are host addresses: allocations from the page allocator, copies and fills as memcpy and memset.
-const H = struct {
+pub const H = struct {
     var held: [16]struct { ptr: u64 = 0, len: usize = 0 } = @splat(.{});
     fn bytes(p: u64, n: usize) []u8 {
         return @as([*]u8, @ptrFromInt(p))[0..n];
@@ -54,7 +54,7 @@ const H = struct {
     fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         return 0;
     }
-    fn driver() cuda.Driver {
+    pub fn driver() cuda.Driver {
         var d: cuda.Driver = undefined;
         d.api.cuMemAlloc_v2 = alloc;
         d.api.cuMemFree_v2 = free;
@@ -67,14 +67,14 @@ const H = struct {
     }
 };
 
-const capacity = 6144; // past the index rings' 4,096 rows, so a state at the end holds a full ring
+pub const capacity = 6144; // past the index rings' 4,096 rows, so a state at the end holds a full ring
 
 /// TP=2 rank 0's shapes on KDA, DSA, KDA, DSA layers.
-const Model = struct {
+pub const Model = struct {
     layers: [4]weights.Layer,
     w: weights.Weights,
 
-    fn init(m: *Model) !void {
+    pub fn init(m: *Model) !void {
         for (&m.layers, [_]bool{ false, true, false, true }) |*l, mla| l.mixer = if (mla) .{ .mla = undefined } else .{ .kda = undefined };
         m.w = undefined;
         m.w.config = .{};
@@ -180,5 +180,156 @@ test "GLM disk image: a kept state's image read out of its lease restores every 
     try pool.move(stream, &blank, &into, false);
     for (plan.parts[0..plan.count], into.parts[0..into.count]) |x, y| {
         try std.testing.expectEqualSlices(u8, H.bytes(x.live, x.len), H.bytes(y.live, y.len));
+    }
+}
+
+test "GLM disk image: the store's image is rank 0's then each other rank's prefix, and routes every byte once" {
+    var m: Model = undefined;
+    try m.init();
+    var d = H.driver();
+    const a = std.testing.allocator;
+    var st = try State.initFormat(a, &d, &m.w, capacity, true);
+    defer st.deinit();
+    const sh = try image.Shape.of(&st, &m.w.config, capacity, true);
+    const at: u32 = 4096;
+    const prefixes = [_]u64{ sh.prefix, sh.prefix - 4096, sh.prefix + 512 }; // TP=3: heads one by one
+    var list: std.ArrayList(image.Part) = .empty;
+    defer list.deinit(a);
+    try image.storeParts(sh, &prefixes, at, &list, a);
+    var total: u64 = 0;
+    for (list.items) |p| total += p.bytes;
+    try expectEqual(image.imageBytes(sh, at) + prefixes[1] + prefixes[2], total);
+    var pieces: std.ArrayList(image.Piece) = .empty;
+    defer pieces.deinit(a);
+    var seen: [3]u64 = .{ 0, 0, 0 };
+    var shared: u64 = 0;
+    const cuts = [_]u64{ 0, 40, image.Words.bytes + sh.prefix - 8, image.imageBytes(sh, at) + 100, total }; // ranges across the seams
+    for (cuts[0 .. cuts.len - 1], cuts[1..]) |lo, hi| {
+        pieces.clearRetainingCapacity();
+        try image.route(sh, &prefixes, at, lo, hi - lo, &pieces, a);
+        var n: u64 = 0;
+        for (pieces.items) |p| {
+            n += p.len;
+            seen[p.rank] += p.len;
+            if (p.shared) shared += p.len;
+            if (p.rank > 0) try expect(p.off >= image.Words.bytes and p.off + p.len <= image.Words.bytes + prefixes[p.rank] and !p.shared);
+            if (p.shared) try expect(p.rank == 0 and p.off >= image.Words.bytes + sh.prefix);
+        }
+        try expectEqual(hi - lo, n);
+    }
+    try expectEqual(image.imageBytes(sh, at), seen[0]);
+    try expectEqual(prefixes[1], seen[1]);
+    try expectEqual(prefixes[2], seen[2]);
+    try expectEqual(image.imageBytes(sh, at) - image.Words.bytes - sh.prefix, shared);
+    try expectError(error.SnapshotShape, image.route(sh, &prefixes, at, total - 4, 8, &pieces, a));
+}
+
+/// The fields of an engine the kept-state functions read, over a host-memory driver.
+const Fake = struct {
+    gpa: std.mem.Allocator,
+    d: *const cuda.Driver,
+    stream: cuda.Stream,
+    c: @import("config.zig").Config,
+    cur: struct { st: State, in_head: usize = 0 },
+    capacity: usize = capacity,
+    mtp: bool = true,
+    snaps: std.AutoHashMapUnmanaged(u64, @import("cuda_engine_types.zig").Snap) = .empty,
+    snap_pages: ?pages.Pool = null,
+    share_pages: bool = false,
+};
+
+test "GLM disk image: a disk read's blank state is refused until sealed, and its seal checks the words" {
+    const snaps = @import("cuda_snapshots.zig");
+    var m: Model = undefined;
+    try m.init();
+    var d = H.driver();
+    const a = std.testing.allocator;
+    var e: Fake = .{ .gpa = a, .d = &d, .stream = .{ .d = &d, .handle = null }, .c = m.w.config, .cur = .{ .st = try State.initFormat(a, &d, &m.w, capacity, false) } };
+    defer e.cur.st.deinit();
+    e.snap_pages = try pages.Pool.init(a, &d, 256 << 20, false);
+    defer e.snap_pages.?.deinit();
+    try e.snaps.ensureTotalCapacity(a, 8);
+    defer e.snaps.deinit(a);
+    const at: u32 = 2048;
+    try snaps.blankAs(&e, 7, at);
+    defer {
+        var s = e.snaps.get(7).?;
+        snaps.free(&e, &s);
+    }
+    try expectError(error.StateKept, snaps.blankAs(&e, 7, at));
+    try expectError(error.UnsealedState, snaps.restore(&e, 7));
+    try expectError(error.DiskWords, snaps.seal(&e, 7, at + @import("cuda_state.zig").window_rows + 1, .{ 0, 0 }, 0)); // a head past its verify window
+    try expectError(error.DiskWords, snaps.seal(&e, 7, at, .{ 0, 0 }, @as(u64, 1) << @intCast(e.cur.st.cur.len))); // a copy bit no layer has
+    try snaps.seal(&e, 7, at - 1, .{ 3, 5 }, 0b01);
+    const s = e.snaps.get(7).?;
+    const sh = try image.Shape.of(&e.cur.st, &e.c, capacity, true);
+    try expectEqual(image.leaseBytes(sh, at, at - 1), @as(u64, s.len));
+    try expectEqual(@as(usize, at - 1), s.mtp_len);
+    try expectEqual([2]usize{ 3, 5 }, s.bases);
+    try std.testing.expectEqualSlices(u1, &.{ 1, 0 }, s.cur);
+    try expectError(error.StateKept, snaps.seal(&e, 7, at, .{ 0, 0 }, 0));
+}
+
+/// A state's store image at `at` for two ranks, rank 1's prefix a copy of rank 0's: what the load's probe gathers.
+fn storeImage(a: std.mem.Allocator, d: *const cuda.Driver, pool: *pages.Pool, st: *const State, c: *const @import("config.zig").Config, sh: image.Shape, at: u32, mtp: u64) ![]u8 {
+    const plan = try Plan.init(st, c, at, mtp, 0);
+    var kept = try pool.take(plan.len);
+    defer pool.give(&kept);
+    try pool.move(.{ .d = d, .handle = null }, &kept, &plan, true);
+    var segs: std.ArrayList(image.Seg) = .empty;
+    defer segs.deinit(a);
+    try image.segments(sh, at, mtp, &segs, a);
+    const own = image.imageBytes(sh, at);
+    const out = try a.alloc(u8, @intCast(own + sh.prefix));
+    errdefer a.free(out);
+    @memset(out[0..image.Words.bytes], 0); // the words are not the probe's question
+    const copy: image.Copy = .{ .d = d, .pool = pool, .lease = &kept, .segs = segs.items, .words = undefined };
+    try copy.run(image.Words.bytes, out[image.Words.bytes..@intCast(own)], true);
+    @memcpy(out[@intCast(own)..], out[image.Words.bytes..][0..@intCast(sh.prefix)]);
+    return out;
+}
+
+test "GLM disk image: the probe's hash leaves out what a prompt pass does not write, whatever the slot ran before" {
+    var m: Model = undefined;
+    try m.init();
+    var d = H.driver();
+    const a = std.testing.allocator;
+    const c = &m.w.config;
+    var st = try State.initFormat(a, &d, &m.w, capacity, false);
+    defer st.deinit();
+    for (H.bytes(st.arena.buf.ptr, st.arena.buf.len), 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+    var pool = try pages.Pool.init(a, &d, 64 << 20, false);
+    defer pool.deinit();
+    const at: u32 = 2048;
+    const mtp: u64 = at - 1; // the head a row behind: its last pool unfinished
+    const sh = try image.Shape.of(&st, c, capacity, true);
+    const prefixes = [_]u64{ sh.prefix, sh.prefix };
+    var loose: std.ArrayList(image.Span) = .empty;
+    defer loose.deinit(a);
+    try image.unwritten(sh, &prefixes, &.{ sh.window, sh.window }, at, mtp, &loose, a);
+    try expectError(error.SnapshotShape, image.unwritten(sh, &prefixes, &.{ sh.window + 1, sh.window }, at, mtp, &loose, a));
+    const before = try storeImage(a, &d, &pool, &st, c, sh, at, mtp);
+    defer a.free(before);
+    // what load's timed windows leave in the slot: a window's rows, keys past `at`'s whole pools, the first-draft row
+    const row = c.i_dim * 2;
+    const pool_rows = @import("cuda_sparse.zig").pool;
+    @memset(H.bytes(st.proj, st.caches[0].lc - st.proj), 0xa5);
+    for (st.caches) |x| @memset(H.bytes(x.pk + at / pool_rows * row, 2 * row), 0xa5);
+    @memset(H.bytes(st.mtp_caches.pk + mtp / pool_rows * row, 2 * row), 0xa5);
+    @memset(H.bytes(st.prompt_hidden, c.hidden * 2), 0xa5);
+    const after = try storeImage(a, &d, &pool, &st, c, sh, at, mtp);
+    defer a.free(after);
+    try expect(!std.mem.eql(u8, before, after)); // the image carries them: hashed whole, two loads named two stores
+    image.clear(loose.items, 0, before);
+    image.clear(loose.items, 0, after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    // what the prompt writes still names the store: a KDA state, a whole pool's keys
+    for ([_]u64{ st.conv, st.caches[1].pk }) |p| {
+        H.bytes(p, 1)[0] ^= 1;
+        defer H.bytes(p, 1)[0] ^= 1;
+        const changed = try storeImage(a, &d, &pool, &st, c, sh, at, mtp);
+        defer a.free(changed);
+        image.clear(loose.items, 0, changed);
+        try expect(!std.mem.eql(u8, before, changed));
     }
 }
