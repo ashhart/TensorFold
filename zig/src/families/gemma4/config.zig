@@ -1,4 +1,4 @@
-//! Admission for dense Gemma 4 MLX affine checkpoints (31B and 12B): pinned geometries and widths, each refusal named.
+//! Admission for Gemma 4 MLX affine checkpoints (31B, 12B and E4B): pinned geometries and widths, each refusal named.
 const std = @import("std");
 pub const widths = @import("widths.zig");
 
@@ -14,7 +14,7 @@ pub const global_theta: f64 = 1000000.0;
 /// Pairs the global layers' proportional RoPE rotates: partial_rotary_factor 0.25 of 512 dims, in pairs.
 pub const global_rotated = 64;
 
-/// A model's sizes; everything else (head dims, window, vocab, RoPE) is the same in each admitted one.
+/// A model's sizes; everything else (head dims, vocab, RoPE) is the same in each admitted one.
 pub const Geometry = struct {
     name: []const u8,
     hidden: usize,
@@ -23,6 +23,12 @@ pub const Geometry = struct {
     query_heads: usize,
     sliding_kv_heads: usize,
     global_kv_heads: usize,
+    sliding_window: usize = window,
+    /// The E-series' per-layer input width (0: none), and the trailing layers that read an earlier layer's cache.
+    layer_input: usize = 0,
+    shared_layers: usize = 0,
+    /// Whether global layers have no v_proj (their values are their keys).
+    keys_are_values: bool = true,
 
     /// The 12B's unified checkpoint: its image input is the patch embedder, not the 31B's tower.
     pub fn unified(g: Geometry) bool {
@@ -49,11 +55,13 @@ pub const Geometry = struct {
 pub const dense31b: Geometry = .{ .name = "31B", .hidden = 5376, .layers = 60, .intermediate = 21504, .query_heads = 32, .sliding_kv_heads = 16, .global_kv_heads = 4 };
 /// Gemma 4 12B's text model (model_type gemma4_unified, text_config gemma4_unified_text).
 pub const unified12b: Geometry = .{ .name = "12B", .hidden = 3840, .layers = 48, .intermediate = 15360, .query_heads = 16, .sliding_kv_heads = 8, .global_kv_heads = 1 };
+/// Gemma 4 E4B (model_type gemma4, per-layer inputs and 18 layers reading the cache of an earlier one).
+pub const e4b: Geometry = .{ .name = "E4B", .hidden = 2560, .layers = 42, .intermediate = 10240, .query_heads = 8, .sliding_kv_heads = 2, .global_kv_heads = 2, .sliding_window = 512, .layer_input = 256, .shared_layers = 18, .keys_are_values = false };
 /// Layers an admitted geometry has at most: the size of per-layer arrays.
 pub const max_layers = 60;
 
 comptime {
-    for ([_]Geometry{ dense31b, unified12b }) |g| std.debug.assert(g.layers <= max_layers);
+    for ([_]Geometry{ dense31b, unified12b, e4b }) |g| std.debug.assert(g.layers <= max_layers);
 }
 
 pub const Error = error{
@@ -85,11 +93,28 @@ pub const Config = struct {
         defer gpa.free(bytes);
         return parse(gpa, bytes);
     }
+
+    /// The refusal of a backend that computes neither per-layer inputs nor shared caches, before it loads a weight.
+    pub fn requireDense(c: Config) Error!void {
+        if (c.geo.layer_input != 0) return error.GemmaPerLayerInputsNotServed;
+        if (c.geo.shared_layers != 0) return error.GemmaSharedKvNotServed;
+        if (!c.geo.keys_are_values) return error.GemmaKeysNotValues;
+    }
 };
 
 /// Whether layer `index` is a global (full attention) layer: every sixth, and the last.
 pub fn global(index: usize) bool {
     return index % 6 == 5;
+}
+
+/// The layer whose cache `index` reads when the layers from `first_shared` on share: the last of its kind before them.
+pub fn cacheOwner(index: usize, first_shared: usize) ?usize {
+    if (index < first_shared) return index;
+    var j = first_shared;
+    while (j > 0) : (j -= 1) {
+        if (global(j - 1) == global(index)) return j - 1;
+    }
+    return null;
 }
 
 /// A layer's head dim and key heads.
@@ -131,6 +156,15 @@ fn integer(o: std.json.ObjectMap, key: []const u8) Error!i64 {
 fn optionalInt(o: std.json.ObjectMap, key: []const u8) i64 {
     const v = o.get(key) orelse return 0;
     return if (v == .integer) v.integer else 0;
+}
+
+/// The E-series keys against each other: both per-layer input sizes set, and every shared layer has an owner to read.
+fn eSeries(text: std.json.ObjectMap, layers: i64) Error!void {
+    const shared = optionalInt(text, "num_kv_shared_layers");
+    if (optionalInt(text, "hidden_size_per_layer_input") <= 0 or optionalInt(text, "vocab_size_per_layer_input") <= 0) return error.BadGemmaConfig;
+    if (layers < 1 or layers > max_layers or shared < 0 or shared >= layers) return error.BadGemmaConfig;
+    const first: usize = @intCast(layers - shared);
+    for (first..@intCast(layers)) |i| if (cacheOwner(i, first) == null) return error.BadGemmaConfig;
 }
 
 fn isString(v: ?std.json.Value, expected: []const u8) bool {
@@ -181,21 +215,27 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     if (!unified and !isString(root.get("model_type"), "gemma4")) return error.BadGemmaConfig;
     const text = try object(try field(root, "text_config"));
     if (unified and !isString(text.get("model_type"), "gemma4_unified_text")) return error.GemmaUnifiedNotServed;
-    const geo = if (unified) unified12b else dense31b;
+    const e_series = !unified and (optionalInt(text, "hidden_size_per_layer_input") != 0 or optionalInt(text, "num_kv_shared_layers") != 0 or !isTrue(text, "attention_k_eq_v"));
+    const geo = if (unified) unified12b else if (e_series) e4b else dense31b;
     if (isTrue(text, "enable_moe_block")) return error.GemmaMoeNotServed;
-    if (optionalInt(text, "hidden_size_per_layer_input") != 0) return error.GemmaPerLayerInputsNotServed;
-    if (optionalInt(text, "num_kv_shared_layers") != 0) return error.GemmaSharedKvNotServed;
-    if (!isTrue(text, "attention_k_eq_v")) return error.GemmaKeysNotValues;
+    if (e_series) try eSeries(text, try integer(text, "num_hidden_layers"));
+    if (isTrue(text, "attention_k_eq_v") != geo.keys_are_values) return error.UnsupportedGemmaGeometry;
     if (isTrue(text, "use_double_wide_mlp") or isTrue(text, "attention_bias")) return error.UnsupportedGemmaGeometry;
     if (!isString(text.get("hidden_activation"), "gelu_pytorch_tanh")) return error.UnsupportedGemmaGeometry;
     if (!isTrue(text, "tie_word_embeddings")) return error.UnsupportedGemmaGeometry;
     const dims = .{
         .{ "hidden_size", geo.hidden },             .{ "vocab_size", vocab },                    .{ "num_hidden_layers", geo.layers },
         .{ "intermediate_size", geo.intermediate }, .{ "num_attention_heads", geo.query_heads }, .{ "num_key_value_heads", geo.sliding_kv_heads },
-        .{ "head_dim", sliding_dim },               .{ "global_head_dim", global_dim },          .{ "num_global_key_value_heads", geo.global_kv_heads },
-        .{ "sliding_window", window },
+        .{ "head_dim", sliding_dim },               .{ "global_head_dim", global_dim },          .{ "sliding_window", geo.sliding_window },
     };
     inline for (dims) |d| if (try integer(text, d[0]) != @as(i64, @intCast(d[1]))) return error.UnsupportedGemmaGeometry;
+    if (optionalInt(text, "hidden_size_per_layer_input") != geo.layer_input) return error.UnsupportedGemmaGeometry;
+    if (optionalInt(text, "num_kv_shared_layers") != geo.shared_layers) return error.UnsupportedGemmaGeometry;
+    if (e_series) {
+        if (try integer(text, "vocab_size_per_layer_input") != vocab) return error.UnsupportedGemmaGeometry;
+        const heads = text.get("num_global_key_value_heads") orelse .null; // E-series global layers take num_key_value_heads
+        if (heads != .null and !(heads == .integer and heads.integer == geo.global_kv_heads)) return error.UnsupportedGemmaGeometry;
+    } else if (try integer(text, "num_global_key_value_heads") != geo.global_kv_heads) return error.UnsupportedGemmaGeometry;
     if (try number(try field(text, "rms_norm_eps")) != 1e-6) return error.UnsupportedGemmaGeometry;
     if (try number(try field(text, "final_logit_softcapping")) != softcap) return error.UnsupportedGemmaGeometry;
     const types = try field(text, "layer_types");
@@ -218,6 +258,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
 const fixture = @embedFile("fixtures/config.json");
 /// The 4-bit 12B's config as tools/zig/gemma4_12b_convert.py writes it: unified model types (the text model's part).
 const fixture_12b = @embedFile("fixtures/config_12b.json");
+/// The E4B's config as its converter writes it: the text model's part, a quantization table, no towers.
+const fixture_e4b = @embedFile("fixtures/config_e4b.json");
 
 fn boundaryFixture(base: []const u8, key: []const u8, value: []const u8, root_eos: bool) ![]u8 {
     const a = std.testing.allocator;
@@ -290,6 +332,10 @@ fn edited12b(gpa: std.mem.Allocator, edits: []const [2][]const u8) ![]u8 {
     return bytes;
 }
 
+fn editedE4b(gpa: std.mem.Allocator, from: []const u8, to: []const u8) ![]u8 {
+    return std.mem.replaceOwned(u8, gpa, fixture_e4b, from, to);
+}
+
 test "the 31B 4-bit checkpoint's config is admitted, with its context and end tokens" {
     const c = try parse(std.testing.allocator, fixture);
     try std.testing.expectEqualStrings("31B", c.geo.name);
@@ -305,6 +351,69 @@ test "the 12B's unified text model is admitted with its own geometry" {
     try std.testing.expectEqual(@as(usize, 48), c.geo.layers);
     try std.testing.expectEqual(@as(usize, 262144), c.context);
     try std.testing.expectEqualSlices(u32, &.{ 1, 106, 50 }, c.eos[0..c.eos_count]);
+}
+
+test "the E4B's per-layer inputs, shared caches and separate values are admitted as geometry" {
+    const c = try parse(std.testing.allocator, fixture_e4b);
+    try std.testing.expectEqualStrings("E4B", c.geo.name);
+    try std.testing.expectEqual(e4b, c.geo);
+    try std.testing.expectEqual(@as(usize, 42), c.geo.layers);
+    try std.testing.expectEqual(@as(usize, 512), c.geo.sliding_window);
+    try std.testing.expectEqual(@as(usize, 2), c.geo.kvHeads(23));
+    try std.testing.expectEqual(@as(usize, 65536), c.context);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 106 }, c.eos[0..c.eos_count]);
+    const heads = try editedE4b(std.testing.allocator, "\"num_global_key_value_heads\": null", "\"num_global_key_value_heads\": 2");
+    defer std.testing.allocator.free(heads);
+    try std.testing.expectEqual(e4b, (try parse(std.testing.allocator, heads)).geo);
+}
+
+test "a backend that serves no E-series refuses each of its three needs by name" {
+    for ([_]Geometry{ dense31b, unified12b }) |g| try (Config{ .geo = g, .context = 1 }).requireDense();
+    try std.testing.expectError(error.GemmaPerLayerInputsNotServed, (try parse(std.testing.allocator, fixture_e4b)).requireDense());
+    var geo = dense31b;
+    geo.layer_input = 256;
+    try std.testing.expectError(error.GemmaPerLayerInputsNotServed, (Config{ .geo = geo, .context = 1 }).requireDense());
+    geo = dense31b;
+    geo.shared_layers = 18;
+    try std.testing.expectError(error.GemmaSharedKvNotServed, (Config{ .geo = geo, .context = 1 }).requireDense());
+    geo = dense31b;
+    geo.keys_are_values = false;
+    try std.testing.expectError(error.GemmaKeysNotValues, (Config{ .geo = geo, .context = 1 }).requireDense());
+}
+
+test "malformed E-series geometries are refused, and well-formed other sizes are not the E4B" {
+    const gpa = std.testing.allocator;
+    const cases = .{
+        .{ "\"num_kv_shared_layers\": 18", "\"num_kv_shared_layers\": 42", error.BadGemmaConfig },
+        .{ "\"num_kv_shared_layers\": 18", "\"num_kv_shared_layers\": -1", error.BadGemmaConfig },
+        .{ "\"num_kv_shared_layers\": 18", "\"num_kv_shared_layers\": 41", error.BadGemmaConfig },
+        .{ "\"num_kv_shared_layers\": 18", "\"num_kv_shared_layers\": 37", error.BadGemmaConfig },
+        .{ "\"hidden_size_per_layer_input\": 256", "\"hidden_size_per_layer_input\": 0", error.BadGemmaConfig },
+        .{ "\"vocab_size_per_layer_input\": 262144", "\"vocab_size_per_layer_input\": 0", error.BadGemmaConfig },
+        .{ "\"num_kv_shared_layers\": 18", "\"num_kv_shared_layers\": 12", error.UnsupportedGemmaGeometry },
+        .{ "\"hidden_size_per_layer_input\": 256", "\"hidden_size_per_layer_input\": 128", error.UnsupportedGemmaGeometry },
+        .{ "\"vocab_size_per_layer_input\": 262144", "\"vocab_size_per_layer_input\": 1024", error.UnsupportedGemmaGeometry },
+        .{ "\"attention_k_eq_v\": false", "\"attention_k_eq_v\": true", error.UnsupportedGemmaGeometry },
+        .{ "\"num_global_key_value_heads\": null", "\"num_global_key_value_heads\": 4", error.UnsupportedGemmaGeometry },
+        .{ "\"sliding_window\": 512", "\"sliding_window\": 1024", error.UnsupportedGemmaGeometry },
+        .{ "\"num_hidden_layers\": 42", "\"num_hidden_layers\": 48", error.UnsupportedGemmaGeometry },
+    };
+    inline for (cases) |c| {
+        const bytes = try editedE4b(gpa, c[0], c[1]);
+        defer gpa.free(bytes);
+        try std.testing.expect(!std.mem.eql(u8, bytes, fixture_e4b));
+        try std.testing.expectError(c[2], parse(gpa, bytes));
+    }
+}
+
+test "the cache a shared layer reads is the last layer of its kind before the shared ones" {
+    try std.testing.expectEqual(@as(?usize, 5), cacheOwner(5, 24));
+    try std.testing.expectEqual(@as(?usize, 22), cacheOwner(24, 24));
+    try std.testing.expectEqual(@as(?usize, 22), cacheOwner(40, 24));
+    try std.testing.expectEqual(@as(?usize, 23), cacheOwner(29, 24));
+    try std.testing.expectEqual(@as(?usize, 23), cacheOwner(41, 24));
+    try std.testing.expectEqual(@as(?usize, 0), cacheOwner(1, 1));
+    try std.testing.expectEqual(@as(?usize, null), cacheOwner(5, 1));
 }
 
 test "a model type with the other geometry's sizes is refused" {
@@ -329,8 +438,8 @@ test "each other unified layout is refused by name" {
     const gpa = std.testing.allocator;
     const cases = .{
         .{ "\"model_type\": \"gemma4_unified_text\"", "\"model_type\": \"gemma4_text\"", error.GemmaUnifiedNotServed },
-        .{ "\"hidden_size_per_layer_input\": 0", "\"hidden_size_per_layer_input\": 256", error.GemmaPerLayerInputsNotServed },
-        .{ "\"num_kv_shared_layers\": 0", "\"num_kv_shared_layers\": 18", error.GemmaSharedKvNotServed },
+        .{ "\"hidden_size_per_layer_input\": 0", "\"hidden_size_per_layer_input\": 256", error.UnsupportedGemmaGeometry },
+        .{ "\"num_kv_shared_layers\": 0", "\"num_kv_shared_layers\": 18", error.UnsupportedGemmaGeometry },
         .{ "\"enable_moe_block\": false", "\"enable_moe_block\": true", error.GemmaMoeNotServed },
         .{ "\"bits\": 4", "\"bits\": 7", error.UnsupportedGemmaQuantization },
     };
@@ -347,9 +456,9 @@ test "each other Gemma 4 layout is refused by name" {
     const cases = .{
         .{ "\"enable_moe_block\": false", "\"enable_moe_block\": true", error.GemmaMoeNotServed },
         .{ "\"model_type\": \"gemma4\"", "\"model_type\": \"gemma4_unified\"", error.GemmaUnifiedNotServed },
-        .{ "\"attention_k_eq_v\": true", "\"attention_k_eq_v\": false", error.GemmaKeysNotValues },
-        .{ "\"num_kv_shared_layers\": 0", "\"num_kv_shared_layers\": 18", error.GemmaSharedKvNotServed },
-        .{ "\"hidden_size_per_layer_input\": 0", "\"hidden_size_per_layer_input\": 256", error.GemmaPerLayerInputsNotServed },
+        .{ "\"attention_k_eq_v\": true", "\"attention_k_eq_v\": false", error.BadGemmaConfig },
+        .{ "\"num_kv_shared_layers\": 0", "\"num_kv_shared_layers\": 18", error.BadGemmaConfig },
+        .{ "\"hidden_size_per_layer_input\": 0", "\"hidden_size_per_layer_input\": 256", error.UnsupportedGemmaGeometry },
         .{ "\"sliding_window\": 1024", "\"sliding_window\": 512", error.UnsupportedGemmaGeometry },
     };
     inline for (cases) |c| {

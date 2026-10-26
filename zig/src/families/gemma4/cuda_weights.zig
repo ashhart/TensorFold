@@ -180,6 +180,7 @@ const lm = "language_model.model.";
 /// Admission as Metal's (MLX affine 2-6 and 8 bits, groups of 64), every tensor checked. `layers` caps them (checks).
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, layers: ?usize, images: bool) !Weights {
     const c = try cfg.Config.read(gpa, io, dir);
+    try c.requireDense();
     const geo = c.geo;
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();
@@ -294,4 +295,17 @@ fn vision(x: *Ctx, c: cfg.Config) !Vision {
     const pp = "embed_vision.embedding_projection";
     v.proj = if (x.ck.has(pp ++ ".scales")) .{ .q = try x.linear(pp, c.geo.hidden, vw, c.widths.vision.bits) } else .{ .bf16 = try x.tensor(pp ++ ".weight", .bf16, &.{ c.geo.hidden, vw }) };
     return v;
+}
+
+test "an E-series checkpoint is refused before a weight is read or the device is touched" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = @embedFile("fixtures/config_e4b.json") });
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(path);
+    var d: cuda.Driver = undefined;
+    const s: cuda.Stream = undefined;
+    var k: kern.Kernels = undefined;
+    try std.testing.expectError(error.GemmaPerLayerInputsNotServed, load(a, std.testing.io, &d, s, &k, path, null, false));
 }
