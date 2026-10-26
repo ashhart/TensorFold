@@ -38,6 +38,8 @@ pub const Kernels = struct {
     w8: ze.H,
     dec_narrow16: ze.H,
     dec_wide16: ze.H,
+    dec_narrow16s: ze.H, // the same two with the scales loaded ahead (same bits)
+    dec_wide16s: ze.H,
     dp_part: [2]ze.H,
     dp_rows: [2]ze.H,
     dp_sums: [2]ze.H,
@@ -155,6 +157,8 @@ pub const Runner = struct {
             .w8 = try d.kernel(mg, "g4_w8", 256),
             .dec_narrow16 = try d.kernel(mm, "w4k_s16x16", 64),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
+            .dec_narrow16s = try d.kernel(mm, "w4k_s16x16s", 64),
+            .dec_wide16s = try d.kernel(mm, "w4k1_d16s", 64),
             .dp_part = .{ try d.kernel(mg, "g4_attn_dp_part", 256), try d.kernel(mgg, "g4_attn_dp_part", 256) },
             .dp_rows = .{ try d.kernel(mg, "g4_attn_dp_rows", 256), try d.kernel(mgg, "g4_attn_dp_rows", 256) },
             .dp_sums = .{ try d.kernel(mg, "g4_attn_sums", 128), try d.kernel(mgg, "g4_attn_sums", 128) },
@@ -366,12 +370,12 @@ pub const Runner = struct {
         }
         if (w.wide) {
             if (w.n <= 6144) // 64 columns a group: twice the groups of the 128-column kernel on these narrow-N shapes
-                try r.d.launch(k.dec_wide16, .{ .x = 1, .y = w.n / 64 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+                try r.d.launch(if (@rem(G, 8) == 0) k.dec_wide16s else k.dec_wide16, .{ .x = 1, .y = w.n / 64 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
             else if (w.n >= 30000)
                 try r.d.launch(k.dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
             else
                 try r.d.launch(k.dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
-        } else try r.d.launch(k.dec_narrow16, .{ .x = 1, .y = w.n / 16 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G }); // K in 4 slices, 16 columns a group
+        } else try r.d.launch(if (@rem(G, 32) == 0) k.dec_narrow16s else k.dec_narrow16, .{ .x = 1, .y = w.n / 16 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G }); // K in 4 slices, 16 columns a group
     }
 
     fn dump(r: *Runner, name: []const u8, p0: u32, rows: u32) !void {
