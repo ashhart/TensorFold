@@ -22,9 +22,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .{ "gemm128", "zig/kernels/xpu/qwen27/gemm.cl", " -DGSZ=128" },
         .{ "gdn", "zig/kernels/xpu/qwen27/gdn_chunk.cl", "" },
         .{ "drafter", "zig/kernels/xpu/qwen27/drafter.cl", "" },
-        // Sage-A1.5 (qwen3_5_moe): the same sources at its shape (shape.h); the GEMM and GDN chunk images are shared
-        .{ "sage_glue", "zig/kernels/xpu/qwen27/glue.cl", " " ++ sage_config.sage_defines },
-        .{ "sage_decode", "zig/kernels/xpu/qwen27/decode.cl", " " ++ sage_config.sage_defines },
+        // Sage images use sage_defines and -DQ27_MROPE. The 27B images above do not define Q27_MROPE.
+        .{ "sage_glue", "zig/kernels/xpu/qwen27/glue.cl", " " ++ sage_config.sage_defines ++ " -DQ27_MROPE" },
+        .{ "sage_decode", "zig/kernels/xpu/qwen27/decode.cl", " " ++ sage_config.sage_defines ++ " -DQ27_MROPE" },
         .{ "sage_moe", "zig/kernels/xpu/sage_moe.cl", "" },
         .{ "qwen_vision", "zig/kernels/xpu/qwen_vision.cl", "" },
     }) |k| {

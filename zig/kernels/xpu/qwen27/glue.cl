@@ -257,6 +257,7 @@ KERNEL(256) void gdn_pre(global const half *P, global const half *CIN, global ha
   }
 }
 
+#if Q27_GQA == 8
 // One decode row of a GDN layer (no window, no streams): gdn_pre, gdn_step and gated_norm of v head h in one
 
 // work-group, with the same bits as the three kernels. Each work-group computes the convolution of its own channels:
@@ -364,6 +365,7 @@ KERNEL(256) void gdn_one(global const half *P, global const half *CIN, global ha
     }
   }
 }
+#endif
 
 // Same computation, one row per group of 256 (all the token's channels): better for long prompt chunks.
 KERNEL(256) void gdn_pre_rows(global const half *P, global const half *CIN, global half *COUT, global const ushort *CW,
