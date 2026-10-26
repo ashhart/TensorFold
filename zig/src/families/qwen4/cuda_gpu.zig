@@ -50,10 +50,11 @@ pub fn Gpu(comptime C: type) type {
             if (linear) out.gdn = try Gdn.load(b.driver, images.gdn);
             if (sparse) {
                 out.attention = try Attention.load(b.driver, images.attention, images.batch);
-                const table = try a.alloc(f32, @max(@as(usize, 1), c.rotary / 2));
+                const table = try a.alloc(f32, 3 + c.rotary / 2);
                 defer a.free(table);
                 try @import("rotary_table.zig").fill(c.theta, c.rotary, table);
-                out.rope = try b.upload(std.mem.sliceAsBytes(table));
+                // CUDA reads INV[i] directly; the three-word Metal prefix is not part of this buffer.
+                out.rope = try b.upload(std.mem.sliceAsBytes(table[if (c.rotary == 0) 2 else 3..]));
             }
             if (c.ple_count > 0) out.lexical = try Ple.load(b.driver, images.ple, c);
             return out;
