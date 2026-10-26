@@ -58,8 +58,35 @@ pub fn keepAs(e: anytype, id: u64) !void {
     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base } });
 }
 
+/// A disk read's state: `at`'s pages leased under rank 0's id on each rank, refused by `restore` until `seal`.
+pub fn blankAs(e: anytype, id: u64, at: usize) !void {
+    if (e.snaps.contains(id)) return error.StateKept;
+    const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
+    var lease = try pool.take(bytes(e, at));
+    errdefer pool.give(&lease);
+    const cur = try e.gpa.alloc(u1, e.cur.st.cur.len);
+    @memset(cur, 0);
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 } });
+}
+
+/// A blank state made whole from its image's words (its bytes are in or follow): a restore takes it from here.
+pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !void {
+    const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
+    if (s.len != 0) return error.StateKept;
+    if (s.cur.len > 64 or (s.cur.len < 64 and cur >> @intCast(s.cur.len) != 0)) return error.DiskWords;
+    const head = if (e.mtp) @min(e.capacity, s.pos + @import("cuda_state.zig").window_rows) else 0;
+    if (mtp_len > head) return error.DiskWords;
+    const n = try layout.Plan.size(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null);
+    if (n == 0 or n > s.lease.ids.items.len * pages.page) return error.SnapshotSize;
+    for (s.cur, 0..) |*b, i| b.* = @intCast(cur >> @intCast(i) & 1);
+    s.len = n;
+    s.mtp_len = mtp_len;
+    s.bases = bases;
+}
+
 pub fn restore(e: anytype, id: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
+    if (s.len == 0) return error.UnsealedState;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     const plan = try layout.Plan.init(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null);
     if (plan.len != s.len) return error.SnapshotSize;

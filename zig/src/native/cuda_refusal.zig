@@ -47,7 +47,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     }
-    if (o.learn_conversations and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
+    if (o.learn_conversations and F != nemotron.native and F != @import("glm_cuda").native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, GLM-5.3-Flash, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
     if (o.learn_conversations and o.tp > 1) if (@import("cuda_disk.zig").keptDisk(F)) |K| if (@hasDecl(K, "one_rank") and K.one_rank) return "--learn-conversations keeps one rank's states on disk for this CUDA family: serve without --tp or without --learn-conversations";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
@@ -135,7 +135,7 @@ test "a family with no head of its own words its --drafter refusal" {
     try std.testing.expectEqualStrings("--drafter: none yet", family(Headless, .{ .dir = "d", .model_type = "m", .drafter = "x" }) orelse "");
 }
 
-test "--learn-conversations opens Nemotron and a family whose states declare a disk image, no other" {
+test "--learn-conversations opens Nemotron, GLM-5.3-Flash and a family whose states declare a disk image, no other" {
     const Other = struct {};
     const Imaged = struct {
         pub const kept_disk = struct {};
@@ -160,6 +160,7 @@ test "--learn-conversations opens Nemotron and a family whose states declare a d
     try std.testing.expect(family(AllRanks, .{ .dir = "d", .model_type = "m", .tp = 2, .learn_conversations = true }) == null);
     try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
     try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
+    try std.testing.expect(family(@import("glm_cuda").native, .{ .dir = "d", .model_type = "glm5_next", .learn_conversations = true }) == null);
 }
 
 test "CUDA MTP controls respect window and probability bounds" {

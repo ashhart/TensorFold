@@ -37,6 +37,8 @@ pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
 pub const native = @import("cuda_native.zig");
 pub const snapshots = @import("cuda_snapshots.zig");
+pub const disk_image = @import("cuda_disk_image.zig");
+pub const disk_ranks = @import("cuda_disk_ranks.zig");
 
 test {
     _ = @import("cuda_tile.zig");

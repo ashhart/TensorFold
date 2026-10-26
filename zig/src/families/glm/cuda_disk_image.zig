@@ -112,13 +112,10 @@ pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: s
     var img: u64 = Words.bytes;
     var lease: u64 = 0;
     try out.append(a, .{ .img = 0, .len = Words.bytes, .from = .words });
-    var front: u64 = sh.prefix; // the prefix and every DSA layer's parts sit in the lease as in the image
-    for (0..sh.layers) |_| for (cache(sh, at)) |n| {
-        front += n;
-    };
-    try out.append(a, .{ .img = img, .len = front, .from = .{ .lease = 0 } });
-    img += front;
-    lease += front;
+    const f = front(sh, at);
+    try out.append(a, .{ .img = img, .len = f, .from = .{ .lease = 0 } });
+    img += f;
+    lease += f;
     if (sh.head) for (cache(sh, sh.headRows(at)), cache(sh, mtp_len)) |full, held| {
         if (held > 0) try out.append(a, .{ .img = img, .len = held, .from = .{ .lease = lease } });
         if (full > held) try out.append(a, .{ .img = img + held, .len = full - held, .from = .zeros });
@@ -126,6 +123,15 @@ pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: s
         lease += held;
     };
     if (sh.tail > 0) try out.append(a, .{ .img = img, .len = sh.tail, .from = .{ .lease = lease } });
+}
+
+/// The image bytes after the words that sit in the lease as in the image: the prefix and every DSA layer's parts.
+pub fn front(sh: Shape, at: u32) u64 {
+    var n: u64 = sh.prefix;
+    for (0..sh.layers) |_| for (cache(sh, at)) |x| {
+        n += x;
+    };
+    return n;
 }
 
 /// The lease bytes of a state at `at` whose head holds `mtp_len` rows (layout.Plan's length for it).
@@ -138,6 +144,44 @@ pub fn leaseBytes(sh: Shape, at: u32, mtp_len: u64) u64 {
         n += x;
     };
     return n;
+}
+
+/// Rank 0's image bytes at `at` (its head counted at a verify window past `at`).
+pub fn imageBytes(sh: Shape, at: u32) u64 {
+    var n: u64 = Words.bytes + front(sh, at) + sh.tail;
+    if (sh.head) for (cache(sh, sh.headRows(at))) |x| {
+        n += x;
+    };
+    return n;
+}
+
+/// `len` bytes at `off` of rank `rank`'s image; `shared`: past rank 0's prefix, the same bytes every rank holds.
+pub const Piece = struct { rank: u32, off: u64, len: u64, shared: bool };
+
+/// The store's image at `at`: rank 0's, then each other rank's prefix (rank 0's bytes stand for all the rest).
+pub fn storeParts(sh: Shape, prefixes: []const u64, at: u32, out: *std.ArrayList(Part), a: std.mem.Allocator) !void {
+    try parts(sh, at, out, a);
+    for (prefixes[1..]) |p| try out.append(a, .{ .bytes = p });
+}
+
+/// Store image bytes [off, off + len) split by rank: rank 0's image, then rank r's prefix after its words.
+pub fn route(sh: Shape, prefixes: []const u64, at: u32, off: u64, len: u64, out: *std.ArrayList(Piece), a: std.mem.Allocator) !void {
+    const own = Words.bytes + sh.prefix; // rank 0's bytes no other rank holds
+    var start: u64 = 0; // the section's first store byte
+    for (prefixes, 0..) |p, r| {
+        const size = if (r == 0) imageBytes(sh, at) else p;
+        defer start += size;
+        const lo = @max(off, start);
+        const hi = @min(off + len, start + size);
+        if (lo >= hi) continue;
+        if (r > 0) {
+            try out.append(a, .{ .rank = @intCast(r), .off = Words.bytes + lo - start, .len = hi - lo, .shared = false });
+            continue;
+        }
+        if (lo < own) try out.append(a, .{ .rank = 0, .off = lo, .len = @min(hi, own) - lo, .shared = false });
+        if (hi > own) try out.append(a, .{ .rank = 0, .off = @max(lo, own), .len = hi - @max(lo, own), .shared = true });
+    }
+    if (off + len > start) return error.SnapshotShape;
 }
 
 /// Copies between `host` and image bytes [off, off + host.len) of a lease: out (lease to host) or in.

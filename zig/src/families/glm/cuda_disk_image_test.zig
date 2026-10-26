@@ -182,3 +182,89 @@ test "GLM disk image: a kept state's image read out of its lease restores every 
         try std.testing.expectEqualSlices(u8, H.bytes(x.live, x.len), H.bytes(y.live, y.len));
     }
 }
+
+test "GLM disk image: the store's image is rank 0's then each other rank's prefix, and routes every byte once" {
+    var m: Model = undefined;
+    try m.init();
+    var d = H.driver();
+    const a = std.testing.allocator;
+    var st = try State.initFormat(a, &d, &m.w, capacity, true);
+    defer st.deinit();
+    const sh = try image.Shape.of(&st, &m.w.config, capacity, true);
+    const at: u32 = 4096;
+    const prefixes = [_]u64{ sh.prefix, sh.prefix - 4096, sh.prefix + 512 }; // TP=3: heads one by one
+    var list: std.ArrayList(image.Part) = .empty;
+    defer list.deinit(a);
+    try image.storeParts(sh, &prefixes, at, &list, a);
+    var total: u64 = 0;
+    for (list.items) |p| total += p.bytes;
+    try expectEqual(image.imageBytes(sh, at) + prefixes[1] + prefixes[2], total);
+    var pieces: std.ArrayList(image.Piece) = .empty;
+    defer pieces.deinit(a);
+    var seen: [3]u64 = .{ 0, 0, 0 };
+    var shared: u64 = 0;
+    const cuts = [_]u64{ 0, 40, image.Words.bytes + sh.prefix - 8, image.imageBytes(sh, at) + 100, total }; // ranges across the seams
+    for (cuts[0 .. cuts.len - 1], cuts[1..]) |lo, hi| {
+        pieces.clearRetainingCapacity();
+        try image.route(sh, &prefixes, at, lo, hi - lo, &pieces, a);
+        var n: u64 = 0;
+        for (pieces.items) |p| {
+            n += p.len;
+            seen[p.rank] += p.len;
+            if (p.shared) shared += p.len;
+            if (p.rank > 0) try expect(p.off >= image.Words.bytes and p.off + p.len <= image.Words.bytes + prefixes[p.rank] and !p.shared);
+            if (p.shared) try expect(p.rank == 0 and p.off >= image.Words.bytes + sh.prefix);
+        }
+        try expectEqual(hi - lo, n);
+    }
+    try expectEqual(image.imageBytes(sh, at), seen[0]);
+    try expectEqual(prefixes[1], seen[1]);
+    try expectEqual(prefixes[2], seen[2]);
+    try expectEqual(image.imageBytes(sh, at) - image.Words.bytes - sh.prefix, shared);
+    try expectError(error.SnapshotShape, image.route(sh, &prefixes, at, total - 4, 8, &pieces, a));
+}
+
+/// The fields of an engine the kept-state functions read, over a host-memory driver.
+const Fake = struct {
+    gpa: std.mem.Allocator,
+    d: *const cuda.Driver,
+    stream: cuda.Stream,
+    c: @import("config.zig").Config,
+    cur: struct { st: State, in_head: usize = 0 },
+    capacity: usize = capacity,
+    mtp: bool = true,
+    snaps: std.AutoHashMapUnmanaged(u64, @import("cuda_engine_types.zig").Snap) = .empty,
+    snap_pages: ?pages.Pool = null,
+};
+
+test "GLM disk image: a disk read's blank state is refused until sealed, and its seal checks the words" {
+    const snaps = @import("cuda_snapshots.zig");
+    var m: Model = undefined;
+    try m.init();
+    var d = H.driver();
+    const a = std.testing.allocator;
+    var e: Fake = .{ .gpa = a, .d = &d, .stream = .{ .d = &d, .handle = null }, .c = m.w.config, .cur = .{ .st = try State.initFormat(a, &d, &m.w, capacity, false) } };
+    defer e.cur.st.deinit();
+    e.snap_pages = try pages.Pool.init(a, &d, 256 << 20);
+    defer e.snap_pages.?.deinit();
+    try e.snaps.ensureTotalCapacity(a, 8);
+    defer e.snaps.deinit(a);
+    const at: u32 = 2048;
+    try snaps.blankAs(&e, 7, at);
+    defer {
+        var s = e.snaps.get(7).?;
+        snaps.free(&e, &s);
+    }
+    try expectError(error.StateKept, snaps.blankAs(&e, 7, at));
+    try expectError(error.UnsealedState, snaps.restore(&e, 7));
+    try expectError(error.DiskWords, snaps.seal(&e, 7, at + 9, .{ 0, 0 }, 0)); // a head past its verify window
+    try expectError(error.DiskWords, snaps.seal(&e, 7, at, .{ 0, 0 }, @as(u64, 1) << @intCast(e.cur.st.cur.len))); // a copy bit no layer has
+    try snaps.seal(&e, 7, at - 1, .{ 3, 5 }, 0b01);
+    const s = e.snaps.get(7).?;
+    const sh = try image.Shape.of(&e.cur.st, &e.c, capacity, true);
+    try expectEqual(image.leaseBytes(sh, at, at - 1), @as(u64, s.len));
+    try expectEqual(@as(usize, at - 1), s.mtp_len);
+    try expectEqual([2]usize{ 3, 5 }, s.bases);
+    try std.testing.expectEqualSlices(u1, &.{ 1, 0 }, s.cur);
+    try expectError(error.StateKept, snaps.seal(&e, 7, at, .{ 0, 0 }, 0));
+}
