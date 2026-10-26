@@ -112,19 +112,18 @@ pub fn Kept(comptime F: type) type {
                 }
             };
             var hook: Hook = .{ .c = c };
+            defer if (hook.saved) |saved| F.snap_drop(c, saved);
             const marks = [_]u32{4136};
             var s = try lanes.Stream.init(a, .{ .id = "probe", .prompt = &toks, .max_new = 1, .drafts = c.head != null, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
             defer s.deinit(a);
-            const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
-            backend.vtable.prefill(backend.ptr, &s) catch |e| {
-                backend.vtable.release(backend.ptr, &s);
-                return e;
+            const ns = pass: {
+                defer backend.vtable.release(backend.ptr, &s); // once, whether the pass, its wait or nothing failed
+                const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
+                try backend.vtable.prefill(backend.ptr, &s);
+                try c.stream.synchronize();
+                break :pass std.Io.Clock.awake.now(io).toNanoseconds() - t0;
             };
-            try c.stream.synchronize();
-            const ns = std.Io.Clock.awake.now(io).toNanoseconds() - t0;
-            backend.vtable.release(backend.ptr, &s);
             const saved = hook.saved orelse return hook.failed orelse error.ProbeUnmarked;
-            defer F.snap_drop(c, saved);
             if (!whole(c, saved)) return error.ProbeUnmarked;
             const st: *snap.Snap = @ptrCast(@alignCast(saved));
             const bytes = try a.alloc(u8, words + st.buf.len);
@@ -147,5 +146,42 @@ test "the image covers a state's device bytes once, its rows split into 256-toke
         try partsOf(at, head, &parts, a);
         try std.testing.expect(rows.image.valid(parts.items, at, rows.block_tokens));
         try std.testing.expectEqual(words + snap.bytes(at, head), rows.image.imageBytes(parts.items));
+    };
+}
+
+test "the image's parts are cuda_snap.move's pieces in its order: sizes, offsets and rows, with and without the head" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |head| for ([_]u32{ 0, 1, 3, 4, 255, 256, 1000, 4136, 4137 }) |at| {
+        var parts: std.ArrayList(rows.image.Part) = .empty;
+        defer parts.deinit(a);
+        try partsOf(at, head, &parts, a);
+        try std.testing.expectEqual(@as(u64, words), parts.items[0].bytes);
+        const o = snap.order(at, head);
+        var i: usize = 1;
+        var off: u64 = words; // the image's offset; move's buffer offset is this less the words
+        var moved: u64 = 0;
+        for (o.p[0..o.len]) |p| {
+            if (p.row == 0) { // the DeltaNet's pieces and the tail: one part of every layer's bytes
+                try std.testing.expectEqual(@as(u64, p.layers * p.n), parts.items[i].bytes);
+                try std.testing.expectEqual(@as(u32, 0), parts.items[i].row);
+                off += parts.items[i].bytes;
+                moved += p.layers * p.n;
+                i += 1;
+                continue;
+            }
+            for (0..p.layers) |_| { // each layer's rows: keys, values, indexer keys, pooled blocks
+                const x = parts.items[i];
+                try std.testing.expectEqual(@as(u64, p.n), x.bytes);
+                try std.testing.expectEqual(@as(u64, p.row), x.row);
+                try std.testing.expectEqual(@as(u64, p.per), x.per);
+                try std.testing.expectEqual(off - words, moved);
+                off += x.bytes;
+                moved += p.n;
+                i += 1;
+            }
+        }
+        try std.testing.expectEqual(parts.items.len, i);
+        try std.testing.expectEqual(@as(u64, snap.bytes(at, head)), moved);
+        try std.testing.expectEqual(rows.image.imageBytes(parts.items), off);
     };
 }
