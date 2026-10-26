@@ -249,6 +249,22 @@ fn gauge(w: *std.Io.Writer, name: []const u8, kind: []const u8, help: []const u8
     try w.print("{s}{s} {d}\n", .{ prefix, name, value });
 }
 
+pub fn renderConnections(w: *std.Io.Writer, open: u32) !void {
+    try gauge(w, "open_connections", "gauge", "Client TCP connections admitted and not yet closed, including the one serving this scrape; keep-alive idle connections count.", open);
+}
+
+test "open connections render help, gauge type and admitted count" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try renderConnections(&out.writer, 3);
+    try std.testing.expectEqualStrings(
+        "# HELP tensorfold:open_connections Client TCP connections admitted and not yet closed, including the one serving this scrape; keep-alive idle connections count.\n" ++
+            "# TYPE tensorfold:open_connections gauge\n" ++
+            "tensorfold:open_connections 3\n",
+        out.written(),
+    );
+}
+
 fn processGauges(w: *std.Io.Writer, sample: ?process.Snapshot) !void {
     const p = sample orelse return;
     try gauge(w, "process_footprint_bytes", "gauge", "Current OS physical footprint including Metal buffers (macOS).", p.physical_footprint_bytes);
