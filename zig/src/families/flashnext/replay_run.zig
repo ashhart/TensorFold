@@ -57,6 +57,7 @@ pub const Run = struct {
     span_pipe: mtl.Pipeline = undefined,
     positions_pipe: mtl.Pipeline = undefined,
     draw_pipe: mtl.Pipeline = undefined, // tf_sample_full: a sampled reply's draws (sample.zig)
+    draw_ids_pipe: mtl.Pipeline = undefined, // tf_sample_full_ids: a sampled stream's drafts over the draft head's ids
     take_pipe: mtl.Pipeline = undefined,
     gpu_round: bool = false,
     ar: Buf = undefined,
