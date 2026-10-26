@@ -433,6 +433,76 @@ test "a stream ends with a call to a tool the request did not offer as text, as 
     try std.testing.expectEqualStrings(message.get("content").?.string, std.mem.trim(u8, prose.items, " \n"));
 }
 
+const lookup_reply = "<tool_call>{\"name\":\"lookup\",\"arguments\":{}}</tool_call>";
+const vault_reply = "<tool_call>{\"name\":\"vault_list\",\"arguments\":{}}</tool_call>";
+
+fn expectStreamMatchesWhole(reply: []const u8) !void {
+    var text: DropLate = .{};
+    var backend: Capture = .{ .reply = reply };
+    defer std.testing.allocator.free(backend.prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const whole = try exchange(srv, "/v1/chat/completions", prose_chat ++ "}");
+    defer std.testing.allocator.free(whole.body);
+    try std.testing.expectEqual(@as(u16, 200), whole.status);
+    const message = (try json.parse(a, whole.body)).ok.get("choices").?.array[0].get("message").?;
+    const expected_calls = if (message.get("tool_calls")) |calls| calls.array else &.{};
+    const got = try exchange(srv, "/v1/chat/completions", prose_chat ++ ",\"stream\":true}");
+    defer std.testing.allocator.free(got.body);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    var prose: std.ArrayList(u8) = .empty;
+    var arguments: std.ArrayList(u8) = .empty;
+    var names: std.ArrayList(u8) = .empty;
+    var calls: usize = 0;
+    var lines = std.mem.splitScalar(u8, got.body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data: ")) continue;
+        const data = std.mem.trimEnd(u8, line["data: ".len..], "\r");
+        if (std.mem.eql(u8, data, "[DONE]")) continue;
+        const choices = (try json.parse(a, data)).ok.get("choices").?.array;
+        if (choices.len == 0) continue;
+        const delta = choices[0].get("delta").?;
+        if (delta.get("content")) |content| try prose.appendSlice(a, content.string);
+        if (delta.get("tool_calls")) |tc| for (tc.array) |call| {
+            try std.testing.expectEqual(@as(i64, 0), call.get("index").?.int64().?);
+            if (call.get("id")) |id| {
+                try std.testing.expect(id.string.len > 0);
+                try std.testing.expectEqualStrings("function", call.get("type").?.string);
+                calls += 1;
+            }
+            const function = call.get("function").?;
+            if (function.get("name")) |name| try names.appendSlice(a, name.string);
+            if (function.get("arguments")) |args| try arguments.appendSlice(a, args.string);
+        };
+    }
+    try std.testing.expectEqual(expected_calls.len, calls);
+    try std.testing.expectEqualStrings(if (expected_calls.len > 0) expected_calls[0].get("function").?.get("name").?.string else "", names.items);
+    try std.testing.expectEqualStrings(if (expected_calls.len > 0) expected_calls[0].get("function").?.get("arguments").?.string else "", arguments.items);
+    try std.testing.expectEqualStrings(textOf(message, "content"), prose.items);
+}
+
+test "stream replay retains the unoffered envelope after an offered call" {
+    try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ vault_reply);
+}
+
+test "stream retained envelope preserves the leading newline" {
+    try expectStreamMatchesWhole("\nChecking." ++ vault_reply);
+}
+
+test "stream content and tool calls occur exactly once across all chunks" {
+    try expectStreamMatchesWhole(lookup_reply);
+    try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ vault_reply);
+    try expectStreamMatchesWhole("\nChecking." ++ vault_reply);
+}
+
 test "single-call whole replies retain prose and tool-only replies still have null content" {
     var text: DropLate = .{};
     var backend: Capture = .{};
