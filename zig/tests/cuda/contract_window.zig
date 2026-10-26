@@ -38,6 +38,14 @@ pub fn spec(f: Cfg) c.Spec {
     return .{ .name = f.name, .accum = .f32, .depth = keyChain, .ops = 1, .out = .bf16, .tiles = .{ .{ .size = row_tile }, .{}, k_tile }, .served = f.served, .sums = .{ .why = if (f.d == 128) attn.why else split_why } };
 }
 
+/// The runner's window kernels: window_attention.cu and window_rows.cu, with window_pages.cu for the paged rows.
+pub fn load(d: *const cuda.Driver) !wa.WindowAttention {
+    var w = try wa.WindowAttention.load(d);
+    errdefer w.unload();
+    try w.loadPages(d);
+    return w;
+}
+
 pub const Window = struct {
     rig: rig_.Rig,
     f: Cfg,
