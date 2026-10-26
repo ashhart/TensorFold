@@ -258,9 +258,13 @@ KERNEL(256) void gdn_pre(global const half *P, global const half *CIN, global ha
 }
 
 // One decode row of a GDN layer (no window, no streams): gdn_pre, gdn_step and gated_norm of v head h in one
+
 // work-group, with the same bits as the three kernels. Each work-group computes the convolution of its own channels:
+
 // the q and k of its K head and the v of its head (the first V head of a K head writes the q, k state). Sub-group sg
+
 // then holds rows 8 sg ... 8 sg + 7 of the head's state, as gdn_step. S: the state, read and written in place.
+
 // Grid (Q27_GV); gs: AHI, ALO groups, 16 to 128.
 KERNEL(256) void gdn_one(global const half *P, global const half *CIN, global half *COUT, global const ushort *CW,
                          global const ushort *ALOG, global const ushort *DT, global float *S, global const ushort *WN,

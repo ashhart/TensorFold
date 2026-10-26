@@ -1,5 +1,7 @@
 // Sage-A1.5 (qwen3_5_moe) MoE decode ops: fp16 router, softmax top-k with renormalised weights, the shared expert's
+
 // sigmoid gate, 4-bit affine (MLX, groups of 64) SwiGLU experts on stacked tables, and the gated combine.
+
 // x: the post-attention norm's fp16 rows [rows, dim] (forward.zig's h); out: fp16 [rows, dim], the residual's r.
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 inline float bf(ushort v) { return as_float((uint)v << 16); }
@@ -15,6 +17,7 @@ inline ushort to_bf(float f) {
 #define MAX_TOPK 8
 
 // logits[row][e] = x[row] . gate[e] in fp32 (gate fp16 [n_experts, dim]); slot n_experts is the shared expert's gate.
+
 // Grid (n_experts + 1, rows), one sub-group a work-group; dim: a multiple of 8.
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_router(__global const half *x, __global const half *gate, __global const half *shared_gate,
@@ -32,6 +35,7 @@ __kernel void sage_router(__global const half *x, __global const half *gate, __g
 }
 
 // Per row: softmax over n_experts, top_k by probability (ties to the lower id), weights renormalised to sum 1.
+
 // shared_w[row] = sigmoid(the shared gate's logit). Grid (rows), one sub-group a work-group.
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_route(__global const float *logits, __global uint *ids, __global float *wts, __global float *shared_w,
@@ -84,7 +88,8 @@ __kernel void sage_route(__global const float *logits, __global uint *ids, __glo
 }
 
 // 4-bit affine dot of row `row` of a stacked table with fp16 x; the sum is valid on every lane of the sub-group.
-// A lane reads 4 words (32 values, half a group of 64) at a time, with one scale and one bias. in_dim: a multiple of 32.
+
+// A lane reads 4 words (32 values, half a group of 64), with one scale and one bias. in_dim: a multiple of 32.
 inline float qdot(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const half *x,
                   ulong row, uint in_dim) {
     const uint lane = get_sub_group_local_id();
@@ -136,8 +141,11 @@ inline float2 qdot2(__global const uint *w, __global const ushort *scales, __glo
 }
 
 // gate and up of one expert pair and SwiGLU: act[p][r] = fp16(bf16(silu(bf16(gate)) * bf16(up))). One work-group a
+
 // row r (K split over its work-items); grid (ff, pairs).
+
 // Pair p is (row p / top_k, expert ids[p]); pairs at or past n_pairs are the shared expert of row p - n_pairs, whose
+
 // tables are the `sh_` ones. gate_up holds 2 * ff rows an expert: gate rows 0..ff, then up rows.
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_expert_swiglu(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
@@ -155,6 +163,7 @@ __kernel void sage_expert_swiglu(__global const uint *w, __global const ushort *
 }
 
 // sage_expert_swiglu with SROWS rows a work-group of 32 (dim == 2048): a work-item keeps its 64 values of x (its group
+
 // of 64) in registers for the gate and up rows of all SROWS rows. Grid (ff / SROWS, pairs).
 #define SROWS 4
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -222,7 +231,9 @@ __kernel void sage_expert_down(__global const uint *w, __global const ushort *sc
 }
 
 // sage_expert_down with DROWS rows a sub-group: the lane's 32 values of act (its quad of in_dim 512) stay in
+
 // registers for all the rows, so act is read once a sub-group, not once a row. Grid (dim / (sub-groups a group *
+
 // DROWS), pairs); ff == 512.
 #define DROWS 8
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -263,8 +274,10 @@ __kernel void sage_expert_down8(__global const uint *w, __global const ushort *s
 }
 
 // One decode row: down of all its pairs and sage_moe_combine in one kernel. A sub-group takes CROWS output rows of
+
 // every pair (expert picks in order, then the shared expert) and adds them as the combine does, so no y round trip.
-// out[i] = fp16(bf16(sum_k wts[k] y[k][i] + shared_w y_shared[i])). Grid (dim / (sub-groups a group * CROWS)); ff == 512.
+
+// out[i] = fp16(bf16(sum_k wts[k] y[k][i] + shared_w y_shared[i])). Grid (dim / (SG * CROWS)). ff == 512.
 #define CROWS 2
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_down_combine(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
@@ -323,8 +336,11 @@ __kernel void sage_moe_combine(__global const float *y, __global const float *wt
 }
 
 // ---------------------------------------------------------------- grouped prompt MoE (XMX)
+
 // A prompt chunk's pairs sorted by expert into tiles of at most MC pairs, so a tile reads its expert's weights once.
+
 // The shared expert is expert n_experts, one pair a row (pair n_pairs + row). act and y keep the pair index, so
+
 // sage_moe_combine is the same as in decode.
 #define MC 16
 #define DPH(a, b, c) intel_sub_group_f16_f16_matrix_mad_k16(as_short8(a), as_int8(b), c)
@@ -340,6 +356,7 @@ __kernel void sage_group_sums(__global const half *src, __global float *sums, ui
 }
 
 // order: the pair indices grouped by expert (shared expert last); tiles: (expert, first slot, count) uint4 records;
+
 // ntiles[0]: the tile count. One work-group of 256 work-items.
 __kernel __attribute__((reqd_work_group_size(256, 1, 1)))
 void sage_moe_sort(__global const uint *ids, __global uint *order, __global uint4 *tiles, __global uint *ntiles,
@@ -368,11 +385,13 @@ void sage_moe_sort(__global const uint *ids, __global uint *order, __global uint
     for (uint r = lid; r < rows; r += 256) order[start[n_experts] + r] = n_pairs + r;
 }
 
-// The x row a pair reads: its token's row (routed) or row p - n_pairs (shared) for gate|up; the pair's own row for down.
+// x row a pair reads: the token row, or row p - n_pairs when shared. Down reads the pair's own row.
 inline uint pair_row(uint p, uint n_pairs, uint top_k, bool own) { return own ? p : p >= n_pairs ? p - n_pairs : p / top_k; }
 
 // acc[rb][c] += x[tile rows] . W[col block c]ᵀ over in_dim, 4-bit affine (MLX 4/64): per group of 64, the DPAS dot of
+
 // x with the raw nibbles, then scale * dot + bias * sum(x). Lane l owns column cols[c] + l; rows of the tile past `n`
+
 // read the tile's first row and are not stored.
 #define TILE_DOT(NB)                                                                                                    \
     for (uint g = 0; g < groups; g++) {                                                                                \
@@ -481,6 +500,7 @@ __kernel void sage_tile_down(__global const uint *w, __global const ushort *ex_s
 }
 
 // sage_router for prompt rows on XMX: 16 rows x 16 experts a sub-group, fp16 DPAS into fp32. Column n_experts is the
+
 // shared expert's gate. Grid ((n_experts + 16) / 16, (rows + 15) / 16), one sub-group a group.
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_router_tile(__global const half *x, __global const half *gate, __global const half *shared_gate,
@@ -507,8 +527,11 @@ __kernel void sage_router_tile(__global const half *x, __global const half *gate
 }
 
 // ---------------------------------------------------------------- grouped decode MoE (several streams)
+
 // A decode step of `rows` rows (one a stream, at most MAX_G). sage_group_plan groups the step's pairs by expert, and
+
 // the group kernels do every pair of a group, so a step reads each expert's weights once. The shared expert is a
+
 // group of all rows. act and y keep the pair index, as in decode.
 #define MAX_G 16
 #define GREC (2 + MAX_G) // a group record: expert (n_experts: the shared one), count, pair indices
@@ -561,7 +584,7 @@ inline void unpack32(uint4 pk, float *v) {
     }
 }
 
-// gate|up and SwiGLU for every pair of a group: act[p][r] as sage_expert_swiglu. Grid (ff, n_pairs + 1: the most groups).
+// gate|up and SwiGLU for every pair: act[p][r] as sage_expert_swiglu. Grid (ff, n_pairs + 1).
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_group_swiglu(__global const uint *w, __global const ushort *ex_scales, __global const ushort *ex_biases,
                                 __global const uint *sh_w, __global const ushort *sh_scales, __global const ushort *sh_biases,
@@ -611,6 +634,7 @@ __kernel void sage_group_swiglu(__global const uint *w, __global const ushort *e
 }
 
 // down for every pair of a group to fp32: y[p][r] as sage_expert_down. A lane owns one output row and reads all of it,
+
 // and the act values are the same for the whole sub-group. Grid (dim / 16, n_pairs + 1: the most groups).
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void sage_group_down(__global const uint *w, __global const ushort *ex_scales, __global const ushort *ex_biases,

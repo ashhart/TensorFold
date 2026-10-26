@@ -1,4 +1,5 @@
 // The Qwen3.5 vision tower on Xe2 (transformers' Qwen3_5VisionModel in bf16), as kernels/cuda/qwen_vision.cu runs it:
+
 // the GEMMs sum in fp32 on DPAS, the epilogues add the bias to the fp32 sums and round once.
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -15,7 +16,9 @@ inline ushort to_bf(float f) {
 inline float rnd(float f) { return bf(to_bf(f)); }
 
 // C [M, N] fp32 = A [M, K] bf16 x W [N, K]^T bf16 (a Linear's weight as stored). K is a multiple of 16, rows are
+
 // 16-byte multiples. A group of 8 sub-groups holds a 128 x 64 tile: 4 sub-groups down M by 2 across N, 32 x 32 each.
+
 // The 2-D block reads return zeros past M and N, and the writes stop there.
 KWG(128) void qv_gemm(global const ushort *A, global const ushort *W, global float *C, int M, int N, int K) {
   const int sg = get_sub_group_id();
@@ -81,6 +84,7 @@ KWG(256) void qv_layernorm(global const ushort *x, global const ushort *w, globa
 }
 
 // qkv = bf16(acc + b) split into q, k, v [heads][rows][hd]; q and k get the axial 2-D rotary in fp32 (h, then w).
+
 // Groups (rows, heads), 128 items.
 KWG(128) void qv_qkv_rope(global const float *acc, global const ushort *bias, global const int *hw, global const float *inv,
                           global ushort *q, global ushort *k, global ushort *v, int rows, int heads, int hd) {
@@ -107,6 +111,7 @@ KWG(128) void qv_qkv_rope(global const float *acc, global const ushort *bias, gl
 }
 
 // Attention within one image's rows [s0, s0 + n) at a head width of HD (72): an item a query row, an online softmax in
+
 // fp32 over key tiles of 64 rows in local memory. Groups (query tiles of 64, heads), 64 items.
 #define HD 72
 KWG(64) void qv_attention(global const ushort *q, global const ushort *k, global const ushort *v, global ushort *out,

@@ -1,6 +1,9 @@
 //! Sage-A1.5 (qwen3_5_moe) weights on the host, for any backend: fp16 rows of small dense or MLX-quantized tensors,
-//! and the routed and shared expert tables in the order the MoE kernels read them. No device code here: a backend
-//! passes its checkpoint (anything with `get(name) !Tensor` and `has(name) bool`) and a sink that copies bytes out.
+
+// and the routed and shared expert tables in the order the MoE kernels read them. No device code here: a backend
+
+// passes its checkpoint (anything with `get(name) !Tensor` and `has(name) bool`) and a sink that copies bytes out.
+
 const std = @import("std");
 
 fn bf16At(b: []const u8, i: usize) f32 {
@@ -12,8 +15,11 @@ fn tensorName(buf: []u8, comptime f: []const u8, args: anytype) ![]const u8 {
 }
 
 /// fp16 [rows, k] of `prefix`.weight, which is BF16, F16 or MLX affine with groups of 64. The bit width comes from the
-/// shapes: Sage's MLX router (`mlp.gate`) and shared expert gate are 8 bit while its projections are 4 bit, so the
-/// router logits need this conversion before an fp16 kernel reads them. The caller owns the result.
+
+// shapes: Sage's MLX router (`mlp.gate`) and shared expert gate are 8 bit while its projections are 4 bit, so the
+
+// router logits need this conversion before an fp16 kernel reads them. The caller owns the result.
+
 pub fn halfRows(gpa: std.mem.Allocator, c: anytype, prefix: []const u8) ![]f16 {
     var nb: [256]u8 = undefined;
     const t = try c.get(try tensorName(&nb, "{s}.weight", .{prefix}));
@@ -40,7 +46,9 @@ pub fn halfRows(gpa: std.mem.Allocator, c: anytype, prefix: []const u8) ![]f16 {
 }
 
 /// MLX affine dequantization: w = scale * q + bias, q packed low bits first in little-endian u32 words, bf16 scales and
-/// biases for each group of 64 along a row.
+
+// biases for each group of 64 along a row.
+
 pub fn mlxRows(gpa: std.mem.Allocator, words_b: []const u8, scales: []const u8, biases: []const u8, rows: usize, words: usize) ![]f16 {
     const groups = scales.len / 2 / rows;
     if (groups == 0 or biases.len != scales.len) return error.UnexpectedShape;
@@ -63,7 +71,9 @@ pub fn mlxRows(gpa: std.mem.Allocator, words_b: []const u8, scales: []const u8, 
 pub const Part = enum { gu_w, gu_s, gu_b, dn_w, dn_s, dn_b };
 
 /// Bytes of one expert in each buffer. gate|up: the gate rows then the up rows, 2 ff rows of D inputs. down: D rows of
-/// ff inputs. One launch then reads both halves of the SwiGLU from one row index.
+
+// ff inputs. One launch then reads both halves of the SwiGLU from one row index.
+
 pub const Sizes = struct {
     gu_w: usize,
     gu_g: usize,
@@ -90,7 +100,9 @@ pub const Sizes = struct {
 };
 
 /// Expert `e`'s bytes of one MLX tensor: from a stacked `switch_mlp` tensor [count, ...] (the MLX export) or from a
-/// tensor for each expert (`experts.E.`).
+
+// tensor for each expert (`experts.E.`).
+
 fn expertBytes(c: anytype, p: []const u8, part: []const u8, which: []const u8, e: u32, count: u32) ![]const u8 {
     var nb: [256]u8 = undefined;
     const stacked = try tensorName(&nb, "{s}mlp.switch_mlp.{s}.{s}", .{ p, part, which });
@@ -109,7 +121,9 @@ fn sharedBytes(c: anytype, p: []const u8, part: []const u8, which: []const u8) !
 }
 
 /// Packs layer `p`'s routed experts (`count` of them) or its shared expert (`shared`, count 1) into the table layout:
-/// calls `sink.put(part, offset, bytes)` for each piece, with `offset` in bytes from the start of that part's buffer.
+
+// calls `sink.put(part, offset, bytes)` for each piece, with `offset` in bytes from the start of that part's buffer.
+
 pub fn packExperts(c: anytype, p: []const u8, count: u32, shared: bool, ff: u32, d: u32, sink: anytype) !void {
     const z = Sizes.of(ff, d);
     const whiches = [_][]const u8{ "weight", "scales", "biases" };
@@ -141,9 +155,13 @@ pub fn toBf16(x: f32) u16 {
 }
 
 /// GPTQ symmetric 4 bit (auto_round:auto_gptq, v1 zeros) as MLX affine 4/64, with no requantization.
-/// qweight I32 [K/8, N] packs 8 values along K, low bits first: the MLX word [N, K/8] is the same word, transposed.
-/// Each GPTQ group of g (a multiple of 64) along K gives g/64 MLX groups: scale s, bias -s * (qzero + 1). The scale
-/// goes from fp16 to bf16, so w = bf16(s) * (q - zero) differs from the GPTQ value by the scale rounding only.
+
+// qweight I32 [K/8, N] packs 8 values along K, low bits first: the MLX word [N, K/8] is the same word, transposed.
+
+// Each GPTQ group of g (a multiple of 64) along K gives g/64 MLX groups: scale s, bias -s * (qzero + 1). The scale
+
+// goes from fp16 to bf16, so w = bf16(s) * (q - zero) differs from the GPTQ value by the scale rounding only.
+
 pub fn gptqAsMlx(qweight: []const u8, qzeros: []const u8, scales: []const u8, k: usize, n: usize, out_w: []u32, out_s: []u16, out_b: []u16) !void {
     if (k % 64 != 0 or n % 8 != 0 or qweight.len != k / 8 * n * 4) return error.UnexpectedShape;
     const groups = scales.len / 2 / n;
@@ -170,7 +188,9 @@ pub fn gptqAsMlx(qweight: []const u8, qzeros: []const u8, scales: []const u8, k:
 }
 
 /// bf16 rows [r, k] quantized to MLX affine 4/64 by rounding to the nearest level: scale (max - min) / 15 and bias
-/// min, both rounded to bf16 first, as an MLX export of the same rows.
+
+// min, both rounded to bf16 first, as an MLX export of the same rows.
+
 pub fn quantizeRows(rows: []const u8, r: usize, k: usize, out_w: []u32, out_s: []u16, out_b: []u16) !void {
     if (k % 64 != 0 or rows.len != r * k * 2 or out_w.len != r * (k / 8) or out_s.len != r * (k / 64) or out_b.len != out_s.len) return error.UnexpectedShape;
     for (0..r) |i| for (0..k / 64) |gi| {
@@ -201,7 +221,9 @@ pub fn quantizeRows(rows: []const u8, r: usize, k: usize, out_w: []u32, out_s: [
 }
 
 /// bf16 weights plus one: an MLX export stores Sage's RMSNorm weights (layer, q and k norms, the final norm) as 1 + w,
-/// and the kernels read them that way. The gated GDN norm is stored as is.
+
+// and the kernels read them that way. The gated GDN norm is stored as is.
+
 pub fn plusOne(in: []const u8, out: []u16) void {
     for (out, 0..) |*o, i| o.* = toBf16(bf16At(in, i) + 1.0);
 }

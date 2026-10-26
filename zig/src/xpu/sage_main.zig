@@ -80,11 +80,17 @@ const Sampling = struct {
 };
 
 /// `--loop`: one request a line on stdin, `REQ MAX STOPS [s=TEMP,TOP_P,TOP_K,PRESENCE,SEED] ID ID ...` (REQ: the front
-/// end's request number; STOPS: ids with commas, or `-`). Without `s=` the reply is greedy. The presence penalty counts
-/// the tokens of this reply only. Up to XPU_SLOTS requests run at once: each takes a free slot (a fresh sequence) and
-/// its prompt, then the running slots decode together, one stepMulti row a slot. The runner writes `t REQ ID` for each
-/// token as soon as it exists, then `end REQ stop|length|error PROMPT_S DECODE_S N`. A stop token ends the reply and is
-/// not written. A front end (a server, a bench) drives it through a pipe and owns the tokenizer.
+
+// end's request number; STOPS: ids with commas, or `-`). Without `s=` the reply is greedy. The presence penalty counts
+
+// the tokens of this reply only. Up to XPU_SLOTS requests run at once: each takes a free slot (a fresh sequence) and
+
+// its prompt, then the running slots decode together, one stepMulti row a slot. The runner writes `t REQ ID` for each
+
+// token as soon as it exists, then `end REQ stop|length|error PROMPT_S DECODE_S N`. A stop token ends the reply and is
+
+// not written. A front end (a server, a bench) drives it through a pipe and owns the tokenizer.
+
 const Req = struct {
     req: u64 = 0,
     max: usize = 0,
@@ -159,7 +165,9 @@ fn take(sl: *Slot, tok: i32) !bool {
 }
 
 /// XPU_SPEC=k with XPU_MTP: a lone greedy stream decodes by Runner.specStep with k drafts a step, several greedy
-/// streams by Runner.specMulti.
+
+// streams by Runner.specMulti.
+
 fn loop(r: *sage.Runner) !void {
     const spec: u32 = if (std.c.getenv("XPU_SPEC")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 0;
     var q: std.ArrayList(Req) = .empty;
@@ -306,7 +314,9 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// XPU_SLOTS > 1: slot i takes the prompt less its last 7 i tokens; `steps` stepMulti rounds over all slots, timed,
-/// then each slot again alone (Runner.step) on slot 0, and whether its tokens match.
+
+// then each slot again alone (Runner.step) on slot 0, and whether its tokens match.
+
 fn multiCheck(r: *sage.Runner, ids: []const i32, steps: usize) !void {
     const n = r.slots;
     var slots: [sage.MAX_SLOTS]u32 = undefined;
@@ -347,7 +357,9 @@ fn multiCheck(r: *sage.Runner, ids: []const i32, steps: usize) !void {
 }
 
 /// `--nll`: the mean negative log likelihood of each id given the ones before it, one decode step a token, from the
-/// fp16 logits: a check that two checkpoints of one model predict text alike.
+
+// fp16 logits: a check that two checkpoints of one model predict text alike.
+
 fn nll(r: *sage.Runner, ids: []const i32) !void {
     const logits = try alloc.alloc(f16, r.z.s.vocab);
     defer alloc.free(logits);
@@ -373,7 +385,9 @@ fn nll(r: *sage.Runner, ids: []const i32) !void {
 }
 
 /// `--tower IMAGE OUT`: the image's patches through the vision tower, as a check against a reference: OUT.grid (gh gw),
-/// OUT.pixels (fp32 patches) and OUT.rows (fp32 [tokens, hidden]).
+
+// OUT.pixels (fp32 patches) and OUT.rows (fp32 [tokens, hidden]).
+
 fn tower(io: std.Io, dir: []const u8, image: []const u8, out: []const u8) !void {
     const core = @import("core");
     const vision = @import("vision.zig");
@@ -413,7 +427,9 @@ fn tower(io: std.Io, dir: []const u8, image: []const u8, out: []const u8) !void 
 }
 
 /// XPU_SLOTS > 1 with XPU_MTP and XPU_SPEC=k: slot i takes the prompt less its last 7 i tokens; specMulti rounds until
-/// each slot has `steps` tokens, timed, then each slot again alone (Runner.step) on slot 0, and whether its tokens match.
+
+// each slot has `steps` tokens, timed. Then each slot runs alone. The check is whether the tokens match.
+
 fn specMultiCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void {
     const n = r.slots;
     var slots: [sage.MAX_SLOTS]u32 = undefined;
@@ -463,7 +479,9 @@ fn specMultiCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void
 }
 
 /// XPU_SPEC_CHECK=k: `steps` greedy tokens by Runner.step, then the same by verify and commit blocks of k drafts taken
-/// from those tokens, one draft in a block wrong every third block. The tokens must be the same.
+
+// from those tokens, one draft in a block wrong every third block. The tokens must be the same.
+
 fn specCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void {
     if (k == 0 or k >= sage.WINDOW) return error.BadDrafts;
     var want: std.ArrayList(i32) = .empty;
@@ -505,7 +523,9 @@ fn specCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void {
 }
 
 /// XPU_SPEC=k with XPU_MTP: `steps` greedy tokens by Runner.step (timed), then by specStep with k MTP drafts (timed);
-/// the tokens must be the same. Prints the drafts kept a step and both decode rates.
+
+// the tokens must be the same. Prints the drafts kept a step and both decode rates.
+
 fn mtpCheck(r: *sage.Runner, ids: []const i32, steps: usize, k: u32) !void {
     var want: std.ArrayList(i32) = .empty;
     defer want.deinit(alloc);

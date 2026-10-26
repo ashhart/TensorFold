@@ -1,5 +1,7 @@
 // EXL3 (ExLlamaV3 trellis) projections on Xe2, first form: 1..16 rows, the stored tile order, the mul1 codebook.
+
 // y = ((((x * suh) @ H_K) @ W_q) @ H_N) * svh + bias, H the 128x128 Sylvester Hadamard / sqrt(128).
+
 // The format is docs/recipes/exl3.md; zig/src/core/exl3_format.zig is the scalar reference these kernels follow.
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 inline float bf(ushort v) { return as_float((uint)v << 16); }
@@ -71,7 +73,9 @@ inline float mul1_value(uint s) {
 }
 
 // sums[row][n] = rot[row] @ W_q[:, n] for one 16-column tile strip. Grid (N / 16, 1), one sub-group a work-group.
+
 // Lane c owns column c of the strip; of a tile's 256 stream values, the 16 that land in column c are
+
 // p = 32 (c % 8) + 8 m + 4 (c / 8) + i (m, i = 0..3), at tile row 2 m + (i & 1) + 8 (i >> 1).
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void exl3_matvec(__global const ushort *trellis, __global const half *rot, __global float *sums,

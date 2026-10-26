@@ -673,7 +673,9 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
 #endif // Q27_GQA == 8
 
 // Decode attention for long caches: as attn_decode, but a slice holds `span` keys (a launch argument), so the partials
+
 // stay few at any context. Rows: one stream each (MT, POS), or a window at p0 (row t at position p0 + t). Grid (NS,
+
 // Q27_AKV * Q27_QPARTS, rows). cap > 0: int8 cache.
 KERNEL(16) void attn_decode_span(global const ushort *Q, global const ushort *KC, global const ushort *VC,
                                  global float *PM, global float *PL, global float *PO, int p0, int NS, int span,
@@ -740,6 +742,7 @@ KERNEL(16) void attn_decode_span(global const ushort *Q, global const ushort *KC
 }
 
 // Merge of attn_decode_span slices: O bf16 [T, Q27_AQ, 256]. One work-group of 16 subgroups per (head, row), each
+
 // subgroup takes every 16th slice, then the work-group adds the 16 partials.
 KERNEL(256) void attn_merge_span(global const float *PM, global const float *PL, global const float *PO,
                                  global ushort *O, int p0, int NS, int span, global const int *POS) {

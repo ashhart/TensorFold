@@ -1,6 +1,9 @@
 //! Sage-A1.5 (qwen3_5_moe, 35B-A3B) on Intel Xe2 over Level Zero, first form: MLX affine 4/64 weights, decode kernels
-//! plus prompt chunks (norms, GEMMs and MoE over the chunk), one sequence. It reuses the 27B's device layer, loaders and
-//! kernels, built at Sage's shape (shape.h, sage_glue and sage_decode), plus the MoE ops of sage_moe.cl.
+
+// plus prompt chunks (norms, GEMMs and MoE over the chunk), one sequence. It reuses the 27B device layer.
+
+// Kernels are built at Sage's shape (shape.h, sage_glue, sage_decode), plus the MoE ops of sage_moe.cl.
+
 const std = @import("std");
 const ze = @import("ze");
 const kb = @import("xpu_qwen27_kernels");
@@ -262,8 +265,10 @@ pub fn actsBytes(z: Sizes, ctx: u32) usize {
     return Acts.bytes(z, ctx);
 }
 
-/// sage_moe.cl's kernels and the long-cache attention pair of decode.cl (the Dev's table is the 27B runner's, filled from
-/// the Sage images).
+/// Kernels from sage_moe.cl and the long-cache attention pair in decode.cl.
+
+// The Dev table is the 27B runner's table, filled from the Sage images.
+
 pub const MoeKernels = struct { attn_span: ze.H, merge_span: ze.H, down8: ze.H, swiglu4: ze.H, down_combine: ze.H, gdn_one: ze.H, router: ze.H, route: ze.H, swiglu: ze.H, down: ze.H, combine: ze.H, group_plan: ze.H, group_swiglu: ze.H, group_down: ze.H, router_tile: ze.H, sums: ze.H, sort: ze.H, tile_swiglu: ze.H, tile_down: ze.H };
 
 /// Sub-groups a work-group of the decode expert kernels (one sub-group a row).
@@ -324,8 +329,11 @@ fn experts(d: *Dev, c: *const Checkpoint, p: []const u8, count: u32, shared: boo
 }
 
 /// MLX affine 4/64 only in this form; the scales of the experts must be BF16 (sage_moe.cl reads bf16). Checked on the
-/// Sage MLX-4bit checkpoint by tools/xpu/sage_mlx_check.py: stacked switch_mlp experts, 8 bit router, conv1d [NCONV, 4, 1].
-/// kv8: an int8 K/V cache (256 int8 a position and head, then the fp32 scales after `ctx` positions), else bf16.
+
+// Sage MLX-4bit checkpoint: stacked switch_mlp experts, an 8 bit router, conv1d [NCONV, 4, 1].
+
+// kv8: an int8 K/V cache (256 int8 a position and head, then the fp32 scales after `ctx` positions), else bf16.
+
 pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32, slots: u32, kv8: bool) !Model {
     const s = z.s;
     if (c.has("in_proj_qkv.qweight") or c.has("in_proj_qkv.trellis")) return error.OnlyMlxInThisForm;
@@ -409,9 +417,13 @@ pub fn load(d: *Dev, c: *const Checkpoint, z: Sizes, ctx: u32, slots: u32, kv8: 
 // ---------------------------------------------------------------- the MTP head
 
 /// Sage's multi-token prediction head (mtp_num_hidden_layers 1), the drafter of Runner.specStep. A row at slot j reads
-/// the target's normed final hidden of row j and the token after it, and drafts the token after that:
-/// x = fc_e(norm_e(embed(token))) + fc_h(norm_h(hidden)), then one attention + MoE layer with its own K/V cache, then
-/// norm and the target's lm_head. A chained draft reads the row before's normed output as its hidden.
+
+// the target's normed final hidden of row j and the token after it, and drafts the token after that:
+
+// x = fc_e(norm_e(embed(token))) + fc_h(norm_h(hidden)), then one attention + MoE layer with its own K/V cache, then
+
+// norm and the target's lm_head. A chained draft reads the row before's normed output as its hidden.
+
 pub const Mtp = struct {
     layer: Layer,
     fc_e: Proj, // fc [D, 2 D] split by input: the embedding half and the hidden half
@@ -427,7 +439,9 @@ pub const Mtp = struct {
 };
 
 /// The MTP head from the W4A16 AutoRound checkpoint in `dir` (the MLX export drops it): its projections and experts
-/// shown as MLX affine 4/64 with no requantization, fc quantized to 4/64 from bf16.
+
+// shown as MLX affine 4/64 with no requantization, fc quantized to 4/64 from bf16.
+
 pub fn loadMtp(d: *Dev, dir: []const u8, z: Sizes, ctx: u32, slots: u32, kv8: bool) !*Mtp {
     const s = z.s;
     const shard = try mtpShard(dir);
@@ -541,9 +555,13 @@ pub const Runner = struct {
     live: bool = false, // K/V caches and acts are allocated for ctx
 
     /// specMulti's host side for sampled slots (Leviathan and Chen speculative sampling). `keep` gets slot i's block
-    /// (its rows from `row` of the logits, `ids` the pending token then the drafts) and returns null for a greedy
-    /// slot, else the rows to keep with their tokens in `out`. `draft` gets the slot's row of the MTP logits and
-    /// returns null for a greedy slot, else the slot's next first draft.
+
+    // (its rows from `row` of the logits, `ids` the pending token then the drafts) and returns null for a greedy
+
+    // slot, else the rows to keep with their tokens in `out`. `draft` gets the slot's row of the MTP logits and
+
+    // returns null for a greedy slot, else the slot's next first draft.
+
     pub const Judge = struct {
         ctx: *anyopaque,
         keep: *const fn (ctx: *anyopaque, i: usize, row: u32, ids: []const i32, out: *[WINDOW]i32) anyerror!?u32,
@@ -581,6 +599,7 @@ pub const Runner = struct {
         if (mtp) |md| r.mtp = try loadMtp(d, md, z, 0, slots, kv8);
         if (gptq) {
             // the converted host copies are on the device now; the conversion threads freed them into their own malloc
+
             // arenas, which keep the pages until a trim gives them back
             r.ckpt.dropPut();
             _ = malloc_trim(0);
@@ -688,7 +707,9 @@ pub const Runner = struct {
     }
 
     /// One decode token for each slot in `slots` (distinct, at most WINDOW), fed `toks`: one forward of a row a slot.
-    /// Each slot's greedy next token goes to `out`; logits row i (rowLogits) is slot i's.
+
+    // Each slot's greedy next token goes to `out`; logits row i (rowLogits) is slot i's.
+
     pub fn stepMulti(r: *Runner, slots: []const u32, toks: []const i32, out: []i32) !void {
         const T: u32 = @intCast(slots.len);
         if (T == 0 or T > WINDOW or toks.len != T or out.len != T) return error.BadWindow;
@@ -731,8 +752,11 @@ pub const Runner = struct {
     }
 
     /// The embedding and the layers over the windows of `slots` (distinct): slot i's window is wn[i] rows of `ids`, at
-    /// its positions spos.. Each window's first row reads the slot's GDN and convolution states, its last row writes
-    /// them (verifying: the GDN state to rec_save, the window's GDN inputs to the slot's stash). Leaves x and r.
+
+    // its positions spos.. Each window's first row reads the slot's GDN and convolution states, its last row writes
+
+    // them (verifying: the GDN state to rec_save, the window's GDN inputs to the slot's stash). Leaves x and r.
+
     fn layersMulti(r: *Runner, slots: []const u32, wn: []const u32, ids: []const i32) !void {
         const d = &r.d;
         const a = &r.acts;
@@ -842,7 +866,9 @@ pub const Runner = struct {
     }
 
     /// Feeds tokens in chunks of CHUNK rows (a tail of WINDOW rows or less as one decode forward); `last` afterwards
-    /// is the greedy token after the final one.
+
+    // is the greedy token after the final one.
+
     pub fn prompt(r: *Runner, ids: []const i32) !void {
         var at: usize = 0;
         while (at < ids.len) {
@@ -861,7 +887,9 @@ pub const Runner = struct {
     }
 
     /// One prompt piece of at most CHUNK rows with images: `f.rope` holds every row's M-RoPE positions and `f.rows`
-    /// the tower rows that replace placeholder embeddings. `last` afterwards is the greedy token after the piece.
+
+    // the tower rows that replace placeholder embeddings. `last` afterwards is the greedy token after the piece.
+
     pub fn promptFeed(r: *Runner, ids: []const i32, f: Feed) !void {
         if (ids.len > CHUNK or (f.rope != null and f.rope.?.len != ids.len)) return error.BadWindow;
         const p0 = r.pos;
@@ -875,7 +903,9 @@ pub const Runner = struct {
     }
 
     /// The MTP over the last forward's rows (their normed final hidden in acts.h) at slots p0..: `follow` holds the
-    /// token after each row. The slot's first draft becomes the last row's.
+
+    // token after each row. The slot's first draft becomes the last row's.
+
     fn absorb(r: *Runner, follow: []const i32, p0: u32) !void {
         const mt = r.mtp.?;
         try dev.copy(&r.d, mt.hin, r.acts.h, follow.len * r.z.s.hidden * 2);
@@ -886,7 +916,9 @@ pub const Runner = struct {
     }
 
     /// The MTP reads the last absorbed row of the current slot again, with `token` after it in place of the greedy
-    /// one: a sampled first token. The slot's first draft becomes this row's. Only right after prompt or promptFeed.
+
+    // one: a sampled first token. The slot's first draft becomes this row's. Only right after prompt or promptFeed.
+
     pub fn refollow(r: *Runner, token: i32) !void {
         const mt = r.mtp orelse return;
         if (r.mpos[r.cur] == 0) return;
@@ -898,7 +930,9 @@ pub const Runner = struct {
     }
 
     /// The MTP layer over rows `ids` (with mtp.hin their hidden) at slots p0..; the last row's normed output goes to
-    /// the slot's state, and its greedy draft is returned.
+
+    // the slot's state, and its greedy draft is returned.
+
     fn mtpForward(r: *Runner, ids: []const i32, p0: u32) !i32 {
         const mt = r.mtp.?;
         const l = &mt.layer;
@@ -981,8 +1015,11 @@ pub const Runner = struct {
     }
 
     /// One speculative step of the current slot (greedy, MTP on): up to `k` drafts from the MTP, one verify block,
-    /// the kept rows committed and absorbed. The tokens it yields go to `out` (1 to k + 1 of them); r.last is the
-    /// newest, not yet fed.
+
+    // the kept rows committed and absorbed. The tokens it yields go to `out` (1 to k + 1 of them); r.last is the
+
+    // newest, not yet fed.
+
     pub fn specStep(r: *Runner, k: u32, out: []i32) !usize {
         const mt = r.mtp orelse return error.NoMtpHead;
         const s = r.z.s;
@@ -1012,10 +1049,15 @@ pub const Runner = struct {
     }
 
     /// One speculative step of several greedy slots (MTP on, `slots` distinct): each slot's drafts (up to `k`, fewer
-    /// when all the blocks would pass WINDOW rows), one forward of every slot's block as a window, each slot's kept
-    /// rows committed, and all kept rows absorbed in one MTP forward. Slot i's tokens go to out[i][0..n[i]]; the
-    /// newest of them is its last, not yet fed. With `judge`, a slot it samples keeps the rows judge.keep picks, and
-    /// its next first draft is judge.draft's draw.
+
+    // when all the blocks would pass WINDOW rows), one forward of every slot's block as a window, each slot's kept
+
+    // rows committed, and all kept rows absorbed in one MTP forward. Slot i's tokens go to out[i][0..n[i]]; the
+
+    // newest of them is its last, not yet fed. With `judge`, a slot it samples keeps the rows judge.keep picks, and
+
+    // its next first draft is judge.draft's draw.
+
     pub fn specMulti(r: *Runner, slots: []const u32, k: u32, out: [][WINDOW]i32, n: []usize, judge: ?Judge) !void {
         const mt = r.mtp orelse return error.NoMtpHead;
         const S: u32 = @intCast(slots.len);
@@ -1113,8 +1155,11 @@ pub const Runner = struct {
     }
 
     /// The MTP layer over the kept rows of several slots (mtp.hin their hidden), row t at position pos[t] of its
-    /// slot's MTP cache: slot i has n[i] rows, its last at row mlast[i]. Each slot's state and first draft become its
-    /// last row's.
+
+    // slot's MTP cache: slot i has n[i] rows, its last at row mlast[i]. Each slot's state and first draft become its
+
+    // last row's.
+
     fn mtpMulti(r: *Runner, slots: []const u32, ids: []const i32, pos: []const i32, n: []const usize, mlast: []const u32, judge: ?Judge) !void {
         const mt = r.mtp.?;
         const l = &mt.layer;
@@ -1182,7 +1227,9 @@ pub const Runner = struct {
     }
 
     /// Runs a block at r.pos (2 to WINDOW rows: the pending token, then drafts) and returns each row's greedy token,
-    /// with the same arithmetic a row as `step`. The position and states move only at `commit`.
+
+    // with the same arithmetic a row as `step`. The position and states move only at `commit`.
+
     pub fn verify(r: *Runner, ids: []const i32) ![]const i32 {
         if (ids.len < 2 or ids.len > WINDOW) return error.BadBlock;
         const p = r.pos;
@@ -1195,8 +1242,11 @@ pub const Runner = struct {
     }
 
     /// Keeps the first `keep` rows of the last verified block. All kept: the block's final GDN states are the states.
-    /// Else each GDN layer replays the kept rows from the entry state, and its convolution state is rebuilt. The K/V
-    /// rows past the kept ones are written again by later forwards.
+
+    // Else each GDN layer replays the kept rows from the entry state, and its convolution state is rebuilt. The K/V
+
+    // rows past the kept ones are written again by later forwards.
+
     pub fn commit(r: *Runner, keep: u32) !void {
         if (keep == 0 or keep > r.block_rows) return error.BadCommit;
         const d = &r.d;
@@ -1359,7 +1409,9 @@ pub const Runner = struct {
     }
 
     /// The M-RoPE positions of a forward's T rows at r.pos: the feed's, else the slot's shift past its images, else
-    /// none (every axis at the row's index, the kernels' own rotary).
+
+    // none (every axis at the row's index, the kernels' own rotary).
+
     fn feedRope(r: *Runner, f: Feed, T: u32) !?*anyopaque {
         if (f.rope) |rows| {
             @memcpy(r.rope_host[0..T], rows);
@@ -1384,7 +1436,9 @@ pub const Runner = struct {
     }
 
     /// After a forward of `T` rows: the greedy token of the last row when `want`, else -1 (after a sync).
-    /// The embeddings of the T ids at acts.ids into acts.x: MLX 4/64 rows, or an fp16 table.
+
+    // The embeddings of the T ids at acts.ids into acts.x: MLX 4/64 rows, or an fp16 table.
+
     fn embed(r: *Runner, T: u32) !void {
         const m = &r.model;
         const a = &r.acts;
@@ -1625,9 +1679,13 @@ const Job = struct {
 };
 
 /// A W4A16 AutoRound (GPTQ symmetric 4 bit) checkpoint, shown to the MLX loader as an MLX export: each quantized
-/// projection as MLX affine 4/64 words, scales and biases (sl.gptqAsMlx: no requantization), the bf16 embedding and
-/// lm_head quantized to 4/64 as an MLX export has them, the RMSNorm weights as 1 + w. MTP and vision tensors are not
-/// read. False (and nothing changed) for other checkpoints. The checkpoint gets a name index either way.
+
+// projection as MLX affine 4/64 words, scales and biases (sl.gptqAsMlx: no requantization), the bf16 embedding and
+
+// lm_head quantized to 4/64 as an MLX export has them, the RMSNorm weights as 1 + w. MTP and vision tensors are not
+
+// read. False (and nothing changed) for other checkpoints. The checkpoint gets a name index either way.
+
 fn sageAsMlx() bool {
     return std.c.getenv("XPU_SAGE_AS_MLX") != null;
 }
@@ -1637,7 +1695,9 @@ fn autoRound(c: *Checkpoint) !bool {
 }
 
 /// The tensors autoRound converts: `main`, the model less MTP and vision; `mtp`, the MTP head only (every norm as
-/// 1 + w, fc and the router gates left as stored, for loadMtp).
+
+// 1 + w, fc and the router gates left as stored, for loadMtp).
+
 fn showAsMlx(c: *Checkpoint, which: enum { main, mtp }) !bool {
     try c.buildIndex();
     if (which == .main and !c.has("layers.0.mlp.shared_expert.gate_proj.qweight")) return false;
@@ -1653,6 +1713,7 @@ fn showAsMlx(c: *Checkpoint, which: enum { main, mtp }) !bool {
         return false;
     }
     // the embedding and lm_head as 4/64, as MLX has them; XPU_SAGE_HEAD16=1 keeps fp16 copies of the bf16 ones (text
+
     // NLL 1.9933 against 2.0023 on 1499 tokens, decode about 19% slower: the head reads 1 GB a token)
     const head4 = std.c.getenv("XPU_SAGE_HEAD16") == null;
     var jobs: std.ArrayList(Job) = .empty;

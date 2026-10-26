@@ -89,7 +89,9 @@ pub const Shape = struct {
 };
 
 /// The -D values zig/kernels/xpu/qwen27/shape.h takes, for a qwen27 kernel image built at shape `s`.
-/// `qpg`: query heads one attn_decode subgroup holds (4 keeps a lane's q and o at 128 floats).
+
+// `qpg`: query heads one attn_decode subgroup holds (4 keeps a lane's q and o at 128 floats).
+
 pub fn kernelDefines(buf: []u8, s: Shape, qpg: u32) ![]const u8 {
     const nqk = s.gdn_k_heads * 128;
     const vd = s.gdn_v_heads * 128;
@@ -101,13 +103,12 @@ pub fn kernelDefines(buf: []u8, s: Shape, qpg: u32) ![]const u8 {
         "-DQ27_NCONV={d} -DQ27_VD={d} -DQ27_GDN_IN={d} -DQ27_GA={d} -DQ27_GB={d} -DQ27_AQ={d} -DQ27_AKV={d} -DQ27_AH={d} " ++
         "-DQ27_AV0={d} -DQ27_GQA={d} -DQ27_QPG={d} -DQ27_QPARTS={d} -DQ27_ATT_IN={d} -DQ27_AK0={d} -DQ27_AV0C={d} " ++
         "-DQ27_OD={d} -DQ27_OB={d} -DQ27_KVROW={d}", .{
-        s.hidden,                          s.hidden / 512,      s.gdn_k_heads,              s.gdn_v_heads,
-        s.gdn_v_heads / s.gdn_k_heads,     nqk,                 nconv,                      vd,
-        (nconv + vd + 2 * s.gdn_v_heads + 255) / 256 * 256,     nconv + vd,                 nconv + vd + s.gdn_v_heads,
-        s.q_heads,                         s.kv_heads,          s.q_heads + 2 * s.kv_heads, s.q_heads + s.kv_heads,
-        gqa,                               qpg,                 gqa / qpg,                  s.attIn(),
-        att_k,                             att_k + s.kv_heads * 256,                        s.q_heads * 256,
-        s.q_heads * 2,                     s.kv_heads * 256,
+        s.hidden,                                           s.hidden / 512,             s.gdn_k_heads,              s.gdn_v_heads,
+        s.gdn_v_heads / s.gdn_k_heads,                      nqk,                        nconv,                      vd,
+        (nconv + vd + 2 * s.gdn_v_heads + 255) / 256 * 256, nconv + vd,                 nconv + vd + s.gdn_v_heads, s.q_heads,
+        s.kv_heads,                                         s.q_heads + 2 * s.kv_heads, s.q_heads + s.kv_heads,     gqa,
+        qpg,                                                gqa / qpg,                  s.attIn(),                  att_k,
+        att_k + s.kv_heads * 256,                           s.q_heads * 256,            s.q_heads * 2,              s.kv_heads * 256,
     });
 }
 

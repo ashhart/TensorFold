@@ -62,9 +62,13 @@ pub const Slots = struct {
     }
 
     /// With an MTP head: greedy windows of the pending row and `depth` held drafts, all in one specMulti forward.
-    /// Without: one-row rounds, no drafts; the running streams' rows share one forward (stepMulti). The lane core shares a
-    /// forward only for a width of 2 or more, so the width is 2 with copy drafts off: every window is one row.
-    /// stepMulti's grouped expert kernels add in another order than step, so a near-tie can pick another token.
+
+    // Without an MTP head: one-row rounds and no drafts. Streams share one forward (stepMulti).
+
+    // The lane core shares a forward only at width 2 or more. Copy drafts off keeps width 2, so each window is one row.
+
+    // stepMulti's grouped expert kernels add in another order than step, so a near-tie can pick another token.
+
     pub fn facts(b: *const Slots) lanes.Model {
         if (b.r.mtp != null) return .{ .exact_width = b.depth + 1, .copy_drafts = false, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .sampled_drafts = b.sampled_drafts, .drafts = b.depth, .draft_streams = true, .hidden_rows = true, .streams_exact = true, .batch_rows = sage.WINDOW, .max_streams = b.r.slots };
         return .{ .exact_width = 2, .copy_drafts = false, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .hidden_rows = true, .streams_exact = true, .batch_rows = b.r.slots, .max_streams = b.r.slots };
@@ -87,7 +91,9 @@ pub const Slots = struct {
     }
 
     /// The stream's next token: the runner's greedy one, else drawn on the host from logits row `row` (null: the
-    /// current slot's last forward) at `position`.
+
+    // current slot's last forward) at `position`.
+
     fn draw(b: *Slots, s: *const lanes.Stream, greedy: i32, row: ?u32, position: u64) !u32 {
         const sp = s.sampling orelse return @intCast(greedy);
         if (sp.temperature <= 0) return @intCast(greedy);
@@ -190,8 +196,11 @@ pub const Slots = struct {
     }
 
     /// Every stream's pending token in one forward: the single-row step for one stream, else stepMulti. A window of
-    /// two rows (a grammar's forced token after the pending one) runs alone, row by row: its second row is fed only
-    /// when the first row's draw equals it, so the slot holds exactly the rows a keep can take.
+
+    // two rows (a grammar's forced token after the pending one) runs alone, row by row: its second row is fed only
+
+    // when the first row's draw equals it, so the slot holds exactly the rows a keep can take.
+
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const b = of(ptr);
         const r = b.r;
@@ -240,8 +249,11 @@ pub const Slots = struct {
     }
 
     /// The windows with held drafts, grouped by depth, each group one specMulti: it drafts, verifies and commits.
-    /// A window's rows report the kept tokens, and its drafts are the kept ones then one that differs, so the lane
-    /// core keeps exactly the rows specMulti committed.
+
+    // A window's rows report the kept tokens, and its drafts are the kept ones then one that differs, so the lane
+
+    // core keeps exactly the rows specMulti committed.
+
     fn verifyDrafted(b: *Slots, windows: []const be.Window, out: []be.Verified) !void {
         const r = b.r;
         var depth: u32 = 1;
@@ -254,7 +266,7 @@ pub const Slots = struct {
                 const slot = b.slotOf(w.stream) orelse return error.UnknownStream;
                 if (b.held[slot] < depth) return error.NoHeldDrafts;
                 if (w.positions[0] != r.spos[slot] + 1 and !(slot == r.cur and w.positions[0] == r.pos + 1)) return error.PositionMismatch;
-                // specMulti feeds the slot's last token: the runner's greedy one, which a sampled pending token replaces
+                // specMulti feeds the slot's last token. A sampled pending token replaces the greedy one.
                 if (slot == r.cur) r.last = @intCast(w.pending) else r.slast[slot] = @intCast(w.pending);
                 slots[n] = slot;
                 at[n] = i;
@@ -283,9 +295,13 @@ pub const Slots = struct {
     }
 
     /// Judge.keep: speculative sampling of a sampled slot's block. Row j's draft x (from q) is kept with chance
-    /// min(1, p(x) / q(x)), p and q both filtered by the stream's sampling. The first rejected row draws from
-    /// max(0, p - q) normalized and ends the block; with every draft kept, the last row draws from p. A draft from
-    /// the MTP's argmax has q one at x. The kept tokens then have the one-row path's distribution.
+
+    // min(1, p(x) / q(x)), p and q both filtered by the stream's sampling. The first rejected row draws from
+
+    // max(0, p - q) normalized and ends the block; with every draft kept, the last row draws from p. A draft from
+
+    // the MTP's argmax has q one at x. The kept tokens then have the one-row path's distribution.
+
     fn keepSampled(ptr: *anyopaque, i: usize, row: u32, ids: []const i32, out: *[sage.WINDOW]i32) anyerror!?u32 {
         const b = of(ptr);
         const x = b.spec.?;
@@ -336,7 +352,9 @@ pub const Slots = struct {
     }
 
     /// A window keeps at most the rows its verify fed (one, or two when the forced token landed). A shorter path
-    /// ends the stream; a next verify of it would fail its position check.
+
+    // ends the stream; a next verify of it would fail its position check.
+
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
         const b = of(ptr);
         for (windows, paths) |w, p| {
@@ -346,7 +364,9 @@ pub const Slots = struct {
     }
 
     /// The MTP absorbed the kept rows in specMulti (or the prompt in prefill): note the drafts each stream's next
-    /// window holds. specMulti makes them with its forward.
+
+    // window holds. specMulti makes them with its forward.
+
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const b = of(ptr);
         if (b.r.mtp == null) return error.NoDraftHead;
@@ -357,7 +377,9 @@ pub const Slots = struct {
     }
 
     /// A lone greedy stream on MTP drafts (Runner.specStep, `depth` a round) until it ends (false) or another stream
-    /// arrives (true). The lane core then decodes it beside the others, one row a round, with no drafts.
+
+    // arrives (true). The lane core then decodes it beside the others, one row a round, with no drafts.
+
     fn loneFn(ptr: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         const b = of(ptr);
         const r = b.r;
@@ -393,7 +415,9 @@ pub const Slots = struct {
     }
 
     /// A grammar stream's held draft as a host token, for the grammar to walk: the slot's MTP draft. Its window then
-    /// runs on the two-row path of verifyFn, which feeds the draft only when the masked draw equals it.
+
+    // runs on the two-row path of verifyFn, which feeds the draft only when the masked draw equals it.
+
     fn heldFn(ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
         const b = of(ptr);
         const slot = b.slotOf(s) orelse return error.UnknownStream;
@@ -423,7 +447,9 @@ const salt_bonus: u64 = 0xFFFF_0000_0000_0003;
 const salt_draft: u64 = 0xFFFF_0000_0000_0004;
 
 /// A filtered next-token distribution: the candidates chooseOrdered keeps (top_k, top_p, min_p after temperature),
-/// in its order, with their softmax chances.
+
+// in its order, with their softmax chances.
+
 const Dist = struct {
     ids: []u32 = &.{},
     p: []f64 = &.{},
@@ -697,7 +723,10 @@ const Served = struct {
     }
 };
 
-/// Sage from `o.dir` (MLX affine 4/64, or AutoRound GPTQ 4/128 shown as MLX at load): --parallel slots (1 to 8) of --context tokens each, int8 K/V with XPU_KV_INT8.
+/// Sage from `o.dir`. MLX affine 4/64 loads as stored. AutoRound needs XPU_SAGE_AS_MLX.
+
+// Slots are 1 to 8. int8 K/V needs XPU_KV_INT8.
+
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const context: u32 = std.math.cast(u32, o.context orelse 32768) orelse 0;
     if (context == 0) {
@@ -751,13 +780,19 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 /// Card bytes kept free of the engine's buffers.
 const card_reserve: u64 = 64 << 20;
 /// Bytes Dev.allocated counts that the card does not hold once every slot is in use. Measured with drm-total-vram0
-/// after 8 streams at once: 34.60 GB counted and 34.12 GB held (--parallel 8 --context 133000), 32.91 and 32.42 GB
-/// (the same with the MTP head at --context 100000). Taken a little under the 0.49 GB seen.
+
+// after 8 streams at once: 34.60 GB counted and 34.12 GB held (--parallel 8 --context 133000), 32.91 and 32.42 GB
+
+// (the same with the MTP head at --context 100000). Taken a little under the 0.49 GB seen.
+
 const counted_not_held: u64 = 450_000_000;
 
 /// Whether the card holds what the load allocated. A K/V page is written only when its slot first reaches it, so
-/// an overcommit loses the device then, not at load. Else `problem` names the largest context for these slots and
-/// the most slots for this context.
+
+// an overcommit loses the device then, not at load. Else `problem` names the largest context for these slots and
+
+// the most slots for this context.
+
 fn fitsCard(a: Allocator, r: *sage.Runner, slots: u32, context: u32, problem: *[]const u8) !bool {
     const mem = r.d.g.memory() catch |err| {
         std.log.warn("XPU: no Sysman memory size ({s}), so the load does not check that the card holds every slot's K/V", .{@errorName(err)});

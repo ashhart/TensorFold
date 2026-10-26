@@ -1,5 +1,7 @@
 //! The Qwen3.5 vision tower on Intel Xe2 (kernels/xpu/qwen_vision.cl), as vision/qwen_cuda.zig runs it on CUDA: an
-//! image's patches to the rows its placeholders take in the language model, bf16 weights as the checkpoint stores them.
+
+// image's patches to the rows its placeholders take in the language model, bf16 weights as the checkpoint stores them.
+
 const std = @import("std");
 const ze = @import("ze");
 const kb = @import("xpu_qwen27_kernels");
@@ -64,7 +66,9 @@ pub const Tower = struct {
     bytes: usize, // device bytes: weights and scratch
 
     /// The tower `prefix` (vision_tower. for MLX, model.visual. for HF) names in `ck`, bf16, with scratch for images of
-    /// up to `max_patches` patches.
+
+    // up to `max_patches` patches.
+
     pub fn load(d: *Dev, ck: *const Checkpoint, prefix: []const u8, c: Config, max_patches: u32) !*Tower {
         if (c.hidden / c.heads != head_dim or c.hidden % c.heads != 0) return error.UnsupportedVisionTower;
         const t = try alloc.create(Tower);
@@ -94,12 +98,12 @@ pub const Tower = struct {
         errdefer alloc.free(t.blocks);
         for (t.blocks, 0..) |*b, i| {
             const fields = .{
-                .{ "norm1_w", "norm1.weight", .{h} },                .{ "norm1_b", "norm1.bias", .{h} },
-                .{ "qkv_w", "attn.qkv.weight", .{ 3 * h, h } },      .{ "qkv_b", "attn.qkv.bias", .{3 * h} },
-                .{ "proj_w", "attn.proj.weight", .{ h, h } },        .{ "proj_b", "attn.proj.bias", .{h} },
-                .{ "norm2_w", "norm2.weight", .{h} },                .{ "norm2_b", "norm2.bias", .{h} },
-                .{ "fc1_w", "mlp.linear_fc1.weight", .{ ff, h } },   .{ "fc1_b", "mlp.linear_fc1.bias", .{ff} },
-                .{ "fc2_w", "mlp.linear_fc2.weight", .{ h, ff } },   .{ "fc2_b", "mlp.linear_fc2.bias", .{h} },
+                .{ "norm1_w", "norm1.weight", .{h} },              .{ "norm1_b", "norm1.bias", .{h} },
+                .{ "qkv_w", "attn.qkv.weight", .{ 3 * h, h } },    .{ "qkv_b", "attn.qkv.bias", .{3 * h} },
+                .{ "proj_w", "attn.proj.weight", .{ h, h } },      .{ "proj_b", "attn.proj.bias", .{h} },
+                .{ "norm2_w", "norm2.weight", .{h} },              .{ "norm2_b", "norm2.bias", .{h} },
+                .{ "fc1_w", "mlp.linear_fc1.weight", .{ ff, h } }, .{ "fc1_b", "mlp.linear_fc1.bias", .{ff} },
+                .{ "fc2_w", "mlp.linear_fc2.weight", .{ h, ff } }, .{ "fc2_b", "mlp.linear_fc2.bias", .{h} },
             };
             inline for (fields) |f| {
                 var nb: [96]u8 = undefined;
@@ -140,7 +144,9 @@ pub const Tower = struct {
     }
 
     /// One image's patches ([gh * gw, patch_width] fp32, merge order) to its gh * gw / 4 rows at `out`: fp32
-    /// [rows, out_hidden], each value a bf16 one, as the language model's residual stream takes them.
+
+    // [rows, out_hidden], each value a bf16 one, as the language model's residual stream takes them.
+
     pub fn encode(t: *Tower, d: *Dev, pixels: []const f32, gh: u32, gw: u32, out: *anyopaque) !void {
         const c = t.c;
         const n: u32 = gh * gw;
@@ -221,7 +227,9 @@ const Reader = struct {
     }
 
     /// The patch convolution's weight as [hidden, channel, frame, y, x] rows: HF's as stored, MLX's [hidden, frame, y,
-    /// x, channel] turned.
+
+    // x, channel] turned.
+
     fn patchWeight(r: Reader, c: Config) !*anyopaque {
         const h: u64 = c.hidden;
         const tn = try r.tensor("patch_embed.proj.weight");
@@ -238,7 +246,9 @@ const Reader = struct {
 };
 
 /// The patches of a gh x gw grid in merge order: each one's (row, column) and its 4 bilinear taps into the 48 x 48
-/// learned grid (align_corners), as transformers' fast_pos_embed_interpolate takes them.
+
+// learned grid (align_corners), as transformers' fast_pos_embed_interpolate takes them.
+
 pub fn positions(gh: u32, gw: u32, hw: []i32, idx: []i32, wts: []f32) void {
     const bw = gw / merge;
     for (0..@as(usize, gh) * gw) |i| {

@@ -22,7 +22,9 @@ pub const Checkpoint = struct {
     maps: std.ArrayList([]const u8) = .empty, // the shards, mapped as long as the tensors' bytes are read
     headers: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty, // the tensors' names live in them
     /// Optional (buildIndex): tensor index by name without its model prefix. With it, get and has look names up
-    /// instead of scanning, and `put` tensors (converted at load) take the place of the stored ones.
+
+    // instead of scanning, and `put` tensors (converted at load) take the place of the stored ones.
+
     index: std.StringHashMapUnmanaged(usize) = .empty,
     owned: std.ArrayList([]u8) = .empty, // the put tensors' bytes and names
     stored: usize = 0, // tensors from the shards; the put ones follow

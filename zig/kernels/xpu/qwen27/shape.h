@@ -1,5 +1,7 @@
 // Model sizes the qwen27 kernels are compiled for. The defaults are Qwen3.8-27B; another qwen3_5 model (Sage-A1.5)
+
 // passes every value with -D, computed from its config.json by zig/build/xpu.zig. Keep the defaults literal: then the
+
 // 27B's preprocessed source does not change.
 #ifndef Q27_D
 #define Q27_D 5120         // hidden size, a multiple of 512
