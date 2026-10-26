@@ -300,6 +300,7 @@ pub const Open = struct {
     recall: bool = false,
     kv8: bool = false, // --kv-cache fp8: e4m3 attention caches, an fp32 scale a row (families whose Options take kv8)
     prompt_int8: bool = false, // --prompt-precision int8: prompt matmuls on int8 activations (Options taking prompt_int8)
+    prompt_fp8: bool = false, // --prompt-precision fp8: guarded Q4 prompt matmuls with row-scaled e4m3 activations
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,

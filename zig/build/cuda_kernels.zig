@@ -39,6 +39,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "probe", .flags = &.{"-O3"} },
     .{ .name = "qmm_group", .flags = &.{"-O3"} }, // cuda/kernels/qmm.py, tensorfold_qmm_v5
     .{ .name = "qmm_prefill", .flags = &.{"-O3"} },
+    .{ .name = "qmm_prefill8", .flags = &.{"-O3"}, .min_sm = 89 }, // opt-in Q4 prompt GEMM with row-scaled e4m3 activations
     .{ .name = "flashnext_fact", .flags = &.{"-O3"} }, // ours: prompt rows on qmm.cu's factored arithmetic
     .{ .name = "flashnext_hcf", .flags = glue }, // ours: the hyper-connection read-out's prompt tiles, fn_hc's bits
     .{ .name = "flashnext_fexp", .flags = &.{"-O3"} }, // ours: prompt pairs' experts on expert_rows' factored arithmetic
@@ -61,6 +62,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "sample", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // ours: the Metal engine's keyed draws
     .{ .name = "train", .flags = &.{"-O3"} }, // ours: Sliding Weights' learning step (train.metal's kernels)
     .{ .name = "qwen35", .flags = &.{"-O3"} }, // ours: the Qwen3.5 hybrids' glue, the Metal kernels' rounding points
+    .{ .name = "qwen35_prefill8", .flags = glue, .min_sm = 89 }, // opt-in fused prompt preparation for Qwen3.8 on GB10
     .{ .name = "qwen35_draft", .flags = &.{"-O3"} }, // ours: the DFlash2 drafter's glue (draft_ops.metal's rounding)
     .{ .name = "qwen35_keep", .flags = &.{"-O3"} }, // ours: a verified window's kept path applied to its stream's state
     .{ .name = "qwen_vision", .flags = &.{ "-O3", "--fmad=false" } }, // ours: the Qwen3.5 vision tower's glue and attention

@@ -12,6 +12,14 @@ tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
 
+On a single GB10, the native server can opt into the guarded FP8 prompt projection path with
+`--prompt-precision fp8`. This mode is limited to the uniform MLX 4-bit 27B checkpoint and text input; startup
+refuses other Qwen shapes, mixed-width/ModelOpt/EXL3 checkpoints, `--vision`, and `--slide`. The switch changes
+prompt arithmetic only: DFlash2, decode, verification, KV-cache format, attention and sampling keep the current
+native implementation. It reserves another 10.625 GiB for exact e4m3 copies of dense MLP gate/up weights; the
+decode path continues to use the original Q4 tiles. Treat performance and quality as unqualified until a same-binary bf16/FP8/bf16 run and
+the FP8 kernel numerical gate have both passed; see [prompt precision](cuda.md#prompt-precision).
+
 Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
 from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
 

@@ -19,6 +19,8 @@ const Stream = stream_.Stream;
 pub const proposal = @import("proposal_head.zig");
 pub const Affine4 = struct {
     w: u64,
+    /// Optional prompt-only exact e4m3 expansion. Decode and verify keep `w`.
+    w8: u64 = 0,
     s: u64,
     b: u64,
     n: usize,

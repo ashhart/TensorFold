@@ -40,6 +40,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (comptime @hasField(F.Options, "drafter_bits")) opts.drafter_bits = o.drafter_bits;
     if (@hasField(F.Options, "kv8")) opts.kv8 = o.kv8;
     if (@hasField(F.Options, "prompt_int8")) opts.prompt_int8 = o.prompt_int8;
+    if (@hasField(F.Options, "prompt_fp8")) opts.prompt_fp8 = o.prompt_fp8;
     if (@hasField(F.Options, "loops")) opts.loops = o.loops;
     return true;
 }
@@ -77,9 +78,9 @@ test "native family options forward lane counts and fixedness only when declared
     try std.testing.expect(fixed.lanes_fixed);
 }
 
-test "prompt precision: family options receive both explicit int8 and default bf16" {
+test "prompt precision: family options receive explicit int8, fp8 and default bf16" {
     const F = struct {
-        pub const Options = struct { prompt_int8: bool = false };
+        pub const Options = struct { prompt_int8: bool = false, prompt_fp8: bool = false };
     };
     var why: []const u8 = "";
     var opts: F.Options = .{ .prompt_int8 = true };
@@ -87,6 +88,8 @@ test "prompt precision: family options receive both explicit int8 and default bf
         try std.testing.expect(set(F, .{ .dir = "d", .model_type = "qwen3_5", .prompt_int8 = on }, &opts, &why));
         try std.testing.expectEqual(on, opts.prompt_int8);
     }
+    try std.testing.expect(set(F, .{ .dir = "d", .model_type = "qwen3_5", .prompt_fp8 = true }, &opts, &why));
+    try std.testing.expect(opts.prompt_fp8);
 }
 
 test "full-only precision: checkpoint is unknown before a family can load or allocate" {

@@ -191,17 +191,25 @@ counterpart.
 
 ### Prompt precision
 
-This section and the next describe the Python 0.6.6 engine; the native binary refuses `--prefill-fp8`,
-`--no-prefill-fp8` and `--precision`.
-
-The native Qwen3.5 engine has its own switch, `--prompt-precision int8` (bf16 by default). Prompt passes past 16 rows
+The native Qwen3.5 engine uses `--prompt-precision bf16|int8|fp8` (`bf16` by default). `int8` prompt passes past 16 rows
 quantize each MLX affine 4-bit projection's inputs to int8, one scale (amax / 127) a 64-input group, and run the int8
 mma (`cuda.w4a8`, `w4a8_prefill.cu`). The per-64 integer dot is exact int32. Group sums and the scaled epilogue add in
 fp32 and can round; weights of other widths keep the bf16 prompt GEMM. The quantized inputs take 76.5 MiB of device memory, only with the switch on.
+
+The opt-in native `fp8` mode is narrower: it accepts only text-only, single-GPU, uniform MLX-Q4 Qwen3.8-27B on
+GB10 (`sm_121`). It fuses residual RMSNorm, SwiGLU, GDN gating or attention gating with row-scaled e4m3 preparation,
+then runs the stored Q4 projections through `qmm_prefill8.cu`. Dense MLP gate/up weights also keep a prompt-only,
+exact e4m3 expansion (10.625 GiB for this 64-layer model) to avoid unpacking the same Q4 codes in every prompt;
+their original Q4 tiles remain authoritative for decode and verification. Decode, verification, the drafter,
+KV-cache format, attention and sampling remain on their ordinary native paths. Other devices, model shapes, quantization layouts,
+`--vision`, and `--slide` fail closed at startup instead of falling back silently.
 Qualification requires kernel-contract receipts and same-build bf16 controls. Record revision, binary, model,
 fixture, compiler, flags and fatbin hashes with the quality and timing results. The input commit's performance and
 quality measurements are contributor observations until those receipts and the chunk, cache, draft and concurrency
 comparisons are complete.
+
+The remainder of this section describes the Python 0.6.6 engine. Its `--prefill-fp8` and `--no-prefill-fp8` names
+are not native-server aliases.
 
 Prompt matmuls take bf16 activations by default. `--prefill-fp8` switches the ones that have an FP8 kernel (the
 27B's and Qwen3.6's MLX 4-bit projections, and the FP8, NVFP4 and MXFP8 layers of NVFP4 checkpoints) to e4m3

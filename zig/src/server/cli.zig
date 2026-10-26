@@ -103,7 +103,7 @@ pub const flags = [_]Flag{
     .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
     .{ .name = "--record", .native = true },
     .{ .name = "--kv-cache", .choices = &.{ "bf16", "fp8" }, .native = true },
-    .{ .name = "--prompt-precision", .choices = &.{ "bf16", "int8" }, .native = true },
+    .{ .name = "--prompt-precision", .choices = &.{ "bf16", "int8", "fp8" }, .native = true },
     .{ .name = "--mtp-drafts", .native = served("--mtp-drafts") },
     .{ .name = "--mtp-confidence", .native = served("--mtp-confidence") },
     .{ .name = "--lane-kernels", .choices = &.{ "auto", "on", "off" } },
@@ -213,7 +213,7 @@ pub const Args = struct {
     drafter_bits: u8 = 4,
     record: ?[]const u8 = null, // drafter training rows written under this folder
     kv_cache: []const u8 = "bf16", // fp8: e4m3 attention caches with a scale a row, about twice the context
-    prompt_precision: []const u8 = "bf16", // int8: prompt matmuls quantize their inputs to int8 a 64-input group
+    prompt_precision: []const u8 = "bf16", // int8/fp8: guarded prompt-only activation quantization modes
     slide: bool = false, // Sliding Weights learns what /v1/slide/learn is told into the served weights, live
     slide_graph: ?[]const u8 = null, // the Sliding Weights fact graph's file (null: memory only)
     parallel: []const u8 = "auto",
@@ -544,6 +544,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .record = args.record,
         .kv8 = std.mem.eql(u8, args.kv_cache, "fp8"),
         .prompt_int8 = std.mem.eql(u8, args.prompt_precision, "int8"),
+        .prompt_fp8 = std.mem.eql(u8, args.prompt_precision, "fp8"),
         .speed_up = args.speed_up,
         .prompt_cache_gib = args.prompt_cache_gib,
         .prompt_cache_over_cap = args.prompt_cache_over_cap,

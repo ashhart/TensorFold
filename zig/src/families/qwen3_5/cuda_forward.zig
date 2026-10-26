@@ -23,12 +23,18 @@ pub fn promptMoe(prompt: bool, rows: usize) bool {
     return prompt and rows > prompt_moe_cutoff;
 }
 
+fn fp8ProjectMany(e: *E.Engine, ls: []const E.Proj, outs: []const u64, rows: usize) !void {
+    if (ls.len == 0 or ls.len != outs.len) return error.UnexpectedTensor;
+    for (ls, outs) |l, out| try e.promptProject8(l, out, rows);
+}
+
 pub fn body(e: *E.Engine, shape: anytype) !void {
     const g = e.g;
     const total: usize = shape.total;
     const nseg: usize = shape.nseg;
     const record = shape.record;
     const prompt = shape.prompt;
+    const fp8_prompt = prompt and e.prompt8.on;
     const heads: usize = if (record) total else 1;
     const t_ids = e.tables.ptr + ids_at;
     const t_segs = e.tables.ptr + segs_at;
@@ -48,24 +54,24 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     var di: usize = 0;
     var ai: c_int = 0;
     for (e.layers, 0..) |l, i| {
-        try e.norm(i != 0, l.input_norm, total);
+        try e.promptNorm(i != 0, l.input_norm, total, fp8_prompt);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
                 const layer: c_int = @intCast(di);
-                try e.projMany(&.{ m.qkv, m.z, m.a, m.b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total, prompt);
+                if (fp8_prompt) try fp8ProjectMany(e, &.{ m.qkv, m.z, m.a, m.b }, &.{ e.qkv, e.z, e.a, e.b }, total) else try e.projMany(&.{ m.qkv, m.z, m.a, m.b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total, prompt);
                 if (e.learning) |k| try k.delta(i, e.qkv, e.z, e.b, e.a, total);
                 try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
                 // one recorded window of 2+ rows: gdn_pre logged its tails, conv_commit would only return
                 if (!(record and nseg == 1 and total > 1)) try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
                 if (prompt and nseg == 1) try @import("cuda_prompt.zig").delta(e, di, total) else try e.deltaScan(record, shape.slots, nseg, layer);
-                try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
-                try e.projAgain(m.out, e.mix, e.r, total, prompt);
+                if (fp8_prompt) try e.preparePrompt8(e.y, e.z, m.norm, total, g.valueWidth(), .gated_norm) else try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
+                if (fp8_prompt) try e.promptProject8(m.out, e.r, total) else try e.projAgain(m.out, e.mix, e.r, total, prompt);
                 di += 1;
             },
             .attention => |m| {
                 const aw = g.attnWidth();
-                try e.projMany(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
+                if (fp8_prompt) try fp8ProjectMany(e, &.{ m.q, m.k, m.v }, &.{ e.qraw, e.kraw, e.vraw }, total) else try e.projMany(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
                 try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                 try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
@@ -89,22 +95,24 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                     }
                     try launch(e, e.fns.attn_merge, sig.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
                 }
-                try launch(e, e.fns.attn_gate, sig.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params, sums });
+                if (fp8_prompt) try e.preparePrompt8(e.y, e.qraw, 0, total, aw, .attention_gate) else try launch(e, e.fns.attn_gate, sig.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params, sums });
                 if (e.learning) |k| try k.gated(i, e.mix, total);
-                try e.projAgain(m.o, e.mix, e.r, total, prompt);
+                if (fp8_prompt) try e.promptProject8(m.o, e.r, total) else try e.projAgain(m.o, e.mix, e.r, total, prompt);
                 ai += 1;
             },
         }
-        try e.norm(true, l.post_norm, total);
+        try e.promptNorm(true, l.post_norm, total, fp8_prompt);
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
         switch (l.mlp) {
             .dense => |m| {
-                try e.projAgain(m.gate, e.x, e.gate, total, prompt);
-                try e.projAgain(m.up, e.x, e.up, total, prompt);
+                if (fp8_prompt) try fp8ProjectMany(e, &.{ m.gate, m.up }, &.{ e.gate, e.up }, total) else {
+                    try e.projAgain(m.gate, e.x, e.gate, total, prompt);
+                    try e.projAgain(m.up, e.x, e.up, total, prompt);
+                }
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
                 const n: c_longlong = @intCast(total * g.intermediate);
-                try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)), sums });
-                try e.projAgain(m.down, e.act, e.r, total, prompt);
+                if (fp8_prompt) try e.preparePrompt8(e.gate, e.up, 0, total, g.intermediate, .swiglu) else try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)), sums });
+                if (fp8_prompt) try e.promptProject8(m.down, e.r, total) else try e.projAgain(m.down, e.act, e.r, total, prompt);
                 if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.add(e.stream, i, e.x, e.r, total, e.taught);
             },
             .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, promptMoe(prompt, total), t_params),

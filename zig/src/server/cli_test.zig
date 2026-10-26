@@ -169,6 +169,7 @@ test "parse and capabilities share the table" {
     try std.testing.expectEqualStrings("fp8", (try parse(a, &.{ "m", "--kv-cache", "fp8" }, &u)).kv_cache);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--kv-cache", "int4" }, &u));
     try std.testing.expectEqualStrings("int8", (try parse(a, &.{ "m", "--prompt-precision", "int8" }, &u)).prompt_precision);
+    try std.testing.expectEqualStrings("fp8", (try parse(a, &.{ "m", "--prompt-precision", "fp8" }, &u)).prompt_precision);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--prompt-precision", "fp4" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--reasoning-effort", "max" }, &u));
     try std.testing.expectEqual(@as(?f64, 12.5), (try parse(a, &.{ "m", "--prompt-cache-gib", "12.5" }, &u)).prompt_cache_gib);
@@ -394,10 +395,11 @@ test "prompt precision: parsing and request forwarding cover defaults, explicit 
     defer arena.deinit();
     const a = arena.allocator();
     var usage: Usage = .{};
-    for ([_][]const []const u8{ &.{"m"}, &.{ "m", "--prompt-precision", "bf16" }, &.{ "m", "--prompt-precision", "int8" } }, 0..) |argv, i| {
+    for ([_][]const []const u8{ &.{"m"}, &.{ "m", "--prompt-precision", "bf16" }, &.{ "m", "--prompt-precision", "int8" }, &.{ "m", "--prompt-precision", "fp8" } }, 0..) |argv, i| {
         const args = try parse(a, argv, &usage);
-        try std.testing.expectEqualStrings(if (i == 2) "int8" else "bf16", args.prompt_precision);
+        try std.testing.expectEqualStrings(if (i == 2) "int8" else if (i == 3) "fp8" else "bf16", args.prompt_precision);
         try std.testing.expectEqual(i == 2, (try request(a, "d", "t", args)).prompt_int8);
+        try std.testing.expectEqual(i == 3, (try request(a, "d", "t", args)).prompt_fp8);
     }
     for ([_][]const []const u8{ &.{ "m", "--prompt-precision" }, &.{ "m", "--prompt-precision", "unknown" }, &.{ "m", "--prompt-precision", "fp4" } }) |argv|
         try std.testing.expectError(error.Usage, parse(a, argv, &usage));

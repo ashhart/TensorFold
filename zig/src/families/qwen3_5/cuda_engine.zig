@@ -84,6 +84,7 @@ pub const Engine = struct {
     fp8: Kv8,
     prompt_attn: @import("cuda_prompt.zig").Fns, // a prompt chunk's attention tiles and delta-rule chain
     int8: @import("cuda_prompt_int8.zig").State = .{}, // prompt projections with int8 activations, when on
+    prompt8: @import("cuda_prefill8.zig").State = .{}, // opt-in row-scaled e4m3 prompt preparation and Q4 GEMM
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
     wide: cuda.qlinear.AffineNKernels, // the tiles of every width but 4, and their packs
@@ -175,6 +176,8 @@ pub const Engine = struct {
         const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
         errdefer e.int8.deinit();
+        e.prompt8 = .{};
+        errdefer e.prompt8.deinit();
         e.gpa = gpa;
         e.dir = try gpa.dupe(u8, dir);
         errdefer gpa.free(e.dir);
@@ -291,6 +294,7 @@ pub const Engine = struct {
         e.affine.deinit();
         e.wide.deinit();
         e.int8.deinit();
+        e.prompt8.deinit();
         if (e.mo) |*m| m.unload();
         for (&e.mods) |*m| m.unload();
         e.stream.deinit();
@@ -397,6 +401,20 @@ pub const Engine = struct {
 
     pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
+    }
+
+    /// The target prompt-only FP8 path fuses the producer with row quantization. Decode and verify never call these.
+    pub fn promptNorm(e: *Engine, residual: bool, w: u64, rows: usize, fp8_prompt: bool) !void {
+        if (!fp8_prompt) return e.norm(residual, w, rows);
+        try e.prompt8.prepare(e, e.h, if (residual) e.r else 0, w, rows, e.g.hidden, .norm);
+    }
+
+    pub fn preparePrompt8(e: *Engine, x: u64, y: u64, w: u64, rows: usize, columns: usize, mode: @import("cuda_prefill8.zig").Mode) !void {
+        try e.prompt8.prepare(e, x, y, w, rows, columns, mode);
+    }
+
+    pub fn promptProject8(e: *Engine, l: Proj, out: u64, rows: usize) !void {
+        try e.prompt8.project(e, l, out, rows);
     }
 
     /// Refuse the whole frame before settling any prior window or launching work.

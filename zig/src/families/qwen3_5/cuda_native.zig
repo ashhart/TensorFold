@@ -45,7 +45,7 @@ pub const snap_grid: u32 = E.max_rows;
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, prompt_fp8: bool = false, precision: ?enum { full } = null };
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -105,6 +105,7 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
+    if (o.prompt_fp8 and (o.slide or o.vision != null)) return error.UnsupportedFp8Prefill;
     const page_tokens = try pages_mod.paging();
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
@@ -112,6 +113,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
     errdefer e.deinit();
     if (o.prompt_int8) try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
+    if (o.prompt_fp8) {
+        const sm: u32 = @intCast(10 * try ctx.attribute(.compute_capability_major) + try ctx.attribute(.compute_capability_minor));
+        try e.prompt8.enable(e, sm);
+    }
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
     if (o.slide) _ = try @import("cuda_learn_shape.zig").from(e.g);
     // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
@@ -225,6 +230,7 @@ fn closeDrafter(p: *anyopaque) void {
 /// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
+        error.UnsupportedFp8Prefill => "--prompt-precision fp8 supports only text-only GB10 Qwen3.8-27B uniform MLX Q4; use bf16 or int8 for this model/configuration",
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
         error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
