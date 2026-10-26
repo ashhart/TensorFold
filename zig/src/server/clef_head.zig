@@ -44,7 +44,7 @@ pub const Files = struct {
     }
 };
 
-pub const Config = struct { hidden: usize = 5120, width: usize = 1024, routing: usize = 2, layers: usize = 4, heads: usize = 16, ff: usize = 4096 };
+pub const Config = struct { hidden: usize = 5120, width: usize = 1024, routing: usize = 2, layers: usize = 4, heads: usize = 16, ff: usize = 4096, threads: usize = 0 };
 
 const Lin = struct { w: []const f32, b: ?[]const f32, out: usize, in: usize };
 const Norm = struct { w: []const f32, b: []const f32 };
@@ -143,7 +143,7 @@ pub const Head = struct {
         const nh = try a.alloc(f32, n * H);
         layerNormRows(hidden, nh, h.hidden_norm, H);
         const memory = try a.alloc(f32, n * W);
-        try linear(nh, n, h.memory, memory);
+        try linear(h.cfg.threads, nh, n, h.memory, memory);
         const global = nh[(n - 1) * H ..][0..H];
         const nq = rec.questions.len;
         const qvec = try a.alloc(f32, nq * H);
@@ -173,18 +173,18 @@ pub const Head = struct {
         };
         const routed = try a.alloc(f32, total * W);
         const t2 = try a.alloc(f32, total * W);
-        try linear(ctx, total, h.option_context, routed);
-        try linear(lexv, total, h.option_lexical, t2);
+        try linear(h.cfg.threads, ctx, total, h.option_context, routed);
+        try linear(h.cfg.threads, lexv, total, h.option_lexical, t2);
         add(routed, t2);
-        try linear(qrep, total, h.option_question, t2);
+        try linear(h.cfg.threads, qrep, total, h.option_question, t2);
         add(routed, t2);
         for (h.routing) |*r| try routingLayer(a, r, routed, total, memory, n, h.cfg);
         // fields: the question projection, its options summarised by it, the record's last row and the type
         const fields = try a.alloc(f32, nq * W);
-        try linear(qvec, nq, h.question, fields);
+        try linear(h.cfg.threads, qvec, nq, h.question, fields);
         const summaries = try a.alloc(f32, nq * W);
         const gproj = try a.alloc(f32, W);
-        try linear(global, 1, h.global, gproj);
+        try linear(h.cfg.threads, global, 1, h.global, gproj);
         var off: usize = 0;
         for (rec.questions, 0..) |q, qi| {
             const m = q.options.len;
@@ -232,10 +232,10 @@ pub const Head = struct {
                     feat[2 * W + i] = f[i] * ov[i];
                     feat[3 * W + i] = @abs(f[i] - ov[i]);
                 }
-                try linear(feat, 1, h.scorer1, hid);
+                try linear(h.cfg.threads, feat, 1, h.scorer1, hid);
                 gelu(hid);
                 var res: [1]f32 = undefined;
-                try linear(hid, 1, h.scorer2, &res);
+                try linear(h.cfg.threads, hid, 1, h.scorer2, &res);
                 l.* = prior + h.gate * (h.joint_scale * cosine + res[0]);
             }
             off += q.options.len;
@@ -339,9 +339,14 @@ fn layerNormRows(x: []const f32, out: []f32, nm: Norm, w: usize) void {
     }
 }
 
-/// `out = x Wᵀ + b` for `n` rows, split over the host's cores by rows.
-fn linear(x: []const f32, n: usize, l: Lin, out: []f32) !void {
-    const threads = @min(std.Thread.getCpuCount() catch 1, 32, @max(1, n / 8));
+/// Worker threads for `cap` (0: the host's cores), at most 32.
+fn cores(cap: usize) usize {
+    return @min(if (cap > 0) cap else std.Thread.getCpuCount() catch 1, 32);
+}
+
+/// `out = x Wᵀ + b` for `n` rows, split over `cap` threads (0: the host's cores) by rows.
+fn linear(cap: usize, x: []const f32, n: usize, l: Lin, out: []f32) !void {
+    const threads = @min(cores(cap), @max(1, n / 8));
     if (threads <= 1) return linearRows(x, l, out, 0, n);
     var pool: [32]std.Thread = undefined;
     const per = (n + threads - 1) / threads;
@@ -371,17 +376,17 @@ fn linearRows(x: []const f32, l: Lin, out: []f32, lo: usize, hi: usize) void {
 }
 
 /// torch MultiheadAttention without masks: `q` (nq rows) attends to `kv` (nk rows); the result goes to `out`.
-fn attention(a: Allocator, m: *const Mha, q: []const f32, nq: usize, kv: []const f32, nk: usize, heads: usize, out: []f32) !void {
+fn attention(a: Allocator, cap: usize, m: *const Mha, q: []const f32, nq: usize, kv: []const f32, nk: usize, heads: usize, out: []f32) !void {
     const W = m.q.out;
     const dh = W / heads;
     const qp = try a.alloc(f32, nq * W);
     const kp = try a.alloc(f32, nk * W);
     const vp = try a.alloc(f32, nk * W);
-    try linear(q, nq, m.q, qp);
-    try linear(kv, nk, m.k, kp);
-    try linear(kv, nk, m.v, vp);
+    try linear(cap, q, nq, m.q, qp);
+    try linear(cap, kv, nk, m.k, kp);
+    try linear(cap, kv, nk, m.v, vp);
     const ctx = try a.alloc(f32, nq * W);
-    const threads = @min(std.Thread.getCpuCount() catch 1, 32, @max(1, nq));
+    const threads = @min(cores(cap), @max(1, nq));
     const scores = try a.alloc(f32, threads * nk);
     const ar: Attend = .{ .qp = qp, .kp = kp, .vp = vp, .ctx = ctx, .w = W, .dh = dh, .nk = nk, .heads = heads };
     if (threads <= 1) {
@@ -399,7 +404,7 @@ fn attention(a: Allocator, m: *const Mha, q: []const f32, nq: usize, kv: []const
             started += 1;
         }
     }
-    try linear(ctx, nq, m.o, out);
+    try linear(cap, ctx, nq, m.o, out);
 }
 
 const Attend = struct { qp: []const f32, kp: []const f32, vp: []const f32, ctx: []f32, w: usize, dh: usize, nk: usize, heads: usize };
@@ -419,11 +424,11 @@ fn attendRows(ar: Attend, s: []f32, lo: usize, hi: usize) void {
     };
 }
 
-fn feedForward(a: Allocator, f1: Lin, f2: Lin, x: []const f32, n: usize, out: []f32) !void {
+fn feedForward(a: Allocator, cap: usize, f1: Lin, f2: Lin, x: []const f32, n: usize, out: []f32) !void {
     const mid = try a.alloc(f32, n * f1.out);
-    try linear(x, n, f1, mid);
+    try linear(cap, x, n, f1, mid);
     gelu(mid);
-    try linear(mid, n, f2, out);
+    try linear(cap, mid, n, f2, out);
 }
 
 /// EvidenceRoutingLayer: the options attend to the normed memory, then a feed-forward step, both residual.
@@ -434,10 +439,10 @@ fn routingLayer(a: Allocator, r: *const Routing, x: []f32, n: usize, memory: []c
     const mn = try a.alloc(f32, nm * W);
     layerNormRows(memory, mn, r.mn, W);
     const t = try a.alloc(f32, n * W);
-    try attention(a, &r.attn, qn, n, mn, nm, cfg.heads, t);
+    try attention(a, cfg.threads, &r.attn, qn, n, mn, nm, cfg.heads, t);
     add(x, t);
     layerNormRows(x, qn, r.fn_, W);
-    try feedForward(a, r.f1, r.f2, qn, n, t);
+    try feedForward(a, cfg.threads, r.f1, r.f2, qn, n, t);
     add(x, t);
 }
 
@@ -447,13 +452,13 @@ fn decoderLayer(a: Allocator, d: *const Decoder, x: []f32, n: usize, memory: []c
     const y = try a.alloc(f32, n * W);
     const t = try a.alloc(f32, n * W);
     layerNormRows(x, y, d.n1, W);
-    try attention(a, &d.self, y, n, y, n, cfg.heads, t);
+    try attention(a, cfg.threads, &d.self, y, n, y, n, cfg.heads, t);
     add(x, t);
     layerNormRows(x, y, d.n2, W);
-    try attention(a, &d.cross, y, n, memory, nm, cfg.heads, t);
+    try attention(a, cfg.threads, &d.cross, y, n, memory, nm, cfg.heads, t);
     add(x, t);
     layerNormRows(x, y, d.n3, W);
-    try feedForward(a, d.l1, d.l2, y, n, t);
+    try feedForward(a, cfg.threads, d.l1, d.l2, y, n, t);
     add(x, t);
 }
 

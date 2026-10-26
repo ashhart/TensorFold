@@ -108,3 +108,74 @@ fn maxProbDiff(x: []const f64, y: []const f64) f64 {
     for (x, y) |a, b| worst = @max(worst, @abs(@exp(a - mx) / sx - @exp(b - my) / sy));
     return worst;
 }
+
+/// The tiny fixture's tensors as clef_head's loader reads them: bf16 bits from JSON, by name.
+const Tiny = struct {
+    names: std.StringHashMap([]const u8),
+    pub fn get(t: *const Tiny, name: []const u8) ?head.Files.T {
+        const b = t.names.get(name) orelse return null;
+        return .{ .dtype = .bf16, .bytes = b, .n = b.len / 2 };
+    }
+};
+
+fn bf16Bytes(a: std.mem.Allocator, v: std.json.Value) ![]u8 {
+    const items = v.array.items;
+    const out = try a.alloc(u8, items.len * 2);
+    for (items, 0..) |x, i| std.mem.writeInt(u16, out[2 * i ..][0..2], @intCast(x.integer), .little);
+    return out;
+}
+
+fn num(v: std.json.Value) f64 {
+    return switch (v) {
+        .float => |f| f,
+        .integer => |n| @floatFromInt(n),
+        else => unreachable,
+    };
+}
+
+test "Clef: a tiny random head equals Cloudflare's JointSchemaHead, and 1 and 4 threads give the same bits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // fixtures/clef_tiny.json: tools/clef_tiny_golden.py ran Cloudflare's joint_schema_model.py on these weights
+    const g = try std.json.parseFromSliceLeaky(std.json.Value, a, @embedFile("fixtures/clef_tiny.json"), .{});
+    const c = g.object.get("config").?.object;
+    const cfg: head.Config = .{ .hidden = @intCast(c.get("hidden").?.integer), .width = @intCast(c.get("width").?.integer), .routing = @intCast(c.get("routing").?.integer), .layers = @intCast(c.get("layers").?.integer), .heads = @intCast(c.get("heads").?.integer), .ff = @intCast(c.get("ff").?.integer) };
+    var tiny: Tiny = .{ .names = .init(a) };
+    var it = g.object.get("tensors").?.object.iterator();
+    while (it.next()) |e| try tiny.names.put(e.key_ptr.*, try bf16Bytes(a, e.value_ptr.*));
+    const table = try bf16Bytes(a, g.object.get("lm_head").?);
+    const lex: head.Lexical = .{ .table = table, .rows = table.len / 2 / cfg.hidden, .width = cfg.hidden };
+    const hv = g.object.get("hidden").?.array.items;
+    const hidden = try a.alloc(f32, hv.len);
+    for (hidden, hv) |*h, v| h.* = @floatCast(num(v));
+    const iv = g.object.get("ids").?.array.items;
+    const ids = try a.alloc(u32, iv.len);
+    for (ids, iv) |*d, v| d.* = @intCast(v.integer);
+    const qv = g.object.get("questions").?.array.items;
+    const qs = try a.alloc(enc.Question, qv.len);
+    for (qs, qv) |*q, v| {
+        const sp = v.object.get("span").?.array.items;
+        const ov = v.object.get("options").?.array.items;
+        const opts = try a.alloc([2]u32, ov.len);
+        const oids = try a.alloc([]const u8, ov.len);
+        for (opts, oids, ov) |*o, *id, x| {
+            o.* = .{ @intCast(x.array.items[0].integer), @intCast(x.array.items[1].integer) };
+            id.* = "";
+        }
+        q.* = .{ .id = "", .kind = @fromBackingInt(@intCast(@as(u8, @intCast(v.object.get("kind").?.integer)))), .span = .{ @intCast(sp[0].integer), @intCast(sp[1].integer) }, .options = opts, .option_ids = oids };
+    }
+    const rec: enc.Record = .{ .ids = ids, .questions = qs, .state_rows = @intCast(ids.len) };
+    var got: [2][][]f32 = undefined;
+    for ([_]usize{ 1, 4 }, 0..) |threads, k| {
+        var c2 = cfg;
+        c2.threads = threads;
+        var h = try head.Head.load(std.testing.allocator, &tiny, c2);
+        defer h.deinit();
+        got[k] = try h.forward(a, hidden, rec, lex);
+    }
+    for (got[0], got[1]) |x, y| for (x, y) |p, q| try std.testing.expectEqual(@as(u32, @bitCast(p)), @as(u32, @bitCast(q)));
+    for (g.object.get("logits").?.array.items, got[0]) |want, mine| for (want.array.items, mine) |w, m| {
+        try std.testing.expectApproxEqAbs(@as(f32, @floatCast(num(w))), m, 1e-4);
+    };
+}
