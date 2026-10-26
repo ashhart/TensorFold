@@ -1,9 +1,10 @@
-//! Gemma 4 on CUDA (#1048 step 8); cuda_config/cuda_widths copy config/widths (a file belongs to one module).
+//! Gemma 4 on CUDA (#1048 step 8); cuda_config, cuda_widths and cuda_plan copy their twins (one module per file).
 
 const std = @import("std");
 
 pub const config = @import("cuda_config.zig");
 pub const widths = @import("cuda_widths.zig");
+pub const plan = @import("cuda_plan.zig");
 pub const weights = @import("cuda_weights.zig");
 pub const kernels = @import("cuda_kernels.zig");
 pub const forward = @import("cuda_forward.zig");
@@ -17,10 +18,10 @@ pub const image = @import("cuda_image.zig");
 pub const native = @import("cuda_native.zig").Family("gemma4_unified");
 pub const native31 = @import("cuda_native.zig").Family("gemma4");
 
-test "cuda_config, cuda_widths and cuda_image are config, widths and image but for their first lines (doc, imports)" {
+test "cuda_config, cuda_widths, cuda_plan and cuda_image are config, widths, plan and image but for their first lines (doc, imports)" {
     // the copies' width tests log the refusals they plant, as Metal's do: warnings, meant
     std.testing.log_level = .err;
-    const pairs = [_][2][]const u8{ .{ @embedFile("config.zig"), @embedFile("cuda_config.zig") }, .{ @embedFile("widths.zig"), @embedFile("cuda_widths.zig") }, .{ @embedFile("image.zig"), @embedFile("cuda_image.zig") } };
+    const pairs = [_][2][]const u8{ .{ @embedFile("config.zig"), @embedFile("cuda_config.zig") }, .{ @embedFile("widths.zig"), @embedFile("cuda_widths.zig") }, .{ @embedFile("plan.zig"), @embedFile("cuda_plan.zig") }, .{ @embedFile("image.zig"), @embedFile("cuda_image.zig") } };
     for (pairs) |p| {
         var a = std.mem.splitScalar(u8, p[0], '\n');
         var b = std.mem.splitScalar(u8, p[1], '\n');
@@ -36,6 +37,7 @@ test "cuda_config, cuda_widths and cuda_image are config, widths and image but f
 test {
     _ = @import("cuda_config.zig");
     _ = @import("cuda_widths.zig");
+    _ = @import("cuda_plan.zig");
     _ = @import("cuda_weights.zig");
     _ = @import("cuda_kernels.zig");
     _ = @import("cuda_forward.zig");
