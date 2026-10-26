@@ -58,7 +58,7 @@ calls under 33 rows, and flash attention on simdgroup matrices (32-row tiles, P 
 are) for the text model's prompt rows and the image tower. The projections
 are the shared affine kernels.
 
-Every cos3 kernel the engine launches is registered with the [kernel contract](../kernel-contract.md)
+Every cos3 Metal kernel the engine launches is registered with the [kernel contract](../kernel-contract.md)
 (`zig/tests/contract/metal_cosmos3*.zig`, eight planted controls). On an M5 Ultra, `tf-kernel-contract --only cosmos3`:
 `SUMMARY 13 kernels: 13 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 red as planted, 0 missed; 0 limit
 problems`.
@@ -78,3 +78,27 @@ synthetic 640 x 480 picture of three shapes and a word.
 - Resumed equals fresh: turns 2 and 3 of text and image conversations, resumed from the prompt cache's kept states,
   equal the same conversations sent to a server with `--prompt-cache-gib 0`.
 - The checkpoint has no drafter, so drafts are off.
+
+## CUDA
+
+The same conversion serves on NVIDIA GPUs (GB10 checked; 8-bit conversions only). The text model runs on qlinear's
+MLX 8-bit tiles (one-row decode on group sums up to 16 rows, the prompt GEMM past that), q, k and v stacked into one
+projection. `zig/kernels/cuda/cosmos3.cu` holds the glue at `cosmos3.metal`'s rounding points: 8-bit embedding rows,
+RMS norms, interleaved M-RoPE with the cache write, relu^2, causal GQA over a stream's cache and a split-key decode
+kernel. The tower widens its 8-bit weights to bf16 at load and runs on `vit`'s cuBLASLt Linears, LayerNorm and GELU.
+
+The eight `tf_cos3_*` kernels are registered with the kernel contract (`zig/tests/cuda/contract_cosmos3*.zig`, nine
+registrations, twelve planted controls) with nvcc 13.0.88 records for sm_80, 86, 89, 120 and 121
+(`cosmos3_cuda_records.zig`). On a GB10, every cosmos3 registration passes gates 1 to 4, every control goes red and
+every cosmos3 launch passes gate 5.
+
+On a GB10 (CUDA 13.0), against the same reference and prompts as above:
+
+- First-token logits: top-1 equal on four of five; the fifth (the public reasoning image) takes the reference's second
+  token, 0.026 behind its first. Top-5 identical on three; on the other two four of the five tokens agree; cosine
+  0.9968 to 0.9998.
+- 48-token greedy: three of five identical; the other two part at the reference's near-ties (margins 0.026 and 0.26).
+- `tools/bench_concurrent.py --levels 1,2,4 --alone --serial`: every concurrent reply equals its solo run and every
+  solo run equals `"draft": false`.
+- The CUDA backend keeps no prompt states yet, so every request prefills its whole prompt; a resumed path is not
+  offered, and turns 2 and 3 of the conversations above equal a server with `--prompt-cache-gib 0`.
