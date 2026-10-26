@@ -128,19 +128,18 @@ pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Targe
         }
     };
     var hook: Hook = .{ .t = t };
+    defer if (hook.saved) |saved| reuse.drop(t, saved);
     const marks = [_]u32{engine.max_rows};
     var s = try lanes.Stream.init(a, .{ .id = "probe", .prompt = &toks, .max_new = 1, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
     defer s.deinit(a);
-    const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
-    backend.vtable.prefill(backend.ptr, &s) catch |e| {
-        backend.vtable.release(backend.ptr, &s);
-        return e;
+    const ns = pass: {
+        defer backend.vtable.release(backend.ptr, &s); // once, whether the pass, its wait or nothing failed
+        const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
+        try backend.vtable.prefill(backend.ptr, &s);
+        try t.e.stream.synchronize();
+        break :pass std.Io.Clock.awake.now(io).toNanoseconds() - t0;
     };
-    try t.e.stream.synchronize();
-    const ns = std.Io.Clock.awake.now(io).toNanoseconds() - t0;
-    backend.vtable.release(backend.ptr, &s);
     const saved = hook.saved orelse return hook.failed orelse error.ProbeUnmarked;
-    defer reuse.drop(t, saved);
     const c: *const Copy = @ptrCast(@alignCast(saved));
     var h = std.hash.Wyhash.init(0x7135);
     h.update(std.mem.asBytes(&wordsOf(c)));

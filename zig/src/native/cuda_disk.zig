@@ -129,19 +129,18 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
         }
     };
     var hook: Hook = .{ .t = t };
+    defer if (hook.saved) |saved| kept.drop(t, saved);
     const marks = [_]u32{4136};
     var s = try lanes.Stream.init(a, .{ .id = "probe", .prompt = &toks, .max_new = 1, .drafts = t.head != null, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
     defer s.deinit(a);
-    const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
-    backend.vtable.prefill(backend.ptr, &s) catch |e| {
-        backend.vtable.release(backend.ptr, &s);
-        return e;
+    const ns = pass: {
+        defer backend.vtable.release(backend.ptr, &s); // once, whether the pass, its wait or nothing failed
+        const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
+        try backend.vtable.prefill(backend.ptr, &s);
+        try kept.settle(t);
+        break :pass std.Io.Clock.awake.now(io).toNanoseconds() - t0;
     };
-    try kept.settle(t);
-    const ns = std.Io.Clock.awake.now(io).toNanoseconds() - t0;
-    backend.vtable.release(backend.ptr, &s);
     const saved = hook.saved orelse return hook.failed orelse error.ProbeUnmarked;
-    defer kept.drop(t, saved);
     if (!whole(t, saved)) return error.ProbeUnmarked;
     const sh = kept.shape(t, 4136);
     const bytes = try a.alloc(u8, words + sh.kv + sh.mamba);
