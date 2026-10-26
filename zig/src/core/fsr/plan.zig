@@ -36,7 +36,7 @@ pub fn pool(requested: u64, parts: [9]u64, keys: usize, max_union: usize) !Pool 
     const slabs = try std.math.mul(u64, count, stride);
     // CPU CLOCK slots and read tickets, the persistent CPU/GPU map, demand bits and owner bookkeeping.
     const per_slot = @sizeOf(cache.Slot) + @sizeOf(arena.Arena(void).Job) + @sizeOf(usize);
-    const per_key = 9 * @sizeOf(reader.Span) + @sizeOf(i32) + @sizeOf(bool);
+    const per_key = 9 * (@sizeOf(reader.Span) + @sizeOf(u64)) + 2 * @sizeOf(i32) + @sizeOf(bool) + @sizeOf(u64);
     const descriptors = try std.math.mul(u64, keys, per_key);
     const metadata = try std.math.add(u64, try std.math.mul(u64, count, per_slot), try std.math.add(u64, descriptors, arena.worker_stack_bytes + 4096));
     return .{ .requested = requested, .slots = @intCast(count), .stride = stride, .slabs = slabs, .metadata = metadata, .unused = requested - slabs };

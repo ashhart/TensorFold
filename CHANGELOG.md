@@ -14,6 +14,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next CUDA NVFP4 next-chunk file hints are opt-in with `TF_FLASHNEXT_WARM_AHEAD=1`; unset or `0` leaves them off (#1292).
 
+- Add opt-in exact Fluid Subgraph Residency for Flash Next on Metal: SSD expert slots, PLE row streaming, locality traces and bounded next-layer prefetch, following EdgeMoE, MoE-Infinity, Fiddler and Fate; slotstream is an outside comparison only. Device memory tiers require qualification.
+
+- Flash Next exact SSD expert residency batches contiguous component reads with bounded asynchronous IO, indexes pending reads, and gives actual demand priority over unused forecasts (#1039). Synthetic locality tools report the storage-byte ceiling; device speed remains to be qualified.
+
 - Flash Next on Macs: concurrent chats share each round's work more fully (#1338, #1339, #1340, #1341, #1342, #1343). A shared round samples every sampled stream's draft and target rows in one dispatch, drafts every stream in one packed MTP pass, copies kept states in the verify command buffer, runs the sessions' recurrences in one verify without barriers between them, and prices a batched head's extra drafts as the deepest stream's steps. On an M3 Ultra with the 4-bit MTP checkpoint, decode across 2, 4 and 8 concurrent streams rises 6.9%, 8.8% and 11.8% (4.5% and 10.7% at 2 and 4 streams on an M5 Ultra); one stream and prefill are unchanged, and prompt tokens equal the previous build's. `FZ_VERIFY_OVERLAP=0`, `FZ_PRICE_BATCHED=0` and `FZ_KEYED_DRAFTS=0` restore the previous paths. Thanks to @gilby.
 
 - Qwen4 dense (preparation, ahead of a released checkpoint): the native binary admits `qwen4` and `qwen4_text` configs on Metal and CUDA, sharing Flash Next's layer graph with a dense feed-forward, and refuses any geometry its kernels do not cover before allocating (#1244). Weights stay as stored (BF16, MLX affine, ModelOpt FP8 or NVFP4). Synthetic device gates (`zig build test-qwen4-metal`, `tf-cuda-test qwen4`) load nonzero checkpoints through the serving engine and match a binary64 reference with no tolerance; no real checkpoint, speed or memory fit is claimed yet. Existing models are unchanged.
@@ -49,8 +53,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--name-priority ID=background` gives a served name or alias a background default: a request naming it without its own `priority` yields to foreground work (#1317, from Python #445).
 
 - Qwen3.8-27B on Metal fills prompts a chunk at a time with the other streams' rounds between chunks, so streams already decoding keep going while a long prompt fills (#1303), and kept states reuse spare buffers with their save blits off the engine thread (#1304). On an M3 Ultra, with an 8.7k-token prompt arriving while two streams decode, the decoding streams' longest pause goes from 28.6 s to 0.47 s; the long prompt's first token comes 7.9% later (28.6 s to 30.9 s), and every reply is unchanged.
-
-- Add opt-in exact Fluid Subgraph Residency for Flash Next on Metal: SSD expert slots, PLE row streaming, locality traces and bounded next-layer prefetch, following EdgeMoE, MoE-Infinity, Fiddler and Fate; slotstream is an outside comparison only. Device memory tiers require qualification.
 
 - Gemma 4 on CUDA with a drafter keeps its prompt-cache mark after the drafter absorbs a stepped prompt chunk, so a chat's next turn resumes instead of prefilling again: with Gemma 4 31B and its DFlash drafter on a GB10, a 30k-token chat's next turn starts after 3.6 s instead of 45 s, with the same reply (#1286).
 

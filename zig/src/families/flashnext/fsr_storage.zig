@@ -19,6 +19,9 @@ pub const Source = struct {
         if (which >= s.files.len) return error.NoFile;
         return s.files[which].readAt(0, out, offset);
     }
+    pub fn readMany(s: Source, requests: []const core.reader.Request, stats: *core.reader.Stats) !void {
+        return @import("../../core/fsr/io_macos.zig").readMany(s.files, requests, stats);
+    }
 };
 pub const Arena = core.arena.Arena(Source);
 pub const Builder = struct {

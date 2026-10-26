@@ -2,6 +2,7 @@
 """Analyze complete native FSR routing traces without loading model weights."""
 import argparse
 import json
+import math
 from pathlib import Path
 
 
@@ -15,7 +16,23 @@ def integer(value, name, minimum=0):
     return value
 
 
-def analyze(lines, budgets, ssd_bytes_per_second=None):
+def read_requests(jobs, parts):
+    count = 0
+    for size in parts:
+        previous, length = None, 0
+        for key, slot in jobs:
+            adjacent = previous is not None and key[0] == previous[0][0] and key[1] == previous[0][1] + 1 and slot == previous[1] + 1
+            if adjacent and length + size <= 4 * 1024 * 1024:
+                length += size
+            else:
+                count += math.ceil(length / (4 * 1024 * 1024))
+                length = size
+            previous = (key, slot)
+        count += math.ceil(length / (4 * 1024 * 1024))
+    return count
+
+
+def analyze(lines, budgets, ssd_bytes_per_second=None, *, tokens=None, resident_tps=None, read_latency_ns=0):
     records = [json.loads(line) for line in lines if line.strip()]
     if any(not isinstance(record, dict) for record in records):
         raise TraceError("every trace record must be an object")
@@ -25,6 +42,17 @@ def analyze(lines, budgets, ssd_bytes_per_second=None):
     layers = integer(header.get("layers"), "layers", 1)
     experts = integer(header.get("experts"), "experts", 1)
     stride = integer(header.get("slot_bytes"), "slot_bytes", 1)
+    parts = header.get("component_bytes")
+    if parts is not None:
+        if not isinstance(parts, list) or len(parts) != 9:
+            raise TraceError("component_bytes needs nine stored widths")
+        if sum(integer(n, "component bytes", 1) for n in parts) != stride:
+            raise TraceError("component bytes must sum to slot_bytes")
+    if tokens is not None:
+        integer(tokens, "generated or prompt tokens", 1)
+    integer(read_latency_ns, "read latency ns")
+    if resident_tps is not None and (isinstance(resident_tps, bool) or not math.isfinite(resident_tps) or resident_tps <= 0):
+        raise TraceError("invalid resident tokens/second")
     if not header.get("workload") or not header.get("checkpoint"):
         raise TraceError("workload and checkpoint identity are required")
     modes = header.get("modes", {})
@@ -94,26 +122,28 @@ def analyze(lines, budgets, ssd_bytes_per_second=None):
     frontier = []
     for budget in budgets:
         budget = integer(budget, "budget bytes", 1)
-        capacity = budget // stride
+        capacity = min(budget // stride, layers * experts)
         row = {"budget_bytes": budget, "slots": capacity, "usable_bytes": capacity * stride,
                "observed_union_fits": len(active) <= capacity,
                "supported_window_fits": max_union <= capacity,
-               "unused_tail_bytes": budget % stride}
+               "unused_tail_bytes": budget - capacity * stride}
         if capacity < max_union:
             row["verdict"] = "active window exceeds pool; no exact full-window simulation"
             frontier.append(row)
             continue
-        slots, mapping, hand, misses = [], {}, 0, 0
+        slots, mapping, hand, misses, demands, calls, groups = [], {}, 0, 0, 0, 0, 0
         cold = []
         for window in windows:
             window_misses = 0
             for layer, ids in window["routes"]:
                 demand = [(layer, eid) for eid in ids]
+                demands += len(demand)
                 protected = set(demand)
-                for key in demand:
+                jobs = []
+                for key in sorted(demand):
                     if key in mapping:
                         slots[mapping[key]][1] = True
-                for key in demand:
+                for key in sorted(demand):
                     if key in mapping:
                         continue
                     if len(slots) < capacity:
@@ -133,16 +163,37 @@ def analyze(lines, budgets, ssd_bytes_per_second=None):
                             break
                     slots[at] = [key, True]
                     mapping[key] = at
+                    jobs.append((key, at))
                     window_misses += 1
+                if parts is not None:
+                    route_calls = read_requests(jobs, parts)
+                    calls += route_calls
+                    groups += math.ceil(route_calls / 9)
             misses += window_misses
             cold.append({"window": window["id"], "misses": window_misses,
                          "cold_bytes": window_misses * stride})
         row.update(verdict="observed union fits" if row["observed_union_fits"] else "capacity pressure",
                    policy="CLOCK, demand unions protected, no forecast", misses=misses,
-                   cold_bytes=misses * stride, per_window=cold)
+                   cold_bytes=misses * stride, per_window=cold, demands=demands,
+                   hit_rate=1 - misses / demands, component_reads_without_coalescing=9 * misses)
+        if parts is not None:
+            row.update(coalesced_read_requests=calls, bounded_read_groups=groups,
+                       mean_read_bytes=misses * stride / calls if calls else 0,
+                       coalescing_assumption="stored tensor components and slot strides match the declared uniform recipe")
+        if tokens is not None:
+            row.update(tokens=tokens, cold_bytes_per_token=misses * stride / tokens)
         if ssd_bytes_per_second is not None:
             rate = integer(ssd_bytes_per_second, "measured SSD bytes/second", 1)
             row["storage_seconds_lower_bound"] = misses * stride / rate
+            if tokens is not None:
+                row["storage_tokens_per_second_ceiling"] = tokens / row["storage_seconds_lower_bound"] if misses else None
+                if resident_tps is not None and parts is not None:
+                    compute = tokens / resident_tps
+                    baseline_io = row["storage_seconds_lower_bound"] + 9 * misses * read_latency_ns / 1e9
+                    batched_io = row["storage_seconds_lower_bound"] + groups * read_latency_ns / 1e9
+                    row.update(serialized_baseline_tps=tokens / (compute + baseline_io),
+                               serialized_batched_tps=tokens / (compute + batched_io),
+                               prediction="synthetic planning estimate; added request latency is conservative and uncalibrated")
         frontier.append(row)
     return {"format": "tensorfold-fsr-profile-v1", "workload": header["workload"],
             "checkpoint": header["checkpoint"], "windows": len(windows),
@@ -157,10 +208,14 @@ def main():
     parser.add_argument("trace", type=Path)
     parser.add_argument("--budget-bytes", type=int, action="append", required=True)
     parser.add_argument("--ssd-bytes-per-second", type=int)
+    parser.add_argument("--tokens", type=int)
+    parser.add_argument("--resident-tps", type=float)
+    parser.add_argument("--read-latency-ns", type=int, default=0)
     args = parser.parse_args()
     try:
         result = analyze(args.trace.read_text().splitlines(), args.budget_bytes,
-                         args.ssd_bytes_per_second)
+                         args.ssd_bytes_per_second, tokens=args.tokens, resident_tps=args.resident_tps,
+                         read_latency_ns=args.read_latency_ns)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         parser.exit(2, f"FSR profile refused: {exc}\n")
     print(json.dumps(result, indent=2))

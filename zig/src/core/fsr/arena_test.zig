@@ -67,3 +67,57 @@ test "FSR failed component cannot publish an expert or overwrite an owned consum
     try std.testing.expect(s.clock.map[0] >= 0);
     try std.testing.expectError(error.ActiveUnionExceedsPool, s.demand(&.{ 0, 1, 2 }));
 }
+
+test "FSR demand waits for its forecast reads and cancels unrelated reads between experts" {
+    const Gate = struct {
+        data: [6 * 36]u8 = @splat(7),
+        enabled: bool = false,
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        bytes: usize = 0,
+        pub fn fileSize(s: *@This(), _: usize) !u64 {
+            return s.data.len;
+        }
+        pub fn readAt(s: *@This(), _: usize, dst: []u8, at: u64) !usize {
+            if (s.enabled and !s.entered.swap(true, .acq_rel)) {
+                while (!s.release.load(.acquire)) std.Thread.yield() catch {};
+            }
+            @memcpy(dst, s.data[@intCast(at)..][0..dst.len]);
+            s.bytes += dst.len;
+            return dst.len;
+        }
+    };
+    const Owned = arena.Arena(*Gate);
+    const Request = struct {
+        pool: *Owned,
+        failure: ?anyerror = null,
+        fn run(s: *@This()) void {
+            s.pool.demand(&.{3}) catch |err| {
+                s.failure = err;
+            };
+        }
+    };
+    var source: Gate = .{};
+    const ex = experts();
+    var memory: [9][6 * 4]u8 = undefined;
+    var slabs: [9][]u8 = undefined;
+    for (&slabs, &memory) |*dst, *src| dst.* = src;
+    var s = try Owned.init(std.testing.allocator, &source, &ex, @splat(4), slabs);
+    defer s.deinit();
+    try s.demand(&.{0});
+    source.enabled = true;
+    source.bytes = 0;
+    try s.forecast(&.{ 1, 2, 3, 4, 5 });
+    errdefer source.release.store(true, .release);
+    while (!source.entered.load(.acquire)) std.Thread.yield() catch {};
+    var request: Request = .{ .pool = &s };
+    const caller = try std.Thread.spawn(.{}, Request.run, .{&request});
+    while (!s.urgent.load(.acquire)) std.Thread.yield() catch {};
+    source.release.store(true, .release);
+    caller.join();
+    try std.testing.expect(request.failure == null);
+    try std.testing.expectEqual(@as(usize, 72), source.bytes);
+    try std.testing.expectEqual(@as(u64, 3), s.cancelled_forecasts);
+    try std.testing.expect(s.clock.map[1] >= 0 and s.clock.map[3] >= 0);
+    for ([_]usize{ 2, 4, 5 }) |key| try std.testing.expect(s.clock.map[key] < 0 and s.clock.pending(key) == null);
+}

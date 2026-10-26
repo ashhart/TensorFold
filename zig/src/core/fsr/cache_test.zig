@@ -80,3 +80,25 @@ test "FSR publishes into the borrowed GPU map and never frees its owner" {
     map[0] = 17;
     try std.testing.expectEqual(@as(i32, 17), map[0]);
 }
+
+test "FSR forecast cannot spend demand second chances or promote unused predictions" {
+    var c = try Cache.init(a, 8, 3);
+    defer c.deinit();
+    try fill(&c, &.{ 0, 1, 2 });
+    c.release();
+    const result = c.reserve(3, true);
+    if (result) |ticket| {
+        if (ticket) |t| try c.abort(t);
+        return error.ForecastEvictedRecentDemand;
+    } else |err| try std.testing.expectEqual(error.NoEvictableSlot, err);
+    for (c.slots) |s| try std.testing.expect(s.referenced);
+    try fill(&c, &.{3});
+    c.release();
+    const predicted = (try c.reserve(4, true)).?;
+    try c.publish(predicted);
+    try std.testing.expect(!c.slots[predicted.slot].referenced);
+    try std.testing.expect(try c.peek(4) != null);
+    try std.testing.expect(!c.slots[predicted.slot].referenced);
+    _ = try c.resident(4);
+    try std.testing.expect(c.slots[predicted.slot].referenced);
+}

@@ -66,7 +66,12 @@ pub const Runtime = struct {
             t.sink.close();
             s.trace = null;
         }
-        if (s.pool) |*p| p.arena.deinit();
+        if (s.pool) |*p| {
+            p.arena.join() catch {};
+            const a = &p.arena;
+            std.log.info("flash next FSR lifetime IO: {d} bytes, {d} read requests, {d} file checks; {d}/{d} demand/forecast reservations, {d} cancelled forecasts, {d}/{d} unique/raw demand keys, {d} worker joins, {d} command waits (includes startup)", .{ a.io.bytes, a.io.calls, a.io.size_checks, a.demand_misses, a.forecast_misses, a.cancelled_forecasts, a.unique_demand_keys, a.demand_keys, a.worker_joins, s.commands.waits });
+            p.arena.deinit();
+        }
         if (s.ple) |*p| p.table.deinit();
         s.fence.deinit();
     }
@@ -145,11 +150,15 @@ pub const Runtime = struct {
     pub fn after(s: *Runtime, r: *fz.Run) !void {
         if (s.predicted_count == 0) return;
         var missing = false;
-        for (s.predicted[0..s.predicted_count]) |key| if (try s.pool.?.arena.clock.resident(key) == null) {
+        for (s.predicted[0..s.predicted_count]) |key| if (try s.pool.?.arena.clock.peek(key) == null) {
             missing = true;
             break;
         };
         if (!missing) {
+            s.predicted_count = 0;
+            return;
+        }
+        if (!s.pool.?.arena.clock.forecastRoom()) {
             s.predicted_count = 0;
             return;
         }

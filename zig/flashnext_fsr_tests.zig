@@ -64,7 +64,11 @@ test "FSR native owner joins forecasts, loads actual multi-row demand and fails 
     @memset(pick.b.slice(u32, 20), 7);
     try s.prepare(&r, 1, lg, rows, pick, wts, 2, lg, null, false);
     try std.testing.expect(s.commands.pending == null);
-    try std.testing.expect(try s.pool.?.arena.clock.resident(512 + 42) != null);
+    try std.testing.expect(s.pool.?.arena.clock.pending(512 + 42) == null);
+    if (try s.pool.?.arena.clock.peek(512 + 42)) |forecast_slot| {
+        for (s.pool.?.buffers, 0..) |buffer, part|
+            try std.testing.expectEqualSlices(u8, bytes[(9 + part) * tensor_bytes + 42 * stride ..][0..stride], buffer.b.contents()[forecast_slot * stride ..][0..stride]);
+    }
     try std.testing.expect(try s.pool.?.arena.clock.resident(512 + 7) != null);
     const actual = (try s.pool.?.arena.clock.resident(512 + 7)).?;
     try std.testing.expectEqualSlices(u8, bytes[9 * tensor_bytes + 7 * stride ..][0..stride], s.pool.?.buffers[0].b.contents()[actual * stride ..][0..stride]);
