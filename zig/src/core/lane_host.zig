@@ -574,7 +574,7 @@ pub const LaneHost = struct {
                     continue;
                 }
                 if (rows_host.idle(h)) continue;
-                if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))
+                if (h.cancels.items.len == 0 and !scoring.busy(h) and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))
                     h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
                 h.unlock();
                 continue;

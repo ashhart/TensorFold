@@ -286,7 +286,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         }
         if (!work) {
             if (rows_host.idle(h)) continue;
-            if (h.cancels.items.len == 0) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+            if (h.cancels.items.len == 0 and !@import("lane_host_score.zig").busy(h)) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();
             continue;
         }

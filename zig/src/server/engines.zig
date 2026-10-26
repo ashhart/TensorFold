@@ -37,7 +37,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         problem.* = "--record writes rows from the CUDA engine only so far: serve without --record";
         return null;
     }
-    return native.open(a, gpa, io, try cli.request(a, dir, model_type, args), problem);
+    var req = try cli.request(a, dir, model_type, args);
+    if (args.clef != null) req.decision_rows = @import("clef_serve.zig").max_length;
+    return native.open(a, gpa, io, req, problem);
 }
 
 /// A tensor-parallel rank above 0 runs rank 0's steps until it stops; false with ``problem`` set when it cannot.

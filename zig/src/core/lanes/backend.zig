@@ -124,8 +124,8 @@ pub const Backend = struct {
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
         /// One logit per label at the row after `prompt` and, when `mass`, the vocabulary's logsumexp (decisions).
         score: ?*const fn (ptr: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 = null,
-        /// Every row's final normed state (bf16 bits, rows x hidden) of `prompt` on a fresh cache (Clef decisions).
-        hidden: ?*const fn (ptr: *anyopaque, prompt: []const u32, out: []u16) anyerror!void = null,
+        /// A decision prompt piece from row `at` (0: fresh): final normed bf16 rows into `out`; the next piece's row.
+        hidden: ?*const fn (ptr: *anyopaque, prompt: []const u32, out: []u16, at: usize) anyerror!usize = null,
         /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
         first_masked: ?*const fn (ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 = null,
         /// The stream's held drafts as host tokens in window order, waiting for the draft (a grammar walks them).

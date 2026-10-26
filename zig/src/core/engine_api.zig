@@ -292,6 +292,8 @@ pub const Open = struct {
     learn_conversations: bool = false,
     /// --learn-daily-gib: what learned states may write a day under the root, every model together.
     learn_daily_gib: f64 = 32,
+    /// --clef: a decision's longest prompt, whose cache the engine reserves at startup inside its budget (0: none).
+    decision_rows: u32 = 0,
     /// --spill-gib (Macs): states evicted from RAM go to the store `learn_conversations` opens (off: written behind).
     spill: prompt_cache.rows.Spill = .off,
     /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).

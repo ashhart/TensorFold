@@ -59,3 +59,40 @@ test "a backend's score runs on the engine thread, a failure comes back as Faile
     try std.testing.expectError(error.Failed, engine.score(&.{1}, &.{2}, logits[0..1], false));
     try std.testing.expectEqual(@as(usize, 2), Scorer.calls);
 }
+
+/// A stepped hidden-rows backend: 3 rows a piece, row i's value prompt[i] * 2 + 1; it records each piece's start.
+const Rows = struct {
+    var starts: [8]usize = undefined;
+    var n: usize = 0;
+
+    fn hidden(_: *anyopaque, prompt: []const u32, out: []u16, at: usize) anyerror!usize {
+        starts[n] = at;
+        n += 1;
+        const end = @min(prompt.len, at + 3);
+        for (at..end) |i| out[i] = @intCast(prompt[i] * 2 + 1);
+        return end;
+    }
+};
+
+test "a decision's hidden rows come one backend piece per engine-thread pass, and equal a whole pass" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    const plain = target.backend();
+    var vt = plain.vtable.*;
+    vt.hidden = Rows.hidden;
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, .{ .ptr = plain.ptr, .vtable = &vt }, clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    try host.start();
+    defer host.stop();
+    Rows.n = 0;
+    const prompt = [_]u32{ 5, 1, 4, 1, 5, 9, 2, 6 };
+    var out: [8]u16 = undefined;
+    try host.engine().hidden(&prompt, &out);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3, 6 }, Rows.starts[0..Rows.n]);
+    for (prompt, out) |p, o| try std.testing.expectEqual(@as(u16, @intCast(p * 2 + 1)), o);
+}

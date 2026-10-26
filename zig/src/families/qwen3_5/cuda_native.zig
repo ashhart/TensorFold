@@ -45,7 +45,7 @@ pub const snap_grid: u32 = E.max_rows;
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, decision_rows: usize = 0 };
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -123,6 +123,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const l = try gpa.create(Lanes);
     l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .page_test = page_test, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
+    // --clef: one decision cache made and touched now, so the startup budget counts it
+    if (o.decision_rows > 0) l.decision = try reserveDecision(gpa, e, o.decision_rows);
     return .{
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
@@ -151,6 +153,16 @@ pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
 /// The CUDA hybrids use the shared lane planner for five-token context copies, alone and without a draft model.
 pub fn laneFacts(window: u32, verify: u32) lanes.Model {
     return .{ .exact_width = window, .hidden_rows = true, .batch_rows = verify, .max_streams = E.max_segs, .streams_exact = true, .copy_match = 5, .context_copies = true, .lone_cost_tile = 16 };
+}
+
+/// A decision cache of `rows`, allocated and reset (touched) now.
+fn reserveDecision(gpa: std.mem.Allocator, e: *E.Engine, rows: usize) !*E.Cache {
+    const d = try gpa.create(E.Cache);
+    errdefer gpa.destroy(d);
+    d.* = try E.Cache.init(gpa, e, rows);
+    errdefer d.deinit(gpa);
+    try d.reset(e);
+    return d;
 }
 
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {
@@ -255,6 +267,8 @@ fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
 
 const Lanes = struct {
     timing_on: bool = false,
+    /// --clef: the reserved cache decisions' prompt pieces run on, reset at a decision's first piece.
+    decision: ?*E.Cache = null,
     trace: ?*round_timing.Trace = null,
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -287,6 +301,10 @@ const Lanes = struct {
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, Fill) = .empty,
 
     fn deinit(self: *Lanes) void {
+        if (self.decision) |d| {
+            d.deinit(self.gpa);
+            self.gpa.destroy(d);
+        }
         var it = self.caches.valueIterator();
         while (it.next()) |cache| self.give(cache.*); // a pool lane's pages back, a window to the reserve
         self.caches.deinit(self.gpa);
@@ -346,20 +364,17 @@ const Lanes = struct {
         return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .hidden = hiddenFn, .release = releaseFn } };
     }
 
-    /// Clef decisions: `ids` through a fresh cache in max_rows pieces, every row's final normed state kept.
-    fn hiddenFn(ptr: *anyopaque, ids: []const u32, out: []u16) anyerror!void {
+    /// Clef decisions: one max_rows piece of `ids` from `at` on the reserved cache, its rows' final normed states kept.
+    fn hiddenFn(ptr: *anyopaque, ids: []const u32, out: []u16, at: usize) anyerror!usize {
         const self: *Lanes = @ptrCast(@alignCast(ptr));
+        const cache = self.decision orelse return error.QwenNoDecisionCache;
         const width = self.e.g.hidden;
-        if (ids.len == 0 or ids.len > self.capacity or out.len != ids.len * width) return error.InvalidQwenPrompt;
-        var cache = try E.Cache.init(self.gpa, self.e, ids.len);
-        defer cache.deinit(self.gpa);
-        var at: usize = 0;
-        while (at < ids.len) {
-            const end = @min(ids.len, at + E.max_rows);
-            try self.e.forward(&.{.{ .cache = &cache, .rows = end - at }}, ids[at..end], .last);
-            try self.e.finalRows(end - at, out[at * width ..][0 .. (end - at) * width]);
-            at = end;
-        }
+        if (ids.len == 0 or ids.len > cache.cap or at >= ids.len or out.len != ids.len * width) return error.InvalidQwenPrompt;
+        if (at == 0) try cache.reset(self.e);
+        const end = @min(ids.len, at + E.max_rows);
+        try self.e.forward(&.{.{ .cache = cache, .rows = end - at }}, ids[at..end], .last);
+        try self.e.finalRows(end - at, out[at * width ..][0 .. (end - at) * width]);
+        return end;
     }
 
     /// A drafter ring's bytes in each lane's run (0: no DFlash2 drafter).
