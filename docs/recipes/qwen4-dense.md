@@ -2,8 +2,8 @@
 
 The `qwen4` and `qwen4_text` adapters prepare a dense version of the related Flash Next architecture.
 No released Qwen4-27B checkpoint was available for this preparation.
-The supplied Intel kernels establish supported shapes, not the complete model configuration.
-Real checkpoint, Metal and CUDA device qualification remain unchecked.
+The supplied kernel notes establish supported shapes, not the complete model configuration.
+The synthetic Metal and CUDA device gates below pass; a real checkpoint remains unchecked.
 
 Config admission requires explicit hidden, vocabulary, layer, MLP, HC, GDN, QSA, RoPE and PLE geometry.
 It accepts `linear_attention`, `indexed_attention` and the `full_attention` spelling for indexed layers.
