@@ -1,5 +1,6 @@
-//! Native dense mixers declare source-derived ceilings; CUDA usage still requires five-SM compiler receipts.
+//! Native dense mixers keep source-derived Metal ceilings and nvcc 13.0 CUDA receipts only on sm_121.
 const registry = @import("registry.zig");
+const receipts = @import("measurements/qwen4_130_sm121.zig");
 const limits = @import("limits.zig");
 const suffixes = [_][]const u8{ "", "_bad_nan", "_bad_repeat", "_bad_tail", "_bad_sums" };
 pub const cuda = blk: {
@@ -8,7 +9,7 @@ pub const cuda = blk: {
     for (.{ .{ "qwen4_dense_act", "qwen4_hc", 256 }, .{ "qwen4_ple_gate", "qwen4_ple", 512 }, .{ "qwen4_ple_conv", "qwen4_ple", 512 }, .{ "qwen4_gdn_chain", "qwen4_gdn", 1024 } }) |item| {
         for (suffixes, 0..) |suffix, i| {
             if ((item[2] == 256 and i == 4) or (item[2] == 1024 and i == 0)) continue;
-            out[at] = .{ .launch = .{ .name = item[1] ++ " " ++ item[0] ++ suffix, .symbol = item[0] ++ suffix, .image = item[1], .threads = item[2] }, .usage = registry.none };
+            out[at] = .{ .launch = .{ .name = item[1] ++ " " ++ item[0] ++ suffix, .symbol = item[0] ++ suffix, .image = item[1], .threads = item[2] }, .usage = receipts.usage(item[1] ++ " " ++ item[0] ++ suffix), .later_pending = true };
             at += 1;
         }
     }
