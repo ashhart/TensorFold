@@ -24,4 +24,6 @@ test {
     _ = launch;
     _ = decode;
     _ = exl3;
+    _ = @import("exl3_activation.zig");
+    _ = @import("../core/bf16_round.zig");
 }
