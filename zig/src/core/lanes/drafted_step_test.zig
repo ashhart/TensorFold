@@ -18,6 +18,15 @@ const long = dt.long;
 const p1 = dt.p1;
 const sampled = dt.sampled;
 
+// FakeDrafter's open, counting opens that found the stream's target lane already open (its cache, a pool lane's run)
+var lane_target: *const fake.Fake = undefined;
+var opened_on_lane: u32 = 0;
+var fake_open: *const fn (*anyopaque, *sm.Stream) anyerror!void = undefined;
+fn countedOpen(ptr: *anyopaque, s: *sm.Stream) anyerror!void {
+    opened_on_lane += @intFromBool(lane_target.lanes.contains(s));
+    return fake_open(ptr, s);
+}
+
 test "a stepping target's prompt goes in a step at a time through the wrapper: the drafter absorbs each step's rows, the reply is the whole prefill's" {
     const cases = [_]Case{ .{ .prompt = &long }, .{ .prompt = &p1, .sampling = sampled } };
     const whole = try run(&cases, .wrapped, false);
@@ -26,7 +35,11 @@ test "a stepping target's prompt goes in a step at a time through the wrapper: t
     defer target.deinit();
     var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5 } };
     defer head.deinit();
-    var wrapped = try Drafted.init(gpa, target.stepped(), head.drafter());
+    var hd = head.drafter();
+    var vt = hd.vtable.*;
+    fake_open, vt.open, lane_target, opened_on_lane = .{ vt.open, countedOpen, &target, 0 };
+    hd.vtable = &vt;
+    var wrapped = try Drafted.init(gpa, target.stepped(), hd);
     defer wrapped.deinit();
     try std.testing.expect(wrapped.backend().vtable.prefill_step != null and wrapped.backend().vtable.reports_fill);
     var cfg = try Config.init(gpa, wrapped.facts(base()), 16, 15);
@@ -50,6 +63,8 @@ test "a stepping target's prompt goes in a step at a time through the wrapper: t
         try std.testing.expectEqual(@as(usize, 2), steps); // three steps: two not done, then the open
     }
     try std.testing.expectEqual(@as(u32, 2), head.opens);
+    // each opened after the target's first step: its lane (a pool lane's run, which the drafter borrows) exists
+    try std.testing.expectEqual(@as(u32, 2), opened_on_lane);
     while (engine.activeCount() > 0) try engine.step();
     for (whole.tokens, &streams) |want, *s| try std.testing.expectEqualSlices(u32, want, s.emitted());
 }

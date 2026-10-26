@@ -158,18 +158,19 @@ pub const Drafted = struct {
         try x.drafter.absorb(&.{.{ .stream = s, .features = f, .start = from, .follow = ids[from + 1 ..] }});
     }
 
-    /// A step of the target's prompt pass, then the drafter absorbs its rows (as `take`); it opens at the first step.
+    /// A step of the target's prompt pass, then the drafter absorbs its rows (`take`); it opens after the first step.
     fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
         const x = self(ptr);
         const step = x.target.vtable.prefill_step.?;
         if (!s.drafts) return step(x.target.ptr, s);
+        errdefer x.dropStream(s);
+        const done = try step(x.target.ptr, s);
+        // the target's lane is open now: a drafter that keeps its stream's rows in the lane's run finds it
         if (!x.lanes.contains(s)) {
             try x.lanes.ensureUnusedCapacity(x.gpa, 1);
             try x.drafter.open(s);
             x.lanes.putAssumeCapacity(s, .{});
         }
-        errdefer x.dropStream(s);
-        const done = try step(x.target.ptr, s);
         const lane = x.lanes.getPtr(s).?;
         const from = lane.stepped orelse s.cached; // a resumed pass starts at its kept state
         const to: u64 = if (done) s.prompt().len else s.fill_at.load(.monotonic);
