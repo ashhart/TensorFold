@@ -1,4 +1,4 @@
-//! Gemma 4's MTP assistant (gemma4_unified_assistant): config admitted, bf16 linears and the tied head made 4-bit.
+//! Gemma 4's MTP assistants (12B unified, 31B): config admitted, bf16 linears and the tied head made 4-bit.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -12,8 +12,10 @@ pub const Ref = dw.Ref;
 
 /// Layers an admitted assistant has at most: the size of per-layer arrays.
 pub const max_layers = 8;
-/// The stock assistant's sizes (google/gemma-4-12B-it-assistant); another config is refused with its reason.
-const stock = .{ .hidden = 1024, .layers = 4, .intermediate = 8192, .heads = 16 };
+/// Stock sizes of google/gemma-4-12B-it-assistant and -31B-it-assistant (query heads follow the target).
+const stock = .{ .hidden = 1024, .layers = 4, .intermediate = 8192 };
+/// Each stock assistant's model type with its text config's: the 12B's unified pair and the 31B's.
+const types = .{ .{ "gemma4_unified_assistant", "gemma4_unified_text" }, .{ "gemma4_assistant", "gemma4_text" } };
 
 pub const Config = struct {
     layers: u32,
@@ -38,14 +40,14 @@ pub const Config = struct {
         var parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
         defer parsed.deinit();
         const o = if (parsed.value == .object) parsed.value.object else return error.BadDraftConfig;
-        if (!isString(o.get("model_type"), "gemma4_unified_assistant")) return error.UnsupportedAssistantType;
+        const text_type = textType(o.get("model_type")) orelse return error.UnsupportedAssistantType;
         if (isTrue(o, "use_ordered_embeddings")) return error.AssistantOrderedEmbeddingsNotServed;
         if (try integer(o, "backbone_hidden_size") != geo.hidden) return error.AssistantForAnotherTarget;
         if (o.get("quantization") != null or o.get("quantization_config") != null) return error.UnsupportedAssistantQuantization;
         const t = if (o.get("text_config")) |v| (if (v == .object) v.object else return error.BadDraftConfig) else return error.BadDraftConfig;
-        if (!isString(t.get("model_type"), "gemma4_unified_text")) return error.BadDraftConfig;
+        if (!isString(t.get("model_type"), text_type)) return error.BadDraftConfig;
         var c: Config = .{ .layers = @intCast(try integer(t, "num_hidden_layers")), .hidden = @intCast(try integer(t, "hidden_size")), .intermediate = @intCast(try integer(t, "intermediate_size")), .heads = @intCast(try integer(t, "num_attention_heads")), .glue = undefined };
-        if (c.hidden != stock.hidden or c.layers != stock.layers or c.intermediate != stock.intermediate or c.heads != stock.heads) return error.UnsupportedAssistantGeometry;
+        if (c.hidden != stock.hidden or c.layers != stock.layers or c.intermediate != stock.intermediate or c.heads != geo.query_heads) return error.UnsupportedAssistantGeometry;
         if (try integer(t, "num_key_value_heads") != geo.sliding_kv_heads or try integer(t, "num_global_key_value_heads") != geo.global_kv_heads) return error.AssistantForAnotherTarget;
         if (try integer(t, "num_kv_shared_layers") != c.layers) return error.UnsupportedAssistantGeometry; // every layer reads the target's
         const dims = .{ .{ "head_dim", cfg.sliding_dim }, .{ "global_head_dim", cfg.global_dim }, .{ "sliding_window", cfg.window }, .{ "vocab_size", cfg.vocab } };
@@ -113,6 +115,12 @@ fn typeIsAssistant(gpa: std.mem.Allocator, bytes: []const u8) !bool {
     defer parsed.deinit();
     const t = if (parsed.value == .object) parsed.value.object.get("model_type") else null;
     return t != null and t.? == .string and std.mem.startsWith(u8, t.?.string, "gemma4") and std.mem.endsWith(u8, t.?.string, "assistant");
+}
+
+/// The text config's model type that goes with assistant type `v`, or null for a type not served.
+fn textType(v: ?std.json.Value) ?[]const u8 {
+    inline for (types) |p| if (isString(v, p[0])) return p[1];
+    return null;
 }
 
 fn isString(v: ?std.json.Value, expected: []const u8) bool {
@@ -235,13 +243,30 @@ test "the 12B's assistant is admitted against the 12B, with the target's key hea
     try std.testing.expectEqual(@as(usize, 512), c.headDim(3));
 }
 
+const fixture_31b = @embedFile("fixtures/assistant_31b_config.json");
+
+test "the 31B's assistant is admitted against the 31B with its 32 query heads, and refused against the 12B" {
+    const c = try Config.parse(std.testing.allocator, fixture_31b, cfg.dense31b);
+    try std.testing.expectEqual(@as(u32, 4), c.layers);
+    try std.testing.expectEqual(@as(u32, 32), c.heads);
+    try std.testing.expect(c.sliding[0] and c.sliding[2] and !c.sliding[3]);
+    try std.testing.expectEqual(@as(usize, 16), c.glue.sliding_kv_heads);
+    try std.testing.expectEqual(@as(usize, 4), c.glue.global_kv_heads);
+    const g = cfg.dense31b;
+    try std.testing.expectEqual(@as(?[2]usize, .{ 1024, 10752 }), c.expected(g, "pre_projection.weight"));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 16384, 1024 }), c.expected(g, "model.layers.3.self_attn.q_proj.weight"));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 1024, 8192 }), c.expected(g, "model.layers.0.self_attn.o_proj.weight"));
+    try std.testing.expectError(error.AssistantForAnotherTarget, Config.parse(std.testing.allocator, fixture_31b, cfg.unified12b));
+}
+
 test "an assistant for another target or layout is refused by name" {
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.AssistantForAnotherTarget, Config.parse(gpa, fixture, cfg.dense31b));
     const cases = .{
         .{ "\"use_ordered_embeddings\": false", "\"use_ordered_embeddings\": true", error.AssistantOrderedEmbeddingsNotServed },
         .{ "\"backbone_hidden_size\": 3840", "\"backbone_hidden_size\": 5376", error.AssistantForAnotherTarget },
-        .{ "\"model_type\": \"gemma4_unified_assistant\"", "\"model_type\": \"gemma4_assistant\"", error.UnsupportedAssistantType },
+        .{ "\"model_type\": \"gemma4_unified_assistant\"", "\"model_type\": \"gemma4_other_assistant\"", error.UnsupportedAssistantType },
+        .{ "\"model_type\": \"gemma4_unified_assistant\"", "\"model_type\": \"gemma4_assistant\"", error.BadDraftConfig },
         .{ "\"num_key_value_heads\": 8", "\"num_key_value_heads\": 16", error.AssistantForAnotherTarget },
         .{ "\"final_logit_softcapping\": null", "\"final_logit_softcapping\": 30.0", error.UnsupportedAssistantGeometry },
         .{ "\"hidden_size\": 1024", "\"hidden_size\": 2048", error.UnsupportedAssistantGeometry },

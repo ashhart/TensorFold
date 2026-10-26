@@ -192,7 +192,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.PastContext => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream's caches are in use: retry once another request ends",
         error.NoDraftHead => "Gemma 4 on CUDA drafts with an assistant loaded by --drafter, or from the prompt's own text",
-        error.GemmaDrafterNotServed => "--drafter: Gemma 4 on CUDA loads the 12B's MTP assistant (gemma4_unified_assistant) or a DFlash drafter (DFlashDraftModel)",
+        error.GemmaDrafterNotServed => "--drafter: Gemma 4 on CUDA loads the target's MTP assistant (gemma4_unified_assistant for the 12B, gemma4_assistant for the 31B) or a DFlash drafter (DFlashDraftModel)",
         error.DraftForAnotherTarget => "--drafter: this DFlash drafter was trained for another target (its width or tapped layers do not fit)",
         error.NotDFlashV1, error.UnsupportedDraftMask, error.UnsupportedDraftShape => "--drafter: this DFlash drafter's layout is not the stock one this engine serves",
         error.AssistantForAnotherTarget => "--drafter: this assistant was trained for another Gemma 4 target (its backbone width or key heads differ)",
@@ -212,7 +212,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
-/// --drafter: the 12B's MTP assistant over the target's caches, or z-lab's DFlash drafter on the 31B's taps.
+/// --drafter: the target's MTP assistant over its caches, or z-lab's DFlash drafter on the 31B's taps.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
     if (bits != 4) return error.DrafterBitsUnsupported;
     const own: *Owned = @ptrCast(@alignCast(p));

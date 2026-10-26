@@ -9,8 +9,10 @@ const Affine4 = cuda.qlinear.Affine4;
 
 /// Layers an admitted assistant has at most.
 pub const max_layers = 8;
-/// The stock assistant's sizes (google/gemma-4-12B-it-assistant); another config is refused with its reason.
-const stock = .{ .hidden = 1024, .layers = 4, .intermediate = 8192, .heads = 16 };
+/// Stock sizes of google/gemma-4-12B-it-assistant and -31B-it-assistant (query heads follow the target).
+const stock = .{ .hidden = 1024, .layers = 4, .intermediate = 8192 };
+/// Each stock assistant's model type with its text config's: the 12B's unified pair and the 31B's.
+const types = .{ .{ "gemma4_unified_assistant", "gemma4_unified_text" }, .{ "gemma4_assistant", "gemma4_text" } };
 
 pub const Config = struct {
     layers: usize,
@@ -29,14 +31,14 @@ pub const Config = struct {
         var parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
         defer parsed.deinit();
         const o = if (parsed.value == .object) parsed.value.object else return error.BadDraftConfig;
-        if (!isString(o.get("model_type"), "gemma4_unified_assistant")) return error.UnsupportedAssistantType;
+        const text_type = textType(o.get("model_type")) orelse return error.UnsupportedAssistantType;
         if (isTrue(o, "use_ordered_embeddings")) return error.AssistantOrderedEmbeddingsNotServed;
         if (try integer(o, "backbone_hidden_size") != geo.hidden) return error.AssistantForAnotherTarget;
         if (o.get("quantization") != null or o.get("quantization_config") != null) return error.UnsupportedAssistantQuantization;
         const t = if (o.get("text_config")) |v| (if (v == .object) v.object else return error.BadDraftConfig) else return error.BadDraftConfig;
-        if (!isString(t.get("model_type"), "gemma4_unified_text")) return error.BadDraftConfig;
+        if (!isString(t.get("model_type"), text_type)) return error.BadDraftConfig;
         var c: Config = .{ .layers = @intCast(try integer(t, "num_hidden_layers")), .hidden = @intCast(try integer(t, "hidden_size")), .intermediate = @intCast(try integer(t, "intermediate_size")), .heads = @intCast(try integer(t, "num_attention_heads")) };
-        if (c.hidden != stock.hidden or c.layers != stock.layers or c.intermediate != stock.intermediate or c.heads != stock.heads) return error.UnsupportedAssistantGeometry;
+        if (c.hidden != stock.hidden or c.layers != stock.layers or c.intermediate != stock.intermediate or c.heads != geo.query_heads) return error.UnsupportedAssistantGeometry;
         if (try integer(t, "num_key_value_heads") != geo.sliding_kv_heads or try integer(t, "num_global_key_value_heads") != geo.global_kv_heads) return error.AssistantForAnotherTarget;
         if (try integer(t, "num_kv_shared_layers") != c.layers) return error.UnsupportedAssistantGeometry;
         const dims = .{ .{ "head_dim", cfg.sliding_dim }, .{ "global_head_dim", cfg.global_dim }, .{ "sliding_window", cfg.window }, .{ "vocab_size", cfg.vocab } };
@@ -59,6 +61,12 @@ pub const Config = struct {
         return c;
     }
 };
+
+/// The text config's model type that goes with assistant type `v`, or null for a type not served.
+fn textType(v: ?std.json.Value) ?[]const u8 {
+    inline for (types) |p| if (isString(v, p[0])) return p[1];
+    return null;
+}
 
 fn isString(v: ?std.json.Value, expected: []const u8) bool {
     const s = v orelse return false;
@@ -278,6 +286,14 @@ test "the 12B's assistant is admitted against the 12B, and refused against the 3
     try std.testing.expect(c.sliding[0] and c.sliding[2] and !c.sliding[3]);
     try std.testing.expectEqual(@as(usize, 512), c.headDim(3));
     try std.testing.expectError(error.AssistantForAnotherTarget, Config.parse(std.testing.allocator, fixture, cfg.dense31b));
+}
+
+test "the 31B's assistant is admitted against the 31B with its 32 query heads, and refused against the 12B" {
+    const fixture_31b = @embedFile("fixtures/assistant_31b_config.json");
+    const c = try Config.parse(std.testing.allocator, fixture_31b, cfg.dense31b);
+    try std.testing.expectEqual(@as(usize, 32), c.heads);
+    try std.testing.expect(c.sliding[0] and c.sliding[2] and !c.sliding[3]);
+    try std.testing.expectError(error.AssistantForAnotherTarget, Config.parse(std.testing.allocator, fixture_31b, cfg.unified12b));
 }
 
 test "a group quantizes as MLX's affine 4-bit: every value within half a step" {

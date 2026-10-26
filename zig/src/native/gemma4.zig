@@ -12,7 +12,7 @@ const Resident = @import("resident.zig").Resident;
 /// The context a stream gets without --context: attention's per-call scratch grows with it (pass --context for more).
 const default_context = 32768;
 
-/// --drafter loads z-lab's DFlash drafter (31B) or Google's MTP assistant (12B) in front of the engine.
+/// --drafter loads z-lab's DFlash drafter (31B) or Google's MTP assistant (12B or 31B) in front of the engine.
 pub const takes_drafter = true;
 
 const Host = struct {
@@ -97,9 +97,9 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     if (draft_dir) |dir| if (assistant) {
         h.assist = g.assistant.Drafter.init(gpa, io, h.metal, dir) catch |err| {
             problem.* = if (err == error.AssistantForAnotherTarget)
-                try std.fmt.allocPrint(a, "the Gemma 4 MTP assistant at {s} was trained on another target: its backbone width and key heads do not fit Gemma 4 {s} (google/gemma-4-12B-it-assistant drafts for the 12B only)", .{ dir, model.config.geo.name })
+                try std.fmt.allocPrint(a, "the Gemma 4 MTP assistant at {s} was trained on another target: its backbone width and key heads do not fit Gemma 4 {s} (google/gemma-4-12B-it-assistant drafts for the 12B, google/gemma-4-31B-it-assistant for the 31B)", .{ dir, model.config.geo.name })
             else
-                try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load the MTP assistant at {s} ({s}): it takes google/gemma-4-12B-it-assistant as released (bf16, no ordered embeddings)", .{ dir, @errorName(err) });
+                try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load the MTP assistant at {s} ({s}): it takes google/gemma-4-12B-it-assistant or -31B-it-assistant as released (bf16, no ordered embeddings)", .{ dir, @errorName(err) });
             return error.Refused;
         };
     } else {
