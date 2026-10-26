@@ -1288,7 +1288,7 @@ pub const Runner = struct {
         const hij = off(a.ahi, @as(usize, j) * (hk / 64) * 2);
         const loj = off(a.alo, @as(usize, j) * (hk / 64) * 2);
         const yj = off(a.y, @as(usize, j) * z.od * 2);
-        const sp = span(@intCast(p0) + w);
+        const sp = span(@as(u32, @intCast(p0)) + w);
         const ns: u32 = (@as(u32, @intCast(p0)) + w + sp - 1) / sp;
         const rope_j: ?*anyopaque = if (rope != null) off(rope.?, @as(usize, j) * 3 * 4) else null;
         try d.launch(d.k.attn_prep, .{ .x = w }, .{ pj, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, p0, EPS, nul, nul, nul, zero, r.cap, rope_j });
