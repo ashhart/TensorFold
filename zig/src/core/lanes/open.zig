@@ -31,7 +31,9 @@ pub fn addCommitted(e: *Engine, s: *Stream, hook: ?be.Committed) !void {
 
 /// sampled_drafts false: temperature above 0 takes no drafts. Temperature 0 stays a greedy draft.
 pub fn greedyDrafts(e: *const Engine, s: *Stream) void {
-    if (!e.cfg.sampled_drafts) if (s.sampling) |sp| if (sp.temperature > 0) s.drafts = false;
+    if (e.cfg.sampled_drafts) return;
+    const sp = s.sampling orelse return;
+    if (sp.temperature > 0) s.drafts = false;
 }
 
 /// How a stream's first drafts are sized: the depth rule, or the head's whole reach under node probabilities.
