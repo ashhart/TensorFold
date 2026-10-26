@@ -34,6 +34,7 @@ test {
     _ = @import("cuda_penalties.zig");
     _ = @import("cuda_pages_init_test.zig");
     _ = @import("cuda_pages_lifetime_test.zig");
+    _ = @import("cuda_mtp_area_test.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");
