@@ -27,4 +27,5 @@ test {
     _ = pack;
     _ = @import("ops.zig");
     _ = @import("dflash2_load.zig");
+    _ = @import("rounds.zig");
 }
