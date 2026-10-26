@@ -292,6 +292,8 @@ pub const Open = struct {
     learn_conversations: bool = false,
     /// --learn-daily-gib: what learned states may write a day under the root, every model together.
     learn_daily_gib: f64 = 32,
+    /// --spill-gib (Macs): states evicted from RAM go to the store `learn_conversations` opens (off: written behind).
+    spill: prompt_cache.rows.Spill = .off,
     /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
     slide: bool = false,
     /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.

@@ -14,6 +14,7 @@ const servedBy = cli.Test.servedBy;
 const cudaFlag = cli.Test.cudaFlag;
 const gpuFlag = cli.Test.gpuFlag;
 const ranks = cli.Test.ranks;
+const spillWith = cli.Test.spillWith;
 
 test "max frames CLI bounds and engine request preserve the default" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -279,7 +280,7 @@ test "the GPU engine's flags: refused and unlisted unless the backend serves the
     const a = arena.allocator();
     var u: Usage = .{};
     // each flag, a value, and the `serves` entry that turns it on
-    const gated = [_][3][]const u8{ .{ "--tp", "2", "--tp" }, .{ "--rank", "0", "--tp" }, .{ "--master", "node0", "--tp" }, .{ "--master-port", "29600", "--tp" }, .{ "--policy", "matrix=off", "--policy" }, .{ "--mtp-drafts", "2", "--mtp-drafts" }, .{ "--mtp-confidence", "0.5", "--mtp-confidence" }, .{ "--checkpoint-slots", "3", "--checkpoint-slots" } };
+    const gated = [_][3][]const u8{ .{ "--tp", "2", "--tp" }, .{ "--rank", "0", "--tp" }, .{ "--master", "node0", "--tp" }, .{ "--master-port", "29600", "--tp" }, .{ "--policy", "matrix=off", "--policy" }, .{ "--mtp-drafts", "2", "--mtp-drafts" }, .{ "--mtp-confidence", "0.5", "--mtp-confidence" }, .{ "--checkpoint-slots", "3", "--checkpoint-slots" }, .{ "--spill-gib", "2", "--spill-gib" } };
     var out: std.Io.Writer.Allocating = .init(a);
     try capabilities(&out.writer, .{ .version = "0" });
     for (gated) |g| {
@@ -289,7 +290,8 @@ test "the GPU engine's flags: refused and unlisted unless the backend serves the
     }
     try std.testing.expect(servedBy(&.{ "--tp", "--policy" }, "--tp") and !servedBy(&.{"--tp"}, "--policy") and !servedBy(&.{}, "--tp"));
     var args: Args = .{};
-    for ([_][2][]const u8{ .{ "--tp", "4" }, .{ "--rank", "2" }, .{ "--master", "node0" }, .{ "--master-port", "29600" }, .{ "--mtp-drafts", "2" }, .{ "--mtp-confidence", "0.5" }, .{ "--checkpoint-slots", "3" }, .{ "--policy", "matrix=off" }, .{ "--policy", "kernels=reference" } }) |g| try std.testing.expect(try gpuFlag(a, &args, g[0], g[1], &u));
+    for ([_][2][]const u8{ .{ "--tp", "4" }, .{ "--rank", "2" }, .{ "--master", "node0" }, .{ "--master-port", "29600" }, .{ "--mtp-drafts", "2" }, .{ "--mtp-confidence", "0.5" }, .{ "--checkpoint-slots", "3" }, .{ "--spill-gib", "1.5" }, .{ "--policy", "matrix=off" }, .{ "--policy", "kernels=reference" } }) |g| try std.testing.expect(try gpuFlag(a, &args, g[0], g[1], &u));
+    try std.testing.expectEqual(@as(?f64, 1.5), args.spill_gib);
     try std.testing.expectEqual(@as(u32, 4), args.tp);
     try std.testing.expectEqual(@as(u32, 2), args.rank);
     try std.testing.expectEqualStrings("node0", args.master);
@@ -301,8 +303,33 @@ test "the GPU engine's flags: refused and unlisted unless the backend serves the
     try ranks(&u, a, args);
     args.rank = 4;
     try std.testing.expectError(error.Usage, ranks(&u, a, args));
-    for ([_][2][]const u8{ .{ "--rank", "-1" }, .{ "--master-port", "70000" }, .{ "--mtp-drafts", "65" }, .{ "--mtp-confidence", "1.5" }, .{ "--checkpoint-slots", "-1" }, .{ "--policy", "matrix" } }) |g| try std.testing.expectError(error.Usage, gpuFlag(a, &args, g[0], g[1], &u));
+    for ([_][2][]const u8{ .{ "--rank", "-1" }, .{ "--master-port", "70000" }, .{ "--mtp-drafts", "65" }, .{ "--mtp-confidence", "1.5" }, .{ "--checkpoint-slots", "-1" }, .{ "--spill-gib", "-1" }, .{ "--spill-gib", "nan" }, .{ "--policy", "matrix" } }) |g| try std.testing.expectError(error.Usage, gpuFlag(a, &args, g[0], g[1], &u));
     try std.testing.expect(!try gpuFlag(a, &args, "--port", "1", &u));
+}
+
+test "--spill-gib asks the engine for the conversation store, spilling only what RAM evicts, and is off without it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const plain = try request(a, "d", "t", .{});
+    try std.testing.expect(plain.spill == .off and plain.learn == null and !plain.learn_conversations and plain.learn_gib == 32);
+    const zero = try request(a, "d", "t", .{ .spill_gib = 0 });
+    try std.testing.expect(zero.spill == .off and zero.learn == null and !zero.learn_conversations and zero.learn_gib == 32);
+    const alone = try request(a, "d", "t", .{ .spill_gib = 2, .checkpoint_slots = 3 });
+    try std.testing.expect(alone.spill == .evicted and alone.learn_conversations and alone.learn_gib == 2);
+    try std.testing.expectStringEndsWith(alone.learn.?, "/.cache/tensorfold/spilled");
+    try std.testing.expectEqual(@as(?i64, 3), alone.keep);
+    const both = try request(a, "d", "t", .{ .spill_gib = 8, .learn = true, .learn_conversations = true, .learn_dir = "/x" });
+    try std.testing.expect(both.spill == .finish and both.learn_conversations and both.learn_gib == 8);
+    try std.testing.expectEqualStrings("/x", both.learn.?);
+    const capped = try request(a, "d", "t", .{ .spill_gib = 64, .learn = true, .learn_conversations = true, .learn_gib = 16 });
+    try std.testing.expect(capped.spill == .finish and capped.learn_gib == 16); // the smaller cap
+    try spillWith(&u, a, .{ .spill_gib = 2 });
+    try spillWith(&u, a, .{ .spill_gib = 2, .learn = true, .learn_conversations = true });
+    try spillWith(&u, a, .{ .learn = true });
+    try std.testing.expectError(error.Usage, spillWith(&u, a, .{ .spill_gib = 2, .learn = true }));
+    try std.testing.expectStringStartsWith(u.message, "--spill-gib writes evicted states to the conversation store");
 }
 
 test "silence guard flags are opt-in and reach native open options" {

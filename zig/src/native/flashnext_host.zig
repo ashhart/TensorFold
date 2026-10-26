@@ -431,7 +431,7 @@ fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Allocator
 }
 
 /// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
-pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, daily: u64 = 32 << 30, conversations: bool = false };
+pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, daily: u64 = 32 << 30, conversations: bool = false, spill: api.prompt_cache.rows.Spill = .off, slots: ?usize = null };
 
 const rows_image: api.prompt_cache.rows.Image = disk.image(Host);
 
@@ -491,7 +491,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
     if (learn) |l| if (l.conversations) {
-        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l.root, l.cap, l.floor, l.daily);
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l);
     } else {
         h.learned = try learnedStates(gpa, io, eng, l.root, l.cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;

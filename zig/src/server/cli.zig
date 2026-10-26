@@ -110,7 +110,7 @@ pub const flags = [_]Flag{
     .{ .name = "--prompt-cache-gib", .native = true },
     .{ .name = "--prompt-cache-over-cap", .kind = .store_true, .native = true },
     .{ .name = "--checkpoint-slots", .native = served("--checkpoint-slots") },
-    .{ .name = "--spill-gib" },
+    .{ .name = "--spill-gib", .native = served("--spill-gib") },
     .{ .name = "--snapshot-dir", .native = true, .native_values = &.{"none"} },
     .{ .name = "--max-snapshots", .native = true, .native_values = &.{"0"} },
     .{ .name = "--parallel", .native = true },
@@ -225,6 +225,7 @@ pub const Args = struct {
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
     checkpoint_slots: ?i64 = null,
+    spill_gib: ?f64 = null, // disk for states evicted from the prompt cache, every model together (null or 0: off)
     tp: u32 = 1,
     rank: u32 = 0,
     master: []const u8 = "",
@@ -308,7 +309,17 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     if (repeated.hosts.items.len > 64 or repeated.origins.items.len > 64) return fail(u, a, "at most 64 --allowed-host and 64 --allowed-origin entries are allowed", .{});
     out.allowed_host = repeated.hosts.items;
     out.allowed_origin = repeated.origins.items;
+    try spillWith(u, a, out);
     return out;
+}
+
+/// --spill-gib writes to the conversation store: beside --learn's shared prefixes only with --learn-conversations.
+fn spillWith(u: *Usage, a: Allocator, out: Args) error{ Usage, OutOfMemory }!void {
+    if (spills(out) and out.learn and !out.learn_conversations) return fail(u, a, "--spill-gib writes evicted states to the conversation store, which --learn's shared prefixes do not use: add --learn-conversations, or serve without --learn", .{});
+}
+
+fn spills(args: Args) bool {
+    return (args.spill_gib orelse 0) > 0;
 }
 
 fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!i64 {
@@ -497,7 +508,7 @@ fn gpuFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage)
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --checkpoint-slots: a count from 0: '{s}'", .{v});
         out.checkpoint_slots = n;
-    } else if (is(name, "--policy")) {
+    } else if (is(name, "--spill-gib")) out.spill_gib = try gib(u, a, name, v) else if (is(name, "--policy")) {
         if (std.mem.indexOfScalar(u8, v, '=') == null) return fail(u, a, "argument --policy: expected key=value: '{s}'", .{v});
         out.policy = if (out.policy.len == 0) v else try std.fmt.allocPrint(a, "{s},{s}", .{ out.policy, v });
     } else return false;
@@ -536,11 +547,12 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .speed_up = args.speed_up,
         .prompt_cache_gib = args.prompt_cache_gib,
         .prompt_cache_over_cap = args.prompt_cache_over_cap,
-        .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else null,
-        .learn_gib = args.learn_gib,
+        .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else if (spills(args)) try api.prompt_cache.rows.spillRoot(a) else null,
+        .learn_gib = if (spills(args)) @min(args.spill_gib.?, if (args.learn) args.learn_gib else std.math.inf(f64)) else args.learn_gib,
         .learn_min_free_gib = args.learn_min_free_gib,
-        .learn_conversations = args.learn and args.learn_conversations,
+        .learn_conversations = (args.learn and args.learn_conversations) or spills(args),
         .learn_daily_gib = args.learn_daily_gib,
+        .spill = if (!spills(args)) .off else if (args.learn) .finish else .evicted,
         .slide = args.slide,
         .recall = args.recall,
         .device = args.device,
@@ -582,4 +594,5 @@ pub const Test = if (builtin.is_test) struct {
     pub const cudaFlag = cli.cudaFlag;
     pub const gpuFlag = cli.gpuFlag;
     pub const ranks = cli.ranks;
+    pub const spillWith = cli.spillWith;
 } else struct {};

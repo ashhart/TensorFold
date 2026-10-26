@@ -112,11 +112,10 @@ pub fn identity(gpa: Allocator, io: std.Io, eng: *fx.Engine) !struct { id: u64, 
     return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
-/// --learn-conversations: the store under `root`, attached to the cache (Imprint's cut files go unread in this mode).
-pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, id: anytype, root: []const u8, cap: u64, floor: u64, daily: u64) !*rows.Rows {
-    const r = try rows.Rows.open(gpa, store.family, .{ .root = root, .identity = id.id, .cap = cap, .floor = floor, .daily = daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned });
+/// --learn-conversations or --spill-gib: the store under `l.root`, attached to the cache (Imprint's cut files unread).
+pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, id: anytype, l: anytype) !*rows.Rows {
+    const r = try rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = l.spill, .slots = l.slots });
     r.prefill_rate = id.rate;
-    store.disk = r;
-    std.log.info("flash next: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, cap >> 20 });
+    std.log.info("flash next: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, l.cap >> 20 });
     return r;
 }

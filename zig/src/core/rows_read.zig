@@ -92,11 +92,12 @@ fn present(r: *Rows, i: usize) !void {
 /// A disk state reaching further than `have`, read back into a new RAM entry where that costs less than prefilling.
 pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry) ?*pc.Entry {
     const r = s.disk orelse return have;
-    const i = select.choose(s, prompt, starts, spans, have).restore orelse return have;
-    const st = r.states.items[i];
-    const bytes = s.family.vtable.bytes(s.family.ptr, st.at);
+    const chosen = select.choose(s, prompt, starts, spans, have).restore orelse return have;
+    const name = r.states.items[chosen].name;
+    const bytes = s.family.vtable.bytes(s.family.ptr, r.states.items[chosen].at);
     if (bytes > s.budget or s.most == 0) return have;
-    if (!ready(s, bytes)) present(r, i) catch return have; // nothing goes to make room for a state whose file is gone
+    if (!ready(s, bytes)) present(r, chosen) catch return have; // nothing goes to make room for a state whose file is gone
+    if (r.spill != .off) r.touch(chosen); // the newest: the spills that make room for it push older states off first
     while (!ready(s, bytes)) {
         if (s.family.vtable.trim) |trim| {
             const spare = s.spare();
@@ -106,6 +107,8 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
         s.remove(s.victimBut(have, prompt, born) orelse return have);
         s.counts.evicted += 1;
     }
+    const i = r.find(name) orelse return have; // a spill that made room went past the disk cap and took it
+    const st = r.states.items[i];
     const e = s.gpa.create(pc.Entry) catch return have;
     e.* = .{ .tokens = &.{}, .at = st.at, .saved = undefined, .bytes = bytes, .born = born, .used = s.clock, .last = &.{}, .shared = st.shared };
     var ok = false;

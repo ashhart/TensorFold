@@ -16,6 +16,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3: a tool call that `max_tokens` cuts comes back in `tool_calls` with `finish_reason: "length"`, streamed and whole, instead of leaking its `<tool_call>` markup into the reply's text (#1298; thanks @Boscoeuk for the report).
 
+- `--spill-gib N` on Macs writes a prompt state the cache evicts from RAM to disk, up to N GiB, and a later turn whose prefix matches reads it back and resumes exactly as a fresh prompt pass; `--checkpoint-slots N` sets how many states stay in RAM beside it. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash take them, on `--learn-conversations`' disk store; both are off by default, and without them nothing changes (from Python #68; thanks @gilby).
+
 - `tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...` says, before any download or weight load, the memory CUDA admission would grant and whether the checkpoint's weights fit each budget, and which setting would make them fit (#1319, from Python #281; thanks @akol1).
 
 - `--name-priority ID=background` gives a served name or alias a background default: a request naming it without its own `priority` yields to foreground work (#1317, from Python #445).

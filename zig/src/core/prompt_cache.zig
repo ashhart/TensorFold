@@ -170,6 +170,7 @@ pub const Store = struct {
         std.debug.assert(s.entries.items[i].borrowers == 0);
         const e = s.entries.orderedRemove(i);
         s.held -= e.bytes;
+        if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: an evicted state is written before it goes
         s.free(e);
     }
 

@@ -50,6 +50,9 @@ pub const Block = struct { bytes: u64, refs: u32 = 0 };
 
 pub const Counts = struct { written: u64 = 0, read: u64 = 0, reads: u64 = 0, writes: u64 = 0, skipped: u64 = 0, failed: u64 = 0, evicted: u64 = 0, verified: u64 = 0, differed: u64 = 0 };
 
+/// --spill-gib: off (every kept state written behind), evicted (only evicted states), finish (both: evictions finish).
+pub const Spill = enum { off, evicted, finish };
+
 pub const Options = struct {
     root: []const u8,
     identity: u64, // the family's identity (weights, arithmetic, build); the store's directory is its own hash of it
@@ -58,7 +61,23 @@ pub const Options = struct {
     daily: u64, // --learn-daily-gib: bytes written a day under the root
     lookahead: u32 = 0,
     planned: bool = false,
+    spill: Spill = .off,
+    slots: ?usize = null, // --checkpoint-slots: the RAM store's states at most, beside this one (null: the family's)
 };
+
+/// The store under `o`, the RAM store's disk: `o.slots` bounds what it keeps in RAM.
+pub fn attach(gpa: Allocator, store: *pc.Store, o: Options) !*Rows {
+    const r = try Rows.open(gpa, store.family, o);
+    store.disk = r;
+    if (o.slots) |n| store.most = n;
+    return r;
+}
+
+/// Where --spill-gib's states live: $HOME/.cache/tensorfold/spilled, beside the learned states' root.
+pub fn spillRoot(a: Allocator) ![]const u8 {
+    const home = platform.c.getenv("HOME") orelse return error.RowsDir;
+    return std.fmt.allocPrint(a, "{s}/.cache/tensorfold/spilled", .{std.mem.span(home)});
+}
 
 pub const Rows = struct {
     gpa: Allocator,
@@ -81,6 +100,7 @@ pub const Rows = struct {
     counts: Counts = .{},
     turn: u64 = 0, // bytes written since the last report line
     verify: bool = false, // TF_IMPRINT_VERIFY=1: each state written is read back and compared with the RAM state
+    spill: Spill = .off,
 
     /// The store under `o.root` for `o.identity` (made 0700 when missing); its files are read, unreferenced blocks go.
     pub fn open(gpa: Allocator, family: pc.Snapshots, o: Options) !*Rows {
@@ -105,7 +125,7 @@ pub const Rows = struct {
         const root = try gpa.dupe(u8, o.root);
         errdefer gpa.free(root);
         const dir = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ o.root, id }, 0);
-        r.* = .{ .gpa = gpa, .family = family, .img = img, .root = root, .dir = dir, .keying = .{ .identity = id, .block = block_tokens, .lookahead = o.lookahead, .planned = o.planned }, .cap = o.cap, .daily = o.daily, .admission = .{ .floor = o.floor } };
+        r.* = .{ .gpa = gpa, .family = family, .img = img, .root = root, .dir = dir, .keying = .{ .identity = id, .block = block_tokens, .lookahead = o.lookahead, .planned = o.planned }, .cap = o.cap, .daily = o.daily, .admission = .{ .floor = o.floor }, .spill = o.spill };
         return r;
     }
 
@@ -281,6 +301,12 @@ pub const Rows = struct {
     /// The state worth least: tokens saved per byte only it holds (its file, blocks no other names), over 1 + its age.
     fn victim(r: *const Rows) ?usize {
         var out: ?usize = null;
+        if (r.spill == .evicted) { // --spill-gib alone: the least recently used first
+            for (r.states.items, 0..) |s, i| {
+                if (out == null or s.used < r.states.items[out.?].used) out = i;
+            }
+            return out;
+        }
         var worst: f64 = std.math.inf(f64);
         var wants: std.ArrayList(write.Want) = .empty;
         defer wants.deinit(r.gpa);
@@ -513,6 +539,7 @@ test {
     _ = chain;
     _ = file;
     _ = @import("rows_test.zig");
+    _ = @import("rows_spill_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_pool_select_test.zig");
