@@ -149,6 +149,7 @@ pub fn capacity(context: usize) usize {
 pub const window_rows: u32 = fw.window_rows;
 
 const snapshots = @import("cuda_snapshots.zig");
+const disk_ranks = @import("cuda_disk_ranks.zig");
 
 const Owned = struct {
     gpa: std.mem.Allocator,
@@ -308,6 +309,8 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.e.group = &own.group;
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
+    if (p.rank == 0 and p.world > 1) disk_ranks.link = &own.link; // its disk steps cross on the link
+    errdefer disk_ranks.link = null;
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
     try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.kv_lora * 2);
     if (p.world > 1) try a.load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready) else a.load_cache.finish();
@@ -470,6 +473,7 @@ pub fn startup_phase(ptr: *anyopaque, phase: cuda.startup_watch.Phase) void {
 /// What a rank owns, freed by rank 0's close and by a follower before it leaves.
 fn release(own: *Owned) void {
     own.progress.end();
+    disk_ranks.link = null;
     own.link.deinit();
     if (own.e.images) |v| v.deinit();
     own.e.deinit();
