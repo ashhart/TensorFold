@@ -134,7 +134,7 @@ test "a shipped shard that is a symlink is copied as a file; the file it points 
     try Io.Dir.cwd().createDirPath(io, try s.path(&.{"elsewhere"}));
     const real = try s.path(&.{ "elsewhere", "shard" });
     try Io.Dir.cwd().rename(try s.path(&.{ "base", files[2] }), Io.Dir.cwd(), real, io);
-    try Io.Dir.cwd().symLink(io, "../elsewhere/shard", try s.path(&.{ "base", files[2] }), .{});
+    Io.Dir.cwd().symLink(io, "../elsewhere/shard", try s.path(&.{ "base", files[2] }), .{}) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     const before = try s.read("elsewhere", "shard");
     const adapter = try fx.makeAdapter(&s, .{});
     var buf: [4096]u8 = undefined;
@@ -305,7 +305,7 @@ test "a dangling symlink in the source is refused naming it, never skipped" {
     var s = try fx.Scratch.init();
     defer s.deinit();
     const base = try fx.makeBase(&s, fx.base_config);
-    try Io.Dir.cwd().symLink(io, "no-such-file", try s.path(&.{ "base", "tokenizer.json" }), .{});
+    Io.Dir.cwd().symLink(io, "no-such-file", try s.path(&.{ "base", "tokenizer.json" }), .{}) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     const adapter = try fx.makeAdapter(&s, .{});
     var buf: [4096]u8 = undefined;
     const r = try fx.merge(&s, base, adapter, &buf);
