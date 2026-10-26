@@ -60,7 +60,11 @@ fn trimNewlines(s: []const u8) []const u8 {
     return std.mem.trimStart(u8, s, "\n");
 }
 
-pub const Split = struct { reasoning: []const u8, answer: []const u8 };
+pub const Split = struct {
+    reasoning: []const u8,
+    answer: []const u8,
+    promoted_call: bool = false,
+};
 
 /// Where a reply's reasoning ends: the model's own close token, or the text's first spelling of the marker.
 pub const Close = union(enum) {
@@ -110,7 +114,7 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
                 .spelled, .pending => close,
                 .token => |v| .{ .token = if (v >= start) v - start else 0 },
             });
-            return .{ .reasoning = inner.reasoning, .answer = try std.mem.concat(a, u8, &.{ prefix, inner.answer }) };
+            return .{ .reasoning = inner.reasoning, .answer = try std.mem.concat(a, u8, &.{ prefix, inner.answer }), .promoted_call = inner.promoted_call };
         };
         if (!finished) {
             var held = @max(partialTag(text, m.open), partialTag(text, m.close));
@@ -153,7 +157,7 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
         // a call written before the block closes: held while the block may still close, the answer if the reply ends
         if (!finished) return .{ .reasoning = text[0..at_call], .answer = "" };
         for (calls) |c| if (std.mem.startsWith(u8, text[at_call..], c[0]) and find(text[at_call..], c[1]) != null)
-            return .{ .reasoning = text[0..at_call], .answer = text[at_call..] };
+            return .{ .reasoning = text[0..at_call], .answer = text[at_call..], .promoted_call = true };
         return .{ .reasoning = text, .answer = "" };
     }
     var held: usize = 0;
