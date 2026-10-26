@@ -155,7 +155,7 @@ A concurrency claim uses `--workload portable-c2-v1`, `portable-c4-v1` or `porta
 Keep both `sleep 60` lines: `check` accepts a shorter gap, but `compare` then refuses the three captures.
 A plain `tar -czf` records your local owner and group names, so the block above picks ownership-neutral flags by `tar --version`: GNU tar on Linux takes `--owner=0 --group=0 --numeric-owner`, plus `--sort=name --mtime=@0` for stable member order and timestamps, while `tar` on Apple Silicon is bsdtar and takes `--uid 0 --gid 0 --uname '' --gname ''`.
 
-Keep the attempt's private originals under `$WORK`; before attaching, inspect the archive with `tar -tvzf ../attempt-1.tgz` and attach it only when the listing shows just the expected relative receipt files, uid/gid 0 with no owner or group names, and nothing private: no credentials, username, private host, address, path or logs.
+Keep the attempt's private originals under `$WORK`. Before attaching, inspect the archive with `tar -tvzf ../attempt-1.tgz` and require only the expected relative receipt files, uid/gid 0 with no owner or group names, and no logs. Then extract it to a separate fresh directory and inspect every member's contents with the same private-data checklist; the archive listing does not show payload contents. Attach only when both checks find no credentials, username, private host, address or path.
 
 Attach the archive and paste `compare.txt`; the server logs stay out of the archive.
 `MEASURED FASTER` means B beat both A and A2; quote the smaller of the two changes.
