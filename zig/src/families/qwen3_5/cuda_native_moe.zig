@@ -27,6 +27,8 @@ pub const snap_host = native.snap_host;
 pub const snap_lookahead = native.snap_lookahead;
 pub const snap_grid = native.snap_grid;
 pub const kept_disk = native.kept_disk;
+
+pub const request_starts = native.request_starts;
 pub const explains_open = native.explains_open;
 pub const vision = native.vision;
 
