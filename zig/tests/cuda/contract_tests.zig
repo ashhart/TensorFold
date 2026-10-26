@@ -36,6 +36,7 @@ const act_round_k = @import("contract_act_round.zig");
 const f32w_k = @import("contract_glm_f32w.zig");
 
 const w4a8_k = @import("contract_w4a8.zig");
+const fp8_prefill_k = @import("contract_fp8_prefill.zig");
 
 const round_k = @import("contract_tree_round.zig");
 
@@ -140,6 +141,31 @@ pub fn run(gpu: check.Gpu) !void {
     for (&w4a8_cases, w4a8_configs) |*case, cfg| case.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = cfg.kind, .fault = cfg.fault, .kernels = w4a8_fns, .arena = .init(a) };
     defer for (&w4a8_cases) |*case| case.deinit();
     for (&w4a8_cases) |*case| try kernels.append(a, case.kernel());
+    var fp8_qmm_mod = try cuda.Module.load(gpu.d, kk.qmm_prefill8);
+    defer fp8_qmm_mod.unload();
+    var fp8_prepare_mod = try cuda.Module.load(gpu.d, kk.qwen35_prefill8);
+    defer fp8_prepare_mod.unload();
+    const fp8_fns: fp8_prefill_k.Fns = .{
+        .prepare = try fp8_prepare_mod.function("tf_q35_prefill8_prepare"),
+        .q4 = try fp8_qmm_mod.function("tf_qmm_prefill8"),
+        .w8 = try fp8_qmm_mod.function("tf_qmm_prefill8_w8"),
+        .expand = try fp8_qmm_mod.function("tf_qmm_prefill8_expand_w8"),
+    };
+    try fp8_fns.prepare.allowDynamicShared(70_656);
+    try fp8_fns.q4.allowDynamicShared(37_632);
+    try fp8_fns.w8.allowDynamicShared(49_920);
+    var fp8_prepare: fp8_prefill_k.Prepare = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fp8_fns.prepare, .arena = .init(a) };
+    defer fp8_prepare.deinit();
+    var fp8_expand: fp8_prefill_k.Expand = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fp8_fns.expand };
+    defer fp8_expand.deinit();
+    var fp8_q4: fp8_prefill_k.Matmul = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = .q4, .f = fp8_fns.q4, .expand = fp8_fns.expand, .arena = .init(a) };
+    defer fp8_q4.deinit();
+    var fp8_w8: fp8_prefill_k.Matmul = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = .w8, .f = fp8_fns.w8, .expand = fp8_fns.expand, .arena = .init(a) };
+    defer fp8_w8.deinit();
+    try kernels.append(a, fp8_prepare.kernel());
+    try kernels.append(a, fp8_expand.kernel());
+    try kernels.append(a, fp8_q4.kernel());
+    try kernels.append(a, fp8_w8.kernel());
     var q35_bf16 = try cuda.qwen35_bf16_rows.Kernels.load(gpu.d);
     defer q35_bf16.unload();
     const Q35Bf16Case = q35_bf16_k.Case(@TypeOf(q35_bf16));
