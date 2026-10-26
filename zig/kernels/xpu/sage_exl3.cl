@@ -5,6 +5,7 @@
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 inline ushort to_bf(float f) {
     uint u = as_uint(f);
+    if (isnan(f)) return (ushort)((u >> 16) | 0x40u);
     u += 0x7fffu + ((u >> 16) & 1u);
     return (ushort)(u >> 16);
 }
