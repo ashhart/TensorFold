@@ -176,7 +176,7 @@ pub const Gemma = struct {
         try x.d.check(x.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, x.s.handle), "cuMemcpyHtoDAsync");
     }
 
-/// A row's allowed-token words (lanes/grammar.zig: token t at bit t % 32 of word t / 32).
+    /// A row's allowed-token words (lanes/grammar.zig: token t at bit t % 32 of word t / 32).
     const words = (cfg.vocab + 31) / 32;
 
     /// A window's grammar rows at row `row` of the bits on the device, for a sampled draw.
