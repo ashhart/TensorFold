@@ -115,6 +115,7 @@ pub fn compileGlue(r: *Run) !void {
     r.positions_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, verdict, "fz_positions", false));
     const draws = try r.ownResource(try mtl.Library.fromSource(r.device, ks.nemotron_sample, mtl.CompileOptions.mlx()));
     r.draw_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, draws, "tf_sample_full", false));
+    r.draw_ids_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, draws, "tf_sample_full_ids", false));
     r.take_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_mtp_take", false));
     r.repack_w = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false));
     r.repack_s = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false));

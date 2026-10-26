@@ -489,11 +489,13 @@ pub const Backend = struct {
         var ones: [fz.MAXR][1]u32 = undefined;
         var ss: [fz.MAXR]*Session = undefined;
         var depths: [fz.MAXR]usize = undefined;
+        var draws: [fz.MAXR]?lanes.Sampling = undefined;
+        var lands: [fz.MAXR]u64 = undefined;
         if (requests.len > fz.MAXR) return error.DraftOutOfStep;
         for (requests, 0..) |r, k| {
             if (r.early or r.lanes != null or r.ranks or r.depth >= fz.MAXR) return error.DraftOutOfStep;
             const s = try b.session(r.stream);
-            ss[k], depths[k] = .{ s, r.depth };
+            ss[k], depths[k], draws[k], lands[k] = .{ s, r.depth, r.stream.sampling, r.position };
             follows[k] = if (r.first) |f| blk: {
                 ones[k][0] = switch (f) {
                     .value => |v| v,
@@ -519,7 +521,7 @@ pub const Backend = struct {
         const cb = b.e.r.queue.commandBuffer();
         b.e.r.enc = cb.compute(if (b.e.r.serial) .serial else .concurrent);
         const n = requests.len;
-        const packed_ = batch_draft.encode(b, ss[0..n], follows[0..n], hiddens[0..n], depths[0..n]) catch |err| {
+        const packed_ = batch_draft.encode(b, ss[0..n], follows[0..n], hiddens[0..n], depths[0..n], draws[0..n], lands[0..n]) catch |err| {
             b.e.r.enc.end();
             return err;
         };

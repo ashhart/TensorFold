@@ -1,6 +1,8 @@
 //! A shared round's MTP drafts packed across streams: row-wise steps once, attention per stream, one tail a step.
 const std = @import("std");
 const mtl = @import("metal");
+const lanes = @import("lanes");
+const sample = @import("sample.zig");
 const fz = @import("replay.zig");
 const variants = @import("variants.zig");
 const Session = @import("session.zig").Session;
@@ -24,7 +26,7 @@ pub const Scratch = struct {
     logits: Buf, // the draft head's rows
 };
 
-const Row = struct { s: *Session, follow: []const u32, hidden: Buf, steps: usize };
+const Row = struct { s: *Session, follow: []const u32, hidden: Buf, steps: usize, sampling: ?lanes.Sampling = null, position: u64 = 0 };
 
 /// FZ_BATCH_MTP_ROWS=0: each stream's drafts encoded alone, as before.
 pub const State = struct {
@@ -34,6 +36,12 @@ pub const State = struct {
     n: usize = 0,
     calls: usize = 0,
 };
+
+/// FZ_KEYED_DRAFTS=0: a sampled stream drafts by argmax, as before.
+fn keyed() bool {
+    const v = std.c.getenv("FZ_KEYED_DRAFTS") orelse return true;
+    return v[0] != '0';
+}
 
 pub fn on(st: *State) bool {
     if (st.off == null) st.off = if (std.c.getenv("FZ_BATCH_MTP_ROWS")) |v| v[0] == '0' else false;
@@ -61,12 +69,12 @@ fn deeper(_: void, a: Row, b: Row) bool {
 }
 
 /// Encodes every stream's absorb and chained drafts into the bound encoder; false: off, nothing encoded.
-pub fn encode(b: anytype, sessions: []const *Session, follows: []const []const u32, hiddens: []const Buf, depths: []const usize) !bool {
+pub fn encode(b: anytype, sessions: []const *Session, follows: []const []const u32, hiddens: []const Buf, depths: []const usize, samplings: []const ?lanes.Sampling, positions: []const u64) !bool {
     const st = &b.packed_drafts;
     const r = b.e.r;
     if (!on(st) or r.tp != null or sessions.len == 0) return false;
     const x = try scratch(st, r, b.primary.mtp.ids_n);
-    for (sessions, follows, hiddens, depths, 0..) |s, f, hd, d, k| st.rows[k] = .{ .s = s, .follow = f, .hidden = hd, .steps = @max(d, 1) };
+    for (sessions, follows, hiddens, depths, 0..) |s, f, hd, d, k| st.rows[k] = .{ .s = s, .follow = f, .hidden = hd, .steps = @max(d, 1), .sampling = samplings[k], .position = positions[k] };
     st.n = sessions.len;
     st.calls = 0;
     const list = st.rows[0..st.n];
@@ -184,7 +192,7 @@ fn step(st: *State, m: *fz.Model, x: *Scratch, g: []const Row, p0: usize, j: usi
         took = true;
     };
     if (took and !r.serial) r.enc.barrier();
-    try tail(m, x, g.len, md1, p0, j);
+    try tail(m, x, g, md1, p0, j);
     for (g) |w| {
         const hs = &w.s.m.mtp;
         hs.pos += if (j == 0) w.follow.len else 1;
@@ -218,7 +226,8 @@ fn attend(r: *fz.Run, t: *fz.Tmp, s: *Session, j: usize, row: usize, rows: usize
 }
 
 /// The head's tail over one kept row a stream: its output rows to `chain` from row p0, its drafts to step j's outs.
-fn tail(m: *fz.Model, x: *Scratch, n: usize, md1: Buf, p0: usize, j: usize) !void {
+fn tail(m: *fz.Model, x: *Scratch, g: []const Row, md1: Buf, p0: usize, j: usize) !void {
+    const n = g.len;
     const r = m.r;
     const t = &m.t;
     const h = &m.mtp;
@@ -234,9 +243,13 @@ fn tail(m: *fz.Model, x: *Scratch, n: usize, md1: Buf, p0: usize, j: usize) !voi
     try m.mtpProject(out, h.mix, "mtp:qa_hc_down@mtp.mix", "mtp:qa_hc_up@mtp.mix", t.inj_a, md1);
     if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, md1 }, &.{t.xs});
     try m.mtpLane(h.draft, "mtp:lane_qmm_bytes_grouped@mtp.draft", t.mixed, md1, n, D, x.logits);
-    r.enc.setPipeline(r.argids_pipe); // fz_argmax_ids takes one row: one dispatch a stream
-    for (0..n) |q| {
+    for (g, 0..) |w, q| { // one dispatch a stream: a sampled stream's draft under its keyed rule, else the argmax
         const o: Buf = .{ .b = x.outs, .off = (j * MAXR + p0 + q) * 4 };
+        if (w.sampling) |s| if (s.temperature > 0 and keyed()) {
+            sample.drawIds(r.enc, r.draw_ids_pipe, x.logits.at(q * h.ids_n * 2), h.ids, h.ids_n, w.position + j, s, o);
+            continue;
+        };
+        r.enc.setPipeline(r.argids_pipe);
         for ([_]Buf{ x.logits.at(q * h.ids_n * 2), o, h.n_ids, h.ids }, 0..) |bb, i| r.enc.setBuffer(bb.b, bb.off, i);
         r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
     }
