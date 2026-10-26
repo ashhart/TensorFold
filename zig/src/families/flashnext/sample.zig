@@ -55,24 +55,34 @@ pub fn drawRows(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, logits: fz.Buf, pos
     enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
 }
 
-/// tf_sample_full_ids on one bf16 row over `n` columns that are token ids `ids`: the draft at `position`, under the target's keyed rule.
-pub fn drawIds(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, logits: fz.Buf, ids: fz.Buf, n: usize, position: u64, s: lanes.Sampling, out: fz.Buf) void {
-    const rule = lanes.gpu_rule.rule(s);
-    const seeds = rule.seedHalves();
-    const cfgs = rule.cfg();
-    const cap: u32 = rule.top_k;
-    const at: u32 = @intCast(position);
+/// A greedy row among keyed ones: its top token alone races.
+const top_one: lanes.Sampling = .{ .seed = 0, .temperature = 1.0, .top_k = 1, .top_p = 1.0 };
+
+/// tf_sample_full_ids over bf16 rows of `n` token-id columns: row i's draft at lands[i] by its keyed rule (null: top).
+pub fn drawIds(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, logits: fz.Buf, ids: fz.Buf, n: usize, ss: []const ?lanes.Sampling, lands: []const u64, out: fz.Buf) void {
+    const rows = ss.len;
+    var seeds: [2 * fz.MAXR]u32 = @splat(0);
+    var cfgs: [4 * fz.MAXR]f32 = @splat(0);
+    var caps: [fz.MAXR]u32 = @splat(0);
+    var at: [fz.MAXR]u32 = @splat(0);
+    for (ss, lands, 0..) |si, p, i| {
+        const rule = lanes.gpu_rule.rule(si orelse top_one);
+        seeds[2 * i ..][0..2].* = rule.seedHalves();
+        cfgs[4 * i ..][0..4].* = rule.cfg();
+        caps[i] = rule.top_k;
+        at[i] = @intCast(p);
+    }
     const v: u32 = @intCast(n);
     enc.setPipeline(pipe);
     enc.setBuffer(logits.b, logits.off, 0);
-    enc.setBytes(std.mem.sliceAsBytes(&seeds), 1);
-    enc.setBytes(std.mem.asBytes(&at), 2);
-    enc.setBytes(std.mem.sliceAsBytes(&cfgs), 3);
-    enc.setBytes(std.mem.asBytes(&cap), 4);
+    enc.setBytes(std.mem.sliceAsBytes(seeds[0 .. 2 * rows]), 1);
+    enc.setBytes(std.mem.sliceAsBytes(at[0..rows]), 2);
+    enc.setBytes(std.mem.sliceAsBytes(cfgs[0 .. 4 * rows]), 3);
+    enc.setBytes(std.mem.sliceAsBytes(caps[0..rows]), 4);
     enc.setBuffer(out.b, out.off, 5);
     enc.setBuffer(ids.b, ids.off, 6);
     enc.setBytes(std.mem.asBytes(&v), 7);
-    enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
+    enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
 }
 
 test "a window's draws on the GPU are the shared rule's host draws at the cache length + 1 + row" {
@@ -152,19 +162,19 @@ test "a sampled stream's draft over the draft head's ids is the shared rule's ho
     const q = try dev.queue();
     defer q.deinit();
     const n = 3000;
-    const logits = try dev.buffer(n * 2, fz.opts);
+    const logits = try dev.buffer(2 * n * 2, fz.opts);
     defer logits.deinit();
     const ids = try dev.buffer(n * 4, fz.opts);
     defer ids.deinit();
-    const out = try dev.buffer(4, fz.opts);
+    const out = try dev.buffer(8, fz.opts);
     defer out.deinit();
     var prng = std.Random.DefaultPrng.init(5);
     const rng = prng.random();
     for (ids.slice(u32, n), 0..) |*v, i| v.* = @intCast(3 * i + 7); // a cut head's sorted ids
-    const words = logits.slice(u16, n);
+    const words = logits.slice(u16, 2 * n);
     const row = try gpa.alloc(f32, n);
     defer gpa.free(row);
-    for (words, row) |*w, *x| {
+    for (words[0..n], row) |*w, *x| {
         const v: f32 = rng.floatNorm(f32) * 2.0 + @as(f32, if (rng.uintLessThan(u32, 100) == 0) 7.0 else 0.0);
         const b: u32 = @bitCast(v);
         w.* = @truncate((b + 0x7FFF + ((b >> 16) & 1)) >> 16);
@@ -177,12 +187,15 @@ test "a sampled stream's draft over the draft head's ids is the shared rule's ho
     for (cases) |s| for ([_]u64{ 3, 70_001 }) |at| {
         const cb = q.commandBuffer();
         const enc = cb.compute(.serial);
-        drawIds(enc, pipe, .{ .b = logits }, .{ .b = ids }, n, at, s, .{ .b = out });
+        @memcpy(words[n..], words[0..n]); // row 1: the same scores, greedy
+        drawIds(enc, pipe, .{ .b = logits }, .{ .b = ids }, n, &.{ s, null }, &.{ at, at }, .{ .b = out });
         enc.end();
         cb.commit();
         cb.wait();
         try std.testing.expect(cb.failure() == null);
         const want = try lanes.gpu_full.sample(gpa, row, s, @intCast(at), ids.slice(u32, n));
-        try std.testing.expectEqual(want, out.slice(u32, 1)[0]);
+        try std.testing.expectEqual(want, out.slice(u32, 2)[0]);
+        const greedy = std.mem.indexOfScalar(u32, ids.slice(u32, n), out.slice(u32, 2)[1]).?;
+        try std.testing.expectEqual(std.mem.max(f32, row), row[greedy]); // a top score (ties may go either way)
     };
 }

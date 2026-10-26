@@ -243,12 +243,23 @@ fn tail(m: *fz.Model, x: *Scratch, g: []const Row, md1: Buf, p0: usize, j: usize
     try m.mtpProject(out, h.mix, "mtp:qa_hc_down@mtp.mix", "mtp:qa_hc_up@mtp.mix", t.inj_a, md1);
     if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, md1 }, &.{t.xs});
     try m.mtpLane(h.draft, "mtp:lane_qmm_bytes_grouped@mtp.draft", t.mixed, md1, n, D, x.logits);
-    for (g, 0..) |w, q| { // one dispatch a stream: a sampled stream's draft under its keyed rule, else the argmax
-        const o: Buf = .{ .b = x.outs, .off = (j * MAXR + p0 + q) * 4 };
+    var draws: [MAXR]?lanes.Sampling = @splat(null);
+    var at: [MAXR]u64 = @splat(0);
+    var any = false;
+    for (g, 0..) |w, q| {
+        at[q] = w.position + j;
         if (w.sampling) |s| if (s.temperature > 0 and keyed()) {
-            sample.drawIds(r.enc, r.draw_ids_pipe, x.logits.at(q * h.ids_n * 2), h.ids, h.ids_n, w.position + j, s, o);
-            continue;
+            draws[q] = s;
+            any = true;
         };
+    }
+    if (any) { // a sampled stream's draft under its keyed rule, every stream's row in one dispatch
+        sample.drawIds(r.enc, r.draw_ids_pipe, x.logits, h.ids, h.ids_n, draws[0..n], at[0..n], .{ .b = x.outs, .off = (j * MAXR + p0) * 4 });
+        if (!r.serial) r.enc.barrier();
+        return;
+    }
+    for (0..n) |q| { // fz_argmax_ids takes one row: one dispatch a stream
+        const o: Buf = .{ .b = x.outs, .off = (j * MAXR + p0 + q) * 4 };
         r.enc.setPipeline(r.argids_pipe);
         for ([_]Buf{ x.logits.at(q * h.ids_n * 2), o, h.n_ids, h.ids }, 0..) |bb, i| r.enc.setBuffer(bb.b, bb.off, i);
         r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
