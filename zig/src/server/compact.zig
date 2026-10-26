@@ -348,9 +348,21 @@ fn roleOf(m: Value) []const u8 {
     return if (r == .string) r.string else "";
 }
 
-fn contentOf(m: Value) []const u8 {
+/// A message's words: its content string, or its text parts joined with nothing between them.
+fn contentOf(a: Allocator, m: Value) Allocator.Error![]const u8 {
     const c = m.get("content") orelse return "";
-    return if (c == .string) c.string else "";
+    if (c == .string) return c.string;
+    if (c != .array) return "";
+    var buf: std.ArrayList(u8) = .empty;
+    for (c.array) |part| {
+        if (part != .object) continue;
+        const kind = part.get("type") orelse continue;
+        if (kind != .string or !std.mem.eql(u8, kind.string, "text")) continue;
+        const t = part.get("text") orelse continue;
+        if (t != .string) continue;
+        try buf.appendSlice(a, t.string);
+    }
+    return buf.items;
 }
 
 fn isLead(m: Value) bool {
@@ -380,9 +392,9 @@ fn findMarker(msgs: []const Value) ?usize {
 fn markerBody(m: Value) ?[]const u8 {
     const r = roleOf(m);
     if (!std.mem.eql(u8, r, "system") and !std.mem.eql(u8, r, "user") and !std.mem.eql(u8, r, "developer")) return null;
-    const c = contentOf(m);
-    if (!std.mem.startsWith(u8, c, marker_line)) return null;
-    var rest = c[marker_line.len..];
+    const c = m.get("content") orelse return null;
+    if (c != .string or !std.mem.startsWith(u8, c.string, marker_line)) return null;
+    var rest = c.string[marker_line.len..];
     if (std.mem.startsWith(u8, rest, "\n")) rest = rest[1..];
     return rest;
 }
@@ -457,7 +469,7 @@ fn lineOf(a: Allocator, m: Value) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(a, roleOf(m));
     try buf.appendSlice(a, ": ");
-    try buf.appendSlice(a, contentOf(m));
+    try buf.appendSlice(a, try contentOf(a, m));
     try appendCalls(a, &buf, m);
     return buf.items;
 }
