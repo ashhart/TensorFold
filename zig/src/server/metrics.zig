@@ -1,6 +1,7 @@
 //! Prometheus text for GET /metrics, family for family as the Python server writes it.
 const std = @import("std");
 const process = @import("process_memory.zig");
+const resident = @import("process_resident.zig");
 const api = @import("engine_api");
 
 const prefix = "tensorfold:";
@@ -122,6 +123,7 @@ pub const Metrics = struct {
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
         try processGauges(w, process.read());
+        try residentGauges(w, resident.read(io));
         try gauge(w, "num_requests_running", "gauge", "Requests in prefill or decode. A mirror of tensorfold:requests_running.", 0);
         try gauge(w, "num_requests_waiting", "gauge", "Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.", 0);
         try histogram(w, "e2e_request_latency_seconds", "Seconds from arrival to the reply leaving, under vLLM's name.", snap.latency);
@@ -178,6 +180,7 @@ pub const Metrics = struct {
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
         try processGauges(w, process.read());
+        try residentGauges(w, resident.read(io));
         if (memory) |mem| {
             try gauge(w, "device_memory_bytes", "gauge", "Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).", mem.active);
             try gauge(w, "device_memory_peak_bytes", "gauge", "The most device memory the engine has held since start or the last /health?reset_peak=1.", mem.peak);
@@ -216,6 +219,15 @@ fn processGauges(w: *std.Io.Writer, sample: ?process.Snapshot) !void {
     try gauge(w, "process_footprint_peak_bytes", "gauge", "Kernel lifetime peak physical footprint including Metal buffers; never reset by health (macOS).", p.lifetime_peak_physical_footprint_bytes);
 }
 
+fn residentGauges(w: *std.Io.Writer, sample: ?resident.Snapshot) !void {
+    const r = sample orelse return;
+    if (r.resident_bytes) |b| try gauge(w, "process_resident_bytes", "gauge", "Current resident set (VmRSS); device memory is not in it, so it is not a physical footprint (Linux).", b);
+    if (r.anon_bytes) |b| try gauge(w, "process_resident_anon_bytes", "gauge", "Current resident anonymous memory (RssAnon): heap, stacks and private maps (Linux).", b);
+    if (r.file_bytes) |b| try gauge(w, "process_resident_file_bytes", "gauge", "Current resident file-backed memory (RssFile): the binary, libraries and mapped files (Linux).", b);
+    if (r.shmem_bytes) |b| try gauge(w, "process_resident_shmem_bytes", "gauge", "Current resident shared memory (RssShmem): System V shared memory, tmpfs maps and shared anonymous maps (Linux).", b);
+    if (r.peak_bytes) |b| try gauge(w, "process_resident_peak_bytes", "gauge", "Kernel lifetime peak resident set (VmHWM); never reset by health (Linux).", b);
+}
+
 test "process gauges omit unknown samples and keep current and lifetime peak distinct" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
@@ -224,6 +236,58 @@ test "process gauges omit unknown samples and keep current and lifetime peak dis
     try processGauges(&out.writer, .{ .physical_footprint_bytes = 0, .lifetime_peak_physical_footprint_bytes = 12 });
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "tensorfold:process_footprint_bytes 0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "tensorfold:process_footprint_peak_bytes 12\n") != null);
+}
+
+test "resident gauges render each count the kernel reports, and only those" {
+    var all: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer all.deinit();
+    try residentGauges(&all.writer, .{ .resident_bytes = 4 << 30, .anon_bytes = 3 << 30, .file_bytes = 768 << 20, .shmem_bytes = 256 << 20, .peak_bytes = 5 << 30 });
+    const body = all.written();
+    try std.testing.expect(std.mem.indexOf(u8, body, "# TYPE tensorfold:process_resident_bytes gauge\ntensorfold:process_resident_bytes 4294967296\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:process_resident_anon_bytes 3221225472\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:process_resident_file_bytes 805306368\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:process_resident_shmem_bytes 268435456\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:process_resident_peak_bytes 5368709120\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "process_footprint") == null); // not a footprint
+    var old: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer old.deinit();
+    try residentGauges(&old.writer, null);
+    try std.testing.expectEqual(@as(usize, 0), old.written().len);
+    try residentGauges(&old.writer, .{ .resident_bytes = 1 << 20, .peak_bytes = 2 << 20 }); // a kernel before 4.5
+    try std.testing.expect(std.mem.indexOf(u8, old.written(), "tensorfold:process_resident_bytes 1048576\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, old.written(), "process_resident_anon_bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, old.written(), "process_resident_shmem_bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, old.written(), "tensorfold:process_resident_peak_bytes 2097152\n") != null);
+}
+
+test "only a Linux scrape reports the resident set, parked or not, and never as the footprint" {
+    const gpa = std.testing.allocator;
+    var m: Metrics = .{ .gpa = gpa };
+    const stub: RenderStub = .{};
+    var live: std.Io.Writer.Allocating = .init(gpa);
+    defer live.deinit();
+    try m.render(std.testing.io, &live.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
+    var parked: std.Io.Writer.Allocating = .init(gpa);
+    defer parked.deinit();
+    try m.renderParked(std.testing.io, &parked.writer, 4096);
+    for ([_][]const u8{ live.written(), parked.written() }) |body| {
+        if (@import("builtin").os.tag != .linux) {
+            try std.testing.expect(std.mem.indexOf(u8, body, "process_resident_") == null);
+            continue;
+        }
+        try std.testing.expect(std.mem.indexOf(u8, body, "process_footprint_bytes") == null);
+        const rss = try scraped(body, "\ntensorfold:process_resident_bytes ");
+        try std.testing.expect(rss > 0);
+        try std.testing.expect(try scraped(body, "\ntensorfold:process_resident_peak_bytes ") >= rss);
+        try std.testing.expect(std.mem.indexOf(u8, body, "\ntensorfold:process_resident_anon_bytes ") != null);
+    }
+}
+
+/// The number after `head` in a rendered body.
+fn scraped(body: []const u8, head: []const u8) !u64 {
+    const at = std.mem.indexOf(u8, body, head) orelse return error.NoGauge;
+    const rest = body[at + head.len ..];
+    return std.fmt.parseUnsigned(u64, rest[0 .. std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len], 10);
 }
 
 fn pools(w: *std.Io.Writer, name: []const u8, label: []const u8, lengths: []const u32, window: u32) !void {
