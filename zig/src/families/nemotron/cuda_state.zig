@@ -345,11 +345,11 @@ pub const Buffers = struct {
     /// Every scratch field, in scratchSizes' order.
     fn scratchPtrs(b: *Buffers) [scratch_count]*u64 {
         return .{
-            &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden,  &b.p_logits, &b.p_sampled, &b.emb, &b.h[0],         &b.h[1],       &b.y,
-            &b.xs,        &b.delta,     &b.proj,  &b.p_xc,      &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
-            &b.axs,       &b.po,        &b.pm,    &b.pl,        &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
-            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,      &b.shared,   &b.pocket,    &b.lat, &b.comb,         &b.sact,       &b.sids,
-            &b.job,       &b.ck8,       &b.ck4,   &b.ones,      &b.lane_part,
+            &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden, &b.p_logits,  &b.p_sampled, &b.emb, &b.h[0],         &b.h[1],       &b.y,
+            &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,        &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
+            &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,      &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
+            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,    &b.pocket,    &b.lat, &b.comb,         &b.sact,       &b.sids,
+            &b.job,       &b.ck8,       &b.ck4,   &b.ones,     &b.lane_part,
         };
     }
 
