@@ -158,7 +158,8 @@ Attach every attempt, failed ones included; after updating the commits and build
 On a checkpoint whose count prompt ends before 400 tokens, `portable-v1` cannot finish its captures; rerun all three with `--workload baseline-v2`, which fixes exactly 400 output tokens, and note the workload with the receipt.
 `baseline-v2` is defined in the Grill repo's [workload JSON](https://github.com/plotarmordev/thegrill/blob/a551fdf2b63059f56df6287e72ed573ca06cca2f/crates/grill-perf/examples/baseline-v2.json) and described in its [default scope and budget](https://github.com/plotarmordev/thegrill/blob/a551fdf2b63059f56df6287e72ed573ca06cca2f/docs/performance/README.md#default-scope-and-budget), not in the install guide.
 
-A real receipt, from The Grill 0.11.0 on a DGX Spark (GB10), measuring a CUDA window-cost change with `baseline-v2` (deployment lines shortened):
+An abridged excerpt of a real receipt's `compare.txt`, from The Grill 0.11.0 on a DGX Spark (GB10), measuring a CUDA window-cost change with `baseline-v2`.
+The deployment lines are shortened (endpoint, CPU, client placement, collector source and prompt length left out), and the `Model:` line and the per-run `Baseline:`/`Candidate:` request and ceiling accounting are omitted, as is the `Report:` path; a real receipt pastes `compare.txt` whole.
 
 ```text
 INCONCLUSIVE: no direction established; this does not mean equivalent performance
@@ -173,6 +174,7 @@ Selected declaration change: runtime
 Observed throughput change between capture periods: +0.33%
 Uncertainty range (model-based, nominal 95%) for the measured change: [-0.49%, +1.15%]
 candidate is not directional against both baseline capture periods
+Limits: a measured direction does not establish its cause or practical importance. These sequential measurements may be correlated or drift over time, making the uncertainty range too narrow. No guaranteed precision.
 Serving identity is declared, not attested.
 ```
 
