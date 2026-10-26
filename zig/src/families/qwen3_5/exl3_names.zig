@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The EXL3 projections of a Qwen3.5-MoE checkpoint under their HF tensor names, for every backend.
-//! No device work: names, shapes and the stored-group check. The CUDA loader (cuda_exl3_weights.zig) and the
-//! XPU loader read the same groups; each then uploads them its own way.
+
+//! EXL3 projections of a Qwen3.5-MoE checkpoint under their HF tensor names.
+
+//! No device work: names, shapes, and the stored-group check. CUDA and XPU read the same groups.
 
 const std = @import("std");
 

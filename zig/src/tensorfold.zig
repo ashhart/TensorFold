@@ -79,6 +79,7 @@ test {
     _ = @import("families/qwen3_5/config.zig");
     _ = @import("families/gemma4/gemma4.zig");
     _ = @import("families/qwen3_5/backend.zig");
+    _ = @import("families/qwen3_5/exl3_names.zig");
     _ = @import("families/step5/step5.zig");
     _ = @import("families/spark25/metal.zig");
     _ = @import("families/lfm2_moe/config.zig");
