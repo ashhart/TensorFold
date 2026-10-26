@@ -105,11 +105,8 @@ inline void lfm2_rms(const thread float* v, const device bfloat* w, float eps, d
 }
 
 // A segment's short conv: Bx = B * x, 3 taps over (state [2, D], Bx), y = C * conv; SNAP: rows' states from FIRST on.
-[[kernel]] void lfm2_conv(const device bfloat* bcx [[buffer(0)]], const device bfloat* state [[buffer(1)]],
-                          const device bfloat* w [[buffer(2)]], device bfloat* y [[buffer(3)]], device bfloat* snap [[buffer(4)]],
-                          constant uint& first [[buffer(5)]], uint2 at [[thread_position_in_grid]]) {
-  const uint ch = at.x, r = at.y;
-  if (ch >= D) return;
+inline void lfm2_conv_row(const device bfloat* bcx, const device bfloat* state, const device bfloat* w, device bfloat* y,
+                          device bfloat* snap, uint first, uint ch, uint r) {
   bfloat bx[3];
   for (int tap = 0; tap < 3; ++tap) {
     const int src = int(r) + tap - 2;
@@ -127,6 +124,11 @@ inline void lfm2_rms(const thread float* v, const device bfloat* w, float eps, d
   snap[(size_t(r - first) * 2) * D + ch] = bx[1];
   snap[(size_t(r - first) * 2 + 1) * D + ch] = bx[2];
 }
+[[kernel]] void lfm2_conv(const device bfloat* bcx [[buffer(0)]], const device bfloat* state [[buffer(1)]],
+                          const device bfloat* w [[buffer(2)]], device bfloat* y [[buffer(3)]], device bfloat* snap [[buffer(4)]],
+                          constant uint& first [[buffer(5)]], uint2 at [[thread_position_in_grid]]) {
+  if (at.x < D) lfm2_conv_row(bcx, state, w, y, snap, first, at.x, at.y);
+}
 
 // One head of one row: RMS norm over its 64 values (lane l: l and l + 32), then RoPE on the pair at position `pos`.
 inline void lfm2_head(const device bfloat* src, const device bfloat* gain, float eps, float log2_theta, uint pos, uint lane,
@@ -143,11 +145,10 @@ inline void lfm2_head(const device bfloat* src, const device bfloat* gain, float
 
 // A simdgroup a (head, row): queries normed and rotated, keys and values into the [KVH, cap, HD] cache at len + r.
 struct lfm2_qk_args { uint len, cap; float eps, log2_theta; };
-[[kernel]] void lfm2_qk(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
-                        const device bfloat* qn [[buffer(3)]], const device bfloat* kn [[buffer(4)]], constant lfm2_qk_args& p [[buffer(5)]],
-                        device bfloat* queries [[buffer(6)]], device bfloat* keys [[buffer(7)]], device bfloat* values [[buffer(8)]],
-                        uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
-  const uint head = tg.x, r = tg.y, pos = p.len + r;
+inline void lfm2_qk_row(const device bfloat* q, const device bfloat* k, const device bfloat* v, const device bfloat* qn,
+                        const device bfloat* kn, lfm2_qk_args p, device bfloat* queries, device bfloat* keys,
+                        device bfloat* values, uint head, uint r, uint lane) {
+  const uint pos = p.len + r;
   bfloat a, b;
   if (head < QH) {
     lfm2_head(q + (size_t(r) * QH + head) * HD, qn, p.eps, p.log2_theta, pos, lane, a, b);
@@ -163,6 +164,12 @@ struct lfm2_qk_args { uint len, cap; float eps, log2_theta; };
   keys[at + lane + 32] = b;
   values[at + lane] = v[(size_t(r) * KVH + kh) * HD + lane];
   values[at + lane + 32] = v[(size_t(r) * KVH + kh) * HD + lane + 32];
+}
+[[kernel]] void lfm2_qk(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
+                        const device bfloat* qn [[buffer(3)]], const device bfloat* kn [[buffer(4)]], constant lfm2_qk_args& p [[buffer(5)]],
+                        device bfloat* queries [[buffer(6)]], device bfloat* keys [[buffer(7)]], device bfloat* values [[buffer(8)]],
+                        uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  lfm2_qk_row(q, k, v, qn, kn, p, queries, keys, values, tg.x, tg.y, lane);
 }
 
 // Keys a chunk: a row's keys split at fixed positions, so prompt tiles and decode rows cut them the same way.
@@ -226,14 +233,10 @@ inline void lfm2_stage(const thread uint4* pre, threadgroup uint* ks, threadgrou
 
 // Every row's attention partials (one kernel for prompt and decode): a threadgroup a (chunk, kv head, 8 * RB rows).
 template <int RB>  // a simdgroup's RB row blocks share each staged K and V fragment, each block's arithmetic its own
-[[kernel]] void lfm2_attn_mma(const device bfloat* queries [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
-                              const device bfloat* values [[buffer(2)]], constant lfm2_attn_args& p [[buffer(3)]],
-                              device float* pm [[buffer(4)]], device float* pl [[buffer(5)]], device float* po [[buffer(6)]],
-                              constant uint& rows [[buffer(7)]], uint3 tg [[threadgroup_position_in_grid]],
-                              uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
-                              uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup uint ks[2][HD * (KT / 2)];
-  threadgroup bfloat vs[2][KB * KP];
+inline void lfm2_attn_rows(const device bfloat* queries, const device bfloat* keys, const device bfloat* values,
+                           lfm2_attn_args p, device float* pm, device float* pl, device float* po, uint rows, uint3 tg,
+                           uint tid, uint sg, uint lane, threadgroup uint (*ks)[HD * (KT / 2)],
+                           threadgroup bfloat (*vs)[KB * KP]) {
   // Row tiles first in the grid: the threadgroups in flight walk the same keys together (one chunk, one kv head).
   const uint chunk = tg.z / p.subs, sub0 = p.subs == 1 ? 0 : tg.z % SUBS, sub1 = p.subs == 1 ? SUBS : sub0 + 1;
   const uint kh = tg.y, r0 = tg.x * 8 * RB, head = kh * (QH / KVH) + sg;
@@ -337,15 +340,23 @@ template <int RB>  // a simdgroup's RB row blocks share each staged K and V frag
     for (int d = 0; d < 8; ++d) *(device float2*)(po + at * HD + 8 * d + fn) = O[b][d];
   }
 }
+template <int RB>
+[[kernel]] void lfm2_attn_mma(const device bfloat* queries [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
+                              const device bfloat* values [[buffer(2)]], constant lfm2_attn_args& p [[buffer(3)]],
+                              device float* pm [[buffer(4)]], device float* pl [[buffer(5)]], device float* po [[buffer(6)]],
+                              constant uint& rows [[buffer(7)]], uint3 tg [[threadgroup_position_in_grid]],
+                              uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                              uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup uint ks[2][HD * (KT / 2)];
+  threadgroup bfloat vs[2][KB * KP];
+  lfm2_attn_rows<RB>(queries, keys, values, p, pm, pl, po, rows, tg, tid, sg, lane, ks, vs);
+}
 template [[host_name("lfm2_attn_mma")]] [[kernel]] decltype(lfm2_attn_mma<1>) lfm2_attn_mma<1>;
 template [[host_name("lfm2_attn_mma_r2")]] [[kernel]] decltype(lfm2_attn_mma<2>) lfm2_attn_mma<2>;
 
 // The chunks merged in chunk order for (head, row): Y [rows, QH*HD] bf16.
-[[kernel]] void lfm2_attn_merge(const device float* pm [[buffer(0)]], const device float* pl [[buffer(1)]],
-                                const device float* po [[buffer(2)]], constant lfm2_attn_args& p [[buffer(3)]],
-                                device bfloat* y [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
-                                uint lane [[thread_index_in_simdgroup]]) {
-  const uint head = tg.x, r = tg.y;
+inline void lfm2_merge_row(const device float* pm, const device float* pl, const device float* po, lfm2_attn_args p,
+                           device bfloat* y, uint head, uint r, uint lane) {
   const uint count = p.len + r + 1;
   const uint per = PER;
   const uint chunks = (count + per - 1) / per;
@@ -379,6 +390,12 @@ template [[host_name("lfm2_attn_mma_r2")]] [[kernel]] decltype(lfm2_attn_mma<2>)
   device bfloat* out = y + (size_t(r) * QH + head) * HD;
   out[lane] = static_cast<bfloat>(o0 / l);
   out[lane + 32] = static_cast<bfloat>(o1 / l);
+}
+[[kernel]] void lfm2_attn_merge(const device float* pm [[buffer(0)]], const device float* pl [[buffer(1)]],
+                                const device float* po [[buffer(2)]], constant lfm2_attn_args& p [[buffer(3)]],
+                                device bfloat* y [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
+                                uint lane [[thread_index_in_simdgroup]]) {
+  lfm2_merge_row(pm, pl, po, p, y, tg.x, tg.y, lane);
 }
 
 // Router logits [rows, E] in fp32: a simdgroup an expert, lane l over inputs 4l..4l+3 of each 128, then simd_sum.
