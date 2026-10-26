@@ -3,10 +3,12 @@ const std = @import("std");
 const bf16_round = @import("../../core/bf16_round.zig");
 const cfg = @import("config.zig");
 
-const rn = bf16_round.round32;
+// One-row steps match MLX 0.32.4's SHA-256 prints (tools/zig/gemma4_e4b_layer_input_oracle.py); M > 1: up to 0.05% off.
+
+pub const rn = bf16_round.round32;
 
 /// A weak-typed scalar as MLX multiplies by it: rounded to bf16 first.
-fn scalar(v: f64) f32 {
+pub fn scalar(v: f64) f32 {
     return rn(@floatCast(v));
 }
 
@@ -16,27 +18,81 @@ pub const Model = struct { project: []const f32, norm: []const f32 };
 /// One layer's gate [width, hidden], projection [hidden, width], post norm [hidden] and layer_scalar, as bf16 values.
 pub const Layer = struct { gate: []const f32, project: []const f32, norm: []const f32, scalar: f32 };
 
-fn dot(a: []const f32, b: []const f32) f32 {
-    var acc: f32 = 0;
-    for (a, b) |x, y| acc += x * y;
-    return acc;
+/// The most a row's norm axis or a projection's input holds, in the Ref's scratch (the E4B's hidden width, 2560).
+const max_hidden = 2560;
+const max_width = 256;
+
+/// simd_sum on Apple GPUs (checked bit for bit on an M4 Max): the butterfly over lane ^ 1, 2, 4, 8, 16.
+fn simdSum(v: *[32]f32) f32 {
+    inline for (.{ 1, 2, 4, 8, 16 }) |s| {
+        var next: [32]f32 = undefined;
+        for (&next, 0..) |*n, l| n.* = v[l] + v[l ^ s];
+        v.* = next;
+    }
+    return v[0];
 }
 
-/// mx.fast.rms_norm on one bf16 row: the row's normalized values rounded, then the weight's product rounded.
-fn rms(x: []const f32, w: []const f32, out: []f32) void {
-    var ss: f32 = 0;
-    for (x) |v| ss += v * v;
-    const inv = 1.0 / @sqrt(ss / @as(f32, @floatFromInt(x.len)) + cfg.eps);
+/// MLX 0.32.4's one-row bf16 matmul: 32 lanes x 4 values per 128, fp32 chains, shuffle-down (gemv.h:175,206).
+pub fn dot(a: []const f32, b: []const f32) f32 {
+    var lane: [32]f32 = @splat(0);
+    var base: usize = 0;
+    while (base < a.len) : (base += 128) {
+        for (0..4) |tn| for (0..32) |l| {
+            const k = base + l * 4 + tn;
+            if (k < a.len) lane[l] += a[k] * b[k];
+        };
+    }
+    inline for (.{ 16, 8, 4, 2, 1 }) |s| for (0..32 - s) |l| {
+        lane[l] += lane[l + s]; // lane l + s is not yet updated
+    };
+    return lane[0];
+}
+
+/// mx.fast.rms_norm, one row of at most 4,096: 4-value chains, two simd_sums, correct rsqrt (rms_norm.metal:36-61).
+pub fn rms(x: []const f32, w: []const f32, out: []f32) void {
+    std.debug.assert(x.len <= 4096);
+    const threads = (x.len + 3) / 4;
+    const groups = (threads + 31) / 32;
+    var sums: [32]f32 = @splat(0);
+    for (0..groups) |g| {
+        var lane: [32]f32 = undefined;
+        for (&lane, 0..) |*acc, l| {
+            acc.* = 0;
+            for (0..4) |i| {
+                const k = (g * 32 + l) * 4 + i;
+                if (k < x.len) acc.* += x[k] * x[k];
+            }
+        }
+        sums[g] = simdSum(&lane);
+    }
+    const total = simdSum(&sums);
+    const mean = total / @as(f32, @floatFromInt(x.len)) + cfg.eps;
+    const inv: f32 = @floatCast(1.0 / @sqrt(@as(f64, mean))); // metal::precise::rsqrt rounds correctly
     for (x, w, out) |v, wi, *o| o.* = rn(wi * rn(v * inv));
 }
 
-/// mlx_lm's gelu_approx(x) * up as MLX's bf16 ops (the geglu kernels' rounding points).
+/// A subnormal flushed to zero, as the GPU's elementwise kernels read and write them.
+fn ftz(v: f32) f32 {
+    return if (@abs(v) < std.math.floatMin(f32)) std.math.copysign(@as(f32, 0), v) else v;
+}
+
+/// rn of an fp32 result the GPU flushes first: below 2^-126 it is zero, not the smallest normal.
+fn rnf(v: f32) f32 {
+    return rn(ftz(v));
+}
+
+/// mlx_lm's gelu_approx as MLX's bf16 ops, equal for every finite bf16 x; the GPU flushes subnormal fp32 results first.
+pub fn gelu(x_in: f32) f32 {
+    const x = ftz(x_in);
+    const cube = rnf(x * x * x);
+    const inner = rnf(x + rnf(scalar(0.044715) * cube));
+    const th = rnf(std.math.tanh(rnf(scalar(0.7978845608028654) * inner)));
+    return rnf(rnf(0.5 * x) * rnf(1.0 + th));
+}
+
+/// gelu_approx(x) * up.
 fn geglu(x: f32, up: f32) f32 {
-    const cube = rn(x * x * x);
-    const inner = rn(x + rn(scalar(0.044715) * cube));
-    const th = rn(std.math.tanh(rn(scalar(0.7978845608028654) * inner)));
-    const gelu = rn(rn(0.5 * x) * rn(1.0 + th));
-    return rn(gelu * up);
+    return rn(gelu(x) * up);
 }
 
 /// A row's inputs for every layer in `out` [layers, width], from its scaled embedding `h` and its `table` row.
@@ -64,7 +120,7 @@ pub fn apply(g: cfg.Geometry, l: Layer, input: []const f32, h: []f32, scratch: [
 }
 
 /// The same steps in float64, each bf16 rounding one rounding of the float64 value; `skip` leaves one out (a control).
-const Ref = struct {
+pub const Ref = struct {
     skip: ?enum { mix_sum } = null,
 
     fn bf(v: f64) f64 {
@@ -91,7 +147,7 @@ const Ref = struct {
         return bf(bf(bf(0.5 * x) * bf(1.0 + th)) * up);
     }
 
-    fn inputs(r: Ref, g: cfg.Geometry, m: Model, h: []const f64, table: []const f32, out: []f64) void {
+    pub fn inputs(r: Ref, g: cfg.Geometry, m: Model, h: []const f64, table: []const f32, out: []f64) void {
         const width = g.layer_input;
         const scale = bf(1.0 / @sqrt(@as(f64, @floatFromInt(g.hidden))));
         const token = bf(@sqrt(@as(f64, @floatFromInt(width))));
@@ -107,10 +163,11 @@ const Ref = struct {
         }
     }
 
-    fn apply(g: cfg.Geometry, l: Layer, input: []const f64, h: []f64) void {
-        var gate: [64]f64 = undefined;
+    pub fn apply(g: cfg.Geometry, l: Layer, input: []const f64, h: []f64) void {
+        std.debug.assert(g.layer_input <= max_width and g.hidden <= max_hidden);
+        var gate: [max_width]f64 = undefined;
         for (gate[0..g.layer_input], input, 0..) |*v, up, j| v.* = Ref.geglu(bf(Ref.dot(l.gate[j * g.hidden ..][0..g.hidden], h)), up);
-        var x: [128]f64 = undefined;
+        var x: [max_hidden]f64 = undefined;
         for (x[0..g.hidden], 0..) |*v, j| v.* = bf(Ref.dot(l.project[j * g.layer_input ..][0..g.layer_input], gate[0..g.layer_input]));
         Ref.rms(x[0..g.hidden], l.norm, x[0..g.hidden]);
         for (h, x[0..g.hidden]) |*r, v| r.* = bf(bf(r.* + v) * @as(f64, l.scalar));
@@ -161,9 +218,9 @@ const Fixture = struct {
 };
 
 /// The worst column's difference in its own largest magnitude, the aggregate RMS, and how many values differ at all.
-const Spread = struct { worst: f64, rms: f64, differing: usize };
+pub const Spread = struct { worst: f64, rms: f64, differing: usize };
 
-fn spread(host: []const f32, want: []const f64, cols: usize) Spread {
+pub fn spread(host: []const f32, want: []const f64, cols: usize) Spread {
     var worst: f64 = 0;
     var sq: f64 = 0;
     var ref_sq: f64 = 0;

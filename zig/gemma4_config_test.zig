@@ -3,4 +3,5 @@ test {
     _ = @import("src/families/gemma4/config.zig");
     _ = @import("src/families/gemma4/plan.zig");
     _ = @import("src/families/gemma4/layer_input.zig");
+    _ = @import("src/families/gemma4/layer_input_mlx_test.zig");
 }
