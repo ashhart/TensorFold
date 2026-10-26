@@ -18,6 +18,7 @@ pub const metal_draw = @import("metal_draw.zig");
 pub const metal_gpu = @import("metal_gpu.zig");
 pub const cuda_gpu = @import("cuda_gpu.zig");
 pub const reader = @import("reader.zig");
+pub const node_gate = @import("node_gate.zig");
 pub const device_gate = @import("device_gate.zig");
 pub const device_fixture = @import("device_fixture.zig");
 pub const device_weights = @import("device_weights.zig");
@@ -50,6 +51,8 @@ pub const Config = config.Config;
 pub const Problem = config.Problem;
 test {
     _ = metal_control;
+    _ = @import("rotary_table.zig");
+    _ = @import("node_capture_test.zig");
     _ = @import("config_test.zig");
     _ = @import("weights_test.zig");
     _ = @import("graph_test.zig");

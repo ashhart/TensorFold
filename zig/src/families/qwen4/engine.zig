@@ -28,6 +28,7 @@ pub fn Engine(comptime G: type) type {
         weights: Placed = undefined,
         model: Model = undefined,
         gpu: G = undefined,
+        trace: ?@import("node_trace.zig").Sink(B) = null,
         scratch: Scratch = undefined,
         plan: admission.Plan = undefined,
         slots: []Slot = undefined,
@@ -161,7 +162,7 @@ pub fn Engine(comptime G: type) type {
             }
             try e.scratch.rewind(0);
             try batch.begin();
-            var ops: @import("gpu_ops.zig").Ops(G) = .{ .gpu = &e.gpu, .model = &e.model, .scratch = &e.scratch, .host = e.a, .problem = p };
+            var ops: @import("gpu_ops.zig").Ops(G) = .{ .gpu = &e.gpu, .model = &e.model, .scratch = &e.scratch, .host = e.a, .problem = p, .trace = e.trace };
             const logits = try graph.forward(&ops, geometry, &batch, tokens);
             off = 0;
             for (items) |item| {

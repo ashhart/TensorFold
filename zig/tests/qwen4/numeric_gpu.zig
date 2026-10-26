@@ -37,6 +37,8 @@ extern fn tf_hc_pointwise_cpu([*]const u16, [*]const u16, [*]const u16, [*]u16, 
 pub const G = struct {
     pub const Storage = B;
     pub const kind = @import("../../src/families/qwen4/native_admission.zig").Backend.cuda;
+    probability_bf16: bool = true,
+    trace: ?@import("../../src/families/qwen4/node_trace.zig").Sink(B) = null,
     b: *B,
     c: *const cfg.Config,
     arena: ?std.heap.ArenaAllocator = null,
@@ -61,8 +63,16 @@ pub const G = struct {
         p.rows = @intCast(x.rows);
         tf_weight_only_cpu(bits(x).ptr, w.weight.ptr, w.scales.ptr, w.biases.ptr, bits(y).ptr, p, 0, 0);
     }
-    pub fn hcNorm(g: *G, n: Model.Norm, x: Tensor, _: Tensor, y: Tensor, eps: f32) !void {
-        for (0..x.rows) |r| @memcpy(row(y, r), try norm(g, n, row(x, r), g.c.hidden, eps));
+    pub fn hcNorm(g: *G, n: Model.Norm, x: Tensor, sums: Tensor, y: Tensor, eps: f32) !void {
+        const partials = std.mem.bytesAsSlice(f32, sums.buffer[sums.offset..][0..try sums.bytes()]);
+        for (0..x.rows) |r| {
+            for (0..sums.width) |part| {
+                var sum: f32 = 0;
+                for (row(x, r)[part * 256 ..][0..256]) |bits_| sum += m.f(bits_) * m.f(bits_);
+                partials[r * sums.width + part] = sum;
+            }
+            @memcpy(row(y, r), try norm(g, n, row(x, r), g.c.hidden, eps));
+        }
     }
     pub fn hcActivation(_: *G, x: Tensor, y: Tensor, streams: usize, injection: bool) !void {
         tf_hc_activation_cpu(bits(x).ptr, bits(y).ptr, @intCast(bits(x).len), @intCast(streams), @intFromBool(injection), 0, 0);
@@ -96,5 +106,12 @@ pub const G = struct {
 pub const Loader = struct {
     pub fn load(_: Loader, _: std.mem.Allocator, b: *B, c: *const cfg.Config, _: *cfg.Problem) !G {
         return .{ .b = b, .c = c };
+    }
+};
+
+pub const MetalLoader = struct {
+    pub const reference = @import("../../src/families/qwen4/device_fixture.zig").metal_reference;
+    pub fn load(_: @This(), _: std.mem.Allocator, b: *B, c: *const cfg.Config, _: *cfg.Problem) !G {
+        return .{ .b = b, .c = c, .probability_bf16 = false };
     }
 };

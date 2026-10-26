@@ -29,6 +29,11 @@ def bf(x):
     return sign * (math.inf if y >= math.ldexp(255.5, 120) else y)
 
 
+def f32(x):
+    """An explicit scalar FP32 node; all formula evaluation on either side still uses binary64."""
+    return struct.unpack('<f', struct.pack('<f', x))[0]
+
+
 def sigmoid(x):
     return 1 / (1 + math.exp(-x)) if x >= 0 else math.exp(x) / (1 + math.exp(x))
 
@@ -65,7 +70,11 @@ def values(name, count, norm=False, gated_norm=False):
 
 
 class Oracle:
-    def __init__(self, config):
+    def __init__(self, config, probability="bf16", nodes=False, native_scalars=False):
+        self.native_scalars = native_scalars
+        self.probability = probability
+        self.capture_nodes = nodes
+        self.nodes = []
         self.c = config
         self.h = config['hidden_size']
         self.s = config['hc_count']
@@ -82,6 +91,11 @@ class Oracle:
         self.trace = []
         self.ple_order = {layer - 1: i for i, layer in enumerate(config['ple_layer_ids'])}
 
+    def record(self, name, values, kind="bf16"):
+        if self.capture_nodes and values:
+            self.nodes.append(dict(name=name, position=len(self.tokens), kind=kind, values=list(values)))
+        return values
+
     def matrix(self, x, name, n):
         k = len(x)
         weights = values(name + '.weight', n * k)
@@ -93,11 +107,18 @@ class Oracle:
         out = []
         for start in range(0, len(x), group):
             inv = 1 / math.sqrt(sum(v * v for v in x[start:start + group]) / group + self.eps)
-            out.extend(bf(x[i] * inv * (1 + gamma[i] if gemma else gamma[i]))
-                       for i in range(start, start + group))
+            if self.native_scalars:
+                mean = f32(f32(sum(v * v for v in x[start:start + group])) / group)
+                inv = f32(1 / math.sqrt(f32(mean + f32(self.eps))))
+                out.extend(bf(f32(f32(x[i] * inv) * f32(1 + gamma[i] if gemma else gamma[i])))
+                           for i in range(start, start + group))
+            else:
+                out.extend(bf(x[i] * inv * (1 + gamma[i] if gemma else gamma[i]))
+                           for i in range(start, start + group))
         return out
 
     def hc(self, hidden, name, inject=True):
+        self.record(name + '.sums', [sum(v*v for v in hidden[i:i+256]) for i in range(0,len(hidden),256)], 'f32')
         normed = self.norm(hidden, name + '.hc_norm', self.h)
         down = self.matrix(normed, name + '.input_mix_weight_down', self.c['hc_lowrank'])
         low = [bf(silu(bf(v / self.s))) for v in down]
@@ -108,6 +129,11 @@ class Oracle:
         if inject:
             raw = self.matrix(normed, name + '.block_inject_weight', self.s)
             gates = [bf(2 * bf(sigmoid(bf(v / self.s)))) for v in raw]
+        for node, vector in (("norm", normed), ("down", down), ("low", low), ("up", up), ("mix", mixed)):
+            self.record(name + '.' + node, vector)
+        if inject:
+            self.record(name + '.raw_inject', raw)
+            self.record(name + '.injection', gates)
         return mixed, gates
 
     def writeback(self, hidden, branch, gates):
@@ -118,7 +144,9 @@ class Oracle:
         gate = self.matrix(x, name + '.gate_proj', n)
         up = self.matrix(x, name + '.up_proj', n)
         act = [bf(bf(silu(g)) * u) for g, u in zip(gate, up)]
-        return self.matrix(act, name + '.down_proj', self.h)
+        for node, vector in (("gate", gate), ("up", up), ("act", act)):
+            self.record(name + '.' + node, vector)
+        return self.record(name + '.output', self.matrix(act, name + '.down_proj', self.h))
 
     def delta(self, x, layer, name):
         c, state = self.c, self.cache[layer]
@@ -126,6 +154,7 @@ class Oracle:
         z = self.matrix(x, name + '.in_proj_z', self.vw)
         a = self.matrix(x, name + '.in_proj_a', self.nv)
         b = self.matrix(x, name + '.in_proj_b', self.nv)
+        self.record(name + '.projections', qkv + z + b + a)
         taps = c['linear_conv_kernel_dim']
         history = state.setdefault('conv', [[0.0] * self.channels for _ in range(taps - 1)])
         rows = history + [qkv]
@@ -133,6 +162,7 @@ class Oracle:
         convolved = [bf(silu(bf(sum(rows[t][i] * conv[i * taps + t] for t in range(taps)))))
                      for i in range(self.channels)]
         state['conv'] = rows[1:]
+        self.record(name + '.conv_tail', sum(state['conv'], []))
         queries = convolved[:self.kw]
         keys = convolved[self.kw:2 * self.kw]
         vals = convolved[2 * self.kw:]
@@ -158,6 +188,7 @@ class Oracle:
                 new = [s + t * correction for s, t in zip(old, k)]
                 recurrent[start:start + self.dk] = new
                 y[head * self.dv + col] = bf(sum(s * t for s, t in zip(new, q)))
+        self.record(name + '.recurrent', recurrent, 'f32')
         norm_weight = values(name + '.norm.weight', self.dv, gated_norm=True)
         out = []
         for head in range(self.nv):
@@ -168,7 +199,8 @@ class Oracle:
                 gate = z[head * self.dv + d]
                 activated = sigmoid(gate) if c['output_gate_type'] == 'sigmoid' else silu(gate)
                 out.append(bf(normalized * activated))
-        return self.matrix(out, name + '.out_proj', self.h)
+        self.record(name + '.gated', out)
+        return self.record(name + '.output', self.matrix(out, name + '.out_proj', self.h))
 
     def rope(self, x, pos):
         params = self.c['rope_parameters']
@@ -176,10 +208,16 @@ class Oracle:
         half = width // 2
         out = list(x)
         for i in range(half):
-            angle = pos * params['rope_theta'] ** (-2 * i / width)
+            frequency = params['rope_theta'] ** (-2 * i / width)
+            angle = f32(pos * f32(frequency)) if self.native_scalars else pos * frequency
             cosine, sine = math.cos(angle), math.sin(angle)
-            out[i] = bf(x[i] * cosine - x[i + half] * sine)
-            out[i + half] = bf(x[i + half] * cosine + x[i] * sine)
+            if self.native_scalars:
+                cosine, sine = f32(cosine), f32(sine)
+                out[i] = bf(f32(f32(x[i] * cosine) - f32(x[i + half] * sine)))
+                out[i + half] = bf(f32(f32(x[i + half] * cosine) + f32(x[i] * sine)))
+            else:
+                out[i] = bf(x[i] * cosine - x[i + half] * sine)
+                out[i + half] = bf(x[i + half] * cosine + x[i] * sine)
         return out
 
     def attention(self, x, layer, name):
@@ -191,6 +229,7 @@ class Oracle:
         kraw = self.matrix(x, name + '.k_proj', nk * hd)
         vraw = self.matrix(x, name + '.v_proj', nk * hd)
         ikraw = self.matrix(x, name + '.indexer.index_qk_proj', (ih + 1) * di)
+        self.record(name + '.projections', qraw + kraw + vraw + ikraw)
         q = [self.rope(self.norm(qraw[h * 2 * hd:h * 2 * hd + hd], name + '.q_norm'), pos)
              for h in range(nh)]
         k = [self.rope(self.norm(kraw[h * hd:(h + 1) * hd], name + '.k_norm'), pos) for h in range(nk)]
@@ -199,6 +238,9 @@ class Oracle:
         state.setdefault('index_keys', []).append(ikraw[ih * di:])
         iq = [self.rope(self.norm(ikraw[h * di:(h + 1) * di], name + '.indexer.q_layernorm'), pos)
               for h in range(ih)]
+        self.record(name + '.query', sum(q, []))
+        self.record(name + '.key', sum(k, []))
+        self.record(name + '.index_query', sum(iq, []))
         blocks = (pos + 1) // ratio
         scores = []
         for block in range(blocks):
@@ -206,23 +248,29 @@ class Oracle:
             pooled = [bf(sum(state['index_keys'][start + j][d] for j in range(ratio)) / ratio)
                       for d in range(di)]
             pooled = self.rope(self.norm(pooled, name + '.indexer.k_layernorm'), start)
+            if block == blocks - 1 and (pos + 1) % ratio == 0:
+                self.record(name + '.pooled', pooled)
             scores.append(sum(max(0.0, sum(u * v for u, v in zip(head, pooled))) for head in iq) / math.sqrt(di))
         top = c['indexer_budget'] // ratio
         selected = sorted(sorted(range(blocks), key=lambda i: (-scores[i], i))[:top])
         ids = [i * ratio + j for i in selected for j in range(ratio)] + list(range(blocks * ratio, pos + 1))
-        out = []
+        self.record(name + '.scores', scores, 'f32')
+        out, attended_rows = [], []
         for head in range(nh):
             kh = head // (nh // nk)
             logits = [sum(a * b for a, b in zip(q[head], state['keys'][i][kh])) / math.sqrt(hd) for i in ids]
             maximum = max(logits)
             weights = [math.exp(v - maximum) for v in logits]
             total = sum(weights)
-            probability = [bf(v / total) for v in weights]
+            probability = [bf(v / total) if self.probability == 'bf16' else v / total for v in weights]
             for d in range(hd):
                 attended = bf(sum(p * state['values'][i][kh * hd + d] for i, p in zip(ids, probability)))
+                attended_rows.append(attended)
                 gate = qraw[head * 2 * hd + hd + d]
                 out.append(bf(attended * bf(sigmoid(gate))))
-        return self.matrix(out, name + '.o_proj', self.h)
+        self.record(name + '.attention', attended_rows)
+        self.record(name + '.gated', out)
+        return self.record(name + '.output', self.matrix(out, name + '.o_proj', self.h))
 
     def ple(self, hidden, token, layer, name):
         c, state = self.c, self.cache[layer]
@@ -257,8 +305,11 @@ class Oracle:
             embed.extend(table[row * width:(row + 1) * width])
             offset += size
         state['history'] = (history + [token])[1:]
-        key = self.norm(self.matrix(embed, name + '.key_proj', self.w), name + '.norm_key', self.h)
+        self.record(name + '.embedding', embed)
+        key_raw = self.matrix(embed, name + '.key_proj', self.w)
+        key = self.norm(key_raw, name + '.norm_key', self.h)
         value = self.matrix(embed, name + '.value_proj', self.h)
+        self.record(name + '.projections', key_raw + value)
         query = self.norm(hidden, name + '.norm_query', self.h)
         gated = []
         for s in range(self.s):
@@ -276,12 +327,15 @@ class Oracle:
         branch = [bf(silu(bf(sum(window[t * dilation][d] * conv[d * taps + t] for t in range(taps)))))
                   for d in range(self.w)]
         state['ple_conv'] = window[1:]
-        return [bf(x + bf(g + b)) for x, g, b in zip(hidden, gated, branch)]
+        self.record(name + '.gated', gated)
+        self.record(name + '.normed', normed)
+        return self.record(name + '.residual', [bf(x + bf(g + b)) for x, g, b in zip(hidden, gated, branch)])
 
     def step(self, token):
         c = self.c
         embedding = values('model.embed_tokens.weight', c['vocab_size'] * self.h)
         hidden = embedding[token * self.h:(token + 1) * self.h] * self.s
+        self.record('embed', hidden)
         for layer, kind in enumerate(c['layer_types']):
             pre = f'model.layers.{layer}'
             if layer in self.ple_order:
@@ -289,11 +343,14 @@ class Oracle:
             x, gates = self.hc(hidden, pre + '.attn_hyper_connection')
             branch = self.delta(x, layer, pre + '.linear_attn') if kind == 'linear_attention' else self.attention(x, layer, pre + '.self_attn')
             hidden = self.writeback(hidden, branch, gates)
+            self.record(pre + '.attn_hyper_connection.residual', hidden)
             x, gates = self.hc(hidden, pre + '.mlp_hyper_connection')
             hidden = self.writeback(hidden, self.dense(x, pre + '.mlp'), gates)
+            self.record(pre + '.mlp_hyper_connection.residual', hidden)
             self.trace.append({'position': len(self.tokens), 'layer': layer, 'hidden': hidden})
         mixed, _ = self.hc(hidden, 'model.hyper_connection_mixer', inject=False)
         logits = self.matrix(mixed, 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head', c['vocab_size'])
+        self.record('head', logits)
         self.tokens.append(token)
         return logits
 
@@ -302,14 +359,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--tokens', default='3,5,8,2,13,21,7,9,11,4,6,15')
+    parser.add_argument('--probability', choices=('bf16', 'f32'), default='bf16',
+                        help='BF16 tensor-core probabilities or FP32 split-softmax probabilities; sums remain binary64')
+    parser.add_argument('--native-scalars', action='store_true', help='Declare FP32 RMS and rotary scalar nodes')
+    parser.add_argument('--nodes', action='store_true', help='Include every observable storage node')
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
-    oracle = Oracle(config)
+    oracle = Oracle(config, args.probability, args.nodes, args.native_scalars)
     tokens = [int(x) for x in args.tokens.split(',')]
     logits = [oracle.step(token) for token in tokens]
-    print(json.dumps({'schema': 1, 'oracle': 'binary64 with explicit BF16 nodes', 'tokens': tokens,
+    result = {'schema': 1, 'oracle': 'binary64 with explicit BF16 nodes', 'tokens': tokens,
                       'logits': logits, 'picks': [max(range(len(row)), key=lambda i: (row[i], -i)) for row in logits],
-                      'trace': oracle.trace}, sort_keys=True, allow_nan=False))
+                      'trace': oracle.trace}
+    if args.native_scalars:
+        result['oracle'] += '; FP32 RMS and rotary scalar nodes'
+    if args.probability == 'f32':
+        result['oracle'] += '; unrounded split-softmax probabilities'
+    if args.nodes:
+        result['nodes'] = oracle.nodes
+    print(json.dumps(result, sort_keys=True, allow_nan=False))
 
 
 if __name__ == '__main__':

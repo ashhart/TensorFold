@@ -41,6 +41,7 @@ On a host without GPU toolchains, the shader-free checks are:
 
 ```sh
 zig build test-qwen4-host test-qwen4-projection-host test-qwen4-gdn-host
+zig build test-qwen4-reference-host
 zig build test-qwen4-qsa-host test-qwen4-native-mixers-host
 zig build test-qwen4-projection-bodies test-qwen4-cuda-bodies
 ```
@@ -52,7 +53,10 @@ and run fresh/drafted/concurrent/resumed/prompt-cut model comparisons with its a
 Measure cold prefill, decode and memory on each claimed GPU; no rate or memory-fit claim is established here.
 
 The explicit synthetic device gates generate the same nonzero safetensors through the real checkpoint writer.
-They load the serving native engine and compare all 384 BF16 logits and 12 GPU greedy picks with the binary64 fixture.
+They load the serving native engine and compare all 384 BF16 logits and 12 GPU greedy picks with a binary64 fixture.
+Metal uses its FP32 split-softmax probability profile; CUDA retains its BF16 tensor-core probability profile.
+The Metal reference declares FP32 RMS scalar and rotary scalar nodes, including its stored FP32 frequency table.
+No comparison tolerance or logit mask is used. These backend profiles do not claim HF or cross-backend byte parity.
 They require byte equality for five repeats, every prompt cut, saved-state resume, concurrent streams,
 partial acceptance and abort/retry. The shared lane adapter also checks copied proposals against plain decoding.
 A learned MTP head is not declared by this fixture and remains refused by config admission.
@@ -92,3 +96,22 @@ The source inventory rejects buffer indices outside Metal's 0–30 range before 
 share a four-byte constant struct at slot 17, after GDN's production bindings through slot 16. The CPU Metal
 instruments also require explicit float-to-bfloat construction, so the generated HC control stores are type-checked
 without a GPU; this supplements the actual Metal compiler check.
+
+Before the full Metal comparison, the gate runs a fresh two-token case and prints `QWEN4_NODE` values for embedding,
+PLE, HC sums and boundaries, GDN projections/state/output, QSA preparation/pooling/scores/parts/output, and the head.
+The same captured two rows first face the legacy BF16-probability oracle as a labelled diagnostic, then the corrected
+Metal oracle. No second forward or changed input is used for that before/after comparison.
+`QWEN4_FIRST_DIFFERENCE` identifies the first unequal BF16 storage node per row. FP32 reductions and recurrent state
+are diagnostic raw bits beside their binary64 values; they are not asserted equal to unrounded binary64 arithmetic.
+The two-row QSA range is dense, so no sparse selection result is consumed. The full 12-row gate still checks logits,
+tokens and every state seam strictly. The diagnostic copies stay on the inference queue and finish before readback.
+Normal native inference has no trace sink and performs no diagnostic copies or host readbacks.
+
+Regenerate the Metal reference with:
+
+```sh
+python3 tools/zig/qwen4_reference.py --config zig/src/families/qwen4/fixtures/native-dense.json \
+  --probability f32 --native-scalars
+```
+
+Add `--tokens 3,5 --nodes` for the two-row node ledger. The default generator profile and CUDA fixtures are unchanged.

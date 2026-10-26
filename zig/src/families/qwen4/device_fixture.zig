@@ -3,6 +3,7 @@ const std = @import("std");
 const cfg = @import("config.zig");
 pub const Oracle = struct { schema: u32, oracle: []const u8, tokens: []const u32, logits: [][]f64, picks: []const u32, trace: std.json.Value };
 pub const config = @embedFile("fixtures/native-dense.json");
+pub const metal_reference = @embedFile("fixtures/native-metal-binary64.json");
 pub const reference = @embedFile("fixtures/native-binary64.json");
 pub const Fixture = struct {
     path: []const u8,

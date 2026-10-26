@@ -17,6 +17,21 @@ pub fn Ops(comptime G: type) type {
         problem: *cfg.Problem,
         hidden: ?Tensor = null,
         layer_mark: usize = 0,
+        trace: ?@import("node_trace.zig").Sink(B) = null,
+        trace_layer: ?usize = null,
+        trace_scope: []const u8 = "",
+        fn note(o: *Self, layer: ?usize, scope: []const u8, node: []const u8, x: Tensor) !void {
+            const sink = o.trace orelse return;
+            var buffer: [192]u8 = undefined;
+            try sink.tensor(try @import("node_trace.zig").label(&buffer, layer, scope, node), x);
+        }
+        fn hcScope(b: graph.Boundary) []const u8 {
+            return switch (b) {
+                .readout => "model.hyper_connection_mixer",
+                .attention => "attn_hyper_connection",
+                .mlp => "mlp_hyper_connection",
+            };
+        }
         fn take(o: *Self, rows: usize, width: usize) !Tensor {
             return o.scratch.take(rows, width, .bf16);
         }
@@ -34,6 +49,7 @@ pub fn Ops(comptime G: type) type {
                 try o.model.weights.lookup(o.model.embedding, token, row, o.problem);
                 for (0..streams) |s| try o.scratch.backend.write(h.buffer, h.offset + (r * streams + s) * hidden * 2, std.mem.sliceAsBytes(row));
             }
+            try o.note(null, "", "embed", h);
             o.hidden = h;
             o.layer_mark = o.scratch.used;
             return h;
@@ -50,16 +66,22 @@ pub fn Ops(comptime G: type) type {
             const sums = try o.scratch.take(h.rows, h.width / 256, .f32);
             const out = try o.take(h.rows, h.width);
             try o.gpu.hcNorm(o.hc(layer, b).norm, h, sums, out, eps);
+            o.trace_layer = if (b == .readout) null else layer;
+            o.trace_scope = hcScope(b);
+            try o.note(o.trace_layer, o.trace_scope, "sums", sums);
+            try o.note(o.trace_layer, o.trace_scope, "norm", out);
             return out;
         }
         pub fn hcProject(o: *Self, layer: usize, b: graph.Boundary, p: graph.Projection, x: Tensor) !Tensor {
             const h = o.hc(layer, b);
-            return o.project(switch (p) {
+            const out = try o.project(switch (p) {
                 .down => h.down,
                 .up => h.up,
                 .inject => h.inject orelse return error.Qwen4InjectionMissing,
                 else => return error.Qwen4ProjectionRole,
             }, x);
+            try o.note(if (b == .readout) null else layer, hcScope(b), if (p == .inject) "raw_inject" else @tagName(p), out);
+            return out;
         }
         pub fn hcActivate(o: *Self, x: Tensor, streams: usize) !Tensor {
             return o.activate(x, streams, false);
@@ -71,6 +93,7 @@ pub fn Ops(comptime G: type) type {
             if (streams != o.model.c.streams) return error.Qwen4HcGeometry;
             const out = try o.take(x.rows, x.width);
             try o.gpu.hcActivation(x, out, streams, injection);
+            try o.note(o.trace_layer, o.trace_scope, if (injection) "injection" else "low", out);
             return out;
         }
         pub fn hcMix(o: *Self, up: Tensor, normed: Tensor, streams: usize) !Tensor {
@@ -78,26 +101,31 @@ pub fn Ops(comptime G: type) type {
             const out = try o.take(up.rows, o.model.c.hidden);
             const sums = try o.scratch.take(up.rows, o.model.c.hidden / 32, .f32);
             try o.gpu.hcMix(up, normed, out, sums);
+            try o.note(o.trace_layer, o.trace_scope, "mix", out);
             return out;
         }
         pub fn writeback(o: *Self, h: Tensor, branch: Tensor, injection: Tensor) !Tensor {
             // The residual is the only live input after its boundary, so this is the declared exact in-place view.
             try o.gpu.writeback(h, branch, injection, h);
+            try o.note(o.trace_layer, o.trace_scope, "residual", h);
             return h;
         }
         pub fn denseProject(o: *Self, layer: usize, p: graph.Projection, x: Tensor) !Tensor {
             const d = o.model.layers[layer].dense;
-            return o.project(switch (p) {
+            const out = try o.project(switch (p) {
                 .gate => d.gate,
                 .value => d.up,
                 .output => d.down,
                 else => return error.Qwen4ProjectionRole,
             }, x);
+            try o.note(layer, "mlp", if (p == .value) "up" else @tagName(p), out);
+            return out;
         }
         pub fn swiglu(o: *Self, gate: Tensor, up: Tensor) !Tensor {
             if (gate.rows != up.rows or gate.width != up.width) return error.Qwen4DenseShape;
             const out = try o.take(gate.rows, gate.width);
             try o.gpu.swiglu(gate, up, out);
+            try o.note(o.trace_layer, "mlp", "act", out);
             return out;
         }
         /// Different quantization recipes project separately; queue-ordered row copies form the kernel's input pack.
@@ -121,6 +149,7 @@ pub fn Ops(comptime G: type) type {
                 else => return error.Qwen4LayerKind,
             };
             const input = try o.pack(x, &.{ w.qkv, w.z, w.b, w.a });
+            try o.note(layer, "linear_attn", "projections", input);
             const out = try o.take(x.rows, o.model.c.valueWidth());
             const sums = try o.scratch.take(x.rows, o.model.c.valueWidth() / 32, .f32);
             if (@hasDecl(@TypeOf(state.*), "segments")) {
@@ -132,7 +161,10 @@ pub fn Ops(comptime G: type) type {
                 }
             } else try o.gpu.delta(w, state, layer, input, out, sums);
             try state.captured(layer);
-            return o.project(w.out, out);
+            try o.note(layer, "linear_attn", "gated", out);
+            const y = try o.project(w.out, out);
+            try o.note(layer, "linear_attn", "output", y);
+            return y;
         }
         pub fn indexed(o: *Self, layer: usize, state: anytype, x: Tensor) !Tensor {
             const w = switch (o.model.layers[layer].mixer) {
@@ -140,6 +172,7 @@ pub fn Ops(comptime G: type) type {
                 else => return error.Qwen4LayerKind,
             };
             const input = try o.pack(x, &.{ w.q, w.k, w.v, w.index });
+            try o.note(layer, "self_attn", "projections", input);
             const out = try o.take(x.rows, o.model.c.heads * o.model.c.head_dim);
             if (@hasDecl(@TypeOf(state.*), "segments")) {
                 var off: usize = 0;
@@ -150,7 +183,10 @@ pub fn Ops(comptime G: type) type {
                 }
             } else try o.gpu.indexed(o.scratch, w, state, layer, input, out);
             try state.captured(layer);
-            return o.project(w.out, out);
+            try o.note(layer, "self_attn", "gated", out);
+            const y = try o.project(w.out, out);
+            try o.note(layer, "self_attn", "output", y);
+            return y;
         }
         pub fn ple(o: *Self, layer: usize, state: anytype, tokens: []const u32, h: Tensor) !Tensor {
             const w = o.model.layers[layer].ple orelse return error.Qwen4PleMissing;
@@ -163,7 +199,9 @@ pub fn Ops(comptime G: type) type {
                     off += seg.tokens.len;
                 }
             } else try o.lexicalRows(w, state.history(), tokens, embedding, 0);
+            try o.note(layer, "ple", "embedding", embedding);
             const projections = try o.pack(embedding, &.{ w.key, w.value });
+            try o.note(layer, "ple", "projections", projections);
             const gated = try o.take(h.rows, h.width);
             const normed = try o.take(h.rows, h.width);
             const tail_rows = (c.ple_conv - 1) * c.ngram;
@@ -179,6 +217,9 @@ pub fn Ops(comptime G: type) type {
                 const cin = try o.take(tail_rows + h.rows, h.width);
                 try o.gpu.ple(o.scratch, w, state, layer, projections, h, gated, normed, cin);
             }
+            try o.note(layer, "ple", "gated", gated);
+            try o.note(layer, "ple", "normed", normed);
+            try o.note(layer, "ple", "residual", h);
             return h;
         }
         fn lexicalRows(o: *Self, w: Model.Ple, history: []const u32, tokens: []const u32, embedding: Tensor, offset: usize) !void {
@@ -203,7 +244,9 @@ pub fn Ops(comptime G: type) type {
             }
         }
         pub fn head(o: *Self, x: Tensor) !Tensor {
-            return o.project(o.model.head, x);
+            const y = try o.project(o.model.head, x);
+            try o.note(null, "", "head", y);
+            return y;
         }
         pub fn routed(_: *Self, _: usize, _: Tensor) !Tensor {
             return error.Qwen4RoutedLayer;

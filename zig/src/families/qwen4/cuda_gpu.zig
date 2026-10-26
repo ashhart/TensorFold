@@ -52,11 +52,7 @@ pub fn Gpu(comptime C: type) type {
                 out.attention = try Attention.load(b.driver, images.attention, images.batch);
                 const table = try a.alloc(f32, @max(@as(usize, 1), c.rotary / 2));
                 defer a.free(table);
-                @memset(table, 0);
-                for (table[0 .. c.rotary / 2], 0..) |*v, i| {
-                    const exponent: f32 = @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(c.rotary));
-                    v.* = 1 / std.math.pow(f32, @floatCast(c.theta), exponent);
-                }
+                try @import("rotary_table.zig").fill(c.theta, c.rotary, table);
                 out.rope = try b.upload(std.mem.sliceAsBytes(table));
             }
             if (c.ple_count > 0) out.lexical = try Ple.load(b.driver, images.ple, c);

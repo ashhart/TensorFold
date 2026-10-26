@@ -69,7 +69,7 @@ pub fn Gate(comptime G: type, comptime D: type, comptime L: type, comptime read:
                 if (b.drain()) |_| b.release(buffer) else |_| {}
             };
             var s: Self = .{ .a = mem, .e = e, .d = d, .buffer = buffer };
-            const doc = try std.json.parseFromSlice(fixture.Oracle, mem, fixture.reference, .{});
+            const doc = try std.json.parseFromSlice(fixture.Oracle, mem, if (@hasDecl(@TypeOf(loader), "reference")) @TypeOf(loader).reference else fixture.reference, .{});
             const ids = doc.value.tokens;
             const left = try e.lease();
             const right = try e.lease();

@@ -2,6 +2,8 @@
 const std = @import("std");
 const n = @import("numeric_gpu.zig");
 const m = @import("math.zig");
+const trace = @import("numeric_trace.zig");
+extern fn tf_q4_node_attention([*]const u16, [*]const u16, [*]const u16, [*]const i32, c_int, [*]u16) void;
 pub fn delta(g: *n.G, w: n.Model.Linear, state: anytype, layer: usize, x: n.Tensor, y: n.Tensor) !void {
     const c = g.c;
     const l = state.layout.layers[layer];
@@ -67,6 +69,8 @@ pub fn delta(g: *n.G, w: n.Model.Linear, state: anytype, layer: usize, x: n.Tens
         }
         @memcpy(n.view(u16, try state.row(r, l.conv)), conv);
         @memcpy(n.view(f32, try state.row(r, l.recurrent)), recurrent);
+        try trace.note(g, layer, "linear_attn", "conv_tail", conv, .bf16, r);
+        try trace.note(g, layer, "linear_attn", "recurrent", recurrent, .f32, r);
     }
 }
 fn normalized(g: *n.G, x: []const u16, w: n.Model.Norm, pos: usize) ![]u16 {
@@ -91,6 +95,7 @@ pub fn indexed(g: *n.G, w: n.Model.Indexed, state: anytype, layer: usize, x: n.T
         const vr = p[qr.len + kw ..][0..kw];
         const ir = p[qr.len + 2 * kw ..];
         for (0..c.kv_heads) |head| @memcpy(keys[pos * kw + head * hd ..][0..hd], try normalized(g, kr[head * hd ..][0..hd], w.kn, pos));
+        try trace.note(g, layer, "self_attn", "key", keys[pos * kw ..][0..kw], .bf16, r);
         @memcpy(values[pos * kw ..][0..kw], vr);
         @memcpy(raw[pos * di ..][0..di], ir[c.index_heads * di ..]);
         const blocks = (pos + 1) / c.index_ratio;
@@ -103,17 +108,24 @@ pub fn indexed(g: *n.G, w: n.Model.Indexed, state: anytype, layer: usize, x: n.T
                 v.* = m.bf(sum / @as(f32, @floatFromInt(c.index_ratio)));
             }
             @memcpy(pool[b * di ..][0..di], try normalized(g, pooled, w.ikn, b * c.index_ratio));
+            try trace.note(g, layer, "self_attn", "pooled", pool[b * di ..][0..di], .bf16, r);
         }
+        const query_rows = try g.a.alloc(u16, c.heads * hd);
+        const iq_rows = try g.a.alloc(u16, c.index_heads * di);
+        const attended = try g.a.alloc(u16, c.heads * hd);
         const scores = try g.a.alloc(f32, blocks);
         @memset(scores, 0);
         for (0..c.index_heads) |head| {
             const iq = try normalized(g, ir[head * di ..][0..di], w.iqn, pos);
+            @memcpy(iq_rows[head * di ..][0..di], iq);
             for (scores, 0..) |*score, b| {
                 var dot: f32 = 0;
                 for (iq, pool[b * di ..][0..di]) |q, k| dot += m.f(q) * m.f(k);
                 score.* += @max(@as(f32, 0), dot) / @sqrt(@as(f32, @floatFromInt(di)));
             }
         }
+        try trace.note(g, layer, "self_attn", "index_query", iq_rows, .bf16, r);
+        try trace.note(g, layer, "self_attn", "scores", scores, .f32, r);
         const chosen = try g.a.alloc(usize, blocks);
         for (chosen, 0..) |*v, i| v.* = i;
         std.mem.sort(usize, chosen, scores, struct {
@@ -128,6 +140,15 @@ pub fn indexed(g: *n.G, w: n.Model.Indexed, state: anytype, layer: usize, x: n.T
         for (blocks * c.index_ratio..pos + 1) |i| try ids.append(g.a, i);
         for (0..c.heads) |head| {
             const q = try normalized(g, qr[head * 2 * hd ..][0..hd], w.qn, pos);
+            @memcpy(query_rows[head * hd ..][0..hd], q);
+            if (!g.probability_bf16) {
+                if (c.heads != 1 or c.kv_heads != 1 or hd != 256) return error.NumericMetalGeometry;
+                const selected = try g.a.alloc(i32, ids.items.len);
+                for (selected, ids.items) |*id, source| id.* = @intCast(source);
+                tf_q4_node_attention(q.ptr, keys.ptr, values.ptr, selected.ptr, @intCast(selected.len), attended.ptr);
+                for (0..hd) |d| n.row(y, r)[d] = m.bf(m.f(attended[d]) * m.round(m.sig(m.f(qr[hd + d]))));
+                continue;
+            }
             const kh = head / (c.heads / c.kv_heads);
             const logits = try g.a.alloc(f32, ids.items.len);
             var maximum: f32 = -std.math.inf(f32);
@@ -142,12 +163,15 @@ pub fn indexed(g: *n.G, w: n.Model.Indexed, state: anytype, layer: usize, x: n.T
                 v.* = @exp(v.* - maximum);
                 sum += v.*;
             }
-            for (logits) |*v| v.* = m.round(v.* / sum);
+            for (logits) |*v| v.* = if (g.probability_bf16) m.round(v.* / sum) else v.* / sum;
             for (0..hd) |d| {
                 var value: f32 = 0;
                 for (logits, ids.items) |prob, id| value += prob * m.f(values[id * kw + kh * hd + d]);
+                attended[head * hd + d] = m.bf(value);
                 n.row(y, r)[head * hd + d] = m.bf(m.round(value) * m.round(m.sig(m.f(qr[head * 2 * hd + hd + d]))));
             }
         }
+        try trace.note(g, layer, "self_attn", "query", query_rows, .bf16, r);
+        try trace.note(g, layer, "self_attn", "attention", attended, .bf16, r);
     }
 }

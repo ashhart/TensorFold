@@ -29,6 +29,7 @@ pub fn Gpu(comptime M: type) type {
         attention: ?Attention = null,
         lexical: ?Ple = null,
         rope: ?M.Buffer = null,
+        trace: ?@import("node_trace.zig").Sink(B) = null,
         pub fn load(a: std.mem.Allocator, b: *B, c: *const cfg.Config, p: *cfg.Problem, rounding: core.hc_pointwise.Rounding) !Self {
             _ = b.commands orelse return error.Qwen4CommandSessionMissing;
             const g = try @import("native_admission.zig").check(c, .metal, p);
@@ -61,13 +62,7 @@ pub fn Gpu(comptime M: type) type {
                 out.attention = try Attention.load(a, b.device, g);
                 const table = try a.alloc(f32, 3 + c.rotary / 2);
                 defer a.free(table);
-                @memset(table, 0);
-                table[1] = 1;
-                table[2] = 1;
-                for (table[3..], 0..) |*v, i| {
-                    const exponent: f32 = @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(c.rotary));
-                    v.* = 1 / std.math.pow(f32, @floatCast(c.theta), exponent);
-                }
+                try @import("rotary_table.zig").fill(c.theta, c.rotary, table);
                 out.rope = try b.upload(std.mem.sliceAsBytes(table));
             }
             if (c.ple_count > 0) out.lexical = try Ple.load(a, b.device, c);
@@ -131,6 +126,11 @@ pub fn Gpu(comptime M: type) type {
         fn stateView(comptime V: type, v: anytype) V {
             return .{ .buffer = v.buffer, .offset = v.offset, .len = v.len };
         }
+        fn note(g: *Self, layer: usize, scope: []const u8, node: []const u8, v: anytype, rows: usize, width: usize, element: @import("node_trace.zig").Kind, first: usize) !void {
+            const sink = g.trace orelse return;
+            var key: [192]u8 = undefined;
+            try sink.view(try @import("node_trace.zig").label(&key, layer, scope, node), v, rows, width, element, first);
+        }
         pub fn delta(g: *Self, w: Model.Linear, state: anytype, layer: usize, x: Tensor, y: Tensor, _: Tensor) !void {
             const l = state.layout.layers[layer];
             const p: @import("cuda_gdn.zig").Params = .{ .rows = x.rows, .keys = g.c.key_heads, .values = g.c.value_heads, .eps = g.c.eps, .gate = if (g.c.gate == .silu) .silu else .sigmoid, .row_stride = state.layout.state_bytes, .weight_flags = @import("cuda_gdn.zig").weightFlags(w.conv_bf16, w.norm.mid_bf16) };
@@ -140,6 +140,12 @@ pub fn Gpu(comptime M: type) type {
                 raw(Gdn.View, w.norm.buffer),                        try view(Gdn.View, y),                          stateView(Gdn.View, try state.rowSpan(l.conv)),
                 stateView(Gdn.View, try state.rowSpan(l.recurrent)),
             });
+            if (g.trace != null) for (0..x.rows) |r| {
+                const conv = try state.row(r, l.conv);
+                const recurrent = try state.row(r, l.recurrent);
+                try g.note(layer, "linear_attn", "conv_tail", conv, 1, conv.len / 2, .bf16, r);
+                try g.note(layer, "linear_attn", "recurrent", recurrent, 1, recurrent.len / 4, .f32, r);
+            };
         }
         pub fn indexed(g: *Self, scratch: *Scratch, w: Model.Indexed, state: anytype, layer: usize, x: Tensor, y: Tensor) !void {
             const k = &g.attention.?;
@@ -164,6 +170,29 @@ pub fn Gpu(comptime M: type) type {
                 v[i] = try view(Attention.View, buffer);
             }
             try k.encode(g.backend.commands.?, p, v);
+            if (g.trace != null) {
+                try g.note(layer, "self_attn", "query", v[6], x.rows, g.c.heads * 256, .bf16, 0);
+                try g.note(layer, "self_attn", "key", v[7], x.rows, g.c.kv_heads * 256, .bf16, 0);
+                try g.note(layer, "self_attn", "index_query", v[10], x.rows, g.c.index_heads * g.c.index_dim, .bf16, 0);
+                const plan = try @import("attention_plan.zig").Plan.init(k.geometry, p);
+                for (0..plan.pool_count) |i| {
+                    var pooled = v[12];
+                    pooled.offset += (plan.first_pool + i) * g.c.index_dim * 2;
+                    try g.note(layer, "self_attn", "pooled", pooled, 1, g.c.index_dim, .bf16, (plan.first_pool + i + 1) * g.c.index_ratio - 1);
+                }
+                for (0..x.rows) |r| if (plan.complete[r] > 0) {
+                    var scores = v[13];
+                    scores.offset += r * z.score_stride * 4;
+                    try g.note(layer, "self_attn", "scores", scores, 1, @intCast(plan.complete[r]), .f32, r);
+                };
+                try g.note(layer, "self_attn", "parts_output", v[15], x.rows, g.c.heads * @import("metal_attention_source.zig").parts * 256, .f32, 0);
+                try g.note(layer, "self_attn", "parts_stats", v[16], x.rows, g.c.heads * @import("metal_attention_source.zig").parts * 2, .f32, 0);
+                try g.note(layer, "self_attn", "attention", v[17], x.rows, y.width, .bf16, 0);
+                // No selection writes or IDS reads occur in this two-row dense range.
+                var sparse: usize = 0;
+                for (plan.sparse[0..p.rows]) |flag| sparse += @intFromBool(flag != 0);
+                std.debug.print("QWEN4_SELECTION start={d} dense_rows={d} sparse_rows={d}\n", .{ p.start, p.rows - sparse, sparse });
+            }
             const pt: core.hc_pointwise.Params = .{ .rows = @intCast(x.rows), .hidden = @intCast(y.width), .streams = 1, .op = .output_gate, .round_mid = g.rounding, .gate_stride = @intCast(x.width), .gate_dim = 256 };
             try g.pointwise.?.encode(try g.encoder(), pt, .{ .{ .buffer = v[17].buffer, .offset = v[17].offset, .len = v[17].len }, try view(Pointwise.View, x), raw(Pointwise.View, w.qn.buffer), try view(Pointwise.View, y) });
         }
