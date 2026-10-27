@@ -55,7 +55,7 @@ test "exl3: paged snapshot restores distinct allocations and all state without s
         try std.testing.expectEqual(device_address, destination.pg.dev.ptr);
         try std.testing.expectEqual(saved.history, destination.seq.history);
         try std.testing.expectEqual(saved.at, destination.seq.fed);
-        try std.testing.expect(!destination.seq.invalidated);
+        try std.testing.expect(!destination.pg.graph_prepared and !destination.seq.invalidated);
         const again = try snap.save(std.testing.allocator, &driver, stream, &destination.seq, null);
         defer snap.drop(std.testing.allocator, stream, again);
         try std.testing.expectEqualDeep(saved.paged.?, again.paged.?);
@@ -116,6 +116,7 @@ test "exl3: paged snapshot preserves MTP head mark and rejects stale verificatio
     head.len = 3;
     head.drafted = 0;
     head.open = false;
+    head.verify_cache = .{};
     const saved = try snap.save(std.testing.allocator, &driver, stream, &fixture.seq, &head);
     defer snap.drop(std.testing.allocator, stream, saved);
     head.drafted = 1;
@@ -124,7 +125,11 @@ test "exl3: paged snapshot preserves MTP head mark and rejects stale verificatio
     head.open = true;
     try std.testing.expectError(error.NotAtMark, snap.save(std.testing.allocator, &driver, stream, &fixture.seq, &head));
     head.open = false;
+    const generation = head.verify_cache.generation;
+    head.verify_cache.publish(generation, 3, 3);
     try snap.restore(stream, &fixture.seq, &head, saved);
+    head.verify_cache.publish(generation, 3, 3);
+    try std.testing.expect(!head.verify_cache.take(3, 3, true));
     try std.testing.expectEqual(@as(usize, 3), head.len);
     try std.testing.expect(head.drafted == 0 and head.rows == 0 and !head.open);
     try std.testing.expectEqual(head.streams.ptr, head.prompt_last);

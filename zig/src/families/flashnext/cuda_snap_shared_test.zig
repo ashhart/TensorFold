@@ -42,7 +42,11 @@ test "exl3: native shared snapshot version 2 isolates windows canonical data and
     const destination = try sharedFixture(&driver, arena);
     defer destination.deinit();
     try std.testing.expect(destination.pg.shared_sequence.generation > original_generation);
+    const pending_graph: cuda.graph.Exec = .{ .d = &driver, .handle = @ptrFromInt(1) };
+    try pending_graph.launchOn(stream);
+    try std.testing.expect(shared_fixture.Fake.graph_pending);
     try snap.restore(stream, &destination.seq, null, saved);
+    try std.testing.expect(!shared_fixture.Fake.graph_pending);
     try std.testing.expectEqual(@as(usize, 20), destination.seq.fed);
     try std.testing.expect(!destination.seq.invalidated);
     for (0..wt.attn_n) |layer| for ([_]bool{ false, true }) |values| {
@@ -214,4 +218,48 @@ test "exl3: shared pager common charge admission and snapshot formats are indepe
     var bad = cfg;
     bad.rows = std.math.maxInt(usize);
     try std.testing.expectError(error.Overflow, pager.sharedBytesFor(cap, bad));
+}
+
+test "exl3: shared pager local keys bind generations and arena incarnations while TP keys remain logical" {
+    Fake.reset();
+    var driver = Fake.driver();
+    const stream: cuda.Stream = .{ .d = &driver, .handle = null };
+    const options: pager.shared_device.Options = .{ .cap = 64, .lanes = 2, .window = 2052, .rows = 256, .slots = 16 };
+    const arena = try pager.shared_device.Arena.initStorage(std.testing.allocator, &driver, options);
+    defer arena.destroy() catch unreachable;
+    shared_fixture.Fake.install(arena);
+    const owner = try arena.register(64);
+    var pg: pager.Paged = undefined;
+    pg.cfg = .{ .window = 2052, .rows = 256, .slots = 16, .shared_lanes = 2 };
+    pg.cap = 64;
+    pg.wr = arena.layout.window_rows;
+    pg.win0 = @splat(0);
+    pg.dev = arena.device;
+    pg.tabs = arena.tables;
+    pg.work = arena.work;
+    pg.host_dev = 1234;
+    pg.shared_arena = arena;
+    pg.shared_sequence = owner;
+    const local = pg.graphKey();
+    const logical = pg.logicalGraphKey();
+    try arena.release(owner, stream);
+    const replacement = try arena.register(64);
+    defer arena.release(replacement, stream) catch unreachable;
+    pg.shared_sequence = replacement;
+    try std.testing.expect(!std.meta.eql(local, pg.graphKey()));
+    try std.testing.expectEqual(logical, pg.logicalGraphKey());
+    const other = try pager.shared_device.Arena.initStorage(std.testing.allocator, &driver, options);
+    defer other.destroy() catch unreachable;
+    shared_fixture.Fake.install(other);
+    const placeholder = try other.register(64);
+    defer other.release(placeholder, stream) catch unreachable;
+    const peer = try other.register(64);
+    defer other.release(peer, stream) catch unreachable;
+    pg.shared_arena = other;
+    pg.shared_sequence = peer;
+    try std.testing.expect(!std.meta.eql(local, pg.graphKey()));
+    try std.testing.expectEqual(logical, pg.logicalGraphKey());
+    pg.shared_sequence = placeholder;
+    try std.testing.expect(!std.meta.eql(local, pg.graphKey()));
+    try std.testing.expectEqual(logical, pg.logicalGraphKey());
 }

@@ -3,6 +3,7 @@ const prompt = @import("../../cuda_prompt.zig");
 const load = @import("../../cuda_prompt_load.zig");
 const pool = @import("../offload/cuda_exl3_pool.zig");
 const pass = @import("cuda_exl3_pass.zig");
+const dplan = @import("../dplan/cuda_exl3_dplan.zig");
 const prefill = @import("../prefill/cuda_exl3_prefill.zig");
 const pager = @import("../kv/cuda_exl3_kvpage.zig");
 const weights = @import("../../cuda_prompt_wt.zig");
@@ -34,7 +35,7 @@ pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine
         seen[seen_count] = resident;
         seen_count += 1;
         hash.update(std.mem.asBytes(&resident.telemetry_id));
-        const device = resident.telemetry_device;
+        const device = if (dplan.current()) |planner| try planner.samplePoolAfterConsumers(resident) else resident.telemetry_device;
         var minimum: u64 = std.math.maxInt(u64);
         var maximum: u64 = 0;
         for (resident.src.routed, resident.k2) |source, widths| {

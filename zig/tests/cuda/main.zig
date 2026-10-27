@@ -103,6 +103,7 @@ const flashnext_exl3_tests = @import("flashnext_exl3/model/flashnext_exl3_tests.
 const flashnext_exl3_tp_tests = @import("flashnext_exl3/tp/flashnext_exl3_tp_tests.zig");
 const flashnext_exl3_engine_tests = @import("flashnext_exl3/model/flashnext_exl3_engine_tests.zig");
 const flashnext_exl3_tp_engine_tests = @import("flashnext_exl3/tp/flashnext_exl3_tp_engine_tests.zig");
+const flashnext_exl3_graph_tests = @import("flashnext_exl3/graph/flashnext_exl3_graph_tests.zig");
 const ggml_tests = @import("ggml_tests.zig");
 const paged_tests = @import("paged_tests.zig");
 const glm_loader_gate = @import("glm_loader_gate.zig");
@@ -146,7 +147,13 @@ const usage =
     \\  flashnext-exl3 DIR names|norms|router [layers] [rows]|layer [layers]  Flash Next on an EXL3 pack vs float64
     \\  flashnext-exl3-tp RANK PORT DIR layer [layers]|sum|head|memory  EXL3 expert parallel on two ranks vs tp=1 and float64
     \\  flashnext-exl3-engine DIR tf|gen GOLDEN [LINES] | bench [LINES]  the family's Engine with the offload pool vs the reference golden
-    \\  flashnext-exl3-tpe RANK WORLD PORT DIR tf|gen GOLDEN DUMP | bench  the Engine at tp=1/2 with per-rank pools
+    \\  flashnext-exl3-tpe RANK 2 PORT DIR trace GOLDEN PREFIX [ROUNDS [SCHEDULE [REPEATS]]]
+    \\    graph-on TP2 v3; rounds/segment=1024, CSV zero-based prompt schedule=0, repeats=1
+    \\    sequential shared-pool workload, independent sequence/KV; not concurrent requests
+    \\    e.g. trace GOLDEN PREFIX 128 0,1,2 2; rejects schedules exceeding 1 MiB/pool
+    \\  flashnext-exl3-tpe 0 1 0 - policy FILES...             compare lifetime/LRU/frequency/bypass on expert demand
+    \\  flashnext-exl3-tpe RANK WORLD PORT DIR tf|gen GOLDEN DUMP | bench | hit FILES | graph  the Engine at tp=1/2 with per-rank pools
+    \\  flashnext-exl3-graph plan | RANK WORLD PORT DIR eq GOLDEN [STEPS] [MODES]  the pool planned on the device and decode graphs vs the host cut
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
     \\  flashnext-pages           the attention glue's caches through a page table: paged == contiguous, float64, controls
     \\  info                      driver, device and library versions
@@ -240,7 +247,7 @@ const usage =
     \\  exl3-draft DIR [THREADS]   EXL3 draft head rows dequantised from lm_head vs the full head (Dense) and float64
     \\  exl3-prefill DIR experts|copy [LAYER]|dense  EXL3 prefill pieces on the pack: grouped experts by rows, expert-major passes, line copies, prompt Dense
     \\  exl3-tpprefill RANK WORLD PORT DIR IDS NS ROWS CAP deep|both DUMP  EXL3 deep prefill at tp=1/2 vs the batched pass and tp=1
-    \\  exl3-pool DIR [equal|bench|hit FILES] [LAYERS]  Flash Next EXL3 expert offload pool on Experts' pointer tables vs fully resident
+    \\  exl3-pool DIR [equal|graph|bench|hit FILES] [LAYERS]  Flash Next EXL3 expert offload pool on Experts' pointer tables vs fully resident
     \\  exl3-kv kernel|bench [CAP]|real DIR ...  int8 KV attention kernels vs upstream and float64; KV placement timings; real-pass KV quality
     \\  exl3-kvpage DIR trace|...  dynamic KV paging: selection traces, the paged cache vs all-on-device
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
@@ -352,6 +359,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "flashnext-exl3-tp")) return flashnext_exl3_tp_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "flashnext-exl3-engine")) return flashnext_exl3_engine_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "flashnext-exl3-tpe")) return flashnext_exl3_tp_engine_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "flashnext-exl3-graph")) return flashnext_exl3_graph_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "flashnext-pages")) return @import("contract_fn_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "info")) return info(gpu);
     if (std.mem.eql(u8, cmd, "smoke")) return runtime_tests.smoke(gpu);

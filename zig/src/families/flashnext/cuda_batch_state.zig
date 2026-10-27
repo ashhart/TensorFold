@@ -132,12 +132,18 @@ comptime {
 
 /// A caller's view into the pass. Without any, the pass is the server's prompt pass.
 pub const Hooks = struct {
+    pub const OutputTail = struct {
+        ptr: *anyopaque,
+        enqueue: *const fn (*anyopaque, cuda.Stream) anyerror!void,
+    };
+
     logits: Logits = .last,
     /// Device [rows, vocab] bf16 for `.all` (else the pass's own buffer for the last row).
     logits_out: u64 = 0,
     keep: ?*Keep = null,
     /// Device [rows, wide] bf16: every row's streams after the last MoE write-back (the MTP head's input); 0: none.
     streams: u64 = 0,
+    output_tail: ?OutputTail = null,
     /// A training pass's adds to each layer's MoE output, in place of the model's own (Model.pocket).
     moe_add: ?MoeAdd = null,
 };
@@ -145,24 +151,7 @@ pub const Hooks = struct {
 /// The kernels the pass launches besides the captured Triton ones, loaded once.
 pub const Kernels = @import("cuda_batch_kernels.zig").Kernels;
 
-/// The compute stream as a pass's pinned staging uses it: copies from it, an event behind them, and a drain.
-pub const Uploads = struct {
-    stream: cuda.Stream,
-    event: cuda.Event,
-
-    pub fn copy(u: Uploads, dst: u64, bytes: []const u8) !void {
-        try cuda.copy_source.enqueue(u.stream.d, dst, bytes, u.stream);
-    }
-    pub fn record(u: Uploads) !void {
-        try u.event.record(u.stream);
-    }
-    pub fn wait(u: Uploads) !void {
-        try u.event.synchronize();
-    }
-    pub fn drain(u: Uploads) !void {
-        try u.stream.synchronize();
-    }
-};
+pub const Uploads = @import("cuda_batch_uploads.zig").Uploads;
 
 /// Pinned bytes' uploads and the fence that says when the bytes may change (`Q`: `Uploads`, or a test's stand-in).
 pub fn Staging(comptime Q: type) type {

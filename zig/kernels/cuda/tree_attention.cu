@@ -376,7 +376,7 @@ TF_TREE_SHARED(tf_tree_shared_256_w1, 256, 16, 1, 2)
 TF_TREE_SHARED(tf_tree_shared_w1s3, 128, 32, 1, 3)
 TF_TREE_SHARED(tf_tree_shared_256_w1s3, 256, 16, 1, 3)
 
-// Block (row, key head, group slot): the row's groups past its stream's full committed ones, slot, slot + slots.
+// Block (row, key head, group slot): the row's groups past its stream's full committed ones, slot, slot + slots, ...
 template <int D, int HB, int W, int ST>
 __device__ __forceinline__ void tree_part(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn, const __nv_bfloat16* __restrict__ vn,

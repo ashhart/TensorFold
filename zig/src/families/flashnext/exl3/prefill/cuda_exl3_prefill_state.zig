@@ -244,6 +244,7 @@ pub const Deep = struct {
     history_shape: ?history_.Shape = null,
     second: ?*Deep = null,
     shared: ?*const Deep = null,
+    window_graph_reservation: u64 = 0,
 
     pub fn dptr(dp: *const Deep, off: usize) u64 {
         if (dp.shared) |source| {

@@ -287,6 +287,8 @@ pub fn restoreData(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, snap: *con
     defer finishShared(seq, shared_lease);
     errdefer failShared(stream, seq, shared_lease);
     if (snap.paged != null) try quiesce(stream);
+    @import("exl3/graph/cuda_exl3_graph.zig").releaseDecodeSeq(seq);
+    if (d) |h| h.verify_cache.invalidate();
     seq.invalidated = true;
     if (shared_lease) |lease| try seq.paged.?.shared_arena.?.submitted(lease);
     errdefer cuda.completion.drain(stream.d, stream, "partial snapshot restore did not drain");
@@ -337,6 +339,7 @@ pub fn publishRestore(seq: *prompt.Seq, d: ?*Draft, snap: *const Snap) void {
         h.len = snap.at;
         h.open = false;
         h.fed0 = snap.at;
+        h.verify_pending = null;
         if (snap.paged != null) h.prompt_last = if (snap.at == 0) 0 else h.streams.ptr;
     }
     seq.invalidated = false;

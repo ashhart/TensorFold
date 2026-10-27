@@ -280,13 +280,13 @@ pub const Run = struct {
     /// fz_xgu and friends after the gate/up kernel's header (simd_topk, bsilu): the recorded or checked-in text.
     pub const compileXnew = @import("replay_compile.zig").compileXnew;
 
-    /// fz_hc_up after the recorded qa_hc_down_row header, refused unless every recorded qa_hc_up variant has the.
+    /// fz_hc_up after the recorded qa_hc_down_row header, refused unless every recorded qa_hc_up variant has the...
     pub const compileHc = @import("replay_compile.zig").compileHc;
 
     /// A variant's source: the embedded text when the run is checked-in, else its recorded file.
     pub const variantText = @import("replay_compile.zig").variantText;
 
-    /// A hyper-connection's down then up projection at `as_rows` from normed streams `hn` (sums of squares in).
+    /// A hyper-connection's down then up projection at `as_rows` from normed streams `hn` (sums of squares in...
     pub const hcProject = @import("replay_compile.zig").hcProject;
 
     pub const strings = @import("replay_compile.zig").strings;
@@ -379,7 +379,7 @@ pub const Run = struct {
             if (!r.serial) r.enc.barrier();
         }
     }
-    /// The router's logits for up to `rows` rows (the count itself read from `rows_buf`): fz_router, the recorded.
+    /// The router's logits for up to `rows` rows (the count itself read from `rows_buf`): fz_router, the recorded...
     pub fn router(r: *Run, role: []const u8, x: Buf, w: Buf, rows_buf: Buf, out: Buf, rows: usize) !void {
         if (!r.xnew) return r.call(role, &.{ x, w, rows_buf }, &.{out});
         if (r.skip & class(role) != 0) return;
@@ -455,7 +455,7 @@ pub const Run = struct {
         return 0;
     }
 
-    /// `role` at `rows` rows: the recorded one-row launch with its row dimension (the one that grows from one row to).
+    /// `role` at `rows` rows: the recorded one-row launch with its row dimension (the one that grows from one row to...
     pub fn callRows(r: *Run, role: []const u8, rows: usize, ins: []const Buf, outs: []const Buf, v: ?*Variant) !void {
         var k1: [96]u8 = undefined;
         var k2: [96]u8 = undefined;

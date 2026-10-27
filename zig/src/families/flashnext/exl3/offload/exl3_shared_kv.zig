@@ -71,6 +71,31 @@ pub const Phase = enum { acquired, planned, submitted, ready, poisoned };
 const Active = struct { lease: Lease, phase: Phase = .acquired, count: usize = 0 };
 const Lane = struct { generation: u64 = 0, live: bool = false, failed: bool = false };
 
+pub const Bindings = struct {
+    keys: u64,
+    values: u64,
+    owners: u64,
+    stamps: u64,
+    clock: u64,
+    inverse: u64,
+    marks: u64,
+    controls: u64,
+    work: u64,
+    window_keys: u64,
+    window_values: u64,
+    canonical: u64,
+    cap: u64,
+    rows: u64,
+    origin_hash: u64,
+};
+
+pub const GraphKey = struct {
+    format: u32 = 2,
+    sequence: Sequence,
+    geometry: Geometry,
+    bindings: Bindings,
+};
+
 pub const OwnedEntry = struct { key: Key, stamp: u64, source_slot: u32 };
 
 pub const OwnedBlocks = struct {
@@ -374,6 +399,11 @@ pub const Arena = struct {
         if (active.phase != .poisoned) return error.SharedKvPhase;
         arena.clear(lease.sequence);
         arena.active = null;
+    }
+
+    pub fn graphKey(arena: *Arena, sequence: Sequence, bindings: Bindings) !GraphKey {
+        _ = try arena.state(sequence);
+        return .{ .sequence = sequence, .geometry = arena.geometry, .bindings = bindings };
     }
 
     pub fn validate(arena: *const Arena) !void {

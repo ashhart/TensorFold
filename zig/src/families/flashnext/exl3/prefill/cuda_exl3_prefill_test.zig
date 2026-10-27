@@ -106,10 +106,14 @@ test "exl3: two-chunk arenas retain hidden and deferred HC operands without alia
 test "exl3: two-chunk memory refusal performs no CUDA allocation" {
     const saved_deep = state.deep;
     const saved_options = state.options;
+    const graph = @import("../graph/cuda_exl3_graph.zig");
+    const saved_force = graph.force;
     defer {
         state.deep = saved_deep;
         state.options = saved_options;
+        graph.force = saved_force;
     }
+    graph.force = .off;
     state.options = .{ .two_chunk = true };
     var driver: cuda.Driver = undefined;
     var buffers: Deep = undefined;
@@ -119,7 +123,7 @@ test "exl3: two-chunk memory refusal performs no CUDA allocation" {
     buffers.lay = Layout.of(4096, 2);
     buffers.second = null;
     state.deep = &buffers;
-    try std.testing.expectEqual(@as(u64, 0), try reserveTwoChunk(&driver, Persistent.of(4096).total - 1, 0));
+    try std.testing.expectEqual(@as(u64, 0), try reserveTwoChunk(&driver, Persistent.of(4096).total - 1, 0, 0));
     try std.testing.expect(buffers.second == null);
 }
 

@@ -1,4 +1,4 @@
-//! Flash Next on our Metal runtime: the Python engine's recorded kernels (a dump from tools/zig/flashnext_dump.py).
+//! Flash Next on our Metal runtime: the Python engine's recorded kernels (a dump from tools/zig/flashnext_dump.py)...
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -55,10 +55,10 @@ pub const Site = struct { v: *Variant, grid: mtl.Size, tg: mtl.Size };
 
 pub const glue_source = @import("replay_glue_source.zig").text;
 
-/// Routed and shared experts at full width (FZ_XNEW=1): a 6-bit group read as six aligned words, 16 lanes a gate/up.
+/// Routed and shared experts at full width (FZ_XNEW=1): a 6-bit group read as six aligned words, 16 lanes a gate/up...
 const xnew_source = @import("replay_expert_source.zig").text;
 
-/// The hyper-connection's up projection for windows of 3-8 rows (`Run.hc_up`), compiled after the recorded.
+/// The hyper-connection's up projection for windows of 3-8 rows (`Run.hc_up`), compiled after the recorded...
 const hc_up_source = @import("replay_hc_source.zig").text;
 
 pub fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
@@ -72,7 +72,7 @@ pub fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
 
 pub const Run = @import("replay_run.zig").Run;
 
-/// Past 512 complete 4-key blocks the attention reads each row's 512 best blocks and its tail: the recorded pool.
+/// Past 512 complete 4-key blocks the attention reads each row's 512 best blocks and its tail: the recorded pool,...
 pub const RING_WORDS = @import("replay_buffers.zig").RING_WORDS;
 pub const AR_HLEN = @import("replay_buffers.zig").AR_HLEN;
 pub const AR_WORDS = @import("replay_buffers.zig").AR_WORDS;
@@ -125,7 +125,7 @@ pub const TP_CLASS: u32 = 1 << 8;
 pub const DepthRule = @import("drafts.zig").DepthRule; // drafts a round from recent landing
 pub const copyDrafts = @import("drafts.zig").copyDrafts;
 
-/// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and.
+/// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and...
 pub const PMAX = @import("flashnext_memory").prompt.PMAX; // the prompt buffers' rows; `step` cuts the chunks
 /// A prompt selector's scores: PMAX rows by the trained window's blocks (2 GiB). Past it chunks take fewer rows.
 pub const SC_WORDS: usize = PMAX * (TRAINED / 4);

@@ -269,6 +269,33 @@ test "exl3: shared KV byte accounting charges once and rejects overflow and non-
     try std.testing.expectError(error.SharedKvGeometry, bad.accounting());
 }
 
+test "exl3: shared KV graph keys distinguish bindings geometry arena and reset generations" {
+    var arena = try shared.Arena.init(std.testing.allocator, geometry);
+    defer arena.deinit() catch unreachable;
+    const sequence = try arena.register(0);
+    const bindings: shared.Bindings = .{ .keys = 1, .values = 2, .owners = 3, .stamps = 4, .clock = 5, .inverse = 6, .marks = 7, .controls = 8, .work = 9, .window_keys = 10, .window_values = 11, .canonical = 12, .cap = 32, .rows = 8, .origin_hash = 13 };
+    const original = try arena.graphKey(sequence, bindings);
+    inline for (@typeInfo(shared.Bindings).@"struct".field_names) |field| {
+        var changed = bindings;
+        @field(changed, field) += 1;
+        try std.testing.expect(!std.meta.eql(original, try arena.graphKey(sequence, changed)));
+    }
+    inline for (@typeInfo(shared.Geometry).@"struct".field_names) |field| {
+        var changed = original;
+        @field(changed.geometry, field) += 1;
+        try std.testing.expect(!std.meta.eql(original, changed));
+    }
+    try store(&arena, sequence, &.{first}, 0x89);
+    try std.testing.expectEqualDeep(original, try arena.graphKey(sequence, bindings));
+    const reset = try arena.reset(sequence);
+    try std.testing.expect(!std.meta.eql(original, try arena.graphKey(reset, bindings)));
+    var another = try shared.Arena.init(std.testing.allocator, geometry);
+    defer another.deinit() catch unreachable;
+    const other = try another.register(0);
+    try std.testing.expect(!std.meta.eql(original, try another.graphKey(other, bindings)));
+    try std.testing.expectError(error.SharedKvSequence, another.begin(reset));
+}
+
 test "exl3: shared KV generation lease serial and clock exhaustion fail without wraparound" {
     var arena = try shared.Arena.init(std.testing.allocator, geometry);
     defer arena.deinit() catch unreachable;

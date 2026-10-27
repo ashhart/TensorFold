@@ -9,6 +9,7 @@ const telemetry = @import("../model/exl3_telemetry.zig");
 
 pub const offload = @import("exl3_offload.zig");
 pub const round = round_;
+pub const graph = @import("../graph/exl3_graph.zig");
 pub const Round = round_.Round;
 pub const linesFor = round_.linesFor;
 pub const shape = offload.shape;

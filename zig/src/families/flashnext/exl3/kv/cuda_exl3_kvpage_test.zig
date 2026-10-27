@@ -1,4 +1,4 @@
-//! Host tests of the KV paging: tables, bounds, schedules and the attention dispatch.
+//! Host tests of the KV paging: tables, bounds, graph keys, schedules and the attention dispatch.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -63,6 +63,50 @@ test "exl3: kvpage window boundaries and conservative capacity" {
     try std.testing.expectError(error.KvPageRows, windowPlan(cfg, wr, 0, wr + 1, 1));
     try std.testing.expectEqual(@as(usize, 8192), try windowPlan(cfg, wr, 8192, 8192, 256));
     try std.testing.expectEqual(@as(usize, 8192), try windowPlan(cfg, wr, 8192, 8192, 1));
+}
+
+test "exl3: kvpage graph key changes on rebase and host store replacement" {
+    var pg: Paged = undefined;
+    pg.dev.ptr = 1;
+    pg.tabs.ptr = 2;
+    pg.work.ptr = 3;
+    pg.host_dev = 4;
+    pg.cap = 200_016;
+    pg.cfg = .{};
+    pg.wr = pg.cfg.window + pg.cfg.rows + ratio;
+    pg.win0 = @splat(0);
+    const first = pg.graphKey();
+    try std.testing.expectEqual(first, pg.graphKey());
+    pg.win0[0] = 4;
+    try std.testing.expect(!std.meta.eql(first, pg.graphKey()));
+    pg.win0[0] = 0;
+    pg.host_dev = 5;
+    try std.testing.expect(!std.meta.eql(first, pg.graphKey()));
+}
+
+test "exl3: prefill graph key separates reusable geometry from generation and origin" {
+    var pg: Paged = undefined;
+    pg.dev.ptr = 1;
+    pg.tabs.ptr = 2;
+    pg.work.ptr = 3;
+    pg.host_dev = 4;
+    pg.cap = 200016;
+    pg.cfg = .{ .window = 4096, .rows = 2048, .slots = 20000 };
+    pg.wr = pg.cfg.window + pg.cfg.rows + ratio;
+    pg.incarnation = 1;
+    pg.win0 = @splat(65536);
+    const first = pg.prefillGraphKey();
+    pg.incarnation += 1;
+    const new_generation = pg.prefillGraphKey();
+    try std.testing.expectEqual(first[4], new_generation[4]);
+    try std.testing.expect(first[5] != new_generation[5]);
+    pg.win0[0] += ratio;
+    const moved = pg.prefillGraphKey();
+    try std.testing.expectEqual(first[4], moved[4]);
+    try std.testing.expect(moved[5] != new_generation[5]);
+    pg.cfg.slots += 1;
+    const changed_shape = pg.prefillGraphKey();
+    try std.testing.expect(changed_shape[4] != moved[4]);
 }
 
 test "exl3: kvpage capacity subdivision boundaries and checked admission" {
@@ -142,6 +186,27 @@ test "exl3: kvpage 18k and 200k schedules use identical admission and paging bou
     }
 }
 
+test "exl3: kvpage graph topology hash distinguishes subdivision across origins" {
+    var pg: Paged = undefined;
+    pg.dev.ptr = 1;
+    pg.tabs.ptr = 2;
+    pg.work.ptr = 3;
+    pg.host_dev = 4;
+    pg.cap = 200016;
+    pg.cfg = .{ .window = 4096, .rows = 2048, .slots = 16384 };
+    pg.wr = pg.cfg.window + pg.cfg.rows + ratio;
+    pg.win0 = @splat(65536);
+    const full = pg.graphKey();
+    pg.win0[0] += ratio;
+    const split = pg.graphKey();
+    try std.testing.expect(full[4] != split[4]);
+    try std.testing.expect(full[5] != split[5]);
+    pg.win0[0] += ratio;
+    const moved = pg.graphKey();
+    try std.testing.expectEqual(split[4], moved[4]);
+    try std.testing.expect(split[5] != moved[5]);
+}
+
 test "exl3: kvpage real attention dispatch preserves selection and slices sparse rows" {
     const Fake = struct {
         const ids_base: u64 = 0x100000;
@@ -219,6 +284,7 @@ test "exl3: kvpage real attention dispatch preserves selection and slices sparse
     pg.tabs.ptr = 0x800000;
     pg.work.ptr = 0x900000;
     pg.host_dev = 0xa00000;
+    pg.graph_prepared = true;
     pg.k.plan = .{ .d = &driver, .handle = @ptrFromInt(2) };
     pg.k.fetch = .{ .d = &driver, .handle = @ptrFromInt(3) };
     pg.k.remap = .{ .d = &driver, .handle = @ptrFromInt(4) };

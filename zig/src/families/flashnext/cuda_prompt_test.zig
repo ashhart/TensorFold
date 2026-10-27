@@ -1,5 +1,83 @@
 const std = @import("std");
+const cuda = @import("cuda");
+const kvpage = @import("exl3/kv/cuda_exl3_kvpage.zig");
 const weights = @import("cuda_prompt_wt.zig");
+
+pub fn graphLease(comptime Engine: type, comptime Seq: type, comptime operations: anytype) !void {
+    const fixture = @import("exl3/offload/cuda_exl3_shared_kv_test.zig");
+    var driver = fixture.Fake.driver();
+    var stream: cuda.Stream = .{ .d = &driver, .handle = null };
+    const arena = try kvpage.shared_device.Arena.initStorage(std.testing.allocator, &driver, .{ .cap = 8192, .lanes = 2, .window = 2052, .rows = 1, .slots = 3 });
+    defer arena.destroy() catch unreachable;
+    fixture.Fake.install(arena);
+    const first = try arena.register(8192);
+    defer arena.release(first, stream) catch unreachable;
+    const second = try arena.register(8192);
+    defer arena.release(second, stream) catch unreachable;
+    const cfg: kvpage.Config = .{ .window = 2052, .rows = 1, .slots = 3, .shared_lanes = 2 };
+    var status_first: [weights.attn_n * 8 * 4]u8 align(16) = undefined;
+    var status_second: [weights.attn_n * 8 * 4]u8 align(16) = undefined;
+    var pager_first: kvpage.Paged = undefined;
+    var pager_second: kvpage.Paged = undefined;
+    for ([_]*kvpage.Paged{ &pager_first, &pager_second }, [_]kvpage.shared_contract.Sequence{ first, second }, [_][]align(16) u8{ &status_first, &status_second }) |pg, handle, status| {
+        pg.d = &driver;
+        pg.cfg = cfg;
+        pg.shared_arena = arena;
+        pg.shared_sequence = handle;
+        pg.status_host = .{ .d = &driver, .bytes = status };
+    }
+    var sequence_first: Seq = undefined;
+    var sequence_second: Seq = undefined;
+    sequence_first.paged = &pager_first;
+    sequence_second.paged = &pager_second;
+    sequence_first.invalidated = false;
+    sequence_second.invalidated = false;
+    const seqs = [_]*Seq{ &sequence_first, &sequence_second };
+    var engine: Engine = undefined;
+    engine.page_config = cfg;
+    engine.shared_arena = arena;
+    engine.driver = &driver;
+    engine.stream = &stream;
+    engine.collective = null;
+    var other_driver = fixture.Fake.driver();
+    var wrong_stream: cuda.Stream = .{ .d = &other_driver, .handle = null };
+    engine.stream = &wrong_stream;
+    {
+        defer if (arena.active) |active| arena.cancel(active.lease) catch unreachable;
+        const sync_before = fixture.Fake.sync_calls;
+        try std.testing.expectError(error.SharedKvDriver, operations.begin(&engine, &seqs));
+        try std.testing.expect(arena.active == null);
+        try std.testing.expectEqual(sync_before, fixture.Fake.sync_calls);
+        try std.testing.expect(!sequence_first.invalidated and !sequence_second.invalidated);
+    }
+    const recovered = try arena.acquireMany(&.{ first, second });
+    try arena.cancel(recovered);
+    engine.stream = &stream;
+    const lease = try operations.begin(&engine, &seqs);
+    try pager_first.validateSharedLease();
+    try pager_second.validateSharedLease();
+    const graph: cuda.graph.Exec = .{ .d = &driver, .handle = @ptrFromInt(1) };
+    const before = fixture.Fake.sync_calls;
+    try graph.launchOn(stream);
+    try std.testing.expect(fixture.Fake.graph_pending);
+    try std.testing.expectError(error.SharedKvBusy, arena.acquire(first));
+    try operations.finish(&engine, &seqs);
+    try std.testing.expect(!fixture.Fake.graph_pending);
+    try std.testing.expectEqual(before + 1, fixture.Fake.sync_calls);
+    operations.end(&engine, lease);
+    try std.testing.expectEqual(before + 1, fixture.Fake.sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), fixture.Fake.graph_calls);
+    try std.testing.expectError(error.SharedKvLease, pager_first.validateSharedLease());
+    const failing = try operations.begin(&engine, &seqs);
+    fixture.Fake.fail_graph = true;
+    try std.testing.expectError(error.NotReady, graph.launchOn(stream));
+    operations.fail(&engine, failing, &seqs);
+    try std.testing.expect(sequence_first.invalidated and sequence_second.invalidated);
+    try std.testing.expect(!fixture.Fake.graph_pending);
+    try std.testing.expect(arena.active == null);
+    try std.testing.expectError(error.SharedKvSequenceFailed, arena.acquire(first));
+    try std.testing.expectError(error.SharedKvSequenceFailed, arena.acquire(second));
+}
 
 pub fn failedFill(comptime makeBuffers: anytype) !void {
     const Fake = struct {
@@ -50,4 +128,11 @@ pub fn sequenceBytes(comptime sequenceSize: anytype) !void {
     try std.testing.expectEqual(per_token, sequenceSize(6) - sequenceSize(5));
     try std.testing.expectEqual(per_token + weights.attn_n * weights.index_dim * 2, sequenceSize(5) - sequenceSize(4));
     try std.testing.expect(sequenceSize(weights.window) > weights.window * per_token);
+}
+
+pub fn chunkParsing(comptime parseChunk: anytype, comptime batch: type) !void {
+    try std.testing.expectEqual(batch.default_chunk, try parseChunk(null));
+    try std.testing.expectEqual(@as(usize, 4096), try parseChunk("4096"));
+    try std.testing.expectEqual(batch.max_chunk, try parseChunk("16384"));
+    for ([_][]const u8{ "0", "16385", "-1", "4k", "" }) |bad| try std.testing.expectError(error.BadChunk, parseChunk(bad));
 }

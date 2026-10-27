@@ -24,6 +24,8 @@ test "exl3: invalid paged snapshot geometry rejects before allocation, CUDA acce
     seq.invalidated = false;
     seq.paged = &pager;
     var draft: flash.mtp.Draft = undefined;
+    draft.verify_cache = .{ .generation = 17, .ready = 17, .rows = 4, .position = 200_000 };
+    const before = draft.verify_cache;
     for ([_]usize{ 0, 1, 3, 4, 2051, 2052, 4096, 200_000 }) |at| {
         seq.fed = at;
         seq.cap = 200_016;
@@ -33,6 +35,7 @@ test "exl3: invalid paged snapshot geometry rejects before allocation, CUDA acce
         try std.testing.expectEqual(at, seq.fed);
         try std.testing.expectEqual([2]i64{ 81, 93 }, seq.history);
         try std.testing.expectEqual(@as(u64, 77), session.next_object);
+        try std.testing.expectEqualDeep(before, draft.verify_cache);
     }
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
     try std.testing.expect(!failing.has_induced_failure);

@@ -68,7 +68,7 @@ pub const Model = struct {
         try cuda.launch.launch(self.function(name), .{ .grid = grid, .block = .{ .x = threads }, .shared = shared }, self.stream, args);
     }
 
-    /// `path`: FastH3's transformer in one safetensors file (ComfyUI's layout: blocks.N.attn.qkv_proj.weight).
+    /// `path`: FastH3's transformer in one safetensors file (ComfyUI's layout: blocks.N.attn.qkv_proj.weight ...).
     pub fn load(gpa: std.mem.Allocator, path: [*:0]const u8) !*Model {
         try @import("cuda_load_retained.zig").admit();
         const started = seconds();

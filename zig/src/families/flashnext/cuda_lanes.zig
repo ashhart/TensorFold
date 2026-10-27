@@ -123,7 +123,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         pub fn rankRoom(ptr: *anyopaque, local: u64) !u64 {
             const own = of(ptr);
-            const protected = try @import("exl3/kv/cuda_exl3_kvpage.zig").admissionRoom(local, own.stream_bytes, own.engine.page_config);
+            const protected = try @import("exl3/kv/cuda_exl3_kvpage.zig").admissionRoom(@import("exl3/pack/exl3_startup_memory.zig").laneRoom(local, own.graph_reservation), own.stream_bytes, own.engine.page_config);
             if (own.ranks) |r| return @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, protected, own.stream_bytes);
             return protected;
         }
@@ -169,6 +169,7 @@ pub fn Namespace(comptime Tri: type) type {
             next: u64 = 0,
             /// This rank's Loaded.stream_bytes (rankRoom agrees the ranks' rooms in streams, not bytes).
             stream_bytes: usize = 0,
+            graph_reservation: u64 = 0,
             /// --slide: the pocket's layout, from config.json at load.
             lay: living.Layout = undefined,
             kv: kvl.State = .{},
@@ -180,6 +181,7 @@ pub fn Namespace(comptime Tri: type) type {
             pub fn ops(self: *Cuda) Ops {
                 return .{ .e = self.engine, .tri = self.tri(), .h = self.head.?, .main = if (self.ranks != null) .{
                     .ptr = self,
+                    .rank = self.ranks.?.rank,
                     .forward = mainForward,
                     .verify = mainVerify,
                     .rollback = mainRollback,
@@ -191,9 +193,9 @@ pub fn Namespace(comptime Tri: type) type {
                 return self.ranks.?.forward(Tri, self.tri(), q, ids, hooks);
             }
 
-            fn mainVerify(ptr: *anyopaque, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32) anyerror!void {
+            fn mainVerify(ptr: *anyopaque, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32, tail: ?prompt.batch.Hooks.OutputTail) anyerror!void {
                 const self = of(ptr);
-                return self.ranks.?.verify(Tri, self.tri(), q, d, ids);
+                return self.ranks.?.verifyWithTail(Tri, self.tri(), q, d, ids, tail);
             }
 
             fn mainRollback(ptr: *anyopaque, q: *prompt.Seq, d: *mtp.Draft, keep: usize) anyerror!void {
@@ -284,7 +286,7 @@ pub fn Namespace(comptime Tri: type) type {
                     s.proposer = null;
                 }
                 // a window's rows past the reply's last token (its drafts) still need cache slots
-                const cap = if (self.engine.page_config != null) @min(prompt.max_tokens, self.context + mtp.max_rows) else @min(ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), prompt.max_tokens);
+                const cap = if (self.engine.page_config != null) @min(prompt.max_tokens, self.context + mtp.max_rows) else @import("exl3/offload/cuda_exl3_recycle.zig").roundCap(@min(ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), prompt.max_tokens), @min(prompt.max_tokens, self.context + mtp.max_rows));
                 const from = self.kv.choose();
                 gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.create(cap) else if (from == .pool) self.kv.pool.?.open(cap) else self.engine.newSeq(cap)) catch |err| {
                     self.lanes.removeByPtr(gop.key_ptr);

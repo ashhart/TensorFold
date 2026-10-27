@@ -22,12 +22,16 @@ const pooledBytes = prompt.pooledBytes;
 const seqBytesPaged = prompt.seqBytesPaged;
 
 pub fn newPlacedSeq(engine: *prompt.Engine, cap: usize) !prompt.Seq {
-    return @import("exl3/kv/cuda_exl3_kv.zig").newSeq(engine, prompt.Seq, cap);
+    var sequence = try @import("exl3/kv/cuda_exl3_kv.zig").newSeq(engine, prompt.Seq, cap);
+    sequence.recycle_owner = engine;
+    return sequence;
 }
 
 pub fn deinit(sequence: *prompt.Seq, allocator: std.mem.Allocator) void {
+    if (@import("exl3/offload/cuda_exl3_recycle.zig").giveSeq(sequence)) return;
     if (sequence.stream) |stream| @import("cuda").completion.drain(stream.d, stream, "Flash Next sequence work did not drain before release");
     if (sequence.paged != null or sequence.invalidated) sequence.tail.d.synchronize() catch @panic("sequence consumers did not drain before freeing allocations");
+    @import("exl3/graph/cuda_exl3_graph.zig").releaseSeq(sequence);
     if (sequence.media) |*media| media.deinit();
     @import("exl3/kv/cuda_exl3_kv.zig").deinitSeq(allocator, &sequence.kv8, &sequence.ikc_host);
     for ([_][]@import("cuda").DeviceBuffer{ sequence.conv, sequence.state, sequence.kc, sequence.vc, sequence.ikc, sequence.pooled }) |buffers| {
@@ -49,6 +53,7 @@ pub fn newSeqOn(e: *prompt.Engine, cap: usize, given: ?pages.Paged) !prompt.Seq 
         const arena = e.shared_arena orelse return error.SharedKvArenaRequired;
         if (cap != arena.layout.options.cap) return error.SharedKvCommonCap;
     };
+    if (try @import("exl3/offload/cuda_exl3_recycle.zig").takeSeq(e, cap)) |kept| return kept;
     if (@import("exl3/kv/cuda_exl3_kv.zig").of(e).placed()) return newPlacedSeq(e, cap);
     if (e.page_config == null) return newSeqPageTable(e, cap, null); // contiguous caches: upstream's flow, which drains before it frees
     const logits = try e.gpa.alloc(u8, vocab * 2);
@@ -85,6 +90,7 @@ pub fn newSeqOn(e: *prompt.Engine, cap: usize, given: ?pages.Paged) !prompt.Seq 
         .logits = logits,
         .cap = cap,
         .paged = paged,
+        .recycle_owner = e,
     };
 }
 
@@ -109,6 +115,7 @@ fn newSeqPageTable(e: *prompt.Engine, cap: usize, given: ?pages.Paged) !prompt.S
         .fed = 0,
         .logits = &.{},
         .cap = cap,
+        .recycle_owner = e,
     };
     table = null; // seq owns the pages from here
     // One rollback owns every published array, and drains before releasing any destination.

@@ -1,4 +1,4 @@
-//! exl3-kvpage kernel: kvp_plan against the host's LRU model and replayed.
+//! exl3-kvpage kernel: kvp_plan against the host's LRU model, replayed, graphed and overflowed.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -49,6 +49,10 @@ const Model = struct {
 };
 
 pub fn kernelRun(gpu: Gpu, slots: usize) !void {
+    return kernelReplay(gpu, slots, false, false);
+}
+
+pub fn kernelReplay(gpu: Gpu, slots: usize, graphed: bool, moving: bool) !void {
     const a = gpu.gpa;
     const idw = flash.exl3.prompt_wt.index_idw;
     const row = kvp.row_bytes;
@@ -66,6 +70,7 @@ pub fn kernelRun(gpu: Gpu, slots: usize) !void {
         for (0..cap) |p| for (0..row / 4) |i| {
             h[p * (row / 4) + i] = @intCast((p *% 2654435761 +% i *% 40503 +% v *% 977) & 0xFFFF_FFFF);
         };
+        if (moving) try gpu.d.check(gpu.d.api.cuMemcpyHtoD_v2(pg.devRows(0, v == 1), pg.hostRows(0, v == 1).ptr + w0 * row, pg.wr * row), "cuMemcpyHtoD");
     }
     var ids_d = try cuda.DeviceBuffer.alloc(gpu.d, 256 * idw * 4);
     defer ids_d.free();
@@ -114,8 +119,27 @@ pub fn kernelRun(gpu: Gpu, slots: usize) !void {
     var keys_checked: usize = 0;
     var plan_ns: i96 = 0;
     const calls: usize = 60;
+    var execs: [2]?cuda.graph.Exec = @splat(null);
+    defer for (&execs) |*exec| if (exec.*) |*e| e.deinit();
+    var captured_window = w0;
+    var captures: usize = 0;
+    var replays: usize = 0;
     for (0..calls) |c| {
         const m: usize = if (c % 10 == 9) 64 else 1;
+        const pos0 = w0 + pg.wr - 70 + c;
+        if (moving) {
+            try pg.prepareLayer(stream, 0, pos0, m);
+            const win = pg.win0[0];
+            for (0..2) |v| try gpu.d.check(gpu.d.api.cuMemcpyHtoDAsync_v2(pg.devRows(0, v == 1) + (pos0 - win) * row, pg.hostRows(0, v == 1).ptr + pos0 * row, m * row, stream.handle), "cuMemcpyHtoDAsync");
+            if (win != captured_window) {
+                try stream.synchronize();
+                for (&execs) |*exec| if (exec.*) |*e| {
+                    e.deinit();
+                    exec.* = null;
+                };
+                captured_window = win;
+            }
+        }
         var need = std.AutoHashMap(u32, void).init(a);
         defer need.deinit();
         for (0..m) |r| {
@@ -137,7 +161,7 @@ pub fn kernelRun(gpu: Gpu, slots: usize) !void {
                 out[j * 4 + t] = @intCast(b * 4 + t);
             };
             // 3 tail keys inside the window
-            for (0..3) |t| out[2048 + t] = @intCast(w0 + 100 + c * 4 + t);
+            for (0..3) |t| out[2048 + t] = @intCast(if (moving) pos0 - 3 + t else w0 + 100 + c * 4 + t);
             nk[r] = 2051;
             for (sorted) |b| try need.put(b, {});
         }
@@ -151,7 +175,18 @@ pub fn kernelRun(gpu: Gpu, slots: usize) !void {
         try gpu.d.check(gpu.d.api.cuMemcpyHtoD_v2(sp_d.ptr, sp.ptr, m * 4), "cuMemcpyHtoD");
         const before = try pg.stats(0);
         const t0 = check.now(gpu.io);
-        try pg.page(stream, 0, ids_d.ptr, nk_d.ptr, sp_d.ptr, m);
+        if (graphed) {
+            const slot: usize = @intFromBool(m == 64);
+            if (execs[slot] == null) {
+                try cuda.graph.beginCapture(stream, .thread_local);
+                try pg.page(stream, 0, ids_d.ptr, nk_d.ptr, sp_d.ptr, m);
+                var template = try cuda.graph.endCapture(stream);
+                defer template.deinit();
+                execs[slot] = try template.instantiate();
+                captures += 1;
+            } else replays += 1;
+            try execs[slot].?.launchOn(stream);
+        } else try pg.page(stream, 0, ids_d.ptr, nk_d.ptr, sp_d.ptr, m);
         try stream.synchronize();
         plan_ns += check.now(gpu.io) - t0;
         const after = try pg.stats(0);
@@ -178,9 +213,64 @@ pub fn kernelRun(gpu: Gpu, slots: usize) !void {
         };
     }
     const st = try pg.stats(0);
+    if (graphed) {
+        std.debug.print("pager graphs: captures {d}, replays {d}, device epoch {d}, calls {d}, rebases {d}, written rows {d}\n", .{ captures, replays, st.epoch, st.calls, st.rebases, st.written_rows });
+        try check.expect(replays > 0 and st.epoch == calls and st.calls == calls, "captured pager executes fresh epochs", .{});
+    }
+    if (moving) {
+        const fed = w0 + pg.wr - 70 + calls + 63;
+        try pg.flushLayer(stream, 0, fed);
+        try stream.synchronize();
+        for (0..2) |v| {
+            const words = std.mem.bytesAsSlice(u32, pg.hostRows(0, v == 1));
+            for (0..fed) |position| for (0..row / 4) |column| {
+                const expected: u32 = @truncate(position *% 2654435761 +% column *% 40503 +% v *% 977);
+                if (words[position * (row / 4) + column] != expected) bad += 1;
+            };
+        }
+        try check.expect(st.rebases > 0 and st.written_rows > 0 and captures > 2, "window moves flush rows and recapture pager graphs", .{});
+    }
     std.debug.print("kernel: {d} calls ({d} keys checked): bad {d}; misses GPU {d}, host LRU model {d}; needed {d}; overflow {}; plan+fetch+remap {d:.1} us a call (incl. launch + sync)\n", .{ calls, keys_checked, bad, gpu_miss, model_miss, st.needed, st.overflow, @as(f64, @floatFromInt(plan_ns)) / 1e3 / @as(f64, @floatFromInt(calls)) });
     try check.expect(bad == 0 and !st.overflow, "every remapped key reads its own host row", .{});
     const diff = @as(f64, @floatFromInt(@max(gpu_miss, model_miss) - @min(gpu_miss, model_miss))) / @as(f64, @floatFromInt(@max(model_miss, 1)));
     try check.expect(diff < 0.05, "misses within 5% of the LRU model ({d:.3})", .{diff});
     check.pass("exl3-kvpage kernel", .{});
+}
+
+pub fn overflowReplay(gpu: Gpu) !void {
+    const idw = flash.exl3.prompt_wt.index_idw;
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
+    const pg = try kvp.Paged.init(gpu.gpa, gpu.d, 4096, .{ .window = 2052, .rows = 1, .slots = 1 });
+    defer pg.destroy();
+    pg.setWindow(0, 2052);
+    var ids = try cuda.DeviceBuffer.alloc(gpu.d, idw * 4);
+    defer ids.free();
+    var nk = try cuda.DeviceBuffer.alloc(gpu.d, 4);
+    defer nk.free();
+    var sp = try cuda.DeviceBuffer.alloc(gpu.d, 4);
+    defer sp.free();
+    var input: [idw]i32 = @splat(0);
+    for (0..2048) |index| input[index] = @intCast(index);
+    try ids.upload(0, std.mem.sliceAsBytes(&input));
+    const count: i32 = 2048;
+    const sparse: i32 = 1;
+    try nk.upload(0, std.mem.asBytes(&count));
+    try sp.upload(0, std.mem.asBytes(&sparse));
+    try cuda.graph.beginCapture(stream, .thread_local);
+    try pg.page(stream, 0, ids.ptr, nk.ptr, sp.ptr, 1);
+    var template = try cuda.graph.endCapture(stream);
+    defer template.deinit();
+    var exec = try template.instantiate();
+    defer exec.deinit();
+    for (0..2) |_| {
+        try nk.upload(0, std.mem.asBytes(&count));
+        try exec.launchOn(stream);
+        try stream.synchronize();
+        var actual: i32 = -1;
+        try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(&actual, nk.ptr, 4), "cuMemcpyDtoH");
+        const stats = try pg.stats(0);
+        try check.expect(actual == 0 and stats.overflow and stats.misses == 0, "overflow suppresses fetch and attention key reads on every replay", .{});
+    }
+    check.pass("exl3-kvpage graph overflow fails closed before key reads", .{});
 }

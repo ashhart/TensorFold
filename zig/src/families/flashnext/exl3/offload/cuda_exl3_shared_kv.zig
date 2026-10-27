@@ -504,6 +504,11 @@ pub const Arena = struct {
         try image.validate(arena.geometry());
         if (image.clock > std.math.maxInt(u32)) return error.Overflow;
     }
+
+    pub fn graphKey(arena: *Arena, sequence: contract.Sequence, layer: usize, canonical: u64, origin_hash: u64) !contract.GraphKey {
+        const window = try arena.binding(sequence, layer);
+        return .{ .sequence = sequence, .geometry = .{ .lanes = @intCast(arena.layout.options.lanes), .layers = wt.attn_n, .blocks = @intCast(arena.layout.blocks), .slots = @intCast(arena.layout.options.slots), .row_bytes = row_bytes, .window_rows = arena.layout.window_rows, .work_words = arena.layout.work_bytes / 4 }, .bindings = .{ .keys = arena.device.ptr + arena.layout.options.lanes * wt.attn_n * arena.layout.window_rows * row_bytes, .values = arena.device.ptr + (arena.layout.side_rows + arena.layout.options.lanes * wt.attn_n * arena.layout.window_rows) * row_bytes, .owners = arena.tables.ptr + arena.layout.owners, .stamps = arena.tables.ptr + arena.layout.stamps, .clock = arena.tables.ptr + arena.layout.clock, .inverse = window.inverse, .marks = window.marks, .controls = window.controls, .work = arena.work.ptr, .window_keys = window.keys, .window_values = window.values, .canonical = canonical, .cap = arena.layout.options.cap, .rows = arena.layout.options.rows, .origin_hash = origin_hash } };
+    }
 };
 
 test {

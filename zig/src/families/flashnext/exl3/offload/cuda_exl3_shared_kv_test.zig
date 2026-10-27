@@ -17,6 +17,9 @@ pub const Fake = struct {
     var copy_calls: usize = 0;
     var fail_copy: ?usize = null;
     pub var sync_calls: usize = 0;
+    pub var graph_calls: usize = 0;
+    pub var graph_pending: bool = false;
+    pub var fail_graph: bool = false;
     pub var fail_alloc_at: ?usize = null;
     var device_alloc_calls: usize = 0;
 
@@ -83,7 +86,14 @@ pub const Fake = struct {
 
     fn sync() callconv(.c) c_int {
         sync_calls += 1;
+        if (!fail_sync) graph_pending = false;
         return if (fail_sync) cuda.abi.error_not_ready else 0;
+    }
+
+    fn graphLaunch(_: cuda.abi.GraphExec, _: cuda.abi.Stream) callconv(.c) c_int {
+        graph_calls += 1;
+        graph_pending = true;
+        return if (fail_graph) cuda.abi.error_not_ready else 0;
     }
 
     fn streamSync(_: cuda.abi.Stream) callconv(.c) c_int {
@@ -133,6 +143,9 @@ pub const Fake = struct {
         copy_calls = 0;
         fail_copy = null;
         sync_calls = 0;
+        graph_calls = 0;
+        graph_pending = false;
+        fail_graph = false;
         fail_alloc_at = null;
         device_alloc_calls = 0;
         var result: cuda.Driver = undefined;
@@ -148,6 +161,7 @@ pub const Fake = struct {
         result.api.cuCtxSynchronize = sync;
         result.api.cuStreamSynchronize = streamSync;
         result.api.cuLaunchKernel = launch;
+        result.api.cuGraphLaunch = graphLaunch;
         return result;
     }
 

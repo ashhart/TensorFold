@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 r"""HTTP acceptance receipts for two BF16-paged TP2 requests (standard library only).
 
-Start with short snapshot/cache branches:
+Start with short snapshot/cache branches and graph replay evidence:
   python3 tools/exl3_paged_acceptance.py a.bin b.bin --context-length 4096 \
       --base-url http://127.0.0.1:18400 --model MODEL --completion-tokens 256 \
-      --warm-prefix-tokens 3072 --output receipt.json
+      --warm-prefix-tokens 3072 --require-graph-replay \
+      --graph-evidence graph-observations.jsonl --output receipt.json
 
-The server must already enable BF16 paging, TP2 and two lanes. Repeat at increasing bounded lengths after snapshot/cache checks pass;
+The server must already enable BF16 paging, TP2, two lanes and prefill/decode
+graphs. Repeat at increasing bounded lengths after snapshot/cache checks pass;
 200k x2 is a final later stage, never an automatic validation step.
 
 Fixtures are little-endian u32 IDs. Exactly the first --context-length IDs are
@@ -19,7 +21,20 @@ that a particular snapshot was restored, immutable, or equivalent to a cold run.
 
 Non-streaming responses must report exact prompt and completion counts, a final
 finish_reason and a full token_sha256. HTTP overlap alone never proves server
-lane residency, TP2, BF16 storage, paging or snapshot correctness.
+lane residency, TP2, BF16 storage, paging, snapshot correctness or graph replay.
+
+--require-graph-replay additionally requires an external collector's JSONL file,
+read AFTER requests finish. For each concurrent client_request_id, BOTH ranks
+(0,1) and BOTH phases (prefill,decode) must have exactly one observation:
+  {"client_request_id":"<X-Request-ID>","rank":0,"phase":"prefill",
+   "enabled":true,"replays_before":0,"replays_after":3,"source":"rank0.log:42"}
+The counters must cover that request on that rank and phase. Only a positive
+replay delta qualifies; enabled flags, captures, old totals, global counters
+without request attribution and unrelated IDs do not. This is a collector input
+schema, NOT an existing server API. The harness cannot authenticate its source;
+retain the underlying logs. Missing instrumentation/evidence fails the gate.
+The collector must finish writing before the HTTP phase ends. --graph-evidence
+also implies --require-graph-replay. With neither option graphs stay unverified.
 
 Exit 0 qualifies the requested checks only; exit 1 fails them, exit 2 is bad input.
 """
@@ -50,7 +65,8 @@ CORRELATION = [
     "Correlate /metrics running-request samples with per-rank lane traces; queued HTTP requests are insufficient.",
     "Record pager misses/writebacks/rebases/overflow, per-rank VRAM peaks, host/pinned bytes and expert-pool lines.",
     "For cache reuse, record snapshot save/restore IDs, prefix lengths, admission/eviction bytes and source lanes.",
-    "Verify snapshot branching against independent cold continuations; record MTP rollback if enabled.",
+    "Verify snapshot branching against independent cold continuations; record graph replay and MTP rollback if enabled.",
+    "For graph qualification, retain request-attributed prefill/decode replay counter deltas from both ranks; enabled/capture counts alone do not qualify.",
 ]
 
 
@@ -186,6 +202,54 @@ def overlap(rows):
             "end_utc": earliest["utc"] if seconds > 0 else None, "observed": seconds > 0}
 
 
+def graph_evidence(path, requests):
+    evidence = {
+        "source_file": str(path) if path else None, "observations": [], "errors": [],
+        "scope": "externally collected per-request replay deltas; retain source logs for verification",
+        "qualified": False,
+    }
+    if path is None:
+        evidence["errors"].append("graph replay requires an external --graph-evidence JSONL file")
+        return evidence
+    request_ids = {row["client_request_id"] for row in requests}
+    expected = {(request_id, rank, phase)
+                for request_id in request_ids for rank in (0, 1) for phase in ("prefill", "decode")}
+    seen = set()
+    try:
+        with path.open(encoding="utf-8") as source:
+            for line_number, line in enumerate(source, 1):
+                if not line.strip():
+                    continue
+                item = json.loads(line, parse_constant=reject_constant)
+                if not isinstance(item, dict):
+                    raise ValueError(f"line {line_number}: expected an observation object")
+                if not isinstance(item.get("client_request_id"), str):
+                    raise ValueError(f"line {line_number}: client_request_id must be a string")
+                if item["client_request_id"] not in request_ids:
+                    continue
+                rank, phase = item.get("rank"), item.get("phase")
+                if type(rank) is not int or rank not in (0, 1) or phase not in ("prefill", "decode"):
+                    raise ValueError(f"line {line_number}: invalid TP2 rank or graph phase")
+                key = (item["client_request_id"], rank, phase)
+                if key in seen:
+                    raise ValueError(f"line {line_number}: duplicate observation for {key}")
+                before, after = count(item.get("replays_before")), count(item.get("replays_after"))
+                origin = item.get("source")
+                if (item.get("enabled") is not True or before is None or after is None or after <= before
+                        or not isinstance(origin, str) or not origin.strip()):
+                    raise ValueError(f"line {line_number}: enabled graphs, a positive replay delta and source are required")
+                seen.add(key)
+                evidence["observations"].append({**item, "replay_delta": after - before})
+    except (OSError, ValueError) as error:
+        evidence["errors"].append(f"{type(error).__name__}: {error}")
+    for request_id, rank, phase in sorted(expected - seen):
+        evidence["errors"].append(f"missing graph replay evidence for {request_id} rank={rank} phase={phase}")
+    if not requests:
+        evidence["errors"].append("no concurrent requests to correlate")
+    evidence["qualified"] = not evidence["errors"]
+    return evidence
+
+
 def run(args):
     prompts, fixtures = [], []
     for path in (args.fixture_a, args.fixture_b):
@@ -206,7 +270,9 @@ def run(args):
         "snapshot_restore_proven": False, "correlation_evidence_needed": CORRELATION,
         "configuration": {"context_length": args.context_length, "completion_tokens": args.completion_tokens,
                           "warm_prefix_tokens": prefix_length, "draft": args.draft,
-                          "require_cache_reuse": args.require_cache_reuse or bool(prefix_length)},
+                          "require_cache_reuse": args.require_cache_reuse or bool(prefix_length),
+                          "require_graph_replay": args.require_graph_replay or args.graph_evidence is not None},
+        "graph_replay_evidence": None,
         "fixtures": fixtures, "warmup": None, "requests": [], "errors": [],
     }
     if prefix_length:
@@ -230,6 +296,10 @@ def run(args):
     }
     if not report["http_overlap"]["observed"]:
         report["errors"].append("two HTTP request intervals did not overlap")
+    if report["configuration"]["require_graph_replay"]:
+        report["graph_replay_evidence"] = graph_evidence(args.graph_evidence, report["requests"])
+        if not report["graph_replay_evidence"]["qualified"]:
+            report["errors"].append("required graph replay evidence did not qualify")
     report["finished"] = stamp()
     report["qualified"] = not report["errors"]
     return report
@@ -245,6 +315,10 @@ def main(argv=None):
     parser.add_argument("--completion-tokens", type=int, default=256, help="exact reply tokens; ignore_eos is set")
     parser.add_argument("--warm-prefix-tokens", type=int, default=0)
     parser.add_argument("--require-cache-reuse", action="store_true")
+    parser.add_argument("--require-graph-replay", action="store_true",
+                        help="require attributed prefill/decode replay deltas for both requests on both ranks")
+    parser.add_argument("--graph-evidence", type=Path,
+                        help="external JSONL observations read after requests finish; implies --require-graph-replay")
     parser.add_argument("--draft", action="store_true")
     parser.add_argument("--timeout", type=float, default=7200, help="HTTP socket timeout in seconds")
     parser.add_argument("--output", type=Path, help="also write the JSON receipt to this path")

@@ -127,7 +127,7 @@ pub fn dequant4(bytes: []const u8, scale: f16, out: []f32) error{Length}!void {
 
 pub const Budget = struct {
     device_bytes: u64,
-    /// Dense + shared + router + HC + MTP workspace, already summed by the caller.
+    /// Dense + shared + router + HC + MTP + graph workspace, already summed by the caller.
     resident_bytes: u64,
     kv_bytes: u64,
     routed_expert_bytes: u64,

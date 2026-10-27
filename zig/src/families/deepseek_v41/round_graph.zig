@@ -91,7 +91,7 @@ test "the knob's words" {
 }
 
 test "the split: the head's layers, never inside an open side or deferred fork" {
-    // layer 0: 0..2, layer 1: 3..6 (its side fork 3 joined at 5), layer 2: 7.
+    // layer 0: 0..2, layer 1: 3..6 (its side fork 3 joined at 5), layer 2: 7..
     const cs = [_]calls.Call{
         call(.window, .{}),
         call(.none, .{}),

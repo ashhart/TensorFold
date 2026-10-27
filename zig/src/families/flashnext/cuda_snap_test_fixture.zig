@@ -51,6 +51,7 @@ pub const Fake = struct {
             @memcpy(dst[0..item.len], src[0..item.len]);
         }
         pending = 0;
+        shared_fixture.Fake.graph_pending = false;
         return 0;
     }
 

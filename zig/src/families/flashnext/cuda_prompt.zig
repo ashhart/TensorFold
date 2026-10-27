@@ -245,6 +245,8 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         @import("exl3/prefill/cuda_exl3_prefill.zig").releaseFor(e);
+        @import("exl3/graph/cuda_exl3_graph.zig").releaseFor(e);
+        @import("exl3/offload/cuda_exl3_recycle.zig").drain(e);
         if (e.page_config) |cfg| if (cfg.shared_lanes != 0) {
             if (e.shared_arena) |arena| arena.destroy() catch @panic("shared KV arena still owns live lanes");
         };
@@ -417,6 +419,10 @@ pub const Engine = struct {
             .seq = seq.view(scores),
             .hooks = hooks,
         };
+        if (try @import("exl3/graph/cuda_exl3_graph.zig").forward(e, &p, seq, ids)) {
+            const one = [_]*Seq{seq};
+            return e.finishPaged(&one);
+        }
         var at: usize = 0;
         while (at < ids.len) {
             const n = @min(s.cap, ids.len - at);
@@ -484,7 +490,7 @@ pub const Engine = struct {
         const has_paged = for (seqs) |q| {
             if (q.paged != null) break true;
         } else false;
-        if (e.collective != null and round_graph.enabled() and !has_media and !has_paged) {
+        if (try @import("exl3/graph/cuda_exl3_graph.zig").round(e, &p, seqs, ids, scores, out)) {} else if (e.collective != null and round_graph.enabled() and !has_media and !has_paged) {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
@@ -498,8 +504,18 @@ pub const Engine = struct {
     }
 };
 
+test "exl3: Engine graph-hit lease covers every owner without paging callbacks or extra completion waits" {
+    try @import("cuda_prompt_test.zig").graphLease(Engine, Seq, .{
+        .begin = Engine.beginShared,
+        .finish = Engine.finishPaged,
+        .end = Engine.endShared,
+        .fail = Engine.failShared,
+    });
+}
+
 /// One stream's caches. `fed` tokens have already gone through the model.
 pub const Seq = struct {
+    recycle_owner: ?*Engine = null,
     invalidated: bool = false,
     /// The owning compute stream; synthetic non-device fixtures may leave it absent.
     stream: ?cuda.Stream = null,
@@ -574,10 +590,7 @@ pub fn chunkRows() !usize {
 }
 
 test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the rest" {
-    try std.testing.expectEqual(batch.default_chunk, try parseChunk(null));
-    try std.testing.expectEqual(@as(usize, 4096), try parseChunk("4096"));
-    try std.testing.expectEqual(batch.max_chunk, try parseChunk("16384"));
-    for ([_][]const u8{ "0", "16385", "-1", "4k", "" }) |bad| try std.testing.expectError(error.BadChunk, parseChunk(bad));
+    try @import("cuda_prompt_test.zig").chunkParsing(parseChunk, batch);
 }
 
 test {

@@ -34,7 +34,7 @@ pub const Context = struct {
         return v;
     }
 
-    /// The device's marketing name ("AMD Radeon PRO W7800").
+    /// The device's marketing name ("AMD Radeon PRO W7800" ...).
     pub fn name(self: Context, buf: []u8) runtime.Error![]const u8 {
         if (buf.len < 2) return error.Invalid;
         try runtime.check(self.r.api.hipDeviceGetName(buf.ptr, @intCast(buf.len), self.device));

@@ -196,7 +196,7 @@ pub const Select = struct {
     }
 };
 
-/// Block selection in GPU-side rounds: fz_sel_meta writes each round's rows, pooling range and pooled count; the.
+/// Block selection in GPU-side rounds: fz_sel_meta writes each round's rows, pooling range and pooled count; the...
 pub const SEL_POOLED = 4 * MAXR + 2;
 /// Blocks one round's pool can owe: a window of up to MAXR rows completes at most this many.
 pub const POOL_BLOCKS = (MAXR + 3) / 4;
@@ -369,7 +369,7 @@ pub fn i32Buf(r: *Run, vals: []const i32) !Buf {
 /// One MTP call's per-row values (every call in a command buffer reads its own).
 pub const Slot = struct { rows: Buf, md: Buf, md4: Buf, ids8: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, n_add: Buf };
 
-/// How many token ids the MTP head scores, from the pack's `mtp.draft_ids` bytes, refused unless whole 64-row tiles.
+/// How many token ids the MTP head scores, from the pack's `mtp.draft_ids` bytes, refused unless whole 64-row tiles...
 pub fn draftCount(bytes: usize) !usize {
     const n = bytes / 4;
     if (n == 0 or n % 64 != 0 or n > VOCAB) return error.DraftVocab;
@@ -427,7 +427,7 @@ pub const Mtp = struct {
     gsel: ?GSelect = null, // its block selection in GPU-side rounds
 };
 
-/// Marks a prompt call can take its DeltaNet states at, their slots, and a layer's index among the DeltaNet layers.
+/// Marks a prompt call can take its DeltaNet states at, their slots, and a layer's index among the DeltaNet layers...
 pub const MARKS = mark_slots.MARKS;
 pub const Marks = mark_slots.Slots;
 pub const linearIndex = mark_slots.linearIndex;

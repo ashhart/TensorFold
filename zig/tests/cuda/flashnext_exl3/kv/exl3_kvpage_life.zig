@@ -27,6 +27,7 @@ pub fn snapshotLifecycle(gpu: Gpu) !void {
     engine.round_graph = .{};
     engine.page_config = .{ .window = 2052, .slots = 16, .rows = 256 };
     engine.shared_arena = null;
+    defer flash.exl3.recycle.drain(&engine);
     var destination = try engine.newSeq(8192);
     defer destination.deinit(gpu.gpa);
     for ([_]usize{ 0, 1, 3, 4, 2051, 2052, 4096, 4099, 6147 }) |at| {

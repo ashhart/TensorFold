@@ -66,6 +66,7 @@ fn headSlice(comptime Tri: type, o: anytype, d: *@import("../../cuda_mtp.zig").D
     const x = h.layer.exl3 orelse return false;
     if (x.tp != null or x.pool == null or (x.layer.act_mode != 1 and x.layer.act_mode != 0)) return false;
     if (d.len + n > d.cap) return error.PromptTooLong;
+    try @import("../dplan/cuda_exl3_dplan.zig").toHost(); // the head's pool may be device-planned (cuda_exl3_chain.zig)
     const mtp = @import("../../cuda_mtp.zig");
     const tri = o.tri;
     const want = @max(@as(usize, 32), 2 * @min(n, mtp.piece_rows));

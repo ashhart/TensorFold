@@ -548,7 +548,7 @@ pub const Engine = struct {
         }
     }
 
-    /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1.
+    /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
     pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
         if (e.structured) return e.drawWhole(logits, rows, first, bits, out);
         if (e.cur.sampling) |s| {

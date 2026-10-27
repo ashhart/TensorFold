@@ -33,6 +33,7 @@ const warmTiles = tiles.warmTiles;
 /// Frees the deep chunk's buffers (the engine's deinit, or a test).
 pub fn release() void {
     if (state.deep) |dp| {
+        @import("../graph/cuda_exl3_graph.zig").clearPrefill();
         if (dp.second) |second| {
             dp.aux.synchronize() catch @panic("two-chunk aux retirement synchronization failed");
             dp.dev.d.synchronize() catch @panic("two-chunk compute retirement synchronization failed");
@@ -152,12 +153,17 @@ pub fn reserveAt(gpa: std.mem.Allocator, d: *const cuda.Driver, owner: *const an
     std.log.info("flashnext exl3 prefill: deep chunks of {d} rows, {d:.2} GiB on the device, {d:.1} MiB pinned (world {d})", .{ rows, @as(f64, @floatFromInt(dp.lay.total)) / (1 << 30), @as(f64, @floatFromInt(dp.hl.total)) / (1 << 20), world });
 }
 
-pub fn reserveTwoChunk(d: *const cuda.Driver, free: u64, protected: u64) !u64 {
+pub fn reserveTwoChunk(d: *const cuda.Driver, free: u64, protected: u64, graph_reservation: u64) !u64 {
     const o = opts();
     if (!o.two_chunk or !o.enabled or !o.ring or o.reduced_branch) return 0;
     const dp = state.deep orelse return 0;
     if (dp.dev.d != d or dp.world != 2 or dp.rows > window_.max_rows) return 0;
     if (dp.second != null) return 0;
+    const graph_required = @import("../graph/cuda_exl3_graph_memory.zig").twoChunkReservationBytes();
+    if (@import("../graph/cuda_exl3_graph.zig").enabled() and (graph_required == 0 or graph_reservation < graph_required)) {
+        std.log.info("flashnext exl3 prefill: two-chunk window declined, incremental graph reservation unavailable (required={d} supplied={d})", .{ graph_required, graph_reservation });
+        return 0;
+    }
     const persistent = Persistent.of(dp.rows);
     const sum_bytes = if (dp.world > 1) try std.math.mul(usize, dp.rows, dims * 4) else 0;
     const device_bytes = try std.math.add(usize, persistent.total, sum_bytes);
@@ -200,6 +206,7 @@ pub fn reserveTwoChunk(d: *const cuda.Driver, free: u64, protected: u64) !u64 {
     try d.check(d.api.cuMemsetD8Async(second.dptr(second.lay.y), 0, dp.rows * slots * dims * 4, dp.aux.handle), "cuMemsetD8Async");
     try dp.aux.synchronize();
     dp.second = second;
+    dp.window_graph_reservation = graph_reservation;
     std.log.info("flashnext exl3 prefill: experimental two-chunk window, chunk_rows={d} hidden_bytes={d} full_layout={d} extra_device={d} extra_pinned={d}", .{ dp.rows, 2 * dp.rows * wide * 2, dp.lay.total, device_bytes, second.hl.total });
     return device_bytes;
 }
@@ -251,6 +258,7 @@ var tp_logged = false;
 pub fn forward(e: *prompt.Engine, comptime Tri: type, tri: Tri, seq: *prompt.Seq, ids: []const u32, hooks: batch.Hooks) !bool {
     const o = opts();
     if (!applies(e, seq, ids, hooks, o)) return false;
+    try @import("../dplan/cuda_exl3_dplan.zig").toHost(); // the pools' residency on the host before planning a prompt
     if (ids.len == 0 or seq.fed + ids.len > seq.cap) return error.UnexpectedTensor;
     const s = try e.reserve(@min(ids.len, e.chunk));
     const sub = s.cap / att_rows * att_rows;
@@ -293,6 +301,10 @@ pub fn forward(e: *prompt.Engine, comptime Tri: type, tri: Tri, seq: *prompt.Seq
     var window_room: usize = 0;
     if (o.two_chunk) {
         var supported = dp.second != null and rg != null and world == 2 and !dp.reduced_branch and seq.kv8 == null and deep_rows <= window_.max_rows and ids.len > deep_rows;
+        if (@import("../graph/cuda_exl3_graph.zig").enabled()) {
+            const required = @import("../graph/cuda_exl3_graph_memory.zig").twoChunkReservationBytes();
+            if (required == 0 or dp.window_graph_reservation < required) supported = false;
+        }
         for (e.layers[0..e.n_layers]) |*layer| if (@import("../model/cuda_exl3_heads.zig").isSplit(layer)) {
             supported = false;
         };

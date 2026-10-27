@@ -94,6 +94,23 @@ class AcceptanceTests(unittest.TestCase):
             ])
         return code, json.loads(output.getvalue()), errors.getvalue()
 
+    def graph_collector(self, mutate=lambda rows: rows):
+        path = Path(self.directory.name) / "graph-observations.jsonl"
+        path.write_text("", encoding="utf-8")
+        lock = threading.Lock()
+
+        def observe(request_id, body):
+            if "branch-" not in request_id:
+                return
+            rows = [{"client_request_id": request_id, "rank": rank, "phase": phase, "enabled": True,
+                     "replays_before": 10, "replays_after": 12, "source": f"fake-rank-{rank}.log:42"}
+                    for rank in (0, 1) for phase in ("prefill", "decode")]
+            with lock, path.open("a", encoding="utf-8") as output:
+                for row in mutate(rows):
+                    output.write(json.dumps(row) + "\n")
+
+        return path, observe
+
     def test_exact_concurrent_requests_and_receipt(self):
         output = Path(self.directory.name) / "receipt.json"
         with server() as (base, requests):
@@ -112,6 +129,7 @@ class AcceptanceTests(unittest.TestCase):
         self.assertGreater(report["http_overlap"]["seconds"], 0)
         self.assertFalse(report["server_lane_residency_proven"])
         self.assertFalse(report["snapshot_restore_proven"])
+        self.assertIsNone(report["graph_replay_evidence"])
         self.assertIn("HTTP overlap alone", errors)
         self.assertGreater(len(report["correlation_evidence_needed"]), 0)
         for row in report["requests"]:
@@ -174,6 +192,83 @@ class AcceptanceTests(unittest.TestCase):
             code, report, _ = self.invoke(base, "--warm-prefix-tokens", "2")
         self.assertEqual(code, 1)
         self.assertTrue(report["configuration"]["require_cache_reuse"])
+
+    def test_short_cached_branches_require_prefill_and_decode_replays_on_both_ranks(self):
+        path, observe = self.graph_collector()
+
+        def reuse(body, payload):
+            payload["usage"]["prompt_tokens_details"]["cached_tokens"] = 2
+            return payload
+
+        with server(reuse, observe=observe) as (base, _):
+            code, report, _ = self.invoke(base, "--warm-prefix-tokens", "2",
+                                          "--require-graph-replay", "--graph-evidence", str(path))
+        self.assertEqual(code, 0)
+        self.assertEqual(report["configuration"]["context_length"], 4)
+        self.assertTrue(report["configuration"]["require_graph_replay"])
+        self.assertTrue(report["graph_replay_evidence"]["qualified"])
+        self.assertEqual(len(report["graph_replay_evidence"]["observations"]), 8)
+        self.assertTrue(all(row["replay_delta"] == 2 for row in report["graph_replay_evidence"]["observations"]))
+        self.assertFalse(report["snapshot_restore_proven"])
+
+    def test_graph_requirement_fails_without_collector_file(self):
+        for extra in (("--require-graph-replay",), ("--graph-evidence", str(Path(self.directory.name) / "missing"))):
+            with self.subTest(extra=extra):
+                with server() as (base, _):
+                    code, report, _ = self.invoke(base, *extra)
+                self.assertEqual(code, 1)
+                self.assertFalse(report["graph_replay_evidence"]["qualified"])
+
+    def test_graph_evidence_option_implies_gate_and_unrelated_ids_do_not_satisfy_it(self):
+        def stale(rows):
+            return [{**row, "client_request_id": "previous-run-branch-0"} for row in rows]
+
+        path, observe = self.graph_collector(stale)
+        with server(observe=observe) as (base, _):
+            code, report, _ = self.invoke(base, "--graph-evidence", str(path))
+        self.assertEqual(code, 1)
+        self.assertTrue(report["configuration"]["require_graph_replay"])
+        self.assertEqual(report["graph_replay_evidence"]["observations"], [])
+
+    def test_graphs_enabled_captures_and_total_counts_do_not_establish_replay(self):
+        changes = [
+            {"replays_after": 10, "captures": 100}, {"replays_after": 9},
+            {"replays_before": None, "replays_after": 100},
+            {"replays_before": False}, {"replays_after": "12"},
+            {"enabled": False}, {"source": ""}, {"client_request_id": []},
+        ]
+        for changed in changes:
+            with self.subTest(changed=changed):
+                path, observe = self.graph_collector(lambda rows: [{**row, **changed} for row in rows])
+                with server(observe=observe) as (base, _):
+                    code, report, _ = self.invoke(base, "--graph-evidence", str(path))
+                self.assertEqual(code, 1)
+                self.assertFalse(report["graph_replay_evidence"]["qualified"])
+
+    def test_graph_evidence_missing_rank_phase_or_branch_fails(self):
+        filters = [lambda rows: [row for row in rows if row["rank"] == 0],
+                   lambda rows: [row for row in rows if row["phase"] == "decode"],
+                   lambda rows: [row for row in rows if row["client_request_id"].endswith("branch-0")]]
+        for select in filters:
+            with self.subTest(select=select):
+                path, observe = self.graph_collector(select)
+                with server(observe=observe) as (base, _):
+                    code, report, _ = self.invoke(base, "--graph-evidence", str(path))
+                self.assertEqual(code, 1)
+                self.assertTrue(any("missing graph replay" in error
+                                    for error in report["graph_replay_evidence"]["errors"]))
+
+    def test_duplicate_and_malformed_graph_observations_fail(self):
+        path, observe = self.graph_collector(lambda rows: rows + [rows[0]])
+        with server(observe=observe) as (base, _):
+            code, report, _ = self.invoke(base, "--graph-evidence", str(path))
+        self.assertEqual(code, 1)
+        self.assertTrue(any("duplicate" in error for error in report["graph_replay_evidence"]["errors"]))
+        path.write_text('{"client_request_id":', encoding="utf-8")
+        with server() as (base, _):
+            code, report, _ = self.invoke(base, "--graph-evidence", str(path))
+        self.assertEqual(code, 1)
+        self.assertTrue(report["graph_replay_evidence"]["errors"])
 
     def test_usage_counts_must_be_exact_non_boolean_integers(self):
         for field, value in (("prompt_tokens", 3), ("prompt_tokens", None), ("prompt_tokens", True),

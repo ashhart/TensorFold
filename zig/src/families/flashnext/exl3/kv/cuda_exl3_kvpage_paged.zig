@@ -72,6 +72,7 @@ pub const Paged = struct {
     win0: [attn_n]usize = @splat(0),
     rebases: [attn_n]u64 = @splat(0),
     written: [attn_n]u64 = @splat(0),
+    graph_prepared: bool = false,
     telemetry_id: u64 = 0,
     telemetry_revision: u64 = 0,
     shared_arena: ?*shared_device.Arena = null,
@@ -145,6 +146,7 @@ pub const Paged = struct {
             try arena.release(pg.shared_sequence, .{ .d = pg.d, .handle = null });
             pg.shared_attached = false;
         }
+        pg.graph_prepared = false;
         pg.retired_for_reuse = true;
     }
 
@@ -167,6 +169,7 @@ pub const Paged = struct {
         pg.win0 = @splat(0);
         pg.rebases = @splat(0);
         pg.written = @splat(0);
+        pg.graph_prepared = false;
         pg.telemetry_id = identity;
         pg.telemetry_revision = 0;
         pg.incarnation = incarnation;
@@ -350,6 +353,7 @@ pub const Paged = struct {
         pg.win0 = image.win0;
         pg.rebases = image.rebases;
         pg.written = image.written;
+        pg.graph_prepared = false;
     }
 
     fn advanceTelemetry(pg: *Paged) void {
@@ -453,6 +457,37 @@ pub const Paged = struct {
         if (w0 != pg.win0[ai]) try pg.rebase(ai, pos0, stream);
     }
 
+    pub fn prepareGraph(pg: *Paged, stream: cuda.Stream, pos0: usize, n: usize) !void {
+        for (0..attn_n) |ai| try pg.validateRange(ai, pos0, n);
+        for (0..attn_n) |ai| try pg.prepareLayer(stream, ai, pos0, n);
+        pg.graph_prepared = true;
+    }
+
+    pub fn graphKey(pg: *const Paged) [6]u64 {
+        var shape: [9 + attn_n]usize = undefined;
+        shape[0..5].* = .{ pg.cap, pg.wr, pg.cfg.window, pg.cfg.rows, pg.cfg.slots };
+        shape[5..8].* = if (pg.cfg.shared_lanes == 0) .{ 0, 0, @intCast(pg.incarnation) } else .{ pg.cfg.shared_lanes, pg.shared_sequence.lane, @intCast(pg.shared_sequence.generation) };
+        shape[8] = if (pg.cfg.shared_lanes == 0) 0 else @intCast(pg.shared_arena.?.id);
+        for (pg.win0, 0..) |origin, ai| shape[9 + ai] = pagingRows(pg.cfg, origin, att_rows) catch 0;
+        return .{ pg.dev.ptr, pg.tabs.ptr, pg.work.ptr, pg.host_dev, std.hash.Wyhash.hash(0, std.mem.asBytes(&shape)), std.hash.Wyhash.hash(0, std.mem.asBytes(&pg.win0)) };
+    }
+
+    pub fn prefillGraphKey(pg: *const Paged) [6]u64 {
+        const strict = pg.graphKey();
+        const logical = pg.logicalGraphKey();
+        const lane: u64 = if (pg.cfg.shared_lanes == 0) 0 else pg.shared_sequence.lane;
+        const arena: u64 = if (pg.cfg.shared_lanes == 0) 0 else pg.shared_arena.?.id;
+        const shape = .{ logical[0], lane, arena };
+        return .{ strict[0], strict[1], strict[2], strict[3], std.hash.Wyhash.hash(0, std.mem.asBytes(&shape)), std.hash.Wyhash.hash(strict[4], std.mem.asBytes(&strict[5])) };
+    }
+
+    pub fn logicalGraphKey(pg: *const Paged) [2]u64 {
+        var shape: [6 + attn_n]usize = undefined;
+        shape[0..6].* = .{ pg.cap, pg.wr, pg.cfg.window, pg.cfg.rows, pg.cfg.slots, pg.cfg.shared_lanes };
+        for (pg.win0, 0..) |origin, layer| shape[6 + layer] = pagingRows(pg.cfg, origin, att_rows) catch 0;
+        return .{ std.hash.Wyhash.hash(0, std.mem.asBytes(&shape)), std.hash.Wyhash.hash(0, std.mem.asBytes(&pg.win0)) };
+    }
+
     pub fn validateSharedLease(pg: *const Paged) !void {
         if (pg.cfg.shared_lanes != 0) _ = try pg.shared_arena.?.leaseFor(pg.shared_sequence);
     }
@@ -490,7 +525,10 @@ pub const Paged = struct {
         try pg.validateSharedLeaseOn(p.stream);
         const s = p.s;
         const pos0 = p.pos0;
-        try pg.prepareLayer(p.stream, ai, pos0, n);
+        if (pg.graph_prepared) {
+            try pg.validateRange(ai, pos0, n);
+            if (pos0 + n > pg.win0[ai] + pg.wr) return error.KvPageWindow;
+        } else try pg.prepareLayer(p.stream, ai, pos0, n);
         const w0 = pg.win0[ai];
         const kd = pg.devK(ai);
         const vd = pg.devV(ai);
