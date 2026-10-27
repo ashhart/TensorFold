@@ -179,7 +179,7 @@ fn castGate(comptime gate: []const u8, a: std.mem.Allocator, clock: Elapsed, dev
         try vk.orExit(o.castBf16ToF32(cmds, out_view, in_view, timeout));
     }
     const words_out: usize = if (to_bf16) 1 else 2; // u16 words per output element
-    const back = try a.alloc(u16, n * words_out);
+    const back = try a.alloc(u16, (n + fx.tail) * words_out);
     defer a.free(back);
     try fetch(cmds, staging, out_buf, std.mem.sliceAsBytes(back), timeout);
     for (0..n) |i| {
@@ -190,10 +190,7 @@ fn castGate(comptime gate: []const u8, a: std.mem.Allocator, clock: Elapsed, dev
             return false;
         }
     }
-    const tail_words = try a.alloc(u16, fx.tail * words_out);
-    defer a.free(tail_words);
-    try fetch(cmds, staging, out_buf, std.mem.sliceAsBytes(tail_words), timeout);
-    for (tail_words) |g| if (g != 0xa5a5) {
+    fx.castGuards(back, n, words_out) catch {
         std.debug.print("FAIL {s}: guard tail clobbered\n", .{gate});
         return false;
     };
@@ -311,7 +308,7 @@ fn gatherGate(comptime kind: vk.tensor.Kind, a: std.mem.Allocator, clock: Elapse
     };
     // the out-of-range id must gather zeros, never table row 0
     const oor_view = try vk.tensor.View.init(&oor_buf, .u32, 0, 1);
-    try vk.orExit(o.gather(cmds, out_view, table_view, oor_view, rows, timeout));
+    try vk.orExit(o.gather(cmds, try out_view.slice(0, cols), table_view, oor_view, rows, timeout));
     try fetch(cmds, staging, out_buf, out_bytes, timeout);
     for (out_bytes[0 .. cols * esz]) |byte| if (byte != 0) {
         std.debug.print("FAIL {s}: an out-of-range id gathered nonzero bytes\n", .{gate});
