@@ -384,7 +384,7 @@ pub const Dense = struct {
 
     /// Grow every scratch buffer to what 128 rows of `w` need on `s`, so a call in a graph capture allocates nothing.
     pub fn reserve(de: *Dense, s: Stream, w: Weight) !void {
-        if (plan(w.k, w.n, 192, 8).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128));
+        if (planOf(w).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128)); // a fixed plan's splits too
         _ = try de.grownCounters(s, Linear.counterBytes(w));
         _ = try de.scratch(&de.xh, 128 * w.k * 2);
     }
@@ -395,6 +395,20 @@ pub const Dense = struct {
         const ptr = try de.scratch(&de.counters, bytes);
         try de.counters.?.fill8(0, s.handle);
         return ptr;
+    }
+
+    /// `reserve` for a group `decodeGroup` launches at once: its members' scratch side by side, at 16 rows.
+    pub fn reserveGroup(de: *Dense, s: Stream, ws: []const Weight) !void {
+        if (!groupable(ws, 16)) return;
+        var zb: usize = 0;
+        var cb: usize = 0;
+        for (ws) |w| {
+            zb += Linear.zBytes(w, 128);
+            cb += Linear.counterBytes(w);
+        }
+        if (zb > 0) _ = try de.scratch(&de.z, zb);
+        _ = try de.grownCounters(s, cb);
+        _ = try de.scratch(&de.xh, ws.len * 16 * ws[0].k * 2);
     }
 
     /// Decode rows: one call (the kernel takes 1..128), any count above in 128-row blocks.
