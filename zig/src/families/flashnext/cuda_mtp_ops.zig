@@ -137,7 +137,7 @@ pub fn Ops(comptime Tri: type) type {
                 .k = &e.batch_k,
                 .s = s,
                 .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
-                .seq = .{ .media = d.media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
+                .seq = d.headSeq(d.media, score_rows),
                 .hooks = .{ .logits = .none },
             };
             var at: usize = 0;
@@ -279,7 +279,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             for (ds, nexts, 0..) |d, nx, i| {
                 total += nx.len;
-                lane_buf[i] = .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = nx.len };
+                lane_buf[i] = .{ .seq = d.headSeq(null, score_rows), .pos = d.len, .rows = nx.len };
                 @memcpy(ids_buf[at..][0..nx.len], nx);
                 at += nx.len;
             }
