@@ -32,6 +32,8 @@ fn attention(at: u32, layers: usize, out: *std.ArrayList(rows.image.Part), a: Al
 pub fn Kept(comptime F: type) type {
     return struct {
         pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .scatter = scatter, .whole = whole };
+        /// The states are one tensor rank's: --tp refuses --learn-conversations (native/cuda_refusal.zig).
+        pub const one_rank = true;
 
         fn of(ptr: *anyopaque) *F.Cuda {
             return @ptrCast(@alignCast(ptr));

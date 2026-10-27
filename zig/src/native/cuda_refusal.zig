@@ -45,7 +45,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     }
     if (o.learn_conversations and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
-    if (o.learn_conversations and o.tp > 1 and F == @import("flashnext").native) return "--learn-conversations keeps one rank's Flash Next states on disk: serve without --tp or without --learn-conversations";
+    if (o.learn_conversations and o.tp > 1) if (@import("cuda_disk.zig").keptDisk(F)) |K| if (@hasDecl(K, "one_rank") and K.one_rank) return "--learn-conversations keeps one rank's states on disk for this CUDA family: serve without --tp or without --learn-conversations";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
     if (o.loops != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "loops"))) return "--loops sets a looped model's recurrent passes (Dory's): this CUDA family has none; serve without it";
@@ -141,6 +141,20 @@ test "--learn-conversations opens Nemotron and a family whose states declare a d
     try std.testing.expect(family(@import("flashnext").native, .{ .dir = "d", .model_type = "qwen4_exp", .learn_conversations = true }) == null);
     const tp = family(@import("flashnext").native, .{ .dir = "d", .model_type = "qwen4_exp", .tp = 2, .drafts = false, .learn_conversations = true });
     try std.testing.expectStringStartsWith(tp orelse "", "--learn-conversations keeps one rank's");
+    // the refusal is the kept states' flag, not a family's name: ranked states without it pass
+    const OneRank = struct {
+        pub const Options = struct { context: usize, rank: usize };
+        pub const kept_disk = struct {
+            pub const one_rank = true;
+        };
+    };
+    const AllRanks = struct {
+        pub const Options = struct { context: usize, rank: usize };
+        pub const kept_disk = struct {};
+    };
+    try std.testing.expectStringStartsWith(family(OneRank, .{ .dir = "d", .model_type = "m", .tp = 2, .learn_conversations = true }) orelse "", "--learn-conversations keeps one rank's");
+    try std.testing.expect(family(OneRank, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) == null);
+    try std.testing.expect(family(AllRanks, .{ .dir = "d", .model_type = "m", .tp = 2, .learn_conversations = true }) == null);
     try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
     try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
 }
