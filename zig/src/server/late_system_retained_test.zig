@@ -171,4 +171,3 @@ test "stream content and tool calls occur exactly once across all chunks" {
     try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ vault_reply);
     try expectStreamMatchesWhole("\nChecking." ++ vault_reply);
 }
-
