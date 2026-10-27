@@ -117,7 +117,7 @@ fn seedRows(dir: []const u8, scratch: std.mem.Allocator, prompt: []const u32) !v
     s.disk = r;
     const plan = try s.begin(scratch, prompt, 1400, &.{}, &.{}, null, f.spans);
     try std.testing.expectEqual(@import("rows_fake.zig").fresh(prompt), f.pass(&s, plan));
-    while (rows.write.step(r)) {}
+    _ = rows.write.drain(r, rows.write.nowNs() + 3 * std.time.ns_per_s); // the write worker publishes the state
     try std.testing.expectEqual(@as(usize, 1), r.states.items.len);
     try oracle.check(&s);
 }
