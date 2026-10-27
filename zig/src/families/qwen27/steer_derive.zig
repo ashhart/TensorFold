@@ -9,6 +9,25 @@ const Allocator = std.mem.Allocator;
 pub const method = "difference_of_means_per_layer";
 pub const contrast = "form_matched_harmful_vs_harmless_unpaired";
 
+/// The method name for a capture that took the prompt's last row instead of all of them.
+pub const method_last = "difference_of_means_last_token_per_layer";
+
+/// Which rows of a prompt the capture takes: the prompt's whole content, or its last row.
+pub const Site = enum {
+    /// Every row's mean: the prompt's content, read out where the next word is decided.
+    mean_rows,
+    /// The last row alone: the one the next word is read from, with nothing of the content in it.
+    last_row,
+
+    /// The method name this site writes into the file.
+    pub fn methodName(s: Site) []const u8 {
+        return switch (s) {
+            .mean_rows => method,
+            .last_row => method_last,
+        };
+    }
+};
+
 /// The kernel's constants: the layer whose rows are summed, and the residual's width.
 const Sum = extern struct { layer: u32, width: u32 };
 
@@ -20,17 +39,22 @@ pub const Capture = struct {
     pipeline: mtl.Pipeline,
     layers: usize,
     hidden: usize,
+    site: Site,
 
     /// The accumulator for `layers` layers of `hidden` columns; `dims` is the frame's row metadata.
-    pub fn init(device: mtl.Device, layers: usize, hidden: usize, dims: mtl.Buffer) !Capture {
+    pub fn init(device: mtl.Device, layers: usize, hidden: usize, dims: mtl.Buffer, site: Site) !Capture {
         if (layers == 0 or hidden == 0) return error.BadCaptureShape;
-        const library = try mtl.Library.fromSource(device, source.sumrows, mtl.CompileOptions.mlx());
+        const library = try mtl.Library.fromSource(device, source.capture, mtl.CompileOptions.mlx());
         errdefer library.deinit();
-        const pipeline = try mtl.Pipeline.init(device, library, "q27_sumrows", false);
+        const kernel = switch (site) {
+            .mean_rows => "q27_sumrows",
+            .last_row => "q27_lastrow",
+        };
+        const pipeline = try mtl.Pipeline.init(device, library, kernel, false);
         errdefer pipeline.deinit();
         const buffer = try device.buffer(layers * hidden * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer buffer.deinit();
-        return .{ .buffer = buffer, .dims = dims, .library = library, .pipeline = pipeline, .layers = layers, .hidden = hidden };
+        return .{ .buffer = buffer, .dims = dims, .library = library, .pipeline = pipeline, .layers = layers, .hidden = hidden, .site = site };
     }
 
     pub fn deinit(c: *Capture) void {
@@ -62,6 +86,14 @@ pub const Capture = struct {
         return @intCast(c.dims.slice(i32, 8)[0]);
     }
 
+    /// What one prompt's sums divide by: its row count for a mean of rows, and one for the last row.
+    pub fn divisor(c: *Capture) f32 {
+        return switch (c.site) {
+            .mean_rows => @floatFromInt(c.rows()),
+            .last_row => 1,
+        };
+    }
+
     /// The accumulator's host view: `layers` vectors of `hidden` sums.
     pub fn sums(c: *Capture) []const f32 {
         return c.buffer.slice(f32, c.layers * c.hidden);
@@ -85,11 +117,10 @@ pub const Mean = struct {
         m.total = &.{};
     }
 
-    /// Adds one prompt's summed rows: its own mean, weighted like every other prompt's.
-    pub fn addPrompt(m: *Mean, sums: []const f32, rows: usize) !void {
-        if (rows == 0 or sums.len != m.total.len) return error.BadPromptSums;
-        const count: f32 = @floatFromInt(rows);
-        for (m.total, sums) |*t, s| t.* += s / count;
+    /// Adds one prompt's sums: its own mean, weighted like every other prompt's.
+    pub fn addPrompt(m: *Mean, sums: []const f32, divisor: f32) !void {
+        if (divisor <= 0 or sums.len != m.total.len) return error.BadPromptSums;
+        for (m.total, sums) |*t, s| t.* += s / divisor;
         m.prompts += 1;
     }
 

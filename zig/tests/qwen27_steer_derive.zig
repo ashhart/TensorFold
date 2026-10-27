@@ -9,11 +9,14 @@ const prompts = @import("steer_prompts");
 
 const help =
     \\tf-qwen27-steer-derive --model DIR --out FILE [--alpha 1.0] [--repo ID] [--revision REV] [--prompts N]
+    \\                            [--capture mean|last]
     \\  Derives one control direction per layer from the model itself, then writes the GLP file.
     \\  The refusal set and the form-matched harmless set each run through the native forward.
     \\  --model DIR is the MLX checkpoint directory; --out FILE is the GLP file to write.
     \\  --repo ID and --revision REV are the checkpoint's identity in the file's metadata.
     \\  --prompts N uses only the first N pairs of each set.
+    \\  --capture mean reads every row of a prompt and captures its mean; --capture last
+    \\  takes the last row alone, where the model decides what to say next.
     \\  Layer 0 is not steerable, so the file holds the other layers.
 ;
 
@@ -97,7 +100,7 @@ fn captureSet(runner: *q.decode_round.Runner, capture: *derive.Capture, tok: *co
         if (ids.len == 0 or ids.len > runner.model.frame.capacity) return error.BadPrompt;
         try runner.reset(0);
         try drive(runner, ids, capture);
-        try mean.addPrompt(capture.sums(), capture.rows());
+        try mean.addPrompt(capture.sums(), capture.divisor());
     }
 }
 
@@ -138,13 +141,14 @@ pub fn main(init: std.process.Init) !void {
     var revision: []const u8 = "";
     var alpha: f32 = 1.0;
     var limit: usize = std.math.maxInt(usize);
+    var site: derive.Site = .mean_rows;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const value = args[i];
-        if (std.mem.eql(u8, arg, "--model")) model_dir = value else if (std.mem.eql(u8, arg, "--out")) out_path = value else if (std.mem.eql(u8, arg, "--repo")) repo = value else if (std.mem.eql(u8, arg, "--revision")) revision = value else if (std.mem.eql(u8, arg, "--alpha")) alpha = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--prompts")) limit = try std.fmt.parseInt(usize, value, 10) else return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--model")) model_dir = value else if (std.mem.eql(u8, arg, "--out")) out_path = value else if (std.mem.eql(u8, arg, "--repo")) repo = value else if (std.mem.eql(u8, arg, "--revision")) revision = value else if (std.mem.eql(u8, arg, "--alpha")) alpha = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--prompts")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--capture")) site = if (std.mem.eql(u8, value, "last")) .last_row else if (std.mem.eql(u8, value, "mean")) .mean_rows else return error.UnknownOption else return error.UnknownOption;
     }
     if (model_dir == null or out_path == null) return error.BadOptions;
     if (revision.len == 0) revision = snapshotRevision(model_dir.?) orelse "";
@@ -158,12 +162,14 @@ pub fn main(init: std.process.Init) !void {
     defer tok.deinit();
     var runner = try q.decode_round.Runner.init(init.gpa, m, 1, 512);
     defer runner.deinit();
-    var capture = try derive.Capture.init(m.device, m.config.layers, m.config.hidden, m.frame.get(.dims).buffer);
+    // The blocks are one to `layers`, and the layer after the last one is the head's input.
+    const sites = m.config.layers + 1;
+    var capture = try derive.Capture.init(m.device, sites, m.config.hidden, m.frame.get(.dims).buffer, site);
     defer capture.deinit();
 
-    var harmful = try derive.Mean.init(init.gpa, m.config.layers, m.config.hidden);
+    var harmful = try derive.Mean.init(init.gpa, sites, m.config.hidden);
     defer harmful.deinit(init.gpa);
-    var harmless = try derive.Mean.init(init.gpa, m.config.layers, m.config.hidden);
+    var harmless = try derive.Mean.init(init.gpa, sites, m.config.hidden);
     defer harmless.deinit(init.gpa);
     runner.model.kernels.prompt = true;
     defer runner.model.kernels.prompt = false;
@@ -173,7 +179,7 @@ pub fn main(init: std.process.Init) !void {
     try captureSet(&runner, &capture, &tok, others, &harmless, limit);
     if (harmful.prompts == 0 or harmless.prompts == 0) return error.NoPrompts;
 
-    var derived = try derive.derive(init.gpa, harmful, harmless, m.config.layers, m.config.hidden);
+    var derived = try derive.derive(init.gpa, harmful, harmless, sites, m.config.hidden);
     defer derived.deinit(init.gpa);
     var layers: std.ArrayList(glp.Layer) = .empty;
     defer layers.deinit(init.gpa);
@@ -192,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
         .derived_at = stamp(io, &time_buf),
         .base_model = repo,
         .base_revision = revision,
-        .method = derive.method,
+        .method = site.methodName(),
         .contrast = derive.contrast,
         .layers = layers.items,
     });
@@ -206,12 +212,13 @@ pub fn main(init: std.process.Init) !void {
         .repo = repo,
         .revision = revision,
         .alpha = alpha,
-        .method = derive.method,
+        .method = site.methodName(),
         .contrast = derive.contrast,
         .hook_point = glp.residual_site,
         .width = m.config.hidden,
-        .layers = m.config.layers,
+        .layers = sites - 1,
         .prompts = harmful.prompts,
+        .capture = @tagName(site),
         .directions = layers.items.len,
         .dropped = derived.dropped,
         .bytes = bytes.len,

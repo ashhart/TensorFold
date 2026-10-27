@@ -102,8 +102,9 @@ pub const Stages = struct {
         e.barrier();
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
-            try s.steer(lane, index - 1);
-            if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
+            // The residual now holds the output of the block before this one, which is layer `index`.
+            try s.steer(lane, index);
+            if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index, s.hidden, s.rows);
         }
     }
     pub fn mixer(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
@@ -216,8 +217,9 @@ pub const Stages = struct {
         try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
-        try s.steer(lane, m.config.layers - 1);
-        if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
+        // The residual now holds the output of the last block, which is layer `layers`.
+        try s.steer(lane, m.config.layers);
+        if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers, s.hidden, s.rows);
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
             var input = f.get(.input);

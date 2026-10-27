@@ -13,3 +13,13 @@ kernel void q27_sumrows(device const bfloat* rows [[buffer(0)]], device const in
   for (int r = 0; r < count; ++r) sum += float(rows[r * p.width + gid]);
   acc[p.layer * p.width + gid] += sum;
 }
+
+// One thread per column: a layer's last residual row, the one the next word is read from.
+kernel void q27_lastrow(device const bfloat* rows [[buffer(0)]], device const int* dims [[buffer(1)]],
+                         device float* acc [[buffer(2)]], constant Sum& p [[buffer(3)]],
+                         uint gid [[thread_position_in_grid]]) {
+  if (gid >= p.width) return;
+  const int count = dims[0];
+  if (count <= 0) return;
+  acc[p.layer * p.width + gid] += float(rows[(count - 1) * p.width + gid]);
+}

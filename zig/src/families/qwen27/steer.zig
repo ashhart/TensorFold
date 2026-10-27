@@ -52,7 +52,8 @@ pub const Plan = struct {
 pub fn init(allocator: std.mem.Allocator, device: mtl.Device, src: Source) !*Plan {
     if (src.hidden == 0 or src.layers_total == 0 or src.layers.len == 0) return error.BadSteerShape;
     for (src.layers) |l| {
-        if (l.id == 0 or l.id >= src.layers_total) return error.BadSteerLayer;
+        // Layer 0 is the embedding, which no block writes; the blocks are one to `layers_total`.
+        if (l.id == 0 or l.id > src.layers_total) return error.BadSteerLayer;
         if (l.dir.len != src.hidden) return error.BadSteerWidth;
     }
     const plan = try allocator.create(Plan);
@@ -63,7 +64,7 @@ pub fn init(allocator: std.mem.Allocator, device: mtl.Device, src: Source) !*Pla
     errdefer allocator.free(dirs);
     var live: usize = 0;
     errdefer for (dirs[0..live]) |d| d.deinit();
-    const cover = try allocator.alloc(?usize, src.layers_total);
+    const cover = try allocator.alloc(?usize, src.layers_total + 1);
     errdefer allocator.free(cover);
     @memset(cover, null);
     for (src.layers, 0..) |l, i| {
