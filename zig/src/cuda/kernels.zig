@@ -68,6 +68,7 @@ pub const dense_rows: []const u8 = if (available) &Blob("fatbin_dense_rows").byt
 pub const modelopt_pack: []const u8 = if (available) &Blob("fatbin_modelopt_pack").bytes else &.{};
 pub const glm_glue: []const u8 = if (available) &Blob("fatbin_glm_glue").bytes else &.{};
 pub const glm_ops: []const u8 = if (available) &Blob("fatbin_glm_ops").bytes else &.{};
+pub const glm_index: []const u8 = if (available) &Blob("fatbin_glm_index").bytes else &.{};
 pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
 pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
 pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};

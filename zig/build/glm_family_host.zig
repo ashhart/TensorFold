@@ -8,6 +8,18 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     b.step("test-glm-startup-host", "Page refusals propagate through rank liveness before engine construction").dependOn(&startup_run.step);
     step.dependOn(&startup_run.step);
     b.step("test-glm-tp3-host", "Uneven KDA head shares through actual projection and load planning, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM TP3:"} })).step);
+    // TF_GLM_INDEX_CUDA: the launch rules, and glm_index_scores/pools.cuh as host C++ against plain models
+    const index_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM index:"} }));
+    const index_emulate = b.addExecutable(.{ .name = "glm-index-emulate", .root_module = b.createModule(.{ .target = host, .optimize = .ReleaseSafe, .link_libcpp = true }) });
+    index_emulate.root_module.addCSourceFile(.{ .file = b.path("tools/glm_index_emulate/emulate.cpp"), .flags = &.{ "-std=c++20", "-O1" } });
+    index_emulate.root_module.addIncludePath(b.path("tools/glm_index_emulate"));
+    const index_emulated = b.addRunArtifact(index_emulate);
+    index_emulated.expectExitCode(0);
+    const index_step = b.step("test-glm-index-host", "GLM's prompt indexer kernels: launch rules and the kernels as host C++ against plain models");
+    index_step.dependOn(&index_run.step);
+    index_step.dependOn(&index_emulated.step);
+    step.dependOn(&index_run.step);
+    step.dependOn(&index_emulated.step);
     const kv8_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM FP8 KV:"} }));
     b.step("test-glm-fp8-kv-host", "GLM latent cache layout, mode agreement and recorded CUDA launches without devices").dependOn(&kv8_run.step);
     step.dependOn(&kv8_run.step);
