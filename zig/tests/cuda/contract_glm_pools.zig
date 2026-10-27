@@ -163,22 +163,23 @@ pub const Fast = struct {
     scores: @import("contract_glm_index.zig").Scores,
     pools: Pools,
 
-    pub fn init(gpu: @import("check.zig").Gpu, s: cuda.Stream, fns: glm.glue.Kernels) !Fast {
+    /// On the heap, so the kernels' contexts keep their address; registered into `kernels`.
+    pub fn create(a: std.mem.Allocator, gpu: @import("check.zig").Gpu, s: cuda.Stream, fns: glm.glue.Kernels, kernels: *std.ArrayList(g.Kernel)) !*Fast {
+        const idx = @import("contract_glm_index.zig");
+        const self = try a.create(Fast);
+        errdefer a.destroy(self);
         var m = try cuda.Module.load(gpu.d, cuda.kernels.glm_index);
         errdefer m.unload();
-        const idx = @import("contract_glm_index.zig");
-        return .{ .mod = m, .scores = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = try m.function("tf_glm_index_scores") }, .pools = .{ .rig = .{ .gpu = gpu, .s = s }, .fast = try m.function("tf_glm_index_pools"), .narrow = fns.select_rows } };
-    }
-
-    /// After init's value sits at its final address: each kernel's context points into it.
-    pub fn append(self: *Fast, a: std.mem.Allocator, kernels: *std.ArrayList(g.Kernel)) !void {
+        self.* = .{ .mod = m, .scores = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = try m.function("tf_glm_index_scores") }, .pools = .{ .rig = .{ .gpu = gpu, .s = s }, .fast = try m.function("tf_glm_index_pools"), .narrow = fns.select_rows } };
         try kernels.append(a, self.scores.kernel());
         try kernels.append(a, self.pools.kernel());
+        return self;
     }
 
-    pub fn deinit(self: *Fast) void {
+    pub fn destroy(self: *Fast, a: std.mem.Allocator) void {
         self.pools.deinit();
         self.scores.deinit();
         self.mod.unload();
+        a.destroy(self);
     }
 };
