@@ -1,6 +1,5 @@
 //! The Qwen3.5 CUDA disk image's tests: it covers a host copy, goes to disk and back byte-equal, refuses what differs.
 const std = @import("std");
-const platform = @import("sys");
 const cuda = @import("cuda");
 const api = @import("engine_api");
 const disk = @import("cuda_disk.zig");
@@ -11,7 +10,6 @@ const pc = api.prompt_cache;
 const rows = pc.rows;
 const Engine = engine.Engine;
 const Copy = reuse.Copy;
-extern "c" fn system(cmd: [*:0]const u8) c_int;
 
 /// Pinned host memory from the C heap, as the driver would hand it out.
 const HostFake = struct {
@@ -141,14 +139,18 @@ test "gather and scatter give back the copy byte for byte; a copy kept with imag
     try std.testing.expectError(error.KeptWordsDiffer, disk.image.scatter(&f.t, other, &.{.{ .off = 0, .len = img.len }}, img));
 }
 
-fn dir(buf: []u8, tag: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/tf-qwen-disk-{s}-{d}", .{ tag, platform.c.getpid() }) catch unreachable;
-}
-
-fn rmTree(path: []const u8) void {
-    var buf: [256]u8 = undefined;
-    const cmd = std.fmt.bufPrintSentinel(&buf, "rm -rf '{s}'", .{path}, 0) catch return;
-    _ = system(cmd);
+/// Every file under `path` whose name ends in `ext`: cut to 100 bytes, or byte 40 overwritten.
+fn spoil(a: std.mem.Allocator, io: std.Io, path: []const u8, ext: []const u8, cut: bool) !void {
+    var d = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer d.close(io);
+    var w = try d.walk(a);
+    defer w.deinit();
+    while (try w.next(io)) |e| {
+        if (e.kind != .file or !std.mem.endsWith(u8, e.basename, ext)) continue;
+        const f = try e.dir.openFile(io, e.basename, .{ .mode = .read_write });
+        defer f.close(io);
+        if (cut) try f.setLength(io, 100) else try f.writePositionalAll(io, "x", 40);
+    }
 }
 
 fn entry(a: std.mem.Allocator, c: *Copy, prompt: []u32) !*pc.Entry {
@@ -169,19 +171,19 @@ fn writeBoth(a: std.mem.Allocator, f: *Fixture, o: rows.Options, prompt: []u32, 
 }
 
 test "kept states written to disk read back byte-equal after a restart, sharing blocks; a cut or flipped file is refused" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the test edits files through a POSIX shell
     const gpa = std.testing.allocator;
+    const io = std.testing.io;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var buf: [128]u8 = undefined;
-    const root = dir(&buf, "restart");
-    defer rmTree(root);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, "{s}/restart", .{try tmp.dir.realPathFileAlloc(io, ".", a)});
     const prompt = try a.alloc(u32, 1200);
     for (prompt, 0..) |*x, i| x.* = @intCast(1000 + i * 7 % 997);
     const o: rows.Options = .{ .root = root, .identity = 5, .cap = 1 << 34, .floor = 0, .daily = 1 << 40, .planned = true };
     for ([_]bool{ false, true }) |kv8| {
-        rmTree(root);
+        try tmp.dir.deleteTree(io, "restart");
         var f: Fixture = .{ .d = undefined, .e = undefined };
         f.init(kv8);
         const short = try f.kept(512);
@@ -200,9 +202,8 @@ test "kept states written to disk read back byte-equal after a restart, sharing 
         }
     }
     // a block cut short, then a state's byte flipped: each read fails its check, those states go, nothing crashes
-    const edits = [_][2][]const u8{ .{ "blk", "truncate -s 100 \"$b\"" }, .{ "st", "printf x | dd of=\"$b\" bs=1 seek=40 conv=notrunc 2>/dev/null" } };
-    for (edits) |edit| {
-        rmTree(root);
+    for ([_][]const u8{ ".blk", ".st" }) |ext| {
+        try tmp.dir.deleteTree(io, "restart");
         var f: Fixture = .{ .d = undefined, .e = undefined };
         f.init(true);
         const short = try f.kept(512);
@@ -212,8 +213,7 @@ test "kept states written to disk read back byte-equal after a restart, sharing 
         try writeBoth(a, &f, o, prompt, short, long);
         const r = try rows.Rows.open(gpa, f.snapshots(), o);
         defer r.deinit();
-        var cmd: [512]u8 = undefined;
-        _ = system(try std.fmt.bufPrintSentinel(&cmd, "for b in $(find {s} -name '*.{s}'); do {s}; done", .{ r.dir, edit[0], edit[1] }, 0));
+        try spoil(a, io, r.dir, ext, std.mem.eql(u8, ext, ".blk"));
         while (r.states.items.len > 0) {
             const before = r.states.items.len;
             if (rows.read.read(r, 0)) |got| {
