@@ -348,7 +348,7 @@ pub const Engine = struct {
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
         if (start >= len or start % fw.prefill_rows != 0) return error.BadChunk;
         const rows = @min(len - start, @as(usize, if (part.len > fw.prefill_rows + 1) fw.solo_rows else fw.prefill_rows));
-        if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks);
+        if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
         var one: [1]fw.Rank = undefined;
