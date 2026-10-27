@@ -2,7 +2,8 @@
 const native = @import("cuda_native.zig");
 
 pub const model_type = "qwen3_5_moe";
-pub const formats = native.formats;
+/// MLX's 4-bit tables, and ModelOpt's exports: MIXED_PRECISION (nvidia/Qwen3.6-35B-A3B-NVFP4) and single-format NVFP4.
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-mixed", "modelopt-nvfp4" };
 pub const default_context = native.default_context;
 pub const max_segments = native.max_segments;
 pub const prompt_rows = native.prompt_rows;
@@ -27,3 +28,12 @@ pub const snap_grid = native.snap_grid;
 pub const kept_disk = native.kept_disk;
 pub const explains_open = native.explains_open;
 pub const vision = native.vision;
+
+test "the MoE family's capabilities name the ModelOpt formats it reads beside MLX's" {
+    const std = @import("std");
+    for ([_][]const u8{ "mlx-q4g64", "modelopt-mixed", "modelopt-nvfp4" }) |want| {
+        var found = false;
+        for (formats) |f| found = found or std.mem.eql(u8, f, want);
+        try std.testing.expect(found);
+    }
+}
