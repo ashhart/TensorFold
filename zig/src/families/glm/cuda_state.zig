@@ -180,9 +180,16 @@ pub const Buffers = struct {
         return make(d, w, of.rows, of.prefill, capacity, of.rows, of);
     }
 
-    /// The fields a twin holds apart: make's sizes by index, then their names.
-    const twin_sizes = [_]usize{ 0, 1, 2, 3, 4, 5, 6, 7, 62, 63, 64, 65, 70 };
-    const twin_fields = .{ "ids", "x", "normed", "xs", "post", "comb", "hcpart", "gathered", "hidden", "fnormed", "fxs", "logits", "part" };
+    /// The fields a twin holds apart, by their index in make's sizes (make reads the fields from these indexes too).
+    const twin_at = .{ .ids = 0, .x = 1, .normed = 2, .xs = 3, .post = 4, .comb = 5, .hcpart = 6, .gathered = 7, .hidden = 62, .fnormed = 63, .fxs = 64, .logits = 65, .part = 70 };
+    /// make's size count when twin_at's indexes were last checked: adding or removing a size fails the build.
+    const twin_checked = 76;
+
+    /// Whether make's size `i` is one a twin holds apart.
+    fn twinHolds(i: usize) bool {
+        inline for (@typeInfo(@TypeOf(twin_at)).@"struct".field_names) |f| if (@field(twin_at, f) == i) return true;
+        return false;
+    }
 
     /// `seg`: the most rows one stream's attention takes (a decode window's rows, or a shared window's segment).
     fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize, twin: ?*const Buffers) !Buffers {
@@ -212,7 +219,7 @@ pub const Buffers = struct {
         var split = false; // a KDA stack in two parts moves each part's rows through one more buffer
         for (w.layers) |l| split = split or (l.mixer == .kda and l.mixer.kda.proj == .split);
         const hist_len = if (pairs > cuda.grouped.small) (pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
-        const sizes = [_]usize{
+        const sizes: [twin_checked]usize = .{
             rows * 4,     rows * S * D * 2, rows * D * 2,           rows * (D / 64) * 4,
             rows * S * 4, rows * S * S * 4, glue.hcPartBytes(rows), s.world * rows * D * 4,
             if (prefill or seg < rows) rows * kw * 2 else 4, rows * n * 2, rows * n * 2, // kproj, ka, kg
@@ -253,7 +260,7 @@ pub const Buffers = struct {
         };
         var held = sizes;
         if (twin != null) for (&held, 0..) |*bytes, i| { // a twin allocates its own rows only
-            if (std.mem.indexOfScalar(usize, &twin_sizes, i) == null) bytes.* = 0;
+            if (!twinHolds(i)) bytes.* = 0;
         };
         var p: [sizes.len]u64 = undefined;
         const a = try arena(d, &held, &p);
@@ -263,14 +270,14 @@ pub const Buffers = struct {
             .prefill = prefill,
             .part_rows = part_rows,
             .nch = nch,
-            .ids = p[0],
-            .x = p[1],
-            .normed = p[2],
-            .xs = p[3],
-            .post = p[4],
-            .comb = p[5],
-            .hcpart = p[6],
-            .gathered = p[7],
+            .ids = p[twin_at.ids],
+            .x = p[twin_at.x],
+            .normed = p[twin_at.normed],
+            .xs = p[twin_at.xs],
+            .post = p[twin_at.post],
+            .comb = p[twin_at.comb],
+            .hcpart = p[twin_at.hcpart],
+            .gathered = p[twin_at.gathered],
             .kproj = p[8],
             .kda = .{ .p = 0, .ka = p[9], .kg = p[10], .saves = .{ .out = p[11], .state_out = 0, .k = p[12], .v = p[13], .g = p[14], .b = p[15] }, .wide = .{ .q = p[16], .y = p[17] }, .mm_part = p[42] },
             .dsa = .{
@@ -297,22 +304,22 @@ pub const Buffers = struct {
             },
             .dense = .{ .tmp = p[44], .gu = p[45], .act = p[46], .xs_act = p[47], .mm_part = p[42] },
             .moe = .{ .mlog = p[48], .router_part = p[26], .pick = p[49], .wts = p[50], .plan = .{ .members = p[51], .items = p[52], .counts = p[53], .rank = p[54], .hist = p[55] }, .eact = p[56], .ey = p[57], .sgu = p[58], .sact = p[59], .sxs = p[60], .sy = p[61], .mm_part = p[42] },
-            .hidden = p[62],
-            .fnormed = p[63],
-            .fxs = p[64],
-            .logits = p[65],
+            .hidden = p[twin_at.hidden],
+            .fnormed = p[twin_at.fnormed],
+            .fxs = p[twin_at.fxs],
+            .logits = p[twin_at.logits],
             .hin = p[66],
             .me = p[67],
             .mcat = p[68],
             .mx = p[69],
-            .part = p[70],
+            .part = p[twin_at.part],
         };
         out.moe.x3 = .{ .picks = p[71], .xg = p[72], .xu = p[73], .z = p[74] };
         out.kda.tmp = p[75];
         if (twin) |of| {
             var t = of.*;
             t.arena = out.arena;
-            inline for (twin_fields) |f| @field(t, f) = @field(out, f);
+            inline for (@typeInfo(@TypeOf(twin_at)).@"struct".field_names) |f| @field(t, f) = @field(out, f);
             return t;
         }
         return out;
