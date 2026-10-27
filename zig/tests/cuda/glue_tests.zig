@@ -522,13 +522,11 @@ pub fn run(gpu: Gpu) !void {
         .f = try glue.Fns.resolve(&mods),
         .emb = try cuda.embed_rows.EmbedRows.load(gpu.d),
         .norms = try cuda.norms.Norms.load(gpu.d),
-        .moe = try cuda.moe_glue.MoeGlue.load(gpu.d),
         .rng = prng.random(),
     };
     defer {
         r.emb.unload();
         r.norms.unload();
-        r.moe.unload();
         r.s.deinit();
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);

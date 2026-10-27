@@ -80,7 +80,7 @@ fn chunkSquares(x: []const f32) f32 {
     return butterfly(f32, 8, warps);
 }
 
-/// moe_glue.cu's combine into delta (one fma chain over every slot, rounded to bf16), then addRmsnorm.
+/// tf_moe_add_rms_rows_bf16h: the slots' combine (one fma chain over every slot, rounded to bf16), then addRmsnorm.
 pub fn addMoeNorm(gpa: std.mem.Allocator, x: []const u16, y32: ?[]const f32, y16: ?[]const u16, wt: []const f32, w: []const u16, hn: []u16, out: []u16, xs: []f32, rows: usize, d: usize, eps: f32, ns: usize) !void {
     const delta = try gpa.alloc(u16, rows * d);
     defer gpa.free(delta);

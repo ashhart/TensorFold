@@ -77,7 +77,6 @@ pub const Forward = struct {
                 .s = ops.s,
                 .emb = &ops.k.emb,
                 .norms = &ops.k.norms,
-                .moe = &ops.k.moe,
             },
             .max_len = max_len,
             .nch = nch,

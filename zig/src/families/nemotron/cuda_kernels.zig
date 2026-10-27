@@ -49,7 +49,6 @@ pub const Kernels = struct {
     glue: glue.Fns,
     emb: cuda.embed_rows.EmbedRows,
     norms: cuda.norms.Norms,
-    moe: cuda.moe_glue.MoeGlue, // the shared expert combine
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
     router: cuda.grouped.Router,
     experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
@@ -110,8 +109,6 @@ pub const Kernels = struct {
         errdefer k.emb.unload();
         k.norms = try cuda.norms.Norms.load(d);
         errdefer k.norms.unload();
-        k.moe = try cuda.moe_glue.MoeGlue.load(d);
-        errdefer k.moe.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
         k.latent = null;
@@ -135,7 +132,6 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         k.emb.unload();
         k.norms.unload();
-        k.moe.unload();
         if (k.latent) |*x| x.unload();
         if (k.ck) |*x| x.unload();
         if (k.modelopt) |*m| {
