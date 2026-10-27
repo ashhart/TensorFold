@@ -54,6 +54,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tools: `tools/bench_cache.py` takes `--api-key-env NAME`, as the other benchmark clients do, so its probes can reach a server started with `--api-key`. The key is read from that variable alone and is never printed or written into a report; without the flag the probes send no key, as before (#1483). Thanks to @Maxrio9.
 
+- LFM2.5-24B-A2B on Metal decodes several streams in shared rounds: each layer's short convolution and attention run once over all of a round's streams, in kernels bit-equal to the per-stream ones, and a verify's greedy rows take the GPU's pick of their logits (#1377). On an M5 Ultra with the 4-bit export, aggregate decode rose 20% at 4 streams, 34% at 8 and 31% at 16, and one stream about 2%; every reply is the same tokens as before, alone or beside others, and the exactness checks pass on the 4-, 6- and 8-bit exports. See [the recipe](docs/recipes/lfm2.5-24b-a2b.md). Thanks to @BlivionIaG.
+
+- Kernel contract: Nemotron's routed-expert Metal pipelines are checked from one row to 128 on the engine's route tables: the default window kernels against float64, and the rows2, rows4 and geometry pipelines bit-equal to them, with two planted controls (#1494). One known finding is recorded: a NaN dot in `tf_xup_w3` comes out as 0, as Metal's `max` returns the other operand.
+
+- Tests: Gemma 4's E-series per-layer inputs have a host reference that equals MLX 0.32.4 bit for bit at one row, checked against MLX's own SHA-256 prints at the E4B's shapes (an M4 Max and an M5 Ultra give the same prints) (#1402). The E-series stays refused, and nothing served changes. Thanks to @Mirrdhyn.
+
 ## 1.1.7
 
 - Flash Next on a Mac can leave its routed experts and n-gram tables in the checkpoint and read them from SSD with `--ssd-experts GIB` and `--ple-on-ssd`, so a checkpoint larger than the Mac's memory can be served (#1039, see [Exact Fluid Subgraph Residency](docs/recipes/fluid-subgraph-residency.md)). Neither is on by default. Replies are the same tokens as with everything in memory; a budget too small for one layer's experts refuses at startup instead of changing the model's settings. On an M5 Ultra the 6-bit MTP checkpoint, which does not fit in memory, serves with a 16 GiB expert budget; on an M3 Ultra with the 4-bit checkpoint, servers without the flags are unchanged in prefill and decode.
