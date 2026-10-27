@@ -14,6 +14,7 @@ pub const Penalties = lanes.Penalties;
 pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
+pub const load_ledger = @import("load_ledger.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -450,6 +451,8 @@ pub const Engine = struct {
         imprint: ?*const fn (ctx: *anyopaque, ask: *ImprintAsk) bool = null,
         /// A planned stop's first half: no more work, disk writes finished under a deadline, the engine thread joined.
         drain: ?*const fn (ctx: *anyopaque) void = null,
+        /// The server's load-ledger producer at attach, null at detach (load_ledger.zig); null entry: no engine group.
+        load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -583,6 +586,7 @@ test {
     _ = @import("lane_embedding_test.zig");
     _ = speech_guard;
     _ = @import("lane_host.zig");
+    _ = load_ledger;
     _ = @import("lane_host_test.zig");
     _ = @import("lane_root_copy_test.zig");
     _ = @import("lane_rounds_test.zig");
