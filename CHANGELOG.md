@@ -38,6 +38,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `--loop-guard-stop` (opt-in, implies `--loop-guard`): when the reasoning-loop guard fires, the reply ends there instead of closing the reasoning and answering, so an agent no longer gets tool calls that repeat finished work (#1463). The reply keeps its reasoning and `tensorfold.loop` with `"stopped": true`, carries `finish_reason: "content_filter"` and an error with code `reasoning_loop` (`/v1/messages`: `stop_reason: "refusal"`), and the stream's lane is released at once. Without the flag nothing changes.
 
+- The prompt cache finds a conversation's kept state through an index kept longest first, instead of comparing the prompt with every kept state, so a conversation that keeps a state each turn no longer pays a full prefix compare per kept state on every lookup. Every resume, its position, ties and evictions are the same as before; on an M5 Ultra the Qwen3.8-27B cells give the same tokens at the same speed.
+
 ## 1.1.7
 
 - Flash Next on a Mac can leave its routed experts and n-gram tables in the checkpoint and read them from SSD with `--ssd-experts GIB` and `--ple-on-ssd`, so a checkpoint larger than the Mac's memory can be served (#1039, see [Exact Fluid Subgraph Residency](docs/recipes/fluid-subgraph-residency.md)). Neither is on by default. Replies are the same tokens as with everything in memory; a budget too small for one layer's experts refuses at startup instead of changing the model's settings. On an M5 Ultra the 6-bit MTP checkpoint, which does not fit in memory, serves with a 16 GiB expert budget; on an M3 Ultra with the 4-bit checkpoint, servers without the flags are unchanged in prefill and decode.
