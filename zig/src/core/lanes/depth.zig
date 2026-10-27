@@ -10,9 +10,14 @@ pub const Constants = struct {
     depth_probe_every: u64 = 8, // rounds between probes one depth deeper
     cost_rate: f64 = 0.2, // weight of the newest round in a depth's measured time
     plain_margin: f64 = 1.05, // a drafted depth must beat plain rounds' tokens a ms by this much
-    plain_wait_most: u64 = 128, // plain rounds between probes at most
+    leave_plain_margin: f64 = 1.2, // a stream on plain rounds returns to drafts on its own estimates only by this much (a round's time is noisy)
+    plain_wait_most: u64 = 64, // plain rounds between probes at most
+    rate_weight: f64 = 0.25, // weight of the newest round in a stream's plain and drafted tokens a ms
     draft_slack: i64 = 2, // drafts a stream offers past what its last shared round granted it
 };
+
+/// Rounds of each kind a stream measures before the two are compared.
+const min_samples = 4;
 
 /// A stream's acceptance by depth and probe counters (Python `_depth_state[stream]`).
 pub const State = struct {
@@ -21,6 +26,13 @@ pub const State = struct {
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
+    plain_tok: f64 = 0, // tokens and ms of the stream's recent plain rounds (no head draft held), averaged
+    plain_ms: f64 = 0,
+    plain_n: u32 = 0,
+    draft_tok: f64 = 0, // the same for rounds that verified the head's drafts
+    draft_ms: f64 = 0,
+    draft_n: u32 = 0,
+    chain: bool = true, // the last decision: the round ending now launched the head's chain (its ms carry it)
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);
@@ -94,6 +106,43 @@ pub const Rule = struct {
             const at: usize = @intCast(j);
             p[at] += r.k.depth_rate * (hit - p[at]);
         }
+    }
+
+    /// A finished round's tokens and wall ms.
+    pub fn observeRate(r: *Rule, who: Who, tokens: usize, ms: f64) !void {
+        _ = try r.rates(who);
+        const st = &who.state.*.?;
+        const drafted = st.chain;
+        const tok = if (drafted) &st.draft_tok else &st.plain_tok;
+        const span = if (drafted) &st.draft_ms else &st.plain_ms;
+        const n = if (drafted) &st.draft_n else &st.plain_n;
+        n.* +|= 1;
+        // a true mean over the first rounds (a round's wall time is noisy), then a moving average
+        const w = @max(r.k.rate_weight, 1.0 / @as(f64, @floatFromInt(n.*)));
+        const t: f64 = @floatFromInt(tokens);
+        tok.* += w * (t - tok.*);
+        span.* += w * (ms - span.*);
+    }
+
+    /// Whether the stream's next round runs without the head's drafts: its measured plain tokens a ms beat its drafted
+    fn preferPlain(r: *Rule, who: Who) !bool {
+        _ = try r.rates(who);
+        const st = &who.state.*.?;
+        const plain_round = blk: {
+            if (st.draft_n < min_samples) break :blk false;
+            if (st.plain_n < min_samples) break :blk true;
+            const plain = st.plain_tok / st.plain_ms;
+            const drafted = st.draft_tok / st.draft_ms;
+            const margin = if (st.chain) r.k.plain_margin else r.k.leave_plain_margin;
+            if (drafted >= plain * margin) {
+                st.plain = 0;
+                st.wait = r.k.depth_probe_every;
+                break :blk false;
+            }
+            break :blk !r.probePlain(st);
+        };
+        st.chain = !plain_round;
+        return plain_round;
     }
 
     /// Round times by depth: the stream's own under `plain_guard`, else greedy rounds' for a greedy stream.
@@ -195,7 +244,7 @@ pub const Rule = struct {
     /// Python `_head_depth`: the next round's head drafts for a stream (0 when forced, 1 with a copy ahead).
     pub fn headDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe) !i64 {
         const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.node_probabilities)
-            @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
+            (if (r.plain_guard and try r.preferPlain(who.*)) 0 else @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1)))
         else
             try r.depth(who.*);
         if (who.forced) return 0;
@@ -380,4 +429,37 @@ test "a shared round's drafts come out the same whichever depths its overhead wa
         try rule.budgets(&whos, probe, false, out);
     }
     try std.testing.expectEqualSlices(i64, &got[0], &got[1]);
+}
+
+test "with chances on the wire, a stream whose plain rounds earn more tokens a ms than its drafted ones runs plain, with probes" {
+    const gpa = std.testing.allocator;
+    const empty: Table = .{};
+    var rule: Rule = .{ .gpa = gpa, .prior = &.{ 0.5, 0.5 }, .most_drafts = 2, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = true, .node_probabilities = true, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    const never = struct {
+        fn copy(_: *anyopaque, _: *const Who) bool {
+            return false;
+        }
+    };
+    var unused: u8 = 0;
+    const probe: Probe = .{ .ptr = &unused, .copy = never.copy };
+    // drafts are measured first, then plain
+    try std.testing.expectEqual(@as(i64, 2), try rule.headDepth(&who, null, probe));
+    for (0..min_samples) |i| {
+        try rule.observeRate(who, 2, 60.0); // 2 tokens in 60 ms
+        // then one plain round to measure
+        try std.testing.expectEqual(@as(i64, if (i + 1 < min_samples) 2 else 0), try rule.headDepth(&who, null, probe));
+    }
+    for (0..min_samples) |_| try rule.observeRate(who, 1, 25.0); // a plain token in 25 ms beats 30 ms
+    // the next decisions run plain until the probe comes
+    var plain_rounds: usize = 0;
+    while (try rule.headDepth(&who, null, probe) == 0) plain_rounds += 1;
+    try std.testing.expectEqual(@as(usize, rule.k.depth_probe_every - 1), plain_rounds);
+    // landing drafts that earn more flip it back
+    st.?.chain = true;
+    for (0..8) |_| try rule.observeRate(who, 4, 60.0);
+    try std.testing.expectEqual(@as(i64, 2), try rule.headDepth(&who, null, probe));
 }

@@ -177,8 +177,8 @@ pub fn tpUpdate() bool {
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// TF_FLASHNEXT_EXL3_GRAPH_DECODE_AFTER: the sighting of a key that captures it (default 2; 1 captures at once).
-pub fn after() u32 {
-    const v = std.c.getenv("TF_FLASHNEXT_EXL3_GRAPH_DECODE_AFTER") orelse return 2;
-    return @max(1, std.fmt.parseInt(u32, std.mem.span(v), 10) catch 2);
+/// TF_FLASHNEXT_EXL3_GRAPH_DECODE_AFTER: the sighting of a key that captures it, for rounds and windows alike.
+pub fn after(key: Key) u32 {
+    if (std.c.getenv("TF_FLASHNEXT_EXL3_GRAPH_DECODE_AFTER")) |v| return @max(1, std.fmt.parseInt(u32, std.mem.span(v), 10) catch 2);
+    return if (key.kind == 2) 12 else 2;
 }

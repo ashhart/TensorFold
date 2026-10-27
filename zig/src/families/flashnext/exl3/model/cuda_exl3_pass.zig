@@ -116,11 +116,11 @@ pub fn moe(p: anytype, lw: anytype, x: *const load.Experts) !void {
 /// Host time of the A/B cut (the picks D2H and its wait) and of Pool.plan, summed over every pooled block (read by
 pub var offloaded_layers: usize = 0;
 
-/// Drafted rounds verify more rows and lose on offloaded experts: plain decode unless TF_FLASHNEXT_DRAFT_ENABLE=1.
+/// A drafted window on offloaded experts costs about 18 ms for its first extra row (the missed experts' PCIe copies)
 pub fn plainByDefault() bool {
     if (offloaded_layers == 0) return false;
-    const value = std.c.getenv("TF_FLASHNEXT_DRAFT_ENABLE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(value), "1");
+    const value = std.c.getenv("TF_FLASHNEXT_DRAFT_ENABLE") orelse return false;
+    return std.mem.eql(u8, std.mem.span(value), "0");
 }
 
 pub var pool_time: struct { cut_ns: u64 = 0, plan_ns: u64 = 0, blocks: u64 = 0 } = .{};

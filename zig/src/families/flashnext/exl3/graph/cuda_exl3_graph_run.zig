@@ -50,7 +50,7 @@ pub fn run(key: Key, pass: anytype, ids: []const u32, pos0: usize) !void {
         return e.exec.?.launchOn(pass.stream);
     }
     if (try grebind.tryRebind(key, pass)) return;
-    if (gcache.sighting(key) < gcache.after()) {
+    if (gcache.sighting(key) < gcache.after(key)) {
         hub.stats.eager_dplan += 1;
         glog.note(key, .eager);
         pass.prepared = true;

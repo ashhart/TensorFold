@@ -32,8 +32,8 @@ pub fn runTogether(c: *collective.Collective, key: Key, pass: anytype, ids: []co
     if (entry) |x| x.used = gcache.clock;
     const vote = if (entry != null) graphVote(entry, c.graphTimeoutMs()) else collective.GraphVote{
         .state = if (grebind.stateRequest(key, pass)) |request|
-            if (grebind.rebindCandidate(key, request, true) != null) .capture else if (gcache.sighting(key) < gcache.after()) .eager else .capture
-        else if (gcache.sighting(key) < gcache.after()) .eager else .capture,
+            if (grebind.rebindCandidate(key, request, true) != null) .capture else if (gcache.sighting(key) < gcache.after(key)) .eager else .capture
+        else if (gcache.sighting(key) < gcache.after(key)) .eager else .capture,
     };
     const decision = try c.graphAgree(signature, vote);
     switch (decision.choice) {
