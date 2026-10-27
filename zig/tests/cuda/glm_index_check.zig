@@ -205,6 +205,7 @@ fn same(gpu: check.Gpu, what: []const u8, a: u64, b: u64, n: usize, np: usize, c
     defer gpu.gpa.free(ha);
     const hb = try gpu.gpa.alloc(u8, n);
     defer gpu.gpa.free(hb);
+    std.debug.print("    {s}: read {d} bytes twice\n", .{ what, n });
     try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = a, .len = n, .borrowed = true }).download(0, ha);
     try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = b, .len = n, .borrowed = true }).download(0, hb);
     var diff: usize = 0;
@@ -241,7 +242,15 @@ fn ties(gpu: check.Gpu, bufs: *Bufs, rand: std.Random, set: glm.glue.Set, idx: *
         step(c, np, "ties: read the paths");
         var taken: [512]i32 = undefined;
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = path, .len = rows * 4, .borrowed = true }).download(0, std.mem.sliceAsBytes(taken[0..rows]));
-        for (taken[0..rows]) |p| paths[@intCast(p)] += 1;
+        step(c, np, "ties: count the paths");
+        for (taken[0..rows], 0..) |p, r| {
+            if (p < 0 or p > 2) {
+                std.debug.print("FAIL np {d} row {d}: glm_index_pools reported path {d}\n", .{ np, r, p });
+                return error.TestFailed;
+            }
+            paths[@intCast(p)] += 1;
+        }
+        step(c, np, "ties: compare pools");
         fails += try same(gpu, if (round == 0) "tied pools" else "random pools", sa.pools, sb.pools, rows * sp.topk_pools * 8, np, c);
     }
     return fails;
