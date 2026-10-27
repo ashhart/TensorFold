@@ -1,4 +1,4 @@
-// The build prefixes weight_only.h under these Metal scalar and pointer definitions.
+// The build prefixes the shared weight-only header under these Metal scalar and pointer definitions.
 #include <metal_stdlib>
 using namespace metal;
 #define TF_INLINE inline
