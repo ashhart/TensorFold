@@ -21,33 +21,29 @@ const h3_image = struct {
 /// The named embedded image; only contract_controls may select the planted controls.
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
-    inline for (.{ "l2pf", "l2pace" }) |n|
-        if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "window_rows")) return kk.window_rows;
-    if (std.mem.eql(u8, name, "joint_schema")) return kk.joint_schema;
     if (std.mem.eql(u8, name, "fp8_experts")) return kk.fp8_experts;
-    if (std.mem.eql(u8, name, "mla")) return kk.mla;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "qwen4_projection", "qwen4_hc", "qwen4_gdn", "qwen4_ple", "gemma4_ple" }) |n|
+    inline for (.{ "qwen4_projection", "qwen4_hc", "qwen4_gdn", "qwen4_ple" }) |n|
         if (std.mem.eql(u8, name, n)) return @field(kk, n);
-    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "qmm_prefill", "lane_gemv", "prompt16", "qmmf", "ck_experts", "nvfp4_experts", "nvfp4_experts_tile", "nvfp4_experts32", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "glm_ops", "glm_index", "nemotron_mamba", "sample", "qwen35", "qwen35_bf16_rows", "qwen35_keep", "qwen35_kv8", "w4a8_prefill", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "window_pages", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows", "nemotron_ops", "minimax_m3", "minimax_m3_attn", "experts_bf16", "moss_image", "lfm2_moe", "lfm2", "dots_mocr" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "qmm_prefill", "lane_gemv", "prompt16", "qmmf", "ck_experts", "nvfp4_experts", "nvfp4_experts_tile", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "glm_ops", "glm_index", "nemotron_mamba", "sample", "qwen35", "qwen35_bf16_rows", "qwen35_keep", "qwen35_kv8", "w4a8_prefill", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "window_pages", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows", "nemotron_ops", "minimax_m3", "minimax_m3_attn", "moss_image", "mimo_glue", "mimo_ops", "mimo_attention", "mimo_dflash" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
+    std.debug.print("FAIL kernel-contract: unknown image name: {s}\n", .{name});
     return error.UnknownContractImage;
 }
 
-/// Gate 5 on this GPU, each record against the loaded function; `only`: the launches so named, no offline audit.
-pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
-    var n: usize = 0;
-    if (only.len == 0) n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
-    if (only.len == 0) std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
+/// Gate 5 on this GPU: the table's row for it against the driver, each record against the loaded function.
+pub fn live(gpu: check.Gpu) !usize {
+    var n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
+    std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
     const sm: u32 = @intCast(try gpu.ctx.capability());
-    const t = limits.target(sm) orelse {
+    const at = for (limits.sms, 0..) |t, i| {
+        if (t.sm == sm) break i;
+    } else {
         std.debug.print("N/A  limits live: sm_{d} is not a target the records cover\n", .{sm});
         return n;
     };
-    const at: ?usize = for (limits.sms, 0..) |recorded, i| {
-        if (recorded.sm == sm) break i;
-    } else null;
+    const t = limits.sms[at];
     const dev = [_]struct { []const u8, cuda.abi.DeviceAttribute, u32 }{
         .{ "most shared bytes a block (opt-in)", .max_shared_memory_per_block_optin, t.smem_optin },
         .{ "threads a block", .max_threads_per_block, t.threads },
@@ -60,21 +56,13 @@ pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
     var said: ?limits.Nvcc = null;
     for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
-        if (only.len > 0) for (only) |w| {
-            if (std.mem.indexOf(u8, r.launch.name, w) != null) break;
-        } else continue;
-        if (!control and t.sm < r.launch.min_sm) continue;
-        if (!control and at != null and registry.targetDecision(r, t, r.usage[at.?]) != .applicable) continue;
-        const bytes = image(r.launch.image) catch |err| {
-            std.debug.print("FAIL kernel-contract: unknown image name: {s}\n", .{r.launch.image});
-            return err;
-        };
-        const rel = if (at != null) try built(gpu.gpa, bytes, sm) else null;
-        if (at != null) {
-            const set = registry.setFor(rel);
-            if (said == null or !std.meta.eql(said.?, set)) records("live", rel, set);
-            said = set;
-        }
+        if (!control and registry.targetDecision(r, t, r.usage[at]) != .applicable) continue;
+        const bytes = try image(r.launch.image);
+        const rel = try built(gpu.gpa, bytes, sm);
+        const set = registry.setFor(rel);
+        if (said == null or !std.meta.eql(said.?, set)) records("live", rel, set);
+        said = set;
+        const want = registry.usageFor(r, rel)[at];
         var mod = try cuda.Module.load(gpu.d, bytes);
         defer mod.unload();
         const sym = try gpu.gpa.dupeSentinel(u8, r.launch.symbol, 0);
@@ -83,26 +71,6 @@ pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
         const regs: u32 = @intCast(try f.attribute(.num_regs));
         const static: u32 = @intCast(try f.attribute(.shared_size_bytes));
         const most: u32 = @intCast(try f.attribute(.max_threads_per_block));
-        if (at == null) {
-            const usage: limits.Usage = .{ .regs = regs, .static = static, .bound = most };
-            if (!control and registry.targetDecision(r, t, usage) != .applicable) continue;
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(gpu.gpa);
-            const red = try limits.cuda(auditLaunch(r.launch, sm), usage, t, &out, gpu.gpa);
-            if ((control and red == 0) or (!control and red != 0)) n += 1;
-            std.debug.print("{s} limits live sm_{d} {s}: {d} registers, {d} static shared bytes, bound {d}{s}", .{
-                if (control) (if (red == 0) "MISSED" else "RED ") else if (red == 0) "PASS" else "FAIL",
-                sm,
-                r.launch.name,
-                regs,
-                static,
-                most,
-                if (red == 0) "\n" else ": ",
-            });
-            if (red != 0) std.debug.print("{s}", .{out.items});
-            continue;
-        }
-        const want = registry.usageFor(r, rel)[at.?];
         const fits = r.launch.threads <= most and static + r.launch.dynamic <= t.smem_optin;
         const current = want.regs == regs and want.static == static;
         if (!control and !(fits and current)) n += 1;
@@ -126,31 +94,6 @@ fn records(what: []const u8, rel: ?limits.Nvcc, set: limits.Nvcc) void {
     } else std.debug.print("INFO limits {s}: the images name no nvcc release; checked against nvcc {d}.{d}'s records\n", .{ what, set.major, set.minor });
 }
 
-/// Only sm_110 cubins need the loader's raised shared-memory limit for these launches.
-fn auditLaunch(launch: limits.CudaLaunch, sm: u32) limits.CudaLaunch {
-    if (sm != 110) return launch;
-    const raised = [_][]const u8{
-        "qmmf FP8 64-row tile", // zig/src/cuda/qmmf.zig:147
-        "qmmf FP8 64-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
-        "qmmf BF16 32-row tile", // zig/src/cuda/qmmf.zig:147
-        "qmmf BF16 32-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
-        "qmmf shared down 32 stride", // zig/src/cuda/qmmf.zig:189
-        "prompt16 FP8", // zig/src/cuda/nvfp4.zig:122
-        "qmmf FP8 fp32 out 64-row tile", // zig/src/cuda/qmmf.zig:147
-        "qmmf FP8 fp32 out 64-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
-        "qmmf FP8 fp32 out 64-row tile, fused slices", // zig/src/cuda/qmmf.zig:151
-        "qmmf BF16 fp32 out 32-row tile", // zig/src/cuda/qmmf.zig:147
-        "qmmf BF16 fp32 out 32-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
-        "h3 h3_attention", // zig/src/families/h3/cuda.zig:97
-    };
-    for (raised) |name| if (std.mem.eql(u8, launch.name, name)) {
-        var result = launch;
-        result.opt_in = true;
-        return result;
-    };
-    return launch;
-}
-
 /// kernel-contract-limits DIR: each record against DIR's fatbins; a RECORD line keeps the record for SMs not built.
 fn keep(a: std.mem.Allocator, line: *std.ArrayList(u8), r: registry.CudaRecord, compiler: ?limits.Nvcc, i: usize) !void {
     const u = registry.usageFor(r, compiler)[i];
@@ -161,26 +104,12 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
     const a = gpu.gpa;
     var n: usize = 0;
     var said: ?limits.Nvcc = null;
-    const mode_path = try std.fmt.allocPrint(a, "{s}/norms.fatbin", .{dir});
-    defer a.free(mode_path);
-    const mode_bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, mode_path, a, .limited(1 << 28));
-    defer a.free(mode_bytes);
-    const mode_images = try contract.cubin.images(a, mode_bytes);
-    defer contract.cubin.freeImages(a, mode_images);
-    var release = false;
-    var thor = false;
-    for (mode_images) |img| {
-        thor = thor or img.sm == 110;
-        for (limits.sms) |t| release = release or img.sm == t.sm;
-    }
-    if (!release and !thor) return error.NoKnownSmInFatbins;
     for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
         const any_target = for (limits.sms, 0..) |target, index| {
             if (registry.targetDecision(r, target, r.usage[index]) == .applicable) break true;
         } else false;
-        const thor_target = thor and r.launch.min_sm <= 110;
-        if (!control and !(release and any_target) and !thor_target) {
+        if (!control and !any_target) {
             std.debug.print("N/A limits {s}: no applicable target\n", .{r.launch.name});
             continue;
         }
@@ -191,9 +120,10 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         const imgs = try contract.cubin.images(a, bytes);
         defer contract.cubin.freeImages(a, imgs);
         const compiler: ?limits.Nvcc = if (imgs.len > 0) try contract.cubin.release(a, imgs[0].elf) else null;
+        var red: usize = 0;
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(a);
-        if (release) for (limits.sms, 0..) |t, i| {
+        for (limits.sms, 0..) |t, i| {
             const decision = registry.targetDecision(r, t, r.usage[i]);
             if (!control and decision != .applicable) {
                 std.debug.print("N/A limits {s} sm_{d}: {t}\n", .{ r.launch.name, t.sm, decision });
@@ -225,55 +155,17 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
                 try keep(a, &line, r, compiler, i);
                 continue;
             }
-            const problems = try limits.cuda(r.launch, k.usage, t, &out, a);
+            red += try limits.cuda(r.launch, k.usage, t, &out, a);
             const current = std.meta.eql(k.usage, registry.usageFor(r, rel)[i]);
             if (!control and !current) n += 1;
-            if (control and problems == 0) n += 1;
-            if (!control) n += problems;
-            std.debug.print("{s} limits sm_{d} {s}: {d} registers, {d} static shared bytes, bound {d} (record {s}){s}", .{ if (control) (if (problems == 0) "MISSED" else "RED ") else if (problems == 0) "PASS" else "FAIL", t.sm, r.launch.name, k.usage.regs, k.usage.static, k.usage.bound, if (current) "current" else "stale", if (out.items.len > 0) ": " else "\n" });
+            std.debug.print("{s} limits sm_{d} {s}: {d} registers, {d} static shared bytes, bound {d} (record {s}){s}", .{ if (out.items.len > 0) (if (control) "RED " else "FAIL") else "PASS", t.sm, r.launch.name, k.usage.regs, k.usage.static, k.usage.bound, if (current) "current" else "stale", if (out.items.len > 0) ": " else "\n" });
             if (out.items.len > 0) std.debug.print("{s}", .{out.items});
             try line.print(a, ".{{ .regs = {d}, .static = {d}, .bound = {d} }}, ", .{ k.usage.regs, k.usage.static, k.usage.bound });
-        };
-        if (thor_target) {
-            const t = limits.target(110).?;
-            const img = for (imgs) |im| {
-                if (im.sm == 110) break im;
-            } else {
-                std.debug.print("FAIL limits {s}: {s} holds no sm_110 image\n", .{ r.launch.name, path });
-                n += 1;
-                continue;
-            };
-            const ks = try contract.cubin.kernels(a, img.elf, 110);
-            defer a.free(ks);
-            const k = for (ks) |kv| {
-                if (std.mem.eql(u8, kv.name, r.launch.symbol)) break kv;
-            } else return error.SymbolNotInImage;
-            const decision = registry.targetDecision(r, t, k.usage);
-            if (!control and decision != .applicable) {
-                std.debug.print("N/A limits {s} sm_110: {t}\n", .{ r.launch.name, decision });
-            } else {
-                var out: std.ArrayList(u8) = .empty;
-                defer out.deinit(a);
-                const problems = try limits.cuda(auditLaunch(r.launch, 110), k.usage, t, &out, a);
-                if (control and problems == 0) n += 1;
-                if (!control) n += problems;
-                std.debug.print("{s} limits sm_110 {s}: {d} registers, {d} static shared bytes, bound {d}{s}", .{
-                    if (control) (if (problems == 0) "MISSED" else "RED ") else if (problems == 0) "PASS" else "FAIL",
-                    r.launch.name,
-                    k.usage.regs,
-                    k.usage.static,
-                    k.usage.bound,
-                    if (problems == 0) "\n" else ": ",
-                });
-                if (problems != 0) std.debug.print("{s}", .{out.items});
-            }
         }
-        if (release) std.debug.print("RECORD {s}: .usage = .{{ {s}}}\n", .{ r.launch.name, line.items });
+        std.debug.print("RECORD {s}: .usage = .{{ {s}}}\n", .{ r.launch.name, line.items });
+        if (control and red == 0) n += 1;
+        if (!control) n += red;
     }
     try check.expect(n == 0, "kernel-contract-limits: {d} problems", .{n});
-    if (thor) {
-        check.pass("kernel-contract-limits: every registered launch fits sm_110 from compiled cubins, every control red", .{});
-    } else {
-        check.pass("kernel-contract-limits: every registered launch fits sm_80, sm_86, sm_89, sm_120 and sm_121, every control red", .{});
-    }
+    check.pass("kernel-contract-limits: every registered launch fits sm_80, sm_86, sm_89, sm_120 and sm_121, every control red", .{});
 }
