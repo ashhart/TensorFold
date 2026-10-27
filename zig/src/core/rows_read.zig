@@ -131,7 +131,9 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
 
 fn ready(s: *const pc.Store, at: u32, bytes: u64) bool {
     if (s.held > s.budget or s.entries.items.len >= s.most) return false;
-    if (s.family.vtable.reuses) |f| if (f(s.family.ptr, at)) return true; // spare storage takes it, as a keep's would
+    const f = s.family.vtable;
+    // a pool without trim reads into spare storage that takes the state, as a keep would
+    if (f.trim == null) if (f.reuses) |reuses| if (reuses(s.family.ptr, at)) return true;
     const room = s.budget - s.held;
     const spare = s.spare();
     return spare <= room and bytes <= room - spare;

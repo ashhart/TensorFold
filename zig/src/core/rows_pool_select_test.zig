@@ -136,3 +136,65 @@ test "restore selection: a pool without trim reads into the spare storage an evi
     try t.expectEqual(fresh(&prompt), f.pass(&s, &prompt, .{ .from = restored.at }));
     s.release(borrowed);
 }
+
+/// A disk read into new storage, whatever spare storage the pool holds.
+const Fresh = struct {
+    const api: rows.Image = .{ .parts = Image.parts, .gather = Image.gather, .blank = blank, .scatter = Image.scatter };
+    fn blank(ptr: *anyopaque, at: u32) !pc.Saved {
+        const f: *Fake = @ptrCast(@alignCast(ptr));
+        const previous = f.at;
+        f.at = at;
+        defer f.at = previous;
+        return f.snapshots().vtable.save(ptr, null, at);
+    }
+};
+
+test "restore selection: a pool that also trims reads a disk state only within its budget, whatever it reuses" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    defer a.free(dir);
+    var prompt: [64]u32 = undefined;
+    for (&prompt, 0..) |*token, i| token.* = @intCast(100 + i);
+    const rules: pc.Rules = .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 };
+    {
+        var f: Fake = .{ .gpa = a, .at = 20, .sum = fresh(prompt[0..20]) };
+        var table = f.pooled().vtable.*;
+        table.rows = &Image.api;
+        const family: pc.Snapshots = .{ .ptr = &f, .vtable = &table };
+        const r = try rows.Rows.open(a, family, options(dir));
+        defer r.deinit();
+        var s = pc.Store.init(a, family, rules, 1000);
+        defer s.deinit();
+        s.disk = r;
+        try t.expect(s.keep(&prompt, 20, null, &.{}, &.{}));
+        while (rows.write.step(r)) {}
+    }
+    var f: Fake = .{ .gpa = a, .at = 5, .sum = fresh(prompt[0..5]) };
+    var table = f.pooled().vtable.*;
+    table.rows = &Fresh.api;
+    try t.expect(table.reuses != null and table.trim != null);
+    const family: pc.Snapshots = .{ .ptr = &f, .vtable = &table };
+    const r = try rows.Rows.open(a, family, options(dir));
+    defer r.deinit();
+    var s = pc.Store.init(a, family, rules, 240);
+    defer s.deinit();
+    try t.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
+    const borrowed = s.entries.items[0];
+    borrowed.borrowers = 1;
+    prompt[0] = 999;
+    f.at = 30; // another conversation's state: once evicted, its spare storage is one the family says takes the read
+    f.sum = fresh(prompt[0..30]);
+    try t.expect(s.keep(&prompt, 30, null, &.{}, &.{}));
+    prompt[0] = 100;
+    s.disk = r;
+    try t.expectEqual(.disk, rows.read.resumable(&s, &prompt, &.{}, &.{}).from);
+    const restored = rows.read.recall(&s, &prompt, 64, &.{}, &.{}, borrowed).?;
+    try t.expectEqual(@as(u32, 20), restored.at);
+    try t.expectEqual(@as(u64, 1), r.counts.reads);
+    try t.expectEqual(@as(u64, 1), s.counts.evicted);
+    try t.expect(s.held + s.spare() <= s.budget); // the spare storage was trimmed for the new storage, not left over it
+    try family.vtable.restore(family.ptr, null, restored.saved);
+    try t.expectEqual(fresh(&prompt), f.pass(&s, &prompt, .{ .from = restored.at }));
+    s.release(borrowed);
+}
