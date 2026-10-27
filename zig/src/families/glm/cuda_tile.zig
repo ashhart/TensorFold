@@ -30,8 +30,8 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
             const n = x.heads * kd;
             if (x.tiledInput()) {
                 switch (x.proj) { // a split stack's MXFP8 [q | k | v] is the lane's; its bf16 [f_a | g_a | b] tiles
-                    .bf16 => |*p| try add(list, gpa, p, x.width(), x.dims),
-                    .split => |*sp| try add(list, gpa, &sp.rest, x.width() - 3 * n, x.dims),
+                    .bf16 => |*p| try add(list, gpa, p, x.matWidth(), x.dims), // TF_GLM_KDA_PAD: pack the padded rows
+                    .split => |*sp| try add(list, gpa, &sp.rest, x.matWidth() - 3 * n, x.dims),
                 }
                 try add(list, gpa, &x.fb, n, kd);
                 try add(list, gpa, &x.gb, n, kd);
