@@ -179,7 +179,10 @@ pub fn build(b: *std.Build) void {
     if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step, hip_options);
     const with_vulkan = b.option(bool, "vulkan", "Enable the opt-in Vulkan backend and its host/device targets") orelse false;
     const vulkan_options = vulkan_build.options(b); // declared on every target, used only with -Dvulkan=true
-    if (with_vulkan) vulkan_build.steps(b, target, optimize, test_step, vulkan_options);
+    if (with_vulkan) {
+        vulkan_build.steps(b, target, optimize, test_step, vulkan_options);
+        @import("zig/build/vulkan_model.zig").steps(b, target, optimize, test_step, vulkan_options, build_options);
+    }
     exlr8_build.hostTests(b, target, test_step);
     xpu_build.steps(b, target, optimize, build_options);
     video_build.steps(b, target, test_step);
