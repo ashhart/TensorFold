@@ -34,6 +34,7 @@ fn zeros(gpu: check.Gpu, bufs: *Bufs, n: usize) !u64 {
     var b = try cuda.DeviceBuffer.alloc(gpu.d, n);
     errdefer b.free();
     try b.fill8(0, null);
+    try gpu.d.synchronize(); // before any launch on the non-blocking stream
     try bufs.append(gpu.gpa, b);
     return b.ptr;
 }
@@ -46,7 +47,7 @@ fn fromHost(gpu: check.Gpu, bufs: *Bufs, bytes: []const u8) !u64 {
 }
 
 fn scratch(gpu: check.Gpu, bufs: *Bufs, rows: usize, np: usize) !sp.Scratch {
-    const blk = @min(rows, sp.select_rows);
+    const blk: usize = @min(rows, sp.select_rows);
     return .{ .scores = try zeros(gpu, bufs, blk * np * 4), .ls = try zeros(gpu, bufs, rows * sp.select_list * 4), .li = try zeros(gpu, bufs, rows * sp.select_list * 4), .pools = try zeros(gpu, bufs, rows * sp.topk_pools * 8), .at = try zeros(gpu, bufs, 4) };
 }
 
@@ -150,7 +151,7 @@ pub fn run(gpu: check.Gpu) !void {
         try sp.selectTokens(half, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, c.cap, sc, tc, cc);
         try s.synchronize();
         step(c, np, "compare scores, pools, tokens, scores-only");
-        const blk = @min(c.rows, sp.select_rows);
+        const blk: usize = @min(c.rows, sp.select_rows);
         fails += try same(gpu, "scores", sa.scores, sb.scores, blk * np * 4, np, c);
         fails += try same(gpu, "pools", sa.pools, sb.pools, c.rows * sp.topk_pools * 8, np, c);
         fails += try same(gpu, "tokens", ta, tb, tok_bytes, np, c);
@@ -174,18 +175,20 @@ fn blocks(gpu: check.Gpu, bufs: *Bufs, set: glm.glue.Set, idx: *const glm.index.
     const blk = sp.select_rows;
     const scale: f32 = @floatCast(std.math.pow(f64, d, -0.5));
     const loop: usize = if (c.rows >= sp.score_loop_from) sp.score_loop else 1;
-    const out_a = try zeros(gpu, bufs, @min(c.rows, blk) * np * 4);
-    const out_b = try zeros(gpu, bufs, @min(c.rows, blk) * np * 4);
+    const first: usize = @min(c.rows, blk);
+    const out_a = try zeros(gpu, bufs, first * np * 4);
+    const out_b = try zeros(gpu, bufs, first * np * 4);
     var fails: usize = 0;
     var a: usize = 0;
     while (a < c.rows) : (a += blk) {
-        const n = @min(blk, c.rows - a);
+        const n: usize = @min(blk, c.rows - a);
         step(c, np, "block: upload its position, clear outputs");
         const at_v: i32 = @intCast(c.pos + a);
         const at = try fromHost(gpu, bufs, std.mem.asBytes(&at_v));
         const nb = (sp.scoreColumns(c.pos + a, n, np) + 63) / 64;
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = out_a, .len = n * np * 4, .borrowed = true }).fill8(0, null);
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = out_b, .len = n * np * 4, .borrowed = true }).fill8(0, null);
+        try gpu.d.synchronize(); // the memsets run on the default stream, not on s
         step(c, np, "block: tf_glm_scores");
         var sa: cuda.Args = .{};
         inline for (.{ dq + a * c.heads * d * 2, dw + a * c.heads * 2, @as(i64, @intCast(c.heads)), dk, out_a, at, @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, sp.headScale(c.heads), @as(i64, @intCast(c.heads)), @as(c_int, @intCast(loop)), t.pt, @as(i64, @intCast(t.ps)) }) |v| sa.add(v);
@@ -210,13 +213,22 @@ fn same(gpu: check.Gpu, what: []const u8, a: u64, b: u64, n: usize, np: usize, c
     try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = b, .len = n, .borrowed = true }).download(0, hb);
     var diff: usize = 0;
     for (std.mem.bytesAsSlice(u32, ha), std.mem.bytesAsSlice(u32, hb)) |x, y| diff += @intFromBool(x != y);
-    if (diff != 0) std.debug.print("FAIL np {d} rows {d} {s}: {d} words differ\n", .{ np, c.rows, what, diff });
+    if (diff != 0) {
+        std.debug.print("FAIL np {d} rows {d} {s}: {d} words differ\n", .{ np, c.rows, what, diff });
+        var shown: usize = 0;
+        for (std.mem.bytesAsSlice(u32, ha), std.mem.bytesAsSlice(u32, hb), 0..) |x, y, i| {
+            if (x == y) continue;
+            std.debug.print("    word {d} (row {d}, column {d} if np wide): {x:0>8} vs {x:0>8}\n", .{ i, i / np, i % np, x, y });
+            shown += 1;
+            if (shown == 6) break;
+        }
+    }
     return @intFromBool(diff != 0);
 }
 
 /// Tied and random scores (c.bits: with NaN, +-0, +-inf) through both selects, counting glm_index_pools' paths.
 fn ties(gpu: check.Gpu, bufs: *Bufs, rand: std.Random, set: glm.glue.Set, idx: *const glm.index.Kernels, s: cuda.Stream, sa: sp.Scratch, sb: sp.Scratch, at: u64, np: usize, c: Case) !usize {
-    const rows = @min(c.rows, sp.select_rows);
+    const rows: usize = @min(c.rows, sp.select_rows);
     const host = try gpu.gpa.alloc(f32, rows * np);
     defer gpu.gpa.free(host);
     const path = try zeros(gpu, bufs, rows * 4);
