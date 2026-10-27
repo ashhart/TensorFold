@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The KV pool keeps its counts of free, kept and leased pages up to date as pages change hands, so an admission check no longer scans every page: about 55 µs at 262k pages before, now constant. Admission decisions and page order are unchanged, and on a GB10 with Nemotron's paged CUDA cache replies are the same tokens.
+
 - API keys can be limited to some routes: in the `--api-key-file`, `app[inference]: KEY` reaches only model requests, `grafana[read]: KEY` only listings and metrics, and `ops[admin]: KEY` everything. A scoped key is refused with 403 before its body is read. Keys without brackets, from `--api-key` or `TENSORFOLD_API_KEY`, keep every route as before, and a file that gives one key two different scope sets is rejected. See [key scopes](docs/api.md#key-scopes).
 
 - Opt-in admission limits for a shared server: `--max-inflight N` and `--max-inflight-per-key N` cap model requests in progress, overall or per key, and `--requests-per-second N` with `--request-burst N` limits how fast a key may start them. A refused request answers 429 with `Retry-After`. All four are off by default, and with none set every reply is byte-identical to before. See [admission](docs/api.md#admission).
