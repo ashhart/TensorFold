@@ -259,7 +259,7 @@ pub fn capacity(comptime F: type, loaded: anytype, k: Kept, window: u64) ?api.Pr
 pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, comptime log: type) void {
     const c = facts orelse return;
     if (disabled or c.budget_bytes >= c.minimum_state_bytes) return;
-    log.warn("GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); adjust --context, --parallel, --prompt-cache-gib or TENSORFOLD_MEMORY_RESERVE_GIB to make room", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
+    log.warn("GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); lower --context or --parallel, or TENSORFOLD_MEMORY_RESERVE_GIB, to make room (--prompt-cache-gib only caps the budget the weights and streams leave)", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
 }
 
 test {
