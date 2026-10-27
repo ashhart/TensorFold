@@ -1,4 +1,4 @@
-//! The CUDA contract's family sets, Clef's joint schema head and ZONOS3's kernels.
+//! The CUDA contract's family sets (MiMo-V2's among them), Clef's joint schema head and ZONOS3's kernels.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -31,6 +31,7 @@ pub const Sets = struct {
     idol_decoder: *@import("contract_idol_decoder.zig").Set,
     glm_moe: *@import("contract_glm_moe_direct.zig").Set,
     zonos3: *@import("contract_zonos3.zig").Set,
+    mimo: *@import("contract_mimo.zig").Group,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -79,9 +80,12 @@ pub const Sets = struct {
         errdefer muse.destroy(a);
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         errdefer joint_schema.deinit();
+        const mimo = try @import("contract_mimo.zig").Group.create(a, gpu, s, list);
+        errdefer mimo.destroy(a);
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
+        errdefer idol_decoder.deinit();
         const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
         const zonos3 = try @import("contract_zonos3.zig").Set.init(gpu, s, a, list);
         return .{
@@ -107,6 +111,7 @@ pub const Sets = struct {
             .idol_decoder = idol_decoder,
             .glm_moe = glm_moe,
             .zonos3 = zonos3,
+            .mimo = mimo,
         };
     }
 
@@ -115,6 +120,7 @@ pub const Sets = struct {
         sets.glm_moe.deinit();
         sets.idol_decoder.deinit();
         sets.idol.deinit();
+        sets.mimo.destroy(sets.a);
         sets.joint_schema.deinit();
         sets.muse.destroy(sets.a);
         sets.prompt.deinit();
@@ -126,7 +132,6 @@ pub const Sets = struct {
         sets.grouped.deinit();
         sets.gpa.destroy(sets.grouped);
         sets.modelopt.deinit();
-        sets.qwen3_asr.deinit();
         sets.nemo_audio.deinit();
         sets.glm_vision.deinit();
         sets.moss.deinit();
