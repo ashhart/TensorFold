@@ -52,7 +52,11 @@ fn depth(s: c.Shape) usize {
     return s.k / 16 + 16;
 }
 
-/// Flash Next's routed experts: 2,560 dims, 640 wide.
+/// Flash Next's served shapes (2,560 dims, 640 wide), then Qwen3.6-35B-A3B's ModelOpt experts (2,048 dims, 512 wide).
+const prompt_up_served = [_]c.Shape{ .{ .rows = 130, .n = 640, .k = 2560 }, .{ .rows = 1, .n = 640, .k = 2560 }, .{ .rows = 130, .n = 512, .k = 2048 }, .{ .rows = 1, .n = 512, .k = 2048 } };
+const prompt_down_served = [_]c.Shape{ .{ .rows = 130, .n = 2560, .k = 640 }, .{ .rows = 1, .n = 2560, .k = 640 }, .{ .rows = 130, .n = 2048, .k = 512 }, .{ .rows = 1, .n = 2048, .k = 512 } };
+
+/// Flash Next's routed experts: 2,560 dims, 640 wide; the decode-sums entries also serve Qwen3.6's.
 pub fn spec(kind: Kind) c.Spec {
     // a plan item of 64 pairs (32 token rows) by a CTA's columns (gate-up 4 blocks of 32, down 8), 64 inputs a stage
     const up_tiles = [3]c.Tile{ .{ .size = 64 / slots }, .{ .size = 128, .step = 32, .min = 32 }, .{ .size = 64, .step = 32, .min = 32 } };
@@ -78,9 +82,9 @@ pub fn spec(kind: Kind) c.Spec {
         .up_waves => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_waves<2, 2, 4> (equal waves)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
         .up_half => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_half<2, 2, 4> (two warps a unit)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
         .down_waves => .{ .name = "cuda nvfp4 experts decode down nvfp4_expert_waves<1, 0, 4> (equal waves)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = down_served },
-        .up => .{ .name = "cuda nvfp4 experts prompt gate-up tf_nvfp4_fact_swiglu (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &.{ .{ .rows = 130, .n = 640, .k = 2560 }, .{ .rows = 1, .n = 640, .k = 2560 } }, .sums = .{ .bf16 = 30, .why = "a bf16 sum that collapses moves the output by about itself, and the epilogue's three bf16 roundings already allow 3 u of it: at most 1 / (3 u) = 85x is provable" } },
+        .up => .{ .name = "cuda nvfp4 experts prompt gate-up tf_nvfp4_fact_swiglu (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &prompt_up_served, .sums = .{ .bf16 = 30, .why = "a bf16 sum that collapses moves the output by about itself, and the epilogue's three bf16 roundings already allow 3 u of it: at most 1 / (3 u) = 85x is provable" } },
         .control => .{ .name = "control: scaled-code prompt tile tf_nvfp4_prompt_swiglu posing as the decode gate-up", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &.{.{ .rows = 130, .n = 640, .k = 2560 }} },
-        .down => .{ .name = "cuda nvfp4 experts prompt down tf_nvfp4_fact_down_f32 (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = down_tiles, .served = &.{ .{ .rows = 130, .n = 2560, .k = 640 }, .{ .rows = 1, .n = 2560, .k = 640 } } },
+        .down => .{ .name = "cuda nvfp4 experts prompt down tf_nvfp4_fact_down_f32 (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = down_tiles, .served = &prompt_down_served },
     };
 }
 
@@ -136,6 +140,8 @@ pub const Experts = struct {
                 else => unreachable,
             };
             entry.tiles[1].size = 128;
+            // the K32 tile is Flash Next's alone: its own shapes
+            if (self.kind != .control) entry.served = if (self.kind == .up) prompt_up_served[0..2] else prompt_down_served[0..2];
         }
         return .{ .spec = entry, .ctx = self, .vt = &vt, .control = switch (self.kind) {
             .control, .cut_waves, .cut_waves_one => .shapes,
