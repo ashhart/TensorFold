@@ -427,7 +427,7 @@ allocations for RAM, so a checkpoint's GPU allocation alone does not describe it
 `--context` that leaves them no room is reported at startup; their lookups then page from disk, a cost of about 1.3x
 on prompts.
 
-`--ple-on-ssd` and `--ssd-experts` below are the Python engine's flags; the native binary refuses both.
+`--ple-on-ssd` and `--ssd-experts` below describe the Python engine's flags and measurements. The native binary takes both on one Mac: see [Exact Fluid Subgraph Residency](fluid-subgraph-residency.md).
 
 `--ple-on-ssd` leaves the 29.8 GiB of n-gram tables in the checkpoint and reads each lookup's rows from SSD,
 so a 128 GB Mac can hold Flash Next. It is an opt-in trade. On an M3 Ultra, replies were the same tokens,

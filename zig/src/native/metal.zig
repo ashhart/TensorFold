@@ -18,6 +18,7 @@ const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
 const nemo_disk = @import("nemotron_disk.zig");
 const fsr_options = @import("fsr_options.zig");
+const linkProblem = @import("metal_link.zig").problem;
 
 pub const backends: []const []const u8 = &.{"metal"};
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib" };
@@ -444,16 +445,7 @@ test {
     _ = @import("metal_identity.zig");
     _ = @import("qwen27_landing.zig");
     _ = spill;
-}
-
-/// What a two-Mac link that never connected asks of whoever starts the servers; null for any other error.
-fn linkProblem(e: anyerror) ?[]const u8 {
-    return if (e == error.ConnectFailed) "the other Mac never answered on the link (ConnectFailed). Start both ranks with their own settings file, each link's via naming the other Mac's address on the cable, and run both attached to a session or with Local Network access allowed in System Settings: macOS drops the packets of a server started detached, such as with nohup over SSH" else null;
-}
-
-test linkProblem {
-    try std.testing.expect(std.mem.indexOf(u8, linkProblem(error.ConnectFailed).?, "Local Network") != null);
-    try std.testing.expect(linkProblem(error.OutOfMemory) == null);
+    _ = @import("metal_link.zig");
 }
 
 /// GLM-5.3-Flash's caches hold this many tokens unless --context asks otherwise (its window is 1,048,576).

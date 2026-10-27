@@ -4,6 +4,22 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on a Mac can leave its routed experts and n-gram tables in the checkpoint and read them from SSD with `--ssd-experts GIB` and `--ple-on-ssd`, so a checkpoint larger than the Mac's memory can be served (#1039, see [Exact Fluid Subgraph Residency](docs/recipes/fluid-subgraph-residency.md)). Neither is on by default. Replies are the same tokens as with everything in memory; a budget too small for one layer's experts refuses at startup instead of changing the model's settings. On an M5 Ultra the 6-bit MTP checkpoint, which does not fit in memory, serves with a 16 GiB expert budget; on an M3 Ultra with the 4-bit checkpoint, servers without the flags are unchanged in prefill and decode.
+
+- Flash Next on Macs with `--parallel` above one take `--spill-gib` and `--checkpoint-slots` too (#1349): shared sessions write a state the prompt cache pushes out to disk and read it back when the conversation returns. `--learn` and `--learn-conversations` are still refused there. On an M3 Ultra with the 4-bit MTP checkpoint and 4 sessions, a returning 16k-token conversation that was pushed to disk starts its next turn after 0.9 s instead of 11.9 s for a fresh pass, with the same reply; decode without the flags is unchanged. Thanks to @gilby.
+
+- The NVFP4 prompt GEMM gains a persistent 128x256 tile with a decoupled copy ring (#1350). It does the same arithmetic in the same order, so prompt tokens are unchanged. On a GB10, Qwen3.8-27B NVFP4 prefill rises 4.2% to 6.3% from 2k to 64k tokens; Nemotron and Flash Next NVFP4 are unchanged. Thanks to @jschmied.
+
+- Qwen3.8-27B on CUDA with `TF_QWEN_KV_PAGES`: a stream on pages takes the same tensor-core attention as a whole window, so its reply beside other paged streams equals its reply alone (#1373; before, 6 to 8 of 12 replies differed on an RTX 5090). On a GB10, prefill and decode are unchanged. Thanks to @BobClawblaw.
+
+- With `--prompt-precision int8` on CUDA, a prompt chunk that falls back to bf16 is counted and logged once, so a slow prefill can be told from a fallback (#1371). Thanks to @BobClawblaw.
+
+- Gemma 4 E4B (preparation): the family config admits the E4B geometry and each backend refuses it by name until it computes it, and the tensor plan names the E4B's per-layer inputs, global value projections and shared layers, with mlx-lm's BF16 and 8-bit per-module overrides (#1400, #1401, part of #1222). Existing Gemma 4 models are unchanged. Thanks to @Mirrdhyn.
+
+- Lanes: two opt-in hooks for the LFM2 drafter work (#1378, #1380, part of #1374): a target that reads held drafts on the device gets them without a host read-back, and a family may price copy windows from each stream's own copy history. Nothing sets either yet, so every model is unchanged. Thanks to @BlivionIaG.
+
+- The kernel contract records nvcc 13.3's register and shared-memory limits for the 206 launches it compiles differently (#1397). Thanks to @BobClawblaw.
+
 - A streamed tool call cut by `max_tokens` while an XML value's opening newline was still held no longer sends that framing newline as an extra `\n` in the argument; the stream now matches the whole reply (#1408, item 3 of #1396). Thanks to @Maxrio9.
 
 - Qwen3.8-27B and Qwen3.5-MoE on CUDA apply `presence_penalty` and `frequency_penalty` (-2 to 2; 400 outside), which the server used to ignore silently, as the Qwen3.8 model card's thinking-off settings use (#1346). A drafted row is penalized exactly as the plain step at its position, so drafted replies equal undrafted ones; engines that don't apply them say so once in the log. On a GB10 with Qwen3.8-27B, requests without penalties give the same tokens as before, and prefill and decode are unchanged. Thanks to @BobClawblaw.
@@ -13,10 +29,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The prompt cache keeps, for each entry, links to the entries that extend it, so choosing an eviction victim no longer compares every pair of entries (#1363). Choices are the same (a randomized test checks them against the old scans); in a 220-turn forked conversation with 200 slots, choosing a victim takes about 0.5 ms instead of 20 ms. Thanks to @jschmied.
 
 - Flash Next CUDA NVFP4 next-chunk file hints are opt-in with `TF_FLASHNEXT_WARM_AHEAD=1`; unset or `0` leaves them off (#1292).
-
-- Add opt-in exact Fluid Subgraph Residency for Flash Next on Metal: SSD expert slots, PLE row streaming, locality traces and bounded next-layer prefetch, following EdgeMoE, MoE-Infinity, Fiddler and Fate; slotstream is an outside comparison only. Device memory tiers require qualification.
-
-- Flash Next exact SSD expert residency batches contiguous component reads with bounded asynchronous IO, indexes pending reads, and gives actual demand priority over unused forecasts (#1039). Synthetic locality tools report the storage-byte ceiling; device speed remains to be qualified.
 
 - Flash Next on Macs: concurrent chats share each round's work more fully (#1338, #1339, #1340, #1341, #1342, #1343). A shared round samples every sampled stream's draft and target rows in one dispatch, drafts every stream in one packed MTP pass, copies kept states in the verify command buffer, runs the sessions' recurrences in one verify without barriers between them, and prices a batched head's extra drafts as the deepest stream's steps. On an M3 Ultra with the 4-bit MTP checkpoint, decode across 2, 4 and 8 concurrent streams rises 6.9%, 8.8% and 11.8% (4.5% and 10.7% at 2 and 4 streams on an M5 Ultra); one stream and prefill are unchanged, and prompt tokens equal the previous build's. `FZ_VERIFY_OVERLAP=0`, `FZ_PRICE_BATCHED=0` and `FZ_KEYED_DRAFTS=0` restore the previous paths. Thanks to @gilby.
 
