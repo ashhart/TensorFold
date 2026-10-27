@@ -17,10 +17,10 @@ pub const symbols = [3][:0]const u8{
 };
 const first = 4;
 
-/// The entry a call takes: half while every half unit fits, waves past one wave of units, else null (classic).
-pub fn pick(gate: bool, items: usize, nb: usize, warps: usize) ?usize {
-    if (gate and 2 * items * nb <= warps) return first + 2;
-    if (items * nb <= warps) return null;
+/// The entry: half while its units fit `half` warps, waves past one wave of the classic kernel's `classic`, else null.
+pub fn pick(gate: bool, items: usize, nb: usize, half: usize, classic: usize) ?usize {
+    if (gate and 2 * items * nb <= half) return first + 2;
+    if (items * nb <= classic) return null;
     return first + @as(usize, if (gate) 0 else 1);
 }
 
@@ -29,7 +29,8 @@ pub fn run(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: P
     const gate = epi == .up;
     if ((gate and l.relu2) or (!gate and epi != .down_f32)) return e.run(s, epi, in, l, p, out, items, skip);
     const nb = (if (gate) l.width else l.dims) / Nvfp4Experts.cols;
-    const fi = pick(gate, items, nb, e.resident[first + 2] * e.warps) orelse return e.run(s, epi, in, l, p, out, items, skip);
+    const classic = e.resident[if (gate) 0 else 1] * e.warps;
+    const fi = pick(gate, items, nb, e.resident[first + 2] * e.warps, classic) orelse return e.run(s, epi, in, l, p, out, items, skip);
     return entry(e, fi, s, in, l, p, out, items, skip);
 }
 
@@ -58,11 +59,21 @@ pub fn entry(e: *const Nvfp4Experts, fi: usize, s: Stream, in: Rows, l: Layer, p
 
 test "two warps a unit only while every half unit fits the resident warps" {
     // Flash Next gate-up on GB10: 20 column blocks, 768 resident warps; one row's 11 items fit, two rows' 23 do not
-    try std.testing.expectEqual(@as(?usize, 6), pick(true, 19, 20, 768));
-    try std.testing.expectEqual(@as(?usize, 4), pick(true, 46, 20, 768));
-    try std.testing.expectEqual(@as(?usize, 5), pick(false, 11, 80, 768));
+    try std.testing.expectEqual(@as(?usize, 6), pick(true, 19, 20, 768, 768));
+    try std.testing.expectEqual(@as(?usize, 4), pick(true, 46, 20, 768, 768));
+    try std.testing.expectEqual(@as(?usize, 5), pick(false, 11, 80, 768, 768));
     // one wave and no half fit: the classic kernel (rows 2 and 3 of Flash Next: 23 and 35 items of 20 blocks)
-    try std.testing.expectEqual(@as(?usize, null), pick(true, 23, 20, 768));
-    try std.testing.expectEqual(@as(?usize, null), pick(true, 35, 20, 768));
-    try std.testing.expectEqual(@as(?usize, null), pick(false, 1, 1, 768));
+    try std.testing.expectEqual(@as(?usize, null), pick(true, 23, 20, 768, 768));
+    try std.testing.expectEqual(@as(?usize, null), pick(true, 35, 20, 768, 768));
+    try std.testing.expectEqual(@as(?usize, null), pick(false, 1, 1, 768, 768));
+}
+
+test "the one-wave test uses the replaced classic kernel's resident warps, not the half kernel's" {
+    // 1 warp: four-row gate-up's 780 units fit half's ~1,000 warps but not classic's 768, so waves, not classic
+    try std.testing.expectEqual(@as(?usize, 4), pick(true, 39, 20, 1000, 768));
+    // 4 warps: one-row down's 880 units pass half's 768 warps but fit one wave of a classic down holding 960
+    try std.testing.expectEqual(@as(?usize, null), pick(false, 11, 80, 768, 960));
+    // the half test reads half's warps alone: 760 half units fit 768, 800 do not and one classic wave holds them
+    try std.testing.expectEqual(@as(?usize, 6), pick(true, 19, 20, 768, 960));
+    try std.testing.expectEqual(@as(?usize, null), pick(true, 20, 20, 768, 960));
 }
