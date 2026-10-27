@@ -335,7 +335,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
     if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
-    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "nemotron_h_puzzle")) "Nemotron 3.5 Bolt" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (spill.refusal(o)) |why| return why;
@@ -554,7 +554,7 @@ test "--spill-gib with --checkpoint-slots opens the four families with a disk st
     try std.testing.expectStringStartsWith((try refusal(a, .{ .dir = "d", .model_type = "glm5_next", .keep = 2 }, false)) orelse "", "--checkpoint-slots");
 }
 
-test "--speed-up is refused by Nemotron, the 27B and the 2B before any load, and not by the two-Mac families" {
+test "--speed-up is refused by Nemotron, Bolt, the 27B and the 2B before any load, and not by the two-Mac families" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -563,6 +563,7 @@ test "--speed-up is refused by Nemotron, the 27B and the 2B before any load, and
     try std.testing.expectStringEndsWith((try refusal(a, two, true)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.8-27B"}));
     try std.testing.expectStringEndsWith((try refusal(a, two, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.5-2B"}));
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .speed_up = "pair.json" }, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Nemotron"}));
+    try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h_puzzle", .speed_up = "pair.json" }, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Nemotron 3.5 Bolt"}));
     for ([_][]const u8{ "qwen4_exp", "glm5_next", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .speed_up = "pair.json" }, false)) == null);
 }
 
