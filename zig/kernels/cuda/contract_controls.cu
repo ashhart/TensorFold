@@ -358,6 +358,19 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_liquid_commit_3(__nv_bf
     tf_liquid::liquid_commit<3, 1>(STATE, SNAP, SLOT, ROW, D, state_stride, snap_stride, SS);
 }
 
+// LFM3's 7-tap conv and commit, the same planted faults as the 3-tap pair.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_liquid_conv_7(const __nv_bfloat16* P, const __nv_bfloat16* Wc, const __nv_bfloat16* STATE,
+                                                                        const int* SLOT, const int* OFF, __nv_bfloat16* Y, __nv_bfloat16* SNAP,
+                                                                        int SNAP0, int D, long long SS) {
+    tf_liquid::liquid_conv<7, 1>(P, Wc, STATE, SLOT, OFF, Y, SNAP, SNAP0, D, SS);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_liquid_commit_7(__nv_bfloat16* STATE, const __nv_bfloat16* SNAP, const int* SLOT,
+                                                                          const int* ROW, int D, long long state_stride, long long snap_stride,
+                                                                          long long SS) {
+    tf_liquid::liquid_commit<7, 1>(STATE, SNAP, SLOT, ROW, D, state_stride, snap_stride, SS);
+}
+
 // LFM2.5-24B-A2B's router, one planted fault: ties go to the higher expert id.
 #include "lfm2_moe.cuh"
 
