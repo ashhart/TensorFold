@@ -23,7 +23,7 @@ pub fn run(gpu: Gpu, rank: usize) !void {
     try check.expect(std.c.getenv("NCCL_COMM_ID") != null, "roce-gather: NCCL_COMM_ID names rank 0's address", .{});
     var s = try cuda.Stream.init(gpu.d, false);
     defer s.deinit();
-    var g = try cuda.tp_group.Group.open(rank, 2);
+    var g = try cuda.tp_group.Group.open(gpu.d, rank, 2);
     defer g.close();
     try g.openRoce(a, gpu.io, gpu.d, s, cap);
     try check.expect(g.fast != null, "roce-gather: the RoCE path did not come up on both ranks (see the warning above)", .{});

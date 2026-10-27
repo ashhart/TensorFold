@@ -55,6 +55,7 @@ pub const rank_scatter = @import("rank_scatter.zig");
 pub const relay_plan = @import("relay_plan.zig");
 pub const tp_group = @import("tp_group.zig");
 pub const tp_watch = @import("tp_watch.zig");
+pub const p2p_report = @import("p2p_report.zig");
 pub const ck = @import("ck.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const tree_attention = @import("tree_attention.zig");
@@ -74,6 +75,10 @@ pub const graph_cache = @import("graph_cache.zig");
 
 test {
     _ = nccl;
+    _ = @import("p2p_nvml.zig");
+    _ = @import("p2p_probe.zig");
+    _ = @import("p2p_nccl_log_test.zig");
+    _ = @import("p2p_report_test.zig");
     _ = exl3_grouped;
     _ = gdn_train;
     _ = train_q4;

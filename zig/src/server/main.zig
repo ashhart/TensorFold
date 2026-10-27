@@ -74,6 +74,7 @@ pub fn main(init: std.process.Init) !u8 {
         var out: std.Io.Writer.Allocating = .init(a);
         var caps = engines.capabilities(a);
         caps.optional_libraries = try @import("core").picture.runtime.probe(a, io);
+        caps.p2p = engines.p2p(a);
         try cli.capabilities(&out.writer, caps);
         try std.Io.File.stdout().writeStreamingAll(io, out.written());
         return 0;

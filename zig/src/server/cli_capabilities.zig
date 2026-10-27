@@ -11,6 +11,8 @@ pub const Engines = struct {
     backends: []const []const u8 = &.{},
     /// model_type to the weight formats it reads, as gate entries name them.
     families: []const api.Family = &.{},
+    /// A CUDA host's NVML P2P summary as one JSON object, only with two or more GPUs (p2p_report.compact).
+    p2p: ?[]const u8 = null,
 };
 
 /// The native capabilities document: the table's native flags and the honoured variables.
@@ -43,5 +45,6 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     for (cli.env, 0..) |name, i| try w.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", name });
     try w.writeAll("], \"optional_libraries\": ");
     try std.json.Stringify.value(e.optional_libraries, .{}, w);
+    if (e.p2p) |p| try w.print(", \"p2p\": {s}", .{p});
     try w.writeAll("}\n");
 }

@@ -375,6 +375,19 @@ test "runtime library: capabilities serializes found and missing dependencies wi
     try std.testing.expectEqualStrings(rows[1].problem.?, values[1].object.get("problem").?.string);
 }
 
+test "capabilities: a p2p summary appears only when the engine gives one, as its own object" {
+    var none: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer none.deinit();
+    try capabilities(&none.writer, .{ .version = "test" });
+    try std.testing.expect(std.mem.indexOf(u8, none.written(), "p2p") == null);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try capabilities(&out.writer, .{ .version = "test", .p2p = "{\"driver\":\"580.65.06\",\"gpus\":[],\"pairs\":[]}" });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("580.65.06", parsed.value.object.get("p2p").?.object.get("driver").?.string);
+}
+
 test "--silence-mid-s is opt-in, needs the tail guard and reaches native open options" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

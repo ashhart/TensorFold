@@ -114,6 +114,7 @@ fn send(r: Record) void {
 
 /// This rank loaded `digest`'s bytes: it tells the others, waits for theirs, and stops if any rank's bytes differ.
 pub fn ready(io: std.Io, digest: [32]u8) !void {
+    @import("p2p_report.zig").ready(); // NCCL has connected every peer the load used: its transport line now
     if (line_count == 0) return;
     var r: Record = .{ .kind = ready_kind, .rank = @intCast(my_rank) };
     @memcpy(r.text[0..32], &digest);
