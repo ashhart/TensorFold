@@ -165,7 +165,7 @@ pub fn run(gpu: check.Gpu) !void {
         fails += try ties(gpu, &bufs, rand, old, &idx, s, sa, sb, dpos, np, c);
     }
     std.debug.print("glm_index_pools paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}\n", .{ paths[0], paths[1], paths[2] });
-    try check.expect(paths[0] > 0 and paths[1] > 0, "glm-index-check: the whole-row and candidate paths must both occur", .{});
+    try check.expect(paths[0] > 0 and paths[1] > 0 and paths[2] > 0, "glm-index-check: the whole-row, candidate and retry paths must all occur", .{});
     try check.expect(fails == 0, "glm-index-check: {d} buffers differ", .{fails});
     check.pass("glm-index-check: scores, pools and token lists byte-equal at {d} cases, tied scores through both selects", .{cases.len});
 }
