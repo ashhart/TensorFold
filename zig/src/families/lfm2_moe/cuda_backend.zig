@@ -6,6 +6,7 @@ const cfg = @import("config.zig");
 const fwd = @import("cuda_forward.zig");
 const mdl = @import("cuda_model.zig");
 const kern = @import("cuda_kernels.zig");
+const kv = @import("core").kv_pool;
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -30,7 +31,13 @@ const Lane = struct {
     rule: u64, // sample.cu's Rule, when the stream samples
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
+    lease: kv.Lease = .{}, // a paged slot's pages
 };
+
+/// Pages a request holds: its prompt, its reply and one last verify window.
+pub fn pagesFor(prompt: usize, max_new: usize) usize {
+    return (prompt + max_new + max_window + kern.page - 1) / kern.page;
+}
 
 pub const Lfm = struct {
     gpa: std.mem.Allocator,
@@ -46,6 +53,7 @@ pub const Lfm = struct {
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
+    pool: ?kv.Pool = null, // the pages every slot leases (attach)
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -53,7 +61,7 @@ pub const Lfm = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *mdl.Model, k: *const kern.Kernels, s: cuda.Stream) !Lfm {
-        const free = try gpa.alloc(bool, m.slots);
+        const free = try gpa.alloc(bool, m.slotCap());
         errdefer gpa.free(free);
         @memset(free, true);
         const greedy = try gpa.alloc(bool, ring + round_rows);
@@ -65,7 +73,7 @@ pub const Lfm = struct {
         errdefer picks.free();
         var meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
         errdefer meta.free();
-        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
+        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slotCap());
         errdefer gpa.free(bufs);
         var made: usize = 0;
         errdefer for (bufs[0..made]) |*b| b.free();
@@ -76,9 +84,19 @@ pub const Lfm = struct {
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .tok = tok, .picks = picks, .greedy = greedy, .meta = meta, .slot_bufs = bufs };
     }
 
+    /// Makes a paged model's arena of `pages` pages for `extra + 1` slots, and the pool that leases them.
+    pub fn attach(x: *Lfm, extra: usize, pages: usize) !void {
+        try x.m.attach(x.s, extra, pages);
+        x.pool = try kv.Pool.init(x.gpa, pages, mdl.page_elems * 2);
+    }
+
     pub fn deinit(x: *Lfm) void {
         var it = x.lanes.valueIterator();
-        while (it.next()) |l| l.rows.deinit(x.gpa);
+        while (it.next()) |l| {
+            if (x.pool) |*p| p.finish(&l.lease);
+            l.rows.deinit(x.gpa);
+        }
+        if (x.pool) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
@@ -97,7 +115,7 @@ pub const Lfm = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Lfm) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Lfm {
@@ -133,7 +151,39 @@ pub const Lfm = struct {
     }
 
     fn freeSlot(x: *const Lfm) ?usize {
-        return std.mem.indexOfScalar(bool, x.free, true);
+        return std.mem.indexOfScalar(bool, x.free[0..x.m.slots], true);
+    }
+
+    fn fitsContext(x: *const Lfm, prompt: usize, max_new: usize) bool {
+        return prompt + max_new + max_window <= x.m.context;
+    }
+
+    /// Whether a request could start now: a free slot and (paged) its pages; one that never fits passes.
+    pub fn admits(x: *const Lfm, prompt: usize, max_new: usize) bool {
+        if (!x.fitsContext(prompt, max_new)) return true; // its prompt pass refuses it by name
+        const p = x.pool orelse return x.freeSlot() != null;
+        return x.freeSlot() != null and p.fits(pagesFor(prompt, max_new));
+    }
+
+    const Map = struct {
+        x: *Lfm,
+        slot: usize,
+        fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
+            const m: *const Map = @ptrCast(@alignCast(ctx));
+            try m.x.m.mapPages(m.x.s, m.slot, ids[from..], from);
+        }
+    };
+
+    /// A free slot for the request, its pages leased now when paged; LaneMemory: not yet.
+    fn takeSlot(x: *Lfm, lease: *kv.Lease, prompt: usize, max_new: usize) !usize {
+        const slot = x.freeSlot() orelse return error.NoFreeSlot;
+        const p = if (x.pool) |*p| p else return slot;
+        const n = pagesFor(prompt, max_new);
+        try p.promise(lease, n);
+        errdefer p.finish(lease);
+        var map: Map = .{ .x = x, .slot = slot };
+        try p.cover(lease, n, .{ .ctx = &map, .write = Map.write });
+        return slot;
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
@@ -141,15 +191,16 @@ pub const Lfm = struct {
         const p = s.prompt();
         if (p.len == 0) return error.EmptyPrompt;
         if (s.images.len > 0) return error.LfmTextOnly;
-        if (p.len + @as(usize, s.max_new) + max_window > x.m.context) return error.PastContext;
+        if (!x.fitsContext(p.len, s.max_new)) return error.PastContext;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (!got.found_existing) {
-            const slot = x.freeSlot() orelse {
+            var lease: kv.Lease = .{};
+            const slot = x.takeSlot(&lease, p.len, s.max_new) catch |e| {
                 x.lanes.removeByPtr(got.key_ptr);
-                return error.NoFreeSlot;
+                return e;
             };
             x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr };
+            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .lease = lease };
         }
         const l = got.value_ptr;
         l.sampled = false;
@@ -305,14 +356,35 @@ pub const Lfm = struct {
     }
 
     fn dropLane(x: *Lfm, s: *const Stream) void {
-        if (x.lanes.fetchRemove(s)) |kv| {
-            var l = kv.value;
+        if (x.lanes.fetchRemove(s)) |entry| {
+            var l = entry.value;
+            if (x.pool) |*p| {
+                p.finish(&l.lease);
+                x.m.unmapPages(l.slot);
+            }
             x.free[l.slot] = true;
             l.rows.deinit(x.gpa);
+            if (x.lanes.count() == 0) x.report();
         }
+    }
+
+    /// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
+    fn report(x: *const Lfm) void {
+        if (@import("builtin").is_test) return;
+        const p = x.pool orelse return;
+        const c = p.census();
+        const ok = p.idle() and c.free == c.total;
+        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {
         self(ptr).dropLane(s);
     }
 };
+
+test "a request holds its prompt, its reply and one verify window in whole pages" {
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(1, 1));
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(400, 96));
+    try std.testing.expectEqual(@as(usize, 2), pagesFor(400, 97));
+    try std.testing.expectEqual(@as(usize, 65), pagesFor(32768, 0));
+}
