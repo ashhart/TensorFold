@@ -148,6 +148,7 @@ pub fn forward(m: *const Model, k: *const Kernels, s: Stream, chains: []const Ch
     var rows: usize = 0;
     for (chains) |ch| {
         if (ch.tokens.len == 0 or ch.slot >= m.slots or ch.p0 + ch.tokens.len > m.context) return error.BadChain;
+        if (ch.p0 + ch.tokens.len > m.caps[ch.slot]) return error.PastPages;
         rows += ch.tokens.len;
     }
     if (rows > @as(usize, if (prompt) mdl.prompt_rows else mdl.round_rows) or (prompt and chains.len != 1)) return error.BadWindow;

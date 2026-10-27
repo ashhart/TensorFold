@@ -57,6 +57,8 @@ Coverage includes:
   every stream's caches are contiguous and made at open.
 - Gemma 4 on CUDA: `TENSORFOLD_GEMMA4_KV_PAGES`, global caches in pool pages by default, where `0` keeps them linear.
 - Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
+- LFM2.5-24B-A2B on CUDA: `TENSORFOLD_LFM2_KV_PAGES`, attention caches in pool pages by default, where `0` gives
+  each stream fixed pages made at open.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
 - DeepSeek V4.1 on CUDA: the settings below, with no stable fallback.
