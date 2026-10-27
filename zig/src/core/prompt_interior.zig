@@ -38,7 +38,7 @@ fn same(e: *const pc.Entry, prompt: []const u32, at: u32, lookahead: u32, spans:
 /// Takes ownership of marks only on success. Endpoint, rewind, other marks and outstanding borrows have priority.
 pub fn add(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, from: u32, end: u32, user: u32, starts: []const u32, spans: []const modes.Span, marks: []const u32, endpoint: u32, endpoint_bytes: u64, restored: ?*pc.Entry) ![]const u32 {
     const at = cut(s.rules, prompt.len, from, end, user, starts, spans, marks);
-    if (at == 0 or std.mem.indexOfScalar(u32, marks, at) != null) return marks;
+    if (at == 0 or s.hold or std.mem.indexOfScalar(u32, marks, at) != null) return marks;
     var required: std.ArrayList(u32) = .empty;
     defer required.deinit(a);
     try required.appendSlice(a, marks);

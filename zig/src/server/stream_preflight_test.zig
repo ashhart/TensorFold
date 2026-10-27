@@ -133,6 +133,8 @@ const Seen = struct {
     arguments: [2048]u8 = undefined,
     arguments_len: usize = 0,
     finish: ?enum { stop, length, tool_calls } = null, // the reply's or the stream's last finish_reason
+    refusal: [160]u8 = undefined, // a whole reply's error message
+    refusal_len: usize = 0,
 
     fn keepFinish(c: *Seen, choice: json.Value) void {
         const f = choice.strField("finish_reason") orelse return;
@@ -206,7 +208,12 @@ const Seen = struct {
                 for (t.array) |call| c.keepArguments(call);
             };
         };
-        const code = (payload.get("error") orelse return).get("code") orelse return;
+        const err = payload.get("error") orelse return;
+        if (err.strField("message")) |m| {
+            c.refusal_len = @min(m.len, c.refusal.len);
+            @memcpy(c.refusal[0..c.refusal_len], m[0..c.refusal_len]);
+        }
+        const code = err.get("code") orelse return;
         c.context_code = code == .string and std.mem.eql(u8, code.string, "context_length_exceeded");
     }
 };
@@ -496,7 +503,7 @@ test "unsupported budgets leave zero unset and thinking-disabled requests valid"
     try std.testing.expectEqual(@as(usize, 3), backend.submissions);
 }
 
-test "closed or busy admission is service unavailable across chat, messages and responses" {
+test "closed, busy or memory-pressure admission is service unavailable across chat, messages and responses" {
     const ClosedEngine = struct {
         reason: api.SubmitError = error.Closed,
         fn engine(e: *@This()) api.Engine {
@@ -515,12 +522,13 @@ test "closed or busy admission is service unavailable across chat, messages and 
     defer arena.deinit();
     var wrong: usize = 0;
     var engine: ClosedEngine = .{};
-    for ([_]api.SubmitError{ error.Closed, error.Busy }) |reason| {
+    for ([_]api.SubmitError{ error.Closed, error.Busy, error.MemoryPressure }) |reason| {
         engine.reason = reason;
         for (cases) |c| for ([_]bool{ false, true }) |streaming| {
             const body = if (streaming) try std.mem.concat(arena.allocator(), u8, &.{ c.body[0 .. c.body.len - 1], ",\"stream\":true}" }) else c.body;
             const seen = try sendWith(engine.engine(), c.route, body, .{});
-            if (seen.status != 503 or seen.opened or seen.preparing != 0) {
+            const said = std.mem.eql(u8, seen.refusal[0..seen.refusal_len], api.pressure_message);
+            if (seen.status != 503 or seen.opened or seen.preparing != 0 or (reason == error.MemoryPressure) != said) {
                 wrong += 1;
                 std.debug.print("ADMISSION reason={s} route={s} stream={any} status={any} opened={any} events={d} preparing={d}\n", .{ @errorName(reason), @tagName(c.route), streaming, seen.status, seen.opened, seen.events, seen.preparing });
             }

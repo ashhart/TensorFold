@@ -8,6 +8,7 @@ const learn = @import("lane_host_learn.zig");
 const status = @import("lane_host_status.zig");
 const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
+const pressure = @import("lane_host_pressure.zig");
 const LaneHost = host.LaneHost;
 const Job = LaneHost.Job;
 const Allocator = std.mem.Allocator;
@@ -63,11 +64,11 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     defer refused.deinit(h.gpa);
     h.lock();
     // a stale device takes no reply (`learn.refuse` ends the queued ones), as in the default loop
-    if (!h.stale and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes) {
+    if (!h.stale and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes and !pressure.holds(h)) {
         rd.vtable.begin_admit(rd.ctx);
         var free = h.info_.lanes - h.admitted.items.len;
         var i: usize = 0;
-        while (i < h.queued.items.len and free > 0) {
+        while (i < h.queued.items.len and free > 0 and !pressure.holds(h)) {
             const job = h.queued.items[i];
             var why: []const u8 = "";
             const v = rd.vtable.admit(rd.ctx, .{ .key = @intFromPtr(job), .prompt = job.request.prompt, .max_tokens = job.request.max_tokens, .submitted_s = seconds(job.submitted) }, &why);
@@ -263,6 +264,7 @@ fn runFinals(h: *LaneHost) void {
 pub fn run(h: *LaneHost, rd: Rounds) void {
     while (true) {
         ends.takeCancels(h);
+        pressure.step(h);
         rows_host.answer(h);
         @import("lane_host_score.zig").answer(h);
         learn.refuse(h);

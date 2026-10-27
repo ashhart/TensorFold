@@ -8,6 +8,7 @@ pub fn fitting(s: *pc.Store, a: Allocator, marks_: []const u32) ![]const u32 {
     defer a.free(marks_);
     var out: std.ArrayList(u32) = .empty;
     for (marks_) |at| {
+        if (s.hold) break; // memory pressure: the pass keeps nothing new, so none is planned
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
         if (bytes <= s.budget) try out.append(a, at) else {
             s.counts.refused += 1;
