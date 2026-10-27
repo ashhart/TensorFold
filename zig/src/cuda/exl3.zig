@@ -3,6 +3,7 @@ const std = @import("std");
 const candidate = @import("exl3_candidate.zig");
 const platform = @import("sys");
 const driver = @import("driver.zig");
+const abi = @import("abi.zig");
 const module = @import("module.zig");
 const launch_ = @import("launch.zig");
 const stream_ = @import("stream.zig");
@@ -174,6 +175,14 @@ pub fn planOf(w: Weight) struct { sk: u32, wk: u32 } {
     return .{ .sk = p.sk, .wk = p.wk };
 }
 
+/// Whether the current context's device takes programmatic dependent launches (compute capability 9.0 or newer).
+fn dependentLaunches(d: *const Driver) bool {
+    var dev: abi.Device = 0;
+    var major: c_int = 0;
+    if (d.api.cuCtxGetDevice(&dev) != abi.success) return false;
+    return d.api.cuDeviceGetAttribute(&major, .compute_capability_major, dev) == abi.success and major >= 9;
+}
+
 /// The module and its kernels.
 pub const Linear = struct {
     mod: Module,
@@ -207,6 +216,7 @@ pub const Linear = struct {
         }
         l.group = .{ try l.mod.function("tf_exl3_group_8_2_4"), try l.mod.function("tf_exl3_group_8_2_8") };
         l.rot_group = try l.mod.function("tf_exl3_rot_group");
+        l.pdl = dependentLaunches(d); // sm_90 and newer; the kernels' waits compile to nothing below
         if (platform.c.getenv("TF_EXL3_PDL")) |v| l.pdl = !std.mem.eql(u8, std.mem.span(v), "0");
         return l;
     }
