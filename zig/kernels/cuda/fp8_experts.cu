@@ -151,7 +151,7 @@ __global__ void __launch_bounds__(PWARPS * 32, PMIN)
                              const int* __restrict__ items, const int* __restrict__ counts,
                              const int* __restrict__ members, void* __restrict__ out, int N, float limit, int skip) {
   constexpr int RW = PromptCfg<M, RT, CW>::RW;
-  __shared__ uint4 sw[PSTAGES][CW][M][LANE4][32];
+  __shared__ uint4 sw[PSTAGES][CW][M * BLOCK4];
   __shared__ uint4 sx[PSTAGES][64][4];
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
   const int cw = warp % CW, rw = warp / CW;
@@ -190,8 +190,7 @@ __global__ void __launch_bounds__(PWARPS * 32, PMIN)
       }
       for (int i = threadIdx.x; i < CW * M * BLOCK4; i += PWARPS * 32) {
         const int c = i / (M * BLOCK4), j = i % (M * BLOCK4);
-        const int m = j / BLOCK4, l = (j % BLOCK4) / LANE4, h = j % LANE4;
-        cp16(&sw[g % PSTAGES][c][m][h][l], base + ((size_t)c * KG + g) * (M * BLOCK4) + j);
+        cp16(&sw[g % PSTAGES][c][j], base + ((size_t)c * KG + g) * (M * BLOCK4) + j);
       }
     };
     __syncthreads();
@@ -235,7 +234,7 @@ __global__ void __launch_bounds__(PWARPS * 32, PMIN)
         }
 #pragma unroll
         for (int m = 0; m < M; ++m) {
-          const uint4 wv = sw[g % PSTAGES][cw][m][h][lane];
+          const uint4 wv = sw[g % PSTAGES][cw][m * BLOCK4 + lane * LANE4 + h];
 #pragma unroll
           for (int j = 0; j < NTW; ++j) {
             const uint32_t word = comp(wv, j);
