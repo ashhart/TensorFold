@@ -24,6 +24,12 @@ no Python family for this model, so the kernels are hand-written CUDA and the pa
 | Drafter source (DFlash2, bf16) | `RadixArk/Muse-Spark-Open-DFlash2` | `46c90f412549c472941a68382d91a99e5e6372a0` |
 | Drafter pack (EXL3 4.0 bpw) | built from the drafter source by Muspark's `scripts/quantise_drafter.sh` | exllamav3 `058b8630fd081f3ff46fce6246955b157c3a2e3b` plus Muspark's `patches-exl3/` |
 
+Licences: Muse Spark Open (`meta-models/Muse-Spark-Open-816B-A42B`), AMD's MXFP4 export and the EXL3 pack are under
+Meta's Muse Model License and its Usage Policy (the pack ships it as `LICENSE.md`; it asks for "Built with Muse Spark
+Open" and a separate agreement for large model-as-a-service use). RadixArk's DFlash2 drafter states no licence on its
+card or in its repository, so no drafter pack is published: it is built locally from the original. exllamav3, the
+quantiser and the parity reference, is MIT (Copyright (c) 2025 Turboderp).
+
 ## Files
 
 | File | What it does |
