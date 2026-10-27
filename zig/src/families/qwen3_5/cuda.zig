@@ -40,6 +40,7 @@ test {
     _ = @import("cuda_pages_init_test.zig");
     _ = @import("cuda_pages_lifetime_test.zig");
     _ = @import("cuda_mtp_area_test.zig");
+    _ = @import("cuda_prefix.zig");
     _ = @import("cuda_prefix_fault_test.zig");
 }
 

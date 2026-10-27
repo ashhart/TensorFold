@@ -16,6 +16,18 @@ pub fn sharing() !usize {
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch error.BadQwenKvShare;
 }
 
+/// Below 4 snapshots a stream, live streams evict each other's before a resume (8 at 8 streams resumed none).
+pub fn fewSnapshots(snaps: usize, parallel: usize) bool {
+    return snaps > 0 and snaps < 4 * parallel;
+}
+
+test "TF_QWEN_KV_SHARE below 4 snapshots a stream is too few; off is not" {
+    try std.testing.expect(fewSnapshots(8, 8));
+    try std.testing.expect(fewSnapshots(31, 8));
+    try std.testing.expect(!fewSnapshots(32, 8));
+    try std.testing.expect(!fewSnapshots(0, 8));
+}
+
 /// A stream the store keeps from or restores into: its lane's cache, or (before the lane opens) the state to restore.
 pub const Owner = struct { cache: ?*Cache = null, pending: ?radix.Saved = null };
 
