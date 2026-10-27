@@ -101,6 +101,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "glm_kda", .flags = &.{ "-O3", "--fmad=false" } }, // GLM: the Python family's glm5_next/cuda/kda.cu
     .{ .name = "glm_glue", .flags = &.{"-O3"} }, // ours: the Python family's Triton glue by hand, its PTX op for op
     .{ .name = "glm_ops", .flags = &.{"-O3"} }, // ours: GLM's integer work the Python family did in torch (the DSA token lists)
+    .{ .name = "glm_index", .flags = &.{"-O3"} }, // BadAd84's 0105 and 0101 in CUDA: a prompt chunk's DSA scores and top-512 pools
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts
