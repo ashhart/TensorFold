@@ -16,7 +16,6 @@ pub const Rig = struct {
     emb: cuda.embed_rows.EmbedRows,
     norms: cuda.norms.Norms,
     moe: cuda.moe_glue.MoeGlue,
-    ones: u64 = 0, // fp32 1.0 a router slice, the route's slice-sum weights
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
@@ -24,7 +23,7 @@ pub const Rig = struct {
     sparsest: f64 = 1, // the smallest share of nonzero elements in any reference: none may be all zeros
 
     pub fn g(r: *Rig) glue.Glue {
-        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms, .moe = &r.moe, .ones = r.ones };
+        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms, .moe = &r.moe };
     }
 
     /// A device copy of host values, landed before any kernel on the rig's stream reads it.
