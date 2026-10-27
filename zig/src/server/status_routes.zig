@@ -127,6 +127,7 @@ fn reasoningValue(
 /// Prometheus text, version 0.0.4.
 pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: std.Io.Writer.Allocating = .init(a);
+    const snap = srv.load.read(); // read first: it alone decides whether engine values render
     if (srv.idle_manager) |m| {
         var status: api.Status = .{};
         var streams: [512]u32 = undefined;
@@ -134,15 +135,20 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
         const info = m.readInfo(srv);
         const memory = m.readMemory(srv, false);
         // parked: no engine holds counters; the HTTP and process families still render
-        if (status.healthy) {
+        if (liveRead(snap, status)) {
+            ledgerCounts(&status, snap);
             srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], info, memory, info.context_window) catch return;
-        } else srv.metrics.renderParked(srv.io, &out.writer, srv.info.context_window) catch return;
+        } else srv.metrics.renderParked(srv.io, &out.writer, parkedView(snap)) catch return;
     } else {
         var status: api.Status = .{};
         var streams: [512]u32 = undefined;
         srv.engine.status(&status, &streams);
-        srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], srv.info, srv.engine.memory(false), srv.info.context_window) catch return;
+        if (liveRead(snap, status)) {
+            ledgerCounts(&status, snap);
+            srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], srv.info, srv.engine.memory(false), srv.info.context_window) catch return;
+        } else srv.metrics.renderParked(srv.io, &out.writer, parkedView(snap)) catch return;
     }
+    @import("load_metrics.zig").render(&out.writer, snap, .{ .model = srv.config.served_name, .backend = srv.config.identity.backend, .version = srv.config.identity.version }) catch return;
     if (srv.config.admission.enabled()) @import("metrics.zig").renderAdmission(&out.writer, srv.admission.snapshot(srv.io)) catch return;
     const body = out.written();
     conn.startResponse(200, null) catch return;
@@ -150,6 +156,32 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
     var len: [24]u8 = undefined;
     conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch return) catch return;
     conn.finish(body) catch {};
+}
+
+/// Whether the scrape reads the engine live: a parked ledger snapshot or an unhealthy host takes the fallback body.
+fn liveRead(snap: api.load_ledger.Snapshot, status: api.Status) bool {
+    return status.healthy and !snap.parked;
+}
+
+test "the scrape reads an engine live only when it is healthy and the ledger snapshot is not parked" {
+    var snap: api.load_ledger.Snapshot = .{ .instance = @splat('a'), .start_s = 0, .parked = false, .lanes = 1, .http = @splat(0) };
+    try std.testing.expect(liveRead(snap, .{ .healthy = true }));
+    try std.testing.expect(!liveRead(snap, .{ .healthy = false })); // stale or closing, resident or not
+    snap.parked = true;
+    try std.testing.expect(!liveRead(snap, .{ .healthy = true })); // a reload that lands between the two reads
+}
+
+/// The ledger's request counts and lane give-ups in place of the status read's, so each name shows one value.
+fn ledgerCounts(status: *api.Status, snap: api.load_ledger.Snapshot) void {
+    const r = snap.requests orelse return;
+    status.running = r.running;
+    status.waiting = r.waiting;
+    status.preemptions = r.requeued + r.yields;
+}
+
+fn parkedView(snap: api.load_ledger.Snapshot) @import("metrics.zig").Metrics.Parked {
+    const r = snap.requests orelse return .{ .parked = snap.parked };
+    return .{ .parked = snap.parked, .running = r.running, .waiting = r.waiting };
 }
 
 pub fn dashboard(srv: *Server, conn: *Conn, a: Allocator) void {

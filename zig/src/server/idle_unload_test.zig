@@ -96,6 +96,7 @@ pub const Harness = struct {
             .config = .{ .served_name = "fake", .model_ids = &.{}, .keep_warm_s = 0 },
             .keys = null,
             .metrics = .{ .gpa = gpa },
+            .load = .init(self.io),
             .store = .{ .gpa = gpa },
             .arena = .init(gpa),
             .slide = .init(gpa, self.io, null),

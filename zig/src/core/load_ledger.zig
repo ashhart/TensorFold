@@ -96,7 +96,7 @@ pub const Ledger = struct {
     /// A ledger with a fresh instance id and the process's start time.
     pub fn init(io: std.Io) Ledger {
         var bytes: [16]u8 = undefined;
-        io.randomSecure(&bytes) catch io.random(&bytes);
+        io.random(&bytes); // an identity, not a secret: request seeds keep the secure source to themselves
         return .{ .io = io, .instance = std.fmt.bytesToHex(bytes, .lower), .start_s = std.Io.Clock.real.now(io).toSeconds() };
     }
 

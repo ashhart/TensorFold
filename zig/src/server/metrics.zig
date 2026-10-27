@@ -94,9 +94,11 @@ pub const Metrics = struct {
         m.disconnects += 1;
     }
 
-    /// The scrape body for a parked server: no engine reads, the request and process families only.
-    pub fn renderParked(m: *Metrics, io: std.Io, w: *std.Io.Writer, window: u32) !void {
-        _ = window; // no live streams render while parked: no KV families, so no window
+    /// What the ledger says of an engine that cannot render live: parked (no engine values), or its last counts.
+    pub const Parked = struct { parked: bool = false, running: u32 = 0, waiting: u32 = 0 };
+
+    /// The scrape body without an engine read: the request and process families, and no engine value while parked.
+    pub fn renderParked(m: *Metrics, io: std.Io, w: *std.Io.Writer, view: Parked) !void {
         var snap: Metrics = undefined;
         const requests = blk: {
             m.mutex.lockUncancelable(io);
@@ -109,9 +111,11 @@ pub const Metrics = struct {
             try family(w, "requests_total", "counter", "HTTP replies by API key label and status.");
             for (requests) |r| try w.print("{s}requests_total{{key=\"{s}\",status=\"{d}\"}} {d}\n", .{ prefix, r.key, r.status, r.count });
         }
-        try gauge(w, "requests_running", "gauge", "Requests in prefill or decode.", 0);
-        try gauge(w, "requests_waiting", "gauge", "Requests queued or held until a lane is free.", 0);
-        try gauge(w, "generation_tokens_running", "gauge", "Generated tokens held by live streams.", 0);
+        if (!view.parked) {
+            try gauge(w, "requests_running", "gauge", "Requests in prefill or decode.", view.running);
+            try gauge(w, "requests_waiting", "gauge", "Requests queued or held until a lane is free.", view.waiting);
+            try gauge(w, "generation_tokens_running", "gauge", "Generated tokens held by live streams.", 0);
+        }
         try gauge(w, "prompt_tokens_total", "counter", "Prompt tokens of finished requests.", snap.prompt);
         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
         try gauge(w, "mtp_drafted_total", "counter", "Draft tokens verified on finished requests.", snap.drafted);
@@ -124,8 +128,10 @@ pub const Metrics = struct {
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
         try processGauges(w, process.read());
         try residentGauges(w, resident.read(io));
-        try gauge(w, "num_requests_running", "gauge", "Requests in prefill or decode. A mirror of tensorfold:requests_running.", 0);
-        try gauge(w, "num_requests_waiting", "gauge", "Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.", 0);
+        if (!view.parked) {
+            try gauge(w, "num_requests_running", "gauge", "Requests in prefill or decode. A mirror of tensorfold:requests_running.", view.running);
+            try gauge(w, "num_requests_waiting", "gauge", "Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.", view.waiting);
+        }
         try histogram(w, "e2e_request_latency_seconds", "Seconds from arrival to the reply leaving, under vLLM's name.", snap.latency);
         try histogram(w, "request_decode_time_seconds", "Seconds a finished request spent decoding, under vLLM's name.", snap.decode);
         try histogram(w, "request_prefill_time_seconds", "Seconds a finished request's prompt pass took, under vLLM's name.", snap.prefill);
@@ -269,7 +275,7 @@ test "only a Linux scrape reports the resident set, parked or not, and never as 
     try m.render(std.testing.io, &live.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
     var parked: std.Io.Writer.Allocating = .init(gpa);
     defer parked.deinit();
-    try m.renderParked(std.testing.io, &parked.writer, 4096);
+    try m.renderParked(std.testing.io, &parked.writer, .{});
     for ([_][]const u8{ live.written(), parked.written() }) |body| {
         if (@import("builtin").os.tag != .linux) {
             try std.testing.expect(std.mem.indexOf(u8, body, "process_resident_") == null);
