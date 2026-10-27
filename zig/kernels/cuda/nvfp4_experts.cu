@@ -149,6 +149,8 @@ struct Prompt4 {
   static constexpr int STAGES = SU * 16 * 4 <= 49152 ? 4 : SU * 16 * 3 <= 49152 ? 3 : 2;
   // row r's 16-byte chunk c: rows r .. r + 3 put a 16-input block's lanes on distinct banks
   static __device__ __forceinline__ int chunk(int r, int c) { return r * XC + (c ^ ((r & 3) << 1)); }
+  // FACT's X: rows r, r + 8 of pair p interleaved by word (unit u = one mma A quad); u ^ 5 on odd p: no bank conflicts
+  static __device__ __forceinline__ int pair(int p, int u) { return p * 16 + (u ^ ((p & 1) * 5)); }
 };
 
 // An e4m3 scale in both bf16 halves (bytes 0 and 2 of x, the others zero), exact.
@@ -183,13 +185,52 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
                                              float limit, int cbt, int e, int first, int cnt) {
   using P = Prompt4<M, RT, WM, WN>;
   constexpr int STAGES = P::STAGES;
+  constexpr bool XQ = FACT && NT == RT && WM == 1;  // WM 1: the CTA's warps share NT, so they share X's layout
   extern __shared__ uint4 sm[];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp / WN, wn = warp - wm * WN;
   const int t = lane & 3, gq = lane >> 2, cb = cbt * WN + wn, cbs = min(WN, NB - cbt * WN);
-  const __nv_bfloat16* xsrc[P::XPT];
-  int xdst[P::XPT];
+  // XQ (FACT on full 4-tile items): X through registers, chunk tid & 3 of group gi of pair (tid >> 2) % (BM / 2)
+  constexpr int XP = XQ ? 4 * P::BM / P::THREADS : 1;
+  static_assert(!XQ || (P::THREADS == 128 || P::THREADS == 256) && P::BM == 64 && P::SG == 2, "FACT's pair copy");
+  const uint4* xpr[2] = {nullptr, nullptr};
+  int xpd = 0;  // the thread's first destination chunk in a stage
+  if constexpr (XQ) {
+    const int p = (tid >> 2) % (P::BM / 2), c = tid & 3;
 #pragma unroll
-  for (int i = 0; i < P::XPT; ++i) {
+    for (int h = 0; h < 2; ++h) {
+      const int r = (p >> 3) * 16 + (p & 7) + 8 * h;
+      if (r < cnt) {
+        const int m = __ldg(members + first + r);
+        xpr[h] = reinterpret_cast<const uint4*>(X + (size_t)(slots ? m / slots : m) * x_stride) + c;
+      }
+    }
+    xpd = p * 16 + 8 * (tid / (2 * P::BM)) + ((2 * c) ^ ((p & 1) * 5));
+  }
+  uint4 xg[XP][2];
+  auto xload = [&](int g0) {  // the thread's chunks of k32 groups g0 .. g0 + ng - 1 into registers
+    const int ng = min(P::SG, KG - g0);
+#pragma unroll
+    for (int i = 0; i < XP; ++i) {
+      const int gi = (tid + i * P::THREADS) / (2 * P::BM);
+#pragma unroll
+      for (int h = 0; h < 2; ++h)
+        xg[i][h] = xpr[h] && gi < ng ? ld_nc(xpr[h] + (size_t)(g0 + gi) * 4) : make_uint4(0u, 0u, 0u, 0u);
+    }
+  };
+  auto xstore = [&](int s) {  // ... interleaved into stage s: units 2c and 2c + 1 (u xor 5 swaps them on odd pairs)
+    uint4* xs = sm + s * P::SU;
+#pragma unroll
+    for (int i = 0; i < XP; ++i) {
+      const uint4 a = xg[i][0], b = xg[i][1];
+      xs[xpd + 8 * i] = make_uint4(a.x, b.x, a.y, b.y);
+      xs[(xpd + 8 * i) ^ 1] = make_uint4(a.z, b.z, a.w, b.w);
+    }
+  };
+  constexpr int XPT = XQ ? 1 : P::XPT;
+  const __nv_bfloat16* xsrc[XPT];
+  int xdst[XPT];
+#pragma unroll
+  for (int i = 0; i < XPT && !XQ; ++i) {
     const int q = tid + i * P::THREADS, r = q / P::XC, c = q - r * P::XC;
     xdst[i] = P::chunk(r, c);
     xsrc[i] = nullptr;
@@ -202,9 +243,11 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
   auto stage = [&](int s, int g0) {  // k32 groups g0 .. g0 + ng - 1 (ng < SG only at an odd end)
     const int ng = min(P::SG, KG - g0);
     uint4* xs = sm + s * P::SU;
+    if constexpr (!XQ) {
 #pragma unroll
     for (int i = 0; i < P::XPT; ++i)
       if (xsrc[i] && ((tid + i * P::THREADS) % P::XC) < ng * 4) cp16(xs + xdst[i], xsrc[i] + (size_t)g0 * 32);
+    }
     uint4* ws = xs + P::XU;
     for (int q = tid; q < cbs * P::SG * P::WB; q += P::THREADS) {
       const int j = q / (P::SG * P::WB), o = q - j * P::SG * P::WB;
@@ -213,6 +256,9 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
   };
   constexpr int TA = NT > 0 ? NT : 1;  // array extent
   const int base = 16 * RT * wm;
+  // XQ: lane quad (h, gi, r) = P::pair((base + 16 r) / 2 + gq, 8 gi + 4 h + t) = xs[xqh[h] + 128 r + 8 gi]
+  const int xqh[2] = {(base / 2 + gq) * 16 + 4 * (gq & 1) + (t ^ (gq & 1)),
+                      (base / 2 + gq) * 16 + 4 * (~gq & 1) + (t ^ (gq & 1))};
   const bool active = NT > 0 && cb < NB;
   const uint32_t b = gq & 1;  // byte 2 (j & 1) + (gq & 1) of a scale word holds column j * 8 + gq's scale
   const uint32_t pick[2] = {b | 0x4040u | (b << 8), (b + 2) | 0x4040u | ((b + 2) << 8)};
@@ -226,14 +272,29 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
   const int steps = (KG + P::SG - 1) / P::SG;
 #pragma unroll
   for (int s = 0; s < STAGES - 1; ++s) {
-    if (s < steps) stage(s, s * P::SG);
+    if (s < steps) {
+      stage(s, s * P::SG);
+      if constexpr (XQ) {
+        xload(s * P::SG);
+        xstore(s);
+      }
+    }
     cp_commit();
   }
+  if constexpr (XQ)  // X runs a stage ahead of the weights' cp.async: stage s is stored after stage s - 2's math
+    if (STAGES - 1 < steps) xload((STAGES - 1) * P::SG);
   for (int k = 0; k < steps; ++k) {
     cp_wait<STAGES - 2>();
     __syncthreads();
     if (k + STAGES - 1 < steps) stage((k + STAGES - 1) % STAGES, (k + STAGES - 1) * P::SG);
     cp_commit();
+    if constexpr (XQ) {
+      if (!active) {
+        if (k + STAGES - 1 < steps) xstore((k + STAGES - 1) % STAGES);
+        if (k + STAGES < steps) xload((k + STAGES) * P::SG);
+        continue;
+      }
+    }
     if (!active) continue;
     const uint4* xs = sm + (k % STAGES) * P::SU;
 #pragma unroll
@@ -258,12 +319,17 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
 #pragma unroll
       for (int h = 0; h < 2; ++h) {
         uint2 xa[TA], xb[TA];
+        uint4 xq[TA];  // FACT: the A quad (xa.x, xb.x, xa.y, xb.y) in one read
         const int u = gi * 8 + h * 4 + t;  // the 8-byte unit holding lane t's inputs 16h + 4t .. + 3 of group gi
 #pragma unroll
         for (int r = 0; r < NT; ++r) {
           const int r0 = base + 16 * r + gq;
+          if constexpr (XQ) {
+            xq[r] = xs[xqh[h] + 128 * r + 8 * gi];
+          } else {
           xa[r] = reinterpret_cast<const uint2*>(xs + P::chunk(r0, u >> 1))[u & 1];
           xb[r] = reinterpret_cast<const uint2*>(xs + P::chunk(r0 + 8, u >> 1))[u & 1];
+          }
         }
 #pragma unroll
         for (int m = 0; m < M; ++m)
@@ -278,7 +344,10 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
 #pragma unroll
               for (int r = 0; r < NT; ++r) {
                 float p[4];
-                mma_z(p, xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
+                if constexpr (XQ)
+                  mma_z(p, xq[r].x, xq[r].y, xq[r].z, xq[r].w, b0, b1);
+                else
+                  mma_z(p, xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
                 float(&a)[4] = acc[m][r][j];
                 a[0] = fmaf(p[0], s0, a[0]);
                 a[1] = fmaf(p[1], s1, a[1]);
@@ -293,6 +362,10 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
             }
           }
       }
+    }
+    if constexpr (XQ) {  // X of stage k + STAGES - 1, loaded during this stage's math; then the next one's loads
+      if (k + STAGES - 1 < steps) xstore((k + STAGES - 1) % STAGES);
+      if (k + STAGES < steps) xload((k + STAGES) * P::SG);
     }
   }
   if (!active) return;
