@@ -3,14 +3,17 @@
 const std = @import("std");
 const cuda = @import("cuda");
 
-pub const topk = 512;
+const sparse = @import("cuda_sparse.zig");
+
+pub const topk = sparse.topk_pools;
 /// glm_index_scores: rows a CTA (a warp each), 64-pool tiles a CTA, threads a CTA.
 pub const score_rows = 8;
 pub const score_tiles = 16;
-pub const score_pools = 64;
 pub const threads = score_rows * 32;
-/// The rows a launch must have to take it: tf_glm_scores' `loop` tiling starts there too (sparse.score_loop_from).
-pub const rows_from = 64;
+/// glm_index_pools' block: glm_index::T.
+pub const pool_threads = 256;
+/// The rows a launch must have to take it: where tf_glm_scores' `loop` tiling starts.
+pub const rows_from = sparse.score_loop_from;
 pub const cap_max = 4096;
 
 /// TF_GLM_INDEX_CUDA: unset or 0 (today's launches), 1 (both kernels), scores (only the scores, to bisect).
@@ -66,10 +69,10 @@ pub const Kernels = struct {
         k.module.unload();
     }
 
-    /// Whether `rows` rows of a chunk with this key cache layout go through the kernels.
-    pub fn takes(k: *const Kernels, rows: usize, pk: u64, ps: u64) bool {
+    /// Whether `rows` rows over `np` pools with this key cache layout go through the kernels.
+    pub fn takes(k: *const Kernels, rows: usize, np: usize, pk: u64, ps: u64) bool {
         _ = k;
-        return rows >= rows_from and pk % 16 == 0 and ps % 16 == 0;
+        return rows >= rows_from and np >= topk and pk % 16 == 0 and ps % 16 == 0;
     }
 
     /// tf_glm_scores' launch for `rows` rows at `at` into out [rows][np]; the first `nb` 64-pool blocks are written.
@@ -85,7 +88,7 @@ pub const Kernels = struct {
         const t = tile(np);
         var a: cuda.Args = .{};
         inline for (.{ scores_ptr, out, @as(i64, @intCast(np)), at, @as(c_int, topk), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), path }) |v| a.add(v);
-        try cuda.launch.launch(k.pools_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
+        try cuda.launch.launch(k.pools_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = pool_threads } }, s, &a);
     }
 };
 
@@ -120,8 +123,9 @@ test "GLM index: the candidate cap follows the pool count and stays in shared me
 
 test "GLM index: only prompt-sized launches on aligned key caches take the kernels" {
     const k: Kernels = undefined;
-    try std.testing.expect(k.takes(rows_from, 0x1000, 32768));
-    try std.testing.expect(!k.takes(rows_from - 1, 0x1000, 32768));
-    try std.testing.expect(!k.takes(512, 0x1008, 32768));
-    try std.testing.expect(!k.takes(512, 0x1000, 32760));
+    try std.testing.expect(k.takes(rows_from, 1024, 0x1000, 32768));
+    try std.testing.expect(!k.takes(rows_from - 1, 1024, 0x1000, 32768));
+    try std.testing.expect(!k.takes(512, 1024, 0x1008, 32768));
+    try std.testing.expect(!k.takes(512, 1024, 0x1000, 32760));
+    try std.testing.expect(!k.takes(512, topk - 1, 0x1000, 32768));
 }

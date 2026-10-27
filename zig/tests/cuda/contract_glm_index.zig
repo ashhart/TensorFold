@@ -41,6 +41,9 @@ const sumIn = pages.sumIn;
 pub const Scores = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    /// tf_glm_index_scores, which must equal `f`'s bytes (`f` is then the baseline it replaces).
+    fast: ?cuda.Function = null,
+    base: u64 = 0,
     wrong_table: bool = false,
     shape: c.Shape = undefined,
     q: []u16 = &.{},
@@ -73,6 +76,10 @@ pub const Scores = struct {
 
     pub fn kernel(self: *Scores) g.Kernel {
         var declared = spec(.scores);
+        if (self.fast != null) {
+            declared.name = "cuda glm tf_glm_index_scores on pages out of order";
+            declared.replaces = "tf_glm_scores";
+        }
         if (self.wrong_table) declared.name = "control: GLM paged scores use a swapped table";
         return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
@@ -125,17 +132,34 @@ pub const Scores = struct {
         self.pos = try self.rig.input(std.mem.asBytes(&p));
         self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
         self.out = try self.rig.output(shape.rows * shape.n * 4);
+        self.base = try self.rig.scratch(shape.rows * shape.n * 4);
         return true;
     }
 
     pub fn run(self: *Scores) !void {
+        try self.launch(self.fast orelse self.f, self.fast != null, self.out);
+        try self.rig.s.synchronize();
+    }
+
+    fn launch(self: *Scores, f: cuda.Function, fast: bool, out: u64) !void {
         const rows = self.shape.rows;
         const nb = self.shape.n / 64;
-        const loop: usize = if (rows >= sparse.score_loop_from) sparse.score_loop else 1;
+        const loop: usize = if (fast) glm.index.score_tiles else if (rows >= sparse.score_loop_from) sparse.score_loop else 1;
         var a: cuda.Args = .{};
-        inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], self.out, self.pos, @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);
-        try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((nb + loop - 1) / loop) }, .block = .{ .x = 128 } }, self.rig.s, &a);
-        try self.rig.s.synchronize();
+        if (fast) {
+            inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(rows)), @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);
+            const g2 = glm.index.scoresGrid(rows, nb);
+            try cuda.launch.launch(f, .{ .grid = .{ .x = g2[0], .y = g2[1] }, .block = .{ .x = glm.index.threads } }, self.rig.s, &a);
+        } else {
+            inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);
+            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((nb + loop - 1) / loop) }, .block = .{ .x = 128 } }, self.rig.s, &a);
+        }
+    }
+
+    /// tf_glm_scores on the same inputs, as cuda_sparse launches it.
+    pub fn replaced(self: *Scores) ![]const u8 {
+        try self.launch(self.f, false, self.base);
+        return self.rig.bytes(self.base, self.shape.rows * self.shape.n * 4);
     }
 
     pub fn count(self: *Scores) usize {
