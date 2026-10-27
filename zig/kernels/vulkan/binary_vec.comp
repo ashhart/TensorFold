@@ -12,6 +12,17 @@
 
 #version 460
 
+// -DPRESERVE_F32: keep subnormal f32 intermediates instead of the default
+// flush-to-zero, per OpExecutionMode DenormPreserve (4459, width 32); needs
+// the SPV_KHR_float_controls extension and the DenormPreserve capability
+// (4464), and the host must gate it on the device's
+// shaderDenormPreserveFloat32 feature. Signed zero is the only other result
+// class this mode allows to differ.
+#ifdef PRESERVE_F32
+#extension GL_EXT_spirv_intrinsics : require
+spirv_execution_mode(extensions = ["SPV_KHR_float_controls"], capabilities = [4464], 4459, 32);
+#endif
+
 #ifdef USE_FP16
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
