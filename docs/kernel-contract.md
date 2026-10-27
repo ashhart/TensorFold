@@ -204,6 +204,8 @@ A restored 13.0 receipt can arrive after the later compiler sets. Such records m
 A missing later receipt remains pending; a 13.0 measurement never substitutes for it.
 Flash Next's 27 EXL3 launches (`flashnext_exl3_pending.zig`) carry only an nvcc 13.4 receipt: they stay pending under
 13.0 to 13.3 and take their 13.4 usage from `cuda_134`, which `pending_132.lookup` serves for that release.
+The four DeltaNet head-split launches (`flashnext_gdn_split_pending.zig`, sm_120 only) record geometry alone: their
+resources stay pending until measured, and a pending record never passes a compiled resource check.
 
 Gemma 4 CUDA tower QKV norms and nine-term pooling register FP32 sums and BF16 outputs.
 Their contract keeps the exact FP32 mirror and adds independent FP64 ranges at the BF16 nodes.

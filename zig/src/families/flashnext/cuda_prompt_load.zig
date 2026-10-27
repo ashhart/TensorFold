@@ -83,9 +83,15 @@ pub const Layer = struct {
     native_experts: ?mixed.Owned = null,
     /// EXL3 routed experts with the shared one as id 512 (cuda_exl3_load.zig).
     exl3: ?*exl3_load.Experts = null,
+    /// The rank's decode views of a linear-attention layer's projections when the DeltaNet heads split.
+    half: ?@import("exl3/model/cuda_exl3_gdn_split.zig").Views = null,
 
     pub fn free(self: *Layer, gpa: std.mem.Allocator) void {
         _ = gpa;
+        if (self.half) |*h| {
+            h.proj.free();
+            h.out.free();
+        }
         if (self.exl3) |x| x.destroy();
         self.attn_hc.free();
         self.mlp_hc.free();
@@ -310,6 +316,11 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
     var out_q = Q4.empty(driver);
     errdefer proj_q.free();
     errdefer out_q.free();
+    var shard: ?@import("exl3/model/cuda_exl3_gdn_split.zig").Views = null;
+    errdefer if (shard) |*h| {
+        h.proj.free();
+        h.out.free();
+    };
     var cw_b = deadBuf(driver);
     var a_b = deadBuf(driver);
     var dt_b = deadBuf(driver);
@@ -346,6 +357,7 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         const parts = [_][]const u8{ ".in_proj_qkv", ".in_proj_z", ".in_proj_b", ".in_proj_a" };
         proj_q = try projections.loadStitched(gpa, driver, store, lp, &parts, gdn.proj_width, dims);
         out_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.out_proj", .{lp}), dims, gdn.value_dim);
+        if (@import("exl3/model/cuda_exl3_gdn_split.zig").enabled(world)) shard = try @import("exl3/model/cuda_exl3_gdn_split.zig").build(gpa, driver, proj_q, out_q, rank);
         const conv = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.conv1d.weight", .{lp}));
         if (conv.dtype != .bf16 or conv.bytes.len != gdn.conv_dim * gdn.taps * 2) return error.UnexpectedTensor;
         cw_b = try cuda.DeviceBuffer.fromHost(driver, conv.bytes);
@@ -483,5 +495,6 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         .experts_down = experts_down,
         .native_experts = native_experts,
         .exl3 = exl3_experts,
+        .half = shard,
     };
 }

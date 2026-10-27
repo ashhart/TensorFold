@@ -60,16 +60,16 @@ static __device__ __forceinline__ float conv_act(const __nv_bfloat16* __restrict
 }
 }  // namespace fn_gdn
 
-// Program (row, unit), 256 threads: key head u's normed q and k (u < NK), else a value head's v, decay g and beta.
-extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
+// Program (row, unit), 256 threads: key head u's normed q and k (u < nkl: head hk0 + u), else value head hv0 + u.
+static __device__ __forceinline__ void gdn_front(
         const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
         const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
-        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb, int nkl, int hk0, int hv0) {
     using namespace fn_gdn;
     const int r = blockIdx.x, u = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
-    if (u < NK) {
+    if (u < nkl) {
         __shared__ float x[2][DK];
-        const int hk = u;
+        const int hk = hk0 + u;
         x[t / DK][t % DK] = conv_act(P, cs, cw, r, t < DK ? hk * DK + t : NK * DK + hk * DK + (t - DK));
         __syncthreads();
         if (warp < 2) {
@@ -87,7 +87,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
             for (int i = 0; i < 4; ++i) dst[lane * 4 + i] = v4[i] * inv;
         }
     } else {
-        const int hv = u - NK;
+        const int hv = hv0 + u - nkl;
         if (t < DV) v[(size_t)r * NV * DV + hv * DV + t] = conv_act(P, cs, cw, r, 2 * NK * DK + hv * DV + t);
         else if (t == DV) {
             const float b = __bfloat162float(P[(size_t)r * PW + C + NV * DV + hv]);
@@ -98,12 +98,27 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
     }
 }
 
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+    gdn_front(P, cs, cw, a_log, dt_bias, qn, kn, v, gb, fn_gdn::NK, 0, 0);
+}
+
+// The same for the heads a rank owns: key heads hk0.. (nkl of them), value heads hv0.. (grid.y - nkl of them).
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_front_h(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb, int nkl, int hk0, int hv0) {
+    gdn_front(P, cs, cw, a_log, dt_bias, qn, kn, v, gb, nkl, hk0, hv0);
+}
+
 // The chain through the chunk from state_in to state_out (in place, or apart for a rollback): a warp 4 state rows.
 static __device__ __forceinline__ void gdn_rows(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
-        const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+        const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out, int hv0) {
     using namespace fn_gdn;
-    const int hv = blockIdx.x, hk = hv / (NV / NK), warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int hv = hv0 + blockIdx.x, hk = hv / (NV / NK), warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row0 = blockIdx.y * 16 + warp * 4;
     const size_t sbase = (size_t)hv * DV * DK;
     float s[4][4];
@@ -168,20 +183,33 @@ static __device__ __forceinline__ void gdn_rows(
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
         const float* __restrict__ gb, float* state, int rows, float* __restrict__ ys_out) {
-    gdn_rows(qn, kn, v, gb, state, state, rows, ys_out);
+    gdn_rows(qn, kn, v, gb, state, state, rows, ys_out, 0);
+}
+
+// fn_gdn_rows for the value heads hv0 .. hv0 + grid.x - 1 (state, v, gb and ys keep their global layout).
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_h(
+        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
+        const float* __restrict__ gb, float* state, int rows, float* __restrict__ ys_out, int hv0) {
+    gdn_rows(qn, kn, v, gb, state, state, rows, ys_out, hv0);
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_to(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
         const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
-    gdn_rows(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+    gdn_rows(qn, kn, v, gb, state_in, state_out, rows, ys_out, 0);
 }
 
-extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_to_h(
+        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
+        const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out, int hv0) {
+    gdn_rows(qn, kn, v, gb, state_in, state_out, rows, ys_out, hv0);
+}
+
+static __device__ __forceinline__ void gdn_norm(
         const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
-        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs) {
+        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs, int hv0, int nvl) {
     using namespace fn_gdn;
-    const int r = blockIdx.x, hv = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
+    const int r = blockIdx.x, hv = hv0 + blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
     __shared__ float ys[DV];
     __shared__ float rinv;
     ys[t] = ys_in[((size_t)r * NV + hv) * DV + t];
@@ -200,9 +228,23 @@ extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
     const float yn = bf(bf(ys[t] * rinv) * __bfloat162float(norm_w[t]));
     const float z = __bfloat162float(P[(size_t)r * PW + C + hv * DV + t]);
     const float o = bf(yn * sigmoidf_(z));
-    out[(size_t)r * NV * DV + hv * DV + t] = __float2bfloat16_rn(o);
+    // the output rows are nvl heads wide, head hv0 first (the whole layer's: nvl == NV, hv0 == 0)
+    out[(size_t)r * nvl * DV + (hv - hv0) * DV + t] = __float2bfloat16_rn(o);
     const float gs = warp_sum(o);
-    if (lane == 0) xs[(size_t)r * (NV * DV / 32) + hv * (DV / 32) + warp] = gs;
+    if (lane == 0) xs[(size_t)r * (nvl * DV / 32) + (hv - hv0) * (DV / 32) + warp] = gs;
+}
+
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
+        const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
+        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs) {
+    gdn_norm(ys_in, P, norm_w, eps, out, xs, 0, fn_gdn::NV);
+}
+
+// The gated norm of the value heads hv0 .. hv0 + grid.y - 1 into rows of nvl heads.
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm_h(
+        const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
+        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs, int hv0, int nvl) {
+    gdn_norm(ys_in, P, norm_w, eps, out, xs, hv0, nvl);
 }
 
 // ---- sparse attention (QSA): each row's blocks ----------------------------------------------------------------------

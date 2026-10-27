@@ -24,6 +24,11 @@ pub const Kernels = struct {
     front: cuda.Function,
     chain: cuda.Function,
     chain_to: cuda.Function,
+    /// The same for a rank's heads (exl3/cuda_exl3_gdn_split.zig).
+    front_h: cuda.Function,
+    chain_h: cuda.Function,
+    chain_to_h: cuda.Function,
+    gnorm_h: cuda.Function,
     chain_tpr: cuda.Function,
     /// front + chain + gated norm in one kernel a value head (prompt passes of 64 rows or more).
     gdn_fused: cuda.Function,
@@ -77,6 +82,10 @@ pub const Kernels = struct {
         k.gdn_fused = try k.batch.function("fn_gdn_fused");
         try k.gdn_fused.allowDynamicShared(gdn_fused_smem);
         k.gnorm = try k.batch.function("fn_gdn_norm");
+        k.front_h = try k.batch.function("fn_gdn_front_h");
+        k.chain_h = try k.batch.function("fn_gdn_rows_h");
+        k.chain_to_h = try k.batch.function("fn_gdn_rows_to_h");
+        k.gnorm_h = try k.batch.function("fn_gdn_norm_h");
         return k;
     }
 

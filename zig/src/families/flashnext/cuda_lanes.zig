@@ -86,7 +86,7 @@ pub fn Namespace(comptime Tri: type) type {
             free_streams: u32 = 0,
             /// Kept prompt states in pinned host memory (cuda_snap.on_host): the native host budgets them there.
             host_snaps: bool = false,
-            /// The prefill step when the prompt arithmetic depends on the chunk cuts (EXL3): states keep on its starts
+            /// Prefill step when prompt arithmetic depends on the chunk cuts (EXL3): states keep on its starts only.
             snap_grid: u32 = 0,
             ctx: *anyopaque,
             deinit: *const fn (*anyopaque) void,

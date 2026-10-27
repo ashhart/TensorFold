@@ -25,6 +25,17 @@ pub fn launch(f: cuda.Function, stream: cuda.Stream, in: In, rows: usize, out: u
     try cuda.launch.launch(f, .{ .grid = .{ .x = gdn.nv }, .block = .{ .x = parts.gdn_fused_threads }, .shared = parts.gdn_fused_smem }, stream, &a);
 }
 
+/// fn_gdn_norm_h over `rows` readouts of the value heads hv0 .. hv0 + nvl - 1, into rows of nvl heads.
+pub fn normHeads(f: cuda.Function, stream: cuda.Stream, ys: u64, proj: u64, norm_w: u64, out: u64, xs: u64, rows: usize, hv0: u32, nvl: u32) !void {
+    var b: cuda.Args = .{};
+    for ([_]u64{ ys, proj, norm_w }) |v| b.add(v);
+    b.add(eps);
+    for ([_]u64{ out, xs }) |v| b.add(v);
+    b.add(@as(c_int, @intCast(hv0)));
+    b.add(@as(c_int, @intCast(nvl)));
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = nvl }, .block = .{ .x = gdn.dv } }, stream, &b);
+}
+
 /// fn_gdn_norm over `rows` readouts ys: the gated norm into out, its sums into xs.
 pub fn norm(f: cuda.Function, stream: cuda.Stream, ys: u64, proj: u64, norm_w: u64, out: u64, xs: u64, rows: usize) !void {
     var b: cuda.Args = .{};

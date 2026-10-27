@@ -1,6 +1,7 @@
 //! The batched pass: a chunk of rows through each layer at once, each row's bits those of a one-row pass.
 
 const std = @import("std");
+const gdn_split = @import("exl3/model/cuda_exl3_gdn_split.zig");
 const cuda = @import("cuda");
 const gdn = @import("cuda_gdn.zig");
 const gdn_fused = @import("cuda_gdn_fused.zig");
@@ -254,22 +255,24 @@ pub fn Pass(comptime Tri: type) type {
         pub fn gdnBlock(self: *Self, lw: *const Layer, layer: usize, li: usize, keep: LayerKeep) !void {
             const s = self.s;
             const n = self.rows;
-            _ = try self.lane(s.mixed, s.xsm, lw.proj, s.proj, s.dummy, n, 1);
+            // decode rows under 64 on a rank's half of the heads (cuda_exl3_gdn_split.zig); the rest on every head
+            const shard: ?*const gdn_split.Views = if (lw.half != null and self.m.collective != null and self.halfRows()) &lw.half.? else null;
+            _ = try self.lane(s.mixed, s.xsm, if (shard) |h| h.proj else lw.proj, s.proj, s.dummy, n, 1);
             // a lone pass keeps its projection and conv window; a shared pass keeps each lane's own
             if (self.lanes.len == 0) {
                 try self.copy(keep.proj, s.proj, n * gdn.proj_width * 2);
                 try self.copy(keep.hist, self.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
             }
             // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
-            const fused = self.lanes.len == 0 and n >= 64 and gdn_fused.on();
+            const fused = shard == null and self.lanes.len == 0 and n >= 64 and gdn_fused.on();
             if (fused) {
                 // the three in one kernel a value head: the same per-row op sequences, no fp32 rows through memory
                 const st = self.seq.state[li].ptr;
                 const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr };
                 try gdn_fused.launch(self.k.gdn_fused, self.stream, in, n, s.gout, s.gxs);
             } else if (self.lanes.len == 0) {
-                try self.gdnFront(lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
-                try self.gdnChain(s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
+                try self.gdnFront(lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb, shard);
+                try self.gdnChain(s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys, shard);
             } else {
                 // shared rounds: each lane's rows kept, fronted and chained on its own conv window and state
                 var row0: usize = 0;
@@ -281,52 +284,37 @@ pub fn Pass(comptime Tri: type) type {
                     const gb = row0 * gdn.nv * 2 * 4;
                     try self.copy(lk.proj, proj, l.rows * gdn.proj_width * 2);
                     try self.copy(lk.hist, l.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
-                    try self.gdnFront(lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb);
-                    try self.gdnChain(s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, lk.state_out, l.rows, s.ys + v);
+                    try self.gdnFront(lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, shard);
+                    try self.gdnChain(s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, lk.state_out, l.rows, s.ys + v, shard);
                     // the lane's conv window moves on now: the gated norm below reads none of it
                     try self.shiftWindow(l.seq.conv[li].ptr, proj, gdn.proj_width, l.rows, gdn.taps - 1, gdn.conv_dim);
                     row0 += l.rows;
                 }
             }
-            if (!fused) try gdn_fused.norm(self.k.gnorm, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n);
+            if (shard) |h| {
+                try gdn_fused.normHeads(self.k.gnorm_h, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n, h.hv0, @intCast(gdn_split.rank_nv));
+            } else if (!fused) try gdn_fused.norm(self.k.gnorm, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n);
             if (self.lanes.len == 0) try self.shiftWindow(self.seq.conv[li].ptr, s.proj, gdn.proj_width, n, gdn.taps - 1, gdn.conv_dim);
-            self.out_slices = try self.lane(s.gout, s.gxs, lw.out, s.dummy, s.part, n, out_sk);
+            self.out_slices = try self.lane(s.gout, s.gxs, if (shard) |h| h.out else lw.out, s.dummy, s.part, n, out_sk);
+            // the rank's partial sum of the out projection (slice 0, the other slices zero), then the ranks' sum
+            if (shard != null) try self.m.collective.?.sum(self.stream, s.part, n * dims);
         }
 
         /// fn_gdn_front over `rows` projection rows after the conv window `conv`.
-        fn gdnFront(self: *Self, lw: *const Layer, proj: u64, conv: u64, rows: usize, gq: u64, gk: u64, gv: u64, ggb: u64) !void {
-            var f: cuda.Args = .{};
-            f.add(proj);
-            f.add(conv);
-            f.add(lw.cw.ptr);
-            f.add(lw.a_log.ptr);
-            f.add(lw.dt.ptr);
-            f.add(gq);
-            f.add(gk);
-            f.add(gv);
-            f.add(ggb);
-            try cuda.launch.launch(self.k.front, .{ .grid = .{ .x = @intCast(rows), .y = gdn.nk + gdn.nv }, .block = .{ .x = 256 } }, self.stream, &f);
+        fn gdnFront(self: *Self, lw: *const Layer, proj: u64, conv: u64, rows: usize, gq: u64, gk: u64, gv: u64, ggb: u64, shard: ?*const gdn_split.Views) !void {
+            return @import("cuda_batch_gdn.zig").front(self, lw, proj, conv, rows, gq, gk, gv, ggb, shard);
         }
 
         /// fn_gdn_rows over `rows` rows from `state`, in place or (state_out) to fn_gdn_rows_to's; readouts into ys.
-        fn gdnChain(self: *Self, gq: u64, gk: u64, gv: u64, ggb: u64, state: u64, state_out: u64, rows: usize, ys: u64) !void {
-            var a: cuda.Args = .{};
-            a.add(gq);
-            a.add(gk);
-            a.add(gv);
-            a.add(ggb);
-            a.add(state);
-            if (rows >= 64) {
-                // two threads a state row (fn_gdn_chain_tpr), fn_gdn_rows' bits; in place without a rollback copy
-                a.add(if (state_out != 0) state_out else state);
-                a.add(cint(rows));
-                a.add(ys);
-                return cuda.launch.launch(self.k.chain_tpr, .{ .grid = .{ .x = gdn.nv }, .block = .{ .x = 256 }, .shared = parts.chain_tpr_smem }, self.stream, &a);
-            }
-            if (state_out != 0) a.add(state_out);
-            a.add(cint(rows));
-            a.add(ys);
-            try cuda.launch.launch(if (state_out != 0) self.k.chain_to else self.k.chain, .{ .grid = .{ .x = gdn.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, self.stream, &a);
+        fn gdnChain(self: *Self, gq: u64, gk: u64, gv: u64, ggb: u64, state: u64, state_out: u64, rows: usize, ys: u64, shard: ?*const gdn_split.Views) !void {
+            return @import("cuda_batch_gdn.zig").chain(self, gq, gk, gv, ggb, state, state_out, rows, ys, shard);
+        }
+
+        /// Whether this pass's rows are decode rows: under 64 in all (a lane under 64 each).
+        fn halfRows(self: *const Self) bool {
+            if (self.lanes.len == 0) return self.rows < 64;
+            for (self.lanes) |l| if (l.rows >= 64) return false;
+            return true;
         }
 
         pub fn attnBlock(self: *Self, lw: *const Layer, ai: usize) !void {
