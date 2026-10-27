@@ -99,24 +99,26 @@ test "a reply of many calls searches each opener once, not again after every cal
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
     const call = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":1}}</tool_call>";
-    var ns: [2]u64 = undefined;
-    for ([_]usize{ 400, 3200 }, &ns) |n, *best| {
-        const reply = try a.alloc(u8, n * call.len);
-        for (0..n) |i| @memcpy(reply[i * call.len ..][0..call.len], call);
-        best.* = std.math.maxInt(u64);
-        for (0..3) |_| {
-            var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
-            defer run.deinit();
-            const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-            const r = try parse(run.allocator(), reply, tools, null);
-            try std.testing.expectEqualStrings("", try closeCall(run.allocator(), reply, tools));
-            try std.testing.expectEqualStrings("", try @import("reply_text.zig").hideToolCalls(run.allocator(), reply, false));
-            best.* = @min(best.*, @as(u64, @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start)));
-            try std.testing.expectEqual(n, r.calls.?.len);
-        }
+    const sizes = [_]usize{ 200, 6400 };
+    var replies: [2][]u8 = undefined;
+    for (sizes, &replies) |n, *reply| {
+        reply.* = try a.alloc(u8, n * call.len);
+        for (0..n) |i| @memcpy(reply.*[i * call.len ..][0..call.len], call);
     }
-    // 8x the calls: near 8x the time, not 64x
-    try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+    var ns = [_]u64{ std.math.maxInt(u64), std.math.maxInt(u64) };
+    // the sizes alternate, so a runner busy with other tests slows both alike; each keeps its best of five
+    for (0..5) |_| for (sizes, replies, &ns) |n, reply, *best| {
+        var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer run.deinit();
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+        const r = try parse(run.allocator(), reply, tools, null);
+        try std.testing.expectEqualStrings("", try closeCall(run.allocator(), reply, tools));
+        try std.testing.expectEqualStrings("", try @import("reply_text.zig").hideToolCalls(run.allocator(), reply, false));
+        best.* = @min(best.*, @as(u64, @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start)));
+        try std.testing.expectEqual(n, r.calls.?.len);
+    };
+    // 32x the calls: at most 32x the time (15x in a Debug build on an M3 Ultra), not 1024x
+    try std.testing.expect(ns[1] <= 64 * ns[0]);
 }
 
 test "a call the end token left open closes when it parses whole" {
