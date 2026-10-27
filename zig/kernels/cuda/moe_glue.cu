@@ -141,8 +141,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_warp(const
     if (shared && lane == 0) pick[r * slots + topk] = ne, wts[r * slots + topk] = 1.f;
 }
 
-// The warp form ranking sigmoid(logit) + bias (Nemotron's routing): weights the scores, `shared` slots ne, ne + 1, ...
-// The logits are `slices` partial sums [slices, rows, ne], added in slice order (the combine's chain) before the sigmoid.
+// The warp form ranking sigmoid(logit) + bias, logit the `slices` partials [slices, rows, ne] summed in order.
 extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp(const float* logits, const float* bias,
                                                                                 int* pick, float* wts, int rows, int ne,
                                                                                 int topk, int shared, int normalize,
@@ -186,7 +185,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp
         xb = __shfl_sync(0xFFFFFFFFu, xb, bi & 31);
         if (lane == k) xk = xb, pk = bi;
     }
-    // the weights in their lanes; the sum in pick order, + 1e-20 so all picks underflowing to 0 weigh 0, not 0 / 0
+    // the weights in their lanes; the sum in pick order, + 1e-20: picks all underflowed to 0 weigh 0, not NaN
     float sum = 0.f;
     for (int k = 0; k < topk; ++k) sum = __fadd_rn(sum, __shfl_sync(0xFFFFFFFFu, xk, k));
     if (lane < topk) {
