@@ -54,6 +54,11 @@ fn ms(a: std.Io.Timestamp, b: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(a.durationTo(b).nanoseconds)) / 1e6;
 }
 
+/// One line before each step, so a failure names the case and step it died in.
+fn step(c: Case, np: usize, what: []const u8) void {
+    std.debug.print("  [np {d} rows {d} heads {d}{s}] {s}\n", .{ np, c.rows, c.heads, if (c.paged) " paged" else "", what });
+}
+
 /// How many rows took each path of glm_index_pools (whole row, candidates, whole row after the candidates missed).
 var paths = [3]usize{ 0, 0, 0 };
 
@@ -92,6 +97,7 @@ pub fn run(gpu: check.Gpu) !void {
             for (bufs.items) |*b| b.free();
             bufs.deinit(gpa);
         }
+        step(c, np, "upload inputs");
         const dq = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(qi));
         const dw = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(wts));
         var table: glm.latent.Table = .{};
@@ -113,6 +119,7 @@ pub fn run(gpu: check.Gpu) !void {
         } else dk = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(pk));
         const p0: i32 = @intCast(c.pos);
         const dpos = try fromHost(gpu, &bufs, std.mem.asBytes(&p0));
+        step(c, np, "allocate scratch");
         const sa = try scratch(gpu, &bufs, c.rows, np);
         const sb = try scratch(gpu, &bufs, c.rows, np);
         const sc = try scratch(gpu, &bufs, c.rows, np);
@@ -123,6 +130,7 @@ pub fn run(gpu: check.Gpu) !void {
         const ca = try zeros(gpu, &bufs, c.rows * 4);
         const cb = try zeros(gpu, &bufs, c.rows * 4);
         const cc = try zeros(gpu, &bufs, c.rows * 4);
+        step(c, np, "selectTokens old and new, timed");
         var ms_old: f64 = 0;
         var ms_new: f64 = 0;
         for (0..3) |rep| {
@@ -138,8 +146,10 @@ pub fn run(gpu: check.Gpu) !void {
                 ms_new += ms(t1, t2) / 2;
             }
         }
+        step(c, np, "selectTokens scores-only");
         try sp.selectTokens(half, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, c.cap, sc, tc, cc);
         try s.synchronize();
+        step(c, np, "compare scores, pools, tokens, scores-only");
         const blk = @min(c.rows, sp.select_rows);
         fails += try same(gpu, "scores", sa.scores, sb.scores, blk * np * 4, np, c);
         fails += try same(gpu, "pools", sa.pools, sb.pools, c.rows * sp.topk_pools * 8, np, c);
@@ -148,7 +158,9 @@ pub fn run(gpu: check.Gpu) !void {
         fails += try same(gpu, "scores-only pools", sa.pools, sc.pools, c.rows * sp.topk_pools * 8, np, c);
         fails += try same(gpu, "scores-only tokens", ta, tc, tok_bytes, np, c);
         std.debug.print("np {d} rows {d} heads {d}{s}: selectTokens {d:.2} ms, with glm_index {d:.2} ms\n", .{ np, c.rows, c.heads, if (c.paged) " paged" else "", ms_old, ms_new });
+        step(c, np, "every score block");
         fails += try blocks(gpu, &bufs, old, &idx, s, dq, dw, dk, table, c, np);
+        step(c, np, "tied, random and special scores through both selects");
         fails += try ties(gpu, &bufs, rand, old, &idx, s, sa, sb, dpos, np, c);
     }
     std.debug.print("glm_index_pools paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}\n", .{ paths[0], paths[1], paths[2] });
@@ -168,16 +180,20 @@ fn blocks(gpu: check.Gpu, bufs: *Bufs, set: glm.glue.Set, idx: *const glm.index.
     var a: usize = 0;
     while (a < c.rows) : (a += blk) {
         const n = @min(blk, c.rows - a);
+        step(c, np, "block: upload its position, clear outputs");
         const at_v: i32 = @intCast(c.pos + a);
         const at = try fromHost(gpu, bufs, std.mem.asBytes(&at_v));
         const nb = (sp.scoreColumns(c.pos + a, n, np) + 63) / 64;
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = out_a, .len = n * np * 4, .borrowed = true }).fill8(0, null);
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = out_b, .len = n * np * 4, .borrowed = true }).fill8(0, null);
+        step(c, np, "block: tf_glm_scores");
         var sa: cuda.Args = .{};
         inline for (.{ dq + a * c.heads * d * 2, dw + a * c.heads * 2, @as(i64, @intCast(c.heads)), dk, out_a, at, @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, sp.headScale(c.heads), @as(i64, @intCast(c.heads)), @as(c_int, @intCast(loop)), t.pt, @as(i64, @intCast(t.ps)) }) |v| sa.add(v);
         try cuda.launch.launch(set.glue.scores, .{ .grid = .{ .x = @intCast(n), .y = @intCast((nb + loop - 1) / loop) }, .block = .{ .x = 128 } }, s, &sa);
+        step(c, np, "block: tf_glm_index_scores");
         try idx.scores(s, dq + a * c.heads * d * 2, dw + a * c.heads * 2, c.heads, dk, out_b, at, n, np, nb, scale, sp.headScale(c.heads), c.heads, t.pt, t.ps);
         try s.synchronize();
+        step(c, np, "block: compare");
         fails += try same(gpu, "block scores", out_a, out_b, n * np * 4, np, c);
     }
     return fails;
@@ -213,12 +229,16 @@ fn ties(gpu: check.Gpu, bufs: *Bufs, rand: std.Random, set: glm.glue.Set, idx: *
                 if (c.bits and i < vis and rand.uintLessThan(u32, 8) == 0) x.* = special[rand.uintLessThan(usize, special.len)];
             }
         }
+        step(c, np, "ties: upload scores");
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = sa.scores, .len = rows * np * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(host));
+        step(c, np, "ties: tf_glm_select_rows");
         var sel: cuda.Args = .{};
         inline for (.{ sa.scores, sa.pools, @as(i64, @intCast(np)), at, @as(c_int, sp.topk_pools) }) |v| sel.add(v);
         try cuda.launch.launch(set.glue.select_rows, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 128 } }, s, &sel);
+        step(c, np, "ties: tf_glm_index_pools");
         try idx.pools(s, sa.scores, sb.pools, at, rows, np, path);
         try s.synchronize();
+        step(c, np, "ties: read the paths");
         var taken: [512]i32 = undefined;
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = path, .len = rows * 4, .borrowed = true }).download(0, std.mem.sliceAsBytes(taken[0..rows]));
         for (taken[0..rows]) |p| paths[@intCast(p)] += 1;
