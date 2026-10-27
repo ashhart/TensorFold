@@ -97,7 +97,9 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
         switch (l.mlp) {
             .dense => |m| {
-                if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
+                if (m.gate == .x3) {
+                    try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, prompt); // one EXL3 group launch
+                } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
                 } else {
                     try e.projAgain(m.gate, e.x, e.gate, total, prompt);
