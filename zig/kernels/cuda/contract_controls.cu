@@ -155,6 +155,16 @@ TF_CTL_TAIL(tf_ctl_tail_drop_sum, tf_rms_tail::SUM)
 TF_CTL_TAIL(tf_ctl_tail_drop_row, tf_rms_tail::ROW)
 #undef TF_CTL_TAIL
 
+// Gate 3: norms.cu's MoE residual (tf_moe_add_rms_rows_bf16h) with the combine kept in fp32 before the add.
+#include "norms_vec.cuh"
+
+extern "C" __global__ void __launch_bounds__(tf_norms::VNT) tf_ctl_tail_moe_keep_f32(
+    const __nv_bfloat16* x, const void* ys, int ys_kind, const float* wt, int slots, const __nv_bfloat16* w,
+    __nv_bfloat16* h, __nv_bfloat16* y, float* xs, int width, float eps) {
+    if (ys_kind == 0) tf_norms::add_rms_h<__nv_bfloat16, 0, true>(x, nullptr, w, h, y, xs, width, eps, ys, wt, slots);
+    else tf_norms::add_rms_h<__nv_bfloat16, 2, true>(x, nullptr, w, h, y, xs, width, eps, ys, wt, slots);
+}
+
 // Gate 3: window_rows.cu's kernels at head dims 256 and 512, each with one planted fault (window_rows.cuh's Fault).
 #include "window_rows.cuh"
 
