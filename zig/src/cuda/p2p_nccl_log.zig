@@ -80,6 +80,11 @@ pub const Capture = struct {
     /// The log's first `buf.len` bytes so far (empty when NCCL wrote nothing or the capture is off).
     pub fn read(c: *const Capture, buf: []u8) []const u8 {
         if (c.state != .on) return buf[0..0];
+        // begin never captures on Windows, whose C library has no POSIX open for this to reference
+        return if (comptime builtin.os.tag == .windows) buf[0..0] else c.readFile(buf);
+    }
+
+    fn readFile(c: *const Capture, buf: []u8) []const u8 {
         var name: [256:0]u8 = @splat(0);
         const p = c.path(&name) orelse return buf[0..0];
         const fd = std.c.open(p, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
@@ -97,9 +102,11 @@ pub const Capture = struct {
     /// Removes the log and its directory; NCCL's open handle, if any, keeps writing to the unlinked file.
     pub fn remove(c: *Capture) void {
         if (c.state != .on) return;
-        var name: [256:0]u8 = @splat(0);
-        if (c.path(&name)) |p| _ = std.c.unlink(p);
-        _ = std.c.rmdir(&c.dir);
+        if (comptime builtin.os.tag != .windows) {
+            var name: [256:0]u8 = @splat(0);
+            if (c.path(&name)) |p| _ = std.c.unlink(p);
+            _ = std.c.rmdir(&c.dir);
+        }
         c.state = .off;
     }
 };
