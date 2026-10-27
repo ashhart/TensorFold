@@ -29,6 +29,7 @@ pub const Job = struct {
     began: i96 = 0,
     /// The engine thread says the prompt pass is going: status readers may count this job's fill atomics.
     fill_on: std.atomic.Value(bool) = .init(false),
+    load: @import("lane_host_load.zig").Pass = .{}, // this attempt's prompt pass in the load ledger
     prefilled: ?i96 = null,
     entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
     marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)

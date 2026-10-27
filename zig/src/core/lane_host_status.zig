@@ -61,7 +61,7 @@ fn fillTotals(h: *LaneHost, out: *api.Status) void {
 }
 
 /// `n` tokens delivered now; marks older than the window drop.
-pub fn noteDecoded(h: *LaneHost, n: usize) void {
+pub fn noteDecoded(h: *LaneHost, n: usize, first: bool) void {
     const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
     h.mutex.lockUncancelable(h.io);
     defer h.unlock();
@@ -73,6 +73,7 @@ pub fn noteDecoded(h: *LaneHost, n: usize) void {
     }
     h.decoded.shrinkRetainingCapacity(keep);
     h.decoded.append(h.gpa, .{ .at = now, .tokens = n }) catch {};
+    @import("lane_host_load.zig").decoded(h, n, first);
 }
 
 /// Each started stream's context and generated tokens, for the next status read.
