@@ -41,6 +41,8 @@ pub const snap_drop = reuse.drop;
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
 pub const snap_grid: u32 = E.max_rows;
+/// cuda_prefill cuts a cold pass at the request's chunk starts too, so the server may send its message starts.
+pub const request_starts = true;
 
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;

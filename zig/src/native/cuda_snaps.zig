@@ -23,6 +23,11 @@ pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
     return rules;
 }
 
+/// The server's chunk step: a family whose cold passes cut at request starts gets message starts on its grid (0: none).
+pub fn requestStep(comptime F: type) u32 {
+    return if (@hasDecl(F, "request_starts") and F.request_starts) F.snap_grid else 0;
+}
+
 /// The cache's bytes less what the family sets aside for its states (`snap_ready`, as Nemotron's spare buffers).
 pub fn cacheBudget(comptime F: type, target: anytype, cache: u64) !u64 {
     return if (@hasDecl(F, "snap_ready")) cache - try F.snap_ready(target, cache) else cache;
@@ -85,4 +90,17 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     defer store.deinit();
     const marks = try store.marks(arena.allocator(), prompt, 0, 3540, &.{}, &.{}, &.{});
     try std.testing.expectEqualSlices(u32, &[_]u32{2048}, marks);
+}
+
+test "only a family whose passes cut at request starts asks the server for them" {
+    const Glm = struct {
+        pub const snap_grid: u32 = 2048;
+    };
+    const Qwen = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = true;
+    };
+    try std.testing.expectEqual(@as(u32, 0), requestStep(Glm));
+    try std.testing.expectEqual(@as(u32, 0), requestStep(struct {}));
+    try std.testing.expectEqual(@as(u32, 4096), requestStep(Qwen));
 }
