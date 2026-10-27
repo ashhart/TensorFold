@@ -29,7 +29,7 @@ python3 tools/bench_cache.py http://127.0.0.1:8080 MODEL \
 
 For a server requiring bearer authentication, add `--api-key-env TENSORFOLD_API_KEY` and set that
 environment variable before running the client. Credentials are selected explicitly; the client does not
-read `OPENAI_API_KEY` by default. The key is sent in the request header, never in the report.
+read `OPENAI_API_KEY` by default. The key is sent in the request header; the literal key is redacted from reports.
 
 The phase is the request order; the observed cache state is independent. A first request can reuse an
 existing prefix; a repeated request can remain cold. Concurrent requests can observe different states.
