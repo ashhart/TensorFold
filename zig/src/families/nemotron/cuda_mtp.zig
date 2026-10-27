@@ -277,7 +277,7 @@ pub const Head = struct {
             try t.addRmsnorm(h.h1, b.delta, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps);
         } else {
             try f.experts(m.moe, spans.len, false);
-            try t.addMoeNorm(h.h1, b.ymoe, true, b.wts, m.final_norm, h.hn, h.row, h.rxs, b.delta, spans.len, c.hidden, c.eps, c.top_k, c.slots());
+            try t.addMoeNorm(h.h1, b.ymoe, true, b.wts, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps, c.top_k, c.slots());
         }
     }
 

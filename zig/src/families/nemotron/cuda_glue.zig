@@ -151,11 +151,11 @@ pub const Glue = struct {
         try g.norms.addRmsH(g.s, x, r, w, .bf16, h, y, xs, rows, d, eps);
     }
 
-    /// The expert slots' weighted sum (shared slots weigh 1) into delta, added to h, then its RMSNorm.
-    pub fn addMoeNorm(g: Glue, h: u64, y: u64, y_f32: bool, wt: u64, w: u64, hn: u64, out: u64, xs: u64, delta: u64, rows: usize, d: usize, eps: f32, top_k: usize, slots: usize) !void {
+    /// The expert slots' weighted sum (shared slots weigh 1), rounded to bf16, added to h, then its RMSNorm: add_rms_h
+    /// with the combine as its residual, one launch.
+    pub fn addMoeNorm(g: Glue, h: u64, y: u64, y_f32: bool, wt: u64, w: u64, hn: u64, out: u64, xs: u64, rows: usize, d: usize, eps: f32, top_k: usize, slots: usize) !void {
         if (g.tri()) |t| return t.addMoeNorm(h, y, y_f32, wt, w, hn, out, xs, rows, d, eps, top_k, slots);
-        try g.moe.combine(g.s, y, if (y_f32) .f32 else .bf16, wt, delta, .bf16, rows, slots, d);
-        try g.norms.addRmsH(g.s, h, delta, w, .bf16, hn, out, xs, rows, d, eps);
+        try g.norms.moeAddRmsH(g.s, h, y, if (y_f32) .f32 else .bf16, wt, slots, w, hn, out, xs, rows, d, eps);
     }
 
     /// fp32 router logits over `sk` K slices, each one fma chain in input order whichever kernel runs it.

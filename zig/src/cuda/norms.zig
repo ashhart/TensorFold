@@ -51,6 +51,7 @@ pub const Norms = struct {
     add_rms_bf16_fn: Function,
     add_rms_h_fn: Function,
     add_rms_h_f32w_fn: Function,
+    moe_add_rms_h_fn: Function, // add_rms_h with moe_glue's combine of the expert slots as its residual
     gated_fns: [3]Function, // head dim 64, 128, 256
     rms_sums_fn: Function,
     tail_fns: [2]Function, // each norm rounded once, MLX's bf16 steps
@@ -70,6 +71,7 @@ pub const Norms = struct {
             .add_rms_bf16_fn = try mod.function("tf_add_rms_rows_bf16"),
             .add_rms_h_fn = try mod.function("tf_add_rms_rows_bf16h"),
             .add_rms_h_f32w_fn = try mod.function("tf_add_rms_rows_bf16h_f32w"),
+            .moe_add_rms_h_fn = try mod.function("tf_moe_add_rms_rows_bf16h"),
             .gated_fns = .{ try mod.function("tf_gated_rms_rows_64"), try mod.function("tf_gated_rms_rows_128"), try mod.function("tf_gated_rms_rows_256") },
             .rms_sums_fn = try mod.function("tf_rms_rows_sums"),
             .tail_fns = .{ try mod.function("tf_add_rms_rows_bf16h_tail"), try mod.function("tf_add_rms_rows_bf16h_tail_round") },
@@ -159,6 +161,23 @@ pub const Norms = struct {
         a.add(eps);
         const f = if (w_kind == .bf16) n.add_rms_h_fn else n.add_rms_h_f32w_fn;
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+    }
+
+    /// addRmsH whose residual is moe_glue's combine of `slots` expert rows ys [rows, slots, width] (fp32 or bf16) weighed
+    /// by wt [rows, slots], rounded to bf16: combine into a delta, then addRmsH, in one launch with the same bytes.
+    pub fn moeAddRmsH(n: *const Norms, s: Stream, x: u64, ys: u64, ys_kind: Kind, wt: u64, slots: usize, w: u64, h: u64, y: u64, xs: ?u64, rows: usize, width: usize, eps: f32) !void {
+        if (width % 64 != 0 or !vectorOk(width, &.{ x, ys, w, h, y }) or ys_kind == .f16) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(ys);
+        a.add(@as(i32, @backingInt(ys_kind)));
+        a.add(wt);
+        a.add(@as(i32, @intCast(slots)));
+        for ([_]u64{ w, h, y, xs orelse 0 }) |v| a.add(v);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        try launch_.launch(n.moe_add_rms_h_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 
     /// addRmsH with bf16 weights and a tail's options; with none set it is addRmsH itself, the same kernel and bits.

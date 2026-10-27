@@ -119,7 +119,7 @@ pub const Forward = struct {
         switch (delta) {
             .none => try f.glue.addRmsnorm(x.*, null, w, x.*, b.y, b.xs, rows, c.hidden, c.eps),
             .dense => try f.glue.addRmsnorm(x.*, b.delta, w, next, b.y, b.xs, rows, c.hidden, c.eps),
-            .moe => try f.glue.addMoeNorm(x.*, b.ymoe, moe_f32, b.wts, w, next, b.y, b.xs, b.delta, rows, c.hidden, c.eps, c.top_k, c.slots()),
+            .moe => try f.glue.addMoeNorm(x.*, b.ymoe, moe_f32, b.wts, w, next, b.y, b.xs, rows, c.hidden, c.eps, c.top_k, c.slots()),
         }
         if (delta != .none) x.* = next;
         if (f.dump) |d| try d.norm(f.ops, x.*, b.y, b.xs, rows, c.hidden);

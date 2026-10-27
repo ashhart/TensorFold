@@ -71,7 +71,7 @@ fn norms(r: *Rig) !void {
         const outd = try r.zeros(u16, rows * D);
         const xsd = try r.zeros(f32, rows * D / 64);
         const yd = if (f32_out) try r.dev(f32, y32) else try r.dev(u16, y16);
-        try gl.addMoeNorm(try r.dev(u16, x), yd, f32_out, try r.dev(f32, wt), try r.dev(u16, w), hnd, outd, xsd, try r.zeros(u16, rows * D), rows, D, eps, top_k, NS);
+        try gl.addMoeNorm(try r.dev(u16, x), yd, f32_out, try r.dev(f32, wt), try r.dev(u16, w), hnd, outd, xsd, rows, D, eps, top_k, NS);
         try r.same("add_moe_norm h", u16, hnd, hn);
         try r.same("add_moe_norm y", u16, outd, out);
         try r.same("add_moe_norm xs", f32, xsd, xs);
