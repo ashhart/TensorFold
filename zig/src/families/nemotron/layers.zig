@@ -366,8 +366,9 @@ fn experts4(f: Forward, e: *Enc, m: wts.Moe, comptime key: []const u8, comptime 
     const s = f.s;
     const fc = if (j == 0) m.fc1 else m.fc2;
     const many = rows > 1 and f.members > 0;
-    const geo: [2]usize = if (f.geometry > 0 and !many) kern.geometries[f.geometry - 1] else if (many and f.members == 3) .{ 4, 4 } else .{ 4, 2 };
-    e.pipe(if (many) expertRows(f, j, f.members) else if (f.geometry > 0) expertGeo(f, j, f.geometry - 1) else f.k.get(key));
+    const r8 = many and rows >= f.k.wide_rows; // over any `members`: each member row's dot in tf_qdot16's order
+    const geo: [2]usize = if (r8) .{ 8, 2 } else if (f.geometry > 0 and !many) kern.geometries[f.geometry - 1] else if (many and f.members == 3) .{ 4, 4 } else .{ 4, 2 };
+    e.pipe(if (r8) (if (j == 0) f.k.get("tf_xup_rows2r8") else f.k.get("tf_xdown_rows2r8")) else if (many) expertRows(f, j, f.members) else if (f.geometry > 0) expertGeo(f, j, f.geometry - 1) else f.k.get(key));
     e.buf(if (j == 0) s.x else s.act, 0, 0);
     if (rows == 1) {
         e.buf(s.idx, 0, 1);
