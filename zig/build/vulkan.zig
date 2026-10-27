@@ -15,8 +15,9 @@ pub fn options(b: *std.Build) Options {
 
 /// vulkan-host-test (part of `test`), vulkan-gpu-build and vulkan-gpu-test, vulkan-probe-build and vulkan-probe.
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, test_step: *std.Build.Step, o: Options) void {
+    const vk_host_tests = b.addTest(.{ .root_module = module(b, b.graph.host, .debug, o) });
     const host = b.step("vulkan-host-test", "Vulkan loader admission, device selection, buffer geometry and the qmm fixture, without GPU work");
-    host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug, o) })).step);
+    host.dependOn(&b.addRunArtifact(vk_host_tests).step);
     const fixture = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/affine_fixture.zig"),
         .target = b.graph.host,
@@ -36,6 +37,20 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = stage1_fixture })).step);
     test_step.dependOn(host);
     b.step("stage1-host-test", "Stage 1 tensor, arena, params and operator-plan host tests, plus the qmm fixture suite").dependOn(host);
+
+    // Stage 2 host admission: the vulkan module's own tests (norm_mlp's operator-plan cases among
+    // them) plus the stage 2 fixture suite, without GPU work.
+    const stage2_fixture = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/stage2_fixture.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }},
+    });
+    const stage2_fixture_tests = b.addTest(.{ .root_module = stage2_fixture });
+    host.dependOn(&b.addRunArtifact(stage2_fixture_tests).step);
+    const stage2_host = b.step("stage2-host-test", "Stage 2 norm/MLP operator-plan host tests and the stage 2 fixture suite, without GPU work");
+    stage2_host.dependOn(&b.addRunArtifact(vk_host_tests).step);
+    stage2_host.dependOn(&b.addRunArtifact(stage2_fixture_tests).step);
     const vulkan = module(b, target, optimize, o);
     const gpu = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/vulkan/gpu_tests.zig"),
@@ -101,6 +116,37 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const stage1_probe_run = b.addRunArtifact(stage1_probe);
     stage1_probe_run.addPassthruArgs();
     stage1_run.dependOn(&stage1_probe_run.step);
+
+    // Stage 2: the norm/MLP pointwise variants — norm and swiglu compiled as the Ash8c
+    // Metal-oracle form (ASH_QWEN35), add the plain bf16 form; all with -DUSE_BF16 —
+    // and the GPU probe over the production NormMlp operator. Compile only: no GPU work.
+    const stage2_files = b.addWriteFiles();
+    const stage2_build = b.step("stage2-gpu-build", "Compile the stage 2 SPIR-V variants, install them under stage2/, and build the stage 2 GPU probe without running it");
+    const stage2_run = b.step("stage2-gpu-run", "Run the stage 2 GPU probe on the chosen device (args after --)");
+    for (stage2_variants) |v| {
+        const cmd = b.addSystemCommand(&.{ glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp" });
+        for (v.defines) |d| cmd.addArg(d);
+        cmd.addArg("-o");
+        const spv = cmd.addOutputFileArg(b.fmt("{s}.spv", .{v.name}));
+        cmd.addFileArg(b.path(v.src));
+        stage2_build.dependOn(&b.addInstallFile(spv, b.fmt("stage2/{s}.spv", .{v.name})).step);
+        _ = stage2_files.addCopyFile(spv, b.fmt("{s}.spv", .{v.name}));
+    }
+    const stage2_probe = b.addExecutable(.{ .name = "tf-stage2-gpu", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/stage2_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan", .module = vulkan },
+            .{ .name = "stage2_shaders", .module = b.createModule(.{ .root_source_file = stage2_files.add("stage2_shaders.zig", stage2_shaders_src) }) },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
+        },
+    }) });
+    stage2_build.dependOn(&b.addInstallArtifact(stage2_probe, .{}).step);
+    const stage2_probe_run = b.addRunArtifact(stage2_probe);
+    stage2_probe_run.addPassthruArgs();
+    stage2_run.dependOn(&stage2_probe_run.step);
 }
 
 const ShaderVariant = struct { name: []const u8, src: []const u8, defines: []const []const u8 };
@@ -126,6 +172,20 @@ const stage1_shaders_src =
     \\pub const cast_f32_bf16 align(4) = @embedFile("cast_f32_bf16.spv").*;
     \\pub const copy_u32 align(4) = @embedFile("copy_u32.spv").*;
     \\pub const copy_u16 align(4) = @embedFile("copy_u16.spv").*;
+;
+
+/// The stage 2 closure's shader images: norm and swiglu carry the Ash8c Metal-oracle variant
+/// (single store rounding; weight applied to the product), add the plain bf16 form.
+const stage2_variants = [_]ShaderVariant{
+    .{ .name = "norm_bf16", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "add_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DUSE_BF16"} },
+    .{ .name = "swiglu_bf16", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+};
+
+const stage2_shaders_src =
+    \\pub const norm_bf16 align(4) = @embedFile("norm_bf16.spv").*;
+    \\pub const add_bf16 align(4) = @embedFile("add_bf16.spv").*;
+    \\pub const swiglu_bf16 align(4) = @embedFile("swiglu_bf16.spv").*;
 ;
 
 /// The backend over `vk`, vulkan_core.h translated without prototypes: every entry point comes from the loader.
