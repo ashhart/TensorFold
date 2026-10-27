@@ -32,6 +32,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CI builds each platform's release server and runs the release path check on it for every pull request, so a private path in a built binary fails the pull request instead of the release (#1472).
 
+- Structured output: with `"grammar_budget": true` beside a grammar or a required tool call, each token is drawn so the reply can still finish the grammar within `max_tokens`, so a tool call is no longer cut off unparsed (#1473). It is off by default, where nothing changes; drafted, plain and concurrent replies stay equal with it on, and a grammar it cannot follow (token-level, budgeted, captured or left-recursive rules) is refused with HTTP 400. The first request with a new grammar explores it once, about 60 ms for one tool and 640 ms for twelve.
+
 ## 1.1.7
 
 - Flash Next on a Mac can leave its routed experts and n-gram tables in the checkpoint and read them from SSD with `--ssd-experts GIB` and `--ple-on-ssd`, so a checkpoint larger than the Mac's memory can be served (#1039, see [Exact Fluid Subgraph Residency](docs/recipes/fluid-subgraph-residency.md)). Neither is on by default. Replies are the same tokens as with everything in memory; a budget too small for one layer's experts refuses at startup instead of changing the model's settings. On an M5 Ultra the 6-bit MTP checkpoint, which does not fit in memory, serves with a 16 GiB expert budget; on an M3 Ultra with the 4-bit checkpoint, servers without the flags are unchanged in prefill and decode.
