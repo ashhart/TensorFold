@@ -5,6 +5,7 @@ const kb = @import("xpu_gemma4_kernels");
 const dev = @import("xpu_dev.zig");
 const cfg = @import("xpu_config.zig");
 const load_mod = @import("xpu_load.zig");
+const ple_check = @import("xpu_ple_check.zig");
 const Dev = dev.Dev;
 const Proj = load_mod.Proj;
 const alloc = dev.alloc;
@@ -35,6 +36,7 @@ pub const Kernels = struct {
     dec_narrow: ze.H,
     gemv256: ze.H,
     dense: ze.H,
+    dense_b: ze.H, // the same with the sum rounded to bf16: the per-layer input path
     w8: ze.H,
     dec_narrow16: ze.H,
     dec_wide16: ze.H,
@@ -98,6 +100,7 @@ pub const Runner = struct {
     last: u32 = 0,
     host_logits: []f32,
     dump_dir: ?[]const u8 = null,
+    cap: ?*ple_check.Capture = null, // set by `xpu-gemma4 --ple-check`: the per-layer input path is read back as it runs
     slot: u32 = 0, // the sequence the fields below stand for (kc, vc, pos, last)
     nslots: u32 = 1,
     seqs: [MAXS]SeqSt = undefined, // the other sequences' fields, parked
@@ -124,6 +127,7 @@ pub const Runner = struct {
         r.pos = 0;
         r.last = 0;
         r.window = MAXT;
+        r.cap = null;
         r.slot = 0;
         r.nslots = 1;
         r.rows_last = 0;
@@ -154,6 +158,7 @@ pub const Runner = struct {
             .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
             .gemv256 = try d.kernel(mg, "g4_gemv256", 64),
             .dense = try d.kernel(mg, "g4_dense", 256),
+            .dense_b = try d.kernel(mg, "g4_dense_b", 256),
             .w8 = try d.kernel(mg, "g4_w8", 256),
             .dec_narrow16 = try d.kernel(mm, "w4k_s16x16", 64),
             .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
@@ -347,8 +352,8 @@ pub const Runner = struct {
         const G: i32 = @intCast(w.k / 64);
         const mp: i32 = @intCast((m + 7) / 8 * 8);
         const k = r.k;
-        if (w.dense) { // a bf16 weight
-            try r.d.launch(k.dense, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, out, M, N, K });
+        if (w.dense) { // a bf16 weight (the per-layer linears)
+            try r.d.launch(k.dense_b, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, out, M, N, K });
             return;
         }
         if (w.bits8) { // 8-bit attention: one kernel for every row count
@@ -448,11 +453,13 @@ pub const Runner = struct {
         // the embeddings, and the per-layer inputs they give
         try d.launch(k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x });
         try r.dump("embed", p0, T);
+        if (r.cap) |c| try c.grab(r, .embeddings, 0);
         try d.launch(k.x2h, .{ .x = T }, .{ a.x, a.h, a.ahi, a.alo });
         r.tag = "ple_model_proj";
-            try r.gemm(a.h, a.ahi, a.alo, m.ple_proj, a.p, T);
+        try r.gemm(a.h, a.ahi, a.alo, m.ple_proj, a.p, T);
         try d.launch(k.ple_tok, .{ .x = T }, .{ a.ids, m.ple_w, m.ple_s, m.ple_b, a.tok });
         try d.launch(k.ple_combine, .{ .x = T, .y = cfg.layers }, .{ a.p, a.tok, m.ple_norm, a.pli, EPS });
+        if (r.cap) |c| try c.grab(r, .inputs, 0);
         try d.launch(k.resid, .{ .x = T }, .{ a.x, nul, nul, nul, m.layers[0].in_norm, a.h, a.ahi, a.alo, EPS, @as(i32, 0) });
         if (r.dump_dir != null and p0 == 0) try r.dumpBuf("pli", a.pli, T * cfg.ple_all * 2);
         for (&m.layers, 0..) |*l, i| {
@@ -500,6 +507,7 @@ pub const Runner = struct {
             try r.gemm(a.h, a.ahi, a.alo, l.down, a.r, T);
             try d.launch(k.resid, .{ .x = T }, .{ a.x, a.r, l.post_ffn_norm, nul, nul, a.h, a.ahi, a.alo, EPS, @as(i32, 1) });
             if (r.dump_dir != null and p0 == 0 and i == 0) try r.dump("0_ffn", p0, T);
+            if (r.cap) |c| try c.grab(r, .before, i);
             r.tag = "ple_gate";
             try r.gemm(a.h, a.ahi, a.alo, l.ple_gate, a.p, T);
             try d.launch(k.ple_mid, .{ .x = T }, .{ a.p, a.pli, @as(i32, @intCast(i)), a.h, a.ahi, a.alo });
@@ -507,6 +515,7 @@ pub const Runner = struct {
             try r.gemm(a.h, a.ahi, a.alo, l.ple_proj, a.r, T);
             const next = if (i + 1 < cfg.layers) m.layers[i + 1].in_norm else m.norm;
             try d.launch(k.resid, .{ .x = T }, .{ a.x, a.r, l.post_ple_norm, l.scalar, next, a.h, a.ahi, a.alo, EPS, @as(i32, 0) });
+            if (r.cap) |c| try c.grab(r, .after, i);
             if (r.dump_dir != null and i < 4) {
                 const name = try std.fmt.allocPrint(alloc, "{d}", .{i});
                 defer alloc.free(name);

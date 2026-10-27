@@ -104,7 +104,7 @@ pub fn gemmTest(r: *fwd.Runner) !void {
         .{ .name = "head (tied embed)", .prefix = lm ++ "embed_tokens", .parts = &.{""}, .proj = r.m.head, .amp = 4 },
     };
     for (cases) |c| {
-        if (c.proj.n > 100000) continue; // the head: reference of 262144 x 2560 in f64 is slow; see headTest
+        if (c.proj.n > 100000 or c.proj.dense) continue; // the head (see headTest), BF16 linears (see --ple-check)
         for ([_]u32{ 1, 8, 16 }) |rows| try run(r, c, rows, &rng);
     }
 }
