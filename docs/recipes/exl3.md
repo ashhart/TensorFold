@@ -209,5 +209,7 @@ under real routing) included. The program that records them runs the Python engi
 NCCL (output-column cuts, input-row cuts with fp32 partials summed rank 0 first, and the experts' intermediate cut)
 and checks every rank's bytes and the sums the same way.
 
-No family serves EXL3 natively yet: the Metal projection (#681) and these CUDA pieces are what a family's engine
-takes, through `qlinear` and `exl3_experts`.
+The Metal projection (#681) and these CUDA pieces are what a family's engine takes, through `qlinear` and
+`exl3_experts`. On CUDA, `qwen3_5` serves EXL3 packs of the Qwen3.5 MoE models and of the dense
+[Qwen3.8-27B](qwen3.8-27b.md#cuda), whose DFlash2 drafter reads the head through column views
+(`exl3.Weight.columns`: whole 128-column blocks with the parent's strides).
