@@ -3,6 +3,7 @@ const std = @import("std");
 const dev = @import("xpu_dev.zig");
 const fwd = @import("xpu_forward.zig");
 const load_mod = @import("xpu_load.zig");
+const plan = @import("cuda_plan.zig");
 const alloc = dev.alloc;
 const Proj = load_mod.Proj;
 
@@ -82,7 +83,7 @@ fn run(r: *fwd.Runner, c: Case, rows: u32, rng: *std.Random) !void {
 pub fn gemmTest(r: *fwd.Runner) !void {
     var prng = std.Random.DefaultPrng.init(7);
     var rng = prng.random();
-    const lm = "model.language_model.";
+    const lm = plan.prefix;
     const sa0 = lm ++ "layers.0.self_attn.";
     const sa5 = lm ++ "layers.5.self_attn.";
     const sa30 = lm ++ "layers.30.self_attn.";
