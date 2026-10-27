@@ -61,6 +61,7 @@ fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges: 
 fn bad(r: *Rows, name: Name, ext: []const u8, err: anyerror) anyerror {
     r.counts.failed += 1;
     pc.note("imprint: a disk {s} failed its check ({s}); it and the states naming it are forgotten", .{ if (std.mem.eql(u8, ext, ".blk")) "block" else "state", @errorName(err) });
+    write.fence(r);
     rows_store.unlinkName(r.dir, name, ext);
     if (std.mem.eql(u8, ext, ".blk")) _ = r.blocks.remove(chain.stem(name));
     var i: usize = 0;
@@ -92,6 +93,7 @@ fn present(r: *Rows, i: usize) !void {
 /// A disk state reaching further than `have`, read back into a new RAM entry where that costs less than prefilling.
 pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry) ?*pc.Entry {
     const r = s.disk orelse return have;
+    write.reap(r);
     const chosen = select.choose(s, prompt, starts, spans, have).restore orelse return have;
     const name = r.states.items[chosen].name;
     const bytes = s.family.vtable.bytes(s.family.ptr, r.states.items[chosen].at);

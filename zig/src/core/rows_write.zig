@@ -1,274 +1,256 @@
-//! Kept states written behind: a block (or a block's worth of a state's own file) a step, only while the engine idles.
+//! The engine stages owned images and publishes completions; one I/O thread writes and syncs their files.
 const std = @import("std");
-const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
+const store = @import("rows_store.zig");
 const image = @import("rows_image.zig");
-const chain = @import("rows_chain.zig");
 const file = @import("rows_file.zig");
-const rows_store = @import("rows_store.zig");
-const Rows = rows_store.Rows;
-const Name = chain.Name;
-const Span = @import("cache_modes.zig").Span;
+const chain = @import("rows_chain.zig");
+const sync = @import("rows_write_sync.zig");
+pub const io = @import("rows_io.zig");
+const Rows = store.Rows;
+pub const Want = sync.Want;
+pub const Queued = sync.Queued;
+pub const Job = sync.Job;
+pub const nowNs = io.nowNs;
 
-/// A state's own file goes out in pieces of this many bytes, so a request waits for one piece at most.
-const piece: u64 = 16 << 20;
+pub const Failure = struct { id: u64, generation: u64, name: chain.Name, at: u32, err: anyerror };
 
-/// One whole block a state names: its name, group (window), index and file bytes.
-pub const Want = struct { name: Name, window: u32, k: u32, bytes: u64 };
+/// Recent failures retain each job's identity and outcome, including failures that follow an earlier failure.
+pub const Failures = struct {
+    records: [64]?Failure = @splat(null),
+    count: u64 = 0,
 
-/// A kept entry waiting to be written, with the chunk starts below it (a planned family's state depends on them).
-pub const Queued = struct { entry: *pc.Entry, starts: []u32 };
-
-/// A kept state being written: the blocks the disk lacks, then its own file a piece at a time.
-pub const Job = struct {
-    entry: *pc.Entry,
-    starts: []u32,
-    name: Name,
-    parts: []image.Part,
-    wants: []Want,
-    next: usize = 0, // the next want to look at
-    own: []image.Range,
-    own_i: usize = 0,
-    own_off: u64 = 0,
-    writer: ?file.Writer = null,
-    bytes: u64 = 0, // new bytes this job writes, reserved under the free-disk floor
-    reserved: bool = false,
-    blocks: u32 = 0, // blocks it wrote
-    began: i128 = 0,
+    pub fn add(f: *Failures, record: Failure) void {
+        f.records[@intCast(f.count % f.records.len)] = record;
+        f.count += 1;
+    }
 };
 
-/// A newly kept entry joins the queue (the RAM store calls this on every new keep), with the request's chunk starts.
 pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
-    var n: usize = 0;
-    if (r.keying.planned) while (n < starts.len and starts[n] < e.at) : (n += 1) {};
-    const own = r.gpa.dupe(u32, starts[0..n]) catch return;
-    r.queue.append(r.gpa, .{ .entry = e, .starts = own }) catch r.gpa.free(own);
+    if (r.stopped) return;
+    sync.queued(r, e, starts);
 }
 
-/// An entry leaving the RAM store leaves the queue, and its write is given up if under way.
+/// Staged work owns no entry pointer; eviction only removes an entry still waiting to be staged.
 pub fn dropped(r: *Rows, e: *pc.Entry) void {
-    for (r.queue.items, 0..) |q, i| if (q.entry == e) {
-        r.gpa.free(q.starts);
-        _ = r.queue.orderedRemove(i);
-        break;
-    };
-    if (r.job) |j| if (j.entry == e) abort(r, j);
+    sync.dropped(r, e);
 }
 
-/// Whether anything waits to be written (--spill-gib alone: only an eviction writes, so nothing waits).
 pub fn pending(r: *const Rows) bool {
-    return r.job != null or (r.spill != .evicted and r.queue.items.len > 0);
+    if (r.sync_writes) return sync.pending(r);
+    return (if (r.worker) |w| w.pending() > 0 else false) or (!r.stopped and r.spill != .evicted and r.queue.items.len > 0);
 }
 
-/// --spill-gib: an entry evicted from RAM is written now, unless the disk holds it already; the write under way first.
+pub fn ready(r: *const Rows) bool {
+    if (r.sync_writes) return sync.pending(r);
+    return (if (r.worker) |w| w.ready() else false) or (!r.stopped and r.spill != .evicted and r.queue.items.len > 0);
+}
+
+/// A spill copies the entry before RAM releases it, without waiting for filesystem work or a byte permit.
 pub fn evicted(r: *Rows, e: *pc.Entry) void {
-    if (r.spill == .off) return;
-    if (r.job) |j| if (j.entry != e) while (r.job != null) {
-        _ = step(r);
+    if (r.sync_writes) return sync.evicted(r, e);
+    if (r.spill == .off or r.stopped) return;
+    reap(r);
+    for (r.queue.items, 0..) |q, i| if (q.entry == e) {
+        _ = stage(r, r.queue.orderedRemove(i));
+        return;
     };
-    if (r.job == null) {
-        const i = for (r.queue.items, 0..) |q, k| {
-            if (q.entry == e) break k;
-        } else return;
-        if (!begin(r, r.queue.orderedRemove(i))) return;
-    }
-    while (r.job != null) _ = step(r);
 }
 
-/// Whether the job under way names the block of stem `n` (collection keeps it while its state is written).
 pub fn wanted(r: *const Rows, n: chain.Stem) bool {
-    const j = r.job orelse return false;
-    for (j.wants) |w| if (std.mem.eql(u8, w.name[0..16], &n)) return true;
-    return false;
+    if (r.sync_writes) return sync.wanted(r, n);
+    return if (r.worker) |w| w.wanted(n) else false;
 }
 
-/// One unit of writing: a job started, a block, or a piece of a state's file; false when nothing was done.
+/// Reconcile finished jobs and stage at most one queued entry; an outstanding write alone does not spin the engine.
 pub fn step(r: *Rows) bool {
-    const j = r.job orelse return start(r);
-    unit(r, j) catch |err| {
-        r.counts.failed += 1;
-        pc.note("imprint: writing {d} tokens failed ({s}); they stay in RAM only", .{ j.entry.at, @errorName(err) });
-        end(r, j, false);
-    };
+    if (r.sync_writes) return sync.step(r);
+    reap(r);
+    if (r.stopped or r.spill == .evicted) return false;
+    const q = r.queue.pop() orelse return false;
+    _ = stage(r, q);
     return true;
 }
 
-/// Write until nothing waits or `deadline_ns` (monotonic) passes; the states left unwritten.
-pub fn drain(r: *Rows, deadline_ns: i128) usize {
-    while (pending(r) and nowNs() < deadline_ns) _ = step(r);
-    const left = r.queue.items.len + @intFromBool(r.job != null);
+pub fn abort(r: *Rows, j: *Job) void {
+    sync.abort(r, j);
+}
+
+/// Invalidate old completions before an unlink or a change of model generation.
+pub fn fence(r: *Rows) void {
+    if (r.worker) |w| w.fence();
+}
+
+/// Stop admits no further jobs; an I/O syscall cannot extend the owner's shutdown deadline.
+pub fn stop(r: *Rows, deadline: i128) void {
+    if (r.stopped) return;
+    r.stopped = true;
+    fence(r);
+    if (r.worker) |w| {
+        var jobs: [io.max_jobs]?*io.Job = undefined;
+        w.cancellations(&jobs);
+        for (jobs) |job| if (job) |j| {
+            const err = if (j.done.load(.acquire)) j.failure orelse error.Cancelled else error.Cancelled;
+            if (err == error.Cancelled) r.failures.add(.{ .id = j.id, .generation = j.generation, .name = j.name, .at = j.at, .err = err }) else failed(r, j, err);
+            r.admission.finish(r.dir, j.bytes, err == error.Cancelled);
+        };
+        r.worker = null;
+        w.close(deadline);
+    }
+}
+
+pub fn drain(r: *Rows, deadline: i128) usize {
+    if (r.sync_writes) return sync.drain(r, deadline);
+    while (pending(r) and nowNs() < deadline) {
+        if (!step(r)) io.nap();
+    }
+    reap(r);
+    const left = r.queue.items.len + (if (r.worker) |w| w.pending() else @as(usize, 0));
+    stop(r, deadline);
     if (left > 0) pc.note("imprint: the stop's deadline passed with {d} kept states unwritten", .{left});
     return left;
 }
 
-pub fn nowNs() i128 {
-    var t: platform.c.timespec = undefined;
-    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t);
-    return @as(i128, t.sec) * std.time.ns_per_s + t.nsec;
+fn failed(r: *Rows, j: *const io.Job, err: anyerror) void {
+    r.counts.failed += 1;
+    if (err == error.VerifyFailed) r.counts.differed += 1;
+    r.failures.add(.{ .id = j.id, .generation = j.generation, .name = j.name, .at = j.at, .err = err });
+    pc.note("imprint: writing {d} tokens failed ({s}); the save is skipped", .{ j.at, @errorName(err) });
 }
 
-/// The newest queued entry made a job (its blocks serve older ones); one on disk, or past budget, cap or floor, skips.
-fn start(r: *Rows) bool {
-    if (r.spill == .evicted) return false;
-    const q = r.queue.pop() orelse return false;
-    _ = begin(r, q);
-    return true;
-}
-
-/// `q` made the job under way; false when it is on disk already, or past budget, cap or floor.
-fn begin(r: *Rows, q: Queued) bool {
-    const j = (prepare(r, q) catch |err| {
-        r.counts.skipped += 1;
-        pc.note("imprint: {d} tokens stay in RAM only ({s})", .{ q.entry.at, @errorName(err) });
-        return false;
-    }) orelse return false;
-    r.job = j;
-    admit(r, j) catch |err| {
-        r.counts.skipped += 1;
-        pc.note("imprint: {d} tokens stay in RAM only ({s})", .{ j.entry.at, @errorName(err) });
-        abort(r, j);
-        return false;
-    };
-    return true;
-}
-
-/// A job for `q` (its starts now the job's), or null when the disk holds its state already.
-fn prepare(r: *Rows, q: Queued) !?*Job {
-    const gpa = r.gpa;
-    errdefer gpa.free(q.starts);
-    const e = q.entry;
-    const name = chain.state(r.keying, e.tokens, e.decode_spans, q.starts, e.at);
-    if (r.find(name)) |i| {
-        r.touch(i);
-        gpa.free(q.starts);
-        return null;
-    }
-    if (r.img.whole) |whole| if (!whole(r.family.ptr, e.saved)) return error.NotWhole;
-    const parts = try r.parts(gpa, e.at);
-    errdefer gpa.free(parts);
-    var wants: std.ArrayList(Want) = .empty;
-    errdefer wants.deinit(gpa);
-    try r.blockNames(gpa, parts, e.tokens, e.decode_spans, q.starts, e.at, &wants);
-    var own: std.ArrayList(image.Range) = .empty;
-    errdefer own.deinit(gpa);
-    try image.ownRanges(parts, e.at, r.keying.block, &own, gpa);
-    const j = try gpa.create(Job);
-    j.* = .{ .entry = e, .starts = q.starts, .name = name, .parts = parts, .wants = &.{}, .own = &.{}, .began = nowNs() };
-    j.wants = wants.toOwnedSlice(gpa) catch |err| {
-        gpa.destroy(j);
-        return err;
-    };
-    j.own = own.toOwnedSlice(gpa) catch |err| {
-        gpa.free(j.wants);
-        gpa.destroy(j);
-        return err;
-    };
-    return j;
-}
-
-/// The job's new bytes checked against today's budget, the cap (evicting by value) and the free-disk floor.
-fn admit(r: *Rows, j: *Job) !void {
-    const e = j.entry;
-    for (j.wants) |w| if (!r.blocks.contains(chain.stem(w.name))) {
-        j.bytes += w.bytes;
-    };
-    j.bytes += image.total(j.own) + 4 * (3 + e.tokens.len + 2 * e.decode_spans.len + j.starts.len) + @sizeOf(file.Trailer);
-    if (!r.budget(j.bytes)) return error.DailyBudgetSpent;
-    if (!r.room(j.bytes)) return error.OverCap;
-    switch (r.admission.reserve(r.dir, j.bytes)) {
-        .ready => j.reserved = true,
-        else => return error.UnderFreeDiskFloor,
-    }
-}
-
-/// The job's next unit of work.
-fn unit(r: *Rows, j: *Job) !void {
-    if (r.img.whole) |whole| if (!whole(r.family.ptr, j.entry.saved)) return error.NotWhole;
-    const gather = r.img.gather;
-    while (j.next < j.wants.len and r.blocks.contains(chain.stem(j.wants[j.next].name))) j.next += 1;
-    if (j.next < j.wants.len) {
-        const w = j.wants[j.next];
-        var ranges: std.ArrayList(image.Range) = .empty;
-        defer ranges.deinit(r.gpa);
-        try image.blockRanges(j.parts, r.keying.block, w.window, w.k, &ranges, r.gpa);
-        const n = image.total(ranges.items);
-        const stage = try r.staged(n);
-        try gather(r.family.ptr, j.entry.saved, ranges.items, stage[0..@intCast(n)]);
-        var wr = try file.Writer.open(r.dir, &chain.hex(w.name), ".blk");
-        errdefer wr.abort();
-        try wr.append(stage[0..@intCast(n)]);
-        const bytes = try wr.finish(.{ .kind = @backingInt(file.Kind.block), .payload = 0, .payload_hash = 0, .name = w.name, .block = r.keying.block }, &.{}, false);
-        try r.blocks.put(r.gpa, chain.stem(w.name), .{ .bytes = bytes });
-        r.spent(bytes);
-        j.blocks += 1;
-        j.next += 1;
-        return;
-    }
-    if (j.writer == null) j.writer = try file.Writer.open(r.dir, &chain.hex(j.name), ".st");
-    if (j.own_i < j.own.len) {
-        var pieces: std.ArrayList(image.Range) = .empty;
-        defer pieces.deinit(r.gpa);
-        var n: u64 = 0;
-        while (j.own_i < j.own.len and n < piece) {
-            const g = j.own[j.own_i];
-            const take = @min(g.len - j.own_off, piece - n);
-            try pieces.append(r.gpa, .{ .off = g.off + j.own_off, .len = take });
-            n += take;
-            j.own_off += take;
-            if (j.own_off == g.len) {
-                j.own_i += 1;
-                j.own_off = 0;
-            }
+/// Only this engine-thread function changes indexes or exposes completed files, after all writes and syncs succeeded.
+pub fn reap(r: *Rows) void {
+    const w = r.worker orelse return;
+    while (w.take()) |j| {
+        defer j.destroy();
+        const err: ?anyerror = j.failure orelse if (j.generation != w.generation.load(.acquire)) error.Cancelled else null;
+        if (err) |e| {
+            failed(r, j, e);
+            r.admission.finish(r.dir, j.bytes, e == error.Cancelled);
+            r.collect();
+            continue;
         }
-        const stage = try r.staged(n);
-        try gather(r.family.ptr, j.entry.saved, pieces.items, stage[0..@intCast(n)]);
-        try j.writer.?.append(stage[0..@intCast(n)]);
-        return;
+        publish(r, j) catch |e| {
+            failed(r, j, e);
+            r.admission.finish(r.dir, j.bytes, false);
+            r.collect();
+            continue;
+        };
+        r.admission.finish(r.dir, j.bytes, true);
     }
-    const e = j.entry;
-    const counts = [3]u32{ @intCast(e.tokens.len), @intCast(e.decode_spans.len), @intCast(j.starts.len) };
-    const meta = [_][]const u8{ std.mem.sliceAsBytes(&counts), std.mem.sliceAsBytes(e.tokens), std.mem.sliceAsBytes(e.decode_spans), std.mem.sliceAsBytes(j.starts) };
-    const bytes = try j.writer.?.finish(.{ .kind = @backingInt(file.Kind.state), .payload = 0, .payload_hash = 0, .name = j.name, .at = e.at, .block = r.keying.block, .flags = @intFromBool(e.shared) }, &meta, true);
-    j.writer = null;
-    r.spent(bytes);
-    var s: rows_store.State = .{ .name = j.name, .at = e.at, .tokens = &.{}, .spans = &.{}, .starts = &.{}, .own = bytes, .rows = 0, .used = 0, .shared = e.shared };
-    s.tokens = try r.gpa.dupe(u32, e.tokens);
-    s.spans = r.gpa.dupe(Span, e.decode_spans) catch |err| {
-        r.gpa.free(s.tokens);
-        return err;
-    };
-    s.starts = j.starts;
-    j.starts = &.{};
-    for (j.wants) |w| s.rows += w.bytes;
-    try r.states.append(r.gpa, s);
+}
+
+fn publish(r: *Rows, j: *io.Job) !void {
+    if (r.find(j.name)) |_| return;
+    var s: store.State = .{ .name = j.name, .at = j.at, .tokens = &.{}, .spans = &.{}, .starts = &.{}, .own = j.files[j.files.len - 1].bytes, .rows = 0, .used = 0, .shared = j.shared };
+    s.tokens = try r.gpa.dupe(u32, j.tokens);
+    errdefer r.gpa.free(s.tokens);
+    s.spans = try r.gpa.dupe(@import("cache_modes.zig").Span, j.spans);
+    errdefer r.gpa.free(s.spans);
+    s.starts = try r.gpa.dupe(u32, j.starts);
+    errdefer r.gpa.free(s.starts);
+    try r.states.ensureUnusedCapacity(r.gpa, 1);
+    try r.blocks.ensureUnusedCapacity(r.gpa, @intCast(j.files.len - 1));
+    for (j.files[0 .. j.files.len - 1]) |*f| {
+        try f.writer.?.publish();
+        const refs = if (r.blocks.get(chain.stem(f.trailer.name))) |b| b.refs else 0;
+        r.blocks.putAssumeCapacity(chain.stem(f.trailer.name), .{ .bytes = f.bytes, .refs = refs });
+        r.spent(f.bytes);
+    }
+    try j.files[j.files.len - 1].writer.?.publish();
+    r.spent(s.own);
+    for (j.wants) |want| s.rows += want.bytes;
+    r.states.appendAssumeCapacity(s);
     r.ref(j.wants, 1);
     r.touch(r.states.items.len - 1);
     r.counts.writes += 1;
-    const ms = @as(f64, @floatFromInt(nowNs() - j.began)) / 1e6;
-    if (!@import("builtin").is_test) std.log.info("imprint: {d} tokens on disk: {d} new blocks and its own {d} MiB ({d} MiB this state, {d} MiB of rows it shares) in {d:.0} ms", .{ e.at, j.blocks, bytes >> 20, j.bytes >> 20, s.rows >> 20, ms });
-    finishJob(r, j, true);
-    if (r.verify) @import("rows_verify.zig").state(r, r.states.items.len - 1, e.saved);
+    if (j.verify) r.counts.verified += 1;
+    if (!@import("builtin").is_test) std.log.info("imprint: {d} tokens on disk: {d} new blocks and its own {d} MiB ({d} MiB this state, {d} MiB of rows it shares) in {d:.0} ms", .{ j.at, j.files.len - 1, s.own >> 20, j.bytes >> 20, s.rows >> 20, @as(f64, @floatFromInt(nowNs() - j.began)) / 1e6 });
 }
 
-/// The job under way given up (its entry left RAM, or the store closes): its file in progress goes.
-pub fn abort(r: *Rows, j: *Job) void {
-    end(r, j, true);
+fn stage(r: *Rows, q: Queued) bool {
+    const at = q.entry.at;
+    r.next_job +%= 1;
+    const name = chain.state(r.keying, q.entry.tokens, q.entry.decode_spans, q.starts, at);
+    const j = sync.prepare(r, q) catch |err| {
+        r.counts.skipped += 1;
+        r.failures.add(.{ .id = r.next_job, .generation = if (r.worker) |w| w.generation.load(.acquire) else 0, .name = name, .at = at, .err = err });
+        pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
+        return false;
+    } orelse return false;
+    defer {
+        r.gpa.free(j.starts);
+        r.gpa.free(j.parts);
+        r.gpa.free(j.wants);
+        r.gpa.free(j.own);
+        r.gpa.destroy(j);
+    }
+    stageJob(r, j) catch |err| {
+        r.counts.skipped += 1;
+        r.failures.add(.{ .id = r.next_job, .generation = if (r.worker) |w| w.generation.load(.acquire) else 0, .name = j.name, .at = at, .err = err });
+        if (err == error.GatherFailed or err == error.SnapshotGpuFailure) r.counts.failed += 1;
+        pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
+        return false;
+    };
+    return true;
 }
 
-/// A job ended unwritten; `disk_ok` false (a write failed) backs the free-disk floor's admission off.
-fn end(r: *Rows, j: *Job, disk_ok: bool) void {
-    if (j.writer) |*w| w.abort();
-    j.writer = null;
-    finishJob(r, j, disk_ok);
-    r.collect();
+fn stageJob(r: *Rows, prepared: *const Job) !void {
+    if (r.worker == null) r.worker = try io.Worker.open(r.dir, r.staging_bytes, r.file_io);
+    const w = r.worker.?;
+    if (w.names(prepared.name)) return;
+    const e = prepared.entry;
+    const metadata = 4 * (3 + e.tokens.len + 2 * e.decode_spans.len + prepared.starts.len);
+    var bytes: u64 = 0;
+    var count: usize = 0;
+    var charge: u64 = 0;
+    while (true) {
+        bytes = newBytes(r, prepared, metadata, &count);
+        charge = bytes + @sizeOf(io.Job) + count * @sizeOf(io.File) + prepared.wants.len * @sizeOf(Want) + 4 * @sizeOf([]const u8);
+        if (!w.fits(charge)) return error.StagingFull;
+        const reserved = w.reserved();
+        if (!r.budget(bytes + reserved)) return error.DailyBudgetSpent;
+        if (!r.room(bytes + reserved)) return error.OverCap;
+        var after_count: usize = 0;
+        if (newBytes(r, prepared, metadata, &after_count) == bytes) break;
+    }
+    if (r.admission.reserve(r.dir, bytes) != .ready) return error.UnderFreeDiskFloor;
+    errdefer r.admission.finish(r.dir, bytes, true);
+    const j = try io.allocator.create(io.Job);
+    errdefer io.allocator.destroy(j);
+    var arena = std.heap.ArenaAllocator.init(io.allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+    const files = try a.alloc(io.File, count);
+    var built: usize = 0;
+    for (prepared.wants) |want| if (!r.blocks.contains(chain.stem(want.name))) {
+        var ranges: std.ArrayList(image.Range) = .empty;
+        defer ranges.deinit(r.gpa);
+        try image.blockRanges(prepared.parts, r.keying.block, want.window, want.k, &ranges, r.gpa);
+        files[built] = .{ .trailer = .{ .kind = @backingInt(file.Kind.block), .payload = 0, .payload_hash = 0, .name = want.name, .block = r.keying.block }, .payload = try a.alloc(u8, @intCast(image.total(ranges.items))) };
+        try r.img.gather(r.family.ptr, e.saved, ranges.items, files[built].payload);
+        built += 1;
+    };
+    const own = &files[built];
+    own.* = .{ .trailer = .{ .kind = @backingInt(file.Kind.state), .payload = 0, .payload_hash = 0, .name = prepared.name, .at = e.at, .block = r.keying.block, .flags = @intFromBool(e.shared) }, .payload = try a.alloc(u8, @intCast(image.total(prepared.own))) };
+    if (own.payload.len > 0) try r.img.gather(r.family.ptr, e.saved, prepared.own, own.payload);
+    const tokens = try a.dupe(u32, e.tokens);
+    const spans = try a.dupe(@import("cache_modes.zig").Span, e.decode_spans);
+    const starts = try a.dupe(u32, prepared.starts);
+    const counts = try a.create([3]u32);
+    counts.* = .{ @intCast(tokens.len), @intCast(spans.len), @intCast(starts.len) };
+    own.meta = try a.dupe([]const u8, &.{ std.mem.asBytes(counts), std.mem.sliceAsBytes(tokens), std.mem.sliceAsBytes(spans), std.mem.sliceAsBytes(starts) });
+    const wants = try a.dupe(Want, prepared.wants);
+    j.* = .{ .arena = arena, .id = r.next_job, .generation = w.generation.load(.acquire), .name = prepared.name, .at = e.at, .shared = e.shared, .tokens = tokens, .spans = spans, .starts = starts, .wants = wants, .files = files, .bytes = bytes, .staged = charge, .verify = r.verify, .began = prepared.began };
+    w.submit(j);
 }
 
-fn finishJob(r: *Rows, j: *Job, ok: bool) void {
-    if (j.reserved) r.admission.finish(r.dir, j.bytes, ok);
-    r.gpa.free(j.starts);
-    r.gpa.free(j.parts);
-    r.gpa.free(j.wants);
-    r.gpa.free(j.own);
-    r.job = null;
-    r.gpa.destroy(j);
+fn newBytes(r: *const Rows, j: *const Job, metadata: usize, count: *usize) u64 {
+    var bytes = image.total(j.own) + metadata + @sizeOf(file.Trailer);
+    count.* = 1;
+    for (j.wants) |want| if (!r.blocks.contains(chain.stem(want.name))) {
+        bytes += want.bytes;
+        count.* += 1;
+    };
+    return bytes;
 }

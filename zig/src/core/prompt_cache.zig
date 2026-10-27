@@ -160,6 +160,7 @@ pub const Store = struct {
     }
 
     pub fn deinit(s: *Store) void {
+        if (s.disk) |r| rows.write.stop(r, rows.write.nowNs());
         for (s.entries.items) |e| s.free(e);
         s.entries.deinit(s.gpa);
         s.by_position.deinit(s.gpa);
@@ -184,7 +185,7 @@ pub const Store = struct {
         const e = s.entries.orderedRemove(i);
         policy.unlink(s, e);
         s.held -= e.bytes;
-        if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: an evicted state is written before it goes
+        if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
         s.free(e);
     }
 
@@ -349,6 +350,7 @@ pub const Store = struct {
 
     /// Every kept state goes after a weight change, and learned states on disk stop being read: old arithmetic.
     pub fn clear(s: *Store) void {
+        if (s.disk) |r| rows.write.stop(r, rows.write.nowNs());
         for (s.entries.items) |e| e.expired = true;
         s.collectExpired();
         s.shared_keys.clearRetainingCapacity();

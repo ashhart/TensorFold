@@ -15,7 +15,7 @@ fn root(buf: []u8, tag: []const u8) []const u8 {
 }
 
 fn options(dir: []const u8, spill: rows.Spill) rows.Options {
-    return .{ .root = dir, .identity = 7, .cap = 1 << 34, .floor = 0, .daily = 1 << 40, .lookahead = 1, .spill = spill };
+    return .{ .sync_writes = true, .root = dir, .identity = 7, .cap = 1 << 34, .floor = 0, .daily = 1 << 40, .lookahead = 1, .spill = spill };
 }
 
 /// A conversation's prompt: a head shared by every conversation `c`, then `n` tokens of its own.

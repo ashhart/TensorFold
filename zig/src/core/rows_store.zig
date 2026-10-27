@@ -22,7 +22,7 @@ pub const block_tokens = 256;
 pub const Image = struct {
     /// A state's image at `at`, its parts in order, appended to `out`.
     parts: *const fn (ptr: *anyopaque, at: u32, out: *std.ArrayList(image.Part), a: Allocator) anyerror!void,
-    /// Copy `ranges` of `saved`'s image into `out`, back to back.
+    /// Copy into owned `out`; all GPU producers and copies must complete before returning.
     gather: *const fn (ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, out: []u8) anyerror!void,
     /// A new kept state of `at` tokens, its image filled by `scatter` and then restored as any other.
     blank: *const fn (ptr: *anyopaque, at: u32) anyerror!pc.Saved,
@@ -62,6 +62,8 @@ pub const Options = struct {
     lookahead: u32 = 0,
     planned: bool = false,
     spill: Spill = .off,
+    sync_writes: bool = false,
+    staging_bytes: u64 = 1 << 30,
     slots: ?usize = null, // --checkpoint-slots: the RAM store's states at most, beside this one (null: the family's)
 };
 
@@ -92,7 +94,7 @@ pub const Rows = struct {
     states: std.ArrayList(State) = .empty,
     blocks: std.AutoHashMapUnmanaged(chain.Stem, Block) = .empty,
     queue: std.ArrayList(write.Queued) = .empty, // kept states waiting to be written, newest last (written first)
-    job: ?*write.Job = null, // the state being written, a block a step
+    job: ?*write.Job = null, // the synchronous writer's borrowed entry
     stage: file.Stage = &.{},
     clock: u64 = 0,
     read_rate: f64 = 2e9, // bytes a second, measured as states are read
@@ -101,6 +103,13 @@ pub const Rows = struct {
     turn: u64 = 0, // bytes written since the last report line
     verify: bool = false, // TF_IMPRINT_VERIFY=1: each state written is read back and compared with the RAM state
     spill: Spill = .off,
+    file_io: file.IO = .{},
+    worker: ?*write.io.Worker = null,
+    staging_bytes: u64 = 1 << 30,
+    sync_writes: bool = false,
+    stopped: bool = false,
+    next_job: u64 = 0,
+    failures: write.Failures = .{},
 
     /// The store under `o.root` for `o.identity` (made 0700 when missing); its files are read, unreferenced blocks go.
     pub fn open(gpa: Allocator, family: pc.Snapshots, o: Options) !*Rows {
@@ -110,6 +119,9 @@ pub const Rows = struct {
         try r.scan();
         r.settle();
         r.stamp();
+        r.sync_writes = o.sync_writes or (if (platform.c.getenv("TENSORFOLD_ROWS_SYNC")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false);
+        r.staging_bytes = o.staging_bytes;
+        r.next_job = @truncate(@as(u128, @intCast(write.nowNs())));
         r.verify = if (platform.c.getenv("TF_IMPRINT_VERIFY")) |v| v[0] == '1' else false;
         return r;
     }
@@ -130,6 +142,7 @@ pub const Rows = struct {
     }
 
     pub fn deinit(r: *Rows) void {
+        write.stop(r, write.nowNs());
         if (r.job) |j| write.abort(r, j);
         for (r.queue.items) |q| r.gpa.free(q.starts);
         for (r.states.items) |*s| freeState(r.gpa, s);
@@ -218,6 +231,7 @@ pub const Rows = struct {
 
     /// State `i` forgotten: its file, and every block no other state names.
     pub fn remove(r: *Rows, i: usize) void {
+        write.fence(r);
         var s = r.states.orderedRemove(i);
         defer freeState(r.gpa, &s);
         unlinkName(r.dir, s.name, ".st");
@@ -234,6 +248,7 @@ pub const Rows = struct {
         defer gone.deinit(r.gpa);
         var it = r.blocks.iterator();
         while (it.next()) |kv| if (kv.value_ptr.refs == 0 and !write.wanted(r, kv.key_ptr.*)) gone.append(r.gpa, kv.key_ptr.*) catch {};
+        if (gone.items.len > 0) write.fence(r);
         for (gone.items) |n| {
             unlinkName(r.dir, n, ".blk");
             _ = r.blocks.remove(n);
@@ -285,6 +300,7 @@ pub const Rows = struct {
         for (olds.items) |o| {
             if (over == 0) break;
             const b = dirs.otherBytes(r.root, r.dir, o.id) catch continue;
+            write.fence(r);
             dirs.removeOther(r.root, r.dir, o.id) catch continue;
             over -|= b;
         }
@@ -363,6 +379,7 @@ pub const Rows = struct {
 
     /// Every state and block of this identity forgotten (DELETE /v1/imprint); the queue too. The bytes freed.
     pub fn forgetAll(r: *Rows) u64 {
+        write.fence(r);
         if (r.job) |j| write.abort(r, j);
         for (r.queue.items) |q| r.gpa.free(q.starts);
         r.queue.clearRetainingCapacity();
@@ -540,6 +557,7 @@ test {
     _ = file;
     _ = @import("rows_test.zig");
     _ = @import("rows_spill_test.zig");
+    _ = @import("rows_async_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_pool_select_test.zig");

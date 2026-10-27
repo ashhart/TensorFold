@@ -1,4 +1,4 @@
-//! A lane host's conversation states on disk: written while it idles, asked about between rounds, finished on a stop.
+//! A lane host stages disk images and indexes completed writes between rounds, and bounds the writer on a stop.
 const std = @import("std");
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
@@ -35,6 +35,9 @@ pub fn ask(ctx: *anyopaque, a: *api.ImprintAsk) bool {
 
 /// Every queued ask answered (between rounds, on the engine thread).
 pub fn answer(h: *LaneHost) void {
+    if (h.cache) |store| if (store.disk) |r| {
+        if (!r.sync_writes) _ = rows.write.step(r);
+    };
     h.lock();
     const list = h.disk.take(h.gpa);
     h.unlock();
@@ -47,16 +50,16 @@ pub fn close(h: *LaneHost) void {
     h.disk.close(h.gpa);
 }
 
-/// Whether to write now: states wait, nothing else does, and no admission came for `quiet_ns` (under the lock).
+/// Idle work waits; the synchronous writer also waits for the admission quiet (under the lock).
 pub fn ready(h: *LaneHost) bool {
     const store = h.cache orelse return false;
     const r = store.disk orelse return false;
-    if (!rows.write.pending(r)) return false;
+    if (!rows.write.ready(r)) return false;
     if (h.queued.items.len > 0 or h.admitted.items.len > 0 or h.cancels.items.len > 0 or h.closing) return false;
-    return h.disk.quiet(h.admissions, std.Io.Clock.awake.now(h.io).toNanoseconds());
+    return !r.sync_writes or h.disk.quiet(h.admissions, std.Io.Clock.awake.now(h.io).toNanoseconds());
 }
 
-/// One block's worth of writing, outside the lock: a request that comes meanwhile waits for this one piece.
+/// Stage one queued image or advance the synchronous writer, outside the lock.
 pub fn step(h: *LaneHost) void {
     _ = rows.write.step(h.cache.?.disk.?);
 }

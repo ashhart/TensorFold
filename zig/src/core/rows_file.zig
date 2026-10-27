@@ -40,6 +40,26 @@ pub fn path(buf: []u8, dir: []const u8, stem: []const u8, ext: []const u8, part:
     return std.fmt.bufPrintSentinel(buf, "{s}/{s}{s}{s}", .{ dir, stem, ext, if (part) ".part" else "" }, 0);
 }
 
+/// The filesystem calls for one writer; tests supply per-store faults without a process-wide hook.
+pub const IO = struct {
+    ctx: ?*anyopaque = null,
+    write: *const fn (?*anyopaque, c_int, []const u8) anyerror!usize = writeDefault,
+    sync: *const fn (?*anyopaque, c_int) anyerror!void = syncDefault,
+
+    fn writeDefault(_: ?*anyopaque, fd: c_int, bytes: []const u8) !usize {
+        while (true) {
+            const n = platform.c.write(fd, bytes.ptr, bytes.len);
+            if (n < 0 and platform.c.errno(n) == .INTR) continue;
+            if (n < 0) return error.RowsWrite;
+            return @intCast(n);
+        }
+    }
+
+    fn syncDefault(_: ?*anyopaque, fd: c_int) !void {
+        if (platform.c.fsync(fd) != 0) return error.RowsWrite;
+    }
+};
+
 /// One file written front to back through a `.part` name (0600, past the page cache), renamed into place last.
 pub const Writer = struct {
     fd: c_int,
@@ -47,12 +67,29 @@ pub const Writer = struct {
     tmp_len: usize = 0,
     hash: std.hash.Wyhash = .init(0),
     payload: u64 = 0,
+    io: IO = .{},
+    dest: [1200]u8 = undefined,
+    dest_len: usize = 0,
 
     pub fn open(dir: []const u8, stem: []const u8, ext: []const u8) !Writer {
         var w: Writer = .{ .fd = -1 };
         const t = try path(&w.tmp, dir, stem, ext, true);
         w.tmp_len = t.len;
+        w.dest_len = (try path(&w.dest, dir, stem, ext, false)).len;
         w.fd = platform.c.open(t, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
+        if (w.fd < 0) return error.RowsWrite;
+        if (builtin.os.tag == .macos) _ = platform.c.fcntl(w.fd, platform.c.F.NOCACHE, @as(c_int, 1));
+        return w;
+    }
+
+    /// A private temporary name remains safe if a timed-out writer outlives its store.
+    pub fn openUnique(dir: []const u8, stem: []const u8, ext: []const u8, nonce: u64) !Writer {
+        var w: Writer = .{ .fd = -1 };
+        const d = try path(&w.dest, dir, stem, ext, false);
+        w.dest_len = d.len;
+        const t = try std.fmt.bufPrintSentinel(&w.tmp, "{s}.{x}.part", .{ d, nonce }, 0);
+        w.tmp_len = t.len;
+        w.fd = platform.c.open(t, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
         if (w.fd < 0) return error.RowsWrite;
         if (builtin.os.tag == .macos) _ = platform.c.fcntl(w.fd, platform.c.F.NOCACHE, @as(c_int, 1));
         return w;
@@ -65,38 +102,43 @@ pub const Writer = struct {
     /// Payload bytes, appended.
     pub fn append(w: *Writer, bytes: []const u8) !void {
         w.hash.update(bytes);
-        try put(w.fd, bytes);
+        try put(w.io, w.fd, bytes);
         w.payload += bytes.len;
     }
 
     /// The metadata pieces and the trailer, then (a state) fsync, then the rename that makes it a file of the store.
     pub fn finish(w: *Writer, t: Trailer, pieces: []const []const u8, sync: bool) !u64 {
+        const bytes = try w.seal(t, pieces, sync);
+        try w.publish();
+        return bytes;
+    }
+
+    /// The complete file is closed after its requested sync, still under its private temporary name.
+    pub fn seal(w: *Writer, t: Trailer, pieces: []const []const u8, sync: bool) !u64 {
         var trailer = t;
         trailer.payload = w.payload;
         trailer.payload_hash = w.hash.final();
         var mh = std.hash.Wyhash.init(1);
         for (pieces) |m| {
             mh.update(m);
-            try put(w.fd, m);
+            try put(w.io, w.fd, m);
             trailer.meta += m.len;
         }
         trailer.meta_hash = mh.final();
-        try put(w.fd, std.mem.asBytes(&trailer));
-        if (sync and platform.c.fsync(w.fd) != 0) return error.RowsWrite;
+        try put(w.io, w.fd, std.mem.asBytes(&trailer));
+        if (sync) try w.io.sync(w.io.ctx, w.fd);
         if (builtin.os.tag == .linux) {
             _ = platform.c.fdatasync(w.fd);
             _ = posix_fadvise(w.fd, 0, 0, 4); // POSIX_FADV_DONTNEED: written pages leave the cache
         }
         _ = platform.c.close(w.fd);
         w.fd = -1;
-        const t_path = w.tmpPath();
-        var dest: [1200]u8 = undefined;
-        const d = try std.fmt.bufPrintSentinel(&dest, "{s}", .{t_path[0 .. t_path.len - ".part".len]}, 0);
-        if (platform.c.rename(t_path, d) != 0) {
-            _ = platform.c.unlink(t_path);
-            return error.RowsWrite;
-        }
         return trailer.payload + trailer.meta + @sizeOf(Trailer);
+    }
+
+    /// A sealed file made visible; the owner must check its generation first.
+    pub fn publish(w: *Writer) !void {
+        if (platform.c.rename(w.tmpPath(), w.dest[0..w.dest_len :0]) != 0) return error.RowsWrite;
     }
 
     /// A write given up: the `.part` file goes.
@@ -107,15 +149,12 @@ pub const Writer = struct {
     }
 };
 
-fn put(fd: c_int, bytes: []const u8) !void {
+fn put(io: IO, fd: c_int, bytes: []const u8) !void {
     var done: usize = 0;
     while (done < bytes.len) {
-        const n = platform.c.write(fd, bytes.ptr + done, @min(bytes.len - done, 1 << 30));
-        if (n <= 0) {
-            if (n < 0 and platform.c.errno(n) == .INTR) continue;
-            return error.RowsWrite;
-        }
-        done += @intCast(n);
+        const n = try io.write(io.ctx, fd, bytes[done..][0..@min(bytes.len - done, 1 << 30)]);
+        if (n == 0 or n > bytes.len - done) return error.RowsWrite;
+        done += n;
     }
 }
 

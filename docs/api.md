@@ -598,9 +598,12 @@ cap below needs their room. After a restart, a crash or an eviction from RAM, th
 instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
 one Mac and Nemotron on CUDA keep them; other engines refuse the flag at startup.
 
-States go to disk while the engine is idle, a 16 MiB piece at a time, so a request that arrives meanwhile waits for one
-piece. A planned stop (SIGTERM or SIGINT) finishes what is waiting, within 20 seconds; a killed server loses only what
-its last turn had not written yet. Rows a stored state already holds for the same tokens are written once, so ten
+The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte
+permit and at most eight jobs; when either is full, the save is skipped. The copy waits for its GPU producers before
+RAM can be reused. A state becomes available for reuse only after all its files have been written and synced.
+A planned stop (SIGTERM or SIGINT) drains writes for up to 20 seconds, then cancels the remainder; a blocked syscall
+can finish later using only its private temporary files and staged bytes. A killed server loses unfinished saves.
+Rows a stored state already holds for the same tokens are written once, so ten
 conversations that share a long system prompt and tools store those rows once. A state is read back only when reading
 it takes less time than prefilling the tokens it covers, measured on this machine. Every piece read is checked against
 its hash; a damaged file is deleted, with the states that need it, and the turn prefills instead. A read-back state
@@ -615,16 +618,18 @@ used. `--learn-min-free-gib` keeps free disk (4 GiB by default), and `--learn-da
 
 On a Mac, `--spill-gib N` writes a state to that store only when the prompt cache evicts it from RAM, up to N GiB
 under `~/.cache/tensorfold/spilled` for every model together, and reads it back as above: a later request whose prefix
-matches resumes from it, token for token as a fresh prompt pass, after a restart too. Nothing is written while the
-engine idles; the write is made on the engine thread at the eviction, before the request that needed the room goes on.
+matches resumes from it, token for token as a fresh prompt pass, after a restart too. An eviction stages a copy before
+releasing RAM, then the engine continues while the I/O thread writes it. A full staging permit skips that save;
+the request prefills if it returns before a saved state is available. This changes cache hits, never reply tokens.
 Past N GiB other models' spilled sets go first, then the state this server used least recently. A damaged file is
 deleted and its tokens are prefilled, and a write cut off midway leaves nothing a later turn or a restart reads.
 `--checkpoint-slots N` sets how many states stay in RAM beside the store, so the next one sends the oldest to disk; on a
 Mac it needs `--spill-gib` or `--learn-conversations`. With `--learn-conversations` too, every state is still written
-behind, an evicted state's write under way is finished instead of given up, and the cap is the smaller of `--learn-gib`
-and `--spill-gib`. `--learn-min-free-gib` and `--learn-daily-gib` apply to spilled states as well. The same four Mac
+behind, a staged write survives eviction of its RAM entry, and the cap is the smaller of `--learn-gib` and
+`--spill-gib`. `--learn-min-free-gib` and `--learn-daily-gib` apply to spilled states as well. The same four Mac
 families take both flags and the others refuse them at startup; without either flag nothing changes, and the routes
-below stay off.
+below stay off. `TENSORFOLD_ROWS_SYNC=1` selects the previous synchronous writer for comparisons; its block and state
+files have the same bytes. `TF_IMPRINT_VERIFY=1` reads threaded writes back against their owned staging before publication.
 
 Three routes let a client such as the Mac app ask about a conversation. Each takes the body of a chat completion
 (`messages`, `tools`, `chat_template_kwargs`), renders it as that request would be rendered, and answers on the engine's

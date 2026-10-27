@@ -179,3 +179,46 @@ test "a host writes its kept states while idle and on its stop; the next host re
     try session(root, S.one);
     try session(root, S.two);
 }
+
+test "rows I/O: a host serves another turn while its disk writer is blocked" {
+    const Fixture = @import("rows_async_fixture.zig");
+    const Check = struct {
+        fn run(h: *LaneHost, r: *pc.rows.Rows, _: *lanes.fake.Fake) !void {
+            var gate: Fixture.Gate = .{};
+            var first: Box = .{};
+            var second: Box = .{};
+            defer {
+                gate.release.store(true, .release);
+                h.engine().drain();
+                first.tokens.deinit(std.testing.allocator);
+                second.tokens.deinit(std.testing.allocator);
+            }
+            r.file_io = gate.io();
+            const p = prompt(31);
+            const req: api.Request = .{ .prompt = &p, .max_tokens = 6, .history_len = 600 };
+            try h.engine().submit(31, &req, .{ .ctx = &first, .event = Box.event });
+            try Fixture.Gate.wait(&gate.entered);
+            const q = prompt(32);
+            const next: api.Request = .{ .prompt = &q, .max_tokens = 6, .history_len = 600 };
+            try h.engine().submit(32, &next, .{ .ctx = &second, .event = Box.event });
+            const end = pc.rows.write.nowNs() + 3 * std.time.ns_per_s;
+            var result: ?Reason = null;
+            while (pc.rows.write.nowNs() < end) {
+                second.mutex.lockUncancelable(std.testing.io);
+                result = second.done;
+                second.mutex.unlock(std.testing.io);
+                if (result != null) break;
+                pc.rows.write.io.nap();
+            }
+            gate.release.store(true, .release);
+            _ = first.wait();
+            _ = second.wait();
+            try std.testing.expectEqual(@as(?Reason, .length), result);
+            try std.testing.expectEqual(@as(usize, 6), second.tokens.items.len);
+        }
+    };
+    const root = try std.fmt.allocPrint(std.testing.allocator, "{s}/tf-host-io-{d}", .{ if (platform.c.getenv("TMPDIR")) |p| std.mem.span(p) else ".", platform.c.getpid() });
+    defer std.testing.allocator.free(root);
+    defer rmTree(root);
+    try session(root, Check.run);
+}
