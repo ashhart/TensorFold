@@ -59,7 +59,8 @@ test "the speech lane is free while the reply body is still being written" {
     defer s.deinit();
     var joined = false;
     defer if (!joined) {
-        _ = std.c.shutdown(s.client, 2); // unblock the writer when an assertion fails before draining
+        script.release.store(true, .release);
+        _ = s.readRest() catch {};
         s.join(&script);
     };
     const head = try s.readHead();
@@ -90,7 +91,8 @@ test "the speech lane is free while an error reply body is still being written" 
     defer s.deinit();
     var joined = false;
     defer if (!joined) {
-        _ = std.c.shutdown(s.client, 2); // unblock the writer when an assertion fails before draining
+        script.release.store(true, .release);
+        _ = s.readRest() catch {};
         s.join(&script);
     };
     const head = try s.readHead();
@@ -130,7 +132,8 @@ test "the speech lane is free while a completed stream's body is still being wri
     defer s.deinit();
     var joined = false;
     defer if (!joined) {
-        _ = std.c.shutdown(s.client, 2); // unblock the writer when an assertion fails before draining
+        script.release.store(true, .release);
+        _ = s.readRest() catch {};
         s.join(&script);
     };
     const head = try s.readHead();
@@ -161,7 +164,8 @@ test "a stream the engine is still writing holds its lane at its first audio wri
     defer s.deinit();
     var joined = false;
     defer if (!joined) {
-        _ = std.c.shutdown(s.client, 2); // unblock the writer when an assertion fails before draining
+        script.release.store(true, .release);
+        _ = s.readRest() catch {};
         s.join(&script);
     };
     const head = try s.readHead();
