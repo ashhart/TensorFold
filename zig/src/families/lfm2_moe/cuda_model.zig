@@ -1,6 +1,7 @@
 //! LFM2.5-24B-A2B's device state on CUDA: KV in 512-position pages, each slot's conv states, the scratch.
 const std = @import("std");
 const cuda = @import("cuda");
+const kv = @import("core").kv_pool;
 const c = @import("config.zig");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
@@ -60,9 +61,13 @@ pub const Model = struct {
     w: *const wts.Weights,
     context: usize, // positions a slot holds: whole pages
     slots: usize,
+    paged: bool = false, // slots lease pages of the core pool (attach makes the arena), else each owns a window
+    pages: usize = 0, // pages in the arena
     arena: u64 = 0, // [pages][attention layer][K, V][512][kv_width] bf16
-    table: u64 = 0, // int32 [slots][pages a slot]: slot s's pages s * per .. (s + 1) * per
+    table: u64 = 0, // int32 [slots][pages a slot]: slot s's page ids in position order
     states: u64 = 0, // bf16 [slots][conv layer][2][hidden]
+    ids: []u32 = &.{}, // the tables on the host
+    caps: []usize = &.{}, // positions slot s's pages cover
     inv: u64 = 0, // fp32 [head_dim / 2]: RoPE's inverse frequencies
     s: Scratch = undefined,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
@@ -80,6 +85,16 @@ pub const Model = struct {
     /// Bytes one stream's caches take at `context` positions: its pages and its conv states.
     pub fn streamBytes(context: usize) usize {
         return positions(context) / kern.page * page_elems * 2 + slot_elems * 2;
+    }
+
+    /// What the host's pool plans: a stream's conv states and table row, a token its rows of the ten layers.
+    pub fn layout(m: *const Model) kv.Layout {
+        return .{ .fixed_bytes = slot_elems * 2 + m.perSlot() * 4, .token_bytes = page_elems * 2 / kern.page, .page_tokens = kern.page, .snap_bytes = 0 };
+    }
+
+    /// Slots a backend holds: the model's, or (paged) as many as a round takes.
+    pub fn slotCap(m: *const Model) usize {
+        return if (m.paged) round_rows else m.slots;
     }
 
     /// Decode attention's key chunks a row walks at most, and the blocks that walk them.
@@ -105,26 +120,89 @@ pub const Model = struct {
         return b.ptr;
     }
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize) !Model {
-        var m: Model = .{ .gpa = gpa, .d = d, .w = w, .context = positions(context), .slots = slots };
+    /// `slots` streams, each owning a window of pages; paged: one slot's states now, `attach` makes the pages.
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !Model {
+        var m: Model = .{ .gpa = gpa, .d = d, .w = w, .context = positions(context), .slots = if (paged) 1 else slots, .paged = paged };
         errdefer m.deinit();
         try m.build(s);
         return m;
     }
 
     /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
-    pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize) !usize {
-        var m: Model = .{ .gpa = gpa, .d = d, .w = w, .context = positions(context), .slots = slots, .planned = 0 };
+    pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !usize {
+        var m: Model = .{ .gpa = gpa, .d = d, .w = w, .context = positions(context), .slots = if (paged) 1 else slots, .paged = paged, .planned = 0 };
         defer m.deinit();
         try m.build(s);
         return m.planned.?;
     }
 
-    fn build(m: *Model, s: cuda.Stream) !void {
+    /// Makes the arena of `pool` pages to lease and the states and tables of `extra + 1` slots (no pages mapped).
+    pub fn attach(m: *Model, s: cuda.Stream, extra: usize, pool: usize) !void {
+        if (!m.paged or m.pages != 0 or extra >= round_rows) return error.BadAttach;
+        m.forget(m.table);
+        m.forget(m.states);
+        m.gpa.free(m.ids);
+        m.gpa.free(m.caps);
+        m.ids = &.{};
+        m.caps = &.{};
+        m.slots = extra + 1;
+        m.pages = pool;
+        m.arena = try m.alloc(pool * page_elems * 2);
+        try m.d.check(m.d.api.cuMemsetD8Async(m.arena, 0, pool * page_elems * 2, s.handle), "cuMemsetD8Async");
+        try m.makeSlots(s);
+        try s.synchronize();
+    }
+
+    /// Slot `slot`'s pages from table entry `from` on are `ids` (arena page numbers in position order).
+    pub fn mapPages(m: *Model, s: cuda.Stream, slot: usize, ids: []const u32, from: usize) !void {
+        const at = try m.note(slot, ids, from);
+        try m.d.check(m.d.api.cuMemcpyHtoDAsync_v2(m.table + at * 4, ids.ptr, ids.len * 4, s.handle), "cuMemcpyHtoDAsync");
+    }
+
+    /// mapPages on the host: the table's copy and the slot's reach; the entry its device copy starts at.
+    fn note(m: *Model, slot: usize, ids: []const u32, from: usize) !usize {
         const per = m.perSlot();
-        m.arena = try m.alloc(m.slots * per * page_elems * 2);
+        if (slot >= m.slots or from + ids.len > per) return error.BadChain;
+        for (ids) |id| if (id >= m.pages) return error.BadChain;
+        const at = slot * per + from;
+        @memcpy(m.ids[at..][0..ids.len], ids);
+        m.caps[slot] = (from + ids.len) * kern.page;
+        return at;
+    }
+
+    /// Slot `slot` holds no pages: its table entries stay, no forward may reach them.
+    pub fn unmapPages(m: *Model, slot: usize) void {
+        m.caps[slot] = 0;
+    }
+
+    /// Frees one buffer `alloc` made.
+    fn forget(m: *Model, ptr: u64) void {
+        for (m.buffers.items, 0..) |*b, i| if (b.ptr == ptr) {
+            b.free();
+            _ = m.buffers.swapRemove(i);
+            return;
+        };
+    }
+
+    /// The slots' tables and conv states; a window of pages a slot unless paged (their pages come from leases).
+    fn makeSlots(m: *Model, s: cuda.Stream) !void {
+        const per = m.perSlot();
         m.table = try m.alloc(m.slots * per * 4);
         m.states = try m.alloc(m.slots * slot_elems * 2);
+        if (m.planned != null) return;
+        m.ids = try m.gpa.alloc(u32, m.slots * per);
+        m.caps = try m.gpa.alloc(usize, m.slots);
+        for (m.ids, 0..) |*v, i| v.* = if (m.paged) 0 else @intCast(i);
+        @memset(m.caps, if (m.paged) 0 else m.context);
+        try m.d.check(m.d.api.cuMemcpyHtoDAsync_v2(m.table, m.ids.ptr, m.ids.len * 4, s.handle), "cuMemcpyHtoDAsync");
+        try (DeviceBuffer{ .d = m.d, .ptr = m.states, .len = m.slots * slot_elems * 2, .borrowed = true }).fill8(0, s.handle);
+        try s.synchronize();
+    }
+
+    fn build(m: *Model, s: cuda.Stream) !void {
+        if (!m.paged) m.pages = m.slots * m.perSlot();
+        if (m.pages > 0) m.arena = try m.alloc(m.pages * page_elems * 2);
+        try m.makeSlots(s);
         m.inv = try m.alloc(c.head_dim / 2 * 4);
         const r = prompt_rows;
         const h = c.hidden;
@@ -163,19 +241,15 @@ pub const Model = struct {
             .logits = try m.alloc(round_rows * c.vocab * 2),
         };
         if (m.planned != null) return;
-        const ids = try m.gpa.alloc(i32, m.slots * per);
-        defer m.gpa.free(ids);
-        for (ids, 0..) |*v, i| v.* = @intCast(i);
-        try (DeviceBuffer{ .d = m.d, .ptr = m.table, .len = ids.len * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(ids));
         const inv = inverseFrequencies(m.w.config.theta);
         try (DeviceBuffer{ .d = m.d, .ptr = m.inv, .len = inv.len * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(&inv));
-        try (DeviceBuffer{ .d = m.d, .ptr = m.states, .len = m.slots * slot_elems * 2, .borrowed = true }).fill8(0, s.handle);
-        try s.synchronize();
     }
 
     pub fn deinit(m: *Model) void {
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
+        m.gpa.free(m.ids);
+        m.gpa.free(m.caps);
     }
 
     /// Attention layer a's key (or value) cache as the kernels take it: its part of page 0.
@@ -212,4 +286,50 @@ test "a page holds 512 positions of the ten attention layers' keys and values: 1
     const inv = inverseFrequencies(1e7);
     try std.testing.expectEqual(@as(f32, 1), inv[0]);
     try std.testing.expect(@abs(inv[31] - 1.0 / std.math.pow(f64, 1e7, 62.0 / 64.0)) < 1e-12);
+}
+
+test "the pool's layout: 20 KiB a token, a stream's conv states and table row fixed, no snapshot slots" {
+    var m: Model = undefined;
+    m.context = Model.positions(32768);
+    const l = m.layout();
+    try std.testing.expectEqual(@as(u64, 10 << 20), l.pageBytes());
+    try std.testing.expectEqual(@as(u64, 20 << 10), l.token_bytes);
+    try std.testing.expectEqual(@as(u64, slot_elems * 2 + 64 * 4), l.fixed_bytes);
+    // 40 GiB past the weights, 8 streams at 32k, the default 16 GiB cache: a window for the first, the rest pages
+    const p = try kv.plan(l, .{ .room = 40 << 30, .engine = 0, .lanes = 8, .cache = 16 << 30, .window = 32768 + 16, .engine_paged = true });
+    try std.testing.expectEqual(@as(u32, 8), p.lanes);
+    try std.testing.expectEqual(@as(usize, 0), p.snaps);
+    try std.testing.expect(p.pages * l.pageBytes() + p.copied + 7 * l.fixed_bytes <= 40 << 30);
+    try std.testing.expect(p.pages >= l.pages(32768 + 16));
+}
+
+test "leases map a slot's pages in position order; its reach ends at them; an id past the arena is refused" {
+    var ids: [8]u32 = @splat(0);
+    var caps = [_]usize{ 0, 0 };
+    var m: Model = undefined;
+    m.context = 4 * kern.page;
+    m.slots = 2;
+    m.pages = 16;
+    m.ids = &ids;
+    m.caps = &caps;
+    var pool = try kv.Pool.init(std.testing.allocator, 16, page_elems * 2);
+    defer pool.deinit();
+    var lease: kv.Lease = .{};
+    try pool.promise(&lease, 3);
+    const Rec = struct {
+        m: *Model,
+        fn write(ctx: *anyopaque, got: []const u32, from: usize) anyerror!void {
+            const r: *@This() = @ptrCast(@alignCast(ctx));
+            _ = try r.m.note(1, got[from..], from);
+        }
+    };
+    var rec: Rec = .{ .m = &m };
+    try pool.cover(&lease, 3, .{ .ctx = &rec, .write = Rec.write });
+    try std.testing.expectEqualSlices(u32, lease.ids.items, ids[4..7]);
+    try std.testing.expectEqual(@as(usize, 3 * kern.page), caps[1]);
+    try std.testing.expectEqual(@as(usize, 13), pool.available());
+    pool.finish(&lease);
+    try std.testing.expect(pool.idle() and pool.available() == 16);
+    try std.testing.expectError(error.BadChain, m.note(0, &.{16}, 0));
+    try std.testing.expectError(error.BadChain, m.note(0, &.{ 1, 2, 3, 4, 5 }, 0));
 }

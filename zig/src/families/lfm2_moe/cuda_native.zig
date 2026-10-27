@@ -7,6 +7,7 @@ const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
 const mdl = @import("cuda_model.zig");
 const be = @import("cuda_backend.zig");
+const kv = @import("core").kv_pool;
 
 pub const model_type = "lfm2_moe";
 pub const formats: []const []const u8 = &.{"mlx-q4g64"};
@@ -14,6 +15,8 @@ pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = be.prompt_rows;
 pub const snap_lookahead: u32 = 0;
+/// A request's last verify window: its pages hold that many rows past its prompt and reply.
+pub const window_rows: u32 = be.max_window;
 pub const explains_open = true;
 
 /// The server's reading of the room left after the weights; null if unreadable.
@@ -30,6 +33,10 @@ pub const Loaded = struct {
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
     target: *be.Lfm,
+    /// The attention caches as pages of the core pool (null: every stream owns a window, made at open).
+    layout: ?kv.Layout = null,
+    /// With a layout: the first stream's rows are pages too, a window of them set aside by the plan.
+    engine_paged: bool = true,
 };
 
 const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: kern.Kernels, s: cuda.Stream, m: mdl.Model, lb: be.Lfm };
@@ -45,16 +52,36 @@ fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
     return n;
 }
 
+/// TENSORFOLD_LFM2_KV_PAGES=0: every stream owns a window of pages, made at open; else they lease the pool's.
+fn pagesOn() bool {
+    const v = std.c.getenv("TENSORFOLD_LFM2_KV_PAGES") orelse return true;
+    return !std.mem.eql(u8, std.mem.span(v), "0");
+}
+
+/// The device bytes `n` streams take (paged: the first's states and a round's slot buffers, no pages).
 const Plan = struct {
     own: *const Owned,
     d: *const cuda.Driver,
     context: usize,
+    paged: bool,
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
-        return try mdl.Model.openBytes(o.gpa, p.d, o.s, &o.w, p.context, n) + be.Lfm.openBytes(n);
+        return try mdl.Model.openBytes(o.gpa, p.d, o.s, &o.w, p.context, n, p.paged) + be.Lfm.openBytes(if (p.paged) be.round_rows else n);
     }
 };
+
+/// The pool: `streams` more slots beside the first and an arena of `n` pages.
+pub fn attach(p: *anyopaque, streams: u32, n: usize) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    try own.lb.attach(streams, n);
+}
+
+/// Whether a request's caches could start now (the lane host's admission, on its engine thread).
+pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
+    const own: *const Owned = @ptrCast(@alignCast(p));
+    return own.lb.admits(prompt, max_tokens);
+}
 
 /// The attention layers the kernels' page arena holds: the admitted 10 of 40 (conv the rest).
 fn checkLayers(config: *const cfg.Config) !void {
@@ -77,16 +104,17 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.w.deinit();
     try checkLayers(&own.w.config);
     const context = @min(mdl.Model.positions(o.context), own.w.config.context);
-    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context };
+    const paged = pagesOn();
+    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .paged = paged };
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    const n = fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
+    const n = if (paged) try fitFirst(room, plan) else fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
         if (e == error.ParallelPastMemory) {
             const most = fit(room, o.lanes, false, plan) catch 0;
             std.log.err("--parallel {d} needs {d:.2} GiB at a {d}-token window and the CUDA memory budget leaves {d:.2} GiB after the weights: {d} stream{s} fit", .{ o.lanes, gib(try plan.bytes(o.lanes)), context, gib(room), most, if (most == 1) "" else "s" });
         }
         return e;
     };
-    own.m = try mdl.Model.init(gpa, ctx.d, own.s, &own.w, context, n);
+    own.m = try mdl.Model.init(gpa, ctx.d, own.s, &own.w, context, n, paged);
     errdefer own.m.deinit();
     own.lb = try be.Lfm.init(gpa, ctx.d, &own.m, &own.k, own.s);
     errdefer own.lb.deinit();
@@ -99,7 +127,14 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = own,
         .deinit = release,
         .target = &own.lb,
+        .layout = if (paged) own.m.layout() else null,
     };
+}
+
+/// Paged: the first stream's states and the scratch must fit; the host plans the pool after.
+fn fitFirst(room: u64, plan: anytype) !usize {
+    if (try plan.bytes(1) > room) return error.NoStreamFits;
+    return 1;
 }
 
 fn gib(bytes: u64) f64 {
