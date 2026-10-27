@@ -77,7 +77,21 @@ reproduces the baseline exactly.
 - The launch is registered for the limits gate in
   `zig/src/core/contract/steer_records.zig`: 320 threads and 80 threadgroup
   bytes, against M1 to M5 and sm_80, sm_86, sm_89, sm_120 and sm_121.
-- The device gates run the kernel on the GPU and compare it with float64.
+- The device gates run the kernel on the GPU and compare it with float64. On
+  this M4 Pro the steering kernel passes gates 1 to 4 in both modes it serves,
+  the two controls are red as planted, and the limits gate passes with the 320
+  threads and the 80 bytes of threadgroup memory the launch declares:
+
+  ```
+  PASS nonfinite qwen27 steer project: 20480 non-finite and 5120 finite outputs match the float64 classes
+  PASS repeat    qwen27 steer project: five runs byte-identical (10240 bytes), inputs and guards untouched, no overlap
+  PASS shapes    qwen27 steer project: 4 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+  PASS sums      qwen27 steer project: exact sums at k 5120, where fp16 sums would miss by infx and bf16 by 267x
+  PASS nonfinite/repeat/shapes qwen27 steer add (sums: N/A, declares none sums)
+  CONTROL qwen27 steer project nan control:  red at nonfinite, as planted
+  CONTROL qwen27 steer project sums control: red at sums, as planted
+  SUMMARY 2 kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems
+  ```
 
 ## Tests
 
