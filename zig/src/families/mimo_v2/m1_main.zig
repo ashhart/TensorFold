@@ -74,6 +74,7 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const context: usize = if (args.len > 4) try std.fmt.parseInt(usize, args[4], 10) else 4096;
     const cfg = try tp.Config.fromEnv();
+    if (is_follow and (cfg.world < 2 or cfg.rank == 0)) return error.FollowNeedsRankOne; // world 1 opens no session
     var driver = try cuda.Driver.open();
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, @intCast(cfg.device));
@@ -232,7 +233,6 @@ fn klDiv(want: []align(1) const f32, got: []const f32) f64 {
 
 /// Rank 1 behind the native server: the model rank 0 announces (hello), then every step rank 0 sends, until it stops.
 fn follow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, session: *tp.Session, model_dir: []const u8) !u8 {
-    if (session.cfg.world < 2 or session.cfg.rank == 0) return error.FollowNeedsRankOne;
     var buf: std.ArrayList(i64) = .empty;
     defer buf.deinit(gpa);
     const su = try mimo.engine.setupOf(try session.plan.recvGrow(gpa, &buf));
