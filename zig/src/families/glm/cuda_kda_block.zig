@@ -28,14 +28,15 @@ pub const Layer = struct {
     lower: f32,
     heads: usize,
     dims: usize,
+    max_heads: usize = 0, // the widest rank's KDA head count: the pad target, so every rank carries one row width
 
     pub fn width(l: Layer) usize {
         return 3 * l.heads * kda.dk + 2 * kda.dk + l.heads;
     }
 
-    /// The width the input stack's rows actually carry: `width` plus any alignment pad (TF_GLM_KDA_PAD).
+    /// The width the input stack's rows actually carry (TF_GLM_KDA_PAD): the COMMON width, so every rank agrees.
     pub fn matWidth(l: Layer) usize {
-        return paddedWidth(l.width());
+        return rowWidth(l.heads, l.max_heads);
     }
 
     /// The input stack and its two views need glm_mm's eight-column output and row stride.
@@ -44,15 +45,25 @@ pub const Layer = struct {
     }
 };
 
-/// The fused input's row width, padded to eight columns when TF_GLM_KDA_PAD asks for it. glm_mm needs the output
-/// width and row stride to be multiples of eight; the fused width is 3*heads*dk + 2*dk + heads, which at TP=3 is
-/// 8,726 (22 heads) or 8,341 (21) - so without padding those tensors stay bf16 row-major and cost about 9 ms a call.
-/// One rule, read by the loader (which pads the weights) and by the state (which sizes the rows), so they agree.
-pub fn paddedWidth(raw: usize) usize {
-    if (raw % 8 == 0) return raw;
-    const v = std.c.getenv("TF_GLM_KDA_PAD") orelse return raw;
+/// Whether the pad is asked for (TF_GLM_KDA_PAD unset or 0: no padding anywhere).
+fn padOn() bool {
+    const v = std.c.getenv("TF_GLM_KDA_PAD") orelse return false;
     const t = std.mem.trim(u8, std.mem.span(v), " ");
-    if (t.len == 0 or std.mem.eql(u8, t, "0")) return raw;
+    return !(t.len == 0 or std.mem.eql(u8, t, "0"));
+}
+
+/// The fused input's row width. glm_mm needs the output width and row stride to be multiples of eight, and the fused
+/// width is 3*heads*dk + 2*dk + heads - 8,726 at TP=3's 22 heads, 8,341 at 21 - so without padding those tensors stay
+/// bf16 row-major and cost about 9 ms a call.
+///
+/// With TF_GLM_KDA_PAD the width is the one EVERY rank carries: the widest rank's, eight-aligned. Padding each rank
+/// to its own width (8,732 against 8,344) leaves the prompt plan and its exchanges no single row width and the ranks
+/// hang on the first prompt; one common width keeps them in step and costs the smaller ranks unused zero columns.
+/// One rule, read by the loader (which pads the weights) and by the state (which sizes the rows), so they agree.
+pub fn rowWidth(own_heads: usize, max_heads: usize) usize {
+    const heads = @max(own_heads, max_heads);
+    const raw = 3 * heads * kda.dk + 2 * kda.dk + heads;
+    if (!padOn()) return 3 * own_heads * kda.dk + 2 * kda.dk + own_heads;
     return std.mem.alignForward(usize, raw, 8);
 }
 
