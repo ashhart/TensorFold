@@ -44,26 +44,26 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
 
     // into: hidden -> latent, then the routed experts up/down in the latent (runtime-dim row kernels)
-    gemv(f, e, m.into.?, s.x, 0, s.x_lat, rows);
-    f.indexed(e, m.routed.?[0], c.top_k, pairs, true, s.x_lat, s.idx, s.act);
-    f.indexed(e, m.routed.?[1], 1, pairs, false, s.act, s.idx, s.ey_lat);
+    gemv(f, e, m.into.?, s.x, 0, s.x_lat.?, rows);
+    f.indexed(e, m.routed.?[0], c.top_k, pairs, true, s.x_lat.?, s.idx, s.act);
+    f.indexed(e, m.routed.?[1], 1, pairs, false, s.act, s.idx, s.ey_lat.?);
 
     // the picks combined by weight in MLX's order ((y * scores).sum(-2) in fp32), into x_lat now the up has read it
-    e.pipe(f.p.?.get("tf_moe_combine_rows"));
-    e.buf(s.ey_lat, 0, 0);
+    e.pipe(f.p.?.get("tf_moe_combine_rows_lanes8"));
+    e.buf(s.ey_lat.?, 0, 0);
     e.buf(s.wt, 0, 1);
     e.bytes([2]i32{ @intCast(c.top_k), @intCast(c.latent) }, 2);
-    e.buf(s.x_lat, 0, 3);
+    e.buf(s.x_lat.?, 0, 3);
     e.run(.{ c.latent, rows, 1 }, .{ 256, 1, 1 });
 
     // out: the combined latent back to hidden, once a row (delta is free in an MoE layer)
-    gemv(f, e, m.out.?, s.x_lat, 0, s.delta, rows);
+    gemv(f, e, m.out.?, s.x_lat.?, 0, s.delta, rows);
 
     // add_norm at one pick of weight 1: bf16(y + shared), bf16(h + y), the next input norm and its sums
     e.pipe(f.k.get("add_norm_moe_xs_bolt"));
     e.buf(s.h, 0, 0);
     e.buf(s.delta, 0, 1);
-    e.buf(s.ones, 0, 2);
+    e.buf(s.ones.?, 0, 2);
     e.buf(s.sh, 0, 3);
     e.buf(next.buffer, next.offset, 4);
     e.bytes(eps, 5);

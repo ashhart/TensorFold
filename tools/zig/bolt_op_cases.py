@@ -147,7 +147,7 @@ def combine_cases(ck: Checkpoint | None, quick: bool) -> list[list[Case]]:
             y = normal((rows, TOP_K, latent), 9500 + rows + p, (2.0, 0.2, 8.0, 1.0)[p])
             w = mx.random.uniform(shape=(rows, TOP_K), key=mx.random.key(9600 + rows + p)) * bolt().scale / TOP_K
             ref = mx.concatenate([combine(y[r:r + 1], w[r:r + 1], latent) for r in range(rows)])
-            ours = Launch("tf_moe_combine_rows", [Buf(0, y), Buf(1, w), Buf(2, i32=[TOP_K, latent]),
+            ours = Launch("tf_moe_combine_rows_lanes8", [Buf(0, y), Buf(1, w), Buf(2, i32=[TOP_K, latent]),
                                                   Buf(3, out=((rows, latent), mx.bfloat16))], (latent, rows, 1),
                           (256, 1, 1))
             cases.append(Case("combine", f"k={TOP_K} latent={latent} rows={rows} p{p}",

@@ -290,6 +290,41 @@ fn expectBoltRefused(swaps: []const Fake, drop: []const u8, err: anyerror, words
     };
 }
 
+test "an unquantized bf16 lm_head loads as Bolt's dense head, and is refused for Lightning as before" {
+    const a = std.testing.allocator;
+    const bf16_head = Fake{ .name = "lm_head.weight", .shape = &.{ 128, 128 } };
+    {
+        var buf: [bolt_tensors.len]Fake = undefined;
+        var n: usize = 0;
+        for (bolt_tensors) |t| if (!std.mem.startsWith(u8, t.name, "lm_head.")) {
+            buf[n] = t;
+            n += 1;
+        };
+        buf[n] = bf16_head;
+        n += 1;
+        var ck = try fakeCheckpoint(a, buf[0..n]);
+        defer ck.deinit();
+        const c = tinyBolt();
+        var w = Weights{ .allocator = a, .embed = undefined, .norm_f = undefined, .head = undefined };
+        defer w.deinit();
+        var b = Builder{ .allocator = a, .device = undefined, .ck = &ck, .c = &c, .w = &w };
+        defer b.jobs.deinit(a);
+        try b.fill(null);
+        try std.testing.expectEqual(@as(usize, 128), w.head_dense.?.n);
+        try std.testing.expectEqual(@as(usize, 128), w.head_dense.?.k);
+    }
+    {
+        // Lightning (tinyMoe) with the same bf16 head and no lm_head.scales: still the quantized head's load (which
+        // refuses it for the missing scales, as before), never the dense one
+        var ck = try fakeCheckpoint(a, &.{.{ .name = "lm_head.weight", .shape = &.{ 128, 64 } }});
+        defer ck.deinit();
+        try std.testing.expect(!wts.denseHead(tinyMoe(), &ck));
+        var bolt_ck = try fakeCheckpoint(a, &.{.{ .name = "lm_head.weight", .shape = &.{ 128, 128 } }});
+        defer bolt_ck.deinit();
+        try std.testing.expect(wts.denseHead(tinyBolt(), &bolt_ck));
+    }
+}
+
 test "the Metal loader refuses a puzzle block's latent tensors when missing, transposed, quantized or not bf16" {
     const p = "backbone.layers.0.mixer.";
     try expectBoltRefused(&.{}, p ++ "fc1_latent_proj.weight", error.MissingTensor, &.{ "no " ++ p ++ "fc1_latent_proj.weight", "[64, 128]" });

@@ -126,6 +126,12 @@ pub const Weights = struct {
 };
 
 /// Every tensor the kernels read, checked and laid out for them.
+/// MLX quantizes a module only where {path}.scales exists, so Bolt's lm_head stays bf16 and is read as a dense head;
+/// every other family keeps the quantized head it always loaded (and is refused without one, as before).
+pub fn denseHead(c: cfg.Config, ck: *const ckpt.Checkpoint) bool {
+    return c.bolt and !ck.has("lm_head.scales");
+}
+
 pub const Builder = struct {
     allocator: std.mem.Allocator,
     device: mtl.Device,
@@ -461,12 +467,11 @@ pub const Builder = struct {
                 .attention => .{ .attention = try b.attention("backbone.layers.{d}.mixer", "fused.qkv.{d}", .{i}, ws) },
             };
         }
-        if (b.ck.has("lm_head.scales")) {
-            w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{}, &.{ c.vocab, c.hidden }, c.head_width)});
-        } else {
-            // MLX quantizes a module only where {path}.scales exists: an unquantized lm_head stays bf16 (Bolt's does)
+        if (denseHead(c.*, b.ck)) {
             w.head_dense = try b.dense("lm_head.weight", .{}, c.vocab, c.hidden);
             w.head = .{ .n = c.vocab, .k = c.hidden };
+        } else {
+            w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{}, &.{ c.vocab, c.hidden }, c.head_width)});
         }
         if (draft_ids) |ids| {
             if (b.ck.has("mtp.layers.0.eh_proj.weight")) w.mtp = try b.mtpHead(ids);

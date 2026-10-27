@@ -229,7 +229,8 @@
    "tf_add_bf16": "vv_Addbfloat16",
    "tf_relu2_bf16": "the relu2 fusion (CV2I...MaximumCDFV2OSquareE)",
    "tf_scale_bf16": "sv_Multiplybfloat16 (bf16(scale) x q in the unfused attention)",
-   "tf_moe_combine": "v_copybfloat16float32 + g2_Multiplyfloat32 + col_reduce_small_1_reduce_sumfloat32 + v_copyfloat32bfloat16 in one launch (one row; past 8 weights, col_reduce_small's 8 lanes: weight 8 onto weight 0); _rows: a row each, Bolt's k 9 (bolt_combine)",
+   "tf_moe_combine": "v_copybfloat16float32 + g2_Multiplyfloat32 + col_reduce_small_1_reduce_sumfloat32 + v_copyfloat32bfloat16 in one launch (one row, k <= 7 weights)",
+   "tf_moe_combine_rows_lanes8": "tf_moe_combine_rows in col_reduce_small's 8 lanes past 8 weights (weight 8 onto weight 0): Bolt's k 9 only (check_mlx_ops.py --ops bolt_combine); bit-equal to tf_moe_combine_rows at k <= 8",
    "tf_causal_mask_bf16": "arangeint32 x2 + g2_GreaterEqualint32 + g2_Selectbfloat16: where(q >= k, s, lowest bf16)",
    "tf_gather_u32": "gather_frontuint32_uint32_int_1 (token = draft_ids[argmax]; up to 7 ids)",
    "launch": "threads [count, 1, 1] (mask: [n, R, batch]; combine: [D, rows, 1]), threadgroup [256, 1, 1] or fewer"
