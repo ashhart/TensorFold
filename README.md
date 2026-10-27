@@ -342,6 +342,7 @@ one Mac; Qwen3.8-27B, Qwen3.5-2B, LFM2.5-24B-A2B, GLM-5.3 (EXLR8) and a CUDA ser
 Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
+`TF_Q27_PROFILE=N` makes a native Metal Qwen3.8-27B server log a per-class GPU-time breakdown every N decode rounds (`1` means 64) and add `gpu_seconds` to its replies; it is diagnostic only, and a profiled round runs slower.
 
 ## Community benchmarks
 

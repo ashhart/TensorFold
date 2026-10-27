@@ -32,6 +32,8 @@ pub const Frame = struct {
     part_count: usize = 0,
     ops: u32 = 0,
     residency: ?mtl.ResidencySet.Follow = null,
+    profiler: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE: each pass's buffers time its `drafter` class
+    hold: @import("core").gpu_profile.Hold = .{}, // while open, the trace's spans keep this frame's encoder
     pub fn setResident(f: *Frame, hook: ?mtl.ResidencySet.Follow) void {
         for (f.pool.items) |buffer| {
             if (f.residency) |h| h.leave(h.ctx, buffer);
@@ -59,6 +61,7 @@ pub const Frame = struct {
         f.completed = false;
         f.part_count = 0;
         f.ops = 0;
+        f.hold.take(f.profiler); // a span's own buffer would overtake this frame's pending ops
         return f.epoch;
     }
     /// Commits the work so far and opens the next buffer behind a fence, so the GPU starts early; between ops only.
@@ -85,12 +88,18 @@ pub const Frame = struct {
             if (failed(cb)) return error.DraftGpuFailure;
         }
         if (failed(f.cb)) return error.DraftGpuFailure;
+        if (f.hold.trace) |t| {
+            var seconds = f.cb.gpuSeconds();
+            for (f.parts[0..f.part_count]) |cb| seconds += cb.gpuSeconds();
+            t.record(.drafter, seconds);
+        }
     }
     pub fn release(f: *Frame) void {
         if (f.active and !f.completed) {
             f.encoder.end();
             for (f.parts[0..f.part_count]) |cb| cb.wait(); // committed parts still use the pool
         }
+        f.hold.release();
         f.active = false;
         f.external = null;
     }

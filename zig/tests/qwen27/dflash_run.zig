@@ -72,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
     const prompt_profiled = std.c.getenv("QWEN27_PROFILE_PROMPT") != null;
     if (prompt_profiled) {
         runner.profile(&trace);
+        draft.backend.profile(&trace);
         trace.enabled = true;
     }
     const start = std.Io.Clock.awake.now(io);
@@ -82,10 +83,12 @@ pub fn main(init: std.process.Init) !void {
         for (trace.shapes[0..trace.shape_count]) |sh| std.debug.print("PROMPT shape n={d} k={d} sk={d} bits={d} calls={d} ms={d:.2}\n", .{ sh.n, sh.k, sh.sk, sh.bits, sh.calls, sh.gpu_seconds * 1e3 });
         trace = .{ .queue = target.queue };
         runner.profile(null);
+        draft.backend.profile(null);
     }
     const profiled = platform.c.getenv("QWEN27_PROFILE") != null;
     if (profiled) {
         runner.profile(&trace);
+        draft.backend.profile(&trace);
         trace.enabled = true;
     }
     const decode_start = std.Io.Clock.awake.now(io);

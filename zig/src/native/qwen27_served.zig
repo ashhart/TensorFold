@@ -35,6 +35,7 @@ pub const Host = struct {
     model: *q.model.Model,
     owns_model: bool,
     runner: q.decode_round.Runner,
+    trace: ?tf.gpu_profile.Trace = null, // TF_Q27_PROFILE: rounds' class GPU times to the log, gpu_seconds in replies
     draft: ?*lb.Draft = null,
     back: *lb.Metal,
     cfg: lanes.Config,
@@ -327,8 +328,13 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
+    h.trace = null;
     h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + lb.max_rows, 1);
     errdefer h.runner.deinit();
+    if (profileEvery()) |every| {
+        h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
+        h.runner.profile(&h.trace.?);
+    }
     if (drafter) |d| h.draft = try lb.Draft.attach(gpa, &h.runner, d, false) else if (o.drafter) |d| h.draft = lb.Draft.open(gpa, io, model, &h.runner, d, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ d, @errorName(err) });
         return error.DrafterLoad;
@@ -372,9 +378,19 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     if (o.learn) |l| try disk.attach(h, io, a, l);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
     return h;
+}
+
+/// TF_Q27_PROFILE's rounds between log reports, or null (off); a value it cannot read leaves profiling off.
+fn profileEvery() ?u64 {
+    const v = std.mem.span(platform.c.getenv("TF_Q27_PROFILE") orelse return null);
+    return tf.gpu_profile.every(v) catch {
+        std.log.warn("TF_Q27_PROFILE={s} is not 0, 1 or a round count: profiling stays off", .{v});
+        return null;
+    };
 }
 
 /// Reserve later buffers and the loaded share's priced bytes that its construction left outside the footprint.
@@ -419,6 +435,7 @@ pub fn close(ptr: *anyopaque) void {
     h.cfg.deinit(h.gpa);
     h.back.deinit();
     if (h.draft) |d| d.deinit();
+    if (h.trace) |*t| t.reportRest();
     h.runner.deinit();
     if (h.vision) |v| v.deinit();
     if (h.owns_model) h.model.deinit();
