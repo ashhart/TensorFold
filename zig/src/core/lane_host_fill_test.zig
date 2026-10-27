@@ -223,4 +223,5 @@ test {
     _ = @import("lane_host_fill_progress_test.zig");
     _ = @import("lane_host_share_test.zig");
     _ = @import("lane_host_burst_test.zig");
+    _ = @import("lane_host_service_test.zig");
 }
