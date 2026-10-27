@@ -2,9 +2,9 @@
 
 // Caches: keys [slots, LEN, HK, 192], values [slots, LEN, HK, 128], key p at row p % LEN (a sliding layer's: a ring).
 
-// A row's keys: chunks of 256 at absolute positions, tiles of 32; chunk partials fold in order, the sink last.
+// A decode row's keys: chunks of 256 at absolute positions, tiles of 64; chunk partials fold in order, the sink last.
 
-// Decode rows run chunks in parallel (rows, merge); full layers' prompt rows run on tensor cores (mimo_attn_prompt).
+// Decode rows run chunks in parallel (rows, merge), full layers' prompt rows whole (prompt); both on tensor cores.
 
 #include <cstdint>
 #include <cuda_fp16.h>
@@ -16,21 +16,7 @@ constexpr int QK = 192;      // q/k head dim
 constexpr int VD = 128;      // v head dim
 constexpr int RD = 64;       // rotated dims
 constexpr int CK = 256;      // keys a chunk
-constexpr int TILE = 32;     // keys a tile
-constexpr int KW = QK / 2 + 1;  // K tile row stride in 32-bit words (96 + 1: conflict-free row-per-lane reads)
-constexpr int QW = QK / 2;   // a query in half2 words
 #define NEG_INF (-CUDART_INF_F)
-
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
 
 // A lane's share of a (row, head) state: m and l (every lane's), o dims 2 lane, 2 lane + 1, 64 + 2 lane, 65 + 2 lane.
 struct State {
@@ -41,64 +27,6 @@ struct State {
         o[0] = o[1] = o[2] = o[3] = 0.f;
     }
 };
-
-// Load keys [t0, t0 + 32) of one key head into shared memory; rows at or past `end` are zero.
-__device__ __forceinline__ void load_tile(uint32_t* ks, __half2* vs, const __half* kc, const __half* vc, int64_t base,
-                                          int LEN, int HK, int kh, int t0, int end) {
-    for (int i = threadIdx.x; i < TILE * (QW + VD / 2); i += blockDim.x) {
-        const int row = i / (QW + VD / 2), w = i % (QW + VD / 2);
-        const int key = t0 + row;
-        uint32_t val = 0;
-        if (key < end) {
-            const int64_t at = (base + key % LEN) * HK + kh;
-            val = w < QW ? ((const uint32_t*)(kc + at * QK))[w] : ((const uint32_t*)(vc + at * VD))[w - QW];
-        }
-        if (w < QW)
-            ks[row * KW + w] = val;
-        else
-            *(uint32_t*)(vs + row * (VD / 2) + (w - QW)) = val;
-    }
-}
-
-// A tile into a row's chunk state: lane j scores key t0 + j (valid in [lo, pos]); no valid key: state unchanged.
-__device__ __forceinline__ void tile_step(State& st, const uint32_t* ks, const __half2* vs, const __half2* q, int t0,
-                                         int lo, int pos, float scale) {
-    const int lane = threadIdx.x & 31;
-    const int key = t0 + lane;
-    const bool valid = key >= lo && key <= pos;
-    float s = NEG_INF;
-    if (valid) {
-        const uint32_t* kr = ks + lane * KW;
-        float acc = 0.f;
-#pragma unroll 8
-        for (int w = 0; w < QW; ++w) {
-            const uint32_t u = kr[w];
-            const float2 kf = __half22float2(*(const __half2*)&u);
-            const float2 qf = __half22float2(q[w]);
-            acc = __fmaf_rn(qf.x, kf.x, acc);
-            acc = __fmaf_rn(qf.y, kf.y, acc);
-        }
-        s = acc * scale;
-    }
-    const float mt = warp_max(s);
-    if (mt == NEG_INF) return;
-    const float mn = fmaxf(st.m, mt);
-    const float corr = st.m == NEG_INF ? 0.f : expf(st.m - mn);
-    const float pj = valid ? expf(s - mn) : 0.f;
-    st.l = st.l * corr + warp_sum(pj);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) st.o[i] = st.o[i] * corr;
-    for (int j = 0; j < TILE; ++j) {
-        const float pb = __shfl_sync(0xffffffffu, pj, j);
-        const float2 a = __half22float2(vs[j * (VD / 2) + lane]);
-        const float2 b = __half22float2(vs[j * (VD / 2) + 32 + lane]);
-        st.o[0] = __fmaf_rn(pb, a.x, st.o[0]);
-        st.o[1] = __fmaf_rn(pb, a.y, st.o[1]);
-        st.o[2] = __fmaf_rn(pb, b.x, st.o[2]);
-        st.o[3] = __fmaf_rn(pb, b.y, st.o[3]);
-    }
-    st.m = mn;
-}
 
 // A chunk's partial folded into the running state (chunk order); an empty chunk (m = -inf) changes nothing.
 __device__ __forceinline__ void fold(State& run, float m, float l, const float* o) {
@@ -164,47 +92,6 @@ extern "C" __global__ void mimo_qkv(const __half* __restrict__ q, const __half* 
     }
 }
 
-// Grid (rows, HK, NCH), a warp a query head: row r's chunk c (from its window's first) into [(r NCH + c) H + h].
-extern "C" __global__ void mimo_attn_rows(const __half* __restrict__ qo, const __half* __restrict__ kc,
-                                          const __half* __restrict__ vc, const int32_t* __restrict__ pos,
-                                          const int32_t* __restrict__ slot, float* __restrict__ po,
-                                          float* __restrict__ pm, float* __restrict__ pl, int LEN, int NCH, int H,
-                                          int HK, int win, float scale) {
-    extern __shared__ uint32_t smem[];
-    uint32_t* ks = smem;
-    __half2* vs = (__half2*)(ks + TILE * KW);
-    __half2* qs = vs + TILE * (VD / 2);
-    const int64_t r = blockIdx.x;
-    const int kh = blockIdx.y, c = blockIdx.z;
-    const int G = blockDim.x >> 5, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const int h = kh * G + warp;
-    const int p = pos[r];
-    const int lo = first_key(p, win);
-    const int start = (lo / CK + c) * CK;
-    const int end = min(start + CK, p + 1);
-    const int64_t part = (r * NCH + c) * H + h;
-    State st;
-    st.clear();
-    if (start < end) {
-        for (int i = threadIdx.x; i < G * QW; i += blockDim.x)
-            qs[i] = ((const __half2*)(qo + (r * H + kh * G) * QK))[i];
-        const int64_t base = (int64_t)slot[r] * LEN;
-        for (int t0 = start; t0 < end; t0 += TILE) {
-            __syncthreads();
-            load_tile(ks, vs, kc, vc, base, LEN, HK, kh, t0, end);
-            __syncthreads();
-            tile_step(st, ks, vs, qs + warp * QW, t0, lo, p, scale);
-        }
-    }
-    if (lane == 0) {
-        pm[part] = st.m;
-        pl[part] = st.l;
-    }
-    float* o = po + part * VD;
-    *(float2*)(o + 2 * lane) = make_float2(st.o[0], st.o[1]);
-    *(float2*)(o + 64 + 2 * lane) = make_float2(st.o[2], st.o[3]);
-}
-
 // Grid (rows, H / 4), 128 threads (a warp a head): the row's chunks folded in order, the sink last; fp16 out.
 extern "C" __global__ void mimo_attn_merge(const float* __restrict__ po, const float* __restrict__ pm,
                                            const float* __restrict__ pl, const float* __restrict__ sinks,
@@ -228,7 +115,6 @@ namespace tc {
 constexpr int BM = 64, BN = 64, THREADS = 128;
 constexpr int KS = QK + 8, VS = VD + 8;   // smem row strides in halves (16-byte rows, no ldmatrix bank conflicts)
 constexpr int STAGE = BN * KS + BN * VS;  // a stage's halves: K then V
-constexpr int SMEM = 2 * STAGE * 2;       // two stages, bytes
 
 __device__ __forceinline__ void cp16(void* dst, const void* src, bool valid) {
     const unsigned d = (unsigned)__cvta_generic_to_shared(dst);
@@ -257,13 +143,13 @@ __device__ __forceinline__ uint32_t pack(float x, float y) {
     const __half2 h = __floats2half2_rn(x, y);
     return *(const uint32_t*)&h;
 }
-// Keys [t0, t0 + 64) of key head kh into a stage (rows past `end` zero): 24 + 16 pieces of 16 bytes a key.
+// Keys [t0, t0 + 64) of key head kh into a stage (keys outside [first, end) zero): 24 + 16 pieces of 16 bytes a key.
 __device__ __forceinline__ void load_kv(__half* st, const __half* kc, const __half* vc, int64_t base, int LEN, int HK,
-                                        int kh, int t0, int end) {
+                                        int kh, int t0, int first, int end) {
     for (int i = threadIdx.x; i < BN * (QK / 8 + VD / 8); i += THREADS) {
         const int key = i / (QK / 8 + VD / 8), w = i % (QK / 8 + VD / 8);
-        const bool ok = t0 + key < end;
-        const int64_t at = (base + (ok ? t0 + key : 0) % LEN) * HK + kh;
+        const bool ok = t0 + key >= first && t0 + key < end;
+        const int64_t at = (base + (ok ? t0 + key : first) % LEN) * HK + kh;
         if (w < QK / 8)
             cp16(st + key * KS + w * 8, kc + at * QK + w * 8, ok);
         else
@@ -272,7 +158,7 @@ __device__ __forceinline__ void load_kv(__half* st, const __half* kc, const __ha
 }
 }  // namespace tc
 
-// Grid (ceil(n / 64), H), 128 threads, tc::SMEM bytes: full-layer prompt rows; 64-key tiles from 0, chunk-free bits.
+// Grid (ceil(n / 64), H), 128 threads, ops.ATTN_SHARED: full-layer prompt rows; 64-key tiles from 0, chunk-free bits.
 extern "C" __global__ void __launch_bounds__(128) mimo_attn_prompt(const __half* __restrict__ qo,
                                                                    const __half* __restrict__ kc,
                                                                    const __half* __restrict__ vc,
@@ -308,11 +194,11 @@ extern "C" __global__ void __launch_bounds__(128) mimo_attn_prompt(const __half*
     float ma = NEG_INF, mb = NEG_INF, la = 0.f, lb = 0.f;
     __syncthreads();  // the queries are read: stage 0 takes keys
     const int tiles = (end + BN - 1) / BN;
-    if (tiles > 0) load_kv(sm, kc, vc, base, LEN, HK, kh, 0, end);
+    if (tiles > 0) load_kv(sm, kc, vc, base, LEN, HK, kh, 0, 0, end);
     commit();
     for (int j = 0; j < tiles; ++j) {
         const int t0 = j * BN;
-        if (j + 1 < tiles) load_kv(sm + ((j + 1) & 1) * STAGE, kc, vc, base, LEN, HK, kh, t0 + BN, end);
+        if (j + 1 < tiles) load_kv(sm + ((j + 1) & 1) * STAGE, kc, vc, base, LEN, HK, kh, t0 + BN, 0, end);
         commit();
         wait<1>();
         __syncthreads();
@@ -395,4 +281,161 @@ extern "C" __global__ void __launch_bounds__(128) mimo_attn_prompt(const __half*
         if (pb >= 0)
             *(__half2*)(out + ((int64_t)(r0 + rb) * H + h) * VD + d * 8 + 2 * t) = __floats2half2_rn(o[d][2] / lb, o[d][3] / lb);
     }
+}
+
+// Grid (rows, HK, NCH), 128 threads: a chunk's G <= 16 heads as one m16 tile, warp w keys 16 w + 0..15 of a 64-tile.
+extern "C" __global__ void __launch_bounds__(128) mimo_attn_rows(const __half* __restrict__ qo,
+                                                                 const __half* __restrict__ kc,
+                                                                 const __half* __restrict__ vc,
+                                                                 const int32_t* __restrict__ pos,
+                                                                 const int32_t* __restrict__ slot,
+                                                                 float* __restrict__ po, float* __restrict__ pm,
+                                                                 float* __restrict__ pl, int LEN, int NCH, int H,
+                                                                 int HK, int win, float scale) {
+    using namespace tc;
+    extern __shared__ __align__(16) __half sm[];
+    const int64_t r = blockIdx.x;
+    const int kh = blockIdx.y, c = blockIdx.z, G = H / HK;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    const int p = pos[r];
+    const int lo = first_key(p, win);
+    const int start = (lo / CK + c) * CK;
+    const int end = min(start + CK, p + 1), first = max(start, lo);
+    const int64_t part0 = (r * NCH + c) * H + kh * G;  // the group's first head's partial
+    if (first >= end) {  // an empty chunk: m = -inf, l = 0, o = 0
+        for (int i = threadIdx.x; i < G * VD; i += THREADS) po[part0 * VD + i] = 0.f;
+        if (threadIdx.x < G) {
+            pm[part0 + threadIdx.x] = NEG_INF;
+            pl[part0 + threadIdx.x] = 0.f;
+        }
+        return;
+    }
+    for (int i = threadIdx.x; i < 16 * (QK / 8); i += THREADS) {  // the group's queries, rows past G zero
+        const int hh = i / (QK / 8), w = i % (QK / 8);
+        cp16(sm + hh * KS + w * 8, qo + (r * H + kh * G + min(hh, G - 1)) * QK + w * 8, hh < G);
+    }
+    commit();
+    wait<0>();
+    __syncthreads();
+    uint32_t qa[QK / 16][4];
+#pragma unroll
+    for (int k = 0; k < QK / 16; ++k) ldsm4(qa[k], sm + (lane & 15) * KS + k * 16 + (lane >> 4) * 8);
+    __syncthreads();  // the queries are read: stage 0 takes keys
+    const int64_t base = (int64_t)slot[r] * LEN;
+    const int tb = first / BN * BN, tiles = (end - tb + BN - 1) / BN;
+    float o[VD / 8][4];
+#pragma unroll
+    for (int d = 0; d < VD / 8; ++d) o[d][0] = o[d][1] = o[d][2] = o[d][3] = 0.f;
+    float ma = NEG_INF, mb = NEG_INF, la = 0.f, lb = 0.f;  // rows g and g + 8 (heads), the same keys
+    load_kv(sm, kc, vc, base, LEN, HK, kh, tb, first, end);
+    commit();
+    for (int j = 0; j < tiles; ++j) {
+        const int t0 = tb + j * BN;
+        if (j + 1 < tiles) load_kv(sm + ((j + 1) & 1) * STAGE, kc, vc, base, LEN, HK, kh, t0 + BN, first, end);
+        commit();
+        wait<1>();
+        __syncthreads();
+        const __half* ks = sm + (j & 1) * STAGE;
+        const __half* vs = ks + BN * KS;
+        float sc[2][4] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};  // the warp's 16 keys, two blocks of 8
+#pragma unroll
+        for (int k = 0; k < QK / 16; ++k) {
+            uint32_t b[4];
+            ldsm4(b, ks + (warp * 16 + (lane & 7) + ((lane >> 4) << 3)) * KS + k * 16 + ((lane >> 3) & 1) * 8);
+            mma(sc[0], qa[k], b[0], b[1]);
+            mma(sc[1], qa[k], b[2], b[3]);
+        }
+        float xa = NEG_INF, xb = NEG_INF;
+#pragma unroll
+        for (int nb = 0; nb < 2; ++nb)
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+                const int key = t0 + warp * 16 + nb * 8 + 2 * t + e;
+                const bool ok = key >= first && key < end;
+                sc[nb][e] = ok ? sc[nb][e] * scale : NEG_INF;
+                sc[nb][2 + e] = ok ? sc[nb][2 + e] * scale : NEG_INF;
+                xa = fmaxf(xa, sc[nb][e]);
+                xb = fmaxf(xb, sc[nb][2 + e]);
+            }
+#pragma unroll
+        for (int x = 1; x < 4; x <<= 1) {
+            xa = fmaxf(xa, __shfl_xor_sync(0xffffffffu, xa, x));
+            xb = fmaxf(xb, __shfl_xor_sync(0xffffffffu, xb, x));
+        }
+        const float na = fmaxf(ma, xa), nbm = fmaxf(mb, xb);  // no key of the warp's here: the state stays
+        const float ca = na == NEG_INF ? 1.f : expf(ma - na), cb = nbm == NEG_INF ? 1.f : expf(mb - nbm);
+        float sa = 0.f, sb = 0.f;
+#pragma unroll
+        for (int nb = 0; nb < 2; ++nb)
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+                sc[nb][e] = sc[nb][e] == NEG_INF ? 0.f : expf(sc[nb][e] - na);
+                sc[nb][2 + e] = sc[nb][2 + e] == NEG_INF ? 0.f : expf(sc[nb][2 + e] - nbm);
+                sa += sc[nb][e];
+                sb += sc[nb][2 + e];
+            }
+#pragma unroll
+        for (int x = 1; x < 4; x <<= 1) {
+            sa += __shfl_xor_sync(0xffffffffu, sa, x);
+            sb += __shfl_xor_sync(0xffffffffu, sb, x);
+        }
+        la = la * ca + sa;
+        lb = lb * cb + sb;
+        ma = na;
+        mb = nbm;
+        const uint32_t pk[4] = {pack(sc[0][0], sc[0][1]), pack(sc[0][2], sc[0][3]), pack(sc[1][0], sc[1][1]),
+                                pack(sc[1][2], sc[1][3])};  // p in fp16 as the A fragment of the warp's 16 keys
+#pragma unroll
+        for (int d = 0; d < VD / 8; d += 2) {
+            uint32_t b[4];
+            ldsm4t(b, vs + (warp * 16 + (lane & 7) + ((lane >> 3) & 1) * 8) * VS + d * 8 + (lane >> 4) * 8);
+            o[d][0] *= ca;
+            o[d][1] *= ca;
+            o[d][2] *= cb;
+            o[d][3] *= cb;
+            o[d + 1][0] *= ca;
+            o[d + 1][1] *= ca;
+            o[d + 1][2] *= cb;
+            o[d + 1][3] *= cb;
+            mma(o[d], pk, b[0], b[1]);
+            mma(o[d + 1], pk, b[2], b[3]);
+        }
+        __syncthreads();  // the stage is read: the next load may take it
+    }
+    float* cw = reinterpret_cast<float*>(sm) + warp * (32 + 16 * VD);  // a warp's m [16], l [16], o [16, VD], in order
+    if (t == 0) {
+        cw[g] = ma;
+        cw[g + 8] = mb;
+        cw[16 + g] = la;
+        cw[24 + g] = lb;
+    }
+#pragma unroll
+    for (int d = 0; d < VD / 8; ++d) {
+        *(float2*)(cw + 32 + g * VD + d * 8 + 2 * t) = make_float2(o[d][0], o[d][1]);
+        *(float2*)(cw + 32 + (g + 8) * VD + d * 8 + 2 * t) = make_float2(o[d][2], o[d][3]);
+    }
+    __syncthreads();
+    const int hh = threadIdx.x >> 3, e0 = (threadIdx.x & 7) * 16;  // a thread a head's 16 dims
+    if (hh >= G) return;
+    float M = NEG_INF, L = 0.f, acc[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) acc[i] = 0.f;
+    for (int w = 0; w < THREADS / 32; ++w) {  // as fold(): a warp without keys changes nothing
+        const float* cv = reinterpret_cast<const float*>(sm) + w * (32 + 16 * VD);
+        const float m = cv[hh];
+        if (m == NEG_INF) continue;
+        const float mn = fmaxf(M, m);
+        const float a = M == NEG_INF ? 0.f : expf(M - mn), b = expf(m - mn);
+        L = L * a + cv[16 + hh] * b;
+#pragma unroll
+        for (int i = 0; i < 16; ++i) acc[i] = acc[i] * a + cv[32 + hh * VD + e0 + i] * b;
+        M = mn;
+    }
+    if ((threadIdx.x & 7) == 0) {
+        pm[part0 + hh] = M;
+        pl[part0 + hh] = L;
+    }
+#pragma unroll
+    for (int i = 0; i < 16; i += 4)
+        *(float4*)(po + (part0 + hh) * VD + e0 + i) = make_float4(acc[i], acc[i + 1], acc[i + 2], acc[i + 3]);
 }

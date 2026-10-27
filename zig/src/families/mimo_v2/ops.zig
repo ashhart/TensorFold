@@ -9,8 +9,6 @@ pub const PROMPT_ROWS = 64; // rows a mimo_attn_prompt block (a warp 16), one qu
 const NORM_THREADS = 256;
 const SILU_THREADS = 256;
 const ROUTER_WARPS = 8;
-const TILE_WORDS = 32 * (97 + 64); // attention.cu's K and V tile, 32-bit words
-const QUERY_WORDS = 96; // a 192-dim fp16 query
 
 fn u(x: usize) u32 {
     return @intCast(x);
@@ -48,7 +46,8 @@ pub const Ops = struct {
             @field(o, f[0]) = try o.ops.function(f[1]);
         inline for (.{ .{ "f_qkv", "mimo_qkv" }, .{ "f_rows", "mimo_attn_rows" }, .{ "f_merge", "mimo_attn_merge" }, .{ "f_prompt", "mimo_attn_prompt" } }) |f|
             @field(o, f[0]) = try o.attn.function(f[1]);
-        try o.f_prompt.allowDynamicShared(PROMPT_SHARED);
+        try o.f_prompt.allowDynamicShared(ATTN_SHARED);
+        try o.f_rows.allowDynamicShared(ATTN_SHARED);
         return o;
     }
 
@@ -129,7 +128,7 @@ pub const Ops = struct {
             inline for (.{ io.qo, L.kc, L.vc, io.pos, io.slot, io.po, io.pm, io.pl }) |p| a.add(p);
             inline for (.{ L.len, nch, H, L.hk, L.win }) |v| a.add(ci(v));
             a.add(scale);
-            try go(o.f_rows, s, .{ n, L.hk, nch }, 32 * G, (TILE_WORDS + G * QUERY_WORDS) * 4, &a);
+            try go(o.f_rows, s, .{ n, L.hk, nch }, 128, ATTN_SHARED, &a);
         }
         var a: cuda.Args = .{};
         inline for (.{ io.po, io.pm, io.pl, L.sinks, io.att }) |p| a.add(p);
@@ -145,14 +144,14 @@ pub const Ops = struct {
         inline for (.{ io.qo, L.kc, L.vc, io.pos, io.slot, io.att }) |p| a.add(p);
         inline for (.{ n, L.len, H, L.hk }) |v| a.add(ci(v));
         a.add(scale);
-        try go(o.f_prompt, s, .{ (n + PROMPT_ROWS - 1) / PROMPT_ROWS, H, 1 }, 128, PROMPT_SHARED, &a);
+        try go(o.f_prompt, s, .{ (n + PROMPT_ROWS - 1) / PROMPT_ROWS, H, 1 }, 128, ATTN_SHARED, &a);
     }
 };
 
-/// attention.cu's tc::SMEM: two stages of 64 keys, K rows of 192 + 8 halves and V rows of 128 + 8.
-pub const PROMPT_SHARED: u32 = 2 * 64 * ((192 + 8) + (128 + 8)) * 2;
+/// attention.cu's tc::SMEM (rows and prompt): two stages of 64 keys, K rows of 192 + 8 halves and V rows of 128 + 8.
+pub const ATTN_SHARED: u32 = 2 * 64 * ((192 + 8) + (128 + 8)) * 2;
 
 test "attention shared memory fits a GB10 block" {
-    try std.testing.expect(PROMPT_SHARED <= 99 * 1024);
-    try std.testing.expectEqual(@as(u32, 86016), PROMPT_SHARED);
+    try std.testing.expect(ATTN_SHARED <= 99 * 1024);
+    try std.testing.expectEqual(@as(u32, 86016), ATTN_SHARED);
 }

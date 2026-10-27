@@ -16,9 +16,8 @@ const RD = 64; // rotated dims
 const CK = 256; // ops.CK: keys a chunk
 const W = 128; // sliding_window
 const RB = 64; // ops.PROMPT_ROWS: a prompt block's rows
-const BN = 64; // attention.cu tc::BN: a prompt tile's keys
-const PROMPT_SHARED: u32 = 2 * BN * ((QK + 8) + (VD + 8)) * 2; // ops.PROMPT_SHARED
-const TILE_WORDS = 32 * (97 + 64); // ops.zig: the K and V tile, 32-bit words
+const BN = 64; // attention.cu tc::BN: a key tile (rows and prompt)
+const ATTN_SHARED: u32 = 2 * BN * ((QK + 8) + (VD + 8)) * 2; // ops.ATTN_SHARED: rows and prompt
 const scale: f32 = 0.07216878364870323; // qk_dim^-0.5
 const theta: f64 = 10000; // swa_rope_theta: the tables are the kernel's inputs
 
@@ -54,8 +53,8 @@ pub fn spec(kind: Kind) c.Spec {
     const keys: [3]c.Tile = .{ .{}, .{}, .{ .size = CK } };
     return switch (kind) {
         .qkv => .{ .name = "cuda mimo mimo_qkv (NEOX RoPE on 64 of 192 dims, k and v into the cache)", .accum = .none, .depth = noSums, .out = .f16, .served = qkv },
-        .rows_slide => .{ .name = "cuda mimo mimo_attn_rows (a 128-key window over a ring, 2 chunks)", .accum = .f32, .depth = rowsDepth, .out = .f32, .nan = .{ .stated = nan_rule }, .tiles = keys, .served = slide },
-        .rows_full => .{ .name = "cuda mimo mimo_attn_rows (full layer: 256-key chunks from 0, one empty past)", .accum = .f32, .depth = rowsDepth, .out = .f32, .nan = .{ .stated = nan_rule }, .tiles = keys, .served = full },
+        .rows_slide => .{ .name = "cuda mimo mimo_attn_rows (tensor cores: a 128-key window over a ring, 2 chunks, p in fp16)", .accum = .f32, .depth = rowsDepth, .out = .f32, .nan = .{ .stated = nan_rule }, .tiles = keys, .served = slide },
+        .rows_full => .{ .name = "cuda mimo mimo_attn_rows (tensor cores: full layer, 256-key chunks from 0, one empty past, p in fp16)", .accum = .f32, .depth = rowsDepth, .out = .f32, .nan = .{ .stated = nan_rule }, .tiles = keys, .served = full },
         .merge_sink => .{ .name = "cuda mimo mimo_attn_merge (sliding: two chunks, then the sink)", .accum = .f32, .depth = mergeDepth, .ops = 2, .out = .f16, .served = &.{ .{ .rows = 8, .n = 32, .k = 2 }, .{ .rows = 128, .n = 32, .k = 2 } }, .sums = .{ .f16 = 0, .bf16 = 0, .why = two_why } },
         .merge_full => .{ .name = "cuda mimo mimo_attn_merge (full layer: a bucket's chunks, no sink)", .accum = .f32, .depth = mergeDepth, .ops = 2, .out = .f16, .served = &.{ .{ .rows = 8, .n = 32, .k = 32 }, .{ .rows = 1, .n = 32, .k = 1024 } } },
         .prompt => .{ .name = "cuda mimo mimo_attn_prompt (tensor cores: 64 rows a block, 64-key tiles, p in fp16)", .accum = .f32, .depth = promptDepth, .ops = 2, .out = .f16, .nan = .{ .stated = nan_rule }, .tiles = .{ .{ .size = RB }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = 32, .k = 4096 }, .{ .rows = 16, .n = 32, .k = 8192 }, .{ .rows = 8, .n = 64, .k = 1000 }, .{ .rows = 100, .n = 32, .k = 2000 } } },
@@ -322,8 +321,10 @@ pub const Attn = struct {
                 a.add(@as(c_int, if (self.kind == .rows_slide) W else 0));
                 a.add(scale);
                 grid = .{ @intCast(n), @intCast(self.hk), @intCast(self.nch) };
-                block = @intCast(32 * G);
-                shared = @intCast((TILE_WORDS + G * QK / 2) * 4);
+                std.debug.assert(G <= 16);
+                block = 128;
+                shared = ATTN_SHARED;
+                try self.f.allowDynamicShared(shared);
             },
             .merge_sink, .merge_full => {
                 for (d[0..5]) |p| a.add(p);
@@ -336,7 +337,7 @@ pub const Attn = struct {
                 a.add(scale);
                 grid = .{ @intCast((n + RB - 1) / RB), @intCast(H), 1 };
                 block = 128;
-                shared = PROMPT_SHARED;
+                shared = ATTN_SHARED;
                 try self.f.allowDynamicShared(shared);
             },
         }
@@ -465,8 +466,9 @@ pub const Attn = struct {
             for (p[0..nk], sc[0..nk]) |*x, s| x.* = @exp(s - m);
             for (t[0..nk]) |*x| x.* = 1;
             const l = if (acc == .none) sum(.none, order, p[0..nk]) else sum(acc, order, t[0..nk]);
-            const tiles: f64 = @floatFromInt((nk + 31) / 32 + 1);
+            const tiles: f64 = @floatFromInt((nk + BN - 1) / BN + 1 + 4); // 64-key tiles, then the four warps' folds
             const rel = 2 * ms[1] + tiles * (2 * mu.fast + 3 * mu.u);
+            const rel_o = rel + 0x1p-11; // p rounded to fp16 for o, not l
             out[pr * VD + o] = if (nk == 0) -std.math.inf(f64) else m;
             out[pr * VD + pr + o] = l;
             if (err) |el| {
@@ -482,7 +484,7 @@ pub const Attn = struct {
                 }
                 const y = sum(acc, order, t[0..nk]);
                 out[o * VD + e] = y;
-                if (err) |el| el[o * VD + e] = mu.allow(.f32, y, 2 * abs * (rel + mu.gamma(@as(f64, @floatFromInt(nk)) + tiles + 1)));
+                if (err) |el| el[o * VD + e] = mu.allow(.f32, y, 2 * abs * (rel_o + mu.gamma(@as(f64, @floatFromInt(nk)) + tiles + 1)));
             }
         };
     }
