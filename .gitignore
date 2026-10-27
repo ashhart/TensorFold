@@ -22,8 +22,9 @@ zig-out/
 # The qwen4 device gate writes a scratch checkpoint into the tree and takes it away again.
 .qwen4-device-*/
 
-# The qwen4 device gate writes a scratch checkpoint into the tree and takes it away again.
-.qwen4-device-*/
+# A build tool that crashes leaves a core dump in the tree.
+/core
+*.core
 
 # Versioned GUI build resources, generated app engines stay ignored in app/.gitignore.
 !app/build/

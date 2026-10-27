@@ -404,4 +404,3 @@ compared exactly rather than approximately.
 The test needs `numpy` for the reference reader, and a `weightless` checkout.
 Nothing of the reference is committed here, and no vector from it is either:
 the published files are downloaded when the test runs.
-

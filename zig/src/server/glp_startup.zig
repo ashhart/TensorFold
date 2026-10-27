@@ -64,7 +64,7 @@ pub fn read(a: std.mem.Allocator, g: *?Vec) error{OutOfMemory}!?[]const u8 {
 /// The file read whole: its vector and whether it claims a digest.
 const Loaded = struct { vector: glp.Vector, claimed: bool };
 
-fn load(a: std.mem.Allocator, path: []const u8, alpha: ?f64, why: *glp.Why) error{BadGlpFile, OutOfMemory}!Loaded {
+fn load(a: std.mem.Allocator, path: []const u8, alpha: ?f64, why: *glp.Why) error{ BadGlpFile, OutOfMemory }!Loaded {
     // The strings the reader hands back borrow the file's bytes, so those bytes stay as long as the vector.
     const bytes = std.Io.Dir.cwd().readFileAlloc(startupIo(), path, a, .limited(file_limit)) catch |e| {
         if (e == error.OutOfMemory) return error.OutOfMemory;
@@ -101,7 +101,7 @@ fn startupIo() std.Io {
 }
 
 /// The control vector the engine applies, after the checks that refuse one.
-pub fn engine(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, backend: []const u8, g: ?Vec) error{OutOfMemory, GlpRefused}!?api.Glp {
+pub fn engine(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, backend: []const u8, g: ?Vec) error{ OutOfMemory, GlpRefused }!?api.Glp {
     const v = g orelse return null;
     const vector = v.vector orelse return null;
     if (try refusal(a, dir, model_type, backend, v)) |why| {

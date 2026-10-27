@@ -342,7 +342,7 @@ fn alignmentOf(entries: []const Entry) ?usize {
 
 fn writeEntry(a: std.mem.Allocator, out: *std.ArrayList(u8), e: Entry) Error!void {
     try putString(a, out, e.key);
-    try putU32(a, out, @intFromEnum(std.meta.activeTag(e.value)));
+    try putU32(a, out, @backingInt(std.meta.activeTag(e.value)));
     try writeValue(a, out, e.value);
 }
 
@@ -362,7 +362,7 @@ fn writeValue(a: std.mem.Allocator, out: *std.ArrayList(u8), v: Value) Error!voi
             for (arr.items) |it| {
                 if (std.meta.activeTag(it) != arr.elem) return error.BadGguf;
             }
-            try putU32(a, out, @intFromEnum(arr.elem));
+            try putU32(a, out, @backingInt(arr.elem));
             try putU64(a, out, arr.items.len);
             for (arr.items) |it| try writeValue(a, out, it);
         },
