@@ -142,10 +142,11 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_warp(const
 }
 
 // The warp form ranking sigmoid(logit) + bias (Nemotron's routing): weights the scores, `shared` slots ne, ne + 1, ...
+// The logits are `slices` partial sums [slices, rows, ne], added in slice order (the combine's chain) before the sigmoid.
 extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp(const float* logits, const float* bias,
                                                                                 int* pick, float* wts, int rows, int ne,
                                                                                 int topk, int shared, int normalize,
-                                                                                float scale) {
+                                                                                float scale, int slices) {
     const int lane = threadIdx.x & 31;
     const int64_t r = static_cast<int64_t>(blockIdx.x) * 8 + (threadIdx.x >> 5);
     if (r >= rows) return;
@@ -154,7 +155,12 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp
 #pragma unroll
     for (int j = 0; j < PER; ++j) {
         const int e = lane + 32 * j;
-        x[j] = e < ne ? __fdiv_rn(1.f, __fadd_rn(1.f, expf(-lg[e]))) : 0.f;
+        float l = 0.f;
+        if (e < ne) {
+            l = lg[e];
+            for (int s = 1; s < slices; ++s) l = __fadd_rn(l, lg[static_cast<int64_t>(s) * rows * ne + e]);
+        }
+        x[j] = e < ne ? __fdiv_rn(1.f, __fadd_rn(1.f, expf(-l))) : 0.f;
         v[j] = e < ne ? __fadd_rn(x[j], bias != nullptr ? bias[e] : 0.f) : -INFINITY;
     }
     const int slots = topk + shared;

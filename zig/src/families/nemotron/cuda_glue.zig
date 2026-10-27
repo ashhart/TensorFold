@@ -106,7 +106,6 @@ pub const Glue = struct {
     emb: *const cuda.embed_rows.EmbedRows, // the shared token rows (embed_rows.cu)
     norms: *const cuda.norms.Norms, // the shared RMS norm rows (norms.cu)
     moe: *const cuda.moe_glue.MoeGlue, // the shared expert combine and top-k (moe_glue.cu)
-    ones: u64 = 0, // fp32 1.0 a router slice (Buffers.ones): the combine's weights summing the slices
 
     fn tri(g: Glue) ?triton.Tri {
         return if (g.set) |x| .{ .set = x, .s = g.s } else null;
@@ -176,11 +175,10 @@ pub const Glue = struct {
         if (g.tri()) |t| return t.route(x, w, bias, part, ids, wts, rows, d, e, top_k, scaling, norm);
         if (slots < top_k or slots > top_k + 2) return error.RouterTooWide;
         const shape = routerShape(d);
-        if (shape.sk > max_router_slices) return error.RouterTooWide; // Buffers.ones
+        if (shape.sk > max_router_slices) return error.RouterTooWide;
         try g.logits(x, w, part, rows, d, e, shape.sk);
-        // in place: a thread reads its slices before it writes
-        if (shape.sk > 1) try g.moe.combine(g.s, part, .f32, g.ones, part, .f32, 1, shape.sk, rows * e);
-        const r: cuda.moe_glue.Route = .{ .experts = e, .topk = top_k, .shared = slots > top_k, .shared_slots = slots - top_k, .normalize = norm, .scale = scaling, .score = true };
+        // the top-k adds the slices itself, in slice order: no launch summing them
+        const r: cuda.moe_glue.Route = .{ .experts = e, .topk = top_k, .shared = slots > top_k, .shared_slots = slots - top_k, .normalize = norm, .scale = scaling, .score = true, .slices = shape.sk };
         try g.moe.topk(g.s, part, bias, r, ids, wts, rows);
     }
 

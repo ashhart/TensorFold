@@ -112,9 +112,12 @@ fn route(r: *Rig) !void {
     try routeUnderflow(r);
 }
 
-/// Every pick's sigmoid underflows to 0 in fp32 (logits -100): the sum's + 1e-20 keeps their weights 0, not 0 / 0 = NaN.
+/// Every pick's sigmoid underflows to 0 in fp32 (two slices of -50, logits -100): the sum's + 1e-20 keeps their weights
+/// 0, not 0 / 0 = NaN.
 fn routeUnderflow(r: *Rig) !void {
     const rows = 3;
+    const part = try r.a.alloc(f32, 2 * rows * E);
+    @memset(part, -50);
     const logits = try r.a.alloc(f32, rows * E);
     @memset(logits, -100);
     const bias = try r.f32s(E, -0.05, 0.05);
@@ -123,8 +126,8 @@ fn routeUnderflow(r: *Rig) !void {
     ref.topk(logits, bias, idx, wt, rows, 2.5, E, top_k, NS, true);
     const idxd = try r.zeros(i32, rows * NS);
     const wtd = try r.zeros(f32, rows * NS);
-    const route_: cuda.moe_glue.Route = .{ .experts = E, .topk = top_k, .shared = true, .shared_slots = NS - top_k, .normalize = true, .scale = 2.5, .score = true };
-    try r.moe.topk(r.s, try r.dev(f32, logits), try r.dev(f32, bias), route_, idxd, wtd, rows);
+    const route_: cuda.moe_glue.Route = .{ .experts = E, .topk = top_k, .shared = true, .shared_slots = NS - top_k, .normalize = true, .scale = 2.5, .score = true, .slices = 2 };
+    try r.moe.topk(r.s, try r.dev(f32, part), try r.dev(f32, bias), route_, idxd, wtd, rows);
     try r.same("underflowed top-k ids", i32, idxd, idx);
     r.cases += 1;
     for (try r.get(f32, wtd, rows * NS), 0..) |w, i| if (w != @as(f32, if (i % NS < top_k) 0 else 1)) {
@@ -167,18 +170,20 @@ fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize, d: usize, e: usize, k
     const bias = try r.f32s(e, -0.05, 0.05);
     const part = try r.a.alloc(f32, sk * rows * e);
     ref.router(x[skew..], w, part, rows, d, e, sk);
-    for (part[0 .. rows * e], 0..) |*p, i| { // the combine's chain: slice 0, then each slice added in order
-        for (1..sk) |s| p.* += part[s * rows * e + i];
+    const logits = try r.a.alloc(f32, rows * e);
+    for (logits, 0..) |*l, i| { // the top-k's chain: slice 0, then each slice added in order
+        l.* = part[i];
+        for (1..sk) |s| l.* += part[s * rows * e + i];
     }
     const idx = try r.a.alloc(i32, rows * ns);
     const wt = try r.a.alloc(f64, rows * ns);
-    ref.topk(part[0 .. rows * e], bias, idx, wt, rows, 2.5, e, k, ns, true);
+    ref.topk(logits, bias, idx, wt, rows, 2.5, e, k, ns, true);
     const partd = try r.zeros(f32, sk * rows * e);
     const idxd = try r.zeros(i32, rows * ns);
     const wtd = try r.zeros(f32, rows * ns);
     const xd = try r.dev(u16, x) + @as(u64, 2 * skew);
     try r.g().route(xd, try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, d, e, k, ns, 2.5, true);
-    try r.same("router logits and partials", f32, partd, part);
+    try r.same("router partials", f32, partd, part);
     try r.same("top-k ids", i32, idxd, idx);
     try r.near("top-k weights", wtd, wt);
 }
@@ -551,8 +556,6 @@ pub fn run(gpu: Gpu) !void {
         .moe = try cuda.moe_glue.MoeGlue.load(gpu.d),
         .rng = prng.random(),
     };
-    const ones: [glue.max_router_slices]f32 = @splat(1.0);
-    r.ones = try r.dev(f32, &ones);
     defer {
         r.emb.unload();
         r.norms.unload();

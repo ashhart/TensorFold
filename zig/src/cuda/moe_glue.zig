@@ -20,7 +20,8 @@ pub const most_topk = 64;
 const per_lane = 16;
 
 /// Sigmoid routing: top `topk` by logit (score: sigmoid) + bias, weights sigmoid [normalized] * scale, shared last.
-pub const Route = struct { experts: usize, topk: usize, shared: bool, normalize: bool = false, scale: f32 = 1, score: bool = false, shared_slots: usize = 1 };
+/// score's logits may come as `slices` partial sums [slices, rows, experts], added in slice order.
+pub const Route = struct { experts: usize, topk: usize, shared: bool, normalize: bool = false, scale: f32 = 1, score: bool = false, shared_slots: usize = 1, slices: usize = 1 };
 
 pub const MoeGlue = struct {
     mod: Module,
@@ -46,7 +47,8 @@ pub const MoeGlue = struct {
         if (rows == 0) return;
         const warp = r.experts <= 32 * per_lane and r.topk <= 32;
         if (r.score and (!warp or r.shared_slots > 32)) return error.RouteOutOfRange;
-        if (!r.score and r.shared_slots != 1) return error.RouteOutOfRange;
+        if (!r.score and (r.shared_slots != 1 or r.slices != 1)) return error.RouteOutOfRange;
+        if (r.slices == 0) return error.RouteOutOfRange;
         var a: launch_.Args = .{};
         a.add(logits);
         a.add(bias orelse 0);
@@ -59,6 +61,7 @@ pub const MoeGlue = struct {
         a.add(shared);
         a.add(@as(i32, @intFromBool(r.normalize)));
         a.add(r.scale);
+        if (r.score) a.add(@as(i32, @intCast(r.slices)));
         if (warp) return launch_.launch(if (r.score) g.topk_score_fn else g.topk_warp_fn, .{ .grid = .{ .x = @intCast((rows + 7) / 8), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
         try launch_.launch(g.topk_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
     }
