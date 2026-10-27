@@ -176,6 +176,7 @@ fn park(m: *Manager) void {
         m.stub = stub;
         m.parked = true;
     }
+    srv.load.detach(true); // the resident engine stops writing to the ledger before it closes
     srv.engine = m.stub.?.engine();
     srv.stopKeepalive(); // each resident cycle owns a fresh ticker; it must stop before this engine closes
     m.mutex.unlock(m.io);
@@ -252,6 +253,7 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, reply: Allocator, problem_ou
     m.last_activity_ns = now(m.io);
     srv.engine = opened.engine;
     srv.info = info;
+    srv.load.attach(opened.engine); // only the engine that serves publishes: a failed candidate never attached
     srv.keepalive = keepalive;
     m.re.replace(m.re.ctx, opened, scratch); // shutdown closes this engine, not the long-gone startup one
     m.mutex.unlock(m.io);
