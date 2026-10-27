@@ -164,7 +164,7 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
         var at: usize = 0;
         while (at < rows) : (at += prompt_rows) {
             const n: usize = @min(prompt_rows, rows - at);
-            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, picks + at * slots * 4, n, scratch, plan_buf, ey + at * slots * dims * 4, count);
+            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, .bf16, x_stride, picks + at * slots * 4, n, scratch, plan_buf, ey + at * slots * dims * 4, count);
         }
         return;
     }
