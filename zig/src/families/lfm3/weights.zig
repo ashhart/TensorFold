@@ -34,6 +34,7 @@ fn named(a: Allocator, out: *std.ArrayList(Expected), prefix: []const u8, suffix
 }
 
 fn affine(a: Allocator, out: *std.ArrayList(Expected), cfg: *const c.Config, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !void {
+    if (cfg.scheme == .modelopt_nvfp4) return modelopt(a, out, prefix, suffix, n, k);
     var buf: [256]u8 = undefined;
     const module = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, suffix });
     const q = try cfg.width(module);
@@ -42,6 +43,17 @@ fn affine(a: Allocator, out: *std.ArrayList(Expected), cfg: *const c.Config, pre
     try dense(a, out, try std.fmt.bufPrint(&name, "{s}.weight", .{module}), &.{ n, k * q.bits / 32 }, .u32);
     try dense(a, out, try std.fmt.bufPrint(&name, "{s}.scales", .{module}), &.{ n, k / q.group }, .bf16);
     try dense(a, out, try std.fmt.bufPrint(&name, "{s}.biases", .{module}), &.{ n, k / q.group }, .bf16);
+}
+
+/// ModelOpt NVFP4: the FFN's codes [n, k / 2], e4m3 scales [n, k / 16], fp32 scalar scales; the rest bf16 [n, k].
+fn modelopt(a: Allocator, out: *std.ArrayList(Expected), prefix: []const u8, suffix: []const u8, n: usize, k: usize) !void {
+    var name: [272]u8 = undefined;
+    if (!std.mem.startsWith(u8, suffix, "feed_forward.")) return dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, suffix }), &.{ n, k }, .bf16);
+    if (k % 16 != 0) return error.UnsupportedQuantization;
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, suffix }), &.{ n, k / 2 }, .u8);
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight_scale", .{ prefix, suffix }), &.{ n, k / 16 }, .f8_e4m3);
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight_scale_2", .{ prefix, suffix }), &.{}, .f32);
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.input_scale", .{ prefix, suffix }), &.{}, .f32);
 }
 
 /// Expected metadata for one text decoder; allocate the returned names and list in a caller-owned arena.
@@ -61,7 +73,9 @@ pub fn schema(a: Allocator, cfg: *const c.Config, namespace: Namespace) ![]Expec
         if (kind == .conv) {
             try affine(a, &out, cfg, p, "conv.in_proj", 3 * c.hidden, c.hidden);
             try affine(a, &out, cfg, p, "conv.out_proj", c.hidden, c.hidden);
-            try named(a, &out, p, "conv.conv.weight", &.{ c.hidden, c.conv_taps, 1 });
+            // MLX keeps the depthwise kernel as [channels, taps, 1], torch as [channels, 1, taps]: same values
+            const taps: []const usize = if (cfg.scheme == .modelopt_nvfp4) &.{ c.hidden, 1, c.conv_taps } else &.{ c.hidden, c.conv_taps, 1 };
+            try named(a, &out, p, "conv.conv.weight", taps);
         } else {
             try affine(a, &out, cfg, p, "self_attn.q_proj", c.query_heads * c.head_dim, c.hidden);
             try affine(a, &out, cfg, p, "self_attn.k_proj", c.kv_heads * c.head_dim, c.hidden);

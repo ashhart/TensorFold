@@ -107,6 +107,36 @@ test "malformed JSON fails without retaining allocations" {
     try std.testing.expectError(error.UnexpectedEndOfInput, c.parse(std.testing.allocator, "{"));
 }
 
+test "the ModelOpt NVFP4 export parses as its own scheme: FP4 g16 FFN, bf16 mixers" {
+    var config = try c.parse(std.testing.allocator, nvfp4);
+    defer config.deinit();
+    try std.testing.expectEqual(c.Scheme.modelopt_nvfp4, config.scheme);
+    try std.testing.expectEqual(c.nvfp4_width, try config.width("model.layers.0.feed_forward.w1"));
+    try std.testing.expectEqual(@as(usize, 262144), config.context);
+    var mlx = try c.parse(std.testing.allocator, text);
+    defer mlx.deinit();
+    try std.testing.expectEqual(c.Scheme.mlx_affine, mlx.scheme);
+}
+
+test "an NVFP4 export with another recipe, a missing or extra exclusion, or dynamic inputs is refused" {
+    const edits = [_][2][]const u8{
+        .{ "\"quant_algo\": \"NVFP4\"", "\"quant_algo\": \"FP8\"" },
+        .{ "\"model.layers.9.conv*\"", "\"model.layers.9.self_attn*\"" },
+        .{ "      \"model.layers.9.conv*\"\n", "      \"model.layers.9.conv*\",\n      \"model.layers.9.feed_forward*\"\n" },
+        .{ "      \"model.layers.8.self_attn*\",\n", "" },
+        .{ "\"model.layers.10.self_attn*\"", "\"model.layers.2.self_attn*\"" },
+        .{ "\"dynamic\": false", "\"dynamic\": true" },
+        .{ "\"group_size\": 16", "\"group_size\": 32" },
+        .{ "\"Linear\"", "\"Conv1d\"" },
+    };
+    for (edits) |e| {
+        const bytes = try std.mem.replaceOwned(u8, std.testing.allocator, nvfp4, e[0], e[1]);
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expect(!std.mem.eql(u8, bytes, nvfp4));
+        try std.testing.expectError(error.UnsupportedLfm3Quantization, c.parse(std.testing.allocator, bytes));
+    }
+}
+
 pub const text =
     \\{
     \\  "model_type": "lfm3",
@@ -299,6 +329,134 @@ pub const vl =
     \\      "bits": 8,
     \\      "mode": "affine"
     \\    }
+    \\  }
+    \\}
+;
+
+/// LiquidAI/LFM3-1.7B-NVFP4 (b30025bb)'s config.json as published.
+pub const nvfp4 =
+    \\{
+    \\  "architectures": [
+    \\    "Lfm3ForCausalLM"
+    \\  ],
+    \\  "auto_map": {
+    \\    "AutoConfig": "configuration_lfm3.Lfm3Config",
+    \\    "AutoModel": "modeling_lfm3.Lfm3Model",
+    \\    "AutoModelForCausalLM": "modeling_lfm3.Lfm3ForCausalLM"
+    \\  },
+    \\  "bos_token_id": 124894,
+    \\  "conv_L_cache": 7,
+    \\  "conv_bias": false,
+    \\  "dtype": "bfloat16",
+    \\  "eos_token_id": 124900,
+    \\  "head_dim": 128,
+    \\  "hidden_size": 2048,
+    \\  "initializer_range": 0.02,
+    \\  "intermediate_size": 7680,
+    \\  "layer_types": [
+    \\    "conv",
+    \\    "conv",
+    \\    "full_attention",
+    \\    "conv",
+    \\    "sliding_attention",
+    \\    "conv",
+    \\    "full_attention",
+    \\    "conv",
+    \\    "sliding_attention",
+    \\    "conv",
+    \\    "full_attention",
+    \\    "conv",
+    \\    "sliding_attention",
+    \\    "conv",
+    \\    "full_attention",
+    \\    "conv",
+    \\    "sliding_attention",
+    \\    "conv",
+    \\    "full_attention",
+    \\    "conv",
+    \\    "sliding_attention",
+    \\    "conv",
+    \\    "full_attention",
+    \\    "conv"
+    \\  ],
+    \\  "max_position_embeddings": 262144,
+    \\  "model_type": "lfm3",
+    \\  "norm_eps": 1e-05,
+    \\  "num_attention_heads": 16,
+    \\  "num_hidden_layers": 24,
+    \\  "num_key_value_heads": 4,
+    \\  "pad_token_id": 124893,
+    \\  "rope_parameters": {
+    \\    "full_attention": {
+    \\      "partial_rotary_factor": 0.5,
+    \\      "rope_theta": 1000000.0,
+    \\      "rope_type": "default"
+    \\    },
+    \\    "sliding_attention": {
+    \\      "rope_theta": 10000,
+    \\      "rope_type": "default"
+    \\    }
+    \\  },
+    \\  "sliding_window": 256,
+    \\  "tie_word_embeddings": true,
+    \\  "transformers_version": "5.12.1",
+    \\  "use_cache": true,
+    \\  "use_sandwich_norm": true,
+    \\  "vocab_size": 128000,
+    \\  "quantization_config": {
+    \\    "config_groups": {
+    \\      "group_0": {
+    \\        "input_activations": {
+    \\          "dynamic": false,
+    \\          "num_bits": 4,
+    \\          "type": "float",
+    \\          "group_size": 16
+    \\        },
+    \\        "weights": {
+    \\          "dynamic": false,
+    \\          "num_bits": 4,
+    \\          "type": "float",
+    \\          "group_size": 16
+    \\        },
+    \\        "targets": [
+    \\          "Linear"
+    \\        ]
+    \\      }
+    \\    },
+    \\    "ignore": [
+    \\      "lm_head",
+    \\      "model.embed_tokens",
+    \\      "model.layers.0.conv*",
+    \\      "model.layers.1.conv*",
+    \\      "model.layers.10.self_attn*",
+    \\      "model.layers.11.conv*",
+    \\      "model.layers.12.self_attn*",
+    \\      "model.layers.13.conv*",
+    \\      "model.layers.14.self_attn*",
+    \\      "model.layers.15.conv*",
+    \\      "model.layers.16.self_attn*",
+    \\      "model.layers.17.conv*",
+    \\      "model.layers.18.self_attn*",
+    \\      "model.layers.19.conv*",
+    \\      "model.layers.2.self_attn*",
+    \\      "model.layers.20.self_attn*",
+    \\      "model.layers.21.conv*",
+    \\      "model.layers.22.self_attn*",
+    \\      "model.layers.23.conv*",
+    \\      "model.layers.3.conv*",
+    \\      "model.layers.4.self_attn*",
+    \\      "model.layers.5.conv*",
+    \\      "model.layers.6.self_attn*",
+    \\      "model.layers.7.conv*",
+    \\      "model.layers.8.self_attn*",
+    \\      "model.layers.9.conv*"
+    \\    ],
+    \\    "quant_algo": "NVFP4",
+    \\    "producer": {
+    \\      "name": "modelopt",
+    \\      "version": "0.0.1.dev1+g4c1f81382"
+    \\    },
+    \\    "quant_method": "modelopt"
     \\  }
     \\}
 ;
