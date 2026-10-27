@@ -101,6 +101,42 @@ __device__ __forceinline__ void k_loop(float (&acc)[M][1][NTW][4], const uint4* 
   }
 }
 
+// One unit of the decode form: a warp's 32 columns of item `unit / NB` over all K, then the epilogue.
+template <int M, int EPI>
+__device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, const __nv_bfloat16* __restrict__ X,
+                                          int x_stride, int slots, const uint4* __restrict__ W,
+                                          const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
+                                          const int* __restrict__ members, void* __restrict__ out, int N, float limit,
+                                          int skip) {
+  const int it = unit / NB, cb = unit - it * NB;
+  const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
+  if (e == skip) return;
+  const uint4* blk = W + ((size_t)e * NB + cb) * (size_t)KG * (M * BLOCK4);
+  for (int r0 = 0; r0 < cnt; r0 += 16) {
+    const bool v0 = r0 + gq < cnt, v1 = r0 + gq + 8 < cnt;
+    const int pr0 = v0 ? __ldg(members + first + r0 + gq) : 0;
+    const int pr1 = v1 ? __ldg(members + first + r0 + gq + 8) : 0;
+    const int x0r = slots ? pr0 / slots : pr0, x1r = slots ? pr1 / slots : pr1;
+    const __nv_bfloat16* x0 = X + (size_t)x0r * x_stride;
+    const __nv_bfloat16* x1 = X + (size_t)x1r * x_stride;
+    float acc[M][1][NTW][4];
+#pragma unroll
+    for (int m = 0; m < M; ++m)
+#pragma unroll
+      for (int j = 0; j < NTW; ++j) acc[m][0][j][0] = acc[m][0][j][1] = acc[m][0][j][2] = acc[m][0][j][3] = 0.f;
+    k_loop<M>(acc, blk, KG, lane, t, x0, x1, v0, v1);
+#pragma unroll
+    for (int m = 0; m < M; ++m) {
+      const float g = __ldg(scale + e * M + m);
+#pragma unroll
+      for (int j = 0; j < NTW; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) acc[m][0][j][q] *= g;
+    }
+    epilogue<EPI, M, 1>(acc, 0, out, N, cb * COLS + 2 * t, pr0, pr1, v0, v1, limit);
+  }
+}
+
 template <int M, int EPI, int WARPS>
 __global__ void __launch_bounds__(WARPS * 32)
     nvfp4_expert_kernel(const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,
@@ -109,8 +145,131 @@ __global__ void __launch_bounds__(WARPS * 32)
                         float limit, int skip) {
   const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
   const int units = __ldg(counts) * NB;
+  for (int unit = blockIdx.x * WARPS + (threadIdx.x >> 5); unit < units; unit += gridDim.x * WARPS)
+    unit_full<M, EPI>(unit, lane, gq, t, X, x_stride, slots, W, scale, KG, NB, items, members, out, N, limit, skip);
+}
+
+// The decode form's units dealt in equal waves: ceil(units / waves) warps run, the others leave at once.
+template <int M, int EPI, int WARPS>
+__global__ void __launch_bounds__(WARPS * 32)
+    nvfp4_expert_waves(const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,
+                       const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
+                       const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out, int N,
+                       float limit, int skip) {
+  const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
+  const int units = __ldg(counts) * NB;
+  if (units == 0) return;  // no items: no wave to divide by
+  const int warps = gridDim.x * WARPS, waves = (units + warps - 1) / warps;
+  const int run = (units + waves - 1) / waves, w = blockIdx.x * WARPS + (threadIdx.x >> 5);
+  if (w >= run) return;
+  for (int unit = w; unit < units; unit += run)
+    unit_full<M, EPI>(unit, lane, gq, t, X, x_stride, slots, W, scale, KG, NB, items, members, out, N, limit, skip);
+}
+
+// Half a unit's stage: the lane's words of n8 tiles 2jh and 2jh + 1, all its scales, its inputs.
+template <int M>
+struct Half {
+  uint2 w[M];
+  uint4 s[M];
+  uint2 xa[2], xb[2];
+};
+
+__device__ __forceinline__ uint2 ld_nc2(const void* p) {
+  uint2 r;
+  asm volatile("ld.global.nc.L1::no_allocate.v2.u32 {%0, %1}, [%2];\n" : "=r"(r.x), "=r"(r.y) : "l"(p));
+  return r;
+}
+
+template <int M>
+__device__ __forceinline__ void load_half(Half<M>& st, const uint4* blk, int g, int lane, int t, int jh,
+                                          const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1) {
+  const uint4* b = blk + (size_t)g * (M * BLOCK4);
+#pragma unroll
+  for (int m = 0; m < M; ++m) {
+    st.w[m] = ld_nc2(reinterpret_cast<const uint2*>(b + m * BLOCK4 + lane) + jh);
+    st.s[m] = ld_nc(b + m * BLOCK4 + 32 + t);
+  }
+  const uint2 zero = make_uint2(0u, 0u);
+  const int k0 = g * 32 + 4 * t;
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    st.xa[h] = v0 ? __ldg(reinterpret_cast<const uint2*>(x0 + k0 + 16 * h)) : zero;
+    st.xb[h] = v1 ? __ldg(reinterpret_cast<const uint2*>(x1 + k0 + 16 * h)) : zero;
+  }
+}
+
+// compute_stage's sums for tiles j = 2jh + jj: scale word 2h + jh, byte pair jj * 16.
+template <int M>
+__device__ __forceinline__ void compute_half(float (&acc)[M][2][4], const Half<M>& st, bool hi, int jh) {
+#pragma unroll
+  for (int m = 0; m < M; ++m)
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const uint32_t a0 = st.xa[h].x, a2 = st.xa[h].y, a1 = st.xb[h].x, a3 = st.xb[h].y;
+      const uint32_t sw = h == 0 ? (jh ? st.s[m].y : st.s[m].x) : (jh ? st.s[m].w : st.s[m].z);
+#pragma unroll
+      for (int jj = 0; jj < 2; ++jj) {
+        const uint32_t word = jj ? st.w[m].y : st.w[m].x;
+        float p[4] = {0.f, 0.f, 0.f, 0.f};
+        mma(p, a0, a1, a2, a3, fp4pair(word, 8 * h), fp4pair(word, 8 * h + 4));
+        const int sh = jj * 16;
+        const float s0 = e4m3f((sw >> sh) & 0xFFu), s1 = e4m3f((sw >> (sh + 8)) & 0xFFu);
+        float(&a)[4] = acc[m][jj];
+        a[0] = fmaf(p[0], s0, a[0]);
+        a[1] = fmaf(p[1], s1, a[1]);
+        if (hi) {
+          a[2] = fmaf(p[2], s0, a[2]);
+          a[3] = fmaf(p[3], s1, a[3]);
+        }
+      }
+    }
+}
+
+// experts.cuh's epilogue on a half unit's two n8 tiles.
+template <int EPI, int M>
+__device__ __forceinline__ void epilogue_half(const float (&acc)[M][2][4], void* out, int N, int col0, int pr0, int pr1,
+                                              bool v0, bool v1, float limit) {
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    if (!(h ? v1 : v0)) continue;
+    const size_t row = (size_t)(h ? pr1 : pr0) * N;
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+      const int col = col0 + 8 * j;
+      const float a0 = acc[0][j][2 * h], a1 = acc[0][j][2 * h + 1];
+      if constexpr (EPI == 0) {
+        *reinterpret_cast<float2*>(reinterpret_cast<float*>(out) + row + col) = make_float2(a0, a1);
+      } else {
+        float o0, o1;
+        if constexpr (EPI == 1) {
+          o0 = relu2(a0);
+          o1 = relu2(a1);
+        } else if constexpr (EPI == 2) {
+          o0 = swiglu(a0, acc[M - 1][j][2 * h], limit);
+          o1 = swiglu(a1, acc[M - 1][j][2 * h + 1], limit);
+        } else {
+          o0 = a0;
+          o1 = a1;
+        }
+        *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<__nv_bfloat16*>(out) + row + col) =
+            __floats2bfloat162_rn(o0, o1);
+      }
+    }
+  }
+}
+
+// The decode form with two warps a unit (16 columns each): the same sums, twice the warps for few items.
+template <int M, int EPI, int WARPS>
+__global__ void __launch_bounds__(WARPS * 32)
+    nvfp4_expert_half(const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,
+                      const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
+                      const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out, int N,
+                      float limit, int skip) {
+  constexpr int D = 2;
+  const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
+  const int units = __ldg(counts) * NB * 2;
   for (int unit = blockIdx.x * WARPS + (threadIdx.x >> 5); unit < units; unit += gridDim.x * WARPS) {
-    const int it = unit / NB, cb = unit - it * NB;
+    const int it = unit / (NB * 2), rest = unit - it * NB * 2, cb = rest >> 1, jh = rest & 1;
     const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
     if (e == skip) continue;
     const uint4* blk = W + ((size_t)e * NB + cb) * (size_t)KG * (M * BLOCK4);
@@ -121,21 +280,34 @@ __global__ void __launch_bounds__(WARPS * 32)
       const int x0r = slots ? pr0 / slots : pr0, x1r = slots ? pr1 / slots : pr1;
       const __nv_bfloat16* x0 = X + (size_t)x0r * x_stride;
       const __nv_bfloat16* x1 = X + (size_t)x1r * x_stride;
-      float acc[M][1][NTW][4];
+      float acc[M][2][4];
 #pragma unroll
       for (int m = 0; m < M; ++m)
 #pragma unroll
-        for (int j = 0; j < NTW; ++j) acc[m][0][j][0] = acc[m][0][j][1] = acc[m][0][j][2] = acc[m][0][j][3] = 0.f;
-      k_loop<M>(acc, blk, KG, lane, t, x0, x1, v0, v1);
+        for (int j = 0; j < 2; ++j) acc[m][j][0] = acc[m][j][1] = acc[m][j][2] = acc[m][j][3] = 0.f;
+      Half<M> st[D];
+#pragma unroll
+      for (int d = 0; d < D; ++d)
+        if (d < KG) load_half<M>(st[d], blk, d, lane, t, jh, x0, x1, v0, v1);
+      for (int g0 = 0; g0 < KG; g0 += D) {
+#pragma unroll
+        for (int d = 0; d < D; ++d) {
+          const int g = g0 + d;
+          if (g < KG) {
+            compute_half<M>(acc, st[d], v1, jh);
+            if (g + D < KG) load_half<M>(st[d], blk, g + D, lane, t, jh, x0, x1, v0, v1);
+          }
+        }
+      }
 #pragma unroll
       for (int m = 0; m < M; ++m) {
         const float g = __ldg(scale + e * M + m);
 #pragma unroll
-        for (int j = 0; j < NTW; ++j)
+        for (int j = 0; j < 2; ++j)
 #pragma unroll
-          for (int q = 0; q < 4; ++q) acc[m][0][j][q] *= g;
+          for (int q = 0; q < 4; ++q) acc[m][j][q] *= g;
       }
-      epilogue<EPI, M, 1>(acc, 0, out, N, cb * COLS + 2 * t, pr0, pr1, v0, v1, limit);
+      epilogue_half<EPI, M>(acc, out, N, cb * COLS + 16 * jh + 2 * t, pr0, pr1, v0, v1, limit);
     }
   }
 }
@@ -346,6 +518,14 @@ template __global__ void nvfp4_expert_kernel<2, 2, 4>(const __nv_bfloat16* __res
 template __global__ void nvfp4_expert_kernel<1, 0, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
 template __global__ void nvfp4_expert_kernel<1, 3, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
 template __global__ void nvfp4_expert_kernel<1, 1, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+
+// Equal waves (SwiGLU gate-up, fp32 down), two warps a unit (SwiGLU gate-up): Flash Next's decode rows, 4 or 1 warps.
+template __global__ void nvfp4_expert_waves<2, 2, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+template __global__ void nvfp4_expert_waves<1, 0, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+template __global__ void nvfp4_expert_half<2, 2, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+template __global__ void nvfp4_expert_half<2, 2, 1>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+template __global__ void nvfp4_expert_waves<2, 2, 1>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+template __global__ void nvfp4_expert_waves<1, 0, 1>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
 
 // One warp per CTA exposes more independent expert tiles for narrow rank-local projections.
 template __global__ void nvfp4_expert_kernel<2, 2, 1>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);

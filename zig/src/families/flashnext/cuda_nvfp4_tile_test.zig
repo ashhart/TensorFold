@@ -53,8 +53,12 @@ test "K32 family dispatch: flag off, decode and up-only fallback keep the actual
     try t.expectEqual(@as(usize, 32), Mock.selected);
     try t.expectEqualSlices(u64, &baseline_down, &Mock.args);
     try t.expectEqual(cuda.experts_tile.Tile.shared[1], Mock.shared);
-    try tile.run(&k, 16, s, .up, .{ .x = 10, .stride = 256, .slots = 3 }, layer, plan, 110, 3, 5);
-    try t.expectEqual(@as(usize, 1), Mock.selected);
-    try t.expectEqualSlices(u64, &baseline_up, &Mock.args);
-    try t.expectEqual(@as(u32, 0), Mock.shared);
+    // decode, 5 blocks on 256 warps: half (fns[6]) at 3 items, classic at 30 (one wave), waves (fns[4]) at 60
+    for ([_]usize{ 3, 30, 60 }, [_]usize{ 7, 1, 5 }) |items, id| {
+        try tile.run(&k, 16, s, .up, .{ .x = 10, .stride = 256, .slots = 3 }, layer, plan, 110, items, 5);
+        try t.expectEqual(id, Mock.selected);
+        try t.expectEqualSlices(u64, &baseline_up, &Mock.args);
+        try t.expectEqual(@as(u32, 128), Mock.threads);
+        try t.expectEqual(@as(u32, 0), Mock.shared);
+    }
 }

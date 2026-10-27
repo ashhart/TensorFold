@@ -18,10 +18,10 @@ pub fn size(n: usize) usize {
     return if (n >= factRows()) cuda.experts.promptTile(.nvfp4) else 16;
 }
 
-/// Prompt tiles may select the K32 pipeline; flag-off and decode calls retain their existing launch.
+/// Prompt tiles may select the K32 pipeline; decode calls take the decode form in equal waves; same bits.
 pub fn run(k: anytype, pt: usize, s: cuda.Stream, epi: cuda.experts.Epi, in: cuda.experts.Rows, l: cuda.experts.Layer, p: cuda.grouped.Plan, out: u64, items: usize, skip: i32) !void {
     if (pt != 16) if (k.expert_tile) |*tile| if (tile.takes(epi)) return tile.run(s, epi, in, l, p, out, items, skip);
-    const launch = if (pt == 16) &cuda.experts.Nvfp4Experts.run else &cuda.experts.Nvfp4Experts.runFact;
+    const launch = if (pt == 16) &cuda.experts_waves.run else &cuda.experts.Nvfp4Experts.runFact;
     return launch(&k.nvfp4, s, epi, in, l, p, out, items, skip);
 }
 
