@@ -42,6 +42,7 @@ const modelopt_tests = @import("modelopt_tests.zig");
 const exl3_tests = @import("exl3_tests.zig");
 const exl3_tp2_tests = @import("exl3_tp2_tests.zig");
 const exl3_plan_bench = @import("exl3_plan_bench.zig");
+const exl3_plan_f64 = @import("exl3_plan_f64.zig");
 const exl3_candidate_tests = @import("exl3_candidate_tests.zig");
 const experts3_tests = @import("experts3_tests.zig");
 const moe_tests = @import("moe_tests.zig");
@@ -230,6 +231,7 @@ const usage =
     \\  exl3-shapes [rows]        the 27B's EXL3 shapes once each with the fixed plans (1 and 16 rows), for ncu
     \\  exl3-midm                 the mid-M kernels, linear_wc and the projection groups against the linear, byte for byte
     \\  exl3-plans [shape]        the 27B's EXL3 shapes: every (K splits, warps) and layout timed at 1 and 16 rows
+    \\  exl3-plan-f64 [shape]     the 27B's EXL3 shapes against float64 under plan()'s launch and the fixed one, 16 and 128 rows
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
@@ -405,6 +407,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3-shapes")) return exl3_plan_bench.profileShapes(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-midm")) return exl3_plan_bench.midm(gpu);
     if (std.mem.eql(u8, cmd, "exl3-plans")) return exl3_plan_bench.run(gpu, if (rest.len > 0) rest[0] else null);
+    if (std.mem.eql(u8, cmd, "exl3-plan-f64")) return exl3_plan_f64.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-tp2")) return exl3_tp2_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "topk")) return sample_tests.topk(gpu);

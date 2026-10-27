@@ -8,10 +8,10 @@ const exl3 = cuda.exl3;
 const Gpu = check.Gpu;
 const Rig = quant_ref_tests.RigT;
 
-const Shape = struct { name: []const u8, k: usize, n: usize, halves: u32 };
+pub const Shape = struct { name: []const u8, k: usize, n: usize, halves: u32 };
 
 /// Qwen3.8-27B's projections in turboderp's 4.00bpw pack (6-bit head).
-const shapes = [_]Shape{
+pub const shapes = [_]Shape{
     .{ .name = "gate_up", .k = 5120, .n = 17408, .halves = 8 },
     .{ .name = "down", .k = 17408, .n = 5120, .halves = 8 },
     .{ .name = "qkv", .k = 5120, .n = 10240, .halves = 8 },
@@ -102,8 +102,8 @@ fn shape(r: *Rig, lin: *const exl3.Linear, sh: Shape) !void {
     }
 }
 
-/// The family's fixed plans (cuda_weights_exl3.zig) by shape name, for `midm`.
-const fixed = [_]struct { name: []const u8, sk: u32, wk: u32 }{
+/// The family's fixed plans (cuda_exl3_weights.zig) by shape name, for `midm` and `exl3-plan-f64`.
+pub const fixed = [_]struct { name: []const u8, sk: u32, wk: u32 }{
     .{ .name = "gate_up", .sk = 1, .wk = 4 }, .{ .name = "down", .sk = 1, .wk = 8 },  .{ .name = "qkv", .sk = 1, .wk = 4 },
     .{ .name = "z", .sk = 2, .wk = 4 },       .{ .name = "out_o", .sk = 2, .wk = 8 }, .{ .name = "q", .sk = 1, .wk = 8 },
     .{ .name = "k_v", .sk = 5, .wk = 8 },     .{ .name = "head", .sk = 1, .wk = 4 },
