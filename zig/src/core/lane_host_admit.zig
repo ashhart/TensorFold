@@ -4,9 +4,15 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const lanes = @import("lanes");
 const prefix = @import("lane_host_prefix.zig");
+const fetch = @import("lane_host_fetch.zig");
+const pressure = @import("lane_host_pressure.zig");
 
-/// The queued job to admit (its index), or null to hold; the caller holds the lock and a lane is free.
+/// The queued job to admit (its index), or null to hold; the caller holds the lock.
 pub fn pick(h: *LaneHost) ?usize {
+    if (pressure.holds(h)) return null; // under memory pressure nothing starts or is read ahead
+    if (!h.stale) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
+    // a stale device takes no reply: `learn.refuse` ends the queued ones instead
+    if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) return null;
     prefix.release(h); // requests whose awaited cut is in (or will not come) go on first
     while (true) { // a request that waits for a cut another prompt is filling stays queued, passed over
         const at = choose(h) orelse return null;
@@ -14,10 +20,21 @@ pub fn pick(h: *LaneHost) ?usize {
     }
 }
 
-/// The head, or one behind a head that waits for pool room, passing over prefix waiters.
+/// Whether queued `job` is passed over: it waits for another fill's cut or for its disk state's read.
+fn passed(h: *LaneHost, job: *const Job) bool {
+    return prefix.waiting(job) or fetch.held(h, job);
+}
+
+/// Whether every queued request waits for a cut or a read: an idle engine sleeps until a read wakes it (lock held).
+pub fn holds(h: *LaneHost) bool {
+    for (h.queued.items) |j| if (!passed(h, j)) return false;
+    return h.queued.items.len > 0;
+}
+
+/// The head, or one behind a head that waits for pool room, passing over prefix and read waiters.
 fn choose(h: *LaneHost) ?usize {
     const first = for (h.queued.items, 0..) |j, i| {
-        if (!prefix.waiting(j)) break i;
+        if (!passed(h, j)) break i;
     } else return null;
     const a = h.info_.admit orelse return first;
     if (h.core.activeCount() == 0) return first; // alone: the whole pool is free (kept prefixes give their blocks back)
@@ -26,7 +43,7 @@ fn choose(h: *LaneHost) ?usize {
     if (head.waits_since == null) head.waits_since = h.admissions;
     // it waits on the streams admitted before it waited: while one runs, later requests that fit go first; then none do
     for (h.admitted.items) |j| if (j.seq < head.waits_since.?) {
-        for (h.queued.items[first + 1 ..], first + 1..) |j2, i| if (!prefix.waiting(j2) and fits(a, j2)) return i;
+        for (h.queued.items[first + 1 ..], first + 1..) |j2, i| if (!passed(h, j2) and fits(a, j2)) return i;
         return null;
     };
     return null;

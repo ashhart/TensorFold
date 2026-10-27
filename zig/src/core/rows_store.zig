@@ -111,6 +111,7 @@ pub const Rows = struct {
     flush_clock: ?u64 = null, // a close protects states touched after this clock from older queued saves
     next_job: u64 = 0,
     failures: write.Failures = .{},
+    fetch: ?*@import("rows_prefetch.zig").Prefetch = null, // states read ahead for queued requests (a lane host's)
 
     /// The store under `o.root` for `o.identity` (made 0700 when missing); its files are read, unreferenced blocks go.
     pub fn open(gpa: Allocator, family: pc.Snapshots, o: Options) !*Rows {
@@ -144,6 +145,7 @@ pub const Rows = struct {
 
     pub fn deinit(r: *Rows) void {
         write.stop(r, write.nowNs());
+        if (r.fetch) |f| f.destroy();
         if (r.job) |j| write.abort(r, j);
         for (r.queue.items) |q| r.gpa.free(q.starts);
         for (r.states.items) |*s| freeState(r.gpa, s);
@@ -565,4 +567,5 @@ test {
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_pool_select_test.zig");
+    _ = @import("rows_prefetch.zig");
 }

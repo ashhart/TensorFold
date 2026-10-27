@@ -8,6 +8,7 @@ const file = @import("rows_file.zig");
 const rows_store = @import("rows_store.zig");
 const write = @import("rows_write.zig");
 const select = @import("rows_select.zig");
+const prefetch = @import("rows_prefetch.zig");
 const Rows = rows_store.Rows;
 const Name = chain.Name;
 
@@ -16,30 +17,22 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
     const f = r.family.vtable;
     const s = r.states.items[i];
     const t0 = write.nowNs();
-    const parts = try r.parts(r.gpa, s.at);
-    defer r.gpa.free(parts);
-    var wants: std.ArrayList(write.Want) = .empty;
-    defer wants.deinit(r.gpa);
-    try r.blockNames(r.gpa, parts, s.tokens, s.spans, s.starts, s.at, &wants);
+    var plan = try prefetch.Plan.of(r, r.gpa, &s);
+    defer plan.deinit(r.gpa);
+    const ahead = if (r.fetch) |p| p.take(s.name, &plan) else null; // read on the I/O thread, its files checked there
     const saved = try r.img.blank(r.family.ptr, s.at);
     errdefer f.drop(r.family.ptr, saved);
-    var ranges: std.ArrayList(image.Range) = .empty;
-    defer ranges.deinit(r.gpa);
     var bytes: u64 = 0;
-    for (wants.items) |w| {
-        ranges.clearRetainingCapacity();
-        try image.blockRanges(parts, r.keying.block, w.window, w.k, &ranges, r.gpa);
-        bytes += try one(r, w.name, .block, ".blk", 0, ranges.items, saved);
+    for (plan.pieces) |p| {
+        if (ahead) |a| try r.img.scatter(r.family.ptr, saved, plan.rangesOf(p), a.payload(p)) else bytes += try one(r, p.name, p.kind, prefetch.ext(p.kind), p.at, plan.rangesOf(p), saved);
     }
-    ranges.clearRetainingCapacity();
-    try image.ownRanges(parts, s.at, r.keying.block, &ranges, r.gpa);
-    bytes += try one(r, s.name, .state, ".st", s.at, ranges.items, saved);
-    const ns = write.nowNs() - t0;
+    if (ahead) |a| bytes = a.disk;
+    const ns = if (ahead) |a| a.ns else write.nowNs() - t0;
     if (ns > 0 and bytes > 64 << 20) r.read_rate = 0.5 * r.read_rate + 0.5 * @as(f64, @floatFromInt(bytes)) / (@as(f64, @floatFromInt(ns)) / 1e9);
     r.counts.read += bytes;
     r.counts.reads += 1;
     r.touch(i);
-    if (!@import("builtin").is_test) std.log.info("imprint: read {d} tokens from disk ({d} MiB in {d:.0} ms)", .{ s.at, bytes >> 20, @as(f64, @floatFromInt(ns)) / 1e6 });
+    if (!@import("builtin").is_test) std.log.info("imprint: read {d} tokens from disk ({d} MiB in {d:.0} ms{s})", .{ s.at, bytes >> 20, @as(f64, @floatFromInt(ns)) / 1e6, if (ahead != null) ", read ahead" else "" });
     return saved;
 }
 

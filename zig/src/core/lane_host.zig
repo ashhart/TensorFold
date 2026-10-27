@@ -102,6 +102,7 @@ pub const LaneHost = struct {
     pub fn stop(h: *LaneHost) void {
         rows_host.drainThread(h);
         rows_host.close(h);
+        @import("lane_host_fetch.zig").stop(h);
         scoring.close(h);
         const closed: api.LearnEvent = .{ .done = .{ .message = "the engine closed" } };
         for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
@@ -300,12 +301,7 @@ pub const LaneHost = struct {
     /// The next queued request a lane is free for, moved to the admitted list (`failed`: it was finished instead).
     pub fn takeJob(h: *LaneHost) Taken {
         h.lock();
-        // a stale device takes no reply: `learn.refuse` ends the queued ones instead
-        if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes) or pressure.holds(h)) {
-            h.unlock();
-            return .none;
-        }
-        const at = admit.pick(h) orelse { // a shared cache pool's head waits for room
+        const at = admit.pick(h) orelse { // no lane free, or none may go: a shared cache pool's head waits for room
             h.unlock();
             return .none;
         };
@@ -571,7 +567,7 @@ pub const LaneHost = struct {
                     continue;
                 }
                 if (rows_host.idle(h)) continue;
-                if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))
+                if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
                     h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
                 h.unlock();
                 continue;
@@ -593,4 +589,5 @@ pub const LaneHost = struct {
 test {
     _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_tests.zig");
+    _ = @import("lane_host_fetch.zig");
 }
