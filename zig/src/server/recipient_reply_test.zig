@@ -389,7 +389,8 @@ test "recipient replies: a streamed read goes on from the last call and equals a
     defer arena.deinit();
     const a = arena.allocator();
     const tools = (try json.parse(a, weather[",\"tools\":".len..])).ok.array;
-    for ([_][]const u8{ chat_reply, call_reply, " to=self<|message|>x<|eo" }) |reply| for ([_][]const u8{ "assistant", "assistant to=self<|message|>" }) |lead| {
+    const spaced = " to=self<|message|>Think.\n\nMore.\n\n<|eom|><|start|>assistant to=user<|message|>Done. \n<|eot|>";
+    for ([_][]const u8{ chat_reply, call_reply, " to=self<|message|>x<|eo", spaced }) |reply| for ([_][]const u8{ "assistant", "assistant to=self<|message|>" }) |lead| {
         var going: recipient_reply.Reading = .{ .lead = lead, .tools = tools };
         for (1..reply.len + 1) |n| {
             var fresh: recipient_reply.Reading = .{ .lead = lead, .tools = tools };
@@ -397,6 +398,7 @@ test "recipient replies: a streamed read goes on from the last call and equals a
             const got = try going.split(a, reply[0..n], .streaming);
             try std.testing.expectEqualStrings(want.reasoning, got.reasoning);
             try std.testing.expectEqualStrings(want.answer, got.answer);
+            for ([_][]const u8{ got.reasoning, got.answer }) |t| try std.testing.expect(t.len == 0 or !std.ascii.isWhitespace(t[t.len - 1]));
         }
         for ([_]recipient_reply.End{ .ended, .cut }) |end| {
             var fresh: recipient_reply.Reading = .{ .lead = lead, .tools = tools };

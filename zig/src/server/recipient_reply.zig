@@ -132,8 +132,9 @@ fn keep(a: Allocator, out: *std.ArrayList(u8), bytes: []const u8) Allocator.Erro
     out.appendSliceAssumeCapacity(bytes);
 }
 
-/// A stream's message text since the last call: the body's new bytes, leading whitespace off and a blank line first.
-fn grow(a: Allocator, out: *std.ArrayList(u8), o: *Open, body: []const u8) Allocator.Error!void {
+/// A message's new text since the last call, its end's whitespace held back (the finished reply strips it).
+fn grow(a: Allocator, out: *std.ArrayList(u8), o: *Open, text: []const u8) Allocator.Error!void {
+    const body = reply_text.pyRstrip(text);
     var piece = body[@min(o.sent, body.len)..];
     o.sent = @max(o.sent, body.len);
     if (!o.begun) {
