@@ -15,6 +15,7 @@ pub const reuse = @import("cuda_reuse.zig");
 
 test {
     _ = @import("cuda_attention.zig");
+    _ = @import("cuda_prompt.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
     _ = prompt_int8;

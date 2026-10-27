@@ -40,6 +40,8 @@ const cases = [_]Case{
     .{ .lens = .{ 4095, 5000 }, .rows = 16, .ptok = 256 },
     .{ .lens = .{ 9000, 300 }, .rows = 3, .ptok = 512 },
     .{ .lens = .{ 31, 128 }, .rows = 128, .ptok = 48 },
+    .{ .lens = .{ 4096, 4097 }, .rows = 64, .ptok = 48 },
+    .{ .lens = .{ 4096, 4097 }, .rows = 65, .ptok = 48 },
     .{ .lens = .{ 32767, 32768 }, .rows = 1, .ptok = 256 },
     .{ .lens = .{ 4096, 8192 }, .rows = 1, .ptok = 48, .mode = .stress },
     .{ .lens = .{ 8, 16 }, .rows = 5, .ptok = 16, .mode = .nonfinite },
@@ -180,7 +182,7 @@ pub const Result = struct { q: []u8, out: []u8, prompt: []u8, after_rope: [2][]u
 
 const Fns = struct { rope: cuda.Function, partial: cuda.Function, merge: cuda.Function, compact: cuda.Function };
 /// The engine's attention kernels: short streams' rows in `partial`, long streams' in `rows`, a chunk's in `prompt`.
-const Tc = struct { partial: cuda.Function, rows: cuda.Function, prompt: cuda.Function, shared: u32 };
+const Tc = struct { partial: cuda.Function, rows: cuda.Function, prompt: cuda.Function, shared: u32, whole: bool = false };
 
 /// rope, attention (`fns.partial`, or `tc`'s kernels), keep on layer 1 of both streams: contiguous, or `tables`' pages.
 fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]const u32, given: ?[2][]const u32, a: std.mem.Allocator, seed: u64, tc: ?Tc) !Result {
@@ -261,9 +263,11 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]co
         inline for (.{ f.c.lens[st], f.c.rows, q_heads, kv_heads, group }) |v| pa.add(@as(c_int, @intCast(v)));
         pa.add(@as(f32, 1.0 / 16.0));
         pa.add(@as(c_int, @intCast(f.cap)));
-        pa.add(segs[st].pt);
-        pa.add(@as(i64, @intCast(segs[st].ps)));
-        pa.add(@as(c_int, if (segs[st].pt != 0) @intCast(f.c.ptok) else 1));
+        if (!t.whole) {
+            pa.add(segs[st].pt);
+            pa.add(@as(i64, @intCast(segs[st].ps)));
+            pa.add(@as(c_int, if (segs[st].pt != 0) @intCast(f.c.ptok) else 1));
+        }
         try cuda.launch.launch(t.prompt, .{ .grid = .{ .x = @intCast((f.c.rows + 63) / 64), .y = kv_heads * (group / 2) }, .block = .{ .x = 256 }, .shared = prompt_shared }, s, &pa);
     };
     var r: Result = undefined;
@@ -374,6 +378,16 @@ pub fn run(gpu: check.Gpu) !void {
             try tc.rows.allowDynamicShared(attn_tiles);
         }
         try tc.prompt.allowDynamicShared(prompt_shared);
+        var whole = tc;
+        whole.whole = true;
+        whole.partial = try (if (format == .fp8) kv8 else mod).function(if (format == .fp8) "tf_q35_attn_partial8_whole" else "tf_q35_attn_partial_whole");
+        whole.rows = try (if (format == .fp8) kv8 else mod).function(if (format == .fp8) "tf_q35_attn_rows8_whole" else "tf_q35_attn_rows_whole");
+        whole.prompt = try prompt.function(if (format == .fp8) "_ZN20tf_prefill_attention20hpattn8_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifi" else "_ZN20tf_prefill_attention19hpattn_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi");
+        if (format == .bf16) {
+            try whole.partial.allowDynamicShared(attn_tiles);
+            try whole.rows.allowDynamicShared(attn_tiles);
+        }
+        try whole.prompt.allowDynamicShared(prompt_shared);
         var red_tc = false;
         var red_table = false;
         var red_bound = false;
@@ -407,7 +421,17 @@ pub fn run(gpu: check.Gpu) !void {
                 try check.expect(moved, "qwen35 pages {t}: a swapped page table still gave contiguous bytes (control missed) at lens {any}", .{ format, c.lens });
             }
             // the engine's kernels: paged == contiguous; decode rows off float64 (the prompt tiles' bound: the stack's)
-            const flat_tc = try launch(gpu, s, flat_fns, f, null, null, a, 1, tc);
+            const replaced = try launch(gpu, s, flat_fns, f, null, null, a, 1, tc);
+            const flat_tc = try launch(gpu, s, flat_fns, f, null, null, a, 1, whole);
+            try check.sameBytes("qwen35 whole: decode replaces page-aware entry", flat_tc.out, replaced.out);
+            try check.sameBytes("qwen35 whole: prompt replaces page-aware entry", flat_tc.prompt, replaced.prompt);
+            for (0..5) |rep| {
+                var repeat = std.heap.ArenaAllocator.init(gpu.gpa);
+                defer repeat.deinit();
+                const again = try launch(gpu, s, flat_fns, f, null, null, repeat.allocator(), 30 + rep, whole);
+                try check.sameBytes("qwen35 whole: decode repeat", flat_tc.out, again.out);
+                try check.sameBytes("qwen35 whole: prompt repeat", flat_tc.prompt, again.prompt);
+            }
             if (c.mode == .random) try check.expect(try agrees(a, f, flat_tc), "qwen35 pages {t}: tensor-core attention off float64 at lens {any}, rows {d}", .{ format, c.lens, c.rows });
             for (0..2) |rep| {
                 var repeated = std.heap.ArenaAllocator.init(gpu.gpa);

@@ -23,6 +23,12 @@ pub fn host(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void {
     const page_run = b.addRunArtifact(b.addTest(.{ .root_module = page_run_root }));
     b.step("test-qwen35-page-runs-host", "Actual CUDA page-run helper and table-read controls without devices").dependOn(&page_run.step);
     all.dependOn(&page_run.step);
+    const whole_root = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_whole_host.zig"), .target = b.graph.host, .link_libc = true, .link_libcpp = true });
+    whole_root.addIncludePath(b.path("zig/kernels/cuda"));
+    whole_root.addCSourceFile(.{ .file = b.path("zig/tests/cuda/contract_q35_whole_host.cpp"), .flags = &.{ "-std=c++20", "-fno-fast-math", "-fno-strict-aliasing" } });
+    const whole = b.addRunArtifact(b.addTest(.{ .root_module = whole_root }));
+    b.step("test-qwen35-whole-host", "Whole CUDA tile loaders ignore page metadata and preserve head offsets").dependOn(&whole.step);
+    all.dependOn(&whole.step);
     imageTests(b, core, all);
 }
 

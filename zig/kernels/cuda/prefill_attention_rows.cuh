@@ -1,4 +1,4 @@
-// In scope: q, kc, vc, out, p0, W, H, HK, G, HO, scale, skip, causal, PT, PS, PTOK, F8, ks, vs, HM, CAP, first_row
+// Row attention body; caller supplies tensors, geometry, layout constants, and first_row.
     constexpr int C = D / 8, K16 = (D + 15) / 16, NB = 2 * K16;  // the head's 16-byte chunks, 16-dim steps, 8-dim tiles
     constexpr int CS = (NB + 7) / 8 * 8, RB = WARPS / HPC, THREADS = 32 * WARPS;  // CS: a staged key row's chunks
     constexpr bool QREG = D <= 128;               // the queries' fragments stay in registers, else in shared memory
@@ -11,7 +11,10 @@
     const int head = hk * G + hg * HPC + warp % HPC, wrow = row0 + (warp / HPC) * 16;
     const int tiles = (p0 + (causal ? last : W - 1)) / BN + 1, items = 4 * tiles, limit = p0 + W;
     // HM: head-major caches (a head's CAP rows in a run, or PT's pages of PTOK rows a head, PS apart); else row-major
-    auto row_of = [&](int row) -> int64_t { return HM ? (PT ? (int64_t)hk * PTOK + row % PTOK : (int64_t)hk * CAP + row) : (int64_t)row * HK + hk; };
+    auto row_of = [&](int row) -> int64_t {
+        if constexpr (HPAGED) return HM ? (PT ? (int64_t)hk * PTOK + row % PTOK : (int64_t)hk * CAP + row) : (int64_t)row * HK + hk;
+        else return HM ? (int64_t)hk * CAP + row : (int64_t)row * HK + hk;
+    };
     auto page_of = [&](int row) -> int64_t { return HM && PT ? (int64_t)PT[row / PTOK] * PS : 0; };
     static_assert(!F8 || (NB == C && CS == C), "an fp8 cache: whole 16-dim steps");
     // F8: fetch loads an item's e4m3 words and scales a step ahead, put widens them into its slot, hiding the loads
@@ -29,10 +32,16 @@
                 pre[j] = make_uint2(0u, 0u);
                 pre_s[j] = 0.0f;
                 if (i < HALF * C && key < limit) {
-                    const int row = key + (key < p0 ? 0 : skip);
-                    const int64_t r = row_of(row), pg = page_of(row);
-                    pre[j] = __ldg(reinterpret_cast<const uint2*>(src + pg + r * D + (i % C) * 8));
-                    pre_s[j] = __ldg(reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(sc) + pg) + r);
+                    if constexpr (HPAGED) {
+                        const int row = key + (key < p0 ? 0 : skip);
+                        const int64_t r = row_of(row), pg = page_of(row);
+                        pre[j] = __ldg(reinterpret_cast<const uint2*>(src + pg + r * D + (i % C) * 8));
+                        pre_s[j] = __ldg(reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(sc) + pg) + r);
+                    } else {
+                        const int64_t r = row_of(key + (key < p0 ? 0 : skip));
+                        pre[j] = __ldg(reinterpret_cast<const uint2*>(src + r * D + (i % C) * 8));
+                        pre_s[j] = __ldg(sc + r);
+                    }
                 }
             }
         }
@@ -69,7 +78,8 @@
                 const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
                 const int row = in ? key + (key < p0 ? 0 : skip) : 0;
                 if constexpr (HM) {
-                    cp16z(dst + sw<8 * CS>(i / NB, chunk), src + page_of(row) + row_of(row) * D + chunk * 8, in);
+                    if constexpr (HPAGED) cp16z(dst + sw<8 * CS>(i / NB, chunk), src + page_of(row) + row_of(row) * D + chunk * 8, in);
+                    else cp16z(dst + sw<8 * CS>(i / NB, chunk), src + row_of(row) * D + chunk * 8, in);
                 } else {
                     // a page's rows are contiguous: PT names each 512-row page, PS elements apart (null PT: one run)
                     const int64_t at = PT ? (int64_t)PT[row / 512] * PS + (int64_t)(row % 512) * HK * D : (int64_t)row * HK * D;
