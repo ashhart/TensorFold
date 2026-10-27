@@ -16,7 +16,7 @@ pub const Set = struct {
     sample: ?cuda.Module = null,
     draws: cuda.sample.Draws = undefined,
     penalize: ?penalize_k.Penalize = null,
-    lfm2m: lfm2m_k.Set = .{}, // LFM2.5-24B-A2B's router, conv and commit (rows with sums, beside these)
+    lfm2m: lfm2m_k.Set = .{}, // LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (rows with sums, beside these)
 
     /// Every registration onto `kernels`; the embed controls' symbols come from the contract_controls image `ctl_mod`.
     pub fn add(self: *Set, gpu: check.Gpu, s: cuda.Stream, ctl_mod: cuda.Module, kernels: *std.ArrayList(g.Kernel)) !void {

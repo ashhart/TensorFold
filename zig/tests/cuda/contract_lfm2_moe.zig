@@ -1,4 +1,4 @@
-//! lfm2_moe.cu under the contract: router logits and top-4 rule, short conv and snapshots, commit; each controlled.
+//! lfm2_moe.cu under the contract: router logits and top-4 rule, 3-tap liquid conv and snapshots, commit; controlled.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -231,7 +231,7 @@ pub const Select = struct {
 const conv_rule = "the host's replay of each row's fp32 and bf16 steps, bit for bit (NaN as NaN)";
 
 pub fn convSpec(control: bool) c.Spec {
-    return .{ .name = if (control) "control: lfm2_moe conv with bx unrounded" else "cuda lfm2_moe short conv tf_lfm2m_conv (stream state, every row's snapshot)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = conv_rule }, .tiles = .{ .{}, .{ .size = 256, .step = 64, .min = 64 }, .{} }, .served = &.{ .{ .rows = 1, .n = 2048, .k = 3 }, .{ .rows = 16, .n = 2048, .k = 3 }, .{ .rows = 128, .n = 2048, .k = 3 } } };
+    return .{ .name = if (control) "control: liquid 3-tap conv with bx unrounded" else "cuda liquid 3-tap short conv tf_liquid_conv_3 (stream state, every row's snapshot)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = conv_rule }, .tiles = .{ .{}, .{ .size = 256, .step = 64, .min = 64 }, .{} }, .served = &.{ .{ .rows = 1, .n = 2048, .k = 3 }, .{ .rows = 16, .n = 2048, .k = 3 }, .{ .rows = 128, .n = 2048, .k = 3 } } };
 }
 
 /// Rows of two streams (the first rows/2 slot 1, the rest slot 0) over their states: y and every row's state after it.
@@ -362,7 +362,7 @@ pub const Conv = struct {
 };
 
 pub fn commitSpec(control: bool) c.Spec {
-    return .{ .name = if (control) "control: lfm2_moe commit into the first stream's slot" else "cuda lfm2_moe conv-state commit tf_lfm2m_commit", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "a copy: every bit as stored" }, .served = &.{ .{ .rows = 1, .n = 2048, .k = 30 }, .{ .rows = 16, .n = 2048, .k = 30 } } };
+    return .{ .name = if (control) "control: liquid 3-tap commit into the first stream's slot" else "cuda liquid 3-tap conv-state commit tf_liquid_commit_3", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "a copy: every bit as stored" }, .served = &.{ .{ .rows = 1, .n = 2048, .k = 30 }, .{ .rows = 16, .n = 2048, .k = 30 } } };
 }
 
 /// Streams k = 0.. into slots rows - k of rows + 1, each its snapshot row 2k (stream 1: none, its slot as it was).
@@ -467,8 +467,8 @@ pub const Set = struct {
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
         self.logits = .{ .rig = rig, .f = try m.function("tf_lfm2m_route") };
         for (&self.select, [_]bool{ false, true }) |*x, ctrl| x.* = .{ .rig = rig, .f = try (if (ctrl) ctl else m).function(if (ctrl) "tf_ctl_lfm2m_route" else "tf_lfm2m_route"), .control = ctrl };
-        for (&self.conv, [_]bool{ false, true }) |*x, ctrl| x.* = .{ .rig = rig, .f = try (if (ctrl) ctl else m).function(if (ctrl) "tf_ctl_lfm2m_conv" else "tf_lfm2m_conv"), .control = ctrl };
-        for (&self.commit, [_]bool{ false, true }) |*x, ctrl| x.* = .{ .rig = rig, .f = try (if (ctrl) ctl else m).function(if (ctrl) "tf_ctl_lfm2m_commit" else "tf_lfm2m_commit"), .control = ctrl };
+        for (&self.conv, [_]bool{ false, true }) |*x, ctrl| x.* = .{ .rig = rig, .f = try (if (ctrl) ctl else m).function(if (ctrl) "tf_ctl_liquid_conv_3" else "tf_liquid_conv_3"), .control = ctrl };
+        for (&self.commit, [_]bool{ false, true }) |*x, ctrl| x.* = .{ .rig = rig, .f = try (if (ctrl) ctl else m).function(if (ctrl) "tf_ctl_liquid_commit_3" else "tf_liquid_commit_3"), .control = ctrl };
         try kernels.append(a, self.logits.kernel());
         for (&self.select) |*x| try kernels.append(a, x.kernel());
         for (&self.conv) |*x| try kernels.append(a, x.kernel());
