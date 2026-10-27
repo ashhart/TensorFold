@@ -8,7 +8,7 @@ producer derives such a direction from the model's own activations.
 
 - Apple M4 Pro (`applegpu_g16`), macOS 26.5.1 (25F80), 48 GiB of RAM, Metal.
 - Zig 0.17.0, the version the repository pins.
-- TensorFold 1.1.6, branch `feature/glp-steering`, at the commit this receipt names.
+- TensorFold 1.1.6, branch `feature/glp-steering`.
 - Checkpoint `TensorFold/Qwen3.8-27B-MLX-4bit` at
   `22d8d538154e0e5b6f8dcb1fcc74a60a0798104c`, MLX 4-bit.
 - Serving settings: strength 1.0, 300 new tokens per prompt, the server's own
@@ -95,13 +95,17 @@ reproduces the baseline exactly.
 
 ## Tests
 
-- 55 new Zig tests, in the container reader, the publication metadata, the serve
-  surface, the family and the producer; 8 gate unit tests and 6 parity unit
-  tests in Python.
-- `zig build test`: 544 steps succeeded, 160 of 161 tests passed and one skipped.
-- CI: twelve checks green on Linux, Windows and macOS.
-- The lean checker finds 427 problems on this branch against 428 on the pinned
-  base `8c36359d5`: zero new.
+- 66 new Zig tests: 26 in the container reader, 4 in the publication metadata, 13 in
+  the serve surface, 4 in the family, 8 in the producer, 5 in the two prompt sets
+  and 6 in the contract; 8 gate unit tests and 6 parity unit tests in Python.
+- `zig build test`: 552 steps succeeded, 161 of 162 tests passed and one skipped.
+- CI: the format check, the code, the tests and the tools are green on Linux,
+  Windows and macOS. The app's macOS packaging job is cancelled by the runner
+  pool, four attempts across two runs, while the base tree's own runs are
+  cancelled the same way in the same window; the job's four steps were run here
+  under the job's own pins, and they pass.
+- The lean checker finds 427 problems on this branch against 428 on the base it
+  merged, `b30d5b9d3`: zero new.
 
 ## Not covered
 
