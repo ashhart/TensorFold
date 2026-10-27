@@ -1,6 +1,7 @@
 //! Header-based admission bytes for the text side and optional RADIO tower, including mixed shards.
 const std = @import("std");
 const ck = @import("checkpoint.zig");
+const st = @import("safetensors.zig");
 
 pub fn visionTensor(name: []const u8) bool {
     for ([_][]const u8{ "vision_model.", "vision_projector.", "mlp1." }) |p|
@@ -8,15 +9,25 @@ pub fn visionTensor(name: []const u8) bool {
     return false;
 }
 
+/// Every shard's tensor bytes from its header alone, one header held at a time; a repeated name counts each time.
 pub fn count(a: std.mem.Allocator, io: std.Io, dir: []const u8, vision: bool) !u64 {
-    var model = try ck.Checkpoint.openModel(a, io, dir);
-    defer model.close();
+    try @import("save_guard").check(io, dir);
+    const paths = try ck.shardFiles(a, io, dir);
+    defer ck.freeShardFiles(a, paths);
     var total: u64 = 0;
-    for (model.files.items) |f| for (f.names.keys(), f.names.values()) |name, entry| {
-        if (!vision and visionTensor(name)) continue;
-        total = try std.math.add(u64, total, entry.end - entry.begin);
-    };
+    for (paths) |path| {
+        var header = try st.Metadata.read(a, io, path);
+        defer header.deinit();
+        for (header.names.keys(), header.names.values()) |name, entry| {
+            if (!vision and visionTensor(name)) continue;
+            total = try std.math.add(u64, total, entry.end - entry.begin);
+        }
+    }
     return total;
+}
+
+test {
+    _ = @import("checkpoint_weights_test.zig");
 }
 
 test "text admission excludes RADIO tensors even in a shared shard" {
