@@ -168,7 +168,7 @@ enum Kind { normal, ties, equal, zeros, skewed, decoy };
 
 static void fill(std::mt19937_64& g, float* row, int np, int limit, Kind kind) {
   std::normal_distribution<float> nd(0.0f, 3.0f);
-  const int vis = limit;  // scores past the visible pools are -inf up to the limit, stale beyond it
+  const int vis = limit;  // the row's visible pools; the rest read as stale 1e9, which the kernel must never touch
   for (int i = 0; i < np; i++) {
     float v = nd(g);
     if (kind == ties) v = (float)(int)(g() % 9) * 0.5f;

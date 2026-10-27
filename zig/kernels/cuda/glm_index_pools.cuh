@@ -85,10 +85,11 @@ __device__ __forceinline__ void radix_step(Smem& sm, int& need, uint32_t& prefix
   const int above = block_scan(sm, h, phase, total);  // pools in bins above b
   if (above + h >= need) atomicMax(&sm.digit, b);
   __syncthreads();
-  if (b == sm.digit) sm.need = need - above;
+  const int hit = sm.digit;  // -1: no bin reaches need, as tf_glm_select_rows takes digit 0 and need less every pool
+  if (hit >= 0 && b == hit) sm.need = need - above;
   __syncthreads();
-  const uint32_t digit = (uint32_t)sm.digit;
-  need = sm.need;
+  const uint32_t digit = hit >= 0 ? (uint32_t)hit : 0u;
+  need = hit >= 0 ? sm.need : need - total;
   prefix |= digit << (24 - 8 * p);
   fixed |= 0xFFu << (24 - 8 * p);
 }
@@ -97,7 +98,7 @@ __device__ __forceinline__ void radix_step(Smem& sm, int& need, uint32_t& prefix
 __device__ __forceinline__ void hist_clear(Smem& sm) {
   __syncthreads();
   sm.hist[threadIdx.x] = 0;
-  if (threadIdx.x == 0) sm.digit = 0;
+  if (threadIdx.x == 0) sm.digit = -1;
   __syncthreads();
 }
 
@@ -174,6 +175,7 @@ extern "C" __global__ void __launch_bounds__(glm_index::T)
                        int K, int CAP, int TARGET, int* __restrict__ PATH) {
   using namespace glm_index;
   __shared__ Smem sm;
+  CAP = min(CAP, CAP_MAX);
   const int64_t r = blockIdx.x, vis = ((int64_t)pos[0] + r + 1) / 4;
   const float* row = S + r * np;
   int64_t* out = OUT + r * K;

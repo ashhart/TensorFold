@@ -538,6 +538,9 @@ pub fn run(gpu: check.Gpu) !void {
     var glm_scores = glm_index_k.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.scores };
     defer glm_scores.deinit();
     try kernels.append(a, glm_scores.kernel());
+    var glm_fast = try @import("contract_glm_pools.zig").Fast.init(gpu, s, glm_fns);
+    defer glm_fast.deinit();
+    try glm_fast.append(a, &kernels);
     var glm_ops = try cuda.Module.load(gpu.d, kk.glm_ops);
     defer glm_ops.unload();
     var glm_tokens = glm_index_k.Tokens{ .rig = .{ .gpu = gpu, .s = s }, .f = try glm_ops.function("tf_glm_dsa_tokens") };

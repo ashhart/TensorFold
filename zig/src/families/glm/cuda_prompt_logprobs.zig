@@ -113,7 +113,7 @@ test "the head's columns at TP=2 and TP=3 take no K slices: a pass of any rows n
     };
 }
 
-/// The projection policy used by the prompt-row head passes; an MXFP8 head (FP4-Local's) runs on the lane.
+/// The head passes' projection policy (no indexer launches, so no .index); an MXFP8 head runs on the lane.
 pub fn projectionSet(e: anytype) @import("cuda_glue.zig").Set {
     return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs, .prompt = true, .linear = .{ .lane = &e.m.lane } };
 }
