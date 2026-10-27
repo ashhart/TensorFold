@@ -46,7 +46,7 @@ pub const Layer = struct {
 };
 
 /// Whether the pad is asked for (TF_GLM_KDA_PAD unset or 0: no padding anywhere).
-fn padOn() bool {
+pub fn padOn() bool {
     const v = std.c.getenv("TF_GLM_KDA_PAD") orelse return false;
     const t = std.mem.trim(u8, std.mem.span(v), " ");
     return !(t.len == 0 or std.mem.eql(u8, t, "0"));
@@ -60,7 +60,13 @@ fn padOn() bool {
 /// to its own width (8,732 against 8,344) leaves the prompt plan and its exchanges no single row width and the ranks
 /// hang on the first prompt; one common width keeps them in step and costs the smaller ranks unused zero columns.
 /// One rule, read by the loader (which pads the weights) and by the state (which sizes the rows), so they agree.
+/// The one padded width every rank carries, set once at load (0: no padding). A global rather than a per-layer
+/// field, because a layer built by another path (the MTP head) would otherwise pad to ITS own width and the ranks
+/// would disagree - which is exactly how this failed: descriptor 8,341 against buffers of 8,732.
+pub var pad_to: usize = 0;
+
 pub fn rowWidth(own_heads: usize, max_heads: usize) usize {
+    if (pad_to != 0) return pad_to;
     const heads = @max(own_heads, max_heads);
     const raw = 3 * heads * kda.dk + 2 * kda.dk + heads;
     if (!padOn()) return 3 * own_heads * kda.dk + 2 * kda.dk + own_heads;
