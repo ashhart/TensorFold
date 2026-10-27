@@ -1,4 +1,4 @@
-// LFM2.5-24B-A2B's CUDA glue (short conv, its commit, router); each row's bits its own; CTL 1 is the planted control.
+// LFM2.5-24B-A2B's router; each row's bits its own; CTL 1 is the planted control (short conv: liquid_conv.cuh).
 
 #pragma once
 
@@ -20,53 +20,6 @@ constexpr int DMAX = 2048; // hidden width the router stages
 template <int CTL>
 __device__ __forceinline__ bool beats(float v, int i, float w, int j) { return v > w || (v == w && (CTL == 1 ? i > j : i < j)); }
 
-
-// Block (row, channel block): y = bf16(C * bf16(sum of w * bf16(B * x), oldest tap first)); SNAP rows keep state.
-template <int CTL>  // CTL 1: bx = B * x not rounded to bf16 before its tap.
-__device__ __forceinline__ void lfm2m_conv(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ Wc,
-                                                                const __nv_bfloat16* __restrict__ STATE, const int* __restrict__ SLOT,
-                                                                const int* __restrict__ OFF, __nv_bfloat16* __restrict__ Y,
-                                                                __nv_bfloat16* __restrict__ SNAP, int SNAP0, int D, long long SS) {
-    const int64_t r = blockIdx.x, D3 = 3 * static_cast<int64_t>(D);
-    const int c = blockIdx.y * NT + threadIdx.x;
-    if (c >= D) return;
-    const int o = OFF[r];
-    const __nv_bfloat16* st = STATE + SLOT[r] * SS;
-    __nv_bfloat16 bx[3];
-    float wide[3] = {0.0f, 0.0f, 0.0f};
-#pragma unroll
-    for (int j = 0; j < 3; ++j) {
-        const int back = 2 - j;  // rows before this one
-        if (o >= back) {
-            const int64_t src = r - back;
-            const float v = __fmul_rn(tf_glue::bf(P[src * D3 + c]), tf_glue::bf(P[src * D3 + 2 * D + c]));
-            bx[j] = __float2bfloat16_rn(v);
-            if (CTL == 1) wide[j] = v;
-        } else {
-            bx[j] = st[static_cast<int64_t>(2 - back + o) * D + c];
-            if (CTL == 1) wide[j] = tf_glue::bf(bx[j]);
-        }
-    }
-    float acc = 0.0f;
-#pragma unroll
-    for (int j = 0; j < 3; ++j) acc = __fadd_rn(acc, __fmul_rn(tf_glue::bf(Wc[c * 3 + j]), CTL == 1 ? wide[j] : tf_glue::bf(bx[j])));
-    Y[r * D + c] = __float2bfloat16_rn(__fmul_rn(tf_glue::bf(P[r * D3 + D + c]), tf_glue::rbf(acc)));
-    if (SNAP == nullptr || r < SNAP0) return;
-    SNAP[((r - SNAP0) * 2) * D + c] = bx[1];
-    SNAP[((r - SNAP0) * 2 + 1) * D + c] = bx[2];
-}
-
-// Block (layer, stream): stream k's [2][D] conv state set to its snapshot row ROW[k]; ROW < 0 keeps the state.
-template <int CTL>  // CTL 1: every stream's state written to the first stream's slot.
-__device__ __forceinline__ void lfm2m_commit(__nv_bfloat16* __restrict__ STATE, const __nv_bfloat16* __restrict__ SNAP,
-                                                                  const int* __restrict__ SLOT, const int* __restrict__ ROW, int D,
-                                                                  long long state_stride, long long snap_stride, long long SS) {
-    const int layer = blockIdx.x, k = blockIdx.y, row = ROW[k];
-    if (row < 0) return;
-    __nv_bfloat16* dst = STATE + layer * state_stride + SLOT[CTL == 1 ? 0 : k] * SS;
-    const __nv_bfloat16* src = SNAP + layer * snap_stride + static_cast<int64_t>(row) * 2 * D;
-    for (int i = threadIdx.x; i < 2 * D; i += NT) dst[i] = src[i];
-}
 
 // Block of RB rows: fp32 logits (quarters of D in order, (q0 + q1) + (q2 + q3)), top-4 of sigmoid + bias, weights.
 template <int CTL>  // CTL 1: ties go to the higher expert id.

@@ -1,4 +1,4 @@
-//! LFM2.5-24B-A2B's launches on CUDA: the shared operators and lfm2_moe.cu's conv, conv-state commit and router.
+//! LFM2.5-24B-A2B's launches on CUDA: the shared operators, liquid_conv.cuh's 3-tap conv and commit, the router.
 const std = @import("std");
 const cuda = @import("cuda");
 const c = @import("config.zig");
@@ -75,8 +75,8 @@ pub const Kernels = struct {
         k.chunk = try m[13].function("tf_paged_attn_chunk_segs_64");
         k.merge = try m[13].function("tf_paged_attn_merge_segs_64");
         k.silu_mul = try m[14].function("tf_lfm2_silu_mul");
-        k.conv = try m[15].function("tf_lfm2m_conv");
-        k.commit = try m[15].function("tf_lfm2m_commit");
+        k.conv = try m[15].function("tf_liquid_conv_3");
+        k.commit = try m[15].function("tf_liquid_commit_3");
         k.route = try m[15].function("tf_lfm2m_route");
         k.embed = try cuda.embed_rows.EmbedRows.load(d);
         errdefer k.embed.unload();
