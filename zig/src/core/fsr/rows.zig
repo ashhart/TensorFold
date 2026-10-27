@@ -78,6 +78,10 @@ pub const Table = struct {
             }
             inverse.* = @intCast(lo);
         }
+        var requests: [reader.width]reader.Request = undefined;
+        var sizes: [reader.width]u64 = undefined;
+        var queued: usize = 0;
+        var stats: reader.Stats = .{};
         for (0..3) |part| {
             const width = t.row_bytes[part];
             var at: usize = 0;
@@ -92,14 +96,31 @@ pub const Table = struct {
                 var span = t.shards[first.shard].parts[part];
                 span.offset = try std.math.add(u64, span.offset, try std.math.mul(u64, first.row, width));
                 span.length = (stop - at) * width;
-                try reader.read(source, span, t.slabs[part][at * width .. stop * width]);
+                const destination = t.slabs[part][at * width .. stop * width];
+                const size = try source.fileSize(span.file);
+                try reader.validate(span, size, destination.len);
+                requests[queued] = .{ .span = span, .destination = destination };
+                sizes[queued] = size;
+                queued += 1;
+                if (queued == reader.width) {
+                    try drain(source, requests[0..queued], sizes[0..queued], &stats);
+                    queued = 0;
+                }
                 t.reads += 1;
                 t.bytes += span.length;
                 at = stop;
             }
         }
+        try drain(source, requests[0..queued], sizes[0..queued], &stats);
         t.requests = ids.len;
         t.used = count;
+    }
+
+    /// A batch of reads in flight together (readMany, else readAt in turn), then each file's size is rechecked.
+    fn drain(source: anytype, requests: []const reader.Request, sizes: []const u64, stats: *reader.Stats) !void {
+        if (requests.len == 0) return;
+        try reader.flush(source, requests, stats);
+        for (requests, sizes) |request, size| if (try source.fileSize(request.span.file) != size) return error.CheckpointChanged;
     }
 };
 
@@ -139,4 +160,48 @@ test "FSR PLE rows preserve component bytes, duplicate order and shard edges wit
     var bad = shards;
     bad[1].parts[0].length = 8;
     try std.testing.expectError(error.InconsistentRowWidth, Table.init(std.testing.allocator, &bad, 4, .{ &w, &s, &b }));
+}
+
+test "FSR PLE rows reach the source's readMany in batches of at most reader.width" {
+    const Fake = struct {
+        data: [256]u8,
+        batches: usize = 0,
+        widest: usize = 0,
+        singles: usize = 0,
+        pub fn fileSize(f: *const @This(), _: usize) !u64 {
+            return f.data.len;
+        }
+        pub fn readAt(f: *@This(), _: usize, dst: []u8, offset: u64) !usize {
+            f.singles += 1;
+            @memcpy(dst, f.data[@intCast(offset)..][0..dst.len]);
+            return dst.len;
+        }
+        pub fn readMany(f: *@This(), requests: []const reader.Request, _: *reader.Stats) !void {
+            f.batches += 1;
+            f.widest = @max(f.widest, requests.len);
+            for (requests) |q| @memcpy(q.destination, f.data[@intCast(q.span.offset)..][0..q.destination.len]);
+        }
+    };
+    var fake: Fake = .{ .data = undefined };
+    for (&fake.data, 0..) |*v, i| v.* = @intCast(i);
+    const shards = [_]Shard{.{ .rows = 64, .parts = .{
+        .{ .file = 0, .offset = 0, .length = 128 },
+        .{ .file = 0, .offset = 128, .length = 64 },
+        .{ .file = 0, .offset = 192, .length = 64 },
+    } }};
+    var w: [32]u8 = undefined;
+    var s: [16]u8 = undefined;
+    var b: [16]u8 = undefined;
+    var t = try Table.init(std.testing.allocator, &shards, 16, .{ &w, &s, &b });
+    defer t.deinit();
+    try t.gather(&fake, &.{ 0, 2, 4, 6, 8, 10, 12, 14 }); // apart, so each id is its own run: 8 runs x 3 parts
+    try std.testing.expectEqual(@as(usize, 24), t.reads);
+    try std.testing.expectEqual(@as(usize, 3), fake.batches);
+    try std.testing.expectEqual(@as(usize, reader.width), fake.widest);
+    try std.testing.expectEqual(@as(usize, 0), fake.singles);
+    for (0..8) |k| {
+        try std.testing.expectEqualSlices(u8, fake.data[4 * k ..][0..2], w[2 * k ..][0..2]);
+        try std.testing.expectEqual(fake.data[128 + 2 * k], s[k]);
+        try std.testing.expectEqual(fake.data[192 + 2 * k], b[k]);
+    }
 }
