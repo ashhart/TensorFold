@@ -3,6 +3,7 @@ const std = @import("std");
 const ze = @import("ze");
 const dev = @import("xpu_dev.zig");
 const cfg = @import("xpu_config.zig");
+const plan = @import("cuda_plan.zig");
 const Dev = dev.Dev;
 const Checkpoint = dev.Checkpoint;
 const alloc = dev.alloc;
@@ -125,7 +126,7 @@ fn invFreq(comptime n: usize, theta: f64, dim: f64, rotated: usize) [n]f32 {
 
 pub fn load(d: *Dev, repack: ze.H, c: *const Checkpoint) !Model {
     var m: Model = undefined;
-    const lm = "model.language_model.";
+    const lm = plan.prefix;
     const stage = try d.alloc_(512 << 20);
     const et = try c.get(lm ++ "embed_tokens.weight");
     m.embed_w = try d.upload(et.bytes);
