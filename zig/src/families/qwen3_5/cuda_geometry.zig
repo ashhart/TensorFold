@@ -325,7 +325,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         return g;
     }
     if (exl3) {
-        if (!moe or g.pocket != 0) return error.UnsupportedQwenQuantization;
+        if (g.pocket != 0) return error.UnsupportedQwenQuantization; // dense (Qwen3.8-27B) and MoE checkpoints alike
         return g;
     }
     g.bits = try widths(gpa, root, try object(qv.?), g);

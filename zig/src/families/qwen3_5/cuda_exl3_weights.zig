@@ -1,4 +1,4 @@
-//! ExLlamaV3 (EXL3, mul1 codebook) Qwen3.5-MoE checkpoints on the CUDA engine, read under their HF tensor names.
+//! ExLlamaV3 (EXL3, mul1 codebook) Qwen3.5 checkpoints, MoE and dense, on the CUDA engine under their HF tensor names.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -31,6 +31,7 @@ pub const Kit = struct {
         k.b16 = try b16.Kernels.load(d);
         errdefer k.b16.unload();
         k.grouped = .{ .d = d, .kernels = &k.experts };
+        if (!g.moe()) return k; // a dense checkpoint's MLP is three Dense projections
         // the grouped experts' scratch grows on first use: allocate it before any graph capture, for the widest call
         const pairs = engine.max_rows * g.slots();
         const items = cuda.grouped.maxItems(pairs, g.experts + 1, 16);
@@ -276,7 +277,11 @@ fn all(s: *Sink, ck: *core.Checkpoint) !void {
                 .k_norm = try norm1(s, ck, "{s}self_attn.k_norm.weight", .{p}, geometry.head_dim),
             } };
         }
-        l.mlp = .{ .moe = .{ .router = try router(s, ck, p), .experts = try experts(s, ck, p) } };
+        l.mlp = if (g.moe()) .{ .moe = .{ .router = try router(s, ck, p), .experts = try experts(s, ck, p) } } else .{ .dense = .{
+            .gate = try dense(s, kit, ck, p, "mlp.gate_proj", g.intermediate, g.hidden),
+            .up = try dense(s, kit, ck, p, "mlp.up_proj", g.intermediate, g.hidden),
+            .down = try dense(s, kit, ck, p, "mlp.down_proj", g.hidden, g.intermediate),
+        } };
     }
 }
 

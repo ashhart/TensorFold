@@ -4,7 +4,8 @@ The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified o
 `zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
 the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
-`--kv-cache fp8`; it reads no NVFP4 or EXL3 checkpoint yet.
+`--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
+DFlash2 drafts through the shared EXL3 module, on one GPU.
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
@@ -98,9 +99,9 @@ quality comparisons are TBD [release-0.3.5].
 
 ## CUDA
 
-This section is the Python engine's (0.6.6). The native CUDA engine reads only MLX affine checkpoints so far: the
-NVFP4 and EXL3 readers below have not been ported to it (1.1.0 carries the shared EXL3 module of #832, which the
-27B does not read through yet).
+This section is the Python engine's (0.6.6). The native CUDA engine reads the MLX affine checkpoints, ModelOpt
+NVFP4 and FP8 exports, and turboderp's EXL3 packs through the shared EXL3 module of #832; its own measurements are
+not the ones below.
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks
