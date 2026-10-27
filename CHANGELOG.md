@@ -66,6 +66,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Opt-in, per CUDA family: the prompt cache can keep the state where a new prompt parts from one it has already kept, so when a long document is sent again with a different question, the third and later questions resume after the document instead of prefilling it again (#1291). No family has it on yet (each turns it on after its own device check), so kept states, cached-token counts and replies are unchanged. Thanks to @paragontasx.
 
+- `--learn-conversations` keeps Qwen3.8-27B's and Qwen3.6-35B-A3B's conversation states on disk on CUDA too, as it does Nemotron's, so a turn after a restart reads its state back where that is quicker than prefilling (#1358). Before, CUDA refused the flag for these models. Rows two states share are stored once, every piece read is checked against its hash, and `--learn-gib`, `--learn-daily-gib` and the free-disk floor apply. A state whose prompt holds images stays in RAM. Thanks to @jschmied and @gilby.
+
 ## 1.1.7
 
 - Flash Next on a Mac can leave its routed experts and n-gram tables in the checkpoint and read them from SSD with `--ssd-experts GIB` and `--ple-on-ssd`, so a checkpoint larger than the Mac's memory can be served (#1039, see [Exact Fluid Subgraph Residency](docs/recipes/fluid-subgraph-residency.md)). Neither is on by default. Replies are the same tokens as with everything in memory; a budget too small for one layer's experts refuses at startup instead of changing the model's settings. On an M5 Ultra the 6-bit MTP checkpoint, which does not fit in memory, serves with a 16 GiB expert budget; on an M3 Ultra with the 4-bit checkpoint, servers without the flags are unchanged in prefill and decode.
