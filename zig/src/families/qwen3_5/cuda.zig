@@ -24,6 +24,7 @@ test {
     _ = native;
     _ = native_moe;
     _ = mtp;
+    _ = @import("cuda_mtp_batch.zig");
     _ = config;
     _ = geometry;
     _ = @import("draw.zig");
