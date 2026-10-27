@@ -170,6 +170,9 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
             .ok => |v| v,
             .err => return refuse(conn, a, "the request body is not JSON", 400, null),
         };
+        // a restricted key is stateless here: checked before any stored conversation is read
+        if (@import("auth_scope.zig").responseDenial(conn.key_scopes, body)) |why|
+            return @import("auth_scope_reply.zig").deny(conn, false, why);
         const r = translate_mod.translate(&cx, body, History{ .srv = srv }) catch return refuse(conn, a, cx.message, 400, null);
         break :blk .{ r, body };
     };

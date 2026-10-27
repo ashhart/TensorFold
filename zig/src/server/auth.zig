@@ -7,8 +7,11 @@ const log = @import("log.zig");
 const meta = @import("file_meta.zig").meta;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const scope = @import("auth_scope.zig");
 
-const Key = struct { digest: [32]u8, label: []const u8 };
+const Key = struct { digest: [32]u8, label: []const u8, scopes: scope.Scopes = scope.full };
+/// A verified key: the request's own copy of its label, and its scopes.
+pub const Matched = struct { label: []const u8, scopes: scope.Scopes };
 
 pub var reload_requested: std.atomic.Value(bool) = .init(false);
 
@@ -113,25 +116,39 @@ pub const Store = struct {
         }
         if (!std.unicode.utf8ValidateSlice(text[0..got])) return error.Unsafe;
         var keys: std.ArrayList(Key) = .empty;
+        // one key, one set of scopes: a restricted line cannot be shadowed by a full copy of the same key
+        var assigned: std.AutoHashMapUnmanaged([32]u8, scope.Scopes) = .empty;
+        for (s.static.items) |old| try assigned.put(a, old.digest, old.scopes);
         var lines = std.mem.splitAny(u8, text[0..got], "\n\r");
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\x0b\x0c\x1c\x1d\x1e\x1f");
             if (line.len == 0 or line[0] == '#') continue;
             var label: []const u8 = undefined;
+            var scopes = scope.full;
             var key: []const u8 = line;
             if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
-                label = std.mem.trim(u8, line[0..colon], " \t");
-                key = std.mem.trim(u8, line[colon + 1 ..], " \t");
-                if (!validLabel(label)) {
-                    problem.* = "API key labels need 1-64 letters, digits, dots, underscores or hyphens";
+                const parsed = scope.parseLabel(std.mem.trim(u8, line[0..colon], " \t")) catch |e| {
+                    problem.* = if (e == error.InvalidLabel)
+                        "API key labels need 1-64 letters, digits, dots, underscores or hyphens"
+                    else
+                        "API key scopes are [inference], [read], [inference,read] or [admin]";
                     return error.Invalid;
-                }
+                };
+                label = parsed.name;
+                scopes = parsed.scopes;
+                key = std.mem.trim(u8, line[colon + 1 ..], " \t");
             } else label = try std.fmt.allocPrint(a, "file-{d}", .{keys.items.len + 1});
             const d = digest(key) orelse {
                 problem.* = "API keys must be nonempty text without whitespace";
                 return error.Invalid;
             };
-            try keys.append(a, .{ .digest = d, .label = try a.dupe(u8, label) });
+            const seen = try assigned.getOrPut(a, d);
+            if (seen.found_existing and !seen.value_ptr.eql(scopes)) {
+                problem.* = "the same API key cannot have different scopes";
+                return error.Invalid;
+            }
+            seen.value_ptr.* = scopes;
+            try keys.append(a, .{ .digest = d, .label = try a.dupe(u8, label), .scopes = scopes });
         }
         if (keys.items.len == 0) {
             problem.* = "API key file contains no keys";
@@ -174,6 +191,11 @@ pub const Store = struct {
 
     /// The label of the key a request carries (Authorization: Bearer, or x-api-key), or null.
     pub fn match(s: *Store, a: Allocator, authorization: ?[]const u8, x_api_key: ?[]const u8) ?[]const u8 {
+        return if (s.matchIdentity(a, authorization, x_api_key)) |matched| matched.label else null;
+    }
+
+    /// The key a request carries with its scopes; the first configured key wins when both headers hold one.
+    pub fn matchIdentity(s: *Store, a: Allocator, authorization: ?[]const u8, x_api_key: ?[]const u8) ?Matched {
         const m = log.io();
         s.mutex.lockUncancelable(m);
         defer s.mutex.unlock(m);
@@ -186,14 +208,16 @@ pub const Store = struct {
             }
         }
         candidates[1] = if (x_api_key) |value| headerDigest(a, value) else emptyDigest();
-        var label: ?[]const u8 = null;
+        var selected: ?Key = null;
         for ([_][]Key{ s.static.items, s.file }) |keys| for (keys) |key| {
             var matched = false;
             for (candidates) |c| matched = std.crypto.timing_safe.eql([32]u8, key.digest, c) or matched;
-            if (matched and label == null) label = key.label;
+            if (matched and selected == null) selected = key;
         };
         if (!s.valid) return null;
-        return a.dupe(u8, label orelse return null) catch null; // the request's own copy: a reload frees the file's
+        const key = selected orelse return null;
+        // the request's own copy: a reload frees the file's
+        return .{ .label = a.dupe(u8, key.label) catch return null, .scopes = key.scopes };
     }
 };
 
@@ -203,12 +227,6 @@ const latin1_space = " \t\r\n\x0b\x0c\x1c\x1d\x1e\x1f\x85\xa0";
 fn headerDigest(a: Allocator, value: []const u8) [32]u8 {
     const text = @import("http_conn.zig").latin1(a, value) catch return emptyDigest();
     return digest(text) orelse emptyDigest();
-}
-
-fn validLabel(label: []const u8) bool {
-    if (label.len == 0 or label.len > 64) return false;
-    for (label) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '-')) return false;
-    return true;
 }
 
 fn emptyDigest() [32]u8 {

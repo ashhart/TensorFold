@@ -6,6 +6,7 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const auth = @import("auth.zig");
+const scope = @import("auth_scope.zig");
 const request_guard = @import("request_guard.zig");
 const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
@@ -421,12 +422,22 @@ pub const Server = struct {
     fn authenticate(srv: *Server, conn: *http_conn.Conn, a: Allocator) bool {
         const keys = srv.keys orelse return true;
         if (std.mem.eql(u8, conn.method, "OPTIONS") or !keys.enabled()) return true;
-        conn.key_label = keys.match(a, single(conn, "Authorization"), single(conn, "x-api-key"));
-        if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open) or conn.key_label != null) return true;
+        const matched = keys.matchIdentity(a, single(conn, "Authorization"), single(conn, "x-api-key"));
+        if (matched) |m| {
+            conn.key_label = m.label;
+            conn.key_scopes = m.scopes;
+        }
+        if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open)) return true;
+        if (matched != null and scope.allows(conn.key_scopes, conn.method, conn.path)) return true;
         const path = auth.routePath(conn.path);
         const messages = for ([_][]const u8{ "/v1/messages", "/v1/messages/count_tokens", "/messages", "/messages/count_tokens" }) |p| {
             if (std.mem.eql(u8, path, p)) break true;
         } else false;
+        if (matched != null) {
+            // a key without this route's scope is refused before its body is read or a parked model wakes
+            @import("auth_scope_reply.zig").deny(conn, messages, .route);
+            return false;
+        }
         const body = if (messages)
             "{\"type\": \"error\", \"error\": {\"type\": \"authentication_error\", \"message\": \"A valid API key is required\"}}"
         else

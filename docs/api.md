@@ -23,6 +23,39 @@ Replace the key file atomically to rotate keys. Its modification time is checked
 
 In the Python 0.6.6 engine's [control room](control.md), `tensorfold service install MODEL --api-key-file PATH` forwards the file to its server, and `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a bearer key. The native binary has neither command. Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
 
+### Key scopes
+
+A native key file can limit a key to some routes. Write the scopes in brackets after the label:
+
+```text
+app[inference]: APP_KEY
+grafana[read]: MONITOR_KEY
+notebook[inference,read]: ANOTHER_KEY
+ops[admin]: OPERATOR_KEY
+legacy: OLD_KEY
+```
+
+A key without brackets, from a plain file line, `--api-key` or `TENSORFOLD_API_KEY`, keeps every route, as before. `[admin]` is
+the same as no brackets. The other scopes are `inference`, `read` or both, comma-separated; an unknown, repeated or empty
+scope, or `admin` beside another, makes the file invalid. One key cannot carry two scope sets: a file that gives the same key
+different scopes, or scopes a key the flags or environment already give, is refused at startup and on reload.
+
+| Scope | Routes |
+| --- | --- |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices` |
+| `read` | GET `/metrics`, `/v1/metrics`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
+
+A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
+`/v1/imprint`, another method, or a suffix alias such as `/alt/completions` that the server answers for a full key. The route
+is matched exactly after the query and trailing slashes are cut. A refused route answers 403 with the code
+`insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the connection before the body is read
+or a parked model reloads. The public routes stay public.
+
+The stored Responses belong to the server, not to a key, so a scoped key's `POST /v1/responses` must send `"store": false`
+and no `previous_response_id`, with the whole conversation in `input`; anything else answers 403 naming the field. A request
+keeps the scopes it was accepted with if the file changes while it runs. Scopes are authorization only: every key shares one
+model, its prompt cache and the metrics.
+
 
 ## Browser request headers
 

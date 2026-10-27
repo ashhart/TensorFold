@@ -1,6 +1,7 @@
-"""Frozen native browser-policy cases: every socket still connects to the local fake server."""
+"""Frozen native browser-policy and key cases: every socket still connects to the local fake server."""
 from __future__ import annotations
 import base64
+import json
 
 
 def case(name, host="localhost", origin=None, path="/health", method="GET", extra=()):
@@ -19,6 +20,65 @@ def case(name, host="localhost", origin=None, path="/health", method="GET", extr
         head[-1] = f"Content-Length: {len(body)}"
     raw = ("\r\n".join(head) + "\r\n\r\n").encode() + body
     return {"group": "origin", "name": name, "raws": [{"b64": base64.b64encode(raw).decode()}], "opts": {}}
+
+
+def raw(method, path, body=None, headers=()):
+    """One request's bytes on the local fake server, with a JSON body when one is given."""
+    head = [f"{method} {path} HTTP/1.1", "Host: localhost"]
+    head.extend(f"{key}: {value}" for key, value in headers)
+    data = b"" if body is None else json.dumps(body).encode()
+    if body is not None:
+        head.extend(["Content-Type: application/json", f"Content-Length: {len(data)}"])
+    return ("\r\n".join(head) + "\r\n\r\n").encode() + data
+
+
+def full_key_cases():
+    """Keys without scopes keep every route a scoped key is refused, as the server before key scopes answered."""
+    cli, env = (("Authorization", "Bearer sk-cli"),), (("x-api-key", "sk-env"),)
+    file, bare = (("x-api-key", "sk-file"),), (("Authorization", "Bearer sk-bare"),)
+    completion = {"prompt": "x @script=plain", "max_tokens": 2}
+    items = [
+        ("full-get-response", [raw("GET", "/v1/responses/resp_missing", headers=cli)]),
+        ("full-delete-response", [raw("DELETE", "/v1/responses/resp_missing", headers=file)]),
+        ("full-response-stored", [raw("POST", "/v1/responses", {"input": "Hi @script=plain", "max_output_tokens": 2}, bare)]),
+        ("full-response-parent", [raw("POST", "/v1/responses", {"input": "Hi", "previous_response_id": "resp_missing"}, env)]),
+        ("full-alias-completions", [raw("POST", "/alt/completions", completion, file)]),
+        ("full-slide-learn", [raw("POST", "/v1/slide/learn", {}, cli)]),
+        ("full-slide-graph", [raw("DELETE", "/v1/slide/graph", headers=env)]),
+        ("full-recall", [raw("GET", "/v1/recall", headers=file)]),
+        ("full-imprint-load", [raw("POST", "/v1/imprint/load", {}, bare)]),
+        ("full-stats", [raw("GET", "/stats", headers=cli)]),
+        ("full-head", [raw("HEAD", "/v1/models", headers=file)]),
+        ("full-put", [raw("PUT", "/v1/models", headers=env)]),
+        ("full-future", [raw("GET", "/future/private", headers=bare)]),
+        ("full-then-none", [raw("GET", "/v1/models", headers=file), raw("DELETE", "/v1/responses/resp_missing")]),
+    ]
+    return [{"group": "keys", "name": name, "raws": [{"b64": base64.b64encode(r).decode()} for r in raws], "opts": {}}
+            for name, raws in items]
+
+
+def scope_cases():
+    """Scoped keys reach their exact routes; every other route is refused before its body is read."""
+    app, read, ops = (("x-api-key", "sk-app"),), (("Authorization", "Bearer sk-read"),), (("x-api-key", "sk-ops"),)
+    chat = {"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+    learn = raw("POST", "/v1/slide/learn", {"text": "x"}, app).replace(b"\r\n\r\n", b"\r\nExpect: 100-continue\r\n\r\n", 1)
+    items = [
+        ("read-chat", [raw("POST", "/v1/chat/completions", chat, read)]),
+        ("read-messages", [raw("POST", "/v1/messages", {"max_tokens": 2, "messages": chat["messages"]}, read)]),
+        ("read-models", [raw("GET", "/v1/models", headers=read)]),
+        ("app-metrics", [raw("GET", "/metrics", headers=app)]),
+        ("app-chat", [raw("POST", "/v1/chat/completions", chat, app)]),
+        ("app-alias", [raw("POST", "/alt/completions", {"prompt": "x @script=plain"}, app)]),
+        ("app-recall", [raw("GET", "/v1/recall", headers=app)]),
+        ("app-slide-graph", [raw("DELETE", "/v1/slide/graph", headers=app)]),
+        ("app-learn-expect", [learn]),
+        ("app-response-stored", [raw("POST", "/v1/responses", {"input": "Hi @script=plain"}, app)]),
+        ("app-response-parent", [raw("POST", "/v1/responses", {"input": "Hi", "store": False, "previous_response_id": "resp_x"}, app)]),
+        ("app-response-stateless", [raw("POST", "/v1/responses", {"input": "Hi @script=plain", "store": False, "max_output_tokens": 2}, app)]),
+        ("ops-slide-graph", [raw("DELETE", "/v1/slide/graph", headers=ops)]),
+    ]
+    return [{"group": "scopes", "name": name, "raws": [{"b64": base64.b64encode(r).decode()} for r in raws], "opts": {}}
+            for name, raws in items]
 
 
 def steps():
@@ -55,6 +115,10 @@ def steps():
         {"kind": "serve", "args": ["--allowed-host", "trusted-one.invalid", "--allowed-host=trusted-two.invalid", "--allowed-origin", "https://ui-one.invalid", "--allowed-origin=http://ui-two.invalid:8000"], "env": {}, "cases": allowed, "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": ["--host", "0.0.0.0"], "env": {}, "cases": nonloopback, "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": ["--api-key", "sk-cli"], "env": {}, "cases": keyed, "then": [{"kind": "terminate"}]},
+        {"kind": "serve", "args": ["--api-key", "sk-cli", "--api-key-file", "@KEYFILE@"], "env": {"TENSORFOLD_API_KEY": "sk-env"},
+         "key_file": "# keys\nclient: sk-file\nsk-bare\n", "cases": full_key_cases(), "then": [{"kind": "terminate"}]},
+        {"kind": "serve", "args": ["--api-key-file", "@KEYFILE@"], "env": {},
+         "key_file": "app[inference]: sk-app\nmonitor[read]: sk-read\nops: sk-ops\n", "cases": scope_cases(), "then": [{"kind": "terminate"}]},
     ]
 
 
