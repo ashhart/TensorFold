@@ -4,6 +4,7 @@ const dev = @import("xpu_dev.zig");
 const cfg = @import("xpu_config.zig");
 const fwd = @import("xpu_forward.zig");
 const gemm_test = @import("xpu_gemm_test.zig");
+const ple_check = @import("xpu_ple_check.zig");
 const alloc = dev.alloc;
 const now = dev.now;
 
@@ -139,6 +140,11 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, argv[2], "--topk-test")) return topkTest(r, try readIds(argv[3]));
     if (std.mem.eql(u8, argv[2], "--windows")) return windows(r, try readIds(argv[3]));
     if (std.mem.eql(u8, argv[2], "--gemm-test")) return gemm_test.gemmTest(r);
+    if (std.mem.eql(u8, argv[2], "--ple-check")) {
+        const ids = try alloc.alloc(u32, argv.len - 3);
+        for (argv[3..], ids) |a, *o| o.* = try std.fmt.parseInt(u32, a, 10);
+        return ple_check.run(r, ids);
+    }
     if (std.mem.eql(u8, argv[2], "--teacher")) {
         if (argv.len < 5) return error.Usage;
         return teacher(r, argv[3], argv[4], if (argv.len > 6 and std.mem.eql(u8, argv[5], "--only")) argv[6] else null);
