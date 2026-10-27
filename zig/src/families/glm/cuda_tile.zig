@@ -62,6 +62,36 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
 }
 
 /// Every linear b16.matmul reads, as the fields holding them; the head last, when it is bf16.
+/// TF_GLM_KDA_PAD: move an uneven fused KDA input stack into its own eight-aligned buffer (its true rows, then
+/// zeros), so `tiledInput()` passes and the stack is packed instead of staying bf16 row-major. The pad columns are
+/// computed from zero weights and ignored; the field offsets inside a row (f_a, g_a, b) do not move.
+fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
+    for (w.layers) |*l| switch (l.mixer) {
+        .kda => |*x| try padOneKdaInput(w, d, s, x),
+        else => {},
+    };
+}
+
+/// One KDA layer's fused input stack, moved to an eight-aligned buffer when TF_GLM_KDA_PAD asks for it.
+fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@import("cuda_kda_block.zig").Layer) !void {
+    const kb = @import("cuda_kda_block.zig");
+    const np = kb.paddedWidth(x.width());
+    if (np == x.width()) return; // already aligned, or the pad is off
+    const src = switch (x.proj) {
+        .bf16 => |ptr| ptr,
+        else => return, // the MXFP8 split stack pads its bf16 rest separately
+    };
+    const n = x.width();
+    const k = x.dims;
+    var buf = try cuda.DeviceBuffer.alloc(d, np * k * 2);
+    errdefer buf.free();
+    try d.check(d.api.cuMemcpyDtoDAsync_v2(buf.ptr, src, n * k * 2, s.handle), "cuMemcpyDtoDAsync");
+    try d.check(d.api.cuMemsetD8Async(buf.ptr + n * k * 2, 0, (np - n) * k * 2, s.handle), "cuMemsetD8Async");
+    try s.synchronize();
+    x.proj = .{ .bf16 = buf.ptr };
+    try w.buffers.append(w.gpa, buf);
+}
+
 fn linears(w: *Weights, list: *std.ArrayList(Lin)) !void {
     for (w.layers) |*l| try layerLinears(w.gpa, l, list);
     if (w.mtp) |*m| {
@@ -94,6 +124,7 @@ fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, byte
 
 /// Eligible linears tiled in place; uneven KDA inputs and their views stay bf16 for the row-major kernels.
 pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernels, s: cuda.Stream, d: *const cuda.Driver, dense_bits: u8, head_bits: u8) !mm_mod.Packed {
+    try padKdaInputs(w, d, s);
     var list: std.ArrayList(Lin) = .empty;
     defer list.deinit(w.gpa);
     try linears(w, &list);

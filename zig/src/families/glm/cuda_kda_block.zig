@@ -33,11 +33,28 @@ pub const Layer = struct {
         return 3 * l.heads * kda.dk + 2 * kda.dk + l.heads;
     }
 
+    /// The width the input stack's rows actually carry: `width` plus any alignment pad (TF_GLM_KDA_PAD).
+    pub fn matWidth(l: Layer) usize {
+        return paddedWidth(l.width());
+    }
+
     /// The input stack and its two views need glm_mm's eight-column output and row stride.
     pub fn tiledInput(l: Layer) bool {
-        return l.width() % 8 == 0;
+        return l.matWidth() % 8 == 0;
     }
 };
+
+/// The fused input's row width, padded to eight columns when TF_GLM_KDA_PAD asks for it. glm_mm needs the output
+/// width and row stride to be multiples of eight; the fused width is 3*heads*dk + 2*dk + heads, which at TP=3 is
+/// 8,726 (22 heads) or 8,341 (21) - so without padding those tensors stay bf16 row-major and cost about 9 ms a call.
+/// One rule, read by the loader (which pads the weights) and by the state (which sizes the rows), so they agree.
+pub fn paddedWidth(raw: usize) usize {
+    if (raw % 8 == 0) return raw;
+    const v = std.c.getenv("TF_GLM_KDA_PAD") orelse return raw;
+    const t = std.mem.trim(u8, std.mem.span(v), " ");
+    if (t.len == 0 or std.mem.eql(u8, t, "0")) return raw;
+    return std.mem.alignForward(usize, raw, 8);
+}
 
 /// The block's scratch for `rows` rows: projection, decay and gate rows, chain saves, B16 partials, a split's tmp.
 pub const Scratch = struct { p: u64, ka: u64, kg: u64, saves: kda.Saves, wide: kda.Wide, mm_part: u64, tmp: u64 = 0 };
@@ -74,7 +91,7 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
     var selected = set;
     if (!l.tiledInput()) selected.mm = null;
     const n = l.heads * kda.dk;
-    const w = l.width();
+    const w = l.matWidth();
     const fa = 3 * n;
     switch (l.proj) {
         .bf16 => |p| try b16.matmul(selected, stream, x, x_stride, p, s.p, s.mm_part, rows, w, l.dims, false),
@@ -109,7 +126,7 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64, 
 pub fn chainRows(ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, rows: usize, conv_state: u64, state_in: u64, wide: bool) !void {
     const n = l.heads * kda.dk;
     const fa = 3 * n;
-    const c: kda.Chain = .{ .p = s.p, .p_stride = l.width(), .b_off = fa + 2 * kda.dk, .a = s.ka, .a_stride = n, .g = s.kg, .g_stride = n, .conv_state = conv_state, .conv_w = l.conv_w, .state_in = state_in, .a_log = l.a_log, .dt_bias = l.dt_bias, .norm_w = l.norm_w, .eps = l.eps, .lower = l.lower, .heads = l.heads };
+    const c: kda.Chain = .{ .p = s.p, .p_stride = l.matWidth(), .b_off = fa + 2 * kda.dk, .a = s.ka, .a_stride = n, .g = s.kg, .g_stride = n, .conv_state = conv_state, .conv_w = l.conv_w, .state_in = state_in, .a_log = l.a_log, .dt_bias = l.dt_bias, .norm_w = l.norm_w, .eps = l.eps, .lower = l.lower, .heads = l.heads };
     try kda.chain(ks, stream, c, rows, s.saves, if (wide or rows >= kda.wide_rows) s.wide else null);
 }
 
