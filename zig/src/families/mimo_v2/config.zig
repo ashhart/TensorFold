@@ -208,7 +208,7 @@ fn boolean(o: std.json.ObjectMap, k: []const u8) bool {
 }
 
 // The fields Config.read uses, as MiMo-V2.6-Flash-RL's config.json has them (the 3.0 bpw pack).
-const fixture =
+pub const fixture =
     \\{"add_full_attention_sink_bias": false, "add_swa_attention_sink_bias": true, "eos_token_id": 151645,
     \\ "head_dim": 192, "hidden_size": 4096, "intermediate_size": 16384, "layernorm_epsilon": 1e-06,
     \\ "hybrid_layer_pattern": [0,1,1,1,1,0,1,1,1,1,1,0,1,1,1,1,1,0,1,1,1,1,1,0,1,1,1,1,1,0,1,1,1,1,1,0,1,1,1,1,1,0,1,1,1,1,1,0],
