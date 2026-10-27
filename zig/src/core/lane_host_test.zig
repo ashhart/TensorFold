@@ -573,4 +573,5 @@ test {
     _ = @import("lane_host_rows_test.zig");
     _ = @import("lane_host_many_test.zig");
     _ = @import("lane_host_prefix_test.zig");
+    _ = @import("lane_host_loop_stop_test.zig");
 }

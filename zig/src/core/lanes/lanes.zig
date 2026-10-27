@@ -51,6 +51,7 @@ test {
     _ = @import("engine_test.zig");
     _ = @import("long_loop.zig");
     _ = @import("long_loop_test.zig");
+    _ = @import("loop_stop_test.zig");
     _ = @import("handover_test.zig");
     _ = @import("open_first_test.zig");
     _ = @import("recorder_test.zig");

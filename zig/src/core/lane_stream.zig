@@ -55,6 +55,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .logprobs = r.logprobs,
         .prompt_logprobs = r.prompt_logprobs,
         .loop_guard = r.loop_guard,
+        .loop_stop = r.loop_stop,
         .chunks = r.chunks,
         .history_len = r.history_len,
         .shared_prefixes = r.shared_prefixes,

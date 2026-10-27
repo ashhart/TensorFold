@@ -57,7 +57,7 @@ fn rounds(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, first: cha
         if (parsed.calls) |calls| for (calls) |c| {
             if (tools.isServer(tools.callName(c))) try server.append(a, c) else client = true;
         };
-        const more = round + 1 < max_rounds and !std.mem.eql(u8, reply.finish_reason, "length");
+        const more = round + 1 < max_rounds and !std.mem.eql(u8, reply.finish_reason, "length") and reply.loop_stop == null;
         if (server.items.len > 0 and t.calls_left > 0 and more) {
             try filter.endRound(false);
             if (sink != null) try t.addProse(a, parsed.content); // a stream already showed it; a whole reply drops the narration

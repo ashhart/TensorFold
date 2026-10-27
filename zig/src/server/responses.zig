@@ -416,7 +416,9 @@ const Reply = struct {
     }
 
     fn finish(r: *Reply, reason: ?[]const u8, chat_usage: ?Value, stats: ?Value) E!Value {
-        const incomplete = reason != null and std.mem.eql(u8, reason.?, "length");
+        const length = reason != null and std.mem.eql(u8, reason.?, "length");
+        const filtered = reason != null and std.mem.eql(u8, reason.?, @import("loop_stop.zig").finish_reason);
+        const incomplete = length or filtered;
         const status = if (incomplete) "incomplete" else "completed";
         if (!incomplete) {
             const all_reasoning = for (r.items.items) |item| {
@@ -431,7 +433,7 @@ const Reply = struct {
         try r.put(final, "usage", try r.usage(chat_usage));
         if (incomplete) {
             const d = try r.obj();
-            try r.put(d, "reason", .{ .string = "max_output_tokens" });
+            try r.put(d, "reason", .{ .string = if (filtered) "content_filter" else "max_output_tokens" });
             try r.put(final, "incomplete_details", .{ .object = d });
         } else try r.put(final, "incomplete_details", .null);
         if (!incomplete) try r.put(final, "completed_at", try r.int(std.Io.Clock.real.now(r.srv.io).toSeconds()));

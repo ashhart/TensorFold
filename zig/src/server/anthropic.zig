@@ -251,6 +251,7 @@ const Reply = struct {
             r.finished = true;
             return;
         };
+        if (p.has("error") and std.mem.eql(u8, r.finish, "refusal")) return; // --loop-guard-stop: the refusal says it
         if (p.has("error")) {
             try r.close();
             const problem = p.get("error").?;
@@ -388,6 +389,7 @@ const Reply = struct {
 fn finishOf(reason: []const u8) []const u8 {
     if (std.mem.eql(u8, reason, "tool_calls")) return "tool_use";
     if (std.mem.eql(u8, reason, "length")) return "max_tokens";
+    if (std.mem.eql(u8, reason, @import("loop_stop.zig").finish_reason)) return "refusal";
     return "end_turn";
 }
 

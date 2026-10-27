@@ -429,6 +429,26 @@ for at least 1,024 tokens, the period found from where the reasoning's last 32-t
 continues after the forced close, and reports `runtime.loop: {"period": N}` plus `loop=period:N` in the server log. The native engine refuses the flag on backends that do not enforce it, and prints that refusal as
 a startup error.
 
+`--loop-guard-stop` (off by default; it turns on `--loop-guard`) ends the reply where the guard fires instead. The engine
+writes no forced close and no answer: the stream finishes at the token that fired, and its lane and caches are released
+as for any finished reply. The reply carries the reasoning so far in `reasoning_content`, empty `content` and no
+`tool_calls`, and these marks a client can act on:
+
+- `finish_reason` is `content_filter`, the OpenAI value for a reply the server ended before its answer, which clients
+  that check the value against OpenAI's list accept; it is neither `tool_calls` nor `length`, so it asks no client to
+  run calls or continue a cut reply.
+- `runtime.loop` is `{"period": N, "stopped": true}` and the server log shows `finish=content_filter loop=period:N`.
+- The error object `{"message": "...", "type": "server_error", "param": null, "code": "reasoning_loop"}`: a whole chat
+  or completion reply (HTTP 200) carries it as a top-level `error` beside `choices`; a stream sends it as an
+  `{"error": ...}` event after the finish chunk and its usage, then `[DONE]`, so OpenAI's SDKs raise it after the
+  reasoning arrived.
+- `/v1/responses` replies with `status: "incomplete"` and `incomplete_details: {"reason": "content_filter"}` (streamed:
+  `response.incomplete`), its output the reasoning item alone; `/v1/messages` replies with `stop_reason: "refusal"`.
+
+Requests with tools or structured output end the same way: the guard watches only the think block, so no call is opened
+and no grammar starts. The setting is the server's: a request cannot turn it on or off. Without it, replies are
+unchanged.
+
 ## Context and errors
 
 The rendered prompt and reserved reply must fit the effective context. In 0.3.5, an explicit `max_tokens`
@@ -483,8 +503,8 @@ Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enab
 `rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A request that sends
 `return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
 `token_sha256` hash — on the whole reply and on the streamed finish event alike. A loop-guarded reply adds
-`runtime.loop.period`; these fields describe the native reply and are absent
-from Python replies that do not provide them.
+`runtime.loop.period`, and `runtime.loop.stopped` when `--loop-guard-stop` ended it; these fields describe the native
+reply and are absent from Python replies that do not provide them.
 In the native block, `seconds` is the reply's decode time, from the end of its prompt pass to its last token, and
 `tokens_per_second` divides the reply's tokens after the first by it. `prefill_seconds` is the prompt pass, and
 `time_to_first_token` counts from the request's arrival, so a queued or long prompt shows there, not in `seconds`.

@@ -433,6 +433,7 @@ const Run = struct {
         try o.put(a, "choices", .{ .array = list });
         try o.put(a, "usage", try r.usage(reply));
         try r.extras(o, reply);
+        if (reply.loop_stop) |period| try o.put(a, "error", try @import("loop_stop.zig").errorBody(a, period));
     }
 
     const StreamSink = struct {
@@ -587,6 +588,7 @@ const Run = struct {
             u.object.put(a, "usage", use) catch return;
             r.emit(u) catch return;
         }
+        if (reply.loop_stop) |period| r.emit(wrapError(a, @import("loop_stop.zig").errorBody(a, period) catch return) catch return) catch return;
         r.out.vt.event(r.out.ctx, null) catch {};
         r.warmNext(&reply, calls);
     }

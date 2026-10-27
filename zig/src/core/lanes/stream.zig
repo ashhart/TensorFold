@@ -131,6 +131,7 @@ pub const Spec = struct {
     think_open: ?bool = null, // null: open when a budget is set (the server's rule)
     answer_max: u32 = 0, // reply tokens after `think_end` at most, within `max_new` (0: `max_new` alone)
     loop_guard: bool = false,
+    loop_stop: bool = false, // with loop_guard: finish where it fires instead of forcing the close
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
     history_len: u32 = 0, // prompt prefix lengths a backend may keep for a later turn: the rendered history,
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
@@ -166,6 +167,7 @@ pub const Stream = struct {
     answer_max: u32,
     answer_from: ?usize = null, // emitted() index after the first `think_end`: the answer starts there
     loop_guard: bool,
+    loop_stop: bool = false,
     loop_period: ?u32 = null,
     long_loop: long_loop.Index = .{}, // the reasoning's runs, for passages repeated verbatim (long_loop.zig)
     chunks: []const u32,
@@ -253,6 +255,7 @@ pub const Stream = struct {
             .think_open = spec.think_open orelse (spec.think_budget > 0 or (spec.loop_guard and spec.think_end >= 0)),
             .answer_max = spec.answer_max,
             .loop_guard = spec.loop_guard,
+            .loop_stop = spec.loop_stop,
             .chunks = spec.chunks,
             .history_len = spec.history_len,
             .shared_prefixes = spec.shared_prefixes,
@@ -466,7 +469,7 @@ pub const Stream = struct {
                 if (s.budgetLeft() <= 0) {
                     s.finished = true;
                     s.reason = .length;
-                } else if (s.think_close.len == 0) {
+                } else if (s.think_close.len == 0 or s.loop_stop) {
                     s.finished = true;
                     s.reason = .stop;
                 } else {
