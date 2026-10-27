@@ -123,7 +123,7 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
     e.last = s.gpa.dupe(u32, prompt) catch return have;
     e.saved = read(r, i) catch return have;
     if (s.family.vtable.charged) |f| e.bytes = f(s.family.ptr, e.saved);
-    s.entries.append(s.gpa, e) catch {
+    @import("prompt_cache_index.zig").add(s, e) catch {
         s.family.vtable.drop(s.family.ptr, e.saved);
         return have;
     };

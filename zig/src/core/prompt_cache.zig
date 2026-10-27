@@ -8,6 +8,7 @@ const lifetime = @import("prompt_cache_lifetime.zig");
 const policy = @import("prompt_cache_policy.zig");
 const cuts = @import("prompt_cuts.zig");
 const interior = @import("prompt_interior.zig");
+const index = @import("prompt_cache_index.zig");
 pub const rows = @import("rows_store.zig");
 
 /// A family's copy of one state.
@@ -142,6 +143,7 @@ pub const Store = struct {
     held: u64 = 0,
     clock: u64 = 0,
     entries: std.ArrayList(*Entry) = .empty,
+    by_position: std.ArrayList(*Entry) = .empty, // nonowning, longest first; equal positions retain insertion order
     counts: Counts = .{},
     shared_keys: std.ArrayList(u64) = .empty, // the tokens of recently planned shared cuts, hashed (at most SHARED_KEYS)
     imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
@@ -159,6 +161,7 @@ pub const Store = struct {
     pub fn deinit(s: *Store) void {
         for (s.entries.items) |e| s.free(e);
         s.entries.deinit(s.gpa);
+        s.by_position.deinit(s.gpa);
         s.shared_keys.deinit(s.gpa);
         s.repeat_log.deinit(s.gpa);
         s.held = 0;
@@ -176,6 +179,7 @@ pub const Store = struct {
 
     pub fn remove(s: *Store, i: usize) void {
         std.debug.assert(s.entries.items[i].borrowers == 0);
+        index.remove(s, s.entries.items[i]);
         const e = s.entries.orderedRemove(i);
         policy.unlink(s, e);
         s.held -= e.bytes;
@@ -228,7 +232,7 @@ pub const Store = struct {
     }
 
     /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
-    fn usable(s: *const Store, at: u32, starts: []const u32) bool {
+    pub fn usable(s: *const Store, at: u32, starts: []const u32) bool {
         return at > 0 and (!s.rules.planned or s.startAt(starts, at) == at);
     }
 
@@ -256,19 +260,8 @@ pub const Store = struct {
         return std.mem.eql(u32, prompt[0..n], kept[0..n]) and modes.equal(kept_spans, spans, at);
     }
 
-    /// Find a kept token prefix with matching canonical spans through its position, leaving at least one row.
-    pub fn find(s: *Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*Entry {
-        var best: ?*Entry = null;
-        for (s.entries.items) |e| {
-            if (e.expired or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
-            if (best != null and e.at <= best.?.at) continue;
-            const n = e.tokens.len;
-            if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
-            if (!modes.equal(e.decode_spans, spans, e.at)) continue;
-            best = e;
-        }
-        return best;
-    }
+    /// The longest kept token prefix with matching canonical spans through its position, leaving at least one row.
+    pub const find = index.find;
 
     /// Restore the longest prefix matching tokens and canonical spans, then plan prompt-cache marks.
     pub fn begin(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
@@ -501,7 +494,7 @@ pub const Store = struct {
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
         e.* = .{ .tokens = last[0..n], .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .own = last };
         owns_decoded = false;
-        s.entries.append(s.gpa, e) catch {
+        index.add(s, e) catch {
             s.free(e);
             return s.fail(at, error.OutOfMemory);
         };
@@ -537,7 +530,7 @@ pub const Store = struct {
             return s.drop(e, have, false);
         };
         im.touch(key);
-        s.entries.append(s.gpa, e) catch return s.drop(e, have, true);
+        index.add(s, e) catch return s.drop(e, have, true);
         policy.link(s, e);
         s.held += bytes;
         if (!@import("builtin").is_test) std.log.info("prompt cache: read {d} learned tokens from disk", .{m.at});
@@ -577,6 +570,7 @@ pub fn note(comptime fmt: []const u8, args: anytype) void {
 }
 
 test {
+    _ = @import("prompt_cache_index_test.zig");
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
