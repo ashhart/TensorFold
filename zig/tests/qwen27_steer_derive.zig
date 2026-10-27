@@ -121,7 +121,7 @@ fn snapshotRevision(dir: []const u8) ?[]const u8 {
     return name;
 }
 
-/// The UTC time of the derivation, as the file's derived_at.
+/// The UTC time of the derivation, as the receipt's derived_at.
 fn stamp(io: std.Io, buf: *[32]u8) []const u8 {
     const ns = std.Io.Clock.real.now(io).nanoseconds;
     const secs: u64 = @intCast(@max(0, @divFloor(ns, std.time.ns_per_s)));
@@ -237,7 +237,7 @@ pub fn main(init: std.process.Init) !void {
         .mode = .project,
         .alpha = alpha,
         .hook_point = glp.residual_site,
-        .derived_at = stamp(io, &time_buf),
+        // glp.derived_at is the site the direction was captured at, not a time: the site it applies at.
         .base_model = repo,
         .base_revision = revision,
         .method = method,
@@ -270,6 +270,7 @@ pub fn main(init: std.process.Init) !void {
         .method = method,
         .contrast = derive.contrast,
         .hook_point = glp.residual_site,
+        .derived_at = stamp(io, &time_buf),
         .width = m.config.hidden,
         .layers = sites,
         .prompts = harmful.prompts,

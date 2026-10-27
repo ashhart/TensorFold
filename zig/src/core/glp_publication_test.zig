@@ -82,3 +82,19 @@ test "a file that names no model of its own keeps the base model out of the head
     try std.testing.expect(parsed.file.str("general.base_model.0.repo_url") == null);
     try std.testing.expectEqual(@as(u64, 1), parsed.file.num("controlvector.layer_count").?);
 }
+
+test "a file that names no other site names the site it is applied at" {
+    const a = std.testing.allocator;
+    const dir = try t.unitDir(a, 8, 0);
+    defer a.free(dir);
+    const layers = [_]glp.Layer{.{ .id = 10, .dir = dir }};
+    const bytes = try glp.write(a, .{ .hook_point = glp.residual_site, .layers = &layers });
+    defer a.free(bytes);
+    var parsed = try t.parseFile(a, bytes);
+    defer parsed.deinit();
+    // glp.derived_at is the site the direction was captured at, not a time.
+    try std.testing.expectEqualStrings("residual_stream_post_layer", parsed.file.str("glp.derived_at").?);
+    var read = try t.readOk(bytes);
+    defer read.deinit();
+    try std.testing.expect(!read.vector.transferred);
+}
