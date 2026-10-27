@@ -10,16 +10,14 @@ pub const Depth = struct {
     cost: [st.max_levels + 1]f64 = @splat(1),
     kept: [8]u32 = @splat(0), // the last rounds' kept tokens at the current depth
     seen: usize = 0,
+    missed: [st.max_levels + 1]bool = @splat(false), // levels that landed no draft in a full observation window
 
     const prior = 0.75;
 
     pub fn init(most: usize, fixed: bool, costs: Costs, head_ms: f64) Depth {
         const cap = @min(@max(most, 1), st.max_levels);
         var d = Depth{ .levels = cap, .most = cap, .fixed = fixed };
-        if (costs.rows.len == 0) {
-            if (!fixed) d.levels = @min(4, cap);
-            return d;
-        }
+        std.debug.assert(costs.rows.len > 0 and costs.widths.len == costs.rows.len);
         var best: usize = 1;
         var best_rate: f64 = 0;
         var expected: f64 = 1;
@@ -51,7 +49,12 @@ pub const Depth = struct {
         var cur_all: f64 = 0;
         for (1..cur + 1) |s| {
             var all: u32 = 0;
-            for (d.kept) |k| all += @min(k, @as(u32, @intCast(s + 1)));
+            var landed = false;
+            for (d.kept) |k| {
+                all += @min(k, @as(u32, @intCast(s + 1)));
+                landed = landed or k > s;
+            }
+            d.missed[s] = !landed;
             const tokens: f64 = @floatFromInt(all);
             if (s == cur) cur_all = tokens;
             const rate = tokens / d.cost[s];
@@ -60,7 +63,7 @@ pub const Depth = struct {
                 best_rate = rate;
             }
         }
-        if (best == cur and cur < d.most) {
+        if (best == cur and cur < d.most and !d.missed[cur + 1]) {
             var long: u32 = 0;
             for (d.kept) |k| long += @intFromBool(k >= cur + 1);
             const p = @as(f64, @floatFromInt(long)) / @as(f64, @floatFromInt(d.kept.len));
@@ -101,4 +104,28 @@ test "a flat tile window table starts at 4 levels, steps up on full windows, and
     try std.testing.expect(d.next() <= 4);
     const fixed = Depth.init(8, true, costs, 1.47);
     try std.testing.expectEqual(@as(usize, 8), fixed.levels);
+}
+
+test "a draft level that never lands is not repeatedly explored over 160 rounds" {
+    const widths = [_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const ms = [_]f64{ 19.16, 26.54, 35.00, 42.09, 50.85, 57.40, 66.36, 74.43, 83.78 };
+    var d = Depth.init(8, false, .{ .rows = &ms, .widths = &widths }, 1.47);
+    var wasted: usize = 0;
+    for (0..160) |_| {
+        const levels = d.next();
+        if (levels > 1) wasted += 1;
+        d.observe(2);
+    }
+    try std.testing.expectEqual(@as(usize, 8), wasted);
+}
+
+test "productive deeper levels remain available after an earlier shorter window" {
+    const widths = [_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const ms = [_]f64{ 19.16, 26.54, 35.00, 42.09, 50.85, 57.40, 66.36, 74.43, 83.78 };
+    var d = Depth.init(8, false, .{ .rows = &ms, .widths = &widths }, 1.47);
+    for (0..48) |_| {
+        const levels = d.next();
+        d.observe(@intCast(levels + 1));
+    }
+    try std.testing.expect(d.next() > 2);
 }
