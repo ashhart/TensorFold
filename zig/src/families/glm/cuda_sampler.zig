@@ -72,7 +72,7 @@ pub const Sampler = struct {
         try s.drawFull(stream, rows, first, r, out);
     }
 
-    /// `rows` whole rows already in `full` -> `out` under `r`, tokens at positions first, first + 1, ...
+    /// `rows` whole rows already in `full` -> `out` under `r`, tokens at positions first, first + 1.
     pub fn drawFull(s: *Sampler, stream: cuda.Stream, rows: usize, first: u64, r: Rule, out: []u32) !void {
         std.debug.assert(rows <= s.rows and out.len >= rows and first >= 1);
         const V = s.vocab;

@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 
 #include "exl3_decode.cuh"
+#include "exl3_linear_reset.cuh"
 
 namespace tf_exl3 {
 
@@ -31,7 +32,13 @@ struct RotInArgs {
     half* xh;                // fp16 [m, k] out
     int x_dtype;
     int m, k;
+    int* counters;
+    int counter_count;
 };
+
+static_assert(sizeof(RotInArgs) == 56);
+static_assert(__builtin_offsetof(RotInArgs, counters) == 40);
+static_assert(__builtin_offsetof(RotInArgs, counter_count) == 48);
 
 __device__ __forceinline__ void load4(const void* p, int dtype, size_t i, float (&v)[4]) {
     if (dtype == F32) {
@@ -102,6 +109,7 @@ __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[8 * lane_w
 
 // xh = fp16(((x * suh) @ H) / sqrt(128)): one warp per 128 columns, one block of 4 warps per 512.
 extern "C" __global__ void __launch_bounds__(128) tf_exl3_rot_in(RotInArgs a) {
+    if (blockIdx.y == 0) reset_linear_counters(a.counters, a.counter_count, blockIdx.x, threadIdx.x, gridDim.x);
     const int blk = blockIdx.x * 4 + (threadIdx.x >> 5), row = blockIdx.y, lane = threadIdx.x & 31;
     if (blk * 128 >= a.k) return;
     const int k = blk * 128 + 4 * lane;

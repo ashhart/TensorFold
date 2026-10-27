@@ -18,7 +18,7 @@ pub const Lane = struct { xn: u64, tmp: u64, proj: u64, y: u64, q: u64, pos: u64
 const lay_bb: k.QkLayout = .{ .q_off = 0, .q_head_stride = 2 * cfg.head_dim, .k_off = 2 * cfg.heads * cfg.head_dim, .v_off = 2 * cfg.heads * cfg.head_dim + cfg.kv_heads * cfg.head_dim, .gate_off = cfg.head_dim, .gate_head_stride = 2 * cfg.head_dim };
 const lay_tw: k.QkLayout = .{ .q_off = 0, .q_head_stride = cfg.head_dim, .k_off = 2 * cfg.heads * cfg.head_dim, .v_off = 2 * cfg.heads * cfg.head_dim + cfg.kv_heads * cfg.head_dim, .gate_off = cfg.heads * cfg.head_dim, .gate_head_stride = cfg.head_dim };
 
-/// Gated attention of t rows from the lane's projection rows into the lane's y; K / V go to cache rows pos...
+/// Gated attention of t rows from the lane's projection rows into the lane's y; K / V go to cache rows pos.
 fn attention(e: *Engine, ln: Lane, t: usize, lay: k.QkLayout, qn: u64, kn: u64, kc: u64, vc: u64, interleaved: bool) void {
     const ps = cfg.attn_proj;
     k.qkRope(e.g, ln.proj, ps, lay, qn, kn, ln.pos, ln.q, kc, vc, t, interleaved, cfg.rope_theta, cfg.eps);

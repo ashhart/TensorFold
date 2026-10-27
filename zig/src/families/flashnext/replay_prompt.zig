@@ -157,7 +157,7 @@ pub const Prompt = struct {
         if (!p.r.serial) p.r.enc.barrier();
     }
 
-    /// The decode kernels' attention partials (3.2 GB at PMAX rows), made at first use: the tensor-op path never...
+    /// The decode kernels' attention partials (3.2 GB at PMAX rows), made at first use: the tensor-op path never.
     pub fn partials(p: *Prompt) !void {
         if (p.b.po.b.length() >= PMAX * 24 * 16 * 256 * 4) return;
         p.b.po = .{ .b = try p.r.buffer(PMAX * 24 * 16 * 256 * 4) };
@@ -307,7 +307,7 @@ pub const Prompt = struct {
         p.qmm(b.sa, .{ L.ex[15], L.ex[16], L.ex[17] }, 640, D, rows, .{ .b = b.ydown.b, .off = 10 * D * 2 }, 11 * D);
     }
 
-    /// Each kernel class alone, 48 times in one command buffer, on the buffers the last chunk left (layer 0's and...
+    /// Each kernel class alone, 48 times in one command buffer, on the buffers the last chunk left (layer 0's and).
     pub const classes = @import("replay_prompt_chunks.zig").classes;
 
     pub const copyWords = @import("replay_prompt_chunks.zig").copyWords;
@@ -315,16 +315,16 @@ pub const Prompt = struct {
     /// One prompt chunk from the model's position: caches, DeltaNet states, the n-gram tail and history move past it.
     pub const chunk = @import("replay_prompt_chunks.zig").chunk;
 
-    /// One staggered segment of a chunk: its prompt, rows and first position; the DeltaNet state slot and row it...
+    /// One staggered segment of a chunk: its prompt, rows and first position; the DeltaNet state slot and row it.
     pub const Seg = @import("replay_prompt_segments.zig").Seg;
 
-    /// The DeltaNet pre and scan kernels' mark arguments: the segment's mark rows and layer `li`'s slots (any buffer...
+    /// The DeltaNet pre and scan kernels' mark arguments: the segment's mark rows and layer `li`'s slots (any buffer).
     pub const bindMarks = @import("replay_prompt_segments.zig").bindMarks;
 
     /// A chunk's host inputs at position `pos`: token ids, positions, the cache meta, the n-gram ids after `hist`.
     pub const prep = @import("replay_prompt_segments.zig").prep;
 
-    /// A segment's layer i up to its mixer: the pending expert write (or the n-gram block at layer 1) and the...
+    /// A segment's layer i up to its mixer: the pending expert write (or the n-gram block at layer 1) and the.
     pub const segPre = @import("replay_prompt_segments.zig").segPre;
 
     /// A segment's layer-i mixer, DeltaNet or attention, at the segment's position and state slots.
@@ -338,16 +338,16 @@ pub const Prompt = struct {
 
     pub const bytesOf = @import("replay_prompt_segments.zig").bytesOf;
 
-    /// Segment 0, after layer i's mixer: once the GPU gets here the host sends the state (DeltaNet) or new key,...
+    /// Segment 0, after layer i's mixer: once the GPU gets here the host sends the state (DeltaNet) or new key.
     pub const pairSend = @import("replay_prompt_segments.zig").pairSend;
 
-    /// Segment 1, before layer i's mixer (its n-gram block at layer 1): the GPU waits for the layer's flag, then...
+    /// Segment 1, before layer i's mixer (its n-gram block at layer 1): the GPU waits for the layer's flag, then.
     pub const pairTake = @import("replay_prompt_segments.zig").pairTake;
 
-    /// Flash Next's hooks for core/segments.zig: a segment's embedding, layer parts and final streams, encoded into...
+    /// Flash Next's hooks for core/segments.zig: a segment's embedding, layer parts and final streams, encoded into.
     pub const Hooks = @import("replay_prompt_segments.zig").Hooks;
 
-    /// A chunk as one to segments.MAX staggered segments, one queue each (core/segments.zig): segment k runs each...
+    /// A chunk as one to segments.MAX staggered segments, one queue each (core/segments.zig): segment k runs each.
     pub const chunkN = @import("replay_prompt_chunks.zig").chunkN;
 
     /// chunkN, with each DeltaNet layer also writing its state after each of `marks` rows (ascending, 1..n) to m.marks.
@@ -356,7 +356,7 @@ pub const Prompt = struct {
     /// Speed-up mode's prefill: a chunk's rows split across two Macs (tp.zig).
     pub const chunkPair = @import("replay_prompt_chunks.zig").chunkPair;
 
-    /// Speed-up mode: once each Mac has written the MTP head's prompt keys for its segment's rows (`mine`: first...
+    /// Speed-up mode: once each Mac has written the MTP head's prompt keys for its segment's rows (`mine`: first).
     pub const pairMtp = @import("replay_prompt_chunks.zig").pairMtp;
 
     /// Write the MTP keys and values for these prompt rows; the final row's full head runs later.

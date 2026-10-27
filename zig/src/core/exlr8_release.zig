@@ -3,7 +3,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-/// Where the release publishes the hash of a file given relative to the root (experts/... or dense/...).
+/// Where the release publishes the hash of a file given relative to the root (experts/... or dense/).
 pub fn hashPath(buf: []u8, rel: []const u8) ![]const u8 {
     const base = std.fs.path.basename(rel);
     if (std.mem.startsWith(u8, rel, "experts/")) return std.fmt.bufPrint(buf, "hashes/{s}.sha256", .{base});

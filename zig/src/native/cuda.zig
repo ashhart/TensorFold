@@ -356,7 +356,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
     };
     const free = loaded.free_streams;
-    const grow = budget.growRoom(room, !@hasField(F.Options, "lanes"));
+    const preallocates_lanes = if (@hasDecl(F, "preallocates_lanes")) F.preallocates_lanes else @hasField(F.Options, "lanes");
+    const grow = budget.growRoom(room, !preallocates_lanes);
     const wrapped = kv_pages.wrapped(F, loaded, free, served.stream_bytes, room);
     const layout = wrapped.layout;
     var paged: ?kv_pages.Plan = null;
@@ -410,7 +411,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
         const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else null; // its disk rows
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
-        store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
+        store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded), snaps.loadedGrid(loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
         errdefer {
             const disk = store.disk;
             store.deinit();

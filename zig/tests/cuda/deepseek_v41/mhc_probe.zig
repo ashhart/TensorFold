@@ -1,4 +1,4 @@
-//! `tf-dsv41-test mhc-probe [windows]`: the 16-row mHC boundary timed under one variable at a time (cold L2, spin...).
+//! `tf-dsv41-test mhc-probe [windows]`: the 16-row mHC boundary timed under one variable at a time (cold L2, spin).
 
 const std = @import("std");
 const cuda = @import("cuda");

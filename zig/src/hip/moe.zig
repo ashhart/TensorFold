@@ -8,7 +8,7 @@ const Tensor = ops.Tensor;
 const Kind = ops.Kind;
 const Projection = ops.Projection;
 
-/// A layer's experts, shared expert last: gate and up stacked as one (E + 1, 2 NI, ...) weight, down (E + 1, D, ...).
+/// A layer's experts, shared expert last: gate and up stacked as one (E + 1, 2 NI, ...) weight, down (E + 1, D).
 pub const Experts = struct {
     fused: Projection,
     down: Projection,

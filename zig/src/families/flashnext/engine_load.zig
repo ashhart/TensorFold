@@ -390,7 +390,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     try e.rounds();
     e.tsel = try GSelect.init(r, 0);
     e.msel = try GSelect.init(r, 0);
-    // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in...
+    // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in.
     const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
     if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
     if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);

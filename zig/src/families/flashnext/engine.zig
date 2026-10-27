@@ -1,4 +1,4 @@
-//! Flash Next served from the replay engine: one reply at a time, its prompt through prompt chunks (the MTP head's...
+//! Flash Next served from the replay engine: one reply at a time, its prompt through prompt chunks (the MTP head's).
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -56,7 +56,7 @@ pub const RING = 512;
 pub const MARGIN = 2 * MAXR;
 /// An MoE layer's expert projections in the engine's order: gate, up, shared gate, shared up, down, shared down.
 const expert_projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
-/// Bytes a conversation's next kept state usually adds (about 4k tokens of reply and tool output): the pool readies...
+/// Bytes a conversation's next kept state usually adds (about 4k tokens of reply and tool output): the pool readies.
 pub const NEXT_TURN = 4096 * 13 * 2304;
 
 /// Hash the shared token prefix through its lookahead token.
@@ -145,7 +145,7 @@ pub const Engine = struct {
         return loadWith(gpa, io, model_dir, dump_dir, null);
     }
 
-    /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library...
+    /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library.
     pub const loadWith = @import("engine_load.zig").loadWith;
 
     pub const loadConfigured = @import("engine_load.zig").loadConfigured;
@@ -234,7 +234,7 @@ pub const Engine = struct {
         return follow_mod.run(e);
     }
 
-    /// Rank 1: rank 0's next request, its reply into `out` (null: hashed and logged, this Mac's states kept); null...
+    /// Rank 1: rank 0's next request, its reply into `out` (null: hashed and logged, this Mac's states kept); null.
     pub fn followWith(e: *Engine, out: ?Out) !?Result {
         return follow_mod.one(e, out);
     }
@@ -249,7 +249,7 @@ pub const Engine = struct {
         }
     };
 
-    /// A short reply on fixed tokens: the kernels' first launches and the weights' first reads happen here, not in...
+    /// A short reply on fixed tokens: the kernels' first launches and the weights' first reads happen here, not in.
     pub fn warm(e: *Engine) !void {
         if (e.r.tp) |tp| if (tp.rank == 1) {
             _ = try follow_mod.one(e, null);

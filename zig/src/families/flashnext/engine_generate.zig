@@ -104,7 +104,7 @@ pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const
                 continue;
             }
         }
-        // a call runs on past marks and writes the DeltaNet states there (up to MARKS); more marks end it at the...
+        // a call runs on past marks and writes the DeltaNet states there (up to MARKS); more marks end it at the.
         const taps = e.mark_taps and m.marks != null;
         var c: segments.Call = e.chunkCall(if (taps) prompt.len - at else dr.toNext(at, prompt.len));
         var inside: [fz.MARKS]u32 = undefined;

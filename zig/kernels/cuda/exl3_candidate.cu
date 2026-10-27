@@ -123,9 +123,22 @@ __device__ __forceinline__ void tf_exl3_prompt_job(const __half* Xh, unsigned ro
       const uint32_t b[2][2] = {{tf_exl3_pair(w[0], w[1]), tf_exl3_pair(w[2], w[3])}, {tf_exl3_pair(w[4], w[5]), tf_exl3_pair(w[6], w[7])}};
 #pragma unroll
       for (int i = 0; i < 4; ++i) {
-        const __half* x = xs + (16 * i + g8) * TF_EXL3_XS + 16 * r + 2 * t4;
-        const uint32_t a[4] = {*reinterpret_cast<const uint32_t*>(x), *reinterpret_cast<const uint32_t*>(x + 8 * TF_EXL3_XS),
-                               *reinterpret_cast<const uint32_t*>(x + 8), *reinterpret_cast<const uint32_t*>(x + 8 * TF_EXL3_XS + 8)};
+        uint32_t a[4];
+#if __CUDA_ARCH__ >= 1200
+        if constexpr (C == 2) {
+          const __half* address = xs + (16 * i + (lane & 15)) * TF_EXL3_XS + 16 * r + (lane >> 4) * 8;
+          const unsigned shared_address = (unsigned)__cvta_generic_to_shared(address);
+          asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                       : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3]) : "r"(shared_address));
+        } else
+#endif
+        {
+          const __half* x = xs + (16 * i + g8) * TF_EXL3_XS + 16 * r + 2 * t4;
+          a[0] = *reinterpret_cast<const uint32_t*>(x);
+          a[1] = *reinterpret_cast<const uint32_t*>(x + 8 * TF_EXL3_XS);
+          a[2] = *reinterpret_cast<const uint32_t*>(x + 8);
+          a[3] = *reinterpret_cast<const uint32_t*>(x + 8 * TF_EXL3_XS + 8);
+        }
         tf_exl3_mma(acc[i][0], a, b[0][0], b[0][1]);
         tf_exl3_mma(acc[i][1], a, b[1][0], b[1][1]);
       }

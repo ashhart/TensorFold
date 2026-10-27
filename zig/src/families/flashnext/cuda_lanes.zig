@@ -28,18 +28,18 @@ pub fn Namespace(comptime Tri: type) type {
     return struct {
         pub const model_type = "qwen4_exp";
         pub const tp_draft_snapshots = false;
-        pub const formats: []const []const u8 = &.{ "mlx-q4g32", "modelopt-mixed" };
+        pub const formats: []const []const u8 = &.{ "mlx-q4g32", "modelopt-mixed", @import("exl3/pack/cuda_exl3_config.zig").format };
         // the model's window: past 2,048 keys the block indexer picks each row's 512 best blocks of 4 (cuda_batch.zig)
         pub const default_context: i64 = @intCast(prompt.max_tokens);
         // a prompt runs on the batched pass in chunks of this many rows, one a prefill_step: no staggered segments
         pub const max_segments: u32 = 1;
         pub const prompt_rows: u32 = @intCast(prompt.batch.default_chunk);
         /// The prompt cache's copies of a stream's state (cuda_snap.zig), called with `Loaded.target`.
-        pub const snap_bytes = snapBytes;
+        pub const snap_bytes = copies.bytes;
         pub const snap_repeat_min: u32 = 16;
-        pub const snap_save = snapSave;
-        pub const snap_restore = snapRestore;
-        pub const snap_drop = snapDrop;
+        pub const snap_save = copies.save;
+        pub const snap_restore = copies.restore;
+        pub const snap_drop = copies.drop;
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
         pub const window_rows = kvl.window_rows;
         pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
@@ -57,7 +57,10 @@ pub fn Namespace(comptime Tri: type) type {
             pub const min_gap: u32 = 256;
             pub const min_prompt: u32 = 512;
         };
-        pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
+
+        pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551, kv8: bool = false };
+        pub const preallocates_lanes = false;
+
         /// Living Weights' learner (--slide): lessons put neurons in each layer's pocket beside its shared expert.
         pub const slide = slide_mod.Slide(Tri);
         /// The first file a lesson would rewrite through a link, or null: a teaching copy may hard-link the others.
@@ -79,6 +82,10 @@ pub fn Namespace(comptime Tri: type) type {
             stream_bytes: usize,
             /// Every stream allocates its own sequence; none rides on the engine's.
             free_streams: u32 = 0,
+            /// Kept prompt states in pinned host memory (cuda_snap.on_host): the native host budgets them there.
+            host_snaps: bool = false,
+            /// The prefill step when the prompt arithmetic depends on the chunk cuts (EXL3): states keep on its starts
+            snap_grid: u32 = 0,
             ctx: *anyopaque,
             deinit: *const fn (*anyopaque) void,
             lone: ?LoneRun = null,
@@ -134,6 +141,7 @@ pub fn Namespace(comptime Tri: type) type {
         };
 
         const Ops = mtp.Ops(Tri);
+        const copies = @import("cuda_lanes_snap.zig").Copies(of);
 
         pub const Cuda = struct {
             gpa: std.mem.Allocator,
@@ -142,6 +150,8 @@ pub fn Namespace(comptime Tri: type) type {
             vision: ?*@import("cuda_images.zig").Vision = null,
             ranks: ?*ranks.Session = null,
             head: ?*mtp.Head = null,
+            profile: ?@import("exl3/offload/cuda_exl3_frequency_state.zig").State = null,
+            profile_counts: ?@import("exl3/offload/cuda_exl3_frequency.zig").Counts = null,
             depth: usize = mtp.default_depth,
             confidence: f64 = mtp.default_confidence,
             /// A captured Triton set (TENSORFOLD_CUDA_KERNELS) for comparison, else null: our own glue.
@@ -202,7 +212,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .score = @import("cuda_score.zig").Hook(Cuda, Tri).call,
                     .first_masked = firstMaskedFn,
                 };
-                const ranked_table = @import("cuda_score.zig").withoutScore(scoring_table);
+                const ranked_table = comptime @import("cuda_score.zig").withoutScore(scoring_table); // static: backend() returns its address
                 return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 
@@ -320,6 +330,9 @@ pub fn Namespace(comptime Tri: type) type {
                 };
                 const last = stop == ids.len;
                 self.engine.ngram.warmAhead(ids, stop, @min(ids.len, stop + self.engine.chunk));
+                const previous_telemetry_phase = self.engine.telemetry.forward_phase;
+                self.engine.telemetry.forward_phase = .prefill;
+                defer self.engine.telemetry.forward_phase = previous_telemetry_phase;
                 if (l.draft) |*d| {
                     try self.ops().prefillChunk(&l.seq, d, ids, at, stop);
                 } else if (self.ranks) |r| {
@@ -354,6 +367,7 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn release(p: *anyopaque) void {
             const own: *Cuda = @ptrCast(@alignCast(p));
             cuda.completion.drain(own.engine.driver, own.stream, "flashnext: release did not drain");
+            if (own.profile) |*profile| profile.save(own);
             var it = own.lanes.valueIterator();
             while (it.next()) |l| dropLane(own, l);
             own.lanes.deinit(own.gpa);
@@ -367,6 +381,7 @@ pub fn Namespace(comptime Tri: type) type {
             if (own.set) |*x| x.deinit();
             own.glue.deinit();
             own.stream.deinit();
+            if (own.profile) |*profile| profile.deinit();
             own.gpa.destroy(own);
         }
 
@@ -544,7 +559,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         test {
             _ = @import("cuda_images_test.zig").Cases(Cuda, Cuda.open, dropLane);
-            _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snapRestore, dropLane);
+            _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, copies.restore, dropLane);
             _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
         }
@@ -559,42 +574,6 @@ pub fn Namespace(comptime Tri: type) type {
                 _ = env.setenv("TF_FLASHNEXT_CHUNK", bad, 1);
                 try std.testing.expectError(error.BadChunk, open(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));
             }
-        }
-
-        // -- the prompt cache's copies ------------------------------------------------------------------------
-
-        fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-            return snap.bytes(at, of(ptr).head != null);
-        }
-
-        /// The owner stream's state, its prompt pass standing at `at` (a drafting stream's with the head's rows).
-        fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
-            const self = of(ptr);
-            const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
-            const l = try self.lane(s);
-            if (l.seq.fed != at) return error.NotAtMark;
-            if (self.ranks) |r| {
-                if (l.draft != null) return error.TensorRankDraftSnapshotUnavailable;
-                return try r.save(&l.seq);
-            }
-            return try snap.save(self.gpa, self.engine.driver, self.stream, &l.seq, if (l.draft) |*d| d else null);
-        }
-
-        fn snapRestore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
-            const self = of(ptr);
-            const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
-            const l = try self.lane(s);
-            if (self.ranks) |r| {
-                if (l.draft != null) return error.NoHeadState;
-                return r.restore(&l.seq, @ptrCast(@alignCast(saved)));
-            }
-            try snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, @ptrCast(@alignCast(saved)));
-        }
-
-        fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
-            const self = of(ptr);
-            if (self.ranks) |r| return r.dropSaved(@ptrCast(@alignCast(saved)));
-            snap.drop(self.gpa, self.stream, @ptrCast(@alignCast(saved)));
         }
     };
 }

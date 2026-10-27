@@ -6,6 +6,7 @@ const aot = cuda.aot;
 
 pub const embed = @import("cuda_embed.zig");
 pub const projection = @import("cuda_projection.zig");
+pub const exl3 = @import("exl3/model/cuda_exl3.zig");
 pub const rank_engine = @import("cuda_rank_engine.zig");
 pub const collective = @import("cuda_collective.zig");
 pub const rank_wire = @import("cuda_rank_wire.zig");
@@ -22,8 +23,11 @@ pub const moe = @import("cuda_moe.zig");
 pub const attn = @import("cuda_attn.zig");
 pub const ple = @import("cuda_ple.zig");
 pub const ple_check = @import("cuda_ple_check.zig");
+/// An EXL3 pack's n-gram table (cuda_ple.Ngram's `.exl3` format)
+pub const exl3_ple = @import("exl3/model/cuda_exl3_ple.zig");
 pub const mix = @import("cuda_mix.zig");
 pub const prompt = @import("cuda_prompt.zig");
+pub const snapshot = @import("cuda_snap.zig");
 /// The row-by-row reference path, for flashnext-prompt
 pub const row_path = @import("cuda_rows.zig");
 /// The MTP head's drafts: its forward, the chain, the verify window's rows and their rollback
@@ -32,6 +36,7 @@ pub const mtp = @import("cuda_mtp.zig");
 pub const pocket = @import("cuda_pocket.zig");
 /// Living Weights' trainer over the batched pass
 pub const train = @import("cuda_train.zig");
+pub const exl3_pool = @import("exl3/offload/cuda_exl3_pool.zig");
 /// Decisions' label scores (the lanes backend's `score`)
 pub const score = @import("cuda_score.zig");
 pub const native = @import("cuda_lanes.zig").Namespace(Tri);
@@ -430,6 +435,7 @@ test {
     _ = @import("cuda_pages.zig");
     _ = @import("cuda_kv_lanes.zig");
     _ = @import("cuda_config.zig");
+    _ = @import("exl3/model/cuda_exl3.zig");
     _ = @import("cuda_projection_load.zig");
     _ = @import("cuda_rank_engine.zig");
     _ = @import("cuda_round_graph.zig");
@@ -444,6 +450,10 @@ test {
     _ = pocket;
     _ = train;
     _ = @import("living.zig");
+}
+
+test "exl3: dispatch host contracts" {
+    _ = @import("exl3/model/cuda_exl3_dispatch_test.zig");
 }
 
 test "embed grid is one program per row and per group of 32" {

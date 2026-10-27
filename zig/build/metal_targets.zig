@@ -138,7 +138,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, test_step: *std.Build.Step) void {
     const metal_std = b.option([]const u8, "metal-std", "Metal language version (default: MLX's for this macOS)") orelse mlxMetalStd(b);
 
-    // MLX's mx.fast.metal_kernel JIT: MTLCompileOptions mathMode safe, fp32 functions fast (the default), its...
+    // MLX's mx.fast.metal_kernel JIT: MTLCompileOptions mathMode safe, fp32 functions fast (the default), its.
     const mlx_flags = [_][]const u8{ b.fmt("-std={s}", .{metal_std}), "-fmetal-math-mode=safe", "-fmetal-math-fp32-functions=fast" };
     const lib = metallib(b, "tensorfold", &kernels, &mlx_flags);
     const lib_install = b.addInstallFile(lib, "lib/tensorfold.metallib");
@@ -242,7 +242,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     });
     // The engine: kernel sources compiled at run time (MLX's options), the families, the lane core.
     const sources = mods.sources;
-    // Nemotron's packed kernels, compiled offline and embedded: the runtime fallback when this macOS's compiler...
+    // Nemotron's packed kernels, compiled offline and embedded: the runtime fallback when this macOS's compiler.
     const packed_lib = metallib(b, "nemotron_packed", &nemotron_packed, &mlx_flags);
     b.getInstallStep().dependOn(&b.addInstallFile(packed_lib, "lib/nemotron_packed.metallib").step);
     sources.addImport("nemotron_packed_metallib", embedded(b, packed_lib, "nemotron_packed.metallib"));

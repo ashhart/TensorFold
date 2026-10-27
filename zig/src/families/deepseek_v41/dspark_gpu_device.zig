@@ -229,7 +229,7 @@ pub fn hostStep(x: *GpuPass, r: *run.Runner, logits_t: calls.Tensor, hid_t: call
     const all = try gpa.alloc(f32, packed_.len * Wd);
     defer gpa.free(all);
     try cuda.DeviceBuffer.download(.{ .d = r.d, .ptr = dst, .len = 4 * all.len }, 0, std.mem.sliceAsBytes(all));
-    // [W][n][2k] -> per row: rank 0's k, rank 1's k, ...
+    // [W][n][2k] -> per row: rank 0's k, rank 1's k.
     const c = Wd * k;
     for (0..Wd) |w| for (0..n) |i| {
         const src_row = all[(w * n + i) * 2 * k ..][0 .. 2 * k];

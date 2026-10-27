@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 const calls = @import("block_calls.zig");
 const aot = cuda.aot;
 
-/// Triton's pointer type of a dtype ("*bf16" ...).
+/// Triton's pointer type of a dtype ("*bf16").
 pub fn ptrType(dt: calls.Dt) []const u8 {
     return switch (dt) {
         .bf16 => "*bf16",

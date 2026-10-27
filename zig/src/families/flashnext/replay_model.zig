@@ -264,7 +264,7 @@ pub const Model = struct {
                 const tp = r.tp.?;
                 const k0: usize = tp.rank;
                 if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
-                // [q 64 tiles | k 64 | v 192 | z 192 | b, a 3]: this Mac's q, k, v and z heads, b and a whole, 8 K...
+                // [q 64 tiles | k 64 | v 192 | z 192 | b, a 3]: this Mac's q, k, v and z heads, b and a whole, 8 K.
                 const cols = [_][2]usize{ .{ 32 * k0, 32 }, .{ 64 + 32 * k0, 32 }, .{ 128 + 96 * k0, 96 }, .{ 320 + 96 * k0, 96 }, .{ 512, 3 } };
                 const pj = try L.proj.recorded();
                 try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.in", &.{ t.mixed, t.xs, pj.wq, pj.sbt, t.mdims }, t.p, &cols, 8, null);
@@ -373,10 +373,10 @@ pub const Model = struct {
         r.argmax(.{ .b = t.logits.b }, .{ .b = t.vocab.b }, .{ .b = t.picks.b }, null, rows);
     }
 
-    /// The MTP head on `rows` rows: each row's next token and the streams it follows (target or head output, row by...
+    /// The MTP head on `rows` rows: each row's next token and the streams it follows (target or head output, row by).
     pub const mtpRun = @import("replay_mtp.zig").mtpRun;
 
-    /// Encode the MTP head at its position on `rows` rows (tokens from `ids`), its draft written to `out`; meta in...
+    /// Encode the MTP head at its position on `rows` rows (tokens from `ids`), its draft written to `out`; meta in.
     pub const mtpEncode = @import("replay_mtp.zig").mtpEncode;
 
     pub const mtpMeta = @import("replay_mtp.zig").mtpMeta;

@@ -67,6 +67,7 @@ pub const exl3_experts = @import("exl3_experts.zig");
 pub const exl3_upload = @import("exl3_upload.zig");
 pub const exl3_candidate = @import("exl3_candidate.zig");
 pub const exl3_grouped = @import("exl3_grouped.zig");
+pub const exl3_pool = @import("exl3_pool.zig");
 
 pub const arena = @import("arena.zig");
 pub const pack = @import("pack.zig");
@@ -111,6 +112,7 @@ test {
     _ = exl3;
     _ = exl3_experts;
     _ = exl3_upload;
+    _ = exl3_pool;
     _ = @import("modelopt.zig");
     _ = @import("ck.zig");
     _ = @import("tp_watch.zig");

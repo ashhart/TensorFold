@@ -198,7 +198,7 @@ pub const Drafter = struct {
         s.v_rows = 0;
     }
 
-    /// A verify on slot `i` wrote `rows` tap rows at row `row0` of taps_step, for positions pos0...
+    /// A verify on slot `i` wrote `rows` tap rows at row `row0` of taps_step, for positions pos0.
     pub fn noteVerify(dr: *Drafter, i: u32, row0: usize, rows: usize, pos0: usize, first: bool) !void {
         if (first) dr.verifies += 1; // a shared verify's parts share one
         const s = try dr.slot(i);

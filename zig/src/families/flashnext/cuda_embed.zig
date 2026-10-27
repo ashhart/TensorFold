@@ -83,6 +83,8 @@ pub const Table = struct {
     rows: usize,
     dims: usize,
     dense: bool = false,
+    /// A dense table kept in pinned host memory the kernels read in place (`w` borrows its device address).
+    host: ?cuda.HostBuffer = null,
 
     /// Copies the three tensors. `dims` is hidden size (eight values per stored word).
     pub fn upload(d: *const cuda.Driver, weight: Tensor, scales: Tensor, biases: Tensor) !Table {
@@ -111,7 +113,22 @@ pub const Table = struct {
         return .{ .w = try cuda.DeviceBuffer.fromHost(d, weight.bytes), .s = zero, .b = zero, .rows = weight.dim(0), .dims = weight.dim(1), .dense = true };
     }
 
+    /// Own a dense table in mapped host memory instead of VRAM: the gather reads its rows over PCIe.
+    pub fn uploadDenseHost(d: *const cuda.Driver, weight: Tensor) !Table {
+        if (weight.dtype != .bf16 or weight.rank != 2 or weight.dim(0) == 0 or weight.dim(1) == 0 or weight.dim(1) % 8 != 0)
+            return error.UnexpectedTensor;
+        const count = try std.math.mul(usize, weight.dim(0), weight.dim(1));
+        if (weight.bytes.len != try std.math.mul(usize, count, 2)) return error.UnexpectedTensor;
+        var host = try cuda.HostBuffer.allocMapped(d, weight.bytes.len);
+        errdefer host.free();
+        @memcpy(host.bytes, weight.bytes);
+        const zero: cuda.DeviceBuffer = .{ .d = d, .ptr = 0, .len = 0 };
+        const w: cuda.DeviceBuffer = .{ .d = d, .ptr = try host.device(), .len = weight.bytes.len, .borrowed = true };
+        return .{ .w = w, .s = zero, .b = zero, .rows = weight.dim(0), .dims = weight.dim(1), .dense = true, .host = host };
+    }
+
     pub fn deinit(self: *Table) void {
+        if (self.host) |*h| h.free();
         self.w.free();
         self.s.free();
         self.b.free();

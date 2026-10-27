@@ -77,6 +77,15 @@ class SourceNames(unittest.TestCase):
         result = self.parse(check.HEADERS / "exl3_layout.cpp")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_exl3_linear_reset_covers_dirty_reused_counters_without_touching_guards(self):
+        executable = self.root / "linear_reset"
+        result = subprocess.run([self.compiler, "-std=c++20", "-fsanitize=address,undefined",
+                                 str(check.HEADERS / "exl3_linear_reset.cpp"), "-o", str(executable)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run([str(executable)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_layout_rejects_wrong_coordinate(self):
         header = (check.ROOT / "zig/kernels/cuda/exl3_decode.cuh").read_text()
         bad = header.replace("return (lane >> 2) + 8 * (j >> 2);", "return (lane >> 2);", 1)

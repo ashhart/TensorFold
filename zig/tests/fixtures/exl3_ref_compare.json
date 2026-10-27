@@ -1,0 +1,1907 @@
+{
+ "gen": {
+  "ids16": {
+   "ref": [
+    561,
+    6511,
+    314,
+    6124,
+    369,
+    25358,
+    13,
+    1049,
+    369,
+    3750,
+    364,
+    1141,
+    6278,
+    84713,
+    13,
+    561,
+    6511,
+    314,
+    8071,
+    369,
+    66463,
+    13,
+    1049,
+    557
+   ],
+   "ours": [
+    561,
+    6511,
+    314,
+    6124,
+    369,
+    25358,
+    13,
+    1049,
+    369,
+    3750,
+    364,
+    1141,
+    5269,
+    13,
+    561,
+    6511,
+    314,
+    14898,
+    369,
+    21047,
+    13,
+    1049,
+    369,
+    3750
+   ],
+   "agree_prefix": 12,
+   "same_positions": 12,
+   "n": 24,
+   "first_divergence": 12,
+   "ref_top5_at_divergence": [
+    [
+     6278,
+     17.375
+    ],
+    [
+     86088,
+     17.125
+    ],
+    [
+     5269,
+     16.75
+    ],
+    [
+     45092,
+     16.625
+    ],
+    [
+     81410,
+     16.375
+    ]
+   ],
+   "ref_logit_of_our_pick": 16.75,
+   "ref_margin_top1_minus_our_pick": 0.625
+  },
+  "The capital of France is": {
+   "ref": [
+    11751,
+    13,
+    561,
+    6511,
+    314,
+    9564,
+    369,
+    19241,
+    13,
+    561,
+    6511,
+    314,
+    14898,
+    369,
+    21047,
+    13,
+    561,
+    6511,
+    314,
+    17163,
+    369,
+    23327,
+    13,
+    561
+   ],
+   "ours": [
+    11751,
+    13,
+    561,
+    6511,
+    314,
+    9564,
+    369,
+    19241,
+    13,
+    561,
+    6511,
+    314,
+    14898,
+    369,
+    21047,
+    13,
+    561,
+    6511,
+    314,
+    17163,
+    369,
+    23327,
+    13,
+    561
+   ],
+   "agree_prefix": 24,
+   "same_positions": 24,
+   "n": 24,
+   "first_divergence": null
+  },
+  "Once upon a time, in a small village by the sea": {
+   "ref": [
+    11,
+    1017,
+    11815,
+    264,
+    3777,
+    7914,
+    6725,
+    8105,
+    13,
+    8105,
+    557,
+    264,
+    21520,
+    321,
+    2993,
+    66949,
+    7914,
+    852,
+    9939,
+    310,
+    12804,
+    279,
+    1814,
+    2094
+   ],
+   "ours": [
+    11,
+    1017,
+    11815,
+    264,
+    3777,
+    7914,
+    6725,
+    8105,
+    13,
+    8105,
+    557,
+    264,
+    21520,
+    321,
+    2993,
+    66949,
+    7914,
+    852,
+    9939,
+    310,
+    12804,
+    279,
+    1814,
+    2094
+   ],
+   "agree_prefix": 24,
+   "same_positions": 24,
+   "n": 24,
+   "first_divergence": null
+  }
+ },
+ "tf": {
+  "ids16@tf48.log": {
+   "summary": {
+    "positions": 16,
+    "ref_eq_gpu": 16,
+    "ref_eq_oracle": 16,
+    "gpu_eq_oracle": 16,
+    "top5_set_eq": 14,
+    "max_abs_ref_gpu_top1_logit": 0.35900000000000176,
+    "mean_abs_ref_gpu_top1_logit": 0.10731250000000025,
+    "max_abs_ref_oracle_top1_logit": 0.3359999999999985,
+    "mean_abs_ref_oracle_top1_logit": 0.10831250000000014
+   },
+   "rows": [
+    {
+     "pos": 0,
+     "input": 760,
+     "gpu": 20438,
+     "gpu_logit": 12.414,
+     "oracle": 20438,
+     "oracle_logit": 12.411,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      20438,
+      220,
+      2614,
+      1414,
+      3049
+     ],
+     "ref_top1": 20438,
+     "ref_logit": 12.4375,
+     "ref_top5": [
+      20438,
+      220,
+      2614,
+      1414,
+      3049
+     ],
+     "ref_top5_logits": [
+      12.4375,
+      12.0625,
+      11.8125,
+      11.3125,
+      11.0625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.0235000000000003,
+     "abs_ref_oracle": 0.026500000000000412,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 1,
+     "input": 6511,
+     "gpu": 314,
+     "gpu_logit": 16.234,
+     "oracle": 314,
+     "oracle_logit": 16.223,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      314,
+      3177,
+      2695,
+      5759,
+      1954
+     ],
+     "ref_top1": 314,
+     "ref_logit": 16.25,
+     "ref_top5": [
+      314,
+      3177,
+      2695,
+      5759,
+      1954
+     ],
+     "ref_top5_logits": [
+      16.25,
+      15.1875,
+      14.625,
+      13.625,
+      13.5625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.015999999999998238,
+     "abs_ref_oracle": 0.027000000000001023,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 2,
+     "input": 314,
+     "gpu": 279,
+     "gpu_logit": 15.016,
+     "oracle": 279,
+     "oracle_logit": 15.027,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      279,
+      9338,
+      8071,
+      8100,
+      13437
+     ],
+     "ref_top1": 279,
+     "ref_logit": 15.0625,
+     "ref_top5": [
+      279,
+      9338,
+      8071,
+      13437,
+      6535
+     ],
+     "ref_top5_logits": [
+      15.0625,
+      12.75,
+      12.25,
+      12.0625,
+      11.875
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.046499999999999986,
+     "abs_ref_oracle": 0.03550000000000075,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 3,
+     "input": 9338,
+     "gpu": 369,
+     "gpu_logit": 17.766,
+     "oracle": 369,
+     "oracle_logit": 17.771,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      369,
+      11,
+      682,
+      271,
+      13
+     ],
+     "ref_top1": 369,
+     "ref_logit": 17.875,
+     "ref_top5": [
+      369,
+      11,
+      682,
+      271,
+      13
+     ],
+     "ref_top5_logits": [
+      17.875,
+      17.5,
+      14.9375,
+      14.625,
+      14.375
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.10900000000000176,
+     "abs_ref_oracle": 0.1039999999999992,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 4,
+     "input": 369,
+     "gpu": 11751,
+     "gpu_logit": 16.391,
+     "oracle": 11751,
+     "oracle_logit": 16.398,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      11751,
+      271,
+      264,
+      6924,
+      1259
+     ],
+     "ref_top1": 11751,
+     "ref_logit": 16.5,
+     "ref_top5": [
+      11751,
+      271,
+      6924,
+      264,
+      1259
+     ],
+     "ref_top5_logits": [
+      16.5,
+      14.3125,
+      13.5,
+      13.5,
+      13.0
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.10900000000000176,
+     "abs_ref_oracle": 0.10200000000000031,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 5,
+     "input": 11751,
+     "gpu": 13,
+     "gpu_logit": 17.547,
+     "oracle": 13,
+     "oracle_logit": 17.572,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      13,
+      11,
+      271,
+      321,
+      198
+     ],
+     "ref_top1": 13,
+     "ref_logit": 17.875,
+     "ref_top5": [
+      13,
+      11,
+      321,
+      271,
+      198
+     ],
+     "ref_top5_logits": [
+      17.875,
+      17.375,
+      14.3125,
+      14.1875,
+      13.3125
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.3279999999999994,
+     "abs_ref_oracle": 0.3030000000000008,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 6,
+     "input": 13,
+     "gpu": 561,
+     "gpu_logit": 15.695,
+     "oracle": 561,
+     "oracle_logit": 15.741,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      561,
+      11751,
+      1049,
+      271,
+      1061
+     ],
+     "ref_top1": 561,
+     "ref_logit": 15.75,
+     "ref_top5": [
+      561,
+      11751,
+      1049,
+      1061,
+      198
+     ],
+     "ref_top5_logits": [
+      15.75,
+      15.625,
+      13.8125,
+      13.125,
+      13.0
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.054999999999999716,
+     "abs_ref_oracle": 0.009000000000000341,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 7,
+     "input": 1049,
+     "gpu": 369,
+     "gpu_logit": 19.75,
+     "oracle": 369,
+     "oracle_logit": 19.739,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      369,
+      579,
+      682,
+      557,
+      725
+     ],
+     "ref_top1": 369,
+     "ref_logit": 19.625,
+     "ref_top5": [
+      369,
+      682,
+      579,
+      557,
+      725
+     ],
+     "ref_top5_logits": [
+      19.625,
+      16.375,
+      16.375,
+      15.8125,
+      15.4375
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.125,
+     "abs_ref_oracle": 0.11400000000000077,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 8,
+     "input": 369,
+     "gpu": 799,
+     "gpu_logit": 19.484,
+     "oracle": 799,
+     "oracle_logit": 19.619,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      799,
+      264,
+      279,
+      7172,
+      29099
+     ],
+     "ref_top1": 799,
+     "ref_logit": 19.375,
+     "ref_top5": [
+      799,
+      279,
+      264,
+      7172,
+      29099
+     ],
+     "ref_top5_logits": [
+      19.375,
+      17.0,
+      17.0,
+      16.75,
+      16.625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.10900000000000176,
+     "abs_ref_oracle": 0.24399999999999977,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 9,
+     "input": 3750,
+     "gpu": 364,
+     "gpu_logit": 20.516,
+     "oracle": 364,
+     "oracle_logit": 20.627,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      364,
+      430,
+      14801,
+      310,
+      421
+     ],
+     "ref_top1": 364,
+     "ref_logit": 20.625,
+     "ref_top5": [
+      364,
+      430,
+      14801,
+      310,
+      421
+     ],
+     "ref_top5_logits": [
+      20.625,
+      17.625,
+      16.625,
+      16.125,
+      14.5
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.10900000000000176,
+     "abs_ref_oracle": 0.0019999999999988916,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 10,
+     "input": 364,
+     "gpu": 1141,
+     "gpu_logit": 19.828,
+     "oracle": 1141,
+     "oracle_logit": 19.862,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      1141,
+      279,
+      57902,
+      25438,
+      1599
+     ],
+     "ref_top1": 1141,
+     "ref_logit": 19.75,
+     "ref_top5": [
+      1141,
+      279,
+      57902,
+      25438,
+      1599
+     ],
+     "ref_top5_logits": [
+      19.75,
+      18.25,
+      16.5,
+      16.25,
+      15.6875
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.0779999999999994,
+     "abs_ref_oracle": 0.11199999999999832,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 11,
+     "input": 279,
+     "gpu": 242476,
+     "gpu_logit": 19.688,
+     "oracle": 242476,
+     "oracle_logit": 19.647,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      242476,
+      9440,
+      25438,
+      2614,
+      10919
+     ],
+     "ref_top1": 242476,
+     "ref_logit": 19.75,
+     "ref_top5": [
+      242476,
+      9440,
+      25438,
+      2614,
+      10919
+     ],
+     "ref_top5_logits": [
+      19.75,
+      16.375,
+      13.9375,
+      13.625,
+      13.3125
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.062000000000001165,
+     "abs_ref_oracle": 0.10300000000000153,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 12,
+     "input": 242476,
+     "gpu": 300,
+     "gpu_logit": 20.766,
+     "oracle": 300,
+     "oracle_logit": 20.789,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      300,
+      273,
+      598,
+      75,
+      1076
+     ],
+     "ref_top1": 300,
+     "ref_logit": 21.125,
+     "ref_top5": [
+      300,
+      273,
+      598,
+      75,
+      1076
+     ],
+     "ref_top5_logits": [
+      21.125,
+      14.4375,
+      11.9375,
+      11.875,
+      11.4375
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.35900000000000176,
+     "abs_ref_oracle": 0.3359999999999985,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 13,
+     "input": 300,
+     "gpu": 21262,
+     "gpu_logit": 20.094,
+     "oracle": 21262,
+     "oracle_logit": 20.022,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      21262,
+      20618,
+      198,
+      13,
+      271
+     ],
+     "ref_top1": 21262,
+     "ref_logit": 20.125,
+     "ref_top5": [
+      21262,
+      20618,
+      198,
+      13,
+      271
+     ],
+     "ref_top5_logits": [
+      20.125,
+      14.9375,
+      13.6875,
+      12.875,
+      12.625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.030999999999998806,
+     "abs_ref_oracle": 0.10300000000000153,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 14,
+     "input": 21262,
+     "gpu": 13,
+     "gpu_logit": 19.734,
+     "oracle": 13,
+     "oracle_logit": 19.794,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      13,
+      321,
+      11,
+      248046,
+      198
+     ],
+     "ref_top1": 13,
+     "ref_logit": 19.75,
+     "ref_top5": [
+      13,
+      321,
+      11,
+      248046,
+      198
+     ],
+     "ref_top5_logits": [
+      19.75,
+      19.375,
+      19.375,
+      14.4375,
+      14.1875
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.015999999999998238,
+     "abs_ref_oracle": 0.04400000000000048,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 15,
+     "input": 13,
+     "gpu": 561,
+     "gpu_logit": 15.859,
+     "oracle": 561,
+     "oracle_logit": 15.932,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      561,
+      271,
+      3437,
+      198,
+      11751
+     ],
+     "ref_top1": 561,
+     "ref_logit": 16.0,
+     "ref_top5": [
+      561,
+      3437,
+      271,
+      198,
+      11751
+     ],
+     "ref_top5_logits": [
+      16.0,
+      14.9375,
+      14.8125,
+      14.125,
+      13.5625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.14100000000000001,
+     "abs_ref_oracle": 0.06799999999999962,
+     "top5_set_eq": true
+    }
+   ]
+  },
+  "ids16@tf48_div.log": {
+   "summary": {
+    "positions": 28,
+    "ref_eq_gpu": 27,
+    "ref_eq_oracle": 27,
+    "gpu_eq_oracle": 26,
+    "top5_set_eq": 20,
+    "max_abs_ref_gpu_top1_logit": 0.35900000000000176,
+    "mean_abs_ref_gpu_top1_logit": 0.10070370370370355,
+    "max_abs_ref_oracle_top1_logit": 0.3359999999999985,
+    "mean_abs_ref_oracle_top1_logit": 0.11307407407407417
+   },
+   "rows": [
+    {
+     "pos": 0,
+     "input": 760,
+     "gpu": 20438,
+     "gpu_logit": 12.414,
+     "oracle": 20438,
+     "oracle_logit": 12.411,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      20438,
+      220,
+      2614,
+      1414,
+      3049
+     ],
+     "ref_top1": 20438,
+     "ref_logit": 12.4375,
+     "ref_top5": [
+      20438,
+      220,
+      2614,
+      1414,
+      3049
+     ],
+     "ref_top5_logits": [
+      12.4375,
+      12.0625,
+      11.8125,
+      11.3125,
+      11.0625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.0235000000000003,
+     "abs_ref_oracle": 0.026500000000000412,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 1,
+     "input": 6511,
+     "gpu": 314,
+     "gpu_logit": 16.234,
+     "oracle": 314,
+     "oracle_logit": 16.223,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      314,
+      3177,
+      2695,
+      5759,
+      1954
+     ],
+     "ref_top1": 314,
+     "ref_logit": 16.25,
+     "ref_top5": [
+      314,
+      3177,
+      2695,
+      5759,
+      1954
+     ],
+     "ref_top5_logits": [
+      16.25,
+      15.1875,
+      14.625,
+      13.625,
+      13.5625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.015999999999998238,
+     "abs_ref_oracle": 0.027000000000001023,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 2,
+     "input": 314,
+     "gpu": 279,
+     "gpu_logit": 15.016,
+     "oracle": 279,
+     "oracle_logit": 15.027,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      279,
+      9338,
+      8071,
+      8100,
+      13437
+     ],
+     "ref_top1": 279,
+     "ref_logit": 15.0625,
+     "ref_top5": [
+      279,
+      9338,
+      8071,
+      13437,
+      6535
+     ],
+     "ref_top5_logits": [
+      15.0625,
+      12.75,
+      12.25,
+      12.0625,
+      11.875
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.046499999999999986,
+     "abs_ref_oracle": 0.03550000000000075,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 3,
+     "input": 9338,
+     "gpu": 369,
+     "gpu_logit": 17.766,
+     "oracle": 369,
+     "oracle_logit": 17.771,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      369,
+      11,
+      682,
+      271,
+      13
+     ],
+     "ref_top1": 369,
+     "ref_logit": 17.875,
+     "ref_top5": [
+      369,
+      11,
+      682,
+      271,
+      13
+     ],
+     "ref_top5_logits": [
+      17.875,
+      17.5,
+      14.9375,
+      14.625,
+      14.375
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.10900000000000176,
+     "abs_ref_oracle": 0.1039999999999992,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 4,
+     "input": 369,
+     "gpu": 11751,
+     "gpu_logit": 16.391,
+     "oracle": 11751,
+     "oracle_logit": 16.398,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      11751,
+      271,
+      264,
+      6924,
+      1259
+     ],
+     "ref_top1": 11751,
+     "ref_logit": 16.5,
+     "ref_top5": [
+      11751,
+      271,
+      6924,
+      264,
+      1259
+     ],
+     "ref_top5_logits": [
+      16.5,
+      14.3125,
+      13.5,
+      13.5,
+      13.0
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.10900000000000176,
+     "abs_ref_oracle": 0.10200000000000031,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 5,
+     "input": 11751,
+     "gpu": 13,
+     "gpu_logit": 17.547,
+     "oracle": 13,
+     "oracle_logit": 17.572,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      13,
+      11,
+      271,
+      321,
+      198
+     ],
+     "ref_top1": 13,
+     "ref_logit": 17.875,
+     "ref_top5": [
+      13,
+      11,
+      321,
+      271,
+      198
+     ],
+     "ref_top5_logits": [
+      17.875,
+      17.375,
+      14.3125,
+      14.1875,
+      13.3125
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.3279999999999994,
+     "abs_ref_oracle": 0.3030000000000008,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 6,
+     "input": 13,
+     "gpu": 561,
+     "gpu_logit": 15.695,
+     "oracle": 561,
+     "oracle_logit": 15.741,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      561,
+      11751,
+      1049,
+      271,
+      1061
+     ],
+     "ref_top1": 561,
+     "ref_logit": 15.75,
+     "ref_top5": [
+      561,
+      11751,
+      1049,
+      1061,
+      198
+     ],
+     "ref_top5_logits": [
+      15.75,
+      15.625,
+      13.8125,
+      13.125,
+      13.0
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.054999999999999716,
+     "abs_ref_oracle": 0.009000000000000341,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 7,
+     "input": 1049,
+     "gpu": 369,
+     "gpu_logit": 19.75,
+     "oracle": 369,
+     "oracle_logit": 19.739,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      369,
+      579,
+      682,
+      557,
+      725
+     ],
+     "ref_top1": 369,
+     "ref_logit": 19.625,
+     "ref_top5": [
+      369,
+      682,
+      579,
+      557,
+      725
+     ],
+     "ref_top5_logits": [
+      19.625,
+      16.375,
+      16.375,
+      15.8125,
+      15.4375
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.125,
+     "abs_ref_oracle": 0.11400000000000077,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 8,
+     "input": 369,
+     "gpu": 799,
+     "gpu_logit": 19.484,
+     "oracle": 799,
+     "oracle_logit": 19.619,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      799,
+      264,
+      279,
+      7172,
+      29099
+     ],
+     "ref_top1": 799,
+     "ref_logit": 19.375,
+     "ref_top5": [
+      799,
+      279,
+      264,
+      7172,
+      29099
+     ],
+     "ref_top5_logits": [
+      19.375,
+      17.0,
+      17.0,
+      16.75,
+      16.625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.10900000000000176,
+     "abs_ref_oracle": 0.24399999999999977,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 9,
+     "input": 3750,
+     "gpu": 364,
+     "gpu_logit": 20.516,
+     "oracle": 364,
+     "oracle_logit": 20.627,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      364,
+      430,
+      14801,
+      310,
+      421
+     ],
+     "ref_top1": 364,
+     "ref_logit": 20.625,
+     "ref_top5": [
+      364,
+      430,
+      14801,
+      310,
+      421
+     ],
+     "ref_top5_logits": [
+      20.625,
+      17.625,
+      16.625,
+      16.125,
+      14.5
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.10900000000000176,
+     "abs_ref_oracle": 0.0019999999999988916,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 10,
+     "input": 364,
+     "gpu": 1141,
+     "gpu_logit": 19.828,
+     "oracle": 1141,
+     "oracle_logit": 19.862,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      1141,
+      279,
+      57902,
+      25438,
+      1599
+     ],
+     "ref_top1": 1141,
+     "ref_logit": 19.75,
+     "ref_top5": [
+      1141,
+      279,
+      57902,
+      25438,
+      1599
+     ],
+     "ref_top5_logits": [
+      19.75,
+      18.25,
+      16.5,
+      16.25,
+      15.6875
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.0779999999999994,
+     "abs_ref_oracle": 0.11199999999999832,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 11,
+     "input": 279,
+     "gpu": 242476,
+     "gpu_logit": 19.688,
+     "oracle": 242476,
+     "oracle_logit": 19.647,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      242476,
+      9440,
+      25438,
+      2614,
+      10919
+     ],
+     "ref_top1": 242476,
+     "ref_logit": 19.75,
+     "ref_top5": [
+      242476,
+      9440,
+      25438,
+      2614,
+      10919
+     ],
+     "ref_top5_logits": [
+      19.75,
+      16.375,
+      13.9375,
+      13.625,
+      13.3125
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.062000000000001165,
+     "abs_ref_oracle": 0.10300000000000153,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 12,
+     "input": 242476,
+     "gpu": 300,
+     "gpu_logit": 20.766,
+     "oracle": 300,
+     "oracle_logit": 20.789,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      300,
+      273,
+      598,
+      75,
+      1076
+     ],
+     "ref_top1": 300,
+     "ref_logit": 21.125,
+     "ref_top5": [
+      300,
+      273,
+      598,
+      75,
+      1076
+     ],
+     "ref_top5_logits": [
+      21.125,
+      14.4375,
+      11.9375,
+      11.875,
+      11.4375
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.35900000000000176,
+     "abs_ref_oracle": 0.3359999999999985,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 13,
+     "input": 300,
+     "gpu": 21262,
+     "gpu_logit": 20.094,
+     "oracle": 21262,
+     "oracle_logit": 20.022,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      21262,
+      20618,
+      198,
+      13,
+      271
+     ],
+     "ref_top1": 21262,
+     "ref_logit": 20.125,
+     "ref_top5": [
+      21262,
+      20618,
+      198,
+      13,
+      271
+     ],
+     "ref_top5_logits": [
+      20.125,
+      14.9375,
+      13.6875,
+      12.875,
+      12.625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.030999999999998806,
+     "abs_ref_oracle": 0.10300000000000153,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 14,
+     "input": 21262,
+     "gpu": 13,
+     "gpu_logit": 19.734,
+     "oracle": 13,
+     "oracle_logit": 19.794,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      13,
+      321,
+      11,
+      248046,
+      198
+     ],
+     "ref_top1": 13,
+     "ref_logit": 19.75,
+     "ref_top5": [
+      13,
+      321,
+      11,
+      248046,
+      198
+     ],
+     "ref_top5_logits": [
+      19.75,
+      19.375,
+      19.375,
+      14.4375,
+      14.1875
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.015999999999998238,
+     "abs_ref_oracle": 0.04400000000000048,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 15,
+     "input": 13,
+     "gpu": 561,
+     "gpu_logit": 15.859,
+     "oracle": 561,
+     "oracle_logit": 15.932,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      561,
+      271,
+      3437,
+      198,
+      11751
+     ],
+     "ref_top1": 561,
+     "ref_logit": 16.0,
+     "ref_top5": [
+      561,
+      3437,
+      271,
+      198,
+      11751
+     ],
+     "ref_top5_logits": [
+      16.0,
+      14.9375,
+      14.8125,
+      14.125,
+      13.5625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.14100000000000001,
+     "abs_ref_oracle": 0.06799999999999962,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 16,
+     "input": 561,
+     "gpu": 6511,
+     "gpu_logit": 17.875,
+     "oracle": 6511,
+     "oracle_logit": 18.121,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      6511,
+      9440,
+      242476,
+      3177,
+      8323
+     ],
+     "ref_top1": 6511,
+     "ref_logit": 18.0,
+     "ref_top5": [
+      6511,
+      9440,
+      242476,
+      3177,
+      8323
+     ],
+     "ref_top5_logits": [
+      18.0,
+      15.8125,
+      15.3125,
+      15.1875,
+      13.75
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.125,
+     "abs_ref_oracle": 0.12099999999999866,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 17,
+     "input": 6511,
+     "gpu": 314,
+     "gpu_logit": 20.734,
+     "oracle": 314,
+     "oracle_logit": 20.808,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      314,
+      369,
+      198,
+      695,
+      271
+     ],
+     "ref_top1": 314,
+     "ref_logit": 20.875,
+     "ref_top5": [
+      314,
+      198,
+      369,
+      695,
+      271
+     ],
+     "ref_top5_logits": [
+      20.875,
+      14.625,
+      14.5,
+      14.375,
+      12.625
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.14099999999999824,
+     "abs_ref_oracle": 0.06700000000000017,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 18,
+     "input": 314,
+     "gpu": 6124,
+     "gpu_logit": 18.141,
+     "oracle": 6124,
+     "oracle_logit": 17.961,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      6124,
+      9564,
+      14898,
+      17163,
+      9169
+     ],
+     "ref_top1": 6124,
+     "ref_logit": 18.125,
+     "ref_top5": [
+      6124,
+      9564,
+      14898,
+      17163,
+      9169
+     ],
+     "ref_top5_logits": [
+      18.125,
+      18.0,
+      17.625,
+      17.0,
+      15.25
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.015999999999998238,
+     "abs_ref_oracle": 0.16400000000000148,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 19,
+     "input": 6124,
+     "gpu": 369,
+     "gpu_logit": 21.031,
+     "oracle": 369,
+     "oracle_logit": 21.08,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      369,
+      271,
+      25358,
+      198,
+      11
+     ],
+     "ref_top1": 369,
+     "ref_logit": 20.875,
+     "ref_top5": [
+      369,
+      198,
+      25358,
+      695,
+      11
+     ],
+     "ref_top5_logits": [
+      20.875,
+      14.75,
+      14.5,
+      14.3125,
+      14.125
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.1559999999999988,
+     "abs_ref_oracle": 0.2049999999999983,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 20,
+     "input": 369,
+     "gpu": 25358,
+     "gpu_logit": 19.891,
+     "oracle": 25358,
+     "oracle_logit": 20.028,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      25358,
+      271,
+      198,
+      695,
+      239784
+     ],
+     "ref_top1": 25358,
+     "ref_logit": 19.75,
+     "ref_top5": [
+      25358,
+      198,
+      695,
+      271,
+      239784
+     ],
+     "ref_top5_logits": [
+      19.75,
+      15.375,
+      14.5,
+      14.375,
+      13.8125
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.14099999999999824,
+     "abs_ref_oracle": 0.2779999999999987,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 21,
+     "input": 25358,
+     "gpu": 13,
+     "gpu_logit": 20.938,
+     "oracle": 13,
+     "oracle_logit": 20.945,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      13,
+      11,
+      271,
+      321,
+      198
+     ],
+     "ref_top1": 13,
+     "ref_logit": 20.875,
+     "ref_top5": [
+      13,
+      11,
+      321,
+      271,
+      198
+     ],
+     "ref_top5_logits": [
+      20.875,
+      17.5,
+      15.375,
+      15.25,
+      15.125
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.06299999999999883,
+     "abs_ref_oracle": 0.07000000000000028,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 22,
+     "input": 13,
+     "gpu": 1049,
+     "gpu_logit": 18.75,
+     "oracle": 1049,
+     "oracle_logit": 18.776,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      1049,
+      271,
+      3437,
+      25358,
+      561
+     ],
+     "ref_top1": 1049,
+     "ref_logit": 18.75,
+     "ref_top5": [
+      1049,
+      271,
+      25358,
+      3437,
+      198
+     ],
+     "ref_top5_logits": [
+      18.75,
+      15.6875,
+      15.375,
+      15.25,
+      15.1875
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.0,
+     "abs_ref_oracle": 0.0259999999999998,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 23,
+     "input": 1049,
+     "gpu": 369,
+     "gpu_logit": 20.688,
+     "oracle": 369,
+     "oracle_logit": 20.832,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      369,
+      682,
+      198,
+      17882,
+      271
+     ],
+     "ref_top1": 369,
+     "ref_logit": 20.625,
+     "ref_top5": [
+      369,
+      682,
+      17882,
+      198,
+      20367
+     ],
+     "ref_top5_logits": [
+      20.625,
+      17.75,
+      15.3125,
+      15.3125,
+      14.9375
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.06299999999999883,
+     "abs_ref_oracle": 0.20700000000000074,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 24,
+     "input": 369,
+     "gpu": 3750,
+     "gpu_logit": 21.344,
+     "oracle": 3750,
+     "oracle_logit": 21.366,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      3750,
+      10919,
+      264,
+      279,
+      799
+     ],
+     "ref_top1": 3750,
+     "ref_logit": 21.5,
+     "ref_top5": [
+      3750,
+      10919,
+      264,
+      279,
+      7172
+     ],
+     "ref_top5_logits": [
+      21.5,
+      18.875,
+      17.875,
+      16.875,
+      16.375
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.1559999999999988,
+     "abs_ref_oracle": 0.13400000000000034,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 25,
+     "input": 3750,
+     "gpu": 364,
+     "gpu_logit": 21.156,
+     "oracle": 364,
+     "oracle_logit": 21.295,
+     "match": "yes",
+     "oracle_gap_of_gpu_pick": 0.0,
+     "gpu_top5": [
+      364,
+      430,
+      198,
+      695,
+      13
+     ],
+     "ref_top1": 364,
+     "ref_logit": 21.25,
+     "ref_top5": [
+      364,
+      430,
+      198,
+      695,
+      13
+     ],
+     "ref_top5_logits": [
+      21.25,
+      15.5,
+      14.0625,
+      12.375,
+      12.25
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": 0.0940000000000012,
+     "abs_ref_oracle": 0.045000000000001705,
+     "top5_set_eq": true
+    },
+    {
+     "pos": 26,
+     "input": 364,
+     "gpu": 1141,
+     "gpu_logit": 17.328,
+     "oracle": 10113,
+     "oracle_logit": 17.281,
+     "match": "tie",
+     "oracle_gap_of_gpu_pick": 0.1151,
+     "gpu_top5": [
+      1141,
+      10113,
+      92045,
+      279,
+      39531
+     ],
+     "ref_top1": 1141,
+     "ref_logit": 17.375,
+     "ref_top5": [
+      1141,
+      10113,
+      92045,
+      279,
+      1602
+     ],
+     "ref_top5_logits": [
+      17.375,
+      17.0,
+      16.875,
+      16.125,
+      15.1875
+     ],
+     "ref_eq_gpu": true,
+     "ref_eq_oracle": false,
+     "abs_ref_gpu": 0.0470000000000006,
+     "abs_ref_oracle": null,
+     "top5_set_eq": false
+    },
+    {
+     "pos": 27,
+     "input": 1141,
+     "gpu": 5269,
+     "gpu_logit": 17.313,
+     "oracle": 6278,
+     "oracle_logit": 17.372,
+     "match": "tie",
+     "oracle_gap_of_gpu_pick": 0.9495,
+     "gpu_top5": [
+      5269,
+      6278,
+      86088,
+      45092,
+      31883
+     ],
+     "ref_top1": 6278,
+     "ref_logit": 17.375,
+     "ref_top5": [
+      6278,
+      86088,
+      5269,
+      45092,
+      81410
+     ],
+     "ref_top5_logits": [
+      17.375,
+      17.125,
+      16.75,
+      16.625,
+      16.375
+     ],
+     "ref_eq_gpu": false,
+     "ref_eq_oracle": true,
+     "abs_ref_gpu": null,
+     "abs_ref_oracle": 0.0030000000000001137,
+     "top5_set_eq": false
+    }
+   ]
+  }
+ },
+ "what": "tools/exl3_ref_compare.py: golden vs old engine ~/tensorfold-exl3-pr20 (tf-cuda-test exl3-forward gen 48 24 <ids> and tf 48 <ids> hc, GPU 1 under gpurun, 2026-10-19); tf rows include our f64 oracle"
+}

@@ -52,6 +52,23 @@ pub fn symbol(comptime halves: u32, comptime codebook: Codebook, comptime warps:
 
 pub const rot_in_symbol = "tf_exl3_rot_in";
 
+const RotInArgs = extern struct {
+    x: u64,
+    suh: u64,
+    xh: u64,
+    x_dtype: i32,
+    m: i32,
+    k: i32,
+    counters: u64,
+    counter_count: i32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(RotInArgs) == 56);
+    std.debug.assert(@offsetOf(RotInArgs, "counters") == 40);
+    std.debug.assert(@offsetOf(RotInArgs, "counter_count") == 48);
+}
+
 pub fn variantIndex(halves: u32, codebook: Codebook, warps: u32) ?usize {
     for (variants, 0..) |v, i| {
         if (v.halves == halves and v.codebook == codebook and v.warps == warps) return i;
@@ -130,28 +147,32 @@ pub const Linear = struct {
         return if (p.sk > 1) @as(usize, p.sk) * m * w.n * 4 else 0;
     }
 
-    /// Counter bytes one call needs: per pass and block, zeroed (fill8(0), never zeros()).
+    /// Counter bytes one call needs: per pass and block, reset by input rotation before each split-K launch.
     pub fn counterBytes(w: Weight) usize {
         return 8 * (w.n / 128) * 4;
     }
 
-    /// y [m, n] = x [m, k] through the weight; `xh` is fp16 [m, k] scratch, `z` the split partials, `counters` zeroed.
+    /// y [m, n] = x [m, k] through the weight; `xh` is fp16 [m, k] scratch, `z` the split partials, `counters` scratch.
     pub fn matmul(l: *const Linear, s: Stream, w: Weight, x: u64, x_dtype: DType, m: usize, y: u64, y_dtype: DType, xh: u64, z: u64, counters: u64) !void {
         // Shapes the loader admits (linear.py's k % 128 and n % 128, 1..128 rows) are returned errors here too.
         if (m < 1 or m > 128) return error.Exl3Shape;
-        if (w.k % 128 != 0 or w.n % 128 != 0) return error.Exl3Shape;
+        if (w.k == 0 or w.n == 0 or w.k % 128 != 0 or w.n % 128 != 0) return error.Exl3Shape;
         const p = plan(w.k, w.n, 192, 8);
         if ((w.k / 16) % (p.sk * p.wk) != 0) return error.Exl3Shape;
         const idx = variantIndex(w.halves, w.codebook, p.wk) orelse return error.UnsupportedExl3Width;
-        if (p.sk > 1 and z == 0) return error.Exl3Scratch;
+        if (p.sk > 1 and (z == 0 or counters == 0)) return error.Exl3Scratch;
 
         var r: launch_.Args = .{};
-        r.add(x);
-        r.add(w.suh);
-        r.add(xh);
-        r.add(@as(i32, @backingInt(x_dtype)));
-        r.add(@as(i32, @intCast(m)));
-        r.add(@as(i32, @intCast(w.k)));
+        r.add(RotInArgs{
+            .x = x,
+            .suh = w.suh,
+            .xh = xh,
+            .x_dtype = @backingInt(x_dtype),
+            .m = @intCast(m),
+            .k = @intCast(w.k),
+            .counters = counters,
+            .counter_count = if (p.sk > 1) @intCast(counterBytes(w) / 4) else 0,
+        });
         try launch_.launch(l.rot_in, .{
             .grid = .{ .x = @intCast((w.k / 128 + 3) / 4), .y = @intCast(m), .z = 1 },
             .block = .{ .x = 128, .y = 1, .z = 1 },
@@ -190,7 +211,7 @@ pub const Dense = struct {
     candidate_mod: ?Module = null,
     candidate_k: ?candidate.Kernels = null,
     implementation: enum { reference, tiles } = .reference,
-    counters: ?memory.DeviceBuffer = null, // per pass and block, zeroed before every call
+    counters: ?memory.DeviceBuffer = null,
 
     pub fn load(d: *const Driver) !Dense {
         return .{ .d = d, .lin = try Linear.load(d) };
@@ -271,7 +292,6 @@ pub const Dense = struct {
         while (r < rows) : (r += 128) {
             const m = @min(rows - r, 128);
             const xh = try de.scratch(&de.xh, m * w.k * 2);
-            try de.counters.?.fill8(0, s.handle);
             try de.lin.matmul(s, w, x + @as(u64, r) * w.k * xe, x_dtype, m, y + @as(u64, r) * w.n * ye, y_dtype, xh, z, counters);
         }
     }
@@ -314,6 +334,74 @@ test "matmul refuses shapes the loader would refuse, before any launch" {
     nbad.n = 100;
     try std.testing.expectError(error.Exl3Shape, l.matmul(s, nbad, 0, .bf16, 8, 0, .bf16, 0, 0, 0));
     try std.testing.expectError(error.Exl3Scratch, l.matmul(s, w, 0, .bf16, 8, 0, .bf16, 0, 0, 0)); // plan(4096, 1024) splits K
+    try std.testing.expectError(error.Exl3Scratch, l.matmul(s, w, 0, .bf16, 8, 0, .bf16, 0, 1, 0));
+    kbad = w;
+    kbad.k = 0;
+    try std.testing.expectError(error.Exl3Shape, l.matmul(s, kbad, 0, .bf16, 8, 0, .bf16, 0, 1, 1));
+    nbad = w;
+    nbad.n = 0;
+    try std.testing.expectError(error.Exl3Shape, l.matmul(s, nbad, 0, .bf16, 8, 0, .bf16, 0, 1, 1));
+}
+
+test "dense reference blocks fuse counter reset into rotation on every invocation" {
+    const abi = @import("abi.zig");
+    const Fake = struct {
+        var rotations: usize = 0;
+        var products: usize = 0;
+        var clears: usize = 0;
+        var expected_counters: u64 = 0;
+        var expected_count: i32 = 0;
+        var last_rows: i32 = 0;
+
+        fn launch(function: abi.Function, grid_x: c_uint, grid_y: c_uint, _: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, parameters: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+            if (@intFromPtr(function.?) == 1) {
+                const args: *const RotInArgs = @ptrCast(@alignCast(parameters.?[0].?));
+                std.debug.assert(args.counters == expected_counters and args.counter_count == expected_count);
+                std.debug.assert(grid_x == (@as(u32, @intCast(args.k)) / 128 + 3) / 4);
+                std.debug.assert(grid_y == args.m and threads == 128);
+                last_rows = args.m;
+                rotations += 1;
+            } else {
+                std.debug.assert(rotations == products + 1);
+                products += 1;
+            }
+            return abi.success;
+        }
+
+        fn clear(_: u64, _: u8, _: usize, _: abi.Stream) callconv(.c) abi.Result {
+            clears += 1;
+            return abi.success;
+        }
+    };
+    var test_driver = @import("exl3_mock.zig").init();
+    test_driver.func_name = null;
+    test_driver.api.cuLaunchKernel = Fake.launch;
+    test_driver.api.cuMemsetD8Async = Fake.clear;
+    const rotation: Function = .{ .d = &test_driver, .handle = @ptrFromInt(1) };
+    const product: Function = .{ .d = &test_driver, .handle = @ptrFromInt(2) };
+    var dense: Dense = .{
+        .d = &test_driver,
+        .lin = .{ .mod = undefined, .rot_in = rotation, .fns = @splat(product) },
+        .xh = .{ .d = &test_driver, .ptr = 0x1000, .len = 128 * 4096 * 2 },
+        .z = .{ .d = &test_driver, .ptr = 0x2000, .len = 8 * 128 * 8192 * 4 },
+        .counters = .{ .d = &test_driver, .ptr = 0x3000, .len = 8 * 8192 / 128 * 4 },
+    };
+    Fake.expected_counters = dense.counters.?.ptr;
+    for ([_][2]u32{ .{ 2560, 2560 }, .{ 512, 512 }, .{ 4096, 8192 }, .{ 2560, 512 } }) |shape| {
+        const layout_strides = strides(shape[0], shape[1], 8, false);
+        const weight: Weight = .{ .trellis = 7, .suh = 8, .svh = 9, .k = shape[0], .n = shape[1], .halves = 8, .codebook = .mul1, .stride_k = layout_strides.k, .stride_nb = layout_strides.nb };
+        Fake.expected_count = if (plan(weight.k, weight.n, 192, 8).sk > 1) @intCast(Linear.counterBytes(weight) / 4) else 0;
+        for ([_]usize{ 1, 17, 128, 129, 300, 3 }) |row_count| {
+            const before = Fake.products;
+            try dense.decode(.{ .d = &test_driver, .handle = null }, weight, 10, .bf16, row_count, 11, .bf16);
+            try std.testing.expectEqual((row_count + 127) / 128, Fake.products - before);
+            try std.testing.expectEqual(@as(i32, @intCast((row_count - 1) % 128 + 1)), Fake.last_rows);
+            try dense.prompt(.{ .d = &test_driver, .handle = null }, weight, 10, .bf16, row_count, 11, .f32);
+            try std.testing.expectEqual(2 * ((row_count + 127) / 128), Fake.products - before);
+            try std.testing.expectEqual(Fake.rotations, Fake.products);
+            try std.testing.expectEqual(@as(usize, 0), Fake.clears);
+        }
+    }
 }
 
 test "a failed scratch allocation keeps the old scratch owned" {

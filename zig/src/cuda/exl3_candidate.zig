@@ -44,7 +44,7 @@ pub const MatrixArgs = extern struct { k: u32, n: u32, bits: u32, tiles_n: u32, 
 /// Decode rows a launch; longer decode runs go window by window.
 pub const window = 16;
 /// Prompt rows a chunk: rotated to fp16 together, then 64 rows a block on the tensor units.
-pub const prompt_chunk = 256;
+pub const prompt_chunk = 2048;
 /// Blocks a launch aims for: a matrix with fewer 128-column blocks splits its input blocks into parts.
 const target_blocks = 96;
 
