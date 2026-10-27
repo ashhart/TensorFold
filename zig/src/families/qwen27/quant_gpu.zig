@@ -11,7 +11,7 @@ pub const Ref = projection.Ref;
 pub const Sums = struct { ref: Ref, stride: u32 };
 
 const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
-pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
+pub const Kind = enum { projection, xsum, norm, input_norm, norm_steer, mlp, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one reg dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
 pub fn longPrompt(name: []const u8, tensor_units: bool) bool {
@@ -60,9 +60,6 @@ pub const Kernels = struct {
     long_prompt: bool = false,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
-    /// The control vector's kernel, once compiled for the hidden width it serves.
-    steer_pipeline: ?mtl.Pipeline = null,
-    steer_hidden: u32 = 0,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -91,7 +88,6 @@ pub const Kernels = struct {
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
         k.cache.deinit(k.allocator);
-        if (k.steer_pipeline) |p| p.deinit();
     }
 
     fn get(k: *Kernels, key: Key) !mtl.Pipeline {
@@ -101,6 +97,7 @@ pub const Kernels = struct {
             .xsum => sources.xsum,
             .norm => sources.norm_xs,
             .input_norm => sources.norm_input,
+            .norm_steer => sources.norm_steer,
             .mlp => sources.mlp_xs,
             .ane_input, .mlp_ane, .add_ane => sources.mlp_ane,
         };
@@ -108,7 +105,7 @@ pub const Kernels = struct {
         const definitions = switch (key.kind) {
             .projection => unreachable,
             .xsum => try std.fmt.allocPrint(k.allocator, "constexpr int K={d}, GS=64;", .{key.k}),
-            .norm, .input_norm => try std.fmt.allocPrint(k.allocator, "constexpr int K={d};", .{key.k}),
+            .norm, .input_norm, .norm_steer => try std.fmt.allocPrint(k.allocator, "constexpr int K={d};", .{key.k}),
             .mlp => try std.fmt.allocPrint(k.allocator, "constexpr int N={d};", .{key.n}),
             .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(k.allocator, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
         };
@@ -122,6 +119,7 @@ pub const Kernels = struct {
             .xsum => "custom_kernel_q27_xsum_bfloat16_t_int32_t_float",
             .norm => "custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float",
             .input_norm => "custom_kernel_q27_norm_input_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float",
+            .norm_steer => "custom_kernel_q27_norm_steer_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float_float_float_uint",
             .mlp => "custom_kernel_q27_mlp_xs_bfloat16_t_bfloat16_t_int32_t_bfloat16_t_float",
             .ane_input => "q27_ane_input",
             .mlp_ane => "q27_mlp_ane",
@@ -347,39 +345,19 @@ pub const Kernels = struct {
         try span.end();
     }
 
-    /// The control vector's direction on the residual rows: one threadgroup a row, so the padded rows stay as they are.
-    pub fn steer(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dir: mtl.Buffer, alpha: f32, mode: u32, hidden: u32, rows: u32) !void {
-        if (rows == 0) return;
-        var span = profile.begin(k.profiler, input_encoder, .copy);
+    /// The norm with a direction inside it: the direction's component leaves the row before the normalisation reads it.
+    pub fn normSteer(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, dir: mtl.Buffer, alpha: f32, mode: u32, width: u32, rows: u32) !void {
+        var span = profile.begin(k.profiler, input_encoder, .norm);
         errdefer span.cancel();
         const e = span.encoder;
 
-        e.setPipeline(try k.steerPipeline(hidden));
-        e.setBuffer(x.buffer, x.offset, 0);
-        e.setBuffer(dir, 0, 1);
-        e.setValue(alpha, 2);
-        e.setValue(mode, 3);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        e.setPipeline(try k.get(.{ .kind = .norm_steer, .k = width }));
+        bind(e, .{ h, residual, weight, eps, dims, combined, out, xs });
+        e.setBuffer(dir, 0, 8);
+        e.setValue(alpha, 9);
+        e.setValue(mode, 10);
+        e.dispatchGroups(mtl.Size.of(1, padded(rows), 1), mtl.Size.of(width / 16, 1, 1));
         try span.end();
-    }
-
-    /// The control vector's kernel, compiled for the hidden width it serves.
-    fn steerPipeline(k: *Kernels, hidden: u32) !mtl.Pipeline {
-        if (k.steer_pipeline) |p| {
-            if (k.steer_hidden == hidden) return p;
-            p.deinit();
-            k.steer_pipeline = null;
-        }
-        const define = try std.fmt.allocPrint(k.allocator, "#define Q27_HIDDEN {d}\n", .{hidden});
-        defer k.allocator.free(define);
-        const source = try std.mem.concat(k.allocator, u8, &.{ define, sources.steer });
-        defer k.allocator.free(source);
-        const library = try mtl.Library.fromSource(k.device, source, mtl.CompileOptions.mlx());
-        defer library.deinit();
-        const p = try mtl.Pipeline.init(k.device, library, "custom_kernel_qwen27_steer_bfloat16_t_float_float_float", false);
-        k.steer_pipeline = p;
-        k.steer_hidden = hidden;
-        return p;
     }
 
     /// Prompt rows [base, base + 128) into the Neural Engine's fp16 input planes [hidden][128].

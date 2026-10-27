@@ -98,12 +98,17 @@ pub const Stages = struct {
         const e = lane.enc;
         const layer = m.weights.layers[index];
         const h: u32 = @intCast(m.config.hidden);
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        // The direction for the block before this one rides along with the norm that adds that block's output.
+        const dir = if (s.pending != null) s.direction(index - 1) else null;
+        if (dir) |d| {
+            try m.kernels.normSteer(e, s.hidden, s.pending.?, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), d.buffer, d.alpha, d.mode, h, s.rows);
+        } else {
+            try m.kernels.norm(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        }
         e.barrier();
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
             // The residual now holds the output of the block before this one, which is layer `index - 1`.
-            try s.steer(lane, index - 1);
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
         }
     }
@@ -214,11 +219,17 @@ pub const Stages = struct {
         const f = &m.frame;
         // The head seam reopens the encoder, so it goes back in the lane; rank 0's half-vocab argmax is not a token.
         var e = lane.enc;
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
+        const h: u32 = @intCast(m.config.hidden);
+        // The last block's output is layer `layers - 1`, and the direction for it rides along with the norm.
+        const dir = if (s.pending != null) s.direction(m.config.layers - 1) else null;
+        if (dir) |d| {
+            try m.kernels.normSteer(e, s.hidden, s.pending.?, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), d.buffer, d.alpha, d.mode, h, s.rows);
+        } else {
+            try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        }
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         // The residual now holds the output of the last block, which is layer `layers - 1`.
-        try s.steer(lane, m.config.layers - 1);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
@@ -245,13 +256,19 @@ pub const Stages = struct {
         if (s.tail) |tail| try tail.encode(tail.ptr, e);
     }
 
-    /// The control vector's direction for the layer whose residual just landed; none in force means nothing done.
-    fn steer(s: *Stages, lane: *@import("core").segments.Lane, layer: usize) !void {
-        const plan = s.model.steer orelse return;
-        const dir = plan.dir(@intCast(layer)) orelse return;
-        try s.model.kernels.steer(lane.enc, s.hidden, dir, plan.alpha, @intFromEnum(plan.mode), plan.hidden, s.rows);
-        lane.enc.barrier();
+    /// The direction that steers the layer whose residual just landed; none in force means nothing done.
+    fn direction(s: *Stages, layer: usize) ?Direction {
+        const plan = s.model.steer orelse return null;
+        const buffer = plan.dir(@intCast(layer)) orelse return null;
+        return .{ .buffer = buffer, .alpha = plan.alpha, .mode = @backingInt(plan.mode) };
     }
+
+    /// A direction on the device with the strength and the mode it applies in.
+    const Direction = struct {
+        buffer: mtl.Buffer,
+        alpha: f32,
+        mode: u32,
+    };
 };
 
 /// `e` is the caller's encoder, but seams reopen it: the final one is written back through the pointer, so commit it.

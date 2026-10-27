@@ -7,8 +7,14 @@ const bf16 = @import("../bf16_round.zig");
 /// The hidden width this family's residual stream has.
 pub const hidden = 5120;
 
+/// The elements a thread of the fused norm holds, so the row's dot is spread over `hidden / elements` threads.
+pub const elements = 16;
+
 /// The threads a row's dot is spread over, as the kernel launches it.
-pub const threads = 256;
+pub const threads = hidden / elements;
+
+/// The threadgroup memory the fused kernel's two sets of partials take.
+pub const group_memory = 2 * (threads / 32) * 4;
 
 /// How a direction is applied: its component leaves the stream, or it is added as a bias.
 pub const Mode = enum(u32) { project = 0, add = 1 };
@@ -163,29 +169,32 @@ pub const Steer = struct {
         }
     }
 
-    /// The kernel's own arithmetic: each thread sums its stride in fp32, the simdgroups tree, then the groups add up.
+    /// The kernel's own arithmetic: each thread sums its stretch in fp32, the simdgroups tree, then the groups add up.
     pub fn kernelOut(s: Steer, out: []f64) void {
         const k = s.p.hidden;
-        var lanes: [32]f32 = undefined;
-        var groups: [threads / 32]f32 = undefined;
+        // The fused norm gives every thread the row's own stretch of elements, side by side.
+        const tpg = @max(1, k / elements);
+        const lanes = @min(32, tpg);
+        const groups = (tpg + lanes - 1) / lanes;
+        var lane_sums: [32]f32 = undefined;
+        var group_sums: [32]f32 = undefined;
         for (0..s.p.rows) |r| {
-            @memset(&groups, 0);
-            for (0..groups.len) |g| {
-                for (0..32) |l| {
-                    const t = g * 32 + l;
+            @memset(&group_sums, 0);
+            for (0..groups) |g| {
+                for (0..lanes) |l| {
+                    const t = g * lanes + l;
                     var acc: f32 = 0;
-                    var i = t;
-                    while (i < k) : (i += threads) acc += c.fromBf16(s.x[r * k + i]) * s.dir[i];
-                    lanes[l] = acc;
+                    for (0..elements) |i| acc += c.fromBf16(s.x[r * k + t * elements + i]) * s.dir[t * elements + i];
+                    lane_sums[l] = acc;
                 }
-                var stride: usize = 16;
+                var stride: usize = lanes / 2;
                 while (stride > 0) : (stride /= 2) {
-                    for (0..stride) |i| lanes[i] = lanes[i] + lanes[i + stride];
+                    for (0..stride) |i| lane_sums[i] = lane_sums[i] + lane_sums[i + stride];
                 }
-                groups[g] = lanes[0];
+                group_sums[g] = lane_sums[0];
             }
             var sum: f32 = 0;
-            for (groups) |g| sum += g;
+            for (group_sums[0..groups]) |g| sum += g;
             for (0..k) |i| {
                 const x = c.fromBf16(s.x[r * k + i]);
                 const g = s.dir[i];
@@ -220,9 +229,9 @@ pub const Steer = struct {
     }
 };
 
-/// The roundings a row's dot passes through: the threads' chains, the simd tree, then the groups' partials.
-pub fn depthSums(shape: c.Shape) usize {
-    return (shape.k + threads - 1) / threads + 13;
+/// The roundings a row's dot passes through: the thread's own stretch, the simd tree, then the groups' partials.
+pub fn depthSums(_: c.Shape) usize {
+    return elements + 5 + threads / 32;
 }
 
 /// The add mode has no sums.
