@@ -33,13 +33,13 @@ test "the plan holds a direction for every layer the vector names and none for t
 test "a vector that names a layer the model does not have is refused before any buffer is made" {
     var allocations: mtl.Allocations = .{};
     const dir = [_]f32{ 1, 0, 0, 0 };
-    // The blocks are one to `layers_total`, so the last one is the model's last layer.
+    // The blocks are zero to `layers_total - 1`, so the last one is the model's last layer.
     try std.testing.expectError(error.BadSteerLayer, steer.init(std.testing.allocator, device(&allocations), .{
         .mode = .add,
         .alpha = 1,
         .hidden = 4,
         .layers_total = 4,
-        .layers = &.{.{ .id = 5, .dir = &dir }},
+        .layers = &.{.{ .id = 4, .dir = &dir }},
     }));
     try std.testing.expectError(error.BadSteerLayer, steer.init(std.testing.allocator, device(&allocations), .{
         .mode = .add,
@@ -59,10 +59,10 @@ test "a vector that names the model's last layer is taken" {
         .alpha = 1,
         .hidden = 4,
         .layers_total = 4,
-        .layers = &.{.{ .id = 4, .dir = &dir }},
+        .layers = &.{.{ .id = 3, .dir = &dir }},
     });
     defer plan.deinit();
-    try std.testing.expect(plan.dir(4) != null);
+    try std.testing.expect(plan.dir(3) != null);
 }
 
 test "a direction that is not as wide as the model is refused" {
