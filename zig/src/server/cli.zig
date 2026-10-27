@@ -3,23 +3,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("engine_api");
 const glp_startup = @import("glp_startup.zig");
+const cli_flag = @import("cli_flag.zig");
 const Allocator = std.mem.Allocator;
-pub const Kind = enum {
-    value, // --flag VALUE or --flag=VALUE
-    store_true, // --flag
-    append, // repeatable --flag VALUE
-};
-
-pub const Flag = struct {
-    name: []const u8,
-    kind: Kind = .value,
-    /// argparse's choices; empty: any value of the flag's type.
-    choices: []const []const u8 = &.{},
-    /// This binary honours the flag (and lists it in ``capabilities``); the rest are refused as unsupported.
-    native: bool = false,
-    /// The values it honours when only some of the choices.
-    native_values: ?[]const []const u8 = null,
-};
+pub const Kind = cli_flag.Kind;
+pub const Flag = cli_flag.Flag;
 const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
 
 /// The flags past the common ones the binary's backend serves, from its root's `serves` (test roots: none).
@@ -48,7 +35,7 @@ pub const flags = [_]Flag{
     .{ .name = "--chat-template", .native = true },
     .{ .name = "--voices", .native = true },
     .{ .name = "--default-voice", .native = true },
-} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ [_]Flag{
+} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ glp_startup.flags ++ [_]Flag{
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--name-priority", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
@@ -104,8 +91,6 @@ pub const flags = [_]Flag{
     .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
     .{ .name = "--rope-yarn", .native = cuda_build },
     .{ .name = "--record", .native = true },
-    .{ .name = "--glp", .native = true },
-    .{ .name = "--glp-alpha", .native = true },
     .{ .name = "--kv-cache", .choices = &.{ "bf16", "fp8" }, .native = true },
     .{ .name = "--prompt-precision", .choices = &.{ "bf16", "int8" }, .native = true },
     .{ .name = "--mtp-drafts", .native = served("--mtp-drafts") },
