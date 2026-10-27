@@ -2,6 +2,8 @@
 const std = @import("std");
 const fill = @import("lane_host_fill.zig");
 const lane_halt = @import("lane_halt.zig");
+const lane_stream = @import("lane_stream.zig");
+const recalls = @import("lane_host_recall.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 
@@ -102,6 +104,44 @@ pub fn closeAll(h: *LaneHost) void {
     }
     for (queued.items) |job| h.finish(job, .cancelled, "");
 }
+
+/// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
+pub fn requeue(h: *LaneHost, job: *Job) bool {
+    if (job.stream.pending != null or job.delivered != 0) return h.drop(job, "memory failure after first-token commit");
+    h.lock();
+    for (h.admitted.items, 0..) |j, i| if (j == job) {
+        _ = h.admitted.orderedRemove(i);
+        break;
+    };
+    const others = h.admitted.items.len;
+    const waits = others > 0 and blk: { // with nothing else running no memory comes back: it would wait forever
+        h.queued.insert(h.gpa, 0, job) catch break :blk false;
+        break :blk true;
+    };
+    h.unlock();
+    if (!waits) {
+        h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);
+        return true;
+    }
+    job.fill_on.store(false, .release); // off the lists before the teardown a status reader could have walked into
+    job.reported();
+    if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
+    job.stream.deinit(h.gpa);
+    lane_stream.freeProposer(h, job);
+    recalls.release(job);
+    job.started = false;
+    job.fill_began = false;
+    job.reached = 0;
+    job.entry = null; // looked up again at its next admission
+    h.gpa.free(job.marks);
+    job.marks = &.{};
+    h.gpa.free(job.key);
+    job.key = &.{};
+    h.memory_lanes = others;
+    return false;
+}
+
+const alone_words = "the engine has no memory for this request's caches with nothing else running: lower --context or --parallel";
 
 test {
     _ = @import("lane_host_interrupted_test.zig");
