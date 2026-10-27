@@ -63,11 +63,12 @@ test "writes apart are measured, one write is unmeasured, and the head's bytes t
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const replies = try fake.reply(a, false, 4, 12);
+    // deliveries 100 ms apart, measured as at least half that: a client a busy runner wakes late still sees them apart
+    const replies = try fake.reply(a, false, 4, 100);
     const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "POST", .path = "/v1/completions", .replies = &.{ replies, try batch(a, replies) } }});
     defer f.stop();
     const apart = try one(f, a, suite.fixtures[0], opts(4, false, 5), 1.0, 1234);
-    try std.testing.expect(apart.status == .ok and apart.delivery_seconds.? >= 0.010);
+    try std.testing.expect(apart.status == .ok and apart.delivery_seconds.? >= 0.050);
     try std.testing.expect(apart.ttft_seconds.? < 0.5 and apart.delivery_seconds.? < 0.5);
     const together = try one(f, a, suite.fixtures[0], opts(4, false, 5), 1.0, 1234);
     try std.testing.expect(together.status == .unmeasured and together.delivery_seconds == null);
