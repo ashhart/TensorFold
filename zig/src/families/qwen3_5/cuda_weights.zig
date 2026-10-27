@@ -190,18 +190,23 @@ pub fn linear(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuf
     var parts: [3][]const u8 = undefined;
     const specs = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k * bits / 32 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
     for (specs, &parts) |p, *part| part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ n, p[2] })).bytes;
-    const raw = try stageParts(stage, parts);
     const served = servedBits(bits);
-    const out: Proj = if (served == 4) .{ .a4 = try pack4(e, into, raw, n, k) } else blk: {
-        const l = AffineN.layout(n, k, served);
-        const q: AffineN = .{ .w = try into.alloc(l.words), .s = try into.alloc(l.scales), .b = try into.alloc(l.scales), .n = n, .k = k, .npad = l.npad, .bits = served };
-        try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
-        try e.wide.packTable(e.stream, raw[1], n, k, q.npad, q.s);
-        try e.wide.packTable(e.stream, raw[2], n, k, q.npad, q.b);
-        break :blk .{ .an = q };
-    };
+    if (served == 4) return packLinear(e, into, stage, parts, n, k);
+    const raw = try stageParts(stage, parts);
+    const l = AffineN.layout(n, k, served);
+    const q: AffineN = .{ .w = try into.alloc(l.words), .s = try into.alloc(l.scales), .b = try into.alloc(l.scales), .n = n, .k = k, .npad = l.npad, .bits = served };
+    try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
+    try e.wide.packTable(e.stream, raw[1], n, k, q.npad, q.s);
+    try e.wide.packTable(e.stream, raw[2], n, k, q.npad, q.b);
     try e.stream.synchronize(); // the next projection's staging overwrites this one's
-    return out;
+    return .{ .an = q };
+}
+
+/// MLX affine-4 parts (words, scales, biases) of an n-by-k projection, staged and packed into `into`'s arena.
+pub fn packLinear(e: *Engine, into: anytype, stage: *DeviceBuffer, parts: [3][]const u8, n: usize, k: usize) !Proj {
+    const q = try pack4(e, into, try stageParts(stage, parts), n, k);
+    try e.stream.synchronize(); // the next projection's staging overwrites this one's
+    return .{ .a4 = q };
 }
 
 /// Inputs [from, from + len) of an n-by-k affine-4 projection as their own packed projection (the MTP's fc halves).
@@ -272,17 +277,21 @@ fn expertTable(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: [
         const one: []const usize = &.{ n, p[2] };
         part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], if (count == 0) one else stacked)).bytes;
     }
+    if (bits == 4) return packTable(e, stage, parts, count, n, k, out, m, mi);
     const raw = try stageParts(stage, parts);
-    if (bits == 4) {
-        try e.experts.packInto(e.stream, raw[0], raw[1], raw[2], out, @max(count, 1), n, k, m, mi);
-    } else {
-        const Pack = struct {
-            fn run(owner: *Engine, w: u64, sc: u64, bias: u64, tmp: [2]u64, dst: u64, chunk_count: usize, nn: usize, kk: usize, mm: usize, index: usize) !void {
-                try owner.experts3.packInto(&owner.experts, owner.stream, w, sc, bias, tmp, dst, chunk_count, nn, kk, mm, index);
-            }
-        };
-        try @import("cuda_expert_pack.zig").chunks(e, Pack.run, stage.ptr, stage.len, raw, parts[0].len + parts[1].len + parts[2].len, out, count, n, k, m, mi);
-    }
+    const Pack = struct {
+        fn run(owner: *Engine, w: u64, sc: u64, bias: u64, tmp: [2]u64, dst: u64, chunk_count: usize, nn: usize, kk: usize, mm: usize, index: usize) !void {
+            try owner.experts3.packInto(&owner.experts, owner.stream, w, sc, bias, tmp, dst, chunk_count, nn, kk, mm, index);
+        }
+    };
+    try @import("cuda_expert_pack.zig").chunks(e, Pack.run, stage.ptr, stage.len, raw, parts[0].len + parts[1].len + parts[2].len, out, count, n, k, m, mi);
+    try e.stream.synchronize(); // the next table's staging overwrites this one's
+}
+
+/// MLX affine-4 parts of `count` stacked experts (one at count 0), staged and packed as `out`'s mi-th table of m.
+pub fn packTable(e: *Engine, stage: *DeviceBuffer, parts: [3][]const u8, count: usize, n: usize, k: usize, out: u64, m: usize, mi: usize) !void {
+    const raw = try stageParts(stage, parts);
+    try e.experts.packInto(e.stream, raw[0], raw[1], raw[2], out, @max(count, 1), n, k, m, mi);
     try e.stream.synchronize(); // the next table's staging overwrites this one's
 }
 
