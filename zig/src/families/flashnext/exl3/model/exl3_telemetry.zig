@@ -84,11 +84,31 @@ pub const Experts = struct {
     device_overflow_plans: u64 = 0,
     mapped_copy_payload_min_bytes: u64 = 0,
     mapped_copy_payload_max_bytes: u64 = 0,
+    ring_dma_copies: u64 = 0,
+    ring_dma_requested_bytes: u64 = 0,
+    ring_unused_copies: u64 = 0,
+    ring_hit_picks: u64 = 0,
+    ring_miss_picks: u64 = 0,
+    ring_hit_expert_requests: u64 = 0,
+    ring_miss_expert_requests: u64 = 0,
+    ring_demand_copies: u64 = 0,
+    ring_demand_requested_bytes: u64 = 0,
+    ring_demand_unused_copies: u64 = 0,
+    ring_demand_unused_requested_bytes: u64 = 0,
+    ring_initial_prefetch_copies: u64 = 0,
+    ring_initial_prefetch_requested_bytes: u64 = 0,
+    ring_initial_prefetch_unused_copies: u64 = 0,
+    ring_initial_prefetch_unused_requested_bytes: u64 = 0,
+    ring_cross_layer_prefetch_copies: u64 = 0,
+    ring_cross_layer_prefetch_requested_bytes: u64 = 0,
+    ring_cross_layer_prefetch_unused_copies: u64 = 0,
+    ring_cross_layer_prefetch_unused_requested_bytes: u64 = 0,
 };
 
 pub const Snapshot = struct {
     rank: Rank,
     scope: u64,
+    ring_owner: u64 = 0,
     experts: Experts = .{},
     expert_pools: usize = 0,
     layers: []LayerSample = &.{},
@@ -214,6 +234,7 @@ pub const Report = struct {
         try before.rank.validate();
         try after.rank.validate();
         if (!std.meta.eql(before.rank, after.rank) or before.scope != after.scope or before.expert_pools != after.expert_pools) return error.TelemetryOwnerChanged;
+        if (before.ring_owner != 0 and before.ring_owner != after.ring_owner) return error.TelemetryOwnerChanged;
         if (interval.model_rows == 0 or interval.steps == 0) return error.TelemetryDenominator;
         const experts = try difference(Experts, before.experts, after.experts);
         if (experts.device_overflow_plans != 0) return error.TelemetryExpertOverflow;
