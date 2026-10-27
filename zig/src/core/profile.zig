@@ -135,7 +135,7 @@ const nemotron: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni" };
 const slide_cuda: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "qwen3_5" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
 /// The CUDA families whose host prompt cache the generic CUDA host builds (cuda_keep_others_test.zig checks the list).
-pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory" };
+pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_QWEN_REQUEST_STARTS, .families = qwen, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#1334; default-off; GB10 six-turn: resumed equals fresh, one reply differs from unset" },
