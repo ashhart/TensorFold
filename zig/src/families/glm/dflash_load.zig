@@ -150,7 +150,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     errdefer wbuf.free();
     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
     defer tmp.free();
-    var raw = try cuda.DeviceBuffer.alloc(d, if (bits == 4) 5 * D * D / 2 + 2 * 5 * D * D / 32 + 1024 else 256);
+    // Sized for the largest linear at THIS world: fc (5*D*D) or the non-split gu (2*ff*D), which exceeds it off TP=2.
+    const raw_nk: usize = @max(5 * D * D, 2 * ff * D);
+    var raw = try cuda.DeviceBuffer.alloc(d, if (bits == 4) raw_nk / 2 + 2 * raw_nk / 32 + 1024 else 256);
     defer raw.free();
     var module = try cuda.Module.load(d, cuda.kernels.glm_dflash);
     errdefer module.unload();
