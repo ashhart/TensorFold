@@ -56,6 +56,7 @@ pub fn run(gpu: check.Gpu) !void {
         std.debug.print("PASS {s}: served geometry, FP64, five repeats, guards, inputs; finite corruption RED\n", .{ref.symbol(mode)});
     }
     try planRows(gpu, s);
+    try @import("contract_qwen_mtp_rows.zig").fp64(gpu);
 }
 
 fn served(fns: cuda.moe.Fns, s: cuda.Stream, mode: ref.Mode, p: []const u64, rows: usize, variant: bool, params: u64) !void {

@@ -567,6 +567,8 @@ pub fn run(gpu: check.Gpu) !void {
     };
     defer for (&contiguous) |*x| x.deinit();
     for (&contiguous) |*x| try kernels.append(a, x.kernel());
+    const mtp_rows = try @import("contract_qwen_mtp_rows.zig").Group.create(a, gpu, s, &kernels);
+    defer mtp_rows.destroy();
     const weight_only = try @import("contract_weight_only_suite.zig").Suite.create(a, gpu, s, &kernels);
     defer weight_only.destroy(a);
     var t: g.Tally = .{};
