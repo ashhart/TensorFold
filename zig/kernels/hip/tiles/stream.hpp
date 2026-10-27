@@ -53,13 +53,14 @@ __device__ inline void stream_dots(const typename T::pair (&xp)[RG][16], const u
 
 // Epi::kPair: a lane's CB columns are CB / 2 gate columns and the same up columns; out is silu(gate) * up.
 template <class Dec, class Act, class T, class Epi, int R, int CB, bool WIDE>
-__device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, int gshift, int bx, int pair_cols, float limit) {
+__device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, int gshift, int bx, int by, int pair_cols,
+                                   float limit) {
     using pair = typename T::pair;
     constexpr bool PAIR = Epi::kPair;
     constexpr int RG = R < 4 ? R : 4;  // rows a pass keeps in registers
     constexpr int NG = R / RG;
     constexpr uint32_t kOne = T::ones;
-    const int row0 = blockIdx.y * R;  // a block's rows: more than 8 rows are 8-row blocks on the grid's y
+    const int row0 = by * R;  // a block's rows: row block `by` of the grid's y, or of x when interleaved
     const int lpc = 1 << lpc_log2;
     const int lane = threadIdx.x & 31;
     const int j = lane & (lpc - 1);
@@ -213,7 +214,11 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 // Item z of the plan (or plain product, or a group's side) at CB columns a lane, R rows; chunk group is q >> gshift.
 template <class Dec, class Act, class T, class Epi, int R, int CB, class Sides>
 __device__ inline void stream_tile(typename Dec::Args& a, const Sides& sides, int lpc_log2, int gshift) {
-    int bx = blockIdx.x;
+    // a one-row grid over more than R rows interleaves: a column block's row blocks are neighbours on x
+    const int nby = (a.m + R - 1) / R;
+    const bool interleaved = gridDim.y == 1 && nby > 1;
+    int bx = interleaved ? static_cast<int>(blockIdx.x) / nby : static_cast<int>(blockIdx.x);
+    const int by = interleaved ? static_cast<int>(blockIdx.x) % nby : static_cast<int>(blockIdx.y);
     if (sides.count > 0) {
         int s = 0;
         while (s + 1 < sides.count && bx >= sides.first[s + 1]) ++s;
@@ -226,15 +231,15 @@ __device__ inline void stream_tile(typename Dec::Args& a, const Sides& sides, in
             a.out = static_cast<float*>(sides.out[s]);
         }
     }
-    if (!Dec::take_item(a, blockIdx.z) || static_cast<int>(blockIdx.y) * R >= a.m) return;
+    if (!Dec::take_item(a, blockIdx.z) || by * R >= a.m) return;
     if constexpr (Dec::kWideBytes == 4) {
-        stream_body<Dec, Act, T, Epi, R, CB, false>(a, lpc_log2, gshift, bx, sides.pair_cols, sides.limit);
+        stream_body<Dec, Act, T, Epi, R, CB, false>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
     } else {
         // every chunk is wide-aligned when the words and the row stride are
         if (Dec::wide_aligned(a)) {
-            stream_body<Dec, Act, T, Epi, R, CB, true>(a, lpc_log2, gshift, bx, sides.pair_cols, sides.limit);
+            stream_body<Dec, Act, T, Epi, R, CB, true>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
         } else {
-            stream_body<Dec, Act, T, Epi, R, CB, false>(a, lpc_log2, gshift, bx, sides.pair_cols, sides.limit);
+            stream_body<Dec, Act, T, Epi, R, CB, false>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
         }
     }
 }
