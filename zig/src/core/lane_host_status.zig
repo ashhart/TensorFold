@@ -25,7 +25,6 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
         .waiting = @intCast(h.queued.items.len),
         .decode_tokens_per_second = @as(f64, @floatFromInt(tokens)) / 2.0,
         .prefill_tokens_per_second = if (now - h.prefill_at <= window_ns) h.prefill_rate else 0,
-        .preemptions = 0,
         .streams = n,
         .generation_tokens = h.live_generated,
         .prompt_cache = h.cache_status,
@@ -65,7 +64,7 @@ fn fillTotals(h: *LaneHost, out: *api.Status) void {
 pub fn noteDecoded(h: *LaneHost, n: usize) void {
     const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
     h.mutex.lockUncancelable(h.io);
-    defer h.mutex.unlock(h.io);
+    defer h.unlock();
     var keep: usize = 0;
     for (h.decoded.items) |m| {
         if (m.at < now - window_ns) continue;
@@ -79,7 +78,7 @@ pub fn noteDecoded(h: *LaneHost, n: usize) void {
 /// Each started stream's context and generated tokens, for the next status read.
 pub fn noteLive(h: *LaneHost) void {
     h.mutex.lockUncancelable(h.io);
-    defer h.mutex.unlock(h.io);
+    defer h.unlock();
     h.live_tokens.clearRetainingCapacity();
     h.live_generated = 0;
     h.cache_status = if (h.cache) |s| .{ .states = s.entries.items.len, .bytes = s.held + s.spare() } else null;

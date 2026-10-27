@@ -176,7 +176,6 @@ pub const Host = struct {
             .waiting = @intCast(h.queued.items.len),
             .decode_tokens_per_second = @as(f64, @floatFromInt(tokens)) / 2.0,
             .prefill_tokens_per_second = if (t - h.prefill_at <= window_ns) h.prefill_rate else 0,
-            .preemptions = 0,
             .streams = n,
             .generation_tokens = generation_tokens,
             .fill_unknown = h.prefilling, // this backend reports no fill counters: the page says so, not idle

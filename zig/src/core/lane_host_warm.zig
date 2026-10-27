@@ -8,6 +8,7 @@ pub fn pass(h: *LaneHost, job: *Job, began: i96) bool {
     if (h.cache) |store| if (job.marks.len == 0 and (job.request.untaught or store.rules.lookahead > 0)) return h.cancel(job); // it would keep nothing
     be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
         if (e != error.Cancelled and e != error.Yielded) return @import("lane_host_end.zig").dropFailed(h, job, e);
+        if (e == error.Yielded) @import("lane_host_load.zig").yielded(h);
         be.release(&job.stream);
         return h.cancel(job);
     };
