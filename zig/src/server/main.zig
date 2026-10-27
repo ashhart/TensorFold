@@ -17,6 +17,7 @@ const checkpoint_cli = @import("checkpoint_cli");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB]" ++
     " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
     " [--learn-conversations] [--learn-daily-gib LEARN_DAILY_GIB] [--recall] [--recall-dir RECALL_DIR]" ++

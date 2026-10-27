@@ -525,6 +525,32 @@ An engine that keeps no prompt states leaves all three out.
 The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
 return 404 when the flag is off, and the page polls once per second without adding access-log noise.
 
+## Admission
+
+By default the native server takes every model request it can read and the engine queues them. On a server several people
+share, four flags can refuse requests early instead, each off at 0, its default:
+
+| Flag | Range | Meaning |
+| --- | --- | --- |
+| `--max-inflight N` | 0-128 | Model requests in progress at once, across all keys |
+| `--max-inflight-per-key N` | 0-128 | Model requests in progress at once for one key |
+| `--requests-per-second N` | 0-100000 | Model requests a key may start each second |
+| `--request-burst N` | 0-100000 | Requests a rested key may start at once; 0 takes the rate. Without a rate it does nothing |
+
+A model request is a POST to a completion, chat, Responses, Messages, speech, embeddings, decisions, System One, Sliding
+Weights learning or imprint route; tokenizing, listing models, health and metrics are never counted. A request is counted
+from the end of its headers, after the key check and before its body is read or a parked model reloads, until its reply
+ends, streams included. Each key counts apart, by its digest, whatever its label; a server without keys counts every
+request as one key. A refused request answers 429 with `Retry-After` and the route's error shape (`rate_limit_error`; the
+OpenAI-shaped `code` names the limit) and closes its connection without reading the body. A refusal spends no rate.
+
+The rate's buckets live in a table of 128 keys. A key's bucket stays until it has refilled, so cycling keys cannot reset a
+spent rate; with more than 128 keys starting requests within one refill, a further key is refused
+(`admission_capacity_exceeded`) until a bucket refills. With any of the flags set, `/metrics` adds
+`admission_inflight`, `admission_inflight_peak`, `admission_principals`, `admission_rate_buckets`,
+`admission_accepted_total` and `admission_rejected_total` with a fixed `reason` label (`global_limit`, `key_limit`,
+`principal_capacity`, `rate_limit`). With none set, nothing is counted and the replies and metrics are as before.
+
 ## Conversations on disk
 
 `--learn-conversations` (it implies `--learn`) writes every prompt state the server keeps in RAM to disk as well: a

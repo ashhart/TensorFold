@@ -1,0 +1,84 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"text_completion\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"text\": \"Hello world\", \"finish_reason\": \"length\", \"logprobs\": null}], \"usage\": {\"prompt_tokens\": 15, \"completion_tokens\": 2, \"total_tokens\": 17, \"prompt_tokens_details\": {\"cached_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 0}}, \"exact_mode\": \"exact\", \"tensorfold\": {\"enable_thinking\": false, \"reasoning_effort\": \"none\", \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"be29a1492e97\", \"min_rows\": 2}, \"speculative\": {\"rounds\": 1, \"drafted\": 1, \"accepted\": 1, \"acceptance_rate\": 1.0, \"tokens_per_round\": 2.0}}",
+   "interim": ""
+  },
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"chat.completion\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning_content\": \"Hello world!\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 26, \"completion_tokens\": 4, \"total_tokens\": 30, \"prompt_tokens_details\": {\"cached_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 4}}, \"exact_mode\": \"exact\", \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"ab74875c663e\", \"min_rows\": 1}, \"speculative\": {\"rounds\": 3, \"drafted\": 1, \"accepted\": 1, \"acceptance_rate\": 1.0, \"tokens_per_round\": 1.3333333333333333}}",
+   "interim": ""
+  },
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "378"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"fake-model\", \"content\": [{\"type\": \"text\", \"text\": \"Hello world!\"}], \"stop_reason\": \"end_turn\", \"stop_sequence\": null, \"usage\": {\"input_tokens\": 24, \"output_tokens\": 4, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"output_tokens_details\": {\"thinking_tokens\": 0}}}",
+   "interim": ""
+  },
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"response\", \"created_at\": <ts>, \"status\": \"incomplete\", \"error\": null, \"incomplete_details\": {\"reason\": \"max_output_tokens\"}, \"model\": \"fake-model\", \"output\": [{\"id\": \"<id2>\", \"type\": \"reasoning\", \"summary\": [], \"content\": [{\"type\": \"reasoning_text\", \"text\": \"Hello world\"}], \"status\": \"incomplete\"}], \"usage\": {\"input_tokens\": 26, \"input_tokens_details\": {\"cached_tokens\": 0}, \"output_tokens\": 2, \"output_tokens_details\": {\"reasoning_tokens\": 2}, \"total_tokens\": 28}, \"instructions\": null, \"max_output_tokens\": 2, \"metadata\": {}, \"parallel_tool_calls\": true, \"previous_response_id\": null, \"reasoning\": {\"effort\": null, \"summary\": null}, \"store\": true, \"temperature\": null, \"text\": {\"format\": {\"type\": \"text\"}}, \"tool_choice\": \"auto\", \"tools\": [], \"top_p\": null, \"truncation\": \"disabled\", \"user\": null, \"background\": false, \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"be29a1492e97\", \"min_rows\": 2}}",
+   "interim": ""
+  },
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "text/event-stream"
+    ],
+    [
+     "Cache-Control",
+     "no-cache"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "data: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"Hello world\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"!\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"exact_mode\": \"exact\", \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"ab74875c663e\", \"min_rows\": 1}, \"speculative\": {\"rounds\": 3, \"drafted\": 1, \"accepted\": 1, \"acceptance_rate\": 1.0, \"tokens_per_round\": 1.3333333333333333}, \"usage\": {\"prompt_tokens\": 26, \"completion_tokens\": 4, \"total_tokens\": 30, \"prompt_tokens_details\": {\"cached_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 4}}}\n\ndata: [DONE]\n\n",
+   "interim": ""
+  }
+ ]
+}

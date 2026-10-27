@@ -143,6 +143,7 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.engine.status(&status, &streams);
         srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], srv.info, srv.engine.memory(false), srv.info.context_window) catch return;
     }
+    if (srv.config.admission.enabled()) @import("metrics.zig").renderAdmission(&out.writer, srv.admission.snapshot(srv.io)) catch return;
     const body = out.written();
     conn.startResponse(200, null) catch return;
     conn.addHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8") catch return;

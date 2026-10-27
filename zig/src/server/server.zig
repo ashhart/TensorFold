@@ -93,6 +93,8 @@ pub const Config = struct {
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
     max_connections: u32 = @import("http_admission.zig").default_limit,
+    /// --max-inflight, --max-inflight-per-key, --requests-per-second, --request-burst; all zero: no admission.
+    admission: @import("request_admission.zig").Limits = .{},
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
     /// The process environment GET /v1/benchmark/manifest reads (rank count, revision, the hardware probe); null: none.
@@ -136,6 +138,8 @@ pub const Server = struct {
     draining: std.atomic.Value(bool) = .init(false),
     penalties_logged: std.atomic.Value(bool) = .init(false), // an engine without them was sent penalties: said once
     generating: std.atomic.Value(u32) = .init(0),
+    /// Model requests holding a reservation, when config.admission is on.
+    admission: @import("request_admission.zig").Controller = .{},
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     /// The idle-unload manager (--idle-unload); null when off. Its thread parks the engine; a wake reloads it.
@@ -425,6 +429,7 @@ pub const Server = struct {
         const matched = keys.matchIdentity(a, single(conn, "Authorization"), single(conn, "x-api-key"));
         if (matched) |m| {
             conn.key_label = m.label;
+            conn.key_digest = m.digest;
             conn.key_scopes = m.scopes;
         }
         if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open)) return true;

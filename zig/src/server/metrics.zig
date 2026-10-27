@@ -466,3 +466,38 @@ test "metrics count interior states in retained occupancy as well as restored to
         try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
     }
 }
+
+/// Admission's families, only when a flag turned it on; the reasons are fixed, so no request value becomes a label.
+pub fn renderAdmission(w: *std.Io.Writer, snap: @import("request_admission.zig").Snapshot) !void {
+    try gauge(w, "admission_inflight", "gauge", "Model requests holding an admission reservation.", snap.inflight);
+    try gauge(w, "admission_inflight_peak", "gauge", "Most model requests holding reservations at once since start.", snap.peak);
+    try gauge(w, "admission_principals", "gauge", "Keys (or the one keyless principal) holding reservations.", snap.principals);
+    try gauge(w, "admission_rate_buckets", "gauge", "Per-key rate buckets kept, idle ones refilling included.", snap.rate_buckets);
+    try gauge(w, "admission_accepted_total", "counter", "Model requests admitted before their body was read.", snap.admitted);
+    try family(w, "admission_rejected_total", "counter", "Model requests refused with 429, by reason.");
+    for ([_][]const u8{ "global_limit", "key_limit", "principal_capacity", "rate_limit" }, [_]u64{
+        snap.rejected_global, snap.rejected_key, snap.rejected_capacity, snap.rejected_rate,
+    }) |reason, value| try w.print("{s}admission_rejected_total{{reason=\"{s}\"}} {d}\n", .{ prefix, reason, value });
+}
+
+test "admission metrics name each fixed reason and the reservations held" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try renderAdmission(&out.writer, .{
+        .inflight = 2,
+        .peak = 4,
+        .principals = 1,
+        .admitted = 10,
+        .rejected_global = 3,
+        .rejected_key = 5,
+        .rejected_capacity = 0,
+        .rejected_rate = 7,
+        .rate_buckets = 3,
+    });
+    for ([_][]const u8{
+        "tensorfold:admission_inflight 2\n",                              "tensorfold:admission_inflight_peak 4\n",
+        "tensorfold:admission_accepted_total 10\n",                       "tensorfold:admission_rejected_total{reason=\"global_limit\"} 3\n",
+        "tensorfold:admission_rejected_total{reason=\"key_limit\"} 5\n",  "tensorfold:admission_rejected_total{reason=\"principal_capacity\"} 0\n",
+        "tensorfold:admission_rejected_total{reason=\"rate_limit\"} 7\n", "tensorfold:admission_rate_buckets 3\n",
+    }) |line| try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
+}

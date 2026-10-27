@@ -10,8 +10,8 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const scope = @import("auth_scope.zig");
 
 const Key = struct { digest: [32]u8, label: []const u8, scopes: scope.Scopes = scope.full };
-/// A verified key: the request's own copy of its label, and its scopes.
-pub const Matched = struct { label: []const u8, scopes: scope.Scopes };
+/// A verified key: the request's own copy of its label, its digest (admission's principal) and its scopes.
+pub const Matched = struct { label: []const u8, digest: [32]u8, scopes: scope.Scopes };
 
 pub var reload_requested: std.atomic.Value(bool) = .init(false);
 
@@ -217,7 +217,7 @@ pub const Store = struct {
         if (!s.valid) return null;
         const key = selected orelse return null;
         // the request's own copy: a reload frees the file's
-        return .{ .label = a.dupe(u8, key.label) catch return null, .scopes = key.scopes };
+        return .{ .label = a.dupe(u8, key.label) catch return null, .digest = key.digest, .scopes = key.scopes };
     }
 };
 

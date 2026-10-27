@@ -1,4 +1,4 @@
-"""Frozen native browser-policy and key cases: every socket still connects to the local fake server."""
+"""Frozen native browser-policy, key and admission cases: every socket still connects to the local fake server."""
 from __future__ import annotations
 import base64
 import json
@@ -81,6 +81,17 @@ def scope_cases():
             for name, raws in items]
 
 
+def admission_cases(stem):
+    """Model requests on one connection, the stream last: admission off answers as before its flags existed."""
+    say = [{"role": "user", "content": "Hi @script=plain"}]
+    burst = [raw("POST", "/v1/completions", {"prompt": "x @script=plain", "max_tokens": 2}),
+             raw("POST", "/v1/chat/completions", {"model": "fake-model", "messages": say}),
+             raw("POST", "/v1/messages", {"model": "fake-model", "max_tokens": 4, "messages": say}),
+             raw("POST", "/v1/responses", {"input": "Hi @script=plain", "max_output_tokens": 2}),
+             raw("POST", "/v1/chat/completions", {"model": "fake-model", "messages": say, "stream": True})]
+    return [{"group": "admission", "name": f"{stem}-burst", "raws": [{"b64": base64.b64encode(r).decode()} for r in burst], "opts": {}}]
+
+
 def steps():
     normal = [
         case("rebind-host", "rebind.invalid"),
@@ -119,6 +130,9 @@ def steps():
          "key_file": "# keys\nclient: sk-file\nsk-bare\n", "cases": full_key_cases(), "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": ["--api-key-file", "@KEYFILE@"], "env": {},
          "key_file": "app[inference]: sk-app\nmonitor[read]: sk-read\nops: sk-ops\n", "cases": scope_cases(), "then": [{"kind": "terminate"}]},
+        {"kind": "serve", "args": [], "env": {}, "cases": admission_cases("off"), "then": [{"kind": "terminate"}]},
+        {"kind": "serve", "args": ["--max-inflight", "0", "--max-inflight-per-key", "0", "--requests-per-second", "0", "--request-burst", "7"],
+         "env": {}, "cases": admission_cases("zero"), "then": [{"kind": "terminate"}]},
     ]
 
 

@@ -57,6 +57,9 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const scopes = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"auth scopes"} }));
     scopes.has_side_effects = true;
     b.step("test-key-scopes-host", "Key-file scopes: exact route grants, stateless Responses and refusals over sockets").dependOn(&scopes.step);
+    const admitted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"admission"} }));
+    admitted.has_side_effects = true;
+    b.step("test-admission-host", "Opt-in in-flight caps and per-key rates: limits, 429s over sockets, metrics").dependOn(&admitted.step);
     const run = b.addRunArtifact(b.addTest(.{ .root_module = parser }));
     all.dependOn(&run.step);
     b.step("test-tool-parse-host", "Tool parser visibility, schemas and single-call limits without devices").dependOn(&run.step);

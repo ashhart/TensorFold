@@ -177,6 +177,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .loop_guard = args.loop_guard,
         .keep_warm_s = args.keep_warm,
         .idle_unload_s = args.idle_unload,
+        .admission = args.admission,
         .default_sampling = s.sampling,
         .use_drafts = !args.no_drafts,
         .vision_urls = args.vision_urls,

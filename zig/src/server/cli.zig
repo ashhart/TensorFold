@@ -48,7 +48,7 @@ pub const flags = [_]Flag{
     .{ .name = "--chat-template", .native = true },
     .{ .name = "--voices", .native = true },
     .{ .name = "--default-voice", .native = true },
-} ++ @import("drama_cfg.zig").flags ++ [_]Flag{
+} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ [_]Flag{
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--name-priority", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
@@ -158,6 +158,7 @@ pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENS
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB" } else [_][]const u8{});
 
 pub const Args = struct {
+    admission: @import("request_admission.zig").Limits = .{},
     model: []const u8 = "",
     host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
@@ -400,6 +401,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.max_frames = @intCast(n);
         return;
     }
+    if (try @import("admission_cli.zig").apply(a, &out.admission, name, v, u)) return;
     if (is(name, "--silence-onset-s")) out.silence.onset_seconds = try float(u, a, name, v) else if (is(name, "--silence-onset-voiced-s")) out.silence.onset_voiced_seconds = try float(u, a, name, v) else if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
