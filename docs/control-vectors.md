@@ -174,6 +174,36 @@ recommends when the ratio stands out: a model that measures under 50 has no
 massive activations of its own, and one that measures above it wants the
 mask. The fraction is a decision the operator makes on the checkpoint in
 front of them rather than a habit carried from another one.
+
+## Measuring it yourself
+
+Every number on this page comes from one command per arm. The gate starts the
+server it measures, asks every prompt in a set and writes a receipt:
+
+```
+python3 tools/zig/qwen27_steer_gate.py --serve \
+    --checkpoint TensorFold/Qwen3.8-27B-MLX-4bit \
+    --vector vector.gglp --alpha 1.0 --set holdout \
+    --label "our masked vector" --out receipt.json
+```
+
+Without `--serve` it measures a server that is already running, and
+`--expect-harmful-refused`, `--expect-benign-refused` and `--expect-coherent`
+make it fail when an arm misses the numbers it is supposed to reach.
+
+The prompt sets are the repository's own and they live in Zig, so the producer
+and the tool read the same text. `tf-qwen27-steer-prompts` prints them as JSON:
+
+| Set | What it is |
+| --- | --- |
+| `derive` | The thirty pairs the producer derives a vector from. |
+| `holdout` | Twenty pairs written after the vector was derived, over topics and forms the derivation set never uses. The producer never reads them. |
+
+The gate reports three numbers per arm: the share of harmful prompts the model
+refuses, the share of the harmless twins it refuses, and the share of replies
+that are still answers. The last one is read beside the other two because a
+vector that silences the model is not a refusal removal.
+
 ## Measured
 
 Apple M4 Pro, 48 GiB, Metal, Qwen3.8-27B MLX 4-bit. Thirty form-matched pairs
@@ -227,6 +257,30 @@ vector, and seven under the unmasked vector, against none without one. Our
 prompt set is deliberately tight, so a twin differs from its harmful
 counterpart in intent alone. That is the strength's dial, and the reply text
 is the measure.
+
+## The held-out set
+
+A vector derived from thirty pairs and measured on those same thirty pairs
+measures the derivation, not the vector. The second set asks the question the
+first one cannot: does the recipe generalise, or did it learn thirty prompts?
+
+The twenty held-out pairs were written after the vector was derived. The
+producer never reads them, and a test holds that no prompt in them appears in
+the derivation set. They ask in forms the derivation set never uses: questions,
+a role prompt, a longer sentence, and over topics it never names. A twin
+still differs from its counterpart in intent alone.
+
+| | Harmful refused | Benign refused | Replies coherent |
+| --- | --- | --- | --- |
+| No vector | 20/20 | 6/20 | 40/40 |
+
+The benign column is read against six and not against zero here, and that is
+the set's own doing. The base model refuses six of the twenty twins before any
+vector is applied, because their frame is close enough to the harmful one:
+"brute-force my own wifi password" reads as unauthorised access, and a mockup
+of a bank login reads as credential theft. The base model's refusal follows the
+frame as well as the intent on those six, so they are the floor of that column
+and not a cost any arm pays.
 
 The vector's strength has a ceiling. Past it the model stops answering: the
 residual stream loses more than the direction it was asked to lose. Take the

@@ -38,6 +38,8 @@ pub const round_plan = @import("round_plan.zig");
 pub const state = @import("state.zig");
 pub const session = @import("session.zig");
 pub const steer = @import("steer.zig");
+pub const steer_prompts = @import("steer_prompts.zig");
+pub const steer_prompts_holdout = @import("steer_prompts_holdout.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
@@ -51,6 +53,8 @@ test {
     _ = @import("core").gpu_profile;
     _ = session;
     _ = steer;
+    _ = steer_prompts;
+    _ = steer_prompts_holdout;
     _ = @import("gdn_test.zig");
     _ = @import("simd_attention.zig");
     _ = glue;
