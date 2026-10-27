@@ -3,6 +3,7 @@ import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { assertCortheonReleaseAllowed, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
 import { readEngineEnvOverrides, type EngineEnvOverrides } from '../../../shared/engine-advanced-env'
+import { CONTROL_VECTOR_DEFAULTS, readControlVector, type EngineControlVector } from '../../../shared/control-vector'
 
 // Built-in engine choices the user makes once, kept beside the model registry.
 export interface EnginePreferences {
@@ -12,15 +13,17 @@ export interface EnginePreferences {
   learningModel: string | null
   // Advanced environment passed through to every engine process (validated before set()).
   envOverrides: EngineEnvOverrides
+  // The control vector the operator chose: the file, whether it is in force, the strength.
+  controlVector: EngineControlVector
 }
 
-const DEFAULTS: EnginePreferences = { cortheon: false, learningEnabled: false, learningModel: null, envOverrides: {} }
+const DEFAULTS: EnginePreferences = { cortheon: false, learningEnabled: false, learningModel: null, envOverrides: {}, controlVector: { ...CONTROL_VECTOR_DEFAULTS } }
 
 function readPreferences(file: string): EnginePreferences {
   try {
     const doc = JSON.parse(readFileSync(file, 'utf8'))
     const learningModel = doc?.learningModel === 'TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit' ? doc.learningModel : null
-    return { cortheon: cortheonEnabledForRelease(doc?.cortheon), learningEnabled: doc?.learningEnabled === true && learningModel != null, learningModel, envOverrides: readEngineEnvOverrides(doc?.envOverrides) }
+    return { cortheon: cortheonEnabledForRelease(doc?.cortheon), learningEnabled: doc?.learningEnabled === true && learningModel != null, learningModel, envOverrides: readEngineEnvOverrides(doc?.envOverrides), controlVector: readControlVector(doc?.controlVector) }
   } catch {
     return { ...DEFAULTS }
   }
@@ -44,8 +47,10 @@ export class EnginePreferenceStore {
   set(patch: Partial<EnginePreferences>): Promise<EnginePreferences> {
     // Refuse an old renderer or direct caller before queuing a disk write.
     try { if (patch.cortheon !== undefined) assertCortheonReleaseAllowed(patch.cortheon) } catch (error) { return Promise.reject(error) }
+    // A control vector that names no file cannot be in force, whatever a caller asked for.
+    const controlVector = patch.controlVector ? readControlVector(patch.controlVector) : undefined
     const next = this.writes.then(async () => {
-      const value = { ...this.value, ...patch }
+      const value = { ...this.value, ...patch, ...(controlVector ? { controlVector } : {}) }
       value.cortheon = cortheonEnabledForRelease(value.cortheon)
       const directory = path.dirname(this.file)
       await fs.mkdir(directory, { recursive: true, mode: 0o700 })
