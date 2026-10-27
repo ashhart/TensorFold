@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# A pull request's newer push cancels its older run; every push to main keeps its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   zig:
     runs-on: ubuntu-latest
@@ -90,11 +95,12 @@ jobs:
       - name: zig build fuzz-cortheon
         run: zig build fuzz-cortheon
   # The release's own path check on each platform's dist server (no fatbins), so a leak fails here, not at release.
+  # Pull requests check Linux x86_64 only; every push to main checks all three platforms.
   release-paths:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]
+        os: ${{ github.event_name == 'push' && fromJSON('["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"]') || fromJSON('["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
