@@ -3,6 +3,7 @@ pub const config = @import("config.zig");
 pub const geometry = @import("cuda_geometry.zig");
 pub const round = @import("cuda_round.zig");
 pub const prompt_int8 = @import("cuda_prompt_int8.zig");
+pub const modelopt = @import("cuda_modelopt.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const signatures = @import("cuda_signatures.zig");
 pub const native = @import("cuda_native.zig");
@@ -18,6 +19,7 @@ test {
     _ = @import("cuda_prompt.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
+    _ = @import("cuda_modelopt.zig");
     _ = prompt_int8;
     _ = native;
     _ = native_moe;

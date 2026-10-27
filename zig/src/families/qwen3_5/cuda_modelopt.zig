@@ -169,17 +169,28 @@ pub fn rawBytes(n: usize, k: usize, kind: Kind) usize {
     };
 }
 
+/// FP8 and NVFP4 weights decode to bf16 for mma.sync (sm_80 up), as the Nemotron lane does.
+pub const modelopt_min: u32 = 80;
+
+/// Why a ModelOpt checkpoint cannot load at `capability` (10 * major + minor), or null when it may.
+pub fn modeloptRefusal(capability: u32) ?[]const u8 {
+    if (capability >= modelopt_min) return null;
+    return "FP8 and NVFP4 weights decode to bf16 for mma.sync: " ++
+        "a ModelOpt checkpoint needs compute capability 8.0 or newer";
+}
+
 /// The kernels a ModelOpt checkpoint adds: the lane matmul, the prompt GEMM, the packers and the bf16 token rows.
 pub const Kernels = struct {
     lane: cuda.qmmf.Lane,
     prompt: cuda.nvfp4.Prompt,
     pack: cuda.modelopt.Packer,
     embed: cuda.embed_rows.EmbedRows,
-    /// Slice partials where no cluster meets them (before sm_90): the most any projection takes at max_rows.
+    /// Slice partials where no cluster meets them (before sm_90): the most any projection takes below fused_rows.
     part: ?DeviceBuffer = null,
 
-    pub fn load(d: *const cuda.Driver, major: u32) !Kernels {
-        var lane = try cuda.qmmf.Lane.load(d, major);
+    pub fn load(d: *const cuda.Driver, capability: u32) !Kernels {
+        if (modeloptRefusal(capability) != null) return error.ModeloptNeedsSm80;
+        var lane = try cuda.qmmf.Lane.load(d, capability / 10);
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();
@@ -200,14 +211,14 @@ pub const Kernels = struct {
         return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt };
     }
 
-    /// The slice partials every projection of `e` takes at up to max_rows rows (none with clusters).
+    /// The slice partials every projection of `e` takes below fused_rows (none with clusters).
     pub fn reserveParts(k: *Kernels, e: *const Engine) !void {
         var most: usize = 0;
         const Each = struct {
             fn bytes(lane: cuda.qmmf.Lane, p: Proj) usize {
                 return switch (p) {
                     .ql => |w| switch (w) {
-                        .nvfp4, .fp8, .bf16, .fp8g => |q| lane.partBytes(engine.max_rows, q),
+                        .nvfp4, .fp8, .bf16, .fp8g => |q| lane.partBytes(@min(engine.max_rows, cuda.qmmf.fused_rows - 1), q),
                         else => 0,
                     },
                     else => 0,
@@ -423,4 +434,10 @@ test "a row's FP8 scale fills its column of every 64-input tile, padding rows on
     try std.testing.expectEqual(bf(rows[5]), out[(0 * 2 + 1) * 64 + 5]); // tile 0, group 1, row 5
     try std.testing.expectEqual(bf(rows[129]), out[(2 * 2 + 0) * 64 + 1]); // tile 2: rows 128..
     try std.testing.expectEqual(@as(f32, 1.0), out[(2 * 2 + 1) * 64 + 2]); // row 130: padding
+}
+
+test "ModelOpt's floor refuses pre-Ampere cards and admits non-cluster reductions" {
+    for ([_]u32{ 70, 75 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
+    for ([_]u32{ 80, 86, 87, 89, 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
+    try std.testing.expectEqualStrings("FP8 and NVFP4 weights decode to bf16 for mma.sync: a ModelOpt checkpoint needs compute capability 8.0 or newer", modeloptRefusal(75).?);
 }

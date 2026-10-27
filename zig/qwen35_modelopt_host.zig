@@ -177,3 +177,75 @@ test "full mode: the real Qwen options expose only full precision" {
     try t.expectEqual(@as(usize, 1), values.len);
     try t.expectEqualStrings("full", @tagName(values[0]));
 }
+
+const PartMemory = struct {
+    var allocations: usize = 0;
+    fn alloc(ptr: *u64, _: usize) callconv(.c) cuda.abi.Result {
+        allocations += 1;
+        ptr.* = 0x100000;
+        return 0;
+    }
+    fn free(_: u64) callconv(.c) cuda.abi.Result {
+        return 0;
+    }
+};
+
+fn projection(mode: cuda.qmmf.Mode, n: u32, k: u32) @import("src/families/qwen3_5/cuda_engine.zig").Proj {
+    const w: cuda.qmmf.Weight = .{ .mode = mode, .codes = 1, .scales = 2, .n = n, .k = k, .npad = @intCast(cuda.modelopt.padded(n)) };
+    return .{ .ql = switch (mode) {
+        .fp4 => .{ .nvfp4 = w },
+        .fp8 => .{ .fp8 = w },
+        .fp8g => .{ .fp8g = w },
+        .bf16 => .{ .bf16 = w },
+        else => unreachable,
+    } };
+}
+
+test "ModelOpt partials: real reservations cover every 27B projection below the fused boundary" {
+    var d: cuda.Driver = undefined;
+    var e: Engine = undefined;
+    e.d = &d;
+    e.stream = .{ .d = &d, .handle = null };
+    var layers: [2]@import("src/families/qwen3_5/cuda_engine.zig").Layer = undefined;
+    e.layers = &layers;
+    for ([_]cuda.qmmf.Mode{ .fp4, .fp8, .fp8g, .bf16 }) |mode| {
+        const head = projection(mode, 248320, 5120);
+        const gate = projection(mode, 17408, 5120);
+        const down = projection(mode, 5120, 17408);
+        const qkv = projection(mode, 10240, 5120);
+        const z = projection(mode, 6144, 5120);
+        const ab = projection(mode, 48, 5120);
+        const out = projection(mode, 5120, 6144);
+        const q = projection(mode, 12288, 5120);
+        const kv = projection(mode, 1024, 5120);
+        e.head = head;
+        for (&layers) |*l| l.mlp = .{ .dense = .{ .gate = gate, .up = gate, .down = down } };
+        layers[0].mixer = .{ .delta = .{ .qkv = qkv, .z = z, .a = ab, .b = ab, .out = out, .conv = 0, .norm = 0, .a_log = 0, .dt_bias = 0 } };
+        layers[1].mixer = .{ .attention = .{ .q = q, .k = kv, .v = kv, .o = out, .q_norm = 0, .k_norm = 0 } };
+        for ([_]bool{ false, true }) |clusters| {
+            e.mo = fullKernels(&d);
+            e.mo.?.lane.clusters = clusters;
+            e.mo.?.lane.reduce = @splat(function(&d, 2));
+            d.api.cuMemAlloc_v2 = PartMemory.alloc;
+            d.api.cuMemFree_v2 = PartMemory.free;
+            PartMemory.allocations = 0;
+            try e.mo.?.reserveParts(&e);
+            defer if (e.mo.?.part) |*p| p.free();
+            const reserved = if (e.mo.?.part) |p| p.len else 0;
+            try t.expectEqual(@as(usize, if (clusters) 0 else 20889600), reserved);
+            try t.expectEqual(@as(usize, if (clusters) 0 else 1), PartMemory.allocations);
+            for ([_]@import("src/families/qwen3_5/cuda_engine.zig").Proj{ head, gate, down, qkv, z, ab, out, q, kv }) |p| {
+                const w: cuda.qmmf.Weight = switch (p.ql) {
+                    .nvfp4, .fp8, .fp8g, .bf16 => |w| w,
+                    else => unreachable,
+                };
+                for (1..cuda.qmmf.fused_rows) |rows| try t.expect(e.mo.?.lane.partBytes(rows, w) <= reserved);
+            }
+            if (!clusters) for ([_]usize{ 1, 16, 64, 255 }) |rows| {
+                Recorded.count = 0;
+                try modelopt.project(&e, down.ql, 0x200000, 0x300000, rows, false);
+                try t.expectEqual(@as(usize, 2), Recorded.count);
+            };
+        }
+    }
+}
