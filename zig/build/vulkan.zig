@@ -487,5 +487,19 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/vulkan/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("vk", vk.createModule());
     m.addImport("stage1_params", b.createModule(.{ .root_source_file = b.path("zig/src/vulkan/params.zig"), .target = target, .optimize = optimize }));
+    // Host-test-only .comp sources (exl3's kernel_sources pattern): the
+    // flag-pin tests match push flags against the literal masks in this
+    // text. Only test blocks reference it, so shipped ELFs keep embedding
+    // SPIR-V alone.
+    const comp_files = b.addWriteFiles();
+    inline for (.{ "gated_delta_decode", "gated_delta_prefill_ash", "fast_rope", "gdn_conv_decode" }) |name|
+        _ = comp_files.addCopyFile(b.path("zig/kernels/vulkan/" ++ name ++ ".comp"), name ++ ".comp");
+    m.addImport("vulkan_comp_sources", b.createModule(.{ .root_source_file = comp_files.add("comp_sources.zig",
+        \\pub const gated_delta_decode = @embedFile("gated_delta_decode.comp");
+        \\pub const gated_delta_prefill_ash = @embedFile("gated_delta_prefill_ash.comp");
+        \\pub const fast_rope = @embedFile("fast_rope.comp");
+        \\pub const gdn_conv_decode = @embedFile("gdn_conv_decode.comp");
+        \\
+    ) }));
     return m;
 }
