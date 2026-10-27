@@ -113,8 +113,10 @@ Results:
   ruler is a float32 run of the whole schedule. Over 8 cases (both prompts, 4 seeds each), with the transformer in
   float32 on torch's bf16 encoder rows, our picture is the closer to it in 6, at a mean of 32.3 dB PSNR against torch
   bf16's 31.4 dB. With the encoder in float32 too, torch bf16 averages 32.5 dB and ours 31.2 dB: six cases are within
-  0.5 dB or favor ours, and two sticky-note seeds favor torch's by 4.6 and 8.7 dB. Those 8 ran on an earlier build of
-  this family (0b69e127): this commit's latents are byte for byte its on the two cases above.
+  0.5 dB or favor ours, and two sticky-note seeds favor torch's by 4.6 and 8.7 dB. That ruler came from a follow-up
+  tool, `exact --fp32-encoder`, which this tree's case tool does not have; it comes with the prompt encoder (#1459).
+  Those 8 ran on an earlier build of this family (0b69e127): this commit's latents are byte for byte its on the two
+  cases above.
 - **Repeat:** the same step run twice, another between, gives identical bytes.
 - **Speed**, one session with no other GPU work:
   - torch bf16 on MPS: 0.744 s a forward for the fox, 0.760 s for the sticky note (the median of its 100).
