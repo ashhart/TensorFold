@@ -202,7 +202,7 @@ pub const Pool = struct {
 
     /// A lease gives back its reference; its last reference returns the page to the same free stack.
     fn unlease(p: *Pool, id: u32) void {
-        std.debug.assert(p.leased[id] > 0 and p.refs[id] >= p.leased[id]);
+        if (p.leased[id] == 0 or p.refs[id] < p.leased[id]) std.debug.panic("kv pool: page {d} released with no holder", .{id});
         p.ownership(id, p.refs[id] - 1, p.leased[id] - 1);
         if (p.refs[id] > 0) return;
         p.free[p.nfree] = id;
