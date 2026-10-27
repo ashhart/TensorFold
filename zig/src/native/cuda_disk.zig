@@ -202,3 +202,41 @@ test "a disk module that declares attach opens the store itself" {
     try attachKept(K, "k", std.testing.allocator, std.testing.io, undefined, .{ .dir = "d", .model_type = "m" }, "/r", null, @as(u8, 0), undefined);
     try std.testing.expectEqual(@as(usize, 1), K.calls);
 }
+
+test "CUDA disk open: --spill-gib's mode and --checkpoint-slots reach the store" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // a disk module that opens the store itself, through this file's open, under a fixed identity and no device
+    const K = struct {
+        pub fn attach(_: Allocator, _: std.Io, _: *const cuda.Context, o: api.Open, root: []const u8, _: ?[]const u8, _: anytype, store: *api.prompt_cache.Store) !void {
+            try open(o, root, 7, 1.0, store, "fake");
+        }
+        fn bytes(_: *anyopaque, _: u32) u64 {
+            return 0;
+        }
+        fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+            return error.Unused;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {}
+        fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var family: u8 = 0;
+    const vt: api.prompt_cache.Snapshots.VTable = .{ .bytes = K.bytes, .save = K.save, .restore = K.restore, .drop = K.drop, .rows = &image };
+    for ([_]api.prompt_cache.rows.Spill{ .evicted, .finish }, [_]?i64{ 3, null }) |mode, keep| {
+        var store = api.prompt_cache.Store.init(gpa, .{ .ptr = &family, .vtable = &vt }, .{ .lookahead = 1 }, 1 << 20);
+        const o: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .keep = keep, .learn = root, .learn_conversations = true, .spill = mode };
+        attachKept(K, "k", gpa, io, undefined, o, root, null, @as(u8, 0), &store) catch |e| {
+            store.deinit();
+            return e;
+        };
+        const r = store.disk.?;
+        defer r.deinit();
+        defer store.deinit(); // the store before its disk, as the rows fixtures close them
+        try std.testing.expectEqual(mode, r.spill);
+        try std.testing.expectEqual(if (keep) |n| @as(usize, @intCast(n)) else std.math.maxInt(usize), store.most);
+    }
+}

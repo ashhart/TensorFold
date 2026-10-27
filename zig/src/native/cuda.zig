@@ -536,6 +536,7 @@ test {
     _ = @import("cuda_vision_offer.zig");
     _ = kv_pages;
     _ = drafted;
+    _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
 }
 test "Learner ownership: actual native close drains Nemotron before any source, trainer or parent free" {
     try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, false);
