@@ -568,4 +568,5 @@ test {
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_pool_select_test.zig");
     _ = @import("rows_prefetch.zig");
+    _ = @import("rows_prefetch_stack_test.zig");
 }

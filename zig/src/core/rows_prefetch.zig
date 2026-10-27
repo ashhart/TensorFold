@@ -136,14 +136,20 @@ pub const Notify = struct { ctx: *anyopaque, call: *const fn (ctx: *anyopaque) v
 pub const Prefetch = struct {
     gpa: Allocator,
     io: std.Io,
+    owned_io: std.Io.Threaded = .init_single_threaded,
     limits: Limits,
     dir: [:0]u8,
     block: u32,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
     reads: std.ArrayList(*Read) = .empty,
+    held_reads: usize = 0,
+    held_bytes: u64 = 0,
     thread: ?std.Thread = null,
     stopping: bool = false,
+    refs: std.atomic.Value(u32) = .init(1),
+    exited: std.atomic.Value(bool) = .init(true),
+    notifying: std.atomic.Value(bool) = .init(false),
     notify: ?Notify = null,
     reader: *const fn (f: *Prefetch, rd: *Read) anyerror!void = readFiles, // a test's slow or failing reader
     counts: Counts = .{},
@@ -174,12 +180,10 @@ pub const Prefetch = struct {
         defer f.unlock();
         if (f.stopping) return null;
         if (f.find(s.name) != null) return s.name;
-        if (f.reads.items.len >= f.limits.reads) return null;
+        if (f.held_reads >= f.limits.reads) return null;
         var plan = Plan.of(r, f.gpa, s) catch return null;
-        var held: u64 = 0;
-        for (f.reads.items) |rd| held += rd.plan.bytes;
         const rd = f.gpa.create(Read) catch null;
-        if (held + plan.bytes > f.limits.bytes or rd == null or !f.spawn()) {
+        if (plan.bytes > f.limits.bytes -| f.held_bytes or rd == null or !f.spawn()) {
             plan.deinit(f.gpa);
             if (rd) |x| f.gpa.destroy(x);
             return null;
@@ -190,6 +194,8 @@ pub const Prefetch = struct {
             f.gpa.destroy(rd.?);
             return null;
         };
+        f.held_reads += 1;
+        f.held_bytes += plan.bytes;
         f.counts.made += 1;
         f.cond.signal(f.io);
         return s.name;
@@ -197,17 +203,30 @@ pub const Prefetch = struct {
 
     fn spawn(f: *Prefetch) bool {
         if (f.thread != null) return true;
-        f.thread = std.Thread.spawn(.{}, run, .{f}) catch return false;
+        if (!f.exited.load(.acquire)) return false;
+        f.stopping = false;
+        f.exited.store(false, .release);
+        _ = f.refs.fetchAdd(1, .acq_rel);
+        f.thread = std.Thread.spawn(.{}, run, .{f}) catch {
+            f.exited.store(true, .release);
+            f.releaseOwner();
+            return false;
+        };
         return true;
     }
 
     /// Whether a request still waits for `name`'s read: queued or reading, inside the bound (passing it counts once).
     pub fn pending(f: *Prefetch, name: Name) bool {
+        return f.pendingSince(name, null);
+    }
+
+    /// A preceding staged save shares the request's wait bound with its read.
+    pub fn pendingSince(f: *Prefetch, name: Name, since: ?i128) bool {
         f.lock();
         defer f.unlock();
         const rd = f.reads.items[f.find(name) orelse return false];
         if (rd.phase != .queued and rd.phase != .reading) return false;
-        if (write.nowNs() - rd.since < f.limits.wait_ns) return true;
+        if (write.nowNs() - (since orelse rd.since) < f.limits.wait_ns) return true;
         if (!rd.late) f.counts.timeouts += 1;
         rd.late = true;
         return false;
@@ -251,36 +270,54 @@ pub const Prefetch = struct {
 
     /// A read's memory freed: exactly once, by whoever holds it last (the lock held).
     fn release(f: *Prefetch, rd: *Read) void {
+        f.held_reads -= 1;
+        f.held_bytes -= rd.plan.bytes;
         if (rd.buf.len > 0) f.gpa.free(rd.buf);
         rd.plan.deinit(f.gpa);
         f.gpa.destroy(rd);
         f.counts.freed += 1;
     }
 
-    /// The I/O thread stopped and joined, every read freed; a later `start` makes another thread.
+    /// Cancel all reads and join within the normal stop budget.
     pub fn stop(f: *Prefetch) void {
+        f.stopAt(write.nowNs() + @import("lane_host_rows.zig").stop_ns);
+    }
+
+    /// A blocked read retains only private memory after the owner's deadline; no host callback survives this call.
+    pub fn stopAt(f: *Prefetch, deadline: i128) void {
         f.lock();
         f.stopping = true;
         f.notify = null;
         while (f.reads.pop()) |rd| f.drop(rd);
         f.cond.broadcast(f.io);
         f.unlock();
-        if (f.thread) |t| t.join();
+        while (!f.exited.load(.acquire) and write.nowNs() < deadline) write.io.nap();
+        while (f.notifying.load(.acquire)) write.io.nap();
+        if (f.thread) |thread| {
+            if (f.exited.load(.acquire)) thread.join() else thread.detach();
+        }
         f.thread = null;
-        f.lock();
-        f.stopping = false;
-        f.unlock();
     }
 
     pub fn destroy(f: *Prefetch) void {
-        f.stop();
+        f.stopAt(write.nowNs());
+        f.releaseOwner();
+    }
+
+    fn releaseOwner(f: *Prefetch) void {
+        if (f.refs.fetchSub(1, .acq_rel) != 1) return;
         f.reads.deinit(f.gpa);
+        f.owned_io.deinit();
         f.gpa.free(f.dir);
         f.gpa.destroy(f);
     }
 
     /// The I/O thread: the oldest queued read, read outside the lock, then published (or freed, if it went meanwhile).
     fn run(f: *Prefetch) void {
+        defer {
+            f.exited.store(true, .release);
+            f.releaseOwner();
+        }
         f.lock();
         defer f.unlock();
         while (!f.stopping) {
@@ -303,8 +340,10 @@ pub const Prefetch = struct {
             rd.phase = if (err == null) .ready else .failed;
             if (err != null) f.counts.failed += 1;
             const n = f.notify orelse continue;
+            f.notifying.store(true, .release);
             f.unlock();
             n.call(n.ctx);
+            f.notifying.store(false, .release);
             f.lock();
         }
     }
@@ -332,12 +371,34 @@ pub fn ensure(r: *Rows, io: std.Io, notify: Notify) ?*Prefetch {
 }
 
 /// A prefetcher for `r` under `limits` (its thread starts with the first read); `r` owns it from here.
-pub fn make(r: *Rows, io: std.Io, limits: Limits) !*Prefetch {
-    const f = try r.gpa.create(Prefetch);
-    errdefer r.gpa.destroy(f);
-    f.* = .{ .gpa = r.gpa, .io = io, .limits = limits, .dir = try r.gpa.dupeSentinel(u8, r.dir, 0), .block = r.keying.block };
+pub fn make(r: *Rows, _: std.Io, limits: Limits) !*Prefetch {
+    const a = write.io.allocator;
+    const f = try a.create(Prefetch);
+    errdefer a.destroy(f);
+    f.* = .{ .gpa = a, .io = undefined, .limits = limits, .dir = try a.dupeSentinel(u8, r.dir, 0), .block = r.keying.block };
+    f.io = f.owned_io.io();
     r.fetch = f;
     return f;
+}
+
+/// A compatible staged save is not readable until the engine publishes its complete files and state index.
+pub fn writing(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?Name {
+    const r = s.disk orelse return null;
+    const w = r.worker orelse return null;
+    const have = s.find(prompt, starts, spans);
+    var at: u32 = if (have) |e| e.at else 0;
+    var name: ?Name = null;
+    var jobs: [write.io.max_jobs]?*write.io.Job = undefined;
+    w.cancellations(&jobs);
+    for (jobs) |job| if (job) |j| {
+        if (j.generation != w.generation.load(.acquire) or j.at <= at) continue;
+        if (s.most == 0 or s.family.vtable.bytes(s.family.ptr, j.at) > s.budget) continue;
+        const state: rows_store.State = .{ .name = j.name, .at = j.at, .tokens = j.tokens, .spans = j.spans, .starts = j.starts, .own = 0, .rows = 0, .used = 0, .shared = j.shared };
+        if (!r.matches(&state, prompt, starts, spans)) continue;
+        name = j.name;
+        at = j.at;
+    };
+    return name;
 }
 
 /// The disk state a lookup of `prompt` would read back now (null: none, or it would not fit), as `read.recall` chooses.

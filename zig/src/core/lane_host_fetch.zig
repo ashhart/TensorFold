@@ -4,10 +4,11 @@ const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const prefetch = @import("rows_prefetch.zig");
+const write = @import("rows_write.zig");
 const Name = @import("rows_chain.zig").Name;
 
 /// A queued job's read ahead: looked for once while others run, and the disk state it waits for.
-pub const Ticket = struct { looked: bool = false, name: ?Name = null };
+pub const Ticket = struct { looked: bool = false, name: ?Name = null, writing: ?Name = null, since: i128 = 0 };
 
 /// Reads no queued request names go; then reads start for queued requests a disk state serves (the lock held).
 pub fn queue(h: *LaneHost) void {
@@ -18,26 +19,45 @@ pub fn queue(h: *LaneHost) void {
     var fetcher: ?*prefetch.Prefetch = null;
     for (h.queued.items) |job| {
         if (job.fetch.looked or job.request.background or !keyed(job.request)) continue; // warm passes read where they run
-        job.fetch.looked = true;
         const f = fetcher orelse prefetch.ensure(r, h.io, .{ .ctx = h, .call = wake }) orelse return;
         fetcher = f;
         if (!f.on()) return; // TENSORFOLD_RESTORE_PREFETCH=0: nothing is looked up or read here
+        write.reap(r);
         const q = job.request;
+        if (job.fetch.writing) |name| {
+            if (r.worker) |w| if (w.names(name)) {
+                if (write.nowNs() - job.fetch.since < f.limits.wait_ns) continue;
+                job.fetch.looked = true;
+                job.fetch.writing = null;
+                continue;
+            };
+            job.fetch.writing = null;
+        } else if (prefetch.writing(store, q.cacheKey(), q.chunks, h.spans(q))) |name| {
+            job.fetch.writing = name;
+            job.fetch.since = write.nowNs();
+            continue;
+        }
+        job.fetch.looked = true;
         job.fetch.name = f.start(r, prefetch.choose(store, q.cacheKey(), q.chunks, h.spans(q)) orelse continue);
     }
 }
 
 /// Whether queued `job` waits for its read: still going and inside the bound (the lock held).
 pub fn held(h: *LaneHost, job: *const Job) bool {
+    const r = (h.cache orelse return false).disk orelse return false;
+    const f = r.fetch orelse return false;
+    if (job.fetch.writing) |name| {
+        if (write.nowNs() - job.fetch.since >= f.limits.wait_ns) return false;
+        return if (r.worker) |w| w.names(name) else false;
+    }
     const name = job.fetch.name orelse return false;
-    const f = ((h.cache orelse return false).disk orelse return false).fetch orelse return false;
-    return f.pending(name);
+    return f.pendingSince(name, if (job.fetch.since == 0) null else job.fetch.since);
 }
 
-/// The host's I/O thread joined and its reads freed (its stop, after the engine thread's).
+/// Stop notifications after engine drain; a blocked read keeps only its private memory.
 pub fn stop(h: *LaneHost) void {
     const f = ((h.cache orelse return).disk orelse return).fetch orelse return;
-    f.stop();
+    f.stopAt(write.nowNs());
 }
 
 fn named(h: *LaneHost, name: Name) bool {

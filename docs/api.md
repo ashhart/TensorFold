@@ -614,7 +614,10 @@ same checks, and waits in the queue meanwhile; the engine thread then only copie
 keep decoding through the read. A read that fails, or is not done within `TENSORFOLD_RESTORE_PREFETCH_MS` (30000 by
 default), is left and the state is read at admission as before. `TENSORFOLD_RESTORE_PREFETCH` caps the reads held at
 once (2 by default; 0 turns reading ahead off) and `TENSORFOLD_RESTORE_PREFETCH_GIB` their memory (16 by default); a
-request alone on the engine reads its state at admission as before.
+request alone on the engine reads its state at admission as before. A queued request matching a staged save waits
+within the same timeout for the writer to publish it, then reads it ahead; a failed or late save falls back to the
+ordinary restore or fresh prefill. Read and write workers are separate, so a slow read does not block saves. Cancelled
+reads retain their memory permit until I/O returns, and close cancels reads within the same stop deadline as writes.
 
 States are kept per checkpoint, kernel build, OS build and chip: a macOS update or a new release that computes other
 bits starts a new set, and the old set is the first to go when the disk cap needs room. `--learn-gib` caps the disk

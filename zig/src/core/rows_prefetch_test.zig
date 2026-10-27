@@ -44,7 +44,7 @@ fn written(a: Allocator, dir: []const u8, c: u32) ![]u32 {
     defer s.deinit();
     s.disk = r;
     _ = try request(a, &s, &f, turn1, 1400);
-    while (rows.write.step(r)) {}
+    _ = rows.write.drain(r, rows.write.nowNs() + 3 * std.time.ns_per_s);
     return std.mem.concat(a, u32, &.{ turn1[0..1401], &[_]u32{ 9, 8, 7, 6 } });
 }
 
@@ -191,6 +191,8 @@ test "prefetch: cancellation before, during and after the read frees each read e
     try t.expectEqual(@as(u64, 1), counts(f).freed);
     f.sweep({}, none); // during: the reading one's request went; the I/O thread frees it when its read returns
     try t.expectEqual(@as(u64, 1), counts(f).freed);
+    f.limits.reads = 1;
+    try t.expect(x.start(f, one) == null); // a cancelled read keeps its permit until its blocked syscall returns
     Gate.open.store(true, .release);
     until(f, "freed", 2);
     const n3 = x.start(f, one).?; // after: read in full, then its request went

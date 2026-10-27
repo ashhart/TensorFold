@@ -83,6 +83,7 @@ pub fn fence(r: *Rows) void {
 
 /// Stop admits no further jobs; an I/O syscall cannot extend the owner's shutdown deadline.
 pub fn stop(r: *Rows, deadline: i128) void {
+    if (r.fetch) |f| f.stopAt(deadline);
     if (r.stopped) return;
     r.stopped = true;
     fence(r);
