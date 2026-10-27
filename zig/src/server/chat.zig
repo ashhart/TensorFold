@@ -365,7 +365,7 @@ const Generation = struct {
             answer = split.answer;
         }
         answer = try tool_lfm2.dsml(g.a, answer, g.tools, false); // the answer only, so a call the reasoning mentions is not made
-        const shown = if (g.calls != null) try reply_text.hideInto(g.a, &g.hidden, answer, false) else answer;
+        const shown = if (g.calls != null) try reply_text.hideInto(g.a, &g.hidden, answer, false, true) else answer;
         const vis = reply_text.heldBack(reply_text.streamingVisible(shown), g.calls != null);
         const copied = @intFromPtr(vis.ptr) >= @intFromPtr(g.hidden.items.ptr) and @intFromPtr(vis.ptr) <= @intFromPtr(g.hidden.items.ptr) + g.hidden.items.len;
         const delta = g.streamed.after(vis, !copied);

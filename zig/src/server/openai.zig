@@ -566,7 +566,10 @@ const Run = struct {
                 r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
                 const deltas = tool_parse.deltas(a, calls.?) catch return;
                 for (deltas) |d| r.emit(r.chunk(d, null) catch return) catch return;
-            } else if (reply.content.len > 0 and !r.streamed_prose) {
+            }
+            // Replaying calls does not account for envelopes retained as content.
+            if (reply.content.len > 0 and r.prose_sent.items.len == 0) {
+                if (calls == null) r.prose() catch return;
                 r.emit(r.chunk(.{ .string = reply.content }, null) catch return) catch return;
             } else if (r.plan.policy.kept(reply.content, r.prose_sent.items)) |rest| {
                 r.emit(r.chunk(.{ .string = rest }, null) catch return) catch return;

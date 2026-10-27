@@ -484,10 +484,10 @@ pub const Policy = struct {
         return out.items;
     }
 
-    /// What the filter held back that the reply keeps as text (a malformed call): ``final`` past the prose ``sent``.
-    pub fn kept(p: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
-        if (!p.single) return null;
-        const shown = reply_text.pyLstrip(sent); // the parsed content starts stripped
+    /// Held-back malformed or unoffered call envelopes kept as reply text: ``final`` past the prose ``sent``.
+    pub fn kept(_: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
+        // Replies without parsed calls retain their leading whitespace; parsed content may be stripped.
+        const shown = if (std.mem.startsWith(u8, final, sent)) sent else reply_text.pyLstrip(sent);
         if (!std.mem.startsWith(u8, final, shown)) return null;
         const rest = final[shown.len..];
         return if (reply_text.pyStrip(rest).len > 0) rest else null;

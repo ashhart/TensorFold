@@ -167,11 +167,11 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
 /// Hides tool-call blocks and partial opening tags while streaming, so calls arrive as deltas instead.
 pub fn hideToolCalls(a: Allocator, text: []const u8, finished: bool) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    return hideInto(a, &out, text, finished);
+    return hideInto(a, &out, text, finished, false);
 }
 
 /// ``hideToolCalls`` into ``out`` (cleared first); text without a call block comes back as a slice of ``text``.
-pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finished: bool) Allocator.Error![]const u8 {
+pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finished: bool, defer_closed: bool) Allocator.Error![]const u8 {
     out.clearRetainingCapacity();
     var pos: usize = 0;
     var next: [calls.len]?usize = undefined; // each opener at or after `pos`, searched again only once `pos` passes it
@@ -212,18 +212,25 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
             if (finished) try out.appendSlice(a, text[start.?..]);
             return out.items;
         };
+        // Final parsing may retain this envelope, so later prose must not overtake it.
+        if (defer_closed) return out.items;
         pos = end + calls[which][1].len;
     }
 }
 
 /// With tools, a stream holds trailing whitespace back until more text comes: a reply with a call does not show it.
 pub fn heldBack(text: []const u8, tools: bool) []const u8 {
+    // Only final call acceptance decides whether leading whitespace survives.
+    if (tools and pyLstrip(text).len != text.len) return text[0..0];
     return if (tools) text[0..pyRstrip(text).len] else text; // a prefix, so the stream's pointer checks still hold
 }
 
-/// ``hideToolCalls`` of a finished reply; once a call is hidden, the prose's trailing whitespace stays unsent too.
+/// Prose safe to send before final parsing settles the first hidden closed envelope.
 pub fn finishedProse(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    const prose = try hideToolCalls(a, text, true);
+    // attachCalls has not yet decided whether to strip the reply's content.
+    if (pyLstrip(text).len != text.len) return text[0..0];
+    var out: std.ArrayList(u8) = .empty;
+    const prose = try hideInto(a, &out, text, true, true);
     return if (prose.len != text.len) prose[0..pyRstrip(prose).len] else prose;
 }
 
