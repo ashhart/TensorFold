@@ -106,7 +106,7 @@ test "GLM index: TF_GLM_INDEX_CUDA is off unless 1 or scores, and a typo is refu
 }
 
 test "GLM index: the scores grid covers 8 rows a CTA and 16 pool blocks a CTA" {
-    // a 512-row chunk at 590k tokens: 147,456 pools, 2,304 blocks
+    // a 512-row chunk over 147,456 pools: 2,304 blocks
     try std.testing.expectEqual([2]u32{ 64, 144 }, scoresGrid(512, 2304));
     try std.testing.expectEqual([2]u32{ 9, 1 }, scoresGrid(65, 16));
     try std.testing.expectEqual([2]u32{ 8, 2 }, scoresGrid(64, 17));
