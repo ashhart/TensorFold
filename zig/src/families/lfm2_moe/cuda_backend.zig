@@ -7,6 +7,7 @@ const fwd = @import("cuda_forward.zig");
 const mdl = @import("cuda_model.zig");
 const kern = @import("cuda_kernels.zig");
 const kv = @import("core").kv_pool;
+const snap = @import("cuda_snap.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -54,6 +55,7 @@ pub const Lfm = struct {
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
     pool: ?kv.Pool = null, // the pages every slot leases (attach)
+    snaps: ?snap.Pages = null, // the prompt cache's pages, allocated once inside its budget (snap_ready)
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -97,6 +99,7 @@ pub const Lfm = struct {
             l.rows.deinit(x.gpa);
         }
         if (x.pool) |*p| p.deinit();
+        if (x.snaps) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
@@ -148,6 +151,30 @@ pub const Lfm = struct {
             if (p.nonfinite != 0) return error.NonFiniteLogits;
             t.* = p.token;
         };
+    }
+
+    /// The stream's state at `at` for the prompt cache, copied behind the chunk that ends there.
+    pub fn saveState(x: *Lfm, owner: ?*anyopaque, at: u32) !*snap.Saved {
+        const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+        const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
+        return snap.save(x.gpa, try x.snapPages(), x.m, x.s, l.slot, at);
+    }
+
+    /// The stream's slot made to hold `k`'s state (a restore outside its prompt pass).
+    pub fn restoreState(x: *Lfm, owner: ?*anyopaque, k: *const snap.Saved) !void {
+        const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+        const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        try snap.restore(try x.snapPages(), x.m, x.s, l.slot, k);
+        l.len = k.at;
+    }
+
+    pub fn dropState(x: *Lfm, k: *snap.Saved) void {
+        snap.drop(x.gpa, &x.snaps.?, k);
+    }
+
+    fn snapPages(x: *Lfm) !*snap.Pages {
+        return if (x.snaps) |*p| p else error.NoSnapshotCache;
     }
 
     fn freeSlot(x: *const Lfm) ?usize {
@@ -210,11 +237,30 @@ pub const Lfm = struct {
             l.sampled = true;
         };
         s.cached = 0;
-        if (s.reuse.saved != null) s.reuse_failed = true; // no prompt cache: every pass starts at 0
         try x.m.clearSlot(x.s, l.slot);
-        l.fill = 0;
+        l.fill = x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);
         return l;
+    }
+
+    /// The kept state's position, restored into the slot (0: none, or not this prompt's).
+    fn resumeAt(x: *Lfm, s: *Stream, l: *const Lane, len: usize) usize {
+        const saved = s.reuse.saved orelse return 0;
+        const k: *const snap.Saved = @ptrCast(@alignCast(saved));
+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len) {
+            s.reuse_failed = true;
+            return 0;
+        }
+        const p = x.snapPages() catch {
+            s.reuse_failed = true;
+            return 0;
+        };
+        snap.restore(p, x.m, x.s, l.slot, k) catch {
+            s.reuse_failed = true;
+            return 0;
+        };
+        s.cached = k.at;
+        return k.at;
     }
 
     /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row's logits are written.
