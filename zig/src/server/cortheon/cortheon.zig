@@ -135,7 +135,8 @@ pub const Turn = struct {
         @memcpy(list[0 .. list.len - 1], input.messages.array);
         list[list.len - 1] = message;
         const text = json.stringify(a, .{ .array = t.hidden.items }, .{ .ascii = false }) catch return;
-        t.state.memory.put(memory.replyKey(a, list, list.len - 1), text);
+        const key = memory.replyKey(a, list, list.len - 1) catch return;
+        t.state.memory.put(key, text);
     }
 
     /// One progress line: in the stream's reasoning when there is a stream, and in the log.
@@ -162,17 +163,19 @@ pub fn begin(srv: *Server, a: Allocator, raw: Value, id: []const u8, is_chat: bo
     for (grammar.fields) |k| if (json.truthyField(raw, k)) return null;
     if (json.truthyField(raw, "logprobs")) return null;
     if (raw.get("priority")) |p| if (p == .string and std.mem.eql(u8, p.string, "background")) return null;
-    if (prompt_mod.isTitle(input.messages, input.tools.len > 0) or utility(input)) return null;
+    if (prompt_mod.isTitle(input.messages, input.tools.len > 0) or utility(a, input)) return null;
     return start(state, srv, a, id, input) catch null;
 }
 
 /// A tool-less ask to transform text the request carries, named by its system prompt or a long user turn.
-fn utility(input: *const chat.Input) bool {
+fn utility(a: Allocator, input: *const chat.Input) bool {
     if (input.tools.len > 0) return false;
     const msgs = input.messages.array;
-    if (roleIs(msgs[0], "system") and program.isUtility(memory.text(msgs[0]))) return true;
+    const lead = memory.text(a, msgs[0]) catch return false;
+    if (roleIs(msgs[0], "system") and program.isUtility(lead)) return true;
     const last = msgs[msgs.len - 1];
-    return roleIs(last, "user") and memory.text(last).len >= 200 and program.isUtility(memory.text(last));
+    const words = memory.text(a, last) catch return false;
+    return roleIs(last, "user") and words.len >= 200 and program.isUtility(words);
 }
 
 fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat.Input) !*Turn {
@@ -180,7 +183,7 @@ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat
     var first: ?[]const u8 = null;
     var latest: []const u8 = "";
     for (spliced) |m| if (roleIs(m, "user")) {
-        const own = try program.ownWords(a, memory.text(m));
+        const own = try program.ownWords(a, try memory.text(a, m));
         if (first == null) first = own;
         latest = own;
     };
@@ -195,16 +198,17 @@ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat
         .goal = latest[0..@min(latest.len, 4000)],
         .research = fresh_turn and latest_task.frontier and std.mem.trim(u8, latest, " \t\r\n").len >= 12,
         .client_tools = input.tools.len > 0,
-        .user_key = memory.userKey(spliced),
+        .user_key = try memory.userKey(a, spliced),
         .today = try today(a, srv.io),
     };
-    for (spliced) |m| if (!roleIs(m, "assistant")) try t.seen.addFrom(a, memory.text(m));
+    for (spliced) |m| if (!roleIs(m, "assistant")) try t.seen.addFrom(a, try memory.text(a, m));
     const note = try program.note(a, task, calls_per_reply);
     const list = try a.alloc(Value, spliced.len + @intFromBool(!roleIs(spliced[0], "system")));
     if (roleIs(spliced[0], "system")) {
         @memcpy(list, spliced);
         const sys = try json.copyObject(a, spliced[0].object);
-        try sys.put(a, "content", .{ .string = try std.mem.concat(a, u8, &.{ memory.text(spliced[0]), "\n\n", note }) });
+        const words = try memory.text(a, spliced[0]);
+        try sys.put(a, "content", .{ .string = try std.mem.concat(a, u8, &.{ words, "\n\n", note }) });
         list[0] = .{ .object = sys };
     } else {
         const sys = try json.newObject(a);
