@@ -3,7 +3,8 @@ const std = @import("std");
 const cache = @import("cache.zig");
 const reader = @import("reader.zig");
 pub const components = 9;
-pub const worker_stack_bytes = 256 * 1024;
+/// The engine threads' stack: glibc refuses a smaller one when the binary's static TLS needs more (EINVAL).
+pub const worker_stack_bytes = 16 << 20;
 pub const Expert = [components]reader.Span;
 
 pub fn Arena(comptime Reader: type) type {
