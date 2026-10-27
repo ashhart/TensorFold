@@ -17,6 +17,7 @@ const drama_combine = @import("metal_drama_combine.zig");
 const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const glm_rows_k = @import("metal_glm_rows.zig");
+const bolt_k = @import("metal_bolt.zig");
 
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
@@ -202,6 +203,68 @@ pub fn main(init: std.process.Init) !u8 {
         try rows_list.append(a, r);
         try kernels.append(a, r.kernel());
     }
+    var bolt_gemvs: [2]bolt_k.GemvProbe = undefined;
+    var bolt_gemv_made: usize = 0;
+    defer for (bolt_gemvs[0..bolt_gemv_made]) |*probe| probe.deinit();
+    for (std.enums.values(bolt_k.Gemv)) |v| {
+        if (!wanted(o, bolt_k.gemvSpec(v).name)) continue;
+        bolt_gemvs[bolt_gemv_made] = try bolt_k.GemvProbe.init(a, device, queue, v, null);
+        bolt_gemv_made += 1;
+        try kernels.append(a, bolt_gemvs[bolt_gemv_made - 1].kernel());
+    }
+    var bolt_route: ?bolt_k.RouteProbe = null;
+    defer if (bolt_route) |*probe| probe.deinit();
+    if (wanted(o, bolt_k.routeSpec().name)) {
+        bolt_route = try bolt_k.RouteProbe.init(a, device, queue, null);
+        try kernels.append(a, bolt_route.?.kernel());
+    }
+    var bolt_combine: ?bolt_k.CombineProbe = null;
+    defer if (bolt_combine) |*probe| probe.deinit();
+    if (wanted(o, bolt_k.combineSpec().name)) {
+        bolt_combine = try bolt_k.CombineProbe.init(a, device, queue, null);
+        try kernels.append(a, bolt_combine.?.kernel());
+    }
+    var bolt_norms: [4]bolt_k.NormProbe = undefined;
+    var bolt_norm_made: usize = 0;
+    defer for (bolt_norms[0..bolt_norm_made]) |*probe| probe.deinit();
+    for (std.enums.values(bolt_k.Norm)) |v| {
+        if (!wanted(o, bolt_k.normSpec(v).name)) continue;
+        bolt_norms[bolt_norm_made] = try bolt_k.NormProbe.init(a, device, queue, v, null);
+        bolt_norm_made += 1;
+        try kernels.append(a, bolt_norms[bolt_norm_made - 1].kernel());
+    }
+    // Bolt's planted controls: each a one-line mutation of the kernel above it, which its gate must catch
+    const bc = bolt_k.controls;
+    var bolt_ctl_gemv: [2]bolt_k.GemvProbe = undefined;
+    var bolt_ctl_gemv_made: usize = 0;
+    defer for (bolt_ctl_gemv[0..bolt_ctl_gemv_made]) |*probe| probe.deinit();
+    for ([_]bolt_k.Mut{ bc.gemv_half, bc.gemv_tail }) |m| if (wanted(o, m.name)) {
+        bolt_ctl_gemv[bolt_ctl_gemv_made] = try bolt_k.GemvProbe.init(a, device, queue, .bm4, m);
+        bolt_ctl_gemv_made += 1;
+        try kernels.append(a, bolt_ctl_gemv[bolt_ctl_gemv_made - 1].kernel());
+    };
+    var bolt_ctl_route: [2]bolt_k.RouteProbe = undefined;
+    var bolt_ctl_route_made: usize = 0;
+    defer for (bolt_ctl_route[0..bolt_ctl_route_made]) |*probe| probe.deinit();
+    for ([_]bolt_k.Mut{ bc.route_slice, bc.route_nan }) |m| if (wanted(o, m.name)) {
+        bolt_ctl_route[bolt_ctl_route_made] = try bolt_k.RouteProbe.init(a, device, queue, m);
+        bolt_ctl_route_made += 1;
+        try kernels.append(a, bolt_ctl_route[bolt_ctl_route_made - 1].kernel());
+    };
+    var bolt_ctl_combine: ?bolt_k.CombineProbe = null;
+    defer if (bolt_ctl_combine) |*probe| probe.deinit();
+    if (wanted(o, bc.combine_ninth.name)) {
+        bolt_ctl_combine = try bolt_k.CombineProbe.init(a, device, queue, bc.combine_ninth);
+        try kernels.append(a, bolt_ctl_combine.?.kernel());
+    }
+    var bolt_ctl_norm: [3]bolt_k.NormProbe = undefined;
+    var bolt_ctl_norm_made: usize = 0;
+    defer for (bolt_ctl_norm[0..bolt_ctl_norm_made]) |*probe| probe.deinit();
+    for ([_]struct { v: bolt_k.Norm, m: bolt_k.Mut }{ .{ .v = .add, .m = bc.add_residual }, .{ .v = .group16, .m = bc.group_sums }, .{ .v = .group16, .m = bc.group_mean } }) |x| if (wanted(o, x.m.name)) {
+        bolt_ctl_norm[bolt_ctl_norm_made] = try bolt_k.NormProbe.init(a, device, queue, x.v, x.m);
+        bolt_ctl_norm_made += 1;
+        try kernels.append(a, bolt_ctl_norm[bolt_ctl_norm_made - 1].kernel());
+    };
     var flash_list: [8]flash.Probe = undefined;
     var flash_made: usize = 0;
     defer for (flash_list[0..flash_made]) |*probe| probe.deinit();

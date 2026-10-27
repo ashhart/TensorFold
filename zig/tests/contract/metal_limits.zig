@@ -98,6 +98,20 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         text = sources.core_deltanet;
+    } else if (std.mem.startsWith(u8, d.name, "bolt ")) {
+        // Bolt's ops are the engine's prefill op files (kernels/metal/sources.zig `prefill`), named by the label's 2nd word
+        if (has(d.name, " norm ")) {
+            // Bolt's norm instantiations live beside Lightning's in kernels/metal/nemotron (kernels.zig `all`, by key)
+            const key = if (has(d.name, " group norm ")) "group_norm_xs_bolt_16" else if (has(d.name, "add_norm_moe")) "add_norm_moe_xs_bolt" else "add_norm_xs_bolt";
+            text = for (sources.nemotron.all) |k| {
+                if (std.mem.eql(u8, k.key, key)) break k.source;
+            } else return error.UnknownLaunch;
+        } else {
+            const file = if (has(d.name, " gemv ")) "gemv_ops" else if (has(d.name, " combine ")) "elementwise" else if (has(d.name, " route ")) "route" else return error.UnknownLaunch;
+            text = for (sources.prefill) |f| {
+                if (std.mem.eql(u8, f.name, file)) break f.text;
+            } else return error.UnknownLaunch;
+        }
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else tf.qwen27.runtime_sources.glue;
     } else if (has(d.name, "tile_qmm")) text = sources.core_tile_qmm else if (has(d.name, "softmax")) text = sources.ops_softmax else if (has(d.name, "rms")) text = sources.ops_embed_norm else if (has(d.name, "top-k")) text = topk_text else if (has(d.name, "row projection")) text = sources.core_row_projection else if (has(d.name, "simd_qmm_bits")) text = sources.core_simd_qmm_bits else if (has(d.name, "simd_qmm")) text = sources.core_simd_qmm else if (has(d.name, "affine_mm")) {
