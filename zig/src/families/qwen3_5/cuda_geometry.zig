@@ -56,6 +56,7 @@ pub const Kinds = struct {
     modelopt: bool = false,
     ct: bool = false, // compressed-tensors: the kinds come from the tensors the index names (cuda_modelopt.ctKinds)
     head: Kind = .affine,
+    experts: Kind = .affine, // a MoE's routed and shared experts (one recipe)
     proj: [max_layers][std.enums.values(Slot).len]Kind = @splat(@splat(.affine)),
 
     pub fn of(k: *const Kinds, layer: usize, slot: Slot) Kind {
@@ -212,10 +213,15 @@ fn expertBits(q: std.json.ObjectMap, layers: usize) !struct { bits: u8, count: u
 
 /// Whether config.json's quantization_config says quant_method "exl3" (Mia-AiLab's HF-layout checkpoints).
 fn isExl3(root: std.json.ObjectMap) bool {
+    return quantMethod(root, "exl3");
+}
+
+/// Whether quantization_config names `method` as its quant_method.
+fn quantMethod(root: std.json.ObjectMap, method: []const u8) bool {
     const q = root.get("quantization_config") orelse return false;
     if (q != .object) return false;
     const m = q.object.get("quant_method") orelse return false;
-    return m == .string and std.mem.eql(u8, m.string, "exl3");
+    return m == .string and std.mem.eql(u8, m.string, method);
 }
 
 fn object(v: std.json.Value) !std.json.ObjectMap {
@@ -303,13 +309,13 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     }
     if (g.layers > max_layers or g.hidden % 256 != 0 or g.hidden > 8192 or g.intermediate % 64 != 0) return error.UnsupportedQwenGeometry;
     if (moe) {
-        if (modelopt) return error.UnsupportedQwenQuantization; // the routed experts read MLX tables only
+        if (modelopt and !quantMethod(root, "modelopt")) return error.UnsupportedQwenQuantization; // ModelOpt's own only
         g.experts = try integer(t, "num_experts");
         g.top_k = try integer(t, "num_experts_per_tok");
         // the shared expert runs in the routed experts' table, so it needs their width
         if (try integer(t, "shared_expert_intermediate_size") != g.intermediate) return error.UnsupportedQwenGeometry;
         if (g.experts > 256 or g.top_k > 31 or g.top_k >= g.experts) return error.UnsupportedQwenGeometry;
-        if (!exl3) {
+        if (!exl3 and !modelopt) { // an MLX table's widths; ModelOpt's experts come from their recipes
             const w = try expertBits(try object(qv.?), g.layers);
             if (w.count != 0 and w.count != 3 * g.layers) return error.UnsupportedQwenQuantization;
             g.expert_bits = w.bits;
@@ -480,6 +486,8 @@ test "fp8 caches take e4m3 rows and a scale each: 520 bytes a position and head 
 
 test {
     _ = @import("cuda_quant_admission_test.zig");
+    _ = @import("cuda_modelopt_moe_test.zig");
+    _ = @import("cuda_modelopt_experts.zig");
     _ = @import("cuda_modelopt.zig");
     _ = @import("cuda_exl3_admission_test.zig");
 }

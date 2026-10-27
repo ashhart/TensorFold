@@ -5,6 +5,7 @@ const core = @import("core");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
 const modelopt = @import("cuda_modelopt.zig");
+const modelopt_experts = @import("cuda_modelopt_experts.zig");
 
 const Geometry = geometry.Geometry;
 const Slot = geometry.Slot;
@@ -85,7 +86,7 @@ pub fn total(g: Geometry) usize {
     t += aligned(g.hidden * 2);
     for (0..g.layers) |i| {
         t += 2 * aligned(g.hidden * 2);
-        if (g.moe()) t += routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
+        if (g.moe()) t += if (mo) modelopt_experts.routedBytes(g) else routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
             t += if (mo) modelopt.packedBytes(nk[0], nk[1], g.kinds.of(i, slot)) else packedBytes(nk[0], nk[1], g.bits.of(i, slot));
@@ -107,7 +108,7 @@ pub fn stageBytes(g: Geometry) usize {
             const nk = shape(g, slot);
             raw = @max(raw, modelopt.rawBytes(nk[0], nk[1], g.kinds.of(i, slot)));
         };
-        return raw;
+        return if (g.moe()) @max(raw, modelopt_experts.stageBytes(g)) else raw;
     }
     var most = rawBytes(g.vocab, g.hidden, g.bits.head);
     if (rowBits(g.bits.embed) != g.bits.embed) most = @max(most, rawBytes(g.vocab, g.hidden, g.bits.embed));
@@ -367,7 +368,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
         l.* = .{
             .input_norm = try normVec(e, ck, mo, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
             .post_norm = try normVec(e, ck, mo, "{s}post_attention_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
-            .mlp = if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
+            .mlp = if (g.moe() and mo) try modelopt_experts.routed(e, ck, stage, p) else if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
             .mixer = undefined,
         };
         if (g.pocket > 0) try loadPocket(e, ck, p, i);
