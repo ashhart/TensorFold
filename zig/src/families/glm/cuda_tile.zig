@@ -74,8 +74,7 @@ fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
 
 /// One KDA layer's fused input stack, moved to an eight-aligned buffer when TF_GLM_KDA_PAD asks for it.
 fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@import("cuda_kda_block.zig").Layer) !void {
-    const kb = @import("cuda_kda_block.zig");
-    const np = kb.paddedWidth(x.width());
+    const np = x.matWidth();
     if (np == x.width()) return; // already aligned, or the pad is off
     const src = switch (x.proj) {
         .bf16 => |ptr| ptr,
