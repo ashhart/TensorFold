@@ -373,36 +373,32 @@ test "bare ampersands are text, and a page full of them reads in linear time" {
     try std.testing.expect(many.truncated and many.text.len <= 100);
 }
 
-fn now() u64 {
-    return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
-}
-
-/// The fastest of three reads, in nanoseconds, of `unit` repeated to `size` bytes: for its links or as text.
-fn fastest(unit: []const u8, size: usize, links: bool) !u64 {
-    const page = try std.testing.allocator.alloc(u8, size);
-    defer std.testing.allocator.free(page);
-    for (page, 0..) |*c, i| c.* = unit[i % unit.len];
-    var best: u64 = std.math.maxInt(u64);
-    for (0..3) |_| {
+/// Two pages of one unit repeated, 256 KiB and 2 MiB, read for their links or as text.
+const Unclosed = struct {
+    pages: [2][]u8,
+    links: bool,
+    fn run(u: *const Unclosed, i: usize) anyerror!void {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const start = now();
-        if (links) {
-            _ = try hrefs(arena.allocator(), page, 400, null);
+        if (u.links) {
+            _ = try hrefs(arena.allocator(), u.pages[i], 400, null);
         } else {
-            _ = try toText(arena.allocator(), page, 100, null);
+            _ = try toText(arena.allocator(), u.pages[i], 100, null);
         }
-        best = @min(best, now() - start);
     }
-    return best;
-}
+};
 
 test "a page of unclosed tags reads in linear time" {
     for ([_]struct { []const u8, bool }{ .{ "<", false }, .{ "<a ", true } }) |case| {
-        const small = try fastest(case[0], 256 << 10, case[1]);
-        const big = try fastest(case[0], 2 << 20, case[1]);
-        try std.testing.expect(big < 5 * std.time.ns_per_s); // 2 MiB took minutes while each '<' rescanned the rest
-        try std.testing.expect(big < 24 * @max(small, 1)); // 8x the bytes: near 8x the time, not a quadratic's 64x
+        var u: Unclosed = .{ .pages = undefined, .links = case[1] };
+        for (&u.pages, [_]usize{ 256 << 10, 2 << 20 }) |*page, size| {
+            page.* = try std.testing.allocator.alloc(u8, size);
+            for (page.*, 0..) |*c, i| c.* = case[0][i % case[0].len];
+        }
+        defer for (u.pages) |page| std.testing.allocator.free(page);
+        const ns = try @import("../linear_time.zig").fastest(3, &u, Unclosed.run);
+        try std.testing.expect(ns[1] < 5 * std.time.ns_per_s); // 2 MiB took minutes while each '<' rescanned the rest
+        try std.testing.expect(ns[1] < 24 * @max(ns[0], 1)); // 8x the bytes: near 8x the time, not a quadratic's 64x
     }
 }
 

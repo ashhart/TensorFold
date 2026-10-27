@@ -121,16 +121,17 @@ test "a trickling reply times out, and Ctrl-C cancels the attempt and ends the r
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // 1.5 s of trickle: an attempt or run not cut short takes longer than the 1 s bounds a late wake cannot reach
     var trickle: [60]Write = undefined;
-    trickle[0] = .{ .bytes = try fake.headOf(a, "200 OK", "text/event-stream"), .pause_ms = 4 };
-    for (trickle[1..]) |*w| w.* = .{ .bytes = "x", .pause_ms = 4 };
+    trickle[0] = .{ .bytes = try fake.headOf(a, "200 OK", "text/event-stream"), .pause_ms = 25 };
+    for (trickle[1..]) |*w| w.* = .{ .bytes = "x", .pause_ms = 25 };
     const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "POST", .path = "/v1/completions", .replies = &.{&trickle} }});
     defer f.stop();
     const io = std.testing.io;
     var started = stream.now(io);
     const s = try one(f, a, suite.fixtures[0], opts(4, false, 0.04), 1.0, 1234);
     try std.testing.expectEqual(suite.ErrorCode.timeout, s.error_code.?);
-    try std.testing.expect(stream.now(io) - started < 300 * std.time.ns_per_ms);
+    try std.testing.expect(stream.now(io) - started < 1000 * std.time.ns_per_ms);
     stop.reset();
     defer stop.reset();
     started = stream.now(io);
@@ -144,7 +145,7 @@ test "a trickling reply times out, and Ctrl-C cancels the attempt and ends the r
         defer t.join();
         break :blk try stream.run(a, io, .{ .base = try f.url(a, ""), .served = "m" }, .{ .tokens = 4, .reps = 2, .temperatures = &.{1.0}, .serial = false, .timeout_s = 30 }, null);
     };
-    try std.testing.expect(stream.now(io) - started < 300 * std.time.ns_per_ms);
+    try std.testing.expect(stream.now(io) - started < 1000 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 1), samples.len);
     try std.testing.expect(samples[0].repeat == -1 and samples[0].error_code.? == .cancelled);
 }
@@ -320,8 +321,8 @@ test "a refused attempt keeps its fixed sample and code and hands back the serve
         &.{.{ .bytes = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 15\r\nConnection: close\r\n\r\n<html>x</html>\n" }},
         try fake.jsonReply(a, "400 Bad Request", "{\"error\": \"bad\\u001b[31m red\\u0007\\nline\"}"),
         try fake.jsonReply(a, "400 Bad Request", try std.mem.concat(a, u8, &.{ "{\"detail\": \"", &long, "\"}" })),
-        &.{ .{ .bytes = late_head, .pause_ms = 400 }, .{ .bytes = late_body } },
-        &.{ .{ .bytes = late_head, .pause_ms = 400 }, .{ .bytes = late_body } },
+        &.{ .{ .bytes = late_head, .pause_ms = 1000 }, .{ .bytes = late_body } },
+        &.{ .{ .bytes = late_head, .pause_ms = 1000 }, .{ .bytes = late_body } },
     } }});
     defer f.stop();
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io, .read_buffer_size = 576 << 10 };
@@ -344,7 +345,8 @@ test "a refused attempt keeps its fixed sample and code and hands back the serve
     const started = stream.now(io);
     const late = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
     const took: f64 = @floatFromInt(@as(i64, @intCast(stream.now(io) - started)));
-    try std.testing.expect(took >= 100e6 and took < 300e6 and late.error_code.? == .http_error);
+    // the body comes 1 s after the head: waiting for it takes 1 s or more, the 100 ms wait well under 900 ms
+    try std.testing.expect(took >= 100e6 and took < 900e6 and late.error_code.? == .http_error);
     try std.testing.expect(late.end_to_end_seconds.? * 1e9 < took - 50e6);
     try std.testing.expectEqualStrings("HTTP 400", said);
     const cut = stream.attempt(a, io, &client, target, opts(4, false, 0.05), suite.fixtures[0], 0.0, 1234, 0, &said);
