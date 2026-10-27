@@ -2,6 +2,7 @@
 const std = @import("std");
 const ledger = @import("load_ledger.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
+const Job = LaneHost.Job;
 
 const Published = struct { requests: ?ledger.Requests = null, work: ?ledger.Work = null, capacity: ?ledger.Capacity = null };
 
@@ -15,6 +16,23 @@ pub const State = struct {
     started: u64 = 0,
     requeued: u64 = 0,
     yields: u64 = 0,
+    prefill_compute: u64 = 0,
+    prefill_cache: u64 = 0,
+    decode: u64 = 0,
+    busy_ns: u64 = 0,
+};
+
+/// One attempt's prompt pass as the ledger counts it; the engine thread owns it.
+pub const Pass = struct {
+    on: bool = false,
+    /// `fill_at` when the pass began: a proposed reuse position the backend has not confirmed yet.
+    hint: u32 = 0,
+    /// Computed tokens of this attempt already counted.
+    credited: u32 = 0,
+    /// When the running prompt call began, or its time was last taken (0: no call timed).
+    call_ns: i96 = 0,
+    /// Call time not yet counted: it moves into `busy_ns` only with this pass's own tokens.
+    pending_ns: u64 = 0,
 };
 
 /// Engine.load: the server's producer at attach (published at once), null at detach.
@@ -40,10 +58,105 @@ pub fn publish(h: *LaneHost) void {
     s.mutex.lockUncancelable(h.io);
     defer s.mutex.unlock(h.io);
     const p = s.producer orelse return;
-    const now: Published = .{ .requests = requests(h) };
+    const now: Published = .{ .requests = requests(h), .work = work(h) };
     if (s.last) |last| if (std.meta.eql(last, now)) return;
     s.last = now;
     p.publish(now.requests, now.work, now.capacity);
+}
+
+/// A prompt pass starts, a new attempt from zero: a requeued job's repeated work counts again.
+pub fn began(h: *LaneHost, job: *Job) void {
+    h.lock();
+    defer h.unlock();
+    job.load = .{ .on = true, .hint = job.stream.fill_at.load(.monotonic) };
+}
+
+/// A backend prompt call for `job` starts now (engine thread).
+pub fn calling(h: *LaneHost, job: *Job) void {
+    job.load.call_ns = clock(h);
+}
+
+/// A prompt call returned with its pass still open, as a lone driver's hand-off: its time stays with the pass.
+pub fn returned(h: *LaneHost, job: *Job) void {
+    h.lock();
+    defer h.unlock();
+    if (job.load.on) take(h, &job.load);
+}
+
+/// After a chunk call that returned: its time, and the work it reported when the pass's start is certain.
+pub fn progress(h: *LaneHost, job: *Job) void {
+    h.lock();
+    defer h.unlock();
+    const p = &job.load;
+    if (!p.on) return; // reported already, as by an early first token inside the chunk
+    take(h, p);
+    if (!h.core.backend.vtable.reports_fill) return;
+    const s = &job.stream;
+    if (!(p.hint == 0 or s.cached == p.hint or s.reuse_failed)) return; // a start in doubt counts at the report
+    const start = if (s.reuse_failed) 0 else @max(s.cached, p.hint);
+    const d = (s.fill_at.load(.monotonic) -| start) -| p.credited;
+    if (d == 0) return;
+    h.load.prefill_compute += d;
+    p.credited += d;
+    h.load.busy_ns += p.pending_ns;
+    p.pending_ns = 0;
+}
+
+/// The pass reported: its remaining computed tokens, its restored ones and its time; the caller holds the host mutex.
+pub fn credit(h: *LaneHost, job: *Job) void {
+    const p = &job.load;
+    if (!p.on) return;
+    take(h, p);
+    const s = &job.stream;
+    const c = (@as(u32, @intCast(job.request.prompt.len)) -| s.cached) -| p.credited;
+    h.load.prefill_cache += s.cached;
+    h.load.prefill_compute += c;
+    if (c > 0) h.load.busy_ns += p.pending_ns; // a pass its progress already covered adds no time without tokens
+    job.load = .{};
+}
+
+/// One batched call: every completed prompt and the call's time once, before any of them reports alone.
+pub fn creditBatch(h: *LaneHost, jobs: []const *Job, done: []const bool, t0: i96) void {
+    h.lock();
+    defer h.unlock();
+    var compute: u64 = 0;
+    for (jobs, done) |job, d| {
+        if (!d or !job.load.on) continue; // a prompt whose pass failed counts nothing
+        const s = &job.stream;
+        compute += (@as(u32, @intCast(job.request.prompt.len)) -| s.cached) -| job.load.credited;
+        h.load.prefill_cache += s.cached;
+        job.load = .{};
+    }
+    h.load.prefill_compute += compute;
+    if (compute > 0) h.load.busy_ns += @intCast(@max(0, clock(h) - t0));
+}
+
+/// The pass ends without a report: its time leaves with its uncounted tokens; the caller holds the host mutex.
+pub fn ended(job: *Job) void {
+    job.load = .{};
+}
+
+/// `n` output tokens committed now; a request's first comes from its prompt pass; the caller holds the host mutex.
+pub fn decoded(h: *LaneHost, n: usize, first: bool) void {
+    h.load.decode += n - @intFromBool(first and n > 0);
+}
+
+pub fn clock(h: *const LaneHost) i96 {
+    return std.Io.Clock.awake.now(h.io).toNanoseconds();
+}
+
+/// The time since the call began, or since the last take, into the pass's pending time.
+fn take(h: *const LaneHost, p: *Pass) void {
+    if (p.call_ns == 0) return;
+    const t = clock(h);
+    p.pending_ns += @intCast(@max(0, t - p.call_ns));
+    p.call_ns = t;
+}
+
+/// The `work` group; a family round planner mixes streams in one pass, so its time has no pass to go to.
+fn work(h: *const LaneHost) ?ledger.Work {
+    if (h.rounds != null) return null;
+    return .{ .prefill_compute = h.load.prefill_compute, .prefill_cache = h.load.prefill_cache, .decode = h.load.decode, .prefill_busy_ns = h.load.busy_ns };
 }
 
 /// A background pass gave its lane up to foreground work.
@@ -85,4 +198,5 @@ fn filling(h: *const LaneHost) ?u64 {
 
 test {
     _ = @import("lane_host_load_test.zig");
+    _ = @import("lane_host_load_account_test.zig");
 }

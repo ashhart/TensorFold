@@ -6,6 +6,7 @@ const Job = LaneHost.Job;
 pub fn pass(h: *LaneHost, job: *Job, began: i96) bool {
     const be = h.core.backend;
     if (h.cache) |store| if (job.marks.len == 0 and (job.request.untaught or store.rules.lookahead > 0)) return h.cancel(job); // it would keep nothing
+    @import("lane_host_load.zig").calling(h, job);
     be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
         if (e != error.Cancelled and e != error.Yielded) return @import("lane_host_end.zig").dropFailed(h, job, e);
         if (e == error.Yielded) @import("lane_host_load.zig").yielded(h);

@@ -118,6 +118,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         h.queued.insert(h.gpa, 0, job) catch break :blk false;
         break :blk true;
     };
+    @import("lane_host_load.zig").ended(job); // before the teardown: this attempt's time leaves with it
     if (waits) {
         h.load.requeued += 1;
         h.memory_lanes = others; // under the lock: a publish reads it

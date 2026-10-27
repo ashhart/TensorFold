@@ -246,7 +246,7 @@ pub const LaneHost = struct {
         if (emitted.len > job.delivered) {
             if (job.stream.logprobs != null) emit(job, .{ .logprobs = job.stream.rows.items[job.delivered..emitted.len] });
             emit(job, .{ .tokens = emitted[job.delivered..] });
-            status.noteDecoded(h, emitted.len - job.delivered);
+            status.noteDecoded(h, emitted.len - job.delivered, job.delivered == 0);
             job.delivered = emitted.len;
         }
     }
@@ -269,6 +269,7 @@ pub const LaneHost = struct {
     pub fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
         h.lock();
         h.memory_lanes = null; // a lane may have freed: the next admission asks the backend for memory again
+        load.ended(job);
         h.unlock();
         if (h.rounds) |rd| rd.vtable.left(rd.ctx, @intFromPtr(job));
         job.reported();
@@ -359,6 +360,7 @@ pub const LaneHost = struct {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
             return true;
         }
+        load.calling(h, job);
         h.core.addStreamCommitted(&job.stream, .{ .ptr = job, .call = firstCommitted }) catch |e| return h.failedPass(job, e);
         h.prefilled(job, began);
         if (r.embedding != null) return @import("lane_embeddings.zig").complete(h, job);
@@ -380,6 +382,7 @@ pub const LaneHost = struct {
         const job = h.filling.items[at];
         const first = !job.fill_began;
         job.fill_began = true;
+        load.calling(h, job);
         const done = h.core.fillStreamCommitted(&job.stream, first, .{ .ptr = job, .call = firstCommitted }, fill.capRows(h)) catch |e| {
             _ = switch (e) {
                 error.Cancelled => h.cancel(job),
@@ -391,6 +394,7 @@ pub const LaneHost = struct {
             };
             return;
         };
+        load.progress(h, job);
         if (!done) return;
         _ = h.filling.orderedRemove(at);
         h.prefilled(job, job.began);
@@ -425,6 +429,7 @@ pub const LaneHost = struct {
         if (done > began) h.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len - job.stream.cached)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
         h.prefill_at = done;
         job.prefilled = done;
+        load.credit(h, job);
         h.unlock();
         rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
         job.reported();

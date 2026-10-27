@@ -41,13 +41,24 @@ const Rig = struct {
     core: lanes.Engine = undefined,
     host: LaneHost = undefined,
 
+    const Kind = enum { plain, batched, stepped };
+
     fn init(r: *Rig, info: api.Info) !void {
+        return r.initWith(info, std.testing.io, .plain);
+    }
+
+    fn initWith(r: *Rig, info: api.Info, io: std.Io, kind: Kind) !void {
         const gpa = std.testing.allocator;
         r.cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
         r.target = .{ .gpa = gpa, .prefill_chunks = 3 };
         r.clock = .{};
-        r.core = lanes.Engine.init(gpa, &r.cfg, r.target.backend(), r.clock.clock());
-        r.host = LaneHost.init(gpa, std.testing.io, &r.core, info);
+        const backend = switch (kind) {
+            .plain => r.target.backend(),
+            .batched => r.target.batched(),
+            .stepped => r.target.stepped(),
+        };
+        r.core = lanes.Engine.init(gpa, &r.cfg, backend, r.clock.clock());
+        r.host = LaneHost.init(gpa, io, &r.core, info);
     }
     fn deinit(r: *Rig) void {
         r.host.stop();
@@ -180,4 +191,166 @@ test "after detach the host's work reaches the ledger no more" {
     _ = a.wait();
     const s = ledger.read();
     try std.testing.expect(s.parked and s.requests == null);
+}
+
+/// An awake clock only prompt chunks move: each chunk the fake runs takes `chunk_ns`, all else takes no time.
+const Frozen = struct {
+    const chunk_ns = 1000;
+    var ns: std.atomic.Value(i64) = .init(1);
+    var chunks: std.atomic.Value(u64) = .init(0);
+    var table: std.Io.VTable = undefined;
+    fn now(ctx: ?*anyopaque, kind: std.Io.Clock) std.Io.Timestamp {
+        if (kind == .awake) return .{ .nanoseconds = ns.load(.monotonic) };
+        return std.testing.io.vtable.now(ctx, kind);
+    }
+    fn io() std.Io {
+        table = std.testing.io.vtable.*;
+        table.now = now;
+        chunks.store(0, .monotonic);
+        return .{ .userdata = std.testing.io.userdata, .vtable = &table };
+    }
+    fn tick(_: *anyopaque, _: *lanes.Stream, _: usize) void {
+        _ = ns.fetchAdd(chunk_ns, .monotonic);
+        _ = chunks.fetchAdd(1, .monotonic);
+    }
+    /// Busy time is exactly the chunks' time: no waiting between calls, nothing twice.
+    fn expectBusy(work: api.load_ledger.Work) !void {
+        try std.testing.expectEqual(chunks.load(.monotonic) * chunk_ns, work.prefill_busy_ns);
+    }
+};
+
+fn settled(rig: *Rig, ledger: *Ledger) api.load_ledger.Work {
+    rig.host.lock(); // the last unlock has published
+    rig.host.unlock();
+    return ledger.read().work.?;
+}
+
+fn runTwo(kind: Rig.Kind, memory_lanes: ?usize) !api.load_ledger.Work {
+    var rig: Rig = undefined;
+    try rig.initWith(.{ .lanes = 2 }, Frozen.io(), kind);
+    defer rig.deinit();
+    rig.target.memory_lanes = memory_lanes;
+    rig.target.prefill_hook = Frozen.tick;
+    rig.target.prefill_hook_ctx = &rig;
+    var ledger: Ledger = .init(std.testing.io);
+    defer ledger.detach(false);
+    ledger.attach(rig.host.engine());
+    const one = [_]u32{ 2, 7, 1, 8, 2, 8 };
+    const two = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5 };
+    var a: Box = .{};
+    var b: Box = .{};
+    const ra: Request = .{ .prompt = &one, .max_tokens = 8 };
+    const rb: Request = .{ .prompt = &two, .max_tokens = 4 };
+    try rig.host.engine().submit(1, &ra, a.sink());
+    try rig.host.engine().submit(2, &rb, b.sink()); // both queued: a batching backend takes them in one call
+    try rig.host.start();
+    try std.testing.expectEqual(Reason.length, a.wait());
+    try std.testing.expectEqual(Reason.length, b.wait());
+    if (kind == .batched) try std.testing.expectEqual(@as(usize, 1), rig.target.many_passes);
+    return settled(&rig, &ledger);
+}
+
+test "a request counts its computed prompt once, its output after the first token, and its prompt calls' time" {
+    var rig: Rig = undefined;
+    try rig.initWith(.{ .lanes = 2 }, Frozen.io(), .plain);
+    defer rig.deinit();
+    rig.target.prefill_hook = Frozen.tick;
+    rig.target.prefill_hook_ctx = &rig;
+    var ledger: Ledger = .init(std.testing.io);
+    defer ledger.detach(false);
+    ledger.attach(rig.host.engine());
+    try rig.host.start();
+    const prompt = [_]u32{ 2, 7, 1, 8, 2, 8 };
+    var a: Box = .{};
+    const ra: Request = .{ .prompt = &prompt, .max_tokens = 8 };
+    try rig.host.engine().submit(1, &ra, a.sink());
+    _ = a.wait();
+    const w = settled(&rig, &ledger);
+    try std.testing.expectEqual(@as(u64, 6), w.prefill_compute);
+    try std.testing.expectEqual(@as(u64, 0), w.prefill_cache);
+    try std.testing.expectEqual(@as(u64, 7), w.decode); // the first of 8 came from the prompt pass
+    try std.testing.expect(w.prefill_busy_ns > 0);
+    try Frozen.expectBusy(w);
+}
+
+test "chunked passes count each chunk once and only their own chunks' time" {
+    const w = try runTwo(.stepped, null);
+    try std.testing.expectEqual(@as(u64, 15), w.prefill_compute);
+    try Frozen.expectBusy(w);
+}
+
+test "a batched call counts its prompts and its time once" {
+    const w = try runTwo(.batched, null);
+    try std.testing.expectEqual(@as(u64, 15), w.prefill_compute);
+    try Frozen.expectBusy(w);
+}
+
+test "a requeued request counts the work of each attempt" {
+    const w = try runTwo(.plain, 1); // the second lane's pass fails for memory, then runs once the first ends
+    try std.testing.expectEqual(@as(u64, 15), w.prefill_compute); // the failed attempt computed nothing
+    try Frozen.expectBusy(w);
+}
+
+/// Two queued prompts on the batching backend where the first one's first-token read fails after its prompt ran.
+fn failedFirstToken() !api.load_ledger.Work {
+    var rig: Rig = undefined;
+    try rig.initWith(.{ .lanes = 2 }, Frozen.io(), .batched);
+    defer rig.deinit();
+    rig.target.fail_read = 0; // the first draw's read: the first stream's first token, after its prompt pass
+    rig.target.prefill_hook = Frozen.tick;
+    rig.target.prefill_hook_ctx = &rig;
+    var ledger: Ledger = .init(std.testing.io);
+    defer ledger.detach(false);
+    ledger.attach(rig.host.engine());
+    const one = [_]u32{ 2, 7, 1, 8, 2, 8 };
+    const two = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5 };
+    var a: Box = .{};
+    var b: Box = .{};
+    const ra: Request = .{ .prompt = &one, .max_tokens = 8 };
+    const rb: Request = .{ .prompt = &two, .max_tokens = 4 };
+    try rig.host.engine().submit(1, &ra, a.sink());
+    try rig.host.engine().submit(2, &rb, b.sink());
+    try rig.host.start();
+    try std.testing.expectEqual(Reason.failed, a.wait());
+    try std.testing.expectEqual(Reason.length, b.wait());
+    return settled(&rig, &ledger);
+}
+
+test "a batched prompt whose first token fails after its pass still counts its computed prompt" {
+    const w = try failedFirstToken();
+    try std.testing.expectEqual(@as(u64, 15), w.prefill_compute); // 9 if `done` waited for the first token
+    try Frozen.expectBusy(w);
+}
+
+test "the one-at-a-time fallback counts a prompt whose first token fails after its pass" {
+    var rig: Rig = undefined;
+    try rig.initWith(.{ .lanes = 3 }, Frozen.io(), .batched);
+    defer rig.deinit();
+    rig.target.fail_read = 0; // the first stream's first token fails after its prompt pass
+    rig.target.memory_lanes = 2; // prefill_many refuses three, so each goes alone; the third waits for a lane
+    rig.target.prefill_hook = Frozen.tick;
+    rig.target.prefill_hook_ctx = &rig;
+    var ledger: Ledger = .init(std.testing.io);
+    defer ledger.detach(false);
+    ledger.attach(rig.host.engine());
+    const one = [_]u32{ 2, 7, 1, 8, 2, 8 };
+    const two = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5 };
+    const three = [_]u32{ 1, 4, 1, 4 };
+    var a: Box = .{};
+    var b: Box = .{};
+    var c: Box = .{};
+    const ra: Request = .{ .prompt = &one, .max_tokens = 8 };
+    const rb: Request = .{ .prompt = &two, .max_tokens = 16 };
+    const rc: Request = .{ .prompt = &three, .max_tokens = 4 };
+    try rig.host.engine().submit(1, &ra, a.sink());
+    try rig.host.engine().submit(2, &rb, b.sink());
+    try rig.host.engine().submit(3, &rc, c.sink());
+    try rig.host.start();
+    try std.testing.expectEqual(Reason.failed, a.wait());
+    try std.testing.expectEqual(Reason.length, b.wait());
+    try std.testing.expectEqual(Reason.length, c.wait());
+    try std.testing.expectEqual(@as(usize, 0), rig.target.many_passes);
+    const w = settled(&rig, &ledger);
+    try std.testing.expectEqual(@as(u64, 19), w.prefill_compute); // 13 if `done` waited for the first token
+    try Frozen.expectBusy(w);
 }
