@@ -9,7 +9,7 @@ const prompts = @import("steer_prompts");
 
 const help =
     \\tf-qwen27-steer-derive --model DIR --out FILE [--alpha 1.0] [--repo ID] [--revision REV] [--prompts N]
-    \\                            [--capture mean|last]
+    \\                            [--capture mean|last] [--mask FRAC] [--layers FROM-TO]
     \\  Derives one control direction per layer from the model itself, then writes the GLP file.
     \\  The refusal set and the form-matched harmless set each run through the native forward.
     \\  --model DIR is the MLX checkpoint directory; --out FILE is the GLP file to write.
@@ -17,6 +17,9 @@ const help =
     \\  --prompts N uses only the first N pairs of each set.
     \\  --capture mean reads every row of a prompt and captures its mean; --capture last
     \\  takes the last row alone, where the model decides what to say next.
+    \\  --mask FRAC leaves the top FRAC of a layer's dimensions out of the direction, the ones
+    \\  the activations dominate; 0.005 is the fraction for a model that carries massive
+    \\  activations, and 0 is none at all.
     \\  --layers FROM-TO keeps only the layers in the window; it is every layer by default.
     \\  Layer 0 is not steerable, so the file holds the other layers.
 ;
@@ -155,15 +158,17 @@ pub fn main(init: std.process.Init) !void {
     var site: derive.Site = .mean_rows;
     var first_layer: u32 = 1;
     var last_layer: u32 = std.math.maxInt(u32);
+    var mask: f32 = 0;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const value = args[i];
-        if (std.mem.eql(u8, arg, "--model")) model_dir = value else if (std.mem.eql(u8, arg, "--out")) out_path = value else if (std.mem.eql(u8, arg, "--repo")) repo = value else if (std.mem.eql(u8, arg, "--revision")) revision = value else if (std.mem.eql(u8, arg, "--alpha")) alpha = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--prompts")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--capture")) site = if (std.mem.eql(u8, value, "last")) .last_row else if (std.mem.eql(u8, value, "mean")) .mean_rows else return error.UnknownOption else if (std.mem.eql(u8, arg, "--layers")) try parseLayers(value, &first_layer, &last_layer) else return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--model")) model_dir = value else if (std.mem.eql(u8, arg, "--out")) out_path = value else if (std.mem.eql(u8, arg, "--repo")) repo = value else if (std.mem.eql(u8, arg, "--revision")) revision = value else if (std.mem.eql(u8, arg, "--alpha")) alpha = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--prompts")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--capture")) site = if (std.mem.eql(u8, value, "last")) .last_row else if (std.mem.eql(u8, value, "mean")) .mean_rows else return error.UnknownOption else if (std.mem.eql(u8, arg, "--mask")) mask = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--layers")) try parseLayers(value, &first_layer, &last_layer) else return error.UnknownOption;
     }
     if (model_dir == null or out_path == null) return error.BadOptions;
+    if (mask < 0 or mask >= 1) return error.BadMaskFraction;
     if (revision.len == 0) revision = snapshotRevision(model_dir.?) orelse "";
 
     const pool = mtl.objc.Pool.push();
@@ -192,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
     try captureSet(&runner, &capture, &tok, others, &harmless, limit);
     if (harmful.prompts == 0 or harmless.prompts == 0) return error.NoPrompts;
 
-    var derived = try derive.derive(init.gpa, harmful, harmless, sites, m.config.hidden);
+    var derived = try derive.derive(init.gpa, harmful, harmless, sites, m.config.hidden, mask);
     defer derived.deinit(init.gpa);
     var layers: std.ArrayList(glp.Layer) = .empty;
     defer layers.deinit(init.gpa);
@@ -206,6 +211,11 @@ pub fn main(init: std.process.Init) !void {
     if (layers.items.len == 0) return error.NoDirections;
 
     var time_buf: [32]u8 = undefined;
+    // The method the file names: a masked direction was made differently, and says so.
+    const method = if (mask > 0)
+        try std.fmt.allocPrint(a, "{s}_massive_activation_masked", .{site.methodName()})
+    else
+        site.methodName();
     const bytes = try glp.write(init.gpa, .{
         .mode = .project,
         .alpha = alpha,
@@ -213,13 +223,23 @@ pub fn main(init: std.process.Init) !void {
         .derived_at = stamp(io, &time_buf),
         .base_model = repo,
         .base_revision = revision,
-        .method = site.methodName(),
+        .method = method,
         .contrast = derive.contrast,
         .layers = layers.items,
     });
     defer init.gpa.free(bytes);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path.?, .data = bytes });
 
+    // The massive-activation screen: how far the activations stand out, and where.
+    var worst_layer: usize = 0;
+    var worst_ratio: f64 = 0;
+    for (0..sites) |id| {
+        const ratio = derive.massiveRatio(harmful, harmless, id, m.config.hidden);
+        if (ratio > worst_ratio) {
+            worst_ratio = ratio;
+            worst_layer = id;
+        }
+    }
     const receipt = try std.json.Stringify.valueAlloc(a, .{
         .kind = "qwen27_steer_derive",
         .model = model_dir.?,
@@ -227,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
         .repo = repo,
         .revision = revision,
         .alpha = alpha,
-        .method = site.methodName(),
+        .method = method,
         .contrast = derive.contrast,
         .hook_point = glp.residual_site,
         .width = m.config.hidden,
@@ -238,6 +258,9 @@ pub fn main(init: std.process.Init) !void {
         .last_layer = if (last_layer == std.math.maxInt(u32)) sites - 1 else last_layer,
         .directions = layers.items.len,
         .dropped = derived.dropped,
+        .mask = mask,
+        .massive_ratio = worst_ratio,
+        .massive_layer = worst_layer,
         .bytes = bytes.len,
     }, .{});
     try std.Io.File.stdout().writeStreamingAll(io, receipt);

@@ -104,23 +104,36 @@ pub const Capture = struct {
 pub const Mean = struct {
     /// The per-prompt means, summed: a long prompt does not outweigh a short one.
     total: []f32,
+    /// The largest a dimension's value ever was over the set's prompts: the massive activations.
+    peak: []f32,
     prompts: usize = 0,
     hidden: usize,
 
     pub fn init(a: Allocator, layers: usize, hidden: usize) !Mean {
         if (layers == 0 or hidden == 0) return error.BadMeanShape;
-        return .{ .total = try a.alloc(f32, layers * hidden), .hidden = hidden };
+        const total = try a.alloc(f32, layers * hidden);
+        errdefer a.free(total);
+        const peak = try a.alloc(f32, layers * hidden);
+        errdefer a.free(peak);
+        @memset(peak, 0);
+        return .{ .total = total, .peak = peak, .hidden = hidden };
     }
 
     pub fn deinit(m: *Mean, a: Allocator) void {
         a.free(m.total);
+        a.free(m.peak);
         m.total = &.{};
+        m.peak = &.{};
     }
 
     /// Adds one prompt's sums: its own mean, weighted like every other prompt's.
     pub fn addPrompt(m: *Mean, sums: []const f32, divisor: f32) !void {
         if (divisor <= 0 or sums.len != m.total.len) return error.BadPromptSums;
-        for (m.total, sums) |*t, s| t.* += s / divisor;
+        for (m.total, m.peak, sums) |*t, *p, s| {
+            const v = s / divisor;
+            t.* += v;
+            p.* = @max(p.*, @abs(v));
+        }
         m.prompts += 1;
     }
 
@@ -151,8 +164,48 @@ pub const Derived = struct {
     }
 };
 
+/// The two sets' peaks in one layer: the largest a dimension's activation ever was, over both.
+const Peaks = struct {
+    harmful: Mean,
+    harmless: Mean,
+    base: usize,
+
+    fn at(p: Peaks, i: usize) f32 {
+        return @max(p.harmful.peak[p.base + i], p.harmless.peak[p.base + i]);
+    }
+};
+
+/// The dims a layer's direction leaves out: the top `frac` of them by the activation they carry.
+fn maskDims(peaks: Peaks, hidden: usize, frac: f32, order: []usize, masked: []bool) void {
+    @memset(masked, false);
+    const count = @as(usize, @intFromFloat(@round(frac * @as(f32, @floatFromInt(hidden)))));
+    const k = @min(hidden, @max(1, count));
+    for (order, 0..) |*o, i| o.* = i;
+    std.mem.sort(usize, order, peaks, struct {
+        fn lessThan(p: Peaks, x: usize, y: usize) bool {
+            const px = p.at(x);
+            const py = p.at(y);
+            if (px != py) return px > py;
+            return x < y;
+        }
+    }.lessThan);
+    for (order[0..k]) |i| masked[i] = true;
+}
+
+/// The peak-to-median ratio of a layer's activations: how far the massive activations stand out.
+pub fn massiveRatio(harmful: Mean, harmless: Mean, id: usize, hidden: usize) f64 {
+    const peaks = Peaks{ .harmful = harmful, .harmless = harmless, .base = id * hidden };
+    var values: [5120]f32 = undefined;
+    if (hidden > values.len) return 0;
+    for (0..hidden) |i| values[i] = peaks.at(i);
+    std.mem.sort(f32, values[0..hidden], {}, std.sort.asc(f32));
+    const median = values[hidden / 2];
+    if (median <= 0) return 0;
+    return @as(f64, values[hidden - 1]) / @as(f64, median);
+}
+
 /// The two sets' difference of means per layer, each unit-normalised; a layer with no difference is dropped.
-pub fn derive(a: Allocator, harmful: Mean, harmless: Mean, layers: usize, hidden: usize) !Derived {
+pub fn derive(a: Allocator, harmful: Mean, harmless: Mean, layers: usize, hidden: usize, mask: f32) !Derived {
     var kept: std.ArrayList(Layer) = .empty;
     errdefer {
         for (kept.items) |l| a.free(l.dir);
@@ -166,14 +219,23 @@ pub fn derive(a: Allocator, harmful: Mean, harmless: Mean, layers: usize, hidden
     defer a.free(right);
     const diff = try a.alloc(f32, hidden);
     defer a.free(diff);
+    const order = try a.alloc(usize, hidden);
+    defer a.free(order);
+    const masked = try a.alloc(bool, hidden);
+    defer a.free(masked);
     for (0..layers) |id| {
         harmful.mean(id, left);
         harmless.mean(id, right);
-        var sum: f64 = 0;
-        for (left, right, diff) |l, r, *d| {
-            d.* = l - r;
-            sum += @as(f64, d.*) * @as(f64, d.*);
+        for (left, right, diff) |l, r, *d| d.* = l - r;
+        if (mask > 0) {
+            const peaks = Peaks{ .harmful = harmful, .harmless = harmless, .base = id * hidden };
+            maskDims(peaks, hidden, mask, order, masked);
+            for (diff, masked) |*d, m| {
+                if (m) d.* = 0;
+            }
         }
+        var sum: f64 = 0;
+        for (diff) |d| sum += @as(f64, d) * @as(f64, d);
         const norm = @sqrt(sum);
         if (!std.math.isFinite(norm) or norm == 0) {
             try dropped.append(a, @intCast(id));

@@ -110,7 +110,7 @@ no longer is a path of its own.
 ```
 tf-qwen27-steer-derive --model DIR --out FILE \
     --repo TensorFold/Qwen3.8-27B-MLX-4bit --revision REV \
-    --capture last --layers 10-58
+    --capture last --mask 0.005 --layers 10-58
 ```
 
 The producer runs a harmful prompt set and a form-matched harmless set through
@@ -122,6 +122,7 @@ the file. The prompts are the repository's own
 | --- | --- |
 | `--capture mean` | Read every row of a prompt and capture its mean. |
 | `--capture last` | Take the last row alone, where the model decides what to say next. |
+| `--mask FRAC` | Leave the top `FRAC` of a layer's dimensions out of the direction. |
 | `--layers FROM-TO` | Keep a window of layers; every layer by default. |
 | `--prompts N` | Use only the first N pairs of each set. |
 | `--alpha A` | The `glp.alpha_default` the file carries. |
@@ -131,6 +132,28 @@ decision the model is about to make; the mean over every row is mostly the
 prompt's content, and a direction built from it does not separate refusal from
 anything else.
 
+### The massive activations
+
+Some checkpoints carry a handful of dimensions whose activations stand orders
+of magnitude above the rest. A difference of means taken where they dominate
+points at them rather than at the feature you asked for.
+
+This model does. The producer's screen reports the largest activation against
+the median dimension's at 701 times, and the reference implementation measures
+75 to 434 times for the same checkpoint.
+
+`--mask FRAC` leaves the top `FRAC` of a layer's dimensions out of the
+direction, the ones the activations dominate, and renormalises what is left.
+The dims are excluded from the direction, not from the model.
+
+At 0.005, twenty-six of five thousand dimensions are left out per layer, and
+they held between 12% and 66% of the direction's length before the mask: two
+thirds of it at layer 58. That is a direction pointing at the massive
+activations rather than at the refusal.
+
+The producer reports the screen in its receipt, so the fraction is a decision
+the operator makes on the checkpoint in front of them rather than a habit
+carried from another one.
 ## Measured
 
 Apple M4 Pro, 48 GiB, Metal, Qwen3.8-27B MLX 4-bit. Thirty form-matched pairs
@@ -145,25 +168,34 @@ instead of a refusal looks like.
 | Vector at strength 1e-6 | 30/30 | 0/30 | 60/60 |
 | Published GLP-49, layers 10-58, strength 1.0 | 19/30 | 6/30 | 60/60 |
 | Our vector, last-row capture, layers 10-58, strength 1.0 | 18/30 | 7/30 | 60/60 |
+| Our vector, masked at 0.005, strength 1.0 | 0/30 | 0/30 | 60/60 |
 
 A strength of 1e-6 reproduces the baseline: the path is a no-op at zero.
 
 The published vector is `msuiche/Qwen3.8-27B-abliterated-cyber-GLP-49`. It is
 downloaded and run here; it is not vendored and it is not committed. The last
-row is the vector this repository's own producer derives from the model itself,
-on our own prompt set.
+two rows are vectors this repository's own producer derives from the model
+itself, on our own prompt set.
 
-At strength 1.0 the vector takes two refusals in three off the harmful
-prompts, and the replies stay coherent. That is the part that matters: a
+The masked vector is the one to read. It takes every refusal off and takes no
+harmless prompt with it: the refusal direction, with the dimensions the
+massive activations dominate left out of it, is a direction at the refusal
+rather than a direction at the stream's offset.
+
+The unmasked vector is the same derivation without that exclusion, and it
+shows what the exclusion is worth: it removes two refusals in three and costs
+seven harmless refusals in thirty. The direction that carries "I will not"
+also carried "I will", because it was pointing at the wrong thing.
+
+That the replies stay coherent in every arm matters more than the rates: a
 vector that silences the model is not a refusal removal, so read the replies,
 not the rate.
 
-The benign column is the price, and it is not small: six of the thirty
-harmless twins are refused under the published vector, against none without
-one. The direction that carries "I will not" carries some of "I will" with it,
-and this prompt set is deliberately tight, so a twin differs from its harmful
-counterpart in intent alone. That is the strength's dial, and the reply text is
-the measure.
+The benign column is the price in the arms that pay it, and it is not small:
+six of the thirty harmless twins are refused under the published vector, and
+seven under the unmasked vector, against none without one. Our prompt set is
+deliberately tight, so a twin differs from its harmful counterpart in intent
+alone. That is the strength's dial, and the reply text is the measure.
 
 The vector's strength has a ceiling. Past it the model stops answering: the
 residual stream loses more than the direction it was asked to lose. Take the
