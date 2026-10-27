@@ -35,6 +35,24 @@ pub const Layer = struct {
     dir: []const f32,
 };
 
+/// What the file says about itself: the keys a consumer reads before it reads the directions.
+pub const Publication = struct {
+    /// What the file calls itself: general.name.
+    name: ?[]const u8 = null,
+    /// What the file says it is: general.description.
+    description: ?[]const u8 = null,
+    /// Who derived it: general.author.
+    author: ?[]const u8 = null,
+    /// The licence the file is under: general.license.
+    license: ?[]const u8 = null,
+    /// The model family a consumer matches against: controlvector.model_hint.
+    model_hint: ?[]const u8 = null,
+    /// What the strength does, as it was measured: glp.measured_effect.
+    measured_effect: ?[]const u8 = null,
+    /// The day the file was made: glp.created.
+    created: ?[]const u8 = null,
+};
+
 /// A vector read whole and accepted.
 pub const Vector = struct {
     mode: Mode,
@@ -49,6 +67,7 @@ pub const Vector = struct {
     layers: []const Layer,
     sha256: [32]u8,
     transferred: bool,
+    publication: Publication = .{},
 };
 
 /// The residual site this reader applies at, the one llama.cpp's control vectors name.
@@ -189,6 +208,15 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         .layers = layers.items,
         .sha256 = sha,
         .transferred = !std.mem.eql(u8, derived, hook),
+        .publication = .{
+            .name = file.str("general.name"),
+            .description = file.str("general.description"),
+            .author = file.str("general.author"),
+            .license = file.str("general.license"),
+            .model_hint = file.str("controlvector.model_hint"),
+            .measured_effect = file.str("glp.measured_effect"),
+            .created = file.str("glp.created"),
+        },
     };
 }
 
@@ -232,6 +260,8 @@ pub const WriteSpec = struct {
     base_revision: []const u8 = "",
     method: []const u8 = "",
     contrast: []const u8 = "",
+    /// What the file says about itself; the keys a consumer reads before it reads the directions.
+    publication: Publication = .{},
     layers: []const Layer,
 };
 
@@ -301,6 +331,7 @@ pub fn write(a: std.mem.Allocator, spec: WriteSpec) Error![]u8 {
     const entries = [_]gguf.Entry{
         .{ .key = "general.architecture", .value = .{ .string = "controlvector" } },
         .{ .key = "general.alignment", .value = .{ .u32v = 32 } },
+        .{ .key = "controlvector.layer_count", .value = .{ .u32v = @intCast(sorted.len) } },
         .{ .key = "glp.spec_version", .value = .{ .u32v = 1 } },
         .{ .key = "glp.mode", .value = .{ .string = if (spec.mode == .project) "project" else "add" } },
         .{ .key = "glp.rank", .value = .{ .u32v = 1 } },
@@ -315,10 +346,46 @@ pub fn write(a: std.mem.Allocator, spec: WriteSpec) Error![]u8 {
         .{ .key = "glp.layer_ids_zero_based", .value = .{ .string = ids.items } },
         .{ .key = "glp.content_sha256", .value = .{ .string = hex[0..] } },
     };
-    return gguf.write(a, &entries, tensors) catch |err| switch (err) {
+    var written = std.ArrayList(gguf.Entry).empty;
+    defer written.deinit(tmp);
+    try written.appendSlice(tmp, &entries);
+    // The model the vector came from, in the shape a consumer reads: the repo it was derived from.
+    if (spec.base_model.len > 0) {
+        const is_url = std.mem.startsWith(u8, spec.base_model, "http");
+        const owner = std.mem.lastIndexOfScalar(u8, spec.base_model, '/');
+        const url = if (is_url)
+            spec.base_model
+        else
+            try std.fmt.allocPrint(tmp, "https://huggingface.co/{s}", .{spec.base_model});
+        try written.append(tmp, .{ .key = "general.base_model.count", .value = .{ .u32v = 1 } });
+        if (!is_url) {
+            const org = if (owner) |i| spec.base_model[0..i] else "";
+            const repo_name = if (owner) |i| spec.base_model[i + 1 ..] else spec.base_model;
+            try written.append(tmp, .{ .key = "general.base_model.0.name", .value = .{ .string = repo_name } });
+            try written.append(tmp, .{ .key = "general.base_model.0.organization", .value = .{ .string = org } });
+        }
+        try written.append(tmp, .{ .key = "general.base_model.0.version", .value = .{ .string = spec.base_revision } });
+        try written.append(tmp, .{ .key = "general.base_model.0.repo_url", .value = .{ .string = url } });
+    }
+    // What the file says about itself, when the producer named it.
+    const about = spec.publication;
+    try appendText(&written, tmp, "general.name", about.name);
+    try appendText(&written, tmp, "general.description", about.description);
+    try appendText(&written, tmp, "general.author", about.author);
+    try appendText(&written, tmp, "general.license", about.license);
+    try appendText(&written, tmp, "controlvector.model_hint", about.model_hint);
+    try appendText(&written, tmp, "glp.measured_effect", about.measured_effect);
+    try appendText(&written, tmp, "glp.created", about.created);
+    return gguf.write(a, written.items, tensors) catch |err| switch (err) {
         error.BadGguf => error.BadGlpVector,
         error.OutOfMemory => error.OutOfMemory,
     };
+}
+
+/// One more metadata key, when the producer named one.
+fn appendText(written: *std.ArrayList(gguf.Entry), tmp: std.mem.Allocator, key: []const u8, text: ?[]const u8) !void {
+    const value = text orelse return;
+    try written.append(tmp, .{ .key = key, .value = .{ .string = value } });
 }
 
 /// Write a vector read earlier back out, so a file can be rewritten with the same fields.
@@ -332,10 +399,12 @@ pub fn writeVector(a: std.mem.Allocator, v: Vector) Error![]u8 {
         .base_revision = v.base_revision,
         .method = v.method,
         .contrast = v.contrast,
+        .publication = v.publication,
         .layers = v.layers,
     });
 }
 
 test {
     _ = @import("glp_test.zig");
+    _ = @import("glp_publication_test.zig");
 }
