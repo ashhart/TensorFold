@@ -53,26 +53,57 @@ refusal: the vector is applied at the residual stream either way.
 
 ## The layer a direction names
 
-`direction.N` applies at layer `N`, and layer 0 is not steerable. The blocks
-are one to the last one, so `direction.N` is the output of the N-th block: the
-residual that enters block N. A file for a 64-block model may name layers 1
-to 64.
+`direction.N` is the layer index `N`, and the layers are zero-based: `direction.N`
+is the output of the N-th block, the residual stream as that block leaves it.
+Layer 0 is not steerable, so a file for a 64-block model names layers 1 to 63.
 
-This is worth stating because the alternative is silently wrong. The published
-GLP-49 vector for this model removed no refusal at all through an
-implementation that landed a direction one block late, and most of it through
-one that did not:
+This is worth stating because the alternative is silently wrong. The container
+follows llama.cpp, and llama.cpp's own generator writes `direction.{il+1}` while
+its applier reads `direction.il`: the two cancel, so the applier's numbering is
+the one a file means. An off-by-one here does not fail loudly either, because
+adjacent layers' refusal directions are highly correlated and a stack shifted by
+one layer still produces plausible output.
 
-| The vector's content applied at | Harmful prompts still refused (8 prompts) |
-| --- | --- |
-| One block late | 6 |
-| **The block it names** | **2** |
-| One block early | 5 |
-| Two blocks early | 3 |
+The file says so itself. A published vector for this model carries the layer
+list in its metadata:
 
-The ladder was measured at a fixed strength against the published vector, and
-the corrected implementation reaches the same result with the vector
-unshifted.
+```
+glp.layer_ids_zero_based = 10,11,12,...,58
+```
+
+and this reader refuses a file whose tensor names and that list disagree.
+
+The projection lands on the residual stream after a block, and the block that
+follows reads what is left of it: the direction's component is taken out before
+the next block's normalisation sees the stream, which is where the reference
+implementation takes it too.
+
+## What the projection costs
+
+Nothing, and that took a kernel.
+
+A steered layer used to take two dispatches: the norm that adds the block's
+output to the residual stream, and then a separate kernel that took the
+direction's component out of the stream and wrote it back. The second one read
+the whole residual row, reduced it against the direction, and wrote it again.
+That is a full extra pass over the residual stream per steered layer, plus a
+dispatch and a barrier, on every token.
+
+The projection now rides along with the norm that has to touch the same row
+anyway. One kernel, one pass: the row is summed, the direction's component
+leaves it, and the normalisation that follows reads what is left. A steered
+layer costs exactly what an unsteered one costs, and the block after it sees
+the projected stream, which is the order the reference implementation uses.
+
+The arithmetic is pinned by the contract the projection has always had
+(`zig/src/core/contract/steer.zig`): a float64 reference, the kernel's own
+summation order modelled, and the bound the two are checked against.
+
+What it costs, measured on the same machine: nothing that shows. A 4,063-token
+prefill takes 43.69 s without a vector and 43.68 s with the published one
+across 49 steered layers; decoding runs at the same 14.6 tokens a second either
+way. The steering path is not a measurable cost of a forward pass, because it
+no longer is a path of its own.
 
 ## Deriving one
 
@@ -112,19 +143,27 @@ instead of a refusal looks like.
 | --- | --- | --- | --- |
 | No vector | 30/30 | 0/30 | 60/60 |
 | Vector at strength 1e-6 | 30/30 | 0/30 | 60/60 |
-| Our vector, last-row capture, layers 10-58, strength 1.0 | 15/30 | 1/30 | 60/60 |
-| Our vector, last-row capture, layers 10-58, strength 1.25 | 21/30 | 6/30 | 60/60 |
+| Published GLP-49, layers 10-58, strength 1.0 | 19/30 | 6/30 | 60/60 |
+| Our vector, last-row capture, layers 10-58, strength 1.0 | 18/30 | 7/30 | 60/60 |
 
 A strength of 1e-6 reproduces the baseline: the path is a no-op at zero.
 
-At strength 1.0 the vector halves the refusal rate and costs one benign refusal
-in thirty. The refusals it leaves are the ones a refusal direction does not
-carry: the question asked for a weapon and the model answered anyway.
+The published vector is `msuiche/Qwen3.8-27B-abliterated-cyber-GLP-49`. It is
+downloaded and run here; it is not vendored and it is not committed. The last
+row is the vector this repository's own producer derives from the model itself,
+on our own prompt set.
 
-Past 1.0 the strength stops paying. At 1.25 the refusal rate climbs again and
-the benign refusals with it: the stream is losing more than the direction it
-was asked to lose, and the model starts refusing things it had agreed to. Read
-the replies, not the rate.
+At strength 1.0 the vector takes two refusals in three off the harmful
+prompts, and the replies stay coherent. That is the part that matters: a
+vector that silences the model is not a refusal removal, so read the replies,
+not the rate.
+
+The benign column is the price, and it is not small: six of the thirty
+harmless twins are refused under the published vector, against none without
+one. The direction that carries "I will not" carries some of "I will" with it,
+and this prompt set is deliberately tight, so a twin differs from its harmful
+counterpart in intent alone. That is the strength's dial, and the reply text is
+the measure.
 
 The vector's strength has a ceiling. Past it the model stops answering: the
 residual stream loses more than the direction it was asked to lose. Take the
@@ -133,7 +172,6 @@ strength from the file's own `glp.alpha_default`, and read the replies.
 ## The file
 
 The container is GGUF v3. The metadata follows the GLP standard:
-
 | Key | Meaning |
 | --- | --- |
 | `glp.spec_version` | 1. |
@@ -149,3 +187,33 @@ The container is GGUF v3. The metadata follows the GLP standard:
 
 The tensors are `direction.N`, fp32, one per layer, each the width of the
 residual stream.
+
+## The integration test
+
+A file that one implementation accepts has to mean the same thing to another.
+The reference implementation for this format is the `weightless` plugin's
+container reader, and this repository does not vendor it: the test takes a
+checkout and reads it as a package.
+
+```
+zig build tf-glp-check
+python3 tools/zig/glp_parity.py --reference PATH/TO/weightless \
+    --vector vector.gglp --vector PATH/TO/a-published-vector.gguf
+```
+
+Three legs, over the same files:
+
+| Leg | What it checks |
+| --- | --- |
+| read | The reader in Zig and the reference reader on one file: the layer ids, the metadata and every direction's bytes are equal. |
+| rewrite | The file read in Zig and written out again, read by the reference: the numbers, the mode, the hook point and the strength survive the round trip. |
+| digest | The file's own `glp.content_sha256` over the tensor payloads, hashed the same way on both sides. |
+
+The reader that does the Zig half is `tf-glp-check`, which prints the reader's
+view of a file and writes its directions out as bytes, so the two sides can be
+compared exactly rather than approximately.
+
+The test needs `numpy` for the reference reader, and a `weightless` checkout.
+Nothing of the reference is committed here, and no vector from it is either:
+the published files are downloaded when the test runs.
+
