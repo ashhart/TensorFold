@@ -23,7 +23,7 @@ fn built(k2: u32) bool {
 }
 pub fn eligible(l: ex.Layer) bool {
     const w = widths(l);
-    return l.codebook == .mcg and built(w.gu) and built(w.d) and l.gu_stride == 0 and l.dims > 0 and l.width > 0 and l.dims % 256 == 0 and l.width % 128 == 0 and (l.act_mode == 0 or l.act_mode == 1);
+    return ((l.codebook == .mcg and built(w.gu) and built(w.d)) or (l.codebook == .mul1 and w.gu == 6 and w.d == 6)) and l.gu_stride == 0 and l.dims > 0 and l.width > 0 and l.dims % 256 == 0 and l.width % 128 == 0 and (l.act_mode == 0 or l.act_mode == 1);
 }
 fn mul(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch error.Exl3Shape;
@@ -66,6 +66,8 @@ pub const Kernels = struct {
     gateup: Function, // 4-bit gate and up
     down: Function, // 4-bit down
     gateup_k6: Function, // 3-bit gate and up, gateup's arguments
+    gateup_k6_mul1: Function,
+    down_k6_mul1: Function,
     down_k6: Function, // 3-bit down, down's arguments
     pub fn resolve(mod: Module) !Kernels {
         return .{
@@ -73,12 +75,15 @@ pub const Kernels = struct {
             .gateup = try mod.function("tf_exl3_prompt_gu"),
             .down = try mod.function("tf_exl3_prompt_down"),
             .gateup_k6 = try mod.function("tf_exl3_prompt_gu_k6"),
+            .gateup_k6_mul1 = try mod.function("tf_exl3_prompt_gu_k6_mul1"),
+            .down_k6_mul1 = try mod.function("tf_exl3_prompt_down_k6_mul1"),
             .down_k6 = try mod.function("tf_exl3_prompt_down_k6"),
         };
     }
     /// `skip` is the shared expert's id, equal to the routed count; its output slot stays owned by the caller.
-    pub fn run(k: Kernels, e: *const ex.Experts, router: grouped.Router, s: Stream, l: ex.Layer, x: u64, stride: usize, picks: u64, rows: usize, sc: Scratch, p: grouped.Plan, y: u64, skip: ?usize) !void {
+    pub fn run(k: Kernels, e: *const ex.Experts, router: grouped.Router, s: Stream, l: ex.Layer, x: u64, dtype: ex.DType, stride: usize, picks: u64, rows: usize, sc: Scratch, p: grouped.Plan, y: u64, skip: ?usize) !void {
         if (!eligible(l) or rows == 0 or rows > sc.rows or stride < l.dims or stride > std.math.maxInt(i32)) return error.Exl3Shape;
+        if (l.shared_input and dtype != .bf16) return error.Exl3Shape; // tf_exl3_prompt_rotate reads bf16
         _ = try bytes(l, rows, sc.slots);
         if (skip) |id| if (id != l.experts or l.experts == grouped.max_experts) return error.Exl3Shape;
         const count = l.experts + @intFromBool(skip != null);
@@ -90,12 +95,12 @@ pub const Kernels = struct {
             try go(k.rotate, s, .{ rows, l.dims / 128, 1 }, 32, .{ x, i(stride), l.suh_g, sc.xg, i(l.dims) });
         } else {
             var args: launch.Args = .{};
-            inline for (.{ x, i(stride), @as(i32, @backingInt(ex.DType.bf16)), picks, l.suh_g, l.suh_u, sc.xg, sc.xu, i(l.dims), i(sc.slots), i(l.experts) }) |v| args.add(v);
+            inline for (.{ x, i(stride), @as(i32, @backingInt(dtype)), picks, l.suh_g, l.suh_u, sc.xg, sc.xu, i(l.dims), i(sc.slots), i(l.experts) }) |v| args.add(v);
             try launch.launch(e.rot_in, .{ .grid = .{ .x = @intCast(pairs), .y = @intCast(l.dims / 128), .z = 2 }, .block = .{ .x = 32 } }, s, &args);
         }
         const items = grouped.maxItems(pairs, count, tile);
-        try go(if (w.gu == 6) k.gateup_k6 else k.gateup, s, .{ l.width / 128, items, 1 }, 256, .{ sc.xg, sc.xu, l.gate, l.up, p.items, p.counts, p.members, l.svh_g, l.svh_u, l.suh_d, sc.xd, i(l.dims), i(l.width), i(if (l.shared_input) sc.slots else 1), l.limit, l.act_mode, skip_id });
-        try go(if (w.d == 6) k.down_k6 else k.down, s, .{ l.dims / 256, items, 1 }, 256, .{ sc.xd, l.down, p.items, p.counts, p.members, l.svh_d, y, i(l.width), i(l.dims), skip_id });
+        try go(if (l.codebook == .mul1) k.gateup_k6_mul1 else if (w.gu == 6) k.gateup_k6 else k.gateup, s, .{ l.width / 128, items, 1 }, 256, .{ sc.xg, sc.xu, l.gate, l.up, p.items, p.counts, p.members, l.svh_g, l.svh_u, l.suh_d, sc.xd, i(l.dims), i(l.width), i(if (l.shared_input) sc.slots else 1), l.limit, l.act_mode, skip_id });
+        try go(if (l.codebook == .mul1) k.down_k6_mul1 else if (w.d == 6) k.down_k6 else k.down, s, .{ l.dims / 256, items, 1 }, 256, .{ sc.xd, l.down, p.items, p.counts, p.members, l.svh_d, y, i(l.width), i(l.dims), skip_id });
     }
 };
 
@@ -118,4 +123,15 @@ test "per-projection widths: the group fields, else uniform_k2, and a disagreeme
     try std.testing.expect(!eligible(l));
     l.uniform_k2_gu = 8;
     try std.testing.expect(eligible(l));
+}
+
+test "the prompt kernels take 3-bit mul1 alongside mcg layers" {
+    var l: ex.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .experts = 256, .dims = 4096, .width = 1024, .codebook = .mcg, .uniform_k2 = 8 };
+    try std.testing.expect(eligible(l));
+    l.codebook = .mul1;
+    try std.testing.expect(!eligible(l));
+    l.uniform_k2 = 6;
+    try std.testing.expect(eligible(l));
+    l.uniform_k2 = 0; // widths the loader did not verify
+    try std.testing.expect(!eligible(l));
 }

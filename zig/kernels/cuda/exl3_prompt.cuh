@@ -4,14 +4,13 @@
 #include "common/qmm_frag.cuh"
 namespace tf_exl3_prompt {
 using namespace tf_exl3;
-// One mcg tile of K2 half-bits a value (8: 4 bits, 6: 3 bits) from shared memory into this lane's B fragments.
-template <int K2>
+template <int K2, int CB>
 __device__ __forceinline__ void decode_tile_p(const uint32_t* tile, int lane, uint32_t (&b0)[2], uint32_t (&b1)[2]) {
     uint32_t w[lane_words<K2>()];
     int word, offset;
     lane_start<K2>(lane, word, offset);
     for (int i = 0; i < lane_words<K2>(); ++i) w[i] = tile[(word + i) % tile_words<K2>()];
-    decode_lane<K2, CB_MCG>(w, lane, b0, b1);
+    decode_lane<K2, CB>(w, lane, b0, b1);
 }
 __device__ __forceinline__ void cp_async16(void* dst, const void* src, bool valid) {
     tf_common::cp16z(dst, src, valid);
@@ -25,7 +24,7 @@ namespace tf_exl3_prompt {
 constexpr int TPM = 64, TNW = 8, TMT = 16 / TNW, TNB = TPM / 8, TT = TNW * 32, TPH = TPM / 2;
 constexpr int TBK = 32, TKT = TBK / 16, TSTAGES = 3, TXS = TBK + 8;
 template <int K2>
-constexpr int twords() { return 16 * TKT * tile_words<K2>(); }   // a stage's weight words: 16 tiles by TKT
+constexpr int twords() { return 16 * TKT * tile_words<K2>(); }   // a stage's weight words: 16 tiles by TKT k-steps
 constexpr int GU_ES = 128 + 4, DN_ES = 256 + 4;                        // the epilogue sums' row strides (floats)
 template <int XR, int K2>
 constexpr int tstage_halves() { return XR * TXS + 2 * twords<K2>(); }
@@ -44,12 +43,11 @@ __device__ __forceinline__ void ttile(int q, int cb, int& mat, int& nt) {
 }
 
 // Main loop: acc[i][nb] = warp tile i x members nb * 8 .. + 7 over K; XR rows a stage (TPM if X0 == X1, else 2 TPM).
-template <int MATS, int XR, int K2>
+template <int MATS, int XR, int K2, int CB>
 __device__ __forceinline__ void tmain(const half* __restrict__ X0, const half* __restrict__ X1, const uint64_t* __restrict__ tp0,
         const uint64_t* __restrict__ tp1, const int* rows_sh, int cnt, int e, int K, int NTILES, int cb, int xdiv,
         half* stage, float (&acc)[TMT][TNB][4]) {
-    constexpr int SH = tstage_halves<XR, K2>();
-    constexpr int TW = tile_words<K2>(), PIECES = TW / 4;   // a tile's 32-bit words and 16-byte pieces
+    constexpr int SH = tstage_halves<XR, K2>(), TW = tile_words<K2>(), PIECES = TW / 4;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     int mat, nt_unused;
     ttile<MATS>(warp * TMT, cb, mat, nt_unused);
@@ -101,7 +99,7 @@ __device__ __forceinline__ void tmain(const half* __restrict__ X0, const half* _
 #pragma unroll
             for (int i = 0; i < TMT; ++i) {
                 uint32_t b0[2], b1[2];
-                decode_tile_p<K2>(ws + ((size_t)(warp * TMT + i) * TKT + kk) * TW, lane, b0, b1);
+                decode_tile_p<K2, CB>(ws + ((size_t)(warp * TMT + i) * TKT + kk) * TW, lane, b0, b1);
                 a[i][0] = b0[0]; a[i][1] = b1[0]; a[i][2] = b0[1]; a[i][3] = b1[1];
             }
 #pragma unroll
@@ -140,7 +138,7 @@ __device__ __forceinline__ void tspill(float* E, int ES, int col0, const float (
         }
 }
 
-template <int XR, int K2>
+template <int XR, int K2, int CB>
 __device__ __forceinline__ void tgateup(const half* __restrict__ Xg, const half* __restrict__ Xu, const uint64_t* __restrict__ Tg,
         const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members,
         const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d, half* __restrict__ xd,
@@ -152,7 +150,7 @@ __device__ __forceinline__ void tgateup(const half* __restrict__ Xg, const half*
     __syncthreads();
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     float acc[TMT][TNB][4];
-    tmain<2, XR, K2>(Xg, Xu, Tg, Tu, rows_sh, cnt, e, K, N >> 4, cb, xdiv, reinterpret_cast<half*>(smem_raw), acc);
+    tmain<2, XR, K2, CB>(Xg, Xu, Tg, Tu, rows_sh, cnt, e, K, N >> 4, cb, xdiv, reinterpret_cast<half*>(smem_raw), acc);
     float* Eg = reinterpret_cast<float*>(smem_raw);
     int mat, nt;
     ttile<2>(warp * TMT, cb, mat, nt);
