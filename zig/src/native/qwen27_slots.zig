@@ -80,7 +80,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
         return error.Yielded;
     }
     const at = f.at;
-    var end = @min(ids.len, at + b.chunk);
+    var end = @min(ids.len, at + @import("qwen27_prompt_rows.zig").choose(b, s));
     for (s.chunks) |cut| if (cut > at and cut < end) {
         end = cut;
     };

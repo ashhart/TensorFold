@@ -1,6 +1,8 @@
 //! Host regressions use no shaders, model or GPU execution.
 const std = @import("std");
 pub fn tests(b: *std.Build) void {
+    const rows = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_rows_test.zig"), .target = b.graph.host });
+    b.step("test-qwen27-prompt-rows-host", "Device-aware prompt rows beside owned decoding streams without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rows, .filters = &.{"qwen27 rows:"} })).step);
     const ane_policy = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/ane_policy.zig"), .target = b.graph.host });
     b.step("test-qwen27-ane-policy-host", "Neural Engine opt-in and tensor-unit chip policy without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ane_policy })).step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });

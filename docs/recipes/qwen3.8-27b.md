@@ -12,6 +12,10 @@ tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
 
+On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
+default. `TF_PROMPT_ROWS` selects another multiple of 16 from 16 to 2,048. Each chunk takes at most 512 rows beside
+a decoding request, including with an override, and still respects the frame, attention and request boundaries.
+
 Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
 from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
 

@@ -24,6 +24,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.5-2B on Metal: with `--prompt-cache-gib N`, a later request that extends a conversation resumes from its deepest kept prompt state, held in RAM (recurrence, convolution tails, attention K/V and logits), instead of prefilling it again (#505). Without the flag nothing changes: the same tokens and speed as before. On an M5 Ultra, the next turn of a 28.5k-token chat resumed with 28,544 tokens cached, and on an M5 Ultra and an M3 Ultra every resumed reply equalled a fresh one. Thanks to @akol1.
 
+- Qwen3.8-27B on Metal requests 2,048 prompt rows on M5 when no other request is decoding, and caps each chunk at 512 beside a decoder (#1478). Earlier chips keep the 512-row default. `TF_PROMPT_ROWS` overrides the requested width within the existing frame and attention limits.
+
 ## 1.1.8
 
 - Qwen3.5 and 3.6 on HIP (Linux): when a checkpoint shard can't be memory-mapped and is read into memory instead (for example on some network or FUSE mounts), releasing an uploaded layer no longer zeroes that copy. Before, it also zeroed neighbouring tensors not yet uploaded: 269 of 690 layer tensors on Qwen3.5-2B, so the model ran on wrong weights or the loader panicked at close. A malformed shard header is now refused by name. Loads that map their shards are byte-identical to before.
