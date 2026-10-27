@@ -70,6 +70,12 @@ fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
         .kda => |*x| try padOneKdaInput(w, d, s, x),
         else => {},
     };
+    // The MTP head's layer is registered by `linears()` too, so leaving it unpadded here gives it a padded
+    // descriptor over an unpadded buffer - the exact over-read this pad exists to avoid.
+    if (w.mtp) |*m| switch (m.layer.mixer) {
+        .kda => |*x| try padOneKdaInput(w, d, s, x),
+        else => {},
+    };
 }
 
 /// One KDA layer's fused input stack, moved to an eight-aligned buffer when TF_GLM_KDA_PAD asks for it.
@@ -123,6 +129,13 @@ fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, byte
 
 /// Eligible linears tiled in place; uneven KDA inputs and their views stay bf16 for the row-major kernels.
 pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernels, s: cuda.Stream, d: *const cuda.Driver, dense_bits: u8, head_bits: u8) !mm_mod.Packed {
+    // TF_GLM_KDA_PAD: one width for every layer and rank, from the widest rank's head count.
+    if (@import("cuda_kda_block.zig").padOn()) {
+        const dk = @import("cuda_kda.zig").dk;
+        const max_heads = (w.config.kda_heads + w.share.world - 1) / w.share.world;
+        const raw = 3 * max_heads * dk + 2 * dk + max_heads;
+        @import("cuda_kda_block.zig").pad_to = std.mem.alignForward(usize, raw, 8);
+    }
     try padKdaInputs(w, d, s);
     var list: std.ArrayList(Lin) = .empty;
     defer list.deinit(w.gpa);
