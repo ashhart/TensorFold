@@ -25,10 +25,15 @@ export class ControlVectorSetting {
     return { supported: this.deps.supported(), enabled: prefs.enabled, file: prefs.file, alpha: prefs.alpha, active: this.deps.supervisor.status().controlVectorActive }
   }
 
-  // The file the operator picked: it is remembered, not applied.
+  // The file the operator picked: it is remembered, and it takes effect at once when a
+  // vector is already in force, so the engine and the setting never name different files.
   async choose(file: string): Promise<EngineControlVectorSnapshot> {
     const prior = this.deps.preferences.get().controlVector
-    await this.deps.preferences.set({ controlVector: { ...prior, file } })
+    if (!prior.enabled) {
+      await this.deps.preferences.set({ controlVector: { ...prior, file } })
+      return this.snapshot()
+    }
+    await this.apply({ ...prior, file }, prior)
     return this.snapshot()
   }
 
