@@ -35,8 +35,7 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     qwen35.addImport("cuda", cuda);
     qwen35.addImport("core", core);
     qwen35.addImport("lanes", lanes);
-    // qwen3_5 names core's prompt-cache types (its disk image, its paged prompt cache): the engine_api the server links
-    qwen35.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} }));
+    qwen35.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} })); // core's prompt-cache types, the server's engine_api
     const qwen_vision = qwenVisionModule(b, target, optimize, cuda, core, lanes);
     qwen35.addImport("qwen_vision", qwen_vision);
     return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen35 = qwen35, .qwen_vision = qwen_vision, .tokenizer = tokenizer, .heat = heat, .radio = radio, .living = living };

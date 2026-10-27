@@ -147,9 +147,9 @@ pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Targe
     return .{ .hash = h.final(), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
-/// What else the states depend on: the cache format and whether a drafter set the target's taps.
-pub fn facts(t: *const Target) [2]u64 {
-    return .{ @backingInt(reuse.formatOf(t.e)), @intFromBool(t.e.n_taps > 0) };
+/// What else the states depend on: the cache format, whether a drafter set the target's taps, int8 prompt projections.
+pub fn facts(t: *const Target) [3]u64 {
+    return .{ @backingInt(reuse.formatOf(t.e)), @intFromBool(t.e.n_taps > 0), @intFromBool(t.e.int8.on) };
 }
 
 test {
