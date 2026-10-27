@@ -17,6 +17,7 @@ const help =
     \\  --prompts N uses only the first N pairs of each set.
     \\  --capture mean reads every row of a prompt and captures its mean; --capture last
     \\  takes the last row alone, where the model decides what to say next.
+    \\  --layers FROM-TO keeps only the layers in the window; it is every layer by default.
     \\  Layer 0 is not steerable, so the file holds the other layers.
 ;
 
@@ -127,6 +128,16 @@ fn stamp(io: std.Io, buf: *[32]u8) []const u8 {
     }) catch "unknown";
 }
 
+/// The window of layers the operator named, as "FROM-TO"; the first is never below one.
+fn parseLayers(value: []const u8, first: *u32, last: *u32) !void {
+    const dash = std.mem.indexOfScalar(u8, value, '-') orelse return error.BadLayerWindow;
+    const lo = std.fmt.parseInt(u32, std.mem.trim(u8, value[0..dash], " "), 10) catch return error.BadLayerWindow;
+    const hi = std.fmt.parseInt(u32, std.mem.trim(u8, value[dash + 1 ..], " "), 10) catch return error.BadLayerWindow;
+    if (lo == 0 or hi < lo) return error.BadLayerWindow;
+    first.* = lo;
+    last.* = hi;
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const io = init.io;
@@ -142,13 +153,15 @@ pub fn main(init: std.process.Init) !void {
     var alpha: f32 = 1.0;
     var limit: usize = std.math.maxInt(usize);
     var site: derive.Site = .mean_rows;
+    var first_layer: u32 = 1;
+    var last_layer: u32 = std.math.maxInt(u32);
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const value = args[i];
-        if (std.mem.eql(u8, arg, "--model")) model_dir = value else if (std.mem.eql(u8, arg, "--out")) out_path = value else if (std.mem.eql(u8, arg, "--repo")) repo = value else if (std.mem.eql(u8, arg, "--revision")) revision = value else if (std.mem.eql(u8, arg, "--alpha")) alpha = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--prompts")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--capture")) site = if (std.mem.eql(u8, value, "last")) .last_row else if (std.mem.eql(u8, value, "mean")) .mean_rows else return error.UnknownOption else return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--model")) model_dir = value else if (std.mem.eql(u8, arg, "--out")) out_path = value else if (std.mem.eql(u8, arg, "--repo")) repo = value else if (std.mem.eql(u8, arg, "--revision")) revision = value else if (std.mem.eql(u8, arg, "--alpha")) alpha = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--prompts")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--capture")) site = if (std.mem.eql(u8, value, "last")) .last_row else if (std.mem.eql(u8, value, "mean")) .mean_rows else return error.UnknownOption else if (std.mem.eql(u8, arg, "--layers")) try parseLayers(value, &first_layer, &last_layer) else return error.UnknownOption;
     }
     if (model_dir == null or out_path == null) return error.BadOptions;
     if (revision.len == 0) revision = snapshotRevision(model_dir.?) orelse "";
@@ -186,6 +199,8 @@ pub fn main(init: std.process.Init) !void {
     for (derived.layers) |l| {
         // Layer 0 is not steerable, so the file holds the other layers only.
         if (l.id == 0) continue;
+        // The operator's window keeps the layers the vector steers; it is every one by default.
+        if (l.id < first_layer or l.id > last_layer) continue;
         try layers.append(init.gpa, .{ .id = l.id, .dir = l.dir });
     }
     if (layers.items.len == 0) return error.NoDirections;
@@ -219,6 +234,8 @@ pub fn main(init: std.process.Init) !void {
         .layers = sites - 1,
         .prompts = harmful.prompts,
         .capture = @tagName(site),
+        .first_layer = first_layer,
+        .last_layer = if (last_layer == std.math.maxInt(u32)) sites - 1 else last_layer,
         .directions = layers.items.len,
         .dropped = derived.dropped,
         .bytes = bytes.len,
