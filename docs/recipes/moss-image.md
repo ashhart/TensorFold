@@ -62,7 +62,11 @@ SUMMARY 11 kernels: 11 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 r
 
 ## Run a case
 
+`moss_image_case.py` imports and runs the checkpoint's own `pipeline_moss_image.py`, the publisher's Python. It does so
+only when the file's sha256 is the pinned revision's (`1dac1aca…8b31`) and refuses any other file.
+
 ```sh
+hf download OpenMOSS-Team/MOSS-Image-Base --revision 85975793d8b3d432f1b6e27f352abaa4c2a4c0d3 --local-dir MODEL_DIR
 python3 tools/zig/moss_image_case.py case MODEL_DIR case/ --prompt-file prompt.txt   # needs torch, diffusers, transformers
 zig build tf-moss-image -Dcpu=apple_m1
 zig-out/bin/tf-moss-image MODEL_DIR/transformer case/case.safetensors case/

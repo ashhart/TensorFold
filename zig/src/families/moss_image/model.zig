@@ -113,7 +113,10 @@ pub const Model = struct {
         const plan = try Scratch.of(max_text, image);
         const scratch_bytes = try plan.bytes();
         // qualified on the M5's tensor units alone: the projections and attention take another path before them
-        if (!device.tensorUnits()) return error.TensorUnitsRequired;
+        if (!device.tensorUnits()) {
+            std.log.err("moss image: {s} has no tensor units; this family runs on the M5's alone, the only chip it was checked on", .{device.name()});
+            return error.TensorUnitsRequired;
+        }
         const t = try gpa.create(Model);
         errdefer gpa.destroy(t);
         t.* = .{ .gpa = gpa, .device = device, .queue = undefined, .k = undefined, .w = undefined, .max_text = max_text, .image = image, .rows = g.rows, .columns = g.columns, .scratch = undefined, .x = undefined, .xn = undefined, .qr = undefined, .kr = undefined, .vr = undefined, .att = undefined, .y = undefined, .ug = undefined, .s = undefined, .q = undefined, .k_ = undefined, .v = undefined, .sums = undefined, .lat = undefined, .vel = undefined, .ctx = undefined, .mods = undefined };

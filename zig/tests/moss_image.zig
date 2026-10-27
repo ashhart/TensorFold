@@ -148,8 +148,11 @@ pub fn main(init: std.process.Init) !u8 {
 
     var out: std.ArrayList(u8) = .empty;
     const refining = mtl.clock.seconds();
-    var branches = [2]mi.Prompt{ try model.prompt(prompt), try model.prompt(negative) };
-    defer for (&branches) |*b| b.deinit();
+    var branches: [2]mi.Prompt = undefined;
+    branches[0] = try model.prompt(prompt);
+    defer branches[0].deinit();
+    branches[1] = try model.prompt(negative);
+    defer branches[1].deinit();
     const refine_s = mtl.clock.seconds() - refining;
     std.debug.print("both prompts refined: {d:.3} s\n", .{refine_s});
     try print(&out, a, "{{\"device\": \"{s}\", \"image_rows\": {d}, \"prompt_rows\": {d}, \"negative_rows\": {d}, \"load_s\": {d:.2}, \"refine_s\": {d:.4}", .{ device.name(), rows, text, negative_rows, load_s, refine_s });

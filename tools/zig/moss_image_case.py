@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -22,9 +23,17 @@ empty negative prompt whose branch skips block 22, the bf16 transformer and text
 """
 
 
+# pipeline_moss_image.py at OpenMOSS-Team/MOSS-Image-Base revision 85975793d8b3d432f1b6e27f352abaa4c2a4c0d3
+PIPELINE_SHA256 = "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
+
+
 def module(model_dir: str):
-    """The checkpoint's pipeline_moss_image.py, imported from its folder."""
-    spec = importlib.util.spec_from_file_location("pipeline_moss_image", Path(model_dir) / "pipeline_moss_image.py")
+    """The checkpoint's pipeline_moss_image.py, imported from its folder once its sha256 is the pinned revision's."""
+    path = Path(model_dir) / "pipeline_moss_image.py"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != PIPELINE_SHA256:
+        sys.exit(f"{path} has sha256 {digest}; this tool runs only the pinned revision's ({PIPELINE_SHA256})")
+    spec = importlib.util.spec_from_file_location("pipeline_moss_image", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
