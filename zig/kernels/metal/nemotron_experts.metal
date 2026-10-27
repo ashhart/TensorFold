@@ -156,6 +156,8 @@ template [[host_name("tf_xup_rows2")]] [[kernel]] decltype(tf_experts_rows<2688,
 template [[host_name("tf_xdown_rows2")]] [[kernel]] decltype(tf_experts_rows<1856, 2688, 64, 4, 2, 6, 2, false>) tf_experts_rows<1856, 2688, 64, 4, 2, 6, 2, false>;
 template [[host_name("tf_xup_rows4")]] [[kernel]] decltype(tf_experts_rows<2688, 1856, 64, 4, 2, 6, 4, true>) tf_experts_rows<2688, 1856, 64, 4, 2, 6, 4, true>;
 template [[host_name("tf_xdown_rows4")]] [[kernel]] decltype(tf_experts_rows<1856, 2688, 64, 4, 2, 6, 4, false>) tf_experts_rows<1856, 2688, 64, 4, 2, 6, 4, false>;
+template [[host_name("tf_xup_rows2r8")]] [[kernel]] decltype(tf_experts_rows<2688, 1856, 64, 8, 2, 6, 2, true>) tf_experts_rows<2688, 1856, 64, 8, 2, 6, 2, true>;
+template [[host_name("tf_xdown_rows2r8")]] [[kernel]] decltype(tf_experts_rows<1856, 2688, 64, 8, 2, 6, 2, false>) tf_experts_rows<1856, 2688, 64, 8, 2, 6, 2, false>;
 
 // A 16-group's four weight words as the outer loop: four activations a member live, each sum in tf_qdot16's order.
 template <int K, int GS, int RPS, int MB>

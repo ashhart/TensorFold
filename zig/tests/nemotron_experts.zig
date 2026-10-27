@@ -88,7 +88,7 @@ const mix_source =
 /// Shapes the engine's source already instantiates (tf_xup_rows2/4, tf_xdown_rows2/4, tf_xup_w3, tf_xdown_w3).
 fn builtIn(v: Variant) bool {
     if (v.words) return v.mb == 3 and v.rps == 4 and v.sg == 4;
-    return !v.mix and v.rps == 4 and v.sg == 2 and (v.mb == 2 or v.mb == 4);
+    return !v.mix and v.sg == 2 and ((v.rps == 4 and (v.mb == 2 or v.mb == 4)) or (v.rps == 8 and v.mb == 2));
 }
 
 fn bf16(f: f32) u16 {
@@ -283,8 +283,8 @@ pub fn main(init: std.process.Init) !void {
     defer lib.deinit();
     var kernels: [variants.len]Kernel = undefined;
     for (variants, &kernels) |v, *k| {
-        const up_name = if (!builtIn(v)) try std.fmt.allocPrint(a, "p_up_{s}", .{v.name}) else if (v.words) "tf_xup_w3" else try std.fmt.allocPrint(a, "tf_xup_rows{d}", .{v.mb});
-        const down_name = if (!builtIn(v)) try std.fmt.allocPrint(a, "p_down_{s}", .{v.name}) else if (v.words) "tf_xdown_w3" else try std.fmt.allocPrint(a, "tf_xdown_rows{d}", .{v.mb});
+        const up_name = if (!builtIn(v)) try std.fmt.allocPrint(a, "p_up_{s}", .{v.name}) else if (v.words) "tf_xup_w3" else try std.fmt.allocPrint(a, "tf_xup_rows{d}{s}", .{ v.mb, if (v.rps == 8) "r8" else "" });
+        const down_name = if (!builtIn(v)) try std.fmt.allocPrint(a, "p_down_{s}", .{v.name}) else if (v.words) "tf_xdown_w3" else try std.fmt.allocPrint(a, "tf_xdown_rows{d}{s}", .{ v.mb, if (v.rps == 8) "r8" else "" });
         k.* = .{ .up = try mtl.Pipeline.init(device, lib, up_name, false), .down = try mtl.Pipeline.init(device, lib, down_name, false), .rps = v.rps, .sg = v.sg };
     }
     const window: Kernel = .{ .up = engine.get("tf_xup_rows2"), .down = engine.get("tf_xdown_rows2"), .rps = 4, .sg = 2 };
