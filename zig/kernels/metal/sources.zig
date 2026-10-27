@@ -127,6 +127,8 @@ pub const glm_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("glm_v
 pub const core_qwen_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("core/qwen_vision.metal");
 /// Qwen-Image-2.1's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
 pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
+/// MOSS-Image's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
+pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
