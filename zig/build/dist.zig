@@ -16,6 +16,23 @@ pub fn validVersion(v: []const u8) bool {
     return count == 3;
 }
 
+pub const Platform = struct { label: []const u8, query: std.Target.Query };
+pub const platforms = [_]Platform{
+    .{ .label = "macos-arm64", .query = .{
+        .cpu_arch = .aarch64,
+        .os_tag = .macos,
+        .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.apple_m1 },
+        .os_version_min = .{ .semver = .{ .major = 13, .minor = 0, .patch = 0 } },
+    } },
+    .{ .label = "linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu, .glibc_version = .{ .major = 2, .minor = 28, .patch = 0 } } },
+    .{ .label = "linux-aarch64", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu, .glibc_version = .{ .major = 2, .minor = 28, .patch = 0 } } },
+};
+
+/// The server binary an archive ships: Metal over the macOS SDK, else CUDA with the given fatbins (null: host-only).
+pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, ids: *std.Build.Module, options: *std.Build.Step.Options, sdk: []const u8, fatbins: ?[]const u8) *std.Build.Step.Compile {
+    return if (target.result.os.tag == .macos) root.distMetalServer(b, target, ids, options, sdk) else cuda.distServer(b, target, ids, options, fatbins);
+}
+
 pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.Options, version: ?[]const u8, xgrammar: ?[]const u8) void {
     const privacy = @import("cuda_release_paths.zig").checker(b);
     const package_tests = b.addSystemCommand(&.{"python3"});
@@ -30,6 +47,7 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
     const sdk_override = b.option([]const u8, "dist-macos-sdk", "macOS SDK path, default xcrun macosx SDK on a Mac");
     const aot = b.option([]const u8, "dist-cuda-aot", "Optional CUDA capture root with sm<capability>/aot.json and cubins/");
     const host_only = b.option(bool, "dist-host-only", "Verification only: build unusable CUDA archives labelled host-only") orelse false;
+    @import("release_paths_step.zig").steps(b, privacy, ids, options, sdk_override);
     if (version == null) {
         step.dependOn(&b.addFail("dist requires -Dversion=MAJOR.MINOR.PATCH; the release owner chooses the version").step);
         return;
@@ -57,22 +75,9 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
         step.dependOn(&b.addFail("the macOS archive requires a macOS SDK; use a Mac builder or -Ddist-macos-sdk=DIR").step);
         return;
     };
-    const platforms = [_]struct { label: []const u8, query: std.Target.Query }{
-        .{ .label = "macos-arm64", .query = .{
-            .cpu_arch = .aarch64,
-            .os_tag = .macos,
-            .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.apple_m1 },
-            .os_version_min = .{ .semver = .{ .major = 13, .minor = 0, .patch = 0 } },
-        } },
-        .{ .label = "linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu, .glibc_version = .{ .major = 2, .minor = 28, .patch = 0 } } },
-        .{ .label = "linux-aarch64", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu, .glibc_version = .{ .major = 2, .minor = 28, .patch = 0 } } },
-    };
     for (platforms) |p| {
         const target = b.resolveTargetQuery(p.query);
-        const exe = if (p.query.os_tag == .macos)
-            root.distMetalServer(b, target, ids, options, sdk)
-        else
-            cuda.distServer(b, target, ids, options, fatbins);
+        const exe = server(b, target, ids, options, sdk, fatbins);
         if (p.query.os_tag == .linux) if (fatbin_check) |check| exe.step.dependOn(check);
         const label = if (host_only and p.query.os_tag == .linux) b.fmt("{s}-host-only", .{p.label}) else p.label;
         const pack = b.addSystemCommand(&.{"sh"});

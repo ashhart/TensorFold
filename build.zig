@@ -158,6 +158,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen27_host.zig").tests(b);
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
+    @import("zig/build/release_paths_step.zig").tests(b, test_step);
     @import("zig/build/sessions.zig").add(b, test_step);
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/gradient_host.zig").add(b);

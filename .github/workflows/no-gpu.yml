@@ -89,6 +89,26 @@ jobs:
         run: zig build test-golden
       - name: zig build fuzz-cortheon
         run: zig build fuzz-cortheon
+  # The release's own path check on each platform's dist server (no fatbins), so a leak fails here, not at release.
+  release-paths:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: Metal toolchain
+        if: runner.os == 'macOS'
+        run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
+      - name: zig build check-release-paths
+        run: zig build check-release-paths
   zig-macos-dev-tools:
     runs-on: macos-26
     timeout-minutes: 45
