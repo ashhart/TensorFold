@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const slice = @import("slice.zig");
 const convert = @import("convert.zig");
 const keys = @import("keys.zig");
+pub const geometry = @import("mlx_geometry.zig");
 
 const Tensor = types.Tensor;
 const Allocator = std.mem.Allocator;
@@ -102,9 +103,8 @@ pub fn read(a: Allocator, t: anytype, key: []const u8) !Host {
     words.dtype = .i32;
     const scale = try t.get(join(&buf, &.{ key, ".scales" }));
     const bias = try t.get(join(&other, &.{ key, ".biases" }));
-    if (scale.rank != 2 or bias.rank != 2 or !std.mem.eql(usize, scale.shape[0..2], bias.shape[0..2])) return refuse(key, "scale and bias must share shape (N, K / group)");
-    const k = scale.shape[1] * w.group;
-    if (words.shape[1] != k * w.bits / 32 or words.shape[0] != scale.shape[0]) return refuse(key, "packed shape does not match K, bits and group");
+    _ = geometry.shape(words, scale, bias, w.bits, w.group, false) catch
+        return refuse(key, "packed words and group tables have incompatible or unrepresentable geometry");
     const pair = try tables(a, scale, bias);
     return .{ .words = words, .scales = pair[0], .biases = pair[1], .bits = w.bits, .group = w.group };
 }
@@ -121,6 +121,7 @@ pub fn bytes(h: Host) usize {
 
 /// `_halves`: a fused [embedding | hidden] projection split in two along K, words and group tables alike.
 pub fn halves(a: Allocator, p: Host) ![2]Host {
+    _ = try geometry.shape(p.words, p.scales, p.biases, p.bits, p.group, false);
     const groups = p.scales.shape[1];
     const half = groups * p.group / 2;
     if (groups % 2 != 0 or half * p.bits % 32 != 0) return refuse("fc", "does not split on a word boundary");
@@ -143,11 +144,13 @@ pub fn halves(a: Allocator, p: Host) ![2]Host {
 
 /// `_rows`: output rows `spans` of a projection, the share of a column-split one.
 pub fn sliceRows(a: Allocator, p: Host, spans: []const slice.Span) slice.Error!Host {
+    _ = geometry.shape(p.words, p.scales, p.biases, p.bits, p.group, false) catch return error.UnevenSplit;
     return .{ .words = try slice.takeRows(a, p.words, spans), .scales = try slice.takeRows(a, p.scales, spans), .biases = try slice.takeRows(a, p.biases, spans), .bits = p.bits, .group = p.group };
 }
 
 /// `_cols`: one rank's whole input groups of a row-split projection, whose fp32 outputs the ranks sum.
 pub fn sliceCols(a: Allocator, p: Host, r: slice.Rank, what: []const u8) slice.Error!Host {
+    _ = geometry.shape(p.words, p.scales, p.biases, p.bits, p.group, false) catch return error.UnevenSplit;
     const groups = try slice.even(p.scales.shape[1], r.world, what);
     const words = groups * p.group * p.bits / 32;
     return .{
@@ -161,6 +164,7 @@ pub fn sliceCols(a: Allocator, p: Host, r: slice.Rank, what: []const u8) slice.E
 
 /// A stack of E + 1 experts cut to a rank's `part` of them (the shared one last, kept on rank 0).
 pub fn sliceStack(a: Allocator, p: Host, r: slice.Rank, part: usize) slice.Error!Host {
+    _ = geometry.shape(p.words, p.scales, p.biases, p.bits, p.group, true) catch return error.UnevenSplit;
     return .{ .words = try slice.takeExperts(a, p.words, r, part), .scales = try slice.takeExperts(a, p.scales, r, part), .biases = try slice.takeExperts(a, p.biases, r, part), .bits = p.bits, .group = p.group };
 }
 
@@ -169,6 +173,7 @@ pub const Device = struct { words: types.Buf, scales: types.Buf, biases: types.B
 
 /// The checkpoint's words and tables on the device as stored: this format keeps its layout.
 pub fn upload(u: types.Uploader, h: Host) !Device {
+    _ = try geometry.shape(h.words, h.scales, h.biases, h.bits, h.group, h.words.rank == 3);
     return .{ .words = try u.tensor(h.words), .scales = try u.tensor(h.scales), .biases = try u.tensor(h.biases), .bits = h.bits, .group = h.group };
 }
 
@@ -188,11 +193,13 @@ fn tableKind(dtype: types.DType) error{UnsupportedTables}!types.Tables {
 
 /// The projection's (N, K) and addresses; a stack (E + 1, N, ...) reads as one expert's shape at the stack's addresses.
 pub fn view(d: Device, stacked: bool) error{UnsupportedTables}!View {
-    const lead: usize = @intFromBool(stacked);
-    const n = d.words.dim(lead);
-    const k = d.words.dim(lead + 1) * 32 / d.bits;
+    const dims = geometry.shape(d.words, d.scales, d.biases, d.bits, d.group, stacked) catch
+        return error.UnsupportedTables;
+    if (d.scales.dtype != d.biases.dtype) return error.UnsupportedTables;
+    inline for (.{ d.words, d.scales, d.biases }) |buffer| geometry.address(buffer) catch
+        return error.UnsupportedTables;
     const matrix: Matrix = .{ .words = d.words.ptr, .scale = d.scales.ptr, .bias = d.biases.ptr, .tables = try tableKind(d.scales.dtype), .bits = d.bits, .group = d.group };
-    return .{ .n = @intCast(n), .k = @intCast(k), .matrix = matrix };
+    return .{ .n = dims.n, .k = dims.k, .matrix = matrix };
 }
 
 fn table64(dtype: types.DType, data: []const u8, i: usize) f64 {
@@ -208,13 +215,15 @@ pub fn elements(h: Host) usize {
 
 /// fp64 dequantization of every row of `h` (leading dimensions folded), scale * code + bias, into `out` [rows, K].
 pub fn reference(h: Host, out: []f64) error{UnexpectedTensor}!void {
+    const dims = try geometry.scalarShape(h.words, h.scales, h.biases, h.bits, h.group, h.words.rank == 3);
+    if (!convert.tableDtype(h.scales.dtype) or !convert.tableDtype(h.biases.dtype)) return error.UnexpectedTensor;
     const rank = h.words.rank;
     var n_rows: usize = 1;
     for (h.words.shape[0 .. rank - 1]) |d| n_rows *= d;
     const groups = h.scales.shape[h.scales.rank - 1];
     const k = groups * h.group;
     const words_row = h.words.shape[rank - 1];
-    if (out.len != n_rows * k or words_row * 32 != k * h.bits) return error.UnexpectedTensor;
+    if (out.len != dims.elements) return error.UnexpectedTensor;
     const mask: u64 = (@as(u64, 1) << @intCast(h.bits)) - 1;
     for (0..n_rows) |r| for (0..k) |c| {
         const bit = c * h.bits;
@@ -233,13 +242,14 @@ pub fn dequant(a: Allocator, words: Tensor, scale: Tensor, bias: Tensor, group: 
     if (words.dtype != .u32 and words.dtype != .i32) return error.UnexpectedTensor;
     if (!convert.isFloat(scale.dtype) or scale.dtype == .f64 or !convert.isFloat(bias.dtype) or bias.dtype == .f64) return error.UnexpectedTensor;
     const n_rows = words.shape[0];
-    const k = scale.shape[1] * group;
-    if (k == 0 or 32 * words.shape[1] / k == 0) return error.UnexpectedTensor;
-    const bits = 32 * words.shape[1] / k;
+    const k = try geometry.product(scale.shape[1], group);
+    const packed_bits = try geometry.product(32, words.shape[1]);
+    if (k == 0) return error.UnexpectedTensor;
+    const bits = packed_bits / k;
     if (bits < 2 or bits > 8) return error.UnsupportedQuantization;
+    const dims = try geometry.scalarShape(words, scale, bias, bits, group, false);
     const row_words = words.shape[1];
-    if (row_words * 32 != k * bits or scale.shape[0] != n_rows) return error.UnexpectedTensor;
-    const out = try a.alloc(f32, n_rows * k);
+    const out = try a.alloc(f32, dims.elements);
     const mask: u64 = (@as(u64, 1) << @intCast(bits)) - 1;
     for (0..n_rows) |r| for (0..k) |c| {
         // a code may run into the next word (3, 5, 6 and 7 bits): read the pair
@@ -336,7 +346,8 @@ test "a projection splits its words and group tables on the same boundary" {
     var words: [2 * 4]u32 = undefined;
     for (&words, 0..) |*w, i| w.* = @intCast(i);
     var scales: [2 * 2]u16 = .{ 10, 11, 12, 13 };
-    const p = hostOf(&words, &scales, &scales, 2, 4, 32);
+    try std.testing.expectError(error.UnexpectedTensor, halves(arena.allocator(), hostOf(&words, &scales, &scales, 2, 4, 32)));
+    const p = hostOf(&words, &scales, &scales, 2, 2, 32);
     const pair = try halves(arena.allocator(), p);
     try std.testing.expectEqual(@as(usize, 2), pair[0].words.shape[1]);
     try std.testing.expectEqual(@as(usize, 1), pair[1].scales.shape[1]);
@@ -351,8 +362,14 @@ test "a column split keeps whole groups and a row split its own rows" {
     var words: [4 * 4]u32 = undefined;
     for (&words, 0..) |*w, i| w.* = @intCast(i);
     var scales: [4 * 2]u16 = .{ 0, 1, 2, 3, 4, 5, 6, 7 };
-    // eight bits: four words a row hold sixteen codes, two groups of eight
-    const p = hostOf(&words, &scales, &scales, 4, 8, 8);
+    // Two bits: four words a row hold sixty-four codes, two admitted groups of thirty-two.
+    const p = hostOf(&words, &scales, &scales, 4, 2, 32);
+    var unsupported: Device = .{ .words = undefined, .scales = undefined, .biases = undefined, .bits = 8, .group = 8 };
+    inline for (.{ "words", "scales", "biases" }) |field| {
+        const t = @field(p, field);
+        @field(unsupported, field) = .{ .ptr = @intFromPtr(t.bytes.ptr), .len = t.bytes.len, .dtype = t.dtype, .rank = t.rank, .shape = t.shape };
+    }
+    try std.testing.expectError(error.UnsupportedTables, view(unsupported, false));
     const c = try sliceCols(a, p, .{ .rank = 1, .world = 2 }, "test");
     try std.testing.expectEqual(@as(usize, 2), c.words.shape[1]);
     try std.testing.expectEqualSlices(u32, &.{ 2, 3, 6, 7, 10, 11, 14, 15 }, @alignCast(std.mem.bytesAsSlice(u32, c.words.bytes)));
@@ -521,4 +538,6 @@ test "an entry the kernels do not run refuses every spelling of its module" {
 
 test {
     _ = keys;
+    _ = @import("mlx_geometry_test.zig");
+    _ = @import("mlx_checkpoint_test.zig");
 }
