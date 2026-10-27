@@ -40,11 +40,20 @@ pub fn takesTwo(start: usize, len: usize, world: usize, marks: []const u32) bool
     return std.mem.indexOfScalar(u32, marks, @intCast(next)) == null;
 }
 
+/// Whether a pair at `start` (b of `rb` rows) rebases the index rings where chunks one at a time do: at a, or not.
+pub fn ringsAgree(base: usize, ring: usize, start: usize, rb: usize) bool {
+    const ra = fw.prefill_rows;
+    return start + ra > base + ring or start + ra + rb <= base + ring;
+}
+
 /// Rank 0's choice for the step at `start` (the others take the ids it sends); not with a drafter, prompt rows or prof.
-pub fn pairedAt(e: *const Engine, start: usize, len: usize, marks: ?engine.Marks) bool {
+pub fn pairedAt(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, marks: ?engine.Marks) bool {
     if (e.pair == null or !e.settings.pair or e.drafter != null or e.prompt_logprobs != null or e.prompt_profs[3] != null) return false;
     if (e.pieces.count == 1 and !e.settings.split) return false; // run takes such a chunk whole
-    return takesTwo(start, len, e.share.world, if (marks) |m| m.at else &.{});
+    if (!takesTwo(start, len, e.share.world, if (marks) |m| m.at else &.{})) return false;
+    // a resumed step restores its kept state, and the rings' base, after this choice
+    const base = if (from) |r| (e.snaps.get(r.id) orelse return false).bases[0] else e.cur.st.base;
+    return ringsAgree(base, e.cur.st.ring_rows, start, @min(len - start - fw.prefill_rows, fw.prefill_rows));
 }
 
 /// Engine.prefillChunk of two chunks (`part`: both, then the next id): one pass, then each chunk's MTP rows and commit.
@@ -54,6 +63,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     const rb: usize = @min(len - start - ra, fw.prefill_rows);
     const pair = if (e.pair) |*p| p else return error.BadChunk;
     if (rb < e.share.world or part.len != @min(len - start, ra + rb + 1) or e.drafter != null or e.prompt_logprobs != null) return error.BadChunk;
+    if (!ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rb)) return error.BadChunk; // pairedAt's rule, every rank
     if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
     e.gate(cancel) catch |err| {
         if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
@@ -68,7 +78,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     fa.index_split = split; // the step's choice (TF_GLM_INDEX_SPLIT) for both chunks
     fb.index_split = split;
     const st = &e.cur.st;
-    try st.ready(e.stream, ra + rb); // one rebase for both chunks, before b's view copies the rings' base
+    try st.ready(e.stream, ra + rb); // one rebase for both chunks, at a as a chunk at a time, before b's view copies it
     var sb = st.*;
     sb.pos_dev = pair.pos.ptr;
     try sb.setPos(e.stream, st.pos + ra);
@@ -114,4 +124,13 @@ test "a prompt step takes the next chunk when it holds min_rows or more and no k
     try std.testing.expect(takesTwo(2 * C, 5 * C, 3, &.{}));
     try std.testing.expect(!takesTwo(0, 3 * C, 3, &.{C})); // a state kept at the next chunk's start: that chunk starts a step
     try std.testing.expect(takesTwo(0, 3 * C, 3, &.{ 2 * C, 3 * C })); // marks past the pair
+}
+
+test "a pair rebases the index rings where a chunk at a time would, so a ring based at chunk 0 pairs from chunk 2" {
+    const C = fw.prefill_rows;
+    try std.testing.expect(ringsAgree(0, 2 * C, 0, C)); // neither rebases
+    try std.testing.expect(!ringsAgree(0, 2 * C, C, C)); // a chunk at a time rebases at b's start, a pair at a's
+    try std.testing.expect(!ringsAgree(0, 2 * C, C, 1));
+    try std.testing.expect(ringsAgree(0, 2 * C, 2 * C, C)); // both at a's start
+    try std.testing.expect(ringsAgree(C, 2 * C, C, C));
 }
