@@ -28,6 +28,8 @@ pub fn kvRowBytes(kv: Kv, heads: usize) usize {
 /// The levers that change a sequence's device bytes.
 pub const Policy = struct {
     kv: Kv = .bf16,
+    /// KV heads a rank keeps (2: replicated as upstream; 1: the attention head split across two ranks).
+    heads: usize = kv_heads,
     /// K/V in mapped pinned host memory, read in place by the chunk kernel (only selected keys cross PCIe).
     kv_host: bool = false,
     /// The raw indexer keys [tokens][128] in mapped host memory (read only when a block of 4 completes and pools).
@@ -55,7 +57,7 @@ pub fn pooledBytes(cap: usize) u64 {
 /// cuda_prompt.zig seqBytes split by lever (the default policy gives upstream's number: a host test checks it).
 pub fn seqBytes(cap: usize, p: Policy) SeqBytes {
     const attn: u64 = wt.attn_n;
-    const kv: u64 = attn * cap * kvRowBytes(p.kv, kv_heads);
+    const kv: u64 = attn * cap * kvRowBytes(p.kv, p.heads);
     const ikc: u64 = attn * cap * index_row;
     var s: SeqBytes = .{
         .gdn = wt.linear_n * ((gdn.taps - 1) * gdn.conv_dim * 2 + wt.state_n * 4),
@@ -68,6 +70,11 @@ pub fn seqBytes(cap: usize, p: Policy) SeqBytes {
     if (p.kv_host) s.host += kv;
     if (p.ikc_host) s.host += ikc;
     return s;
+}
+
+/// The MTP head's one attention layer of its draft cache (the part of cuda_mtp_draft.zig Draft.bytes that grows with
+pub fn draftAttnBytes(cap: usize, p: Policy) u64 {
+    return (if (p.kv_host) 0 else @as(u64, cap) * kvRowBytes(p.kv, p.heads)) + (if (p.ikc_host) 0 else @as(u64, cap) * index_row) + pooledBytes(cap);
 }
 
 pub const gib: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -85,19 +92,21 @@ pub const EngineKv = struct {
     ikc_host: bool = false,
     /// The 32-point Hadamard on each group (K10: off by default; plain int8 sat at int12's noise floor).
     rot: bool = false,
+    /// KV heads a sequence holds: 1 when the attention heads are split across two ranks (cuda_exl3_heads.zig).
+    heads: usize = kv_heads,
 
     pub fn policy(k: EngineKv) Policy {
-        return .{ .kv = if (k.k8 != null) .int8 else .bf16, .ikc_host = k.ikc_host };
+        return .{ .kv = if (k.k8 != null) .int8 else .bf16, .ikc_host = k.ikc_host, .heads = k.heads };
     }
 
     /// Whether new sequences differ from upstream's newSeq.
     pub fn placed(k: EngineKv) bool {
-        return k.k8 != null or k.ikc_host;
+        return k.k8 != null or k.ikc_host or k.heads != kv_heads;
     }
 
     /// A snapshot's rows of one layer a token: K (and V) bytes, and their int8 scales (0: bf16).
     pub fn rows(k: EngineKv) Rows {
-        return snapRows(k.k8 != null, kv_heads);
+        return snapRows(k.k8 != null, k.heads);
     }
 };
 
@@ -144,20 +153,27 @@ pub fn enable(e: anytype, int8: bool, rot: bool, ikc_host: bool) !void {
     std.log.info("flashnext: KV caches {s}{s}, indexer keys in {s} memory", .{ if (kv.k8 != null) "int8 (32-groups, fp16 scales)" else "bf16", if (rot and kv.k8 != null) " rotated" else "", if (ikc_host) "mapped pinned host" else "device" });
 }
 
+/// Widest logits pass the server runs (a decode round of 32 streams, an MTP window): `head_local`'s rows.
+pub const head_local_serve_rows: usize = 64;
 /// K10 lever 3: the pass's chunk for an EXL3 checkpoint unless TF_FLASHNEXT_CHUNK says (+3% prompt time a chunk at
 pub const exl3_chunk: usize = 1024;
 
 /// The server's load hook (cuda_lanes_load.zig, right after the engine loads, before any scratch or sequence).
 pub fn setup(e: anytype, kv8_flag: bool, exl3: bool) !void {
     const f = fromEnv(kv8_flag);
+    const heads = @import("../model/cuda_exl3_heads.zig").kvHeads(e.layers[0..e.n_layers]);
+    if (heads != kv_heads) (try entryOf(e)).heads = heads;
     if (f.int8 or f.ikc_host) try enable(e, f.int8, f.rot, f.ikc_host);
+    if (heads != kv_heads) std.log.info("flashnext: attention heads split across the ranks: {d} query heads and {d} KV head a rank", .{ wt.q_heads / 2, heads });
     if (!exl3) return;
     if (e.batch_s != null) return error.ScratchAlreadyReserved;
     const decoder_exl3 = e.n_layers != 0 and for (e.layers[0..e.n_layers]) |layer| {
         if (layer.exl3 == null) break false;
     } else true;
-    e.scratch_format = if (decoder_exl3) .exl3 else .classic;
+    const draft_exl3 = @import("../pack/cuda_exl3_load.zig").hasExperts(&e.store, "language_model.mtp.layers.0.mlp");
+    e.scratch_format = if (decoder_exl3 and draft_exl3) .exl3 else .classic;
     if (std.c.getenv("TF_FLASHNEXT_CHUNK") == null) e.chunk = exl3_chunk;
+    @import("../../cuda_batch_state.zig").head_local_rows = if (e.head_q.n == wt.vocab) 0 else head_local_serve_rows;
 }
 
 /// One log line: a stream's device bytes at the window by piece, and the host bytes it maps.
@@ -185,6 +201,15 @@ pub fn snapHost(context: usize, exl3: bool) bool {
     if (std.c.getenv("TF_FLASHNEXT_SNAP_HOST")) |v| on = std.mem.eql(u8, std.mem.span(v), "1");
     @import("../../cuda_snap.zig").on_host = on;
     return on;
+}
+
+/// cuda_lanes.zig rankRoom: the ranks agree how many STREAMS fit (each its own stream_bytes: rank 1 holds no MTP head
+pub fn rankRoom(r: anytype, local: u64, stream_bytes: usize) !u64 {
+    if (stream_bytes == 0) return r.room(local);
+    const sb: u64 = stream_bytes;
+    const q = (local / sb) << 16 | ((local % sb) << 16) / sb;
+    const m = try r.room(q);
+    return (m >> 16) * sb + ((m & 0xffff) * sb >> 16);
 }
 
 /// The engine's deinit.
@@ -246,6 +271,7 @@ pub fn newSeq(e: anytype, comptime Seq: type, cap: usize) !Seq {
     const conv = try held.bufs(d, st, wt.linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
     const state = try held.bufs(d, st, wt.linear_n, wt.state_n * 4);
     const int8 = kv.k8 != null;
+    if (int8 and kv.heads != kv_heads) return error.SplitAttentionUnsupported;
     const row = kv.rows();
     const kc = try held.bufs(d, st, attn, cap * row.kv);
     const vc = try held.bufs(d, st, attn, cap * row.kv);

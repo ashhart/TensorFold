@@ -33,6 +33,8 @@ pub const Ops = struct {
     sums: ?cuda.DeviceBuffer = null,
     glue: ?cuda.Module = null,
     split_fn: cuda.Function = undefined,
+    /// Expert parallel's masks, sums and kernels (cuda_exl3_tp.zig), made on first use.
+    tp: ?*@import("../tp/cuda_exl3_tp.zig").Scratch = null,
     /// Sizing maxima over what was loaded (`reserve` allocates every scratch for them once, before any round): the
     max_k: usize = 0,
     max_z: usize = 0,
@@ -67,6 +69,7 @@ pub const Ops = struct {
         if (o.sums) |*b| b.free();
         if (o.picks) |*b| b.free();
         if (o.glue) |*m| m.unload();
+        if (o.tp) |t| t.destroy();
         o.gpa.destroy(o);
     }
 
@@ -132,11 +135,12 @@ pub const Ops = struct {
     }
 
     /// Every scratch buffer's address and size: unchanged across a pass means nothing grew (nor synchronised) in it.
-    pub fn fingerprint(o: *const Ops) [8][2]u64 {
-        var f: [8][2]u64 = @splat(.{ 0, 0 });
+    pub fn fingerprint(o: *const Ops) [12][2]u64 {
+        var f: [12][2]u64 = @splat(.{ 0, 0 });
+        if (o.tp) |t| f[8..12].* = @import("../tp/cuda_exl3_tp.zig").fingerprint(t);
         const de: ?cuda.exl3.Dense = o.dense;
         const bufs = [8]?cuda.DeviceBuffer{ o.tmp, o.moe, o.halves, o.sums, if (de) |x| x.xh else null, if (de) |x| x.z else null, if (de) |x| x.counters else null, null };
-        for (bufs, &f) |b, *e| if (b) |x| {
+        for (bufs, f[0..8]) |b, *e| if (b) |x| {
             e.* = .{ x.ptr, x.len };
         };
         if (o.picks) |h| f[7] = .{ @intFromPtr(h.bytes.ptr), h.bytes.len };
@@ -152,6 +156,7 @@ pub const Ops = struct {
         if (o.dense) |de| for ([_]?cuda.DeviceBuffer{ de.xh, de.z, de.counters }) |b| if (b) |x| {
             n += x.len;
         };
+        if (o.tp) |t| n += @import("../tp/cuda_exl3_tp.zig").reservedBytes(t);
         return n;
     }
 
@@ -308,12 +313,19 @@ pub fn load(gpa: std.mem.Allocator, d: *cuda.Driver, store: *Store, prefix: []co
     return wrap(gpa, d, store, prefix, &.{""}, n, k);
 }
 
-/// Engine.initRank's head for an EXL3 pack: one rank holds the whole vocabulary.
+/// Engine.initRank's head for an EXL3 pack:
 pub fn head(gpa: std.mem.Allocator, d: *cuda.Driver, store: *Store, world: usize, rank: usize) !?projection.Projection {
     if (!has(store, "language_model.lm_head")) return null;
-    if (world != 1 or rank != 0) return error.UnsupportedQuantization;
-    if (try @import("../../cuda_head.zig").enabled()) return error.BadHeadSharding;
+    if (shardHead(world)) return try @import("../tp/cuda_exl3_tp.zig").headProjection(gpa, d, store, "language_model.lm_head", world, rank);
+    if (world == 1 and try @import("../../cuda_head.zig").enabled()) return error.BadHeadSharding;
     return try load(gpa, d, store, "language_model.lm_head", wt.vocab, wt.dims);
+}
+
+/// Whether an EXL3 head is split at `world`: at 2 unless TF_FLASHNEXT_SHARD_HEAD=0; never at 1.
+pub fn shardHead(world: usize) bool {
+    if (world != 2) return false;
+    const v = std.c.getenv("TF_FLASHNEXT_SHARD_HEAD") orelse return true;
+    return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 
 /// Whether any of `prefix`'s parts is an EXL3 matrix (cuda_projection_load.loadStitched's branch).
@@ -359,6 +371,8 @@ pub const Experts = struct {
     /// Each expert's and projection's trellis words on the device, for a pool to rewrite (gate, up, down; 513 each).
     trellis: [3][]u64 = .{ &.{}, &.{}, &.{} },
     halves: [3][]i32 = .{ &.{}, &.{}, &.{} },
+    /// The ids this rank holds under expert parallel (cuda_exl3_tp.zig); null: one rank holds all 513.
+    tp: ?@import("../tp/cuda_exl3_tp.zig").Rank = null,
     bank: ?cuda.HostBuffer = null,
     /// The pool's Source: every routed expert's gate/up/down bytes inside `bank`, and the shared expert's.
     routed: [][3][]const u8 = &.{},
@@ -443,9 +457,11 @@ fn align256(n: usize) usize {
 
 /// Every routed expert of `mlp`, the shared expert as id 512 (the same 2560 x 640 x 2560 shape): resident, or with
 pub fn experts(gpa: std.mem.Allocator, d: *cuda.Driver, store: *Store, mlp: []const u8, world: usize, rank: usize) !*Experts {
-    if (world != 1 or rank != 0) return error.UnsupportedQuantization; // one rank holds all 513
+    if (world != 1 or rank != 0) return @import("../tp/cuda_exl3_tp.zig").experts(gpa, d, store, mlp, world, rank); // plan step 10
     const count = wt.experts_n + 1;
-    const offload = offloaded();
+    // TF_FLASHNEXT_EXL3_MTP_RESIDENT=1: the MTP layer's experts stay on the device (0.88 GiB) instead of a pool
+    const mtp_resident = std.mem.indexOf(u8, mlp, "mtp.") != null and if (std.c.getenv("TF_FLASHNEXT_EXL3_MTP_RESIDENT")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    const offload = offloaded() and !mtp_resident;
     const x = try gpa.create(Experts);
     x.* = .{ .gpa = gpa, .ops = try opsOf(store, d), .layer = undefined };
     errdefer x.destroy();

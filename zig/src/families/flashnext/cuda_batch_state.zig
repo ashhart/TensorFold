@@ -49,6 +49,8 @@ pub const pocket_stride: usize = 128;
 pub const fused_rows: usize = 1024;
 /// Rows a pass holds at most unless asked for more.
 pub const default_chunk: usize = 1536;
+/// Rows of `head_local` (a vocabulary-split head's local logits) a scratch holds at most: every row by default; an
+pub var head_local_rows: usize = std.math.maxInt(usize);
 /// The most rows TF_FLASHNEXT_CHUNK may ask for (the largest measured pass; its scratch is about 13 GiB more).
 pub const max_chunk: usize = 16384;
 const ratio = wt.index_ratio;
@@ -391,7 +393,7 @@ pub const Scratch = struct {
             cap * streams * 4,
             cap * wide * 2,
             vocab * 2,
-            if (format == .classic) cap * vocab else null,
+            @min(cap, head_local_rows) * vocab,
             half * 4,
             4096,
         };

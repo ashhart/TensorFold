@@ -79,15 +79,51 @@ pub fn deviceBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Optio
     return total;
 }
 
-/// The family's deviceWeightBytes for an EXL3 checkpoint; 0 if unread.
-pub fn weightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
-    return deviceBytes(gpa, io, dir, options()) catch 0;
+/// The MTP head's device bytes: its `mtp.*` tensors placed as the main layers' are (its routed experts under the same
+pub fn headBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !u64 {
+    var store = try wt.Store.open(gpa, io, dir);
+    defer store.deinit();
+    const wm = store.parsed.value.object.get("weight_map") orelse return error.MissingTensor;
+    var files: std.StringHashMapUnmanaged(void) = .empty;
+    defer files.deinit(gpa);
+    var it = wm.object.iterator();
+    while (it.next()) |kv| if (std.mem.startsWith(u8, kv.key_ptr.*, "mtp.")) try files.put(gpa, kv.value_ptr.string, {});
+    var total: u64 = tables_per_layer + draft_rows * wt.dims * 2;
+    var fi = files.keyIterator();
+    while (fi.next()) |rel| {
+        const path = try std.fs.path.join(gpa, &.{ dir, rel.* });
+        defer gpa.free(path);
+        var file = try core.safetensors.File.open(gpa, io, path);
+        defer file.close(io);
+        var ni = file.names.iterator();
+        while (ni.next()) |e| {
+            const name = e.key_ptr.*;
+            if (!std.mem.startsWith(u8, name, "mtp.")) continue;
+            // the head's tensors as a decoder layer's: drop the `mtp.` prefix the host-only rule keys on
+            var buf: [256]u8 = undefined;
+            const as_layer = try std.fmt.bufPrint(&buf, "model.language_model.{s}", .{name["mtp.".len..]});
+            total = try std.math.add(u64, total, try tensorBytes(as_layer, e.value_ptr.*, o));
+        }
+    }
+    return total;
 }
 
-/// A rank's placement bytes: one rank holds the whole model (no MTP head: an EXL3 pack decodes plain).
-pub fn placement(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize) !u64 {
-    if (world != 1 or rank != 0) return error.BadRank;
-    return deviceBytes(gpa, io, dir, options());
+/// The draft head's vocabulary rows (cuda_mtp.zig headBytes' count).
+const draft_rows: u64 = 79_591;
+
+/// The family's deviceWeightBytes for an EXL3 checkpoint: the main model and the MTP head; 0 if unread.
+pub fn weightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
+    const o = options();
+    const main = deviceBytes(gpa, io, dir, o) catch return 0;
+    return main + (headBytes(gpa, io, dir, o) catch return 0);
+}
+
+/// A rank's placement bytes; at world 2 the expert-parallel rank's (cuda_exl3_tp.zig, plan step 10).
+pub fn placement(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
+    if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
+    if (world != 1) return @import("../tp/cuda_exl3_tp.zig").placement(gpa, io, dir, world, rank, drafts);
+    const o = options();
+    return try deviceBytes(gpa, io, dir, o) + if (drafts) try headBytes(gpa, io, dir, o) else @as(u64, 0);
 }
 
 fn entry(dtype: core.safetensors.DType, shape: []const usize, bytes: u64) Entry {
@@ -106,6 +142,7 @@ test "exl3: routed trellis stays on the host under offload, its scales and every
     try std.testing.expectEqual(tr.end, try tensorBytes("model.language_model.layers.0.mlp.shared_expert.gate_proj.trellis", tr, .{}));
     try std.testing.expectEqual(tr.end, try tensorBytes("lm_head.trellis", tr, .{}));
     try std.testing.expectEqual(@as(u64, 0), try tensorBytes("lm_head.mul1", entry(.i32, &.{}, 4), .{}));
+    try std.testing.expectEqual(@as(u64, 0), try tensorBytes("mtp.layers.0.mlp.experts.3.up_proj.trellis", tr, .{ .routed_on_host = false }));
 }
 
 test "exl3: dense F16 weights count as their BF16 device packing, norms as fp32" {
@@ -121,7 +158,7 @@ test "exl3: dense F16 weights count as their BF16 device packing, norms as fp32"
     try std.testing.expectEqual(@as(u64, 0), try tensorBytes("model.visual.blocks.0.attn.qkv.weight", entry(.bf16, &.{ 3456, 1152 }, 3456 * 1152 * 2), .{}));
 }
 
-test "exl3: placement names an EXL3 checkpoint and refuses any world but one" {
+test "exl3: placement names an EXL3 checkpoint and refuses worlds past 2 (world 2: cuda_exl3_tp.zig's test)" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -129,6 +166,5 @@ test "exl3: placement names an EXL3 checkpoint and refuses any world but one" {
     const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
     defer a.free(dir);
     try std.testing.expect(isExl3(a, std.testing.io, dir));
-    try std.testing.expectError(error.BadRank, placement(a, std.testing.io, dir, 2, 0));
-    try std.testing.expectError(error.BadRank, placement(a, std.testing.io, dir, 1, 1));
+    try std.testing.expectError(error.BadRank, placement(a, std.testing.io, dir, 3, 0, false));
 }

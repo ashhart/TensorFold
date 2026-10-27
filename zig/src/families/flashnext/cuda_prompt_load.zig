@@ -365,8 +365,13 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         @memcpy(pre_buf[0..pre.len], pre);
         const ap = pre_buf[0..pre.len];
         const parts = [_][]const u8{ ".q_proj", ".k_proj", ".v_proj", ".indexer.index_qk_proj" };
-        proj_q = try projections.loadStitched(gpa, driver, store, ap, &parts, proj_n, dims);
-        out_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.o_proj", .{ap}), dims, out_k);
+        if (try @import("exl3/model/cuda_exl3_heads.zig").loadRank(gpa, driver, store, ap, world, rank)) |head_weights| { // EXL3 tp=2: this rank's heads
+            proj_q = head_weights[0];
+            out_q = head_weights[1];
+        } else {
+            proj_q = try projections.loadStitched(gpa, driver, store, ap, &parts, proj_n, dims);
+            out_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.o_proj", .{ap}), dims, out_k);
+        }
         const qn = try store.normScale(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.q_norm.weight", .{ap})));
         defer gpa.free(qn);
         const kn = try store.normScale(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.k_norm.weight", .{ap})));

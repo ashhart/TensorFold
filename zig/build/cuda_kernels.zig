@@ -120,6 +120,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "drama3_fp8", .flags = &.{"-O3"} },
     .{ .name = "drama3_codec", .flags = &.{"-O3"} },
     .{ .name = "flashnext_exl3", .src = "flashnext_exl3/flashnext_exl3", .flags = glue }, // ours: Flash Next's EXL3 glue (an fp16 row split exactly into two bf16)
+    .{ .name = "flashnext_exl3_tp", .src = "flashnext_exl3/flashnext_exl3_tp", .flags = glue }, // ours: Flash Next's EXL3 expert-parallel masks and placement
     .{ .name = "flashnext_exl3_kv", .src = "flashnext_exl3/flashnext_exl3_kv", .flags = glue }, // ours: Flash Next attention over an int8 KV cache (K10 prototype)
 };
 

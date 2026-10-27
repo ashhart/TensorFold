@@ -111,7 +111,7 @@ pub const Pool = struct {
         errdefer gpa.free(k2);
         var held: usize = 0;
         for (src.routed, k2) |e, *w| {
-            // an expert with no source bytes: never picked here
+            // an expert another rank holds (expert parallel, cuda_exl3_tp.zig): no bytes, never picked here
             if (e[0].len == 0 and e[1].len == 0 and e[2].len == 0) {
                 w.* = .{ 0, 0, 0 };
                 continue;
@@ -298,7 +298,7 @@ pub const Pool = struct {
     }
 
     fn loadCopy(p: *Pool, c: round_.Copy) !void {
-        if (p.k2[c.id][0] == 0) return error.Invalid; // an expert without source bytes reached the planner
+        if (p.k2[c.id][0] == 0) return error.Invalid; // another rank's expert reached the planner unmasked
         const ev: ?usize = if (c.evicted == offload.Cache.empty_id) null else c.evicted;
         try p.lines.load(c.line, c.id, p.src.routed[c.id], p.k2[c.id], ev, p.opt.direct, p.io);
     }

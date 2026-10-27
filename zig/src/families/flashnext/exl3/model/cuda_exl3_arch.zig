@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 /// The one compute capability (10 * major + minor) this family's EXL3 path is qualified on: Blackwell sm_120.
 pub const qualified: u32 = 120;
 
-pub const message = "Flash Next EXL3 (expert offload, one rank) is qualified on sm_120 only; this device is sm_{d}: " ++
+pub const message = "Flash Next EXL3 (expert offload, TP=2) is qualified on sm_120 only; this device is sm_{d}: " ++
     "serve an NVFP4 or BF16 Flash Next checkpoint, or set TF_FLASHNEXT_EXL3_ARCH=unqualified to try it without a claim";
 
 /// Whether a device of `capability` may serve an EXL3 pack; `override` is the TF_FLASHNEXT_EXL3_ARCH value for testers.

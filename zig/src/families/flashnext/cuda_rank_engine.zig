@@ -7,6 +7,7 @@ const wire = @import("cuda_rank_wire.zig");
 const Collective = @import("cuda_collective.zig").Collective;
 const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
+const telemetry = @import("cuda_prompt_telemetry.zig");
 
 pub const Identity = extern struct {
     config: [32]u8,
@@ -187,7 +188,7 @@ pub const Session = struct {
     pub fn forward(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, ids: []const u32, hooks: prompt.batch.Hooks) !void {
         if (ids.len == 0 or ids.len > wire.max_payload / 4 or q.fed + ids.len > q.cap or hooks.keep != null or hooks.logits == .all) return error.UnsupportedRankOperation;
         try tokenIds(ids);
-        const h = try s.command(.{ .kind = .forward, .object = q.rank_id, .bytes = @intCast(ids.len * 4), .flags = @backingInt(hooks.logits) }, std.mem.sliceAsBytes(ids));
+        const h = try s.command(.{ .kind = .forward, .object = q.rank_id, .arg = telemetry.forwardArg(s.engine.telemetry, q.fed), .bytes = @intCast(ids.len * 4), .flags = @backingInt(hooks.logits) }, std.mem.sliceAsBytes(ids));
         errdefer s.poison();
         try s.engine.forward(Tri, tri, q, ids, hooks);
         try s.ack(h);
@@ -235,26 +236,31 @@ pub const Session = struct {
         const item = try s.windows.getOrPut(s.gpa, q.rank_id);
         if (!item.found_existing) {
             errdefer _ = s.windows.remove(q.rank_id);
-            item.value_ptr.* = try mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, q.cap, 1, s.engine.chunk);
+            // rank 1 never runs the head: its window keeps the rollback buffers and a one-entry head cache, not q.cap's
+            item.value_ptr.* = try mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, 1, 1, s.engine.chunk);
         }
         return item.value_ptr;
     }
 
-    pub fn save(s: *Session, q: *prompt.Seq) !*snaps.Snap {
-        const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, null);
+    /// `d`: rank 0's head cache (a drafting stream); rank 1 keeps the sequence alone (it never runs the head).
+    pub fn save(s: *Session, q: *prompt.Seq, d: ?*mtp.Draft) !*snaps.Snap {
+        const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, d);
         errdefer snaps.drop(s.gpa, s.engine.stream.*, kept);
         kept.rank_id = s.next_object;
         s.next_object = std.math.add(u64, s.next_object, 1) catch return error.BadRankFrame;
         const h = try s.command(.{ .kind = .save, .object = q.rank_id, .arg = kept.rank_id }, &.{});
+        errdefer s.poison();
         try s.ack(h);
         return kept;
     }
 
-    pub fn restore(s: *Session, q: *prompt.Seq, kept: *const snaps.Snap) !void {
+    pub fn restore(s: *Session, q: *prompt.Seq, d: ?*mtp.Draft, kept: *const snaps.Snap) !void {
         if (kept.at > q.cap) return error.SequenceTooShort;
+        // refused before rank 1 hears of it (snaps.restore's own check, made first)
+        if (d) |hd| if (!kept.head or kept.at > hd.cap) return error.NoHeadState;
         const h = try s.command(.{ .kind = .restore, .object = q.rank_id, .arg = kept.rank_id }, &.{});
         errdefer s.poison();
-        try snaps.restore(s.engine.stream.*, q, null, kept);
+        try snaps.restore(s.engine.stream.*, q, d, kept);
         try s.ack(h);
     }
 
@@ -315,6 +321,8 @@ pub const Session = struct {
                 defer s.gpa.free(ids);
                 for (ids, 0..) |*v, i| v.* = std.mem.readInt(u32, payload[i * 4 ..][0..4], .little);
                 try tokenIds(ids);
+                const telemetry_scope = s.engine.telemetry.enter(try telemetry.phaseFromArg(h.arg));
+                defer telemetry_scope.restore();
                 try s.engine.forward(Tri, tri, q, ids, .{ .logits = @fromBackingInt(@intCast(h.flags)) });
             },
             .round => {
@@ -360,6 +368,7 @@ pub const Session = struct {
             .save => {
                 if (s.saved.contains(h.arg)) return error.BadRankFrame;
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                if (s.windows.getPtr(h.object)) |d| if (d.open) return error.NotAtMark;
                 const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, null);
                 errdefer snaps.drop(s.gpa, s.engine.stream.*, kept);
                 try s.saved.put(s.gpa, h.arg, kept);
@@ -367,7 +376,13 @@ pub const Session = struct {
             .restore => {
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
                 const kept = s.saved.get(h.arg) orelse return error.UnknownRankSnapshot;
+                s.engine.round_graph.clear();
                 try snaps.restore(s.engine.stream.*, q, null, kept);
+                // a drafting sequence's verify window starts over at the restored mark, as rank 0's head cache does
+                if (s.windows.getPtr(h.object)) |d| {
+                    d.reset();
+                    d.len = kept.at;
+                }
             },
             .drop_snap => {
                 const entry = s.saved.fetchRemove(h.object) orelse return error.UnknownRankSnapshot;
@@ -406,7 +421,10 @@ pub fn shape(h: wire.Header) !void {
     switch (h.kind) {
         .create => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .media => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 64) return error.BadRankFrame,
-        .forward => if (h.object == 0 or h.arg != 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame,
+        .forward => {
+            _ = try telemetry.phaseFromArg(h.arg);
+            if (h.object == 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame;
+        },
         .verify => if (h.object == 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 4 != 0 or h.bytes / 4 > mtp.max_rows) return error.BadRankFrame,
         .keep => if (h.object == 0 or h.arg == 0 or h.arg > mtp.max_rows or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .round => if (h.object != 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 32) return error.BadRankFrame,

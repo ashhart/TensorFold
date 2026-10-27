@@ -17,12 +17,16 @@ test "exl3: kv the default policy is upstream's seqBytes, split" {
     }
 }
 
-test "exl3: kv int8 is 34 bytes a 32-group, int4 18; host placement moves K/V and the indexer keys off the device" {
+test "exl3: kv int8 is 34 bytes a 32-group, int4 18; a head split halves K/V, not the indexer" {
     try std.testing.expectEqual(@as(usize, 2048), kvRowBytes(.bf16, 2));
     try std.testing.expectEqual(@as(usize, 1088), kvRowBytes(.int8, 2));
     try std.testing.expectEqual(@as(usize, 576), kvRowBytes(.int4, 2));
+    try std.testing.expectEqual(@as(usize, 544), kvRowBytes(.int8, 1));
     const cap = 200_000;
     const a = seqBytes(cap, .{ .kv = .int8 });
+    const b = seqBytes(cap, .{ .kv = .int8, .heads = 1 });
+    try std.testing.expectEqual(a.kv, 2 * b.kv);
+    try std.testing.expectEqual(a.ikc, b.ikc);
     const h = seqBytes(cap, .{ .kv = .int8, .kv_host = true, .ikc_host = true });
     try std.testing.expectEqual(a.kv + a.ikc, h.host);
     try std.testing.expectEqual(a.device() - a.kv - a.ikc, h.device());

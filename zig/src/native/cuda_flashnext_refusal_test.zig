@@ -20,7 +20,7 @@ pub fn cache(comptime open: anytype) !void {
                         .drafts = drafts,
                         .prompt_cache_gib = gib,
                     };
-                    if (tp == 2 and drafts and (gib orelse 1) > 0) {
+                    if (!F.tp_draft_snapshots and tp == 2 and drafts and (gib orelse 1) > 0) {
                         var problem: []const u8 = "";
                         try std.testing.expect((try open(F, a, a, std.testing.io, o, &problem)) == null);
                         try std.testing.expectEqualStrings(message, problem);

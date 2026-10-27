@@ -58,7 +58,7 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 - `--parallel N` admits N streams. Each stream's caches are its own: about 110 MiB of DeltaNet state and the n-gram
   tail, plus 28 KiB a token of keys, values and indexer keys, and with drafts its MTP head's cache.
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
-- `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default 0.60) set the head's chain.
+- `TF_FLASHNEXT_DRAFT_DEPTH` (1 to 15, default 6) and `TF_FLASHNEXT_DRAFT_CONFIDENCE` (default 0.60) set the head's chain.
 - The engine uploads 73.3 GiB of the checkpoint: the n-gram tables stay mapped from the shards, and the vision tower is
   not loaded without `--vision`.
 - `--vision` (experimental) runs images through the Qwen-VL tower that Qwen's CUDA family runs too
@@ -115,7 +115,7 @@ hyper-connection dots run on mma tiles with K in ascending order.
 - `zig build flashnext-prompt -Dflashnext_model=DIR -Dflashnext_kernels=native -Dflashnext_ids=FILE
   -Dflashnext_count=32`: 32 greedy tokens through the batched pass, against the Python engine's teacher path
   (`zig/tests/cuda/flashnext/lr7/results.json`, `results-sparse.json`); a captured set's folder in place of `native`
-  runs its glue. `TF_FLASHNEXT_DRAFTS=6` decodes each prompt serially and drafted and compares them token for token
+  runs its glue. `TF_FLASHNEXT_DRAFT_DEPTH=6` decodes each prompt serially and drafted and compares them token for token
   (`TF_FLASHNEXT_SEED` for keyed sampled draws).
 - `zig build flashnext-compare -Dflashnext_model=DIR -Dflashnext_kernels=SET -Dflashnext_ids=FILE`: our glue against a
   captured set on one loaded engine: every prompt row's scores (top-1 agreement, KL, each path's perplexity on the

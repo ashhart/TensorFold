@@ -378,7 +378,7 @@ test "the device KV layout is exl3_kv.Table's for one layer" {
     const kv = @import("../kv/exl3_kv.zig");
     const gpa = std.testing.allocator;
     const tokens: usize = 8;
-    var t = try kv.Table.init(gpa, tokens, .bf16);
+    var t = try kv.Table.init(gpa, tokens, .bf16, 0, 1);
     defer t.deinit(gpa);
     try std.testing.expectEqual(@as(usize, kv_heads), t.heads);
     const slot_bytes = 2 * head_dim * 2;

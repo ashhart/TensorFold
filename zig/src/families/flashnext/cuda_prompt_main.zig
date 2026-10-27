@@ -15,8 +15,8 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
     const count = try std.fmt.parseInt(usize, args[4], 10);
-    // TF_FLASHNEXT_DRAFTS: the MTP check (cuda_mtp.zig) over every comma-separated ids file, one load
-    if (std.c.getenv("TF_FLASHNEXT_DRAFTS") != null) return drafted(gpa, io, args[1], args[2], args[3], count);
+    // TF_FLASHNEXT_DRAFT_DEPTH: the MTP check (cuda_mtp.zig) over every comma-separated ids file, one load
+    if (std.c.getenv("TF_FLASHNEXT_DRAFT_DEPTH") != null) return drafted(gpa, io, args[1], args[2], args[3], count);
     const text = try std.Io.Dir.cwd().readFileAlloc(io, args[3], gpa, .limited(1 << 24));
     defer gpa.free(text);
     var ids: std.ArrayList(u32) = .empty;
