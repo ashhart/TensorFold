@@ -2,44 +2,17 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 typedef __nv_bfloat16 bf16;
 
 __device__ __forceinline__ float f32(bf16 v) { return __bfloat162float(v); }
 __device__ __forceinline__ bf16 b16(float v) { return __float2bfloat16(v); }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
-
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
-
-// The sum over a block of `groups` warps, the same in every thread.
-__device__ __forceinline__ float block_sum(float v, float* scratch, int groups) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_sum(v);
-    if (lane == 0) scratch[w] = v;
-    __syncthreads();
-    v = warp_sum(lane < groups ? scratch[lane] : 0.0f);
-    __syncthreads();
-    return v;
-}
-
-__device__ __forceinline__ float block_max(float v, float* scratch, int groups) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_max(v);
-    if (lane == 0) scratch[w] = v;
-    __syncthreads();
-    v = warp_max(lane < groups ? scratch[lane] : -INFINITY);
-    __syncthreads();
-    return v;
-}
+using tf_common::warp_sum;
+using tf_common::warp_max;
+using tf_common::block_sum_tree;
+using tf_common::block_max_tree;
 
 __device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
 
@@ -74,7 +47,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_attn_prep(const bf16* pq, c
     const bool q = hd < heads;
     const float x = q ? f32(pq[(size_t)r * 2 * qw + hd * 2 * dim + d]) : f32(pk[(size_t)r * kw + (hd - heads) * dim + d]);
     const float* w = q ? qscale : kscale;
-    const float rinv = 1.0f / sqrtf(block_sum(x * x, scratch, dim / 32) / (float)dim + eps);
+    const float rinv = 1.0f / sqrtf(block_sum_tree(x * x, scratch, dim / 32) / (float)dim + eps);
     xn[d] = f32(b16(x * rinv * w[d]));
     __syncthreads();
     float out = xn[d];
@@ -117,20 +90,20 @@ extern "C" __global__ void __launch_bounds__(256) tf_attn_q(const bf16* qkv, con
     __syncthreads();
     float top = -INFINITY;
     for (int j = t; j <= at; j += 256) top = fmaxf(top, sc[j]);
-    top = block_max(top, scratch, 8);
+    top = block_max_tree(top, scratch, 8);
     float total = 0;
     for (int j = t; j <= at; j += 256) {
         const float e = expf(sc[j] - top);
         sc[j] = e;
         total += e;
     }
-    total = block_sum(total, scratch, 8);
+    total = block_sum_tree(total, scratch, 8);
     float mix = 0;
     for (int j = t; j <= at; j += 256) {
         sc[j] /= total;
         mix += sc[j] * dp[j];
     }
-    mix = block_sum(mix, scratch, 8);
+    mix = block_sum_tree(mix, scratch, 8);
     const size_t row = ((size_t)h * a.rows + i) * keys;
     for (int j = t; j < keys; j += 256) {
         const bool live = j <= at;
@@ -181,7 +154,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_attn_prep_back(const bf16* 
         gn = d < half ? go[d] * c + go[d + half] * s : go[d] * c - go[d - half] * s;
     }
     const float w = (q ? qscale : kscale)[d];
-    const float sq = block_sum(x * x, scratch, dim / 32), dot = block_sum(w * gn * x, scratch, dim / 32);
+    const float sq = block_sum_tree(x * x, scratch, dim / 32), dot = block_sum_tree(w * gn * x, scratch, dim / 32);
     const float rinv = 1.0f / sqrtf(sq / (float)dim + eps);
     const float g = rinv * w * gn - rinv * rinv * rinv * x * dot / (float)dim;
     if (q)

@@ -4,28 +4,15 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 typedef __nv_bfloat16 bf16;
 
 __device__ __forceinline__ float f32(bf16 v) { return __bfloat162float(v); }
 __device__ __forceinline__ bf16 b16(float v) { return __float2bfloat16(v); }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
-
-// The sum over a block of `groups` warps, the same in every thread.
-__device__ __forceinline__ float block_sum(float v, float* scratch, int groups) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_sum(v);
-    if (lane == 0) scratch[w] = v;
-    __syncthreads();
-    v = warp_sum(lane < groups ? scratch[lane] : 0.0f);
-    __syncthreads();
-    return v;
-}
+using tf_common::warp_sum;
+using tf_common::block_sum_tree;
 
 __device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
 __device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
@@ -255,8 +242,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_fn_pocket_grad(const bf16* 
         a += gate[(size_t)j * d + i] * v;
         b += up[(size_t)j * d + i] * v;
     }
-    a = block_sum(a, scratch, 8);
-    b = block_sum(b, scratch, 8);
+    a = block_sum_tree(a, scratch, 8);
+    b = block_sum_tree(b, scratch, 8);
     const float k = w * wts[(size_t)r * slots + at] * silu(a) * b;
     for (int i = t; i < d; i += 256) grad[(size_t)j * d + i] += k * push[(size_t)r * d + i];
 }
@@ -282,7 +269,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_fn_hc_branch_back(const flo
         dbranch[(size_t)r * d + i] = v;
     }
     for (int s = 0; s < streams; s++) {
-        const float v = block_sum(part[s], scratch, 8);
+        const float v = block_sum_tree(part[s], scratch, 8);
         if (t == 0) dinject[r * streams + s] = v;
     }
 }
@@ -332,8 +319,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_fn_hc_norm_back(const bf16*
         sq += v * v;
         dot += w[i] * dnormed[base + i] * v;
     }
-    sq = block_sum(sq, scratch, 8);
-    dot = block_sum(dot, scratch, 8);
+    sq = block_sum_tree(sq, scratch, 8);
+    dot = block_sum_tree(dot, scratch, 8);
     const float inv = rsqrtf(sq / (float)d + eps), k = inv * inv * inv * dot / (float)d;
     for (int i = t; i < d; i += 256) g[base + i] += inv * w[i] * dnormed[base + i] - k * f32(h[base + i]);
 }

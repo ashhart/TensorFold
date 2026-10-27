@@ -3,7 +3,7 @@
 #pragma once
 #include <cuda_fp8.h>
 
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 #include "qwen35.cuh"
 #include "qwen35_page_run.h"
 

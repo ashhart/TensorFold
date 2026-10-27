@@ -6,7 +6,7 @@
 
 #include "mma4.cuh"
 #include "nvfp4q.cuh"
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace tf_ck4 {
 

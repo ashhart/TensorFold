@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace tf_lane_gemv {
 

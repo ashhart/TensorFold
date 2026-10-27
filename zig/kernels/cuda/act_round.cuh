@@ -4,6 +4,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_act_round {
 
@@ -51,36 +52,9 @@ __device__ __forceinline__ float softcap(float x, float cap, int keep) {
     return __fmul_rn(point(tanhf(t), keep, CAP_TANH), cap);
 }
 
-__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
-    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float2 t = __bfloat1622float2(h[i]);
-        f[2 * i] = t.x;
-        f[2 * i + 1] = t.y;
-    }
-}
-
-__device__ __forceinline__ uint4 pack8(const float* f) {
-    uint4 u;
-    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
-    return u;
-}
-
-// act_rows.cu's group_sum8: a thread's 8 stored values in order, then the group's 8 lanes in a fixed tree.
-__device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
-    float f[8];
-    unpack8(packed, f);
-    float s = 0.f;
-    if (live)
-#pragma unroll
-        for (int i = 0; i < 8; ++i) s = __fadd_rn(s, f[i]);
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 4));
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 2));
-    return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
-}
+using tf_common::unpack8;
+using tf_common::pack8;
+using tf_common::group_sum8;
 
 // out[r, i] = bf16(act(gate[r * g_ld + i], up[r * u_ld + i])) for i < n (n % 64 == 0), GEGLU or not; xs its sums.
 template <bool GEGLU>

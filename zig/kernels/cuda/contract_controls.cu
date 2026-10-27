@@ -265,7 +265,7 @@ extern "C" __global__ void tf_ctl_q35_dense_half(const __nv_bfloat16 *X, const _
 // The pre-template GLM BF16 operators, kept apart from the candidate math for byte equality.
 #include "contract_glm_bf16_baseline.cuh"
 // Gate 4: flashnext_hc's fn_hc_dense_mix8 with each 32-column group summed in bf16, while its spec declares fp32 sums.
-#include "glue_math.cuh"
+#include "common/glue_math.cuh"
 
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_hc_mix8_bf16(const __nv_bfloat16* UP, const __nv_bfloat16* NORMED,
                                                                       __nv_bfloat16* MIXED, float* XSM, int D, int SS) {

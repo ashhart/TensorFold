@@ -2,6 +2,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_q36m {
 
@@ -11,11 +12,7 @@ constexpr int ROT = 64;  // rotary dims: pairs (i, i + 32), the target's partial
 __device__ __forceinline__ float bf(__nv_bfloat16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ float rbf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
-    return x;
-}
+using tf_common::warp_sum;
 
 }  // namespace tf_q36m
 

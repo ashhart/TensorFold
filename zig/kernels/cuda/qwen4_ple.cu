@@ -1,5 +1,5 @@
 #include <cuda_bf16.h>
-#include "glue_math.cuh"
+#include "common/glue_math.cuh"
 using namespace tf_glue;
 __device__ __forceinline__ float bsig(float x) { const float e = tf_exp(-fabsf(x)); return rbf(__fdiv_rn(x < 0 ? e : 1.0f, __fadd_rn(1.0f, e))); }
 __device__ __forceinline__ float bsilu(float x) { const float e = tf_exp(-fabsf(x)); return rbf(__fdiv_rn(x < 0 ? __fmul_rn(x, e) : x, __fadd_rn(1.0f, e))); }

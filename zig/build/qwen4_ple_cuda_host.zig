@@ -15,11 +15,12 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
     var text = try ctl.cuda(a, production);
     text = try edit.once(a, text, reduce, "");
     for ([_][]const u8{ "kss", "qss", "dot", "gss" }) |v| text = try std.mem.replaceOwned(u8, a, text, try std.fmt.allocPrint(a, "block_sum({s}, scratch)", .{v}), try std.fmt.allocPrint(a, "(co_await cpu_block_sum({s}))", .{v}));
-    var math = @embedFile("../kernels/cuda/glue_math.cuh").*;
+    var math = @embedFile("../kernels/cuda/common/glue_math.cuh").*;
     var helpers: []const u8 = &math;
-    helpers = try edit.once(a, helpers, try edit.function(helpers, "float warp_sum("), "");
+    helpers = try edit.once(a, helpers, "#include \"common/reduce.cuh\"", "");
+    helpers = try edit.once(a, helpers, "using tf_common::warp_sum;", "");
     const replacements = [_][2][]const u8{
-        .{ "#pragma once", "" },                       .{ "#include <cuda_bf16.h>", "" },                                                                .{ "#include <cuda_fp16.h>", "" },                                                                .{ "#include \"glue_math.cuh\"", "" },
+        .{ "#pragma once", "" },                       .{ "#include <cuda_bf16.h>", "" },                                                                .{ "#include <cuda_fp16.h>", "" },                                                                .{ "#include \"common/glue_math.cuh\"", "" },
         .{ "__device__ __forceinline__ ", "inline " }, .{ "extern \"C\" __global__ void __launch_bounds__(512) qwen4_ple_gate", "Task qwen4_ple_gate" }, .{ "extern \"C\" __global__ void __launch_bounds__(512) qwen4_ple_conv", "void qwen4_ple_conv" }, .{ "__shared__ float", "static float" },
         .{ "blockIdx.", "cpu_block." },                .{ "threadIdx.x", "cpu_lane" },                                                                   .{ "blockDim.x", "512" },
     };

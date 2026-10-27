@@ -4,6 +4,7 @@
 #include <cuda_fp8.h>
 #include <stdint.h>
 #include <math.h>
+#include "common/reduce.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -15,17 +16,8 @@ __device__ __forceinline__ float b2f(bf16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ bf16 f2b(float x) { return __float2bfloat16(x); }
 __device__ __forceinline__ float rb(float x) { return __bfloat162float(__float2bfloat16(x)); }  // round to bf16
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(FULL, v, o);
-  return v;
-}
-
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-  for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(FULL, v, o));
-  return v;
-}
+using tf_common::warp_sum;
+using tf_common::warp_max;
 
 // Sum over the block (blockDim.x a multiple of 32, at most 1024); every thread gets the total.
 __device__ float block_sum(float v) {

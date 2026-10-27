@@ -2,15 +2,12 @@
 #include <stdint.h>
 #include <math.h>
 #include <cuda_bf16.h>
+#include "common/reduce.cuh"
 
 namespace {
 constexpr unsigned FULL = 0xFFFFFFFFu;
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(FULL, v, o);
-  return v;
-}
+using tf_common::warp_sum;
 
 __device__ float block_sum(float v) {
   __shared__ float part[32];

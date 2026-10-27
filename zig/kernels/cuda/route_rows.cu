@@ -6,8 +6,8 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "glue_math.cuh"
-#include "qmm_frag.cuh"
+#include "common/glue_math.cuh"
+#include "common/qmm_frag.cuh"
 
 using namespace tf_glue;
 

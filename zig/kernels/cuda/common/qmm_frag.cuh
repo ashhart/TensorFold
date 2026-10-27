@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/kernels/qmm_frag.cuh (lines 1-118, comments dropped), checked by zig/tests/cuda/copies.py.
+// Shared device primitives: cp.async, ldmatrix (x2, x4, x4 .trans), bf16 mma, int4 and e2m1 pair decoding, swizzle.
 #pragma once
 
 #include <cuda_bf16.h>
@@ -43,6 +43,14 @@ __device__ __forceinline__ void cp4(void* dst, const void* src) {
     asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(smem(dst)), "l"(src));
 }
 
+__device__ __forceinline__ uint4 ld_nc(const uint4* p) {
+    uint4 r;
+    asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
+                 : "l"(p));
+    return r;
+}
+
 __device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;\n" ::); }
 
 template <int N>
@@ -56,6 +64,11 @@ __device__ __forceinline__ void ldmatrix4(uint32_t (&r)[4], const void* p) {
 
 __device__ __forceinline__ void ldmatrix2(uint32_t (&r)[2], const void* p) {
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(smem(p)));
+}
+
+__device__ __forceinline__ void ldmatrix4t(uint32_t (&r)[4], const void* p) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(smem(p)));
 }
 
 __device__ __forceinline__ void mma(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
@@ -82,6 +95,14 @@ __device__ __forceinline__ uint32_t pair(uint32_t w, int s) {
 #else
     asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
 #endif
+    return r;
+}
+
+__device__ __forceinline__ uint32_t fp4pair(uint32_t w, int s) {
+    const uint32_t v = w >> s;
+    const uint32_t t = ((v & 0x00070007u) << 6) | ((v & 0x00080008u) << 12);
+    uint32_t r;
+    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x7E807E80u), "r"(0x80008000u));
     return r;
 }
 

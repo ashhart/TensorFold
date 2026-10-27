@@ -6,7 +6,7 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 #include "window_fallback.h"
 
 namespace tf_wrows {
@@ -39,6 +39,7 @@ struct Pg {
 using qmm_frag::commit;
 using qmm_frag::cp16z;
 using qmm_frag::ldmatrix4;
+using qmm_frag::ldmatrix4t;
 using qmm_frag::mma;
 using qmm_frag::mma0;
 
@@ -299,12 +300,6 @@ __device__ __forceinline__ void merge(const float* __restrict__ po, const float*
 }
 
 namespace prompt {
-
-__device__ __forceinline__ void ldmatrix4t(uint32_t (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"(qmm_frag::smem(p)));
-}
 
 template <int N>
 __device__ __forceinline__ void wait_group() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
