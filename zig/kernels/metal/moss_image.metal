@@ -123,7 +123,7 @@ struct MiSitu {
   y[i] = bfloat(c[i] + float(b[at.x]));
 }
 
-// tfp::attention_nax (MLX's steel attention on the tensor units), full: every row sees every row.
+// tfp::attention_nax, full (every row sees every row): forms for L % 32 > 0, L % 32 = 0, and L % 64 = 0.
 #define MI_ATTENTION(NAME, AQ, AK)                                                                                 \
   [[max_total_threads_per_threadgroup(128)]] [[kernel]] void NAME(                                               \
       const device bfloat16_t* Q [[buffer(0)]], const device bfloat16_t* K [[buffer(1)]],                       \
@@ -135,5 +135,4 @@ struct MiSitu {
   }
 MI_ATTENTION(mi_attention_00, false, false)
 MI_ATTENTION(mi_attention_01, false, true)
-MI_ATTENTION(mi_attention_10, true, false)
 MI_ATTENTION(mi_attention_11, true, true)

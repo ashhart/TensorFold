@@ -367,6 +367,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer native_ple.destroy();
     const native_gdn = try @import("metal_qwen4_gdn.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer native_gdn.destroy();
+    const moss_image = try @import("metal_moss_image.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer moss_image.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

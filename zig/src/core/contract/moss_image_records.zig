@@ -11,7 +11,6 @@ pub const records = [_]M{
     .{ .name = "moss image mi_bias", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "moss image mi_attention_00", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "moss image mi_attention_01", .threads = 128, .tg_memory = 0, .reserved = 128 },
-    .{ .name = "moss image mi_attention_10", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "moss image mi_attention_11", .threads = 128, .tg_memory = 0, .reserved = 128 },
 };
 

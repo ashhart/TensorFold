@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
-const Ref = @import("../../core/qwen_vl/weights.zig").Ref;
+pub const Ref = @import("../../core/qwen_vl/weights.zig").Ref;
 
 /// Each pipeline by its function: the tower's four bf16 projections, the two fp32-sum ones, then this family's.
 pub const names = [_][]const u8{
@@ -20,7 +20,6 @@ pub const names = [_][]const u8{
     "mi_bias",
     "mi_attention_00",
     "mi_attention_01",
-    "mi_attention_10",
     "mi_attention_11",
 };
 const tower_count = 6;
@@ -93,26 +92,12 @@ pub const Kernels = struct {
         e.setBuffer(sum.buf, sum.off, 3);
         const tiles = (tn << swz) * ((tm + (@as(usize, 1) << swz) - 1) >> swz);
         e.dispatchThreads(mtl.Size.of(tiles * 32, 2, 2), mtl.Size.of(32, 2, 2));
-        bind(e, k.get("mi_bias"), &.{ sum, b, y }, @as(u32, @intCast(N)));
-        e.dispatchThreads(mtl.Size.of(N, M, 1), mtl.Size.of(256, 1, 1));
+        bias(e, k.get("mi_bias"), sum, b, y, M, N);
     }
 
-    /// o = softmax(q k^T / sqrt(128)) v, every row to every row: q, k, v [heads, L, 128], o rows [L, heads * 128].
-    pub fn attention(k: *const Kernels, e: mtl.ComputeEncoder, q: Ref, kb: Ref, vb: Ref, o: Ref, L: usize, heads: usize) void {
-        const nq = (L + 63) / 64;
-        const nk = (L + 31) / 32;
-        e.setPipeline(k.p[attention_first + @as(usize, @intFromBool(L % 64 == 0)) * 2 + @intFromBool(L % 32 == 0)]);
-        for ([_]Ref{ q, kb, vb }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-        const d = 128;
-        const vals = [_]usize{ 1, heads, L, L, 1, nq, nk, L / 64, L / 32, L % 64, L % 32, 0, 0, L * d, d, 0, L * d, d, 0, L * d, d, 0, d, heads * d };
-        var p: [32]i32 = @splat(0);
-        for (vals, 0..) |v, i| p[i] = @intCast(v);
-        e.setBytes(std.mem.asBytes(&p), 3);
-        var f: [16]f32 = @splat(0);
-        f[0] = 1.0 / @sqrt(@as(f32, d));
-        e.setBytes(std.mem.asBytes(&f), 4);
-        e.setBuffer(o.buf, o.off, 5);
-        e.dispatchThreads(mtl.Size.of(nq * 32, heads * 4, 1), mtl.Size.of(32, 4, 1));
+    /// o = softmax(q k^T / sqrt(128)) v, every row to every row: q, k, v [count, L, 128], o rows [L, count * 128].
+    pub fn attention(k: *const Kernels, e: mtl.ComputeEncoder, q: Ref, kb: Ref, vb: Ref, o: Ref, L: usize, count: usize) void {
+        attend(e, k.p[attention_first + attentionForm(L)], q, kb, vb, o, L, count);
     }
 
     /// One kernel's buffers in order, then its parameters at the next index.
@@ -122,6 +107,61 @@ pub const Kernels = struct {
         e.setValue(params, refs.len);
     }
 };
+
+/// The attention form for L rows: 0 for L % 32 > 0, 1 for 32-aligned, 2 for 64-aligned (its query blocks whole too).
+pub fn attentionForm(L: usize) usize {
+    return if (L % 64 == 0) 2 else @intFromBool(L % 32 == 0);
+}
+
+/// mi_attention_* `p` (the form for L) over `count` heads of L rows.
+pub fn attend(e: mtl.ComputeEncoder, p: mtl.Pipeline, q: Ref, kb: Ref, vb: Ref, o: Ref, L: usize, count: usize) void {
+    const nq = (L + 63) / 64;
+    const nk = (L + 31) / 32;
+    e.setPipeline(p);
+    for ([_]Ref{ q, kb, vb }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    const d = 128;
+    const vals = [_]usize{ 1, count, L, L, 1, nq, nk, L / 64, L / 32, L % 64, L % 32, 0, 0, L * d, d, 0, L * d, d, 0, L * d, d, 0, d, count * d };
+    var params: [32]i32 = @splat(0);
+    for (vals, 0..) |v, i| params[i] = @intCast(v);
+    e.setBytes(std.mem.asBytes(&params), 3);
+    var f: [16]f32 = @splat(0);
+    f[0] = 1.0 / @sqrt(@as(f32, d));
+    e.setBytes(std.mem.asBytes(&f), 4);
+    e.setBuffer(o.buf, o.off, 5);
+    e.dispatchThreads(mtl.Size.of(nq * 32, count * 4, 1), mtl.Size.of(32, 4, 1));
+}
+
+/// y = mi_norm of x's `rows` rows of `width` with weight w, then by s and b when `modulated`; a threadgroup a row.
+pub fn norm(e: mtl.ComputeEncoder, p: mtl.Pipeline, x: Ref, w: Ref, s: Ref, b: Ref, y: Ref, rows: usize, width: usize, eps: f32, modulated: bool) void {
+    const params = extern struct { width: u32, eps: f32, modulated: u32 }{ .width = @intCast(width), .eps = eps, .modulated = @intFromBool(modulated) };
+    Kernels.bind(e, p, &.{ x, w, s, b, y }, params);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// q, k, v rows `stride` apart to normed, rotated heads [count, rows, 128] in q, k and v (copied).
+pub fn heads(e: mtl.ComputeEncoder, p: mtl.Pipeline, qr: Ref, kr: Ref, vr: Ref, nq: Ref, nk: Ref, cos: Ref, sin: Ref, q: Ref, k: Ref, v: Ref, rows: usize, count: usize, stride: usize, eps: f32) void {
+    const params = extern struct { rows: u32, heads: u32, stride: u32, eps: f32 }{ .rows = @intCast(rows), .heads = @intCast(count), .stride = @intCast(stride), .eps = eps };
+    Kernels.bind(e, p, &.{ qr, kr, vr, nq, nk, cos, sin, q, k, v }, params);
+    e.dispatchGroups(mtl.Size.of(rows, (count + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// o [rows, width] = situ(h, g) of rows `stride` apart.
+pub fn situ(e: mtl.ComputeEncoder, p: mtl.Pipeline, h: Ref, g: Ref, o: Ref, rows: usize, width: usize, stride: usize) void {
+    Kernels.bind(e, p, &.{ h, g, o }, [2]u32{ @intCast(width), @intCast(stride) });
+    e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// x [rows, width] += y gated by the vector g, in place.
+pub fn gateAdd(e: mtl.ComputeEncoder, p: mtl.Pipeline, x: Ref, y: Ref, g: Ref, rows: usize, width: usize) void {
+    Kernels.bind(e, p, &.{ x, y, g }, @as(u32, @intCast(width)));
+    e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// y [rows, width] = bf16(c + b): fp32 sums and a bias vector, rounded once.
+pub fn bias(e: mtl.ComputeEncoder, p: mtl.Pipeline, c: Ref, b: Ref, y: Ref, rows: usize, width: usize) void {
+    Kernels.bind(e, p, &.{ c, b, y }, @as(u32, @intCast(width)));
+    e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
+}
 
 test "every MOSS-Image pipeline compiles and loads on this GPU" {
     const pool = mtl.objc.Pool.push();

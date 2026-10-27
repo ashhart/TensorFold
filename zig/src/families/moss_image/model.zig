@@ -112,6 +112,8 @@ pub const Model = struct {
         const image = try Scratch.mul(g.rows, g.columns);
         const plan = try Scratch.of(max_text, image);
         const scratch_bytes = try plan.bytes();
+        // qualified on the M5's tensor units alone: the projections and attention take another path before them
+        if (!device.tensorUnits()) return error.TensorUnitsRequired;
         const t = try gpa.create(Model);
         errdefer gpa.destroy(t);
         t.* = .{ .gpa = gpa, .device = device, .queue = undefined, .k = undefined, .w = undefined, .max_text = max_text, .image = image, .rows = g.rows, .columns = g.columns, .scratch = undefined, .x = undefined, .xn = undefined, .qr = undefined, .kr = undefined, .vr = undefined, .att = undefined, .y = undefined, .ug = undefined, .s = undefined, .q = undefined, .k_ = undefined, .v = undefined, .sums = undefined, .lat = undefined, .vel = undefined, .ctx = undefined, .mods = undefined };
@@ -225,28 +227,22 @@ pub const Model = struct {
     fn norm(t: *const Model, e: mtl.ComputeEncoder, rows: usize, w: Ref, m: ?Modulated) void {
         const s = if (m) |v| t.vec(v.scale) else t.vec(.ones);
         const b = if (m) |v| t.vec(v.shift) else t.vec(.ones);
-        const p = extern struct { width: u32, eps: f32, modulated: u32 }{ .width = H, .eps = cfg.eps, .modulated = @intFromBool(m != null) };
-        ks.Kernels.bind(e, t.k.get("mi_norm"), &.{ t.x, w, s, b, t.xn }, p);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        ks.norm(e, t.k.get("mi_norm"), t.x, w, s, b, t.xn, rows, H, cfg.eps, m != null);
     }
 
     /// x += y gated by shared vector `gate` (ones: plain).
     fn gateAdd(t: *const Model, e: mtl.ComputeEncoder, rows: usize, gate: host.Vector) void {
-        ks.Kernels.bind(e, t.k.get("mi_gate_add"), &.{ t.x, t.y, t.vec(gate) }, @as(u32, H));
-        e.dispatchThreads(mtl.Size.of(H, rows, 1), mtl.Size.of(256, 1, 1));
+        ks.gateAdd(e, t.k.get("mi_gate_add"), t.x, t.y, t.vec(gate), rows, H);
     }
 
     /// q k v rows of `stride` to normed, rotated heads in q, k_, v.
     fn heads(t: *const Model, e: mtl.ComputeEncoder, qr: Ref, kr: Ref, vr: Ref, stride: usize, nq: Ref, nk: Ref, cos: Ref, sin: Ref, rows: usize) void {
-        const p = extern struct { rows: u32, heads: u32, stride: u32, eps: f32 }{ .rows = @intCast(rows), .heads = cfg.heads, .stride = @intCast(stride), .eps = cfg.eps };
-        ks.Kernels.bind(e, t.k.get("mi_qk"), &.{ qr, kr, vr, nq, nk, cos, sin, t.q, t.k_, t.v }, p);
-        e.dispatchGroups(mtl.Size.of(rows, cfg.heads / 8, 1), mtl.Size.of(256, 1, 1));
+        ks.heads(e, t.k.get("mi_qk"), qr, kr, vr, nq, nk, cos, sin, t.q, t.k_, t.v, rows, cfg.heads, stride, cfg.eps);
     }
 
     /// s = situ(hidden, gate) of rows `stride` apart.
     fn situ(t: *const Model, e: mtl.ComputeEncoder, hidden: Ref, gate: Ref, rows: usize, stride: usize) void {
-        ks.Kernels.bind(e, t.k.get("mi_situ"), &.{ hidden, gate, t.s }, [2]u32{ F, @intCast(stride) });
-        e.dispatchThreads(mtl.Size.of(F, rows, 1), mtl.Size.of(256, 1, 1));
+        ks.situ(e, t.k.get("mi_situ"), hidden, gate, t.s, rows, F, stride);
     }
 
     /// One joint block over the image and prompt rows (`rows` in all), under the shared modulation.

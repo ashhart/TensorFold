@@ -11,6 +11,7 @@ pub const text_layers = 2;
 pub const context = 4096;
 pub const time_dim = 256;
 pub const channels = 128;
+/// Every RMSNorm's, fixed in the publisher's _RMSNorm (pipeline_moss_image.py), not a config setting.
 pub const eps: f32 = 1e-6;
 /// Rotary: four axes (unused, frame, height, width) of 16 frequencies each, the rotation of halves.
 pub const bands = head_dim / 8;
