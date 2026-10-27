@@ -38,7 +38,7 @@ pub fn dropped(r: *Rows, e: *pc.Entry) void {
 
 pub fn pending(r: *const Rows) bool {
     if (r.sync_writes) return sync.pending(r);
-    return (if (r.worker) |w| w.pending() > 0 else false) or (!r.stopped and r.spill != .evicted and r.queue.items.len > 0);
+    return (if (r.worker) |w| w.pending() > 0 else false) or (!r.stopped and (r.spill != .evicted or r.flush_clock != null) and r.queue.items.len > 0);
 }
 
 pub fn ready(r: *const Rows) bool {
@@ -66,7 +66,7 @@ pub fn wanted(r: *const Rows, n: chain.Stem) bool {
 pub fn step(r: *Rows) bool {
     if (r.sync_writes) return sync.step(r);
     reap(r);
-    if (r.stopped or r.spill == .evicted) return false;
+    if (r.stopped or (r.spill == .evicted and r.flush_clock == null)) return false;
     const q = r.queue.pop() orelse return false;
     _ = stage(r, q);
     return true;
@@ -99,9 +99,30 @@ pub fn stop(r: *Rows, deadline: i128) void {
     }
 }
 
+/// A spill-enabled close also drains RAM, newest first; completed saves keep their cap space over older entries.
 pub fn drain(r: *Rows, deadline: i128) usize {
+    const previous = r.flush_clock;
+    defer r.flush_clock = previous;
+    if (r.spill != .off) {
+        if (r.sync_writes) {
+            while (r.job != null and nowNs() < deadline) _ = sync.step(r);
+        } else while (r.worker) |w| {
+            reap(r);
+            if (w.pending() == 0 or nowNs() >= deadline) break;
+            io.nap();
+        }
+        r.flush_clock = r.clock;
+    }
     if (r.sync_writes) return sync.drain(r, deadline);
     while (pending(r) and nowNs() < deadline) {
+        if (r.flush_clock != null) {
+            reap(r);
+            if (nowNs() >= deadline) break;
+            if (r.worker) |w| if (w.pending() > 0) {
+                io.nap();
+                continue;
+            };
+        }
         if (!step(r)) io.nap();
     }
     reap(r);

@@ -616,11 +616,15 @@ builds' sets go first, then the states worth least: the fewest tokens saved per 
 used. `--learn-min-free-gib` keeps free disk (4 GiB by default), and `--learn-daily-gib` caps what they write a day
 (32 GiB by default); past either, a state stays in RAM only, with a log line, and no reply changes.
 
-On a Mac, `--spill-gib N` writes a state to that store only when the prompt cache evicts it from RAM, up to N GiB
-under `~/.cache/tensorfold/spilled` for every model together, and reads it back as above: a later request whose prefix
+On a Mac, `--spill-gib N` writes a state to that store when the prompt cache evicts it from RAM or the engine closes,
+up to N GiB under `~/.cache/tensorfold/spilled` for every model together, and reads it back as above: a later request whose prefix
 matches resumes from it, token for token as a fresh prompt pass, after a restart too. An eviction stages a copy before
 releasing RAM, then the engine continues while the I/O thread writes it. A full staging permit skips that save;
 the request prefills if it returns before a saved state is available. This changes cache hits, never reply tokens.
+An idle unload and a planned stop also save the states still in RAM, newest first, within the same disk cap and
+20-second stop budget. The next engine open scans those files and restores them through the same path as evictions.
+Older queued saves cannot evict states saved earlier in that close. States that exceed a staging permit, disk cap,
+daily budget or free-disk floor are skipped; unfinished writes are cancelled at the deadline.
 Past N GiB other models' spilled sets go first, then the state this server used least recently. A damaged file is
 deleted and its tokens are prefilled, and a write cut off midway leaves nothing a later turn or a restart reads.
 `--checkpoint-slots N` sets how many states stay in RAM beside the store, so the next one sends the oldest to disk; on a
@@ -629,7 +633,8 @@ behind, a staged write survives eviction of its RAM entry, and the cap is the sm
 `--spill-gib`. `--learn-min-free-gib` and `--learn-daily-gib` apply to spilled states as well. The same four Mac
 families take both flags and the others refuse them at startup; without either flag nothing changes, and the routes
 below stay off. `TENSORFOLD_ROWS_SYNC=1` selects the previous synchronous writer for comparisons; its block and state
-files have the same bytes. `TF_IMPRINT_VERIFY=1` reads threaded writes back against their owned staging before publication.
+files have the same bytes. That comparison writer retains blocking I/O; the bounded disk wait uses the threaded writer.
+`TF_IMPRINT_VERIFY=1` reads threaded writes back against their owned staging before publication.
 
 Three routes let a client such as the Mac app ask about a conversation. Each takes the body of a chat completion
 (`messages`, `tools`, `chat_template_kwargs`), renders it as that request would be rendered, and answers on the engine's

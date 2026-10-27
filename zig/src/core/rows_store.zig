@@ -50,7 +50,7 @@ pub const Block = struct { bytes: u64, refs: u32 = 0 };
 
 pub const Counts = struct { written: u64 = 0, read: u64 = 0, reads: u64 = 0, writes: u64 = 0, skipped: u64 = 0, failed: u64 = 0, evicted: u64 = 0, verified: u64 = 0, differed: u64 = 0 };
 
-/// --spill-gib: off (every kept state written behind), evicted (only evicted states), finish (both: evictions finish).
+/// --spill-gib: off (every keep written behind), evicted (evictions and close), finish (both: evictions finish).
 pub const Spill = enum { off, evicted, finish };
 
 pub const Options = struct {
@@ -108,6 +108,7 @@ pub const Rows = struct {
     staging_bytes: u64 = 1 << 30,
     sync_writes: bool = false,
     stopped: bool = false,
+    flush_clock: ?u64 = null, // a close protects states touched after this clock from older queued saves
     next_job: u64 = 0,
     failures: write.Failures = .{},
 
@@ -319,6 +320,7 @@ pub const Rows = struct {
         var out: ?usize = null;
         if (r.spill == .evicted) { // --spill-gib alone: the least recently used first
             for (r.states.items, 0..) |s, i| {
+                if (r.flush_clock) |cut| if (s.used > cut) continue;
                 if (out == null or s.used < r.states.items[out.?].used) out = i;
             }
             return out;
@@ -327,6 +329,7 @@ pub const Rows = struct {
         var wants: std.ArrayList(write.Want) = .empty;
         defer wants.deinit(r.gpa);
         for (r.states.items, 0..) |*s, i| {
+            if (r.flush_clock) |cut| if (s.used > cut) continue;
             wants.clearRetainingCapacity();
             r.wantsOf(r.gpa, s, &wants) catch {};
             var only = s.own;
@@ -558,6 +561,7 @@ test {
     _ = @import("rows_test.zig");
     _ = @import("rows_spill_test.zig");
     _ = @import("rows_async_test.zig");
+    _ = @import("rows_close_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_pool_select_test.zig");

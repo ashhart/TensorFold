@@ -55,9 +55,9 @@ pub fn dropped(r: *Rows, e: *pc.Entry) void {
     if (r.job) |j| if (j.entry == e) abort(r, j);
 }
 
-/// Whether anything waits to be written (--spill-gib alone: only an eviction writes, so nothing waits).
+/// Whether writing waits; spill-only RAM entries wait for eviction or the close-time flush.
 pub fn pending(r: *const Rows) bool {
-    return r.job != null or (r.spill != .evicted and r.queue.items.len > 0);
+    return r.job != null or ((r.spill != .evicted or r.flush_clock != null) and r.queue.items.len > 0);
 }
 
 /// --spill-gib: an entry evicted from RAM is written now, unless the disk holds it already; the write under way first.
@@ -109,7 +109,7 @@ pub fn nowNs() i128 {
 
 /// The newest queued entry made a job (its blocks serve older ones); one on disk, or past budget, cap or floor, skips.
 fn start(r: *Rows) bool {
-    if (r.spill == .evicted) return false;
+    if (r.spill == .evicted and r.flush_clock == null) return false;
     const q = r.queue.pop() orelse return false;
     _ = begin(r, q);
     return true;
