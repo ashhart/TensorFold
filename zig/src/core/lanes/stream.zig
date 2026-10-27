@@ -271,6 +271,10 @@ pub const Stream = struct {
         if (spec.grammar) |g| if (g.after) |end| if (std.mem.indexOfScalar(u32, s.think_close, end)) |at| {
             s.think_close = s.think_close[0 .. at + 1];
         };
+        // grammar_budget counts the reply's tokens against the limits budgetLeft reads
+        if (spec.grammar) |g| if (g.budget) |*b| {
+            b.* = .{ .max_new = spec.max_new, .answer_max = spec.answer_max, .think_end = spec.think_end };
+        };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;
     }

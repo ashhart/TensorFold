@@ -304,6 +304,7 @@ pub const Server = struct {
             if (request.structure) |tool| tool.free();
             request.structure = st;
         }
+        try budgetStructure(cx, f, request);
     }
 
     /// Give back a request's preparing count, and its grammar once the engine is done with it (or it was never sent).
@@ -319,6 +320,19 @@ pub const Server = struct {
         const compiled = c.compile(srv.io, @fromBackingInt(@intCast(@backingInt(kind))), text, &err) catch
             return cx.fail(.request, "{s}: the grammar cannot be enforced: {s}", .{ field, std.mem.sliceTo(&err, 0) });
         return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c, .compiled = compiled };
+    }
+
+    /// grammar_budget: a boolean; true keeps a grammar's reply completable within max_tokens (none without a grammar).
+    fn budgetStructure(cx: *Cx, f: Value, request: *api.Request) errors.Refused!void {
+        const v = f.get("grammar_budget") orelse return;
+        if (v != .bool) return cx.refuse("grammar_budget must be a boolean");
+        if (!v.bool) return;
+        const st = if (request.structure) |*s| s else return;
+        const g = st.compiled orelse return cx.refuse("grammar_budget: the grammar was not compiled here");
+        if (g.f.budget_ready == null) return cx.refuse("grammar_budget needs a libtfgrammar built with it: rebuild with zig build grammar or use a release archive's lib/");
+        const ready = g.budgetReady() catch false;
+        if (!ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
+        st.budget = true;
     }
 
     /// The model's grammar compiler: tokenizer.json, the text model's vocab_size, the eos ids.

@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "tf_budget.h"
+
 namespace {
 
 // xgrammar's error without its timestamp and source location, first line only (grammar.py _message).
@@ -61,16 +63,21 @@ struct Compiler {
     xgrammar::GrammarCompiler compiler;
     int vocab;
     std::shared_ptr<const Spellings> spell;
+    tfb::Cache budgets;
 };
 
 struct Compiled {
     xgrammar::CompiledGrammar g;
     std::shared_ptr<const Spellings> spell;
+    Compiler* owner;
 };
 
 struct Matcher {
     xgrammar::GrammarMatcher m;
     std::shared_ptr<const Spellings> spell;
+    Compiler* owner;
+    xgrammar::CompiledGrammar g;
+    std::unique_ptr<tfb::Follower> budget;  // armed by tfg_budget before the first token (grammar_budget)
 };
 
 constexpr int BLANKS = 32;                      // grammar.py BLANKS
@@ -117,7 +124,7 @@ void* tfg_open(const char* tokenizer_json, size_t len, int vocab, const int32_t*
         bool prefix = mo2.at("add_prefix_space").get<bool>();
         std::vector<int32_t> stop(stops, stops + nstops);
         xgrammar::TokenizerInfo info(encoded, type, vocab, stop, prefix);
-        return new Compiler{info, xgrammar::GrammarCompiler(info, 8, true, CACHE_BYTES), vocab, spellings(info)};
+        return new Compiler{info, xgrammar::GrammarCompiler(info, 8, true, CACHE_BYTES), vocab, spellings(info), tfb::Cache(info)};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());
     } catch (...) {
@@ -158,7 +165,7 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
                 default: return c->compiler.CompileGrammar(t);
             }
         }();
-        return new Compiled{g, c->spell};
+        return new Compiled{g, c->spell, c};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());
     } catch (...) {
@@ -172,7 +179,7 @@ void tfg_free(void* g) { delete static_cast<Compiled*>(g); }
 void* tfg_matcher(void* g) {
     try {
         auto* c = static_cast<Compiled*>(g);
-        return new Matcher{xgrammar::GrammarMatcher(c->g), c->spell};
+        return new Matcher{xgrammar::GrammarMatcher(c->g), c->spell, c->owner, c->g, nullptr};
     } catch (...) {
         return nullptr;
     }
@@ -183,7 +190,10 @@ void tfg_matcher_free(void* m) { delete static_cast<Matcher*>(m); }
 // 1 taken, 0 rejected, -1 failed.
 int tfg_accept(void* m, int32_t token) {
     try {
-        return static_cast<Matcher*>(m)->m.AcceptToken(token) ? 1 : 0;
+        auto* w = static_cast<Matcher*>(m);
+        if (!w->m.AcceptToken(token)) return 0;
+        if (w->budget) w->budget->Accept(token);
+        return 1;
     } catch (...) {
         return -1;
     }
@@ -191,8 +201,35 @@ int tfg_accept(void* m, int32_t token) {
 
 int tfg_rollback(void* m, int n) {
     try {
-        static_cast<Matcher*>(m)->m.Rollback(n);
+        auto* w = static_cast<Matcher*>(m);
+        w->m.Rollback(n);
+        if (w->budget) w->budget->Rollback(n);
         return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// grammar_budget's tables for a compiled grammar, explored once: 1 covered, 0 not, -1 failed.
+int tfg_budget_ready(void* g) {
+    try {
+        auto* c = static_cast<Compiled*>(g);
+        return tfb::Ready(*c->owner->budgets.Get(c->g)) ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// n == 0 arms a fresh matcher, else clears bits that leave no completion in left - 1 more: 0, 1 not covered, -1 failed.
+int tfg_budget(void* m, int32_t* words, int n, int left) {
+    try {
+        auto* w = static_cast<Matcher*>(m);
+        if (!w->budget) {
+            if (n > 0) return 1;
+            w->budget = std::make_unique<tfb::Follower>(w->owner->budgets.Get(w->g));
+            return 0;
+        }
+        return n == 0 ? 0 : w->budget->Mask(words, n, left);
     } catch (...) {
         return -1;
     }

@@ -178,6 +178,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
+| `grammar_budget` | Boolean, default false. Under a grammar (the fields above, or a required tool call), never draw a token after which the reply could no longer complete within `max_tokens`; see [Structured output](#structured-output) | Native |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | Both |
 | `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | Both |
@@ -354,6 +355,22 @@ The server does not silently turn a required call into `auto`. Installing the gr
 backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
 
 The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
+
+`grammar_budget: true` (native server, off by default) keeps a constrained reply completable within its token limit, so
+a required tool call or a JSON value cut by `max_tokens` still parses. Before each draw, a token is masked when no
+continuation after it reaches a place where the grammar could end within the draws left (`max_tokens`, counted after
+the think block when the server reserves thinking tokens beyond it); the count includes that token and treats the place
+where the end token becomes allowed as complete, so a call that closes on the last token can still finish as
+`length`. Outputs change only where the budget binds: a token is masked only when every completion after it would
+overrun, so the reply equals its `grammar_budget: false` reply token for token up to the first draw where the limit
+binds. The mask depends only on the grammar's place and the tokens left, so
+drafted, `"draft": false` and concurrent replies stay the same with it on. When `max_tokens` is already below the
+grammar's shortest reply, the mask is not applied and the reply is cut as without it. The first request for a grammar
+explores its parser states over the tokenizer's tokens (on the request thread, then kept for the last eight grammars);
+a grammar with more than 16,384 such states is only masked where its explored states decide it, never beyond what
+completes. It is refused with HTTP 400 when the loaded `libtfgrammar` predates it, and for grammars with token-level,
+budgeted, captured or left-recursive rules. The masks follow from xgrammar's byte-level parse; with thinking on they
+start after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),

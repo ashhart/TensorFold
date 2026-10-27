@@ -12,17 +12,28 @@ pub fn option(b: *std.Build) ?[]const u8 {
     return b.option([]const u8, "xgrammar", "An xgrammar " ++ pinned ++ " checkout with its submodules (zig build grammar, dist)");
 }
 
-pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8) void {
+pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, lanes: *std.Build.Module) void {
     const step = b.step("grammar", "libtfgrammar (structured output) from an xgrammar " ++ pinned ++ " checkout: -Dxgrammar=DIR");
+    const budget = b.step("test-grammar-budget", "grammar_budget's masks against brute force through a real libtfgrammar: -Dxgrammar=DIR");
     const root = dir orelse {
         step.dependOn(&b.addFail("zig build grammar needs -Dxgrammar=DIR: " ++ clone).step);
+        budget.dependOn(&b.addFail("zig build test-grammar-budget needs -Dxgrammar=DIR: " ++ clone).step);
         return;
     };
     const lib = library(b, target, root) orelse {
-        step.dependOn(&b.addFail(b.fmt("-Dxgrammar={s} is not an xgrammar " ++ pinned ++ " checkout: " ++ clone, .{root})).step);
+        const fail = b.addFail(b.fmt("-Dxgrammar={s} is not an xgrammar " ++ pinned ++ " checkout: " ++ clone, .{root}));
+        step.dependOn(&fail.step);
+        budget.dependOn(&fail.step);
         return;
     };
     step.dependOn(&installNative(b, lib).step);
+    const native = target.result.os.tag == b.graph.host.result.os.tag and target.result.cpu.arch == b.graph.host.result.cpu.arch;
+    const host = if (native) lib else library(b, b.graph.host, root).?;
+    const options = b.addOptions();
+    options.addOptionPath("library", host.getEmittedBin());
+    const check = b.createModule(.{ .root_source_file = b.path("zig/grammar_budget_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    check.addOptions("grammar_budget_library", options);
+    budget.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = check })).step);
 }
 
 fn installNative(b: *std.Build, lib: *std.Build.Step.Compile) *std.Build.Step.InstallArtifact {
@@ -63,8 +74,10 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, dir: []const u8)
     mod.addIncludePath(root.path(b, "include"));
     mod.addIncludePath(root.path(b, "3rdparty/picojson"));
     mod.addIncludePath(root.path(b, "3rdparty/dlpack/include"));
+    mod.addIncludePath(root.path(b, "cpp"));
     mod.addCSourceFiles(.{ .root = root, .files = sources(b, dir), .flags = &flags });
     mod.addCSourceFile(.{ .file = b.path("zig/src/grammar/tf_grammar.cc"), .flags = &flags });
+    mod.addCSourceFile(.{ .file = b.path("zig/src/grammar/tf_budget.cc"), .flags = &flags });
     return b.addLibrary(.{ .name = "tfgrammar", .linkage = .dynamic, .root_module = mod });
 }
 

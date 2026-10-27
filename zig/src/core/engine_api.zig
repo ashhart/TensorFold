@@ -52,6 +52,8 @@ pub const Structure = struct {
     compiler: ?*grammar.Compiler = null,
     /// That compile, which the engine reads instead of compiling again; the server frees it after `finished`.
     compiled: ?grammar.Compiled = null,
+    /// grammar_budget: mask tokens after which the reply could no longer complete within its token limits.
+    budget: bool = false,
 
     pub fn free(st: Structure) void {
         if (st.compiled) |g| g.free();

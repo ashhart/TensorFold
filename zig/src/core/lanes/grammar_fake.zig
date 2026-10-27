@@ -4,6 +4,8 @@ const grammar = @import("grammar.zig");
 
 pub var compiles: usize = 0;
 pub var frees: usize = 0;
+pub var arms: usize = 0; // grammar_budget: matchers armed, and masks it was asked to narrow (it narrows none)
+pub var narrows: usize = 0;
 
 /// Grammar `g` at step `k` allows token t when (t + g + k) % 3 == 0 (so masks tell grammars and steps apart).
 const State = struct { g: usize, k: usize };
@@ -65,6 +67,15 @@ fn drafts(_: *anyopaque, _: [*]i32, _: c_int) callconv(.c) c_int {
     return 0;
 }
 
+fn budget(_: *anyopaque, _: [*]i32, n: c_int, _: c_int) callconv(.c) c_int {
+    if (n == 0) arms += 1 else narrows += 1;
+    return 0;
+}
+
+fn budgetReady(_: *anyopaque) callconv(.c) c_int {
+    return 1;
+}
+
 fn unused(_: *anyopaque) callconv(.c) void {}
 
 fn open(_: [*]const u8, _: usize, _: c_int, _: [*]const i32, _: c_int, _: [*]u8, _: usize) callconv(.c) ?*anyopaque {
@@ -88,12 +99,16 @@ const library: grammar.Library = .{
     .terminated = terminated,
     .fill = fill,
     .drafts = drafts,
+    .budget = budget,
+    .budget_ready = budgetReady,
 };
 
 /// The stand-in installed (give the returned library back to grammar.swapLibrary after) and a two-word compiler.
 pub fn install() ?grammar.Library {
     compiles = 0;
     frees = 0;
+    arms = 0;
+    narrows = 0;
     return grammar.swapLibrary(library);
 }
 

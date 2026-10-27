@@ -362,3 +362,55 @@ test "a request's compiled grammar is kept for the engine, freed once at release
     try std.testing.expectEqual(@as(usize, 4), fake.compiles);
     try std.testing.expectEqual(@as(usize, 4), fake.frees);
 }
+
+fn never(_: *anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+test "grammar_budget: a boolean that marks a covered grammar, refused when malformed, unbuilt or not covered" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    const fake = lanes.grammar_fake;
+    const old = fake.install();
+    defer _ = lanes.grammar.swapLibrary(old);
+    var compiler = fake.compiler();
+    var text: Text = .{};
+    var stub: Stub = .{};
+    const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    const offered = (try value(g, specs)).array;
+    const Want = struct { fields: []const u8, budget: ?bool, refusal: []const u8 = "" };
+    const cases = [_]Want{
+        .{ .fields = "{\"response_format\":{\"type\":\"json_object\"},\"grammar_budget\":true}", .budget = true },
+        .{ .fields = "{\"tool_call_required\":true,\"grammar_budget\":true}", .budget = true },
+        .{ .fields = "{\"response_format\":{\"type\":\"json_object\"},\"grammar_budget\":false}", .budget = false },
+        .{ .fields = "{\"response_format\":{\"type\":\"json_object\"}}", .budget = false },
+        .{ .fields = "{\"grammar_budget\":true}", .budget = null }, // no grammar: nothing to keep
+        .{ .fields = "{\"response_format\":{\"type\":\"json_object\"},\"grammar_budget\":\"yes\"}", .budget = null, .refusal = "must be a boolean" },
+    };
+    for (cases) |c| {
+        var cx: errors.Cx = .{ .a = g };
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };
+        const result = srv.checkFeatures(&cx, try value(g, c.fields), true, false, &.{1}, offered, &request);
+        if (c.refusal.len > 0) { // a refusal frees what it compiled
+            try std.testing.expectError(error.Refused, result);
+            try std.testing.expect(std.mem.indexOf(u8, cx.message, c.refusal) != null);
+            continue;
+        }
+        try result;
+        defer srv.release(false, request);
+        if (c.budget) |want| try std.testing.expectEqual(want, request.structure.?.budget) else try std.testing.expect(request.structure == null);
+    }
+    for ([_]?*const fn (*anyopaque) callconv(.c) c_int{ null, never }, [_][]const u8{ "libtfgrammar", "cannot be kept" }) |ready, why| {
+        compiler.f.budget_ready = ready;
+        var cx: errors.Cx = .{ .a = g };
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };
+        try std.testing.expectError(error.Refused, srv.checkFeatures(&cx, try value(g, cases[0].fields), true, false, &.{1}, offered, &request));
+        try std.testing.expectEqual(@as(u16, 400), cx.status());
+        try std.testing.expect(std.mem.indexOf(u8, cx.message, why) != null);
+    }
+    try std.testing.expectEqual(fake.compiles, fake.frees); // refused requests free what they compiled
+}

@@ -18,6 +18,9 @@ const Fns = struct {
     terminated: *const fn (*anyopaque) callconv(.c) c_int,
     fill: *const fn (*anyopaque, [*]i32, c_int) callconv(.c) c_int,
     drafts: *const fn (*anyopaque, [*]i32, c_int) callconv(.c) c_int,
+    // grammar_budget's entries: optional, so a library built before them still serves everything else
+    budget: ?*const fn (*anyopaque, [*]i32, c_int, c_int) callconv(.c) c_int = null,
+    budget_ready: ?*const fn (*anyopaque) callconv(.c) c_int = null,
 };
 
 var lib: ?Fns = null;
@@ -43,7 +46,7 @@ fn load(io: std.Io, a: Allocator) ?Fns {
     var f: Fns = undefined;
     const info = @typeInfo(Fns).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
-        @field(f, name) = dl.lookup(T, "tfg_" ++ name) orelse return null;
+        @field(f, name) = if (@typeInfo(T) == .optional) dl.lookup(@typeInfo(T).optional.child, "tfg_" ++ name) else dl.lookup(T, "tfg_" ++ name) orelse return null;
     }
     lib_failed = false;
     lib = f;
@@ -124,6 +127,16 @@ pub const Compiled = struct {
     pub fn matcher(g: Compiled) !Matcher {
         return .{ .f = g.f, .h = g.f.matcher(g.h) orelse return error.Grammar };
     }
+
+    /// grammar_budget's tables explored for this grammar (once, the library keeps them): false where not covered.
+    pub fn budgetReady(g: Compiled) !bool {
+        const ready = g.f.budget_ready orelse return false;
+        return switch (ready(g.h)) {
+            1 => true,
+            0 => false,
+            else => error.Grammar,
+        };
+    }
 };
 
 /// A reply's place in its xgrammar grammar.
@@ -136,7 +149,16 @@ pub const Matcher = struct {
     }
 
     pub fn rules(m: Matcher) Rules {
-        return .{ .ptr = m.h, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .drafts = draftsFn, .free = freeFn } };
+        return .{ .ptr = m.h, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .drafts = draftsFn, .free = freeFn, .budget = budgetFn } };
+    }
+
+    fn budgetFn(h: *anyopaque, words: []u32, left: u32) anyerror!bool {
+        const budget = lib.?.budget orelse return false;
+        return switch (budget(h, @ptrCast(words.ptr), @intCast(words.len), @intCast(@min(left, std.math.maxInt(c_int))))) {
+            0 => true,
+            1 => false,
+            else => error.Grammar,
+        };
     }
 
     fn draftsFn(h: *anyopaque, out: []u32) anyerror!usize {
@@ -185,6 +207,8 @@ pub const Rules = struct {
         /// Tokens spelling the text the grammar forces from here (none where it branches); the matcher stays put.
         drafts: *const fn (ptr: *anyopaque, out: []u32) anyerror!usize,
         free: *const fn (ptr: *anyopaque) void,
+        /// Clear bits after which no reply completes in `left` draws (empty `words`: arm); false where not covered.
+        budget: ?*const fn (ptr: *anyopaque, words: []u32, left: u32) anyerror!bool = null,
     };
 };
 
@@ -202,9 +226,44 @@ pub const Constraint = struct {
     words: usize,
     after: ?u32, // with thinking on, the grammar starts at the token after this one
     active: bool,
+    budget: ?Budget = null, // grammar_budget: each mask also keeps the reply completable within its token limits
+
+    /// The reply's token limits as Stream.budgetLeft counts them, and the tokens it has committed.
+    pub const Budget = struct {
+        max_new: u32 = 0,
+        answer_max: u32 = 0, // tokens after think_end at most (0: max_new alone)
+        think_end: i64 = -1,
+        followed: u32 = 0,
+        answer_from: ?u32 = null, // `followed` just after the first think_end
+    };
 
     pub fn init(rules: Rules, words: usize, after: ?u32) Constraint {
         return .{ .rules = rules, .words = words, .after = after, .active = after == null };
+    }
+
+    /// Turn grammar_budget on before the first token (the stream then sets the limits); refused where not covered.
+    pub fn arm(c: *Constraint) !void {
+        const budget = c.rules.vtable.budget orelse return error.GrammarBudgetUnsupported;
+        if (!try budget(c.rules.ptr, &.{}, 0)) return error.GrammarBudgetUnsupported;
+        c.budget = .{};
+    }
+
+    /// Draws the reply may still make at the row `depth` past the matcher, itself included; null without a budget.
+    fn leftAt(c: *const Constraint, depth: usize, opened: ?usize) ?u32 {
+        const b = c.budget orelse return null;
+        const at = @as(i64, b.followed) + @as(i64, @intCast(depth));
+        var left = @as(i64, b.max_new) - at;
+        const from: ?i64 = if (b.answer_from) |f| f else if (opened) |o| @as(i64, b.followed) + @as(i64, @intCast(o)) else null;
+        if (b.answer_max > 0) if (from) |f| {
+            left = @min(left, @as(i64, b.answer_max) - (at - f));
+        };
+        return @intCast(std.math.clamp(left, 0, std.math.maxInt(i32)));
+    }
+
+    /// A planned row's token closes the think block for the budget's answer limit (once, before it has closed).
+    fn opens(c: *const Constraint, token: u32) bool {
+        const b = c.budget orelse return false;
+        return b.answer_from == null and @as(i64, token) == b.think_end;
     }
 
     pub fn deinit(c: *Constraint, gpa: Allocator) void {
@@ -219,6 +278,15 @@ pub const Constraint = struct {
 
     /// Follow a committed token; false when the grammar rejects it (each is chosen under its mask, forced ones aside).
     pub fn follow(c: *Constraint, token: u32) !bool {
+        const ok = try c.take(token);
+        if (ok) if (c.budget) |*b| {
+            b.followed += 1;
+            if (b.answer_from == null and @as(i64, token) == b.think_end) b.answer_from = b.followed;
+        };
+        return ok;
+    }
+
+    fn take(c: *Constraint, token: u32) !bool {
         if (!c.active) {
             c.active = token == c.after.?;
             return true;
@@ -232,13 +300,14 @@ pub const Constraint = struct {
         if (!c.active or c.finished()) return null;
         const bits = try a.alloc(u32, c.words);
         errdefer a.free(bits);
-        try c.fill(bits);
+        try c.fill(bits, c.leftAt(0, null));
         return bits;
     }
 
     /// The next token's bits at the matcher's place; a row that allows nothing is a dead grammar, never a draw.
-    fn fill(c: *Constraint, bits: []u32) !void {
+    fn fill(c: *Constraint, bits: []u32, left: ?u32) !void {
         try c.rules.vtable.fill(c.rules.ptr, bits);
+        if (left) |l| _ = try c.rules.vtable.budget.?(c.rules.ptr, bits, l);
         for (bits) |w| if (w != 0) return;
         return error.GrammarDeadEnd;
     }
@@ -259,7 +328,7 @@ pub const Constraint = struct {
         @memset(kept, forced);
         kept[0] = true;
         var walk: Walk = .{ .c = c, .tokens = tokens, .parents = parents, .bits = bits, .kept = kept };
-        try walk.visit(0, c.active);
+        try walk.visit(0, c.active, 0, null);
         var count: usize = 0;
         for (kept) |k| count += @intFromBool(k);
         const rows = try a.alloc(u32, count);
@@ -288,10 +357,12 @@ pub const Constraint = struct {
         var free = false; // a forced row the grammar rejected: it and the rows after it stay unconstrained
         var ended = false; // a planned draft was the stop token: nothing after it is verified
         var filled = false;
+        var opened: ?usize = null; // the row whose token closed the think block, for the budget's answer limit
         var kept: usize = 0;
         while (kept < tokens.len) {
             const t = tokens[kept];
             if (kept > 0) {
+                if (opened == null and c.opens(t)) opened = kept;
                 if (!active) {
                     active = t == c.after.?;
                 } else if (!free and try c.rules.vtable.accept(c.rules.ptr, t)) {
@@ -304,7 +375,7 @@ pub const Constraint = struct {
             }
             const row = try masks.addManyAsSlice(a, c.words);
             if (active and !free) {
-                try c.fill(row);
+                try c.fill(row, c.leftAt(kept, opened));
                 filled = true;
             } else @memset(row, std.math.maxInt(u32));
             kept += 1;
@@ -316,7 +387,7 @@ pub const Constraint = struct {
             for (drafts[0..n]) |t| {
                 if (!try c.rules.vtable.accept(c.rules.ptr, t)) break;
                 taken += 1;
-                try c.fill(try masks.addManyAsSlice(a, c.words));
+                try c.fill(try masks.addManyAsSlice(a, c.words), c.leftAt(kept + extra.len, opened));
                 extra = drafts[0 .. extra.len + 1];
             }
         }
@@ -338,22 +409,23 @@ pub const Constraint = struct {
         kept: []bool,
         filled: bool = false,
 
-        /// The matcher has taken row r's path (when `active`): fill its bits, then each child's.
-        fn visit(w: *Walk, r: usize, active: bool) !void {
+        /// The matcher has taken row r's path (when `active`): fill its bits, then each child's; `opened` as in chain.
+        fn visit(w: *Walk, r: usize, active: bool, depth: usize, opened: ?usize) !void {
             const c = w.c;
             if (active) {
-                try c.fill(w.bits[r * c.words ..][0..c.words]);
+                try c.fill(w.bits[r * c.words ..][0..c.words], c.leftAt(depth, opened));
                 w.filled = true;
             }
             for (w.parents[1..], 1..) |p, child| {
                 if (p != @as(i32, @intCast(r))) continue;
+                const below = if (opened == null and c.opens(w.tokens[child])) depth + 1 else opened;
                 if (!active) {
                     w.kept[child] = true;
-                    try w.visit(child, w.tokens[child] == c.after.?);
+                    try w.visit(child, w.tokens[child] == c.after.?, depth + 1, below);
                 } else if (try c.rules.vtable.accept(c.rules.ptr, w.tokens[child])) {
                     if (!c.rules.vtable.terminated(c.rules.ptr)) {
                         w.kept[child] = true;
-                        try w.visit(child, true);
+                        try w.visit(child, true, depth + 1, below);
                     }
                     try c.rules.vtable.rollback(c.rules.ptr, 1);
                 } // rejected: forced rows stay, unconstrained (kept and all set from the start)
@@ -498,4 +570,5 @@ test "a chain grows past its last kept row with the grammar's own drafts, never 
 test {
     _ = @import("grammar_error_test.zig");
     _ = @import("grammar_handoff_test.zig");
+    _ = @import("grammar_budget_test.zig");
 }

@@ -67,4 +67,10 @@ test "a compiled grammar handed in compiles nothing on the lane thread and masks
     try std.testing.expectEqual(@as(usize, 2), fake.compiles); // without a handle the lane thread compiles, as before
     try std.testing.expectEqual(@as(usize, 8), handed.len);
     try std.testing.expectEqualSlices(u32, compiled, handed);
+    try std.testing.expectEqual(@as(usize, 0), fake.arms + fake.narrows); // grammar_budget off: never consulted
+    const budgeted = try reply(&host, 3, .{ .kind = .json_schema, .text = text, .compiler = &c, .compiled = g, .budget = true });
+    defer a.free(budgeted);
+    try std.testing.expectEqual(@as(usize, 1), fake.arms); // armed once, before its first token
+    try std.testing.expect(fake.narrows > 0);
+    try std.testing.expectEqualSlices(u32, handed, budgeted); // the stand-in narrows nothing, so nothing else changed
 }
