@@ -217,6 +217,12 @@ pub const Notify = struct {
 /// A family's pool as the load ledger reads it: tokens a page, and the contiguous run it needs (0: none).
 pub const Source = struct { pool: *Pool, page_tokens: u32, run_pages: u32 = 0 };
 
+/// A tier's notice that a page lost its last holder (its frame, if any, is free again).
+pub const Freed = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, id: u32) void,
+};
+
 /// What an idle pool must show: nothing promised, every page free or the store's alone, none waiting on readers.
 pub const Census = struct { total: usize, free: usize, promised: usize, kept: usize, leased: usize, pending: usize = 0 };
 
@@ -238,6 +244,7 @@ pub const Pool = struct {
     ledger: ?Gate = null, // the lane host's ledger, the only test a promise passes; null: the pool's own pages
     depth: u8 = 0, // public changes in progress: the outermost one notifies, after nested calls and rollbacks
     retired: retirement.Retired = .{}, // pages a lease gave back mid-stream, until their readers are done
+    freed: ?Freed = null,
 
     pub fn init(gpa: Allocator, count: usize, page_bytes: u64) !Pool {
         const refs = try gpa.alloc(u32, count);
@@ -558,8 +565,13 @@ pub const Pool = struct {
     }
 };
 
+/// The host tier: logical pages in host RAM and device frames that cache them (kv_tier.zig).
+pub const tier = @import("kv_tier.zig");
+pub const Tier = tier.Tier;
+
 test {
     _ = @import("kv_pool_test.zig");
+    _ = @import("kv_tier.zig");
     _ = @import("kv_pool_counts_test.zig");
     _ = @import("kv_pool_walk_test.zig");
     _ = @import("kv_pool_notify_test.zig");
