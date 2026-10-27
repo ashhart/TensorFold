@@ -1,4 +1,4 @@
-//! NVFP4 prompt tiles with the decode form's sums under the contract: each replaces its decode form bit for bit.
+//! NVFP4 prompt tiles and decode waves with the decode form's sums under the contract: each replaces it bit for bit.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -10,11 +10,41 @@ const g = contract.gates;
 const fx = cuda.experts.Nvfp4Experts;
 const grouped = cuda.grouped;
 
-/// SwiGLU gate-up, fp32 down, and a control: tf_nvfp4_prompt_swiglu posing as a replacement, which gate 3 refuses.
-pub const Kind = enum { up, down, control };
+/// Fact up/down, a control, experts_waves' entries, the TF_NVFP4_DECODE_WARPS=1 CTAs, two controls cut to one wave.
+pub const Kind = enum { up, down, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one };
+
+/// experts_waves.zig's entry a kind launches, or null for the prompt-tile and classic kinds.
+fn wavesEntry(kind: Kind) ?usize {
+    return switch (kind) {
+        .up_waves, .up_waves_one, .cut_waves => 4,
+        .down_waves, .down_waves_one, .cut_waves_one => 5,
+        .up_half, .up_half_one => 6,
+        else => null,
+    };
+}
+
+fn isDown(kind: Kind) bool {
+    return switch (kind) {
+        .down, .down_waves, .down_one, .down_bf16_one, .down_waves_one, .cut_waves_one => true,
+        else => false,
+    };
+}
+
+/// Kinds that run the group's 1-warp CTAs; the baseline is always its 4-warp classic kernel.
+fn isOne(kind: Kind) bool {
+    return switch (kind) {
+        .up_one, .down_one, .down_bf16_one, .relu2_one, .up_waves_one, .down_waves_one, .up_half_one, .cut_waves_one => true,
+        else => false,
+    };
+}
+
+fn epiOf(kind: Kind) cuda.experts.Epi {
+    return if (kind == .down_bf16_one) .down_bf16 else if (isDown(kind)) .down_f32 else .up;
+}
 
 const experts = 4;
 const slots = 2; // pairs a token row, both routed
+const waves_rows = 1024; // the waves kinds' two-wave shape: cut_waves and cut_waves_one go red only there
 const rule = "as the decode form it replaces gives them: NaN and infinite global scales, a NaN block scale, NaN and infinite inputs";
 
 /// Each 16-input block's mma (16 products) and its fma into the running sum, blocks in ascending K.
@@ -27,7 +57,27 @@ pub fn spec(kind: Kind) c.Spec {
     // a plan item of 64 pairs (32 token rows) by a CTA's columns (gate-up 4 blocks of 32, down 8), 64 inputs a stage
     const up_tiles = [3]c.Tile{ .{ .size = 64 / slots }, .{ .size = 128, .step = 32, .min = 32 }, .{ .size = 64, .step = 32, .min = 32 } };
     const down_tiles = [3]c.Tile{ .{ .size = 64 / slots }, .{ .size = 256, .step = 32, .min = 32 }, .{ .size = 64, .step = 32, .min = 32 } };
+    // a decode item of 16 pairs (8 token rows) by a warp's 32 columns (half: 16 of them) over all K, 32 inputs a step
+    const unit = [3]c.Tile{ .{ .size = 16 / slots }, .{ .size = 32, .step = 32, .min = 32 }, .{ .size = 32, .step = 32, .min = 32 } };
+    const why = "a bf16 sum that collapses moves the output by about itself, and the epilogue's three bf16 roundings already allow 3 u of it: at most 1 / (3 u) = 85x is provable";
+    // 1,024 rows: 128+ items of 16 pairs, 2,560+ gate-up and 10,240+ down units: two waves below 2,560 resident warps
+    const up_served = &[_]c.Shape{ .{ .rows = 1, .n = 640, .k = 2560 }, .{ .rows = 4, .n = 640, .k = 2560 }, .{ .rows = 16, .n = 640, .k = 2560 }, .{ .rows = waves_rows, .n = 640, .k = 2560 } };
+    const down_served = &[_]c.Shape{ .{ .rows = 1, .n = 2560, .k = 640 }, .{ .rows = 4, .n = 2560, .k = 640 }, .{ .rows = 16, .n = 2560, .k = 640 }, .{ .rows = waves_rows, .n = 2560, .k = 640 } };
+    const why2 = "the bf16 rounding before the square is allowed in the bound (2 u of the output), so a short sum stands out less than in SwiGLU: fp16 and bf16 sums miss by 64x";
+    const cut = "dropped past the first wave: gate 3 at the two-wave shape refuses it";
     return switch (kind) {
+        .up_one => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_kernel<2, 2, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .up_waves_one => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_waves<2, 2, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .up_half_one => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_half<2, 2, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .relu2_one => .{ .name = "cuda nvfp4 experts decode up relu^2 nvfp4_expert_kernel<1, 1, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .mids = 1, .out = .bf16, .replaces = "nvfp4_expert_kernel<1, 1, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .f16 = 50, .bf16 = 30, .why = why2 } },
+        .down_one => .{ .name = "cuda nvfp4 experts decode down nvfp4_expert_kernel<1, 0, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = down_served },
+        .down_waves_one => .{ .name = "cuda nvfp4 experts decode down nvfp4_expert_waves<1, 0, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = down_served },
+        .down_bf16_one => .{ .name = "cuda nvfp4 experts decode down bf16 nvfp4_expert_kernel<1, 3, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "nvfp4_expert_kernel<1, 3, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = down_served, .sums = .{ .bf16 = 30, .why = why } },
+        .cut_waves => .{ .name = "control: nvfp4_expert_waves<2, 2, 4> with its items " ++ cut, .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served },
+        .cut_waves_one => .{ .name = "control: nvfp4_expert_waves<1, 0, 1> with its items " ++ cut, .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = down_served },
+        .up_waves => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_waves<2, 2, 4> (equal waves)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .up_half => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_half<2, 2, 4> (two warps a unit)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .down_waves => .{ .name = "cuda nvfp4 experts decode down nvfp4_expert_waves<1, 0, 4> (equal waves)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = down_served },
         .up => .{ .name = "cuda nvfp4 experts prompt gate-up tf_nvfp4_fact_swiglu (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &.{ .{ .rows = 130, .n = 640, .k = 2560 }, .{ .rows = 1, .n = 640, .k = 2560 } }, .sums = .{ .bf16 = 30, .why = "a bf16 sum that collapses moves the output by about itself, and the epilogue's three bf16 roundings already allow 3 u of it: at most 1 / (3 u) = 85x is provable" } },
         .control => .{ .name = "control: scaled-code prompt tile tf_nvfp4_prompt_swiglu posing as the decode gate-up", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &.{.{ .rows = 130, .n = 640, .k = 2560 }} },
         .down => .{ .name = "cuda nvfp4 experts prompt down tf_nvfp4_fact_down_f32 (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = down_tiles, .served = &.{ .{ .rows = 130, .n = 2560, .k = 640 }, .{ .rows = 1, .n = 2560, .k = 640 } } },
@@ -37,7 +87,8 @@ pub fn spec(kind: Kind) c.Spec {
 pub const Experts = struct {
     rig: rig_.Rig,
     kind: Kind,
-    k: *const fx,
+    k: *const fx, // Group's four: the baseline, and the kernels under test unless isOne
+    k1: *const fx, // Group's one
     tile: ?*const cuda.experts_tile.Tile = null,
     router: grouped.Router,
     shape: c.Shape = undefined,
@@ -82,16 +133,20 @@ pub const Experts = struct {
                 .up => "cuda nvfp4 K32 tile gate-up (decode sums)",
                 .down => "cuda nvfp4 K32 tile fp32 down (decode sums)",
                 .control => "control: scaled-code prompt posing as the K32 tile",
+                else => unreachable,
             };
             entry.tiles[1].size = 128;
         }
-        return .{ .spec = entry, .ctx = self, .vt = &vt, .control = if (self.kind == .control) .shapes else null };
+        return .{ .spec = entry, .ctx = self, .vt = &vt, .control = switch (self.kind) {
+            .control, .cut_waves, .cut_waves_one => .shapes,
+            else => null,
+        } };
     }
 
     const vt = g.hooks(Experts);
 
     fn parts(self: *const Experts) usize {
-        return if (self.kind != .down) 2 else 1;
+        return if (isDown(self.kind) or self.kind == .relu2_one) 1 else 2;
     }
 
     fn pairs(self: *const Experts) usize {
@@ -99,11 +154,11 @@ pub const Experts = struct {
     }
 
     fn xRows(self: *const Experts) usize {
-        return if (self.kind != .down) self.shape.rows else self.pairs();
+        return if (!isDown(self.kind)) self.shape.rows else self.pairs();
     }
 
     fn row(self: *const Experts, pair: usize) usize {
-        return if (self.kind != .down) pair / slots else pair;
+        return if (!isDown(self.kind)) pair / slots else pair;
     }
 
     fn route(self: *Experts, ids: u64, tile: usize, zeros: []const u8) !grouped.Plan {
@@ -162,7 +217,7 @@ pub const Experts = struct {
         defer a.free(words);
         for (0..experts) |e| {
             const o = words[e * per ..][0..per];
-            if (self.kind != .down) fx.packGateUp(o, .{ self.codesOf(e, 0), self.scalesOf(e, 0) }, .{ self.codesOf(e, 1), self.scalesOf(e, 1) }, n, k) else fx.packOne(o, self.codesOf(e, 0), self.scalesOf(e, 0), n, k);
+            if (self.parts() == 2) fx.packGateUp(o, .{ self.codesOf(e, 0), self.scalesOf(e, 0) }, .{ self.codesOf(e, 1), self.scalesOf(e, 1) }, n, k) else fx.packOne(o, self.codesOf(e, 0), self.scalesOf(e, 0), n, k);
         }
         self.wd = try self.rig.input(std.mem.sliceAsBytes(words));
         self.sd = try self.rig.input(std.mem.sliceAsBytes(self.globals[0 .. experts * self.parts()]));
@@ -223,22 +278,43 @@ pub const Experts = struct {
     }
 
     fn layer(self: *const Experts) cuda.experts.Layer {
-        const up = self.kind != .down;
-        return .{ .format = .nvfp4, .up = self.wd, .down = self.wd, .up_scale = self.sd, .down_scale = self.sd, .width = if (up) self.shape.n else self.shape.k, .dims = if (up) self.shape.k else self.shape.n, .experts = experts };
+        const up = !isDown(self.kind);
+        return .{ .format = .nvfp4, .up = self.wd, .down = self.wd, .up_scale = self.sd, .down_scale = self.sd, .width = if (up) self.shape.n else self.shape.k, .dims = if (up) self.shape.k else self.shape.n, .experts = experts, .relu2 = self.kind == .relu2_one };
     }
 
     fn launch(self: *Experts, fact: bool, out: u64) !void {
-        const up = self.kind != .down;
+        const up = !isDown(self.kind);
         const in: cuda.experts.Rows = .{ .x = self.xd, .stride = self.shape.k, .slots = if (up) slots else 0 };
-        const epi: cuda.experts.Epi = if (up) .up else .down_f32;
-        if (fact and self.kind == .control) {
+        const epi = epiOf(self.kind);
+        const items = grouped.maxItems(self.pairs(), experts, 16);
+        const k = if (isOne(self.kind)) self.k1 else self.k;
+        if (fact and wavesEntry(self.kind) != null) {
+            const plan = if (self.kind == .cut_waves or self.kind == .cut_waves_one) try self.firstWave(k, items) else self.plan;
+            try cuda.experts_waves.entry(k, wavesEntry(self.kind).?, self.rig.s, in, self.layer(), plan, out, items, -1);
+        } else if (fact and isOne(self.kind)) {
+            try k.run(self.rig.s, epi, in, self.layer(), self.plan, out, items, -1);
+        } else if (fact and self.kind == .control) {
             try self.k.runPrompt(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
         } else if (fact and self.tile != null) {
             try self.tile.?.run(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
         } else if (fact) {
             try self.k.runFact(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
-        } else try self.k.run(self.rig.s, epi, in, self.layer(), self.plan, out, grouped.maxItems(self.pairs(), experts, 16), -1);
+        } else try self.k.run(self.rig.s, epi, in, self.layer(), self.plan, out, items, -1);
         try self.rig.s.synchronize();
+    }
+
+    /// The plan with its item count cut to one wave of the entry's grid (unchanged where one wave covers it).
+    fn firstWave(self: *Experts, k: *const fx, items: usize) !grouped.Plan {
+        const fi = wavesEntry(self.kind).?;
+        const nb = self.shape.n / fx.cols;
+        const grid = @min((items * nb + k.warps - 1) / k.warps, k.resident[fi]);
+        try self.rig.s.synchronize();
+        var counts: [2]i32 = undefined;
+        @memcpy(std.mem.asBytes(&counts), try self.rig.bytes(self.plan.counts, 8));
+        counts[0] = @min(counts[0], @as(i32, @intCast(grid * k.warps / nb)));
+        var p = self.plan;
+        p.counts = try self.rig.input(std.mem.asBytes(&counts));
+        return p;
     }
 
     pub fn run(self: *Experts) !void {
@@ -269,7 +345,11 @@ pub const Experts = struct {
     /// The epilogue on pair p's sums: global scales, then for up the kernel's SwiGLU with its bf16 roundings.
     fn epilogue(self: *const Experts, p: usize, s0: f64, s1: f64) f64 {
         const e: usize = @intCast(self.picks[p]);
-        if (self.kind == .down) return s0 * self.globals[e];
+        if (isDown(self.kind)) return s0 * self.globals[e];
+        if (self.kind == .relu2_one) {
+            const r = @max(c.fromBf16(c.toBf16(@floatCast(s0 * self.globals[e]))), 0);
+            return r * r;
+        }
         const gv = c.fromBf16(c.toBf16(@floatCast(s0 * self.globals[e * 2])));
         const uv = c.fromBf16(c.toBf16(@floatCast(s1 * self.globals[e * 2 + 1])));
         return c.fromBf16(c.toBf16(@floatCast(silu(gv)))) * uv;
@@ -292,11 +372,19 @@ pub const Experts = struct {
                     abs[part] += @abs(v);
                 }
             }
-            if (self.kind == .down) {
+            if (isDown(self.kind)) {
                 const gl = self.globals[e];
                 want[o] = sum[0] * gl;
                 mag[o] = @abs(gl) * abs[0];
                 self.allow_extra[o] = 0;
+                continue;
+            }
+            if (self.kind == .relu2_one) {
+                const r = @max(sum[0] * self.globals[e], 0);
+                want[o] = r * r;
+                mag[o] = 2 * r * @abs(self.globals[e]) * abs[0];
+                // the kernel rounds the scaled sum to bf16 before squaring: half a bf16 ulp, doubled by the square
+                self.allow_extra[o] = 0x1p-8 * 2 * r * r * 1.01;
                 continue;
             }
             const gs = sum[0] * self.globals[e * 2];

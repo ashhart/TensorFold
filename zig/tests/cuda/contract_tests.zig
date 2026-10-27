@@ -336,9 +336,7 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(e3_k.Fault), &e3_splits) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &e3_mods.k, .fault = f };
     defer for (&e3_splits) |*x| x.deinit();
     for (&e3_splits) |*x| try kernels.append(a, x.kernel());
-    var nvfp4 = try cuda.experts.Nvfp4Experts.load(gpu.d, sms);
-    defer nvfp4.unload();
-    const nvfp4_facts = try @import("contract_nvfp4_tile.zig").Group.create(a, gpu, s, &nvfp4, try cuda.grouped.Router.resolve(mods[6]), &kernels);
+    const nvfp4_facts = try @import("contract_nvfp4_tile.zig").Group.create(a, gpu, s, sms, try cuda.grouped.Router.resolve(mods[6]), &kernels);
     defer nvfp4_facts.destroy();
     var round_mod = try cuda.Module.load(gpu.d, kk.tree_round);
     defer round_mod.unload();

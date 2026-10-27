@@ -334,8 +334,8 @@ pub const Fp8Experts = struct {
 /// NVFP4 experts (nvfp4_experts.cu): decode rows 16 pairs at a time; prompt rows staged, 64 pairs a CTA.
 pub const Nvfp4Experts = struct {
     mod: Module,
-    fns: [4]Function, // by Epi, then relu^2 up
-    resident: [4]usize, // blocks the grid may hold: per SM times SMs
+    fns: [7]Function, // by Epi, then relu^2 up, then experts_waves.zig's
+    resident: [7]usize, // blocks the grid may hold: per SM times SMs
     prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
     fact_fns: [2]Function, // the decode form's sums on prompt tiles: SwiGLU gate-up, fp32 down
     warps: usize = 4,
@@ -384,7 +384,7 @@ pub const Nvfp4Experts = struct {
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
         var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .fact_fns = undefined, .warps = warps };
-        for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 }, 0..) |name, i| {
+        for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 } ++ @import("experts_waves.zig").symbols, 0..) |name, i| {
             var narrow: [256]u8 = undefined;
             const selected = if (warps == 1) blk: {
                 const marker = std.mem.indexOf(u8, name, "ELi4E") orelse return error.MissingSymbol;
