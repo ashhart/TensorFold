@@ -7,6 +7,7 @@ const Proj = engine.Proj;
 
 pub fn projectMany(e: *Engine, ls: []const Proj, x: u64, xs: u64, outs: []const u64, rows: usize, prompt: bool, params: u64, sums: bool, allow_fused_prompt: bool) !void {
     if (ls.len == 0 or ls.len != outs.len) return error.UnexpectedTensor;
+    if (e.kit != null and !(prompt and rows > 16)) return exl3Group(e, ls, x, xs, outs, rows, prompt, params, sums);
     const A = cuda.qlinear.Affine4Kernels;
     const fused_prompt = allow_fused_prompt and prompt and rows > A.max_rows and qwen38PromptShape(ls, rows) and !e.int8.on and e.affine.pdl and blk: {
         const k = ls[0].inputs();
@@ -73,4 +74,28 @@ test "Qwen3.8 GB10 large prompt tile admits only screened projection shapes" {
 
 fn affine(n: usize) Proj {
     return .{ .a4 = .{ .w = 0, .s = 0, .b = 0, .n = n, .k = 5120, .npad = n } };
+}
+
+/// Decode rows of an EXL3 engine: groupable EXL3 members in one launch (each keeps its own bits), the rest one by one.
+fn exl3Group(e: *Engine, ls: []const Proj, x: u64, xs: u64, outs: []const u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
+    var ws: [3]cuda.exl3.Weight = undefined;
+    var ys: [3]u64 = undefined;
+    var n: usize = 0;
+    for (ls, outs) |l, out| if (l == .x3 and n < ws.len) {
+        ws[n] = l.x3;
+        ys[n] = out;
+        n += 1;
+    };
+    const grouped = n >= 2 and cuda.exl3.groupable(ws[0..n], rows);
+    if (grouped) try e.kit.?.dense.decodeGroup(e.stream, ws[0..n], x, .bf16, rows, ys[0..n], .bf16);
+    var first = true;
+    var taken: usize = 0;
+    for (ls, outs) |l, out| {
+        if (grouped and l == .x3 and taken < n) {
+            taken += 1;
+            continue;
+        }
+        try e.project(l, x, xs, out, rows, prompt, params, sums and first);
+        first = false;
+    }
 }

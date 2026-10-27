@@ -126,11 +126,30 @@ fn f32vec(s: *Sink, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytyp
 const admit = @import("cuda_exl3_admit.zig");
 const group = admit.group;
 
+/// (K splits, warps) per Qwen3.8-27B projection (K, N, halves), chosen with tf-cuda-test exl3-plans.
+const plans = [_]struct { k: usize, n: usize, halves: u32, sk: u32, wk: u32 }{
+    .{ .k = 5120, .n = 17408, .halves = 8, .sk = 1, .wk = 4 }, // gate, up
+    .{ .k = 17408, .n = 5120, .halves = 8, .sk = 1, .wk = 8 }, // down
+    .{ .k = 5120, .n = 10240, .halves = 8, .sk = 1, .wk = 4 }, // in_proj_qkv
+    .{ .k = 5120, .n = 6144, .halves = 8, .sk = 2, .wk = 4 }, // in_proj_z
+    .{ .k = 6144, .n = 5120, .halves = 8, .sk = 2, .wk = 8 }, // out_proj, o_proj
+    .{ .k = 5120, .n = 12288, .halves = 8, .sk = 1, .wk = 8 }, // q_proj (8 warps: one group launch with k and v)
+    .{ .k = 5120, .n = 1024, .halves = 8, .sk = 5, .wk = 8 }, // k_proj, v_proj
+    .{ .k = 5120, .n = 248320, .halves = 12, .sk = 1, .wk = 4 }, // lm_head (6-bit)
+};
+
+/// A shape's fixed plan, so every row count keeps one reduction; other shapes take plan()'s.
+fn tuned(k: usize, n: usize, halves: u32) ?[2]u32 {
+    for (plans) |p| if (p.k == k and p.n == n and p.halves == halves) return .{ p.sk, p.wk };
+    return null;
+}
+
 /// An n-by-k EXL3 projection, its trellis kept as stored (Dense reads the stored layout).
 fn dense(s: *Sink, kit: ?*Kit, ck: *core.Checkpoint, prefix: []const u8, mod: []const u8, n: usize, k: usize) !Proj {
     var buf: [200]u8 = undefined;
     const gr = try admit.denseGroup(ck, try name(&buf, "{s}{s}", .{ prefix, mod }), n, k);
     const st = cuda.exl3.strides(k, n, gr.halves, false);
+    const fixed = tuned(k, n, gr.halves);
     const w: cuda.exl3.Weight = .{
         .trellis = try s.put(gr.trellis.bytes),
         .suh = try s.put(gr.suh.bytes),
@@ -141,7 +160,10 @@ fn dense(s: *Sink, kit: ?*Kit, ck: *core.Checkpoint, prefix: []const u8, mod: []
         .codebook = .mul1,
         .stride_k = st.k,
         .stride_nb = st.nb,
+        .sk = if (fixed) |f| f[0] else 0,
+        .wk = if (fixed) |f| f[1] else 0,
     };
+    if (cuda.exl3.variantIndex(w.halves, w.codebook, cuda.exl3.planOf(w).wk) == null) return error.UnsupportedQwenQuantization;
     if (kit) |x| try x.dense.reserve(s.e.stream, w);
     return .{ .x3 = w };
 }
@@ -277,11 +299,24 @@ fn all(s: *Sink, ck: *core.Checkpoint) !void {
                 .k_norm = try norm1(s, ck, "{s}self_attn.k_norm.weight", .{p}, geometry.head_dim),
             } };
         }
+        if (kit) |k| try reserveGroups(s.e.stream, k, l.*);
         l.mlp = if (g.moe()) .{ .moe = .{ .router = try router(s, ck, p), .experts = try experts(s, ck, p) } } else .{ .dense = .{
             .gate = try dense(s, kit, ck, p, "mlp.gate_proj", g.intermediate, g.hidden),
             .up = try dense(s, kit, ck, p, "mlp.up_proj", g.intermediate, g.hidden),
             .down = try dense(s, kit, ck, p, "mlp.down_proj", g.hidden, g.intermediate),
         } };
+    }
+}
+
+/// Grouped decode launches (q/k/v, qkv/z, gate/up) need their members' scratch together before any graph capture.
+fn reserveGroups(st: cuda.Stream, k: *Kit, l: engine.Layer) !void {
+    switch (l.mixer) {
+        .delta => |m| try k.dense.reserveGroup(st, &.{ m.qkv.x3, m.z.x3 }),
+        .attention => |m| try k.dense.reserveGroup(st, &.{ m.q.x3, m.k.x3, m.v.x3 }),
+    }
+    switch (l.mlp) {
+        .dense => |m| try k.dense.reserveGroup(st, &.{ m.gate.x3, m.up.x3 }),
+        .moe => {},
     }
 }
 
