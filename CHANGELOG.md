@@ -4,6 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- API keys can be limited to some routes: in the `--api-key-file`, `app[inference]: KEY` reaches only model requests, `grafana[read]: KEY` only listings and metrics, and `ops[admin]: KEY` everything. A scoped key is refused with 403 before its body is read. Keys without brackets, from `--api-key` or `TENSORFOLD_API_KEY`, keep every route as before, and a file that gives one key two different scope sets is rejected. See [key scopes](docs/api.md#key-scopes).
+
+- Opt-in admission limits for a shared server: `--max-inflight N` and `--max-inflight-per-key N` cap model requests in progress, overall or per key, and `--requests-per-second N` with `--request-burst N` limits how fast a key may start them. A refused request answers 429 with `Retry-After`. All four are off by default, and with none set every reply is byte-identical to before. See [admission](docs/api.md#admission).
+
+- Loading an MLX affine checkpoint checks each projection's geometry before it is read, cut or uploaded (bits, group size, packed words, scales and biases shapes, extents), and refuses a malformed one by name. On HIP, a MoE checkpoint whose shared expert stores its tables in another dtype than the routed experts now converts each from its own dtype, where it used to read the wrong bytes or overrun its buffer. Every published checkpoint we load gives the same bytes as before.
+
 - A streamed chat reply with tools now carries the same content as the whole reply: an unoffered or malformed tool call the whole reply keeps as text reaches the stream too, including around accepted calls and before later prose (#1365, #1429). A reply whose answer starts with whitespace sends its text when the reply ends, because only the final parse decides whether that whitespace stays. Inference tokens are unchanged. Thanks to @plotarmordev.
 
 - On Linux, `/metrics` reports the server's resident memory: `tensorfold:process_resident_bytes` and its anonymous, file and shared parts, plus the kernel's lifetime peak, read from `/proc/self/status` at scrape time (#1422). On a GB10 the CPU and GPU share one memory pool, so host memory a rank adds counts against the same limit as the weights. Thanks to @nuk3s.
