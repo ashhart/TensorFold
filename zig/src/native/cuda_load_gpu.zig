@@ -197,7 +197,6 @@ test "native Bolt load failure keeps destinations and kernel GPU parents through
     const module: cuda.Module = .{ .d = d, .handle = @ptrFromInt(6) };
     e.k.emb.mod = module;
     e.k.norms.mod = module;
-    e.k.moe.mod = module;
     e.k.train.module = module;
     for (&e.k.mods) |*m| m.* = module;
     const p = try t.allocator.create(nemotron.weights.PendingLoad);
@@ -220,7 +219,7 @@ test "native Bolt load failure keeps destinations and kernel GPU parents through
     Fake.fail_drain = false;
     try t.expectEqual(@as(usize, 0), recover());
     try t.expectEqual(@as(usize, 2), Fake.frees);
-    try t.expectEqual(@as(usize, 25), Fake.modules);
+    try t.expectEqual(@as(usize, 24), Fake.modules);
     try t.expectEqual(@as(usize, 1), Fake.releases);
     try t.expectEqual(@as(usize, 0), Fake.unsafe);
 }
@@ -306,7 +305,6 @@ fn partialEngine(g: *Gpu) !*nemotron.Engine {
     const module: cuda.Module = .{ .d = d, .handle = @ptrFromInt(6) };
     e.k.emb.mod = module;
     e.k.norms.mod = module;
-    e.k.moe.mod = module;
     e.k.train.module = module;
     for (&e.k.mods) |*m| m.* = module;
     const p = try t.allocator.create(nemotron.weights.PendingLoad);
@@ -365,7 +363,7 @@ fn interleaving(radio: bool) !void {
     keep(a);
     try t.expectEqual(@as(usize, 0), recover());
     try t.expectEqual(@as(usize, 2), Fake.releases);
-    try t.expectEqual(@as(usize, 50), Fake.modules);
+    try t.expectEqual(@as(usize, 48), Fake.modules);
     try t.expectEqualSlices(usize, &.{ 1, 1 }, &Fake.released);
     try t.expectEqual(@as(usize, if (radio) 4 else 2), Fake.frees);
     try t.expectEqual(@as(usize, 0), Fake.unsafe);
@@ -402,7 +400,7 @@ test "native close entry retries old loads and restores the closing context" {
     b.driver.close();
     t.allocator.destroy(b);
     try t.expectEqual(@as(usize, 1), releases);
-    try t.expectEqual(@as(usize, 25), modules);
+    try t.expectEqual(@as(usize, 24), modules);
     try t.expectEqual(@as(usize, 1), frees);
     try t.expectEqual(expected, bound);
 }
@@ -421,7 +419,7 @@ test "engine close entry retries other retained contexts and restores its own" {
     b.ctx.deinit();
     b.driver.close();
     t.allocator.destroy(b);
-    try t.expectEqual(@as(usize, 25), modules);
+    try t.expectEqual(@as(usize, 24), modules);
     try t.expectEqual(expected, bound);
 }
 fn nativeOverlap(new_keep: bool) !void {
@@ -458,7 +456,7 @@ fn nativeOverlap(new_keep: bool) !void {
     try t.expectEqual(@as(usize, if (new_keep) 1 else 2), Fake.releases);
     try t.expectEqual(@as(usize, 0), recover());
     try t.expectEqual(@as(usize, 2), Fake.releases);
-    try t.expectEqual(@as(usize, 50), Fake.modules);
+    try t.expectEqual(@as(usize, 48), Fake.modules);
     try t.expectEqualSlices(usize, &.{ 1, 1 }, &Fake.released);
     try t.expectEqual(@as(usize, 2), Fake.frees);
     try t.expectEqual(@as(usize, 0), recover());

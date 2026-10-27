@@ -109,7 +109,6 @@ pub const Glue = struct {
     s: cuda.Stream,
     emb: *const cuda.embed_rows.EmbedRows, // the shared token rows (embed_rows.cu)
     norms: *const cuda.norms.Norms, // the shared RMS norm rows (norms.cu)
-    moe: *const cuda.moe_glue.MoeGlue, // the shared expert combine (moe_glue.cu)
 
     fn tri(g: Glue) ?triton.Tri {
         return if (g.set) |x| .{ .set = x, .s = g.s } else null;
