@@ -386,4 +386,5 @@ pub const Pool = struct {
 test {
     _ = @import("kv_pool_test.zig");
     _ = @import("kv_pool_counts_test.zig");
+    _ = @import("kv_pool_walk_test.zig");
 }
