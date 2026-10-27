@@ -45,6 +45,8 @@ pub fn Kept(comptime F: type) type {
 
         fn copy(c: *F.Cuda, st: *snap.Snap, ranges: []const rows.image.Range, host: []u8, out: bool) !void {
             const d = c.engine.driver;
+            // a later range's failure leaves earlier copies queued on `host`, which its caller then frees or reuses
+            errdefer cuda.completion.drain(d, c.stream, "a failed kept-state copy did not drain");
             var w: Words = .{ .history = st.history, .at = st.at, .head = @intFromBool(st.head) };
             var o: usize = 0;
             for (ranges) |g| {
@@ -185,5 +187,53 @@ test "the image's parts are cuda_snap.move's pieces in its order: sizes, offsets
         try std.testing.expectEqual(parts.items.len, i);
         try std.testing.expectEqual(@as(u64, snap.bytes(at, head)), moved);
         try std.testing.expectEqual(rows.image.imageBytes(parts.items), off);
+    };
+}
+
+/// A driver whose device copies, out or in, queue the first and refuse the next; `pending`: queued, not yet waited for.
+const OneCopy = struct {
+    var queued: usize = 0;
+    var pending: usize = 0;
+    fn queue() cuda.abi.Result {
+        if (queued == 1) return cuda.abi.error_not_ready; // check() returns NotReady for it, logging nothing
+        queued += 1;
+        pending += 1;
+        return cuda.abi.success;
+    }
+    fn toHost(_: ?*anyopaque, _: u64, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return queue();
+    }
+    fn toDevice(_: u64, _: ?*const anyopaque, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return queue();
+    }
+    fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        pending = 0;
+        return cuda.abi.success;
+    }
+};
+
+/// A Flash Next namespace whose Cuda has just the fields its image reads, and no MTP head.
+const Bare = struct {
+    pub const Cuda = struct { gpa: Allocator, engine: struct { driver: *const cuda.Driver }, head: ?*anyopaque = null, stream: cuda.Stream };
+};
+
+test "Flash Next completion: a kept state's copy out or in that fails part way drains the copies it queued" {
+    var d: cuda.Driver = undefined;
+    d.api.cuMemcpyDtoHAsync_v2 = OneCopy.toHost;
+    d.api.cuMemcpyHtoDAsync_v2 = OneCopy.toDevice;
+    d.api.cuStreamSynchronize = OneCopy.sync;
+    var c: Bare.Cuda = .{ .gpa = std.testing.allocator, .engine = .{ .driver = &d }, .stream = .{ .d = &d, .handle = @ptrFromInt(331) } };
+    var st: snap.Snap = .{ .buf = .{ .d = &d, .ptr = 1 << 20, .len = 1024 }, .at = 0, .history = .{ 0, 0 }, .head = false };
+    var host: [words + 1024]u8 = @splat(0);
+    const K = Kept(Bare);
+    // the words and half the state queue a copy; the driver refuses the other half, or that range runs past the state
+    for ([_]bool{ true, false }) |refused| for ([_]bool{ true, false }) |out| {
+        OneCopy.queued = 0;
+        OneCopy.pending = 0;
+        const ranges = [_]rows.image.Range{ .{ .off = 0, .len = words + 512 }, .{ .off = words + 512, .len = if (refused) 512 else 1024 } };
+        const got = if (out) K.image.gather(&c, &st, &ranges, &host) else K.image.scatter(&c, &st, &ranges, &host);
+        try std.testing.expectError(if (refused) error.NotReady else error.BadKeptRange, got);
+        try std.testing.expectEqual(@as(usize, 1), OneCopy.queued);
+        try std.testing.expectEqual(@as(usize, 0), OneCopy.pending); // the caller's `host` may go: nothing copies on it
     };
 }
