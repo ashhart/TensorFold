@@ -205,7 +205,7 @@ pub fn topk(logits: []const f32, bias: []const f32, idx: []i32, wt: []f64, rows:
         }
         for (0..ns) |k| {
             if (k >= top_k) idx[r * ns + k] = @intCast(e + k - top_k);
-            wt[r * ns + k] = if (k >= top_k) 1 else if (norm) wt[r * ns + k] / total * scaling else wt[r * ns + k] * scaling;
+            wt[r * ns + k] = if (k >= top_k) 1 else if (norm) wt[r * ns + k] / (total + 1e-20) * scaling else wt[r * ns + k] * scaling;
         }
     }
 }

@@ -199,7 +199,7 @@ pub const TopK = struct {
                 const id = std.mem.readInt(u32, out[(r * ns + k) * 4 ..][0..4], .little);
                 const got: f64 = @as(f32, @bitCast(std.mem.readInt(u32, out[(n + r * ns + k) * 4 ..][0..4], .little)));
                 if (k >= k_ and id != ne + k - k_) return try std.fmt.bufPrint(&self.msg, "row {d}: shared slot {d} holds {d}", .{ r, k, id });
-                const want = if (k >= k_) 1 else (if (self.route.normalize) w64[k] / sum else w64[k]) * self.route.scale;
+                const want = if (k >= k_) 1 else (if (self.route.normalize) w64[k] / (sum + 1e-20) else w64[k]) * self.route.scale;
                 if (!(@abs(got - want) <= @abs(want) * 0x1p-20 + 1e-30)) return try std.fmt.bufPrint(&self.msg, "row {d} slot {d}: weight {d:.8} where float64 gives {d:.8}", .{ r, k, got, want });
             }
         }
