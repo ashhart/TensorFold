@@ -352,6 +352,8 @@ the same tokens as a fresh prompt pass; `TF_QWEN27_SLOT_RESUME=0` turns both off
 `--glp` reads its file once at startup, and the startup line reports the mode (`project` removes the component along the
 direction, `add` adds it), the strength in force, the layers the file names, the checkpoint the vector was derived from and
 whether the file's own digest matched; a vector derived at another site is reported as a warning, not refused.
+The [control vector guide](docs/control-vectors.md) covers the format, the layer a direction names, the producer that derives
+a vector from the model itself and the measured behaviour on Qwen3.8-27B.
 
 Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
