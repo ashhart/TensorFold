@@ -4,6 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 and 3.6 on HIP (Linux): when a checkpoint shard can't be memory-mapped and is read into memory instead (for example on some network or FUSE mounts), releasing an uploaded layer no longer zeroes that copy. Before, it also zeroed neighbouring tensors not yet uploaded: 269 of 690 layer tensors on Qwen3.5-2B, so the model ran on wrong weights or the loader panicked at close. A malformed shard header is now refused by name. Loads that map their shards are byte-identical to before.
+
+- Nemotron on CUDA counts the checkpoint's bytes for admission from the shard headers alone, without reading the weights. The estimate is unchanged, and with memory mapping off the count no longer reads each shard into memory.
+
+- Tests: the CUDA kernel contract runs to completion in a ReleaseSafe build. Three test adapters freed or copied memory in ways a safe build stops on (#1428). Thanks to @Bizuayeu.
+
 - The KV pool keeps its counts of free, kept and leased pages up to date as pages change hands, so an admission check no longer scans every page: about 55 µs at 262k pages before, now constant. Admission decisions and page order are unchanged, and on a GB10 with Nemotron's paged CUDA cache replies are the same tokens.
 
 - API keys can be limited to some routes: in the `--api-key-file`, `app[inference]: KEY` reaches only model requests, `grafana[read]: KEY` only listings and metrics, and `ops[admin]: KEY` everything. A scoped key is refused with 403 before its body is read. Keys without brackets, from `--api-key` or `TENSORFOLD_API_KEY`, keep every route as before, and a file that gives one key two different scope sets is rejected. See [key scopes](docs/api.md#key-scopes).
