@@ -1,4 +1,4 @@
-//! The CUDA contract's family sets and Clef's joint schema head.
+//! The CUDA contract's family sets (MiMo-V2's among them) and Clef's joint schema head.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -16,7 +16,6 @@ pub const Sets = struct {
     inkling2: *@import("contract_inkling2.zig").Set,
     moss: *@import("contract_moss_image.zig").Set,
     nemo_audio: *@import("contract_nemo_audio.zig").Set,
-    qwen3_asr: *@import("contract_qwen3_asr.zig").Set,
     modelopt: *@import("contract_flashnext_modelopt.zig").Set,
     grouped: *Grouped,
     flashnext: *@import("contract_flashnext_more.zig").Set,
@@ -28,7 +27,7 @@ pub const Sets = struct {
     joint_schema: *@import("contract_joint_schema.zig").Set,
     idol: *@import("contract_idol.zig").Set,
     idol_decoder: *@import("contract_idol_decoder.zig").Set,
-    glm_moe: *@import("contract_glm_moe_direct.zig").Set,
+    mimo: *@import("contract_mimo.zig").Group,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -44,8 +43,6 @@ pub const Sets = struct {
         errdefer moss.deinit();
         const nemo_audio = try @import("contract_nemo_audio.zig").Set.init(gpu, s, a, list);
         errdefer nemo_audio.deinit();
-        const qwen3_asr = try @import("contract_qwen3_asr.zig").Set.init(gpu, s, a, list);
-        errdefer qwen3_asr.deinit();
         const modelopt = try @import("contract_flashnext_modelopt.zig").Set.init(gpu, s, a, list);
         errdefer modelopt.deinit();
         const grouped = try gpu.gpa.create(Grouped);
@@ -75,10 +72,12 @@ pub const Sets = struct {
         errdefer muse.destroy(a);
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         errdefer joint_schema.deinit();
+        const mimo = try @import("contract_mimo.zig").Group.create(a, gpu, s, list);
+        errdefer mimo.destroy(a);
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
-        const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
+        errdefer idol_decoder.deinit();
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -87,7 +86,6 @@ pub const Sets = struct {
             .inkling2 = inkling2,
             .moss = moss,
             .nemo_audio = nemo_audio,
-            .qwen3_asr = qwen3_asr,
             .modelopt = modelopt,
             .grouped = grouped,
             .flashnext = flashnext,
@@ -99,14 +97,14 @@ pub const Sets = struct {
             .muse = muse,
             .a = a,
             .idol_decoder = idol_decoder,
-            .glm_moe = glm_moe,
+            .mimo = mimo,
         };
     }
 
     pub fn deinit(sets: Sets) void {
-        sets.glm_moe.deinit();
         sets.idol_decoder.deinit();
         sets.idol.deinit();
+        sets.mimo.destroy(sets.a);
         sets.joint_schema.deinit();
         sets.muse.destroy(sets.a);
         sets.prompt.deinit();
@@ -118,7 +116,6 @@ pub const Sets = struct {
         sets.grouped.deinit();
         sets.gpa.destroy(sets.grouped);
         sets.modelopt.deinit();
-        sets.qwen3_asr.deinit();
         sets.nemo_audio.deinit();
         sets.moss.deinit();
         sets.inkling2.deinit();
