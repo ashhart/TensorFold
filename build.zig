@@ -67,6 +67,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dsv41_draft.zig").steps(b);
     const target = b.standardTargetOptions(.{});
     @import("zig/build/copy_source.zig").steps(b);
+    @import("zig/build/checkpoint_io_host.zig").steps(b, target);
     const release_version = b.option([]const u8, "version", "Release version, exactly MAJOR.MINOR.PATCH");
     if (release_version) |v| if (!dist_build.validVersion(v)) @panic("-Dversion must be exactly MAJOR.MINOR.PATCH");
     const build_options = b.addOptions();
