@@ -30,7 +30,7 @@ const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native };
+const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native, @import("mimo_v2").native };
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
