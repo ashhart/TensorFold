@@ -214,7 +214,7 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 // Item z of the plan (or plain product, or a group's side) at CB columns a lane, R rows; chunk group is q >> gshift.
 template <class Dec, class Act, class T, class Epi, int R, int CB, class Sides>
 __device__ inline void stream_tile(typename Dec::Args& a, const Sides& sides, int lpc_log2, int gshift) {
-    // a one-row grid over more than R rows interleaves: a column block's row blocks are neighbours on x
+    // a one-row grid over more than R rows interleaves (launches/stream_layout.zig grid): row blocks neighbour on x
     const int nby = (a.m + R - 1) / R;
     const bool interleaved = gridDim.y == 1 && nby > 1;
     int bx = interleaved ? static_cast<int>(blockIdx.x) / nby : static_cast<int>(blockIdx.x);
