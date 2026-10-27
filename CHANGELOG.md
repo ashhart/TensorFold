@@ -44,6 +44,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on CUDA with NVFP4 experts loads them on several threads straight from the checkpoint's mapped planes, staged through the store's pinned buffer, so a server starts in about 83 s instead of about 200 s on a GB10 with `Qwen3.8-Flash-Next-FP4-Local` (#1368). Replies are the same tokens, and prompt and decode speed are unchanged or slightly faster. Thanks to @Arminova.
 
+- GLM-5.3-Flash on CUDA can score a prompt chunk's DSA indexer in two kernels of its own with `TF_GLM_INDEX_CUDA=1` (opt-in; #1449, for #1430). They read the same MMA fragments and epilogue as the kernel they replace and give the same bytes: on a GB10 the kernel contract finds them byte-equal and stable across repeats, and replies are the same tokens. The first token of a cold prompt came 2% sooner at 131k tokens, 9% at 524k and 16% at 1M. Without the variable nothing changes. Thanks to @wojo.
+
 ## 1.1.7
 
 - Flash Next on a Mac can leave its routed experts and n-gram tables in the checkpoint and read them from SSD with `--ssd-experts GIB` and `--ple-on-ssd`, so a checkpoint larger than the Mac's memory can be served (#1039, see [Exact Fluid Subgraph Residency](docs/recipes/fluid-subgraph-residency.md)). Neither is on by default. Replies are the same tokens as with everything in memory; a budget too small for one layer's experts refuses at startup instead of changing the model's settings. On an M5 Ultra the 6-bit MTP checkpoint, which does not fit in memory, serves with a 16 GiB expert budget; on an M3 Ultra with the 4-bit checkpoint, servers without the flags are unchanged in prefill and decode.
