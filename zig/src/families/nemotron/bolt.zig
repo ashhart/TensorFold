@@ -30,6 +30,7 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
 
     // router logits = x . gate^T in bf16, then mlx_lm's group_expert_select (sigmoid + bias top-k, normalised, scaled)
     gemv(f, e, .{ .w = m.gate.buffer, .off = m.gate.offset, .n = E, .k = c.hidden }, s.x, 0, s.logits_e, rows);
+    f.tapAt(e, .gate, s.logits_e, rows * E * 2);
     e.pipe(f.p.?.get("tf_route_topk"));
     e.buf(s.logits_e, 0, 0);
     e.buf(m.gate_bias.buffer, m.gate_bias.offset, 1);
@@ -38,15 +39,20 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     e.buf(s.idx, 0, 4);
     e.buf(s.wt, 0, 5);
     e.run(.{ E, rows, 1 }, .{ E, 1, 1 });
+    f.tapAt(e, .route_idx, s.idx, pairs * 4);
+    f.tapAt(e, .route_wt, s.wt, pairs * 4);
 
     // the shared expert runs in hidden, as in the Lightning path
     layers.upRelu2(f, e, m.shared_up, rows);
     f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
+    f.tapAt(e, .shared, s.sh, rows * c.hidden * 2);
 
     // into: hidden -> latent, then the routed experts up/down in the latent (runtime-dim row kernels)
     gemv(f, e, m.into.?, s.x, 0, s.x_lat.?, rows);
+    f.tapAt(e, .into, s.x_lat.?, rows * c.latent * 2);
     f.indexed(e, m.routed.?[0], c.top_k, pairs, true, s.x_lat.?, s.idx, s.act);
     f.indexed(e, m.routed.?[1], 1, pairs, false, s.act, s.idx, s.ey_lat.?);
+    f.tapAt(e, .experts, s.ey_lat.?, pairs * c.latent * 2);
 
     // the picks combined by weight in MLX's order ((y * scores).sum(-2) in fp32), into x_lat now the up has read it
     e.pipe(f.p.?.get("tf_moe_combine_rows_lanes8"));
@@ -55,9 +61,11 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     e.bytes([2]i32{ @intCast(c.top_k), @intCast(c.latent) }, 2);
     e.buf(s.x_lat.?, 0, 3);
     e.run(.{ c.latent, rows, 1 }, .{ 256, 1, 1 });
+    f.tapAt(e, .combine, s.x_lat.?, rows * c.latent * 2);
 
     // out: the combined latent back to hidden, once a row (delta is free in an MoE layer)
     gemv(f, e, m.out.?, s.x_lat.?, 0, s.delta, rows);
+    f.tapAt(e, .mixer_out, s.delta, rows * c.hidden * 2);
 
     // add_norm at one pick of weight 1: bf16(y + shared), bf16(h + y), the next input norm and its sums
     e.pipe(f.k.get("add_norm_moe_xs_bolt"));

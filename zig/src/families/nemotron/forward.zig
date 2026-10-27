@@ -59,10 +59,18 @@ pub fn ints8(values: []const i32) [8]i32 {
     return out;
 }
 
+/// A stage of a forward a test tool can look at (tf-nemotron-forward --stages): each names the buffer just written.
+pub const Point = enum { h_in, x_in, in_proj, conv, scan, gnorm, qkv, attn, gate, route_idx, route_wt, shared, into, experts, combine, mixer_out, h_out, x_out };
+
+/// A test tool's copy of each stage's output (bytes from offset 0 of `src`); null in the engine, which then encodes
+/// nothing more.
+pub const Tap = struct { ctx: *anyopaque, at: *const fn (ctx: *anyopaque, f: Forward, e: *Enc, p: Point, src: Buffer, bytes: usize) void };
+
 pub const Forward = struct {
     c: cfg.Config,
     k: *const kern.Kernels,
     p: ?*const pk.Kernels = null, // the MLX-exact ops (Bolt's gemv, route and combine)
+    tap: ?Tap = null, // tf-nemotron-forward --stages only
     w: *const wts.Weights,
     s: *st.Scratch,
     pool: *st.Pool,
@@ -244,9 +252,12 @@ pub const Forward = struct {
         var attention: usize = 0;
         for (0..c.layers) |i| {
             const next = if (i + 1 < c.layers) self.w.norms[i + 1] else self.w.norm_f;
+            self.tapAt(e, .h_in, s.h, rows * d * 2);
+            self.tapAt(e, .x_in, s.x, rows * d * 2);
             switch (self.w.layers[i]) {
                 .mamba => |m| {
                     layers.mamba(self, e, m, mamba, &t, rows);
+                    self.tapAt(e, .mixer_out, s.delta, rows * d * 2);
                     self.norm(e, s.delta, next, rows, c.eps);
                     mamba += 1;
                 },
@@ -255,10 +266,13 @@ pub const Forward = struct {
                     var kvs: [st.max_rows]layers.Kvs = undefined;
                     for (segs, 0..) |g, j| kvs[j] = .{ .kv = g.cache.kv[attention], .len = g.cache.len, .rows = g.rows, .tree = g.parents != null or g.gpu_tree != null, .deepest = deepest, .gpu = g.gpu, .gpu_tree = g.gpu_tree, .layer = attention };
                     layers.attention(self, e, a, kvs[0..segs.len], rows);
+                    self.tapAt(e, .mixer_out, s.delta, rows * d * 2);
                     self.norm(e, s.delta, next, rows, c.eps);
                     attention += 1;
                 },
             }
+            self.tapAt(e, .h_out, s.h, rows * d * 2);
+            self.tapAt(e, .x_out, s.x, rows * d * 2);
         }
     }
 
@@ -414,6 +428,11 @@ pub const Forward = struct {
     /// logits = x . lm_head^T for a full-precision bf16 LM head (Bolt keeps lm_head unquantized).
     fn denseHead(self: Forward, e: *Enc, hd: wts.Dense, x_off: usize, rows: usize) void {
         bolt.gemv(self, e, hd, self.s.x, x_off, self.s.logits, rows);
+    }
+
+    /// Hands the stage just written to the test tool's tap, if any (nothing is encoded without one).
+    pub fn tapAt(self: Forward, e: *Enc, p: Point, src: Buffer, bytes: usize) void {
+        if (self.tap) |t| t.at(t.ctx, self, e, p, src, bytes);
     }
 
     /// u32 rows of `src` from `src_off` into `dst` at `dst_off` (window ids into a shared round's ids).

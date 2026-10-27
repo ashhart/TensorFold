@@ -78,6 +78,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     const c = f.c;
     const s = f.s;
     f.coop(e, "in", m.in_proj, s.x, 0, s.xs, s.proj, rows);
+    f.tapAt(e, .in_proj, s.proj, rows * c.projDim() * 2);
     const dims = [2]i32{ @intCast(t.virtual), st.replay_rows };
     const ra = f.round;
 
@@ -99,6 +100,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     e.buf(f.pool.conv[index], 0, 10);
     e.run(.{ c.convDim(), if (ra) |r| r.virtual else t.virtual, 1 }, .{ 256, 1, 1 });
 
+    f.tapAt(e, .conv, s.xbc, rows * c.convDim() * 2);
     e.pipe(if (c.bolt) f.k.get("tf_tree_scan_bolt") else f.k.get("tf_tree_scan"));
     e.buf(s.proj, 0, 0);
     e.buf(s.xbc, 0, 1);
@@ -123,6 +125,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     e.run(.{ 32, c.mamba_head_dim, c.mamba_heads }, .{ 32, 8, 1 });
 
     const group = c.inner() / c.groups;
+    f.tapAt(e, .scan, s.y, rows * c.inner() * 2);
     e.pipe(groupNorm(f, rows));
     e.buf(s.y, 0, 0);
     e.buf(m.norm.buffer, m.norm.offset, 1);
@@ -132,6 +135,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     e.buf(s.ys, 0, 5);
     e.run(.{ group / 4 * c.groups, Forward.mp(rows), 1 }, .{ group / 4, 1, 1 });
 
+    f.tapAt(e, .gnorm, s.yn, rows * c.inner() * 2);
     f.coop(e, "out", m.out_proj, s.yn, 0, s.ys, s.delta, rows);
     if (m.slide) |r| rest(f, e, r, s.yn, s.delta, rows, f.c.inner());
     if (m.adapter) |ad| adapt(f, e, ad, s.yn, s.delta, rows);
@@ -426,6 +430,7 @@ pub const GpuArgs = struct { buffer: Buffer, kv: usize, attn: usize, chunks: usi
 /// q/k/v for all rows, each segment's new rows into its cache, its rows attending to its cache, then o_proj.
 pub fn attention(f: Forward, e: *Enc, a: wts.Attention, segs: []const Kvs, rows: usize) void {
     f.coop(e, "qkv", a.qkv, f.s.x, 0, f.s.xs, f.s.qkv, rows);
+    f.tapAt(e, .qkv, f.s.qkv, rows * (f.c.heads + 2 * f.c.kv_heads) * f.c.head_dim * 2);
     var r0: usize = 0;
     for (segs) |sg| {
         if (sg.gpu) |ga| kvWriteAt(f, e, sg.kv, ga.buffer, ga.kv, r0, sg.rows) else kvWrite(f, e, sg.kv, sg.write orelse sg.len, r0, sg.rows);
@@ -513,6 +518,7 @@ pub fn attend(f: Forward, e: *Enc, a: wts.Attention, segs: []const Kvs, rows: us
         r0 += t;
     }
     const o_in = if (lone) s.att else s.ax;
+    f.tapAt(e, .attn, o_in, rows * c.heads * hd * 2);
     f.xsum(e, "xsum_4096", c.heads * hd, o_in, 0, s.axs, rows);
     f.coop(e, "out", a.o_proj, o_in, 0, s.axs, s.delta, rows);
     if (a.slide) |r| rest(f, e, r, o_in, s.delta, rows, f.c.heads * f.c.head_dim);
