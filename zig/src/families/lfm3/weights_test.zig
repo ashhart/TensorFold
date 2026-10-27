@@ -130,3 +130,21 @@ test "module names of both namespaces are names of the schema" {
     }
     try std.testing.expectError(error.MixedNamespaces, w.detect(true, true));
 }
+
+test "the ModelOpt NVFP4 export: 502 bare tensors, FP4 FFN with its scales, everything else bf16" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try c.parse(std.testing.allocator, @import("config_test.zig").nvfp4);
+    defer cfg.deinit();
+    const h = try header(arena.allocator(), &cfg, .bare);
+    const m = try w.validate(std.testing.allocator, &cfg, &h);
+    try std.testing.expectEqual(@as(usize, 502), m.tensors);
+    try std.testing.expectEqual(@as(usize, 1829689408), m.bytes);
+    const codes = h.get("model.layers.0.feed_forward.w2.weight").?;
+    try std.testing.expect(codes.dtype == .u8 and codes.shape[0] == 2048 and codes.shape[1] == 3840);
+    try std.testing.expectEqual(@as(u8, 0), h.get("model.layers.0.feed_forward.w2.weight_scale_2").?.rank);
+    try std.testing.expect(h.get("model.layers.2.self_attn.gate_proj.weight").?.dtype == .bf16);
+    try std.testing.expect(h.get("model.embed_tokens.weight").?.dtype == .bf16);
+    try std.testing.expect(h.get("model.layers.0.conv.in_proj.scales") == null);
+    try std.testing.expectEqualSlices(usize, &.{ 2048, 1, 7 }, h.get("model.layers.0.conv.conv.weight").?.shape[0..3]);
+}
