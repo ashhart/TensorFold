@@ -37,25 +37,32 @@ Q27_SPECIALIZE
   const int base = int(m) * K + int(t) * E;
   const int dbase = int(t) * E;
   float hv[E];
+  float dv[E];
   for (int i = 0; i < E; i++) {
     // The residual as the block before it left it, in the precision the stream carries.
     hv[i] = float(bfloat(float(H[base + i]) + float(R[base + i])));
+    // The direction's own stretch, read once: the dot and the projection both read it.
+    dv[i] = DIR[dbase + i];
   }
   // The direction's component in this row: the dot over the row, a simdgroup tree and then the groups' partials.
-  float sd = 0.0f;
-  for (int i = 0; i < E; i++) sd = fma(hv[i], DIR[dbase + i], sd);
-  sd = simd_sum(sd);
-  if (thread_index_in_simdgroup == 0) dot_parts[simdgroup_index_in_threadgroup] = sd;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  float dot = 0.0f;
-  for (int i = 0; i < TPG / 32; i++) dot += dot_parts[i];
-  const float k = ALPHA * dot;
+  float k = 0.0f;
+  if (MODE == 0) {
+    // The add mode does not use the dot, so it skips the reduction the project mode needs.
+    float sd = 0.0f;
+    for (int i = 0; i < E; i++) sd = fma(hv[i], dv[i], sd);
+    sd = simd_sum(sd);
+    if (thread_index_in_simdgroup == 0) dot_parts[simdgroup_index_in_threadgroup] = sd;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float dot = 0.0f;
+    for (int i = 0; i < TPG / 32; i++) dot += dot_parts[i];
+    k = ALPHA * dot;
+  }
 
   // What the stream holds after the direction acts on it, and the squares the normalisation reads.
   float pv[E];
   float ss = 0.0f;
   for (int i = 0; i < E; i++) {
-    const float d = DIR[dbase + i];
+    const float d = dv[i];
     const float v = MODE == 0 ? hv[i] - k * d : hv[i] + ALPHA * d;
     const bfloat rounded = bfloat(v);
     HO[base + i] = rounded;
