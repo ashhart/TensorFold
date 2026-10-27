@@ -475,6 +475,8 @@ pub const SeqState = struct {
     cap: usize,
     /// Block scores for an attention block's rows [min(rows, att_rows), scoreStride(cap)] fp32 (the engine's).
     scores: u64,
+    /// The K/V paged to host memory with a device block cache (cuda_exl3_kvpage.zig), else kc/vc hold it all.
+    paged: ?*@import("exl3/kv/cuda_exl3_kvpage.zig").Paged = null,
     /// The attention caches' pages (pt 0: kc, vc, ikc and pooled are contiguous rows).
     pg: @import("cuda_glue.zig").Pg = .{},
 };

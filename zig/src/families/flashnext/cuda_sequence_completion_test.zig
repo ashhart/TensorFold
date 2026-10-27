@@ -96,6 +96,8 @@ test "Flash Next completion: allocation refusals drain fills before every constr
         e.gpa = t.allocator;
         e.driver = &d;
         e.stream = &stream;
+        e.page_config = null;
+        e.shared_arena = null;
         e.eos = 1;
         e.round_graph = .{};
         try t.expectError(error.OutOfDeviceMemory, e.newSeq(4));
@@ -117,6 +119,8 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
         e.gpa = t.allocator;
         e.driver = &d;
         e.stream = &stream;
+        e.page_config = null;
+        e.shared_arena = null;
         e.eos = 1;
         e.round_graph = .{};
         try t.expectError(error.NotReady, e.newSeq(4));
@@ -130,6 +134,8 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
     e.gpa = t.allocator;
     e.driver = &d;
     e.stream = &stream;
+    e.page_config = null;
+    e.shared_arena = null;
     e.eos = 1;
     e.round_graph = .{};
     var seq = try e.newSeq(4);

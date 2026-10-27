@@ -133,7 +133,7 @@ pub fn finishWithSampler(engine: anytype, sequences: anytype, before: counters.S
         return;
     };
     defer after.deinit(engine.gpa);
-    var report = counters.Report.between(before, after, .{ .phase = phase, .model_rows = rows, .steps = 1 }) catch |failure| {
+    var report = counters.Report.between(before, after, .{ .phase = phase, .model_rows = rows, .steps = 1, .allow_initial_kv_reset = phase == .prefill }) catch |failure| {
         failed(engine, phase, failure);
         return;
     };
@@ -167,10 +167,10 @@ test "exl3: serving telemetry disabled adds no completion or readback and opt in
             engine.completions += 1;
         }
 
-        fn sample(_: std.mem.Allocator, engine: *@This(), _: @TypeOf(null), _: @TypeOf(null), rank: counters.Rank, _: cache.Completion) !counters.Snapshot {
+        fn sample(allocator: std.mem.Allocator, engine: *@This(), _: @TypeOf(null), _: @TypeOf(null), rank: counters.Rank, _: cache.Completion) !counters.Snapshot {
             try std.testing.expect(engine.completions > engine.reads);
             engine.reads += 1;
-            return .{ .rank = rank, .scope = 1, .experts = .{ .device_copies = engine.reads } };
+            return .{ .rank = rank, .scope = 1, .experts = .{ .device_copies = engine.reads }, .kv = try allocator.alloc(counters.KvSample, 0) };
         }
 
         fn emit(engine: *@This(), report: counters.Report) !void {
@@ -254,7 +254,7 @@ test "exl3: forward and verify phase scopes restore nested caller state on error
 test "exl3: extracted disabled forward and round wrappers call underlying operations without joins" {
     const prompt = @import("cuda_prompt.zig");
     const cuda = @import("cuda");
-    const Fake = @import("exl3/model/cuda_exl3_fake_driver_test.zig").Fake;
+    const Fake = @import("exl3/offload/cuda_exl3_shared_kv_test.zig").Fake;
     const Calls = struct {
         var forwards: usize = 0;
         var rounds: usize = 0;

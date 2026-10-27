@@ -21,6 +21,7 @@ pub const flashnext_gdn: []const u8 = if (available) &Blob("fatbin_flashnext_gdn
 pub const flashnext_exl3: []const u8 = if (available) &Blob("fatbin_flashnext_exl3").bytes else &.{};
 pub const flashnext_exl3_tp: []const u8 = if (available) &Blob("fatbin_flashnext_exl3_tp").bytes else &.{};
 pub const flashnext_exl3_kv: []const u8 = if (available) &Blob("fatbin_flashnext_exl3_kv").bytes else &.{};
+pub const flashnext_exl3_kvpage: []const u8 = if (available) &Blob("fatbin_flashnext_exl3_kvpage").bytes else &.{};
 pub const flashnext_exl3_prefill: []const u8 = if (available) &Blob("fatbin_flashnext_exl3_prefill").bytes else &.{};
 pub const flashnext_batch: []const u8 = if (available) &Blob("fatbin_flashnext_batch").bytes else &.{};
 pub const flashnext_mtp: []const u8 = if (available) &Blob("fatbin_flashnext_mtp").bytes else &.{};

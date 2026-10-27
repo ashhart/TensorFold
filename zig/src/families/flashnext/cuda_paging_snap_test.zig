@@ -71,7 +71,7 @@ const Fixture = struct {
         return .{ .base = 0x4000_0000, .table = .{ .d = d, .ptr = 0x5000, .len = 0, .borrowed = true }, .ids = &f.ids, .tokens = 64, .own_ids = false };
     }
     fn seq(f: *Fixture, d: *const cuda.Driver) prompt.Seq {
-        return .{ .conv = &f.conv, .state = &f.states, .kc = &f.kv[0], .vc = &f.kv[1], .ikc = &f.kv[2], .pooled = &f.kv[3], .paged = f.paged(d), .tail = .{ .d = d, .ptr = 0x9000_0000, .len = 0, .borrowed = true }, .history = .{ 5, 9 }, .fed = 150, .logits = &.{}, .cap = 200 };
+        return .{ .conv = &f.conv, .state = &f.states, .kc = &f.kv[0], .vc = &f.kv[1], .ikc = &f.kv[2], .pooled = &f.kv[3], .ptable = f.paged(d), .tail = .{ .d = d, .ptr = 0x9000_0000, .len = 0, .borrowed = true }, .history = .{ 5, 9 }, .fed = 150, .logits = &.{}, .cap = 200 };
     }
 };
 
@@ -113,7 +113,7 @@ test "paged snapshots: save and restore keep contiguous order across partial shu
     for (saved[0..n], Fake.copies[0..n]) |a, b| try std.testing.expectEqual([3]u64{ a[1], a[0], a[2] }, b);
     try std.testing.expectEqual(@as(usize, 150), seq.fed);
     var flat = seq;
-    flat.paged = null;
+    flat.ptable = null;
     Fake.n = 0;
     try snap.restore(stream, &flat, null, kept);
     try std.testing.expectEqual(@as(usize, 2 * wt.linear_n + 4 * wt.attn_n + 1), Fake.n);
@@ -155,7 +155,7 @@ test "paged snapshots: the pooled MTP head occupies the thirteenth layer with th
     var seq = f.seq(&d);
     var p = f.paged(&d);
     p.layers = wt.attn_n + 1;
-    seq.paged = p;
+    seq.ptable = p;
     const Draft = @import("cuda_mtp_draft.zig").Draft;
     var head = try Draft.initIn(std.testing.allocator, &d, 200, 8, 16, &p, 0xa000_0000, Draft.runBytes(8, 16));
     defer head.deinit();

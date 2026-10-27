@@ -153,7 +153,7 @@ const Fixture = struct {
         const stats = fixture.ring.stats;
         var experts: telemetry.Experts = .{ .ring_dma_copies = stats.copies, .ring_dma_requested_bytes = stats.dma_requested_bytes, .ring_unused_copies = stats.wasted };
         attribution.publish(fixture.ring.attribution.?.totals, &experts);
-        return .{ .rank = .{ .rank = 1, .world = 2 }, .scope = 1, .ring_owner = 1, .experts = experts };
+        return .{ .rank = .{ .rank = 1, .world = 2 }, .scope = 1, .ring_owner = 1, .experts = experts, .kv = &.{} };
     }
 };
 

@@ -9,6 +9,7 @@ const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
 const exl3_pass = @import("exl3/model/cuda_exl3_pass.zig");
+const exl3_kvpage = @import("exl3/kv/cuda_exl3_kvpage.zig");
 const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
@@ -371,6 +372,7 @@ pub fn Pass(comptime Tri: type) type {
         /// `n` rows of self.seq from self.pos0: rope, cache writes and pooling, then scores, selection and attention.
         fn attnRows(self: *Self, lw: *const Layer, ai: usize, pa: u64, n: usize, at: RowsAt) !void {
             if (self.seq.kv8) |c| return @import("exl3/kv/cuda_exl3_kv.zig").attnRows(self, lw, ai, pa, n, at, c); // int8 KV (K10)
+            if (exl3_kvpage.takes(self.seq)) return exl3_kvpage.attnRows(self, lw, ai, pa, n, at);
             const s = self.s;
             const kc = self.seq.kc[ai].ptr;
             const vc = self.seq.vc[ai].ptr;

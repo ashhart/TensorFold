@@ -123,8 +123,9 @@ pub fn Namespace(comptime Tri: type) type {
 
         pub fn rankRoom(ptr: *anyopaque, local: u64) !u64 {
             const own = of(ptr);
-            if (own.ranks) |r| return @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, local, own.stream_bytes);
-            return local;
+            const protected = try @import("exl3/kv/cuda_exl3_kvpage.zig").admissionRoom(local, own.stream_bytes, own.engine.page_config);
+            if (own.ranks) |r| return @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, protected, own.stream_bytes);
+            return protected;
         }
 
         /// A request or load this engine refuses, in words; null: none of its own.
@@ -283,7 +284,7 @@ pub fn Namespace(comptime Tri: type) type {
                     s.proposer = null;
                 }
                 // a window's rows past the reply's last token (its drafts) still need cache slots
-                const cap = @min(ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), prompt.max_tokens);
+                const cap = if (self.engine.page_config != null) @min(prompt.max_tokens, self.context + mtp.max_rows) else @min(ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), prompt.max_tokens);
                 const from = self.kv.choose();
                 gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.create(cap) else if (from == .pool) self.kv.pool.?.open(cap) else self.engine.newSeq(cap)) catch |err| {
                     self.lanes.removeByPtr(gop.key_ptr);
@@ -314,7 +315,7 @@ pub fn Namespace(comptime Tri: type) type {
                     l.filled = kept.at;
                     s.cached = @intCast(kept.at);
                 } else |err| switch (err) {
-                    error.SequenceTooShort, error.NoHeadState => {
+                    error.SequenceTooShort, error.NoHeadState, error.KvPageSnapshotLayout => {
                         std.log.warn("flashnext: kept state at {d} not restored ({t})", .{ kept.at, err });
                         s.reuse_failed = true;
                     },

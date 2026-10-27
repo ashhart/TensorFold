@@ -11,7 +11,7 @@ const max_rows = mtp.max_rows;
 
 test "exl3: common verification scopes TP1 and TP2 validation and delegation without joins" {
     const Tri = @import("cuda_launch.zig").Tri;
-    const Fake = @import("exl3/model/cuda_exl3_fake_driver_test.zig").Fake;
+    const Fake = @import("exl3/offload/cuda_exl3_shared_kv_test.zig").Fake;
     const Phase = @import("exl3/model/exl3_telemetry.zig").Phase;
     const Delegate = struct {
         engine: *prompt.Engine,

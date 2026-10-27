@@ -26,6 +26,7 @@ comptime {
 /// Whether attention layers split at `world`: at 2 only with TF_FLASHNEXT_ATTN_SPLIT=1; never at 1.
 pub fn splitAt(world: usize) bool {
     if (world != 2) return false;
+    if (@import("../kv/cuda_exl3_kvpage.zig").configFromEnv() != null) return false;
     const v = std.c.getenv("TF_FLASHNEXT_ATTN_SPLIT") orelse return false;
     return std.mem.eql(u8, std.mem.span(v), "1");
 }

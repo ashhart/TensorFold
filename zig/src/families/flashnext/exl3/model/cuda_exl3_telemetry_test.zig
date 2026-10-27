@@ -1,7 +1,52 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const pool = @import("../offload/cuda_exl3_pool.zig");
+const pager = @import("../kv/cuda_exl3_kvpage.zig");
 const telemetry = @import("exl3_telemetry.zig");
+const Fake = @import("../offload/cuda_exl3_shared_kv_test.zig").Fake;
+
+test "exl3: raw KV counters preserve unsigned high bits and restore advances telemetry revision" {
+    var driver = Fake.driver();
+    var tables: [12 * (2 + 8) + 2]u32 = @splat(0);
+    tables[24 + 3] = 0x80000001;
+    tables[24 + 4] = 0xfffffff0;
+    tables[24 + 5] = 0x90000002;
+    tables[24] = 0x80000010;
+    var paged: pager.Paged = undefined;
+    paged.d = &driver;
+    paged.shared_arena = null;
+    paged.cfg = .{ .slots = 1 };
+    paged.wr = 4096;
+    paged.nblocks = 1;
+    paged.tabs = .{ .d = &driver, .ptr = @intFromPtr(&tables), .len = @sizeOf(@TypeOf(tables)), .borrowed = true };
+    paged.rebases = @splat(0);
+    paged.written = @splat(0);
+    const stats = try paged.stats(0);
+    try std.testing.expectEqual(@as(u64, 0x80000001), stats.misses);
+    try std.testing.expectEqual(@as(u64, 0xfffffff0), stats.needed);
+    try std.testing.expectEqual(@as(u64, 0x90000002), stats.calls);
+    try std.testing.expectEqual(@as(u32, 0x80000010), try paged.sampleClockAfterConsumers());
+    paged.telemetry_revision = 7;
+    paged.publishSnapshot(.{ .layout = undefined, .win0 = @splat(0), .rebases = @splat(0), .written = @splat(0) });
+    try std.testing.expectEqual(@as(u64, 8), paged.telemetry_revision);
+}
+
+test "exl3: shared telemetry samples the arena clock without completion waits" {
+    const shared = @import("../offload/cuda_exl3_shared_kv.zig");
+    var driver = Fake.driver();
+    const arena = try shared.Arena.initStorage(std.testing.allocator, &driver, .{ .cap = 8192, .lanes = 2, .window = 2052, .rows = 1, .slots = 3 });
+    defer arena.destroy() catch unreachable;
+    const clock: *u32 = @ptrFromInt(arena.tables.ptr + arena.layout.clock);
+    clock.* = 524288;
+    var paged: pager.Paged = undefined;
+    paged.d = &driver;
+    paged.shared_arena = arena;
+    const syncs = Fake.sync_calls;
+    try std.testing.expectEqual(@as(u32, 524288), try paged.sampleClockAfterConsumers());
+    clock.* += 1;
+    try std.testing.expectEqual(@as(u32, 524289), try paged.sampleClockAfterConsumers());
+    try std.testing.expectEqual(syncs, Fake.sync_calls);
+}
 
 test "exl3: ring demand counts routed pick appearances separately from per-chunk expert requests and speculative copies" {
     var stats: @import("../prefill/cuda_exl3_prefill_ring.zig").Stats = .{};
@@ -32,6 +77,7 @@ test "exl3: aggregate telemetry finds attached pools deduplicates MTP aliases an
     var experts: @import("../pack/cuda_exl3_load.zig").Experts = undefined;
     experts.pool = &resident;
     var engine: @import("../../cuda_prompt.zig").Engine = undefined;
+    engine.shared_arena = null;
     engine.telemetry = .{};
     engine.n_layers = 1;
     engine.layers[0].exl3 = &experts;

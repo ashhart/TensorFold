@@ -126,7 +126,7 @@ pub const Pool = struct {
         }
         errdefer cuda.completion.drain(e.driver, e.stream.*, "flashnext: failed pool initialization did not drain");
         try arena.fill8(0, e.stream.handle);
-        for (p.lanes) |x| try x.seq.paged.?.table.fill8(0, e.stream.handle);
+        for (p.lanes) |x| try x.seq.ptable.?.table.fill8(0, e.stream.handle);
         try e.stream.synchronize();
         return p;
     }
@@ -153,7 +153,7 @@ pub const Pool = struct {
         const none: cuda.DeviceBuffer = .{ .d = d, .ptr = 0, .len = 0, .borrowed = true };
         @memset(conv, none);
         @memset(state, none);
-        return .{ .conv = conv, .state = state, .kc = kc, .vc = vc, .ikc = ikc, .pooled = pooled, .paged = paged, .tail = none, .history = .{ p.e.eos, p.e.eos }, .fed = 0, .logits = try gpa.alloc(u8, prompt.vocabulary * 2), .cap = 0 };
+        return .{ .conv = conv, .state = state, .kc = kc, .vc = vc, .ikc = ikc, .pooled = pooled, .ptable = paged, .tail = none, .history = .{ p.e.eos, p.e.eos }, .fed = 0, .logits = try gpa.alloc(u8, prompt.vocabulary * 2), .cap = 0 };
     }
 
     pub fn deinit(p: *Pool) void {
@@ -194,9 +194,9 @@ pub const Pool = struct {
         const run = p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
         errdefer p.pool.releaseRun(run, k);
         errdefer cuda.completion.drain(p.e.driver, p.e.stream.*, "flashnext: a failed lane open did not drain");
-        var up: Upload = .{ .p = p, .table = x.seq.paged.?.table };
+        var up: Upload = .{ .p = p, .table = x.seq.ptable.?.table };
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
-        x.seq.paged.?.ids = x.lease.ids.items;
+        x.seq.ptable.?.ids = x.lease.ids.items;
         x.run = run;
         try p.mapStates(&x.seq);
         try p.e.clearSeq(&x.seq, cap);
@@ -230,12 +230,12 @@ pub const Pool = struct {
         const x = p.laneOf(seq) orelse return error.UnknownStream;
         const run_len = p.layout.runPages() * p.layout.pageBytes();
         if (run_len < seqRunBytes()) return error.FlashNextRunTooShort;
-        return mtp.Draft.initIn(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.paged.?, p.runBase(x) + seqRunBytes(), run_len - seqRunBytes());
+        return mtp.Draft.initIn(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.ptable.?, p.runBase(x) + seqRunBytes(), run_len - seqRunBytes());
     }
 
     fn laneOf(p: *Pool, seq: *const prompt.Seq) ?*Lane {
-        const t = (seq.paged orelse return null).table.ptr;
-        for (p.lanes) |*x| if (x.seq.paged.?.table.ptr == t) return x;
+        const t = (seq.ptable orelse return null).table.ptr;
+        for (p.lanes) |*x| if (x.seq.ptable.?.table.ptr == t) return x;
         return null;
     }
 
@@ -248,7 +248,7 @@ pub const Pool = struct {
         p.pool.finish(&x.lease);
         if (seq.media) |*m| m.deinit(); // the stream's image state, held by its copy
         seq.media = null;
-        x.seq.paged.?.ids = &.{};
+        x.seq.ptable.?.ids = &.{};
         x.seq.cap = 0;
         x.used = false;
         return true;

@@ -3,11 +3,15 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const snap = @import("cuda_snap.zig");
+const mtp = @import("cuda_mtp.zig");
+const prompt = @import("cuda_prompt.zig");
 
 /// Size, save, restore and drop over the lane owner `of` finds behind a target pointer.
 pub fn Copies(comptime of: anytype) type {
     return struct {
         pub fn bytes(ptr: *anyopaque, at: u32) u64 {
+            const self = of(ptr);
+            if (self.engine.page_config) |cfg| return snap.pagedBytes(@min(self.context + mtp.max_rows, prompt.max_tokens), cfg.forChunk(self.engine.chunk), at, self.head != null) catch std.math.maxInt(u64);
             return snap.bytesKv(at, of(ptr).head != null, @import("exl3/kv/cuda_exl3_kv.zig").of(of(ptr).engine).rows());
         }
 

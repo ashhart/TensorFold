@@ -25,7 +25,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
-    if (page_tokens > 0 and (o.tp != 1 or o.slide or captured != null or mode == .exl3)) return error.FlashNextPagesUnsupported; // the pool's pages are not wired to EXL3's K/V
+    if (page_tokens > 0 and (o.tp != 1 or o.slide or captured != null or mode == .exl3)) return error.FlashNextPagesUnsupported; // EXL3 pages its own K/V (cuda_exl3_kvpage.zig)
     const driver: *cuda.Driver = @constCast(ctx.d);
     const own = try gpa.create(Cuda);
     errdefer gpa.destroy(own);
@@ -77,6 +77,9 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     }
     errdefer if (own.head) |h| h.deinit();
     const window = @min(o.context + mtp.max_rows, prompt.max_tokens);
+    const common_kv = try own.engine.reserveSharedKv(window);
+    persistent_bytes = try std.math.add(u64, persistent_bytes, common_kv);
+    if (common_kv != 0) std.log.info("flashnext rank {d}: shared BF16 KV common allocation {d} bytes, charged once before lane and expert-pool admission", .{ o.rank, common_kv });
     // and an attention block's block scores at the window (64 MiB at 262,144 tokens)
     _ = try own.engine.reserveScores(window, @min(o.context, own.engine.chunk));
     // a shared round's or a shared verify's scores: up to a drafting round's rows (facts' batch_rows)
@@ -89,7 +92,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const deep_before = cuda.usage(false).device;
     @import("exl3/prefill/cuda_exl3_prefill.zig").reserveFor(own.engine, o.context, o.tp); // EXL3 offload: deep prefill rows before the pools
     const deep_bytes = cuda.usage(false).device -| deep_before;
-    const own_seq_bytes = @import("exl3/kv/cuda_exl3_kv.zig").engineSeqBytes(@import("exl3/kv/cuda_exl3_kv.zig").of(own.engine), window);
+    const own_seq_bytes = try @import("exl3/kv/cuda_exl3_kv.zig").engineSeqBytes(@import("exl3/kv/cuda_exl3_kv.zig").of(own.engine), window, own.engine.chunk);
     var stream_bytes = own_seq_bytes;
     if (own.head) |h| {
         stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(window, h.ids.len, @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(own.engine)));

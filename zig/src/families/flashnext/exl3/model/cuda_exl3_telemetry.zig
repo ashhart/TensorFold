@@ -4,6 +4,7 @@ const load = @import("../../cuda_prompt_load.zig");
 const pool = @import("../offload/cuda_exl3_pool.zig");
 const pass = @import("cuda_exl3_pass.zig");
 const prefill = @import("../prefill/cuda_exl3_prefill.zig");
+const pager = @import("../kv/cuda_exl3_kvpage.zig");
 const weights = @import("../../cuda_prompt_wt.zig");
 pub const counters = @import("exl3_telemetry.zig");
 pub const Completion = enum { all_rank_consumers_joined };
@@ -11,6 +12,7 @@ pub const Completion = enum { all_rank_consumers_joined };
 pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine, mtp: ?*const load.Layer, sequences: []const *prompt.Seq, rank: counters.Rank, completion: Completion) !counters.Snapshot {
     _ = completion;
     try rank.validate();
+    if (engine.shared_arena) |arena| if (arena.active != null) return error.TelemetryConsumersActive;
     var hash = std.hash.Wyhash.init(@intFromPtr(engine));
     var totals: counters.Experts = .{};
     var attached: [weights.layers_n + 1]*@import("../pack/cuda_exl3_load.zig").Experts = undefined;
@@ -76,7 +78,24 @@ pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine
             layers[seen_count - 1] = layer_sample;
         }
     }
-    for (sequences, 0..) |sequence, index| for (sequences[0..index]) |previous| if (previous == sequence) return error.TelemetryDuplicateOwner;
+    var count: usize = 0;
+    for (sequences, 0..) |sequence, index| {
+        if (sequence.invalidated) return error.TelemetryInvalidSequence;
+        for (sequences[0..index]) |previous| if (previous == sequence) return error.TelemetryDuplicateOwner;
+        if (sequence.paged != null) count = try std.math.add(usize, count, weights.attn_n);
+    }
+    const samples = try allocator.alloc(counters.KvSample, count);
+    errdefer allocator.free(samples);
+    var index: usize = 0;
+    for (sequences) |sequence| if (sequence.paged) |paged| {
+        if (paged.telemetry_id == 0) return error.TelemetryOwnerChanged;
+        const clock = try paged.sampleClockAfterConsumers();
+        for (0..weights.attn_n) |layer| {
+            const status = try paged.stats(layer);
+            samples[index] = .{ .owner = paged.telemetry_id, .revision = paged.telemetry_revision, .layer = layer, .empty = sequence.fed == 0, .epoch = status.epoch, .clock = clock, .requests = @intCast(status.needed), .misses = @intCast(status.misses), .calls = @intCast(status.calls), .overflow = status.overflow, .max_blocks = @min(paged.cfg.slots, paged.nblocks), .block_bytes = weights.index_ratio * 2 * pager.row_bytes, .rebases = status.rebases, .written = status.written_rows };
+            index += 1;
+        }
+    };
     const ring = prefill.ringTelemetry(engine);
     if (ring) |observed| {
         totals.ring_dma_copies = observed.copies;
@@ -89,7 +108,7 @@ pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine
         if (observed.attribution) |by_source| @import("../prefill/cuda_exl3_prefill_attribution.zig").publish(by_source, &totals);
     }
     const sampled_layers = if (engine.telemetry.layers_enabled) try allocator.realloc(layers, seen_count) else layers;
-    return .{ .rank = rank, .scope = hash.final(), .ring_owner = if (ring) |observed| observed.owner else 0, .experts = totals, .expert_pools = seen_count, .layers = sampled_layers };
+    return .{ .rank = rank, .scope = hash.final(), .ring_owner = if (ring) |observed| observed.owner else 0, .experts = totals, .kv = samples, .expert_pools = seen_count, .layers = sampled_layers };
 }
 
 test "exl3: cache telemetry pure host contracts" {

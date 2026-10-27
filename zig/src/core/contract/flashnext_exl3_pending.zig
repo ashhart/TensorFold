@@ -1,4 +1,4 @@
-//! Flash Next EXL3 launches (int8 KV, prefill experts); nvcc 13.4 measured, older pending.
+//! Flash Next EXL3 launches (int8 and paged KV, prefill experts); nvcc 13.4 measured, older pending.
 const std = @import("std");
 const limits = @import("limits.zig");
 const registry = @import("registry.zig");
@@ -15,6 +15,12 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "flashnext_exl3_kv fn_kv8_pack", .symbol = "fn_kv8_pack", .image = "flashnext_exl3_kv", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "flashnext_exl3_kv fn_kv_gather", .symbol = "fn_kv_gather", .image = "flashnext_exl3_kv", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "flashnext_exl3_kv fn_kv_roundtrip", .symbol = "fn_kv_roundtrip", .image = "flashnext_exl3_kv", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvpage kvp_plan", .symbol = "kvp_plan", .image = "flashnext_exl3_kvpage", .threads = 1024 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvpage kvp_shared_plan", .symbol = "kvp_shared_plan", .image = "flashnext_exl3_kvpage", .threads = 1024 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvpage kvp_shared_release", .symbol = "kvp_shared_release", .image = "flashnext_exl3_kvpage", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvpage kvp_fetch", .symbol = "kvp_fetch", .image = "flashnext_exl3_kvpage", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvpage kvp_remap", .symbol = "kvp_remap", .image = "flashnext_exl3_kvpage", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvpage kvp_copy", .symbol = "kvp_copy", .image = "flashnext_exl3_kvpage", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "flashnext_exl3_prefill tf_exl3pf_rotate", .symbol = "tf_exl3pf_rotate", .image = "flashnext_exl3_prefill", .threads = 32 }, .usage = registry.none },
     .{ .launch = .{ .name = "flashnext_exl3_prefill tf_exl3pf_gu", .symbol = "tf_exl3pf_gu", .image = "flashnext_exl3_prefill", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "flashnext_exl3_prefill tf_exl3pf_down", .symbol = "tf_exl3pf_down", .image = "flashnext_exl3_prefill", .threads = 256 }, .usage = registry.none },
@@ -34,6 +40,12 @@ pub const cuda_134 = [_]registry.Override{
     .{ .name = "flashnext_exl3_kv fn_kv8_pack", .usage = .{ .{ .regs = 18, .static = 0, .bound = 256 }, .{ .regs = 20, .static = 0, .bound = 256 }, .{ .regs = 20, .static = 0, .bound = 256 }, .{ .regs = 22, .static = 0, .bound = 256 }, .{ .regs = 22, .static = 0, .bound = 256 } } },
     .{ .name = "flashnext_exl3_kv fn_kv_gather", .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 39, .static = 0, .bound = 256 }, .{ .regs = 39, .static = 0, .bound = 256 }, .{ .regs = 38, .static = 0, .bound = 256 }, .{ .regs = 38, .static = 0, .bound = 256 } } },
     .{ .name = "flashnext_exl3_kv fn_kv_roundtrip", .usage = .{ .{ .regs = 19, .static = 0, .bound = 256 }, .{ .regs = 21, .static = 0, .bound = 256 }, .{ .regs = 21, .static = 0, .bound = 256 }, .{ .regs = 21, .static = 0, .bound = 256 }, .{ .regs = 21, .static = 0, .bound = 256 } } },
+    .{ .name = "flashnext_exl3_kvpage kvp_plan", .usage = .{ .{ .regs = 27, .static = 1056, .bound = 1024 }, .{ .regs = 27, .static = 1056, .bound = 1024 }, .{ .regs = 27, .static = 1056, .bound = 1024 }, .{ .regs = 36, .static = 1056, .bound = 1024 }, .{ .regs = 36, .static = 1056, .bound = 1024 } } },
+    .{ .name = "flashnext_exl3_kvpage kvp_shared_plan", .usage = .{ .{ .regs = 27, .static = 1056, .bound = 1024 }, .{ .regs = 32, .static = 1056, .bound = 1024 }, .{ .regs = 32, .static = 1056, .bound = 1024 }, .{ .regs = 50, .static = 1056, .bound = 1024 }, .{ .regs = 50, .static = 1056, .bound = 1024 } } },
+    .{ .name = "flashnext_exl3_kvpage kvp_shared_release", .usage = .{ .{ .regs = 16, .static = 0, .bound = 256 }, .{ .regs = 16, .static = 0, .bound = 256 }, .{ .regs = 16, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 } } },
+    .{ .name = "flashnext_exl3_kvpage kvp_fetch", .usage = .{ .{ .regs = 28, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 32, .static = 0, .bound = 256 } } },
+    .{ .name = "flashnext_exl3_kvpage kvp_remap", .usage = .{ .{ .regs = 19, .static = 4, .bound = 256 }, .{ .regs = 19, .static = 4, .bound = 256 }, .{ .regs = 19, .static = 4, .bound = 256 }, .{ .regs = 24, .static = 4, .bound = 256 }, .{ .regs = 24, .static = 4, .bound = 256 } } },
+    .{ .name = "flashnext_exl3_kvpage kvp_copy", .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 } } },
     .{ .name = "flashnext_exl3_prefill tf_exl3pf_rotate", .usage = .{ .{ .regs = 22, .static = 0, .bound = 0 }, .{ .regs = 22, .static = 0, .bound = 0 }, .{ .regs = 22, .static = 0, .bound = 0 }, .{ .regs = 19, .static = 0, .bound = 0 }, .{ .regs = 19, .static = 0, .bound = 0 } } },
     .{ .name = "flashnext_exl3_prefill tf_exl3pf_gu", .usage = .{ .{ .regs = 128, .static = 46080, .bound = 256 }, .{ .regs = 128, .static = 46080, .bound = 256 }, .{ .regs = 128, .static = 46080, .bound = 256 }, .{ .regs = 128, .static = 46080, .bound = 256 }, .{ .regs = 128, .static = 46080, .bound = 256 } } },
     .{ .name = "flashnext_exl3_prefill tf_exl3pf_down", .usage = .{ .{ .regs = 128, .static = 46336, .bound = 256 }, .{ .regs = 128, .static = 46336, .bound = 256 }, .{ .regs = 128, .static = 46336, .bound = 256 }, .{ .regs = 128, .static = 46336, .bound = 256 }, .{ .regs = 128, .static = 46336, .bound = 256 } } },
