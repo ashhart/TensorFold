@@ -142,25 +142,33 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_warp(const
 }
 
 // The warp form ranking sigmoid(logit) + bias, logit the `slices` partials [slices, rows, ne] summed in order.
-extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp(const float* logits, const float* bias,
-                                                                                int* pick, float* wts, int rows, int ne,
-                                                                                int topk, int shared, int normalize,
-                                                                                float scale, int slices) {
+constexpr int MAXSK = 8; // slices the score form sums
+
+// A lane holds experts lane + 32 j, j < P; every slice's and the bias's load issued before the sums.
+template <int P>
+__device__ __forceinline__ void score_warp(const float* logits, const float* bias, int* pick, float* wts, int rows, int ne,
+                                           int topk, int shared, int normalize, float scale, int slices) {
     const int lane = threadIdx.x & 31;
     const int64_t r = static_cast<int64_t>(blockIdx.x) * 8 + (threadIdx.x >> 5);
     if (r >= rows) return;
     const float* lg = logits + r * ne;
-    float v[PER], x[PER];
+    float v[P], x[P], part[P][MAXSK], b[P];
 #pragma unroll
-    for (int j = 0; j < PER; ++j) {
+    for (int j = 0; j < P; ++j) {
         const int e = lane + 32 * j;
-        float l = 0.f;
-        if (e < ne) {
-            l = lg[e];
-            for (int s = 1; s < slices; ++s) l = __fadd_rn(l, lg[static_cast<int64_t>(s) * rows * ne + e]);
-        }
+        b[j] = e < ne && bias != nullptr ? bias[e] : 0.f;
+#pragma unroll
+        for (int s = 0; s < MAXSK; ++s) part[j][s] = e < ne && s < slices ? lg[static_cast<int64_t>(s) * rows * ne + e] : 0.f;
+    }
+#pragma unroll
+    for (int j = 0; j < P; ++j) {
+        const int e = lane + 32 * j;
+        float l = part[j][0];
+#pragma unroll
+        for (int s = 1; s < MAXSK; ++s)
+            if (s < slices) l = __fadd_rn(l, part[j][s]);
         x[j] = e < ne ? __fdiv_rn(1.f, __fadd_rn(1.f, expf(-l))) : 0.f;
-        v[j] = e < ne ? __fadd_rn(x[j], bias != nullptr ? bias[e] : 0.f) : -INFINITY;
+        v[j] = e < ne ? __fadd_rn(x[j], b[j]) : -INFINITY;
     }
     const int slots = topk + shared;
     float xk = 0.f; // lane k's pick's score
@@ -169,7 +177,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp
         float bv = -INFINITY;
         int bi = ne;
 #pragma unroll
-        for (int j = 0; j < PER; ++j) {
+        for (int j = 0; j < P; ++j) {
             const int e = lane + 32 * j;
             if (e < ne && beats(v[j], e, bv, bi)) bv = v[j], bi = e;
         }
@@ -180,7 +188,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp
         }
         float xb = 0.f;
 #pragma unroll
-        for (int j = 0; j < PER; ++j)
+        for (int j = 0; j < P; ++j)
             if (lane + 32 * j == bi) v[j] = -INFINITY, xb = x[j];
         xb = __shfl_sync(0xFFFFFFFFu, xb, bi & 31);
         if (lane == k) xk = xb, pk = bi;
@@ -193,6 +201,22 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp
         wts[r * slots + lane] = __fmul_rn(normalize ? __fdiv_rn(xk, __fadd_rn(sum, 1e-20f)) : xk, scale);
     }
     if (lane < shared) pick[r * slots + topk + lane] = ne + lane, wts[r * slots + topk + lane] = 1.f;
+}
+
+// Up to 512 experts.
+extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp(const float* logits, const float* bias,
+                                                                                int* pick, float* wts, int rows, int ne,
+                                                                                int topk, int shared, int normalize,
+                                                                                float scale, int slices) {
+    score_warp<PER>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices);
+}
+
+// Up to 128 experts (Lightning's): four a lane, so the slices' loads fit in registers beside the rest.
+extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp_128(const float* logits, const float* bias,
+                                                                                    int* pick, float* wts, int rows, int ne,
+                                                                                    int topk, int shared, int normalize,
+                                                                                    float scale, int slices) {
+    score_warp<4>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices);
 }
 
 // out[r, d] = sum over the row's slots, in slot order, of w[r, k] * y[r, k, d] (fp32 fma), rounded once to out's kind.

@@ -29,7 +29,7 @@ pub const routes = [_]Route{
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_warp (Kolibri: 384 experts, top 6 + shared)", .shared = true, .warp = true },
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_warp (256 experts, top 8 normalized x2.5)", .shared = false, .normalize = true, .scale = 2.5, .warp = true },
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid (block form, 513 to 4,096 experts)", .shared = true, .warp = false },
-    .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_warp (Nemotron: 128 experts, top 6 normalized x2.5 + 2 shared)", .shared = true, .shared_slots = 2, .normalize = true, .scale = 2.5, .warp = true, .score = true },
+    .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_warp_128 (Nemotron: 128 experts, top 6 normalized x2.5 + 2 shared)", .shared = true, .shared_slots = 2, .normalize = true, .scale = 2.5, .warp = true, .score = true },
     .{ .name = "cuda moe top-k tf_moe_topk_sigmoid_score_warp (Bolt: 496 experts, top 9 normalized x2.5)", .shared = false, .normalize = true, .scale = 2.5, .warp = true, .score = true },
     .{ .name = "control: score top-k ranking logit + bias (tf_moe_topk_sigmoid_warp)", .shared = false, .normalize = true, .scale = 2.5, .warp = true, .score = true, .plant = true },
 };
