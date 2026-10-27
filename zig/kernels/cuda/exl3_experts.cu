@@ -23,17 +23,26 @@ struct GroupedArgs {
     int k, n, p, sk, maxm, slots, nexp_max, mats, ns, standard, skip;
 };
 
-// One warp's k tiles [kt0, kt0 + nkt) of an expert matrix into acc: per-lane loads and the shared decode (same bits).
+// One warp's k tiles [kt0, kt0 + nkt) of an expert matrix into acc: per-lane loads a tile ahead, the shared decode.
 template <int CB, int K2, int NT>
 __device__ __forceinline__ void warp_tiles(const uint32_t* T, int ntiles, int kt0, int nkt, int nt0, const half* x0,
                                            const half* x1, bool ok0, bool ok1, int lane, float (&acc)[NT][2][4]) {
     constexpr int TW = tile_words<K2>(), LW = lane_words<K2>();
     const size_t kstride = (size_t)ntiles * TW;
+    const uint32_t* tb = T + (size_t)kt0 * kstride + (size_t)nt0 * TW;
+    uint32_t nx[NT][LW];  // the next tile's words, in flight while this one decodes
+    if (nkt > 0)
+#pragma unroll
+        for (int j = 0; j < NT; ++j) ldg_lane_words<K2>(tb + j * TW, lane, nx[j]);
     for (int i = 0; i < nkt; ++i) {
-        const uint32_t* t0 = T + (size_t)(kt0 + i) * kstride + (size_t)nt0 * TW;
         uint32_t w[NT][LW];
 #pragma unroll
-        for (int j = 0; j < NT; ++j) ldg_lane_words<K2>(t0 + j * TW, lane, w[j]);
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int l = 0; l < LW; ++l) w[j][l] = nx[j][l];
+        if (i + 1 < nkt)
+#pragma unroll
+            for (int j = 0; j < NT; ++j) ldg_lane_words<K2>(tb + (size_t)(i + 1) * kstride + j * TW, lane, nx[j]);
         const int k = (kt0 + i) * 16;
         const uint32_t a[4] = {ok0 ? *reinterpret_cast<const uint32_t*>(x0 + k) : 0u,
                                ok1 ? *reinterpret_cast<const uint32_t*>(x1 + k) : 0u,
