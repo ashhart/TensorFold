@@ -1,4 +1,4 @@
-// GLM-5.3-Flash DSA indexer, a prompt chunk's top-K pools in one pass over its scores: BadAd84's patch 0101 in CUDA.
+// GLM-5.3-Flash DSA indexer, a prompt chunk's top-K pools in one pass: a sampled floor, the survivors, a radix select.
 #pragma once
 
 #include <cuda_runtime.h>

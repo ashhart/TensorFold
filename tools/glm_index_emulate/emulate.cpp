@@ -1,6 +1,4 @@
-// glm_index_scores.cuh and glm_index_pools.cuh run on the host, every thread of a block at once with real barriers and
-// warp exchanges: scores against a plain model of tf_glm_scores (mma as a double sum per k16 step), pools against a
-// plain top-K. Build: clang++ -std=c++20 -I tools/glm_index_emulate tools/glm_index_emulate/emulate.cpp -o <out>
+// glm_index_*.cuh on the host, a block's threads at once, against plain models (zig build test-glm-index-emulate)
 #define GLM_INDEX_HOST
 #include <cstdio>
 #include <functional>

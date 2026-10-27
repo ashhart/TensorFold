@@ -12,7 +12,7 @@ const Case = struct { cap: usize, pos: usize, rows: usize, heads: usize = 32, pa
 const cases = [_]Case{
     .{ .cap = 4096, .pos = 300, .rows = 512 }, // few visible pools: the rows select over their first 512
     .{ .cap = 1024, .pos = 4 * 1024 - 520, .rows = 512 },
-    .{ .cap = 4096, .pos = 4 * 4096 - 520, .rows = 512, .bits = true }, // NaN and signed zeros planted in the tied scores
+    .{ .cap = 4096, .pos = 4 * 4096 - 520, .rows = 512, .bits = true }, // NaN and signed zeros in tied scores
     .{ .cap = 16384, .pos = 4 * 16384 - 520, .rows = 512 },
     .{ .cap = 16384, .pos = 4 * 16384 - 1130, .rows = 1100 }, // three score blocks, the later two from s.at
     .{ .cap = 16384, .pos = 4 * 16384 - 600, .rows = 512, .paged = true },
