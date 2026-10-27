@@ -101,8 +101,16 @@ __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[8 * lane_w
 }
 
 // Programmatic dependent launch: wait for the previous kernel's writes here (a no-op without it); trigger the next.
-__device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;\n" ::: "memory"); }
-__device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); }
+__device__ __forceinline__ void pdl_wait() {
+#if __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.wait;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void pdl_trigger() {
+#if __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");
+#endif
+}
 
 // xh = fp16(((x * suh) @ H) / sqrt(128)): one warp per 128 columns, one block of 4 warps per 512.
 __device__ __forceinline__ void rot_in_body(const void* x, int x_dtype, const half* suh, half* xh, int kdim) {
@@ -460,14 +468,18 @@ struct GroupArgs {
     LinearArgs l[3];
     int ends[3];
 };
-#define TF_EXL3_GROUP(K2, CB, WK)                                                        \
-    extern "C" __global__ void __launch_bounds__((WK) * 32)                              \
-        tf_exl3_group_##K2##_##CB##_##WK(tf_exl3::GroupArgs g) {                         \
-        const int b = blockIdx.x, i = b < g.ends[0] ? 0 : b < g.ends[1] ? 1 : 2;         \
-        tf_exl3::linear_body<K2, CB, WK>(g.l[i], b - (i ? g.ends[i - 1] : 0));           \
-    }
-TF_EXL3_GROUP(8, 2, 4) TF_EXL3_GROUP(8, 2, 8)
-#undef TF_EXL3_GROUP
+// Member i of a group runs linear_body on its own blocks, exactly as its own launch would.
+__device__ __forceinline__ int group_member(const tf_exl3::GroupArgs& g, int b) {
+    return b < g.ends[0] ? 0 : b < g.ends[1] ? 1 : 2;
+}
+extern "C" __global__ void __launch_bounds__(128) tf_exl3_group_8_2_4(tf_exl3::GroupArgs g) {
+    const int b = blockIdx.x, i = group_member(g, b);
+    tf_exl3::linear_body<8, 2, 4>(g.l[i], b - (i ? g.ends[i - 1] : 0));
+}
+extern "C" __global__ void __launch_bounds__(256) tf_exl3_group_8_2_8(tf_exl3::GroupArgs g) {
+    const int b = blockIdx.x, i = group_member(g, b);
+    tf_exl3::linear_body<8, 2, 8>(g.l[i], b - (i ? g.ends[i - 1] : 0));
+}
 #undef TF_EXL3_CODEBOOK
 #undef TF_EXL3_WIDTHS
 }  // namespace tf_exl3
