@@ -1,47 +1,18 @@
 //! The CUDA engines a native server opens (native/cuda.zig) and the family modules they import.
 const std = @import("std");
 
-/// canon.zig as its own module. A compilation that also builds cluster.zig must pass this same module in.
-pub fn canonModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon.zig"), .target = target, .optimize = optimize });
-}
-
 /// The GLM-5.3-Flash CUDA family over the runtime, the core, the lane core, canon's shares, core/heat.zig, engine_api.
 pub fn glmCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, heat: *std.Build.Module, api: *std.Build.Module) *std.Build.Module {
-    return glmCudaShared(b, target, optimize, cuda, core, lanes, heat, api, canonModule(b, target, optimize), @import("tp.zig").verbsModule(b, target, optimize));
-}
-
-/// GLM with the caller's canon and verbs modules, so cluster and fabric in one binary do not root those files twice.
-pub fn glmCudaShared(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, heat: *std.Build.Module, api: *std.Build.Module, canon: *std.Build.Module, verbs: *std.Build.Module) *std.Build.Module {
+    const canon = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon.zig"), .target = target, .optimize = optimize });
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
     m.addImport("core", core);
     m.addImport("canon", canon);
-    m.addImport("mesh", @import("mesh.zig").module(b, target, optimize, canon)); // shares declared over that canon
     m.addImport("lanes", lanes);
     m.addImport("heat", heat);
     m.addImport("tp", @import("tp.zig").module(b, target, optimize, cuda)); // over the engine's own cuda module
-    m.addImport("engine_api", api); // TF_KV_SHARE's prompt_radix store: family()'s, the server's
-    m.addImport("tp", @import("tp.zig").moduleWith(b, target, optimize, cuda, verbs)); // over the engine's own cuda module
     m.addImport("engine_api", api); // TF_GLM_KV_SHARE's prompt_radix store: family()'s, the server's
     return m;
-}
-
-/// Qwen3's dense embedding and reranker checkpoints on CUDA: the family module the native server's open dispatches to.
-pub fn qwen3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, api: *std.Build.Module) *std.Build.Module {
-    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3/qwen3_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    m.addImport("cuda", cuda);
-    m.addImport("core", core);
-    m.addImport("lanes", lanes);
-    m.addImport("engine_api", api); // the server's engine_api: family's (qwen3_5's), the shared one
-    return m;
-}
-
-/// The family module's GPU-free host tests, without a GPU; `all` (test-cuda-host and so `test`) runs them.
-pub fn qwen3HostTest(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) void {
-    const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
-    b.step("test-qwen3-cuda-host", "Qwen3 CUDA host tests: config, folder head, prompt lane and reranker labels (no GPU)").dependOn(&run.step);
-    all.dependOn(&run.step);
 }
 
 /// LFM2 (d1's decision model) on CUDA: config, weights, kernels and the forward that scores labels.
@@ -62,10 +33,8 @@ pub fn flashnextModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
-pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module, canon: *std.Build.Module, verbs: *std.Build.Module } {
+pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
     const api = qwen35.import_table.get("engine_api").?; // family()'s, so the server and qwen3_5 share one
-    const canon = canonModule(b, target, optimize);
-    const verbs = @import("tp.zig").verbsModule(b, target, optimize);
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/src/native/cuda.zig"),
         .target = target,
@@ -80,18 +49,16 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) },
             .{ .name = "core", .module = core },
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision, api) },
-            .{ .name = "glm_cuda", .module = glmCudaShared(b, target, optimize, cuda, core, lanes, heat, api, canon, verbs) },
-            .{ .name = "qwen3_cuda", .module = qwen3Module(b, target, optimize, cuda, core, lanes, api) },
+            .{ .name = "glm_cuda", .module = glmCuda(b, target, optimize, cuda, core, lanes, heat, api) },
             .{ .name = "minimax_m3_cuda", .module = @import("minimax_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "qwen35", .module = qwen35 },
             .{ .name = "kolibri1", .module = @import("kolibri.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "gemma4_cuda", .module = @import("gemma4_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "spark25", .module = @import("spark25.zig").module(b, target, optimize, cuda, core, lanes) },
-            .{ .name = "lfm2_moe_cuda", .module = @import("lfm2_moe_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "dory", .module = @import("dory.zig").module(b, target, optimize, cuda, core, lanes) },
-            .{ .name = "dots_mocr_cuda", .module = @import("dots_mocr_cuda.zig").module(b, target, optimize, cuda, core, lanes, @import("cuda_dense.zig").module(b, target, optimize, cuda, core, lanes)) },
+            .{ .name = "mimo_v2", .module = @import("mimo.zig").module(b, target, optimize, cuda, core, lanes) },
         },
     });
     mod.addImport("qwen4", @import("qwen4.zig").module(b, target, optimize, core));
-    return .{ .api = api, .engines = mod, .canon = canon, .verbs = verbs };
+    return .{ .api = api, .engines = mod };
 }
