@@ -100,6 +100,7 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     // checks, and TF_QWEN_KV_SHARE: every stream on pages (each can adopt the kept ones), the reserved window idle
     l.paged_only = (pages_mod.pagedOnly() or l.share_snaps > 0) and streams > 0;
     if (l.share_snaps > 0 and streams > 0) l.prefix = try prefix_mod.Prefix.init(l.gpa, l.e, l.pages.?, l.share_snaps);
+    if (l.prefix != null and prefix_mod.fewSnapshots(l.share_snaps, streams + 1)) std.log.warn("TF_QWEN_KV_SHARE={d} keeps under 4 recurrent-state snapshots a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more", .{ l.share_snaps, streams + 1, 4 * (streams + 1) });
 }
 
 /// The lane host's admission: the first stream's window is free, or a lane and the request's pages are.
