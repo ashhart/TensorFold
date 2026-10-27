@@ -63,3 +63,15 @@ comes from its own acceptance rate, priced with a round cost that grows with its
 - `tf-mimo m1 MODEL ORACLE [CONTEXT [DUMP_OUT [DUMP_BASE]]]` on each rank (`tf-mimo follow MODEL` beside it):
   teacher-forced steps against an answer key's logits (KL and argmax), optionally against an earlier build's dump,
   and the prompt path read in one chunk against two.
+
+## Licences and sources
+
+- Model: Xiaomi's `XiaomiMiMo/MiMo-V2.6-Flash-RL` on Hugging Face, MIT (its model card). The packs below are
+  converted from its revision `5711b268`.
+- Pack: `ajensenwaud/MiMo-V2.6-Flash-RL-exl3-3.0bpw`, MIT as its source, quantised from that revision with
+  exllamav3 v1.6.0 (`turboderp-org/exllamav3`, MIT): `-b 3.0 -hb 8 -mb 4 -hq -cr 250 -cc 2048 -cb mul1`.
+  benthecarman's 2.27 bpw pack, `benthecarman/MiMo-V2.6-Flash-RL-exl3` (MIT), serves too.
+- Drafter: Xiaomi's DFlash drafter, published in the model repository's `dflash/` folder under its MIT licence.
+  The packs' `dflash/` is that drafter as benthecarman repaired it to load and quantised it to 4 bpw EXL3
+  (`benthecarman/MiMo-V2.6-Flash-RL-exl3` at `5ae87b83`); the 3.0 bpw pack carries the same file unchanged.
+  DFlash, the drafting method and its reference code, is z-lab's (`z-lab/dflash`, MIT).
