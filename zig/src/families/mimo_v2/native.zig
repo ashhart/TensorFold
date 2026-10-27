@@ -480,17 +480,34 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 /// TF_TP_* once TF_TP_WORLD is set (rank 0 serves; `tf-mimo follow` on rank 1); null: one GPU. A bad setting refuses.
 fn tpConfig() tp.config.Error!?tp.Config {
-    if (std.c.getenv("TF_TP_WORLD") == null) return null;
-    return try tp.Config.fromEnv();
+    return tpFrom(&envGet);
+}
+
+fn tpFrom(get: *const fn ([]const u8) ?[]const u8) tp.config.Error!?tp.Config {
+    if (get("TF_TP_WORLD") == null) return null;
+    return try tp.Config.parse(get);
+}
+
+fn envGet(name: []const u8) ?[]const u8 {
+    var buf: [64]u8 = undefined;
+    const z = std.mem.printSentinel(&buf, "{s}", .{name}, 0) catch return null;
+    return std.mem.span(std.c.getenv(z) orelse return null);
 }
 
 /// Admission bytes of a rank: the split matrices' share of `total`, plus the embeddings and dflash/ whole on each.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) tp.config.Error!u64 {
+    return share(a, io, dir, total, &envGet);
+}
+
+/// weightShare under `get`'s TF_TP_*: a bad setting is BadSetting, as `open` refuses it, not one GPU's share.
+fn share(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, get: *const fn ([]const u8) ?[]const u8) tp.config.Error!u64 {
     const drafter = drafterBytes(a, io, dir);
-    const world: u64 = if (tpConfig() catch null) |c| c.world else 1;
+    const world: u64 = if (try tpFrom(get)) |c| c.world else 1;
     if (world <= 1) return total + drafter;
     const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return total + drafter;
+    defer a.free(path);
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24)) catch return total + drafter;
+    defer a.free(text);
     const c = config.Config.parse(a, text, null) catch return total + drafter;
     const embed = @min(total, @as(u64, c.vocab) * c.hidden * 2);
     return (total - embed) / world + embed + drafter;
@@ -499,6 +516,7 @@ pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64
 /// The pack's DFlash drafter (dflash/model.safetensors), 0 without one.
 fn drafterBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
     const path = std.fs.path.join(a, &.{ dir, "dflash", "model.safetensors" }) catch return 0;
+    defer a.free(path);
     const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return 0;
     return st.size;
 }
@@ -528,4 +546,37 @@ fn release(p: *anyopaque) void {
         own.gpa.destroy(ss);
     }
     own.gpa.destroy(own);
+}
+
+fn tpEnv(comptime world: []const u8, comptime rank: []const u8) *const fn ([]const u8) ?[]const u8 {
+    return &struct {
+        fn get(name: []const u8) ?[]const u8 {
+            if (std.mem.eql(u8, name, "TF_TP_WORLD")) return world;
+            if (std.mem.eql(u8, name, "TF_TP_RANK") and rank.len > 0) return rank;
+            return null;
+        }
+    }.get;
+}
+
+test "a bad TF_TP_* refuses the weight share; TF_TP_WORLD unset is one GPU" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const unset = struct {
+        fn get(_: []const u8) ?[]const u8 {
+            return null;
+        }
+    }.get;
+    try std.testing.expectEqual(@as(u64, 1000), try share(a, io, "no-such-pack", 1000, &unset));
+    inline for (.{ .{ "two", "" }, .{ "0", "" }, .{ "65", "" }, .{ "2", "2" }, .{ "2", "-1" }, .{ "2", "one" } }) |bad| {
+        try std.testing.expectError(error.BadSetting, share(a, io, "no-such-pack", 1000, tpEnv(bad[0], bad[1])));
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = config.fixture });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const c = try config.Config.parse(a, config.fixture, null);
+    const embed = @as(u64, c.vocab) * c.hidden * 2;
+    const total: u64 = 100 << 30;
+    try std.testing.expectEqual((total - embed) / 2 + embed, try share(a, io, dir, total, tpEnv("2", "1")));
 }
