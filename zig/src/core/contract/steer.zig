@@ -16,6 +16,13 @@ pub const threads = hidden / elements;
 /// The threadgroup memory the fused kernel's two sets of partials take.
 pub const group_memory = 2 * (threads / 32) * 4;
 
+/// The stress rows' direction scale: the largest that keeps a row's terms under 2^24, so the fp32 sums stay exact.
+fn stress_scale(k: usize) f32 {
+    const largest_term: f64 = 64 * 7;
+    const scale = @max(1.0, (0x1p24 - 1) / (@as(f64, @floatFromInt(k)) * largest_term));
+    return @floatFromInt(@as(u64, @intFromFloat(scale)));
+}
+
 /// How a direction is applied: its component leaves the stream, or it is added as a bias.
 pub const Mode = enum(u32) { project = 0, add = 1 };
 
@@ -108,7 +115,7 @@ pub const Steer = struct {
             if (k % 2 == 1) s.x[row * k + k - 1] = 0;
         }
         for (0..h) |i| {
-            const w: f32 = @floatFromInt(1 + rng.uintLessThan(u32, 7));
+            const w: f32 = @as(f32, @floatFromInt(1 + rng.uintLessThan(u32, 7))) * stress_scale(k);
             s.dir[i] = w;
             s.dir[h + i] = -w;
         }

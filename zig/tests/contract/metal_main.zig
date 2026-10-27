@@ -21,6 +21,7 @@ const glm_rows_k = @import("metal_glm_rows.zig");
 const pair_k = @import("metal_pair.zig");
 const pair_controls = @import("metal_pair_controls.zig");
 const minimax_k = @import("metal_minimax.zig");
+const steer_k = @import("metal_qwen27_steer.zig");
 
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
@@ -450,6 +451,12 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image_decoder.destroy();
     var dsv41_suites = try dsv41.Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
+    var steer_suite: steer_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer steer_suite.deinit();
+    for (steer_k.entries) |entry| {
+        if (!wanted(o, entry.name)) continue;
+        try steer_suite.add(entry);
+    }
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
