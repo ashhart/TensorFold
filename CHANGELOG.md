@@ -61,6 +61,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: Gemma 4's E-series per-layer inputs have a host reference that equals MLX 0.32.4 bit for bit at one row, checked against MLX's own SHA-256 prints at the E4B's shapes (an M4 Max and an M5 Ultra give the same prints) (#1402). The E-series stays refused, and nothing served changes. Thanks to @Mirrdhyn.
 
 - MOSS-Image-Base's 5B transformer runs on Metal as a test tool (`tf-moss-image`), from the released bf16 checkpoint as published, on cases `tools/zig/moss_image_case.py` makes with the publisher's own pipeline, which also encodes the prompt and decodes the image (#1457). It needs the M5's tensor units and refuses other GPUs, and nothing is served yet. On an M5 Ultra, a 1024x1024 case's worst step has a cosine of 0.9997982 against the publisher's torch bf16 pipeline, the same step run twice gives the same bytes, its 50 steps take 47.3 s, and the decoded picture is 31.9 dB PSNR from torch's. Its eleven kernels pass the kernel contract, with eight planted controls red. See [the recipe](docs/recipes/moss-image.md). Thanks to @BobClawblaw.
+- GLM-5.3-Flash on CUDA: the DFlash2 drafter's loader sizes its 4-bit scratch for the largest linear at the server's rank count. It held only the two-rank case's, so on one rank or three or more, loading the drafter at 4 bits (the default) wrote about 9.4 MB past its end (#1496). At two ranks it allocates the same bytes as before. Thanks to @BadAd84.
 
 ## 1.1.7
 
