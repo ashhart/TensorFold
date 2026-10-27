@@ -48,7 +48,7 @@ pub fn pairedAt(e: *const Engine, start: usize, len: usize, marks: ?engine.Marks
 }
 
 /// Engine.prefillChunk of two chunks (`part`: both, then the next id): one pass, then each chunk's MTP rows and commit.
-pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: ?engine.Cancel, marks: ?engine.Marks) !?u32 {
+pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: ?engine.Cancel, marks: ?engine.Marks, split: bool) !?u32 {
     const ra: usize = fw.prefill_rows;
     if (len <= start + ra) return error.BadChunk;
     const rb: usize = @min(len - start - ra, fw.prefill_rows);
@@ -65,6 +65,8 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     var fb = e.view(&pair.bp, &two);
     fa.prof = null;
     fb.prof = null;
+    fa.index_split = split; // the step's choice (TF_GLM_INDEX_SPLIT) for both chunks
+    fb.index_split = split;
     const st = &e.cur.st;
     try st.ready(e.stream, ra + rb); // one rebase for both chunks, before b's view copies the rings' base
     var sb = st.*;
@@ -78,6 +80,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     try cuda.copy_source.enqueue(e.d, pair.bp.ids, std.mem.sliceAsBytes(ids[ra .. ra + rb]), e.stream);
     try fw.Forward.pairBody(&fa, &fb, ra, rb);
     pair.steps += 1;
+    e.index_splits += @intFromBool(split);
     try mtpRows(e, &fa, ids[1 .. ra + 1], e.bp.fnormed);
     try fa.commit(ra);
     st.pending = rb;
