@@ -72,7 +72,8 @@ The chat template thinks by default, as on vLLM: replies reason in `reasoning_co
 
 ## CUDA execution
 
-CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Prompts take bf16
+In 0.6.6, CUDA read this model's MLX 4-bit checkpoint only; the native CUDA engine also reads EXL3 exports and
+[NVIDIA's NVFP4 export](#nvidias-nvfp4-checkpoint-native-cuda). Prompts take bf16
 activations by default: 0.90-0.96x the FP8 prompt path from 2k to 128k, and 1.23-1.89x vLLM on NVIDIA's NVFP4 export
 from 2k to 64k. `--prefill-fp8` restores the FP8 path ([prompt precision](cuda.md#prompt-precision)).
 
@@ -130,6 +131,52 @@ On one DGX Spark (GB10, sm_121, CUDA 13.0), checkpoint revision f84b054, the fle
 181.7 / 220.1 tok/s aggregate at 2 / 4 / 8 users, against 112.6 and 115.5 / 137.9 / 159.0 with `TF_MTP_BATCH=0` on
 the same binary. The drafter's attention over its ring loads eight slots ahead of the fold, in the same order: a
 4,200-slot ring takes 0.24 ms where it took 1.6 ms.
+
+## NVIDIA's NVFP4 checkpoint (native CUDA)
+
+The native CUDA engine serves `nvidia/Qwen3.6-35B-A3B-NVFP4` as downloaded, MTP drafts included:
+
+```bash
+tensorfold pull nvidia/Qwen3.6-35B-A3B-NVFP4@1355db6a052410cfd62085d94b58866fd0f2c3c5
+tensorfold serve nvidia/Qwen3.6-35B-A3B-NVFP4 --drafter nvidia/Qwen3.6-35B-A3B-NVFP4
+```
+
+Every target projection runs as stored, with bf16 activations: the routed and shared experts' W4A16 NVFP4 codes and
+e4m3 block scales with their global scale, the FP8 attention and DeltaNet projections with their per-tensor scale, the
+W4A16 NVFP4 head, and bf16 `in_proj_a`/`in_proj_b`, router and embedding rows. Admission reads every expert
+projection's effective recipe, so a checkpoint that quantizes one expert, the shared expert or the router differently
+is refused before loading. The shared expert sits last in the routed table, as in the MLX layout. Decode rows run the
+grouped NVFP4 expert kernel and prompt tiles its decode-sum form, so an expert pair has the same bits in a prompt
+chunk, a verify window and a one-row step.
+
+The checkpoint keeps its MTP layer in bf16 in its own shards. Without `mtp-4bit.safetensors` beside it, the drafter
+quantizes that layer to MLX affine-4 at load, as Nemotron's ModelOpt drafter does; this changes only which rows a
+round proposes, never a reply, and the startup log says so. With the file present, the file is read instead.
+
+The rules come from @gilby's Python port ([#345](https://github.com/ashhart/TensorFold/pull/345)): bf16 activations
+for the W4A16 layers, the shared expert last in the table, and the MTP layer drafting through the target's head.
+
+One DGX Spark (GB10, sm_121, CUDA 13.0), checkpoint revision `1355db6a`, greedy unless noted, thinking off, 256 tokens:
+
+| | Code | Chat |
+| --- | ---: | ---: |
+| `--no-drafts` (`tools/bench_openai.py`) | 66.6 tok/s | 66.2 tok/s |
+| MTP drafts, one stream (`tools/bench_concurrent.py`) | 124.7 tok/s | 111.8 tok/s |
+| MTP drafts, four streams, aggregate | 240.3 tok/s | 236.2 tok/s |
+
+The model takes 20.3 GiB (20.9 GiB with the drafter) and loads in about 30 s. Every drafted reply equals its
+`"draft": false` run (6 of 6, greedy and two seeded temperatures), every concurrent reply equals its solo run (40 of
+40 at one and four streams, greedy and sampled), and a second turn that resumes from 8,192 cached tokens equals its
+run on a server with the prompt cache off.
+
+Cold prefill: a fresh server per size with `--prompt-cache-gib 0 --context 66560`, exact token arrays of Python
+standard-library source from the checkpoint's own tokenizer, one request each through `tools/bench_cache.py
+--require-cold` (time to first token):
+
+| Prompt tokens | 2,048 | 8,192 | 32,768 | 65,536 |
+| --- | ---: | ---: | ---: | ---: |
+| Time to first token | 0.38 s | 1.42 s | 6.59 s | 15.91 s |
+| Prompt rate | 5,441 tok/s | 5,757 tok/s | 4,975 tok/s | 4,120 tok/s |
 
 ## Measurements
 
