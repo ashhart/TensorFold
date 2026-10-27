@@ -37,8 +37,7 @@ pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
     defer x.end() catch {};
     const V = e.share.vocab.len();
     const from = C; // every step from the second chunk on: each holds rows past the dense limit
-    // three chunks and a tail of 300, a tail of 2 (one rank without a row), a tail of 5, two chunks, and a second step
-    // that pairs past `from` (Leader.chunk pairs where it can; a paired step's two chunks take the split of its start)
+    // tails of 300, 2 (one rank without a row) and 5, two whole chunks, and a second step paired past `from`
     const lens = [_]usize{ 3 * C + 300, 2 * C + 2, 2 * C + 5, 2 * C, 3 * C + glm.prompt_pair.min_rows };
     var failed = false;
     var paired: u64 = 0; // the split twins' paired steps
