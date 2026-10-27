@@ -19,8 +19,7 @@ pub const most_topk = 64;
 /// Experts a lane ranks in the warp form (moe_glue.cu PER): up to 512 experts take it.
 const per_lane = 16;
 
-/// Sigmoid routing: top `topk` by logit (score: sigmoid) + bias, weights sigmoid [normalized] * scale, shared last.
-/// score's logits may come as `slices` partial sums [slices, rows, experts], added in slice order.
+/// Sigmoid routing: top `topk` by logit (score: sigmoid of `slices` partials summed) + bias, weights scaled.
 pub const Route = struct { experts: usize, topk: usize, shared: bool, normalize: bool = false, scale: f32 = 1, score: bool = false, shared_slots: usize = 1, slices: usize = 1 };
 
 pub const MoeGlue = struct {

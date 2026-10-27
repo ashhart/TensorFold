@@ -112,8 +112,7 @@ fn route(r: *Rig) !void {
     try routeUnderflow(r);
 }
 
-/// Every pick's sigmoid underflows to 0 in fp32 (two slices of -50, logits -100): the sum's + 1e-20 keeps their weights
-/// 0, not 0 / 0 = NaN.
+/// Every sigmoid underflows in fp32 (two slices of -50): the sum's + 1e-20 keeps the weights 0, not 0 / 0 = NaN.
 fn routeUnderflow(r: *Rig) !void {
     const rows = 3;
     const part = try r.a.alloc(f32, 2 * rows * E);
