@@ -4,6 +4,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/vec.cuh"
 
 namespace tf_l2 {
 
@@ -22,23 +23,8 @@ __device__ __forceinline__ float point(float v) {
     else return v;
 }
 
-__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
-    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float2 t = __bfloat1622float2(h[i]);
-        f[2 * i] = t.x;
-        f[2 * i + 1] = t.y;
-    }
-}
-
-__device__ __forceinline__ uint4 pack8(const float* f) {
-    uint4 u;
-    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
-    return u;
-}
+using tf_common::unpack8;
+using tf_common::pack8;
 
 // 1 / sqrt(sum + eps) of the row's squares: a thread's fma chain, the warp's xor tree, the 8 warps' tree (IEEE).
 __device__ __forceinline__ float inv_l2(const float (&v)[MOST][8], float eps) {

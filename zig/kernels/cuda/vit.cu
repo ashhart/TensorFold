@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "glue_math.cuh"
+#include "common/glue_math.cuh"
 #include "vit_norm.cuh"
 #include "vit_gemma.cuh"
 

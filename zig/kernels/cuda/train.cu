@@ -2,44 +2,17 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 typedef __nv_bfloat16 bf16;
 
 __device__ __forceinline__ float f32(bf16 v) { return __bfloat162float(v); }
 __device__ __forceinline__ bf16 b16(float v) { return __float2bfloat16(v); }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
-
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
-
-// The sum over a block of `groups` warps, the same in every thread.
-__device__ __forceinline__ float block_sum(float v, float* scratch, int groups) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_sum(v);
-    if (lane == 0) scratch[w] = v;
-    __syncthreads();
-    v = warp_sum(lane < groups ? scratch[lane] : 0.0f);
-    __syncthreads();
-    return v;
-}
-
-__device__ __forceinline__ float block_max(float v, float* scratch, int groups) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_max(v);
-    if (lane == 0) scratch[w] = v;
-    __syncthreads();
-    v = warp_max(lane < groups ? scratch[lane] : -INFINITY);
-    __syncthreads();
-    return v;
-}
+using tf_common::warp_sum;
+using tf_common::warp_max;
+using tf_common::block_sum_tree;
+using tf_common::block_max_tree;
 
 __device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
 
@@ -60,10 +33,10 @@ extern "C" __global__ void __launch_bounds__(1024) tf_train_softmax(bf16* logits
     bf16* l = logits + (size_t)r * vocab;
     float m = -INFINITY;
     for (int v = t; v < vocab; v += 1024) m = fmaxf(m, f32(l[v]));
-    m = block_max(m, scratch, 32);
+    m = block_max_tree(m, scratch, 32);
     float s = 0;
     for (int v = t; v < vocab; v += 1024) s += expf(f32(l[v]) - m);
-    s = block_sum(s, scratch, 32);
+    s = block_sum_tree(s, scratch, 32);
     const unsigned target = targets[r];
     const float lt = f32(l[target]);
     if (t == 0) stats[r] = make_float2(logf(s) + m - lt, expf(lt - m) / s);
@@ -85,8 +58,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_rms_back(const bf16* 
         sq += v * v;
         dot += f32(w[j]) * dr[j] * v;
     }
-    sq = block_sum(sq, scratch, 8);
-    dot = block_sum(dot, scratch, 8);
+    sq = block_sum_tree(sq, scratch, 8);
+    dot = block_sum_tree(dot, scratch, 8);
     const float s = rsqrtf(sq / (float)dim + eps), k = s * s * s * dot / (float)dim;
     for (int j = t; j < dim; j += 256) g[(size_t)r * dim + j] += s * f32(w[j]) * dr[j] - k * f32(hr[j]);
 }
@@ -478,7 +451,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_route_back(const floa
     for (int j = 0; j < top_k; j++) {
         float s = 0;
         for (int i = t; i < dim; i += 256) s += g[(size_t)r * dim + i] * f32(ys[((size_t)r * slots + j) * dim + i]);
-        a[j] = block_sum(s, scratch, 8);
+        a[j] = block_sum_tree(s, scratch, 8);
     }
     if (t == 0) {
         float p[16];

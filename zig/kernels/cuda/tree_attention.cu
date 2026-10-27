@@ -6,13 +6,14 @@
 #include <stdint.h>
 
 #include "attn_odd.cuh"
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace tf_tree {
 
 using qmm_frag::commit;
 using qmm_frag::cp16z;
 using qmm_frag::ldmatrix4;
+using qmm_frag::ldmatrix4t;
 using qmm_frag::mma;
 using qmm_frag::mma0;
 
@@ -22,11 +23,6 @@ constexpr float LOG2E = 1.4426950408889634f;
 
 template <int N>
 __device__ __forceinline__ void wait_group() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
-
-__device__ __forceinline__ void ldmatrix4t(uint32_t (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(qmm_frag::smem(p)));
-}
 
 __device__ __forceinline__ float texp(float x) {
     float y;

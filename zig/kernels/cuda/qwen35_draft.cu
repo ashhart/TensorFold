@@ -2,6 +2,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_q35d {
 
@@ -10,11 +11,7 @@ constexpr int HD = 128;  // the drafter's head width (q, k, v)
 __device__ __forceinline__ float bf(__nv_bfloat16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ float rbf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
-    return x;
-}
+using tf_common::warp_sum;
 
 }  // namespace tf_q35d
 

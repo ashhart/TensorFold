@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "affine_codes.cuh"
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace tf_affine8 {
 

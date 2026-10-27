@@ -1,5 +1,5 @@
 // Shared hyper-connection activation only; the original Flash Next image remains unchanged.
-#include "glue_math.cuh"
+#include "common/glue_math.cuh"
 #include <cuda_fp16.h>
 #define TF_INLINE __device__ __forceinline__
 #define TF_DATA

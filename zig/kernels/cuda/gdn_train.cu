@@ -2,6 +2,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -21,21 +22,8 @@ __device__ __forceinline__ float f32(bf16 v) { return __bfloat162float(v); }
 __device__ __forceinline__ bf16 b16(float v) { return __float2bfloat16_rn(v); }
 __device__ __forceinline__ float bf(float x) { return f32(b16(x)); }
 
-__device__ __forceinline__ float warp_sum(float x) {
-    for (int o = 16; o; o >>= 1) x += __shfl_xor_sync(0xffffffffu, x, o);
-    return x;
-}
-
-// The sum over a block of `groups` warps, the same in every thread.
-__device__ __forceinline__ float block_sum(float v, float* scratch, int groups) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_sum(v);
-    if (lane == 0) scratch[w] = v;
-    __syncthreads();
-    v = warp_sum(lane < groups ? scratch[lane] : 0.0f);
-    __syncthreads();
-    return v;
-}
+using tf_common::warp_sum;
+using tf_common::block_sum_tree;
 
 __device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }
 __device__ __forceinline__ float softplusf_(float x) { return x > 20.0f ? x : log1pf(expf(x)); }
@@ -200,7 +188,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_norm_back(const bf16* _
     const float sg = sigmoidf_(f32(P[zc])), d = dout[row + t];
     dproj[zc] = d * yn * sg * (1.0f - sg);
     const float dn = d * sg * w;
-    const float dot = block_sum(yv * dn, scratch, 4);
+    const float dot = block_sum_tree(yv * dn, scratch, 4);
     dy[row + t] = ri * dn - ri * ri * ri * yv * dot / (float)DV;
 }
 
@@ -371,8 +359,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_qk_back(const bf16* __r
             for (int p = 0; p < SPLIT; ++p) d += part[(((size_t)r * s.nv + h) * SPLIT + p) * DK + t];
         const int c = which * s.nk * DK + hk * DK + t;
         const float x = f32(act[(size_t)r * s.conv + c]);
-        const float ss = block_sum(x * x, scratch, 4);
-        const float dot = block_sum(x * d, scratch, 4);
+        const float ss = block_sum_tree(x * x, scratch, 4);
+        const float dot = block_sum_tree(x * d, scratch, 4);
         const float inv = 1.0f / sqrtf(ss + 1e-6f), sc = which == 0 ? 1.0f / sqrtf((float)DK) : 1.0f;
         dact[(size_t)r * s.conv + c] = sc * inv * (d - inv * inv * x * dot);
     }

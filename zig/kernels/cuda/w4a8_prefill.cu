@@ -2,7 +2,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 #include "w4a8_quantize.cuh"
 #include "w4a8_store.cuh"
 

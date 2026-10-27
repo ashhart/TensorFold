@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "experts.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace tf_d3_fp8 {
 
@@ -11,13 +12,7 @@ constexpr int LANE4 = 2;
 constexpr int BLOCK4 = 32 * LANE4;
 constexpr int PER_SCALE = 4;
 
-__device__ __forceinline__ uint4 ld_nc(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+using qmm_frag::ld_nc;
 
 __device__ __forceinline__ uint32_t fp8pair(uint32_t v) {
   const uint32_t t = ((v & 0x7Fu) << 4) | ((v & 0x80u) << 8) | ((v & 0x7F00u) << 12) | ((v & 0x8000u) << 16);

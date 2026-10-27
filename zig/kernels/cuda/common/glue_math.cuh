@@ -4,6 +4,8 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
+#include "common/reduce.cuh"
+
 namespace tf_glue {
 
 __device__ __forceinline__ float bf(__nv_bfloat16 v) { return __bfloat162float(v); }
@@ -61,11 +63,6 @@ __device__ __forceinline__ float tf_softplus(float v) {
     return __fadd_rn(fmaxf(v, 0.0f), tf_log1p_unit(tf_exp(-fabsf(v))));
 }
 
-// A warp's 32 values summed by xor butterfly (16, 8, 4, 2, 1): every lane ends with the same sum.
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, off));
-    return v;
-}
+using tf_common::warp_sum;
 
 }  // namespace tf_glue

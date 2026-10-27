@@ -4,16 +4,13 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include "common/reduce.cuh"
 
 namespace tf_gdn {
 
 constexpr int DK = 128;
 
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
-    return x;
-}
+using tf_common::warp_sum;
 
 template <int N>
 __device__ __forceinline__ float spread_sum(float (&v)[N], int lane) {

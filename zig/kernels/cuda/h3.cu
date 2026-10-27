@@ -1,5 +1,6 @@
 // MiniMax H3 / FastH3's transformer blocks on CUDA in the checkpoint's bf16: the row, routing and attention kernels.
 #include "h3_attention.cuh"
+#include "common/reduce.cuh"
 
 namespace tf_h3 {
 
@@ -17,16 +18,9 @@ __device__ __forceinline__ float block_sum(float v, float* scratch) {
     __syncthreads();
     return t;
 }
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
+
+using tf_common::warp_max;
+using tf_common::warp_sum;
 
 // The modulated norm of one value, rounded to bf16 where torch's bf16 ops round: norm, 1 + scale, product, shift.
 __device__ __forceinline__ float modulated(float x, float inv, float w, float scale, float shift) {

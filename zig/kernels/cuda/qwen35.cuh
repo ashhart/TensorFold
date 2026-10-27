@@ -3,6 +3,7 @@
 #pragma once
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_q35 {
 
@@ -84,11 +85,7 @@ __device__ __forceinline__ int back(const int* __restrict__ rowpar, int w, int s
 __device__ __forceinline__ float bf(__nv_bfloat16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ float rbf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
-    return x;
-}
+using tf_common::warp_sum;
 
 // P (device counts): the row past the forward's rows, as qwen35.cu's other counts read it.
 __device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nullptr && m >= P[2]; }
