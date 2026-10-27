@@ -19,6 +19,12 @@ zig-out/
 # Native Qwen CPU-only Metal compiler receipts.
 .q27-metal-check/
 
+# The qwen4 device gate writes a scratch checkpoint into the tree and takes it away again.
+.qwen4-device-*/
+
+# The qwen4 device gate writes a scratch checkpoint into the tree and takes it away again.
+.qwen4-device-*/
+
 # Versioned GUI build resources, generated app engines stay ignored in app/.gitignore.
 !app/build/
 
