@@ -51,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
             .base_revision = vector.base_revision,
             .method = vector.method,
             .contrast = vector.contrast,
+            .publication = vector.publication,
             .layers = vector.layers,
         });
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = out });
@@ -77,6 +78,13 @@ pub fn main(init: std.process.Init) !void {
         .width = vector.width,
         .sha256 = std.fmt.bytesToHex(vector.sha256, .lower),
         .transferred = vector.transferred,
+        .name = vector.publication.name,
+        .description = vector.publication.description,
+        .author = vector.publication.author,
+        .license = vector.publication.license,
+        .model_hint = vector.publication.model_hint,
+        .measured_effect = vector.publication.measured_effect,
+        .created = vector.publication.created,
         .layers = ids.items,
         .bytes = blob.items.len,
     }, .{});
