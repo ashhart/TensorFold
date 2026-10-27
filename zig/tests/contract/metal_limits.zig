@@ -264,6 +264,20 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         if (!assemble) return undefined;
         text = sources.core_deltanet;
+    } else if (std.mem.startsWith(u8, d.name, "bolt ")) {
+        // Bolt's ops are the engine's prefill op files (kernels/metal/sources.zig `prefill`), named by the label's 2nd word
+        if (has(d.name, " norm ")) {
+            // Bolt's norm instantiations live beside Lightning's in kernels/metal/nemotron (kernels.zig `all`, by key)
+            const key = if (has(d.name, " group norm ")) "group_norm_xs_bolt_16" else if (has(d.name, "add_norm_moe")) "add_norm_moe_xs_bolt" else "add_norm_xs_bolt";
+            text = for (sources.nemotron.all) |k| {
+                if (std.mem.eql(u8, k.key, key)) break k.source;
+            } else return error.UnknownLaunch;
+        } else {
+            const file = if (has(d.name, " gemv ")) "gemv_ops" else if (has(d.name, " combine ")) "elementwise" else if (has(d.name, " route ")) "route" else return error.UnknownLaunch;
+            text = for (sources.prefill) |f| {
+                if (std.mem.eql(u8, f.name, file)) break f.text;
+            } else return error.UnknownLaunch;
+        }
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         if (!assemble) return undefined;
         text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
