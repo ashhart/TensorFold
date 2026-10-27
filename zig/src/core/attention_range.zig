@@ -21,6 +21,13 @@ pub const Form = struct {
     /// The chains of o's terms p_j v_j and of l's terms p_j, as roundings of their terms' magnitude.
     num: f64,
     den: f64,
+    /// Roundings on a score past its dot (Metal's fp32 SCALE * log2e: 4), and in the final division (fast: 3).
+    score_round: f64 = 1,
+    div: f64 = 1,
+    /// A weight's exp as (a + b |x|) ulps of 2^-23 (Metal's fast::exp: 40 + 2 |x|), in place of fast_exp's.
+    exp_ulps: ?[2]f64 = null,
+    /// The scores' max keeps a NaN (Metal's softmax), where @max drops it.
+    nan_max: bool = false,
 };
 
 /// An mma k16 step's error in 2^-24 of |acc| + sum |a b|: 17 terms cut at the largest's ulp, then rounded down.
@@ -51,8 +58,8 @@ pub fn head(q: []const f64, k: []const f64, v: []const f64, n: usize, d: usize, 
             a += @abs(q[e] * k[j * d + e]);
         }
         w[j] = s * scale;
-        tau[j] = f.score * u * a * @abs(scale) + u * @abs(w[j]); // the score's spread; below, the weight's
-        m = @max(m, w[j]);
+        tau[j] = f.score * u * a * @abs(scale) + f.score_round * u * @abs(w[j]); // the score's spread; below, the weight's
+        m = if (f.nan_max and (std.math.isNan(w[j]) or std.math.isNan(m))) std.math.nan(f64) else @max(m, w[j]);
         if (std.math.isFinite(tau[j])) dmax = @max(dmax, tau[j]);
     }
     var l: f64 = 0;
@@ -60,7 +67,7 @@ pub fn head(q: []const f64, k: []const f64, v: []const f64, n: usize, d: usize, 
     var vmax: f64 = 0;
     for (w[0..n], tau[0..n]) |*p, *t| {
         const x = (m - p.*) + 2 * dmax; // |the computed s_j - max| at most
-        var e = t.* + u * x + if (f.fast_exp) (3 + 1.2 * x) * 0x1p-23 else 0x1p-22;
+        var e = t.* + u * x + if (f.exp_ulps) |c| (c[0] + c[1] * x) * 0x1p-23 else if (f.fast_exp) (3 + 1.2 * x) * 0x1p-23 else 0x1p-22;
         if (f.chunk_exp) e += 0x1p-22 + u * x;
         p.* = @exp(p.* - m);
         l += p.*;
@@ -94,7 +101,7 @@ pub fn head(q: []const f64, k: []const f64, v: []const f64, n: usize, d: usize, 
         const e1 = dv / (1 - tmax);
         const en = (gamma(f.num) + f.p_rel) * r * kappa;
         const base = @abs(o) + e1 + en;
-        half[e] = (e1 + en + (gamma(f.den) + u) * base) * (1 + 0x1p-20) + tiny;
+        half[e] = (e1 + en + (gamma(f.den) + f.div * u) * base) * (1 + 0x1p-20) + tiny;
     }
 }
 
