@@ -32,6 +32,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CI builds each platform's release server and runs the release path check on it for every pull request, so a private path in a built binary fails the pull request instead of the release (#1472).
 
+- With `--cortheon`, a turn sent as an array of parts (a vision turn) gives Cortheon its text parts joined, as the chat template reads them, so its checks see the turn's words and two different vision turns no longer share a key (#1469). Without `--cortheon` nothing changes. Thanks to @ppardus.
+
 - Structured output: with `"grammar_budget": true` beside a grammar or a required tool call, each token is drawn so the reply can still finish the grammar within `max_tokens`, so a tool call is no longer cut off unparsed (#1473). It is off by default, where nothing changes; drafted, plain and concurrent replies stay equal with it on, and a grammar it cannot follow (token-level, budgeted, captured or left-recursive rules) is refused with HTTP 400. The first request with a new grammar explores it once, about 60 ms for one tool and 640 ms for twelve.
 
 ## 1.1.7
