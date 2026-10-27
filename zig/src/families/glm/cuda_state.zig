@@ -100,7 +100,7 @@ fn stateSizes(gpa: std.mem.Allocator, w: *const weights.Weights, capacity: usize
     const nd = mlaLayers(w);
     const nk = w.layers.len - nd;
     const n = s.kda.len() * c.kda_dim;
-    const kw = 3 * n + 2 * c.kda_dim + s.kda.len();
+    const kw = @import("cuda_kda_block.zig").paddedWidth(3 * n + 2 * c.kda_dim + s.kda.len()); // TF_GLM_KDA_PAD
     const pk_rows = capacity / sparse.pool + 2;
     const ring_rows = @min(capacity, index_ring);
     const rows: usize = @intFromBool(table == null); // on pages a cache's rows are the pool's
@@ -120,7 +120,7 @@ fn b16Shapes(w: *const weights.Weights) [12][2]usize {
     const c = &w.config;
     const s = &w.share;
     const n = s.kda.len() * c.kda_dim;
-    const kw = 3 * n + 2 * c.kda_dim + s.kda.len();
+    const kw = @import("cuda_kda_block.zig").paddedWidth(3 * n + 2 * c.kda_dim + s.kda.len()); // TF_GLM_KDA_PAD
     return .{
         .{ kw, c.hidden },                   .{ n, c.kda_dim },                    .{ c.hidden, n },
         .{ c.q_lora + c.kv_lora, c.hidden }, .{ s.mla.len() * c.nope, c.q_lora },  .{ c.i_dim + c.i_heads, c.hidden },
@@ -379,7 +379,7 @@ pub const State = struct {
         const nk = w.layers.len - mlaLayers(w);
         const nd = mlaLayers(w);
         const n = s.kda.len() * c.kda_dim;
-        const kw = 3 * n + 2 * c.kda_dim + s.kda.len();
+        const kw = @import("cuda_kda_block.zig").paddedWidth(3 * n + 2 * c.kda_dim + s.kda.len()); // TF_GLM_KDA_PAD
         const pk_rows = capacity / sparse.pool + 2;
         const sizes = try stateSizes(gpa, w, capacity, kv8, if (paged) |q| q.pages else null);
         defer gpa.free(sizes);
