@@ -186,6 +186,9 @@ pub const Layer = struct {
     down: ?exl3.Linear = null,
 };
 
+/// A layer before its tensors: no experts to free.
+const blank: Layer = .{ .input_norm = 0, .post_norm = 0, .q = undefined, .k = undefined, .v = undefined, .o = undefined };
+
 pub const Weights = struct {
     full: Config,
     cfg: Config, // this rank's view
@@ -217,7 +220,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, model_dir
     const view = try full.rankView(world);
     var ck = try core.Checkpoint.openModel(gpa, io, model_dir);
     defer ck.close();
-    var w: Weights = .{ .full = full, .cfg = view, .rank = rank, .world = world, .embed = 0, .layers = try gpa.alloc(Layer, full.layers), .norm = 0, .head = undefined, .arena = .{ .d = d, .gpa = gpa }, .gpa = gpa };
+    const layers = try gpa.alloc(Layer, full.layers);
+    @memset(layers, blank); // deinit reads every layer's experts: a refusal before a layer is filled frees none of it
+    var w: Weights = .{ .full = full, .cfg = view, .rank = rank, .world = world, .embed = 0, .layers = layers, .norm = 0, .head = undefined, .arena = .{ .d = d, .gpa = gpa }, .gpa = gpa };
     errdefer w.deinit();
     const ar = &w.arena;
     const emb = try ck.get("model.embed_tokens.weight");
@@ -236,7 +241,6 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, model_dir
         cuts.clearRetainingCapacity();
         try config.layerCuts(full, i, rank, world, &names, gpa, &cuts);
         const L = &w.layers[i];
-        L.* = .{ .input_norm = 0, .post_norm = 0, .q = undefined, .k = undefined, .v = undefined, .o = undefined };
         L.input_norm = try f32Upload(gpa, ar, try ck.get(try std.fmt.bufPrint(&nb, "model.layers.{d}.input_layernorm.weight", .{i})));
         L.post_norm = try f32Upload(gpa, ar, try ck.get(try std.fmt.bufPrint(&nb, "model.layers.{d}.post_attention_layernorm.weight", .{i})));
         inline for (.{ "q", "k", "v", "o" }, 0..) |f, j| @field(L, f) = try linear(gpa, ar, try cut(gpa, try readMat(gpa, &ck, cuts.items[j].prefix), cuts.items[j]));
@@ -349,4 +353,21 @@ test "bf16 rounding is torch's" {
     try std.testing.expectEqual(@as(u32, 0x3F80_0000), @as(u32, @bitCast(bf16Round(@bitCast(@as(u32, 0x3F80_8000)))))); // tie to even
     try std.testing.expectEqual(@as(u32, 0x3F82_0000), @as(u32, @bitCast(bf16Round(@bitCast(@as(u32, 0x3F81_8000)))))); // tie to even (up)
     try std.testing.expectEqual(@as(u32, 0x3F81_0000), @as(u32, @bitCast(bf16Round(@bitCast(@as(u32, 0x3F80_8001))))));
+}
+
+// An fp16 embedding refuses before any layer is filled; deinit then frees no layer's (unset) expert tables.
+test "a refused load frees only what it set" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = config.fixture });
+    const header = "{\"model.embed_tokens.weight\":{\"dtype\":\"F16\",\"shape\":[1],\"data_offsets\":[0,2]}}";
+    var image: [8 + header.len + 2]u8 = @splat(0);
+    std.mem.writeInt(u64, image[0..8], header.len, .little);
+    @memcpy(image[8..][0..header.len], header);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &image });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectError(error.EmbedNotBf16, load(gpa, io, undefined, dir, 0, 1, false)); // no device touched
 }
