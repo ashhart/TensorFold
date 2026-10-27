@@ -326,6 +326,14 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
                 );
                 return null;
             },
+            error.ModeloptNeedsSm80 => {
+                problem.* = try std.fmt.allocPrint(
+                    a,
+                    "{s} is sm_{d}: {s} (the 4-bit checkpoints run on it)",
+                    .{ name, capability, qwen35.modelopt.modeloptRefusal(capability).? },
+                );
+                return null;
+            },
             else => {
                 problem.* = try std.fmt.allocPrint(
                     a,
