@@ -38,21 +38,27 @@ __device__ float block_sum(float v) {
 extern "C" __global__ void mimo_rms(const float* __restrict__ x, float* __restrict__ res, const float* __restrict__ w,
                                     __half* __restrict__ out, int D, float eps) {
     const int64_t r = blockIdx.x;
-    float v[kMaxPer];
+    float v[kMaxPer];  // unrolled: the values stay in registers
     float ss = 0.f;
-    int n = 0;
-    for (int d = threadIdx.x; d < D; d += blockDim.x, ++n) {
-        float t = x[r * D + d];
-        if (res) {
-            t = res[r * D + d] + t;
-            res[r * D + d] = t;
+#pragma unroll
+    for (int n = 0; n < kMaxPer; ++n) {
+        const int d = threadIdx.x + n * blockDim.x;
+        if (d < D) {
+            float t = x[r * D + d];
+            if (res) {
+                t = res[r * D + d] + t;
+                res[r * D + d] = t;
+            }
+            v[n] = t;
+            ss += t * t;
         }
-        v[n] = t;
-        ss += t * t;
     }
     const float rs = rsqrtf(block_sum(ss) / (float)D + eps);
-    n = 0;
-    for (int d = threadIdx.x; d < D; d += blockDim.x, ++n) out[r * D + d] = __float2half_rn(v[n] * rs * w[d]);
+#pragma unroll
+    for (int n = 0; n < kMaxPer; ++n) {
+        const int d = threadIdx.x + n * blockDim.x;
+        if (d < D) out[r * D + d] = __float2half_rn(v[n] * rs * w[d]);
+    }
 }
 
 // out = half(silu(g) * u), fp32 math; grid (rows, N / blockDim.x).
@@ -111,11 +117,11 @@ extern "C" __global__ void mimo_topk(const float* __restrict__ logits, const flo
         sc[t] = s;
         c = s + bias[t];
     }
-    for (int k = 0; k < K; ++k) {
+    for (int k = 0; k < K; ++k) {  // the tree t <- t + o, o = blockDim / 2 .. 1: shared to 64, then warp 0's shuffles
         bv[t] = c;
         bi[t] = t;
         __syncthreads();
-        for (int o = blockDim.x >> 1; o > 0; o >>= 1) {
+        for (int o = blockDim.x >> 1; o >= 64; o >>= 1) {
             if (t < o) {
                 const float v = bv[t + o];
                 const int i = bi[t + o];
@@ -126,10 +132,21 @@ extern "C" __global__ void mimo_topk(const float* __restrict__ logits, const flo
             }
             __syncthreads();
         }
-        if (t == 0) sel[k] = bi[0];
+        if (t < 32) {
+            float bvt = bv[t];
+            int bit = bi[t];
+            for (int o = min((int)blockDim.x >> 1, 32); o > 0; o >>= 1) {
+                const float v = o == 32 ? bv[t + 32] : __shfl_down_sync(0xffffffffu, bvt, o);
+                const int i = o == 32 ? bi[t + 32] : __shfl_down_sync(0xffffffffu, bit, o);
+                if (v > bvt || (v == bvt && i < bit)) {
+                    bvt = v;
+                    bit = i;
+                }
+            }
+            if (t == 0) sel[k] = bit;
+        }
         __syncthreads();
-        if (t == sel[k]) c = -CUDART_INF_F;
-        __syncthreads();
+        if (t == sel[k]) c = -CUDART_INF_F;  // bv is not read again before the next write: no barrier here
     }
     if (t == 0) {
         float sum = 0.f;

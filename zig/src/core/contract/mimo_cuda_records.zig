@@ -15,13 +15,13 @@ pub const cuda = [_]registry.CudaRecord{
     rec("mimo_glue", "mimo_add2_f32", 256, 0, .{ .regs = 34, .static = 0, .bound = 0 }),
     rec("mimo_glue", "mimo_rope_tables", 256, 0, .{ .regs = 40, .static = 0, .bound = 0 }),
     rec("mimo_glue", "mimo_argmax", 256, 0, .{ .regs = 32, .static = 2048, .bound = 0 }),
-    rec("mimo_ops", "mimo_rms", 256, 0, .{ .regs = 18, .static = 144, .bound = 0 }),
+    rec("mimo_ops", "mimo_rms", 256, 0, .{ .regs = 44, .static = 144, .bound = 0 }),
     rec("mimo_ops", "mimo_silu_mul", 256, 0, .{ .regs = 18, .static = 0, .bound = 0 }),
     rec("mimo_ops", "mimo_wsum", 256, 0, .{ .regs = 36, .static = 0, .bound = 0 }),
     rec("mimo_ops", "mimo_router", 256, 4096 * 4, .{ .regs = 36, .static = 0, .bound = 0 }),
     rec("mimo_ops", "mimo_topk", 256, 0, .{ .regs = 27, .static = 12416, .bound = 0 }),
     rec("mimo_attention", "mimo_qkv", 64, 0, .{ .regs = 20, .static = 0, .bound = 0 }),
-    rec("mimo_attention", "mimo_attn_rows", 512, (5152 + 16 * 96) * 4, .{ .regs = 40, .static = 0, .bound = 0 }), // full layers' 16-head groups
+    rec("mimo_attention", "mimo_attn_rows", 128, 2 * 64 * (200 + 136) * 2, .{ .regs = 164, .static = 0, .bound = 128 }),
     rec("mimo_attention", "mimo_attn_merge", 128, 0, .{ .regs = 36, .static = 0, .bound = 0 }),
     rec("mimo_attention", "mimo_attn_prompt", 128, 2 * 64 * (200 + 136) * 2, .{ .regs = 218, .static = 0, .bound = 128 }),
     rec("exl3_experts", "tf_exl3_prompt_gu_k6_mul1", 256, 0, .{ .regs = 128, .static = 40192, .bound = 256 }), // the shared
