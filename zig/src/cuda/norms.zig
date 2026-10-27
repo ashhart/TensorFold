@@ -163,8 +163,7 @@ pub const Norms = struct {
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 
-    /// addRmsH whose residual is moe_glue's combine of `slots` expert rows ys [rows, slots, width] (fp32 or bf16) weighed
-    /// by wt [rows, slots], rounded to bf16: combine into a delta, then addRmsH, in one launch with the same bytes.
+    /// addRmsH on the bf16 combine of ys [rows, slots, width] (fp32 or bf16) by wt: combine then addRmsH's bytes.
     pub fn moeAddRmsH(n: *const Norms, s: Stream, x: u64, ys: u64, ys_kind: Kind, wt: u64, slots: usize, w: u64, h: u64, y: u64, xs: ?u64, rows: usize, width: usize, eps: f32) !void {
         if (width % 64 != 0 or !vectorOk(width, &.{ x, ys, w, h, y }) or ys_kind == .f16) return error.RowShape;
         if (rows == 0) return;

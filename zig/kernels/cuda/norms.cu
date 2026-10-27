@@ -370,8 +370,7 @@ __device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
     return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
 }
 
-// moe_glue's combine at 8 columns d of row `row`: the slots' w[k] * ys[k] fp32 fmas in slot order from 0, then its bf16
-// delta (SK: the slot rows' kind, 0 fp32, 2 bf16).
+// The combine at columns d..d+7 of a row: w[k] * ys[k] fmas in slot order from 0, rounded to bf16 (SK: 0 fp32, 2 bf16).
 template <int SK>
 __device__ __forceinline__ void slot_sum8(const void* __restrict__ ys, const float* __restrict__ wt, int slots, int64_t row,
                                           int width, int d, float* rv) {
@@ -391,8 +390,7 @@ __device__ __forceinline__ void slot_sum8(const void* __restrict__ ys, const flo
     for (int i = 0; i < 8; ++i) rv[i] = __bfloat162float(__float2bfloat16_rn(acc[i]));
 }
 
-// h = bf16(x + r) (r null: h = x), y = bf16(rms(h) * w), xs y's 64-value sums; width % 64, 16-byte loads.
-// SK >= 0: r is the expert slots' combine (slot_sum8 over ys, wt), the bytes of combine then add_rms_h in one pass.
+// h = bf16(x + r) (r null: h = x; SK >= 0: r is slot_sum8 of ys, wt), y = bf16(rms(h) * w), xs y's 64-value sums.
 template <typename WT, int SK = -1>
 __device__ __forceinline__ void add_rms_h(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ r,
                                           const WT* __restrict__ w, __nv_bfloat16* __restrict__ h,
@@ -467,8 +465,7 @@ extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16h_f32w(con
     add_rms_h(x, r, w, h, y, xs, width, eps);
 }
 
-// h = bf16(x + combine), combine = moe_glue's tf_moe_combine of the expert slots into bf16 (ys [rows, slots, width] of
-// kind ys_kind, 0 fp32 or 2 bf16; wt [rows, slots]), y = bf16(rms(h) * w), xs: add_rms_h's bytes without the delta row.
+// add_rms_h on r = tf_moe_combine's bf16 of ys [rows, slots, width] (ys_kind 0 fp32, 2 bf16) by wt, in one launch.
 extern "C" __global__ void __launch_bounds__(VNT) tf_moe_add_rms_rows_bf16h(const __nv_bfloat16* x, const void* ys,
                                                                            int ys_kind, const float* wt, int slots,
                                                                            const __nv_bfloat16* w, __nv_bfloat16* h,

@@ -11,8 +11,7 @@ const rows = core.contract.rows;
 const ref = core.norms_ref;
 const bfr = core.bf16_round;
 
-/// The kernels by output checked (y or residual h; add_: add_rms_h, moe_add_: add_rms_h on one combined expert slot
-/// of weight 1, the residual's bytes; parts_: strided parts), controls dropping a point.
+/// Kernels by output (y, residual h; add_/moe_add_: add_rms_h, alone or on one slot of weight 1), controls drop one.
 pub const Which = enum { round_y, round_h, once_y, once_h, add_y, add_h, moe_add_y, moe_add_h, parts_once_y, parts_round_y, drop_branch_row, drop_branch_out, drop_sum, drop_row };
 
 fn noSums(_: c.Shape) usize {
@@ -43,7 +42,7 @@ pub fn spec(which: Which) c.Spec {
             .drop_sum => "control: MLX tail without the sum's rounding before the scalar",
             .drop_row => "control: MLX tail without the output's normalized-row rounding",
         },
-        .accum = if (which == .add_h or which == .moe_add_h) .none else .f32, // add_rms_h's h is one rounded add: no sum reaches it
+        .accum = if (which == .add_h or which == .moe_add_h) .none else .f32, // h is one rounded add: no sum reaches it
         .depth = if (which == .add_h or which == .moe_add_h) noSums else depth,
         .ops = 8,
         .mids = 4, // a rounding point decided the other way by the fp32 inverse: two output half-ulps a point
