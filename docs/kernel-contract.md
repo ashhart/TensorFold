@@ -113,7 +113,8 @@ A gate failure on a kernel already shipped is reported, not hidden. Until its fi
 it pass, the run fails until the entry is removed. Today: affine_mm's 4-bit form gives NaN for an infinite input where
 MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s. GLM-5.3-Flash's
 `tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `fmaxf(x, 0)`, as `tl.maximum` is in the
-Python family's Triton glue it was ported from.
+Python family's Triton glue it was ported from. Nemotron's Metal `tf_xup_w3` gives 0 for a NaN dot where float64 keeps
+the NaN: its relu2 is `metal::max(bfloat(acc), 0.0f)`; the other up pipelines give its bytes on the same inputs.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -136,6 +137,10 @@ stream's rows in one dispatch, each bit-equal to the per-stream kernels it repla
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
 Their launches are in `lfm2_records.zig` with the M1 and M2 limits from `--offline`; `lfm2_attn_segs` reserves its 128
 threads in its source, as Metal cannot build it for M1 or M2 at another count.
+Metal also checks Nemotron's routed experts on the engine's route tables, one row to 128: `tf_xup_w3` and `tf_xdown_w3`
+against float64 at tf_load16's bf16 x sums (up's relu2 as an interval over its two bf16 roundings), and the rows2, rows4
+and six geometry pipelines of each projection bit-equal to them (two controls: member rows read from one row, and
+w3's x sums without their bf16 steps).
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and

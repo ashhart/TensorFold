@@ -75,6 +75,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = @import("h3_kernels").source;
     } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ")) {
         text = tf.glm.wide.gather_source;
+    } else if (std.mem.startsWith(u8, d.name, "nemotron experts ")) {
+        text = sources.nemotron_experts;
+    } else if (std.mem.startsWith(u8, d.name, "nemotron geometry ")) {
+        text = if (has(d.name, " up ")) tf.nemotron.kernels.geo_up else tf.nemotron.kernels.geo_down;
     } else if (std.mem.startsWith(u8, d.name, "glm ")) {
         const key = d.name[4..std.mem.indexOfScalarPos(u8, d.name, 4, ' ').?];
         text = for (sources.glm.all) |k| {

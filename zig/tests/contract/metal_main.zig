@@ -326,6 +326,9 @@ pub fn main(init: std.process.Init) !u8 {
     var glm_windows: glm_rows_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
+    var nemotron_experts: @import("metal_nemotron_experts.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer nemotron_experts.deinit();
+    try nemotron_experts.collect(o.only);
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);
     defer a.free(weight_source);
