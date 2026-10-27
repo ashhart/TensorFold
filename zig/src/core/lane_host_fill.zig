@@ -154,9 +154,10 @@ fn step(h: *LaneHost, at: usize) u64 {
 
 /// A long prompt's step, timed while its share owes decoders a part of it; its rows as `step` counts them.
 fn longStep(h: *LaneHost, at: usize) u64 {
-    if (h.share.p >= 1) return step(h, at);
     const decoding = runnable(h) > 0;
-    h.filling.items[at].stream.settle_step = decoding; // timed on the host, so a step owed to decoders ends on the GPU
+    // timed on the host, so a step owed to decoders ends on the GPU; at p = 1 none is owed, and no earlier mark stays
+    h.filling.items[at].stream.settle_step = decoding and h.share.p < 1;
+    if (h.share.p >= 1) return step(h, at);
     const t0 = std.Io.Clock.awake.now(h.io);
     const rows = step(h, at);
     h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);

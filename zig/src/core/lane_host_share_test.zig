@@ -136,10 +136,11 @@ test "a long prompt's step owed to decoders is marked to end on its device; p = 
     defer job.stream.deinit(gpa);
     defer core.backend.release(&job.stream);
     try host.filling.append(gpa, &job);
-    for ([_]f64{ 1, 0.5, 0.5 }, [_]bool{ false, false, true }) |p, paused| {
+    for ([_]f64{ 1, 0.5, 1, 0.5 }, [_]bool{ false, false, false, true }) |p, paused| { // p back at 1 clears the mark
         host.share.p = p;
+        host.share.debt_ns = 0; // decode rounds paid the last step's debt, so every run steps
         d.paused = paused;
         fill.run(&host);
     }
-    try std.testing.expectEqualSlices(bool, &.{ false, true, false }, seen.marks[0..seen.n]);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, false, false }, seen.marks[0..seen.n]);
 }
