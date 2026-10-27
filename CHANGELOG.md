@@ -2,6 +2,16 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- A streamed chat reply with tools now carries the same content as the whole reply: an unoffered or malformed tool call the whole reply keeps as text reaches the stream too, including around accepted calls and before later prose (#1365, #1429). A reply whose answer starts with whitespace sends its text when the reply ends, because only the final parse decides whether that whitespace stays. Inference tokens are unchanged. Thanks to @plotarmordev.
+
+- On Linux, `/metrics` reports the server's resident memory: `tensorfold:process_resident_bytes` and its anonymous, file and shared parts, plus the kernel's lifetime peak, read from `/proc/self/status` at scrape time (#1422). On a GB10 the CPU and GPU share one memory pool, so host memory a rank adds counts against the same limit as the weights. Thanks to @nuk3s.
+
+- Compaction reads a message's text parts as the chat template does, so a turn sent as an array of text parts is no longer treated as empty when the memory note and the kept span are chosen (#1406). Replies are unchanged. Thanks to @ppardus.
+
+- Tests: the LoRA symlink cases skip on Windows when the account may not create symlinks (#1405). Thanks to @BobClawblaw.
+
 ## 1.1.7
 
 - Flash Next on a Mac can leave its routed experts and n-gram tables in the checkpoint and read them from SSD with `--ssd-experts GIB` and `--ple-on-ssd`, so a checkpoint larger than the Mac's memory can be served (#1039, see [Exact Fluid Subgraph Residency](docs/recipes/fluid-subgraph-residency.md)). Neither is on by default. Replies are the same tokens as with everything in memory; a budget too small for one layer's experts refuses at startup instead of changing the model's settings. On an M5 Ultra the 6-bit MTP checkpoint, which does not fit in memory, serves with a 16 GiB expert budget; on an M3 Ultra with the 4-bit checkpoint, servers without the flags are unchanged in prefill and decode.
