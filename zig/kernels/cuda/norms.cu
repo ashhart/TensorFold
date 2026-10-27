@@ -370,11 +370,35 @@ __device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
     return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
 }
 
+// moe_glue's combine at 8 columns d of row `row`: the slots' w[k] * ys[k] fp32 fmas in slot order from 0, then its bf16
+// delta (SK: the slot rows' kind, 0 fp32, 2 bf16).
+template <int SK>
+__device__ __forceinline__ void slot_sum8(const void* __restrict__ ys, const float* __restrict__ wt, int slots, int64_t row,
+                                          int width, int d, float* rv) {
+    float acc[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) acc[i] = 0.f;
+    for (int k = 0; k < slots; ++k) {
+        const float wk = wt[row * slots + k];
+        const int64_t at = (row * slots + k) * width + d;
+        float yv[8];
+        if constexpr (SK == 0) load8f(static_cast<const float*>(ys) + at, yv);
+        else unpack8(*reinterpret_cast<const uint4*>(static_cast<const __nv_bfloat16*>(ys) + at), yv);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) acc[i] = __fmaf_rn(wk, yv[i], acc[i]);
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) rv[i] = __bfloat162float(__float2bfloat16_rn(acc[i]));
+}
+
 // h = bf16(x + r) (r null: h = x), y = bf16(rms(h) * w), xs y's 64-value sums; width % 64, 16-byte loads.
-template <typename WT>
+// SK >= 0: r is the expert slots' combine (slot_sum8 over ys, wt), the bytes of combine then add_rms_h in one pass.
+template <typename WT, int SK = -1>
 __device__ __forceinline__ void add_rms_h(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ r,
                                           const WT* __restrict__ w, __nv_bfloat16* __restrict__ h,
-                                          __nv_bfloat16* __restrict__ y, float* __restrict__ xs, int width, float eps) {
+                                          __nv_bfloat16* __restrict__ y, float* __restrict__ xs, int width, float eps,
+                                          const void* __restrict__ ys = nullptr, const float* __restrict__ wt = nullptr,
+                                          int slots = 0) {
     const int64_t at = static_cast<int64_t>(blockIdx.x) * width;
     const int chunks = width / 8;
     float v[VEC_MOST][8], wv[VEC_MOST][8];
@@ -384,7 +408,7 @@ __device__ __forceinline__ void add_rms_h(const __nv_bfloat16* __restrict__ x, c
         const int c = threadIdx.x + j * VNT;
         if (c < chunks) {
             xp[j] = reinterpret_cast<const uint4*>(x + at)[c];
-            if (r != nullptr) rp[j] = reinterpret_cast<const uint4*>(r + at)[c];
+            if (SK < 0 && r != nullptr) rp[j] = reinterpret_cast<const uint4*>(r + at)[c];
             load8w(w + 8 * c, wv[j]);
         }
     }
@@ -393,9 +417,10 @@ __device__ __forceinline__ void add_rms_h(const __nv_bfloat16* __restrict__ x, c
         const int c = threadIdx.x + j * VNT;
         if (c < chunks) {
             unpack8(xp[j], v[j]);
-            if (r != nullptr) {
+            if (SK >= 0 || r != nullptr) {
                 float rv[8];
-                unpack8(rp[j], rv);
+                if constexpr (SK >= 0) slot_sum8<SK>(ys, wt, slots, blockIdx.x, width, 8 * c, rv);
+                else unpack8(rp[j], rv);
 #pragma unroll
                 for (int i = 0; i < 8; ++i) v[j][i] = __fadd_rn(v[j][i], rv[i]);
                 const uint4 hp = pack8(v[j]);
@@ -440,6 +465,17 @@ extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16h_f32w(con
                                                                               __nv_bfloat16* h, __nv_bfloat16* y,
                                                                               float* xs, int width, float eps) {
     add_rms_h(x, r, w, h, y, xs, width, eps);
+}
+
+// h = bf16(x + combine), combine = moe_glue's tf_moe_combine of the expert slots into bf16 (ys [rows, slots, width] of
+// kind ys_kind, 0 fp32 or 2 bf16; wt [rows, slots]), y = bf16(rms(h) * w), xs: add_rms_h's bytes without the delta row.
+extern "C" __global__ void __launch_bounds__(VNT) tf_moe_add_rms_rows_bf16h(const __nv_bfloat16* x, const void* ys,
+                                                                           int ys_kind, const float* wt, int slots,
+                                                                           const __nv_bfloat16* w, __nv_bfloat16* h,
+                                                                           __nv_bfloat16* y, float* xs, int width,
+                                                                           float eps) {
+    if (ys_kind == 0) add_rms_h<__nv_bfloat16, 0>(x, nullptr, w, h, y, xs, width, eps, ys, wt, slots);
+    else add_rms_h<__nv_bfloat16, 2>(x, nullptr, w, h, y, xs, width, eps, ys, wt, slots);
 }
 
 // Per head of dv = 8 L: out = bf16(silu(z) * rms(y) * w), y and z rows at strides y_ld, z_ld; xs its 64-value sums.
