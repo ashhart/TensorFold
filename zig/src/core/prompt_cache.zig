@@ -104,7 +104,7 @@ pub const Rules = struct {
     tail: bool = false,
     /// Repeated raw prompts keep near their end; only families that allow any-row cuts opt in (0: off).
     repeat_min: u32 = 0,
-    /// A miss keeps a mark where a later prompt forks off the kept prompt it shares the longest prefix with. Off: none.
+    /// Keep one before where the prompt parts from the one it resumed (a miss: the longest kept one), however near.
     fork: bool = false,
 };
 
@@ -314,11 +314,10 @@ pub const Store = struct {
         const e = rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)));
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
-        const previous: []const u32 = if (e) |x| x.last else &.{};
         const ordinary = if (s.active_rewind_at == 0)
-            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, previous))
+            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
         else
-            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, previous)), endpoint, s.active_rewind_at, endpoint_bytes);
+            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
         const known_end = if (user_end <= history_len) user_end else 0;
         const marks_ = interior.add(s, a, prompt, from, known_end, rewind_len, starts, spans, ordinary, endpoint, endpoint_bytes, e) catch |err| {
             a.free(ordinary);
@@ -427,20 +426,18 @@ pub const Store = struct {
         const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else if (history_len == 0) repeat_at else history_len;
         try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
-        const stable_at: u32 = if (previous.len > 0 and !short) blk: {
-            const st: u32 = @intCast(std.mem.indexOfDiff(u32, previous, prompt) orelse @min(previous.len, prompt.len));
-            // One before the part only under the fork rule: a state read at `at` is keyed with the token at `at`.
-            break :blk if (st > 0 and st < history_len and st >= history_len / 2) (if (s.rules.fork) st -| s.rules.lookahead else st) else 0;
-        } else 0;
-        if (stable_at > 0) try want.append(a, stable_at);
-        // A miss keeps the fork however near the history's mark, as the rewind does: a question is under min_gap.
-        const fork_at: u32 = if (previous.len == 0 and s.rules.fork) forks.forkAt(Entry, s.entries.items, prompt, s.rules.lookahead, history_len) else 0;
-        if (fork_at > 0 and fork_at != stable_at) try want.append(a, fork_at);
+        // the prompt this one parts from: the one it resumed, or (fork rule) on a miss the kept one sharing the most
+        const kept = if (previous.len > 0 or !s.rules.fork) previous else forks.longestShared(Entry, s.entries.items, prompt);
+        const part: u32 = if (kept.len == 0 or short) 0 else @intCast(std.mem.indexOfDiff(u32, kept, prompt) orelse @min(kept.len, prompt.len));
+        // the fork rule keeps one before the part, however near: a state at `at` is keyed with the token at `at`
+        const stable: u32 = if (part == 0 or part >= history_len or part < history_len / 2) 0 else if (s.rules.fork) part -| s.rules.lookahead else part;
+        if (stable > 0) try want.append(a, stable);
         if (!short) try want.appendSlice(a, shared);
+        const fork_at = if (s.rules.fork and s.rules.planned) s.startAt(starts, stable) else stable; // where the loop snaps it
         for (want.items, 0..) |w, k| {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
-            const priority = (rewind > 0 and k == 1 and at == rewind) or (s.rules.fork and (at == fork_at or at == stable_at));
+            const priority = (rewind > 0 and k == 1 and at == rewind) or (s.rules.fork and at == fork_at);
             if (!priority and !(k == 0 and warm_pass) and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm == .on))) continue; // near the resume point
             if (k > 0 and !priority) { // the history's mark always (warm families: away from the resume point); the others away from it and each other
                 const near = for (out.items) |o| {
@@ -589,7 +586,6 @@ test {
     _ = @import("prompt_cache_interior_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_fork_test.zig");
-    _ = @import("prompt_cache_fork.zig");
     _ = @import("prompt_cache_give_test.zig");
     _ = @import("prompt_cache_lifetime_test.zig");
     _ = @import("prompt_cache_scan_test.zig");

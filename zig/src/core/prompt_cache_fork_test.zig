@@ -88,3 +88,51 @@ test "a follow-up that resumes the rewind state keeps its fork, near the history
     try std.testing.expectEqual(@as(u32, fork - 1), p.from);
     try std.testing.expectEqual(fresh(&p3), f.pass(&s, &p3, p));
 }
+
+test "a planned family keeps the fork on its grid, however near the history's mark" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .planned = true, .grid = 4, .min_prompt = 0, .fork = true }, 1 << 20);
+    defer s.deinit();
+
+    var p = try s.begin(a, &p1, history, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqualSlices(u32, &.{20}, p.marks); // the history's 22 on the grid, keyed with the question's token
+    try std.testing.expectEqual(fresh(&p1), f.pass(&s, &p1, p));
+
+    // The fork's 19 snaps to 16, 4 from the history's 20 and nearer than min_gap: compared snapped, it keeps.
+    p = try s.begin(a, &p2, history, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 0), p.from);
+    try std.testing.expectEqualSlices(u32, &.{ 16, 20 }, p.marks);
+    try std.testing.expectEqual(fresh(&p2), f.pass(&s, &p2, p));
+
+    p = try s.begin(a, &p3, history, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 16), p.from);
+    try std.testing.expectEqual(fresh(&p3), f.pass(&s, &p3, p));
+}
+
+test "a miss keeps no fork where the prompts part before half the history, or share nothing" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0, .fork = true }, 1 << 20);
+    defer s.deinit();
+    _ = f.pass(&s, &p1, try s.begin(a, &p1, history, &.{}, &.{}, null, &.{}));
+
+    const early = sys[0..2].* ++ [_]u32{ 8, 8 } ++ doc ++ q1 ++ tail; // parts at 2, under half the history
+    const other: [p1.len]u32 = @splat(7); // shares no token
+    for ([_][]const u32{ &early, &other }) |prompt| {
+        const p = try s.begin(a, prompt, history, &.{}, &.{}, null, &.{});
+        try std.testing.expectEqual(@as(u32, 0), p.from);
+        try std.testing.expectEqualSlices(u32, &.{history}, p.marks);
+        try std.testing.expectEqual(fresh(prompt), f.pass(&s, prompt, p));
+    }
+}
+
+test {
+    _ = @import("prompt_cache_fork.zig");
+}
