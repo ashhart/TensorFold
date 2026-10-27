@@ -69,6 +69,11 @@ pub fn blankAs(e: anytype, id: u64, at: usize) !void {
     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 } });
 }
 
+/// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
+fn ringHolds(base: usize, len: usize, rows: usize) bool {
+    return base <= len and len - base <= rows;
+}
+
 /// A blank state made whole from its image's words (its bytes are in or follow): a restore takes it from here.
 pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
@@ -76,6 +81,8 @@ pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !voi
     if (s.cur.len > 64 or (s.cur.len < 64 and cur >> @intCast(s.cur.len) != 0)) return error.DiskWords;
     const head = if (e.mtp) @min(e.capacity, s.pos + @import("cuda_state.zig").window_rows) else 0;
     if (mtp_len > head) return error.DiskWords;
+    const rows = e.cur.st.ring_rows;
+    if (!ringHolds(bases[0], s.pos, rows) or !ringHolds(bases[1], mtp_len, rows)) return error.DiskWords;
     const n = try layout.Plan.size(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null);
     if (n == 0 or n > s.lease.ids.items.len * pages.page) return error.SnapshotSize;
     for (s.cur, 0..) |*b, i| b.* = @intCast(cur >> @intCast(i) & 1);

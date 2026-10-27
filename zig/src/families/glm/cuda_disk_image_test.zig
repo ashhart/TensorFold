@@ -259,6 +259,8 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
     try expectError(error.UnsealedState, snaps.restore(&e, 7));
     try expectError(error.DiskWords, snaps.seal(&e, 7, at + 9, .{ 0, 0 }, 0)); // a head past its verify window
     try expectError(error.DiskWords, snaps.seal(&e, 7, at, .{ 0, 0 }, @as(u64, 1) << @intCast(e.cur.st.cur.len))); // a copy bit no layer has
+    try expectError(error.DiskWords, snaps.seal(&e, 7, at - 1, .{ at + 1, 0 }, 0)); // a main ring based past the state
+    try expectError(error.DiskWords, snaps.seal(&e, 7, at - 1, .{ 0, at }, 0)); // a head ring based past its rows
     try snaps.seal(&e, 7, at - 1, .{ 3, 5 }, 0b01);
     const s = e.snaps.get(7).?;
     const sh = try image.Shape.of(&e.cur.st, &e.c, capacity, true);
@@ -267,4 +269,20 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
     try expectEqual([2]usize{ 3, 5 }, s.bases);
     try std.testing.expectEqualSlices(u1, &.{ 1, 0 }, s.cur);
     try expectError(error.StateKept, snaps.seal(&e, 7, at, .{ 0, 0 }, 0));
+    const far: u32 = capacity - 1024; // a state past the rings' rows
+    const back: u32 = far - @as(u32, @intCast(e.cur.st.ring_rows)); // the least base whose ring still holds its rows
+    try snaps.blankAs(&e, 8, far);
+    defer {
+        var held = e.snaps.get(8).?;
+        snaps.free(&e, &held);
+    }
+    try expectError(error.DiskWords, snaps.seal(&e, 8, far, .{ back - 1, back }, 0)); // a main ring too far back
+    try expectError(error.DiskWords, snaps.seal(&e, 8, far, .{ back, back - 1 }, 0)); // a head ring too far back
+    try snaps.seal(&e, 8, far, .{ back, back }, 0);
+    try snaps.blankAs(&e, 9, far);
+    defer {
+        var held = e.snaps.get(9).?;
+        snaps.free(&e, &held);
+    }
+    try snaps.seal(&e, 9, 0, .{ back, 0 }, 0); // no head rows yet (as without drafts): the main ring holds the state's rows
 }
