@@ -575,15 +575,20 @@ test "kv pages: a family that keeps no prompts plans no cache, so its streams ta
         try std.testing.expect(fits(Promptless, loaded, o, 3 << 29, 8192, 0) and !fits(struct {}, loaded, o, 3 << 29, 8192, 0));
     }
 }
-test "kv pages: LFM2-MoE declares neither keeps_no_prompts nor snap_save and plans its default cache as before" {
+test "kv pages: LFM2-MoE keeps prompts without snapshot slots: its default cache plans as before, and the store holds what the plan set aside" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var problem: []const u8 = "";
     const lfm = @import("lfm2_moe_cuda").native;
-    try std.testing.expect(!keepsNoPrompts(lfm) and !@hasDecl(lfm, "snap_save") and keepsNoPrompts(Promptless));
+    try std.testing.expect(!keepsNoPrompts(lfm) and @hasDecl(lfm, "snap_save") and !@hasDecl(lfm, "snap_slots") and keepsNoPrompts(Promptless));
     const l: kv_pool.Layout = .{ .fixed_bytes = 180 << 20, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
     const o: api.Open = .{ .dir = "", .model_type = "lfm2_moe", .lanes = 8 };
-    // as a family that declares neither: main's default cache, scaled by the room the streams leave
-    try std.testing.expectEqual(try kv_pool.plan(l, budgetOf(struct {}, l, 3 << 29, o, 8192, false, false, 0, null)), (try plan(lfm, arena.allocator(), l, 3 << 29, o, 8192, &problem, false, false, 0, null)).?);
-    try std.testing.expectEqual(@as(u64, 0), kept(lfm, .{}, null, o, 40 << 30, 0, 0, false).copied); // no store either way
+    // as any family that keeps prompts: main's default cache, scaled by the room the streams leave
+    const p = (try plan(lfm, arena.allocator(), l, 3 << 29, o, 8192, &problem, false, false, 0, null)).?;
+    try std.testing.expectEqual(try kv_pool.plan(l, budgetOf(struct {}, l, 3 << 29, o, 8192, false, false, 0, null)), p);
+    // on pages the store holds the plan's budget as pool pages; on fixed pages (TENSORFOLD_LFM2_KV_PAGES=0) the room's
+    const q = (try plan(lfm, arena.allocator(), l, 40 << 30, o, 8192, &problem, false, false, 0, null)).?;
+    try std.testing.expect(q.copied + q.kept > 0);
+    try std.testing.expectEqual(q.copied + q.kept, kept(lfm, .{}, q, o, 40 << 30, 0, 0, false).copied);
+    try std.testing.expectEqual(budget.cacheBytes(null, 40 << 30, 0), kept(lfm, .{}, null, o, 40 << 30, 0, 0, false).copied);
 }
