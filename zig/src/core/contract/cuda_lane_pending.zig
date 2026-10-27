@@ -50,8 +50,6 @@ pub const records = [_]CudaRecord{
     .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8_paged", .symbol = "tf_q35_attn_partial8_paged", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
     .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial_contiguous", .symbol = "tf_q35_attn_partial_contiguous", .image = "qwen35", .threads = 1024 }, .usage = none },
     .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8_contiguous", .symbol = "tf_q35_attn_partial8_contiguous", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
-    .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial", .symbol = "tf_q35_attn_partial", .image = "qwen35", .threads = 1024 }, .usage = none },
-    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8", .symbol = "tf_q35_attn_partial8", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
 };
 
 test "five-SM receipts qualify measured CUDA lanes and keep awaiting launches failing closed" {
@@ -64,8 +62,6 @@ test "five-SM receipts qualify measured CUDA lanes and keep awaiting launches fa
         .{ "tf_q35_attn_partial8_paged", {} },
         .{ "tf_q35_attn_partial_contiguous", {} },
         .{ "tf_q35_attn_partial8_contiguous", {} },
-        .{ "tf_q35_attn_partial", {} },
-        .{ "tf_q35_attn_partial8", {} },
     });
     for (records) |r| {
         if (awaiting.has(r.launch.symbol) and std.meta.eql(none, r.usage)) {
