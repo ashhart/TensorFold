@@ -47,6 +47,8 @@ pub const Runner = struct {
     capture_taps: bool = false,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
+    gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
+    trace: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE's: each pass run while it is enabled is a round
     current_round: ?*const Round = null,
     current_gdn: ?*const GdnPlan = null,
     current_attention: ?*const attn.Plan = null,
@@ -182,6 +184,7 @@ pub const Runner = struct {
     }
 
     pub fn profile(r: *Runner, trace: ?*@import("core").gpu_profile.Trace) void {
+        r.trace = trace;
         r.model.kernels.profiler = trace;
         r.model.glue.profiler = trace;
         r.gdn.profiler = trace;
@@ -243,6 +246,8 @@ pub const Runner = struct {
         if (r.capture_taps) r.taps.begin();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
+        const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .images = placed.images };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
@@ -252,6 +257,10 @@ pub const Runner = struct {
             r.failed = true;
             return err;
         };
+        if (r.trace) |t| {
+            r.gpu_seconds += r.last_gpu_seconds + (t.spanned - spanned) + (if (r.model.ane) |share| share.gpu_seconds - handed else 0);
+            t.round();
+        }
         if (r.capture_taps) try r.taps.complete();
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));

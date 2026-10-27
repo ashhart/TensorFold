@@ -509,6 +509,12 @@ In the native block, `seconds` is the reply's decode time, from the end of its p
 `tokens_per_second` divides the reply's tokens after the first by it. `prefill_seconds` is the prompt pass, and
 `time_to_first_token` counts from the request's arrival, so a queued or long prompt shows there, not in `seconds`.
 The Python 0.6 server's `seconds` is the whole request, prompt included.
+A native Metal Qwen3.8-27B server started with `TF_Q27_PROFILE=N` logs each kernel class's GPU time, the DFlash2
+drafter's included, every N decode rounds (`1` means 64; unset, empty or `0` is off, and any other value leaves it off
+with a warning). Prompt passes run unprofiled, and a profiled round runs slower while its spans are timed. Its replies
+add `gpu_seconds` to the block: the GPU-busy time of the target model's forward passes the reply ran in, its prompt
+pass included. A round shared with other streams counts whole in each of their replies, and the drafter's passes
+are not included. Without `TF_Q27_PROFILE` the field is absent and replies are unchanged.
 
 The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,
 `thinking`, `effort`, `tokens`, `sha`, `finish`, `rounds`, and draft acceptance; a refused request reports

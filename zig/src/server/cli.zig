@@ -154,9 +154,10 @@ pub const flags = [_]Flag{
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
 };
 
-/// The variables this binary honours as the Python engine does, then the CUDA build's.
+/// The variables this binary honours as the Python engine does, then the CUDA build's or the Metal build's.
 pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "BRAVE_SEARCH_API_KEY" } ++
-    (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "TENSORFOLD_P2P_DIAGNOSTICS", "TENSORFOLD_P2P_PROBE" } else [_][]const u8{});
+    (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "TENSORFOLD_P2P_DIAGNOSTICS", "TENSORFOLD_P2P_PROBE" } else [_][]const u8{}) ++
+    (if (builtin.os.tag == .macos) [_][]const u8{"TF_Q27_PROFILE"} else [_][]const u8{});
 
 pub const Args = struct {
     admission: @import("request_admission.zig").Limits = .{},

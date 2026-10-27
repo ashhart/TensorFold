@@ -19,6 +19,7 @@ test {
 
 test {
     _ = @import("lane_host_interior_test.zig");
+    _ = @import("lane_host_gpu_seconds_test.zig");
 }
 
 test {

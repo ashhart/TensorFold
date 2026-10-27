@@ -90,6 +90,7 @@ pub const Fake = struct {
     runs: usize = 0, // `pieces` calls that ran
     image_words: bool = false, // an image row feeds a word of its image's identity, as a tower's row would
     image_rows: usize = 0, // image rows fed (`image_words`): the rows a tower had to make
+    gpu_charge: ?f64 = null, // each verify and step charges its streams this many GPU seconds, as a timed backend does
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -417,6 +418,7 @@ pub const Fake = struct {
         const x = self(ptr);
         const l = x.lane(s);
         try l.history.append(x.gpa, x.value(feed));
+        if (x.gpu_charge) |g| s.chargeGpu(g);
         return x.draw(l, s, position, true);
     }
 
@@ -433,6 +435,7 @@ pub const Fake = struct {
         if (x.fail_round == x.rounds) return error.GpuFailed;
         x.last_rows = 0;
         x.last_sampled = false;
+        if (x.gpu_charge) |g| for (windows) |w| w.stream.chargeGpu(g);
         for (windows, out) |w, o| {
             x.last_rows += w.rows();
             x.last_sampled = x.last_sampled or w.stream.sampling != null;

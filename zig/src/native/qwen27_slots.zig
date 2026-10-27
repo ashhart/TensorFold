@@ -59,8 +59,15 @@ pub fn closing(b: *Metal, s: *const lanes.Stream) void {
     if (b.image_fill == s) b.image_fill = null;
 }
 
+/// With TF_Q27_PROFILE on, the target's passes since `before` count whole toward `s`'s reply (`gpu_seconds`).
+pub fn charge(b: *const Metal, s: *lanes.Stream, before: f64) void {
+    if (b.runner.trace != null) s.chargeGpu(b.runner.gpu_seconds - before);
+}
+
 /// The pass's next chunk, its drafter's absorb before its marks; true once the prompt is in.
 pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
+    const paused = tf.gpu_profile.pause(b.runner.trace); // prompt passes run unprofiled: TF_Q27_PROFILE's rounds decode
+    defer paused.end();
     const ids = s.prompt();
     const slot = f.slot;
     const d = b.drafter(slot);
@@ -115,6 +122,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
     };
     const part = ids[at..end];
     const last = end == ids.len;
+    const before = b.runner.gpu_seconds;
     if (d) |x| {
         if (decoded) try x.decodeChunk(part, last) else try x.promptChunk(part, last);
     } else {
@@ -122,6 +130,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
         if (decoded) try session.decodeChunk(part, last) else try session.promptChunk(part, last);
         if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
     }
+    charge(b, s, before);
     f.at = end;
     s.fill_at.store(@intCast(end), .monotonic); // a prompt chunk waits: `at` is landed progress
     if (s.isCancelled()) return error.Cancelled;
@@ -368,8 +377,10 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         }
         const room: u32 = @intCast(s.max_new - s.emitted().len);
         copies.history = s.context.items;
+        const before = b.runner.gpu_seconds;
         const result = try g.runRound(room, b.nodes, s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
         defer b.gpa.free(result.tokens);
+        charge(b, s, before);
         if (result.extended > 0) {
             try copies.lookup.observe(result.extended, result.extension_landed);
             if (result.extension_landed == result.extended) extra = @min(cap, extra * 2) else if (2 * result.extension_landed < result.extended) extra = @max(@min(cap, 16), extra / 2);

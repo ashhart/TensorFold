@@ -375,6 +375,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    @import("q27_profile_host.zig").steps(b, server_tests);
     b.step("test-drama-cfg-host", "Drama CFG CLI, HTTP and voice transitions without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"CFG"} })).step);
     b.step("test-speech-redraw-deadline-host", "Busy speech redraw expiry without counting an unsubmitted take").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a busy redraw stops at its latest start"} })).step);
     @import("proposal_vocab_host.zig").steps(b, mods.core);

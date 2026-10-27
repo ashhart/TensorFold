@@ -517,8 +517,8 @@ const Generation = struct {
         try runtime.put(a, "reasoning_effort", if (!thinking) .{ .string = "none" } else if (effort) |e| .{ .string = e } else .null);
         try runtime.put(a, "engine", .{ .string = g.srv.info.name });
         try runtime.put(a, "tokens_per_second", .{ .float = if (decode_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_s else 0 });
-        // the reply's decode seconds, as tokens_per_second divides them
-        try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) });
+        try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) }); // the reply's decode seconds, as tokens_per_second divides them
+        if (m.stats.gpu_seconds) |gpu| try runtime.put(a, "gpu_seconds", .{ .float = gpu }); // TF_Q27_PROFILE only
         try runtime.put(a, "prefill_seconds", if (m.stats.prefill_seconds) |p| .{ .float = p } else .null);
         const widths = try a.alloc(Value, m.widths.len);
         for (m.widths, widths) |w, *slot| slot.* = try json.intValue(a, w);

@@ -451,10 +451,12 @@ pub const Metal = struct {
         slots.promoteDue(b);
         const slot = try b.slotFor(s);
         const token = try b.value(feed);
+        const before = b.runner.gpu_seconds;
         if (b.drafter(slot)) |d| try d.advance(token) else {
             try (q.session.Session{ .runner = b.runner, .slot = slot }).step(token);
             if (b.ringOf(slot)) |g| try b.ringChunk(g, 1);
         }
+        slots.charge(b, s, before);
         var next: [1]u32 = undefined;
         try b.draw(s, 0, 1, &.{position}, &next, &.{});
         return b.push(next[0]);
@@ -504,7 +506,9 @@ pub const Metal = struct {
         b.round = try Round.init(b.gpa, inputs[0..windows.len], @intCast(r.model.config.conv_kernel), r.slots, @intCast(r.model.config.vocab));
         b.count = windows.len;
         errdefer b.dropRound();
+        const before = r.gpu_seconds;
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
+        for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
         b.advanced = plain;
         b.rows = total;
         // every greedy window's rows from one argmax over the round; a sampled window draws on the host
