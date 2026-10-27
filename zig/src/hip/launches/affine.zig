@@ -377,7 +377,9 @@ pub const Kernels = struct {
         }));
         const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
         const f = table[b][ri][pick].?;
-        try go(r, f, .{ .x = blocks, .y = cdiv(a.m, stream_rows[ri]), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
+        // a column block's row blocks run next to each other on x, so the later ones read its weights from cache
+        const ny = cdiv(a.m, stream_rows[ri]);
+        try go(r, f, .{ .x = blocks * ny, .y = 1, .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
     }
 
     /// One row on the row tile: a lane owns a group, a wave reads a column's row in one run.
