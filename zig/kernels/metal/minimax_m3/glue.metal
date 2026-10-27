@@ -58,25 +58,29 @@ inline void mm_norm_row(const device float* x, const device bfloat* w, uint widt
   R[i] = float(bfloat(R[i] + float(X[i])));
 }
 
-// torch's sigmoid of an fp32 value (precise exp of -|x|, the same on either side).
+// The sigmoid of an fp32 value from the precise exp of -|x|; below 0 as e / (1 + e), which 1 - y would cancel.
 inline float mm_sigmoid(float x) {
   const float e = precise::exp(-fabs(x)), y = 1.0f / (1.0f + e);
-  return x < 0.0f ? 1.0f - y : y;
+  return x < 0.0f ? e * y : y;
 }
+
+// torch's clamp: a NaN stays NaN (Metal's min and clamp would give the bound).
+inline float mm_clamp(float x, float lo, float hi) { return isnan(x) ? x : clamp(x, lo, hi); }
 
 // SwiGLU-OAI of a gate|up row in bf16 steps: (clamp(up) + 1) * g * sigmoid(g * alpha), g = min(gate, limit).
 [[kernel]] void mm_swiglu(const device bfloat* GU [[buffer(0)]], constant mm_args& a [[buffer(1)]],
     device bfloat* A [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
   if (p.x >= a.width || p.y >= a.rows) return;
   const size_t at = (size_t)p.y * a.stride + p.x;
-  const float g = min(float(GU[at]), a.limit);
-  const float u = clamp(float(GU[at + a.width]), -a.limit, a.limit);
+  const float g = mm_clamp(float(GU[at]), -INFINITY, a.limit);
+  const float u = mm_clamp(float(GU[at + a.width]), -a.limit, a.limit);
   const float s = float(bfloat(mm_sigmoid(float(bfloat(g * a.alpha)))));
   const float glu = float(bfloat(g * s));
   A[(size_t)p.y * a.width + p.x] = bfloat(float(bfloat(u + 1.0f)) * glu);
 }
 
 // The router's fp32 logits: L[r, e] = sum_d float(X[r, d]) * W[e, d], 8 rows and 8 experts a threadgroup.
+[[max_total_threads_per_threadgroup(256)]]
 [[kernel]] void mm_router(const device bfloat* X [[buffer(0)]], const device float* W [[buffer(1)]],
     constant mm_args& a [[buffer(2)]], device float* L [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
     uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
@@ -229,27 +233,54 @@ inline float mm_moe_out(const device bfloat* Y, const device int* pick, const de
   R[i] = float(bfloat(R[i] + mm_moe_out(Y, pick, wts, shared, a, p.y, p.x)));
 }
 
-// A chunk's a.rows picks by expert (a.width experts): offsets[e] its first pair, order the pairs (any order in one).
+// A chunk's a.rows picks by expert (at most 256): offsets[e] its first pair, order each expert's pairs ascending.
 [[kernel]] void mm_sort(const device int* pick [[buffer(0)]], constant mm_args& a [[buffer(1)]],
-    device int* offsets [[buffer(2)]], device int* order [[buffer(3)]], uint t [[thread_position_in_threadgroup]]) {
-  threadgroup atomic_int counts[1024];
-  threadgroup atomic_int next[1024];
+    device int* offsets [[buffer(2)]], device int* order [[buffer(3)]], uint t [[thread_position_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  constexpr uint E = 256, T = 1024, SGS = T / 32;
+  threadgroup atomic_int counts[E];
+  threadgroup int next[E];
+  threadgroup ushort before[SGS][E]; // a 1,024-pair pass: each simdgroup's pairs of an expert, then the pairs ahead
+  threadgroup ushort got[E];         // the pass's pairs of each expert
   if (t < a.width) atomic_store_explicit(&counts[t], 0, memory_order_relaxed);
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint i = t; i < a.rows; i += 1024) atomic_fetch_add_explicit(&counts[pick[i]], 1, memory_order_relaxed);
+  for (uint i = t; i < a.rows; i += T) atomic_fetch_add_explicit(&counts[pick[i]], 1, memory_order_relaxed);
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (t == 0) {
     int sum = 0;
     for (uint e = 0; e < a.width; ++e) {
-      const int c = atomic_load_explicit(&counts[e], memory_order_relaxed);
       offsets[e] = sum;
-      atomic_store_explicit(&next[e], sum, memory_order_relaxed);
-      sum += c;
+      next[e] = sum;
+      sum += atomic_load_explicit(&counts[e], memory_order_relaxed);
     }
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  // a pair's products do not depend on the rows beside it, so an expert's pairs may land in any order
-  for (uint i = t; i < a.rows; i += 1024) order[atomic_fetch_add_explicit(&next[pick[i]], 1, memory_order_relaxed)] = int(i);
+  for (uint i0 = 0; i0 < a.rows; i0 += T) {
+    for (uint j = t; j < SGS * E; j += T) before[j / E][j % E] = 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint i = i0 + t;
+    const int e = i < a.rows ? pick[i] : -1;
+    ushort ahead = 0, same = 0; // the simdgroup's lanes of this expert: below this one, in all
+    for (ushort l = 0; l < 32; ++l)
+      if (simd_shuffle(e, l) == e) {
+        same += 1;
+        ahead += l < lane ? 1 : 0;
+      }
+    if (e >= 0 && ahead + 1 == same) before[sg][e] = same;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t < a.width) {
+      ushort run = 0;
+      for (uint g = 0; g < SGS; ++g) {
+        const ushort n = before[g][t];
+        before[g][t] = run;
+        run += n;
+      }
+      got[t] = run;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (e >= 0) order[next[e] + before[sg][e] + ahead] = int(i);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t < a.width) next[t] += got[t];
+  }
 }
 
 // Y[i] = X[order[i] / a.heads]: each sorted pair's input row (a.width wide).
@@ -329,6 +360,9 @@ struct mm_prep_args { uint rows, heads, kv_heads, index_heads, dim, pos, rotary,
 
 struct mm_index_args { uint rows, pos, heads, blocks, first_row; };
 
+// torch's max: a NaN wins (Metal's max is fmax and drops it).
+inline float mm_max(float x, float y) { return isnan(x) || isnan(y) ? NAN : max(x, y); }
+
 // Indexer scores: S[row, h, j] = max over block j's keys up to the row of IQ[row, h] . IK[k]; 128 keys by 16 rows.
 [[kernel]] void mm_index_scores(const device bfloat* IQ [[buffer(0)]], const device bfloat* IK [[buffer(1)]],
     constant mm_index_args& a [[buffer(2)]], device float* S [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
@@ -357,12 +391,13 @@ struct mm_index_args { uint rows, pos, heads, blocks, first_row; };
   }
   for (uint r = 0; r < nr; ++r)
     for (uint h = 0; h < H; ++h) {
-      const float s = simd_max(key <= a.pos + r0 + r ? acc[r * H + h] : -INFINITY);
+      const float v = key <= a.pos + r0 + r ? acc[r * H + h] : -INFINITY;
+      const float s = simd_any(isnan(v)) ? NAN : simd_max(v);
       if (lane == 0) part[sg][r * H + h] = s;
     }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (t < nr * H) {
-    const float s = max(max(part[0][t], part[1][t]), max(part[2][t], part[3][t]));
+    const float s = mm_max(mm_max(part[0][t], part[1][t]), mm_max(part[2][t], part[3][t]));
     S[((size_t)(r0 + t / H) * a.heads + t % H) * a.blocks + j] = s;
   }
 }
@@ -382,15 +417,15 @@ struct mm_index_args { uint rows, pos, heads, blocks, first_row; };
     for (uint b = 0; b < nb; ++b) list[count++] = int(b);
   } else {
     list[count++] = int(nb - 1);
-    float last_best = INFINITY;
-    uint last_id = nb - 1;
+    float last_best = INFINITY; // (+Inf, -1): before every block, so +Inf blocks are kept first
+    int last_id = -1;
     for (uint k = 1; k < topk; ++k) {
       // the best (score, id) strictly after (last_best, last_id) in the order score desc, id asc
       float best = -INFINITY;
       uint bid = 0xffffffffu;
       for (uint b = lane; b < nb - 1; b += 32) {
         const float v = s[b];
-        const bool after = v < last_best || (v == last_best && b > last_id);
+        const bool after = v < last_best || (v == last_best && int(b) > last_id);
         if (after && (v > best || (v == best && b < bid))) { best = v; bid = b; }
       }
       for (ushort off = 16; off > 0; off /= 2) {
@@ -401,7 +436,7 @@ struct mm_index_args { uint rows, pos, heads, blocks, first_row; };
       if (bid == 0xffffffffu || best == -INFINITY) break;
       list[count++] = int(bid);
       last_best = best;
-      last_id = bid;
+      last_id = int(bid);
     }
   }
   if (lane == 0) {

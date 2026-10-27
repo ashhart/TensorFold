@@ -5,20 +5,19 @@ using namespace tfp;
 // Defines: DH (128, the index dim), IH (index heads).
 
 constant constexpr int LD = DH;
-constant constexpr float kMasked = -3.402823466e+38f;
 
-// Row max (MAX) or sum over a fragment's 32 columns into r[0], r[1] (rows home.y, home.y + 8).
-template <bool MAX>
-inline void fold(thread const frag<float>& f, thread float* r) {
+// torch's max: a NaN wins (Metal's max is fmax and drops it).
+inline float nmax(float x, float y) { return isnan(x) || isnan(y) ? NAN : max(x, y); }
+
+// Row max over a fragment's 32 columns into r[0], r[1] (rows home.y, home.y + 8).
+inline void fold_max(thread const frag<float>& f, thread float* r) {
   TF_UNROLL
   for (short h = 0; h < 2; h++) {
     const short b = 4 * h;
-    float t = MAX ? max(max(f[b], f[b + 1]), max(f[b + 2], f[b + 3])) : (f[b] + f[b + 1]) + (f[b + 2] + f[b + 3]);
-    const float u = simd_shuffle_xor(t, ushort(1));
-    t = MAX ? max(t, u) : t + u;
-    const float w = simd_shuffle_xor(t, ushort(8));
-    t = MAX ? max(t, w) : t + w;
-    r[h] = MAX ? max(r[h], t) : r[h] + t;
+    float t = nmax(nmax(f[b], f[b + 1]), nmax(f[b + 2], f[b + 3]));
+    t = nmax(t, simd_shuffle_xor(t, ushort(1)));
+    t = nmax(t, simd_shuffle_xor(t, ushort(8)));
+    r[h] = nmax(r[h], t);
   }
 }
 
@@ -86,7 +85,7 @@ inline frag<bfloat> blk(const device bfloat* p, int ld, int r, int c, short2 hom
     }
     float m[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};
     TF_UNROLL
-    for (short i = 0; i < 4; i++) fold<true>(s[i], m + 2 * (i >> 1));
+    for (short i = 0; i < 4; i++) fold_max(s[i], m + 2 * (i >> 1));
     threadgroup_barrier(mem_flags::mem_threadgroup); // the step before has read rowmax
     if (home.x == 0) {
       TF_UNROLL
@@ -95,7 +94,7 @@ inline frag<bfloat> blk(const device bfloat* p, int ld, int r, int c, short2 hom
     threadgroup_barrier(mem_flags::mem_threadgroup);
     TF_UNROLL
     for (short j = 0; j < 4; j++)
-      for (int u = 0; u < NS; u++) best[j] = max(best[j], rowmax[u][home.y + 8 * j]);
+      for (int u = 0; u < NS; u++) best[j] = nmax(best[j], rowmax[u][home.y + 8 * j]);
     if (kb % 2 == 1 || kb + 1 == steps) { // a block's two steps done (or its first, when it is the tile's last)
       const int b = kb / 2;
       if (sg == 0 && home.x == 0 && b < blocks) {

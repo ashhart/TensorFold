@@ -54,8 +54,7 @@ pub const Model = struct {
     tap: mtl.Pipeline,
     /// A drafter block's attention over its context ring and itself (dspark.metal's mm_draft_vec, either drafter's).
     draft_vec: mtl.Pipeline,
-    /// A decode window's slots by expert, then each expert's rows at 3 and 4 bits (experts.metal).
-    groups: mtl.Pipeline,
+    /// A decode window's rows of each expert at 3 and 4 bits (experts.metal), grouped by mm_route_groups.
     grouped: [2]mtl.Pipeline,
     /// Each layer's place in the drafter's taps, -1 when untapped (no drafter: all -1).
     tap_at: [cfg.max_layers]i8 = @splat(-1),
@@ -151,13 +150,11 @@ pub const Model = struct {
             defer gpa.free(text);
             const lib = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
             defer lib.deinit();
-            m.groups = try mtl.Pipeline.init(m.device, lib, "mm_expert_groups", false);
-            errdefer m.groups.deinit();
             m.grouped[0] = try mtl.Pipeline.init(m.device, lib, "mm_experts_grouped_q3", false);
             errdefer m.grouped[0].deinit();
             m.grouped[1] = try mtl.Pipeline.init(m.device, lib, "mm_experts_grouped_q4", false);
         }
-        errdefer for ([_]mtl.Pipeline{ m.groups, m.grouped[0], m.grouped[1] }) |p| p.deinit();
+        errdefer for (m.grouped) |p| p.deinit();
         errdefer for (m.mm[0..m.mms]) |f| for (f.pipes) |p| p.deinit();
         try m.addMm(m.weights.head);
         for (m.weights.layers) |l| {
@@ -229,7 +226,6 @@ pub const Model = struct {
         m.index_nax.deinit();
         m.tap.deinit();
         m.draft_vec.deinit();
-        m.groups.deinit();
         for (m.grouped) |p| p.deinit();
         m.sample.deinit();
         m.sample_full.deinit();

@@ -1,26 +1,8 @@
 // A decode window's routed experts, expert by expert: weights read once a window, tf_row_projection_indexed's bits.
 
-// G[0] the experts picked, G[1 + 2g] the g-th by id and G[2 + 2g] its first member in M (its slots in order).
-[[kernel]] void mm_expert_groups(const device int* ids [[buffer(0)]], constant uint& slots [[buffer(1)]],
-    device uint* G [[buffer(2)]], device uint* M [[buffer(3)]], uint t [[thread_position_in_grid]]) {
-  if (t != 0) return;
-  uint n = 0, at = 0;
-  int last = -1;
-  while (true) {
-    int next = 0x7fffffff;
-    for (uint s = 0; s < slots; ++s) if (ids[s] > last && ids[s] < next) next = ids[s];
-    if (next == 0x7fffffff) break;
-    G[1 + 2 * n] = uint(next);
-    G[2 + 2 * n] = at;
-    for (uint s = 0; s < slots; ++s) if (ids[s] == next) M[at++] = s;
-    last = next;
-    n += 1;
-  }
-  G[0] = n;
-}
-
 // One threadgroup an (expert, RPS * SG columns): its members 4, 2 then 1 at a time through tf_rp_rows_at.
 template <int RPS, int SG, int BITS>
+[[max_total_threads_per_threadgroup(64)]]
 [[kernel]] void mm_experts_grouped(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
     const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]], constant int* dims [[buffer(4)]],
     device bfloat* OUT [[buffer(5)]], const device uint* G [[buffer(6)]], const device uint* M [[buffer(7)]],

@@ -112,7 +112,7 @@ struct df_act_args { uint rows, width; };
   const size_t at = (size_t)p.y * 2 * a.width + p.x;
   const float g = float(GU[at]);
   const float e = precise::exp(-fabs(g)), y = 1.0f / (1.0f + e);
-  const float s = g < 0.0f ? 1.0f - y : y;
+  const float s = g < 0.0f ? e * y : y; // e / (1 + e) below 0, which 1 - y would cancel
   A[(size_t)p.y * a.width + p.x] = bfloat(float(bfloat(g * s)) * float(GU[at + a.width]));
 }
 
