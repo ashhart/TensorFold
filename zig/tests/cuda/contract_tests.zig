@@ -33,7 +33,6 @@ const latent_k = @import("contract_latent.zig");
 const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
 const f32w_k = @import("contract_glm_f32w.zig");
-
 const w4a8_k = @import("contract_w4a8.zig");
 
 const round_k = @import("contract_tree_round.zig");
@@ -538,9 +537,8 @@ pub fn run(gpu: check.Gpu) !void {
     var glm_scores = glm_index_k.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.scores };
     defer glm_scores.deinit();
     try kernels.append(a, glm_scores.kernel());
-    var glm_fast = try @import("contract_glm_pools.zig").Fast.init(gpu, s, glm_fns);
-    defer glm_fast.deinit();
-    try glm_fast.append(a, &kernels);
+    const glm_fast = try @import("contract_glm_pools.zig").Fast.create(a, gpu, s, glm_fns, &kernels);
+    defer glm_fast.destroy(a);
     var glm_ops = try cuda.Module.load(gpu.d, kk.glm_ops);
     defer glm_ops.unload();
     var glm_tokens = glm_index_k.Tokens{ .rig = .{ .gpu = gpu, .s = s }, .f = try glm_ops.function("tf_glm_dsa_tokens") };
