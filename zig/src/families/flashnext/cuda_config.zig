@@ -3,6 +3,7 @@
 const std = @import("std");
 const wt = @import("cuda_prompt_wt.zig");
 const gdn = @import("cuda_gdn.zig");
+const exl3 = @import("exl3/pack/cuda_exl3_config.zig");
 
 /// One config field and the value the kernels and buffers assume.
 const Want = struct { name: []const u8, value: i64 };
@@ -100,7 +101,7 @@ pub fn mismatch(text: std.json.ObjectMap, quant: ?std.json.ObjectMap) ?[]const u
     return geometry(text);
 }
 
-fn geometry(text: std.json.ObjectMap) ?[]const u8 {
+pub fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     // a folder Living Weights taught widens the shared expert by its pocket (a whole number of groups, 128 at most)
     const learned = int(text, learned_key) orelse 0;
     if (learned < 0 or learned > 128 or @mod(learned, 32) != 0) return learned_key;
@@ -111,7 +112,7 @@ fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     return semantics(text);
 }
 
-pub const Mode = enum { affine, modelopt };
+pub const Mode = enum { affine, modelopt, exl3 };
 
 fn projection(q: std.json.ObjectMap, name: []const u8, algo: []const u8, group: i64) bool {
     const p = object(q, name) orelse return false;
@@ -201,8 +202,8 @@ pub fn mode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Mode {
     const root = parsed.value.object;
     const text = if (root.get("text_config")) |v| (if (v == .object) v.object else root) else root;
     const quant = if (root.get("quantization")) |v| (if (v == .object) v.object else null) else null;
-    const selected: Mode = if (quant != null) .affine else .modelopt;
-    var field = if (selected == .affine) mismatch(text, quant) else if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization";
+    const selected: Mode = if (quant != null) .affine else if (exl3.named(root)) .exl3 else .modelopt;
+    var field = if (selected == .affine) mismatch(text, quant) else if (selected == .exl3) exl3.mismatch(root, text, geometry) else if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization";
     if (field == null) if (given(root, "tie_word_embeddings")) |v| if (!holds(v, .{ .flag = false })) {
         field = "tie_word_embeddings";
     };
