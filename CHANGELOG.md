@@ -28,6 +28,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Speech: the speech lane is released as soon as the engine finishes a request, and before any error reply, so a client that sends one request after another no longer gets 503 "speech output capacity is full" for a reply it has already received in full (#1438). Thanks to @plotarmordev.
 
+- CUDA servers with two or more ranks log, at startup, each GPU's peer-to-peer read and write status and PCIe path to the others, the driver, CUDA and NCCL versions, the P2P-related NCCL and CUDA settings in effect, and the transport NCCL chose. Nothing changes peer access or NCCL settings, nothing here can fail startup, and replies are unchanged; `TENSORFOLD_P2P_DIAGNOSTICS=0` turns the report off and `TENSORFOLD_P2P_PROBE` times a small all-gather.
+
 - CI builds each platform's release server and runs the release path check on it for every pull request, so a private path in a built binary fails the pull request instead of the release (#1472).
 
 ## 1.1.7
