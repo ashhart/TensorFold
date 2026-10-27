@@ -12,6 +12,7 @@ const recalls = @import("lane_host_recall.zig");
 const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
 const pressure = @import("lane_host_pressure.zig");
+const load = @import("lane_host_load.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -85,6 +86,7 @@ pub const LaneHost = struct {
     pressure: ?@import("memory_pressure.zig").Governor = null, // macOS memory pressure (lane_host_pressure.zig); null: off
     activity: ?@import("lane_activity.zig").Activity = null, // owned work scopes for a backend's watchdog; null: off
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
+    load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -141,6 +143,7 @@ pub const LaneHost = struct {
         .recall = recalls.attach,
         .imprint = rows_host.ask,
         .drain = rows_host.drain,
+        .load = load.attach,
     };
 
     const scored_vtable: Engine.VTable = blk: {
@@ -170,7 +173,7 @@ pub const LaneHost = struct {
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
         h.mutex.lockUncancelable(h.io);
-        defer h.mutex.unlock(h.io);
+        defer h.unlock();
         const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
         if (unavailable or h.stale or pressure.refuses(h)) {
             h.gpa.destroy(job);
@@ -183,6 +186,7 @@ pub const LaneHost = struct {
             h.gpa.destroy(job);
             return error.Busy;
         };
+        h.load.started += 1;
         h.wake.signal(h.io);
     }
 
@@ -232,6 +236,7 @@ pub const LaneHost = struct {
         while (!h.closing and !h.foregroundWaiting() and h.core.activeCount() == 0 and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
             h.wake.waitTimeout(h.io, &h.mutex, until) catch |e| return e == error.Timeout;
         }
+        h.load.yields += @intFromBool(!h.closing and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null); // foreground work came
         return false;
     }
 
@@ -262,7 +267,9 @@ pub const LaneHost = struct {
     }
 
     pub fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
+        h.lock();
         h.memory_lanes = null; // a lane may have freed: the next admission asks the backend for memory again
+        h.unlock();
         if (h.rounds) |rd| rd.vtable.left(rd.ctx, @intFromPtr(job));
         job.reported();
         h.gpa.free(job.marks);
@@ -285,7 +292,9 @@ pub const LaneHost = struct {
         h.mutex.lockUncancelable(h.io);
     }
 
+    /// Every list change ends here: the ledger hears what it changed before the lock is released.
     pub fn unlock(h: *LaneHost) void {
+        load.publish(h);
         h.mutex.unlock(h.io);
     }
 

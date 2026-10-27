@@ -118,6 +118,10 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         h.queued.insert(h.gpa, 0, job) catch break :blk false;
         break :blk true;
     };
+    if (waits) {
+        h.load.requeued += 1;
+        h.memory_lanes = others; // under the lock: a publish reads it
+    }
     h.unlock();
     if (!waits) {
         h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);
@@ -137,7 +141,6 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
     job.marks = &.{};
     h.gpa.free(job.key);
     job.key = &.{};
-    h.memory_lanes = others;
     return false;
 }
 
