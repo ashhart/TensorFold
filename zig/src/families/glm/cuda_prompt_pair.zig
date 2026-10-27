@@ -33,6 +33,11 @@ pub const Pair = struct {
     }
 };
 
+/// Whether an engine makes the pair's twin: TF_GLM_PROMPT_PAIR on, and other ranks whose exchanges a pair hides.
+pub fn wanted(on: bool, world: usize) bool {
+    return on and world > 1;
+}
+
 /// Whether a step at `start` of a `len`-id prompt takes the next chunk too: min_rows or more there, and no mark at it.
 pub fn takesTwo(start: usize, len: usize, world: usize, marks: []const u32) bool {
     const next = start + fw.prefill_rows;
@@ -133,4 +138,10 @@ test "a pair rebases the index rings where a chunk at a time would, so a ring ba
     try std.testing.expect(!ringsAgree(0, 2 * C, C, 1));
     try std.testing.expect(ringsAgree(0, 2 * C, 2 * C, C)); // both at a's start
     try std.testing.expect(ringsAgree(C, 2 * C, C, C));
+}
+
+test "only ranks that exchange make the twin: TP=1 has no exchanges to hide" {
+    try std.testing.expect(!wanted(true, 1));
+    try std.testing.expect(wanted(true, 2));
+    try std.testing.expect(!wanted(false, 3));
 }
