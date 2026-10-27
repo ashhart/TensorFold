@@ -240,6 +240,8 @@ pub fn main(init: std.process.Init) !void {
             worst_layer = id;
         }
     }
+    // What the screen says to do about it: a model that stands out this far wants the mask.
+    const recommended: f32 = if (worst_ratio >= derive.massive_threshold) derive.mask_recommended else 0;
     const receipt = try std.json.Stringify.valueAlloc(a, .{
         .kind = "qwen27_steer_derive",
         .model = model_dir.?,
@@ -261,6 +263,7 @@ pub fn main(init: std.process.Init) !void {
         .mask = mask,
         .massive_ratio = worst_ratio,
         .massive_layer = worst_layer,
+        .mask_recommended = recommended,
         .bytes = bytes.len,
     }, .{});
     try std.Io.File.stdout().writeStreamingAll(io, receipt);
