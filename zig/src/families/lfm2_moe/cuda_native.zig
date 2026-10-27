@@ -1,4 +1,4 @@
-//! LFM2.5-24B-A2B (MLX affine 4-bit) behind the native CUDA registry: plain and copy-drafted decoding, no prompt cache.
+//! LFM2.5-24B-A2B (MLX affine 4-bit) behind the native CUDA registry: plain and copy-drafted decoding, prompt reuse.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -7,6 +7,7 @@ const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
 const mdl = @import("cuda_model.zig");
 const be = @import("cuda_backend.zig");
+const snap = @import("cuda_snap.zig");
 const kv = @import("core").kv_pool;
 
 pub const model_type = "lfm2_moe";
@@ -14,6 +15,7 @@ pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = be.prompt_rows;
+/// A kept state is the caches through its position and nothing past it (no draft head reads a token on).
 pub const snap_lookahead: u32 = 0;
 /// A request's last verify window: its pages hold that many rows past its prompt and reply.
 pub const window_rows: u32 = be.max_window;
@@ -141,6 +143,49 @@ fn gib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
+fn lfm(ptr: *anyopaque) *be.Lfm {
+    return @ptrCast(@alignCast(ptr));
+}
+
+/// Bytes a state at `at` prompt tokens takes: whole snapshot pages.
+pub fn snap_bytes(_: *anyopaque, at: u32) u64 {
+    return snap.bytes(at);
+}
+
+/// The cache's pages, allocated once before any request: the store counts held and spare pages through the hooks below.
+pub fn snap_ready(ptr: *anyopaque, budget: u64) !u64 {
+    const x = lfm(ptr);
+    if (x.snaps != null) return error.SnapshotCacheMade;
+    x.snaps = try snap.Pages.init(x.gpa, x.d, budget);
+    return 0;
+}
+
+pub fn snap_charged(_: *anyopaque, saved: *anyopaque) u64 {
+    const k: *const snap.Saved = @ptrCast(@alignCast(saved));
+    return k.lease.ids.items.len * snap.page;
+}
+
+pub fn snap_spare(ptr: *anyopaque) u64 {
+    return if (lfm(ptr).snaps) |*p| p.spare() else 0;
+}
+
+pub fn snap_reuses(ptr: *anyopaque, at: u32) bool {
+    return snap_spare(ptr) >= snap.bytes(at);
+}
+
+/// The prompt pass stands at `at` (a chunk end or a mark): copy the stream's caches there.
+pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
+    return @ptrCast(try lfm(ptr).saveState(owner, at));
+}
+
+pub fn snap_restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
+    return lfm(ptr).restoreState(owner, @ptrCast(@alignCast(saved)));
+}
+
+pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
+    lfm(ptr).dropState(@ptrCast(@alignCast(saved)));
+}
+
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PastContext => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
@@ -181,4 +226,10 @@ test "the admitted layer pattern has the arena's ten attention layers" {
     try checkLayers(&config);
     config.attention[0] = true;
     try std.testing.expectError(error.UnsupportedLfmGeometry, checkLayers(&config));
+}
+
+test "the prompt cache's hooks compile against the store's vtable" {
+    const pc: struct { bytes: *const fn (*anyopaque, u32) u64, save: *const fn (*anyopaque, ?*anyopaque, u32) anyerror!*anyopaque, restore: *const fn (*anyopaque, ?*anyopaque, *anyopaque) anyerror!void, drop: *const fn (*anyopaque, *anyopaque) void } = .{ .bytes = snap_bytes, .save = snap_save, .restore = snap_restore, .drop = snap_drop };
+    try std.testing.expect(@intFromPtr(pc.save) != 0);
+    try std.testing.expectEqual(snap.bytes(100), snap_bytes(undefined, 100));
 }
