@@ -180,12 +180,12 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp
         xb = __shfl_sync(0xFFFFFFFFu, xb, bi & 31);
         if (lane == k) xk = xb, pk = bi;
     }
-    // the weights in their lanes; the sum in pick order
+    // the weights in their lanes; the sum in pick order, + 1e-20 so all picks underflowing to 0 weigh 0, not 0 / 0
     float sum = 0.f;
     for (int k = 0; k < topk; ++k) sum = __fadd_rn(sum, __shfl_sync(0xFFFFFFFFu, xk, k));
     if (lane < topk) {
         pick[r * slots + lane] = pk;
-        wts[r * slots + lane] = __fmul_rn(normalize ? __fdiv_rn(xk, sum) : xk, scale);
+        wts[r * slots + lane] = __fmul_rn(normalize ? __fdiv_rn(xk, __fadd_rn(sum, 1e-20f)) : xk, scale);
     }
     if (lane < shared) pick[r * slots + topk + lane] = ne + lane, wts[r * slots + topk + lane] = 1.f;
 }

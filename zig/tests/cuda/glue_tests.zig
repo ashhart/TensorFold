@@ -109,6 +109,29 @@ fn route(r: *Rig) !void {
     try routeShape(r, D, E, top_k, NS);
     try routeShape(r, 4096, 496, 9, 9);
     for ([_]usize{ 32, 33, 300, 4100 }) |rows| try superLogits(r, rows); // 32 rows keep tf_nemo_router
+    try routeUnderflow(r);
+}
+
+/// Every pick's sigmoid underflows to 0 in fp32 (logits -100): the sum's + 1e-20 keeps their weights 0, not 0 / 0 = NaN.
+fn routeUnderflow(r: *Rig) !void {
+    const rows = 3;
+    const logits = try r.a.alloc(f32, rows * E);
+    @memset(logits, -100);
+    const bias = try r.f32s(E, -0.05, 0.05);
+    const idx = try r.a.alloc(i32, rows * NS);
+    const wt = try r.a.alloc(f64, rows * NS);
+    ref.topk(logits, bias, idx, wt, rows, 2.5, E, top_k, NS, true);
+    const idxd = try r.zeros(i32, rows * NS);
+    const wtd = try r.zeros(f32, rows * NS);
+    const route_: cuda.moe_glue.Route = .{ .experts = E, .topk = top_k, .shared = true, .shared_slots = NS - top_k, .normalize = true, .scale = 2.5, .score = true };
+    try r.moe.topk(r.s, try r.dev(f32, logits), try r.dev(f32, bias), route_, idxd, wtd, rows);
+    try r.same("underflowed top-k ids", i32, idxd, idx);
+    r.cases += 1;
+    for (try r.get(f32, wtd, rows * NS), 0..) |w, i| if (w != @as(f32, if (i % NS < top_k) 0 else 1)) {
+        r.bad += 1;
+        std.debug.print("DIFFER underflowed top-k weights: element {d} is {d}, want {d}\n", .{ i, w, @as(f32, if (i % NS < top_k) 0 else 1) });
+        break;
+    };
 }
 
 fn routeShape(r: *Rig, d: usize, e: usize, k: usize, ns: usize) !void {
