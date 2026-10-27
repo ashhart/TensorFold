@@ -344,7 +344,7 @@ pub const LaneHost = struct {
     /// A set-up job into the engine: a warm pass, the lone driver, the fill queue, or its own prompt pass.
     pub fn launch(h: *LaneHost, job: *Job, began: i96) bool {
         const r = job.request;
-        if (r.embedding == null and r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
+        if (r.embedding == null and r.max_tokens == 0 and h.info_.warm_turns) return @import("lane_host_warm.zig").pass(h, job, began);
         if (r.embedding == null and lone.fits(h, job)) return lone.run(h, job, began, false);
         if (h.core.fills()) {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
@@ -361,7 +361,7 @@ pub const LaneHost = struct {
     pub fn failedPass(h: *LaneHost, job: *Job, e: anyerror) bool {
         return switch (e) {
             error.Cancelled => h.cancel(job),
-            error.LaneMemory => h.requeue(job),
+            error.LaneMemory => ends.requeue(h, job),
             else => ends.dropFailed(h, job, e),
         };
     }
@@ -376,7 +376,7 @@ pub const LaneHost = struct {
                 error.Cancelled => h.cancel(job),
                 error.LaneMemory => blk: {
                     fill.unfill(h, job);
-                    break :blk h.requeue(job);
+                    break :blk ends.requeue(h, job);
                 },
                 else => ends.dropFailed(h, job, e),
             };
@@ -433,23 +433,6 @@ pub const LaneHost = struct {
         return if (h.decoded_rows) r.decode_spans else &.{};
     }
 
-    /// A prompt-only pass on a `warm_turns` engine: the backend prefills, the cache keeps its end (a mark, if keyed on)
-    fn warmPass(h: *LaneHost, job: *Job, began: i96) bool {
-        const be = h.core.backend;
-        if (h.cache) |store| if (job.marks.len == 0 and (job.request.untaught or store.rules.lookahead > 0)) return h.cancel(job); // it would keep nothing
-        be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
-            if (e != error.Cancelled and e != error.Yielded) return ends.dropFailed(h, job, e);
-            be.release(&job.stream);
-            return h.cancel(job);
-        };
-        h.prefilled(job, began);
-        if (h.cache) |store| _ = if (!job.request.untaught and store.rules.lookahead == 0) store.keepBorn(job.cacheKey(), job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request)) else false;
-        be.release(&job.stream);
-        h.remove(job);
-        h.finish(job, .length, "");
-        return true;
-    }
-
     pub fn words(h: *const LaneHost, e: anyerror) []const u8 {
         const x = h.explain orelse return @errorName(e);
         return x.text(x.ctx, e) orelse @errorName(e);
@@ -461,44 +444,6 @@ pub const LaneHost = struct {
         h.finish(job, .failed, message);
         return true;
     }
-
-    /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
-    fn requeue(h: *LaneHost, job: *Job) bool {
-        if (job.stream.pending != null or job.delivered != 0) return h.drop(job, "memory failure after first-token commit");
-        h.lock();
-        for (h.admitted.items, 0..) |j, i| if (j == job) {
-            _ = h.admitted.orderedRemove(i);
-            break;
-        };
-        const others = h.admitted.items.len;
-        const waits = others > 0 and blk: { // with nothing else running no memory comes back: it would wait forever
-            h.queued.insert(h.gpa, 0, job) catch break :blk false;
-            break :blk true;
-        };
-        h.unlock();
-        if (!waits) {
-            h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);
-            return true;
-        }
-        job.fill_on.store(false, .release); // off the lists before the teardown a status reader could have walked into
-        job.reported();
-        if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
-        job.stream.deinit(h.gpa);
-        lane_stream.freeProposer(h, job);
-        recalls.release(job);
-        job.started = false;
-        job.fill_began = false;
-        job.reached = 0;
-        job.entry = null; // looked up again at its next admission
-        h.gpa.free(job.marks);
-        job.marks = &.{};
-        h.gpa.free(job.key);
-        job.key = &.{};
-        h.memory_lanes = others;
-        return false;
-    }
-
-    const alone_words = "the engine has no memory for this request's caches with nothing else running: lower --context or --parallel";
 
     /// A job cancelled in its prompt pass, its lane already released (by a `halt`: failed with its reason).
     pub fn cancel(h: *LaneHost, job: *Job) bool {
