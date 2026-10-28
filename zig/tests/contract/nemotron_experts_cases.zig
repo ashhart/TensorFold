@@ -39,19 +39,20 @@ pub const Entry = struct {
     }
 };
 
-fn rowsEntry(p: Proj, comptime mb: usize, fault: Fault) Entry {
+fn rowsEntry(p: Proj, comptime mb: usize, comptime rps: usize, fault: Fault) Entry {
     const which = if (p == .up) "up" else "down";
-    const symbol = if (mb == 3) "tf_x" ++ which ++ "_w3" else std.fmt.comptimePrint("tf_x{s}_rows{d}", .{ which, mb });
-    return .{ .proj = p, .symbol = symbol, .rps = 4, .sg = if (mb == 3) 4 else 2, .mb = mb, .fault = fault };
+    const r8 = if (rps == 8) "r8" else "";
+    const symbol = if (mb == 3) "tf_x" ++ which ++ "_w3" else std.fmt.comptimePrint("tf_x{s}_rows{d}{s}", .{ which, mb, r8 });
+    return .{ .proj = p, .symbol = symbol, .rps = rps, .sg = if (mb == 3) 4 else 2, .mb = mb, .fault = fault };
 }
 
-/// The eighteen pipelines, then the two controls: rows2 up with coupled members, w3 down summing x in fp32.
+/// The twenty pipelines, then the two controls: rows2 up with coupled members, w3 down summing x in fp32.
 pub const entries = blk: {
-    var out: [20]Entry = undefined;
+    var out: [22]Entry = undefined;
     var n: usize = 0;
     for ([_]Proj{ .up, .down }) |p| {
-        for ([_]usize{ 3, 2, 4 }) |mb| {
-            out[n] = rowsEntry(p, mb, .none);
+        for ([_][2]usize{ .{ 3, 4 }, .{ 2, 4 }, .{ 4, 4 }, .{ 2, 8 } }) |mr| {
+            out[n] = rowsEntry(p, mr[0], mr[1], .none);
             n += 1;
         }
         for (geometries) |geo| {
@@ -60,8 +61,8 @@ pub const entries = blk: {
             n += 1;
         }
     }
-    out[n] = rowsEntry(.up, 2, .coupled);
-    out[n + 1] = rowsEntry(.down, 3, .fp32_sums);
+    out[n] = rowsEntry(.up, 2, 4, .coupled);
+    out[n + 1] = rowsEntry(.down, 3, 4, .fp32_sums);
     break :blk out;
 };
 
