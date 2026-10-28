@@ -369,5 +369,5 @@ test "a refused load frees only what it set" {
     try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &image });
     var path: [64]u8 = undefined;
     const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try std.testing.expectError(error.EmbedNotBf16, load(gpa, io, undefined, dir, 0, 1, false)); // no device touched
+    try std.testing.expectError(error.EmbedNotBf16, load(gpa, io, undefined, dir, 0, 2, false)); // no device touched
 }
