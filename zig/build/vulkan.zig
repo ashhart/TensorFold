@@ -191,7 +191,19 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const datamove_run = b.addRunArtifact(datamove);
     datamove_run.addPassthruArgs();
     b.step("stage1-datamove", "Run the datamove group's contract gates on the chosen device (args after --)").dependOn(&datamove_run.step);
-    host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = datamove_module })).step);
+    // The datamove fixtures' host suite runs on the build host, whatever -Dtarget the runner is built for.
+    const datamove_host_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_datamove_main.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan", .module = module(b, b.graph.host, .debug, o) },
+            .{ .name = "stage1_shaders", .module = stage1_shaders_mod },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
+        },
+    });
+    host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = datamove_host_module })).step);
 
     // Stage 2: the norm/MLP pointwise variants — norm and swiglu compiled as the Ash8c
     // Metal-oracle form (ASH_QWEN35), add the plain bf16 form; all with -DUSE_BF16 —
