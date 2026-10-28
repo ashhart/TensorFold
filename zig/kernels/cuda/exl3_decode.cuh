@@ -51,8 +51,7 @@ __device__ __forceinline__ void load_lane_words(const uint32_t* tile, int lane, 
     for (int i = 0; i < lane_words<K2>(); ++i) w[i] = tile[(word + i) % tile_words<K2>()];
 }
 
-// A trellis word through the read-only path without allocating in L1: the weight stream is read once, so a
-// line kept in L1 evicts something that will be reused. Same value as __ldg, cache policy only.
+// The weight stream is read once, so do not allocate L1 for it: same value as __ldg, cache policy only.
 __device__ __forceinline__ uint32_t ldg_stream_u32(const uint32_t* p) {
     uint32_t v;
     asm volatile("ld.global.nc.L1::no_allocate.u32 %0, [%1];" : "=r"(v) : "l"(p));
