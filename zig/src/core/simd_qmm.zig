@@ -8,6 +8,11 @@ pub fn splits(n: usize) u32 {
     return if (n <= 64) 32 else if (n <= 6144) 16 else 8;
 }
 
+/// Chunks for `n`; a split rank passes the whole width as `whole` so it keeps that width's tree (0 keeps `n`).
+pub fn chunks(n: usize, whole: usize) u32 {
+    return splits(if (whole != 0) whole else n);
+}
+
 /// Output tiles a simdgroup within the 16 KB reduction buffer; tiles never change a row's bits.
 pub fn tiles(n: usize, rt: u32, s: u32) u32 {
     var nt: u32 = if (n % 32 == 0) 4 else if (n % 16 == 0) 2 else 1;
@@ -72,10 +77,10 @@ pub const Pipelines = struct {
 pub const Call = struct { pipeline: mtl.Pipeline, args: Args, groups: mtl.Size, threads: usize };
 
 /// y = x W^T, 4-bit groups of 64: the scalar twin at 1-2 rows if `scalar`, chunk pairs if `paired`, else MMA tiles.
-pub fn call(p: *const Pipelines, n: usize, k: usize, rows: usize, scalar: bool, paired: bool) !Call {
+pub fn call(p: *const Pipelines, n: usize, k: usize, rows: usize, scalar: bool, paired: bool, whole: usize) !Call {
     if (n == 0 or n % 8 != 0 or n > std.math.maxInt(i32) or k == 0 or k % 64 != 0 or k > std.math.maxInt(i32)) return error.UnsupportedSimdShape;
     if (rows == 0 or rows > std.math.maxInt(i32)) return error.NoRows;
-    const s = splits(n);
+    const s = chunks(n, whole);
     const si = std.mem.indexOfScalar(u32, &s_values, s).?;
     const args = Args{ .k = @intCast(k), .n = @intCast(n), .r = @intCast(rows) };
     if (scalar and scalarBlock(rows, s) != 0) {
@@ -127,7 +132,7 @@ pub fn pairedExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     defer queue.deinit();
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    for (outs, [_]bool{ false, true }) |o, pair| encode(e, try call(p, m.n, m.k, rows, false, pair), m, x, 0, o, 0);
+    for (outs, [_]bool{ false, true }) |o, pair| encode(e, try call(p, m.n, m.k, rows, false, pair, 0), m, x, 0, o, 0);
     e.end();
     cb.commit();
     cb.wait();
@@ -157,9 +162,9 @@ pub fn twinExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     defer queue.deinit();
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    encode(e, try call(p, m.n, m.k, rows, false, false), m, x, 0, tiled, 0);
-    for (0..rows) |r| encode(e, try call(p, m.n, m.k, 1, true, false), m, x, r * m.k * 2, twin, r * m.n * 2);
-    for ([_]usize{ 0, rows - 2 }, 0..) |r, i| encode(e, try call(p, m.n, m.k, 2, true, false), m, x, r * m.k * 2, twos, i * 2 * m.n * 2);
+    encode(e, try call(p, m.n, m.k, rows, false, false, 0), m, x, 0, tiled, 0);
+    for (0..rows) |r| encode(e, try call(p, m.n, m.k, 1, true, false, 0), m, x, r * m.k * 2, twin, r * m.n * 2);
+    for ([_]usize{ 0, rows - 2 }, 0..) |r, i| encode(e, try call(p, m.n, m.k, 2, true, false, 0), m, x, r * m.k * 2, twos, i * 2 * m.n * 2);
     e.end();
     cb.commit();
     cb.wait();
@@ -177,6 +182,8 @@ test "chunks follow output width only and tiles fit the reduction buffer" {
     try std.testing.expectEqual(@as(u32, 32), splits(48));
     try std.testing.expectEqual(@as(u32, 16), splits(5120));
     try std.testing.expectEqual(@as(u32, 8), splits(34816));
+    try std.testing.expectEqual(splits(6240), chunks(3168, 6240));
+    try std.testing.expectEqual(splits(6240), chunks(6240, 0));
     for (s_values) |s| for ([_]u32{ 1, 2 }) |rt| {
         const nt = tiles(34816, rt, s);
         try std.testing.expect(s * rt * nt * 64 * 4 <= 16384);

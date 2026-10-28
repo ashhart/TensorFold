@@ -32,6 +32,8 @@ pub const exlr8 = @import("core/exlr8.zig");
 pub const exlr8_projection = @import("core/exlr8_projection.zig");
 pub const exlr8_dense_gpu = @import("core/exlr8_dense_gpu.zig");
 pub const exlr8_prompt = @import("core/exlr8_prompt.zig");
+/// The two-Mac pair seam's row split: the transport, its layout and the one-Mac Loopback the stage-2 checks use.
+pub const pair_rows = @import("core/pair_rows.zig");
 pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_vision_contract = @import("families/flashnext/vision_contract.zig");

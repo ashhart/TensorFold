@@ -198,7 +198,7 @@ pub const Proj = struct {
                 e.dispatchGroups(mtl.Size.of(cl.groups, cl.slots, 1), mtl.Size.of(cl.threads, 1, 1));
             },
             .simd => {
-                const cl = try sq.call(&p.sq_p.?, shape.n, shape.k, shape.rows, false, true);
+                const cl = try sq.call(&p.sq_p.?, shape.n, shape.k, shape.rows, false, true, 0);
                 sq.encode(e, cl, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off, .n = shape.n, .k = shape.k }, p.x.buf, p.x.off, p.out.buf, p.out.off);
             },
             .simd_bits => {

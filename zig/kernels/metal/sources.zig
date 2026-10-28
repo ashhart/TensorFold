@@ -36,6 +36,8 @@ pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
 pub const core_exlr8_prompt = @embedFile("core/exlr8_prompt.metal");
 pub const core_exlr8_dense_prompt = @embedFile("core/exlr8_dense_prompt.metal");
 pub const core_pair = @embedFile("core/pair.metal");
+/// The row-split seam's kernels (see `pair_rows.zig`): `pair.metal` above stays as it is for glm_dsa.
+pub const core_pair_rows = @embedFile("core/pair_rows.metal");
 
 /// GLM-5.3 (glm_moe_dsa): MLA with rope over a bf16 latent cache, the DSA indexer and its top-k, fp32 glue.
 pub const glm_dsa_mla = @embedFile("glm_dsa/mla.metal");
