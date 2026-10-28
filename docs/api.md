@@ -605,8 +605,9 @@ instead of reading the conversation again from its first token. Qwen3.8-27B, Nem
 one Mac and Nemotron on CUDA keep them; other engines refuse the flag at startup.
 
 The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte
-permit and at most eight jobs; when either is full, the save is skipped. The copy waits for its GPU producers before
-RAM can be reused. A state becomes available for reuse only after all its files have been written and synced.
+permit and at most eight jobs; when either is full, the save is skipped. A block still being written is charged and
+copied once, however many saves name it. The copy waits for its GPU producers before RAM can be reused. A state
+becomes available for reuse only after all its files have been written and synced.
 A planned stop (SIGTERM or SIGINT) drains writes for up to 20 seconds, then cancels the remainder; a blocked syscall
 can finish later using only its private temporary files and staged bytes. A killed server loses unfinished saves.
 Rows a stored state already holds for the same tokens are written once, so ten
@@ -656,11 +657,11 @@ publication.
 On CUDA, Nemotron, the Qwen3.5 hybrids and Flash Next take `--spill-gib` and `--checkpoint-slots` with the same store
 and cap as a Mac. At an eviction the engine thread stages a copy of the state into host memory, waiting for the GPU
 work that produced it, then releases its RAM entry and goes on; the I/O thread writes and fsyncs the copy while the
-engine decodes. Staging holds at most 1 GiB and eight jobs: a state whose new bytes (rows not already on disk) do not
-fit what is free is not saved, so one past 1 GiB never is, and a later request for it prefills. When the engine closes,
-at a planned stop (SIGTERM or SIGINT) or an idle unload, it saves the states still in RAM, newest first, within the same
-disk cap and 20-second stop budget. While other streams run, a queued request whose state is on disk has it read ahead
-on an I/O thread, as described above.
+engine decodes. Staging holds at most 1 GiB and eight jobs: a state whose new bytes (rows neither on disk nor being
+written) do not fit what is free is not saved, so one past 1 GiB never is, and a later request for it prefills. When the
+engine closes, at a planned stop (SIGTERM or SIGINT) or an idle unload, it saves the states still in RAM, newest first,
+within the same disk cap and 20-second stop budget. While other streams run, a queued request whose state is on disk has
+it read ahead on an I/O thread, as described above.
 
 Three routes let a client such as the Mac app ask about a conversation. Each takes the body of a chat completion
 (`messages`, `tools`, `chat_template_kwargs`), renders it as that request would be rendered, and answers on the engine's

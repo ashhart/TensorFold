@@ -36,12 +36,20 @@ pub const Job = struct {
     taken: bool = false,
     failure: ?anyerror = null,
 
+    /// The block files it writes: every file but the last, which is the state's own.
+    pub fn blocks(j: *const Job) []File {
+        return j.files[0..j.files.len -| 1];
+    }
+
     pub fn destroy(j: *Job) void {
         for (j.files) |*f| if (f.writer) |*w| w.abort();
         j.arena.deinit();
         allocator.destroy(j);
     }
 };
+
+/// The stems of the blocks jobs in flight are writing.
+pub const Promised = std.AutoHashMapUnmanaged(chain.Stem, void);
 
 pub const Worker = struct {
     dir: [:0]u8,
@@ -90,16 +98,32 @@ pub const Worker = struct {
         unreachable;
     }
 
-    /// Completed jobs stay owned here until the engine takes them, retaining their permits meanwhile.
+    /// Completed jobs stay owned here until the engine takes them, oldest first, retaining their permits meanwhile.
     pub fn take(w: *Worker) ?*Job {
         w.lock();
         defer w.mutex.unlock();
-        for (&w.slots) |*s| if (s.*) |j| if (j.done.load(.acquire)) {
-            s.* = null;
-            w.used -= j.staged;
-            return j;
+        const s = w.oldest(finished) orelse return null;
+        const j = s.*.?;
+        s.* = null;
+        w.used -= j.staged;
+        return j;
+    }
+
+    /// The slot of the earliest staged job `ok` accepts: ids rise as jobs are staged, whichever slot each took.
+    fn oldest(w: *Worker, comptime ok: fn (*const Job) bool) ?*?*Job {
+        var out: ?*?*Job = null;
+        for (&w.slots) |*s| if (s.*) |j| if (ok(j) and (out == null or j.id < out.?.*.?.id)) {
+            out = s;
         };
-        return null;
+        return out;
+    }
+
+    fn finished(j: *const Job) bool {
+        return j.done.load(.acquire);
+    }
+
+    fn untaken(j: *const Job) bool {
+        return !j.taken;
     }
 
     pub fn names(w: *Worker, name: chain.Name) bool {
@@ -112,9 +136,28 @@ pub const Worker = struct {
     pub fn wanted(w: *Worker, stem: chain.Stem) bool {
         w.lock();
         defer w.mutex.unlock();
-        for (w.slots) |s| if (s) |j| for (j.wants) |want| {
-            if (std.mem.eql(u8, want.name[0..16], &stem)) return true;
+        for (w.slots) |s| if (s) |j| if (lists(j, stem)) return true;
+        return false;
+    }
+
+    /// Replaces `set` with the blocks jobs that can still publish write; a job that skipped a block writes none of it.
+    pub fn promised(w: *Worker, gpa: std.mem.Allocator, set: *Promised) !void {
+        set.clearRetainingCapacity();
+        w.lock();
+        defer w.mutex.unlock();
+        const generation = w.generation.load(.acquire);
+        for (w.slots) |s| if (s) |j| if (j.generation == generation and !lost(j)) for (j.blocks()) |f| {
+            try set.put(gpa, chain.stem(f.trailer.name), {});
         };
+    }
+
+    /// Whether the job finished with an error (the worker sets `failure` before it publishes `done`).
+    fn lost(j: *const Job) bool {
+        return j.done.load(.acquire) and j.failure != null;
+    }
+
+    fn lists(j: *const Job, stem: chain.Stem) bool {
+        for (j.wants) |want| if (std.mem.eql(u8, want.name[0..16], &stem)) return true;
         return false;
     }
 
@@ -167,11 +210,9 @@ pub const Worker = struct {
     fn next(w: *Worker) ?*Job {
         w.lock();
         defer w.mutex.unlock();
-        for (w.slots) |s| if (s) |j| if (!j.taken) {
-            j.taken = true;
-            return j;
-        };
-        return null;
+        const j = (w.oldest(untaken) orelse return null).*.?;
+        j.taken = true;
+        return j;
     }
 
     fn run(w: *Worker) void {
@@ -273,4 +314,60 @@ fn compare(fd: c_int, bytes: []const u8, offset: *u64) !void {
         done += got;
         offset.* += got;
     }
+}
+
+const testing = std.testing;
+
+fn named(b: u8) chain.Name {
+    return @splat(b);
+}
+
+fn fileOf(b: u8, kind: file.Kind) File {
+    return .{ .trailer = .{ .kind = @backingInt(kind), .payload = 0, .payload_hash = 0, .name = named(b) }, .payload = &.{} };
+}
+
+/// A job as the worker's slots see it: an id, the blocks its state names and the files it writes (the last is its own).
+fn job(id: u64, wants: []Want, files: []File) Job {
+    return .{ .arena = undefined, .id = id, .generation = 1, .name = undefined, .at = 0, .shared = false, .tokens = &.{}, .spans = &.{}, .starts = &.{}, .wants = wants, .files = files, .bytes = 0, .staged = 1 };
+}
+
+fn threadless() Worker {
+    return .{ .dir = undefined, .io = .{}, .limit = 1 << 20, .thread = undefined };
+}
+
+test "rows io: jobs are run and taken in the order they were staged, whatever slot each holds" {
+    var w = threadless();
+    var jobs = [_]Job{ job(1, &.{}, &.{}), job(2, &.{}, &.{}), job(3, &.{}, &.{}), job(4, &.{}, &.{}) };
+    for (jobs[0..3]) |*j| w.submit(j);
+    try testing.expectEqual(&jobs[0], w.next().?);
+    jobs[0].done.store(true, .release);
+    try testing.expectEqual(&jobs[0], w.take().?);
+    w.submit(&jobs[3]); // the slot job 1 left: the lowest, though the newest
+    for (jobs[1..]) |*j| try testing.expectEqual(j, w.next().?);
+    try testing.expectEqual(@as(?*Job, null), w.next());
+    for (jobs[1..]) |*j| j.done.store(true, .release);
+    for (jobs[1..]) |*j| try testing.expectEqual(j, w.take().?);
+    try testing.expectEqual(@as(?*Job, null), w.take());
+}
+
+test "rows io: only the blocks a job that can still publish writes are promised" {
+    var w = threadless();
+    var wants = [_]Want{ .{ .name = named(1), .window = 0, .k = 0, .bytes = 1 }, .{ .name = named(2), .window = 0, .k = 1, .bytes = 1 } };
+    var writes = [_]File{ fileOf(1, .block), fileOf(2, .block), fileOf(8, .state) };
+    var skips = [_]File{ fileOf(3, .block), fileOf(9, .state) }; // it names blocks 1 and 2 and leaves them to the first job
+    var jobs = [_]Job{ job(1, &wants, &writes), job(2, &wants, &skips) };
+    for (&jobs) |*j| w.submit(j);
+    var set: Promised = .empty;
+    defer set.deinit(testing.allocator);
+    try w.promised(testing.allocator, &set);
+    try testing.expectEqual(@as(u32, 3), set.count());
+    for ([_]u8{ 1, 2, 3 }) |b| try testing.expect(set.contains(chain.stem(named(b))));
+    jobs[0].failure = error.NoSpaceLeft;
+    jobs[0].done.store(true, .release);
+    try w.promised(testing.allocator, &set);
+    try testing.expectEqual(@as(u32, 1), set.count());
+    try testing.expect(set.contains(chain.stem(named(3))));
+    w.fence();
+    try w.promised(testing.allocator, &set);
+    try testing.expectEqual(@as(u32, 0), set.count());
 }

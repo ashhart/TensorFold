@@ -154,7 +154,8 @@ pub fn reap(r: *Rows) void {
         }
         publish(r, j) catch |e| {
             failed(r, j, e);
-            r.admission.finish(r.dir, j.bytes, false);
+            // The job that owed the block already backed admission off.
+            r.admission.finish(r.dir, j.bytes, e == error.MissingBlock);
             r.collect();
             continue;
         };
@@ -164,6 +165,7 @@ pub fn reap(r: *Rows) void {
 
 fn publish(r: *Rows, j: *io.Job) !void {
     if (r.find(j.name)) |_| return;
+    if (!complete(r, j)) return error.MissingBlock;
     var s: store.State = .{ .name = j.name, .at = j.at, .tokens = &.{}, .spans = &.{}, .starts = &.{}, .own = j.files[j.files.len - 1].bytes, .rows = 0, .used = 0, .shared = j.shared };
     s.tokens = try r.gpa.dupe(u32, j.tokens);
     errdefer r.gpa.free(s.tokens);
@@ -188,6 +190,17 @@ fn publish(r: *Rows, j: *io.Job) !void {
     r.counts.writes += 1;
     if (j.verify) r.counts.verified += 1;
     if (!@import("builtin").is_test) std.log.info("imprint: {d} tokens on disk: {d} new blocks and its own {d} MiB ({d} MiB this state, {d} MiB of rows it shares) in {d:.0} ms", .{ j.at, j.files.len - 1, s.own >> 20, j.bytes >> 20, s.rows >> 20, @as(f64, @floatFromInt(nowNs() - j.began)) / 1e6 });
+}
+
+/// Whether every block the job's state names is on disk or among the files it publishes now.
+fn complete(r: *const Rows, j: *const io.Job) bool {
+    blocks: for (j.wants) |want| {
+        const n = chain.stem(want.name);
+        if (r.blocks.contains(n)) continue;
+        for (j.blocks()) |f| if (std.mem.eql(u8, &chain.stem(f.trailer.name), &n)) continue :blocks;
+        return false;
+    }
+    return true;
 }
 
 fn stage(r: *Rows, q: Queued) bool {
@@ -223,18 +236,24 @@ fn stageJob(r: *Rows, prepared: *const Job) !void {
     if (w.names(prepared.name)) return;
     const e = prepared.entry;
     const metadata = 4 * (3 + e.tokens.len + 2 * e.decode_spans.len + prepared.starts.len);
-    var bytes: u64 = 0;
+    var promised: io.Promised = .empty;
+    defer promised.deinit(r.gpa);
     var count: usize = 0;
+    try w.promised(r.gpa, &promised);
+    var bytes = newBytes(r, &promised, prepared, metadata, &count);
     var charge: u64 = 0;
     while (true) {
-        bytes = newBytes(r, prepared, metadata, &count);
         charge = bytes + @sizeOf(io.Job) + count * @sizeOf(io.File) + prepared.wants.len * @sizeOf(Want) + 4 * @sizeOf([]const u8);
         if (!w.fits(charge)) return error.StagingFull;
         const reserved = w.reserved();
         if (!r.budget(bytes + reserved)) return error.DailyBudgetSpent;
         if (!r.room(bytes + reserved)) return error.OverCap;
-        var after_count: usize = 0;
-        if (newBytes(r, prepared, metadata, &after_count) == bytes) break;
+        try w.promised(r.gpa, &promised); // a fence inside room frees the blocks cancelled jobs promised
+        var again_count: usize = 0;
+        const again = newBytes(r, &promised, prepared, metadata, &again_count);
+        if (again == bytes) break;
+        bytes = again;
+        count = again_count;
     }
     if (r.admission.reserve(r.dir, bytes) != .ready) return error.UnderFreeDiskFloor;
     errdefer r.admission.finish(r.dir, bytes, true);
@@ -245,7 +264,7 @@ fn stageJob(r: *Rows, prepared: *const Job) !void {
     const a = arena.allocator();
     const files = try a.alloc(io.File, count);
     var built: usize = 0;
-    for (prepared.wants) |want| if (!r.blocks.contains(chain.stem(want.name))) {
+    for (prepared.wants) |want| if (lacks(r, &promised, want)) {
         var ranges: std.ArrayList(image.Range) = .empty;
         defer ranges.deinit(r.gpa);
         try image.blockRanges(prepared.parts, r.keying.block, want.window, want.k, &ranges, r.gpa);
@@ -267,10 +286,16 @@ fn stageJob(r: *Rows, prepared: *const Job) !void {
     w.submit(j);
 }
 
-fn newBytes(r: *const Rows, j: *const Job, metadata: usize, count: *usize) u64 {
+/// Whether the state's block is for this job to write: the disk lacks it and no job in flight is writing it.
+fn lacks(r: *const Rows, promised: *const io.Promised, want: Want) bool {
+    const n = chain.stem(want.name);
+    return !r.blocks.contains(n) and !promised.contains(n);
+}
+
+fn newBytes(r: *const Rows, promised: *const io.Promised, j: *const Job, metadata: usize, count: *usize) u64 {
     var bytes = image.total(j.own) + metadata + @sizeOf(file.Trailer);
     count.* = 1;
-    for (j.wants) |want| if (!r.blocks.contains(chain.stem(want.name))) {
+    for (j.wants) |want| if (lacks(r, promised, want)) {
         bytes += want.bytes;
         count.* += 1;
     };

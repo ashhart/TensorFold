@@ -33,6 +33,7 @@ pub const Fake = struct {
     slots: ?usize = null, // a family whose states each take one of so many slots (Nemotron CUDA's): past them, none
     gathers: ?usize = null, // copies out of kept states that succeed before every later one fails (null: all succeed)
     scatters: ?Fault = null, // copies into new states that succeed before every later one fails (null: all succeed)
+    gathered: usize = 0, // copies out of kept states made so far
 
     pub fn snapshots(f: *Fake) pc.Snapshots {
         return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .rows = &.{ .parts = partsFn, .gather = gatherFn, .blank = blankFn, .scatter = scatterFn } } };
@@ -134,6 +135,7 @@ pub const Fake = struct {
     }
     fn gatherFn(ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, out: []u8) anyerror!void {
         const f = of(ptr);
+        f.gathered += 1;
         if (f.gathers) |*n| if (n.* == 0) return error.GatherFailed else {
             n.* -= 1;
         };

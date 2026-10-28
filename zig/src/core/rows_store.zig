@@ -583,10 +583,12 @@ test {
     _ = image;
     _ = chain;
     _ = file;
+    _ = write.io;
     _ = @import("rows_test.zig");
     _ = @import("rows_spill_test.zig");
     _ = @import("rows_async_test.zig");
     _ = @import("rows_close_test.zig");
+    _ = @import("rows_stage_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_pool_select_test.zig");
