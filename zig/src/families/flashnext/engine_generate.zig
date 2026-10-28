@@ -189,8 +189,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     r.tree = tr;
     defer r.tree = null;
     if (tr) |t| t.select(prompt);
-    // gated lanes (FZ_GATE) for the same replies: the head's confidence sets each round's width on the GPU
-    const gt: ?*gate_mod.Gate = if (e.gate) |g| (if (tr == null and drafted and out.sampling == null and !watch.armed and r.tp == null and !long) g else null) else null;
+    // gated lanes (FZ_GATE) for those replies at any context: the head's confidence sets each round's width on the GPU
+    const gt: ?*gate_mod.Gate = if (e.gate) |g| (if (tr == null and drafted and out.sampling == null and !watch.armed and r.tp == null) g else null) else null;
     const gfix: ?usize = if (platform.c.getenv("FZ_GATE_FIX")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch null else null; // dev: a fixed host window
     const fixed = if (tr) |t| t.a + t.b else if (gt != null) (gfix orelse gate_mod.WMAX_FIRST) - 1 else depth;
     const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
