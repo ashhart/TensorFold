@@ -45,7 +45,7 @@ fn borrow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *const G
     const w = try gpa.create(Wire); // before the last vote: nothing after it can fail
     errdefer gpa.destroy(w);
     w.* = .{ .gpa = gpa, .r = r, .rank = g.rank };
-    if (!try everyRank(&b, probe(gpa, d, g, r) catch false)) return error.ProbeMismatch;
+    try lendIfAll(&b, probe(gpa, d, g, r) catch false);
     var line: [384]u8 = undefined;
     std.log.info("rank {d}: TF_GLM_ROCE_MULTI: gathers up to {d} KiB a rank on the wire, its probe equal to NCCL's: {s}", .{ g.rank, r.slot_bytes / 1024, r.describeLink(&line) });
     return w;
@@ -73,6 +73,11 @@ fn probe(gpa: std.mem.Allocator, d: *const cuda.Driver, g: *const Group, r: *tp.
     const equal = std.mem.eql(u8, got[0 .. world * n], got[world * n ..]);
     if (!equal) std.log.warn("rank {d}: TF_GLM_ROCE_MULTI's probe: the wire's gather DIFFERS from NCCL's", .{g.rank});
     return equal;
+}
+
+/// The wire is lent only when every rank's probe matched NCCL's bytes: one rank's mismatch keeps every rank on NCCL.
+fn lendIfAll(b: *tp.Bootstrap, good: bool) !void {
+    if (!try everyRank(b, good)) return error.ProbeMismatch;
 }
 
 /// Every rank's vote over the bootstrap, the same answer on every rank.
@@ -153,4 +158,36 @@ test "the wire is lent only when every rank's vote is one byte saying yes" {
     try std.testing.expect(!allSaid(&.{ &.{1}, &.{0}, &.{1} }));
     try std.testing.expect(!allSaid(&.{ &.{1}, &.{}, &.{1} }));
     try std.testing.expect(!allSaid(&.{ &.{1}, &.{ 1, 1 }, &.{1} }));
+}
+
+test "a probe mismatch on one rank keeps all three on NCCL; matches on all three lend the wire on all three" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const Vote = struct {
+        port: u16,
+        lfd: tp.sock.Fd,
+        odd: ?u32,
+        errs: [3]?anyerror = .{ null, null, null },
+
+        fn rank(v: *@This(), me: u32) void {
+            v.errs[me] = v.body(me);
+        }
+
+        fn body(v: *@This(), me: u32) ?anyerror {
+            var b = (if (me == 0) tp.Bootstrap.acceptOn(v.lfd, 3, 5 * std.time.ns_per_s) else tp.Bootstrap.open(.{ .world = 3, .rank = me, .link_port = v.port, .connect_timeout_ns = 5 * std.time.ns_per_s })) catch |e| return e;
+            defer b.close();
+            lendIfAll(&b, v.odd != me) catch |e| return e;
+            return null;
+        }
+    };
+    for ([_]?u32{ 1, null }) |odd| {
+        const l = try tp.bootstrap.testListener();
+        defer tp.sock.close(l.fd);
+        var v: Vote = .{ .port = l.port, .lfd = l.fd, .odd = odd };
+        var t: [2]std.Thread = undefined;
+        for (&t, 1..) |*x, me| x.* = try std.Thread.spawn(.{}, Vote.rank, .{ &v, @as(u32, @intCast(me)) });
+        v.rank(0);
+        for (t) |x| x.join();
+        const want: ?anyerror = if (odd == null) null else error.ProbeMismatch;
+        for (v.errs) |e| try std.testing.expectEqual(want, e);
+    }
 }
