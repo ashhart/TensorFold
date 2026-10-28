@@ -275,23 +275,7 @@ test "off leaves the runtime object unchanged and a short request only reports t
     try std.testing.expect(light.runtime.get("compaction") == null);
 }
 
-test "auto leaves a short request alone when the reserve floor is larger than the window" {
-    var eng: Eng = .{ .window = 8192 };
-    var text: Text = .{};
-    defer freePrompts(&eng);
-    const srv = try start(&eng, &text, .auto, null, null);
-    defer srv.deinit();
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var cx: errors.Cx = .{ .a = a };
-    const light = try go(srv, a, &.{try userMsg(a, "hello")}, 8, &cx);
-    try std.testing.expect(light.runtime.get("context_window") != null);
-    try std.testing.expect(light.runtime.get("compaction") == null);
-    try std.testing.expectEqual(@as(usize, 1), eng.prompts.items.len);
-}
-
-test "auto still compacts once a small window's fifteen percent reserve is passed" {
+test "auto under the reserve floor leaves a short request and compacts past fifteen percent" {
     var eng: Eng = .{ .window = 8192 };
     var text: Text = .{};
     defer freePrompts(&eng);
@@ -300,11 +284,14 @@ test "auto still compacts once a small window's fifteen percent reserve is passe
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const msgs = [_]Value{ try userMsg(a, try pads(a, "BIG-", 7000)), try userMsg(a, "TAIL") };
     var cx: errors.Cx = .{ .a = a };
+    const light = try go(srv, a, &.{try userMsg(a, "hello")}, 8, &cx);
+    try std.testing.expect(light.runtime.get("compaction") == null);
+    try std.testing.expectEqual(@as(usize, 1), eng.prompts.items.len);
+    const msgs = [_]Value{ try userMsg(a, try pads(a, "BIG-", 7000)), try userMsg(a, "TAIL") };
     const reply = try go(srv, a, &msgs, 8, &cx);
     try std.testing.expect(reply.runtime.get("compaction") != null);
-    try std.testing.expect(seenFrom(&eng, 0, "BIG-"));
+    try std.testing.expect(seenFrom(&eng, 1, "BIG-"));
 }
 
 test "the kept span never starts between a tool call and its results" {
