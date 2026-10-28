@@ -61,6 +61,8 @@ Coverage includes:
 - Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
 - LFM2.5-24B-A2B on CUDA: `TENSORFOLD_LFM2_KV_PAGES`, attention caches in pool pages by default, where `0` gives
   each stream fixed pages made at open.
+- LFM3-1.7B on CUDA: `TENSORFOLD_LFM3_KV_PAGES`, full-attention caches in pool pages by default, where `0` gives
+  each stream fixed pages made at open.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
 - Qwen on Metal: `TF_QWEN27_METAL_KV_PAGES` (the 27B) and `TF_QWEN35_METAL_KV_PAGES`, where exactly `1` puts keys and
