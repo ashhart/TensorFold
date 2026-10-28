@@ -31,7 +31,7 @@ fn mutated(a: std.mem.Allocator, text: []const u8, m: Mut) ![]u8 {
 }
 
 /// A pipeline for `name` from `text`, mutated when this is a control.
-fn build(a: std.mem.Allocator, device: mtl.Device, text: []const u8, name: []const u8, mut: ?Mut) !mtl.Pipeline {
+pub fn build(a: std.mem.Allocator, device: mtl.Device, text: []const u8, name: []const u8, mut: ?Mut) !mtl.Pipeline {
     const m = mut orelse return rig_.pipeline(device, text, name);
     const src = try mutated(a, text, m);
     defer a.free(src);
@@ -39,7 +39,7 @@ fn build(a: std.mem.Allocator, device: mtl.Device, text: []const u8, name: []con
 }
 
 /// The registration a probe runs under: its own, or its control's name and expected failure.
-fn under(s: c.Spec, mut: ?Mut) c.Spec {
+pub fn under(s: c.Spec, mut: ?Mut) c.Spec {
     var out = s;
     if (mut) |m| out.name = m.name;
     return out;
@@ -603,25 +603,25 @@ pub fn normSpec(v: Norm) c.Spec {
     };
 }
 
-fn bf16of(v: f32) f32 {
+pub fn bf16of(v: f32) f32 {
     return c.fromBf16(c.toBf16(v));
 }
 
-const Range = struct {
+pub const Range = struct {
     lo: f64,
     hi: f64,
-    fn widen(r: Range, rel: f64) Range {
+    pub fn widen(r: Range, rel: f64) Range {
         const e = rel * @max(@abs(r.lo), @abs(r.hi)) + 0x1p-149;
         return .{ .lo = r.lo - e, .hi = r.hi + e };
     }
-    fn scale(r: Range, b: f64) Range {
+    pub fn scale(r: Range, b: f64) Range {
         return if (b >= 0) .{ .lo = r.lo * b, .hi = r.hi * b } else .{ .lo = r.hi * b, .hi = r.lo * b };
     }
-    fn times(r: Range, s: Range) Range {
+    pub fn times(r: Range, s: Range) Range {
         const p = [4]f64{ r.lo * s.lo, r.lo * s.hi, r.hi * s.lo, r.hi * s.hi };
         return .{ .lo = @min(@min(p[0], p[1]), @min(p[2], p[3])), .hi = @max(@max(p[0], p[1]), @max(p[2], p[3])) };
     }
-    fn bf16(r: Range) Range {
+    pub fn bf16(r: Range) Range {
         return .{ .lo = c.fromBf16(c.toBf16(@floatCast(r.lo))), .hi = c.fromBf16(c.toBf16(@floatCast(r.hi))) };
     }
 };
