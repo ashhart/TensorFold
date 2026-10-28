@@ -1,19 +1,29 @@
 //! The Qwen3.5-2B Vulkan model probe: a real CLI greedy run of the first
-//! native model core against the frozen unchanged-Ash Metal oracle, exactly
-//! the oracle's drawn tokens fed from the probe's own selections (never
-//! teacher forcing).
+//! native model core against the frozen unchanged-Ash Metal oracle. In the
+//! default free-running mode exactly the oracle's drawn tokens are fed from
+//! the probe's own selections; --teacher-forced instead feeds each scored
+//! step's oracle id as the next input — a labelled per-step mode, never a
+//! free-running chain proof.
 //!
 //! Inputs: MODEL_DIR (the pinned Qwen3.5-2B checkpoint), INPUT_IDS.npy (u32
 //! rank 1), ORACLE_DIR (the oracle's token_ids.json + result.json +
 //! logits_bf16.bin), OUTPUT_DIR (must be new). Flags: --vendor ID (optional
 //! generic Vulkan vendor guard; no Apple PCI id is assumed), --timeout-ms
-//! MS. --help exits 0 before any loader or device opens; bad usage or bad
-//! inputs exit 2; a failed run exits 1; a fence timeout exits 124 (inside
-//! the engine's orExit).
+//! MS, --context N (the KV capacity request, 1 to the backend's 7168;
+//! default 256) and --teacher-forced. --help exits 0 before any loader or
+//! device opens; bad usage or bad inputs exit 2; a failed run exits 1; a
+//! fence timeout exits 124 (inside the engine's orExit).
+//!
+//! The whole prompt is prefilled: planFor validates its full length and the
+//! generated steps against the requested context before any GPU work, and
+//! Engine.prefill splits it into canonical 32-row chunks internally.
 //!
 //! PASS requires the exact oracle IDs (strict lowest-index ties, no epsilon,
 //! no known-ID special case) on two fresh-cache runs — a real reset between
-//! them — with byte-identical logits rows within Vulkan. The full BF16 logit
+//! them, both in the selected mode — with byte-identical logits rows within
+//! Vulkan. In teacher-forced mode that is the per-step agreement under golden
+//! inputs, not a free-running chain claim; the receipt's execution_mode
+//! names the mode. The full BF16 logit
 //! rows are preserved to OUTPUT_DIR/logits_bf16.bin for the receipt (the GPU
 //! greedy is the selector, never a CPU argmax); the raw logits are also
 //! compared element-wise against the oracle's file as a diagnostic only —
@@ -33,10 +43,13 @@ const sys = @import("sys");
 
 const Engine = engine_mod.Engine;
 
-const usage = "usage: tf-qwen35-model [--vendor ID] [--timeout-ms MS] MODEL_DIR INPUT_IDS.npy ORACLE_DIR OUTPUT_DIR\n" ++
-    "  --help          show this text and exit without opening a loader or device\n" ++
-    "  --vendor ID     refuse a device whose Vulkan vendorID differs (decimal or 0x hex; no default)\n" ++
-    "  --timeout-ms MS bound on every fence wait, 1 to 300000 (default 10000); a timeout ends the process\n";
+const usage = "usage: tf-qwen35-model [--vendor ID] [--timeout-ms MS] [--context N] [--teacher-forced] [--sequential-prefill] MODEL_DIR INPUT_IDS.npy ORACLE_DIR OUTPUT_DIR\n" ++
+    "  --help            show this text and exit without opening a loader or device\n" ++
+    "  --vendor ID       refuse a device whose Vulkan vendorID differs (decimal or 0x hex; no default)\n" ++
+    "  --timeout-ms MS   bound on every fence wait, 1 to 300000 (default 10000); a timeout ends the process\n" ++
+    "  --context N       KV context capacity to request, 1 to 7168 (default 256)\n" ++
+    "  --teacher-forced  feed each scored step's oracle id as the next input (labelled per-step mode; default off)\n" ++
+    "  --sequential-prefill  prefill one prompt token per Engine.prefill call (test-only; default is the canonical whole-prompt 32-row chunking)\n";
 
 const Elapsed = struct {
     io: std.Io,
@@ -47,7 +60,20 @@ const Elapsed = struct {
     }
 };
 
-const Options = struct { vendor: ?u32 = null, timeout_ms: u64 = 10_000, positional: [4][]const u8 = undefined };
+const Options = struct {
+    vendor: ?u32 = null,
+    timeout_ms: u64 = 10_000,
+    context: usize = 256,
+    teacher_forced: bool = false,
+    sequential_prefill: bool = false,
+    positional: [4][]const u8 = undefined,
+};
+
+/// The receipt's execution_mode labels: the default free-running greedy and
+/// the labelled teacher-forced per-step mode. The external v1.1 scorer keys
+/// on these exact strings.
+const free_running_mode = "free-running-greedy";
+const teacher_forced_mode = "teacher-forced";
 
 /// The CLI's shape: flags then exactly four positional paths, or null; pure
 /// and host-tested (the probe's only argument validator — no duplicate).
@@ -65,6 +91,17 @@ pub fn parseArgs(args: []const []const u8) ?Options {
             o.timeout_ms = std.fmt.parseInt(u64, args[i + 1], 10) catch return null;
             if (o.timeout_ms == 0 or o.timeout_ms > 300_000) return null;
             i += 2;
+        } else if (std.mem.eql(u8, arg, "--context")) {
+            if (i + 1 >= args.len) return null;
+            o.context = std.fmt.parseInt(usize, args[i + 1], 10) catch return null;
+            if (o.context == 0 or o.context > q35v.backend.max_capacity) return null;
+            i += 2;
+        } else if (std.mem.eql(u8, arg, "--teacher-forced")) {
+            o.teacher_forced = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--sequential-prefill")) {
+            o.sequential_prefill = true;
+            i += 1;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             return null;
         } else break;
@@ -73,6 +110,12 @@ pub fn parseArgs(args: []const []const u8) ?Options {
     if (rest.len != 4) return null;
     o.positional = .{ rest[0], rest[1], rest[2], rest[3] };
     return o;
+}
+
+/// Canonical prefill chunking: how many 32-row chunks `rows` spans; pure and
+/// host-tested. The chunk size is the engine's constant — not configurable.
+pub fn chunkCount(rows: usize) usize {
+    return (rows + engine_mod.max_prefill_rows - 1) / engine_mod.max_prefill_rows;
 }
 
 /// The .npy header's verdict, or null when it is not a v1 little-endian u32
@@ -258,8 +301,8 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("FAIL input: {s} is not a v1 little-endian u32 rank-1 NPY with a nonempty shape\n", .{opts.positional[1]});
         return 2;
     };
-    if (npy.count > engine_mod.max_prefill_rows) {
-        std.debug.print("FAIL input: {d} prompt ids past the {d}-row whole-prefill cap\n", .{ npy.count, engine_mod.max_prefill_rows });
+    if (npy.count > q35v.backend.max_capacity) {
+        std.debug.print("FAIL input: {d} prompt ids past the {d}-row context cap\n", .{ npy.count, q35v.backend.max_capacity });
         return 2;
     }
     const prompt = try readPromptIds(a, npy_bytes[npy.data_offset..]);
@@ -305,6 +348,14 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
 
+    // the full prompt and every generated step must fit the requested
+    // context — checked here, before the device, the weights or the output
+    // directory exist; the engine's prefill chunks the prompt canonically
+    engine_mod.planFor(opts.context, 0, prompt.len, expected.len) catch |e| {
+        std.debug.print("FAIL plan: {s} (prompt {d} rows, {d} steps, context {d})\n", .{ @errorName(e), prompt.len, expected.len, opts.context });
+        return 1;
+    };
+
     // the output directory must be new before the GPU exists
     cwd.createDir(io, opts.positional[3], .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {
@@ -322,7 +373,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     defer out.close(io);
 
-    const engine = Engine.init(a, io, bundle(), opts.positional[0], 256, opts.timeout_ms * std.time.ns_per_ms) catch |e| {
+    const engine = Engine.init(a, io, bundle(), opts.positional[0], opts.context, opts.timeout_ms * std.time.ns_per_ms) catch |e| {
         std.debug.print("FAIL engine: {s}\n", .{@errorName(e)});
         return 1;
     };
@@ -330,11 +381,6 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("MILESTONE engine-ready elapsed_ms={d} capacity={d} model_context={d} logits_bytes={d}\n", .{ clock.ms(), engine.capacity(), engine.modelContext(), engine.logitsLen() });
     if (opts.vendor) |want| if (engine.vendorId() != want) {
         std.debug.print("FAIL device: vendor 0x{x:0>4} is not the requested 0x{x:0>4}\n", .{ engine.vendorId(), want });
-        return 1;
-    };
-
-    engine_mod.planFor(engine.capacity(), engine.visible(), prompt.len, expected.len) catch |e| {
-        std.debug.print("FAIL plan: {s} (prompt {d} rows, {d} steps, capacity {d}, visible {d})\n", .{ @errorName(e), prompt.len, expected.len, engine.capacity(), engine.visible() });
         return 1;
     };
 
@@ -348,13 +394,13 @@ pub fn main(init: std.process.Init) !u8 {
     const ids_b = try a.alloc(u32, expected.len);
     defer a.free(ids_b);
 
-    greedyRun(engine, prompt, ids_a, rows_a, row_len) catch |e| {
+    greedyRun(engine, opts.teacher_forced, opts.sequential_prefill, prompt, expected, ids_a, rows_a, row_len) catch |e| {
         std.debug.print("FAIL run1: {s}\n", .{@errorName(e)});
         return 1;
     };
     std.debug.print("MILESTONE run1-done elapsed_ms={d}\n", .{clock.ms()});
     try engine.reset();
-    greedyRun(engine, prompt, ids_b, rows_b, row_len) catch |e| {
+    greedyRun(engine, opts.teacher_forced, opts.sequential_prefill, prompt, expected, ids_b, rows_b, row_len) catch |e| {
         std.debug.print("FAIL run2: {s}\n", .{@errorName(e)});
         return 1;
     };
@@ -386,6 +432,11 @@ pub fn main(init: std.process.Init) !u8 {
     writeResult(a, io, out, .{
         .status = if (match_a and match_b and ids_equal and logits_equal) "ok" else "mismatch",
         .steps = expected.len,
+        .execution_mode = if (opts.teacher_forced) teacher_forced_mode else free_running_mode,
+        .prefill_schedule = if (opts.sequential_prefill) "rowwise" else "chunk32",
+        .context_cap = opts.context,
+        .prompt_chunks = if (opts.sequential_prefill) prompt.len else chunkCount(prompt.len),
+        .prefill_chunk_rows = if (opts.sequential_prefill) 1 else engine_mod.max_prefill_rows,
         .capacity = engine.capacity(),
         .model_context = engine.modelContext(),
         .prompt_tokens = prompt.len,
@@ -415,17 +466,32 @@ pub fn main(init: std.process.Init) !u8 {
         clock.ms(),                                                                           match_a,                   match_b,  ids_equal, logits_equal,
         if (mismatches) |n| (std.fmt.allocPrint(diag, "{d}", .{n}) catch "?") else "skipped", oracle.generated_ids_hash, ids_hash,
     });
+    // mode labels ride only the non-default modes so the anchor default's
+    // RESULT line stays byte-identical; teacher-forced is per-step agreement,
+    // never claimed as a free-running chain proof
+    if (opts.teacher_forced) std.debug.print("RESULT execution_mode=teacher-forced: oracle ids fed as previous tokens; per-step agreement, not a free-running chain proof\n", .{});
+    if (opts.sequential_prefill) std.debug.print("RESULT prefill_schedule=rowwise: one Engine.prefill call per prompt token\n", .{});
     return if (match_a and match_b and ids_equal and logits_equal) 0 else 1;
 }
 
-/// One greedy run over the fresh state: prefill, then exactly
-/// `ids_out.len` draws, feeding only its own selections.
-fn greedyRun(e: *Engine, prompt: []const u32, ids_out: []u32, rows_out: []u8, row_len: usize) !void {
-    try e.prefill(prompt);
+/// One greedy run over the fresh state: whole-prompt prefill (the engine
+/// chunks it canonically into 32-row pieces; --sequential-prefill instead
+/// issues one Engine.prefill call per prompt token for the boundary
+/// evidence), then exactly `ids_out.len` draws, every id selected by the GPU
+/// argreduce and recorded as drawn. Free-running (the default and the
+/// anchor) feeds each draw back; the teacher-forced mode feeds the oracle's
+/// own id for the step just scored as the next input — a labelled per-step
+/// check, never a free-running chain proof.
+fn greedyRun(e: *Engine, teacher_forced: bool, sequential: bool, prompt: []const u32, expected: []const u32, ids_out: []u32, rows_out: []u8, row_len: usize) !void {
+    if (sequential) {
+        for (prompt) |tok| try e.prefill(&.{tok});
+    } else {
+        try e.prefill(prompt);
+    }
     for (ids_out, 0..) |*slot, step| {
         slot.* = try e.draw();
         try e.logitsBytes(rows_out[step * row_len ..][0..row_len]);
-        if (step + 1 < ids_out.len) try e.decode(slot.*);
+        if (step + 1 < ids_out.len) try e.decode(if (teacher_forced) expected[step] else slot.*);
     }
 }
 
@@ -442,7 +508,11 @@ const Receipt = struct {
     status: []const u8,
     backend: []const u8 = "vulkan-qwen35-first-core",
     steps: usize,
-    context_cap: usize = 256,
+    execution_mode: []const u8,
+    prefill_schedule: []const u8,
+    context_cap: usize,
+    prompt_chunks: usize,
+    prefill_chunk_rows: usize,
     capacity: usize,
     model_context: usize,
     prompt_tokens: usize,
@@ -501,6 +571,11 @@ test "buildResult escapes oracle strings and round-trips through the JSON parser
     const r: Receipt = .{
         .status = "mismatch",
         .steps = 2,
+        .execution_mode = teacher_forced_mode,
+        .prefill_schedule = "rowwise",
+        .context_cap = 512,
+        .prompt_chunks = 1,
+        .prefill_chunk_rows = 32,
         .capacity = 256,
         .model_context = 4096,
         .prompt_tokens = 3,
@@ -531,6 +606,8 @@ test "buildResult escapes oracle strings and round-trips through the JSON parser
     // no raw control characters or unescaped quotes leaked into the bytes
     try testing.expect(std.mem.indexOf(u8, j, "rev \"937") == null);
     try testing.expectEqualStrings(&@as([64]u8, @splat('c')), root.get("generated_ids_hash").?.string);
+    try testing.expectEqualStrings("teacher-forced", root.get("execution_mode").?.string);
+    try testing.expectEqualStrings("rowwise", root.get("prefill_schedule").?.string);
     try testing.expect(root.get("repeat_checks").?.object.get("generated_ids_equal").? == .bool);
     try testing.expect(root.get("oracle_logits_element_mismatches").? == .null);
 }
@@ -546,6 +623,39 @@ test "parseArgs takes the two flags and exactly four paths" {
     try testing.expect(parseArgs(&.{ "--timeout-ms", "0", "/m", "/i", "/o", "/out" }) == null);
     try testing.expect(parseArgs(&.{ "--wat", "/m", "/i", "/o", "/out" }) == null);
     try testing.expect(parseArgs(&.{ "/m", "/i", "/o", "/out", "/extra" }) == null);
+}
+
+test "parseArgs context and mode flags keep the anchor default and bound the context" {
+    // the anchor default: no new flags, the historical 256 free-running run
+    const plain = parseArgs(&.{ "/m", "/i", "/o", "/out" }).?;
+    try testing.expectEqual(@as(usize, 256), plain.context);
+    try testing.expect(!plain.teacher_forced);
+    try testing.expect(!plain.sequential_prefill);
+
+    // the boundary sizes the corpus runs: 33, 65, 7105 all parse
+    for ([_][]const u8{ "33", "65", "7105", "7168" }) |n| {
+        const o = parseArgs(&.{ "--context", n, "--teacher-forced", "--sequential-prefill", "/m", "/i", "/o", "/out" }).?;
+        try testing.expect(o.teacher_forced);
+        try testing.expect(o.sequential_prefill);
+    }
+    // one past the backend's capacity is refused at the CLI, no device
+    try testing.expectEqual(@as(usize, 7168), q35v.backend.max_capacity);
+    try testing.expect(parseArgs(&.{ "--context", "7169", "/m", "/i", "/o", "/out" }) == null);
+    try testing.expect(parseArgs(&.{ "--context", "0", "/m", "/i", "/o", "/out" }) == null);
+    try testing.expect(parseArgs(&.{ "--context", "-1", "/m", "/i", "/o", "/out" }) == null);
+    try testing.expect(parseArgs(&.{ "--context", "abc", "/m", "/i", "/o", "/out" }) == null);
+    try testing.expect(parseArgs(&.{"--context"}) == null);
+    try testing.expect(parseArgs(&.{ "--context", "256", "/m", "/i", "/o", "/out", "/extra" }) == null);
+}
+
+test "chunkCount spans the canonical 32-row chunks without a configurable size" {
+    try testing.expectEqual(@as(usize, engine_mod.max_prefill_rows), 32);
+    try testing.expectEqual(@as(usize, 1), chunkCount(1));
+    try testing.expectEqual(@as(usize, 1), chunkCount(32));
+    try testing.expectEqual(@as(usize, 2), chunkCount(33)); // boundary: two chunks
+    try testing.expectEqual(@as(usize, 2), chunkCount(64));
+    try testing.expectEqual(@as(usize, 3), chunkCount(65)); // boundary: three chunks
+    try testing.expectEqual(@as(usize, 224), chunkCount(7168)); // full context
 }
 
 test "parseNpy takes exactly a v1 LE u32 rank-1 array" {
