@@ -39,6 +39,13 @@ release fixes it, and the release notes say which one.
 - DeepSeek-V4.1 CUDA pieces land in this release, but no release binary serves DeepSeek checkpoints until its whole-model gate ([#827](https://github.com/ashhart/TensorFold/pull/827)) passes.
 
 
+## HIP builds
+
+- gfx1100 with Ubuntu's clang 21 hipcc fails to compile `affine_dot2_stream_relu2_pair<Dot, 6, 1, 8>` ("branch size
+  exceeds simm16"). Build with ROCm 7.13, or pass `-Dhip-relax-branches=true`, which adds
+  `-mllvm -amdgpu-s-branch-bits=15` to the gfx1100 code objects. The option is off by default and has not been run on a
+  gfx1100 GPU ([#1521](https://github.com/ashhart/TensorFold/issues/1521)).
+
 ## Living Weights (`--slide`)
 
 - Living Weights implementation and safety work is in the 1.1.1 tree, including CUDA learners, shared retention
