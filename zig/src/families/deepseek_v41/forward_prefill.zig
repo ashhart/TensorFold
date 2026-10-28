@@ -168,6 +168,7 @@ pub fn planPrograms(f: *Forward, p: *buffers.Plan, rows: u32, layers: []const u3
     const replay = state(f).mode == .replay;
     const runs = try block_prefill.planRuns(ra.allocator(), f.cfg, f.widths, image_opts.planOptions(f), if (replay) try encoderLayers(f, layers) else layers, if (replay) try decoderLayers(f, layers) else null, rows, if (replay) .encoder else .whole);
     for (runs.items) |cs| try p.add(cs);
+    try @import("index_scratch.zig").plan(p, rows, image_opts.planOptions(f), f.cfg, "");
 }
 
 /// TF_DSV41_PF_WS_SHARE=1 with TF_DSV41_PF_4K alone: a 4K segment reuses forward roles that are already large enough.
