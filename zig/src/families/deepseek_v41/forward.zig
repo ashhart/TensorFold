@@ -267,7 +267,6 @@ pub const Forward = struct {
         // no embed of a window fills image rows (graphed: never; eager: no keep or bias), so image ids fail here
         if (hooks.set.vision) |v| try v.checkWindow(ids);
         // the pool's pages for the window's positions, their table entries up before the launches (every rank alike)
-        if (f.kv) |kx| try kx.reserve(f.slot.pos + ids.len);
         if (f.leads()) {
             var msg: [2 + 128]i64 = undefined;
             if (ids.len > 128) return error.BadWindow;
@@ -276,6 +275,7 @@ pub const Forward = struct {
             for (ids, 0..) |t, i| msg[2 + i] = t;
             try f.link.?.send(msg[0 .. 2 + ids.len]);
         }
+        try @import("forward_prefill.zig").reserve(f, f.slot.pos + ids.len);
         const tf = ph.start(f.phases, .forward);
         defer tf.stop();
         f.runner.rows = @intCast(ids.len); // l2pf: wider windows skip the prefetch sites
