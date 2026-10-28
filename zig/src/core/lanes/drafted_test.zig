@@ -395,6 +395,9 @@ test "the depth rule reads the drafter's facts, not the target's" {
     try std.testing.expect(m.plain_guard and m.draft_streams and m.mtp and !m.speculate_early);
     try std.testing.expectEqualSlices(f64, &prior, m.draft_prior);
     try std.testing.expectEqual(@as(u32, 3), m.drafts);
+    try std.testing.expectEqual(t.copy_match, m.copy_match); // 0: the target's
+    head.facts_.copy_match = 20;
+    try std.testing.expectEqual(@as(i64, 20), wrapped.facts(t).copy_match);
     head.facts_.stream_bytes = 4096;
     try std.testing.expectEqual(@as(usize, 1000 + 4096), wrapped.streamBytes(1000)); // admission counts both
 }
