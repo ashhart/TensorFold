@@ -107,6 +107,24 @@ pub const Span = struct { at: usize, n: u32, rows: Ref };
 
 /// `ids` (at most 512) at the cache's length, `images`' rows over theirs (a span wholly in or out); s.logits: the last.
 pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span) !void {
+    return pass(m, s, c, ids, images, true);
+}
+
+/// run for a chunk nothing reads: the cache and the taps fill, the layers from `deepFrom` and the head are left out.
+pub fn fill(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span) !void {
+    return pass(m, s, c, ids, images, false);
+}
+
+/// The first layer whose output feeds no cache and no tap: past the layers that own a cache and the drafter's last tap.
+pub fn deepFrom(m: *const Model) usize {
+    var from = m.config.geo.cacheLayers();
+    for (m.tap_of[0..m.config.geo.layers], 0..) |t, i| {
+        if (t >= 0) from = @max(from, i + 1);
+    }
+    return from;
+}
+
+fn pass(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span, last: bool) !void {
     const rows = ids.len;
     if (rows == 0 or rows > R) return error.BadChunk;
     if (c.len + rows > c.capacity) return error.ContextFull;
@@ -148,16 +166,17 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     if (m.kernels.ple) |*pk| fwd.pleInputs(m, e, s, pk, rows);
     var cur: usize = 0;
-    for (0..geo.layers) |i| {
+    for (0..if (last) geo.layers else deepFrom(m)) |i| {
         if (geo.layer_input != 0) try layerE(m, e, s, c, i, cur, r32) else try layer(m, e, s, c, i, cur, r32, .{});
         cur = 1 - cur;
     }
-    // the head on the last row only (the lane kernel's one-row bits), soft-capped
-    try projectHead(m.gpa, m.device, &m.projections, e, w.head, s.normed[cur], s.logits, rows);
-    e.setPipeline(ks.softcap);
-    bind(e, &.{s.logits}, 0);
-    e.setValue(cfg.softcap, 1);
-    e.dispatchThreads(.{ .width = cfg.vocab }, .{ .width = 256 });
+    if (last) { // the head on the last row only (the lane kernel's one-row bits), soft-capped
+        try projectHead(m.gpa, m.device, &m.projections, e, w.head, s.normed[cur], s.logits, rows);
+        e.setPipeline(ks.softcap);
+        bind(e, &.{s.logits}, 0);
+        e.setValue(cfg.softcap, 1);
+        e.dispatchThreads(.{ .width = cfg.vocab }, .{ .width = 256 });
+    }
     e.end();
     cb.commit();
     cb.wait();
