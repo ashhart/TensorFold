@@ -6,6 +6,8 @@ const lanes = @import("lanes");
 const Fence = @import("../../core/fence.zig").Fence;
 const fwd = @import("forward.zig");
 const st = @import("state.zig");
+const kv_pages = @import("kv_pages.zig");
+const kvp = @import("../../core/metal_kv_pages.zig");
 const lesson_route = @import("living").lesson_route;
 const layers = @import("layers.zig");
 const mtp = @import("mtp.zig");
@@ -76,6 +78,10 @@ pub const Metal = struct {
     living: ?@import("adapters.zig").Sites = null, // the saved lessons' gated blocks, until a learner takes them
     trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson scores logged (dev)
     residency: ?mtl.ResidencySet.Follow = null,
+    kv_arena: ?mtl.Buffer = null, // TF_NEMOTRON_METAL_KV_PAGES: every page, in the residency set
+    kv_tables: ?mtl.Buffer = null, // and every lane's page table
+    kv_pages: ?*kvp.Pages = null, // the core pool over them: a stream leases a lane's pages when it opens
+    kv_pipes: ?*kv_pages.Pipelines = null, // the paged twins (the model's kernels point at them)
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
@@ -111,6 +117,7 @@ pub const Metal = struct {
             self.gpa.destroy(c.*);
         }
         self.caches.deinit(self.gpa);
+        kv_pages.detach(self);
         if (self.head) |*h| h.deinit();
         if (self.masks) |*m| m.deinit();
         if (self.wide) |*w| w.deinit();
@@ -587,5 +594,6 @@ pub const Metal = struct {
             kv.value.deinit(&self.pool);
             self.gpa.destroy(kv.value);
         }
+        if (self.caches.count() == 0) kv_pages.census(self);
     }
 };

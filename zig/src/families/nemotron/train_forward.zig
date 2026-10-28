@@ -168,7 +168,7 @@ fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize, spans
         };
         const keys = sp.skip + sp.rows;
         const strides = [12]usize{ sp.rows * q_row, D, q_row, kvh, cap * D, D, kvh, cap * D, D, sp.rows * row, D, row };
-        l.attention(qkv.plus(sp.at * q_row * 2), At.of(kv.k), At.of(kv.v), At.of(s.ya).plus(sp.at * row * 2), sp.rows, keys, c.heads, c.kv_heads, strides, scale);
+        l.attention(qkv.plus(sp.at * q_row * 2), At.of(kv.k), At.of(kv.v), At.of(s.ya).plus(sp.at * row * 2), sp.rows, keys, c.heads, c.kv_heads, strides, scale, null);
     }
     x.linear("out", "xsum_4096", lin.o_proj, a.o, s.ya, s.out);
     if (lin.slide) |r| layers.rest(x.f, x.e, r, s.ya, s.out, L, row);

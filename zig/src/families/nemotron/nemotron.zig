@@ -30,6 +30,7 @@ pub const train = @import("train.zig");
 pub const pocket_fit = @import("living").pocket_fit;
 pub const lesson_route = @import("living").lesson_route;
 pub const snapshot = @import("snapshot.zig");
+pub const kv_pages = @import("kv_pages.zig");
 pub const learned_prompts = @import("learned_prompts.zig");
 
 pub const Model = model.Model;

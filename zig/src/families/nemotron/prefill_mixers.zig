@@ -9,6 +9,18 @@ const prefill_w = @import("prefill_w.zig");
 const Experts = @import("../../core/row_projection.zig").Experts;
 
 const At = pl.At;
+const kvp = @import("kv_pages.zig");
+const st = @import("state.zig");
+
+/// A cache's keys (or values) for a prompt kernel: its own buffer, or its part of every page.
+fn cacheAt(kv: st.Kv, values: bool) At {
+    if (kv.paged) |p| return .{ .b = p.arena(), .off = if (values) p.v_off else p.k_off };
+    return At.of(if (values) kv.v else kv.k);
+}
+
+fn tableOf(p: st.Paged) pl.Table {
+    return .{ .b = p.table(), .off = p.tableOff(), .page_bytes = p.pageBytes() };
+}
 const Chunk = pre.Chunk;
 
 /// mlx_lm's Mamba2 mixer over the chunk's normed rows (s.x) into s.out; conv and SSM states into the fresh slot.
@@ -105,11 +117,11 @@ pub fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize) v
         if (lin.qkv.tiles != null) x.f.xsum(x.e, "xsum_2688", c.hidden, s.x, 0, s.xs, L);
         if (L <= pre.lane_rows or !x.f.wide(x.e, lin.qkv, s.x, s.qkv, L)) x.f.coop(x.e, "qkv", lin.qkv, s.x, 0, s.xs, s.qkv, L);
         const e = x.e;
-        e.pipe(x.f.k.get("tf_kv_write"));
+        e.pipe(if (kv.paged != null) x.f.k.paged.?.glue[0] else x.f.k.get("tf_kv_write"));
         e.buf(s.qkv, 0, 0);
-        e.buf(kv.k, 0, 1);
-        e.buf(kv.v, 0, 2);
+        kvp.bindKv(e, kv, 1, 2);
         e.bytes([4]u32{ @intCast(c.qkvDim()), @intCast(row), @intCast(cap), @intCast(x.cache.len) }, 3);
+        if (kv.paged) |pg| kvp.bindTable(e, pg, 4);
         e.run(.{ D, c.kv_heads, L }, .{ D, 1, 1 });
         q_row = c.qkvDim();
     } else {
@@ -119,14 +131,18 @@ pub fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize) v
         l.qmm(At.of(s.x), a.q, qkv, At.of(s.parts), L, row, c.hidden);
         l.qmm(At.of(s.x), a.k, k_at, At.of(s.parts), L, kv_row, c.hidden);
         l.qmm(At.of(s.x), a.v, v_at, At.of(s.parts), L, kv_row, c.hidden);
-        for ([2]At{ k_at, v_at }, [2]At{ At.of(kv.k), At.of(kv.v) }) |src, dst| {
-            l.glue("kv_put_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", &.{ src, src }, &.{ L, c.kv_heads, D, cap, x.cache.len, cap, 0 }, &.{dst}, .{ D, L, c.kv_heads }, .{ 128, 2, 1 });
+        for ([2]At{ k_at, v_at }, [2]At{ cacheAt(kv, false), cacheAt(kv, true) }) |src, dst| {
+            const p = [_]usize{ L, c.kv_heads, D, cap, x.cache.len, cap, 0 };
+            if (kv.paged) |pg| {
+                l.goWith(x.f.k.paged.?.glue[2], &.{ src, src }, &p, 16, null, &.{dst}, .{ D, L, c.kv_heads }, .{ 128, 2, 1 }, tableOf(pg));
+            } else l.glue("kv_put_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", &.{ src, src }, &p, &.{dst}, .{ D, L, c.kv_heads }, .{ 128, 2, 1 });
         }
     }
     const kvh = c.kv_heads * cap * D;
     const strides = [12]usize{ L * q_row, D, q_row, kvh, cap * D, D, kvh, cap * D, D, L * row, D, row };
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(D), -0.5));
-    l.attention(qkv, At.of(kv.k), At.of(kv.v), At.of(s.ya), L, x.cache.len + L, c.heads, c.kv_heads, strides, scale);
+    const paged: ?pl.Paged = if (kv.paged) |pg| .{ .pipes = x.f.k.paged.?, .table = tableOf(pg) } else null;
+    l.attention(qkv, cacheAt(kv, false), cacheAt(kv, true), At.of(s.ya), L, x.cache.len + L, c.heads, c.kv_heads, strides, scale, paged);
     x.linear("out", "xsum_4096", lin.o_proj, a.o, s.ya, s.out);
     if (lin.slide) |r| layers.rest(x.f, x.e, r, s.ya, s.out, L, row);
     if (lin.adapter) |ad| layers.adapt(x.f, x.e, ad, s.ya, s.out, L);

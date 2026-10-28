@@ -97,6 +97,7 @@ pub const Kernels = struct {
     rows: ?row.Pipelines = null, // the core's row projections: chips without tensor units, and widths but 4/64
     bits: ?*row.simd_bits.Pipelines = null, // prompt chunks' tiles at widths but 4/64 (the model owns them)
     gathers: []const @import("prefill_w.zig").Gathers = &.{}, // prompt chunks' routed experts at widths but 4/64 (model's)
+    paged: ?*const @import("kv_pages.zig").Pipelines = null, // TF_NEMOTRON_METAL_KV_PAGES: the twins (the backend's)
 
     /// The pipeline of a generated kernel (by its generator key) or a glue kernel (by function name).
     pub fn get(self: *const Kernels, comptime key: []const u8) mtl.Pipeline {

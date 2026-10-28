@@ -6,6 +6,12 @@ const Enc = @import("encoder.zig").Enc;
 
 const Buffer = mtl.Buffer;
 
+/// A paged cache's table for a twin: the lane's entries and the arena's page bytes.
+pub const Table = struct { b: Buffer, off: usize, page_bytes: u64 };
+
+/// The prompt attention's paged twins and the stream's table (TF_NEMOTRON_METAL_KV_PAGES).
+pub const Paged = struct { pipes: *const @import("kv_pages.zig").Pipelines, table: Table };
+
 /// A buffer and a byte offset into it.
 pub const At = struct {
     b: Buffer,
@@ -30,9 +36,14 @@ pub const Launch = struct {
 
     /// Bind `inputs`, the int32 P array (`n` entries, zero-padded), `extra` bytes, then `outputs`, and dispatch.
     pub fn go(l: Launch, name: []const u8, inputs: []const At, p: []const usize, n: usize, extra: ?[]const u8, outputs: []const At, grid: [3]usize, group: [3]usize) void {
+        l.goWith(l.k.get(name), inputs, p, n, extra, outputs, grid, group, null);
+    }
+
+    /// go() with its pipeline given, and a paged twin's table bound after the outputs.
+    pub fn goWith(l: Launch, pipe: mtl.Pipeline, inputs: []const At, p: []const usize, n: usize, extra: ?[]const u8, outputs: []const At, grid: [3]usize, group: [3]usize, table: ?Table) void {
         var params: [32]i32 = @splat(0);
         for (p, 0..) |v, i| params[i] = @intCast(v);
-        l.e.pipe(l.k.get(name));
+        l.e.pipe(pipe);
         var slot: usize = 0;
         for (inputs) |a| {
             l.e.buf(a.b, a.off, slot);
@@ -47,6 +58,10 @@ pub const Launch = struct {
         for (outputs) |a| {
             l.e.buf(a.b, a.off, slot);
             slot += 1;
+        }
+        if (table) |t| {
+            l.e.buf(t.b, t.off, slot);
+            l.e.bytes(t.page_bytes, slot + 1);
         }
         l.e.run(grid, group);
     }
@@ -86,7 +101,7 @@ pub const Launch = struct {
     }
 
     /// Causal NAX attention (bq64 bk32 d128) of L queries on kL keys; strides: (batch, head, row) of Q, K, V, O.
-    pub fn attention(l: Launch, q: At, k: At, v: At, o: At, L: usize, kL: usize, heads: usize, kv_heads: usize, strides: [12]usize, scale: f32) void {
+    pub fn attention(l: Launch, q: At, k: At, v: At, o: At, L: usize, kL: usize, heads: usize, kv_heads: usize, strides: [12]usize, scale: f32, paged: ?Paged) void {
         const nq = (L + 63) / 64;
         const nk = (kL + 31) / 32;
         var name: [160]u8 = undefined;
@@ -95,7 +110,8 @@ pub const Launch = struct {
         const p = head ++ strides;
         var f: [16]f32 = @splat(0);
         f[0] = scale;
-        l.go(full, &.{ q, k, v }, &p, 32, std.mem.sliceAsBytes(&f), &.{o}, .{ nq * 32, heads * 4, 1 }, .{ 32, 4, 1 });
+        const pipe = if (paged) |pg| pg.pipes.promptFor(L % 64 == 0, kL % 32 == 0) else l.k.get(full);
+        l.goWith(pipe, &.{ q, k, v }, &p, 32, std.mem.sliceAsBytes(&f), &.{o}, .{ nq * 32, heads * 4, 1 }, .{ 32, 4, 1 }, if (paged) |pg| pg.table else null);
     }
 
     /// Inclusive fp32 cumsum along the middle axis of a contiguous [outer, axis, stride] array from `offset`.
