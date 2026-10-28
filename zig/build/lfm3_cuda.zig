@@ -8,7 +8,7 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     const wf = b.addWriteFiles();
     const src = wf.add("rope_freq.zig", "const r = @import(\"core\").rope_freq;\npub const inverseFrequencies = r.inverseFrequencies;\npub const proportional = r.proportional;\n");
     const rope = b.createModule(.{ .root_source_file = src, .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} });
-    return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm3/cuda_family.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "safetensors", .module = st }, .{ .name = "rope_freq", .module = rope } } });
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm3/cuda_family.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "safetensors", .module = st }, .{ .name = "rope_freq", .module = rope }, .{ .name = "liquid_cuda", .module = @import("liquid_cuda.zig").module(b, target, optimize, cuda, core, lanes) } } });
 }
 
 pub fn host(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) void {
