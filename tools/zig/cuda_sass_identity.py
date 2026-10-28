@@ -14,7 +14,7 @@ NVCC = os.environ.get("NVCC", "/usr/local/cuda/bin/nvcc")
 CUOBJDUMP = os.environ.get("CUOBJDUMP", str(Path(NVCC).with_name("cuobjdump")))
 GENERATED = ("qwen4_gdn", "qwen4_ple")  # the build compiles a generated text; the checked-in unit stands in for it
 CONTROLS = (
-    ("fp4pair constant", "common/qmm_frag.cuh", r'"r"\(0x7E807E80u\)', '"r"(0x7E817E80u)'),
+    ("fp4pair constant", "common/fp_pairs.cuh", r'"r"\(0x7E807E80u\)', '"r"(0x7E817E80u)'),
     ("warp_sum order", "common/reduce.cuh", r"int o = 16; o > 0; o >>= 1\)", "int o = 1; o < 32; o <<= 1)"),
 )
 USAGE = """BASE and HEAD are git revisions of this repository (a merge commit works). Every catalog image
@@ -22,7 +22,7 @@ USAGE = """BASE and HEAD are git revisions of this repository (a merge commit wo
 between them is built from both trees with that tree's catalog flags, torch's nvcc flags and -I zig/kernels/cuda, for
 sm_80/86/89/120/121 as the build passes them (min_sm, the "a" targets of arch-specific units), and compared function
 by function. Two planted controls then prove the comparison can go red: a changed fp4pair constant
-(common/qmm_frag.cuh) and a reversed warp_sum butterfly (common/reduce.cuh), each built against the head. Exit status
+(common/fp_pairs.cuh) and a reversed warp_sum butterfly (common/reduce.cuh), each built against the head. Exit status
 0 only when every function matches and both controls change functions."""
 INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
 

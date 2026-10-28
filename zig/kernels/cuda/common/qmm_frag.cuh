@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include "fp_pairs.cuh"
 
 namespace qmm_frag {
 
@@ -98,13 +99,7 @@ __device__ __forceinline__ uint32_t pair(uint32_t w, int s) {
     return r;
 }
 
-__device__ __forceinline__ uint32_t fp4pair(uint32_t w, int s) {
-    const uint32_t v = w >> s;
-    const uint32_t t = ((v & 0x00070007u) << 6) | ((v & 0x00080008u) << 12);
-    uint32_t r;
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x7E807E80u), "r"(0x80008000u));
-    return r;
-}
+using tf_common::fp4pair;
 
 __device__ __forceinline__ void grid_wait() {
 #if __CUDA_ARCH__ >= 900

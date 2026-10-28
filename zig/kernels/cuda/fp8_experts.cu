@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "experts.cuh"
+#include "common/fp_pairs.cuh"
 
 namespace tf_fp8_experts {
 
@@ -19,12 +20,7 @@ __device__ __forceinline__ uint4 ld_nc(const uint4* p) {
   return r;
 }
 
-__device__ __forceinline__ uint32_t fp8pair(uint32_t v) {
-  const uint32_t t = ((v & 0x7Fu) << 4) | ((v & 0x80u) << 8) | ((v & 0x7F00u) << 12) | ((v & 0x8000u) << 16);
-  uint32_t r;
-  asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x7B807B80u), "r"(0x80008000u));
-  return r;
-}
+using tf_common::fp8pair;
 
 template <int M>
 struct Stage {
