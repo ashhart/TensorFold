@@ -1,4 +1,4 @@
-//! Muse Spark behind the native server: the lane backend over engine.zig, one GPU or two TP ranks (`tf-muse follow`).
+//! Muse Spark behind the native server: the lane backend over engine.zig at two TP ranks (`tf-muse follow` on rank 1).
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -10,6 +10,7 @@ const dflash2 = @import("dflash2.zig");
 const kept = @import("kept.zig");
 const prompt_ = @import("prompt.zig");
 const rounds = @import("rounds.zig");
+const config = @import("config.zig");
 const be = lanes.backend;
 const Engine = engine.Engine;
 
@@ -436,28 +437,23 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
     if (l.pins) |*x| x.remove(st);
 }
 
-/// The native entry: TF_TP_* for two ranks (rank 1 runs `tf-muse follow`); drafts need --drafter, own kernels only.
+/// The native entry: a GB10 (sm_121) at TF_TP_WORLD=2 (rank 1 runs `tf-muse follow`); drafts need --drafter.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // no captured Triton set: Muse runs its own CUDA kernels
     if (o.lanes == 0 or o.lanes > 32) return error.Slots;
+    const c = (try tpConfig()) orelse return error.MuseSparkRequiresTwoRanks;
+    try config.admit(try ctx.capability(), c.world);
+    if (c.rank != 0) return error.FollowerServes; // rank 1 runs `tf-muse follow`
     const drafting = o.drafts and o.drafter != null;
     const su: engine.Setup = .{ .context = o.context, .slots = o.lanes, .drafts = drafting };
-    var session: ?*tp.Session = null;
-    if (try tpConfig()) |c| {
-        if (c.world > 1) {
-            if (c.rank != 0) return error.FollowerServes; // rank 1 runs `tf-muse follow`
-            const ss = try gpa.create(tp.Session);
-            errdefer gpa.destroy(ss);
-            try ss.open(ctx.d, c, @import("tp_kernel").mailbox);
-            session = ss;
-            try ss.plan.send(&engine.hello(su));
-        }
+    const session = try gpa.create(tp.Session);
+    errdefer gpa.destroy(session);
+    try session.open(ctx.d, c, @import("tp_kernel").mailbox);
+    errdefer {
+        session.announceStop();
+        session.close();
     }
-    errdefer if (session) |ss| {
-        ss.announceStop();
-        ss.close();
-        gpa.destroy(ss);
-    };
+    try session.plan.send(&engine.hello(su));
     const e = try Engine.init(gpa, io, ctx.d, dir, su, session, o.drafter);
     errdefer e.deinit();
     const own = try gpa.create(Owned);
@@ -477,7 +473,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
 }
 
-/// TF_TP_* once TF_TP_WORLD is set (rank 0 serves; `tf-muse follow` on rank 1); null: one GPU. A bad setting refuses.
+/// TF_TP_* once TF_TP_WORLD is set (rank 0 serves; `tf-muse follow` on rank 1); null: unset. A bad setting refuses.
 fn tpConfig() tp.config.Error!?tp.Config {
     return tpFrom(&envGet);
 }
@@ -493,15 +489,16 @@ fn envGet(name: []const u8) ?[]const u8 {
     return std.mem.span(std.c.getenv(z) orelse return null);
 }
 
-/// Admission bytes of a rank: the checkpoint over the TP ranks (the embedding stays in host memory).
-pub fn weightShare(_: std.mem.Allocator, _: std.Io, _: []const u8, total: u64) tp.config.Error!u64 {
+/// Admission bytes of a rank: the checkpoint over the two TP ranks (the embedding stays in host memory).
+pub fn weightShare(_: std.mem.Allocator, _: std.Io, _: []const u8, total: u64) (tp.config.Error || error{MuseSparkRequiresTwoRanks})!u64 {
     return share(total, &envGet);
 }
 
-/// weightShare under `get`'s TF_TP_*: a bad setting is BadSetting, as `open` refuses it, not one GPU's share.
-fn share(total: u64, get: *const fn ([]const u8) ?[]const u8) tp.config.Error!u64 {
-    const world: u64 = if (try tpFrom(get)) |c| c.world else 1;
-    return total / world;
+/// weightShare under `get`'s TF_TP_*: a bad setting is BadSetting and one rank is refused, as `open` refuses them.
+fn share(total: u64, get: *const fn ([]const u8) ?[]const u8) (tp.config.Error || error{MuseSparkRequiresTwoRanks})!u64 {
+    const c = (try tpFrom(get)) orelse return error.MuseSparkRequiresTwoRanks;
+    if (c.world != 2) return error.MuseSparkRequiresTwoRanks;
+    return total / c.world;
 }
 
 pub const explains_open = true;
@@ -510,7 +507,9 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream slot is busy: retry once another request ends",
-        error.BadSetting => "a TF_TP_* setting is out of range (TF_TP_WORLD 1 to 64, TF_TP_RANK below it, TF_TP_PORT): fix it or unset TF_TP_WORLD for one GPU",
+        error.BadSetting => "a TF_TP_* setting is malformed or out of range (TF_TP_WORLD, TF_TP_RANK below it, TF_TP_PORT): Muse Spark serves at TF_TP_WORLD=2",
+        error.MuseSparkRequiresSm121 => "Muse Spark is served on GB10 (sm_121) only so far, and this GPU is another",
+        error.MuseSparkRequiresTwoRanks => "Muse Spark is served at two TP ranks only so far: TF_TP_WORLD=2 and TF_TP_RANK=0 here, `tf-muse follow` on rank 1",
         error.FollowerServes => "TF_TP_RANK is not 0: rank 0 serves, the other ranks run `tf-muse follow`",
         else => null,
     };
@@ -542,13 +541,15 @@ fn tpEnv(comptime world: []const u8, comptime rank: []const u8) *const fn ([]con
     }.get;
 }
 
-test "a bad TF_TP_* refuses the weight share; TF_TP_WORLD unset is one GPU" {
+test "a bad TF_TP_* refuses the weight share; one rank is refused by name" {
     const unset = struct {
         fn get(_: []const u8) ?[]const u8 {
             return null;
         }
     }.get;
-    try std.testing.expectEqual(@as(u64, 1000), try share(1000, &unset));
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, &unset));
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, tpEnv("1", "")));
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, tpEnv("4", "3")));
     inline for (.{ .{ "two", "" }, .{ "0", "" }, .{ "65", "" }, .{ "2", "2" }, .{ "2", "-1" }, .{ "2", "one" } }) |bad| {
         try std.testing.expectError(error.BadSetting, share(1000, tpEnv(bad[0], bad[1])));
     }

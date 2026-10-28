@@ -286,6 +286,7 @@ fn follow(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, drafter: ?[
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, @intCast(cfg.device));
     defer ctx.deinit();
+    try muse.config.admit(try ctx.capability(), cfg.world);
     var session: tp.Session = undefined;
     try session.open(&driver, cfg, @import("tp_kernel").mailbox);
     defer {

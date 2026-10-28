@@ -123,9 +123,9 @@ pub const Config = struct {
         c.eos_len += 1;
     }
 
-    /// A rank's view under TP: heads, KV heads and the expert width split; the latent stays whole.
+    /// A rank's view at two ranks (as `admit`): heads, KV heads and the expert width split; the latent stays whole.
     pub fn rankView(c: Config, world: usize) !Config {
-        if (world != 1 and world != 2) return error.World;
+        if (world != 2) return error.MuseSparkRequiresTwoRanks;
         if (c.heads % world != 0 or c.kv_heads % world != 0) return error.HeadsSplit;
         if (c.width % (128 * world) != 0 or c.latent % (128 * world) != 0) return error.WidthSplit;
         if ((c.heads / world) * c.head_dim % 128 != 0 or (c.kv_heads / world) * c.head_dim % 128 != 0) return error.HeadsSplit;
@@ -136,6 +136,12 @@ pub const Config = struct {
         return r;
     }
 };
+
+/// Muse Spark is served only as it was gated: on GB10 (sm_121), at two TP ranks.
+pub fn admit(sm: u32, world: usize) error{ MuseSparkRequiresSm121, MuseSparkRequiresTwoRanks }!void {
+    if (sm != 121) return error.MuseSparkRequiresSm121;
+    if (world != 2) return error.MuseSparkRequiresTwoRanks;
+}
 
 /// One EXL3 matrix a rank loads: its tensors' prefix and the cut: outputs (`n`) or inputs (`k`).
 pub const Cut = struct {
@@ -251,6 +257,16 @@ test "Config.parse reads the 2-layer pack as exllamav3's MuseSparkConfig does" {
     try std.testing.expectEqual(@as(usize, 8), r.kv_heads);
     try std.testing.expectEqual(@as(usize, 2048), r.width);
     try std.testing.expectEqual(@as(usize, 4096), r.latent);
+}
+
+test "Muse Spark is admitted on GB10 (sm_121) at two TP ranks only" {
+    try admit(121, 2);
+    try std.testing.expectError(error.MuseSparkRequiresSm121, admit(120, 2));
+    try std.testing.expectError(error.MuseSparkRequiresSm121, admit(90, 2));
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, admit(121, 1));
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, admit(121, 4));
+    const c = try Config.parse(std.testing.allocator, fixture, null);
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, c.rankView(1));
 }
 
 test "Config.parse refuses what the forward does not wire" {

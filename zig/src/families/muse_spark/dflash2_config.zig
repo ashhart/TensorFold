@@ -91,9 +91,9 @@ pub const DConfig = struct {
         return c;
     }
 
-    /// A rank's view: query / KV heads and the MLP width split (the context projection fc by outputs).
+    /// A rank's view at two ranks: query / KV heads and the MLP width split (the context projection fc by outputs).
     pub fn rankView(c: DConfig, world: usize) !DConfig {
-        if (world != 1 and world != 2) return error.World;
+        if (world != 2) return error.MuseSparkRequiresTwoRanks;
         if (c.heads % world != 0 or c.kv_heads % world != 0) return error.HeadsSplit;
         if ((c.kv_heads / world) * c.head_dim % 128 != 0) return error.HeadsSplit;
         if (c.inter % (128 * world) != 0 or c.hidden % (128 * world) != 0) return error.WidthSplit;
@@ -204,6 +204,7 @@ test "DConfig.parse reads RadixArk's Muse Spark DFlash2" {
     try std.testing.expectEqual(@as(usize, 2), c.conv_k);
     try std.testing.expectEqual(@as(f64, 20), c.softcap);
     try std.testing.expectApproxEqRel(@as(f64, 0.17677669529663687), c.out_mult, 1e-12);
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, c.rankView(1));
     const r = try c.rankView(2);
     try std.testing.expectEqual(@as(usize, 32), r.heads);
     try std.testing.expectEqual(@as(usize, 4), r.kv_heads);
