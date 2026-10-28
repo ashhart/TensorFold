@@ -359,3 +359,17 @@ test "Draft frames: enlarged frame byte counts reject overflow" {
     d.c.rank = std.math.maxInt(usize);
     try std.testing.expectError(error.Overflow, d.layout(false));
 }
+
+test "Draft frames: an EXL3 head's span views plan their K split as the whole head does" {
+    const x3 = cuda.exl3;
+    const F = q.draft.frame;
+    for ([_]bool{ false, true }) |strips| {
+        const st = x3.strides(5120, 248320, 12, strips);
+        const w: x3.Weight = .{ .trellis = 0x1000, .suh = 0x2000, .svh = 0x3000, .k = 5120, .n = 248320, .halves = 12, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb };
+        const v = try F.x3Views(w);
+        const whole = x3.plan(w.k, w.n, 192, 8);
+        try std.testing.expectEqual(whole, x3.plan(v.first.k, v.first.n, 192, 8));
+        try std.testing.expectEqual(whole, x3.plan(v.tail.k, v.tail.n, 192, 8));
+        try std.testing.expect(F.x3_tail_at <= 248032 and F.x3_tail_at + v.tail.n == w.n);
+    }
+}
