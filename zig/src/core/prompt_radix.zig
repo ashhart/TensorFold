@@ -54,7 +54,7 @@ pub const Store = struct {
     const SHARED_KEYS = 64;
 
     pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, rules: Rules) !Store {
-        std.debug.assert(rules.page > 0 and (!rules.planned or (rules.grid > 0 and rules.grid % rules.page == 0)));
+        if (rules.page == 0 or (rules.planned and (rules.grid == 0 or rules.grid % rules.page != 0))) return error.BadPromptRadixRules;
         return .{ .tree = try Tree.init(gpa, family, pages, rules.page, rules.lookahead), .rules = rules };
     }
 

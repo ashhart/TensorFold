@@ -505,3 +505,12 @@ test "GLM's shape, a grid of four pages and lookahead 1: a chat resumes at its h
     try std.testing.expectEqual(@as(usize, 12), s.tree.held_pages);
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
+
+test "a store refuses rules it cannot keep: no page, or a planned grid that is no multiple of the page" {
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    try std.testing.expectError(error.BadPromptRadixRules, newStore(&f, .{ .page = 0 }));
+    try std.testing.expectError(error.BadPromptRadixRules, newStore(&f, .{ .page = 4, .planned = true }));
+    try std.testing.expectError(error.BadPromptRadixRules, newStore(&f, .{ .page = 4, .planned = true, .grid = 6 }));
+    var s = try newStore(&f, .{ .page = 4, .planned = true, .grid = 8 });
+    s.deinit();
+}
