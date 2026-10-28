@@ -1,10 +1,11 @@
-//! The RoCE wire over verbs: one RC queue pair a HCA and peer, a send slot striped over the HCAs to every peer.
+//! The RoCE wire over verbs: one RC queue pair a HCA and peer, a send slot striped over the HCAs that reach each peer.
 const std = @import("std");
 const log = @import("log.zig");
 const verbs = @import("verbs");
 const abi = verbs.abi;
 const Verbs = verbs.Verbs;
 const guard = @import("roce_multi_guard.zig");
+const pair = @import("roce_multi_pairs.zig");
 const sock = @import("sock.zig");
 
 pub const max_hcas = guard.max_hcas;
@@ -202,8 +203,12 @@ pub const VerbsWire = struct {
     me: u32,
     /// Every rank's region address (this rank's entry unused).
     peer_region: [max_peers]u64 = @splat(0),
-    /// peer_rkey[p][i]: the rkey of rank p's HCA that this rank's HCA i writes to.
+    /// peer_rkey[p][s]: the rkey of rank p's HCA that stripe s lands on.
     peer_rkey: [max_peers][max_hcas]u32 = @splat(@splat(0)),
+    /// via[p][s]: our HCA that carries stripe s to rank p (`connect` pairs them; on a switch, HCA s).
+    via: [max_peers][max_hcas]u8 = @splat(.{ 0, 1 }),
+    /// Stripes a post makes to each peer, every peer the same (0 before `connect`): the kernel's `n_hca`.
+    stripes: u32 = 0,
     /// Every rank's region has this layout.
     layout: Layout,
     region: []u8,
@@ -368,7 +373,7 @@ pub const VerbsWire = struct {
                 out.print("HCA {d} QP state unknown (no ibv_query_qp); ", .{i}) catch break;
                 continue;
             };
-            const qp = h.qp[guard.peerAt(w.me, w.layout.world, 0)] orelse {
+            const qp = h.qp[w.shown(i)] orelse {
                 out.print("HCA {d} has no peer QP; ", .{i}) catch break;
                 continue;
             };
@@ -385,6 +390,15 @@ pub const VerbsWire = struct {
         return out.buffered();
     }
 
+    /// The first peer in post order that HCA `i` carries a stripe to (before `connect`, the first peer).
+    fn shown(w: *const VerbsWire, i: usize) u32 {
+        for (0..w.layout.world - 1) |k| {
+            const p = guard.peerAt(w.me, w.layout.world, @intCast(k));
+            for (w.via[p][0..w.stripes]) |v| if (v == i) return p;
+        }
+        return guard.peerAt(w.me, w.layout.world, 0);
+    }
+
     pub fn record(w: *const VerbsWire) Record {
         var r: Record = .{ .world = w.layout.world, .rank = w.me, .n_hca = w.n_hca, .region = @intFromPtr(w.region.ptr), .slot_bytes = w.layout.slot, .region_len = w.region.len };
         for (w.hcas[0..w.n_hca], 0..) |h, i| {
@@ -397,74 +411,65 @@ pub const VerbsWire = struct {
         return r;
     }
 
-    /// Each HCA's peer on its IPv4 /24 (by position if several share it); none or a non-1:1 map is `error.BadRecord`.
-    pub fn pairing(mine: Record, peer: Record) ![max_hcas]u32 {
+    /// Our HCAs' pairs to the peer on shared IPv4 /24s (`pair.pairsOf`); a record of another layout is `BadRecord`.
+    pub fn pairing(mine: Record, peer: Record) !pair.Pairs {
         if (peer.magic != record_magic or mine.magic != record_magic) return error.BadRecord;
         if (peer.n_hca != mine.n_hca or mine.n_hca == 0 or mine.n_hca > max_hcas) return error.BadRecord;
         if (peer.slot_bytes != mine.slot_bytes or peer.region_len != mine.region_len) return error.BadRecord;
-        var out: [max_hcas]u32 = undefined;
-        for (0..mine.n_hca) |i| {
-            out[i] = @intCast(i);
-            var hits: u32 = 0;
-            for (0..peer.n_hca) |j| if (std.mem.eql(u8, mine.gid[i][12..15], peer.gid[j][12..15])) {
-                out[i] = @intCast(j);
-                hits += 1;
-            };
-            if (hits > 1) out[i] = @intCast(i); // one subnet for both: keep the order
-            // No common subnet: refuse, so the ranks take the NCCL fallback instead of connecting a pair nobody chose.
-            if (hits == 0) return error.BadRecord;
-        }
-        // two of ours on one of the peer's: the stripes would cross (each HCA i must reach a distinct peer HCA)
-        for (0..mine.n_hca) |i| for (0..i) |k| if (out[i] == out[k]) return error.BadRecord;
-        return out;
+        return pair.pairsOf(mine.gid[0..mine.n_hca], peer.gid[0..peer.n_hca]);
     }
 
     /// `pairing` checked from the peer's side as well: our HCA i to its j exactly when its j comes back to our i.
-    pub fn pairBoth(mine: Record, peer: Record) ![max_hcas]u32 {
+    pub fn pairBoth(mine: Record, peer: Record) !pair.Pairs {
         const there = try pairing(mine, peer);
         const back = try pairing(peer, mine);
-        for (0..mine.n_hca) |i| if (back[there[i]] != i) return error.BadRecord;
+        if (back.n != there.n) return error.BadRecord;
+        for (there.mine[0..there.n], there.theirs[0..there.n]) |i, j| {
+            const t = std.mem.indexOfScalar(u32, back.mine[0..back.n], j) orelse return error.BadRecord;
+            if (back.theirs[t] != i) return error.BadRecord;
+        }
         return there;
     }
 
-    /// Validate the complete peer table before changing any queue pair.
-    pub fn validateRecords(w: *const VerbsWire, all: []const Record) !void {
+    /// Validate the complete peer table before changing any queue pair; the plan names each stripe's HCA to each peer.
+    pub fn validateRecords(w: *const VerbsWire, all: []const Record) !pair.Plan {
         if (all.len != w.layout.world) return error.BadRecord;
         const mine = w.record();
+        var per: [max_peers]pair.Pairs = @splat(.{});
         for (all, 0..) |peer, p| {
             if (peer.world != w.layout.world or peer.rank != p) return error.BadRecord;
             if (peer.region == 0 or peer.region > std.math.maxInt(u64) - peer.region_len) return error.BadRecord;
             if (p == w.me) continue;
-            const pairs = try pairBoth(mine, peer);
-            for (0..w.n_hca) |h| if (peer.qpn[pairs[h]][w.me] == 0) return error.BadRecord;
+            per[p] = try pairBoth(mine, peer);
+            for (per[p].theirs[0..per[p].n]) |j| if (peer.qpn[j][w.me] == 0) return error.BadRecord;
         }
+        return pair.plan(per[0..all.len], w.me, w.n_hca);
     }
 
-    /// INIT to RTR to RTS against every other rank's record: our HCA i's queue pair to rank p meets p's paired HCA's.
+    /// INIT to RTR to RTS against every other rank's record: each stripe's queue pair to rank p meets p's paired HCA's.
     pub fn connect(w: *VerbsWire, all: []const Record) !void {
-        try w.validateRecords(all);
-        const mine = w.record();
+        const plan = try w.validateRecords(all);
         const api = w.v.api;
         const m = abi.mask;
         for (all, 0..) |peer, pi| {
             const p: u32 = @intCast(pi);
-            if (peer.world != w.layout.world or peer.rank != p) return error.BadRecord;
             if (p == w.me) continue;
-            const pairs = try pairBoth(mine, peer);
+            const pairs = plan.pairs[p];
             w.peer_region[p] = peer.region;
-            for (w.hcas[0..w.n_hca], 0..) |*h, i| {
-                const j = pairs[i];
+            for (pairs.mine[0..pairs.n], pairs.theirs[0..pairs.n], 0..) |i, j, s| {
+                const h = &w.hcas[i];
                 const qp = h.qp[p] orelse return error.BadRecord;
-                if (peer.qpn[j][w.me] == 0) return error.BadRecord;
-                w.peer_rkey[p][i] = peer.rkey[j];
+                w.via[p][s] = @intCast(i);
+                w.peer_rkey[p][s] = peer.rkey[j];
                 var rtr: abi.QpAttr = .{ .qp_state = abi.qps_rtr, .path_mtu = @intCast(@min(peer.mtu[j], h.mtu)), .dest_qp_num = peer.qpn[j][w.me], .rq_psn = 0, .max_dest_rd_atomic = 1, .min_rnr_timer = 12 };
                 rtr.ah_attr = .{ .grh = .{ .dgid = .{ .raw = peer.gid[j] }, .sgid_index = h.gid_index, .hop_limit = 64, .traffic_class = w.traffic_class }, .dlid = @intCast(peer.lid[j]), .is_global = 1, .port_num = 1 };
                 if (api.ibv_modify_qp(qp, &rtr, m.state | m.av | m.path_mtu | m.dest_qpn | m.rq_psn | m.max_dest_rd_atomic | m.min_rnr_timer) != 0) return error.VerbsFailed;
                 var rts: abi.QpAttr = .{ .qp_state = abi.qps_rts, .timeout = 14, .retry_cnt = 7, .rnr_retry = 7, .sq_psn = 0, .max_rd_atomic = 1 };
                 if (api.ibv_modify_qp(qp, &rts, m.state | m.timeout | m.retry_cnt | m.rnr_retry | m.sq_psn | m.max_qp_rd_atomic) != 0) return error.VerbsFailed;
             }
-            log.info("[tensorfold] tp roce: rank {d} -> rank {d}: HCA pairs {any}", .{ w.me, p, pairs[0..w.n_hca] });
+            log.info("[tensorfold] tp roce: rank {d} -> rank {d}: HCA pairs {any} from ours {any}", .{ w.me, p, pairs.theirs[0..pairs.n], pairs.mine[0..pairs.n] });
         }
+        w.stripes = plan.stripes;
     }
 
     /// This rank's layout; the MR covers `region` exactly and every peer's record matched it at connect.
@@ -472,7 +477,7 @@ pub const VerbsWire = struct {
         return w.layout;
     }
 
-    /// Slot `slot`'s first `padded` bytes to every peer, next rank first, striped over the HCAs; `seq` follows.
+    /// Slot `slot`'s first `padded` bytes to every peer, next rank first, striped over the HCAs to it; `seq` follows.
     pub fn post(w: *VerbsWire, slot: u32, seq: u32, padded: u32) !void {
         const l = w.layout;
         // the guard's refusals first: a post no HCA may make must not wait on completions to say so
@@ -481,14 +486,17 @@ pub const VerbsWire = struct {
         var seq_copy = seq;
         var plan: [max_hcas]guard.Stripe = undefined;
         if (l.world < 3 or l.world > max_peers) return error.OutOfRegion;
-        try guard.stripes(l, w.me, peerAt(w.me, l.world, 0), w.n_hca, slot, padded, &plan);
-        for (w.hcas[0..w.n_hca]) |h| for (0..l.world) |p| if (p != w.me and h.qp[p] == null) return error.BadRecord;
+        try guard.stripes(l, w.me, peerAt(w.me, l.world, 0), w.stripes, slot, padded, &plan);
+        for (0..l.world) |p| if (p != w.me) for (w.via[p][0..w.stripes]) |i| {
+            if (i >= w.n_hca or w.hcas[i].qp[p] == null) return error.BadRecord;
+        };
         for (0..l.world - 1) |k| {
             // the cap before each peer's stripe, so a post adds one `padded` past it, not (world - 1) of them
             while (w.inflight() + padded > max_inflight) try w.reapWait();
             const p = peerAt(w.me, l.world, @intCast(k));
-            try guard.stripes(l, w.me, p, w.n_hca, slot, padded, &plan);
-            for (w.hcas[0..w.n_hca], plan[0..w.n_hca], 0..) |*h, s, i| {
+            try guard.stripes(l, w.me, p, w.stripes, slot, padded, &plan);
+            for (w.via[p][0..w.stripes], plan[0..w.stripes], 0..) |hi, s, i| {
+                const h = &w.hcas[hi];
                 while (h.outstanding[p] >= send_depth / 4) try w.reapWait();
                 const id: u64 = (@as(u64, p) << 32) | seq;
                 var flag_sge: abi.Sge = .{ .addr = @intFromPtr(&seq_copy), .length = 4, .lkey = 0 };
@@ -572,8 +580,8 @@ test "HCA lists parse and subnets pair the functions" {
     b.gid[0][15] = 11;
     b.gid[1][15] = 11;
     const p = try VerbsWire.pairing(a, b);
-    try std.testing.expectEqual(@as(u32, 1), p[0]);
-    try std.testing.expectEqual(@as(u32, 0), p[1]);
+    try std.testing.expectEqual([2]u32{ 1, 0 }, p.theirs);
+    try std.testing.expectEqual(p, try VerbsWire.pairBoth(a, b));
     try std.testing.expect(ipv4Mapped(sub100));
     b.n_hca = 1;
     try std.testing.expectError(error.BadRecord, VerbsWire.pairing(a, b));

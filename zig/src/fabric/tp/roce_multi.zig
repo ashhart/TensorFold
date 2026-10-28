@@ -103,9 +103,10 @@ const Wire = union(WireKind) {
         }
     }
 
-    fn hcas(w: *const Wire) u32 {
+    /// Stripes a post makes to each peer: the flags a receiver counts from every source.
+    fn stripes(w: *const Wire) u32 {
         return switch (w.*) {
-            .verbs => |v| v.n_hca,
+            .verbs => |v| v.stripes,
             .shm => |s| s.stripes,
         };
     }
@@ -408,7 +409,7 @@ pub const Roce = struct {
             .timeout_ns = r.timeout_ns,
             .rank = r.me,
             .mode = @backingInt(mode),
-            .n_hca = r.wire.hcas(),
+            .n_hca = r.wire.stripes(),
             .opts = r.fast,
             .lens = lens,
             .chunk = chunk,
@@ -519,7 +520,7 @@ pub const Roce = struct {
         const t0 = sock.nowNs();
         for (0..r.world - 1) |k| {
             const p = rv.peerAt(r.me, r.world, @intCast(k));
-            for (0..r.wire.hcas()) |h| {
+            for (0..r.wire.stripes()) |h| {
                 const flag: *std.atomic.Value(u32) = @ptrCast(@alignCast(r.region[l.flagAt(p, slot, @intCast(h))..].ptr));
                 var polls: u32 = 0;
                 while (flag.load(.acquire) != seq) {
