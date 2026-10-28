@@ -89,25 +89,32 @@ pub const Layer = union(enum) { full: FullLayer, linear: LinearLayer };
 /// The one supported model, checked field by field against the pinned family
 /// constants before anything is trusted.
 pub fn expectPinnedModel(s: loader.config.Spec) Error!void {
-    const ok =
-        s.hidden == pinned.hidden and
-        s.vocab == pinned.vocab and
-        s.n_layers == pinned.layers and
-        s.intermediate == pinned.intermediate and
-        s.heads == pinned.query_heads and
-        s.kv_heads == pinned.kv_heads and
-        s.head_dim == pinned.head_dim and
-        s.key_heads == pinned.linear_heads and
-        s.value_heads == pinned.linear_heads and
-        s.key_dim == pinned.linear_heads * pinned.linear_dim and
-        s.value_dim == pinned.linear_heads * pinned.linear_dim and
-        s.conv == pinned.conv_dim and
-        s.rotary_dim == pinned.rotary_dim and
-        s.full_every == 4 and
-        s.bits == 4 and
-        s.group == pinned.group and
-        s.experts == 0;
-    if (!ok) return error.UnsupportedModel;
+    const expected = .{
+        .hidden = pinned.hidden,
+        .vocab = pinned.vocab,
+        .n_layers = pinned.layers,
+        .intermediate = pinned.intermediate,
+        .heads = pinned.query_heads,
+        .kv_heads = pinned.kv_heads,
+        .head_dim = pinned.head_dim,
+        .key_heads = pinned.linear_heads,
+        .value_heads = pinned.linear_heads,
+        // Spec stores per-head dimensions and conv taps, not channel widths.
+        .key_dim = pinned.linear_dim,
+        .value_dim = pinned.linear_dim,
+        .conv = pinned.conv_taps,
+        .rotary_dim = pinned.rotary_dim,
+        .full_every = 4,
+        .bits = 4,
+        .group = pinned.group,
+        .experts = 0,
+    };
+    inline for (@typeInfo(@TypeOf(expected)).@"struct".field_names) |field| {
+        if (@field(s, field) != @field(expected, field)) {
+            std.debug.print("Vulkan weights admission: Spec.{s}: expected {d}, found {d}\n", .{ field, @field(expected, field), @field(s, field) });
+            return error.UnsupportedModel;
+        }
+    }
 }
 
 comptime {
@@ -157,12 +164,19 @@ const Builder = struct {
     }
 
     fn key(buf: *[192]u8, comptime fmt: []const u8, args: anytype) Error![]const u8 {
-        return std.fmt.bufPrint(buf, fmt, args) catch error.UnsupportedModel;
+        // Layer prefixes can point into buf: format elsewhere before copying.
+        var scratch: [192]u8 = undefined;
+        const name = std.fmt.bufPrint(&scratch, fmt, args) catch return error.UnsupportedModel;
+        @memcpy(buf[0..name.len], name);
+        return buf[0..name.len];
     }
 
     /// The named tensor, dtype-checked before its mapped bytes are touched.
     fn named(b: *Builder, name: []const u8) Error!Tensor {
-        const t = try b.table.get(name);
+        const t = b.table.get(name) catch |err| {
+            std.debug.print("Vulkan weights tensor {s}: {s}\n", .{ name, @errorName(err) });
+            return err;
+        };
         switch (t.dtype) {
             .f32, .bf16, .u32 => {},
             else => {
@@ -305,8 +319,14 @@ pub const Model = struct {
     ) !Model {
         // pinned admission: model type, geometry, quantization and tying,
         // straight from config.json — before anything else is read
-        const cfg = try pinned.Config.read(gpa, io, dir);
-        var ck = try loader.checkpoint.Checkpoint.open(gpa, io, dir);
+        const cfg = pinned.Config.read(gpa, io, dir) catch |err| {
+            std.debug.print("Vulkan weights config.json admission: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        var ck = loader.checkpoint.Checkpoint.open(gpa, io, dir) catch |err| {
+            std.debug.print("Vulkan weights Checkpoint.open: {s}\n", .{@errorName(err)});
+            return err;
+        };
         defer ck.close();
         try expectPinnedModel(ck.spec());
 
@@ -382,44 +402,33 @@ test "kindOf maps exactly the dtypes the views carry" {
     try testing.expectEqual(@as(?vk.tensor.Kind, null), kindOf(.f16));
 }
 
-test "the pinned-model check refuses drift in any field" {
-    var s: loader.config.Spec = .{
-        .hidden = pinned.hidden,
-        .intermediate = pinned.intermediate,
-        .n_layers = pinned.layers,
-        .heads = pinned.query_heads,
-        .kv_heads = pinned.kv_heads,
-        .head_dim = pinned.head_dim,
-        .key_heads = pinned.linear_heads,
-        .value_heads = pinned.linear_heads,
-        .key_dim = pinned.linear_heads * pinned.linear_dim,
-        .value_dim = pinned.linear_heads * pinned.linear_dim,
-        .conv = pinned.conv_dim,
-        .vocab = pinned.vocab,
-        .eps = pinned.eps,
-        .rope_theta = pinned.theta,
-        .rotary_dim = pinned.rotary_dim,
-        .full_every = 4,
-        .bits = 4,
-        .group = pinned.group,
-        .experts = 0,
-        .top_k = 0,
-        .moe_width = 0,
-        .shared_width = 0,
-        .mtp_layers = 0,
-    };
+test "tensor keys can extend a prefix in the destination buffer" {
+    var buf: [192]u8 = undefined;
+    const base = try Builder.key(&buf, prefix ++ "layers.{d}.", .{0});
+    const name = try Builder.key(&buf, "{s}input_layernorm.weight", .{base});
+    try testing.expectEqualStrings(prefix ++ "layers.0.input_layernorm.weight", name);
+    const oversized: [193]u8 = @splat('x');
+    try testing.expectError(error.UnsupportedModel, Builder.key(&buf, "{s}", .{oversized[0..]}));
+}
+
+test "the real pinned config geometry is admitted and field drift is refused" {
+    const bytes = @embedFile("qwen35_2b_config.json");
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    try testing.expectEqualStrings("beb7fc5a6e0405fe332821cf1a8ef7b69bb390a8c8933171647de5579debf949", &std.fmt.bytesToHex(digest, .lower));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const doc = try pinned.declared(arena.allocator(), bytes);
+    const s = try pinned.geometry(try pinned.textTower(doc), 4, 64);
+    try testing.expectEqual(@as(usize, 128), s.key_dim);
+    try testing.expectEqual(@as(usize, 128), s.value_dim);
+    try testing.expectEqual(@as(usize, 4), s.conv);
     try expectPinnedModel(s);
-    s.bits = 8;
-    try testing.expectError(error.UnsupportedModel, expectPinnedModel(s));
-    s.bits = 4;
-    s.experts = 64;
-    try testing.expectError(error.UnsupportedModel, expectPinnedModel(s));
-    s.experts = 0;
-    s.full_every = 6;
-    try testing.expectError(error.UnsupportedModel, expectPinnedModel(s));
-    s.full_every = 4;
-    s.head_dim = 128;
-    try testing.expectError(error.UnsupportedModel, expectPinnedModel(s));
+    inline for (.{ "hidden", "vocab", "n_layers", "intermediate", "heads", "kv_heads", "head_dim", "key_heads", "value_heads", "key_dim", "value_dim", "conv", "rotary_dim", "full_every", "bits", "group", "experts" }) |field| {
+        var drift = s;
+        @field(drift, field) += 1;
+        try testing.expectError(error.UnsupportedModel, expectPinnedModel(drift));
+    }
 }
 
 test "tensor shape checks refuse rank and dim drift by name" {
