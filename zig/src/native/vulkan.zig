@@ -92,6 +92,7 @@ fn bundle() fam.engine.ShaderBundle {
         .norm = .{
             .norm_bf16 = &sh.norm_bf16,
             .add_bf16 = &sh.add_bf16,
+            .add_preserve_bf16 = &sh.add_preserve_bf16,
             .swiglu_bf16 = &sh.swiglu_bf16,
         },
         .attention = .{

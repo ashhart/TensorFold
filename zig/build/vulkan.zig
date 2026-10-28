@@ -414,12 +414,14 @@ const stage1_shaders_src =
 const stage2_variants = [_]ShaderVariant{
     .{ .name = "norm_bf16", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
     .{ .name = "add_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DUSE_BF16"} },
+    .{ .name = "add_preserve_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{ "-DUSE_BF16", "-DPRESERVE_F32" } },
     .{ .name = "swiglu_bf16", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
 };
 
 const stage2_shaders_src =
     \\pub const norm_bf16 align(4) = @embedFile("norm_bf16.spv").*;
     \\pub const add_bf16 align(4) = @embedFile("add_bf16.spv").*;
+    \\pub const add_preserve_bf16 align(4) = @embedFile("add_preserve_bf16.spv").*;
     \\pub const swiglu_bf16 align(4) = @embedFile("swiglu_bf16.spv").*;
 ;
 
