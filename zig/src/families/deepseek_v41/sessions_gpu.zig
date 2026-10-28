@@ -193,7 +193,7 @@ pub const Sessions = struct {
             var full: [32]u8 = undefined;
             h.final(&full);
             // the staging set (TF_DSV41_SESSION_STAGING_MIB) in 8 MiB chunks: a park's or restore's host transient
-            s.disk = try sessions.Disk.open(gpa, io, .{ .root = root, .compat = full[0..16].*, .rank = kx.rank, .world = kx.world, .budget = o.disk_budget, .min_tokens = o.disk_min_tokens, .staging = @max(2, o.staging_mib / 8), .chunk = 8 << 20 });
+            s.disk = try sessions.Disk.open(gpa, io, .{ .root = root, .compat = full[0..16].*, .rank = kx.rank, .world = kx.world, .budget = o.disk_budget, .fresh_start = true, .min_tokens = o.disk_min_tokens, .staging = @max(2, o.staging_mib / 8), .chunk = 8 << 20 });
         }
         errdefer if (s.disk) |dd| dd.close();
         s.store = try Store.init(gpa, io, &kx.pool, kx.dev.store(), s.disk, policy(o));
