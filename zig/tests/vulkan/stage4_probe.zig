@@ -221,14 +221,6 @@ fn convSplitGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
     var a_log = try uploadShell(dev, cmds, staging, f.a_log_bits, timeout);
     defer a_log.deinit();
 
-    // views; out buffers start poisoned so every output element must be written
-    var init16 = try a.alloc(u16, @intCast(soa_elems));
-    defer a.free(init16);
-    @memset(init16, fx.poison16);
-    const init32 = try a.alloc(u16, @intCast(2 * gate_elems));
-    defer a.free(init32);
-    @memset(init32, 0xffff);
-
     const conv_input_view = try vk.tensor.View.init(&conv_input, .bf16, 0, (T + 3) * C);
     const state_view = try vk.tensor.View.init(&state, .bf16, 0, 3 * C);
     const qkv_view = try vk.tensor.View.init(&qkv, .bf16, 0, T * C);
@@ -251,19 +243,90 @@ fn convSplitGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
 
     var first: ?[]u16 = null;
     defer if (first) |x| a.free(x);
+    var g_first: ?[]u16 = null;
+    defer if (g_first) |x| a.free(x);
+    var beta_first: ?[]u16 = null;
+    defer if (beta_first) |x| a.free(x);
+    var conv_first: ?[]u16 = null;
+    defer if (conv_first) |x| a.free(x);
+    var state_first: ?[]u16 = null;
+    defer if (state_first) |x| a.free(x);
+    // poison shells for EVERY output: soa, g, beta, conv_out, state_out
+    const init16 = try a.alloc(u16, @intCast(soa_elems));
+    defer a.free(init16);
+    @memset(init16, fx.poison16);
+    const init32 = try a.alloc(u16, @intCast(2 * gate_elems));
+    defer a.free(init32);
+    @memset(init32, 0xffff);
+    const init_beta = try a.alloc(u16, @intCast(gate_elems));
+    defer a.free(init_beta);
+    @memset(init_beta, fx.poison16);
+    const init_conv = try a.alloc(u16, @intCast(T * C));
+    defer a.free(init_conv);
+    @memset(init_conv, fx.poison16);
+    const init_state = try a.alloc(u16, @intCast(3 * C));
+    defer a.free(init_state);
+    @memset(init_state, fx.poison16);
+    // per-repeat readbacks of every output, compared byte-for-byte
     const soa_repeat = try a.alloc(u16, @intCast(soa_elems));
     defer a.free(soa_repeat);
+    const g_repeat = try a.alloc(u16, @intCast(2 * gate_elems));
+    defer a.free(g_repeat);
+    const beta_repeat = try a.alloc(u16, @intCast(gate_elems));
+    defer a.free(beta_repeat);
+    const conv_repeat = try a.alloc(u16, @intCast(T * C));
+    defer a.free(conv_repeat);
+    const state_repeat = try a.alloc(u16, @intCast(3 * C));
+    defer a.free(state_repeat);
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, soa, 0, staging, std.mem.sliceAsBytes(init16[0..@intCast(soa_elems)]), timeout));
         try vk.orExit(vk.upload(cmds, g_out, 0, staging, std.mem.sliceAsBytes(init32), timeout));
+        try vk.orExit(vk.upload(cmds, beta_out, 0, staging, std.mem.sliceAsBytes(init_beta), timeout));
+        try vk.orExit(vk.upload(cmds, conv_out, 0, staging, std.mem.sliceAsBytes(init_conv), timeout));
+        try vk.orExit(vk.upload(cmds, state_out, 0, staging, std.mem.sliceAsBytes(init_state), timeout));
         try vk.orExit(m.convPrefill(cmds, soa_view, g_view, beta_view, conv_out_view, conv_input_view, state_view, qkv_view, weight_view, a_view2, b_view, a_log_view, dt_view, state_out_view, T, timeout));
         try fetch(cmds, staging, soa, std.mem.sliceAsBytes(soa_repeat), timeout);
+        try fetch(cmds, staging, g_out, std.mem.sliceAsBytes(g_repeat), timeout);
+        try fetch(cmds, staging, beta_out, std.mem.sliceAsBytes(beta_repeat), timeout);
+        try fetch(cmds, staging, conv_out, std.mem.sliceAsBytes(conv_repeat), timeout);
+        try fetch(cmds, staging, state_out, std.mem.sliceAsBytes(state_repeat), timeout);
         if (first) |x| {
             if (std.mem.indexOfDiff(u16, x, soa_repeat)) |at| {
-                std.debug.print("FAIL conv-split: repeat {d} differs at element {d}\n", .{ rep, at });
+                std.debug.print("FAIL conv-split: repeat {d} soa differs at element {d}\n", .{ rep, at });
                 return false;
             }
-        } else first = try a.dupe(u16, soa_repeat);
+            // compare the remaining outputs against the FIRST repeat's copies
+            if (g_first) |gf| {
+                if (std.mem.indexOfDiff(u16, gf, g_repeat)) |at| {
+                    std.debug.print("FAIL conv-split: repeat {d} g differs at element {d}\n", .{ rep, at });
+                    return false;
+                }
+            } else g_first = try a.dupe(u16, g_repeat);
+            if (beta_first) |bf| {
+                if (std.mem.indexOfDiff(u16, bf, beta_repeat)) |at| {
+                    std.debug.print("FAIL conv-split: repeat {d} beta differs at element {d}\n", .{ rep, at });
+                    return false;
+                }
+            } else beta_first = try a.dupe(u16, beta_repeat);
+            if (conv_first) |cf2| {
+                if (std.mem.indexOfDiff(u16, cf2, conv_repeat)) |at| {
+                    std.debug.print("FAIL conv-split: repeat {d} conv_out differs at element {d}\n", .{ rep, at });
+                    return false;
+                }
+            } else conv_first = try a.dupe(u16, conv_repeat);
+            if (state_first) |sf2| {
+                if (std.mem.indexOfDiff(u16, sf2, state_repeat)) |at| {
+                    std.debug.print("FAIL conv-split: repeat {d} state_out differs at element {d}\n", .{ rep, at });
+                    return false;
+                }
+            } else state_first = try a.dupe(u16, state_repeat);
+        } else {
+            first = try a.dupe(u16, soa_repeat);
+            g_first = try a.dupe(u16, g_repeat);
+            beta_first = try a.dupe(u16, beta_repeat);
+            conv_first = try a.dupe(u16, conv_repeat);
+            state_first = try a.dupe(u16, state_repeat);
+        }
     }
     // download and check everything
     const soa_bits = try a.alloc(u16, @intCast(soa_elems));
@@ -383,37 +446,53 @@ fn runSplit(s: *SharedSplit, a: std.mem.Allocator, dev: *const vk.Device, cmds: 
     const T = fx.tokens;
     const soa_elems: u64 = 3 * T * fx.Model.linear_dim;
     const gate_elems: u64 = T * fx.Model.heads;
-    s.* = .{
-        .a = a,
-        .f = try fx.Split.init(a, 0x57a4),
-        .soa_buf = try vk.Buffer.init(dev, .device, @intCast(soa_elems * 2)),
-        .g_buf = try vk.Buffer.init(dev, .device, @intCast(gate_elems * 4)),
-        .beta_buf = try vk.Buffer.init(dev, .device, @intCast(gate_elems * 2)),
-        .soa_bits = try a.alloc(u16, @intCast(soa_elems)),
-        .g_pairs = try a.alloc(u16, @intCast(2 * gate_elems)),
-        .beta_bits = try a.alloc(u16, @intCast(gate_elems)),
-        .soa_view = undefined,
-        .g_view = undefined,
-        .beta_view = undefined,
-        .a_log_buf = undefined,
-        .a_buf = undefined,
-        .b_buf = undefined,
-        .dt_buf = undefined,
-    };
-    errdefer s.deinit();
+    // staged construction: each field owns its own errdefer, so a failure at
+    // any point never runs deinit on still-undefined handles
+    s.a = a;
+    s.f = try fx.Split.init(a, 0x57a4);
+    errdefer s.f.deinit();
+    s.soa_bits = try a.alloc(u16, @intCast(soa_elems));
+    errdefer a.free(s.soa_bits);
+    s.g_pairs = try a.alloc(u16, @intCast(2 * gate_elems));
+    errdefer a.free(s.g_pairs);
+    s.beta_bits = try a.alloc(u16, @intCast(gate_elems));
+    errdefer a.free(s.beta_bits);
+    s.soa_buf = try vk.Buffer.init(dev, .device, @intCast(soa_elems * 2));
+    errdefer s.soa_buf.deinit();
+    s.g_buf = try vk.Buffer.init(dev, .device, @intCast(gate_elems * 4));
+    errdefer s.g_buf.deinit();
+    s.beta_buf = try vk.Buffer.init(dev, .device, @intCast(gate_elems * 2));
+    errdefer s.beta_buf.deinit();
+    s.soa_view = undefined;
+    s.g_view = undefined;
+    s.beta_view = undefined;
     s.a_log_buf = try uploadShell(dev, cmds, staging, s.f.a_log_bits, timeout);
+    errdefer s.a_log_buf.deinit();
     s.a_buf = try uploadShell(dev, cmds, staging, s.f.a_bits, timeout);
+    errdefer s.a_buf.deinit();
     s.b_buf = try uploadShell(dev, cmds, staging, s.f.b_bits, timeout);
+    errdefer s.b_buf.deinit();
     s.dt_buf = try uploadShell(dev, cmds, staging, s.f.dt_bits, timeout);
+    errdefer s.dt_buf.deinit();
     s.soa_view = try vk.tensor.View.init(&s.soa_buf, .bf16, 0, soa_elems);
     s.g_view = try vk.tensor.View.init(&s.g_buf, .f32, 0, gate_elems);
     s.beta_view = try vk.tensor.View.init(&s.beta_buf, .bf16, 0, gate_elems);
     var conv_out_buf = try uploadShell(dev, cmds, staging, s.f.conv_out_bits, timeout);
     defer conv_out_buf.deinit();
+    // poison ALL THREE split outputs before the dispatch: a dead or partial
+    // write of g/beta fails the fixture check instead of inheriting zeros
     const poison = try a.alloc(u16, @intCast(soa_elems));
     defer a.free(poison);
     @memset(poison, fx.poison16);
+    const poison_g = try a.alloc(u16, @intCast(2 * gate_elems));
+    defer a.free(poison_g);
+    @memset(poison_g, 0xffff);
+    const poison_beta = try a.alloc(u16, @intCast(gate_elems));
+    defer a.free(poison_beta);
+    @memset(poison_beta, fx.poison16);
     try vk.orExit(vk.upload(cmds, s.soa_buf, 0, staging, std.mem.sliceAsBytes(poison), timeout));
+    try vk.orExit(vk.upload(cmds, s.g_buf, 0, staging, std.mem.sliceAsBytes(poison_g), timeout));
+    try vk.orExit(vk.upload(cmds, s.beta_buf, 0, staging, std.mem.sliceAsBytes(poison_beta), timeout));
     try vk.orExit(m.split(cmds, s.soa_view, s.g_view, s.beta_view, try vk.tensor.View.init(&conv_out_buf, .bf16, 0, T * fx.Model.conv_channels), try vk.tensor.View.init(&s.a_buf, .bf16, 0, gate_elems), try vk.tensor.View.init(&s.b_buf, .bf16, 0, gate_elems), try vk.tensor.View.init(&s.a_log_buf, .f32, 0, fx.Model.heads), try vk.tensor.View.init(&s.dt_buf, .bf16, 0, fx.Model.heads), T, timeout));
     try fetch(cmds, staging, s.soa_buf, std.mem.sliceAsBytes(s.soa_bits), timeout);
     try fetch(cmds, staging, s.g_buf, std.mem.sliceAsBytes(s.g_pairs), timeout);
@@ -433,7 +512,7 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
     var split: SharedSplit = undefined;
     runSplit(&split, a, dev, cmds, staging, m, timeout) catch return false;
     defer split.deinit();
-    const rf = try fx.Recur.init(a, split.soa_bits, split.g_pairs, split.beta_bits, 0x57a7);
+    const rf = try fx.Recur.init(a, split.soa_bits, split.g_pairs, split.beta_bits, 0x57a7, chunk);
     defer rf.deinit();
 
     var h0 = try uploadShell(dev, cmds, staging, rf.h0_bits, timeout);
@@ -452,36 +531,70 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
     const hf_view = try vk.tensor.View.init(&hf, .f32, 0, state_elems);
     const snap_view: ?vk.tensor.View = if (snap) |*s| try vk.tensor.View.init(s, .f32, 0, snap_chunks.? * state_elems) else null;
 
-    // poison y; initialize hf/snap with the reference so carry-out is checked
-    // against GPU writes, not stale memory
+    // poison y AND hf/snap before EVERY repeat: a dead or partial state-store
+    // leaves poison behind and fails; the hf/snap readback is compared against
+    // the independent f64 reference, never against pre-seeded values
     const poison = try a.alloc(u16, @intCast(section));
     defer a.free(poison);
     @memset(poison, fx.poison16);
-    var hf_init = try a.alloc(u16, @intCast(2 * state_elems));
-    defer a.free(hf_init);
-    for (rf.want_state, 0..) |w, i| {
-        const bits: u32 = @bitCast(@as(f32, @floatCast(w)));
-        hf_init[2 * i] = @truncate(bits);
-        hf_init[2 * i + 1] = @truncate(bits >> 16);
-    }
+    const poison_state = try a.alloc(u16, @intCast(2 * state_elems));
+    defer a.free(poison_state);
+    @memset(poison_state, 0xffff);
     var first: ?[]u16 = null;
     defer if (first) |x| a.free(x);
+    var hf_first: ?[]u16 = null;
+    defer if (hf_first) |x| a.free(x);
+    var snap_first: ?[]u16 = null;
+    defer if (snap_first) |x| a.free(x);
     const ybits = try a.alloc(u16, @intCast(section));
     defer a.free(ybits);
     const hfpairs = try a.alloc(u16, @intCast(2 * state_elems));
     defer a.free(hfpairs);
+    const snappairs = try a.alloc(u16, @intCast(2 * state_elems));
+    defer a.free(snappairs);
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, y, 0, staging, std.mem.sliceAsBytes(poison), timeout));
-        try vk.orExit(vk.upload(cmds, hf, 0, staging, std.mem.sliceAsBytes(hf_init), timeout));
+        try vk.orExit(vk.upload(cmds, hf, 0, staging, std.mem.sliceAsBytes(poison_state), timeout));
+        if (snap) |*s| try vk.orExit(vk.upload(cmds, s.*, 0, staging, std.mem.sliceAsBytes(poison_state), timeout));
         try vk.orExit(m.prefillRecur(cmds, split.soa_view, split.g_view, split.beta_view, h0_view, y_view, hf_view, snap_view, T, chunk, timeout));
         try fetch(cmds, staging, y, std.mem.sliceAsBytes(ybits), timeout);
         try fetch(cmds, staging, hf, std.mem.sliceAsBytes(hfpairs), timeout);
+        // EVERY repeat: y byte-equal to the first AND hf re-checked against
+        // the independent f64 reference (poison or partial write fails here)
         if (first) |x| {
             if (std.mem.indexOfDiff(u16, x, ybits)) |at| {
-                std.debug.print("FAIL prefill chunk={d}: repeat {d} differs at element {d}\n", .{ chunk, rep, at });
+                std.debug.print("FAIL prefill chunk={d}: repeat {d} y differs at element {d}\n", .{ chunk, rep, at });
                 return false;
             }
-        } else first = try a.dupe(u16, ybits);
+            if (hf_first) |hf0| {
+                if (std.mem.indexOfDiff(u16, hf0, hfpairs)) |at| {
+                    std.debug.print("FAIL prefill chunk={d}: repeat {d} hf differs at element {d}\n", .{ chunk, rep, at });
+                    return false;
+                }
+            } else hf_first = try a.dupe(u16, hfpairs);
+        } else {
+            first = try a.dupe(u16, ybits);
+            hf_first = try a.dupe(u16, hfpairs);
+        }
+        _ = rf.check(ybits, hfpairs) catch |e| {
+            std.debug.print("FAIL prefill chunk={d}: repeat {d} {s}\n", .{ chunk, rep, @errorName(e) });
+            return false;
+        };
+        // the snapshot slot: downloaded, checked against the walker's boundary
+        // state, and byte-compared across repeats
+        if (snap) |*s| {
+            try fetch(cmds, staging, s.*, std.mem.sliceAsBytes(snappairs), timeout);
+            if (snap_first) |sp0| {
+                if (std.mem.indexOfDiff(u16, sp0, snappairs)) |at| {
+                    std.debug.print("FAIL prefill chunk={d}: repeat {d} snap differs at element {d}\n", .{ chunk, rep, at });
+                    return false;
+                }
+            } else snap_first = try a.dupe(u16, snappairs);
+            _ = rf.checkSnap(snappairs) catch |e| {
+                std.debug.print("FAIL prefill chunk={d}: repeat {d} snap {s}\n", .{ chunk, rep, @errorName(e) });
+                return false;
+            };
+        }
     }
     const rrep = rf.check(ybits, hfpairs) catch |e| {
         std.debug.print("FAIL prefill chunk={d}: {s}\n", .{ chunk, @errorName(e) });
@@ -495,7 +608,7 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
     }
     if (!try plantRefuse2(rf, first.?, hfpairs, "y", "prefill")) return false;
     std.debug.print("MILESTONE prefill elapsed_ms={d} tokens={d} chunk={d} chunks={?d} worst={e} of bound, " ++
-        "repeats byte-identical, h0 and soa unchanged, planted outputs refused\n", .{ clock.ms(), T, chunk, snap_chunks, rrep.worst });
+        "hf matches independent f64 reference from poison, repeats byte-identical, h0 and soa unchanged, planted outputs refused\n", .{ clock.ms(), T, chunk, snap_chunks, rrep.worst });
     return true;
 }
 
@@ -534,13 +647,11 @@ fn decodeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     const poison = try a.alloc(u16, @intCast(linear));
     defer a.free(poison);
     @memset(poison, fx.poison16);
-    var hf_init = try a.alloc(u16, @intCast(2 * state_elems));
-    defer a.free(hf_init);
-    for (f.want_state, 0..) |w, i| {
-        const bits: u32 = @bitCast(@as(f32, @floatCast(w)));
-        hf_init[2 * i] = @truncate(bits);
-        hf_init[2 * i + 1] = @truncate(bits >> 16);
-    }
+    // poison state_out before EVERY repeat: a dead store leaves poison and the
+    // f64-reference comparison refuses it; never pre-seed with the reference
+    const poison_state = try a.alloc(u16, @intCast(2 * state_elems));
+    defer a.free(poison_state);
+    @memset(poison_state, 0xffff);
     var first: ?[]u16 = null;
     defer if (first) |x| a.free(x);
     const ybits = try a.alloc(u16, @intCast(linear));
@@ -549,7 +660,7 @@ fn decodeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     defer a.free(souts);
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, y, 0, staging, std.mem.sliceAsBytes(poison), timeout));
-        try vk.orExit(vk.upload(cmds, state_out, 0, staging, std.mem.sliceAsBytes(hf_init), timeout));
+        try vk.orExit(vk.upload(cmds, state_out, 0, staging, std.mem.sliceAsBytes(poison_state), timeout));
         try vk.orExit(m.decodeRecur(cmds, soa_view, a_view, b_view, a_log_view, dt_view, state_in_view, state_out_view, y_view, timeout));
         try fetch(cmds, staging, y, std.mem.sliceAsBytes(ybits), timeout);
         try fetch(cmds, staging, state_out, std.mem.sliceAsBytes(souts), timeout);
@@ -768,7 +879,7 @@ fn normGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     defer out.deinit();
     const y_view = try vk.tensor.View.init(&y, .bf16, 0, total);
     const z_view = try vk.tensor.View.init(&z, .bf16, 0, total);
-    const w_view = try vk.tensor.View.init(&w, .bf16, 0, fx.Model.linear_dim);
+    const w_view = try vk.tensor.View.init(&w, .bf16, 0, fx.Model.head_dim);
     const out_view = try vk.tensor.View.init(&out, .bf16, 0, total);
     const poison = try a.alloc(u16, @intCast(total));
     defer a.free(poison);
