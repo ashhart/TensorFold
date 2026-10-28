@@ -182,10 +182,21 @@ class Recorder:
               flush=True)
         self.i += 1
 
+    def resume_len(self, conv: Conv, prompt: list[int]) -> int:
+        """The rendered history the next turn repeats, under the prompt (a state needs a row left to draw from)."""
+        hist = self.c.tokens(conv.messages, conv.tools, conv.thinking, False)
+        if conv.messages[-1]["role"] == "tool":  # a template may close the turn after a tool reply only while no assistant message follows
+            more = self.c.tokens(conv.messages + [{"role": "assistant", "content": PROBE}], conv.tools, conv.thinking, False)
+            n = 0
+            while n < min(len(hist), len(more)) and hist[n] == more[n]:
+                n += 1
+            hist = hist[:n]
+        return min(len(hist), len(prompt) - 1)
+
     def turn(self, conv: Conv, allowed: list[int] | None, tool_text: tuple[str, str], plain: bool = True, plain_allowed: list[int] | None = None) -> dict:
         """One turn: drafted, then "draft": false on the same messages (it resumes this turn's own history)."""
         prompt = self.c.tokens(conv.messages, conv.tools, conv.thinking, True)
-        history = len(self.c.tokens(conv.messages, conv.tools, conv.thinking, False))
+        history = self.resume_len(conv, prompt)
         body = conv.body(self.c.model, self.max_tokens, False)
         got = self.c.chat(body)
         self.row(conv, "drafted", body, got, allowed, history)
@@ -501,7 +512,7 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=160)
     ap.add_argument("--turns", type=int, default=9)
     ap.add_argument("--text", default=os.path.dirname(os.__file__))
-    ap.add_argument("--cancel-after", type=float, default=4.0)
+    ap.add_argument("--cancel-after", type=float, default=1.0)
     ap.add_argument("--planned", action="store_true", help="the family keeps states only at chunk starts (Nemotron)")
     ap.add_argument("--min-prompt", type=int, default=4096, help="the server keeps nothing for shorter prompts (Rules.min_prompt)")
     ap.add_argument("--new-tokens", type=int, default=200, help="warm: tool output tokens a turn adds")
