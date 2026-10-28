@@ -75,23 +75,16 @@ pub fn steps(
         },
     }) });
     all.dependOn(&b.addRunArtifact(native_tests).step);
-    const files = b.addWriteFiles();
+    // A file-local root discovers tests; a separate imported module does not.
     const family_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = files.add("qwen35_vulkan_host_tests.zig",
-            \\const std = @import("std");
-            \\test {
-            \\    std.testing.refAllDecls(@import("qwen35_vulkan"));
-            \\    std.testing.refAllDecls(@import("qwen35_vulkan").backend);
-            \\    std.testing.refAllDecls(@import("qwen35_vulkan").engine);
-            \\    std.testing.refAllDecls(@import("qwen35_vulkan").engine.Engine);
-            \\}
-        ),
+        .root_source_file = b.path("zig/src/families/qwen3_5/vulkan_test.zig"),
         .target = host,
         .optimize = .debug,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "qwen35_vulkan", .module = h.qwen35_vulkan },
-            .{ .name = "qwen35_shaders", .module = h.qwen35_shaders },
+            .{ .name = "vulkan", .module = h.qwen35_vulkan.import_table.get("vulkan").? },
+            .{ .name = "lanes", .module = h.engine_api.import_table.get("lanes").? },
+            .{ .name = "core", .module = h.core },
         },
     }) });
     all.dependOn(&b.addRunArtifact(family_tests).step);
