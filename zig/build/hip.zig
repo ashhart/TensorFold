@@ -510,6 +510,7 @@ const groups = [_]Source{
     .{ .path = "joint_schema/joint_schema.hip" },
     .{ .path = "lighton_ocr.hip", .strict = true },
     .{ .path = "qwen_vision.hip", .strict = true },
+    .{ .path = "draft/draft.hip" },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{

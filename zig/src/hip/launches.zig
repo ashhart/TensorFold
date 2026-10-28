@@ -45,6 +45,7 @@ const nemotron_moe = @import("launches/nemotron_moe.zig");
 const columns = @import("launches/columns.zig");
 const vision = @import("launches/vision.zig");
 const dense_text = @import("launches/dense_text.zig");
+pub const draft = @import("launches/draft.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -106,6 +107,8 @@ pub const Launcher = struct {
     mamba: mamba.Fns,
     /// Nemotron-H's MoE pick and relu^2 (nemotron_moe.hpp).
     nemo: nemotron_moe.Fns,
+    /// The DFlash2 drafter's kernels (draft/draft.hip).
+    draft: draft.Fns,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -322,6 +325,7 @@ pub const Launcher = struct {
         l.softmax_stats = try att.function("tf_softmax_stats");
         l.sum_partials = try att.function("tf_sum_partials");
         l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);
+        l.draft = try draft.Fns.load(l.mods[@backingInt(kernels.Group.draft)]);
         const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;
@@ -418,6 +422,11 @@ pub const Launcher = struct {
     pub const tf_mamba_scan = mamba.tf_mamba_scan;
     pub const tf_mamba_gnorm = mamba.tf_mamba_gnorm;
     pub const tf_mamba_window = mamba.tf_mamba_window;
+    pub const draftGather = draft.gather;
+    pub const draftRingPut = draft.ringPut;
+    pub const draftDynConv = draft.dynConv;
+    pub const draftMaskRows = draft.maskRows;
+    pub const draftAttention = draft.attention;
 
     /// Launches on `s`; the counting stream runs nothing.
     pub fn go(l: *const Launcher, f: Function, grid: Dim3, block: Dim3, shared: u32, s: S, args: *Args) Error!void {
