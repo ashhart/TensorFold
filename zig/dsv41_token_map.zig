@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     var t = try tok.loadTokenizer(io, a, tokenizer_path.?);
     defer t.deinit();
 
-    const config = try @import("src/families/deepseek_v41/config.zig").Config.parse(a, config_bytes);
+    const config = try @import("src/families/deepseek_v41/config.zig").Config.parseMetadata(a, config_bytes);
 
     // Decode, fall back to the raw token on U+FFFD, normalize, then deduplicate keys in first-seen order.
     var key_arena = std.heap.ArenaAllocator.init(a);
