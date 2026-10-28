@@ -1,0 +1,81 @@
+{
+  "scope": "Test-only independent-row scheduling of the GLM eh FP64 oracle; no inference arithmetic changes",
+  "host": {
+    "chip": "Apple M4 Pro",
+    "model_identifier": "Mac16,7",
+    "memory_gib": 48,
+    "macos": "26.5.1",
+    "macos_build": "25F80",
+    "zig": "0.17.0",
+    "optimization": "ReleaseFast"
+  },
+  "arithmetic": "Per output, ascending-K FP64 multiply, stored terms, ascending sum and magnitude unchanged; one BF16-to-FP64 input-row conversion reused across columns",
+  "scheduling": {
+    "maximum_workers": 8,
+    "includes_caller": true,
+    "allocation": "Parent allocates all worker scratch before spawn/output writes",
+    "thread_failure": "Failed partitions run synchronously; every successfully started thread joins before return"
+  },
+  "validation": {
+    "private_byte_comparisons": 96,
+    "private_failure_schedules": [
+      "normal",
+      "partial spawn failure",
+      "all spawn failure"
+    ],
+    "actual_glm_dimensions": {
+      "n": 4096,
+      "k": 8192,
+      "rows": 3,
+      "fills": [
+        "random",
+        "stress",
+        "nonfinite"
+      ],
+      "input_mutation": true,
+      "want_and_magnitude_bytes_equal": true
+    },
+    "public_host_comparisons": 288,
+    "public_allocation_failure": "Output sentinels unchanged when parent scratch allocation fails",
+    "existing_host_target_exit_code": 0,
+    "existing_host_target": "test-glm-window-contract-host filtered to eh reference parallel"
+  },
+  "abba": {
+    "rows": 64,
+    "n": 4096,
+    "k": 8192,
+    "references_per_sample": 3,
+    "clock": "std.Io.Clock.awake elapsed reference span; excludes fixture fill",
+    "serial_seconds": [
+      5.680653583,
+      5.695065042
+    ],
+    "eight_worker_seconds": [
+      0.748116667,
+      0.748363709
+    ],
+    "mean_ratio": 7.601649047618384,
+    "want_wyhash": "b4ee7a08920c6bd2",
+    "magnitude_wyhash": "35820e70c5958488",
+    "all_sample_hashes_equal": true,
+    "concurrency": "Root GPU performance window exited; projection GPU correctness controls overlapped, no concurrent GPU performance measurement"
+  },
+  "private_artifact_sha256": {
+    "glm_parallel_reference.zig": "2ad53105e415873374aadf596590cf9f297849faf2503f91f038f4f86c1f3b74",
+    "glm_parallel_test.zig": "a71e64655f037db24f5fb46dfcc488f51e989eb52a852cd2a15a0bdb40c90f0c",
+    "glm_parallel_bench.zig": "09c403dbefeba1c9b450b57c140031e04bf2d8ea33eec3781cfa73a07f38ff40",
+    "glm-parallel-reference-proposal.md": "beaac8743e4f7393c0072a4b8ce6f04eaf052de5f96d08e04ce5762a41bf01f2",
+    "glm_parallel_bench": "8cbf0a177d8c1d82584231bc9d8865a29114c64c734421baa87e03f6bd61cb11"
+  },
+  "running_m5_job": "Unchanged immutable binary; no claim this patch accelerates the currently running qualification",
+  "limits": "Measured reference timing on one M4 Pro; not an M5 or full-suite speedup claim",
+  "reproduction": "zig build test-glm-window-contract-host -Dglm-rows-contract-filter=\"eh reference parallel\"",
+  "public_source_sha256": {
+    "zig/tests/contract/metal_glm_eh.zig": "2a48fc2328e0aee5072b6cc5918150b4abd22a2078e08f39287419a247f087f7",
+    "zig/glm_rows_contract_host.zig": "f7c491ed3a5e584ddec17c3dae8811d3164b892994e6d27ffc08068f44d1f857"
+  },
+  "normal_host_build": {
+    "command": "zig build test-glm-window-contract-host tf-kernel-contract -Dcpu=apple_m1 --summary all",
+    "summary": "Build Summary: 47/47 steps succeeded; 18/18 tests passed"
+  }
+}
