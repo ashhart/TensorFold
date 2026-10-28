@@ -104,6 +104,13 @@ const full_push_bytes: u32 = params.push_bytes; // 120
 const prefill_push_bytes: u32 = 128;
 const decode_raw_gates: u32 = 8;
 const decode_f32_alog: u32 = 512;
+/// Prefill push flags (gated_delta_prefill_ash.comp): bit2 g is f32, and the
+/// output pass adds bit3.
+const scan_flags: u32 = 4;
+const out_flags: u32 = 4 | 8;
+/// Conv-decode push flags: the shader's SiLU (bit0) and norm (bit1) masks
+/// stay off by intent — the split owns the single SiLU (Metal gdn_pre).
+const conv_decode_flags: u32 = 0;
 
 /// Params plus the prefill scan's trailing chunk fields, matching the
 /// shader's push block field for field.
@@ -322,7 +329,7 @@ pub const Gdn = struct {
             .operation = Model.taps,
             .lhs_size = Model.conv_state_rows,
             .reduce_size = plan.conv_channels,
-            .flags = 0, // raw conv store: the split owns the single SiLU (Metal gdn_pre)
+            .flags = conv_decode_flags,
         };
         try m.conv_decode_bf16.run(cmds, std.mem.asBytes(&p)[0..conv_decode_push_bytes], try groups(plan.count, m.conv_decode_bf16.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
         try m.split(cmds, out_soa, g_out, beta_out, activated, a, b, a_log, dt, 1, timeout_ns);
@@ -345,8 +352,6 @@ pub const Gdn = struct {
         const v = try soa.slice(2 * plan.section_elements, plan.section_elements);
         try refuseOverlap(&.{ y, hf }, &.{ soa, g, beta, h0 });
         if (snap) |s| try refuseOverlap(&.{s}, &.{ h0, hf, y });
-        const scan_flags: u32 = 4; // bit2: g is f32
-        const out_flags: u32 = 4 | 8; // bit2 + bit3: output pass
         if (plan.chunks > 1) {
             const snap_v = snap orelse return error.Invalid;
             const db = try m.dummyView(.bf16);
@@ -686,10 +691,22 @@ test "single-chunk prefill read and written snapshot dummies are disjoint" {
     try testing.expectEqual(dummy_bytes, snapshot.byteLen());
 }
 
-test "decode gate flags match the shader masks, not the bit numbers" {
+test "gdn push flags match the masks the embedded shaders actually test" {
+    const src = @import("vulkan_comp_sources");
+    // Decode: raw-gates prologue (bit3) and f32 A_log (bit9); the old
+    // 0x300 producer class failed the shader's `& 8u` mask.
     try testing.expectEqual(@as(u32, 8), decode_raw_gates);
     try testing.expectEqual(@as(u32, 512), decode_f32_alog);
-    const flags = decode_raw_gates | decode_f32_alog;
-    try testing.expect(flags & 8 != 0);
-    try testing.expect(flags & 512 != 0);
+    try testing.expect(std.mem.indexOf(u8, src.gated_delta_decode, "(params.flags & 8u)") != null);
+    try testing.expect(std.mem.indexOf(u8, src.gated_delta_decode, "(params.flags & 512u)") != null);
+    // Prefill: scan pass keeps g f32 (bit2); the output pass adds bit3.
+    try testing.expectEqual(@as(u32, 4), scan_flags);
+    try testing.expectEqual(@as(u32, 4 | 8), out_flags);
+    try testing.expect(std.mem.indexOf(u8, src.gated_delta_prefill_ash, "(params.flags & 4u)") != null);
+    try testing.expect(std.mem.indexOf(u8, src.gated_delta_prefill_ash, "(params.flags & 8u)") != null);
+    // Conv decode: SiLU (bit0) and norm (bit1) masks exist but stay
+    // disabled by intent — the split owns the single SiLU.
+    try testing.expectEqual(@as(u32, 0), conv_decode_flags);
+    try testing.expect(std.mem.indexOf(u8, src.gdn_conv_decode, "(params.flags & 1u)") != null);
+    try testing.expect(std.mem.indexOf(u8, src.gdn_conv_decode, "(params.flags & 2u)") != null);
 }
