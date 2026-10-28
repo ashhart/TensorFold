@@ -47,6 +47,13 @@ pub fn main(init: std.process.Init) !u8 {
     var p_scribble = try vk.dispatch.Pipeline.init(&dev, &shaders.scribble_sum, control_layout); defer p_scribble.deinit();
     var p_tail = try vk.dispatch.Pipeline.init(&dev, &shaders.drop_tail, control_layout); defer p_tail.deinit();
     var p_fp16 = try vk.dispatch.Pipeline.init(&dev, &shaders.fp16_accum, control_layout); defer p_fp16.deinit();
+    // Planted gate 2 controls on the real kernel: a write to its weights and to its biases (the last input) after the dispatch.
+    var p_w = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout); defer p_w.deinit();
+    var p_b = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout); defer p_b.deinit();
+    var writes_w = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_w); defer writes_w.deinit();
+    writes_w.corrupt = 1;
+    var writes_b = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_b); defer writes_b.deinit();
+    writes_b.corrupt = 3;
     var controls = [_]fx.Control{
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fmax, .qmm_fmax),
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_atomic, .atomic_sum),
@@ -55,9 +62,11 @@ pub fn main(init: std.process.Init) !u8 {
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fp16, .fp16_accum),
     };
     defer for (&controls) |*control| control.deinit();
-    var kernels: [6]g.Kernel = undefined;
+    var kernels: [8]g.Kernel = undefined;
     kernels[0] = fixture.kernel();
     for (&controls, 1..) |*control, i| kernels[i] = control.kernel();
+    kernels[6] = writes_w.kernel();
+    kernels[7] = writes_b.kernel();
     const start = std.Io.Clock.awake.now(init.io);
     tally.controls += gate5_controls;
     tally.caught += gate5_controls;
