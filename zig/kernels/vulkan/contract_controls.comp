@@ -1,0 +1,66 @@
+#version 460
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// HIP's controls plant one gate fault each; Vulkan compiles these source variants separately.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) buffer InputX { uint16_t x[]; } input_x;
+layout(set = 0, binding = 1, std430) buffer InputW { uint16_t w[]; } input_w;
+layout(set = 0, binding = 2, std430) buffer OutputY { uint y[]; } output_y;
+layout(push_constant) uniform Params { uint rows; uint k; } p;
+float load_bf16(uint16_t v) { return uintBitsToFloat(uint(v) << 16u); }
+void atomic_add_float(uint index, float value) {
+  uint old_bits = atomicAdd(output_y.y[index], 0u);
+  for (;;) {
+    uint next_bits = floatBitsToUint(uintBitsToFloat(old_bits) + value);
+    uint prior = atomicCompSwap(output_y.y[index], old_bits, next_bits);
+    if (prior == old_bits) return;
+    old_bits = prior;
+  }
+}
+float half_round(float v) { return unpackHalf2x16(packHalf2x16(vec2(v, 0.0))).x; }
+void main() {
+  uint lane = gl_LocalInvocationID.x;
+#ifdef TF_CTL_ATOMIC_SUM
+  uint row = gl_WorkGroupID.y;
+  uint k = gl_WorkGroupID.x * 256u + lane;
+  if (row < p.rows && k < p.k) atomic_add_float(row, load_bf16(input_x.x[row * p.k + k]));
+#elif defined(TF_CTL_SCRIBBLE)
+  uint row = gl_WorkGroupID.x;
+  if (row < p.rows && lane == 0u) {
+    float s = 0.0;
+    for (uint i = 0u; i < p.k; ++i) s += load_bf16(input_x.x[row * p.k + i]);
+    output_y.y[row] = floatBitsToUint(s);
+    input_x.x[row * p.k] = uint16_t(floatBitsToUint(s) >> 16u);
+  }
+#elif defined(TF_CTL_DROP_TAIL)
+  uint row = gl_WorkGroupID.x;
+  if (row < p.rows && lane == 0u) {
+    float s = 0.0;
+    uint whole = (p.k / 32u) * 32u;
+    for (uint i = 0u; i < whole; ++i) s += load_bf16(input_x.x[row * p.k + i]);
+    for (uint i = whole; i + 1u < p.k; ++i) s += load_bf16(input_x.x[row * p.k + i]);
+    output_y.y[row] = floatBitsToUint(s);
+  }
+#elif defined(TF_CTL_FP16)
+  uint row = gl_WorkGroupID.x;
+  if (row < p.rows && lane == 0u) {
+    float s = 0.0;
+    for (uint i = 0u; i < p.k; ++i) s = half_round(s + load_bf16(input_x.x[row * p.k + i]) * load_bf16(input_w.w[i]));
+    output_y.y[row] = floatBitsToUint(s);
+  }
+#elif defined(TF_CTL_QMM_FMAX)
+  // Same NaN-loss fault as HIP's fmax max, placed at Q4 affine projection accumulation.
+  uint row = gl_WorkGroupID.x;
+  if (row < p.rows && lane == 0u) {
+    float acc = 0.0;
+    for (uint i = 0u; i < p.k; ++i) {
+      float v = load_bf16(input_x.x[row * p.k + i]) * load_bf16(input_w.w[i]);
+      acc = isnan(v) ? acc : max(acc, v);
+    }
+    output_y.y[row] = floatBitsToUint(acc);
+  }
+#elif defined(TF_CTL_OVER_LIMIT)
+  if (lane < p.rows) output_y.y[lane] = floatBitsToUint(load_bf16(input_x.x[lane]));
+#endif
+}
