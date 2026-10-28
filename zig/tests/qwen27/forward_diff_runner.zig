@@ -29,7 +29,7 @@ const Hooks = struct {
         try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = 1024, .stride = 2048, .offset = 1024 });
         e.barrier();
         try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = Weights.ref(weights.q_norm), .k_gain = Weights.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta });
-        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), &.{cache}, f.get(.q_gate), false);
+        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), &.{cache}, f.get(.q_gate), false, false);
     }
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: Ref, rows: u32) !void {
         const h: *Hooks = @ptrCast(@alignCast(ptr));

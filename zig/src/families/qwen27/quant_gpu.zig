@@ -26,7 +26,7 @@ pub const Kernels = struct {
     /// Per [n, k] shape: whether the scalar twin's 1-2 row bits equal the tiles' (checked once on this chip).
     twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// The same for simd_qmm_bits, per [bits, n, k].
-    bit_twins: std.AutoHashMapUnmanaged([3]usize, bool) = .empty,
+    bit_twins: std.AutoHashMapUnmanaged([4]usize, bool) = .empty,
     /// Per [n, k]: whether simd_qmm's chunk pairs give its tiles' bits (checked once on this chip).
     pair_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// Set around prompt chunks: prompt rows take projection.promptSplit, decoded rows the decode split.
@@ -126,26 +126,29 @@ pub const Kernels = struct {
         if (skip > 0 and (p.raw != null or skip >= p.n / 64)) return error.BadCoreProjectionRows;
         if (p.raw) |raw| if (raw.bits != 4 and k.tiled(raw)) {
             if (rows == 0 or rows > 128 or p.tile != 32) return error.BadCoreProjectionRows;
-            return k.strided(input_encoder, raw, x, y, rows, @intCast(raw.n));
+            return k.strided(input_encoder, raw, x, y, rows, @intCast(raw.n), p.gn);
         };
         var span = profile.begin(k.profiler, input_encoder, .dense);
-        const sk = if (k.prompt) projection.promptSplit(p.n, p.k) orelse p.slices else p.slices;
+        // Prompt rows take the checkpoint matrix's split, as decoded rows already do through `p.slices`.
+        const gn = if (p.gn != 0) p.gn else p.n;
+        const sk = if (k.prompt) projection.promptSplit(gn, p.k) orelse p.slices else p.slices;
         span.shape = .{ .n = p.n, .k = p.k, .sk = sk, .bits = p.bits };
         errdefer span.cancel();
         const e = span.encoder;
 
         _ = dims;
         if (rows == 0 or rows > @import("gpu_frame.zig").max_rows or p.tile != 32) return error.BadCoreProjectionRows;
-        if (p.raw) |raw| if (raw.bits == 4 and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0) {
-            const m = row.simd.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off, .n = raw.n, .k = raw.k };
-            const scalar = try k.twin(m); // loads the tiles before they're read
-            const call = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, try k.pairTwin(m), 0);
-            row.simd.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
-            e.barrier();
-            try span.end();
-            return;
-        };
         if (p.raw) |raw| {
+            if (raw.bits == 4 and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0) {
+                const m = row.simd.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off, .n = raw.n, .k = raw.k };
+                const scalar = try k.twin(m); // loads the tiles before they're read
+                const paired = try k.pairTwin(m);
+                const call = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, paired, gn);
+                row.simd.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
+                e.barrier();
+                try span.end();
+                return;
+            }
             if (k.row_pipelines == null) k.row_pipelines = try row.Pipelines.load(k.device);
             const call = try row.call(&k.row_pipelines.?, raw, rows, false);
             e.setPipeline(call.pipeline);
@@ -189,7 +192,7 @@ pub const Kernels = struct {
         if (skip > 0 or cut[1] > 0 or rows == 0 or rows > 128) return error.BadCoreProjectionRows;
         for (p.runs) |run| {
             if (run.linear.raw) |raw| {
-                try k.strided(input_encoder, raw, x, .{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 }, rows, p.n);
+                try k.strided(input_encoder, raw, x, .{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 }, rows, p.n, run.linear.gn);
                 continue;
             }
             for (0..rows) |r| { // lane kernels take one row a launch until they write at a stride
@@ -202,7 +205,8 @@ pub const Kernels = struct {
     }
 
     /// simd_qmm's tiles at any width (4-bit: its bits), else the row kernel; output row m at y + m * stride values.
-    fn strided(k: *Kernels, input_encoder: mtl.ComputeEncoder, raw: row.Weights, x: Ref, y: Ref, rows: u32, stride: u32) !void {
+    fn strided(k: *Kernels, input_encoder: mtl.ComputeEncoder, raw: row.Weights, x: Ref, y: Ref, rows: u32, stride: u32, whole: usize) !void {
+        // `whole` is the checkpoint matrix's rows (0: the staged rows), so a rank splits K as one Mac does.
         var span = profile.begin(k.profiler, input_encoder, .dense);
         span.shape = .{ .n = @intCast(raw.n), .k = @intCast(raw.k), .sk = 1, .bits = raw.bits };
         errdefer span.cancel();
@@ -210,8 +214,8 @@ pub const Kernels = struct {
         if (k.tiled(raw)) {
             if (k.simd_bits == null) k.simd_bits = try row.simd_bits.Pipelines.load(k.device);
             const m = row.simd_bits.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off };
-            const scalar = rows <= row.simd.max_scalar_rows and try k.bitTwin(m, raw); // loads the tiles before they're read
-            const call = try row.simd_bits.call(&k.simd_bits.?, raw.bits, raw.n, raw.k, rows, stride, scalar);
+            const scalar = rows <= row.simd.max_scalar_rows and try k.bitTwin(m, raw, whole); // loads the tiles before they're read
+            const call = try row.simd_bits.call(&k.simd_bits.?, raw.bits, raw.n, raw.k, rows, stride, scalar, whole);
             row.simd_bits.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
             e.barrier();
             try span.end();
@@ -231,11 +235,11 @@ pub const Kernels = struct {
         try span.end();
     }
 
-    /// Checks simd_qmm_bits' scalar twin against its tiles once per width and shape.
-    fn bitTwin(k: *Kernels, m: row.simd_bits.Matrix, raw: row.Weights) !bool {
-        const key = [3]usize{ raw.bits, raw.n, raw.k };
+    /// Checks simd_qmm_bits' scalar twin against its tiles once per width, shape and K split key.
+    fn bitTwin(k: *Kernels, m: row.simd_bits.Matrix, raw: row.Weights, whole: usize) !bool {
+        const key = [4]usize{ raw.bits, raw.n, raw.k, whole };
         if (k.bit_twins.get(key)) |ok| return ok;
-        const ok = try row.simd_bits.twinExact(&k.simd_bits.?, k.device, raw.bits, m, raw.n, raw.k);
+        const ok = try row.simd_bits.twinExact(&k.simd_bits.?, k.device, raw.bits, m, raw.n, raw.k, whole);
         if (!ok) std.log.info("qwen27: {d}-bit {d}x{d} rows take simdgroup tiles at every width (the scalar twin's bits differ on this chip)", .{ raw.bits, raw.n, raw.k });
         try k.bit_twins.put(k.allocator, key, ok);
         return ok;

@@ -124,10 +124,10 @@ pub const Model = struct {
         var it = m.weights.linears.valueIterator();
         while (it.next()) |lin| if (lin.tiles == null) {
             for (lin.stack[0..lin.stacked]) |s| if (fwd.tiled(s.rows)) {
-                _ = try row.simd_bits.call(p, s.rows.bits, s.rows.n, s.rows.k, prefill.lane_rows + 1, lin.n, false);
+                _ = try row.simd_bits.call(p, s.rows.bits, s.rows.n, s.rows.k, prefill.lane_rows + 1, lin.n, false, 0);
             };
             if (lin.rows) |r| if (fwd.tiled(r)) {
-                _ = try row.simd_bits.call(p, r.bits, r.n, r.k, prefill.lane_rows + 1, r.n, false);
+                _ = try row.simd_bits.call(p, r.bits, r.n, r.k, prefill.lane_rows + 1, r.n, false, 0);
             };
         };
         var gathers: std.ArrayList(prefill_w.Gathers) = .empty;

@@ -135,7 +135,7 @@ pub const Forward = struct {
         var calls: [3]row.simd_bits.Call = undefined;
         for (parts, 0..) |m, i| {
             if (!tiled(m.rows)) return false;
-            calls[i] = row.simd_bits.call(p, m.rows.bits, m.rows.n, m.rows.k, rows, lin.n, false) catch return false;
+            calls[i] = row.simd_bits.call(p, m.rows.bits, m.rows.n, m.rows.k, rows, lin.n, false, 0) catch return false;
         }
         for (parts, calls[0..parts.len]) |m, c| {
             e.pipe(c.pipeline);

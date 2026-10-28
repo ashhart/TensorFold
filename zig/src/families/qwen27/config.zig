@@ -27,6 +27,9 @@ pub const Config = struct {
     eos_count: usize = 0,
     max_position: usize = 262144,
     mrope_interleaved: bool = true,
+    rank: u32 = 0,
+    ranks: u32 = 1,
+    split_attention: bool = false,
 
     pub fn kind(c: Config, layer: usize) Kind {
         return c.kinds[layer];
@@ -51,7 +54,152 @@ pub const Config = struct {
     pub fn isEos(c: Config, token: u32) bool {
         return std.mem.indexOfScalar(u32, c.eos[0..c.eos_count], token) != null;
     }
+
+    // Rank/ranks: 0/1 on one Mac. The fused zba row holds this rank's z, then every rank's b, then every rank's a.
+
+    /// This rank's first value head: where its b, a, A_log and dt_bias rows start; 0 on one Mac or a replicated shard.
+    pub fn valueHead0(c: Config) usize {
+        return if (c.split_attention) c.rank * c.v_heads else 0;
+    }
+
+    /// The `b` block's width: every rank's, because the fused projection keeps it replicated.
+    fn zbaHeads(c: Config) usize {
+        return if (c.split_attention) c.ranks * c.v_heads else c.v_heads;
+    }
+
+    /// The rank's `b` row inside the fused `zba` row.
+    pub fn zbaB(c: Config) usize {
+        return c.gdnValueDim() + c.valueHead0();
+    }
+
+    /// The rank's `a` row inside the fused `zba` row, after the `b` block.
+    pub fn zbaA(c: Config) usize {
+        return c.gdnValueDim() + c.zbaHeads() + c.valueHead0();
+    }
+
+    /// The fused `zba` row's width. A multiple of 32 keeps `projection.prepare` on its tiled kernel.
+    pub fn zbaDim(c: Config) usize {
+        return c.gdnValueDim() + 2 * c.zbaHeads();
+    }
 };
+
+/// A rank's slice of one tensor: elements `[from, from+len)` of the checkpoint's rows, or of an input row.
+pub const Span = struct {
+    from: usize = 0,
+    len: usize = 0,
+
+    pub fn end(s: Span) usize {
+        return s.from + s.len;
+    }
+};
+
+/// A rank's share of the 27B: the checkpoint holds `global`'s shapes, `local` is what this rank runs.
+pub const Shard = struct {
+    rank: u32,
+    ranks: u32,
+    global: Config,
+    local: Config,
+
+    /// This rank's first output row in a module whose `local` rows each rank takes a block of.
+    pub fn row0(s: Shard, local: usize) usize {
+        return @as(usize, s.rank) * local;
+    }
+
+    /// This rank's rows of a global-row module: local rows on a split dimension, the whole tensor on a replicated one.
+    fn rows(s: Shard, global: usize, local: usize) Span {
+        return if (local == global) .{ .from = 0, .len = global } else .{ .from = s.row0(local), .len = local };
+    }
+
+    /// Whether attention and linear attention split across ranks; an mlp shard leaves them whole, so one seam a layer.
+    pub fn splitsAttention(s: Shard) bool {
+        return s.local.split_attention;
+    }
+
+    /// self_attn.q_proj rows: q and its gate interleave every head_dim, so slices land on a 2*head_dim boundary.
+    pub fn qRows(s: Shard) Span {
+        return s.rows(s.global.qDim(), s.local.qDim());
+    }
+
+    /// `self_attn.k_proj` and `v_proj` rows (stacked k|v in that order): whole KV heads, one GQA group each.
+    pub fn kvRows(s: Shard) Span {
+        return s.rows(s.global.kvDim(), s.local.kvDim());
+    }
+
+    /// linear_attn.in_proj_qkv rows and conv1d channels: one q | k | v tensor, each block split on its own head count.
+    pub fn qkvSpans(s: Shard) [3]Span {
+        const gqk = s.global.k_heads * s.global.dk;
+        const q = s.rows(gqk, s.local.k_heads * s.local.dk);
+        const k = s.rows(gqk, s.local.k_heads * s.local.dk);
+        const v = s.rows(s.global.gdnValueDim(), s.local.gdnValueDim());
+        return .{ q, .{ .from = gqk + k.from, .len = k.len }, .{ .from = 2 * gqk + v.from, .len = v.len } };
+    }
+
+    /// linear_attn.conv1d channels in qkvSpans order: the same three blocks, so local conv state indexes like qkv rows.
+    pub fn convSpans(s: Shard) [3]Span {
+        return s.qkvSpans();
+    }
+
+    /// `linear_attn.in_proj_z` rows: this rank's `v_heads * dv` value channels, one contiguous block.
+    pub fn zRows(s: Shard) Span {
+        return s.rows(s.global.gdnValueDim(), s.local.gdnValueDim());
+    }
+
+    /// linear_attn.in_proj_a and in_proj_b: replicated whole into zba; a 24-row split would drop the tiled projection.
+    pub fn abRows(s: Shard) Span {
+        return .{ .from = 0, .len = s.global.v_heads };
+    }
+
+    /// `linear_attn.A_log` and `dt_bias`: one constant a value head, so a rank takes its own heads' slice.
+    pub fn valueRows(s: Shard) Span {
+        return s.rows(s.global.v_heads, s.local.v_heads);
+    }
+
+    /// `mlp.gate_proj` and `up_proj` rows (stacked gate|up): this rank's share of the intermediate width.
+    pub fn intermediateRows(s: Shard) Span {
+        return s.rows(s.global.intermediate, s.local.intermediate);
+    }
+
+    /// `lm_head` rows: this rank's share of the vocabulary, one contiguous block of tokens.
+    pub fn vocabRows(s: Shard) Span {
+        return s.rows(s.global.vocab, s.local.vocab);
+    }
+
+    /// `o_proj`/`out_proj`/`down_proj` rows: this rank's block over the whole K, or the width when replicated.
+    pub fn outputRows(s: Shard) Span {
+        return if (s.splitsAttention()) s.rows(s.global.hidden, s.global.hidden / s.ranks) else .{ .from = 0, .len = s.global.hidden };
+    }
+};
+
+/// Mode: full halves attention, linear attention and MLP; mlp splits only the MLP and head, so one seam a layer.
+pub const Mode = enum { full, mlp };
+
+/// Split the even dimensions: heads, GQA groups, GDN heads, MLP width and vocabulary; embeddings and norms stay whole.
+pub fn split(c: *Config, rank: u32, ranks: u32, mode: Mode) !Shard {
+    if (ranks < 2 or ranks > 8 or rank >= ranks) return error.BadShard;
+    if (c.intermediate % ranks != 0 or c.vocab % ranks != 0) return error.BadShard;
+    if (mode == .full and (c.heads % ranks != 0 or c.kv_heads % ranks != 0 or c.k_heads % ranks != 0 or c.v_heads % ranks != 0 or c.hidden % ranks != 0)) return error.BadShard;
+    const global = c.*;
+    if (mode == .full) {
+        c.heads /= ranks;
+        c.kv_heads /= ranks;
+        c.k_heads /= ranks;
+        c.v_heads /= ranks;
+    }
+    c.intermediate /= ranks;
+    c.vocab /= ranks;
+    c.rank = rank;
+    c.ranks = ranks;
+    c.split_attention = mode == .full;
+    // the local shapes must keep the group structure the attention, GDN and projection kernels run
+    if (c.heads == 0 or c.kv_heads == 0 or c.k_heads == 0 or c.v_heads == 0) return error.BadShard;
+    if (c.heads % c.kv_heads != 0 or c.v_heads % c.k_heads != 0) return error.BadShard;
+    if (c.heads / c.kv_heads != global.heads / global.kv_heads) return error.BadShard;
+    if (c.qDim() % 4 != 0 or c.kvDim() % 4 != 0 or c.gdnQkvDim() % 4 != 0 or c.gdnValueDim() % 4 != 0) return error.BadShard;
+    if (c.vocab % 4 != 0 or c.intermediate % 4 != 0) return error.BadShard;
+    if (c.layers != global.layers) return error.BadShard;
+    try shapeProducts(c.*);
+    return .{ .rank = rank, .ranks = ranks, .global = global, .local = c.* };
+}
 
 pub fn object(v: std.json.Value) !std.json.ObjectMap {
     return if (v == .object) v.object else error.BadConfig;
@@ -184,121 +332,12 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     return c;
 }
 
-const fixture =
-    \\{"model_type":"qwen3_5","hidden_size":64,"intermediate_size":128,"num_hidden_layers":4,
-    \\"num_attention_heads":4,"num_key_value_heads":2,"head_dim":16,"vocab_size":97,
-    \\"linear_num_key_heads":2,"linear_num_value_heads":4,"linear_key_head_dim":16,
-    \\"linear_value_head_dim":16,"linear_conv_kernel_dim":4,"eos_token_id":[2,11]}
-;
-
-fn edit(a: std.mem.Allocator, key: []const u8, value: std.json.Value) ![]u8 {
-    var p = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
-    defer p.deinit();
-    try p.value.object.put(p.arena.allocator(), key, value);
-    return std.json.Stringify.valueAlloc(a, p.value, .{});
+/// The embedding table stays whole on every rank, so its gather bound is the table's rows, not a shard's width.
+pub fn embedBound(c: *const Config, rows: u64) !u32 {
+    if (rows < c.vocab) return error.BadEmbedding;
+    return std.math.cast(u32, rows) orelse error.BadEmbedding;
 }
 
-test "flat config preserves dimensions and interval schedule" {
-    const c = try parse(std.testing.allocator, fixture, null);
-    try std.testing.expectEqual(@as(usize, 128), c.qDim());
-    try std.testing.expectEqual(@as(usize, 32), c.kvDim());
-    try std.testing.expectEqual(@as(usize, 128), c.gdnQkvDim());
-    try std.testing.expectEqual(Kind.linear, c.kind(0));
-    try std.testing.expectEqual(Kind.attention, c.kind(3));
-}
-
-test "nested config merges generation EOS in stable order" {
-    const a = std.testing.allocator;
-    const text = try std.fmt.allocPrint(a, "{{\"model_type\":\"qwen3_5\",\"eos_token_id\":[11,2],\"text_config\":{s}}}", .{fixture});
-    defer a.free(text);
-    const c = try parse(a, text, "{\"eos_token_id\":[2,3,11]}");
-    try std.testing.expectEqualSlices(u32, &.{ 11, 2, 3 }, c.eos[0..c.eos_count]);
-    try std.testing.expect(c.isEos(3) and !c.isEos(4));
-}
-
-test "explicit layer types preserve their order" {
-    const a = std.testing.allocator;
-    var p = try std.json.parseFromSlice(std.json.Value, a, "[\"full_attention\",\"linear_attention\",\"full_attention\",\"linear_attention\"]", .{});
-    defer p.deinit();
-    const json = try edit(a, "layer_types", p.value);
-    defer a.free(json);
-    const c = try parse(a, json, null);
-    try std.testing.expectEqualSlices(Kind, &.{ .attention, .linear, .attention, .linear }, c.kinds[0..4]);
-}
-
-test "rope parameters preserve precision and section metadata" {
-    const a = std.testing.allocator;
-    const p = try std.json.parseFromSlice(std.json.Value, a, "{\"rope_theta\":1234567.25,\"partial_rotary_factor\":0.5,\"mrope_section\":[2,1,1]}", .{});
-    defer p.deinit();
-    const json = try edit(a, "rope_parameters", p.value);
-    defer a.free(json);
-    const c = try parse(a, json, null);
-    try std.testing.expectEqual(@as(f64, 1234567.25), c.rope_theta);
-    try std.testing.expectEqual(@as(usize, 8), c.rope_dims);
-    try std.testing.expectEqualSlices(usize, &.{ 2, 1, 1 }, &c.mrope_section);
-}
-
-test "dense config refuses MoE and tied embedding heads" {
-    const a = std.testing.allocator;
-    const moe = try edit(a, "num_experts", .{ .integer = 8 });
-    defer a.free(moe);
-    try std.testing.expectError(error.NotQwenDense, parse(a, moe, null));
-    const tied = try edit(a, "tie_word_embeddings", .{ .bool = true });
-    defer a.free(tied);
-    try std.testing.expectError(error.TiedEmbeddingHead, parse(a, tied, null));
-}
-
-test "invalid scalar shapes and types fail without a cast trap" {
-    const a = std.testing.allocator;
-    for ([_]std.json.Value{ .{ .integer = -1 }, .{ .integer = 0 }, .{ .bool = true }, .{ .integer = 4294967296 } }) |v| {
-        const json = try edit(a, "hidden_size", v);
-        defer a.free(json);
-        try std.testing.expectError(error.BadConfig, parse(a, json, null));
-    }
-    const json = try edit(a, "num_hidden_layers", .{ .integer = 129 });
-    defer a.free(json);
-    try std.testing.expectError(error.BadConfig, parse(a, json, null));
-}
-
-test "missing and out of vocabulary EOS fail" {
-    const a = std.testing.allocator;
-    const missing = try edit(a, "eos_token_id", .null);
-    defer a.free(missing);
-    try std.testing.expectError(error.MissingEos, parse(a, missing, null));
-    const c = try parse(a, missing, "{\"eos_token_id\":7}");
-    try std.testing.expect(c.isEos(7));
-    const wrong = try edit(a, "eos_token_id", .{ .integer = 97 });
-    defer a.free(wrong);
-    try std.testing.expectError(error.BadEos, parse(a, wrong, null));
-}
-
-test "malformed layer and rope metadata fail" {
-    const a = std.testing.allocator;
-    const layers = try edit(a, "layer_types", .{ .bool = true });
-    defer a.free(layers);
-    try std.testing.expectError(error.BadConfig, parse(a, layers, null));
-    const rope = try edit(a, "partial_rotary_factor", .{ .float = 2 });
-    defer a.free(rope);
-    try std.testing.expectError(error.BadConfig, parse(a, rope, null));
-    try std.testing.expectError(error.BadConfig, parse(a, "[]", null));
-}
-
-test "head grouping requires complete key and value groups" {
-    const a = std.testing.allocator;
-    const attention = try edit(a, "num_key_value_heads", .{ .integer = 3 });
-    defer a.free(attention);
-    try std.testing.expectError(error.BadConfig, parse(a, attention, null));
-    const gdn = try edit(a, "linear_num_value_heads", .{ .integer = 3 });
-    defer a.free(gdn);
-    try std.testing.expectError(error.BadConfig, parse(a, gdn, null));
-}
-
-test "text execution refuses unsupported gates and activation contracts" {
-    const a = std.testing.allocator;
-    const gate = try edit(a, "attn_output_gate", .{ .bool = false });
-    defer a.free(gate);
-    try std.testing.expectError(error.UnsupportedAttentionGate, parse(a, gate, null));
-    const act = try edit(a, "output_gate_type", .{ .string = "sigmoid" });
-    defer a.free(act);
-    try std.testing.expectError(error.UnsupportedActivation, parse(a, act, null));
+test {
+    _ = @import("config_test.zig");
 }

@@ -304,7 +304,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
 pub fn projectRow(ps: *Projections, device: mtl.Device, e: mtl.ComputeEncoder, raw: rowp.Weights, l: Linear, x: lane.Ref, y: mtl.Buffer, rows: usize) !void {
     const p = try ps.simd(device);
     const mtx = rowp.simd_bits.Matrix{ .w = raw.w, .scales = raw.scales, .biases = raw.biases };
-    const call = try rowp.simd_bits.call(p, raw.bits, raw.n, raw.k, rows, l.y_stride orelse l.n, false);
+    const call = try rowp.simd_bits.call(p, raw.bits, raw.n, raw.k, rows, l.y_stride orelse l.n, false, 0);
     rowp.simd_bits.encode(e, call, mtx, x.buf, x.off, y, l.col * 2);
 }
 

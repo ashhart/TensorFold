@@ -46,7 +46,9 @@ pub const Geometry = struct {
     }
 
     pub fn check(g: Geometry) !void {
-        if (g.heads != 24 or g.kv_heads != 4 or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
+        // Shaders take the GQA group (6) as a constant, not head count: 12/2 on a rank equals 24/4 on one Mac.
+        if (g.dim != 256 or g.rotary != 64 or g.heads == 0 or g.kv_heads == 0 or g.heads % g.kv_heads != 0) return error.TargetAttentionShape;
+        if (g.heads / g.kv_heads != 6) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
         return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
@@ -435,7 +437,13 @@ test "target attention reads every config dimension without widening kernel qual
     const g = try Geometry.fromConfig(c, false);
     try std.testing.expect(g.sameShape(.{}));
     try std.testing.expect(!g.shared_prefix);
+    c.heads = 12; // a rank of a two-way split: the same GQA6 over half the heads
+    c.kv_heads = 2;
+    const half = try Geometry.fromConfig(c, true);
+    try std.testing.expectEqual(@as(u32, 12), half.heads);
+    try std.testing.expectEqual(@as(u32, 6), half.group());
     c.heads = 16; // the supplied 9B has GQA4; the unchanged shaders still require GQA6
+    c.kv_heads = 4;
     try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
     c.heads = 24;
     c.kv_heads = 2;

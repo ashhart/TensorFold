@@ -157,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
             try binding.upload(plan, &caches);
             const cb = queue.commandBuffer();
             const e = cb.compute(.concurrent);
-            try op.encode(e, &scratch, &binding, plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = val }, .{ .buffer = out }, &caches, null, prompt and pass == 0);
+            try op.encode(e, &scratch, &binding, plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = val }, .{ .buffer = out }, &caches, null, prompt and pass == 0, false);
             e.end();
             cb.commit();
             cb.wait();
