@@ -31,6 +31,8 @@ pub const Shape = struct {
     words_aligned: bool = true,
     /// A plan's items; 0 is a plain product.
     items: u32 = 0,
+    /// A routed plan's pairs (rows x slots); 0: not given, and no pairs bound refuses it.
+    plan_pairs: u32 = 0,
     /// Parts the groups are split into.
     parts: u32 = 1,
     /// Inside a lane round: the decode tile keeps every row count.
@@ -114,6 +116,8 @@ pub fn Registry(comptime Launch: type) type {
             if (plan and !t.routed) return null;
             if (!plan and !t.plain) return null;
             if (t.items != 0 and plan and shape.items > t.items) return null;
+            if (t.pairs_per_item != 0 and plan and shape.plan_pairs != 0 and
+                @as(u64, shape.plan_pairs) > @as(u64, t.pairs_per_item) * shape.items) return null;
             // a routed prompt's kernel is chosen by its items, whatever rows they hold
             if (!plan or e.path == .decode) {
                 const limit = if (t.rows_matrix != 0 and env.matrix_on and env.matrix) t.rows_matrix else t.rows;
@@ -290,6 +294,34 @@ test "a plan is chosen by its items, a plain product by its rows" {
     try std.testing.expect(std.mem.endsWith(u8, r.select(toy_env, .mlx, .project, .prefill, shape).?.id, "plan"));
     shape.items = 301;
     try std.testing.expect(std.mem.endsWith(u8, r.select(toy_env, .mlx, .project, .prefill, shape).?.id, "big"));
+}
+
+test "a plan past its entry's pairs per item takes the next entry" {
+    const entries = [_]ToyEntry{
+        toy("a.prefill.k3", .prefill, .gemm, false),
+        toy("a.prefill.k1", .prefill, .gemm, false),
+        toy("a.prefill.big", .prefill, .gemm, false),
+    };
+    const rows = [_]tuning.Row{
+        .{ .id = "a.prefill.k3", .cost = 1, .items = 300, .pairs_per_item = 3, .plain = false },
+        .{ .id = "a.prefill.k1", .cost = 2, .items = 300, .pairs_per_item = 4 },
+        .{ .id = "a.prefill.big", .cost = 3 },
+    };
+    const r = Toy.init(&.{ .gfx = "toy", .rows = &rows }, &entries);
+    var shape = toy_shape;
+    shape.items = 100;
+    const want = [_]struct { u32, []const u8 }{ .{ 0, "k3" }, .{ 1, "k3" }, .{ 300, "k3" }, .{ 301, "k1" }, .{ 400, "k1" }, .{ 401, "big" } };
+    for (want) |w| {
+        shape.plan_pairs = w[0];
+        try std.testing.expect(std.mem.endsWith(u8, r.select(toy_env, .mlx, .project, .prefill, shape).?.id, w[1]));
+    }
+    // the items bound still holds, and a plain product has no pairs bound
+    shape.plan_pairs = 1;
+    shape.items = 301;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(toy_env, .mlx, .project, .prefill, shape).?.id, "big"));
+    shape.items = 0;
+    shape.plan_pairs = 5000;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(toy_env, .mlx, .project, .prefill, shape).?.id, "k1"));
 }
 
 test "the family rule refuses a path whose family changes with the rows" {
