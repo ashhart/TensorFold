@@ -1,0 +1,7 @@
+For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+
+integrated_multimodal_description: [Shot 1] Live-action, cinematic, a medium shot frames a middle-aged baker with short dark hair, wearing a cream shirt and a dark green apron, standing behind a wooden counter in a small bakery at dawn. A round loaf of bread rests on a white ceramic plate in front of him. Warm window light enters from the left, and softly blurred shelves of bread fill the background. The camera holds steady for the single continuous fifteen-second shot. The baker looks at the camera and speaks throughout, gesturing gently toward the loaf with one hand. The baker, speaking in a calm, warm, slightly raspy male voice (S1), says: <d>[English] Good morning. I have been baking since four o'clock, the way my father taught me. This loaf came out of the oven ten minutes ago. Tear it open while it is still warm, and you will hear the crust sing.</d> His mouth movements follow his speech. After speaking, he smiles and rests both hands on the counter.
+
+overall_soundscape: Quiet bakery room tone and a low oven ventilation hum continue throughout. No other voices.
+
+non_diegetic_music: N/A

@@ -1,0 +1,260 @@
+{
+ "version": 1,
+ "built": "2026-10-13",
+ "groups": [
+  {
+   "id": "wasserman",
+   "name": "Wasserman",
+   "folder": "00-wasserman"
+  },
+  {
+   "id": "camera",
+   "name": "01 Camera & Viewpoint",
+   "folder": "01-camera-viewpoint"
+  },
+  {
+   "id": "transform",
+   "name": "02 Transformation & Morphing",
+   "folder": "02-transformation-morphing"
+  },
+  {
+   "id": "character",
+   "name": "03 Character Editing",
+   "folder": "03-character-editing"
+  },
+  {
+   "id": "motion",
+   "name": "04 Motion & Action",
+   "folder": "04-motion-action"
+  },
+  {
+   "id": "style",
+   "name": "05 Art Style",
+   "folder": "05-art-style"
+  },
+  {
+   "id": "finish",
+   "name": "06 Support & Finishing",
+   "folder": "06-support-finishing"
+  },
+  {
+   "id": "fun",
+   "name": "07 Fun",
+   "folder": "07-fun"
+  }
+ ],
+ "loras": {
+  "wasserman-80s-horror": {
+   "category": [
+    "wasserman"
+   ],
+   "spark": {
+    "file": "00-wasserman/wasserman-80s-horror/spark/wasserman-80s-horror.safetensors",
+    "size": 149144792,
+    "sha256": "9e8e820be3e1ad04ce904c0b3c774d08297bfde4341f5cce6fb47cb00451a8ac"
+   },
+   "mac": {
+    "file": "00-wasserman/wasserman-80s-horror/mac/wasserman-80s-horror.mlx.safetensors",
+    "size": 149138370,
+    "sha256": "01cff58cae98ad01265781f3b5d0c30c553cec3eff9b4ae391bc0eb0afc2b871"
+   }
+  },
+  "camera-motion": {
+   "category": [
+    "camera"
+   ],
+   "spark": {
+    "file": "01-camera-viewpoint/camera-motion/spark/camera-motion.safetensors",
+    "size": 155109680,
+    "sha256": "9d7d98d7377f56efed3aa7d507f767936112d208906f49908ec9a8ae912be88b"
+   },
+   "mac": {
+    "file": "01-camera-viewpoint/camera-motion/mac/camera-motion.mlx.safetensors",
+    "size": 155103464,
+    "sha256": "a0362351ed0edb407c9c80c6d0717ae28f773c0f0e7e18fb57c28daa7823eaf6"
+   }
+  },
+  "headmounted-fpv": {
+   "category": [
+    "camera"
+   ],
+   "spark": {
+    "file": "01-camera-viewpoint/headmounted-fpv/spark/headmounted-fpv.safetensors",
+    "size": 77580048,
+    "sha256": "eabade655732836b339e25c9bb9101967e36febff9ada6541fa54bb2593b6ac2"
+   },
+   "mac": {
+    "file": "01-camera-viewpoint/headmounted-fpv/mac/headmounted-fpv.mlx.safetensors",
+    "size": 77573616,
+    "sha256": "c5a1ee92c6e8eab0a7014d129180ee5626bce0a7a82de130ea519d3389917771"
+   }
+  },
+  "equi360": {
+   "category": [
+    "camera"
+   ],
+   "spark": {
+    "file": "01-camera-viewpoint/equi360/spark/equi360.safetensors",
+    "size": 131229760,
+    "sha256": "a1e3ebd2b79be92d5e970c6f516519f8bd7f8e4271a71e7a7d7c8e938e157cf7"
+   },
+   "mac": {
+    "file": "01-camera-viewpoint/equi360/mac/equi360.mlx.safetensors",
+    "size": 131226400,
+    "sha256": "915599e62eb683953deaa0ce9865b31edeb28451881dae8944a1468657499fbb"
+   }
+  },
+  "orbit-360": {
+   "category": [
+    "camera"
+   ],
+   "spark": {
+    "file": "01-camera-viewpoint/orbit-360/spark/orbit-360.safetensors",
+    "size": 155111424,
+    "sha256": "14f13e3effaf3e729fdc0c97680344aa63f473be0c55963f963d718b3db2a4d4"
+   },
+   "mac": {
+    "file": "01-camera-viewpoint/orbit-360/mac/orbit-360.mlx.safetensors",
+    "size": 155103475,
+    "sha256": "505090360504fbd4c9a0eea5b4c83225764d256f7211d8961730e879e3500602"
+   }
+  },
+  "transformation": {
+   "category": [
+    "transform"
+   ],
+   "spark": {
+    "file": "02-transformation-morphing/transformation/spark/transformation.safetensors",
+    "size": 37297968,
+    "sha256": "42d7d7468db7e5a3b9946df7728eb63e6b71d122511cfa8b09f23cb06048e1b9"
+   },
+   "mac": {
+    "file": "02-transformation-morphing/transformation/mac/transformation.mlx.safetensors",
+    "size": 37295046,
+    "sha256": "c4ea707a059edce1c3ff27ea33eb3299bee99d204a54b3ecdcf32eed3993a87e"
+   }
+  },
+  "turnaround": {
+   "category": [
+    "transform"
+   ],
+   "spark": {
+    "file": "02-transformation-morphing/turnaround/spark/turnaround.safetensors",
+    "size": 63103776,
+    "sha256": "9bc12ae97d2076b3449f8b1feca1fff52252576d608a84e4625497644f265d35"
+   },
+   "mac": {
+    "file": "02-transformation-morphing/turnaround/mac/turnaround.mlx.safetensors",
+    "size": 63100620,
+    "sha256": "b67446f8527f83242d027bf55283ba6541bb7680a7392f6b139a895f6e21e492"
+   }
+  },
+  "character-swap": {
+   "category": [
+    "character"
+   ],
+   "spark": {
+    "file": "03-character-editing/character-swap/spark/character-swap.safetensors",
+    "size": 155110320,
+    "sha256": "4b2a3f420ae804c0aa3422761ff84dbd1bf52eef6900ffab6d2e66df63cb4e79"
+   },
+   "mac": {
+    "file": "03-character-editing/character-swap/mac/character-swap.mlx.safetensors",
+    "size": 155103481,
+    "sha256": "2cc9800b5b7f6de930b057f8957ae45796ff01663d7bbe079fdbd2f4ae725db5"
+   }
+  },
+  "person-remover": {
+   "category": [
+    "character",
+    "fun"
+   ],
+   "spark": {
+    "file": "03-character-editing/person-remover/spark/person-remover.safetensors",
+    "size": 155110584,
+    "sha256": "b01dc9fe888c2f4e455a8eb3b4878dfd4038ee0e2320a7b186c7935e65c93ba5"
+   },
+   "mac": {
+    "file": "03-character-editing/person-remover/mac/person-remover.mlx.safetensors",
+    "size": 155103471,
+    "sha256": "4fcf8c128318441a293dc25320973b88b324bf9ab8949726f2728f7b4a8bbce3"
+   }
+  },
+  "natural-face-speech": {
+   "category": [
+    "character",
+    "finish"
+   ],
+   "spark": {
+    "file": "03-character-editing/natural-face-speech/spark/natural-face-speech.safetensors",
+    "size": 310168816,
+    "sha256": "40b1af6134ddf8597e6b9bfed1b97fc782bac6917e498f954effd34681ab881b"
+   },
+   "mac": {
+    "file": "03-character-editing/natural-face-speech/mac/natural-face-speech.mlx.safetensors",
+    "size": 310161958,
+    "sha256": "95c1a84cb068e5825c7a0e145178da15612cc860fc44ac9a80ce04f736ffed1e"
+   }
+  },
+  "spatial-physics": {
+   "category": [
+    "motion"
+   ],
+   "spark": {
+    "file": "04-motion-action/spatial-physics/spark/spatial-physics.safetensors",
+    "size": 155109672,
+    "sha256": "7d14f3701560068e7004159c8b2a7278bd2dbfc9e5e3b60d0bc9aef6c049919d"
+   },
+   "mac": {
+    "file": "04-motion-action/spatial-physics/mac/spatial-physics.mlx.safetensors",
+    "size": 155103466,
+    "sha256": "5b97bdb4434d758b060828efa8fee9ef88f80a1114cd08ba7734f6ba0a304ad3"
+   }
+  },
+  "vh5tape-vhs": {
+   "category": [
+    "fun"
+   ],
+   "spark": {
+    "file": "07-fun/vh5tape-vhs/spark/vh5tape-vhs.safetensors",
+    "size": 131242912,
+    "sha256": "2966503f53d6448c53ac492f5d1055feba410f094abc739592cef5dc0961da7d"
+   },
+   "mac": {
+    "file": "07-fun/vh5tape-vhs/mac/vh5tape-vhs.mlx.safetensors",
+    "size": 131226404,
+    "sha256": "ee69c50700603388a9a1c92cd91669243a489a92043273fe3219d246cf446b2d"
+   }
+  },
+  "wushu-action": {
+   "category": [
+    "fun"
+   ],
+   "spark": {
+    "file": "07-fun/wushu-action/spark/wushu-action.safetensors",
+    "size": 155109672,
+    "sha256": "136c16924f7413f0edb1c439f29c1e4c9da13d2cf07117c4e46556691193aa16"
+   },
+   "mac": {
+    "file": "07-fun/wushu-action/mac/wushu-action.mlx.safetensors",
+    "size": 155103463,
+    "sha256": "e668eea743676d3689efcad5e80daeabb5ef96ab008e25ed27c41aff852b09f2"
+   }
+  },
+  "qwen-multiple-angles": {
+   "category": [
+    "fun"
+   ],
+   "spark": {
+    "file": "07-fun/qwen-multiple-angles/angles_v2_full_qwen21_multiple_angles_v2_qwen21_multiple_angles_v2_000001500.safetensors",
+    "size": 318819792,
+    "sha256": "548c57977c3f1c09c2c9e5f4e83e930cbc6f719c878a576ab8666ce29fef39b6"
+   },
+   "mac": {
+    "file": "07-fun/qwen-multiple-angles/angles_v2_full_qwen21_multiple_angles_v2_qwen21_multiple_angles_v2_000001500.safetensors",
+    "size": 318819792,
+    "sha256": "548c57977c3f1c09c2c9e5f4e83e930cbc6f719c878a576ab8666ce29fef39b6"
+   }
+  }
+ }
+}

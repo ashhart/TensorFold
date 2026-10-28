@@ -1,0 +1,693 @@
+[
+ {
+  "id": "wasserman-80s-horror",
+  "name": "Wasserman-80's Horror LORA",
+  "author": "Sam Wasserman (wassermanproductions.com)",
+  "url": "https://github.com/wassermanproductions/wasserman-80s-horror-lora/releases/download/v1.0.0/80s_horror_wk.safetensors",
+  "page": "github.com/wassermanproductions/wasserman-80s-horror-lora",
+  "sha256": "9e8e820be3e1ad04ce904c0b3c774d08297bfde4341f5cce6fb47cb00451a8ac",
+  "trigger": "80s_horror_wk",
+  "styles": {
+   "VHS": "shot on VHS.",
+   "16mm film": "shot on 16mm film."
+  },
+  "strength": 1.0,
+  "range": [
+   0.6,
+   1.3
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits and Acceptable Use Policy. Read WEIGHTS_LICENSE.md on the LoRA's page before downloading. Keep the credit: 80s Horror LoRA by Sam Wasserman (wassermanproductions.com). Powered by MiniMax H3.",
+  "notes": "The look of a 1970s-80s horror movie: VHS for neon, tape and 80s video, or 16mm film for warm grindhouse grain. Write the light and the place, what happens, the camera and the sound; the trigger word brings the era. Made for 1280x704 or 1344x768, 5 to 8 seconds, 20 steps.",
+  "category": [
+   "wasserman"
+  ],
+  "needs": "text",
+  "status": "ready",
+  "size": null,
+  "what": "The look of a 1970s-80s horror movie: VHS or 16mm film."
+ },
+ {
+  "id": "camera-motion",
+  "name": "Camera Motion",
+  "author": "Jojocodex",
+  "url": "https://huggingface.co/Jojocodex/minimax-h3-Camera-Motion-lora/resolve/main/camera_motion_h3_lora_v1_3000_pruned.safetensors",
+  "page": "huggingface.co/Jojocodex/minimax-h3-Camera-Motion-lora",
+  "sha256": "9d7d98d7377f56efed3aa7d507f767936112d208906f49908ec9a8ae912be88b",
+  "size": 155109680,
+  "trigger": "camera motion",
+  "styles": {
+   "No move named (write it yourself)": "",
+   "Push-in (steadiest)": "slow push-in",
+   "Pull-back (steadiest)": "pull-back",
+   "Handheld follow (steadiest)": "handheld tracking shot",
+   "Orbit": "slow orbit",
+   "Crane reveal": "crane reveal",
+   "Tilt up": "tilt up",
+   "Tilt down": "tilt down",
+   "Push-in, then pull-back": "push-in then pull-back",
+   "Pan left (weaker)": "pan left",
+   "Pan right (weaker)": "pan right"
+  },
+  "strength": 0.9,
+  "range": [
+   0.8,
+   1.0
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author publishes this file under Apache-2.0. It was trained on MiniMax H3, whose Community License Agreement (territory limits, Acceptable Use Policy) still governs the base model you run it on.",
+  "licence_tag": "Apache-2.0",
+  "category": [
+   "camera"
+  ],
+  "needs": "text",
+  "what": "Camera moves the base model tends to miss: push-in, pull-back, orbit, tracking, aerial, crane, pan, macro.",
+  "status": "ready",
+  "why": "",
+  "notes": "Write the prompt as: subject, place, the camera move, light and style. Name the move in plain words, for example 'slow push-in with subtle lateral tracking' or 'slow pull-back combined with a gentle orbit'. 0.8 is gentle, 1.0 is definite, above 1.2 the picture can turn unstable. The author's page has a library of 55 prompts. The Camera move choices are the author's own phrases, with the author's note on how steady each is; the phrase is added to the prompt after the trigger.",
+  "comma": true,
+  "tested": "Mac, DGX Spark",
+  "choice": "Camera move"
+ },
+ {
+  "id": "headmounted-fpv",
+  "name": "Head-mounted FPV",
+  "author": "neph1",
+  "url": "https://huggingface.co/neph1/minimax_h3_headmounted_fpv_cam/resolve/main/fpv_headbob_h3_50.safetensors",
+  "page": "huggingface.co/neph1/minimax_h3_headmounted_fpv_cam",
+  "sha256": "eabade655732836b339e25c9bb9101967e36febff9ada6541fa54bb2593b6ac2",
+  "size": 77580048,
+  "trigger": "",
+  "styles": {
+   "Walking, hands in view": "first-person view from a head-mounted camera, hands visible, the view bobs with each step",
+   "Running": "first-person view from a head-mounted camera, running, the view shakes with each stride",
+   "Standing still, looking around": "first-person view from a head-mounted camera, standing still, the head turns to look around",
+   "Write it yourself": ""
+  },
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community",
+  "category": [
+   "camera"
+  ],
+  "needs": "text",
+  "what": "A first-person view from a camera on the head, with the bob of walking or running.",
+  "status": "ready",
+  "why": "",
+  "notes": "The author's page gives no trigger word or settings (it mirrors a Civitai upload). Describe the shot as seen through the person's own eyes: 'first-person view from a head-mounted camera, hands visible, the view bobs with each step'. The View choices are the Studio's wording, since the author gives none.",
+  "tested": "Mac, DGX Spark",
+  "choice": "View"
+ },
+ {
+  "id": "equi360",
+  "name": "Equirectangular 360°",
+  "author": "shamanic",
+  "url": "https://huggingface.co/shamanic/minimax-h3-equi360-lora/resolve/main/h3-equi360-reviewed-v2-step2500.safetensors",
+  "page": "huggingface.co/shamanic/minimax-h3-equi360-lora",
+  "sha256": "a1e3ebd2b79be92d5e970c6f516519f8bd7f8e4271a71e7a7d7c8e938e157cf7",
+  "size": 131229760,
+  "trigger": "equirect360",
+  "styles": {
+   "360° layout": "Equirectangular 360-degree panoramic video: the frame is a full spherical projection, a complete environment wrapping around the viewer on all sides, with the horizon at the vertical middle of the frame."
+  },
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community",
+  "category": [
+   "camera"
+  ],
+  "needs": "text",
+  "what": "A full-sphere 360° panorama video with sound, for VR players.",
+  "status": "ready",
+  "why": "",
+  "notes": "Made for a 21:9 frame: pick Custom size, 1120x480. The whole frame is the sphere: resize the clip to 2:1 and add 360 metadata for a VR player. Describe the place, the motion and the sound; a still camera works best. Seams at the wrap and stretching at the poles can still happen.",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "orbit-360",
+  "name": "360° Orbit",
+  "author": "pablodawson",
+  "url": "https://huggingface.co/pablodawson/MiniMax-H3-360-Orbit-LoRA/resolve/main/minimax_h3_flf2v_lora_v1.safetensors",
+  "page": "huggingface.co/pablodawson/MiniMax-H3-360-Orbit-LoRA",
+  "sha256": "14f13e3effaf3e729fdc0c97680344aa63f473be0c55963f963d718b3db2a4d4",
+  "size": 155111424,
+  "trigger": "",
+  "styles": {},
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community",
+  "category": [
+   "camera"
+  ],
+  "needs": "first-last",
+  "what": "One photo becomes a frozen-moment 360° orbit that ends on the frame it started from.",
+  "status": "ready",
+  "why": "",
+  "notes": "Give the same picture as the first and the last frame (step 2, 'Same as the first frame') and use the author's prompt as it is. Author's settings: 768x768, 73 frames, 28 passes, strength 1.0, no sound. It also orbited here at the Studio's usual passes.",
+  "prompt": "One frozen instant. Only the camera moves. In a continuous 360 orbit. Preserve every person and object in exactly the same world position, orientation, shape and pose throughout the shot. Airborne objects remain suspended at the captured height and angle: no wobbling, shaking, spinning, drifting, falling or continued action. Keep faces, hands, clothing, liquids and the background motionless while retaining their natural appearance. Camera parallax is the only source of apparent movement. No cuts, zoom, morphing or added objects.",
+  "same_first_last": true
+ },
+ {
+  "id": "transformation",
+  "name": "Transformation",
+  "author": "Ashmotv",
+  "url": "https://huggingface.co/Ashmotv/transformation_lora/resolve/main/Transformation_style_c1-st2500_comfyui.safetensors",
+  "page": "huggingface.co/Ashmotv/transformation_lora",
+  "sha256": "42d7d7468db7e5a3b9946df7728eb63e6b71d122511cfa8b09f23cb06048e1b9",
+  "size": 37297968,
+  "trigger": "Tr@nsf0rmation_style",
+  "styles": {},
+  "strength": 1.0,
+  "range": [
+   1.0,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community",
+  "category": [
+   "transform"
+  ],
+  "needs": "first-last",
+  "what": "Morphs one picture into another, element by element.",
+  "status": "ready",
+  "why": "",
+  "notes": "Give the start picture as the first frame and the target as the last frame (step 2), and use the author's prompt. Strength 1.0 to 1.2.",
+  "prompt": "[Shot 1] Picture 1 Tr@nsf0rmation into Picture 2 with individual elements and subjects Tr@nsf0rmation into one another."
+ },
+ {
+  "id": "turnaround",
+  "name": "Turnaround",
+  "author": "matlod",
+  "url": "https://huggingface.co/matlod/minimax-h3-turnaround/resolve/main/minimax_h3_five_view_512_s1500.safetensors",
+  "page": "huggingface.co/matlod/minimax-h3-turnaround",
+  "sha256": "9bc12ae97d2076b3449f8b1feca1fff52252576d608a84e4625497644f265d35",
+  "size": 63103776,
+  "trigger": "",
+  "styles": {},
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community",
+  "category": [
+   "transform"
+  ],
+  "needs": "action",
+  "what": "A five-view character sheet (front to back) from one reference picture.",
+  "status": "action",
+  "why": "Press Turnaround under a picture in the Library: one picture in, five views of its subject out, each a picture of its own.",
+  "notes": "1.0 turns furthest, about 0.7 keeps the look closest. Made on the Ref2VA model with the packing of MATLOWAI's contact-sheet sampler (their own ComfyUI nodes on a DGX Spark, the MLX engine on a Mac); not for clips (on a normal clip it breaks motion).",
+  "action": "turnaround",
+  "platforms": [
+   "mac",
+   "spark"
+  ]
+ },
+ {
+  "id": "keyframe-animation",
+  "name": "Keyframe Animation",
+  "author": "alvdansen",
+  "url": "https://huggingface.co/alvdansen/h3-keyframe-animation/resolve/main/adapters/h3_seq_step12000.safetensors",
+  "page": "huggingface.co/alvdansen/h3-keyframe-animation",
+  "sha256": "1a82a85859cccf207afe171c51bafdfd4e85076fe74300d84991d14beeb71bf5",
+  "size": 5642802888,
+  "trigger": "",
+  "styles": {},
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author's own H3 Keyframe Animation Adapter License 1.0.0, on top of the MiniMax H3 Community License Agreement. The files are gated: you accept the terms on the author's page with your own Hugging Face account.",
+  "licence_tag": "Custom, gated",
+  "category": [
+   "transform"
+  ],
+  "needs": "reference",
+  "what": "Hand-drawn animation on held frames: the next key drawing, an inbetween, or a short held sequence from one or two drawings.",
+  "status": "gated",
+  "why": "The files are gated on the author's page: accept the author's licence there with your own Hugging Face account, then Install fetches the file with your token (HF_TOKEN, or `hf auth login`).",
+  "notes": "Three adapters, 1.9 GB each: hero (1 drawing), tween (2 drawings), sequence (2 drawings); this preset is sequence. Works on a clip from references with one or two drawings as pictures, at 20 passes (the author: not on a Turbo adapter).",
+  "variants": {
+   "Sequence (2 drawings: a short held sequence)": {
+    "url": "https://huggingface.co/alvdansen/h3-keyframe-animation/resolve/main/adapters/h3_seq_step12000.safetensors",
+    "sha256": "1a82a85859cccf207afe171c51bafdfd4e85076fe74300d84991d14beeb71bf5",
+    "size": 1880934296
+   },
+   "Hero (1 drawing: the next key drawing)": {
+    "url": "https://huggingface.co/alvdansen/h3-keyframe-animation/resolve/main/adapters/h3_hero_step12000.safetensors",
+    "sha256": "91a7581b6e43797ea04256b55e94b6458067abf577f6602290d07468dd83b74c",
+    "size": 1880934304
+   },
+   "Tween (2 drawings: the next inbetween)": {
+    "url": "https://huggingface.co/alvdansen/h3-keyframe-animation/resolve/main/adapters/h3_tween_step12000.safetensors",
+    "sha256": "4bb1225df5f2a3ba34092c1a43f8d65931f6ac5b7464666a2aa88d907807cb55",
+    "size": 1880934296
+   }
+  },
+  "flow": "keyframe",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "character-swap",
+  "name": "Character Swap",
+  "author": "Akatz Labs (akatz-ai)",
+  "url": "https://huggingface.co/akatz-ai/MiniMax-H3-Character-Swap-LoRA/resolve/main/h3_character_swap_pro4500_1000.safetensors",
+  "page": "huggingface.co/akatz-ai/MiniMax-H3-Character-Swap-LoRA",
+  "sha256": "4b2a3f420ae804c0aa3422761ff84dbd1bf52eef6900ffab6d2e66df63cb4e79",
+  "size": 155110320,
+  "trigger": "",
+  "styles": {},
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community",
+  "category": [
+   "character"
+  ],
+  "needs": "source-video",
+  "what": "Replaces a person in a source clip with the person in a reference picture, keeping the scene.",
+  "status": "ready",
+  "why": "",
+  "notes": "Works on a clip from references: your clip as Video 1 and a picture of the new character as Picture 1. Strength 1.0, no trigger: under Video 1 say who is replaced. Shots of 4 to 5 seconds worked best for the author. On a DGX Spark the clip runs on the full-precision reference model.",
+  "flow": "character-swap",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "person-remover",
+  "name": "Person Remover",
+  "author": "Akatz Labs (akatz-ai)",
+  "url": "https://huggingface.co/akatz-ai/MiniMax-H3-Person-Remover-LoRA/resolve/main/H3-Person-Remover-V1.safetensors",
+  "page": "huggingface.co/akatz-ai/MiniMax-H3-Person-Remover-LoRA",
+  "sha256": "b01dc9fe888c2f4e455a8eb3b4878dfd4038ee0e2320a7b186c7935e65c93ba5",
+  "size": 155110584,
+  "trigger": "",
+  "styles": {},
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community",
+  "category": [
+   "character",
+   "fun"
+  ],
+  "needs": "action",
+  "what": "Removes a chosen person from a video and rebuilds the background.",
+  "status": "action",
+  "why": "Press Remove a person under a clip in the Library: the person is found from a few words (SAM 3.1), painted green, and removed in windows of 22 frames through Akatz Labs' H3 Relay.",
+  "notes": "Strength 1.0, 12 passes, windows of 22 frames, as its author set them.",
+  "action": "remove",
+  "platforms": [
+   "spark"
+  ],
+  "mac": "DGX Spark only. The removal needs SAM 3.1 to track the person, a source clip fed in as a frame-aligned guide and windows that carry 18 frames of history; the Mac's MLX engine has no segmentation model, no aligned guide and no history relay."
+ },
+ {
+  "id": "natural-face-speech",
+  "name": "Natural Face Speech",
+  "author": "vpakarinen",
+  "url": "https://huggingface.co/vpakarinen/natural-face-speech-h3-lora/resolve/main/natural_face_speech_h3_lora_v2_500.safetensors",
+  "page": "huggingface.co/vpakarinen/natural-face-speech-h3-lora",
+  "sha256": "40b1af6134ddf8597e6b9bfed1b97fc782bac6917e498f954effd34681ab881b",
+  "size": 310168816,
+  "trigger": "",
+  "styles": {},
+  "strength": 0.7,
+  "range": [
+   0.6,
+   0.8
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author publishes this file under Apache-2.0. It was trained on MiniMax H3, whose Community License Agreement (territory limits, Acceptable Use Policy) still governs the base model you run it on.",
+  "licence_tag": "Apache-2.0",
+  "category": [
+   "character",
+   "finish"
+  ],
+  "needs": "text",
+  "what": "More natural face muscles and clearer English speech for a person talking to the camera.",
+  "status": "ready",
+  "why": "",
+  "notes": "Text to video or from a first frame. Author's prompt shape: 'she is speaking into a mic, she maintains eye contact with the viewer saying: ...'. Made for 720x1280 at 20 to 30 passes.",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "motion-continuity-repair",
+  "name": "Motion Continuity Repair",
+  "author": "JOKER141",
+  "url": "https://huggingface.co/JOKER141/MiniMax-H3-General-Motion-Continuity-Repair/resolve/main/Motion_Repair_V2.safetensors",
+  "page": "huggingface.co/JOKER141/MiniMax-H3-General-Motion-Continuity-Repair",
+  "sha256": "edfa0e2858caeba7be9108883f61da8525d3c58af998c94ac7a449d9603d7574",
+  "size": 155110272,
+  "trigger": "",
+  "styles": {
+   "No trigger": "",
+   "With trigger": "bunny_crisp_motion"
+  },
+  "strength": 0.9,
+  "range": [
+   0.2,
+   1.0
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author states no licence for this file. It was trained on MiniMax H3, whose Community License Agreement applies to the base model and to derivatives of it. Ask the author before any use beyond your own.",
+  "licence_tag": "None stated",
+  "category": [
+   "motion",
+   "finish"
+  ],
+  "needs": "text",
+  "what": "Keeps fast movement connected: fewer broken transitions, less unwanted slow motion, closer to the prompt.",
+  "status": "ready",
+  "why": "",
+  "notes": "For running, sport, dance, tumbling, fights. About 0.9 alone; 0.5 to 0.7 beside Combat Base V2. Too high can rebuild the whole movement or change the sound. The trigger word is optional.",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "combat-base-v2",
+  "name": "Combat Base V2",
+  "author": "JOKER141",
+  "url": "https://huggingface.co/JOKER141/MiniMax-H3-Combat-Base-V2/resolve/main/H3_Combat_V2.safetensors",
+  "page": "huggingface.co/JOKER141/MiniMax-H3-Combat-Base-V2",
+  "sha256": "5b3edb09e9d6029439badf9bc9db4ba4a355ae679b0810888de82c4793c0bac8",
+  "size": 155110280,
+  "trigger": "",
+  "styles": {
+   "Steady (no trigger)": "",
+   "Intense": "prfight2",
+   "Heavy stunt impact": "prfight2, prfin1"
+  },
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.0
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author states no licence for this file. It was trained on MiniMax H3, whose Community License Agreement applies to the base model and to derivatives of it. Ask the author before any use beyond your own.",
+  "licence_tag": "None stated",
+  "category": [
+   "motion"
+  ],
+  "needs": "text",
+  "what": "Faster, harder-hitting fight movement, and livelier body movement and sound in dialogue scenes.",
+  "status": "ready",
+  "why": "",
+  "notes": "The prompt still decides what the fighters do; the LoRA changes how it is performed. Write the action first, then any dialogue. The author gives no strength figure.",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "weapon-combat",
+  "name": "Weapon Combat",
+  "author": "JOKER141",
+  "url": "https://huggingface.co/JOKER141/MiniMax-H3-Weapon-Combat-LoRA/resolve/main/Bunny_weapon_combatV1.safetensors",
+  "page": "huggingface.co/JOKER141/MiniMax-H3-Weapon-Combat-LoRA",
+  "sha256": "d49de2902f3ea5e6889d9489c031ed64694de93d6a77c111d164f83c0dc359df",
+  "size": 155110272,
+  "trigger": "BUNNY",
+  "styles": {},
+  "strength": 0.6,
+  "range": [
+   0.45,
+   1.0
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author states no licence for this file. It was trained on MiniMax H3, whose Community License Agreement applies to the base model and to derivatives of it. Ask the author before any use beyond your own.",
+  "licence_tag": "None stated",
+  "category": [
+   "motion"
+  ],
+  "needs": "text",
+  "what": "Sword, staff and other weapon fights that hold together better.",
+  "status": "ready",
+  "why": "",
+  "notes": "Use it alone: stacked with Combat Base V2 or Motion Continuity Repair it can turn unstable. The author says its training includes finishing moves and dismemberment, so it can produce graphic violence if the prompt asks for a kill.",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "spatial-physics",
+  "name": "Spatial Physics",
+  "author": "Jojocodex",
+  "url": "https://huggingface.co/Jojocodex/minimax-h3-spatial-physics-lora/resolve/main/wushu_spatial_physics_clean_3000_pruned.safetensors",
+  "page": "huggingface.co/Jojocodex/minimax-h3-spatial-physics-lora",
+  "sha256": "7d14f3701560068e7004159c8b2a7278bd2dbfc9e5e3b60d0bc9aef6c049919d",
+  "size": 155109672,
+  "trigger": "",
+  "styles": {},
+  "strength": 0.4,
+  "range": [
+   0.3,
+   0.5
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author publishes this file under Apache-2.0. It was trained on MiniMax H3, whose Community License Agreement (territory limits, Acceptable Use Policy) still governs the base model you run it on.",
+  "licence_tag": "Apache-2.0",
+  "category": [
+   "motion"
+  ],
+  "needs": "text",
+  "what": "Objects that collide, stack, fall and block each other more believably; also firmer contact in fights.",
+  "status": "ready",
+  "why": "",
+  "notes": "The author calls it a test release and suggests 0.3 to 0.5: a light push toward real physics on top of the base model.",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "anime-slider",
+  "name": "Anime Slider",
+  "author": "adf99",
+  "url": "https://huggingface.co/adf99/H3_Ref2V_Anime_Slider_v1/resolve/main/H3_Ref2V_Anime_Slider_v1.safetensors",
+  "page": "huggingface.co/adf99/H3_Ref2V_Anime_Slider_v1",
+  "sha256": "60b0e8523c72a94eb84dca63eaf88bb0f0b844f053c86d8f318c4f8b7d4eac11",
+  "size": 77580464,
+  "trigger": "",
+  "styles": {},
+  "strength": 3.0,
+  "range": [
+   -5.0,
+   5.0
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author states no licence for this file. It was trained on MiniMax H3, whose Community License Agreement applies to the base model and to derivatives of it. Ask the author before any use beyond your own.",
+  "licence_tag": "None stated",
+  "category": [
+   "style"
+  ],
+  "needs": "text",
+  "what": "A slider between flat 2D anime (plus) and photorealism (minus).",
+  "status": "ready",
+  "why": "",
+  "notes": "Plus values lean to 2D anime, minus values to a photographic look; 3 or -3 is usually enough. Made because the base model's anime leans 3D. Works on clips from text, a first frame or references.",
+  "tested": "Mac, DGX Spark",
+  "flow": "slider",
+  "ends": [
+   "photographic",
+   "2D anime"
+  ]
+ },
+ {
+  "id": "lineart-anime",
+  "name": "Lineart Anime",
+  "author": "DiffSynth-Studio",
+  "url": "https://huggingface.co/DiffSynth-Studio/MiniMax-H3-LoRA-LineartAnime/resolve/main/model.safetensors",
+  "page": "huggingface.co/DiffSynth-Studio/MiniMax-H3-LoRA-LineartAnime",
+  "sha256": "1fa460c686e09beafed735642b22fcbd7afd4f99e108567ea36a164b36b8cd88",
+  "size": 1258532696,
+  "trigger": "",
+  "styles": {},
+  "strength": 1.0,
+  "range": [
+   0.5,
+   1.2
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author publishes this file under Apache-2.0. It was trained on MiniMax H3, whose Community License Agreement (territory limits, Acceptable Use Policy) still governs the base model you run it on.",
+  "licence_tag": "Apache-2.0",
+  "category": [
+   "style"
+  ],
+  "needs": "source-video",
+  "what": "Colours a line-art video into finished anime.",
+  "status": "ready",
+  "why": "",
+  "notes": "Works on a clip from references with one video, a line-art video (white lines on black) at the clip's own size: “Make line art of Video 1” draws one from any clip. Scene and Action describe the finished picture. 1.26 GB, in DiffSynth-Studio's layout: the Studio rewrites it for each engine at install.",
+  "flow": "lineart",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "3d-animation-style",
+  "name": "3D Animation Style",
+  "author": "SOLRICKS",
+  "url": "https://huggingface.co/SOLRICKS/3D-Animation-Style-MiniMax-H3/resolve/main/3dsrx_minimax_h3_rank16-step00001250.safetensors",
+  "page": "huggingface.co/SOLRICKS/3D-Animation-Style-MiniMax-H3",
+  "sha256": "28b56d2240990436fba8d9a1fa06310c971a7ef95d3046059118445e0c0a4ef0",
+  "size": 298260424,
+  "trigger": "3dsrx",
+  "styles": {},
+  "strength": 0.8,
+  "range": [
+   0.4,
+   1.0
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community, gated",
+  "category": [
+   "style"
+  ],
+  "needs": "text",
+  "what": "The look of a 3D animated feature.",
+  "status": "ready",
+  "notes": "Start the prompt with 3dsrx. The author's settings: 0.8 for people from text, 1.0 for animals, fantasy characters and places, 0.4 from a first frame. Tested on a DGX Spark at 1.0 (same seed with and without: the clip turns into a 3D animated film). On a Mac the file is rewritten for the engine, but no clip has been rendered with it yet. The author approves each download by hand: ask on the LoRA's page with your Hugging Face account, then Install fetches it with that account's token.",
+  "tested": "DGX Spark"
+ },
+ {
+  "id": "video-upscaler",
+  "name": "Video Upscaler LoRA",
+  "author": "dntpi",
+  "url": "https://huggingface.co/sandpies/ComfyUI-H3-Video-Upsampler/resolve/main/lora/h3upscale_v2_x2.safetensors",
+  "page": "github.com/dntpi/ComfyUI-H3-Video-Upsampler",
+  "sha256": "ff671fa94e377fd277319a89c366a67f49b97ae6528c8ac3b0c5e0a3b254c56c",
+  "size": 620285992,
+  "trigger": "",
+  "styles": {},
+  "strength": 1.0,
+  "range": [
+   1.0,
+   1.0
+  ],
+  "base": "MiniMax H3",
+  "licence_tag": "MIT code, weights other",
+  "licence": "The node code is MIT. The LoRA file is on the author's Hugging Face page under its own terms, and it derives from MiniMax H3, whose Community License Agreement applies.",
+  "category": [
+   "finish"
+  ],
+  "needs": "action",
+  "what": "Doubles the size of a finished clip: a latent upscale, then one guided re-draw in tiles.",
+  "status": "action",
+  "why": "Press Upscale under a clip in the Library: the latent upscaler enlarges the clip, then one light re-draw in tiles is guided by the clip itself through this LoRA (dntpi's H3 Video Upsampler).",
+  "notes": "620 MB. Re-draw 0.1 is the author's tested setting.",
+  "action": "upscale",
+  "platforms": [
+   "spark"
+  ],
+  "mac": "DGX Spark only. The upscaler is a ComfyUI node pack in PyTorch (a latent upscaler network, then a re-draw in tiles guided through the LoRA's own layout); the Mac build has no ComfyUI and its MLX engine has neither. On a Mac the 2K and QHD sizes double a clip with the 2x decoder."
+ },
+ {
+  "id": "vh5tape-vhs",
+  "name": "VH5 Tape (VHS)",
+  "author": "KennethFal",
+  "url": "https://huggingface.co/KennethFal/vh5tape-vhs-lora-minimax-h3/resolve/main/vh5tape-comfyui.safetensors",
+  "page": "huggingface.co/KennethFal/vh5tape-vhs-lora-minimax-h3",
+  "sha256": "2966503f53d6448c53ac492f5d1055feba410f094abc739592cef5dc0961da7d",
+  "size": 131242912,
+  "trigger": "vh5tape",
+  "comma": true,
+  "styles": {
+   "Medium wear": "worn VHS tape recording with visible tape damage.",
+   "Light wear": "lightly worn VHS tape with slight analog noise.",
+   "Heavy damage": "badly damaged VHS tape with heavy tracking errors and distortion."
+  },
+  "strength": 1.0,
+  "range": [
+   0.7,
+   1.0
+  ],
+  "base": "MiniMax H3",
+  "licence": "The weights are a Model Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement, with its territory limits, commercial terms and Acceptable Use Policy. Read the licence on the LoRA's page before downloading.",
+  "licence_tag": "H3 Community",
+  "category": [
+   "fun"
+  ],
+  "needs": "text",
+  "what": "A 1980s home-video look with a damage dial: light wear, visible tape damage, or heavy tracking errors.",
+  "status": "ready",
+  "why": "",
+  "notes": "Trigger first, damage level second, then the scene: the hub writes the first two for you. Period details help: wood panelling, studio lighting, 4:3, 1980s clothes. 0.7 to 0.9 softens the wear.",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "wushu-action",
+  "name": "Wushu Action",
+  "author": "Jojocodex",
+  "url": "https://huggingface.co/Jojocodex/minimax-h3-wushu-action-lora/resolve/main/old/wushu_action_h3_lora_v5_3000_fl2va_no-adaln.safetensors",
+  "page": "huggingface.co/Jojocodex/minimax-h3-wushu-action-lora",
+  "sha256": "136c16924f7413f0edb1c439f29c1e4c9da13d2cf07117c4e46556691193aa16",
+  "size": 155109672,
+  "trigger": "wushu_action",
+  "comma": true,
+  "styles": {},
+  "strength": 0.5,
+  "range": [
+   0.4,
+   1.0
+  ],
+  "base": "MiniMax H3",
+  "licence": "The author publishes this file under Apache-2.0. It was trained on MiniMax H3, whose Community License Agreement (territory limits, Acceptable Use Policy) still governs the base model you run it on.",
+  "licence_tag": "Apache-2.0",
+  "category": [
+   "fun"
+  ],
+  "needs": "text",
+  "what": "Kung fu and wushu moves with weight behind them: punches, kicks, spins, staff work.",
+  "status": "ready",
+  "why": "",
+  "notes": "Write: who, the moves and how the force travels ('powerful hip rotation and weight transfer'), the place, the shot ('full-body shot, stable camera'). The author pairs it at 0.5 with Spatial Physics at 0.3. The page's current file sits in its 'old' folder (v5, 3000 steps).",
+  "tested": "Mac, DGX Spark"
+ },
+ {
+  "id": "qwen-multiple-angles",
+  "name": "Multiple Angles (image)",
+  "author": "akhaliq",
+  "url": "https://huggingface.co/akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA/resolve/main/checkpoints_v2/angles_v2_full_qwen21_multiple_angles_v2_qwen21_multiple_angles_v2_000001500.safetensors",
+  "page": "huggingface.co/akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA",
+  "sha256": "548c57977c3f1c09c2c9e5f4e83e930cbc6f719c878a576ab8666ce29fef39b6",
+  "size": 318819792,
+  "trigger": "<mva>",
+  "styles": {},
+  "strength": 0.9,
+  "range": [
+   0.8,
+   1.0
+  ],
+  "base": "Qwen-Image-2.1",
+  "licence": "The author publishes this file under Apache-2.0. It runs on Qwen-Image-2.1-Turbo, which is under the Qwen Research License Agreement: non-commercial use only.",
+  "licence_tag": "Apache-2.0",
+  "category": [
+   "fun"
+  ],
+  "needs": "image",
+  "what": "Shows the subject of a picture from another camera angle: 12 directions at 4 heights, each also as a close-up. It works in Create, Edit a picture, where it adds a camera ring.",
+  "status": "ready",
+  "notes": "Prompt shape: '<mva> front-right quarter view, eye-level shot'; the camera ring writes it. v2, step 1500, is the file the author recommends. Trained on single objects and characters: side and back views often come back on a plain background. Lower the strength towards 0.8 if a result copies your picture. A picture of a whole scene is often reduced to one thing in it on a plain background (measured on both machines). Measured here on Turbo's 8 steps: the quarter views turn the way asked, but a straight left side view and a straight right side view can come out facing the same way. The author's own setting is 40 steps on the base model (the installers' --image-edit adds it; not measured here).",
+  "target": "image",
+  "tested": "Mac, DGX Spark"
+ }
+]
