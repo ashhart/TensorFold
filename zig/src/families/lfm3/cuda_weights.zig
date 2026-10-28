@@ -115,7 +115,8 @@ const Ctx = struct {
             const codes = try x.ck.expect(try std.fmt.bufPrint(&buf, "{s}.weight", .{name}), .u8, &.{ rows, k / 2 });
             const blocks = try x.ck.expect(try std.fmt.bufPrint(&buf, "{s}.weight_scale", .{name}), .f8_e4m3, &.{ rows, k / 16 });
             const g = try scalar(x.ck, try std.fmt.bufPrint(&buf, "{s}.weight_scale_2", .{name}));
-            _ = try scalar(x.ck, try std.fmt.bufPrint(&buf, "{s}.input_scale", .{name})); // weight-only: bf16 rows in
+            // weight-only: the static FP4 input scale is read (admission requires it), not applied; rows stay bf16
+            _ = try scalar(x.ck, try std.fmt.bufPrint(&buf, "{s}.input_scale", .{name}));
             if (global) |v| if (v != g) return error.UnsupportedLfm3Quantization; // one scale a stacked weight
             global = g;
             try x.stage.upload(at * k / 2, codes.bytes);
@@ -163,6 +164,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
     try admitted(gpa, &w.config, &ck);
+    if (!@import("builtin").is_test) std.log.info("LFM3 NVFP4 on CUDA serves weight-only: FP4 weights, bf16 activations; the export's static FP4 input scales are read and not applied", .{});
     const h = c.hidden;
     var stage = try DeviceBuffer.alloc(d, stage_bytes);
     defer stage.free();
