@@ -2,6 +2,8 @@
 
 /// Nemotron's generated kernels (tools/zig/gen_nemotron_kernels.py).
 pub const nemotron = @import("nemotron/kernels.zig");
+/// Nemotron's KV in pages of the core pool: twins of its seven K/V kernels, each library beside its original.
+pub const nemotron_paged = @import("nemotron/paged.zig");
 
 pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
