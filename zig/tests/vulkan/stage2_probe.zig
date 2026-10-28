@@ -196,10 +196,14 @@ fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
             first = try a.dupe(u16, bits);
         }
     }
-    f.check(bits) catch |e| {
+    const mm = f.firstMismatch(bits) catch |e| {
         std.debug.print("FAIL residual-add case=\"{s}\": {s}\n", .{ case.name, @errorName(e) });
         return false;
     };
+    if (mm) |bad| {
+        std.debug.print("FAIL residual-add case=\"{s}\": {s} at element {d}: a=0x{x:0>4} ({s}) b=0x{x:0>4} ({s}) want=0x{x:0>4} ({s}) got=0x{x:0>4} ({s})\n", .{ case.name, @errorName(bad.kind), bad.index, bad.a, fx.classify(bad.a), bad.b, fx.classify(bad.b), bad.want, fx.classify(bad.want), bad.got, fx.classify(bad.got) });
+        return false;
+    }
     // A planted nonfinite output at a finite-want element must be refused by the same checker.
     const data_at = case.at.out + firstFinite(f.want).?;
     var mutated = try a.dupe(u16, bits);
