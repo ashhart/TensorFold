@@ -68,7 +68,7 @@ float bf16_load(uint16_t bits) {
 
 uint16_t bf16_store(float value) {
   uint bits = floatBitsToUint(value);
-  if ((bits & 0x7fff0000u) == 0x7f800000u) {
+  if (isnan(value)) {
     return uint16_t((bits >> 16) | 0x40u);
   }
   return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
