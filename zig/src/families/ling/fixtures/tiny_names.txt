@@ -1,0 +1,37 @@
+ling30tiny-names 9283 00e1c40b568197eb4b367827963a4b83e1dd4c5c4cb8ea3418fc22093852b700
+lm_head.weight
+model.norm.weight
+model.word_embeddings.weight
+model.layers.{L}.attention.A_log 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.b_proj.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.dense.weight 3,7,11,15,19,23
+model.layers.{L}.attention.dt_bias 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.f_proj.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.g_proj.weight 0-23
+model.layers.{L}.attention.k_conv1d.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.k_proj.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.kv_a_layernorm.weight 3,7,11,15,19,23
+model.layers.{L}.attention.kv_a_proj_with_mqa.weight 3,7,11,15,19,23
+model.layers.{L}.attention.kv_b_proj.weight 3,7,11,15,19,23
+model.layers.{L}.attention.o_norm.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.o_proj.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.q_a_layernorm.weight 3,7,11,15,19,23
+model.layers.{L}.attention.q_a_proj.weight 3,7,11,15,19,23
+model.layers.{L}.attention.q_b_proj.weight 3,7,11,15,19,23
+model.layers.{L}.attention.q_conv1d.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.q_proj.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.v_conv1d.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.attention.v_proj.weight 0-2,4-6,8-10,12-14,16-18,20-22
+model.layers.{L}.input_layernorm.weight 0-23
+model.layers.{L}.mlp.down_proj.weight 0
+model.layers.{L}.mlp.experts.{E}.down_proj.weight 1-23 128
+model.layers.{L}.mlp.experts.{E}.gate_proj.weight 1-23 128
+model.layers.{L}.mlp.experts.{E}.up_proj.weight 1-23 128
+model.layers.{L}.mlp.gate.expert_bias 1-23
+model.layers.{L}.mlp.gate.weight 1-23
+model.layers.{L}.mlp.gate_proj.weight 0
+model.layers.{L}.mlp.shared_experts.down_proj.weight 1-23
+model.layers.{L}.mlp.shared_experts.gate_proj.weight 1-23
+model.layers.{L}.mlp.shared_experts.up_proj.weight 1-23
+model.layers.{L}.mlp.up_proj.weight 0
+model.layers.{L}.post_attention_layernorm.weight 0-23
