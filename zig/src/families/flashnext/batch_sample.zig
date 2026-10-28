@@ -5,6 +5,9 @@ const fz = @import("replay.zig");
 const Engine = @import("engine.zig").Engine;
 const sample = @import("sample.zig");
 
+/// The draw kernels and scratch that encode and encodeAll take.
+pub const Draws = sample.Draws;
+
 pub fn active(params: ?lanes.Sampling) ?lanes.Sampling {
     const p = params orelse return null;
     return if (p.temperature > 0) p else null;
