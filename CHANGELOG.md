@@ -42,6 +42,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: a follow-up turn resumes from the state its conversation's last reply left in the server's first slot when the prompt cache holds nothing as far, so on a Mac whose cache cannot keep a long conversation's state (a 32 GB Mac) the next turn reads only its new tokens instead of its whole prompt (#1197). Where the cache cannot keep a whole context, a turn whose template drops the last reply's reasoning goes back to that slot's state at the last prompt's history end, which the server keeps in one extra buffer. The first prompt chunk stays in the ordinary cache even when its background warm pass steps aside, so an interleaved conversation can still resume that checkpoint. Replies are the same tokens as a fresh prompt pass, and `TF_QWEN27_SLOT_RESUME=0` turns it off. Thanks to @RS91Dev.
 
+- `--compact-at auto` on a context window smaller than its 16,384-token reserve reserves fifteen percent of the window instead, so a short request on `--context 8192` is no longer compacted and the memory note's budget fits inside the window (#1536). Larger windows keep the 16,384-token reserve. Thanks to @ppardus.
+
 ## 1.1.8
 
 - Qwen3.5 and 3.6 on HIP (Linux): when a checkpoint shard can't be memory-mapped and is read into memory instead (for example on some network or FUSE mounts), releasing an uploaded layer no longer zeroes that copy. Before, it also zeroed neighbouring tensors not yet uploaded: 269 of 690 layer tensors on Qwen3.5-2B, so the model ran on wrong weights or the loader panicked at close. A malformed shard header is now refused by name. Loads that map their shards are byte-identical to before.
