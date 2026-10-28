@@ -10,6 +10,10 @@ test "contract image: GLM top1 selects its own image" {
     try std.testing.expectEqualStrings("glm_glue", try resolve("glm_glue"));
 }
 
+test "contract image: qmm prefill launch fusion selects its own image" {
+    try std.testing.expectEqualStrings("qmm_prefill", try resolve("qmm_prefill"));
+}
+
 test "contract image: only explicit controls select the controls image" {
     try std.testing.expectEqualStrings("contract_controls", try resolve("contract_controls"));
     try std.testing.expectEqualStrings("h3", try resolve("h3"));

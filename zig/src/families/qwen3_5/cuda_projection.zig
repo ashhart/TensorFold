@@ -1,8 +1,8 @@
 //! Qwen3.5's projections: the row tiles, the prompt GEMM and the grouped form.
-const std = @import("std");
 const cuda = @import("cuda");
 const engine = @import("cuda_engine.zig");
 const int8_prompt = @import("cuda_prompt_int8.zig");
+const projection_many = @import("cuda_projection_many.zig");
 
 const Engine = engine.Engine;
 const Proj = engine.Proj;
@@ -23,15 +23,20 @@ pub fn projAgain(e: *Engine, l: Proj, x: u64, out: u64, rows: usize, prompt: boo
 
 /// `projAgain` of each of `ls` into `outs` over one x; on the split form's GPUs one segmented launch a row tile.
 pub fn projMany(e: *Engine, ls: []const Proj, x: u64, outs: []const u64, rows: usize, prompt: bool) !void {
-    return projectMany(e, ls, x, e.xs, outs, rows, prompt, e.tables.ptr + Engine.params_at, false);
+    return projectMany(e, ls, x, e.xs, outs, rows, prompt, e.tables.ptr + Engine.params_at, false, false);
+}
+
+/// The landed forward's shared-input projections; on GB10 their prompt CTAs may share one launch.
+pub fn projManyPrompt(e: *Engine, ls: []const Proj, x: u64, outs: []const u64, rows: usize, prompt: bool) !void {
+    return projectMany(e, ls, x, e.xs, outs, rows, prompt, e.tables.ptr + Engine.params_at, false, true);
 }
 
 /// `projMany` with shared input sums, preserving the caller's prompt or native projection role.
 pub fn projManySums(e: *Engine, ls: []const Proj, x: u64, xs: u64, outs: []const u64, rows: usize, prompt: bool, params: u64) !void {
-    return projectMany(e, ls, x, xs, outs, rows, prompt, params, true);
+    return projectMany(e, ls, x, xs, outs, rows, prompt, params, true, false);
 }
 
-pub const projectMany = @import("cuda_projection_many.zig").projectMany;
+pub const projectMany = projection_many.projectMany;
 
 pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
     if (l == .ql) return @import("cuda_modelopt.zig").project(e, l.ql, x, out, rows, prompt);
@@ -57,7 +62,7 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
         .ql => unreachable,
     };
     if (prompt and rows > 16) return switch (l) {
-        .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
+        .a4 => |q| if (qwen38LargePromptTile(e, q.n, q.k, rows)) e.affine.promptHalf(e.stream, x, q, out, rows) else e.affine.prompt(e.stream, x, q, out, rows),
         .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
         .ql => unreachable,
         .x3, .bf => unreachable,
@@ -81,4 +86,8 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
             .x3, .bf => unreachable,
         }
     }
+}
+
+fn qwen38LargePromptTile(e: *const Engine, n: usize, k: usize, rows: usize) bool {
+    return e.affine.pdl and e.g.hidden == 5120 and e.g.intermediate == 17408 and e.g.layers == 64 and e.g.experts == 0 and projection_many.qwen38LargePromptShape(n, k, rows);
 }

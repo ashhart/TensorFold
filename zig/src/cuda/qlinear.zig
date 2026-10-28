@@ -234,6 +234,7 @@ pub const symbols = struct {
     pub const verify128 = "_ZN12tf_qmm_group12group_kernelILi64ELi128ELi64ELi1ELi4ELi3ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
     pub const prefill = "_ZN14tf_qmm_prefill14prefill_kernelILi64ELi128ELi128ELi2ELi4ELi3ELb0EEEvPK13__nv_bfloat16PKjS3_S3_Pviiiiii";
     pub const prefill22 = "_ZN14tf_qmm_prefill14prefill_kernelILi64ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKjS3_S3_Pviiiiii";
+    pub const prefill_many = "tf_qmm_prefill_many";
     pub const gemv = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
     pub const gemv_split = "tf_lane_gemv_split";
     pub const gemv_seg = "tf_lane_gemv_seg";
@@ -245,6 +246,10 @@ pub const symbols = struct {
 pub const Part = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int, first: c_int };
 pub const Parts = extern struct { p: [4]Part, count: c_int };
 
+/// qmm_prefill.cu's projection descriptors for one prompt grid over a shared bf16 input.
+pub const PrefillPart = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, first: c_int };
+pub const PrefillParts = extern struct { p: [4]PrefillPart, count: c_int };
+
 /// lane_gemv.cu's Part: one projection whose column tiles the CTAs share out.
 pub const GemvPart = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int };
 
@@ -254,6 +259,7 @@ pub const Segs = extern struct { s: [4]Seg, count: c_int };
 
 comptime {
     std.debug.assert(@sizeOf(Part) == 56 and @sizeOf(Parts) == 232 and @sizeOf(GemvPart) == 48);
+    std.debug.assert(@sizeOf(PrefillPart) == 48 and @sizeOf(PrefillParts) == 200);
     std.debug.assert(@sizeOf(Seg) == 64 and @sizeOf(Segs) == 264);
 }
 

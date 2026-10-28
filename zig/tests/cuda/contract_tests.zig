@@ -10,6 +10,8 @@ const tail_k = @import("contract_norms_tail.zig");
 const dory_k = @import("contract_dory.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
+const prefill_many_k = @import("contract_qmm_prefill_many.zig");
+const prefill_tile22_k = @import("contract_qmm_prefill_tile22.zig");
 const mx_k = @import("contract_mxfp8.zig");
 const half_k = @import("contract_lane_half.zig");
 const wide_k = @import("contract_projection_f32.zig");
@@ -34,9 +36,7 @@ const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
 const f32w_k = @import("contract_glm_f32w.zig");
 const w4a8_k = @import("contract_w4a8.zig");
-
 const round_k = @import("contract_tree_round.zig");
-
 const act_k = @import("contract_act.zig");
 const vit_g4_group = @import("contract_gemma_group.zig");
 const gdn_k = @import("contract_gdn.zig");
@@ -47,11 +47,9 @@ const glm_index_k = @import("contract_glm_index.zig");
 const glm_attn_k = @import("contract_glm_attn.zig");
 const glm = @import("glm_cuda");
 const elementwise_k = @import("contract_elementwise.zig");
-
 const tree_k = @import("contract_tree_attn.zig");
 const block_k = @import("contract_block_attn.zig");
 const q35_k = @import("contract_q35_attn.zig");
-
 const window_k = @import("contract_window.zig");
 const moe_k = @import("contract_moe.zig");
 const qkr_k = @import("contract_qk_round.zig");
@@ -59,7 +57,6 @@ const fact_k = @import("contract_flashnext_fact.zig");
 const route_k = @import("contract_route_rows.zig");
 const fexp_k = @import("contract_flashnext_fexp.zig");
 const glue_k = @import("contract_flashnext_glue.zig");
-
 const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
@@ -208,6 +205,12 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&verify_controls) |*m| m.deinit();
     for (&verify_controls) |*m| if (m.kernel()) |k| try kernels.append(a, k);
+    var prefill_many = prefill_many_k.Registrations.init(gpu, s, &affine4);
+    defer prefill_many.deinit();
+    try prefill_many.append(cap, a, &kernels);
+    var prefill_tile22 = prefill_tile22_k.Registrations.init(gpu, s, &affine4);
+    defer prefill_tile22.deinit();
+    try prefill_tile22.append(cap, a, &kernels);
     var mx = [_]mx_k.Product{
         .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .clusters = true },
         .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .clusters = false },
