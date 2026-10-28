@@ -92,13 +92,14 @@ pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     const ring = l.ringBytes();
-    l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, streams, pages);
+    // checks, and TF_QWEN_KV_SHARE: every stream on pages (each can adopt the kept ones), the window idle: a lane each
+    l.paged_only = (pages_mod.pagedOnly() or l.share_snaps > 0) and streams > 0;
+    const pool_lanes = if (l.paged_only) streams + 1 else streams;
+    l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, pool_lanes, pages);
     if (streams > 0) {
         if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf };
         if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf };
     }
-    // checks, and TF_QWEN_KV_SHARE: every stream on pages (each can adopt the kept ones), the reserved window idle
-    l.paged_only = (pages_mod.pagedOnly() or l.share_snaps > 0) and streams > 0;
     if (l.share_snaps > 0 and streams > 0) l.prefix = try prefix_mod.Prefix.init(l.gpa, l.e, l.pages.?, l.share_snaps);
     if (l.prefix != null and prefix_mod.fewSnapshots(l.share_snaps, streams + 1)) std.log.warn("TF_QWEN_KV_SHARE={d} keeps under 4 recurrent-state snapshots a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more", .{ l.share_snaps, streams + 1, 4 * (streams + 1) });
 }
@@ -551,6 +552,10 @@ const Lanes = struct {
         return seen;
     }
 };
+
+test "Qwen share faults: --parallel N admits N streams at once with every stream on pages" {
+    try @import("cuda_admit_test.zig").admits(Lanes);
+}
 
 test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
