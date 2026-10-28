@@ -100,10 +100,13 @@ const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
 const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
 const exl3_pack_tests = @import("flashnext_exl3/pack/exl3_pack_tests.zig");
 const exl3_ple2_tests = @import("flashnext_exl3/model/exl3_ple2_tests.zig");
+const exl3_draft_tests = @import("flashnext_exl3/tp/exl3_draft_tests.zig");
 const exl3_pool_tests = @import("flashnext_exl3/offload/exl3_pool_tests.zig");
 const exl3_prefill_tests = @import("flashnext_exl3/prefill/exl3_prefill_tests.zig");
 const flashnext_exl3_tests = @import("flashnext_exl3/model/flashnext_exl3_tests.zig");
+const flashnext_exl3_tp_tests = @import("flashnext_exl3/tp/flashnext_exl3_tp_tests.zig");
 const flashnext_exl3_engine_tests = @import("flashnext_exl3/model/flashnext_exl3_engine_tests.zig");
+const flashnext_exl3_tp_engine_tests = @import("flashnext_exl3/tp/flashnext_exl3_tp_engine_tests.zig");
 const ggml_tests = @import("ggml_tests.zig");
 const paged_tests = @import("paged_tests.zig");
 const glm_loader_gate = @import("glm_loader_gate.zig");
@@ -145,7 +148,9 @@ const usage =
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
     \\  flashnext-exl3 DIR names|norms|router [layers] [rows]|layer [layers]  Flash Next on an EXL3 pack vs float64
+    \\  flashnext-exl3-tp RANK PORT DIR layer [layers]|sum|head|memory  EXL3 expert parallel on two ranks vs tp=1 and float64
     \\  flashnext-exl3-engine DIR tf|gen GOLDEN [LINES] | bench [LINES]  the family's Engine with the offload pool vs the reference golden
+    \\  flashnext-exl3-tpe RANK WORLD PORT DIR tf|gen GOLDEN DUMP | bench  the Engine at tp=1/2 with per-rank pools
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
     \\  flashnext-pages           the attention glue's caches through a page table: paged == contiguous, float64, controls
     \\  info                      driver, device and library versions
@@ -237,6 +242,7 @@ const usage =
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
     \\  exl3-pack DIR [REPS]       EXL3 Dense and grouped experts on a real EXL3 pack's shapes: float64 error and timing
     \\  exl3-ple2 DIR [ROW] [N]    EXL3 n-gram table through cuda_ple.Ngram (ids, rows, RSS) and the PLE kernels vs float64
+    \\  exl3-draft DIR [THREADS]   EXL3 draft head rows dequantised from lm_head vs the full head (Dense) and float64
     \\  exl3-prefill DIR experts|copy [LAYER]|dense  EXL3 prefill pieces on the pack: grouped experts by rows, expert-major passes, line copies, prompt Dense
     \\  exl3-pool DIR [equal|bench|hit FILES] [LAYERS]  Flash Next EXL3 expert offload pool on Experts' pointer tables vs fully resident
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
@@ -357,7 +363,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-exl3")) return flashnext_exl3_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "flashnext-exl3-tp")) return flashnext_exl3_tp_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "flashnext-exl3-engine")) return flashnext_exl3_engine_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "flashnext-exl3-tpe")) return flashnext_exl3_tp_engine_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "flashnext-pages")) return @import("contract_fn_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "info")) return info(gpu);
     if (std.mem.eql(u8, cmd, "smoke")) return runtime_tests.smoke(gpu);
@@ -413,8 +421,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3")) return exl3_tests.run(gpu, if (rest.len > 0) rest[0] else "none");
     if (std.mem.eql(u8, cmd, "exl3-pack")) return exl3_pack_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-ple2")) return exl3_ple2_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "exl3-draft")) return exl3_draft_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-pool")) return exl3_pool_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-prefill")) return exl3_prefill_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "nccl-lat")) return exl3_pack_tests.ncclLatency(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-tiles")) return exl3_candidate_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-tp2")) return exl3_tp2_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);

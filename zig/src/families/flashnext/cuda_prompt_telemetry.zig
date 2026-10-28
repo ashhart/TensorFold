@@ -5,7 +5,7 @@ const counters = cache.counters;
 pub const State = struct {
     enabled: bool = false,
     layers_enabled: bool = false,
-    layer_cursor: counters.LayerCursor(@import("cuda_prompt_wt.zig").layers_n) = .{},
+    layer_cursor: counters.LayerCursor(@import("cuda_prompt_wt.zig").layers_n + 1) = .{},
     rank: counters.Rank = .{ .rank = 0, .world = 1 },
     forward_phase: counters.Phase = .unknown,
 
@@ -35,6 +35,26 @@ pub const Scope = struct {
         scope.state.forward_phase = scope.previous;
     }
 };
+
+pub fn forwardArg(state: State, fed: usize) u64 {
+    if (!state.enabled) return 0;
+    return switch (state.forwardPhase(fed)) {
+        .unknown => 0,
+        .prefill => 1,
+        .decode => 2,
+        .verify => 3,
+    };
+}
+
+pub fn phaseFromArg(value: u64) !counters.Phase {
+    return switch (value) {
+        0 => .unknown,
+        1 => .prefill,
+        2 => .decode,
+        3 => .verify,
+        else => error.BadRankFrame,
+    };
+}
 
 pub fn Operations(comptime Engine: type, comptime Seq: type, comptime Hooks: type, comptime underlying: anytype) type {
     return struct {
@@ -93,7 +113,7 @@ pub fn beginWithSampler(engine: anytype, sequences: anytype, phase: counters.Pha
         failed(engine, phase, failure);
         return failure;
     };
-    return sample(engine.gpa, engine, sequences, engine.telemetry.rank, cache.Completion.all_rank_consumers_joined) catch |failure| {
+    return sample(engine.gpa, engine, null, sequences, engine.telemetry.rank, cache.Completion.all_rank_consumers_joined) catch |failure| {
         failed(engine, phase, failure);
         return null;
     };
@@ -108,7 +128,7 @@ pub fn finishWithSampler(engine: anytype, sequences: anytype, before: counters.S
         failed(engine, phase, failure);
         return failure;
     };
-    var after = sample(engine.gpa, engine, sequences, engine.telemetry.rank, cache.Completion.all_rank_consumers_joined) catch |failure| {
+    var after = sample(engine.gpa, engine, null, sequences, engine.telemetry.rank, cache.Completion.all_rank_consumers_joined) catch |failure| {
         failed(engine, phase, failure);
         return;
     };
@@ -138,7 +158,7 @@ fn publish(engine: anytype, report: counters.Report) !void {
 test "exl3: serving telemetry disabled adds no completion or readback and opt in samples only completed boundaries" {
     const Fake = struct {
         gpa: std.mem.Allocator,
-        telemetry: State = .{ .rank = .{ .rank = 0, .world = 1 } },
+        telemetry: State = .{ .rank = .{ .rank = 1, .world = 2 } },
         completions: u64 = 0,
         reads: u64 = 0,
         records: u64 = 0,
@@ -147,7 +167,7 @@ test "exl3: serving telemetry disabled adds no completion or readback and opt in
             engine.completions += 1;
         }
 
-        fn sample(_: std.mem.Allocator, engine: *@This(), _: @TypeOf(null), rank: counters.Rank, _: cache.Completion) !counters.Snapshot {
+        fn sample(_: std.mem.Allocator, engine: *@This(), _: @TypeOf(null), _: @TypeOf(null), rank: counters.Rank, _: cache.Completion) !counters.Snapshot {
             try std.testing.expect(engine.completions > engine.reads);
             engine.reads += 1;
             return .{ .rank = rank, .scope = 1, .experts = .{ .device_copies = engine.reads } };
@@ -157,7 +177,7 @@ test "exl3: serving telemetry disabled adds no completion or readback and opt in
             try std.testing.expectEqual(counters.Phase.decode, report.interval.phase);
             try std.testing.expectEqual(@as(u64, 2), report.interval.model_rows);
             try std.testing.expectEqual(@as(u64, 1), report.experts.device_copies);
-            try std.testing.expectEqual(@as(usize, 0), report.rank.rank);
+            try std.testing.expectEqual(@as(usize, 1), report.rank.rank);
             engine.records += 1;
         }
     };
@@ -174,6 +194,41 @@ test "exl3: serving telemetry disabled adds no completion or readback and opt in
     try std.testing.expectEqual(@as(u64, 1), engine.records);
 }
 
+test "exl3: TP forward metadata has explicit bounded phase mapping independent of token count" {
+    const rank_engine = @import("cuda_rank_engine.zig");
+    const wire = @import("cuda_rank_wire.zig");
+    const logits = @import("cuda_prompt.zig").batch.Logits;
+    const phases = [_]counters.Phase{ .unknown, .prefill, .decode, .verify };
+    var sender: State = .{ .enabled = true };
+    var worker: State = .{ .enabled = true, .forward_phase = .verify };
+    for (phases, 0..) |phase, index| {
+        sender.forward_phase = phase;
+        for ([_]u32{ 4, 8192 }) |bytes| {
+            const header: wire.Header = .{ .kind = .forward, .object = 17, .arg = forwardArg(sender, 16384), .bytes = bytes, .flags = @backingInt(logits.last) };
+            try std.testing.expectEqual(@as(u64, index), header.arg);
+            const frame = try header.encode();
+            const received = try wire.Header.decode(&frame);
+            try rank_engine.shape(received);
+            {
+                const scope = worker.enter(try phaseFromArg(received.arg));
+                defer scope.restore();
+                try std.testing.expectEqual(sender.forwardPhase(16384), worker.forwardPhase(16384));
+            }
+            try std.testing.expectEqual(counters.Phase.verify, worker.forward_phase);
+        }
+    }
+    sender.enabled = false;
+    sender.forward_phase = .prefill;
+    try std.testing.expectEqual(@as(u64, 0), forwardArg(sender, 0));
+    try rank_engine.shape(.{ .kind = .forward, .object = 17, .bytes = 4 });
+    for ([_]u64{ 4, 255, std.math.maxInt(u64) }) |invalid_arg| {
+        try std.testing.expectError(error.BadRankFrame, phaseFromArg(invalid_arg));
+        try std.testing.expectError(error.BadRankFrame, rank_engine.shape(.{ .kind = .forward, .object = 17, .arg = invalid_arg, .bytes = 4 }));
+    }
+    try std.testing.expectError(error.BadRankFrame, rank_engine.shape(.{ .kind = .verify, .object = 17, .arg = 3, .bytes = 4 }));
+    try std.testing.expectError(error.BadRankFrame, rank_engine.shape(.{ .kind = .round, .arg = 1, .bytes = 12 }));
+}
+
 test "exl3: forward and verify phase scopes restore nested caller state on error" {
     const Call = struct {
         fn fail(state: *State, phase: counters.Phase) !void {
@@ -188,7 +243,7 @@ test "exl3: forward and verify phase scopes restore nested caller state on error
         const parent = state.enter(.prefill);
         try std.testing.expectError(error.ScopedOperationFailed, Call.fail(&state, .verify));
         try std.testing.expectEqual(counters.Phase.prefill, state.forward_phase);
-        try std.testing.expectError(error.ScopedOperationFailed, Call.fail(&state, .prefill));
+        try std.testing.expectError(error.ScopedOperationFailed, Call.fail(&state, try phaseFromArg(1)));
         try std.testing.expectEqual(counters.Phase.prefill, state.forward_phase);
         parent.restore();
         try std.testing.expectEqual(previous, state.forward_phase);

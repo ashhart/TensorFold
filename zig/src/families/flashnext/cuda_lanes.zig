@@ -9,6 +9,8 @@ const mtp_ops = @import("cuda_mtp_ops.zig");
 const lanes_draft = @import("cuda_lanes_draft.zig");
 const snap = @import("cuda_snap.zig");
 const ranks = @import("cuda_rank_engine.zig");
+const config = @import("cuda_config.zig");
+const exl3_memory = @import("exl3/pack/cuda_exl3_memory.zig");
 const Glue = @import("cuda_glue.zig").Glue;
 const living = @import("living");
 const slide_mod = @import("cuda_slide.zig");
@@ -27,6 +29,10 @@ pub fn Namespace(comptime Tri: type) type {
     return struct {
         pub const model_type = "qwen4_exp";
         pub const tp_draft_snapshots = false;
+        /// Whether `dir` holds an EXL3 pack: --tp is served for those, and their ranks keep drafting states.
+        pub fn exl3_pack(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+            return @import("exl3/pack/cuda_exl3_config.zig").packAt(gpa, io, dir);
+        }
         pub const formats: []const []const u8 = &.{ "mlx-q4g32", "modelopt-mixed", @import("exl3/pack/cuda_exl3_config.zig").format };
         // the model's window: past 2,048 keys the block indexer picks each row's 512 best blocks of 4 (cuda_batch.zig)
         pub const default_context: i64 = @intCast(prompt.max_tokens);
@@ -120,7 +126,8 @@ pub fn Namespace(comptime Tri: type) type {
         }
 
         pub fn rankRoom(ptr: *anyopaque, local: u64) !u64 {
-            if (of(ptr).ranks) |r| return r.room(local);
+            const own = of(ptr);
+            if (own.ranks) |r| return if (own.exl3) @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, local, own.stream_bytes) else r.room(local);
             return local;
         }
 
@@ -163,6 +170,9 @@ pub fn Namespace(comptime Tri: type) type {
             logits: cuda.DeviceBuffer,
             drawn: [ring]u32 = undefined,
             next: u64 = 0,
+            /// An EXL3 pack: its ranks agree their room in streams of stream_bytes and keep drafting states.
+            exl3: bool = false,
+            stream_bytes: usize = 0,
             /// --slide: the pocket's layout, from config.json at load.
             lay: living.Layout = undefined,
             kv: kvl.State = .{},
@@ -303,14 +313,18 @@ pub fn Namespace(comptime Tri: type) type {
                 const saved = s.reuse.saved orelse return l;
                 const kept: *snap.Snap = @ptrCast(@alignCast(saved));
                 if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= ids.len) {
+                    std.log.warn("flashnext: kept state at {d} not restored for reuse at {d} of {d} ids", .{ kept.at, s.reuse.at, ids.len });
                     s.reuse_failed = true;
-                } else if (self.ranks != null and l.draft != null) {
+                } else if (self.ranks != null and l.draft != null and !self.exl3) {
                     s.reuse_failed = true;
-                } else if (if (self.ranks) |r| r.restore(&l.seq, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
+                } else if (if (self.ranks) |r| r.restore(&l.seq, if (l.draft) |*d| d else null, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
                     l.filled = kept.at;
                     s.cached = @intCast(kept.at);
                 } else |err| switch (err) {
-                    error.SequenceTooShort, error.NoHeadState => s.reuse_failed = true,
+                    error.SequenceTooShort, error.NoHeadState => {
+                        std.log.warn("flashnext: kept state at {d} not restored ({t})", .{ kept.at, err });
+                        s.reuse_failed = true;
+                    },
                     else => return err,
                 }
                 return l;

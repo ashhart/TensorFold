@@ -171,6 +171,8 @@ pub const Rig = struct {
     history: [2]i64 = .{ 0, 0 },
     scores: cuda.DeviceBuffer = undefined,
     cap: usize,
+    /// The ranks' NCCL owner when a check runs two ranks (flashnext_exl3_tp_tests.zig); null: one rank.
+    collective: ?*flash.collective.Collective = null,
 
     pub fn init(r: *Rig, gpu: Gpu, dir: []const u8, rows: usize, cap: usize) !void {
         r.* = .{ .gpu = gpu, .stream = try cuda.Stream.init(gpu.d, true), .glue = undefined, .k = undefined, .s = undefined, .store = undefined, .pack_mod = undefined, .pack_fn = undefined, .cap = cap };
@@ -237,7 +239,7 @@ pub const Rig = struct {
             .tri = .{ .own = &r.glue, .s = r.stream },
             .k = &r.k,
             .s = &r.s,
-            .m = .{ .table_w = 0, .table_s = 0, .table_b = 0, .layers = layers, .mixer = undefined, .head = undefined, .ngram = undefined, .collective = null },
+            .m = .{ .table_w = 0, .table_s = 0, .table_b = 0, .layers = layers, .mixer = undefined, .head = undefined, .ngram = undefined, .collective = r.collective },
             .seq = .{ .conv = &r.conv, .state = &r.state, .kc = &r.kc, .vc = &r.vc, .ikc = &r.ikc, .pooled = &r.pooled, .tail = r.tail, .history = &r.history, .cap = r.cap, .scores = r.scores.ptr },
             .hooks = .{},
         };

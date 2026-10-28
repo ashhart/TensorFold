@@ -44,6 +44,13 @@ pub fn seqBytes(cap: usize) SeqBytes {
 
 pub const gib: f64 = 1024.0 * 1024.0 * 1024.0;
 
+/// Widest logits pass the server runs (a decode round of 32 streams, an MTP window): `head_local`'s rows.
+pub const head_local_serve_rows: usize = 64;
+
+/// A full-vocabulary rank still stages every batched MTP lane's BF16 scores in the shared head buffer.
+pub fn headLocalRows(full_vocab: bool) usize {
+    return if (full_vocab) 2 * @import("../../cuda_mtp_ops.zig").max_lanes else head_local_serve_rows;
+}
 /// K10 lever 3: the pass's chunk for an EXL3 checkpoint unless TF_FLASHNEXT_CHUNK says.
 pub const exl3_chunk: usize = 1024;
 
@@ -65,8 +72,19 @@ pub fn setup(e: anytype, exl3: bool) !void {
     const decoder_exl3 = e.n_layers != 0 and for (e.layers[0..e.n_layers]) |layer| {
         if (layer.exl3 == null) break false;
     } else true;
-    e.scratch_format = if (decoder_exl3) .exl3 else .classic;
+    const draft_exl3 = @import("../pack/cuda_exl3_load.zig").hasExperts(&e.store, "language_model.mtp.layers.0.mlp");
+    e.scratch_format = if (decoder_exl3 and draft_exl3) .exl3 else .classic;
     cut(e, std.c.getenv("TF_FLASHNEXT_CHUNK") != null);
+    e.head_local_rows = headLocalRows(e.head_q.n == wt.vocab);
+}
+
+test "exl3: full-vocabulary scratch admits every shared MTP score row" {
+    const state = @import("../../cuda_batch_state.zig");
+    const lanes = @import("../../cuda_mtp_ops.zig").max_lanes;
+    const empty = state.Scratch.bytesForHead(exl3_chunk, .exl3, 0);
+    const full = state.Scratch.bytesForHead(exl3_chunk, .exl3, headLocalRows(true));
+    try std.testing.expect(full - empty + 256 >= lanes * wt.vocab * 2);
+    try std.testing.expect(headLocalRows(false) >= headLocalRows(true));
 }
 
 /// One log line: a stream's device bytes at the window by piece.
@@ -81,7 +99,7 @@ pub fn logStream(e: anytype, window: usize, stream_bytes: usize) !void {
         @as(f64, @floatFromInt(b.gdn)) / gib,
         @as(f64, @floatFromInt(stream_bytes -| b.device())) / gib,
         e.chunk,
-        @as(f64, @floatFromInt(@import("../../cuda_batch_state.zig").Scratch.bytesForFormat(e.chunk, e.scratch_format))) / gib,
+        @as(f64, @floatFromInt(@import("../../cuda_batch_state.zig").Scratch.bytesForHead(e.chunk, e.scratch_format, e.head_local_rows))) / gib,
     });
 }
 
@@ -91,4 +109,13 @@ pub fn snapHost(context: usize, exl3: bool) bool {
     if (std.c.getenv("TF_FLASHNEXT_SNAP_HOST")) |v| on = std.mem.eql(u8, std.mem.span(v), "1");
     @import("../../cuda_snap.zig").on_host = on;
     return on;
+}
+
+/// cuda_lanes.zig rankRoom: the ranks agree how many STREAMS fit (each its own stream_bytes: rank 1 holds no MTP head).
+pub fn rankRoom(r: anytype, local: u64, stream_bytes: usize) !u64 {
+    if (stream_bytes == 0) return r.room(local);
+    const sb: u64 = stream_bytes;
+    const q = (local / sb) << 16 | ((local % sb) << 16) / sb;
+    const m = try r.room(q);
+    return (m >> 16) * sb + ((m & 0xffff) * sb >> 16);
 }

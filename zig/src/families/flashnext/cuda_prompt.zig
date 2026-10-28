@@ -138,6 +138,8 @@ pub const Engine = struct {
     /// The pass's scratch, grown to the widest chunk run.
     batch_s: ?batch.Scratch = null,
     scratch_format: @import("cuda_batch_state.zig").ScratchFormat = .classic,
+    /// Local head staging bound for this engine, fixed before its first scratch allocation.
+    head_local_rows: usize = std.math.maxInt(usize),
     /// Block scores for the sparse rows of an attention block, grown to the longest sequence's need.
     scores: ?cuda.DeviceBuffer = null,
     /// Rows a batched chunk takes at most: TF_FLASHNEXT_CHUNK_SOLO if set, else TF_FLASHNEXT_CHUNK (cuda_chunk.zig).
@@ -172,6 +174,7 @@ pub const Engine = struct {
         e.stream = stream;
         e.n_layers = 0;
         e.scratch_format = .classic;
+        e.head_local_rows = std.math.maxInt(usize);
         e.collective = null;
         e.image_factory = null;
         e.telemetry = cache_telemetry.State.fromEnv(rank, world);
@@ -391,7 +394,7 @@ pub const Engine = struct {
             bs.free(e.gpa);
             e.batch_s = null;
         }
-        e.batch_s = try batch.Scratch.allocForFormat(e.gpa, e.driver, e.stream.*, rows, e.scratch_format);
+        e.batch_s = try batch.Scratch.allocForHead(e.gpa, e.driver, e.stream.*, rows, e.scratch_format, e.head_local_rows);
         return &e.batch_s.?;
     }
 

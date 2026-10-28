@@ -23,7 +23,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const mode = try config.mode(gpa, io, dir);
     if (mode == .exl3) try @import("exl3/model/cuda_exl3_arch.zig").check(ctx.d); // sm_120 only: refused before any weight loads
     try @import("exl3/kv/cuda_exl3_kv.zig").refuseSolo(mode == .exl3, std.c.getenv("TF_FLASHNEXT_CHUNK_SOLO") != null);
-    if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
+    if (o.tp != 1 and ((mode != .modelopt and mode != .exl3) or captured != null)) return error.UnsupportedQuantization;
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
@@ -48,6 +48,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
             id.max_images = v.max_images;
         }
         own.ranks = try ranks.Session.init(gpa, io, o.master orelse "127.0.0.1", o.master_port, o.rank, id);
+        // an EXL3 pack's decode step ends its collectives within tens of microseconds: poll before sleeping
+        if (mode == .exl3) own.ranks.?.collective.spin_ns = 3 * std.time.ns_per_ms;
     }
     errdefer if (own.ranks) |r| {
         r.poison();
@@ -72,8 +74,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     // the pass's scratch for a full chunk, once for the engine (every prompt, window, round and head pass)
     _ = try own.engine.reserve(@max(@min(o.context, own.engine.chunk), if (o.slide) @as(usize, @import("cuda_train.zig").pack_rows) else 0));
     // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and 0.60)
-    if (o.drafts and mode == .exl3) std.log.info("flashnext: an EXL3 pack decodes without the MTP head", .{});
-    if (o.drafts and mode != .exl3 and (o.tp == 1 or o.rank == 0)) {
+    if (o.drafts and (o.tp == 1 or o.rank == 0)) {
         const head_before = cuda.usage(false).device;
         own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
         persistent_bytes = try std.math.add(u64, persistent_bytes, cuda.usage(false).device -| head_before);
@@ -95,7 +96,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     var stream_bytes = own_seq_bytes;
     if (own.head) |h| {
         stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(window, h.ids.len, own.engine.chunk));
-    } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(window, 1, own.engine.chunk);
+    } else if (o.drafts and o.tp == 2) stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(if (mode == .exl3) 1 else window, 1, own.engine.chunk)); // an EXL3 rank 1 keeps no head cache
     if (o.vision) |v| stream_bytes = try std.math.add(u64, stream_bytes, try std.math.add(u64, try std.math.mul(u64, v.image_tokens, @import("cuda_prompt_wt.zig").dims * 2), try std.math.mul(u64, 16, o.context)));
     if (page_tokens > 0) {
         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
@@ -104,15 +105,17 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
     }
     try @import("exl3/kv/cuda_exl3_kv.zig").logStream(own.engine, window, stream_bytes); // K10: what a stream holds, by piece
+    own.exl3 = mode == .exl3;
+    own.stream_bytes = stream_bytes;
     const pool_budget = try exl3_pass.budgetForStreams(stream_bytes, o.lanes);
     const placement = @import("exl3/offload/cuda_exl3_frequency_state.zig");
-    if (try placement.prepare(gpa, io, dir, own.engine.layers[0..own.engine.n_layers], @intCast(o.tp), @intCast(o.rank))) |prepared| {
+    if (try placement.prepare(gpa, io, dir, own.engine.layers[0..own.engine.n_layers], own.head, @intCast(o.tp), @intCast(o.rank))) |prepared| {
         own.profile = prepared.state;
         own.profile_counts = prepared.counts;
     }
     errdefer if (own.profile) |*profile| profile.deinit();
     const profile_counts = if (own.profile_counts) |*counts| &counts.decoder else null;
-    const attached = try exl3_pass.attach(gpa, io, driver, own.stream, own.engine.layers[0..own.engine.n_layers], own.engine.chunk, pool_budget, profile_counts);
+    const attached = try exl3_pass.attach(gpa, io, driver, own.stream, own.engine.layers[0..own.engine.n_layers], if (own.head) |h| &h.layer else null, own.engine.chunk, pool_budget, profile_counts);
     if (own.profile_counts) |*counts| try placement.finish(own, counts);
     const ledger: memory.Ledger = .{
         .persistent = persistent_bytes,

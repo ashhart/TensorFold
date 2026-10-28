@@ -52,7 +52,7 @@ const Eng = struct {
         g.out = try cuda.DeviceBuffer.alloc(gpu.d, out_rows * vocab * 2);
         var b = try xpass.budgetFromEnv(0);
         if (lines) |n| b.lines = n;
-        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, g.e.layers[0..g.e.n_layers], g.e.chunk, b, null);
+        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, g.e.layers[0..g.e.n_layers], null, g.e.chunk, b, null);
         const t2 = check.now(gpu.io);
         g.load_s = ms(t0, t2) / 1e3;
         var free: usize = 0;
@@ -86,7 +86,7 @@ const Eng = struct {
     }
 
     fn stats(g: *Eng) flash.exl3_pool.Stats {
-        return xpass.poolStats(g.e.layers[0..g.e.n_layers]);
+        return xpass.poolStats(g.e.layers[0..g.e.n_layers], null);
     }
 };
 
@@ -162,33 +162,8 @@ const Raw = struct {
     }
 };
 
-/// lm_head as stored: trellis int16 [K/16, N/16, 8 * halves] (bytes), suh fp16 [K], svh fp16 [N].
-const Head = struct {
-    trellis: []const u8,
-    suh: []const u8,
-    svh: []const u8,
-    k: usize,
-    n: usize,
-    halves: u16,
-
-    fn words(h: Head) usize {
-        return @as(usize, h.halves) * 8;
-    }
-
-    fn of(trellis: st.Tensor, suh: st.Tensor, svh: st.Tensor, mul1: ?st.Tensor) !Head {
-        if (trellis.dtype != .i16 or trellis.rank != 3 or trellis.dim(2) % 8 != 0) return error.UnexpectedTensor;
-        const h: Head = .{ .trellis = trellis.bytes, .suh = suh.bytes, .svh = svh.bytes, .k = trellis.dim(0) * 16, .n = trellis.dim(1) * 16, .halves = @intCast(trellis.dim(2) / 8) };
-        if (suh.dtype != .f16 or suh.numel() != h.k or svh.dtype != .f16 or svh.numel() != h.n) return error.UnexpectedTensor;
-        if (h.k % fmt.hadamard_dim != 0 or h.n % fmt.hadamard_dim != 0 or h.halves < 2 or h.halves > 16) return error.UnexpectedTensor;
-        if (mul1) |m| {
-            if (m.bytes.len != 4 or std.mem.readInt(u32, m.bytes[0..4], .little) != fmt.Mul1Mul) return error.UnexpectedTensor;
-        }
-        return h;
-    }
-};
-
 const HeadWork = struct {
-    head: Head,
+    head: flash.exl3_mtp.Head,
     x: []const f64, // [rows, K]
     rows: usize,
     out: []f64, // [rows, N]
@@ -244,7 +219,7 @@ fn headWork(w: *HeadWork, gpa: std.mem.Allocator) !void {
 }
 
 fn headF64(gpa: std.mem.Allocator, raw: *const Raw, x: []const f64, rows: usize) ![]f64 {
-    const head = try Head.of(try raw.get("lm_head.trellis"), try raw.get("lm_head.suh"), try raw.get("lm_head.svh"), raw.get("lm_head.mul1") catch null);
+    const head = try flash.exl3_mtp.Head.of(try raw.get("lm_head.trellis"), try raw.get("lm_head.suh"), try raw.get("lm_head.svh"), raw.get("lm_head.mul1") catch null);
     const out = try gpa.alloc(f64, rows * head.n);
     errdefer gpa.free(out);
     var w: HeadWork = .{ .head = head, .x = x, .rows = rows, .out = out };

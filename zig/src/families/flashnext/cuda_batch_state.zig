@@ -197,6 +197,8 @@ pub const ScratchFormat = enum { classic, exl3 };
 pub const Scratch = struct {
     cap: usize,
     format: ScratchFormat = .classic,
+    /// The allocation's own head bound; another engine cannot change its launch admission.
+    head_local_rows: usize = std.math.maxInt(usize),
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     ids: u64 = 0,
     pos: u64 = 0,
@@ -325,7 +327,15 @@ pub const Scratch = struct {
         "ple_vals",  "ple_part",   "ple_gated",  "ple_pss", "ple_nrow", "logits",  "head_local", "inv",        "dummy",
     };
 
+    pub fn headRows(s: *const Scratch) usize {
+        return @min(s.cap, s.head_local_rows);
+    }
+
     pub fn allocationSizes(cap: usize, format: ScratchFormat) [64]?usize {
+        return allocationSizesForHead(cap, format, cap);
+    }
+
+    pub fn allocationSizesForHead(cap: usize, format: ScratchFormat, head_rows: usize) [64]?usize {
         const pairs = cap * slots;
         const nblk = cdiv(pairs, plan_small);
         const items = cdiv(pairs, tile) + experts_n + 1;
@@ -391,7 +401,7 @@ pub const Scratch = struct {
             cap * streams * 4,
             cap * wide * 2,
             vocab * 2,
-            if (format == .classic) cap * vocab else null,
+            @min(cap, head_rows) * vocab,
             half * 4,
             4096,
         };
@@ -402,8 +412,12 @@ pub const Scratch = struct {
     }
 
     pub fn bytesForFormat(cap: usize, format: ScratchFormat) usize {
+        return bytesForHead(cap, format, cap);
+    }
+
+    pub fn bytesForHead(cap: usize, format: ScratchFormat, head_rows: usize) usize {
         var total: usize = 0;
-        for (allocationSizes(cap, format)) |optional| if (optional) |len| {
+        for (allocationSizesForHead(cap, format, head_rows)) |optional| if (optional) |len| {
             total += @max(len, 256);
         };
         return total;
@@ -414,12 +428,16 @@ pub const Scratch = struct {
     }
 
     pub fn allocForFormat(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, format: ScratchFormat) !Scratch {
-        var s: Scratch = .{ .cap = cap, .format = format };
+        return allocForHead(gpa, d, stream, cap, format, cap);
+    }
+
+    pub fn allocForHead(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, format: ScratchFormat, head_rows: usize) !Scratch {
+        var s: Scratch = .{ .cap = cap, .format = format, .head_local_rows = head_rows };
         errdefer {
             cuda.completion.drain(d, stream, "Flash Next scratch work did not drain before rollback");
             s.free(gpa);
         }
-        const sizes = allocationSizes(cap, format);
+        const sizes = allocationSizesForHead(cap, format, head_rows);
         // a row of a decode round or a block of att_rows rows takes `pos`'s 16 bytes
         var inv: [half]f32 = undefined;
         for (&inv, 0..) |*o, i| o.* = @floatCast(std.math.pow(f64, 10_000_000.0, -@as(f64, @floatFromInt(i)) / @as(f64, half)));

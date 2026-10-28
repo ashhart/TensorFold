@@ -18,8 +18,8 @@ pub fn Copies(comptime of: anytype) type {
             const l = try self.lane(s);
             if (l.seq.fed != at) return error.NotAtMark;
             if (self.ranks) |r| {
-                if (l.draft != null) return error.TensorRankDraftSnapshotUnavailable;
-                return try r.save(&l.seq);
+                if (l.draft != null and !self.exl3) return error.TensorRankDraftSnapshotUnavailable;
+                return try r.save(&l.seq, if (l.draft) |*d| d else null); // an EXL3 pack's state carries the head's rows on rank 0
             }
             return try snap.save(self.gpa, self.engine.driver, self.stream, &l.seq, if (l.draft) |*d| d else null);
         }
@@ -32,8 +32,8 @@ pub fn Copies(comptime of: anytype) type {
                 return err;
             };
             if (self.ranks) |r| {
-                if (l.draft != null) return error.NoHeadState;
-                return r.restore(&l.seq, @ptrCast(@alignCast(saved)));
+                if (l.draft != null and !self.exl3) return error.NoHeadState;
+                return r.restore(&l.seq, if (l.draft) |*d| d else null, @ptrCast(@alignCast(saved)));
             }
             self.engine.round_graph.clear();
             snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, @ptrCast(@alignCast(saved))) catch |err| {

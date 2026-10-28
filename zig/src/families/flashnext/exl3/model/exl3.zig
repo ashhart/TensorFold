@@ -2,6 +2,8 @@
 
 pub const shape = @import("../pack/exl3_shape.zig");
 pub const scan = @import("../pack/exl3_scan.zig");
+pub const tp = @import("../tp/exl3_tp.zig");
+pub const canon = @import("../tp/exl3_canon.zig");
 pub const cache = @import("exl3_cache.zig");
 pub const cpu = @import("exl3_cpu.zig");
 pub const place = @import("../pack/exl3_place.zig");
@@ -18,6 +20,7 @@ pub const fwd_cpu = @import("exl3_fwd_cpu.zig");
 test {
     _ = shape;
     _ = scan;
+    _ = tp;
     _ = cache;
     _ = cpu;
     _ = place;

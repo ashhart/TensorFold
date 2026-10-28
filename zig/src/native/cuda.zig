@@ -34,7 +34,7 @@ const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, 
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const serves: []const []const u8 = &.{ "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
+pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 4]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
@@ -211,7 +211,7 @@ const no_stream = "the CUDA memory budget fits no stream: one at a {d}-token win
 const too_many = "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, " ++
     "and the CUDA memory budget leaves {d:.2} GiB{s}: serve --parallel {d}, or lower --context";
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (refusals.family(F, o)) |why| {
+    if (refusals.open(F, gpa, io, o)) |why| {
         problem.* = why;
         return null;
     }
