@@ -16,7 +16,7 @@ const mlp = @import("cuda_mlp.zig");
 const kda_block = @import("cuda_kda_block.zig");
 
 /// A prompt chunk's rows (decode.PREFILL_ROWS).
-pub const prefill_rows = 2048;
+pub const prefill_rows = 4096;
 /// A decode window's rows (Engine's max_rows).
 pub const window_rows = 8;
 /// Prompts one prompt pass takes together (cuda_prompts): a prompt buffer's logits rows, one a prompt.
