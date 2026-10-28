@@ -10,8 +10,10 @@
 //!
 //! Shaders: kernels/vulkan/{fast_rope,sdpa_decode_native,attention_gate}.comp.
 //! fast_rope compiles with -DUSE_BF16 -DASH_QWEN35 (the Metal-oracle
-//! variant: pow(1e7, -i/32) inverse frequency, no intermediate bf16
-//! rounding); sdpa_decode_native with -DBF16_IO -DSDPA_DIM=256 -DSDPA_ROWS;
+//! variant: no intermediate bf16 rounding; the compiled passthrough path
+//! evaluates the theta 1e7 inverse frequency as exp(-i*beta) with
+//! beta = ln(1e7)/32, i.e. 1e7^(-i/32) up to exp-vs-pow ulps);
+//! sdpa_decode_native with -DBF16_IO -DSDPA_DIM=256 -DSDPA_ROWS;
 //! attention_gate as written. fast_rope needs the repo-local
 //! omarchy_trig.h include path.
 //!
