@@ -58,6 +58,9 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 - `--parallel N` admits N streams. Each stream's caches are its own: about 110 MiB of DeltaNet state and the n-gram
   tail, plus 28 KiB a token of keys, values and indexer keys, and with drafts its MTP head's cache.
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
+- `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 1,536) caps the rows of one prompt pass. Every pass reads the weights
+  of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end before
+  other streams decode their next token. See [Prompt chunk size](#prompt-chunk-size).
 - `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default 0.60) set the head's chain.
 - `TF_FLASHNEXT_LOAD_THREADS` (1 to 32, default 8) packs the routed NVFP4 experts on that many threads at load, staged
   through at most 192 MiB of pinned memory: every layer on one GPU, and the MTP head's layer on rank 0 at `--tp 2`.
@@ -192,6 +195,32 @@ The engine holds 73.2 GiB and keeps a 12.2 GiB reserve. A 32,768-token window th
 and a 131,136-token window (the cold prompts above) 2 of 4.03 GiB; a 262,144-token stream takes 7.79 GiB, which fitted
 in one start of four on this machine. After the 131,072-token prompt the process had peaked at 6.5 GB of host and
 83.0 GB of device memory. Absolute speeds on this machine moved by about a tenth between sessions.
+
+### Prompt chunk size
+
+`nvidia/Qwen3.8-Flash-Next-FP4-Local` (revision `b9ce18a6`) on a GB10 (driver 615.71.09, kernels from nvcc 13.0),
+main `a05d62003`, `--parallel 3 --context 40960 --no-drafts --prompt-cache-gib 0`, greedy. The two settings ran in
+fresh servers in the order 1,536 / 8,192 / 8,192 / 1,536; each cell is the median of 3, both runs of a setting given:
+
+| | default (1,536) | `TF_FLASHNEXT_CHUNK=8192` |
+| --- | --- | --- |
+| First token at 436 tokens (s) | 0.304 / 0.306 | 0.306 / 0.307 |
+| First token at 1,922 tokens (s) | 1.062 / 1.068 | 0.928 / 0.928 (-13%) |
+| First token at 8,361 tokens (s) | 4.490 / 4.503 | 3.936 / 3.946 (-12%) |
+| First token at 31,901 tokens (s) | 17.81 / 17.94 | 14.95 / 14.95 (-16%) |
+| Longest wait between two decoding streams' tokens while an 8,361-token prompt runs (s) | 0.90 | 3.78 |
+| Memory available after load (GB) | 44 | 38 |
+
+- **For:** the gain is in the routed experts. In an `nsys` trace of the same build at one stream, a 1,922-token
+  prompt took 138 ms less GPU time at 8,192 rows (1,052 to 914 ms), and the two NVFP4 expert kernels account for all
+  of it: one pass instead of two, so each routed expert's gate, up and down weights are read once. A 1,536-row pass
+  routes to about 350 of the 512 experts, and each takes 1.84 MB of gate and up weights.
+- **Against:** a pass is not interrupted, so a stream that is decoding waits for the whole pass, about four times as
+  long at 8,192 rows as at 1,536. The prompt scratch takes about 6 GB more, and at 16,384 rows the n-gram tables of
+  the MLX 4-bit checkpoint page (see `docs/known-issues.md`).
+- One stream at a time (an agent loop, a single user): the larger chunk shortens every prompt past 1,536 tokens. Several
+  streams that decode while others send long prompts: the default keeps their waits under a second.
+- The 64 greedy tokens after the 436- and 1,922-token prompts were the same at both settings.
 
 ## Not yet
 
