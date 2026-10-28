@@ -321,6 +321,14 @@ fn equalQuant(a: Quant, b: Quant) bool {
     return true;
 }
 
+/// The backends a decoder of this admission runs on.
+pub const Backend = enum { metal, cuda };
+
+/// Whether `backend` serves this checkpoint's scheme: ModelOpt NVFP4 is CUDA's only, so Metal refuses it by name.
+pub fn servedOn(config: *const Config, backend: Backend) !void {
+    if (config.scheme == .modelopt_nvfp4 and backend == .metal) return error.Lfm3ModeloptNvfp4NotOnMetal;
+}
+
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
