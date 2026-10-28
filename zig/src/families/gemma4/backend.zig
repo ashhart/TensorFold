@@ -221,11 +221,14 @@ pub const Metal = struct {
             for ([_][]const u32{ stream.chunks, stream.reuse.marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
                 end = x;
             };
+            // where fill skips the deep layers (E-series) the last row runs alone, the rows before it filling the cache
+            if (end == ids.len and end - at > 1 and prompt.deepFrom(self.model) < self.model.config.geo.layers) end -= 1;
             // an image's rows see each other on sliding layers: no cut inside one (before it, or past it when it leads)
             for (spans.items) |span| if (span.at < end and span.at + span.n > end) {
                 end = if (span.at > at) span.at else span.at + span.n;
             };
-            try prompt.run(self.model, &self.prompt_scratch, cache, ids[at..end], spans.items);
+            const chunk = ids[at..end];
+            if (end == ids.len) try prompt.run(self.model, &self.prompt_scratch, cache, chunk, spans.items) else try prompt.fill(self.model, &self.prompt_scratch, cache, chunk, spans.items);
             if (sink) |k| {
                 const width = self.tapBytes();
                 const rows = self.prompt_scratch.taps.?;
