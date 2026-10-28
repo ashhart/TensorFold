@@ -1076,3 +1076,38 @@ test "fixture initialization fails cleanly under allocation failure" {
     try testing.expectError(error.OutOfMemory, Norm.init(failing.allocator(), 0x19));
     try testing.expectError(error.OutOfMemory, Decode.init(failing.allocator(), 0x1a));
 }
+
+test "decode seed replays the measured wrong raw-gates branch at y zero" {
+    const f = try Decode.init(testing.allocator, 0x57a8);
+    defer f.deinit();
+    const replay = struct {
+        fn first(d: Decode, g: f32, beta: f32) u16 {
+            var kv: f32 = 0;
+            for (0..128) |i| {
+                const state: f32 = @floatCast(f32Of(d.state_in_bits, i));
+                const decayed: f32 = state * g;
+                const term: f32 = decayed * c.fromBf16(d.soa_bits[2048 + i]);
+                kv += term;
+            }
+            const delta: f32 = (c.fromBf16(d.soa_bits[4096]) - kv) * beta;
+            var out: f32 = 0;
+            for (0..128) |i| {
+                const state: f32 = @floatCast(f32Of(d.state_in_bits, i));
+                const decayed: f32 = state * g;
+                const update: f32 = delta * c.fromBf16(d.soa_bits[2048 + i]);
+                const next: f32 = decayed + update;
+                const term: f32 = next * c.fromBf16(d.soa_bits[i]);
+                out += term;
+            }
+            return c.toBf16(out);
+        }
+    }.first;
+    const wrong = replay(f, c.fromBf16(f.a_bits[0]), c.fromBf16(f.b_bits[0]));
+    try testing.expectEqual(c.toBf16(892), wrong);
+    const gates = gateRefAsh(f.a_bits[0], f.b_bits[0], f32Of(f.a_log_bits, 0), f.dt_bits[0]);
+    const corrected = replay(f, @floatCast(gates.g), @floatCast(gates.beta));
+    const bound = budget(260, 4, 0, f.want_y[0], f.max_state);
+    try testing.expect(@abs(c.fromBf16(corrected) - f.want_y[0]) <= bound);
+    try testing.expect(@abs(c.fromBf16(wrong) - f.want_y[0]) > bound);
+    std.debug.print("HOST decode first-element replay seed=0x57a8 skipped-raw={e} corrected={e} want={e} bound={e}\n", .{ c.fromBf16(wrong), c.fromBf16(corrected), f.want_y[0], bound });
+}
