@@ -101,8 +101,8 @@ pub const Product = struct {
     fn makePlan(p: *Product, pairs: usize) !void {
         const c = p.c;
         p.expert_of = try gpa.alloc(u32, pairs);
-        if (c.shared) {
-            drawShared(p.expert_of, c, &p.rig.rng);
+        if (c.shared or c.served) {
+            drawServed(p.expert_of, c, &p.rig.rng);
         } else for (p.expert_of, 0..) |*e, i| {
             e.* = if (c.even) @intCast(i % c.experts) else @intCast(p.rig.rng.next() % c.experts);
         }
@@ -114,7 +114,8 @@ pub const Product = struct {
         const c = p.c;
         // served: serving's tile, and the capacity it sizes the plan for (one token: an item a slot)
         const tile = if (c.served) moe.tileOf(c.rows, false) else c.item_rows;
-        const cap = if (c.served and c.rows > 1) moe.capacity(moe.bucket(c.rows) * c.slots, c.experts + @intFromBool(c.shared)) else 0;
+        const size = if (c.exact) c.rows else moe.bucket(c.rows);
+        const cap = if (c.served and c.rows > 1) moe.capacity(size * c.slots, c.experts + @intFromBool(c.shared)) else 0;
         const order = try gpa.alloc(i32, pairs);
         defer gpa.free(order);
         for (order, 0..) |*o, i| o.* = @intCast(i);
@@ -272,17 +273,18 @@ pub const Product = struct {
     }
 };
 
-/// A token's slots as serving picks them: distinct routed experts, then the shared one (index `experts`).
-fn drawShared(expert_of: []u32, c: cases.Case, rng: *data.Rng) void {
+/// A token's slots as serving picks them: distinct routed experts, then the shared one (index `experts`) if it has one.
+fn drawServed(expert_of: []u32, c: cases.Case, rng: *data.Rng) void {
+    const picks = c.slots - @intFromBool(c.shared);
     for (0..expert_of.len / c.slots) |t| {
         const slot = expert_of[t * c.slots ..][0..c.slots];
-        for (slot[0 .. c.slots - 1], 0..) |*e, i| {
+        for (slot[0..picks], 0..) |*e, i| {
             while (true) {
                 e.* = @intCast(rng.next() % c.experts);
                 if (std.mem.indexOfScalar(u32, slot[0..i], e.*) == null) break;
             }
         }
-        slot[c.slots - 1] = @intCast(c.experts);
+        if (c.shared) slot[c.slots - 1] = @intCast(c.experts);
     }
 }
 

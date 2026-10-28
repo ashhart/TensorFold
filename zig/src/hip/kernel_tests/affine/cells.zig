@@ -5,7 +5,7 @@ const tuning = @import("../../tuning/tuning.zig");
 const moe = @import("../../moe.zig");
 const cases = @import("cases.zig");
 
-/// A product geometry on the prompt path: dense, or the served routed gate and up or down.
+/// A product geometry on the prompt path: dense, or a served model's routed gate and up (or up) or down.
 pub const Class = struct {
     name: []const u8,
     n: usize,
@@ -14,22 +14,41 @@ pub const Class = struct {
     group: u16,
     routed: bool = false,
     down: bool = false,
+    /// A routed class's plan: its routed experts, a token's slots, whose last is the shared expert if `shared`.
+    experts: usize = 0,
+    slots: usize = 0,
+    shared: bool = false,
+    /// The plan is sized by the tokens, not a power-of-two bucket.
+    exact: bool = false,
 
     /// The case of `count` rows (dense) or tokens (routed) of this class.
     pub fn case(c: Class, count: usize) cases.Case {
         if (!c.routed) return .{ .name = c.name, .path = .prefill, .rows = count, .n = c.n, .k = c.k, .bits = c.bits, .group = c.group };
-        return .{ .name = c.name, .path = .prefill, .rows = count, .n = c.n, .k = c.k, .bits = c.bits, .group = c.group, .experts = experts, .shared = true, .served = true, .down = c.down };
+        return .{ .name = c.name, .path = .prefill, .rows = count, .n = c.n, .k = c.k, .bits = c.bits, .group = c.group, .experts = c.experts, .slots = c.slots, .shared = c.shared, .served = true, .exact = c.exact, .down = c.down };
     }
 };
 
-/// Qwen3.6-35B-A3B's routed experts: 256 and the shared one, 8 picks and the shared slot a token.
-const experts = 256;
-const slots = 9;
+const qwen: Class = .{ .name = "", .n = 0, .k = 0, .bits = 4, .group = 64, .routed = true, .experts = 256, .slots = 9, .shared = true };
+const nemotron: Class = .{ .name = "", .n = 0, .k = 0, .bits = 4, .group = 64, .routed = true, .experts = 128, .slots = 6 };
+const flashnext: Class = .{ .name = "", .n = 0, .k = 0, .bits = 4, .group = 32, .routed = true, .experts = 512, .slots = 11, .shared = true, .exact = true };
 
-/// The served routed classes: the experts' gate and up, and their down.
+fn with(c: Class, name: []const u8, n: usize, k: usize, down: bool) Class {
+    var out = c;
+    out.name = name;
+    out.n = n;
+    out.k = k;
+    out.down = down;
+    return out;
+}
+
+/// The served routed classes, Qwen3.6-35B-A3B's first; Nemotron's shared expert runs outside its plan.
 pub const routed = [_]Class{
-    .{ .name = "35b served gate_up", .n = 1024, .k = 2048, .bits = 4, .group = 64, .routed = true },
-    .{ .name = "35b served down", .n = 2048, .k = 512, .bits = 4, .group = 64, .routed = true, .down = true },
+    with(qwen, "35b served gate_up", 1024, 2048, false),
+    with(qwen, "35b served down", 2048, 512, true),
+    with(nemotron, "nemotron served up", 1856, 2688, false),
+    with(nemotron, "nemotron served down", 2688, 1856, true),
+    with(flashnext, "flash next served gate_up", 1280, 2560, false),
+    with(flashnext, "flash next served down", 2560, 640, true),
 };
 
 /// The rows and tokens the tuner starts from; it bisects only between them, so its cells stay at or below the top.
@@ -76,10 +95,11 @@ pub fn longRows(c: Class, buf: []usize) []usize {
     return buf[0..len];
 }
 
-/// The item count serving passes the registry for `tokens` tokens (`moe.run`, `expertParts`).
-pub fn selectorCount(tokens: usize) usize {
-    if (tokens == 1) return slots;
-    return moe.capacity(moe.bucket(tokens) * slots, experts + 1);
+/// The item count serving passes the registry for `tokens` tokens of a routed class (`moe.run`, `expertParts`).
+pub fn selectorCount(c: Class, tokens: usize) usize {
+    if (tokens == 1) return c.slots;
+    const size = if (c.exact) tokens else moe.bucket(tokens);
+    return moe.capacity(size * c.slots, c.experts + @intFromBool(c.shared));
 }
 
 /// The cells on both sides of a bound `b` (rows b and b + 1, or tokens at or below and just above it), both sampled.
@@ -90,7 +110,7 @@ pub fn sides(c: Class, b: u32, out: *[2]usize) bool {
     } else {
         var below: usize = 0;
         var t: usize = 1;
-        while (t <= sampledMax(c) and selectorCount(t) <= b) : (t += 1) below = t;
+        while (t <= sampledMax(c) and selectorCount(c, t) <= b) : (t += 1) below = t;
         if (below == 0 or t > sampledMax(c)) return false;
         out.* = .{ below, t };
     }
