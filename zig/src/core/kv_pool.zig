@@ -129,6 +129,15 @@ pub const Reclaim = struct {
     call: *const fn (ctx: *anyopaque, want: usize) bool,
 };
 
+/// Called after each outermost change to the pool's counts, on the thread that made it.
+pub const Notify = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, p: *const Pool) void,
+};
+
+/// A family's pool as the load ledger reads it: tokens a page, and the contiguous run it needs (0: none).
+pub const Source = struct { pool: *Pool, page_tokens: u32, run_pages: u32 = 0 };
+
 /// What an idle pool must show: nothing promised, every page free or the store's alone.
 pub const Census = struct { total: usize, free: usize, promised: usize, kept: usize, leased: usize };
 
@@ -145,6 +154,8 @@ pub const Pool = struct {
     nleased: usize = 0, // pages mapped by at least one lease, counted once
     page_bytes: u64,
     reclaim: ?Reclaim = null,
+    notify: ?Notify = null,
+    depth: u8 = 0, // public changes in progress: the outermost one notifies, after nested calls and rollbacks
 
     pub fn init(gpa: Allocator, count: usize, page_bytes: u64) !Pool {
         const refs = try gpa.alloc(u32, count);
@@ -221,17 +232,23 @@ pub const Pool = struct {
 
     /// One more holder of a held page; a free page is never retained, only taken.
     pub fn retain(p: *Pool, id: u32) void {
+        p.enter();
+        defer p.leave();
         if (p.refs[id] == 0) std.debug.panic("kv pool: page {d} retained while free", .{id});
         p.ownership(id, p.refs[id] + 1, p.leased[id]);
     }
 
     /// One holder fewer; the last one's release frees the page. Releasing a page nobody holds panics.
     pub fn release(p: *Pool, id: u32) void {
+        p.enter();
+        defer p.leave();
         p.drop(id) catch std.debug.panic("kv pool: page {d} released with no holder", .{id});
     }
 
     /// `release`, as an error when no holder but the leases' holds the page (the store's release of a page it lacks).
     pub fn drop(p: *Pool, id: u32) error{NotHeld}!void {
+        p.enter();
+        defer p.leave();
         if (p.refs[id] <= p.leased[id]) return error.NotHeld; // no holder past the leases' (callers drop theirs first)
         p.ownership(id, p.refs[id] - 1, p.leased[id]);
         if (p.refs[id] > 0) return;
@@ -241,6 +258,8 @@ pub const Pool = struct {
 
     /// Promise `n` more pages to `l`, the store reclaiming first if it must; LaneMemory when they do not fit.
     pub fn promise(p: *Pool, l: *Lease, n: usize) error{LaneMemory}!void {
+        p.enter();
+        defer p.leave();
         if (p.available() < n) if (p.reclaim) |r| {
             _ = r.call(r.ctx, n);
         };
@@ -251,12 +270,16 @@ pub const Pool = struct {
 
     /// The part of `l`'s promise it has not taken goes back.
     pub fn unpromise(p: *Pool, l: *Lease) void {
+        p.enter();
+        defer p.leave();
         p.promised -= l.promised;
         l.promised = 0;
     }
 
     /// A free page from `l`'s promise, appended to its table.
     pub fn take(p: *Pool, l: *Lease) error{ PastReservation, OutOfMemory }!u32 {
+        p.enter();
+        defer p.leave();
         if (l.promised == 0) return error.PastReservation;
         try l.ids.ensureUnusedCapacity(p.gpa, 1);
         p.nfree -= 1;
@@ -270,6 +293,8 @@ pub const Pool = struct {
 
     /// Pages a store's resume retained for this stream (its matched path), at the head of its table.
     pub fn adopt(p: *Pool, l: *Lease, ids: []const u32) error{OutOfMemory}!void {
+        p.enter();
+        defer p.leave();
         l.ids.appendSlice(p.gpa, ids) catch |e| {
             for (ids) |id| p.release(id);
             return e;
@@ -279,6 +304,8 @@ pub const Pool = struct {
 
     /// The stream's page `i` swapped for the store's copy `id` of the same tokens (a keep's Kept.shared).
     pub fn share(p: *Pool, l: *Lease, i: usize, id: u32) void {
+        p.enter();
+        defer p.leave();
         const old = l.ids.items[i];
         if (old == id) return;
         p.retain(id);
@@ -289,6 +316,8 @@ pub const Pool = struct {
 
     /// `l` covers `n` pages, taken from its promise, and the new entries reach `table`; a failure takes them back.
     pub fn cover(p: *Pool, l: *Lease, n: usize, table: ?Table) !void {
+        p.enter();
+        defer p.leave();
         const old = l.ids.items.len;
         errdefer p.shrink(l, old);
         while (l.ids.items.len < n) _ = try p.take(l);
@@ -297,6 +326,8 @@ pub const Pool = struct {
 
     /// `cover` for an empty table: n consecutive ids from a multiple of `step` when they are free, else as `cover`.
     pub fn coverRun(p: *Pool, l: *Lease, n: usize, step: usize, table: ?Table) !void {
+        p.enter();
+        defer p.leave();
         if (l.ids.items.len > 0 or n == 0 or l.promised < n) return p.cover(l, n, table);
         try l.ids.ensureTotalCapacity(p.gpa, n);
         const start = p.findAligned(n, step) orelse return p.cover(l, n, table);
@@ -342,6 +373,8 @@ pub const Pool = struct {
 
     /// `k` consecutive pages from `l`'s promise, held as one run until releaseRun; null: no such run is free now.
     pub fn claimRun(p: *Pool, l: *Lease, k: usize) ?u32 {
+        p.enter();
+        defer p.leave();
         if (l.promised < k) return null;
         const start = p.findRun(k) orelse return null;
         p.claimAt(l, start, k);
@@ -366,6 +399,8 @@ pub const Pool = struct {
 
     /// A run claimed at `start` goes back to the free pages.
     pub fn releaseRun(p: *Pool, start: u32, k: usize) void {
+        p.enter();
+        defer p.leave();
         for (start..start + k) |id| {
             if (p.refs[id] != 1 or p.leased[id] != 1) std.debug.panic("kv pool: run page {d} released while not a run's", .{id});
             p.ownership(id, 0, 0);
@@ -374,8 +409,19 @@ pub const Pool = struct {
         }
     }
 
+    fn enter(p: *Pool) void {
+        p.depth += 1;
+    }
+
+    fn leave(p: *Pool) void {
+        p.depth -= 1;
+        if (p.depth == 0) if (p.notify) |n| n.call(n.ctx, p);
+    }
+
     /// The stream ended (finished, cancelled or failed): its promise and every page it holds go back.
     pub fn finish(p: *Pool, l: *Lease) void {
+        p.enter();
+        defer p.leave();
         p.unpromise(l);
         for (l.ids.items) |id| p.unlease(id);
         l.ids.deinit(p.gpa);
@@ -387,4 +433,5 @@ test {
     _ = @import("kv_pool_test.zig");
     _ = @import("kv_pool_counts_test.zig");
     _ = @import("kv_pool_walk_test.zig");
+    _ = @import("kv_pool_notify_test.zig");
 }

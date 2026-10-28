@@ -20,7 +20,12 @@ pub const State = struct {
     prefill_cache: u64 = 0,
     decode: u64 = 0,
     busy_ns: u64 = 0,
+    /// The pool's last census, from the thread that changed the pool (under `mutex`); null: no pool watched.
+    pool: ?ledger.Pool = null,
 };
+
+/// The `capacity` group's source, set before the engine thread starts: how this engine holds its KV state.
+pub const Source = struct { mode: ledger.Mode };
 
 /// One attempt's prompt pass as the ledger counts it; the engine thread owns it.
 pub const Pass = struct {
@@ -48,6 +53,7 @@ pub fn attach(ctx: *anyopaque, producer: ?ledger.Producer) void {
     h.load.mutex.lockUncancelable(h.io);
     h.load.producer = producer;
     h.load.last = null;
+    if (h.load.pool) |census| producer.?.publishPool(census); // an idle engine shows its capacity at once
     h.load.mutex.unlock(h.io);
     h.unlock(); // its publish sends the first values
 }
@@ -58,7 +64,7 @@ pub fn publish(h: *LaneHost) void {
     s.mutex.lockUncancelable(h.io);
     defer s.mutex.unlock(h.io);
     const p = s.producer orelse return;
-    const now: Published = .{ .requests = requests(h), .work = work(h) };
+    const now: Published = .{ .requests = requests(h), .work = work(h), .capacity = capacity(h) };
     if (s.last) |last| if (std.meta.eql(last, now)) return;
     s.last = now;
     p.publish(now.requests, now.work, now.capacity);
@@ -157,6 +163,22 @@ fn take(h: *const LaneHost, p: *Pass) void {
 fn work(h: *const LaneHost) ?ledger.Work {
     if (h.rounds != null) return null;
     return .{ .prefill_compute = h.load.prefill_compute, .prefill_cache = h.load.prefill_cache, .decode = h.load.decode, .prefill_busy_ns = h.load.busy_ns };
+}
+
+/// A pool change, on the thread that made it: the census goes to the ledger without the host lock.
+pub fn poolChanged(h: *LaneHost, census: ledger.Pool) void {
+    const s = &h.load;
+    s.mutex.lockUncancelable(h.io);
+    defer s.mutex.unlock(h.io);
+    s.pool = census;
+    if (s.producer) |p| p.publishPool(census);
+}
+
+/// The `capacity` group's host part: the mode and the lanes no admitted request holds.
+fn capacity(h: *const LaneHost) ?ledger.Capacity {
+    const c = h.capacity orelse return null;
+    const lanes: usize = @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes);
+    return .{ .mode = c.mode, .lanes_free = @intCast(lanes -| h.admitted.items.len) };
 }
 
 /// A background pass gave its lane up to foreground work.

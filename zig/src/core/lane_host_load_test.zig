@@ -354,3 +354,59 @@ test "the one-at-a-time fallback counts a prompt whose first token fails after i
     try std.testing.expectEqual(@as(u64, 19), w.prefill_compute); // 13 if `done` waited for the first token
     try Frozen.expectBusy(w);
 }
+
+test "a window engine shows its mode and free lanes; a paged one shows its pool as soon as it attaches" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 3 });
+    defer rig.deinit();
+    var ledger: Ledger = .init(std.testing.io);
+    defer ledger.detach(false);
+    rig.host.capacity = .{ .mode = .window };
+    ledger.attach(rig.host.engine());
+    const window = ledger.read();
+    try std.testing.expectEqual(api.load_ledger.Mode.window, window.capacity.?.mode);
+    try std.testing.expectEqual(@as(u32, 3), window.capacity.?.lanes_free);
+    try std.testing.expect(window.pool == null);
+    ledger.detach(true);
+    rig.host.capacity = .{ .mode = .paged };
+    LaneHost.Load.poolChanged(&rig.host, .{ .capacity = 4096, .available = 4096 }); // the census before the thread starts
+    try std.testing.expect(ledger.read().capacity == null); // detached: nothing reaches the ledger
+    ledger.attach(rig.host.engine()); // idle, no request: its capacity shows anyway
+    const paged = ledger.read();
+    try std.testing.expectEqual(api.load_ledger.Mode.paged, paged.capacity.?.mode);
+    try std.testing.expectEqual(@as(u64, 4096), paged.pool.?.available);
+    LaneHost.Load.poolChanged(&rig.host, .{ .capacity = 4096, .available = 1024, .promised = 512 });
+    try std.testing.expectEqual(@as(u64, 1024), ledger.read().pool.?.available);
+}
+
+test "a request holding a lane lowers the free lanes" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 2 });
+    defer rig.deinit();
+    rig.host.capacity = .{ .mode = .window };
+    var ledger: Ledger = .init(std.testing.io);
+    defer ledger.detach(false);
+    ledger.attach(rig.host.engine());
+    const Watch = struct { // the reply's first tokens: the request holds its lane now
+        ledger: *Ledger,
+        free: ?u32 = null,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const w: *@This() = @ptrCast(@alignCast(ctx));
+            if (e.* == .tokens and w.free == null) w.free = w.ledger.read().capacity.?.lanes_free;
+        }
+    };
+    var watch: Watch = .{ .ledger = &ledger };
+    try rig.host.start();
+    const prompt = [_]u32{ 2, 7, 1, 8 };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 32 };
+    try rig.host.engine().submit(1, &request, .{ .ctx = &watch, .event = Watch.event });
+    while (true) {
+        rig.host.lock();
+        const left = rig.host.admitted.items.len + rig.host.queued.items.len;
+        rig.host.unlock();
+        if (left == 0) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(?u32, 1), watch.free);
+    try std.testing.expectEqual(@as(u32, 2), ledger.read().capacity.?.lanes_free);
+}

@@ -593,14 +593,15 @@ An engine on the shared lane host adds these groups, each complete or absent:
 | --- | --- |
 | Requests | `waiting_prompt_tokens` (prompt tokens of queued requests, before any kept prefix restores part of them), `filling_prompt_tokens_left` (absent while a backend without fill progress fills), `requests_started_total`, `requests_requeued_total`, `background_yields_total` |
 | Work | `scheduler_tokens_total{mode}` with `prefill_compute`, `prefill_cache` and `decode` (output tokens after each request's first), counted as the work happens, and `prefill_busy_seconds_total`: engine seconds in prompt calls whose work `prefill_compute` counted. The `prefill_compute` delta over its delta is the prefill rate. A family round planner publishes no work group |
+| Capacity | `kv_capacity_mode{mode}` (`window` or `paged`), `lanes_free`, and for a paged engine `kv_pool_capacity_tokens`, `kv_pool_available_tokens`, `kv_pool_reclaimable_tokens`, `kv_pool_promised_tokens` with `pool="main"`, and `kv_pool_run_available` where the family needs a contiguous run. Published by the CUDA lane host: `window` for an engine without a page plan, `paged` with GLM-5.3-Flash's pool on rank 0; other paged families leave the group out until they name their pool |
 
 In the requests group, `requests_running`, `requests_waiting` and their vLLM mirrors take the ledger's values.
 While the engine is parked, none of these engine values is shown: neither the groups nor `requests_running`,
 `requests_waiting` and `generation_tokens_running`. A missing group means unknown, never zero.
 
 `GET /v1/load` returns the same ledger as one JSON object from one read: `instance`, `timestamp` (the read's wall
-time), `model`, `parked`, `lanes`, `http_active` by route group, and, when present, the request counts, `tokens`
-and `busy_us`. Keys of a group no host fills are left out. It follows the
+time), `model`, `parked`, `lanes`, `http_active` by route group, and, when present, the request counts,
+`capacity` with its `pools`, `tokens` and `busy_us`. Keys of a group no host fills are left out. It follows the
 `/metrics` access rule, and `--metrics-open` opens it too.
 
 ## Admission
