@@ -1,4 +1,4 @@
-//! MiMo-V2's admission: only what was validated opens (GB10); the rest is refused by name.
+//! MiMo-V2's admission: only what was validated opens (GB10, two ranks); the rest is refused by name.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -31,7 +31,7 @@ test "MiMo-V2 refuses every GPU but GB10 (sm_121) before reading anything" {
 }
 
 test "the admission refusals say what was validated" {
-    for ([_]anyerror{error.MimoV2RequiresSm121}) |err| {
+    for ([_]anyerror{ error.MimoV2RequiresSm121, error.MimoV2RequiresTwoRanks }) |err| {
         const text = native.explain(null, err) orelse return error.Unexplained;
         try std.testing.expect(std.mem.indexOf(u8, text, "validated") != null);
     }

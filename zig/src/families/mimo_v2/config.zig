@@ -124,7 +124,7 @@ pub const Config = struct {
 
     /// A rank's view under tensor parallelism (weights.load's `replace`): heads split, everything else whole.
     pub fn rankView(c: Config, world: usize) !Config {
-        if (world != 1 and world != 2) return error.World;
+        if (world != 2) return error.MimoV2RequiresTwoRanks; // only two ranks were validated
         if (c.heads % world != 0 or c.kv_full % world != 0 or c.kv_swa % world != 0) return error.HeadsSplit;
         if (c.moe_width % (128 * world) != 0 or c.dense_width % (128 * world) != 0 or c.vocab % (128 * world) != 0) return error.WidthSplit;
         var r = c;
@@ -238,6 +238,7 @@ test "Config.parse reads MiMo-V2.6-Flash as the Python family does" {
     var n_full: usize = 0;
     for (c.full[0..c.layers]) |f| n_full += @intFromBool(f);
     try std.testing.expectEqual(@as(usize, 9), n_full);
+    inline for (.{ 1, 3, 4 }) |world| try std.testing.expectError(error.MimoV2RequiresTwoRanks, c.rankView(world));
     const r = try c.rankView(2);
     try std.testing.expectEqual(@as(usize, 32), r.heads);
     try std.testing.expectEqual(@as(usize, 2), r.kv_full);

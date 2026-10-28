@@ -1,8 +1,11 @@
 # MiMo-V2.6-Flash
 
 The `mimo_v2` family serves an EXL3 pack of MiMo-V2.6-Flash (exllamav3's MiMo-V2 module, mul1 codebook) on the
-native CUDA server, on one GPU or two DGX Sparks as tensor-parallel ranks. The pack's DFlash drafter sits in its
-`dflash/` folder (`config.json` and `model.safetensors`); the server drafts with it when it is there.
+native CUDA server, on two DGX Sparks as tensor-parallel ranks. The pack's DFlash drafter sits in its `dflash/`
+folder (`config.json` and `model.safetensors`); the server drafts with it when it is there.
+
+Only what was validated is admitted: GB10 (sm_121) at two ranks, on the 3.0 bpw pack below. Any other GPU is
+refused (`MimoV2RequiresSm121`), and so is one rank or any other world (`MimoV2RequiresTwoRanks`).
 Package: `zig/src/families/mimo_v2/`, kernels in `zig/kernels/cuda/mimo_v2/`.
 
 The ranks exchange through the tensor-parallel session and RoCE mailbox of Jay Leaton's two-Spark DeepSeek-V4.1
@@ -70,7 +73,8 @@ comes from its own acceptance rate, priced with a round cost that grows with its
   converted from its revision `5711b268`.
 - Pack: `ajensenwaud/MiMo-V2.6-Flash-RL-exl3-3.0bpw`, MIT as its source, quantised from that revision with
   exllamav3 v1.6.0 (`turboderp-org/exllamav3`, MIT): `-b 3.0 -hb 8 -mb 4 -hq -cr 250 -cc 2048 -cb mul1`.
-  benthecarman's 2.27 bpw pack, `benthecarman/MiMo-V2.6-Flash-RL-exl3` (MIT), serves too.
+- benthecarman's 2.27 bpw pack, `benthecarman/MiMo-V2.6-Flash-RL-exl3` (MIT), is not yet validated with this
+  family. It fits one GB10, which is refused until one rank has its own receipts.
 - Drafter: Xiaomi's DFlash drafter, published in the model repository's `dflash/` folder under its MIT licence.
   The packs' `dflash/` is that drafter as benthecarman repaired it to load and quantised it to 4 bpw EXL3
   (`benthecarman/MiMo-V2.6-Flash-RL-exl3` at `5ae87b83`); the 3.0 bpw pack carries the same file unchanged.
