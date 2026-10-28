@@ -379,6 +379,7 @@ pub const Engine = struct {
     pub const projSums = @import("cuda_projection.zig").projSums;
     pub const projAgain = @import("cuda_projection.zig").projAgain;
     pub const projMany = @import("cuda_projection.zig").projMany;
+    pub const projManyPrompt = @import("cuda_projection.zig").projManyPrompt;
     pub const projManySums = @import("cuda_projection.zig").projManySums;
     pub const projectMany = @import("cuda_projection.zig").projectMany;
     pub const project = @import("cuda_projection.zig").project;

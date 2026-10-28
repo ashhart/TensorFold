@@ -5,7 +5,6 @@ const golden_build = @import("golden.zig");
 const catalog = @import("cuda_kernels.zig");
 pub const Kernel = catalog.Kernel;
 pub const kernels = catalog.kernels;
-
 pub const runtime = @import("cuda_runtime.zig").runtime;
 const stagger = @import("cuda_runtime.zig").stagger;
 const engines_build = @import("cuda_engines.zig");
@@ -131,12 +130,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     q35.addImport("cuda", cuda);
     q35.addImport("core", mods.core);
     q35.addImport("qwen35", mods.qwen35);
-    b.installArtifact(b.addExecutable(.{ .name = "tf-qwen35-cuda", .root_module = q35 }));
+    const q35_install = b.addInstallArtifact(b.addExecutable(.{ .name = "tf-qwen35-cuda", .root_module = q35 }), .{});
+    b.getInstallStep().dependOn(&q35_install.step);
+    b.step("qwen35-cuda", "Build the Qwen CUDA forward and raw state receipt tool").dependOn(&q35_install.step);
     const d3_tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "drama3", .module = @import("drama3_host.zig").module(b, target, optimize, cuda, mods.core) } } });
     const d3_exe = b.addExecutable(.{ .name = "drama3-generate", .root_module = d3_tool });
     b.step("drama3-generate", "Drama generation and replay controls on CUDA").dependOn(&b.addInstallArtifact(d3_exe, .{}).step);
 }
-
 /// The Kolibri-1 CUDA family over the runtime, the core and the lane core.
 const kolibri1Module = @import("kolibri.zig").module;
 
