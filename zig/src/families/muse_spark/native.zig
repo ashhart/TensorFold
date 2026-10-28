@@ -479,14 +479,29 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 /// TF_TP_* once TF_TP_WORLD is set (rank 0 serves; `tf-muse follow` on rank 1); null: one GPU. A bad setting refuses.
 fn tpConfig() tp.config.Error!?tp.Config {
-    if (std.c.getenv("TF_TP_WORLD") == null) return null;
-    return try tp.Config.fromEnv();
+    return tpFrom(&envGet);
+}
+
+fn tpFrom(get: *const fn ([]const u8) ?[]const u8) tp.config.Error!?tp.Config {
+    if (get("TF_TP_WORLD") == null) return null;
+    return try tp.Config.parse(get);
+}
+
+fn envGet(name: []const u8) ?[]const u8 {
+    var buf: [64]u8 = undefined;
+    const z = std.mem.printSentinel(&buf, "{s}", .{name}, 0) catch return null;
+    return std.mem.span(std.c.getenv(z) orelse return null);
 }
 
 /// Admission bytes of a rank: the checkpoint over the TP ranks (the embedding stays in host memory).
-pub fn weightShare(_: std.mem.Allocator, _: std.Io, _: []const u8, total: u64) u64 {
-    const world: u64 = if (tpConfig() catch null) |c| c.world else 1;
-    return total / @max(world, 1);
+pub fn weightShare(_: std.mem.Allocator, _: std.Io, _: []const u8, total: u64) tp.config.Error!u64 {
+    return share(total, &envGet);
+}
+
+/// weightShare under `get`'s TF_TP_*: a bad setting is BadSetting, as `open` refuses it, not one GPU's share.
+fn share(total: u64, get: *const fn ([]const u8) ?[]const u8) tp.config.Error!u64 {
+    const world: u64 = if (try tpFrom(get)) |c| c.world else 1;
+    return total / world;
 }
 
 pub const explains_open = true;
@@ -515,4 +530,27 @@ fn release(p: *anyopaque) void {
         own.gpa.destroy(ss);
     }
     own.gpa.destroy(own);
+}
+
+fn tpEnv(comptime world: []const u8, comptime rank: []const u8) *const fn ([]const u8) ?[]const u8 {
+    return &struct {
+        fn get(name: []const u8) ?[]const u8 {
+            if (std.mem.eql(u8, name, "TF_TP_WORLD")) return world;
+            if (std.mem.eql(u8, name, "TF_TP_RANK") and rank.len > 0) return rank;
+            return null;
+        }
+    }.get;
+}
+
+test "a bad TF_TP_* refuses the weight share; TF_TP_WORLD unset is one GPU" {
+    const unset = struct {
+        fn get(_: []const u8) ?[]const u8 {
+            return null;
+        }
+    }.get;
+    try std.testing.expectEqual(@as(u64, 1000), try share(1000, &unset));
+    inline for (.{ .{ "two", "" }, .{ "0", "" }, .{ "65", "" }, .{ "2", "2" }, .{ "2", "-1" }, .{ "2", "one" } }) |bad| {
+        try std.testing.expectError(error.BadSetting, share(1000, tpEnv(bad[0], bad[1])));
+    }
+    try std.testing.expectEqual(@as(u64, 500), try share(1000, tpEnv("2", "1")));
 }
