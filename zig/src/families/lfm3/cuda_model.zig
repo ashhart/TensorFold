@@ -15,6 +15,8 @@ pub const round_rows = 128;
 /// Layers of each mixer kind in the admitted schedule.
 pub const conv_layers = count(.conv);
 pub const full_layers = count(.full_attention);
+/// The layers whose keys and values live in pages (liquid's kept-state walk).
+pub const paged_layers = full_layers;
 pub const sliding_layers = count(.sliding_attention);
 /// Elements a KV row holds (4 heads of 128) and a page holds over every full layer's keys and values.
 pub const kv_width = c.kv_heads * c.head_dim;
@@ -92,6 +94,14 @@ pub const Model = struct {
     /// Bytes a stream's fixed part takes: its conv states and sliding rings.
     pub const fixed_bytes = (slot_elems + ring_elems) * 2;
 
+    /// A slot's regions outside its pages (liquid's walk): conv states, then each sliding layer's K and V rings.
+    pub fn fixed(m: *const Model, slot: usize, i: usize) ?[2]u64 {
+        const ring_bytes = ring * kv_width * 2;
+        if (i == 0) return .{ m.states + slot * slot_elems * 2, slot_elems * 2 };
+        if (i > 2 * sliding_layers) return null;
+        return .{ m.ringOf((i - 1) / 2, (i - 1) % 2 == 1) + slot * ring_bytes, ring_bytes };
+    }
+
     /// Bytes one stream's caches take at `context` positions: its pages, conv states and rings.
     pub fn streamBytes(context: usize) usize {
         return positions(context) / kern.page * page_elems * 2 + fixed_bytes;
@@ -99,7 +109,7 @@ pub const Model = struct {
 
     /// What the host's pool plans: a stream's conv states, rings and table row, a token its rows of the six layers.
     pub fn layout(m: *const Model) kv.Layout {
-        return .{ .fixed_bytes = fixed_bytes + m.perSlot() * 4, .token_bytes = page_elems * 2 / kern.page, .page_tokens = kern.page, .snap_bytes = 0 };
+        return kv.Layout.ofRows(.{ .kind = .full, .row = kv_width * 2 * 2, .layers = full_layers }, kern.page, fixed_bytes + m.perSlot() * 4, 0);
     }
 
     /// Slots a backend holds: the model's, or (paged) as many as a round takes.
@@ -352,6 +362,8 @@ test "the pool's layout: 12 KiB a token, a stream's conv states, rings and table
     const l = m.layout();
     try std.testing.expectEqual(@as(u64, 6 << 20), l.pageBytes());
     try std.testing.expectEqual(@as(u64, 12 << 10), l.token_bytes);
+    try std.testing.expectEqual(@as(u32, full_layers), l.shape().full.layers);
+    try std.testing.expect(l.shape().named);
     try std.testing.expectEqual(@as(u64, Model.fixed_bytes + 64 * 4), l.fixed_bytes);
     const p = try kv.plan(l, .{ .room = 20 << 30, .engine = 0, .lanes = 8, .cache = 4 << 30, .window = 32768 + 16, .engine_paged = true });
     try std.testing.expectEqual(@as(u32, 8), p.lanes);
