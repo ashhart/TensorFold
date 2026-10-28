@@ -82,6 +82,7 @@ pub const Engine = struct {
     mods: [19]cuda.Module,
     kv8: bool, // attention caches as e4m3 rows with a scale each
     rope_table: u64 = 0, // YaRN's attention factor and 32 frequencies on the device (cuda_rope.zig); 0: plain rope
+    rope_buf: ?cuda.DeviceBuffer = null, // the table's buffer (cuda_rope_table.zig)
     fp8: Kv8,
     prompt_attn: @import("cuda_prompt.zig").Fns, // a prompt chunk's attention tiles and delta-rule chain
     int8: @import("cuda_prompt_int8.zig").State = .{}, // prompt projections with int8 activations, when on
@@ -193,9 +194,12 @@ pub const Engine = struct {
         e.verify_rows = most_verify;
         e.kv8 = kv8;
         e.rope_table = 0; // plain rope until cuda_rope.zig uploads a YaRN table (the engine starts undefined)
+        e.rope_buf = null;
         e.window_rows = most_window;
         e.arena_at = 0;
         e.graphs = .empty;
+        try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
+        errdefer @import("cuda_rope_table.zig").free(e);
         e.penalties = .{};
         e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
         e.n_taps = 0;
@@ -284,6 +288,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
+        @import("cuda_rope_table.zig").free(e);
         if (e.kit) |k| k.deinit(e.gpa);
         e.pockets.deinit();
         var it = e.graphs.valueIterator();

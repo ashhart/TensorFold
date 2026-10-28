@@ -161,8 +161,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
     if (fsr_options.refuse(o, problem)) return null;
-    if (o.prompt_int8) {
-        problem.* = prompt_int8_refusal;
+    if (o.prompt_int8 or o.rope_yarn != null) {
+        problem.* = if (o.prompt_int8) prompt_int8_refusal else "--rope-yarn: the Metal engine has no YaRN rope; serve without --rope-yarn";
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);

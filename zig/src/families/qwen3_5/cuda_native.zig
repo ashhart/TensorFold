@@ -10,6 +10,7 @@ pub const window_costs = @import("cuda_window_costs.zig");
 pub const cost_adapter = @import("cuda_cost_adapter.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
+const cuda_rope = @import("cuda_rope.zig");
 const draft_config = @import("cuda_draft_config.zig");
 const prefill = @import("cuda_prefill.zig");
 const Fill = prefill.Fill;
@@ -49,7 +50,12 @@ pub const kept_disk = @import("cuda_disk.zig");
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, rope_yarn: ?f64 = null };
+
+/// The window --context may ask for: the config's, or the YaRN window its block or --rope-yarn makes (cuda_rope.zig).
+pub fn contextCeiling(a: std.mem.Allocator, io: std.Io, dir: []const u8, flag: ?f64) !i64 {
+    return @intCast((try cuda_rope.resolveDir(a, io, dir, flag)).ceiling);
+}
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -127,6 +133,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
     errdefer e.deinit();
+    if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const r = try cuda_rope.resolveDir(arena.allocator(), io, dir, f);
+        e.g.context = r.ceiling;
+        try @import("cuda_rope_table.zig").set(e, r.rope);
+    }
     if (o.prompt_int8) try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
     if (o.slide) _ = try @import("cuda_learn_shape.zig").from(e.g);

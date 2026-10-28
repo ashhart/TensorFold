@@ -310,6 +310,7 @@ pub const Open = struct {
     drafter: ?[]const u8 = null,
     drafter_name: ?[]const u8 = null, // the supplied --drafter name, before resolving its directory
     drafter_bits: u8 = 4,
+    rope_yarn: ?f64 = null, // --rope-yarn: YaRN over the checkpoint's trained window; families without it refuse
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
     speed_up: ?[]const u8 = null,

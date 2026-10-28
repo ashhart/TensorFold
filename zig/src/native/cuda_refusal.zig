@@ -21,6 +21,8 @@ pub fn backend(o: api.Open) ?[]const u8 {
     }
     if (o.policy.len > 0) return "--policy is not supported by this CUDA build";
     if (@import("disk_spill.zig").refusal(o, "")) |why| return why;
+    if (o.rope_yarn != null and !std.mem.eql(u8, o.model_type, "qwen3_5") and !std.mem.eql(u8, o.model_type, "qwen3_5_moe"))
+        return "--rope-yarn: this CUDA family has no YaRN rope; serve it without --rope-yarn";
     if (o.learn != null and !o.learn_conversations) return "--learn learns shared prompt prefixes on Macs only; CUDA keeps conversation states on disk with --learn-conversations: serve with it, or without --learn, --learn-dir or --learn-gib";
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
@@ -80,6 +82,13 @@ test "GLM-5.3-Flash takes --mtp-confidence alone: --mtp-drafts, or a drafter bes
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "glm5_next", .mtp_confidence = 0.3 }) == null);
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "glm5_next", .mtp_drafts = 2 }) orelse "", "--mtp-drafts: GLM-5.3-Flash's");
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "glm5_next", .mtp_confidence = 0.3, .drafter = "x" }) orelse "", "--mtp-confidence stops");
+}
+
+test "--rope-yarn opens only Qwen3.5 and 3.6, before any family branch (the routes past openWith too)" {
+    for ([_][]const u8{ "qwen3_5", "qwen3_5_moe" }) |t| try std.testing.expect(backend(.{ .dir = "d", .model_type = t, .rope_yarn = 4 }) == null);
+    for ([_][]const u8{ "fish_omni", "qwen4", "qwen4_text", "lfm2_vl", "nemotron_h", "glm4_moe" }) |t|
+        try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = t, .rope_yarn = 4 }) orelse "", "--rope-yarn");
+    try std.testing.expect(backend(.{ .dir = "d", .model_type = "qwen4" }) == null);
 }
 
 test "flags with nothing to do on CUDA are refused, not ignored" {

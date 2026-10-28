@@ -188,6 +188,7 @@ fn join(
 
 /// The family's refusal of --slide or --mtp-confidence, when it names one.
 fn flagRefused(comptime F: type, o: api.Open) ?[]const u8 {
+    if (o.rope_yarn != null) return "--rope-yarn: the native HIP engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
     if (o.slide and @hasDecl(F, "slide_refusal")) return F.slide_refusal;
     if (o.mtp_confidence != null and @hasDecl(F, "confidence_refusal")) return F.confidence_refusal;
     return null;
