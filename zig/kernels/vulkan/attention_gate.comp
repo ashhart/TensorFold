@@ -1,0 +1,79 @@
+// Attention output gate for the dense Qwen3.5-2B Metal oracle, replacing
+// zig/kernels/metal/qwen3_5/layout.metal's qwen35_attention_gate on
+// Vulkan. No existing house shader reads the oracle's interleaved q/gate
+// projection layout or computes sigmoid(gate)*ctx, so this kernel is new.
+//
+// Per token the q projection emits 16 interleaved 256-wide head blocks:
+// q head h at h*512, its gate at h*512 + 256 (qraw row stride 4096).
+// The Metal op is, per output element d of row r:
+//   gate = qraw[r*4096 + (d/256)*512 + 256 + d%256]
+//   s    = bfloat(1 / (1 + exp(-gate)))        -- one RNE bf16 rounding
+//   out  = bfloat(float(ctx[r*2048 + d]) * float(s))
+// This kernel reproduces exactly that: f32 sigmoid rounded to bf16 once,
+// f32 multiply, one RNE bf16 store per lane. Each thread owns one whole
+// output word (two adjacent elements, same head, word-aligned gate pair).
+//
+// Bindings (all bound at their base, element offsets zero):
+//   0 ctx   readonly packed bf16 words, rows*1024 words
+//   1 qraw  readonly packed bf16 words, rows*2048 words
+//   2 out   writeonly packed bf16 words, rows*1024 words
+//
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
+// SPDX-License-Identifier: MIT
+#version 460
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Context {
+  uint values[];
+} ctx_data;
+layout(set = 0, binding = 1, std430) readonly buffer Gate {
+  uint values[];
+} gate_data;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  uint values[];
+} out_data;
+
+layout(push_constant) uniform Push {
+  uint words; // rows * 1024
+} push;
+
+uint bf16_bits(float value) {
+  uint bits = floatBitsToUint(value);
+  return isnan(value)
+      ? ((bits >> 16u) | 0x40u)
+      : ((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+}
+
+float bf16_lane(uint word, uint lane) {
+  return uintBitsToFloat(lane == 0u ? (word << 16u) : (word & 0xFFFF0000u));
+}
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (index < push.words) {
+    const uint row = index >> 10u;          // words per row: 2048 elements / 2
+    const uint w = index & 1023u;
+    const uint head = w >> 7u;              // 128 words per 256-wide block
+    const uint d0 = (w & 127u) << 1u;       // element within the head block
+    // Gate word: qraw[r*4096 + head*512 + 256 + d0 .. +1], all even.
+    const uint gate_word = gate_data.values[
+        ((row * 4096u + head * 512u + 256u + d0) >> 1u)];
+    const uint ctx_word = ctx_data.values[index];
+    uint out_word = 0u;
+    for (uint lane = 0u; lane < 2u; ++lane) {
+      float gate = bf16_lane(gate_word, lane);
+      float s = 1.0f / (1.0f + exp(-gate));
+      s = bf16_lane(bf16_bits(s) << 16u, 0u); // Metal's bfloat(s) rounding
+      float v = bf16_lane(ctx_word, lane) * s;
+      out_word |= bf16_bits(v) << (16u * lane);
+    }
+    out_data.values[index] = out_word;
+    if (push.words - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}
