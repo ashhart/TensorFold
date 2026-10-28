@@ -1,4 +1,4 @@
-# LFM2.5-24B-A2B, native Metal
+# LFM2.5-24B-A2B, native Metal and CUDA
 
 This recipe covers [`LiquidAI/LFM2.5-24B-A2B-MLX-4bit`](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit)
 at revision `667408d494bde191c2cb9dd4f4549827816b9275`. The numbers below are measured on this 4-bit export only.
@@ -41,3 +41,41 @@ the shared-round kernels on it. The M4 Pro is not yet measured on a quiet machin
 
 Every reply was token for token equal before and after, and equal to its solo run and to `"draft": false`.
 Cold prefill at 2k, 8k and 32k tokens and peak memory did not change.
+
+## CUDA
+
+`lfm2_moe` also serves the 4-bit export above (same revision, `667408d494bde191c2cb9dd4f4549827816b9275`) on one
+NVIDIA GPU, through the lane host. Checked on a GB10 (sm_121).
+
+```bash
+zig build native -Doptimize=ReleaseFast -Dnvcc=/usr/local/cuda/bin/nvcc
+zig-out/native/bin/tensorfold-native serve "$HOME/models/lfm2.5-24b-a2b-4bit" --port 8080 --parallel 8
+```
+
+The default window is 32,768 tokens (`--context`), and `--parallel` holds up to 128 streams if the memory budget fits
+them. Each stream has fixed pages for its keys and values. The family reads MLX affine 4-bit weights in groups of
+64, with the embedding at 4, 6 or 8 bits. The 6- and 8-bit exports are refused by name and stay on Metal. Drafts
+are the lane core's copy drafts from the prompt's own text; there is no draft head yet.
+
+Most launches are shared CUDA operators: the affine linears and experts, the norms, `qk_rows`, the MoE combine, the
+pick and the draws. The family adds three kernels: the router (fp32 weights, sigmoid plus bias, top-4) in
+`lfm2_moe.cu`, and the 3-tap short conv and its state commit in `liquid_conv.cuh`. It also adds two instances of shared
+templates at head dim 64: `pattn_kernel<64, 8, 4, 8>` for prompt rows, and `tf_paged_attn_chunk_segs_64` with
+`tf_paged_attn_merge_segs_64` (`paged_attn_segs.cuh`) for decode rows. All of them are under the kernel contract
+(see [the contract](../kernel-contract.md#coverage)).
+
+Receipt (GB10, nvcc 13.0, `--parallel 8`, greedy):
+
+- drafted == plain and concurrent == solo on 8 of 8 prompts, and the token hashes are the same after a restart;
+- a float64 forward of the same weights on the CPU (`tools/lfm2_moe/ref64.py`) picks the engine's greedy token on
+  421 of 435 teacher-forced prompt rows and 123 of 128 reply rows; `tools/lfm2_moe/REF64.md` lists every miss with
+  both tokens and margins;
+- decode, total tok/s: 87 at 1 stream, 194 at 4, 303 at 8;
+- cold TTFT: 0.32 s at 2.8k prompt tokens, 1.32 s at 11.2k.
+
+## Licence
+
+The weights are under Liquid AI's LFM Open License v1.0 (`license: other`, `lfm1.0` on the model card; the text is the
+`LICENSE` file in the checkpoint). Use, changes and redistribution are allowed; commercial use is licensed only to
+an organisation under US$10 million in annual revenue, and a non-profit may use it for research or other
+non-commercial purposes regardless. Read the licence before serving it commercially.
