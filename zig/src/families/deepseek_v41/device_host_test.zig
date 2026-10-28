@@ -29,3 +29,7 @@ test {
 test {
     _ = @import("round_progress_test.zig");
 }
+
+test {
+    _ = @import("session_stall_test.zig");
+}
