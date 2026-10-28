@@ -14,6 +14,8 @@ const moe = @import("moe.zig");
 const draw = @import("draw.zig");
 const tp = @import("tp.zig");
 pub const mamba = @import("mamba.zig");
+/// The DFlash2 drafter's ops (tap gathers, key ring, dynamic conv, block attention).
+pub const draft = @import("draft.zig");
 
 pub const Kind = types.Kind;
 pub const Error = types.Error;
@@ -122,4 +124,5 @@ test "dtype numberings of the three kernel families" {
 
 test "every launch compiles" {
     std.testing.refAllDecls(Ops);
+    std.testing.refAllDecls(draft);
 }
