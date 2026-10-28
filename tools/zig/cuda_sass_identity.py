@@ -92,7 +92,7 @@ def build(tree, torch, img, out):
 
 
 def functions(dump):
-    """(arch, function) -> instruction lines of a cuobjdump -sass dump, whitespace collapsed."""
+    """(arch, function) -> each instruction's line (any address width) and continuation (second word), collapsed."""
     res, cur, arch = {}, None, None
     for line in dump.splitlines():
         m = re.match(r"\s*arch = (sm_\w+)", line)
@@ -104,7 +104,7 @@ def functions(dump):
             cur = (arch, m[1])
             res[cur] = []
             continue
-        if cur and re.match(r"\s*/\*[0-9a-f]{4}\*/", line):
+        if cur and re.match(r"\s*(/\*[0-9a-f]{4,}\*/|/\* 0x)", line):
             res[cur].append(re.sub(r"\s+", " ", line.strip()))
     return res
 
