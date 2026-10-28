@@ -575,6 +575,8 @@ pub fn run(gpu: check.Gpu) !void {
     defer weight_only.destroy(a);
     const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels);
     defer families.deinit();
+    const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, &kernels);
+    defer minimax.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);
